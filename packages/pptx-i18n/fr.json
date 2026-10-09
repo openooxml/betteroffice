@@ -1,9 +1,18 @@
 {
   "_lang": "fr",
+  "worker": {
+    "previousRecovery": null,
+    "preparing": "Préparation de l’éditeur. La modification sera bientôt disponible.",
+    "failed": "La modification est indisponible. Téléchargez la présentation récupérée.",
+    "disabled": "Cette fonctionnalité est indisponible dans ce mode de modification.",
+    "recovery": null,
+    "image": null
+  },
   "toolbar": {
     "label": null,
     "save": "Enregistrer",
     "exportPng": null,
+    "present": "Présenter",
     "historyLabel": null,
     "undo": null,
     "redo": null,
@@ -79,7 +88,13 @@
       "upArrow": null,
       "downArrow": null,
       "chevron": null
-    }
+    },
+    "insertImage": null,
+    "arrange": null,
+    "bringToFront": null,
+    "bringForward": null,
+    "sendBackward": null,
+    "sendToBack": null
   },
   "slides": {
     "panelLabel": null,
@@ -94,9 +109,104 @@
     "openPrompt": null
   },
   "objects": {
-    "defaultTextBoxName": null
+    "defaultTextBoxName": null,
+    "defaultPictureName": null
+  },
+  "presentation": {
+    "label": "Présentation",
+    "exit": "Quitter la présentation (Échap)",
+    "slideCounter": "{current} / {total}",
+    "previousSlide": "Diapositive précédente",
+    "nextSlide": "Diapositive suivante"
+  },
+  "notes": {
+    "panelLabel": "Notes du présentateur",
+    "placeholder": "Ajouter des notes du présentateur…"
   },
   "errors": {
     "decodeSlideImage": null
+  },
+  "proposals": {
+    "title": "Propositions de l'agent",
+    "close": "Fermer",
+    "empty": "Aucune modification en attente de révision.",
+    "preview": "Prévisualiser les modifications",
+    "previewTitle": "Vérifier les modifications proposées",
+    "before": "Diapositive actuelle",
+    "after": "Diapositive proposée",
+    "accept": "Accepter la proposition",
+    "reject": "Refuser",
+    "force": "Appliquer la proposition mise à jour",
+    "blank": "Vide",
+    "target": "Diapositive {slide} · {name}",
+    "targetLabel": "Modification",
+    "targetMissing": "La cible n'est plus disponible",
+    "stale": "Ces objets ont été modifiés après la création de la proposition. Vérifiez les modifications actuelles avant de les appliquer.",
+    "stalePreview": "Cet aperçu utilise la diapositive mise à jour. L'application remplacera les cibles modifiées.",
+    "geometry": "Position et taille (x, y, largeur, hauteur)",
+    "appearance": "Apparence ou mise en forme du texte modifiée",
+    "changedAgain": "La cible a encore changé. Vérifiez l'aperçu actualisé avant d'appliquer.",
+    "canvasTitle": "Modifications sur cette diapositive",
+    "editSlide": "Modifier la diapositive",
+    "showDiff": "Afficher les modifications",
+    "details": "Détails de la révision",
+    "removed": "Supprimé",
+    "added": "Ajouté",
+    "reviewHint": "Mode révision · les modifications s'appliquent une fois acceptées",
+    "canvasStale": "Cibles modifiées. Ouvrez les détails de la révision pour inspecter l'aperçu mis à jour avant d'appliquer.",
+    "previousPosition": "Avant",
+    "proposedPosition": "Proposé",
+    "loadingDiff": "Chargement des modifications…"
+  },
+  "commands": {
+    "moreControls": "Autres commandes",
+    "selectTool": "Sélectionner",
+    "fontSizeStep": "Modifier la taille de police",
+    "customFontSize": "Taille personnalisée…",
+    "fontSizePoints": "Taille en points",
+    "customColor": "Couleur personnalisée…",
+    "hexColor": "Couleur hexadécimale",
+    "apply": "Appliquer",
+    "cancel": "Annuler",
+    "reasons": {
+      "editorUnavailable": "L'éditeur n'est pas prêt.",
+      "documentLoading": "La présentation est encore en cours d'ouverture.",
+      "noDocument": "Aucune présentation n'est ouverte.",
+      "readOnly": "La présentation est en lecture seule.",
+      "nothingToUndo": "Il n'y a rien à annuler.",
+      "nothingToRedo": "Il n'y a rien à rétablir.",
+      "textSelectionRequired": "Sélectionnez d'abord du texte ou une zone de texte.",
+      "shapeRequired": "Sélectionnez d'abord une forme.",
+      "objectRequired": "Sélectionnez d'abord une forme ou une image.",
+      "slideRequired": "Ajoutez d'abord une diapositive.",
+      "unsupportedSelection": "Cela ne s'applique pas à la sélection actuelle.",
+      "invalidLayout": "Cette disposition n'est pas disponible dans cette présentation.",
+      "invalidAdjustment": "Cet ajustement n'est pas disponible pour cette forme.",
+      "zOrderBoundary": "L'objet ne peut pas aller plus loin dans cette direction.",
+      "reviewActive": "Quittez d'abord la révision de la proposition.",
+      "previewPending": "L'aperçu des modifications est encore en cours de chargement.",
+      "previewFailed": "Impossible d'afficher l'aperçu des modifications.",
+      "proposalStale": "Les cibles de la proposition ont changé. Vérifiez l'aperçu actualisé avant d'appliquer.",
+      "proposalNotFound": "Cette proposition n'est plus en attente.",
+      "proposalsUnavailable": "Les propositions ne sont pas disponibles.",
+      "hostDisabled": "Cette action n'est pas disponible ici.",
+      "unsupportedCommand": "Cette commande n'est pas prise en charge.",
+      "invalidArguments": "La commande a reçu des arguments non valides.",
+      "inputFailed": "Une saisie précédente n'a pas pu être appliquée.",
+      "documentReplaced": "La présentation a été remplacée.",
+      "targetChanged": "La sélection a changé avant l'exécution de la commande.",
+      "gestureActive": "Terminez d'abord le geste du pointeur.",
+      "commandFailed": "La commande a échoué.",
+      "permissionDenied": "L'application hôte n'a pas autorisé ce plugin à utiliser cette commande.",
+      "unsupportedPolicy": "Les plugins ne peuvent pas encore exécuter cette commande. Utilisez plutôt un lot de modifications.",
+      "pluginUnavailable": "Le plugin n'est plus actif.",
+      "aborted": "L'action du plugin a été annulée avant l'exécution de la commande."
+    }
+  },
+  "plugins": {
+    "toolbarGroup": "Plugins",
+    "panelTabs": "Panneaux des plugins",
+    "collapsePanel": "Réduire {title}",
+    "expandPanel": "Développer {title}"
   }
 }

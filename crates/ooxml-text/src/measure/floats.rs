@@ -4,10 +4,11 @@
 //! A line `[top, bottom)` misses a zone when `bottom <= topY` or
 //! `top >= bottomY`. Margins from several intersecting zones take the maximum
 //! per side rather than accumulating. A zone carrying non-empty `segments`
-//! replaces margins entirely for the lines it covers, and overlapping segment
-//! lists intersect strip by strip. A `fullWidthBlock` zone short-circuits to a
-//! single zero-width strip, leaving no usable room, which is what pushes an
-//! overlapping line below the band.
+//! describes the line's usable strips instead of a side margin; overlapping
+//! segment lists intersect strip by strip, and the strips are finally clipped
+//! to the room the side margins leave, so the two kinds of zone compose. A
+//! `fullWidthBlock` zone short-circuits to a single zero-width strip, leaving
+//! no usable room, which is what pushes an overlapping line below the band.
 
 use super::input::{FloatSegmentIn, FloatZoneIn};
 
@@ -19,16 +20,29 @@ pub(super) const MIN_WRAP_SEGMENT_WIDTH: f32 = 24.0;
 pub(super) struct LineMargins {
     pub left: f32,
     pub right: f32,
-    /// Present empty segments override margin width.
+    /// Usable strips, already clipped to the side margins, when any zone
+    /// covering the line carries them.
     pub segments: Option<Vec<FloatSegmentIn>>,
 }
 
-/// Resolves margins for a half-open absolute line interval.
+impl LineMargins {
+    /// The first usable strip, or the left margin when there are none.
+    pub(super) fn text_left(&self) -> f32 {
+        match self.segments.as_deref().and_then(<[_]>::first) {
+            Some(first) => first.left_offset,
+            None => self.left,
+        }
+    }
+}
+
+/// Resolves margins for a half-open absolute line interval. `base_width` is
+/// the line's unobstructed width, which the resolved strips are clipped to.
 pub(super) fn floating_margins(
     line_y: f32,
     line_height: f32,
     zones: &[FloatZoneIn],
     paragraph_y_offset: f32,
+    base_width: f32,
 ) -> LineMargins {
     let mut left = 0.0f32;
     let mut right = 0.0f32;
@@ -64,6 +78,16 @@ pub(super) fn floating_margins(
         right = right.max(zone.right_margin);
     }
 
+    if let Some(strips) = segments.as_mut() {
+        *strips = intersect_segments(
+            strips,
+            &[FloatSegmentIn {
+                left_offset: left,
+                available_width: (base_width - left - right).max(0.0),
+            }],
+        );
+    }
+
     LineMargins {
         left,
         right,
@@ -95,7 +119,7 @@ pub(super) fn find_clear_line_y(
 
     let mut y = start_y;
     for _ in 0..zones.len() + 2 {
-        let margins = floating_margins(y, line_height, zones, 0.0);
+        let margins = floating_margins(y, line_height, zones, 0.0, content_width);
         if available_width(&margins, content_width) >= min_width {
             return y;
         }
@@ -118,6 +142,33 @@ pub(super) fn find_clear_line_y(
     y
 }
 
+/// First Y at or below `start_y` clearing every `fullWidthBlock` band, stepping
+/// band bottom by band bottom.
+pub(super) fn clear_full_width_band_y(
+    start_y: f32,
+    line_height: f32,
+    zones: &[FloatZoneIn],
+) -> f32 {
+    let mut y = start_y;
+    for _ in 0..zones.len() {
+        let mut next = y;
+        for zone in zones {
+            if zone.full_width_block
+                && y + line_height > zone.top_y
+                && y < zone.bottom_y
+                && zone.bottom_y > next
+            {
+                next = zone.bottom_y;
+            }
+        }
+        if next <= y {
+            break;
+        }
+        y = next;
+    }
+    y
+}
+
 /// Intersects strip pairs in input order.
 fn intersect_segments(a: &[FloatSegmentIn], b: &[FloatSegmentIn]) -> Vec<FloatSegmentIn> {
     let mut result = Vec::new();
@@ -135,4 +186,57 @@ fn intersect_segments(a: &[FloatSegmentIn], b: &[FloatSegmentIn]) -> Vec<FloatSe
         }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn zone(segments: Option<Vec<(f32, f32)>>, left: f32, right: f32) -> FloatZoneIn {
+        FloatZoneIn {
+            left_margin: left,
+            right_margin: right,
+            top_y: 0.0,
+            bottom_y: 100.0,
+            segments: segments.map(|strips| {
+                strips
+                    .into_iter()
+                    .map(|(left_offset, available_width)| FloatSegmentIn {
+                        left_offset,
+                        available_width,
+                    })
+                    .collect()
+            }),
+            full_width_block: false,
+        }
+    }
+
+    #[test]
+    fn a_side_margin_clips_the_strips_of_a_zone_it_overlaps() {
+        let zones = [
+            zone(None, 40.0, 0.0),
+            zone(Some(vec![(0.0, 300.0), (330.0, 270.0)]), 0.0, 0.0),
+        ];
+        let margins = floating_margins(0.0, 12.0, &zones, 0.0, 600.0);
+        assert_eq!(
+            margins
+                .segments
+                .as_deref()
+                .expect("strips")
+                .iter()
+                .map(|s| (s.left_offset, s.available_width))
+                .collect::<Vec<_>>(),
+            vec![(40.0, 260.0), (330.0, 270.0)]
+        );
+        assert_eq!(available_width(&margins, 600.0), 530.0);
+        assert_eq!((margins.left, margins.text_left()), (40.0, 40.0));
+    }
+
+    #[test]
+    fn margins_alone_still_subtract_from_the_base_width() {
+        let zones = [zone(None, 40.0, 10.0)];
+        let margins = floating_margins(0.0, 12.0, &zones, 0.0, 600.0);
+        assert!(margins.segments.is_none());
+        assert_eq!(available_width(&margins, 600.0), 550.0);
+    }
 }

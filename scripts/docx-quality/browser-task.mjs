@@ -2,6 +2,7 @@ import { chromium } from 'playwright';
 import { mkdir, writeFile, readFile, readdir } from 'node:fs/promises';
 import { basename, extname, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
+import { isAllowedFontRequest } from './network-policy.mjs';
 
 const [file, out, fontMode = 'cdn', base = 'http://127.0.0.1:4178'] =
   process.argv.slice(2);
@@ -20,7 +21,11 @@ if ((await readdir(out).catch(() => [])).length) throw new Error('output must be
 const source = await readFile(file);
 const format = extname(file).slice(1).toLowerCase();
 if (!['docx', 'pptx', 'xlsx', 'vsdx'].includes(format)) throw new Error('Invalid source format');
-const profile = JSON.parse(process.env.QUALITY_CAPTURE_CONFIG ?? 'null');
+const profile = JSON.parse(
+  process.env.QUALITY_CAPTURE_CONFIG_FILE
+    ? await readFile(process.env.QUALITY_CAPTURE_CONFIG_FILE, 'utf8')
+    : process.env.QUALITY_CAPTURE_CONFIG ?? 'null'
+);
 const sha256 = createHash('sha256').update(source).digest('hex');
 const metadata = {
   source: basename(file),
@@ -74,17 +79,7 @@ try {
       cookie: request.headers().cookie ?? null,
     };
     externalRequests.push(record);
-    const font =
-      /^https:\/\/cdn\.jsdelivr\.net\/npm\/@betteroffice\/fonts(?:-cjk)?@0\.1\.0\/assets\/[A-Za-z0-9-]+\.(?:ttf|otf)$/.test(
-        url.href
-      );
-    if (
-      !font ||
-      record.method !== 'GET' ||
-      record.bodyBytes !== 0 ||
-      record.referer ||
-      record.cookie
-    ) {
+    if (process.env.QUALITY_LOCAL_ONLY === '1' || !isAllowedFontRequest(record)) {
       networkViolations.push(record);
       await route.abort();
       return;

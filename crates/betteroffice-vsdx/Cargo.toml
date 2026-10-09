@@ -14,8 +14,15 @@ categories = ["parser-implementations"]
 [dependencies]
 vsdx-parse.workspace = true
 vsdx-resolve.workspace = true
+vsdx-validate = { workspace = true }
 vsdx-eval.workspace = true
 vsdx-edit.workspace = true
+vsdx-render.workspace = true
+vsdx-raster = { workspace = true, optional = true }
+
+[features]
+default = ["raster"]
+raster = ["dep:vsdx-raster"]
 
 [dev-dependencies]
 ooxml-opc.workspace = true

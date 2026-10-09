@@ -2,15 +2,16 @@
 
 mod chart;
 mod display_list;
+mod family_metrics;
+mod geometry;
 mod image_effects;
 mod layout;
-mod metafile;
 
 /// Entry points for the fuzz targets in `fuzz/`; not a stable API.
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
 pub mod fuzzing {
-    pub use crate::metafile::decode;
+    pub use ooxml_metafile::decode;
 }
 
 pub use display_list::*;
@@ -115,6 +116,8 @@ struct ComposedStroke {
     width_px: f32,
     #[serde(default)]
     dash: bool,
+    #[serde(default)]
+    join: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -166,11 +169,14 @@ struct ComposedRun {
 pub fn compile_json(slide_json: &str) -> Result<String, String> {
     let slide: ComposedSlide = serde_json::from_str(slide_json)
         .map_err(|error| format!("invalid composed slide: {error}"))?;
-    serde_json::to_string(&compile(slide))
+    serde_json::to_string(&compile(slide)?)
         .map_err(|error| format!("could not serialize display list: {error}"))
 }
 
-fn compile(slide: ComposedSlide) -> SurfaceDisplayList {
+fn compile(slide: ComposedSlide) -> Result<SurfaceDisplayList, String> {
+    if slide.shapes.len() > layout::MAX_RENDER_SHAPES {
+        return Err("composed slide exceeds the shape limit".to_owned());
+    }
     let mut primitives = Vec::with_capacity(slide.shapes.len() * 2);
     for shape in slide.shapes {
         match shape {
@@ -183,29 +189,34 @@ fn compile(slide: ComposedSlide) -> SurfaceDisplayList {
                 text,
             } => {
                 let transform = transform(&base);
-                let path = geometry_path(
+                let (path, geometry_fallback) = geometry_path(
                     &geometry,
                     &adjust_values,
                     f64::from(base.rect.w) / f64::from(base.rect.h),
                 );
-                primitives.push(Primitive::Shape {
-                    clip: None,
-                    even_odd: false,
-                    object_id: base.id,
-                    shape_id: None,
-                    name: base.name,
-                    x: base.rect.x,
-                    y: base.rect.y,
-                    w: base.rect.w,
-                    h: base.rect.h,
-                    geometry,
-                    path,
-                    adjust_values,
-                    fill,
-                    stroke: stroke.map(Into::into),
-                    shadow: None,
-                    transform,
-                });
+                primitives.extend(
+                    geometry::preset_primitives(Primitive::Shape {
+                        clip: None,
+                        even_odd: false,
+                        object_id: base.id,
+                        shape_id: None,
+                        name: base.name,
+                        x: base.rect.x,
+                        y: base.rect.y,
+                        w: base.rect.w,
+                        h: base.rect.h,
+                        geometry,
+                        path,
+                        geometry_fallback,
+                        adjust_values,
+                        fill,
+                        stroke: stroke.map(Into::into),
+                        shadow: None,
+                        transform,
+                    })
+                    .into_iter()
+                    .map(|(primitive, _)| primitive),
+                );
                 if let Some(text) = text {
                     primitives.push(text_primitive(base.id, base.rect, transform, text));
                 }
@@ -220,6 +231,7 @@ fn compile(slide: ComposedSlide) -> SurfaceDisplayList {
             } => {
                 let transform = transform(&base);
                 primitives.push(Primitive::Image {
+                    geometry_fallback: false,
                     object_id: base.id,
                     shape_id: None,
                     name: base.name,
@@ -230,6 +242,7 @@ fn compile(slide: ComposedSlide) -> SurfaceDisplayList {
                     asset_id: image_part_path,
                     effects,
                     crop,
+                    tile: None,
                     path,
                     stroke: stroke.map(Into::into),
                     shadow: None,
@@ -245,9 +258,12 @@ fn compile(slide: ComposedSlide) -> SurfaceDisplayList {
             },
             ComposedShape::Unknown { base } => primitives.push(placeholder(base, None)),
         }
+        if primitives.len() > layout::MAX_RENDER_SHAPES {
+            return Err("composed slide exceeds the shape limit after expansion".to_owned());
+        }
     }
 
-    SurfaceDisplayList {
+    Ok(SurfaceDisplayList {
         contract_version: CONTRACT_VERSION,
         width: slide.width_px,
         height: slide.height_px,
@@ -257,23 +273,26 @@ fn compile(slide: ComposedSlide) -> SurfaceDisplayList {
             })
         }),
         primitives,
-    }
+    })
 }
 
 fn geometry_path(
     geometry: &str,
     adjust_values: &BTreeMap<String, f32>,
     aspect_ratio: f64,
-) -> Vec<ooxml_drawingml::GeometryPathCommand> {
+) -> (Vec<ooxml_drawingml::GeometryPathCommand>, bool) {
     let adjustments = adjust_values
         .iter()
         .map(|(key, value)| (key.clone(), f64::from(*value)))
         .collect();
-    ooxml_drawingml::preset_geometry_to_path(geometry, &adjustments, aspect_ratio)
-        .or_else(|| {
+    match ooxml_drawingml::preset_geometry_to_path(geometry, &adjustments, aspect_ratio) {
+        Some(path) => (path, false),
+        None => (
             ooxml_drawingml::preset_geometry_to_path("rect", &Default::default(), aspect_ratio)
-        })
-        .unwrap_or_default()
+                .unwrap_or_default(),
+            true,
+        ),
+    }
 }
 
 fn transform(base: &ShapeBase) -> Transform {
@@ -301,6 +320,7 @@ fn composed_chart(base: ShapeBase, chart: &ChartSpace) -> Primitive {
     };
     let plotted = chart_primitive(frame, chart, "", MAX_CHART_PRIMITIVES, &mut |text| {
         Ok(Primitive::TextBox {
+            text_shadow: None,
             object_id: text.object_id,
             shape_id: None,
             story_id: None,
@@ -355,6 +375,7 @@ fn text_primitive(
     text: ComposedText,
 ) -> Primitive {
     Primitive::TextBox {
+        text_shadow: None,
         object_id,
         shape_id: None,
         story_id: None,
@@ -406,6 +427,7 @@ impl From<ComposedStroke> for Stroke {
             width: stroke.width_px,
             dashed: stroke.dash,
             paint: None,
+            join: stroke.join,
             head_end: None,
             tail_end: None,
         }
@@ -415,6 +437,28 @@ impl From<ComposedStroke> for Stroke {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn composed_slides_limit_inputs_and_expanded_paths() {
+        let cube = serde_json::json!({
+            "kind": "shape", "id": 1, "name": "cube", "geometry": "cube",
+            "rect": { "x": 0, "y": 0, "w": 100, "h": 100 }, "rotationDeg": 0
+        });
+        let compose = |count| {
+            let json = serde_json::json!({"widthPx": 100, "heightPx": 100, "shapes": vec![cube.clone(); count]});
+            compile_json(&json.to_string())
+        };
+        let limit = layout::MAX_RENDER_SHAPES;
+        let output: SurfaceDisplayList =
+            serde_json::from_str(&compose(limit / 4).unwrap()).unwrap();
+        assert_eq!(output.primitives.len(), limit);
+        assert!(
+            compose(limit / 4 + 1)
+                .unwrap_err()
+                .contains("after expansion")
+        );
+        assert!(compose(limit + 1).unwrap_err().contains("shape limit"));
+    }
 
     #[test]
     fn composed_pictures_keep_their_effects() {
@@ -452,6 +496,17 @@ mod tests {
         assert_eq!(output["primitives"][1]["kind"], "textBox");
         assert_eq!(output["primitives"][1]["objectId"], 7);
         assert_eq!(output["primitives"][1]["anchor"], "center");
+    }
+
+    #[test]
+    fn composed_unknown_preset_reports_its_rectangle_fallback() {
+        let json = r#"{"widthPx":100,"heightPx":100,"shapes":[{"kind":"shape","id":7,"name":"Unknown","rect":{"x":0,"y":0,"w":10,"h":10},"rotationDeg":0,"geometry":"unknownPreset"}]}"#;
+        let output: serde_json::Value =
+            serde_json::from_str(&compile_json(json).expect("compile")).expect("display list json");
+        let shape = &output["primitives"][0];
+        assert_eq!(shape["geometry"], "unknownPreset");
+        assert_eq!(shape["geometryFallback"], true);
+        assert_eq!(shape["path"].as_array().unwrap().len(), 5);
     }
 
     #[test]
@@ -495,7 +550,7 @@ mod tests {
     }
 
     #[test]
-    fn a_chart_space_fill_grounds_the_chart_instead_of_the_default_white() {
+    fn a_chart_space_fill_grounds_the_chart_and_a_bare_one_stays_transparent() {
         let compile = |fill: &str| {
             let json = format!(
                 r##"{{
@@ -515,9 +570,16 @@ mod tests {
             );
             let output: serde_json::Value =
                 serde_json::from_str(&compile_json(&json).expect("compile")).expect("json");
-            output["primitives"][0]["primitives"][0]["fill"]["color"].clone()
+            output["primitives"][0]["primitives"]
+                .as_array()
+                .expect("chart parts")
+                .iter()
+                .find(|part| part["w"] == 300.0 && part["h"] == 150.0)
+                .map_or(serde_json::Value::Null, |part| {
+                    part["fill"]["color"].clone()
+                })
         };
-        assert_eq!(compile(""), "#FFFFFF");
+        assert_eq!(compile(""), serde_json::Value::Null);
         assert_eq!(
             compile(r##""fill":{"kind":"solid","color":"#01BABC"},"##),
             "#01BABC"

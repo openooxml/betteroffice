@@ -31,6 +31,9 @@ use docx_layout::hit::{
     vertical_move,
 };
 
+#[path = "fixtures/nested_table_cell_window.rs"]
+mod nested_table_cell_window;
+
 const DEMO_FIXTURE: &str =
     include_str!("../../../packages/docx/src/layout/render/__fixtures__/displayList.demo.json");
 
@@ -66,6 +69,12 @@ fn value_eq(a: &serde_json::Value, b: &serde_json::Value) -> bool {
 #[test]
 fn demo_fixture_round_trips_through_serde_types() {
     let typed: DisplayList = serde_json::from_str(DEMO_FIXTURE).expect("fixture parses");
+    assert!(
+        typed
+            .pages
+            .iter()
+            .all(|page| page.watermark_primitive_count.is_none())
+    );
 
     // no field loss: re-serialized output is value-identical to the fixture
     let out = serde_json::to_string(&typed).expect("serializes");
@@ -874,7 +883,7 @@ fn cell_structure_rides_on_table_cell_primitives() {
             .primitives
             .iter()
             .filter_map(doc_attrs)
-            .filter_map(|a| a.cell.clone())
+            .filter_map(|a| a.cell.as_deref().cloned())
             .collect()
     };
 
@@ -1405,6 +1414,7 @@ fn text_watermark_emits_rotated_translucent_text_primitive() {
     let json = build_display_list_json(&input.to_string()).expect("builds");
     let dl: DisplayList = serde_json::from_str(&json).unwrap();
     assert_eq!(dl.pages[0].primitives.len(), 1);
+    assert_eq!(dl.pages[0].watermark_primitive_count, Some(1));
     let Primitive::Text(t) = &dl.pages[0].primitives[0] else {
         panic!("watermark should emit text");
     };
@@ -1448,6 +1458,7 @@ fn picture_watermark_emits_decorative_washout_image_primitive() {
     let json = build_display_list_json(&input.to_string()).expect("builds");
     let dl: DisplayList = serde_json::from_str(&json).unwrap();
     assert_eq!(dl.pages[0].primitives.len(), 1);
+    assert_eq!(dl.pages[0].watermark_primitive_count, Some(1));
     let Primitive::Image(img) = &dl.pages[0].primitives[0] else {
         panic!("watermark should emit image");
     };
@@ -1726,7 +1737,7 @@ fn structural_revisions_emit_pinned_primitives() {
                 text: Some("¶".to_string()),
                 fill: Some("#2e7d32".to_string()),
                 x: 62.0,
-                y: 66.0,
+                y: 62.0,
                 w: 8.0,
                 h: 0.0,
             },
@@ -2008,28 +2019,28 @@ fn table_cell_content_insets_border_and_honors_valign() {
 
     // left cell: cx 50 + left-border 1 + padLeft 7 = 58. vAlign bottom:
     // avail = 60 - 1 - 1 = 58, content 20 → offset 38; content top =
-    // 50 + padTop 1 + 38 = 89; baseline = 89 + half-leading 2 + ascent 12 = 103.
+    // 50 + padTop 1 + 38 = 89; baseline = 89 + ascent 12 = 101.
     assert!(
         (sig.1 - 58.0).abs() < 0.01,
         "sig x {} (want 58: cx+border+pad)",
         sig.1
     );
     assert!(
-        (sig.3 - 103.0).abs() < 0.01,
-        "sig baseline {} (want 103: bottom vAlign)",
+        (sig.3 - 101.0).abs() < 0.01,
+        "sig baseline {} (want 101: bottom vAlign)",
         sig.3
     );
 
     // right cell: cx 150 + no border + padLeft 7 = 157; top-anchored →
-    // content top 50 + 1 = 51; baseline = 51 + 2 + 12 = 65.
+    // content top 50 + 1 = 51; baseline = 51 + 12 = 63.
     assert!(
         (date.1 - 157.0).abs() < 0.01,
         "date x {} (want 157: no left border)",
         date.1
     );
     assert!(
-        (date.3 - 65.0).abs() < 0.01,
-        "date baseline {} (want 65: top-anchored)",
+        (date.3 - 63.0).abs() < 0.01,
+        "date baseline {} (want 63: top-anchored)",
         date.3
     );
 }
@@ -2099,7 +2110,7 @@ fn nested_floating_table_offsets_are_relative_to_the_cell_content() {
 fn carried_table_borders_preserve_cell_content_across_slices() {
     use serde_json::json;
 
-    for (alignment, first_baseline) in [("top", 14.0), ("center", 42.0), ("bottom", 70.0)] {
+    for (alignment, first_baseline) in [("top", 12.0), ("center", 40.0), ("bottom", 68.0)] {
         let paragraphs: Vec<_> = (0..4)
             .map(|index| {
                 json!({ "kind": "paragraph", "id": 70 + index,
@@ -2137,7 +2148,17 @@ fn carried_table_borders_preserve_cell_content_across_slices() {
         assert_eq!(input["layout"]["pages"][1]["fragments"][0]["rowStart"], 1);
         assert!(dl.pages[1].primitives.iter().any(|primitive| {
             matches!(primitive, Primitive::Line(line)
-                if line.attrs.cell.as_ref().is_some_and(|cell| cell.owns_top_border == Some(true)))
+                if line.attrs.cell.as_ref().is_some_and(|cell| cell.owns_top_border == Some(true))
+                    && line.y1 == line.y2 && line.y1.as_f64() == Some(0.0))
+        }));
+        let last_fragment =
+            input["layout"]["pages"].as_array().unwrap().last().unwrap()["fragments"][0].clone();
+        let bottom_y =
+            last_fragment["y"].as_f64().unwrap() + last_fragment["height"].as_f64().unwrap() - 2.0;
+        assert!(dl.pages.last().unwrap().primitives.iter().any(|primitive| {
+            matches!(primitive, Primitive::Line(line)
+                if line.role == Some(docx_layout::display_list::LineRole::TableBorder)
+                    && line.y1 == line.y2 && line.y1.as_f64() == Some(bottom_y))
         }));
         let mut seen = Vec::new();
         for (page_index, page) in dl.pages.iter().enumerate().skip(1) {
@@ -2151,11 +2172,11 @@ fn carried_table_borders_preserve_cell_content_across_slices() {
                     first_baseline + index as f64 * 20.0,
                     "{alignment}, page {page_index}, line {index}"
                 );
-                if baseline - 14.0 >= height || baseline + 6.0 <= 0.0 {
+                if baseline - 12.0 >= height || baseline + 8.0 <= 0.0 {
                     continue;
                 }
                 assert!(
-                    baseline >= 14.0 && baseline + 6.0 <= height,
+                    baseline >= 12.0 && baseline + 8.0 <= height,
                     "{alignment}, line {index} crosses the fragment clip"
                 );
                 seen.push(index);
@@ -2169,8 +2190,8 @@ fn carried_table_borders_preserve_cell_content_across_slices() {
 #[test]
 fn cell_paragraphs_stack_with_collapsed_spacing() {
     // a: after 10; b: before 25 (wins over prev after 10) + after 30; c: before
-    // 5 (loses to prev after 30). Line box 20 (ascent 12, descent 4 → leading 2,
-    // baseline = lineTop + 14). content top = cy 50 + padTop 1 = 51.
+    // 5 (loses to prev after 30). Line box 20 (ascent 12, descent 4, the rest
+    // leading below → baseline = lineTop + 12). content top = cy 50 + padTop 1 = 51.
     let para = |id: u64, ch: &str, before: f64, after: f64, pm: i64| {
         serde_json::json!({
             "kind": "paragraph", "id": id, "pmStart": pm, "pmEnd": pm + 3,
@@ -2215,25 +2236,25 @@ fn cell_paragraphs_stack_with_collapsed_spacing() {
             .3
     };
 
-    // a: top 0 → baseline 51 + 14 = 65.
+    // a: top 0 → baseline 51 + 12 = 63.
     assert!(
-        (base("a") - 65.0).abs() < 0.01,
-        "a baseline {} (want 65)",
+        (base("a") - 63.0).abs() < 0.01,
+        "a baseline {} (want 63)",
         base("a")
     );
     // b: gap max(after 10, before 25) = 25 → top 20 + 25 = 45 → baseline
-    // 51 + 45 + 14 = 110 (before wins the collapse).
+    // 51 + 45 + 12 = 108 (before wins the collapse).
     assert!(
-        (base("b") - 110.0).abs() < 0.01,
-        "b baseline {} (want 110)",
+        (base("b") - 108.0).abs() < 0.01,
+        "b baseline {} (want 108)",
         base("b")
     );
     // c: gap max(after 30, before 5) = 30 → top 45 + 20 + 30 = 95 → baseline
-    // 51 + 95 + 14 = 160 (after wins). The old line-height-only stack put it at
-    // 51 + 40 + 14 = 105, one after-spacing block too high.
+    // 51 + 95 + 12 = 158 (after wins). The old line-height-only stack put it at
+    // 51 + 40 + 12 = 103, one after-spacing block too high.
     assert!(
-        (base("c") - 160.0).abs() < 0.01,
-        "c baseline {} (want 160)",
+        (base("c") - 158.0).abs() < 0.01,
+        "c baseline {} (want 158)",
         base("c")
     );
 }
@@ -2336,6 +2357,238 @@ fn centered_hf_field_line_recenters_per_page() {
         "page 10 field width {}",
         field_w(9, "10")
     );
+}
+
+/// PAGE paints the section label; NUMPAGES paints the document total.
+#[test]
+fn page_fields_paint_section_labels() {
+    let body = serde_json::json!({
+        "block": { "kind": "paragraph", "id": 1, "pmStart": 0, "pmEnd": 10,
+            "runs": [
+                { "kind": "field", "fieldType": "PAGE", "fallback": "1", "pmStart": 6 },
+                { "kind": "field", "fieldType": "NUMPAGES", "fallback": "1", "pmStart": 7 }
+            ] },
+        "measure": { "kind": "paragraph", "totalHeight": 20.0, "lines": [
+            { "headRun": 0, "headChar": 0, "tailRun": 1, "tailChar": 1,
+              "width": 20.0, "ascent": 12.0, "descent": 4.0, "lineHeight": 20.0 }] }
+    });
+    let pages: Vec<serde_json::Value> = [(1, Some("5")), (2, Some("6")), (3, None), (4, Some("9"))]
+        .iter()
+        .map(|(number, label)| {
+            let mut page = serde_json::json!({
+                "size": { "w": 200.0, "h": 300.0 },
+                "margins": { "left": 0.0, "right": 0.0, "footer": 20.0 },
+                "number": number,
+                "fragments": [{
+                    "kind": "paragraph", "blockId": 1, "x": 0.0, "y": 50.0,
+                    "width": 200.0, "height": 20.0,
+                    "fromLine": 0, "toLine": 1, "pmStart": 0, "pmEnd": 10
+                }]
+            });
+            if let Some(label) = label {
+                page["pageLabel"] = serde_json::json!(label);
+            }
+            page
+        })
+        .collect();
+
+    let footer_variant = serde_json::json!({
+        "rId": "rId9", "kind": "footer", "type": "default", "height": 20.0,
+        "measured": [body.clone()],
+        "fieldWidths": [
+            { "pmStart": 6, "fallbackWidth": 10.0, "perPage": [11.0, 12.0, 13.0, 15.0] },
+            { "pmStart": 7, "fallbackWidth": 10.0, "perPage": [14.0, 14.0, 14.0, 14.0] }
+        ]
+    });
+
+    let input = serde_json::json!({
+        "measured": [body], "options": {},
+        "layout": { "pages": pages },
+        "headersFooters": { "variants": [footer_variant] }
+    })
+    .to_string();
+
+    let dl = build_dl(&input);
+    let expected = ["5", "6", "3", "9"];
+    let page_widths = [11.0, 12.0, 13.0, 15.0];
+
+    for (page_idx, want) in expected.iter().enumerate() {
+        assert_eq!(
+            dl.pages[page_idx].page_label.as_deref(),
+            if page_idx == 2 { None } else { Some(*want) },
+        );
+        let mut body_prims = text_prims(&dl.pages[page_idx].primitives);
+        body_prims.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        assert_eq!(
+            body_prims.len(),
+            2,
+            "page {page_idx} body paints PAGE and NUMPAGES: {body_prims:?}"
+        );
+        assert_eq!(
+            body_prims[0].0, *want,
+            "page {page_idx} body PAGE paints label {want}: {body_prims:?}"
+        );
+        assert_eq!(
+            body_prims[1].0, "4",
+            "page {page_idx} body NUMPAGES paints total 4: {body_prims:?}"
+        );
+        let footer = dl.pages[page_idx].footer.as_ref().expect("footer region");
+        let mut footer_texts = text_prims(&footer.primitives);
+        footer_texts.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        assert_eq!(
+            footer_texts.len(),
+            2,
+            "page {page_idx} footer paints PAGE and NUMPAGES: {footer_texts:?}"
+        );
+        assert_eq!(
+            footer_texts[0].0, *want,
+            "page {page_idx} footer PAGE paints {want}: {footer_texts:?}"
+        );
+        assert!(
+            (footer_texts[0].2 - page_widths[page_idx]).abs() < 0.01,
+            "page {page_idx} reserved width {} (want {})",
+            footer_texts[0].2,
+            page_widths[page_idx]
+        );
+        assert_eq!(
+            footer_texts[1].0, "4",
+            "page {page_idx} footer NUMPAGES paints total 4: {footer_texts:?}"
+        );
+        assert!(
+            (footer_texts[1].2 - 14.0).abs() < 0.01,
+            "page {page_idx} footer NUMPAGES width {} (want 14)",
+            footer_texts[1].2
+        );
+    }
+}
+
+#[test]
+fn partial_numpages_uses_saved_text_only_when_enabled() {
+    for fallback in [
+        serde_json::json!("9"),
+        serde_json::json!(""),
+        serde_json::Value::Null,
+    ] {
+        let measured = serde_json::json!({
+            "block": {"kind": "paragraph", "id": 1, "pmStart": 0, "pmEnd": 3,
+                "runs": [{"kind": "field", "fieldType": "NUMPAGES",
+                          "fallback": fallback, "pmStart": 1, "pmEnd": 2}]},
+            "measure": {"kind": "paragraph", "totalHeight": 20, "lines": [{
+                "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 1,
+                "width": 10, "ascent": 12, "descent": 4, "lineHeight": 20
+            }]}
+        });
+        for (partial, cached_page_totals) in [(true, false), (true, true), (false, true)] {
+            let expected = if !partial {
+                "1"
+            } else if cached_page_totals {
+                fallback.as_str().unwrap_or("")
+            } else {
+                ""
+            };
+            let input = serde_json::json!({
+                "measured": [measured], "options": {},
+                "layout": {"partial": partial, "cachedPageTotals": cached_page_totals,
+                    "pages": [{
+                        "size": {"w": 200, "h": 300},
+                        "margins": {"left": 0, "right": 0, "footer": 20},
+                        "fragments": [{
+                            "kind": "paragraph", "blockId": 1, "x": 0, "y": 50,
+                            "width": 200, "height": 20, "fromLine": 0, "toLine": 1,
+                            "pmStart": 0, "pmEnd": 3
+                        }]
+                    }]},
+                "headersFooters": {"variants": [{
+                    "rId": "rId9", "kind": "footer", "type": "default", "height": 20,
+                    "measured": [measured],
+                    "fieldWidths": [{"pmStart": 1, "fallbackWidth": 10,
+                                     "perPage": [if expected.is_empty() { 0 } else { 10 }]}]
+                }]}
+            });
+            let dl = build_dl(&input.to_string());
+            let text = |primitives: &[Primitive]| {
+                text_prims(primitives)
+                    .into_iter()
+                    .map(|primitive| primitive.0)
+                    .collect::<String>()
+            };
+            assert_eq!(text(&dl.pages[0].primitives), expected);
+            let footer = dl.pages[0].footer.as_ref().expect("footer region");
+            assert_eq!(text(&footer.primitives), expected);
+        }
+    }
+}
+
+/// A `w:fmt="lowerRoman"` section paints roman labels across its pages.
+#[test]
+fn page_fields_paint_roman_section_labels() {
+    let body = serde_json::json!({
+        "block": { "kind": "paragraph", "id": 1, "pmStart": 0, "pmEnd": 10,
+            "runs": [
+                { "kind": "field", "fieldType": "PAGE", "fallback": "1", "pmStart": 6 }
+            ] },
+        "measure": { "kind": "paragraph", "totalHeight": 20.0, "lines": [
+            { "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 1,
+              "width": 10.0, "ascent": 12.0, "descent": 4.0, "lineHeight": 20.0 }] }
+    });
+    let pages: Vec<serde_json::Value> = [(1, "i", 0), (2, "ii", 0), (3, "iii", 1), (4, "iv", 1)]
+        .iter()
+        .map(|(number, label, section)| {
+            serde_json::json!({
+                "size": { "w": 200.0, "h": 300.0 },
+                "margins": { "left": 0.0, "right": 0.0, "footer": 20.0 },
+                "number": number,
+                "pageLabel": label,
+                "sectionIndex": section,
+                "fragments": [{
+                    "kind": "paragraph", "blockId": 1, "x": 0.0, "y": 50.0,
+                    "width": 200.0, "height": 20.0,
+                    "fromLine": 0, "toLine": 1, "pmStart": 0, "pmEnd": 10
+                }]
+            })
+        })
+        .collect();
+
+    let footer_variant = serde_json::json!({
+        "rId": "rId9", "kind": "footer", "type": "default", "height": 20.0,
+        "measured": [body.clone()],
+        "fieldWidths": [
+            { "pmStart": 6, "fallbackWidth": 10.0, "perPage": [11.0, 12.0, 13.0, 14.0] }
+        ]
+    });
+
+    let input = serde_json::json!({
+        "measured": [body], "options": {},
+        "layout": { "pages": pages },
+        "headersFooters": { "variants": [footer_variant] }
+    })
+    .to_string();
+
+    let dl = build_dl(&input);
+    for (page_idx, want) in ["i", "ii", "iii", "iv"].iter().enumerate() {
+        assert_eq!(dl.pages[page_idx].page_label.as_deref(), Some(*want));
+        let body_prims = text_prims(&dl.pages[page_idx].primitives);
+        assert_eq!(
+            body_prims.len(),
+            1,
+            "page {page_idx} body paints one PAGE field: {body_prims:?}"
+        );
+        assert_eq!(
+            body_prims[0].0, *want,
+            "page {page_idx} body paints {want}: {body_prims:?}"
+        );
+        let footer = dl.pages[page_idx].footer.as_ref().expect("footer region");
+        let footer_texts = text_prims(&footer.primitives);
+        assert_eq!(
+            footer_texts.len(),
+            1,
+            "page {page_idx} footer paints one PAGE field: {footer_texts:?}"
+        );
+        assert_eq!(
+            footer_texts[0].0, *want,
+            "page {page_idx} footer paints {want}: {footer_texts:?}"
+        );
+    }
 }
 
 /// a paragraph's stable `paraId` is stamped on every primitive it emits (the
@@ -2573,8 +2826,8 @@ fn text_box_fragment_emits_container_and_inner_text() {
     );
 
     // inner paragraphs at content origin: x = 100 + border 2 + padLeft 7 = 109;
-    // first para top = 50 + 2 + 4 = 56 → baseline 56 + half-leading 4 + ascent 12
-    // = 72; second para stacks by totalHeight 24 → baseline 96.
+    // first para top = 50 + 2 + 4 = 56 → baseline 56 + ascent 12 = 68; second
+    // para stacks by totalHeight 24 → baseline 92.
     let t = text_prims(prims);
     let alpha = t.iter().find(|x| x.0 == "Alpha").expect("Alpha inner text");
     let bravo = t.iter().find(|x| x.0 == "Bravo").expect("Bravo inner text");
@@ -2584,8 +2837,8 @@ fn text_box_fragment_emits_container_and_inner_text() {
         alpha.1
     );
     assert!(
-        (alpha.3 - 72.0).abs() < 0.01,
-        "Alpha baseline {} (want 72)",
+        (alpha.3 - 68.0).abs() < 0.01,
+        "Alpha baseline {} (want 68)",
         alpha.3
     );
     assert!(
@@ -2594,8 +2847,8 @@ fn text_box_fragment_emits_container_and_inner_text() {
         bravo.1
     );
     assert!(
-        (bravo.3 - 96.0).abs() < 0.01,
-        "Bravo baseline {} (want 96)",
+        (bravo.3 - 92.0).abs() < 0.01,
+        "Bravo baseline {} (want 92)",
         bravo.3
     );
 
@@ -2761,6 +3014,13 @@ fn table_border_lines_carry_cell_and_table_ownership() {
         .collect();
     assert_eq!(borders.len(), 4, "four bordered edges expected: {json}");
     for line in &borders {
+        if line.color == "#111111" {
+            assert_eq!(line.y1.as_f64(), Some(50.5));
+            assert_eq!(line.y2.as_f64(), Some(50.5));
+        } else if line.color == "#333333" {
+            assert_eq!(line.y1.as_f64(), Some(73.5));
+            assert_eq!(line.y2.as_f64(), Some(73.5));
+        }
         let cell = line.attrs.cell.as_ref().expect("border line carries cell");
         assert_eq!(
             (cell.row, cell.col, cell.row_span, cell.col_span),
@@ -2878,5 +3138,687 @@ fn modern_text_effects_thread_to_text_primitives() {
             _ => None,
         })
         .expect("text primitive");
-    assert_eq!(text.attrs.modern_effects.as_ref(), Some(&effects));
+    assert_eq!(text.attrs.modern_effects.as_deref(), Some(&effects));
+}
+
+/// Word hangs an `auto` line's first baseline off the box top: raising the
+/// multiple grows the box downward and leaves the baseline put. Measured on
+/// Word 16.113, Arial 72pt, 1-inch top margin — 139.552pt under w:line 240,
+/// 276, 288, 360 and 480 alike (spread 0.045pt), against the model's
+/// 72 + (1854 + 67) / 2048 x 72 = 139.535pt, inside the 0.25pt device grid.
+#[test]
+fn auto_spacing_keeps_the_first_baseline_at_the_top_of_a_taller_box() {
+    const WORD_BASELINE_PT: f64 = 139.552;
+    const ASCENT: f64 = 1921.0 / 2048.0 * 72.0;
+    const DESCENT: f64 = 434.0 / 2048.0 * 72.0;
+    const SINGLE: f64 = ASCENT + DESCENT;
+
+    for multiple in [1.0_f64, 1.15, 1.2, 1.5, 2.0] {
+        let height = SINGLE * multiple;
+        let input = serde_json::json!({
+            "measured": [{
+                "block": { "kind": "paragraph", "id": 1, "pmStart": 1, "pmEnd": 7,
+                    "runs": [{ "kind": "text", "text": "Hxdpq", "pmStart": 1, "pmEnd": 6 }] },
+                "measure": { "kind": "paragraph", "totalHeight": height, "lines": [
+                    { "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 5,
+                      "width": 200.0, "ascent": ASCENT, "descent": DESCENT,
+                      "lineHeight": height }
+                ] }
+            }],
+            "options": {},
+            "layout": { "pages": [{ "size": { "w": 612.0, "h": 792.0 }, "margins": {},
+                "fragments": [
+                    { "kind": "paragraph", "blockId": 1, "x": 72.0, "y": 72.0,
+                      "width": 468.0, "height": height, "fromLine": 0, "toLine": 1,
+                      "pmStart": 1, "pmEnd": 7 }
+                ] }] }
+        })
+        .to_string();
+
+        let dl = build_dl(&input);
+        let baseline = text_prims(&dl.pages[0].primitives)
+            .first()
+            .expect("one text primitive")
+            .3;
+        assert!(
+            (baseline - (72.0 + ASCENT)).abs() < 0.01,
+            "multiple {multiple}: baseline {baseline} (want {})",
+            72.0 + ASCENT
+        );
+        assert!(
+            (baseline - WORD_BASELINE_PT).abs() <= 0.25,
+            "multiple {multiple}: baseline {baseline} is off Word's {WORD_BASELINE_PT} \
+             by more than its 0.25pt device grid"
+        );
+    }
+}
+
+#[test]
+fn unbuilt_page_spans_read_positions_as_a_fresh_build_does() {
+    use docx_layout::types::{Input, LayoutBlock};
+    let raw = std::fs::read_to_string(fixture_path("table-splits-with-repeated-header", "input"))
+        .unwrap();
+    let input: Input = serde_json::from_str(&raw).unwrap();
+    let layout = docx_layout::compute_layout_input(&mut input.clone()).unwrap();
+    let unbuilt = |_: usize| false;
+    for value in [f64::NAN, f64::INFINITY, 12.5, 1e30, 18.0] {
+        let mut changed = input.clone();
+        let LayoutBlock::Table(table) = &mut changed.measured[0].block else {
+            panic!("the fixture opens with a table");
+        };
+        let LayoutBlock::Paragraph(paragraph) = &mut table.rows[4].cells[0].blocks[0] else {
+            panic!("the row opens with a paragraph");
+        };
+        paragraph.pm_start = Some(value);
+        paragraph.pm_end = Some(20.0);
+        let fresh = docx_layout::build_resident_display_list_partial_observed(
+            &changed,
+            &layout,
+            "{}",
+            &unbuilt,
+            &mut || {},
+        );
+        let (mut resident, mut list) = docx_layout::build_resident_display_list_partial_observed(
+            &input,
+            &layout,
+            "{}",
+            &unbuilt,
+            &mut || {},
+        )
+        .unwrap();
+        let updated = docx_layout::update_resident_display_list_incremental_partial_observed(
+            &changed,
+            &layout,
+            &mut resident,
+            &mut list,
+            0,
+            layout.pages.len(),
+            &[],
+            &std::collections::HashMap::new(),
+            &unbuilt,
+            &mut || {},
+        );
+        match fresh {
+            Ok((_, fresh)) => {
+                assert!(updated.unwrap(), "{value}");
+                assert_eq!(list.pages, fresh.pages, "{value}");
+            }
+            Err(_) => assert!(updated.is_err(), "{value}"),
+        }
+    }
+}
+
+/// Word draws a boxed paragraph's left edge where its hanging first line
+/// begins, so the outdented label sits inside the box.
+#[test]
+fn paragraph_borders_enclose_a_hanging_first_line() {
+    let edge = serde_json::json!({ "style": "single", "width": 1.0, "space": 0.0 });
+    for (hanging, left_edge) in [(60.0, 50.0), (20.0, 90.0), (0.0, 110.0)] {
+        let mut input = serde_json::json!({
+            "measured": [{
+                "block": { "kind": "paragraph", "id": 1, "pmStart": 0, "pmEnd": 6,
+                    "attrs": { "indent": { "left": 60.0, "right": 0.0, "hanging": hanging },
+                        "borders": { "top": edge, "bottom": edge, "left": edge, "right": edge } },
+                    "runs": [{ "kind": "text", "text": "Remark", "pmStart": 1 }] },
+                "measure": { "kind": "paragraph", "totalHeight": 20.0,
+                    "lines": [{ "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 6,
+                        "width": 40.0, "ascent": 12.0, "descent": 4.0, "lineHeight": 20.0 }] }
+            }],
+            "options": { "pageSize": { "w": 400.0, "h": 200.0 },
+                "margins": { "top": 20.0, "right": 20.0, "bottom": 20.0, "left": 50.0 } }
+        });
+        input["layout"] = serde_json::from_str(
+            &docx_layout::layout_to_canonical_json(&input.to_string()).unwrap(),
+        )
+        .unwrap();
+        let dl = build_dl(&input.to_string());
+        let verticals: Vec<f64> = dl.pages[0]
+            .primitives
+            .iter()
+            .filter_map(|p| match p {
+                Primitive::Line(line)
+                    if line.role == Some(docx_layout::display_list::LineRole::Border)
+                        && line.x1 == line.x2 =>
+                {
+                    line.x1.as_f64()
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(verticals, vec![left_edge, 380.0], "hanging {hanging}");
+    }
+}
+
+fn per_cell_split_input(right_lines: usize) -> serde_json::Value {
+    per_cell_split_cells(&[
+        (if right_lines < 6 { 4 } else { 6 }, 0.0),
+        (right_lines, 4.4),
+    ])
+}
+
+/// A filler paragraph, then a one-row table whose cells hold one paragraph of
+/// `(lines, space before)` each.
+fn per_cell_split_cells(spec: &[(usize, f64)]) -> serde_json::Value {
+    use serde_json::json;
+    let paragraph = |id: usize, count: usize, before: f64| {
+        json!({
+            "kind": "paragraph", "id": id, "pmStart": id, "pmEnd": id + count * 10,
+            "attrs": {"spacing": {"before": before}},
+            "runs": (0..count).map(|line| json!({"kind": "text", "text": format!("{id}-{line}"),
+                "pmStart": id + line * 10})).collect::<Vec<_>>()
+        })
+    };
+    let extent = |count: usize| {
+        json!({
+            "kind": "paragraph", "totalHeight": count * 20,
+            "lines": (0..count).map(|line| json!({"headRun": line, "headChar": 0,
+                "tailRun": line, "tailChar": 5, "width": 40, "ascent": 16, "descent": 4,
+                "lineHeight": 20})).collect::<Vec<_>>()
+        })
+    };
+    let width = if spec.len() > 2 { 70.0 } else { 100.0 };
+    let heights: Vec<f64> = spec
+        .iter()
+        .map(|(lines, before)| *lines as f64 * 20.0 + before)
+        .collect();
+    let row_height = heights.iter().copied().fold(0.0, f64::max);
+    let cells: Vec<_> = spec
+        .iter()
+        .enumerate()
+        .map(|(index, (lines, before))| {
+            json!({"id": index, "background": "#eeeeee",
+                "blocks": [paragraph(100 * (index + 1), *lines, *before)]})
+        })
+        .collect();
+    let measures: Vec<_> = spec
+        .iter()
+        .zip(&heights)
+        .map(|((lines, _), height)| {
+            json!({"width": width, "height": height, "blocks": [extent(*lines)]})
+        })
+        .collect();
+    json!({
+        "measured": [
+            {"block": paragraph(1, 2, 0.0), "measure": extent(2)},
+            {"block": {"kind": "table", "id": 7, "columnWidths": vec![width; spec.len()],
+                "rows": [{"id": 0, "cells": cells}]},
+             "measure": {"kind": "table", "columnWidths": vec![width; spec.len()],
+                "totalWidth": width * spec.len() as f64, "totalHeight": row_height,
+                "rows": [{"height": row_height, "cells": measures}]}}
+        ],
+        "options": {"pageSize": {"w": 240, "h": 120},
+            "margins": {"top": 10, "right": 10, "bottom": 10, "left": 10}}
+    })
+}
+
+#[test]
+fn per_cell_slices_paint_only_their_lines_and_hit_the_continued_paragraph() {
+    use std::collections::BTreeSet;
+    for right_lines in [2, 3, 6] {
+        let mut input = per_cell_split_input(right_lines);
+        input["layout"] =
+            serde_json::from_str(&docx_layout::layout_to_json(&input.to_string()).unwrap())
+                .unwrap();
+        let dl = build_dl(&input.to_string());
+        assert_eq!(dl.pages.len(), 2);
+        let mut seen = [BTreeSet::new(), BTreeSet::new()];
+        for (page_index, page) in dl.pages.iter().enumerate() {
+            let fragment = input["layout"]["pages"][page_index]["fragments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|fragment| fragment["kind"] == "table")
+                .unwrap();
+            assert!(fragment.get("cellClips").is_some());
+            let band_top = fragment["y"].as_f64().unwrap();
+            let band_bottom = band_top + fragment["height"].as_f64().unwrap();
+            for primitive in &page.primitives {
+                let Primitive::Text(text) = primitive else {
+                    continue;
+                };
+                let Some(cell) = text.attrs.cell.as_ref() else {
+                    continue;
+                };
+                let cell_index = cell.col as usize;
+                let line = text.attrs.line_index.unwrap() as usize;
+                assert!(
+                    seen[cell_index].insert(line),
+                    "cell {cell_index}, duplicate line {line}"
+                );
+                let clip = text
+                    .attrs
+                    .clip_group
+                    .as_ref()
+                    .unwrap()
+                    .clip
+                    .as_ref()
+                    .unwrap();
+                let box_top = clip.y.as_ref().unwrap().as_f64().unwrap();
+                let box_bottom = box_top + clip.h.as_ref().unwrap().as_f64().unwrap();
+                let baseline = text.baseline_y.as_f64().unwrap();
+                let top = baseline - 16.0;
+                let bottom = baseline + 4.0;
+                assert!(top >= box_top - 0.01 && bottom <= box_bottom + 0.01);
+                assert!(top >= band_top - 0.01 && bottom <= band_bottom + 0.01);
+                assert_eq!(box_top, band_top);
+                assert!((box_bottom - band_bottom).abs() < 0.01);
+                if page_index == 1 && cell_index == 1 {
+                    let hit =
+                        hit_test(&dl, 1, text.x.as_f64().unwrap() + 10.0, baseline - 4.0).unwrap();
+                    let start = text.attrs.doc_start.unwrap();
+                    let end = text.attrs.doc_end.unwrap();
+                    assert!((start..=end).contains(&hit));
+                    assert!((200..200 + right_lines as i64 * 10).contains(&hit));
+                }
+            }
+        }
+        assert_eq!(seen[0], (0..if right_lines < 6 { 4 } else { 6 }).collect());
+        assert_eq!(seen[1], (0..right_lines).collect());
+        if right_lines == 2 {
+            assert!(
+                !dl.pages[1]
+                    .primitives
+                    .iter()
+                    .filter_map(doc_attrs)
+                    .any(
+                        |attrs| attrs.cell.as_ref().is_some_and(|cell| cell.col == 1)
+                            && attrs.doc_start.is_some()
+                    )
+            );
+        }
+    }
+}
+
+#[test]
+fn per_cell_windows_paint_an_atomic_nested_table_only_on_the_continuation() {
+    let mut input = nested_table_cell_window::input();
+    input["layout"] =
+        serde_json::from_str(&docx_layout::layout_to_json(&input.to_string()).unwrap()).unwrap();
+    let dl = build_dl(&input.to_string());
+    assert_eq!(dl.pages.len(), 2);
+    let nested: Vec<_> = dl
+        .pages
+        .iter()
+        .enumerate()
+        .flat_map(|(page_index, page)| {
+            page.primitives
+                .iter()
+                .filter_map(doc_attrs)
+                .filter(|attrs| {
+                    attrs.block_key.as_deref() == Some("nested")
+                        || attrs.block_id.as_ref().and_then(|id| id.as_u64()) == Some(50)
+                })
+                .map(move |attrs| (page_index, attrs.line_index))
+        })
+        .collect();
+    assert_eq!(nested, [(1, Some(0)), (1, Some(1)), (1, Some(2))]);
+}
+
+#[test]
+fn per_cell_window_keeps_and_clips_a_paragraph_border_at_its_bottom() {
+    use serde_json::json;
+    let mut input = per_cell_split_input(2);
+    input["measured"][1]["block"]["rows"][0]["cells"][1]["blocks"][0]["attrs"]["borders"] =
+        json!({"bottom": {"style": "single", "width": 2, "space": 0, "color": "#123456"}});
+    input["layout"] =
+        serde_json::from_str(&docx_layout::layout_to_json(&input.to_string()).unwrap()).unwrap();
+    let fragment = input["layout"]["pages"][0]["fragments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|fragment| fragment["kind"] == "table")
+        .unwrap();
+    let window = fragment["cellClips"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|clip| clip["cell"] == 1)
+        .unwrap();
+    let top = fragment["y"].as_f64().unwrap();
+    let height = window["bottom"].as_f64().unwrap() - window["top"].as_f64().unwrap();
+    assert!((height - 44.4).abs() < 0.01);
+    let dl = build_dl(&input.to_string());
+    assert_eq!(dl.pages.len(), 2);
+    let borders: Vec<_> = dl.pages[0]
+        .primitives
+        .iter()
+        .filter_map(|primitive| match primitive {
+            Primitive::Line(line)
+                if line.border_owner == Some(docx_layout::display_list::BorderOwner::Paragraph)
+                    && line.color == "#123456" =>
+            {
+                Some(line)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(borders.len(), 1);
+    let border = borders[0];
+    assert_eq!(border.y1, border.y2);
+    assert!((border.y1.as_f64().unwrap() - (top + height)).abs() < 0.01);
+    assert_eq!(border.stroke_width.as_f64(), Some(2.0));
+    let clip = border
+        .attrs
+        .clip_group
+        .as_ref()
+        .unwrap()
+        .clip
+        .as_ref()
+        .unwrap();
+    assert_eq!(clip.y.as_ref().unwrap().as_f64(), Some(top));
+    assert!((clip.h.as_ref().unwrap().as_f64().unwrap() - height).abs() < 0.01);
+}
+
+#[test]
+fn per_cell_window_keeps_a_completed_paragraph_border_inside_the_physical_cell_clip() {
+    use serde_json::json;
+    let mut input = per_cell_split_cells(&[(6, 0.0), (6, 4.4), (2, 0.0)]);
+    input["measured"][1]["block"]["rows"][0]["cells"][2]["blocks"][0]["attrs"]["borders"] =
+        json!({"bottom": {"style": "single", "width": 2, "space": 0, "color": "#123456"}});
+    input["layout"] =
+        serde_json::from_str(&docx_layout::layout_to_json(&input.to_string()).unwrap()).unwrap();
+    let fragment = input["layout"]["pages"][0]["fragments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|fragment| fragment["kind"] == "table")
+        .unwrap();
+    let window = fragment["cellClips"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|clip| clip["cell"] == 2)
+        .unwrap();
+    assert_eq!(window["top"].as_f64(), Some(0.0));
+    assert_eq!(
+        window["bottom"],
+        input["measured"][1]["measure"]["rows"][0]["cells"][2]["height"]
+    );
+    let top = fragment["y"].as_f64().unwrap();
+    let window_bottom = top + window["bottom"].as_f64().unwrap();
+    let physical_bottom = top + fragment["height"].as_f64().unwrap();
+    assert!(physical_bottom > window_bottom + 1.0);
+    let dl = build_dl(&input.to_string());
+    assert_eq!(dl.pages.len(), 2);
+    let borders: Vec<_> = dl.pages[0]
+        .primitives
+        .iter()
+        .filter_map(|primitive| match primitive {
+            Primitive::Line(line)
+                if line.border_owner == Some(docx_layout::display_list::BorderOwner::Paragraph)
+                    && line.color == "#123456" =>
+            {
+                Some(line)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(borders.len(), 1);
+    let border = borders[0];
+    assert_eq!(border.y1, border.y2);
+    assert!((border.y1.as_f64().unwrap() - window_bottom).abs() < 0.01);
+    assert_eq!(border.stroke_width.as_f64(), Some(2.0));
+    let clip = border
+        .attrs
+        .clip_group
+        .as_ref()
+        .unwrap()
+        .clip
+        .as_ref()
+        .unwrap();
+    let clip_top = clip.y.as_ref().unwrap().as_f64().unwrap();
+    let clip_bottom = clip_top + clip.h.as_ref().unwrap().as_f64().unwrap();
+    assert_eq!(clip_top, top);
+    assert!((clip_bottom - physical_bottom).abs() < 0.01);
+    assert!(border.y1.as_f64().unwrap() + 1.0 <= clip_bottom);
+}
+
+#[test]
+fn per_cell_window_keeps_a_spaced_bottom_border_below_completed_content() {
+    use serde_json::json;
+    let mut input = per_cell_split_cells(&[(4, 0.0), (6, 4.4), (2, 0.0)]);
+    input["measured"][1]["block"]["rows"][0]["cells"][2]["blocks"][0]["attrs"]["borders"] =
+        json!({"bottom": {"style": "single", "width": 2, "space": 2, "color": "#123456"}});
+    input["layout"] =
+        serde_json::from_str(&docx_layout::layout_to_json(&input.to_string()).unwrap()).unwrap();
+    let fragment = input["layout"]["pages"][0]["fragments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|fragment| fragment["kind"] == "table")
+        .unwrap();
+    let window = fragment["cellClips"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|clip| clip["cell"] == 2)
+        .unwrap();
+    assert_eq!(window["top"].as_f64(), Some(0.0));
+    assert_eq!(window["bottom"].as_f64(), Some(40.0));
+    assert!((fragment["height"].as_f64().unwrap() - 44.4).abs() < 0.01);
+    let top = fragment["y"].as_f64().unwrap();
+    let window_bottom = top + window["bottom"].as_f64().unwrap();
+    let physical_bottom = top + fragment["height"].as_f64().unwrap();
+    let dl = build_dl(&input.to_string());
+    assert_eq!(dl.pages.len(), 2);
+    let borders: Vec<_> = dl.pages[0]
+        .primitives
+        .iter()
+        .filter_map(|primitive| match primitive {
+            Primitive::Line(line)
+                if line.border_owner == Some(docx_layout::display_list::BorderOwner::Paragraph)
+                    && line.color == "#123456" =>
+            {
+                Some(line)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(borders.len(), 1);
+    let border = borders[0];
+    assert_eq!(border.y1, border.y2);
+    let centre = border.y1.as_f64().unwrap();
+    assert!((centre - (window_bottom + 2.0)).abs() < 0.01);
+    assert_eq!(border.stroke_width.as_f64(), Some(2.0));
+    assert!(centre - 1.0 > window_bottom);
+    assert!(centre + 1.0 < physical_bottom);
+    let clip = border
+        .attrs
+        .clip_group
+        .as_ref()
+        .unwrap()
+        .clip
+        .as_ref()
+        .unwrap();
+    let clip_top = clip.y.as_ref().unwrap().as_f64().unwrap();
+    let clip_bottom = clip_top + clip.h.as_ref().unwrap().as_f64().unwrap();
+    assert_eq!(clip_top, top);
+    assert!((clip_bottom - physical_bottom).abs() < 0.01);
+}
+
+#[test]
+fn per_cell_windows_keep_border_strokes_overlapping_their_edges() {
+    use serde_json::json;
+    for (style, space) in [
+        ("single", 0.5),
+        ("double", 1.2),
+        ("triple", 2.2),
+        ("thinThick", 1.1),
+        ("thickThin", 1.1),
+        ("wave", 1.75),
+        ("doubleWave", 3.4),
+    ] {
+        for edge in ["top", "bottom"] {
+            let mut input = per_cell_split_input(2);
+            let mut borders = json!({});
+            borders[edge] = json!({"style": style, "width": 2,
+                "space": if edge == "top" { 4.4 + space } else { space }, "color": "#123456"});
+            input["measured"][1]["block"]["rows"][0]["cells"][1]["blocks"][0]["attrs"]["borders"] =
+                borders;
+            input["layout"] =
+                serde_json::from_str(&docx_layout::layout_to_json(&input.to_string()).unwrap())
+                    .unwrap();
+            let fragment = input["layout"]["pages"][0]["fragments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|fragment| fragment["kind"] == "table")
+                .unwrap();
+            let window = fragment["cellClips"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|clip| clip["cell"] == 1)
+                .unwrap();
+            let top = fragment["y"].as_f64().unwrap();
+            let bottom = top + window["bottom"].as_f64().unwrap() - window["top"].as_f64().unwrap();
+            let dl = build_dl(&input.to_string());
+            let borders: Vec<_> = dl.pages[0]
+                .primitives
+                .iter()
+                .filter_map(|primitive| match primitive {
+                    Primitive::Line(line)
+                        if line.border_owner
+                            == Some(docx_layout::display_list::BorderOwner::Paragraph)
+                            && line.color == "#123456" =>
+                    {
+                        Some(line)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(borders.len(), 1, "{style} {edge}");
+            let border = borders[0];
+            let centre = if edge == "top" {
+                top - space
+            } else {
+                bottom + space
+            };
+            assert!(
+                (border.y1.as_f64().unwrap() - centre).abs() < 0.01,
+                "{style} {edge}"
+            );
+            assert_eq!(border.y1, border.y2);
+            let clip = border
+                .attrs
+                .clip_group
+                .as_ref()
+                .unwrap()
+                .clip
+                .as_ref()
+                .unwrap();
+            assert_eq!(clip.y.as_ref().unwrap().as_f64(), Some(top));
+            assert!(
+                (clip.h.as_ref().unwrap().as_f64().unwrap() - (bottom - top)).abs() < 0.01,
+                "{style} {edge}"
+            );
+        }
+    }
+}
+
+#[test]
+fn per_cell_windows_survive_the_resident_display_conversion() {
+    let input = per_cell_split_input(6);
+    let mut pagination: docx_layout::types::Input = serde_json::from_value(input.clone()).unwrap();
+    let layout = docx_layout::compute_layout_input(&mut pagination).unwrap();
+    let mut wire = serde_json::to_value(&pagination).unwrap();
+    wire["layout"] = serde_json::to_value(&layout).unwrap();
+    let json = build_dl(&wire.to_string());
+    let fonts = ooxml_text::FontStore::new();
+    let resident = docx_layout::display_list::build_display_list_value_from_resident_with_fonts(
+        &pagination,
+        &layout,
+        "{}",
+        &fonts,
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::to_string(&resident).unwrap(),
+        serde_json::to_string(&json).unwrap()
+    );
+    assert!(
+        wire["layout"]["pages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|page| {
+                page["fragments"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|fragment| fragment["kind"] == "table")
+                    .all(|fragment| fragment.get("cellClips").is_some())
+            })
+    );
+}
+
+#[test]
+fn a_row_after_per_cell_continuations_uses_the_shared_remaining_band() {
+    use serde_json::json;
+    let mut input = per_cell_split_input(6);
+    input["measured"][1]["block"]["rows"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "id": 1, "cells": [
+                {"id": 2, "blocks": [{"kind": "paragraph", "id": 300, "pmStart": 300, "pmEnd": 306,
+                    "runs": [{"kind": "text", "text": "after", "pmStart": 301}]}]},
+                {"id": 3, "blocks": []}
+            ]
+        }));
+    input["measured"][1]["measure"]["rows"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "height": 20, "cells": [
+                {"width": 100, "height": 20, "blocks": [{"kind": "paragraph", "totalHeight": 20,
+                    "lines": [{"headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 5,
+                        "width": 40, "ascent": 16, "descent": 4, "lineHeight": 20}]}]},
+                {"width": 100, "height": 0, "blocks": []}
+            ]
+        }));
+    input["measured"][1]["measure"]["totalHeight"] = json!(144.4);
+    input["layout"] =
+        serde_json::from_str(&docx_layout::layout_to_json(&input.to_string()).unwrap()).unwrap();
+    let dl = build_dl(&input.to_string());
+    assert_eq!(dl.pages.len(), 2);
+    let after = dl.pages[1]
+        .primitives
+        .iter()
+        .find_map(|primitive| match primitive {
+            Primitive::Text(text) if text.text == "after" => Some(text),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(after.baseline_y.as_f64(), Some(106.0));
+    let clip = after
+        .attrs
+        .clip_group
+        .as_ref()
+        .unwrap()
+        .clip
+        .as_ref()
+        .unwrap();
+    assert_eq!(clip.y.as_ref().unwrap().as_f64(), Some(90.0));
+    assert_eq!(clip.h.as_ref().unwrap().as_f64(), Some(20.0));
+    let first_row = dl.pages[1]
+        .primitives
+        .iter()
+        .find_map(|primitive| match primitive {
+            Primitive::Text(text) if text.attrs.cell.as_ref().is_some_and(|cell| cell.row == 0) => {
+                Some(text)
+            }
+            _ => None,
+        })
+        .unwrap();
+    let clip = first_row
+        .attrs
+        .clip_group
+        .as_ref()
+        .unwrap()
+        .clip
+        .as_ref()
+        .unwrap();
+    assert_eq!(clip.y.as_ref().unwrap().as_f64(), Some(10.0));
+    assert_eq!(clip.h.as_ref().unwrap().as_f64(), Some(80.0));
 }

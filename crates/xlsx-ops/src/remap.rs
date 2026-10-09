@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use xlsx_calc::lexer::MAX_FORMULA_BYTES;
 use xlsx_calc::parser::Expr;
-use xlsx_calc::{ColumnRange, parse_formula};
+use xlsx_calc::{ColumnRange, RowRange, parse_formula};
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS, col_to_letters};
 use xlsx_model::{
     AnchorCell, AnchorEditAs, CellRange, CellRef, ChartAnchor, DefinedName, ErrorValue, SheetId,
@@ -94,6 +94,9 @@ pub(crate) fn remap_formulas(wb: &mut Workbook, op: &Op) -> Result<Vec<Op>, OpEr
                 parsed_order.push_back(src.as_str());
                 expr
             };
+            if contains_table_reference(&expr) {
+                return Err(OpError::FormulaNotRewritable { sheet: owner, cell });
+            }
             let mut changed = false;
             let new_expr = transform(&expr, op, &matches, &mut changed);
             if changed {
@@ -754,10 +757,11 @@ fn rewrite_defined_name(
             continue;
         }
         // Whole-column names still need the token rewriter's ambiguity checks.
-        let Some(expr) = parse_formula(component)
-            .ok()
-            .filter(|expr| !contains_column_range(expr))
-        else {
+        let Some(expr) = parse_formula(component).ok().filter(|expr| {
+            !contains_column_range(expr)
+                && !contains_table_reference(expr)
+                && !contains_range_join(expr)
+        }) else {
             match rewrite_reference_tokens(component, op, matches_target, global, names) {
                 DefinedNameRewrite::Unchanged => {
                     rewritten.push(component.to_owned());
@@ -799,7 +803,7 @@ fn rewrite_defined_name(
 
 /// error literals, which name no cell and so survive any structural edit.
 const ERROR_LITERALS: &[&str] = &[
-    "#DIV/0!", "#N/A", "#NAME?", "#NULL!", "#NUM!", "#REF!", "#VALUE!", "#SPILL!",
+    "#DIV/0!", "#N/A", "#NAME?", "#NULL!", "#NUM!", "#REF!", "#VALUE!", "#SPILL!", "#CALC!",
 ];
 
 /// The names a workbook defines, lowercased, as Excel matches them without
@@ -1260,21 +1264,59 @@ fn contains_unqualified_reference(expr: &Expr) -> bool {
     match expr {
         Expr::Ref { sheet: None, .. }
         | Expr::Range { sheet: None, .. }
-        | Expr::ColumnRange { sheet: None, .. } => true,
+        | Expr::ColumnRange { sheet: None, .. }
+        | Expr::RowRange { sheet: None, .. } => true,
         Expr::Unary { expr, .. } | Expr::Percent(expr) => contains_unqualified_reference(expr),
         Expr::Binary { lhs, rhs, .. } => {
             contains_unqualified_reference(lhs) || contains_unqualified_reference(rhs)
+        }
+        Expr::RangeJoin { start, end } => {
+            contains_unqualified_reference(start) || contains_unqualified_reference(end)
         }
         Expr::FuncCall { args, .. } => args.iter().any(contains_unqualified_reference),
         _ => false,
     }
 }
 
+/// A structural edit moves a table's rectangle, and the table part is not
+/// remapped, so a formula reading one is left for the caller to refuse rather
+/// than silently stranded on the pre-edit geometry.
+fn contains_table_reference(expr: &Expr) -> bool {
+    match expr {
+        Expr::TableRef { .. } => true,
+        Expr::Unary { expr, .. } | Expr::Percent(expr) => contains_table_reference(expr),
+        Expr::Binary { lhs, rhs, .. } => {
+            contains_table_reference(lhs) || contains_table_reference(rhs)
+        }
+        Expr::RangeJoin { start, end } => {
+            contains_table_reference(start) || contains_table_reference(end)
+        }
+        Expr::FuncCall { args, .. } => args.iter().any(contains_table_reference),
+        _ => false,
+    }
+}
+
+/// A name written with the range operator keeps the token rewriter, whose
+/// ambiguity checks the ast path does not reproduce — an unqualified end of a
+/// workbook name binds to whichever sheet is active, so it cannot be moved.
+fn contains_range_join(expr: &Expr) -> bool {
+    match expr {
+        Expr::RangeJoin { .. } => true,
+        Expr::Unary { expr, .. } | Expr::Percent(expr) => contains_range_join(expr),
+        Expr::Binary { lhs, rhs, .. } => contains_range_join(lhs) || contains_range_join(rhs),
+        Expr::FuncCall { args, .. } => args.iter().any(contains_range_join),
+        _ => false,
+    }
+}
+
 fn contains_column_range(expr: &Expr) -> bool {
     match expr {
-        Expr::ColumnRange { .. } => true,
+        Expr::ColumnRange { .. } | Expr::RowRange { .. } => true,
         Expr::Unary { expr, .. } | Expr::Percent(expr) => contains_column_range(expr),
         Expr::Binary { lhs, rhs, .. } => contains_column_range(lhs) || contains_column_range(rhs),
+        Expr::RangeJoin { start, end } => {
+            contains_column_range(start) || contains_column_range(end)
+        }
         Expr::FuncCall { args, .. } => args.iter().any(contains_column_range),
         _ => false,
     }
@@ -2035,6 +2077,20 @@ fn transform(
                 }
             }
         }
+        Expr::RowRange { sheet, range } if matches_target(sheet) => match remap_rows(*range, op) {
+            Remapped::Unchanged => expr.clone(),
+            Remapped::Moved(range) => {
+                *changed = true;
+                Expr::RowRange {
+                    sheet: sheet.clone(),
+                    range,
+                }
+            }
+            Remapped::Deleted => {
+                *changed = true;
+                Expr::Error(ErrorValue::Ref)
+            }
+        },
         Expr::Unary { op: u, expr: e } => Expr::Unary {
             op: *u,
             expr: Box::new(transform(e, op, matches_target, changed)),
@@ -2045,12 +2101,41 @@ fn transform(
             lhs: Box::new(transform(lhs, op, matches_target, changed)),
             rhs: Box::new(transform(rhs, op, matches_target, changed)),
         },
-        Expr::FuncCall { name, args } => Expr::FuncCall {
+        Expr::FuncCall { name, func, args } => Expr::FuncCall {
             name: name.clone(),
+            func: *func,
             args: args
                 .iter()
                 .map(|a| transform(a, op, matches_target, changed))
                 .collect(),
+        },
+        // two cell ends are one span: clipping them apart would strand the
+        // near one on `#REF!` while the far one still named a live cell
+        Expr::RangeJoin { start, end } => match joined_cells(start, end, matches_target) {
+            Some((sheet, span)) => match remap_span(span, op) {
+                Remapped::Unchanged => expr.clone(),
+                Remapped::Moved(span) => {
+                    *changed = true;
+                    Expr::RangeJoin {
+                        start: Box::new(Expr::Ref {
+                            sheet: sheet.clone(),
+                            cell: span.start,
+                        }),
+                        end: Box::new(Expr::Ref {
+                            sheet,
+                            cell: span.end,
+                        }),
+                    }
+                }
+                Remapped::Deleted => {
+                    *changed = true;
+                    Expr::Error(ErrorValue::Ref)
+                }
+            },
+            None => Expr::RangeJoin {
+                start: Box::new(transform(start, op, matches_target, changed)),
+                end: Box::new(transform(end, op, matches_target, changed)),
+            },
         },
         _ => expr.clone(),
     }
@@ -2077,6 +2162,27 @@ fn remap_columns(range: ColumnRange, op: &Op) -> Remapped<ColumnRange> {
     }
 }
 
+fn remap_rows(range: RowRange, op: &Op) -> Remapped<RowRange> {
+    let axis = AxisRange {
+        qualifier: "",
+        sheet: None,
+        axis: Axis::Row,
+        start: range.start,
+        end: range.end,
+        start_absolute: range.abs_start,
+        end_absolute: range.abs_end,
+    };
+    match axis.shifted(op) {
+        Remapped::Unchanged => Remapped::Unchanged,
+        Remapped::Moved((start, end)) => Remapped::Moved(RowRange {
+            start,
+            end,
+            ..range
+        }),
+        Remapped::Deleted => Remapped::Deleted,
+    }
+}
+
 /// remap a single-cell reference through the op.
 fn remap_cell(cell: CellRef, op: &Op) -> Remapped<CellRef> {
     match remap_ref(cell, op) {
@@ -2088,6 +2194,22 @@ fn remap_cell(cell: CellRef, op: &Op) -> Remapped<CellRef> {
 
 /// remap a range: inserts shift both corners; deletes clip the span, collapsing
 /// to `#REF!` only when the whole span is deleted.
+/// a join whose two ends are plain cells on the sheet being edited, which a
+/// structural edit moves as one span rather than as two references.
+fn joined_cells(
+    start: &Expr,
+    end: &Expr,
+    matches_target: &dyn Fn(&Option<String>) -> bool,
+) -> Option<(Option<String>, CellRange)> {
+    let (Expr::Ref { sheet: a, cell: s }, Expr::Ref { sheet: b, cell: e }) = (start, end) else {
+        return None;
+    };
+    if a != b || !matches_target(a) {
+        return None;
+    }
+    Some((a.clone(), CellRange::new(*s, *e)))
+}
+
 fn remap_span(range: CellRange, op: &Op) -> Remapped<CellRange> {
     match *op {
         Op::DeleteRows { at, count, .. } => clip_span(range, Axis::Row, at, count),
@@ -2215,6 +2337,30 @@ mod tests {
 
     fn formula(wb: &Workbook, sheet: SheetId, at: &str) -> Option<String> {
         wb.formula(sheet, r(at)).map(str::to_string)
+    }
+
+    /// a join of two cells is one span: deleting the row its near end sits on
+    /// clips the span rather than stranding that end on `#REF!` while the far
+    /// end still names a live cell.
+    #[test]
+    fn a_deletion_inside_a_joined_range_clips_it_as_one_span() {
+        let mut workbook = wb(&["Data"]);
+        // written with a space the lexer reads this as a join rather than as
+        // one range token
+        set_formula(&mut workbook, SheetId(0), "D1", "SUM(A1: B4)");
+        remap_formulas(
+            &mut workbook,
+            &Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            formula(&workbook, SheetId(0), "D1").as_deref(),
+            Some("SUM(A1:B3)")
+        );
     }
 
     #[test]

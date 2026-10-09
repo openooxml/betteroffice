@@ -73,6 +73,93 @@ test('proposals preview real frames, accept atomically, save, and preserve stale
 
 afterAll(() => handle.dispose());
 
+test('text search returns stable slide and story locations without mutating the deck', () => {
+  const source = openPresentation(fixture, { clientId: 9200 });
+  try {
+    const slide = source.snapshot().slides[0];
+    const receipt = source.addTextBox(slide.id, {
+      name: 'Search fixture',
+      text: 'QueryNeedle queryneedle QUERYNEEDLE',
+      rect: { x: 100000, y: 100000, width: 2000000, height: 500000 },
+      style: {},
+    });
+    const shape = source
+      .snapshot()
+      .slides[0].shapes.find((candidate) => candidate.id === receipt.shapeId)!;
+    const story = shape.textStories[0];
+    const stateWithFixture = source.encodeStateVector();
+
+    expect(source.searchText('queryneedle')).toEqual([
+      {
+        slideIndex: 0,
+        slideId: slide.id,
+        shapeId: shape.id,
+        storyId: story.id,
+        start: 0,
+        end: 11,
+        text: 'QueryNeedle',
+      },
+      {
+        slideIndex: 0,
+        slideId: slide.id,
+        shapeId: shape.id,
+        storyId: story.id,
+        start: 12,
+        end: 23,
+        text: 'queryneedle',
+      },
+      {
+        slideIndex: 0,
+        slideId: slide.id,
+        shapeId: shape.id,
+        storyId: story.id,
+        start: 24,
+        end: 35,
+        text: 'QUERYNEEDLE',
+      },
+    ]);
+    expect(source.searchText('QueryNeedle', { caseSensitive: true })).toHaveLength(1);
+    expect(source.searchText('queryneedle', { limit: 2 })).toHaveLength(2);
+    expect(source.searchText('')).toEqual([]);
+    expect(() => source.searchText('queryneedle', { limit: -1 })).toThrow(RangeError);
+    expect(source.encodeStateVector()).toEqual(stateWithFixture);
+  } finally {
+    source.dispose();
+  }
+});
+
+test('Unicode text search preserves simple-folding matches and UTF-16 offsets', async () => {
+  const text = (await readFile(resolve(root,
+    'crates/pptx-edit/tests/fixtures/unicode-search.txt'), 'utf8')).trimEnd();
+  const source = openPresentation(fixture, { clientId: 9291 });
+  try {
+    const slide = source.snapshot().slides[0];
+    const receipt = source.addTextBox(slide.id, {
+      name: 'Unicode search', text,
+      rect: { x: 100000, y: 100000, width: 2000000, height: 500000 }, style: {},
+    });
+    const cases: Array<[string, string[]]> = [
+      ['i', ['I', 'i']], ['I', ['I', 'i']], ['ı', ['ı']], ['İ', ['İ']],
+      ['ΐ', ['ΐ', 'ΐ']], ['ΐ', ['ΐ', 'ΐ']],
+      ['ΰ', ['ΰ', 'ΰ']], ['ΰ', ['ΰ', 'ΰ']],
+      ['ﬅ', ['ﬅ', 'ﬆ']], ['ﬆ', ['ﬅ', 'ﬆ']],
+    ];
+    for (const [query, expected] of cases) {
+      const matches = source.searchText(query).filter((match) => match.shapeId === receipt.shapeId);
+      expect(matches.map((match) => match.text)).toEqual(expected);
+      for (const match of matches) {
+        expect(match.start).toBe(text.indexOf(match.text));
+        expect(match.end).toBe(match.start + match.text.length);
+      }
+      expect(source.searchText(query, { caseSensitive: true })
+        .filter((match) => match.shapeId === receipt.shapeId).map((match) => match.text))
+        .toEqual([query]);
+    }
+  } finally {
+    source.dispose();
+  }
+});
+
 test('inline proposal diffs reflow and paint marked text without changing hit tests or saved text', async () => {
   const source = openPresentation(fixture, { clientId: 9203, fonts: [{ family: 'Liberation Sans', bytes: fontBytes }] });
   try {
@@ -303,7 +390,7 @@ describe('PPTX wasm boundary', () => {
         await paintSlide(ctx, frame);
       }
 
-      expect(expected).toHaveLength(288);
+      expect(expected).toHaveLength(272);
       expect(calls).toHaveLength(expected.length);
       expect(calls).toEqual(expected);
     } finally {
@@ -602,3 +689,139 @@ function oneCallPerTextRun(
   }
   return calls;
 }
+
+test('inserted pictures render, synchronize, arrange and reopen with their bytes', () => {
+  const source = openPresentation(fixture, { clientId: 9401, fonts: [{ family: 'Liberation Sans', bytes: fontBytes }] });
+  const peer = openPresentation(fixture, { clientId: 9402, fonts: [{ family: 'Liberation Sans', bytes: fontBytes }] });
+  const bytes = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 13, 10, 26, 10]);
+  try {
+    const slide = source.snapshot().slides[0];
+    const added = source.addPicture(slide.id, {
+      name: 'Shared picture', rect: { x: 10, y: 20, width: 3000, height: 4000 },
+      contentType: 'image/png', mediaBase64: Buffer.from(bytes).toString('base64'),
+    });
+    const assetId = `pending-media:${added.shapeId}`;
+    expect(source.layoutSlide(0).primitives.some((p) => p.kind === 'image' && p.assetId === assetId)).toBe(true);
+    expect(source.mediaBytes(assetId)).toEqual(bytes);
+    peer.applyUpdate(source.encodeStateAsUpdate());
+    expect(peer.mediaBytes(assetId)).toEqual(bytes);
+    expect(peer.snapshot()).toEqual(source.snapshot());
+    source.sendShapeToBack(slide.id, added.shapeId);
+    expect(source.snapshot().slides[0].shapes[0].id).toBe(added.shapeId);
+    source.bringShapeForward(slide.id, added.shapeId);
+    expect(source.snapshot().slides[0].shapes[1].id).toBe(added.shapeId);
+    source.sendShapeBackward(slide.id, added.shapeId);
+    source.bringShapeToFront(slide.id, added.shapeId);
+    expect(source.snapshot().slides[0].shapes.slice(-1)[0].id).toBe(added.shapeId);
+    const reopened = openPresentation(source.save(), { clientId: 9403 });
+    try {
+      const picture = reopened.snapshot().slides[0].shapes.slice(-1)[0];
+      expect(picture.name).toBe('Shared picture');
+      expect(reopened.mediaBytes(picture.mediaPartPath!)).toEqual(bytes);
+    } finally { reopened.dispose(); }
+  } finally { source.dispose(); peer.dispose(); }
+});
+
+describe('host undo and comment controls', () => {
+  test('manual capture groups different operations and keeps explicit boundaries', () => {
+    const deck = openPresentation(fixture, { clientId: 9981 });
+    try {
+      const before = deck.snapshot();
+      const story = before.slides[0].shapes.find((shape) => shape.textStories.length)!.textStories[0];
+      expect(deck.undoCaptureMode()).toBe('auto');
+      deck.setUndoCaptureMode('manual');
+      deck.insertText(story.id, 0, 'First ');
+      deck.setUndoCaptureMode('manual');
+      deck.addComment(before.slides[0].id, { author: 'Host', text: 'Grouped', created: '2026-09-23T00:00:00Z' });
+      const grouped = deck.snapshot();
+      deck.addUndoBoundary();
+      deck.insertText(story.id, 0, 'Second ');
+      expect(deck.undo().snapshot).toEqual(grouped);
+      expect(deck.undo().snapshot).toEqual(before);
+      expect(deck.redo().snapshot).toEqual(grouped);
+      expect(() => deck.setUndoCaptureMode('invalid' as 'auto')).toThrow();
+      expect(deck.undoCaptureMode()).toBe('manual');
+      deck.setUndoCaptureMode('auto');
+      expect(deck.canRedo()).toBe(true);
+    } finally { deck.dispose(); }
+  });
+
+  test('caret anchors follow typing, undo, redo and remote edits as plain data', () => {
+    const deck = openPresentation(fixture, { clientId: 9982 });
+    const peer = openPresentation(fixture, { clientId: 9983, initialUpdate: deck.encodeStateAsUpdate() });
+    try {
+      const story = deck.snapshot().slides[0].shapes.find((shape) => shape.textStories.length)!
+        .textStories[0];
+      const first = deck.story(story.id).paragraphs[0].runs[0].text[0];
+      deck.addUndoBoundary();
+      deck.insertText(story.id, 0, first);
+      const anchor = JSON.parse(JSON.stringify(deck.anchorCaret(story.id, 1)));
+      expect(Object.keys(anchor).sort()).toEqual(['position', 'storyId']);
+      deck.undo();
+      expect(deck.resolveCaretAnchor(anchor)).toBe(0);
+      deck.redo();
+      expect(deck.resolveCaretAnchor(anchor)).toBe(1);
+      peer.applyUpdate(deck.encodeStateAsUpdate());
+      peer.insertText(story.id, 0, 'Remote ');
+      deck.applyUpdate(peer.encodeStateAsUpdate());
+      expect(deck.resolveCaretAnchor(anchor)).toBe(8);
+      expect(peer.resolveCaretAnchor(anchor)).toBe(8);
+      expect(() => deck.anchorCaret(story.id, 100_000)).toThrow();
+      expect(() => deck.resolveCaretAnchor({ storyId: story.id, position: 'not base64!' })).toThrow();
+    } finally {
+      peer.dispose();
+      deck.dispose();
+    }
+  });
+
+  test('moves modern comments without losing their thread or exported position', async () => {
+    const bytes = await readFile(resolve(root, 'crates/pptx-edit/tests/fixtures/modern-comments.pptx'));
+    const deck = openPresentation(bytes, { clientId: 9982 });
+    try {
+      const before = deck.comments();
+      const root = before.find((comment) => !comment.parentId)!;
+      const expected = before.map((comment) => comment.id === root.id
+        ? { ...comment, xEmu: 914400, yEmu: 1828800 } : comment);
+      deck.setCommentPosition(root.id, { xEmu: 914400, yEmu: 1828800 });
+      expect(() => deck.setCommentPosition(root.id, { xEmu: NaN, yEmu: 0 })).toThrow();
+      expect(() => deck.setCommentPosition('missing', { xEmu: 1, yEmu: 2 })).toThrow();
+      for (let cycle = 0; cycle < 3; cycle++) {
+        expect(deck.comments()).toEqual(expected);
+        const reopened = openPresentation(deck.save(), { clientId: 9983 });
+        try { expect(reopened.comments()).toEqual(expected); } finally { reopened.dispose(); }
+        deck.undo();
+        expect(deck.comments()).toEqual(before);
+        deck.redo();
+      }
+    } finally { deck.dispose(); }
+  });
+});
+
+test('a fallback font draws the characters the run face has no glyph for', async () => {
+  const arabic = new Uint8Array(
+    await readFile(resolve(root, 'packages/fonts/assets/NotoSansArabic-Regular.ttf'))
+  );
+  const source = openPresentation(fixture, {
+    clientId: 9301,
+    fonts: [{ family: 'Liberation Sans', bytes: fontBytes }],
+    fallbackFonts: [{ family: 'Noto Sans Arabic', bytes: arabic }],
+  });
+  try {
+    const story = source
+      .snapshot()
+      .slides[0].shapes.find((shape) => shape.textStories.length > 0)!.textStories[0];
+    source.insertText(story.id, 0, 'مرحبا ');
+    const runs = source
+      .layoutSlide(0)
+      .primitives.filter(
+        (primitive): primitive is TextBoxPrimitive =>
+          primitive.kind === 'textBox' && primitive.storyId === story.id
+      )
+      .flatMap((box) => box.lines.flatMap((line) => line.runs));
+    const drawn = runs.find((run) => run.text.includes('مرحبا'));
+    expect(drawn?.fontFamily).toBe('Noto Sans Arabic');
+    expect(runs.some((run) => run.fontFamily === 'Liberation Sans')).toBe(true);
+  } finally {
+    source.dispose();
+  }
+});

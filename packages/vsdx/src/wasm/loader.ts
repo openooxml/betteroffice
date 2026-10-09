@@ -1,26 +1,50 @@
 import initWasmModule, { VsdxDocument, VsdxRenderer, rendererVersion } from './generated/vsdx_wasm.js';
 import type { InitInput } from './generated/vsdx_wasm.js';
-import type { CellLocator, CellFormulaReceipt, CollaborationUpdateOrigin, ConnectorGlue, DiagramSnapshot, FormulaShapeDraft, HistoryResult, HitTestResult, PageDisplayList, ShapeReceipt, TextReceipt, VsdxFontFace } from '../types';
+import type { CellLocator, CellFormulaReceipt, CellWriteProbe, CellWriteQuery, CollaborationUpdateOrigin, ConnectedShapeReceipt, ConnectorGlue, ConnectorRoutePoint, ConnectorRouteReceipt, DiagramSnapshot, DocumentMaster, RawValidationIssue, FormulaShapeDraft, FormulaShapeTreeDraft, HistoryResult, HitTestResult, PageDisplayList, PageLayer, ShapeDataReceipt, ShapeDataWrite, ShapeReceipt, ShapeTreeGlue, TextReceipt, ValidationIssue, VsdxFontFace } from '../types';
 
 export type WasmInitInput = InitInput | Promise<InitInput>;
 export interface OpenDiagramOptions { clientId?: number; fonts?: ReadonlyArray<VsdxFontFace>; initialUpdate?: Uint8Array; }
 export interface CollaborationResync { update: Uint8Array; }
+export interface ShapeMove { pageId: string; shapeId: string; xFormula: string; yFormula: string; }
+export interface ShapeDelete { pageId: string; shapeId: string; }
+export interface CellFormulaWrite { pageId: string; shapeId: string; cellName: string; formula: string; }
 export interface DiagramHandle {
   readonly clientId: number;
   snapshot(): DiagramSnapshot;
+  masters(): DocumentMaster[];
   registerFont(face: VsdxFontFace): number;
   layoutPage(pageIndex: number): PageDisplayList;
+  exportPdf(): Uint8Array;
+  exportSvg(): string[];
+  exportPng(pageIndex: number, scale?: number): Uint8Array;
+  pageLayers(pageIndex: number): PageLayer[];
+  validate(): ValidationIssue[];
+  validatePage(pageIndex: number): ValidationIssue[];
+  setLayerVisible(pagePartPath: string, layerIndex: number, visible: boolean): void;
+  clearLayerVisibility(): void;
   hitTest(x: number, y: number): HitTestResult | null;
   mediaBytes(assetId: string): Uint8Array;
   setCellFormula(pageId: string, shapeId: string, locator: CellLocator, formula: string): CellFormulaReceipt;
+  probeCellWrites(pageId: string, shapeId: string, probes: readonly CellWriteQuery[]): CellWriteProbe[];
+  setCellFormulas(writes: ReadonlyArray<CellFormulaWrite>): CellFormulaReceipt[];
+  setShapeData(pageId: string, shapeId: string, writes: ReadonlyArray<ShapeDataWrite>): ShapeDataReceipt[];
+  setControlHandle(pageId: string, shapeId: string, row: string, xFormula: string | null, yFormula: string | null): CellFormulaReceipt[];
   moveShape(pageId: string, shapeId: string, xFormula: string, yFormula: string): [CellFormulaReceipt, CellFormulaReceipt];
+  moveShapes(moves: ReadonlyArray<ShapeMove>): Array<[CellFormulaReceipt, CellFormulaReceipt]>;
   setShapeBounds(pageId: string, shapeId: string, xFormula: string, yFormula: string, widthFormula: string, heightFormula: string): [CellFormulaReceipt, CellFormulaReceipt, CellFormulaReceipt, CellFormulaReceipt];
   resizeLocPin(pageId: string, shapeId: string, width: number, height: number): { x: number; y: number };
   resizeShape(pageId: string, shapeId: string, widthFormula: string, heightFormula: string): [CellFormulaReceipt, CellFormulaReceipt];
+  deleteShapes(deletes: ReadonlyArray<ShapeDelete>): ShapeReceipt[];
   reorderShape(pageId: string, shapeId: string, toIndex: number): ShapeReceipt;
   reorderPage(pageId: string, toIndex: number): ShapeReceipt;
   addShape(pageId: string, draft: FormulaShapeDraft): ShapeReceipt;
+  addShapeWithText(pageId: string, draft: FormulaShapeDraft, text: string): ShapeReceipt;
+  addShapeTree(pageId: string, draft: FormulaShapeTreeDraft): ShapeReceipt;
+  subtreeGlue(pageId: string, shapeId: string): ShapeTreeGlue[];
   addConnector(pageId: string, draft: FormulaShapeDraft, from: ConnectorGlue, to: ConnectorGlue): ShapeReceipt;
+  addFreeConnector(pageId: string, draft: FormulaShapeDraft, from: ConnectorGlue): ShapeReceipt;
+  addConnectedShape(pageId: string, shapeDraft: FormulaShapeDraft, connectorDraft: FormulaShapeDraft, from: ConnectorGlue, toCell?: string): ConnectedShapeReceipt;
+  setConnectorRoute(pageId: string, shapeId: string, points: ConnectorRoutePoint[]): ConnectorRouteReceipt;
   deleteShape(pageId: string, shapeId: string): ShapeReceipt;
   shapeText(pageId: string, shapeId: string): string;
   setShapeText(pageId: string, shapeId: string, text: string): TextReceipt;
@@ -111,15 +135,39 @@ export function openDiagram(bytes: Uint8Array, options: OpenDiagramOptions = {})
   const json = <T>(operation: () => string, drainUpdates = false): T => JSON.parse(wasm(operation, drainUpdates)) as T;
   return {
     clientId: doc.clientId, snapshot: () => json(() => doc.snapshotJson()),
+    masters: () => {
+      const masters = json<DocumentMaster[]>(() => renderer.masterPreviewsJson(doc));
+      for (const master of masters) {
+        if (master.display && master.display.contractVersion !== 7) throw new Error(`unsupported VSDX display-list contract version ${master.display.contractVersion}`);
+      }
+      return masters;
+    },
     registerFont: face => wasm(() => renderer.registerFont(face.family, face.bold ?? false, face.italic ?? false, face.bytes)),
+    pageLayers: pageIndex => json(() => renderer.pageLayersJson(doc, pageIndex)),
+    validate: () => mapValidationIssues(json<RawValidationIssue[]>(() => renderer.validateJson(doc)), json<DiagramSnapshot>(() => doc.snapshotJson())),
+    validatePage: (pageIndex) => {
+      const snapshot = json<DiagramSnapshot>(() => doc.snapshotJson());
+      const page = snapshot.pages[pageIndex];
+      if (!page) throw new Error('page index is outside the document');
+      return mapValidationIssues(json<RawValidationIssue[]>(() => renderer.validatePageJson(doc, pageIndex)), snapshot).filter((issue) => issue.pageId === page.id);
+    },
+    setLayerVisible: (pagePartPath, layerIndex, visible) => wasm(() => renderer.setLayerVisible(pagePartPath, layerIndex, visible)),
+    clearLayerVisibility: () => wasm(() => renderer.clearLayerVisibility()),
     layoutPage: pageIndex => {
       hitIds.clear();
       const list = json<PageDisplayList>(() => renderer.layoutPageJson(doc, pageIndex));
-      if (list.contractVersion !== 4) throw new Error(`unsupported VSDX display-list contract version ${list.contractVersion}`);
+      if (list.contractVersion !== 7) throw new Error(`unsupported VSDX display-list contract version ${list.contractVersion}`);
       const page = json<DiagramSnapshot>(() => doc.snapshotJson()).pages[pageIndex];
       const shapes = [...page.shapes];
       while (shapes.length) { const shape = shapes.pop()!; hitIds.set(`${page.sourcePartPath}:${shape.sourceId}`, shape.id); shapes.push(...shape.children); }
       return list;
+    },
+    exportPdf: () => wasm(() => renderer.exportPdf(doc).slice()),
+    exportSvg: () => json<string[]>(() => renderer.exportSvgJson(doc)),
+    exportPng: (pageIndex, scale = 1) => {
+      if (!Number.isInteger(pageIndex) || pageIndex < 0) throw new Error('VSDX page index must be a non-negative integer');
+      if (!Number.isFinite(scale) || scale <= 0) throw new Error('VSDX PNG scale must be a positive number');
+      return wasm(() => renderer.exportPng(doc, pageIndex, scale).slice());
     },
     hitTest: (x, y) => {
       const hit = json<HitTestResult | null>(() => renderer.hitTestJson(x, y));
@@ -127,15 +175,27 @@ export function openDiagram(bytes: Uint8Array, options: OpenDiagramOptions = {})
       return hit && shapeId ? { ...hit, shapeId } : null;
     }, mediaBytes: assetId => wasm(() => doc.mediaBytes(assetId).slice()),
     setCellFormula: (pageId, shapeId, locator, formula) => json(() => doc.setCellFormulaJson(JSON.stringify({ pageId, shapeId, locator, formula })), true),
+    probeCellWrites: (pageId, shapeId, probes) => json(() => doc.probeCellWritesJson(JSON.stringify({ pageId, shapeId, probes: [...probes] }))),
+    setCellFormulas: (writes) => json(() => doc.setCellFormulasJson(JSON.stringify({ writes: [...writes] })), true),
+    setShapeData: (pageId, shapeId, writes) => json(() => doc.setShapeDataJson(JSON.stringify({ pageId, shapeId, writes: [...writes] })), true),
+    setControlHandle: (pageId, shapeId, row, xFormula, yFormula) => json(() => doc.setControlHandleJson(JSON.stringify({ pageId, shapeId, row, xFormula, yFormula })), true),
     moveShape: (pageId, shapeId, xFormula, yFormula) => json(() => doc.moveShapeJson(JSON.stringify({ pageId, shapeId, xFormula, yFormula })), true),
+    moveShapes: (moves) => json(() => doc.moveShapesJson(JSON.stringify({ moves: [...moves] })), true),
     setShapeBounds: (pageId, shapeId, xFormula, yFormula, widthFormula, heightFormula) => json(() => doc.setShapeBoundsJson(JSON.stringify({ pageId, shapeId, xFormula, yFormula, widthFormula, heightFormula })), true),
     resizeLocPin: (pageId, shapeId, width, height) => { const [x, y] = wasm(() => doc.resizeLocPin(pageId, shapeId, width, height)); return { x, y }; },
     resizeShape: (pageId, shapeId, widthFormula, heightFormula) => json(() => doc.resizeShapeJson(JSON.stringify({ pageId, shapeId, widthFormula, heightFormula })), true),
     reorderShape: (pageId, shapeId, toIndex) => json(() => doc.reorderShapeJson(JSON.stringify({ pageId, shapeId, toIndex })), true),
     reorderPage: (pageId, toIndex) => json(() => doc.reorderPageJson(JSON.stringify({ pageId, toIndex })), true),
     addShape: (pageId, draft) => json(() => doc.addShapeJson(JSON.stringify({ pageId, draft })), true),
+    addShapeWithText: (pageId, draft, text) => json(() => doc.addShapeWithTextJson(JSON.stringify({ pageId, draft, text })), true),
+    addShapeTree: (pageId, draft) => json(() => doc.addShapeTreeJson(JSON.stringify({ pageId, draft })), true),
+    subtreeGlue: (pageId, shapeId) => json(() => doc.subtreeGlueJson(JSON.stringify({ pageId, shapeId }))),
     addConnector: (pageId, draft, from, to) => json(() => doc.addConnectorJson(JSON.stringify({ pageId, draft, from, to })), true),
+    addFreeConnector: (pageId, draft, from) => json(() => doc.addFreeConnectorJson(JSON.stringify({ pageId, draft, from })), true),
+    addConnectedShape: (pageId, shapeDraft, connectorDraft, from, toCell) => json(() => doc.addConnectedShapeJson(JSON.stringify({ pageId, shapeDraft, connectorDraft, from, toCell })), true),
+    setConnectorRoute: (pageId, shapeId, points) => json(() => doc.setConnectorRouteJson(JSON.stringify({ pageId, shapeId, points })), true),
     deleteShape: (pageId, shapeId) => json(() => doc.deleteShapeJson(JSON.stringify({ pageId, shapeId })), true),
+    deleteShapes: (deletes) => json(() => doc.deleteShapesJson(JSON.stringify({ deletes: [...deletes] })), true),
     shapeText: (pageId, shapeId) => json(() => doc.shapeTextJson(JSON.stringify({ pageId, shapeId }))),
     setShapeText: (pageId, shapeId, text) => json(() => doc.setShapeTextJson(JSON.stringify({ pageId, shapeId, text })), true),
     save: () => wasm(() => doc.save().slice()),
@@ -148,5 +208,28 @@ export function openDiagram(bytes: Uint8Array, options: OpenDiagramOptions = {})
 }
 function requireInitialized(): void { if (!initialized) throw new Error('vsdx wasm is not initialized; call initWasm() first'); }
 function clientId(): number { if (!globalThis.crypto?.getRandomValues) throw new Error('crypto.getRandomValues is required to generate a collaboration client ID'); const values = new Uint32Array(2); let value = 0; do { crypto.getRandomValues(values); value = (values[0] & 0x1fffff) * 0x1_0000_0000 + values[1]; } while (!value); return value; }
+function mapValidationIssues(raw: RawValidationIssue[], snapshot: DiagramSnapshot): ValidationIssue[] {
+  const pages = new Map(snapshot.pages.map((page) => [page.sourcePartPath, page]));
+  const shapes = new Map<string, Map<number, string>>();
+  for (const page of snapshot.pages) {
+    const index = new Map<number, string>();
+    const work = [...page.shapes];
+    while (work.length) {
+      const shape = work.pop()!;
+      if (!index.has(shape.sourceId)) index.set(shape.sourceId, shape.id);
+      work.push(...shape.children);
+    }
+    shapes.set(page.sourcePartPath, index);
+  }
+  const out: ValidationIssue[] = [];
+  for (const issue of raw) {
+    const page = pages.get(issue.pagePart);
+    const shapeId = shapes.get(issue.pagePart)?.get(issue.shapeId);
+    if (!page || !shapeId) continue;
+    const otherShapeId = issue.otherShapeId === null ? null : shapes.get(issue.pagePart)?.get(issue.otherShapeId) ?? null;
+    out.push({ id: issue.id, rule: issue.rule, severity: issue.severity, pageId: page.id, shapeId, otherShapeId, endpoint: issue.endpoint, row: issue.row });
+  }
+  return out;
+}
 function construct<T>(operation: () => T): T { try { return operation(); } catch (error) { throw toError(error); } }
 function toError(error: unknown): Error { return error instanceof Error ? error : new Error(typeof error === 'string' ? error : String(error)); }

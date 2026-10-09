@@ -10,7 +10,7 @@ paragraphs is the only thing that varies. The master `bodyStyle` sets
 | --- | --- | --- | --- |
 | 2 | Master `spcBef` 10 pt | 18 pt | 13.33 px |
 | 3 | Master 10 pt before plus layout 18 pt after | 18 pt | 37.33 px |
-| 4 | Direct `spcBef` 50% | 32 pt | 21.33 px |
+| 4 | Direct `spcBef` 50% | 32 pt | 25.6 px |
 | 5 | Direct `spcBef` 0% over the master's 10 pt | 18 pt | 0 px |
 | 6 | Direct `spcBef` 6 pt and `spcAft` 6 pt | 18 pt | 16 px |
 | 7 | Direct `spcAft` 12 pt, bottom anchored | 18 pt | 16 px |
@@ -18,9 +18,11 @@ paragraphs is the only thing that varies. The master `bodyStyle` sets
 
 No space is opened above the first paragraph or below the last: shapes 2 to 5
 start at the top of their box and shape 7 ends at the bottom of its box.
-LibreOffice renders all seven at those pitches.
 
-Percentages measure the paragraph's text size, per
-[SpacingPercent](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.drawing.spacingpercent);
-point units are hundredths of a point, per
+Percentages measure a single line rather than the bare text size: PowerPoint
+16.113 puts 7.68 pt between 32 pt paragraphs carrying the 20% `spcBef` of the
+stock Office master, which is 20% of the 1.2 em line, not of the 32 pt text.
+LibreOffice reads [SpacingPercent](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.drawing.spacingpercent)
+as the text size and renders shape 4 at 21.33 px instead. Point units are
+hundredths of a point, per
 [SpacingPoints](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.drawing.spacingpoints).

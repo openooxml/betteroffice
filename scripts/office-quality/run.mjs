@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
@@ -7,10 +6,14 @@ import { promisify } from 'node:util';
 import { FORMATS, renderSection } from './readme.mjs';
 import { measureSamples } from './results.mjs';
 import { validateReferenceMetadata } from './reference.mjs';
-import { CORPUS_ORIGIN as corpus, selectSamples } from './samples.mjs';
+import { download } from './download.mjs';
+import { fetchAsset, resolveAssetCacheDir } from './asset-cache.mjs';
+import { CORPUS_ORIGIN as corpus } from './samples.mjs';
+import { preparePlan, selectPlanSamples, validatePlan } from './plan.mjs';
 
 const execute = promisify(execFile);
 const output = resolve(process.env.QUALITY_OUTPUT ?? '.source/office-quality/run');
+const assetCache = resolveAssetCacheDir(process.env);
 const python = process.env.QUALITY_PYTHON ?? 'python3';
 if (
   (
@@ -28,7 +31,6 @@ if (
 if ((await readdir(output).catch(() => [])).length)
   throw new Error('QUALITY_OUTPUT must be empty');
 await mkdir(output, { recursive: true });
-const ids = await selectSamples(process.env, download);
 
 async function command(program, args, options = {}) {
   const result = await execute(program, args, {
@@ -40,25 +42,6 @@ async function command(program, args, options = {}) {
   return result.stdout;
 }
 
-async function download(url, maximum = 32 * 1024 * 1024) {
-  const response = await fetch(url, {
-    signal: AbortSignal.timeout(
-      Math.max(30_000, Math.ceil(maximum / (1024 * 1024)) * 1000)
-    ),
-    credentials: 'omit',
-    referrerPolicy: 'no-referrer',
-  });
-  if (!response.ok) throw new Error(`Download failed (${response.status}): ${url}`);
-  const chunks = [];
-  let size = 0;
-  for await (const chunk of response.body) {
-    size += chunk.length;
-    if (size > maximum) throw new Error(`Download exceeds byte limit: ${url}`);
-    chunks.push(chunk);
-  }
-  return Buffer.concat(chunks);
-}
-
 async function registry(name) {
   return JSON.parse(
     await download(
@@ -68,32 +51,33 @@ async function registry(name) {
   );
 }
 
+async function checkoutPlan() {
+  const file = process.env.QUALITY_PLAN?.trim();
+  const plan = file
+    ? validatePlan(JSON.parse(await readFile(resolve(file), 'utf8')))
+    : await preparePlan(process.env, { download, command, registry });
+  const [sourceSha, commit] = await Promise.all([
+    command('git', ['rev-parse', 'HEAD']),
+    command('git', ['log', '-1', '--format=%H', '--', '.', ':!README.md']),
+  ]);
+  if (sourceSha.trim() !== plan.source_sha || commit.trim() !== plan.commit)
+    throw new Error('Fidelity plan does not match this checkout');
+  return plan;
+}
+
 async function asset(entry, destination, sample, maximum = 32 * 1024 * 1024) {
-  const url = new URL(entry.url);
-  if (
-    url.origin !== corpus ||
-    !url.pathname.startsWith(`/${sample}/`) ||
-    !Number.isInteger(entry.bytes) ||
-    entry.bytes < 1 ||
-    entry.bytes > maximum ||
-    !/^[a-f0-9]{64}$/.test(entry.sha256)
-  )
-    throw new Error('Invalid corpus asset metadata');
-  const bytes = await download(url, entry.bytes);
-  if (
-    bytes.length !== entry.bytes ||
-    createHash('sha256').update(bytes).digest('hex') !== entry.sha256
-  ) {
-    throw new Error(`Corpus hash mismatch: ${url}`);
-  }
+  const bytes = await fetchAsset(entry, sample, download, {
+    cacheDir: assetCache,
+    origin: corpus,
+    maximum,
+  });
   await writeFile(destination, bytes);
 }
 
-async function reference(id) {
+async function reference({ id, format, metadata }) {
   const metadataUrl = `${corpus}/${id}/metadata.json`;
-  const metadata = JSON.parse(await download(metadataUrl, 2 * 1024 * 1024));
-  if (!FORMATS.includes(metadata.format))
-    throw new Error(`Unsupported sample format: ${id}`);
+  if (!FORMATS.includes(format) || metadata.format !== format)
+    throw new Error(`Unsupported frozen sample format: ${id}`);
   validateReferenceMetadata(metadata, id);
   const directory = resolve(output, id);
   await mkdir(resolve(directory, 'reference'), { recursive: true });
@@ -112,8 +96,9 @@ async function reference(id) {
   );
   return {
     id,
-    format: metadata.format,
+    format,
     metadata_url: metadataUrl,
+    source_sha256: metadata.source.sha256,
     source,
     directory,
     capture_profile: metadata.reference.capture_profile ?? null,
@@ -157,6 +142,7 @@ async function viewer(overrides = {}) {
   const env = { ...process.env, QUALITY_PORT: String(port) };
   delete env.QUALITY_PACKAGE_ROOT;
   delete env.QUALITY_REACT_ROOT;
+  delete env.QUALITY_FONT_ASSETS;
   Object.assign(env, overrides);
   const child = spawn(process.execPath, ['scripts/docx-quality/server.mjs'], {
     env,
@@ -190,44 +176,46 @@ async function viewer(overrides = {}) {
   }
 }
 
-const commit = (
-  await command('git', ['log', '-1', '--format=%H', '--', '.', ':!README.md'])
-).trim();
-const versions = Object.fromEntries(
-  await Promise.all(
-    FORMATS.map(async (format) => [
-      format,
-      (await registry(`@betteroffice/${format}`)).version,
-    ])
-  )
+const plan = await checkoutPlan();
+const requestedFormat = process.env.QUALITY_FORMAT?.trim() || null;
+const { formats: selectedFormats, samples: selectedPlanSamples } = selectPlanSamples(
+  plan,
+  requestedFormat
 );
 const samples = [];
-for (const id of ids) samples.push(await reference(id));
-for (const format of FORMATS.filter((format) =>
-  samples.some((sample) => sample.format === format)
-)) {
-  const reactVersion =
-    format === 'docx' ? (await registry('@betteroffice/docx-react')).version : null;
+for (const sample of selectedPlanSamples) samples.push(await reference(sample));
+for (const format of selectedFormats) {
+  const reactVersion = format === 'docx' ? plan.react_version : null;
   const roots = {
-    QUALITY_PACKAGE_ROOT: await packageRoot(`@betteroffice/${format}`, versions[format]),
+    QUALITY_PACKAGE_ROOT: await packageRoot(
+      `@betteroffice/${format}`,
+      plan.versions[format]
+    ),
     ...(reactVersion
       ? {
-          QUALITY_REACT_ROOT: await packageRoot('@betteroffice/docx-react', reactVersion),
+          QUALITY_REACT_ROOT: await packageRoot(
+            '@betteroffice/docx-react',
+            plan.react_version
+          ),
         }
       : {}),
   };
   for (const channel of ['published', 'commit']) {
     const server = await viewer({
       QUALITY_FORMAT: format,
-      ...(channel === 'published' ? roots : {}),
+      ...(channel === 'published'
+        ? roots
+        : // The commit channel renders with the fonts this checkout ships,
+          // which the pinned CDN only carries once they are published.
+          { QUALITY_FONT_ASSETS: resolve('packages/fonts/assets') }),
     });
     try {
       await measureSamples(
         samples.filter((sample) => sample.format === format),
         {
           channel,
-          version: channel === 'published' ? versions[format] : undefined,
-          renderer_source_commit: channel === 'commit' ? commit : undefined,
+          version: channel === 'published' ? plan.versions[format] : undefined,
+          renderer_source_commit: channel === 'commit' ? plan.commit : undefined,
         },
         {
           capture: (sample) =>
@@ -246,10 +234,12 @@ for (const format of FORMATS.filter((format) =>
                   QUALITY_CAPTURE_CONFIG: JSON.stringify(sample.capture_profile),
                   QUALITY_ENGINE_LABEL:
                     channel === 'published'
-                      ? `@betteroffice/${format}@${versions[format]}${
-                          reactVersion ? `; @betteroffice/docx-react@${reactVersion}` : ''
+                      ? `@betteroffice/${format}@${plan.versions[format]}${
+                          reactVersion
+                            ? `; @betteroffice/docx-react@${plan.react_version}`
+                            : ''
                         }`
-                      : commit,
+                      : plan.commit,
                 },
               }
             ),
@@ -272,8 +262,11 @@ for (const format of FORMATS.filter((format) =>
   }
 }
 const report = {
-  commit,
-  versions,
+  source_sha: plan.source_sha,
+  commit: plan.commit,
+  versions: plan.versions,
+  react_version: plan.react_version,
+  ...(requestedFormat ? { format: requestedFormat } : {}),
   samples: samples.map(({ source, directory, ...sample }) => sample),
 };
 await writeFile(resolve(output, 'report.json'), JSON.stringify(report, null, 2) + '\n');

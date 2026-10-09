@@ -24,6 +24,8 @@ import type { SelectionRect, CaretPosition } from '@betteroffice/docx/layout';
 import {
   CANVAS_PAGE_GAP_PX,
   CANVAS_PAGES_PADDING_PX,
+  displayPageCanvas,
+  effectiveZoom,
   type DisplayList,
   type DisplayListQueries,
 } from '@betteroffice/docx/layout/render';
@@ -37,7 +39,7 @@ export interface CanvasSelectionOverlayProps {
   caretPosition: CaretPosition | null;
   /** Whether the (hidden body) input is focused — drives the blink. */
   isFocused: boolean;
-  /** Hide the caret / selection in read-only mode. */
+  /** Read-only: draw a range selection but never the caret. */
   readOnly?: boolean;
   /**
    * Portal target — `editorContentRef.current`, the positioned ancestor that
@@ -191,18 +193,17 @@ function ProjectedCanvasSelectionOverlay({
 
     const recompute = () => {
       const targetRect = overlayTarget.getBoundingClientRect();
+      const targetZoom = effectiveZoom(overlayTarget);
       const project = (pageIndex: number, x: number, y: number) => {
-        const canvasEl = host.querySelector<HTMLCanvasElement>(
-          `canvas[data-page-index="${pageIndex}"]`
-        );
+        const canvasEl = displayPageCanvas(host, pageIndex);
         const size = displayListQueries.pageSize(pageIndex);
         if (!canvasEl || !size) return null;
         const canvasRect = canvasEl.getBoundingClientRect();
-        const scaleX = size.width > 0 ? canvasRect.width / size.width : 1;
-        const scaleY = size.height > 0 ? canvasRect.height / size.height : 1;
+        const scaleX = (size.width > 0 ? canvasRect.width / size.width : 1) / targetZoom;
+        const scaleY = (size.height > 0 ? canvasRect.height / size.height : 1) / targetZoom;
         return {
-          left: canvasRect.left - targetRect.left + x * scaleX,
-          top: canvasRect.top - targetRect.top + y * scaleY,
+          left: (canvasRect.left - targetRect.left) / targetZoom + x * scaleX,
+          top: (canvasRect.top - targetRect.top) / targetZoom + y * scaleY,
           scaleX,
           scaleY,
         };

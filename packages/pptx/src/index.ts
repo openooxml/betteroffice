@@ -1,5 +1,38 @@
 export { paintSlide, sizeCanvasForSlide } from './render/canvas';
-export { presentationImageBlob } from './render/image';
+/** @experimental */
+export { createPptxWorkerEditorSession } from './session/editorSession';
+/** @experimental */
+export type {
+  PptxWorkerEditorOptions, PptxWorkerEditorRecovery, PptxWorkerEditorSession,
+  PptxWorkerEditorStage, PptxWorkerEditorState,
+} from './session/editorSession';
+/** @experimental */
+export type { PptxWorkerEditorAccess, PptxWorkerEditorInteractionAccess } from './session/editPeer';
+/** @experimental */
+export type {
+  PptxWorkerEditorFrame, PptxWorkerEditorOperation, PptxWorkerEditorReply,
+} from './session/replay';
+/** @experimental */
+export {
+  PptxPeerHydrationError, PptxPeerNotReadyError, PptxWorkerEditorCollaborationError,
+  PptxWorkerEditorDisposedError, PptxWorkerEditorFailedError,
+} from './session/peerHydrationError';
+/** @experimental */
+export { openPresentationSession } from './session/client';
+/** @experimental */
+export type { OpenPresentationSessionOptions, PresentationSession } from './session/client';
+/** @experimental */
+export type {
+  PresentationFrame,
+  PresentationSessionEvents,
+  PresentationSessionFont,
+  PresentationSessionMethods,
+  PresentationSessionOpenOptions,
+  PresentationSessionState,
+  PresentationSlideSummary,
+} from './session/methods';
+export { decodePresentationImage, needsElementDecode, presentationImageBlob } from './render/image';
+export type { PresentationImageDecodeOptions } from './render/image';
 export { StaleProposalError } from './proposals';
 export type { Proposal, ProposalAcceptance, ProposalChange, ProposalDiffSlide, ProposalEdit, ProposalPreview, ProposalTextChange } from './proposals';
 export type { CanvasImageResolver, PaintSlideOptions, SlideCanvasLike } from './render/canvas';
@@ -27,18 +60,91 @@ export type {
 } from './collaboration';
 export { PRESENCE_LABEL_DURATION_MS, presenceColorForClientId } from './collaboration';
 export {
+  exportPptxMarkdown,
+  exportPptxStructured,
   initWasm,
   inspectPresentation,
   isWasmAvailable,
   isProposalsAvailable,
   openPresentation,
+  renderPptxMarkdown,
   wasmVersion,
 } from './wasm/loader';
+export { PptxExportError } from './structuredExport';
 export type {
+  ExportCompletion,
+  ExportDiagnostic,
+  ExportSeverity,
+  MarkdownAnchor,
+  PptxAnchor,
+  PptxAnchorScope,
+  PptxExportComment,
+  PptxExportDiagnostic,
+  PptxExportDiagnosticCode,
+  PptxExportFailure,
+  PptxExportFailureCode,
+  PptxExportList,
+  PptxExportMark,
+  PptxExportNotes,
+  PptxExportObject,
+  PptxExportObjectKind,
+  PptxExportOptions,
+  PptxExportParagraph,
+  PptxExportRefusal,
+  PptxExportResult,
+  PptxExportRun,
+  PptxExportShape,
+  PptxExportShapeKind,
+  PptxExportSlide,
+  PptxExportStory,
+  PptxExportTable,
+  PptxExportTableCell,
+  PptxMarkdownContent,
+  PptxMarkdownOptions,
+  PptxSourceProvenance,
+  PptxStructuredContent,
+  PptxTextSpan,
+} from './structuredExport';
+export type {
+  InspectPresentationOptions,
   OpenPresentationOptions,
   PresentationHandle,
+  UndoCaptureMode,
   WasmInitInput,
 } from './wasm/loader';
+export type {
+  EditSuccess,
+  OperationFailure,
+  OperationRefusal,
+  PptxEditFailure,
+  PptxEditFailureCode,
+  PptxEditHistory,
+  PptxEditPreview,
+  PptxEditReceipt,
+  PptxEditRefusal,
+  PptxEditRequest,
+  PptxEditResult,
+  PptxEditSource,
+  PptxEditStep,
+  PptxEditTarget,
+  PptxFindMatch,
+  PptxFindRequest,
+  PptxFindResult,
+  PptxFindScope,
+  PptxParagraphText,
+  PptxReadRequest,
+  PptxReadResult,
+  PptxShapeTarget,
+  PptxSlideTarget,
+  PptxStoryTarget,
+  PptxStoryText,
+  PptxTextField,
+  PptxTextGuard,
+  PptxTextRange,
+  PptxTextTarget,
+  PptxValidationResult,
+  ValidationSuccess,
+} from './edits';
 export type {
   BlipEffect,
   CaretStop,
@@ -47,27 +153,39 @@ export type {
   CommentReceipt,
   CommentSnapshot,
   DeckSnapshot,
+  EditProfile,
   GeometryPathCommand,
+  HistoryProfile,
   HistoryResult,
   HitTestResult,
   ImageEffect,
   ImageCrop,
   ImagePrimitive,
+  InheritedGeometry,
+  LayoutProfile,
   Paint,
   ParagraphAlignment,
   ParagraphSnapshot,
+  PictureDraft,
   PlaceholderPrimitive,
   PositionedGlyph,
   PositionedTextLine,
   PositionedTextRun,
   PresetShapeDraft,
+  Profiled,
+  ProfiledLayout,
   PptxFontFace,
+  PptxCaretAnchor,
+  PptxTextMatch,
+  PptxTextSearchOptions,
   PrimitiveTransform,
   ShapeAdjustReceipt,
   ShapeDraft,
   ShapeFill,
   ShapeFillReceipt,
+  ShapeGradient,
   ShapeKind,
+  ShapeLineEnd,
   ShapeOutline,
   ShapePrimitive,
   ShapeReceipt,
@@ -75,6 +193,7 @@ export type {
   ShapeSnapshot,
   ShapeStroke,
   ShapeStrokeReceipt,
+  ShapeZOrderReceipt,
   SlideDisplayList,
   SlidePrimitive,
   SlideReceipt,

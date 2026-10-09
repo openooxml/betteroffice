@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
+import { version as fontsVersion } from '../package.json';
+import { version as fontsCjkVersion } from '../../fonts-cjk/package.json';
 import { createFontProvider } from './cdn';
 import { createFontProvider as createBundledFontProvider } from './index';
 
@@ -36,10 +38,8 @@ describe('CDN font provider', () => {
 
   test('lazily loads Latin and Japanese faces from separately pinned packages', async () => {
     const requested: string[] = [];
-    const latin =
-      'https://cdn.jsdelivr.net/npm/@betteroffice/fonts@0.1.0/assets/Carlito-Regular.ttf';
-    const japanese =
-      'https://cdn.jsdelivr.net/npm/@betteroffice/fonts-cjk@0.1.0/assets/NotoSansJP-Regular.otf';
+    const latin = `https://cdn.jsdelivr.net/npm/@betteroffice/fonts@${fontsVersion}/assets/Carlito-Regular.ttf`;
+    const japanese = `https://cdn.jsdelivr.net/npm/@betteroffice/fonts-cjk@${fontsCjkVersion}/assets/NotoSansJP-Regular.otf`;
     intercept(
       {
         [latin]: new URL('../assets/Carlito-Regular.ttf', import.meta.url)

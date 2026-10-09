@@ -1,26 +1,40 @@
 use std::collections::BTreeMap;
 
+use pptx_edit::structured::{
+    PptxExportOptions, PptxExportResult, PptxMarkdownContent, PptxStructuredContent,
+};
 use pptx_edit::{
     CaretAnchor, CommentFlavor, CommentReceipt, CommentSnapshot, DeckSession, DeckSnapshot,
-    EditCtx, PresetShapeDraft, ShapeAdjustReceipt, ShapeDraft, ShapeFillReceipt, ShapeReceipt,
-    ShapeRect, ShapeStroke, ShapeStrokeReceipt, SlideReceipt, StorySnapshot, TextReceipt,
-    TextStyle, TextStylePatch, TransformReceipt, UpdateEvent, UpdateSubscription,
+    DocumentVersion, EditCtx, EditError, EditOutcome, EditRequest, FindOutcome, FindRequest,
+    PresetShapeDraft, ReadOutcome, ReadRequest, ShapeAdjustReceipt, ShapeDraft, ShapeFillReceipt,
+    ShapeReceipt, ShapeRect, ShapeStroke, ShapeStrokeReceipt, SlideReceipt, SlideScope,
+    StorySnapshot, TextReceipt, TextSearchMatch, TextStyle, TextStylePatch, TransformReceipt,
+    UpdateEvent, UpdateSubscription, ValidationOutcome,
 };
 use pptx_parse::{
     MediaPart, ParseLimits, PptxPackage, Presentation as PresentationModel, Slide, SlideLayout,
     SlideMaster, ThemePart,
 };
-use pptx_render::{RenderedSlide, SlideRenderer};
+use pptx_render::{RenderError, RenderedSlide, SlideRenderer};
 
 use crate::Result;
 
 const STANDALONE_CLIENT_ID: u64 = 1;
 
+fn slide_scope(session: &DeckSession, slide_index: usize) -> Result<SlideScope> {
+    session
+        .slide_scope(slide_index)
+        .map_err(|error| match error {
+            EditError::OutOfBounds { .. } => RenderError::SlideNotFound(slide_index).into(),
+            error => error.into(),
+        })
+}
+
 pub struct Presentation {
     session: DeckSession,
     renderer: SlideRenderer,
     #[cfg(feature = "raster")]
-    glyphs: crate::render::GlyphRegistry,
+    caches: crate::render::RenderCaches,
 }
 
 impl Presentation {
@@ -38,9 +52,10 @@ impl Presentation {
 
     pub fn render_proposal(&self, id: &str, slide_index: usize) -> Result<RenderedSlide> {
         let preview = self.session.proposal_preview_session(id)?;
+        let scope = slide_scope(&preview, slide_index)?;
         Ok(self
             .renderer
-            .layout_slide(preview.package(), &preview.snapshot()?, slide_index)?)
+            .layout_scoped_slide(preview.package(), &scope)?)
     }
 
     pub fn accept_proposal(&self, id: &str, force: bool) -> Result<crate::ProposalAcceptance> {
@@ -82,7 +97,7 @@ impl Presentation {
             session,
             renderer: SlideRenderer::new(),
             #[cfg(feature = "raster")]
-            glyphs: crate::render::GlyphRegistry::default(),
+            caches: crate::render::RenderCaches::default(),
         })
     }
 
@@ -118,8 +133,71 @@ impl Presentation {
         &self.package().media
     }
 
+    /// Resolves a display-list image asset, including unsaved pictures.
+    pub fn media_bytes(&self, asset_id: &str) -> Result<Vec<u8>> {
+        Ok(self.session.media_bytes(asset_id)?)
+    }
+
+    pub fn search_text(
+        &self,
+        query: &str,
+        case_sensitive: bool,
+        limit: Option<usize>,
+    ) -> Result<Vec<TextSearchMatch>> {
+        Ok(self.session.search_text(query, case_sensitive, limit)?)
+    }
+
     pub fn snapshot(&self) -> Result<DeckSnapshot> {
         Ok(self.session.snapshot()?)
+    }
+
+    /// The session-scoped version token of the committed deck state; see
+    /// [`DeckSession::version`].
+    pub fn version(&self) -> DocumentVersion {
+        self.session.version()
+    }
+
+    /// Slides and their stories' text with the version it was read at. Policy refusals are the
+    /// inner `Err`.
+    pub fn read_content(&self, request: &ReadRequest) -> Result<ReadOutcome> {
+        Ok(self.session.read_content(request)?)
+    }
+
+    /// Exact, case-sensitive, paragraph-local search with the version it ran at.
+    pub fn find_text(&self, request: &FindRequest) -> Result<FindOutcome> {
+        Ok(self.session.find_text(request)?)
+    }
+
+    /// Structured slide content with the version it was read at; anchors are scoped to that
+    /// version. Nothing changes. Option refusals are the inner `Err`.
+    pub fn export_structured(
+        &self,
+        options: &PptxExportOptions,
+    ) -> Result<PptxExportResult<PptxStructuredContent>> {
+        Ok(self.session.export_structured(options)?)
+    }
+
+    /// [`Presentation::export_structured`] rendered as Markdown from the same read.
+    pub fn export_markdown(
+        &self,
+        options: &PptxExportOptions,
+    ) -> Result<PptxExportResult<PptxMarkdownContent>> {
+        Ok(self.session.export_markdown(options)?)
+    }
+
+    /// Runs every check of [`Presentation::apply_edits`] without changing anything.
+    pub fn validate_edits(&self, request: &EditRequest) -> Result<ValidationOutcome> {
+        Ok(self.session.validate_edits(request)?)
+    }
+
+    /// Applies every step or none against `expect_version`, as one transaction.
+    pub fn apply_edits(&self, request: &EditRequest) -> Result<EditOutcome> {
+        Ok(self.session.apply_edits(request)?)
+    }
+
+    /// Slide ids in deck order, without serializing a full [`DeckSnapshot`].
+    pub fn slide_ids(&self) -> Result<Vec<String>> {
+        Ok(self.session.slide_ids()?)
     }
 
     pub fn story(&self, story_id: &str) -> Result<StorySnapshot> {
@@ -411,15 +489,15 @@ impl Presentation {
     }
 
     #[cfg(feature = "raster")]
-    pub(crate) fn glyphs(&self) -> &crate::render::GlyphRegistry {
-        &self.glyphs
+    pub(crate) fn caches(&self) -> &crate::render::RenderCaches {
+        &self.caches
     }
 
     pub fn render_slide(&self, slide_index: usize) -> Result<RenderedSlide> {
-        let snapshot = self.session.snapshot()?;
+        let scope = slide_scope(&self.session, slide_index)?;
         Ok(self
             .renderer
-            .layout_slide(self.session.package(), &snapshot, slide_index)?)
+            .layout_scoped_slide(self.session.package(), &scope)?)
     }
 
     /// Serializes the deck with all edits applied. Untouched slides keep their
@@ -472,4 +550,32 @@ impl Presentation {
     pub fn add_undo_barrier(&self) {
         self.session.add_undo_barrier();
     }
+}
+
+/// Exports PPTX bytes as structured content; anchors address the returned snapshot only.
+pub fn export_pptx_structured(
+    bytes: &[u8],
+    options: &PptxExportOptions,
+) -> Result<PptxStructuredContent> {
+    Ok(pptx_edit::structured::export_pptx_structured(
+        bytes, options,
+    )?)
+}
+
+/// [`export_pptx_structured`] rendered as Markdown.
+pub fn export_pptx_markdown(
+    bytes: &[u8],
+    options: &PptxExportOptions,
+) -> Result<PptxMarkdownContent> {
+    Ok(pptx_edit::structured::export_pptx_markdown(bytes, options)?)
+}
+
+/// Renders structured content as Markdown.
+pub fn render_pptx_markdown(
+    content: &PptxStructuredContent,
+    options: &pptx_edit::structured::PptxMarkdownOptions,
+) -> Result<PptxMarkdownContent> {
+    Ok(pptx_edit::structured::render_pptx_markdown(
+        content, options,
+    )?)
 }

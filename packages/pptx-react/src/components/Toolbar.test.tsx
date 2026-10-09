@@ -16,6 +16,10 @@ Object.defineProperty(elementPrototype, 'clientWidth', {
 const { cleanup, fireEvent, render } = await import('@testing-library/react');
 
 afterEach(cleanup);
+
+function isDisabled(element: HTMLElement): boolean {
+  return element.getAttribute('aria-disabled') === 'true' || element.hasAttribute('disabled');
+}
 // The globals are process-wide; leaving them installed poisons every later suite.
 afterAll(async () => {
   if (clientWidth) Object.defineProperty(elementPrototype, 'clientWidth', clientWidth);
@@ -53,7 +57,7 @@ describe('Toolbar alignment controls', () => {
     );
 
     expect(getByTestId('pptx-align-center').getAttribute('aria-pressed')).toBe('true');
-    expect(getByTestId('pptx-align-left').getAttribute('aria-pressed')).toBeNull();
+    expect(getByTestId('pptx-align-left').getAttribute('aria-pressed')).toBe('false');
   });
 
   it('disables the buttons without a text selection', () => {
@@ -67,6 +71,31 @@ describe('Toolbar alignment controls', () => {
     fireEvent.click(getByTestId('pptx-align-center'));
 
     expect(actions).toEqual([]);
+  });
+});
+
+describe('Toolbar insert image control', () => {
+  it('invokes onInsertImage when clicked', () => {
+    let clicks = 0;
+    const { getByTestId } = render(
+      <LocaleProvider>
+        <Toolbar onInsertImage={() => (clicks += 1)} />
+      </LocaleProvider>
+    );
+
+    fireEvent.click(getByTestId('pptx-insert-image'));
+
+    expect(clicks).toBe(1);
+  });
+
+  it('is disabled without an onInsertImage handler', () => {
+    const { getByTestId } = render(
+      <LocaleProvider>
+        <Toolbar />
+      </LocaleProvider>
+    );
+
+    expect(isDisabled(getByTestId('pptx-insert-image'))).toBe(true);
   });
 });
 
@@ -120,6 +149,76 @@ describe('Toolbar shape controls', () => {
     expect(actions).toContainEqual({ type: 'strokeColor', value: '#ea4335' });
     expect(actions).toContainEqual({ type: 'strokeWidth', value: 3 });
     expect(actions).toContainEqual({ type: 'adjust', name: 'adj', value: 0.4 });
+  });
+
+  it('lists the stepwise moves before the absolute ones', () => {
+    const { getByTestId, getByRole } = render(
+      <LocaleProvider>
+        <Toolbar shapeArrangeActive onShapeFormat={() => {}} />
+      </LocaleProvider>
+    );
+
+    fireEvent.click(getByTestId('pptx-shape-arrange'));
+
+    const labels = Array.from(
+      getByRole('menu').querySelectorAll('[role="menuitem"]'),
+      (item) => item.getAttribute('aria-label')
+    );
+    expect(labels).toEqual(['Bring forward', 'Send backward', 'Bring to front', 'Send to back']);
+  });
+
+  it('emits a z-order action for each arrange menu item', () => {
+    const actions: ShapeFormattingAction[] = [];
+    const { getByLabelText, getByTestId } = render(
+      <LocaleProvider>
+        <Toolbar shapeArrangeActive onShapeFormat={(action) => actions.push(action)} />
+      </LocaleProvider>
+    );
+
+    fireEvent.click(getByTestId('pptx-shape-arrange'));
+    fireEvent.click(getByLabelText('Bring forward'));
+    fireEvent.click(getByTestId('pptx-shape-arrange'));
+    fireEvent.click(getByLabelText('Send backward'));
+    fireEvent.click(getByTestId('pptx-shape-arrange'));
+    fireEvent.click(getByLabelText('Bring to front'));
+    fireEvent.click(getByTestId('pptx-shape-arrange'));
+    fireEvent.click(getByLabelText('Send to back'));
+
+    expect(actions).toEqual([
+      { type: 'zOrder', value: 'forward' },
+      { type: 'zOrder', value: 'backward' },
+      { type: 'zOrder', value: 'front' },
+      { type: 'zOrder', value: 'back' },
+    ]);
+  });
+
+  it('arranges a picture even though it has no fill or border controls', () => {
+    // Fill/border/adjust only apply to preset shapes (`shapeSelectionActive`),
+    // but z-order applies to any selected object, pictures included.
+    const actions: ShapeFormattingAction[] = [];
+    const { getByLabelText, getByTestId } = render(
+      <LocaleProvider>
+        <Toolbar shapeArrangeActive onShapeFormat={(action) => actions.push(action)} />
+      </LocaleProvider>
+    );
+
+    expect(isDisabled(getByTestId('pptx-shape-fill'))).toBe(true);
+    expect(isDisabled(getByTestId('pptx-shape-arrange'))).toBe(false);
+
+    fireEvent.click(getByTestId('pptx-shape-arrange'));
+    fireEvent.click(getByLabelText('Send to back'));
+
+    expect(actions).toEqual([{ type: 'zOrder', value: 'back' }]);
+  });
+
+  it('disables the arrange menu without a selected object', () => {
+    const { getByTestId } = render(
+      <LocaleProvider>
+        <Toolbar onShapeFormat={() => {}} />
+      </LocaleProvider>
+    );
+
+    expect(isDisabled(getByTestId('pptx-shape-arrange'))).toBe(true);
   });
 
   it('exposes the primary adjustment for non-round presets', () => {

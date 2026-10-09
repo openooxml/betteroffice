@@ -20,6 +20,8 @@ export interface TextStyleSnapshot {
   underline: string | null;
   spacingPt?: number | null;
   baselinePct?: number | null;
+  /** `a:rPr@cap`: how the run is cased when drawn, never in the stored text. */
+  caps?: 'none' | 'small' | 'all' | null;
 }
 
 export interface TextRunSnapshot {
@@ -44,6 +46,33 @@ export interface StorySnapshot {
   paragraphs: ParagraphSnapshot[];
 }
 
+export interface PptxTextSearchOptions {
+  /** Defaults to false. */
+  caseSensitive?: boolean;
+  /** Maximum matches; unlimited by default. */
+  limit?: number;
+}
+
+/**
+ * A caret position in a story that later edits, undo, redo and remote updates
+ * move along with the text. Plain data; `position` is opaque.
+ */
+export interface PptxCaretAnchor {
+  storyId: string;
+  position: string;
+}
+
+/** Zero-based slide index; story-local UTF-16 offsets. */
+export interface PptxTextMatch {
+  slideIndex: number;
+  slideId: string;
+  shapeId: string;
+  storyId: string;
+  start: number;
+  end: number;
+  text: string;
+}
+
 export type ShapeKind = 'shape' | 'picture' | 'graphicFrame' | 'group';
 
 export interface ColorValue {
@@ -52,19 +81,41 @@ export interface ColorValue {
   themeTint?: string;
   themeShade?: string;
   auto?: boolean;
+  luminanceModulation?: number;
+  luminanceOffset?: number;
+  saturationModulation?: number;
+  alpha?: number;
 }
 
+export interface ShapeGradient {
+  type: string;
+  angle?: number;
+  stops: Array<{ position: number; color: ColorValue }>;
+}
+
+/** An authored fill as the deck stores it. */
 export interface ShapeFill {
   type: string;
   color?: ColorValue;
+  gradient?: ShapeGradient;
 }
 
+export interface ShapeLineEnd {
+  type: string;
+  width: string | null;
+  length: string | null;
+}
+
+/** An authored outline as the deck stores it; `width` is EMU. */
 export interface ShapeOutline {
   width?: number;
   color?: ColorValue;
+  gradient?: ShapeGradient;
   style?: string;
   cap?: string;
   join?: string;
+  headEnd?: ShapeLineEnd;
+  tailEnd?: ShapeLineEnd;
 }
 
 export type BlipEffect =
@@ -86,6 +137,8 @@ export interface ShapeSnapshot {
   rotationDeg: number;
   flipH: boolean;
   flipV: boolean;
+  /** The geometry the shape draws at, present only while it has none of its own. */
+  inherited?: InheritedGeometry | null;
   /** Hides this shape and its descendants; omitted when false. */
   hidden?: boolean;
   geometry: string;
@@ -96,10 +149,23 @@ export interface ShapeSnapshot {
   outline: ShapeOutline | null;
   resolvedOutlineColor: string | null;
   mediaPartPath: string | null;
+  /** Image data added to this session, retained across saves. */
+  pendingMedia?: { contentType: string; base64: string } | null;
   blipEffects?: BlipEffect[];
   graphic: unknown | null;
   textStories: StorySnapshot[];
   children: ShapeSnapshot[];
+}
+
+/** The transform a placeholder takes from its layout or master. */
+export interface InheritedGeometry {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  rotationDeg: number;
+  flipH: boolean;
+  flipV: boolean;
 }
 
 export interface SlideSnapshot {
@@ -156,6 +222,13 @@ export interface ShapeReceipt {
   index: number;
 }
 
+export interface ShapeZOrderReceipt {
+  slideId: string;
+  shapeId: string;
+  fromIndex: number;
+  toIndex: number;
+}
+
 export interface ShapeRect {
   x: number;
   y: number;
@@ -191,6 +264,15 @@ export interface PresetShapeDraft {
   fill?: string | null;
 }
 
+export interface PictureDraft {
+  name: string;
+  rect: ShapeRect;
+  /** The image's MIME type, e.g. `image/png`. */
+  contentType: string;
+  /** The image bytes, base64-encoded. */
+  mediaBase64: string;
+}
+
 export interface ShapeStroke {
   color?: string;
   widthPt?: number;
@@ -220,6 +302,36 @@ export interface ShapeAdjustReceipt {
 export interface HistoryResult {
   applied: boolean;
   snapshot: DeckSnapshot;
+}
+
+/** Renderer stage latencies of one profiled slide layout, in ms. */
+export interface LayoutProfile {
+  scopeMs: number;
+  layoutMs: number;
+  serializeMs: number;
+}
+
+export interface ProfiledLayout {
+  layout: SlideDisplayList;
+  profile: LayoutProfile;
+}
+
+/** Boundary stage latencies of one profiled edit, in ms. */
+export interface EditProfile {
+  parseMs: number;
+  applyMs: number;
+  serializeMs: number;
+}
+
+export interface HistoryProfile {
+  undoMs: number;
+  snapshotMs: number;
+  serializeMs: number;
+}
+
+export interface Profiled<T, P = EditProfile> {
+  receipt: T;
+  profile: P;
 }
 
 export interface PptxFontFace {
@@ -265,12 +377,14 @@ export interface Stroke {
   width: number;
   dashed?: boolean;
   paint?: Paint;
+  join?: 'round' | 'bevel' | 'miter';
   headEnd?: StrokeEnd;
   tailEnd?: StrokeEnd;
 }
 
 /** An `a:outerShdw`: a blurred copy of the shape's own path, offset and tinted. */
 export interface Shadow {
+  paths?: Array<{ path: GeometryPathCommand[]; fill: boolean; stroke?: Stroke }>;
   color: string;
   blur?: number;
   dx?: number;
@@ -300,6 +414,8 @@ export interface ShapePrimitive extends PrimitiveBase {
   name: string;
   geometry: string;
   path: GeometryPathCommand[];
+  /** A rectangle substitutes for the authored outline or clip. */
+  geometryFallback?: boolean;
   clip?: GeometryPathCommand[];
   evenOdd?: boolean;
   adjustValues?: Record<string, number>;
@@ -312,6 +428,7 @@ export interface ShapePrimitive extends PrimitiveBase {
 export type ImageEffect =
   | { kind: 'biLevel'; threshold: number }
   | { kind: 'grayscale' }
+  | { kind: 'alpha'; amount: number }
   | { kind: 'luminance'; brightness: number; contrast: number }
   | { kind: 'duotone'; shadow: string; highlight: string }
   | { kind: 'colorChange'; from: string; to: string; useAlpha?: boolean };
@@ -330,8 +447,12 @@ export interface ImagePrimitive extends PrimitiveBase {
   effects?: ImageEffect[];
   /** Fraction of the source discarded per edge, from `a:srcRect`. */
   crop?: ImageCrop;
+  /** `a:tile`: repeat the picture at its own size, scaled by these fractions. */
+  tile?: { scaleX: number; scaleY: number };
   /** Outline the picture is masked to, when its `spPr` gives it one. */
   path?: GeometryPathCommand[];
+  /** A rectangle substitutes for the authored mask. */
+  geometryFallback?: boolean;
   stroke?: Stroke;
   shadow?: Shadow;
 }
@@ -399,6 +520,8 @@ export interface TextBoxPrimitive extends PrimitiveBase {
   }>;
   lines: PositionedTextLine[];
   overflow?: boolean;
+  /** `a:rPr/a:effectLst`: the shadow the box's glyphs are drawn with. */
+  textShadow?: Shadow;
 }
 
 export interface PlaceholderPrimitive extends PrimitiveBase {

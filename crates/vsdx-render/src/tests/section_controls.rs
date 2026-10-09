@@ -299,7 +299,7 @@ fn connector_sections_emit_one_route_with_the_used_channels() {
         ],
     )]);
     assert!(
-        matches!(list.primitives.as_slice(), [Primitive::Shape { id, z_order: 0, fill: Some(_), stroke: Some(_), path, .. }] if id == "page:1" && path == &connector_route(ScenePoint { x: 1.0, y: 1.0 }, ScenePoint { x: 4.0, y: 1.0 }, None))
+        matches!(list.primitives.as_slice(), [Primitive::Shape { id, z_order: 0, fill: Some(_), stroke: Some(_), path, .. }] if id == "page:1" && path == &connector_route(ScenePoint { x: 1.0, y: 1.0 }, ScenePoint { x: 4.0, y: 1.0 }, 0.0))
     );
 }
 

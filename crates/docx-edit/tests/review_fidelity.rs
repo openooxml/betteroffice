@@ -600,6 +600,65 @@ fn break_only_paragraphs_match_word_page_and_column_flow() {
     }
 }
 
+/// One line box and one space-after, whatever the paragraph anchors.
+#[test]
+fn anchored_shapes_charge_their_paragraph_one_line() {
+    const FLOAT: &str = r#"<w:r><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="2" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>2286000</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="914400" cy="457200"/><wp:wrapNone/><wp:docPr id="31" name="Floating shape"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="457200"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="CCCCCC"/></a:solidFill></wps:spPr><wps:txbx><w:txbxContent><w:p><w:r><w:t>S</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>"#;
+    let text = |value: &str| format!(r#"<w:r><w:t>{value}</w:t></w:r>"#);
+    let case = |content: String| {
+        format!(
+            r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="480" w:lineRule="exact"/></w:pPr>{content}</w:p>"#
+        )
+    };
+    let marker_y = |body: String| -> f64 {
+        let output = layout(&format!("{body}{}", paragraph("MARK")), 1);
+        let pages = output["layout"]["pages"].as_array().unwrap();
+        assert_eq!(pages.len(), 1);
+        pages[0]["fragments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .rfind(|fragment| fragment["kind"] == "paragraph")
+            .unwrap()["y"]
+            .as_f64()
+            .unwrap()
+    };
+    let control = marker_y(paragraph("AB"));
+    for content in [
+        format!("{}{FLOAT}{}", text("A"), text("B")),
+        format!("{}{FLOAT}{}{FLOAT}{}", text("A"), text("B"), text("C")),
+        FLOAT.to_owned(),
+        format!("{FLOAT}{FLOAT}"),
+    ] {
+        assert_eq!(marker_y(case(content.clone())), control, "{content}");
+    }
+}
+
+/// Word refuses a `wp:anchor` without its position children; the parser keeps
+/// it anchored by its wrap alone, and it must not split its paragraph either.
+#[test]
+fn anchor_without_position_children_does_not_split_its_paragraph() {
+    const STRIPPED: &str = r#"<w:r><w:drawing><wp:anchor><wp:extent cx="914400" cy="457200"/><wp:wrapNone/><wp:docPr id="32" name="Stripped anchor"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="457200"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="CCCCCC"/></a:solidFill></wps:spPr><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>"#;
+    let body = format!(
+        r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="480" w:lineRule="exact"/></w:pPr><w:r><w:t>A</w:t></w:r>{STRIPPED}<w:r><w:t>B</w:t></w:r></w:p>"#
+    );
+    let output = layout(&body, 1);
+    let fragments = output["layout"]["pages"][0]["fragments"]
+        .as_array()
+        .unwrap();
+    let paragraphs: Vec<_> = fragments
+        .iter()
+        .filter(|fragment| fragment["kind"] == "paragraph")
+        .collect();
+    assert_eq!(paragraphs.len(), 1);
+    assert_eq!(
+        paragraphs[0]["height"].as_f64().unwrap(),
+        layout(&paragraph("AB"), 1)["layout"]["pages"][0]["fragments"][0]["height"]
+            .as_f64()
+            .unwrap()
+    );
+}
+
 #[test]
 fn inside_shape_wrap_matches_actual_page_and_asymmetric_distances() {
     for (prefix, expected_page) in [
@@ -627,9 +686,7 @@ fn inside_shape_wrap_matches_actual_page_and_asymmetric_distances() {
             .unwrap();
         let text = fragments
             .iter()
-            .find(|fragment| {
-                fragment["kind"] == "paragraph" && fragment["pmStart"] == shape["pmStart"]
-            })
+            .rfind(|fragment| fragment["kind"] == "paragraph")
             .unwrap();
         let measure = output["measured"]
             .as_array()
@@ -1057,8 +1114,9 @@ fn hidden_drawings_and_fields_follow_run_visibility() {
     assert_eq!(hidden.as_array().unwrap().len(), 1);
     assert_eq!(hidden[0]["runs"][0]["text"], "After");
     assert_eq!(shown[0]["kind"], "shape");
-    assert_eq!(shown[1]["runs"][0]["kind"], "field");
-    assert_eq!(hidden[0], shown[2]);
+    assert!(shown[1]["runs"].as_array().unwrap().is_empty());
+    assert_eq!(shown[2]["runs"][0]["kind"], "field");
+    assert_eq!(hidden[0], shown[3]);
 }
 
 #[test]

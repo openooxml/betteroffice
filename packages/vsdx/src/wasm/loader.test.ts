@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import JSZip from 'jszip';
 import { VsdxDocument, VsdxRenderer } from './generated/vsdx_wasm.js';
-import { initWasm, openDiagram } from '../index';
+import { initWasm, openDiagram, shapeDataRows, shapeDataValueFormula, visibleShapeDataRows } from '../index';
 import type { FormulaShapeDraft } from '../types';
 
 const root = resolve(import.meta.dir, '../../../..');
@@ -11,15 +11,17 @@ let foundation: Uint8Array;
 let nestedGroups: Uint8Array;
 let groupedGlue: Uint8Array;
 let textAccounting: Uint8Array;
+let validation: Uint8Array;
 let demo: Uint8Array;
 
 beforeAll(async () => {
-  const [wasm, foundationBytes, nestedGroupsBytes, groupedGlueBytes, textAccountingBytes, demoBytes] = await Promise.all([
+  const [wasm, foundationBytes, nestedGroupsBytes, groupedGlueBytes, textAccountingBytes, validationBytes, demoBytes] = await Promise.all([
     readFile(resolve(import.meta.dir, 'generated/vsdx_wasm_bg.wasm')),
     readFile(resolve(root, 'crates/vsdx-parse/tests/fixtures/foundation.vsdx')),
     readFile(resolve(root, 'crates/vsdx-parse/tests/fixtures/nested-groups.vsdx')),
     readFile(resolve(root, 'crates/vsdx-parse/tests/fixtures/grouped-glue.vsdx')),
     readFile(resolve(root, 'crates/vsdx-parse/tests/fixtures/text-accounting.vsdx')),
+    readFile(resolve(root, 'crates/vsdx-parse/tests/fixtures/validation.vsdx')),
     readFile(resolve(root, 'apps/demo/public/betteroffice-demo.vsdx')),
   ]);
   await initWasm(wasm);
@@ -27,6 +29,7 @@ beforeAll(async () => {
   nestedGroups = nestedGroupsBytes;
   groupedGlue = groupedGlueBytes;
   textAccounting = textAccountingBytes;
+  validation = validationBytes;
   demo = demoBytes;
 });
 
@@ -38,9 +41,9 @@ describe('VSDX wasm boundary', () => {
     expect(() => diagram.snapshot()).toThrow('diagram handle is disposed');
   });
 
-  test('accepts only v4 display lists', () => {
+  test('accepts only v7 display lists', () => {
     const diagram = openDiagram(foundation, { clientId: 9002 });
-    expect(diagram.layoutPage(0).contractVersion).toBe(4);
+    expect(diagram.layoutPage(0).contractVersion).toBe(7);
 
     const layoutPageJson = VsdxRenderer.prototype.layoutPageJson;
     VsdxRenderer.prototype.layoutPageJson = () => JSON.stringify({ contractVersion: 2 });
@@ -50,6 +53,15 @@ describe('VSDX wasm boundary', () => {
       VsdxRenderer.prototype.layoutPageJson = layoutPageJson;
       diagram.dispose();
     }
+  });
+
+  test('reports the printable paper tile for page breaks', () => {
+    const diagram = openDiagram(foundation, { clientId: 9054 });
+    try {
+      const frame = diagram.layoutPage(0);
+      expect(frame.printWidth).toBe(frame.width);
+      expect(frame.printHeight).toBe(frame.height);
+    } finally { diagram.dispose(); }
   });
 
   test('frees the document when applying the initial update fails', () => {
@@ -93,11 +105,80 @@ describe('VSDX wasm boundary', () => {
     diagram.dispose();
   });
 
+  test('maps validation issues onto the session shape ids', () => {
+    const diagram = openDiagram(validation, { clientId: 9016 });
+    try {
+      const snapshot = diagram.snapshot();
+      const ids = new Map(snapshot.pages[0].shapes.map((shape) => [shape.sourceId, shape.id]));
+      const issues = diagram.validate();
+      expect(issues.map((issue) => issue.rule)).toEqual([
+        'connector-crossing',
+        'dangling-connector',
+        'dangling-connector',
+        'empty-shape-data',
+        'isolated-shape',
+        'overlapping-shapes',
+      ]);
+      const overlap = issues.find((issue) => issue.rule === 'overlapping-shapes')!;
+      expect(overlap.pageId).toBe(snapshot.pages[0].id);
+      expect(overlap.shapeId).toBe(ids.get(1)!);
+      expect(overlap.otherShapeId).toBe(ids.get(2)!);
+      expect(diagram.validatePage(0)).toEqual(issues);
+      expect(() => diagram.validatePage(9)).toThrow('page index is outside the document');
+    } finally {
+      diagram.dispose();
+    }
+  });
+
+  test('exports one vector SVG per diagram page', () => {
+    const diagram = openDiagram(textAccounting, { clientId: 9014 });
+    try {
+      const pages = diagram.exportSvg();
+      expect(pages).toHaveLength(diagram.snapshot().pages.length);
+      expect(pages[0].startsWith('<svg xmlns="http://www.w3.org/2000/svg"')).toBe(true);
+      expect(pages[0].endsWith('</svg>')).toBe(true);
+      expect(pages.join('')).toContain('<text');
+      expect(pages.join('')).not.toContain('@font-face');
+    } finally {
+      diagram.dispose();
+    }
+  });
+
+  test('exports a scaled PNG per diagram page', () => {
+    const diagram = openDiagram(textAccounting, { clientId: 9015 });
+    try {
+      const first = diagram.exportPng(0, 1);
+      expect([first[0], first[1], first[2], first[3]]).toEqual([0x89, 0x50, 0x4e, 0x47]);
+      const second = diagram.exportPng(0, 2);
+      expect(second.byteLength).toBeGreaterThan(first.byteLength);
+      expect(() => diagram.exportPng(-1, 1)).toThrow('non-negative integer');
+      expect(() => diagram.exportPng(0, 0)).toThrow('positive number');
+      expect(() => diagram.exportPng(99, 1)).toThrow();
+    } finally {
+      diagram.dispose();
+    }
+  });
+
   test('decodes wasm text diagnostic categories using wire casing', () => {
     const diagram = openDiagram(textAccounting, { clientId: 9011 });
     const diagnostics = diagram.layoutPage(0).primitives.flatMap(primitive => primitive.kind === 'textBox' ? primitive.paragraphs.flatMap(paragraph => paragraph.runs.flatMap(run => run.diagnostics ?? [])) : []);
     expect(diagnostics).toContainEqual(expect.objectContaining({ category: 'fidelity', code: 'unregistered-font' }));
     diagram.dispose();
+  });
+
+  test('exports a vector PDF with one page per diagram page', () => {
+    const diagram = openDiagram(textAccounting, { clientId: 9012 });
+    try {
+      const pdf = diagram.exportPdf();
+      const text = new TextDecoder('latin1').decode(pdf);
+      expect(text.startsWith('%PDF-1.4')).toBe(true);
+      expect(text.endsWith('%%EOF')).toBe(true);
+      expect(text.match(/\/Type \/Page /g)?.length).toBe(diagram.snapshot().pages.length);
+      expect(text).toContain('BT');
+      expect(text).toContain('Tj');
+    } finally {
+      diagram.dispose();
+    }
   });
 
   test('omits diagnostics from runs laid out with a registered face', async () => {
@@ -296,6 +377,51 @@ describe('VSDX wasm boundary', () => {
     const archive = await JSZip.loadAsync(deleted);
     const pageXml = await archive.file(editedPart)!.async('text');
     expect(pageXml).not.toMatch(/FromSheet="4"|ToSheet="4"/);
+    await expectUntouchedParts(foundation, saved, editedPart);
+  });
+
+  test('inserts a connected shape with its connector as one undoable receipt', async () => {
+    const pageId = 'page:1';
+    const editedPart = 'visio/pages/page1.xml';
+    const diagram = openDiagram(foundation, { clientId: 9030 });
+    const connectionCells = (rowIndex: number): FormulaShapeDraft['cells'] => ([
+      { locator: { section: 'Connection', rowIndex, rowType: 'Connection', cellName: 'X' }, formula: 'Width*0.5' },
+      { locator: { section: 'Connection', rowIndex, rowType: 'Connection', cellName: 'Y' }, formula: 'Height*1' },
+    ]);
+    const rect = (pinX: string): FormulaShapeDraft => ({ name: 'Rect', cells: [
+      { locator: { cellName: 'Width' }, formula: '1' },
+      { locator: { cellName: 'Height' }, formula: '1' },
+      { locator: { cellName: 'PinX' }, formula: pinX },
+      { locator: { cellName: 'PinY' }, formula: '1' },
+      { locator: { cellName: 'LocPinX' }, formula: '0' },
+      { locator: { cellName: 'LocPinY' }, formula: '0' },
+      ...connectionCells(0),
+    ] });
+    const from = diagram.addShape(pageId, rect('1'));
+    const receipt = diagram.addConnectedShape(pageId, rect('5'), { name: 'Connector', cells: [
+      { locator: { cellName: 'OneD' }, formula: '1' },
+      { locator: { cellName: 'BeginX' }, formula: '1' },
+      { locator: { cellName: 'BeginY' }, formula: '1' },
+      { locator: { cellName: 'EndX' }, formula: '5' },
+      { locator: { cellName: 'EndY' }, formula: '1' },
+    ] }, { shapeId: from.shapeId, toCell: 'Connections.X1' }, 'Connections.X1');
+    const live = diagram.snapshot();
+    expect(live.pages[0].shapes.find(shape => shape.id === receipt.shape.shapeId)).toBeDefined();
+    const connector = live.pages[0].shapes.find(shape => shape.id === receipt.connector.shapeId)!;
+    expect(connector).toEqual(expect.objectContaining({ name: 'Connector' }));
+    const laid = diagram.layoutPage(0);
+    expect(laid.primitives.find(item => item.id === `${live.pages[0].sourcePartPath}:${connector.sourceId}`)).toEqual(expect.objectContaining({ kind: 'shape' }));
+    const beforeUndo = live.pages[0].shapes.length;
+    diagram.undo();
+    expect(diagram.snapshot().pages[0].shapes.length).toBe(beforeUndo - 2);
+    diagram.redo();
+    expect(diagram.snapshot().pages[0].shapes.length).toBe(beforeUndo);
+    const saved = diagram.save();
+    diagram.dispose();
+
+    const reopened = openDiagram(saved, { clientId: 9031 });
+    expect(reopened.layoutPage(0)).toEqual(laid);
+    reopened.dispose();
     await expectUntouchedParts(foundation, saved, editedPart);
   });
 
@@ -587,6 +713,55 @@ describe('VSDX wasm boundary', () => {
     } finally { diagram.dispose(); peer.dispose(); }
   });
 
+  test('a batch move and delete is one undo entry, and a refused shape refuses the batch', () => {
+    const diagram = openDiagram(foundation, { clientId: 9017 });
+    try {
+      const shapeId = (formula?: string) => diagram.addShape('page:1', { cells: [
+        { locator: { cellName: 'PinX' }, formula: '1' },
+        { locator: { cellName: 'PinY' }, formula: '1' },
+        ...(formula ? [{ locator: { cellName: 'LockMoveX' }, formula }] : []),
+      ] }).shapeId;
+      const first = shapeId();
+      const second = shapeId();
+      const origins: string[] = [];
+      const stop = diagram.onUpdate((_update, origin) => { origins.push(origin); });
+      expect(diagram.moveShapes([
+        { pageId: 'page:1', shapeId: first, xFormula: '2', yFormula: '3' },
+        { pageId: 'page:1', shapeId: second, xFormula: '4', yFormula: '5' },
+      ])).toHaveLength(2);
+      expect(origins).toEqual(['local']);
+      stop();
+      const moved = diagram.snapshot();
+      expect(diagram.undo().applied).toBe(true);
+      for (const shape of diagram.snapshot().pages[0].shapes.filter((entry) => entry.id === first || entry.id === second)) {
+        expect(shape.cells.find((cell) => cell.name === 'PinX')?.formula).toBe('1');
+        expect(shape.cells.find((cell) => cell.name === 'PinY')?.formula).toBe('1');
+      }
+      expect(diagram.redo().applied).toBe(true);
+      expect(diagram.snapshot()).toEqual(moved);
+
+      const locked = shapeId('1');
+      const before = diagram.snapshot();
+      expect(() => diagram.moveShapes([
+        { pageId: 'page:1', shapeId: first, xFormula: '6', yFormula: '7' },
+        { pageId: 'page:1', shapeId: locked, xFormula: '8', yFormula: '9' },
+      ])).toThrow('LockMoveX protects this move gesture');
+      expect(diagram.snapshot()).toEqual(before);
+      expect(() => diagram.deleteShapes([
+        { pageId: 'page:1', shapeId: first },
+        { pageId: 'page:1', shapeId: 'page:1:shape:missing' },
+      ])).toThrow('page:1:shape:missing');
+      expect(diagram.snapshot()).toEqual(before);
+      expect(diagram.deleteShapes([
+        { pageId: 'page:1', shapeId: first },
+        { pageId: 'page:1', shapeId: second },
+      ])).toHaveLength(2);
+      expect(diagram.snapshot().pages[0].shapes.some((shape) => shape.id === first || shape.id === second)).toBe(false);
+      expect(diagram.undo().applied).toBe(true);
+      expect(diagram.snapshot()).toEqual(before);
+    } finally { diagram.dispose(); }
+  });
+
   test('aborts a guarded move batch without changing the save bytes', () => {
     const pageId = 'page:1';
     const shapeId = 'page:1:shape:1';
@@ -609,12 +784,16 @@ describe('VSDX wasm boundary', () => {
     diagram.dispose();
   });
 
-  test('keeps shape drafts formula-only at the type boundary', () => {
-    const draft: FormulaShapeDraft = { cells: [] };
-    expect(draft.cells).toEqual([]);
-    // @ts-expect-error Shape cells accept formulas, never cached values.
-    const invalid: FormulaShapeDraft = { cells: [{ locator: { cellName: 'Width' }, formula: '1', value: '1' }] };
-    expect(invalid).toBeDefined();
+  test('keeps plain shape drafts formula-only while paste carries cached values', () => {
+    const diagram = openDiagram(foundation, { clientId: 9011 });
+    try {
+      expect(() => diagram.addShape('page:1', { cells: [{ locator: { cellName: 'Width' }, value: '1' }] })).toThrow('must not contain value');
+      const receipt = diagram.addShapeWithText('page:1', { cells: [{ locator: { cellName: 'Width' }, value: '1' }] }, '');
+      const added = diagram.snapshot().pages[0].shapes.find(shape => shape.id === receipt.shapeId);
+      expect(added?.cells.find(cell => cell.name === 'Width')?.value).toBe('1');
+    } finally {
+      diagram.dispose();
+    }
   });
 
   test('adds a shape from the declared cell locator shape', () => {
@@ -633,6 +812,79 @@ describe('VSDX wasm boundary', () => {
     expect(x?.formula).toBe('2');
     expect(x?.locator).toEqual(expect.objectContaining({ section: 'Geometry', row: { index: 0 }, cellName: 'X' }));
     diagram.dispose();
+  });
+
+  test('commits a shape-data edit through the mutation policy', async () => {
+    const section = `<Section N='Property'>`
+      + `<Row N='Device'><Cell N='Label' V='Device name'/><Cell N='Type' V='0'/><Cell N='SortKey' V='B'/><Cell N='Value' V='Old' F='&quot;Old&quot;'/></Row>`
+      + `<Row N='Serial'><Cell N='Label' V='Serial'/><Cell N='Type' V='0'/><Cell N='SortKey' V='A'/><Cell N='Value' V='ABC' F='GUARD(&quot;ABC&quot;)'/></Row>`
+      + `<Row N='Hidden'><Cell N='Label' V='Hidden'/><Cell N='Invisible' V='1'/><Cell N='Value' V='H' F='&quot;H&quot;'/></Row>`
+      + `</Section>`;
+    const archive = await JSZip.loadAsync(foundation);
+    const contents = await archive.file('visio/pages/page1.xml')!.async('string');
+    archive.file('visio/pages/page1.xml', contents.replace(`NameU='Process'`, `NameU='Process'>${section}`));
+    const diagram = openDiagram(await archive.generateAsync({ type: 'uint8array' }), { clientId: 9054 });
+    try {
+      const page = diagram.snapshot().pages[0];
+      const shape = page.shapes[0];
+      expect(shapeDataRows(shape).map(row => row.rowName)).toEqual(['Hidden', 'Serial', 'Device']);
+      expect(visibleShapeDataRows(shape).map(row => row.rowName)).toEqual(['Serial', 'Device']);
+      const locate = (rowName: string) => ({ cellName: 'Value', section: 'Property', rowName });
+      const receipt = diagram.setCellFormula(page.id, shape.id, locate('Device'), shapeDataValueFormula('string', 'New'));
+      expect(receipt).toEqual({ pageId: page.id, shapeId: shape.id, cellName: 'Value', before: '"Old"', after: '"New"' });
+      expect(shapeDataRows(diagram.snapshot().pages[0].shapes[0]).find(row => row.rowName === 'Device')!.displayValue).toBe('New');
+      expect(() => diagram.setCellFormula(page.id, shape.id, locate('Serial'), '"XYZ"')).toThrow();
+      expect(shapeDataRows(diagram.snapshot().pages[0].shapes[0]).find(row => row.rowName === 'Serial')!.formula).toBe('GUARD("ABC")');
+      const saved = await JSZip.loadAsync(diagram.save()).then(zip => zip.file('visio/pages/page1.xml')!.async('string'));
+      expect(saved).toContain(`<Row N='Device'><Cell N='Label' V='Device name'/><Cell N='Type' V='0'/><Cell N='SortKey' V='B'/><Cell N='Value' F='&quot;New&quot;'/></Row>`);
+      expect(saved).toContain(`<Cell N='Value' V='ABC' F='GUARD(&quot;ABC&quot;)'/>`);
+    } finally { diagram.dispose(); }
+  });
+
+  test('lists page layers and hides shapes on invisible layers', async () => {
+    const archive = await JSZip.loadAsync(foundation);
+    const pages = await archive.file('visio/pages/pages.xml')!.async('string');
+    archive.file('visio/pages/pages.xml', pages.replace('</PageSheet>',
+      `<Section N='Layer'><Row IX='0'><Cell N='Name' V='Trussing'/><Cell N='Color' V='255'/><Cell N='Status' V='0'/><Cell N='Visible' V='1'/><Cell N='Print' V='1'/><Cell N='Active' V='0'/><Cell N='Lock' V='0'/></Row><Row IX='1'><Cell N='Name' V='Lighting'/><Cell N='Color' V='255'/><Cell N='Status' V='0'/><Cell N='Visible' V='0'/><Cell N='Print' V='1'/><Cell N='Active' V='0'/><Cell N='Lock' V='0'/></Row></Section></PageSheet>`));
+    const contents = await archive.file('visio/pages/page1.xml')!.async('string');
+    archive.file('visio/pages/page1.xml', contents.replace(`NameU='Process'`, `NameU='Process'><Cell N='LayerMember' V='1'/>`));
+    const diagram = openDiagram(await archive.generateAsync({ type: 'uint8array' }), { clientId: 9052 });
+    try {
+      expect(diagram.pageLayers(0)).toEqual([
+        { index: 0, name: 'Trussing', visible: true, print: true, lock: false, active: false, color: '255', status: '0' },
+        { index: 1, name: 'Lighting', visible: false, print: true, lock: false, active: false, color: '255', status: '0' },
+      ]);
+      const part = diagram.snapshot().pages[0].sourcePartPath;
+      expect(diagram.layoutPage(0).primitives.some(primitive => primitive.id === `${part}:1`)).toBe(false);
+      diagram.setLayerVisible(part, 1, true);
+      expect(diagram.pageLayers(0)[1]).toEqual(expect.objectContaining({ index: 1, visible: true }));
+      expect(diagram.layoutPage(0).primitives.some(primitive => primitive.id === `${part}:1`)).toBe(true);
+      diagram.setLayerVisible(part, 1, false);
+      expect(diagram.layoutPage(0).primitives.some(primitive => primitive.id === `${part}:1`)).toBe(false);
+      diagram.clearLayerVisibility();
+      expect(diagram.pageLayers(0)[1]).toEqual(expect.objectContaining({ index: 1, visible: false }));
+    } finally { diagram.dispose(); }
+  });
+
+  test('layer visibility stays out of the saved package', async () => {
+    const archive = await JSZip.loadAsync(foundation);
+    const pages = await archive.file('visio/pages/pages.xml')!.async('string');
+    archive.file('visio/pages/pages.xml', pages.replace('</PageSheet>',
+      `<Section N='Layer'><Row IX='0'><Cell N='Name' V='Trussing'/><Cell N='Visible' V='1'/></Row><Row IX='1'><Cell N='Name' V='Lighting'/><Cell N='Visible' V='0'/></Row></Section></PageSheet>`));
+    const contents = await archive.file('visio/pages/page1.xml')!.async('string');
+    archive.file('visio/pages/page1.xml', contents.replace(`NameU='Process'`, `NameU='Process'><Cell N='LayerMember' V='1'/>`));
+    const bytes = await archive.generateAsync({ type: 'uint8array' });
+    const diagram = openDiagram(bytes, { clientId: 9053 });
+    try {
+      const part = diagram.snapshot().pages[0].sourcePartPath;
+      const before = diagram.save();
+      diagram.setLayerVisible(part, 1, true);
+      diagram.layoutPage(0);
+      expect(diagram.save()).toEqual(before);
+      expect(diagram.canUndo()).toBe(false);
+      const saved = await JSZip.loadAsync(diagram.save());
+      expect(await saved.file('visio/pages/pages.xml')!.async('string')).toBe(await JSZip.loadAsync(bytes).then(zip => zip.file('visio/pages/pages.xml')!.async('string')));
+    } finally { diagram.dispose(); }
   });
 
   test('does not reenter update listeners before the outer call unwinds', () => {

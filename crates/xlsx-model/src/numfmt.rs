@@ -49,7 +49,7 @@ pub fn builtin_format_code(id: u16) -> Option<&'static str> {
         11 => "0.00E+00",
         12 => "# ?/?",
         13 => "# ??/??",
-        14 => "m/d/yyyy",
+        14 => "m/d/yy",
         15 => "d-mmm-yy",
         16 => "d-mmm",
         17 => "mmm-yy",
@@ -57,7 +57,7 @@ pub fn builtin_format_code(id: u16) -> Option<&'static str> {
         19 => "h:mm:ss AM/PM",
         20 => "h:mm",
         21 => "h:mm:ss",
-        22 => "m/d/yyyy h:mm",
+        22 => "m/d/yy h:mm",
         37 => "#,##0 ;(#,##0)",
         38 => "#,##0 ;[Red](#,##0)",
         39 => "#,##0.00;(#,##0.00)",
@@ -580,12 +580,31 @@ fn format_number_value(n: f64, code: &str, ds: DateSystem) -> FormattedValue {
     FormattedValue { text, color }
 }
 
+/// whether formatting `value` with `code` degrades to a general render
+/// because the code asks for something the interpreter stubs.
+pub fn format_is_approximate(value: &CellValue, code: &str) -> bool {
+    let CellValue::Number { value } = value else {
+        return false;
+    };
+    let trimmed = code.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("general") {
+        return false;
+    }
+    let parsed = parsed_sections(code);
+    let section = &parsed[select(&parsed, *value).0];
+    !section.has_date() && degrades_to_general(section)
+}
+
+/// fractions are stubbed: they degrade to a general render.
+fn degrades_to_general(sec: &Section) -> bool {
+    !sec.has(|t| matches!(t, Tok::General)) && sec.has(|t| matches!(t, Tok::Slash))
+}
+
 fn render_number_section(sec: &Section, mag: f64) -> String {
     if sec.has(|t| matches!(t, Tok::General)) {
         return render_general_section(sec, mag);
     }
-    // fractions are stubbed: degrade to a general render.
-    if sec.has(|t| matches!(t, Tok::Slash)) {
+    if degrades_to_general(sec) {
         return format_general(mag);
     }
     if sec.has(|t| matches!(t, Tok::Exp(_))) {

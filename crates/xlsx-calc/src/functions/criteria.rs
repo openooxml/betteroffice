@@ -3,7 +3,9 @@
 
 use xlsx_model::{CellValue, ErrorValue};
 
-use crate::eval::{Area, EvalContext, as_area, evaluate, parse_num};
+use crate::eval::{
+    Area, EvalContext, as_area, cmp_text, evaluate, parse_num, used_height, used_width,
+};
 use crate::parser::Expr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +42,14 @@ impl Criterion {
             },
             CellValue::Bool { value } => Criterion::parse(if *value { "TRUE" } else { "FALSE" }),
             CellValue::Text { value } => Criterion::parse(value),
+            // a criterion cell that is blank reads as the number 0, unlike a
+            // `""` written into the formula, which asks for the blanks
+            CellValue::Empty => Criterion {
+                op: Op::Eq,
+                number: Some(0.0),
+                text: String::new(),
+                wildcard: false,
+            },
             _ => Criterion::parse(""),
         }
     }
@@ -75,7 +85,9 @@ impl Criterion {
         }
         let cell_text = cell_text_lower(v);
         if self.wildcard {
-            wildcard_match(&self.text, &cell_text)
+            // a wildcard describes text, so `*` counts text cells rather than
+            // every cell in the range
+            matches!(v, CellValue::Text { .. }) && wildcard_match(&self.text, &cell_text)
         } else {
             cell_text == self.text
         }
@@ -89,9 +101,13 @@ impl Criterion {
                 None => return false,
             }
         } else {
-            // numeric cells never satisfy a text inequality in excel
+            // numeric cells never satisfy a text inequality in excel; a cell
+            // holding the empty string is the smallest text there is, while a
+            // blank one is not text at all
             match v {
-                CellValue::Text { value } => Some(value.to_lowercase().cmp(&self.text)),
+                // the same collation the comparison operators and SORT use,
+                // so `COUNTIF(r,"<x")` agrees with `=cell<"x"`
+                CellValue::Text { value } => Some(cmp_text(value, &self.text)),
                 CellValue::Empty if self.text.is_empty() => Some(Ordering::Equal),
                 _ => return false,
             }
@@ -206,26 +222,133 @@ pub(crate) fn criterion_from_arg(arg: &Expr, ctx: &EvalContext<'_>) -> Criterion
     Criterion::from_value(&evaluate(arg, ctx))
 }
 
-/// parse a `range, criteria, ...` tail into aligned (area, criterion) pairs;
-/// `None` on an odd count, a non-reference range, or a shape mismatch.
+/// the criteria of a `...IFS` call, cut to the extent the data reaches.
+pub(crate) struct Criteria {
+    pub pairs: Vec<(Area, Criterion)>,
+    /// the range the call aggregates, cut and aligned with the criteria.
+    pub values: Option<Area>,
+    /// cells each criteria range holds past the cut, all of them blank.
+    pub unread: u64,
+}
+
+impl Criteria {
+    /// how many of the unread blanks satisfy every criterion: all or none.
+    pub(crate) fn unread_matches(&self) -> u64 {
+        if self
+            .pairs
+            .iter()
+            .all(|(_, criterion)| criterion.matches(&CellValue::Empty))
+        {
+            self.unread
+        } else {
+            0
+        }
+    }
+}
+
+/// parse a `range, criteria, ...` tail into aligned (area, criterion) pairs,
+/// with `values` aligned to them when given; `None` on an odd count, a
+/// non-reference range, or a shape mismatch.
 pub(crate) fn collect_pairs(
     specs: &[Expr],
+    values: Option<&Expr>,
     ctx: &EvalContext<'_>,
-) -> Option<Vec<(Area, Criterion)>> {
+) -> Option<Criteria> {
     if specs.is_empty() || !specs.len().is_multiple_of(2) {
         return None;
     }
-    let mut pairs = Vec::new();
-    let mut dims: Option<(usize, usize)> = None;
+    let mut areas = Vec::new();
     for chunk in specs.chunks(2) {
-        let area = as_area(&chunk[0], ctx)?;
-        match dims {
-            Some(d) if d != (area.rows, area.cols) => return None,
-            _ => dims = Some((area.rows, area.cols)),
-        }
-        pairs.push((area, criterion_from_arg(&chunk[1], ctx)));
+        areas.push(as_area(&chunk[0], ctx)?);
     }
-    Some(pairs)
+    let first = areas[0];
+    if areas
+        .iter()
+        .any(|area| (area.rows, area.cols) != (first.rows, first.cols))
+    {
+        return None;
+    }
+    let count = areas.len();
+    if let Some(values) = values {
+        areas.push(aligned(as_area(values, ctx)?, first.rows, first.cols)?);
+    }
+    bound_together(&mut areas, ctx);
+    let values = values.map(|_| areas[count]);
+    areas.truncate(count);
+    let unread = first.unread(areas[0].cell_count().unwrap_or(0));
+    let pairs = areas
+        .into_iter()
+        .zip(specs.chunks(2))
+        .map(|(area, chunk)| (area, criterion_from_arg(&chunk[1], ctx)))
+        .collect();
+    Some(Criteria {
+        pairs,
+        values,
+        unread,
+    })
+}
+
+/// the range and value range of a `SUMIF`/`AVERAGEIF`, cut together. the value
+/// range keeps its top-left and takes the range's shape, as excel resizes it.
+pub(crate) fn single_pair(range: Area, values: Area, ctx: &EvalContext<'_>) -> (Area, Area) {
+    let values = Area {
+        rows: range.rows,
+        cols: range.cols,
+        ..values
+    };
+    let mut areas = [range, values];
+    bound_together(&mut areas, ctx);
+    (areas[0], areas[1])
+}
+
+/// cut whole-column and whole-row criteria to the data they cover, giving
+/// every one of them the same extent so aligned ranges stay aligned.
+pub(crate) fn bound_together(areas: &mut [Area], ctx: &EvalContext<'_>) {
+    let full_height = |area: &Area| area.rows >= xlsx_model::MAX_ROWS as usize;
+    let full_width = |area: &Area| area.cols >= xlsx_model::MAX_COLS as usize;
+    let rows = areas
+        .iter()
+        .filter(|area| full_height(area))
+        .map(|area| used_height(area, ctx))
+        .max();
+    let cols = areas
+        .iter()
+        .filter(|area| full_width(area))
+        .map(|area| used_width(area, ctx))
+        .max();
+    for area in areas {
+        if let Some(rows) = rows
+            && full_height(area)
+        {
+            area.rows = rows;
+        }
+        if let Some(cols) = cols
+            && full_width(area)
+        {
+            area.cols = cols;
+        }
+    }
+}
+
+/// `bound_together` over the arguments that are references.
+pub(crate) fn cut_references(areas: &mut [Option<Area>], ctx: &EvalContext<'_>) {
+    let mut cut: Vec<Area> = areas.iter().flatten().copied().collect();
+    bound_together(&mut cut, ctx);
+    for (area, cut) in areas.iter_mut().flatten().zip(cut) {
+        *area = cut;
+    }
+}
+
+/// the values a `...IF`/`...IFS` aggregates, cut to the criteria rectangle: a
+/// whole-column range simply takes the criteria shape.
+pub(crate) fn aligned(mut area: Area, rows: usize, cols: usize) -> Option<Area> {
+    if area.rows >= xlsx_model::MAX_ROWS as usize {
+        area.rows = rows;
+    }
+    if area.cols >= xlsx_model::MAX_COLS as usize {
+        area.cols = cols;
+    }
+    (area.rows == rows && area.cols == cols).then_some(area)
 }
 
 /// flat row-major indices where every criterion matches its aligned cell.
@@ -245,7 +368,7 @@ pub(crate) fn matching_indices(
         let col = usize::try_from(index % cols).map_err(|_| ErrorValue::Num)?;
         let mut matches = true;
         for (area, criterion) in pairs {
-            if !criterion.matches(&area.get(ctx, row, col)?) {
+            if !criterion.matches(area.get_ref(ctx, row, col)?.as_ref()) {
                 matches = false;
                 break;
             }
@@ -259,6 +382,8 @@ pub(crate) fn matching_indices(
 
 #[cfg(test)]
 mod tests {
+    use std::cmp::Ordering;
+
     use super::*;
 
     fn num(v: f64) -> CellValue {
@@ -300,6 +425,80 @@ mod tests {
     fn blank_criteria() {
         assert!(Criterion::parse("").matches(&CellValue::Empty));
         assert!(!Criterion::parse("").matches(&txt("x")));
+    }
+
+    /// a wildcard describes text: `*` counts the text cells in a range, not
+    /// its numbers or its blanks.
+    #[test]
+    fn a_wildcard_criterion_matches_only_text() {
+        let any = Criterion::parse("*");
+        assert!(any.matches(&txt("TSLA")));
+        assert!(any.matches(&txt("")));
+        assert!(!any.matches(&num(5.0)));
+        assert!(!any.matches(&CellValue::Empty));
+        let prefix = Criterion::parse("TS*");
+        assert!(prefix.matches(&txt("TSLA")));
+        assert!(!prefix.matches(&txt("AAPL")));
+        assert!(!prefix.matches(&num(5.0)));
+    }
+
+    /// a criterion taken from a blank cell asks for zero, where a `""`
+    /// written into the formula asks for the blanks.
+    #[test]
+    fn a_blank_criterion_cell_asks_for_zero() {
+        let blank = Criterion::from_value(&CellValue::Empty);
+        assert!(blank.matches(&num(0.0)));
+        assert!(!blank.matches(&CellValue::Empty));
+        assert!(!blank.matches(&txt("A")));
+        let written = Criterion::parse("");
+        assert!(written.matches(&CellValue::Empty));
+        assert!(!written.matches(&num(0.0)));
+    }
+
+    /// A cell holding "" — what `=""` caches — sorts below every other text
+    /// and takes part in a text inequality; a blank cell takes part in none.
+    #[test]
+    fn the_empty_string_is_the_smallest_text() {
+        let less = Criterion::parse("<m");
+        assert!(less.matches(&txt("abc")));
+        assert!(less.matches(&txt("")));
+        assert!(!less.matches(&CellValue::Empty));
+        assert!(!less.matches(&num(1.0)));
+
+        let c = Criterion::parse("<14/0430");
+        assert!(c.matches(&txt("")));
+        assert!(c.matches(&txt("13/0450")));
+        assert!(!c.matches(&txt("14/0431")));
+        assert!(!c.matches(&CellValue::Empty));
+
+        assert!(!Criterion::parse(">14/0430").matches(&txt("")));
+        assert!(Criterion::parse(">=").matches(&txt("")));
+        assert!(Criterion::parse(">=").matches(&CellValue::Empty));
+    }
+
+    /// the criteria comparison is the collation the operators and SORT use,
+    /// so `COUNTIF(r,"<x")` cannot disagree with `=r<"x"` about the same pair.
+    #[test]
+    fn ordering_criteria_use_the_same_collation_as_comparison() {
+        use crate::eval::cmp_values;
+        for (criterion, cell) in [
+            ("<[person_10]", "[Person_1]"),
+            ("<a1", "a_"),
+            (">a_", "a1"),
+            ("<m", "abc"),
+        ] {
+            let rest = criterion.trim_start_matches(['<', '>', '=']);
+            let ordered = cmp_values(&txt(cell), &txt(rest));
+            let wanted = match &criterion[..1] {
+                "<" => ordered == Ordering::Less,
+                _ => ordered == Ordering::Greater,
+            };
+            assert!(wanted, "the operator itself disagrees for {criterion}");
+            assert!(
+                Criterion::parse(criterion).matches(&txt(cell)),
+                "{criterion} against {cell:?}"
+            );
+        }
     }
 
     #[test]

@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'bun:test';
-import { presentationImageBlob } from './image';
+import { readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import { initWasm, openPresentation } from '../wasm/loader';
+import { decodePresentationImage, needsElementDecode, presentationImageBlob } from './image';
 
 function record(command: number, payload: Uint8Array): Uint8Array<ArrayBuffer> {
   const bytes = new Uint8Array(6 + payload.length);
@@ -64,10 +67,206 @@ function bitmapMetafile(bitmap = bitmapRecord(), extras: Uint8Array[] = [], plac
   ], placeable);
 }
 
+function dib(width: number, height: number): Uint8Array<ArrayBuffer> {
+  const stride = Math.ceil((width * 24) / 32) * 4;
+  const bytes = new Uint8Array(40 + stride * height);
+  const view = new DataView(bytes.buffer);
+  view.setUint32(0, 40, true);
+  view.setInt32(4, width, true);
+  view.setInt32(8, height, true);
+  view.setUint16(12, 1, true);
+  view.setUint16(14, 24, true);
+  bytes.fill(0x7f, 40);
+  return bytes;
+}
+
+function stretchDibits(pixels: Uint8Array, width: number, height: number): Uint8Array<ArrayBuffer> {
+  const bytes = new Uint8Array(80 + pixels.length);
+  const view = new DataView(bytes.buffer);
+  view.setUint32(0, 81, true);
+  view.setUint32(4, bytes.length, true);
+  view.setInt32(40, width, true);
+  view.setInt32(44, height, true);
+  view.setUint32(48, 80, true);
+  view.setUint32(52, 40, true);
+  view.setUint32(56, 120, true);
+  view.setUint32(60, pixels.length - 40, true);
+  view.setUint32(68, 0x00cc0020, true);
+  view.setInt32(72, width, true);
+  view.setInt32(76, height, true);
+  bytes.set(pixels, 80);
+  return bytes;
+}
+
+function enhancedMetafile(records: Uint8Array[], width = 4, height = 3): Uint8Array<ArrayBuffer> {
+  const eof = new Uint8Array(20);
+  const end = new DataView(eof.buffer);
+  end.setUint32(0, 14, true);
+  end.setUint32(4, 20, true);
+  const body = [...records, eof];
+  const bytes = new Uint8Array(88 + body.reduce((sum, item) => sum + item.length, 0));
+  const view = new DataView(bytes.buffer);
+  view.setUint32(0, 1, true);
+  view.setUint32(4, 88, true);
+  view.setInt32(16, width - 1, true);
+  view.setInt32(20, height - 1, true);
+  view.setUint32(40, 0x464d4520, true);
+  let offset = 88;
+  for (const item of body) {
+    bytes.set(item, offset);
+    offset += item.length;
+  }
+  return bytes;
+}
+
 describe('presentation image blobs', () => {
+  test('rejects oversized TIFF media before transferring it to Wasm', () => {
+    const bytes = new Uint8Array(32 * 1024 * 1024 + 1);
+    bytes.set([0x49, 0x49, 0x2a, 0]);
+    expect(() => presentationImageBlob(bytes)).toThrow('TIFF image exceeds the browser transfer budget');
+  });
+
+  test('transcodes TIFF media from a presentation to PNG', async () => {
+    const [wasm, pptx] = await Promise.all([
+      readFile(resolve(import.meta.dir, '../wasm/generated/pptx_wasm_bg.wasm')),
+      readFile(resolve(import.meta.dir, 'fixtures/tiff-image.pptx')),
+    ]);
+    await initWasm(wasm);
+    const presentation = openPresentation(pptx);
+    try {
+      const blob = presentationImageBlob(presentation.mediaBytes('ppt/media/image1.tiff'));
+      expect(blob.type).toBe('image/png');
+      expect(new Uint8Array(await blob.arrayBuffer()).subarray(0, 8)).toEqual(
+        new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])
+      );
+    } finally {
+      presentation.dispose();
+    }
+  });
+
   test('preserves ordinary media bytes', async () => {
     const bytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
     expect(new Uint8Array(await presentationImageBlob(bytes).arrayBuffer())).toEqual(bytes);
+  });
+
+  test('types SVG media so a browser will decode it at all', async () => {
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96"><rect width="96" height="96"/></svg>';
+    const blob = presentationImageBlob(new TextEncoder().encode(svg));
+    expect(blob.type).toBe('image/svg+xml');
+    expect(needsElementDecode(blob)).toBe(true);
+    expect(await blob.text()).toBe(svg);
+  });
+
+  test('gives a viewBox-only root the intrinsic size Chrome needs', async () => {
+    const blob = presentationImageBlob(
+      new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 16.5"><path d="M 0 0"/></svg>')
+    );
+    expect(await blob.text()).toBe(
+      '<svg width="24" height="16.5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 16.5"><path d="M 0 0"/></svg>'
+    );
+  });
+
+  test('leaves a declared size, a degenerate viewBox and a leading declaration alone', async () => {
+    for (const svg of [
+      '<?xml version="1.0"?>\n<svg xmlns="http://www.w3.org/2000/svg" width="8" viewBox="0 0 24 16"/>',
+      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 0 16"/>',
+      '<svg xmlns="http://www.w3.org/2000/svg"/>',
+    ]) {
+      const blob = presentationImageBlob(new TextEncoder().encode(svg));
+      expect(blob.type).toBe('image/svg+xml');
+      expect(await blob.text()).toBe(svg);
+    }
+  });
+
+  test('finds the root past a prologue that mentions a tag of its own', async () => {
+    const prologue = [
+      '<!-- authored by <svg viewBox="0 0 1 1" width="1"> exporter -->',
+      '<?xml version="1.0" encoding="utf-8"?>',
+      '<?xml-stylesheet href="a.css" type="text/css"?>',
+      '<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "svg11.dtd" [<!ENTITY a "<b>">]>',
+      '<!-- a second <svg width="2"/> note -->',
+    ].join('\n');
+    const svg = `${prologue}\n<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 16"/>`;
+    const blob = presentationImageBlob(new TextEncoder().encode(svg));
+    expect(await blob.text()).toBe(
+      `${prologue}\n<svg width="24" height="16" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 16"/>`
+    );
+  });
+
+  test('reads past comments and instructions inside a DOCTYPE internal subset', async () => {
+    for (const prologue of [
+      '<!DOCTYPE svg [ <!-- ]> --> ]>',
+      "<!DOCTYPE svg [ <!-- it's ]> not the end --> <!ENTITY a \"]>\"> ]>",
+      '<!DOCTYPE svg [ <?note ]> ?> ]>',
+    ]) {
+      const svg = `${prologue}\n<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 16"/>`;
+      const blob = presentationImageBlob(new TextEncoder().encode(svg));
+      expect(await blob.text()).toBe(
+        `${prologue}\n<svg width="24" height="16" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 16"/>`
+      );
+    }
+    const unterminated = '<!DOCTYPE svg [ <!-- ]> <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 16"/>';
+    expect(await presentationImageBlob(new TextEncoder().encode(unterminated)).text()).toBe(unterminated);
+  });
+
+  test('leaves a document alone when no root element settles what it is', async () => {
+    for (const svg of [
+      '<!-- unterminated <svg viewBox="0 0 24 16"/>',
+      '<!-- only a comment mentioning <svg viewBox="0 0 24 16"/> -->',
+      '<html><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 16"/></html>',
+      '<svg:svg xmlns:svg="http://www.w3.org/2000/svg" viewBox="0 0 24 16"/>',
+    ]) {
+      expect(await presentationImageBlob(new TextEncoder().encode(svg)).text()).toBe(svg);
+    }
+  });
+
+  test('does not claim raster media, prose or an oversized document as SVG', async () => {
+    const oversized = new TextEncoder().encode(
+      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 4"><desc>${' '.repeat(4 * 1024 * 1024)}</desc></svg>`
+    );
+    for (const bytes of [
+      new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]),
+      new TextEncoder().encode('a note that mentions <svg> without being one'),
+      oversized,
+    ]) {
+      expect(presentationImageBlob(bytes).type).toBe('');
+    }
+  });
+
+  test('decodes SVG through the element path and falls through when that fails', async () => {
+    const original = { bitmap: globalThis.createImageBitmap, image: globalThis.Image };
+    const bitmaps: Blob[] = [];
+    let fail = false;
+    globalThis.createImageBitmap = ((blob: Blob) => {
+      bitmaps.push(blob);
+      return Promise.resolve({} as ImageBitmap);
+    }) as typeof createImageBitmap;
+    globalThis.Image = class {
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      set src(_value: string) {
+        queueMicrotask(() => (fail ? this.onerror?.() : this.onload?.()));
+      }
+    } as unknown as typeof Image;
+    try {
+      const svg = new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"/>');
+      expect(await decodePresentationImage(svg, 'undecodable')).toBeInstanceOf(globalThis.Image);
+      expect(bitmaps).toHaveLength(0);
+
+      const png = new Uint8Array(24);
+      png.set([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82]);
+      const dimensions = new DataView(png.buffer);
+      dimensions.setUint32(16, 4);
+      dimensions.setUint32(20, 4);
+      await decodePresentationImage(png, 'undecodable');
+      expect(bitmaps).toHaveLength(1);
+
+      fail = true;
+      await expect(decodePresentationImage(svg, 'undecodable')).rejects.toThrow('undecodable');
+    } finally {
+      globalThis.createImageBitmap = original.bitmap;
+      globalThis.Image = original.image;
+    }
   });
 
   test.each([false, true])('unwraps a complete raster WMF (placeable=%s)', async (placeable) => {
@@ -121,6 +320,71 @@ describe('presentation image blobs', () => {
       else view.setInt16(offset, value, true);
       const bytes = bitmapMetafile(bitmap);
       expect(presentationImageBlob(bytes).type).toBe('');
+    }
+  });
+
+  test('unwraps a complete raster EMF', async () => {
+    const pixels = dib(4, 3);
+    const bytes = enhancedMetafile([stretchDibits(pixels, 4, 3)]);
+    const before = bytes.slice();
+    const blob = presentationImageBlob(bytes);
+    const bitmap = new Uint8Array(await blob.arrayBuffer());
+    const header = new DataView(bitmap.buffer);
+    expect(blob.type).toBe('image/bmp');
+    expect(header.getUint16(0, true)).toBe(0x4d42);
+    expect(header.getUint32(2, true)).toBe(14 + pixels.length);
+    expect(header.getUint32(10, true)).toBe(54);
+    expect(bitmap.subarray(14)).toEqual(pixels);
+    expect(bytes).toEqual(before);
+  });
+
+  test('unwraps a raster EMF read as a view into a larger buffer', async () => {
+    const bytes = enhancedMetafile([stretchDibits(dib(4, 3), 4, 3)]);
+    const padded = new Uint8Array(bytes.length + 20);
+    padded.set(bytes, 10);
+    expect(presentationImageBlob(padded.subarray(10, 10 + bytes.length)).type).toBe('image/bmp');
+  });
+
+  test('preserves EMF metafiles that carry vector ink or a second blit', async () => {
+    const polyline = new Uint8Array(16);
+    new DataView(polyline.buffer).setUint32(0, 87, true);
+    new DataView(polyline.buffer).setUint32(4, 16, true);
+    for (const extra of [[polyline], [stretchDibits(dib(4, 3), 4, 3)]]) {
+      const bytes = enhancedMetafile([stretchDibits(dib(4, 3), 4, 3), ...extra]);
+      expect(new Uint8Array(await presentationImageBlob(bytes).arrayBuffer())).toEqual(bytes);
+    }
+  });
+
+  test('preserves EMF blits that scale, offset or composite their source', async () => {
+    for (const [offset, value] of [[32, 1], [40, 3], [68, 0x00ee0086], [64, 1], [72, 3], [24, 1]]) {
+      const blit = stretchDibits(dib(4, 3), 4, 3);
+      new DataView(blit.buffer).setInt32(offset, value, true);
+      expect(presentationImageBlob(enhancedMetafile([blit])).type).toBe('');
+    }
+  });
+
+  test('bounds an EMF that declares an empty bitmap payload', async () => {
+    const record = stretchDibits(dib(4, 3), 4, 3).subarray(0, 80);
+    const empty = new Uint8Array(80);
+    empty.set(record);
+    const view = new DataView(empty.buffer);
+    view.setUint32(4, 80, true);
+    view.setUint32(52, 0, true);
+    view.setUint32(56, 80, true);
+    view.setUint32(60, 0, true);
+    const bytes = enhancedMetafile([empty]);
+    expect(presentationImageBlob(bytes).type).toBe('');
+  });
+
+  test('bounds malformed EMF records and rejects truncated metafiles', async () => {
+    const short = enhancedMetafile([stretchDibits(dib(4, 3), 4, 3)]);
+    const truncated = short.subarray(0, short.length - 2);
+    const oversized = enhancedMetafile([stretchDibits(dib(4, 3), 4, 3)]);
+    new DataView(oversized.buffer).setUint32(92, 0, true);
+    const understated = stretchDibits(dib(4, 3), 4, 3);
+    new DataView(understated.buffer).setUint32(60, dib(4, 3).length - 44, true);
+    for (const bytes of [truncated, oversized, enhancedMetafile([understated])]) {
+      expect(new Uint8Array(await presentationImageBlob(bytes).arrayBuffer())).toEqual(bytes);
     }
   });
 

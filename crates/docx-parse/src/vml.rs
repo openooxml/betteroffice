@@ -9,10 +9,10 @@ use crate::image::{
     Image, ImageCrop, ImageEffect, ImageEffects, ImagePosition, ImageSize, ImageWrap, PositionAxis,
     placeholder_image,
 };
-use crate::media::{MediaMap, resolve_image_data};
+use crate::media::{MediaMap, media_token_index, resolve_image_data};
 use crate::relationships::RelationshipMap;
 use crate::scalars::ColorValue;
-use crate::xml::{XmlElement, namespaces};
+use crate::xml::{ParseBudget, XmlElement, namespaces};
 
 const EMU_PER_PIXEL: f64 = 9_525.0;
 const MAX_STYLE_BYTES: usize = 65_536;
@@ -228,6 +228,17 @@ pub fn parse_vml_image_content(
     relationships: Option<&RelationshipMap>,
     media: Option<&MediaMap>,
 ) -> Option<Image> {
+    vml_image_content(picture, relationships, media, None)
+}
+
+/// [`parse_vml_image_content`] reading `media:{n}` sources through `budget`'s
+/// media table, where a failed read fails the parse.
+pub(crate) fn vml_image_content(
+    picture: &XmlElement,
+    relationships: Option<&RelationshipMap>,
+    media: Option<&MediaMap>,
+    mut budget: Option<&mut ParseBudget<'_>>,
+) -> Option<Image> {
     let mut shapes = Vec::new();
     collect_vml_shapes(picture, 0, &mut shapes);
     for shape in shapes.into_iter().take(MAX_VML_SHAPES) {
@@ -255,9 +266,9 @@ pub fn parse_vml_image_content(
         let mut width = css_length_to_px(style.get("width").map(String::as_str));
         let mut height = css_length_to_px(style.get("height").map(String::as_str));
         if width.is_none() || height.is_none() {
-            if let Some((intrinsic_width, intrinsic_height)) =
-                intrinsic_size_px(bytes_from_image_src(resolved.src.as_deref()).as_deref())
-                && intrinsic_width > 0.0
+            if let Some((intrinsic_width, intrinsic_height)) = intrinsic_size_px(
+                image_src_bytes(resolved.src.as_deref(), budget.as_deref_mut()).as_deref(),
+            ) && intrinsic_width > 0.0
                 && intrinsic_height > 0.0
             {
                 match (width, height) {
@@ -311,20 +322,17 @@ pub fn parse_vml_image_content(
             .map(|value| truncate_utf8(value, 4_096).to_owned());
 
         if positioned {
-            let left = css_length_to_px(
-                style
-                    .get("margin-left")
-                    .or_else(|| style.get("left"))
-                    .map(String::as_str),
-            )
-            .and_then(pixels_to_emu);
-            let top = css_length_to_px(
-                style
-                    .get("margin-top")
-                    .or_else(|| style.get("top"))
-                    .map(String::as_str),
-            )
-            .and_then(pixels_to_emu);
+            // `left`/`top` are group-child coordinates, never anchor offsets.
+            let anchor_left = css_length_to_px(style.get("margin-left").map(String::as_str))
+                .and_then(pixels_to_emu);
+            let anchor_top = css_length_to_px(style.get("margin-top").map(String::as_str))
+                .and_then(pixels_to_emu);
+            let left = anchor_left.or_else(|| {
+                css_length_to_px(style.get("left").map(String::as_str)).and_then(pixels_to_emu)
+            });
+            let top = anchor_top.or_else(|| {
+                css_length_to_px(style.get("top").map(String::as_str)).and_then(pixels_to_emu)
+            });
             image.position = Some(ImagePosition {
                 use_simple_pos: None,
                 simple_pos: None,
@@ -348,7 +356,7 @@ pub fn parse_vml_image_content(
                     )
                     .to_owned(),
                     alignment: None,
-                    pos_offset: None,
+                    pos_offset: anchor_left,
                     offset: left,
                 },
                 vertical: PositionAxis {
@@ -359,7 +367,7 @@ pub fn parse_vml_image_content(
                     )
                     .to_owned(),
                     alignment: None,
-                    pos_offset: None,
+                    pos_offset: anchor_top,
                     offset: top,
                 },
             });
@@ -671,6 +679,34 @@ fn vml_fraction(raw: Option<&str>) -> Option<f64> {
     Some((if fixed { parsed / 65_536.0 } else { parsed }).clamp(0.0, 1.0))
 }
 
+/// Whether `shape`'s style positions it from the page or margin.
+pub(crate) fn placed_off_the_text(shape: &XmlElement) -> bool {
+    style_placed_off_the_text(shape.attribute(None, "style"))
+}
+
+pub(crate) fn style_placed_off_the_text(style: Option<&str>) -> bool {
+    let Some(style) = style else { return false };
+    let mut position = None;
+    let mut vertical = None;
+    for declaration in truncate_utf8(style, MAX_STYLE_BYTES)
+        .split(';')
+        .take(MAX_STYLE_DECLARATIONS)
+    {
+        let Some((key, value)) = declaration.split_once(':') else {
+            continue;
+        };
+        let key = key.trim();
+        let value = truncate_utf8(value.trim(), MAX_STYLE_VALUE_BYTES);
+        if key.eq_ignore_ascii_case("position") {
+            position = Some(value);
+        } else if key.eq_ignore_ascii_case("mso-position-vertical-relative") {
+            vertical = Some(value);
+        }
+    }
+    matches!(position, Some("absolute" | "relative"))
+        && matches!(vml_vertical_relative_to(vertical), "page" | "margin")
+}
+
 fn vml_horizontal_relative_to(raw: Option<&str>) -> &'static str {
     match raw {
         Some("page") => "page",
@@ -687,6 +723,22 @@ fn vml_vertical_relative_to(raw: Option<&str>) -> &'static str {
         Some("line") => "line",
         _ => "paragraph",
     }
+}
+
+fn image_src_bytes(source: Option<&str>, budget: Option<&mut ParseBudget<'_>>) -> Option<Vec<u8>> {
+    let index = source.and_then(media_token_index);
+    if let (Some(budget), Some(index)) = (budget, index)
+        && let Some(table) = budget.media_table()
+    {
+        return match table.bytes(index) {
+            Ok(bytes) => Some(bytes.into_owned()),
+            Err(error) => {
+                budget.fail_media_read(error);
+                None
+            }
+        };
+    }
+    bytes_from_image_src(source)
 }
 
 fn bytes_from_image_src(source: Option<&str>) -> Option<Vec<u8>> {
@@ -1056,7 +1108,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_positioned_vml_image_and_pinned_offset_typo() {
+    fn parses_positioned_vml_image_and_mirrors_the_legacy_offset() {
         let media = build_media_map(&[("word/media/logo.png".to_owned(), vec![0; 24])]);
         let relationships = RelationshipMap::from([(
             "rId7".to_owned(),
@@ -1073,9 +1125,40 @@ mod tests {
         let image = parse_vml_image_content(&picture, Some(&relationships), Some(&media)).unwrap();
         assert_eq!(image.size.width, 914_400.0);
         assert_eq!(image.size.height, 914_400.0);
-        assert_eq!(image.position.unwrap().horizontal.offset, Some(19_050.0));
+        let horizontal = image.position.unwrap().horizontal;
+        assert_eq!(horizontal.pos_offset, Some(19_050.0));
+        assert_eq!(horizontal.offset, Some(19_050.0));
         assert_eq!(image.crop.unwrap().left, Some(0.5));
         assert_eq!(image.transform.unwrap().rotation, Some(45.0));
+    }
+
+    #[test]
+    fn header_vml_shape_keeps_its_word_offsets() {
+        let picture = root(
+            r#"<w:pict xmlns:w="w" xmlns:v="v" xmlns:r="r" xmlns:o="o"><v:shape id="_x0000_s1025" style="position:absolute;margin-left:-10.55pt;margin-top:42.75pt;width:505pt;height:133pt;mso-position-horizontal-relative:text;mso-position-vertical-relative:text"><v:imagedata r:id="rId2"/></v:shape></w:pict>"#,
+        );
+        let position = parse_vml_image_content(&picture, None, None)
+            .unwrap()
+            .position
+            .unwrap();
+        assert_eq!(position.horizontal.relative_to, "character");
+        assert_eq!(position.horizontal.pos_offset, Some(-133_985.0));
+        assert_eq!(position.vertical.relative_to, "paragraph");
+        assert_eq!(position.vertical.pos_offset, Some(542_925.0));
+    }
+
+    #[test]
+    fn grouped_vml_child_coordinates_are_not_anchor_offsets() {
+        let picture = root(
+            r#"<w:pict xmlns:w="w" xmlns:v="v" xmlns:r="r" xmlns:o="o"><v:group style="position:absolute;margin-left:36pt;margin-top:770.6pt;width:540pt;height:1.5pt"><v:shape id="Picture 41" style="position:absolute;left:2476;top:4038;width:6952;height:3368"><v:imagedata r:id="rId2"/></v:shape></v:group></w:pict>"#,
+        );
+        let position = parse_vml_image_content(&picture, None, None)
+            .unwrap()
+            .position
+            .unwrap();
+        assert_eq!(position.horizontal.pos_offset, None);
+        assert_eq!(position.vertical.pos_offset, None);
+        assert_eq!(position.horizontal.offset, Some(23_583_900.0));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 ---
 title: Python
-description: betteroffice-docx, betteroffice-xlsx, and betteroffice-pptx on PyPI — read, edit, lay out, render, and save
+description: Read, edit, render, and save Office files with Python
 ---
 
 ```bash
@@ -9,16 +9,15 @@ pip install betteroffice-xlsx
 pip install betteroffice-pptx
 ```
 
-All three formats are on PyPI. The Rust engine is compiled into each wheel: no
-Word, no Excel, no PowerPoint, no LibreOffice subprocess, no COM. Wheels are
-built for Linux (x86_64, aarch64), macOS (arm64, x86_64), and Windows (x86_64)
-against the stable ABI for CPython 3.9 and up.
+Each package includes its Rust engine and runs independently of Microsoft Office.
+Wheels support CPython 3.9 and later on Linux (x86_64, aarch64), macOS (arm64,
+x86_64), and Windows (x86_64).
 
 [`betteroffice-xlsx`](https://pypi.org/project/betteroffice-xlsx/) is the
-workbook distribution, and the rest of this page walks through it;
-[DOCX](#docx) and [PPTX](#pptx) follow at the end.
+spreadsheet package. Start with the workbook example below, or jump to
+[DOCX](#docx) or [PPTX](#pptx).
 
-## Formulas calculate
+## Edit a workbook
 
 ```python
 from betteroffice_xlsx import Workbook
@@ -30,18 +29,18 @@ sheet["B1"] = 10
 sheet["B2"] = 32
 sheet["B3"] = "=SUM(B1:B2)"
 
-print(sheet["B3"])           # 42.0, computed here
-print(sheet.formula("B3"))   # 'SUM(B1:B2)'
+print(sheet["B3"])
+print(sheet.formula("B3"))
 
 wb.save_path("budget-out.xlsx")
 ```
 
-Writing a cell recalculates its dependents. A cell you have not touched keeps
-whatever the authoring application cached, stale or not; `Workbook.open_recalculated`
-or a later `recalculate()` evaluates the whole workbook with this engine instead.
-Values come back as `None`, `float`, `str`, `bool`, or a `CellError` that compares
-equal to its code, so `#DIV/0!` as a value stays distinguishable from a cell
-holding that text.
+This prints `42.0` and `SUM(B1:B2)`. Editing a cell recalculates its dependents;
+other cells retain their cached results. Use `Workbook.open_recalculated` or
+`recalculate()` to evaluate the whole workbook.
+
+Cell values are returned as `None`, `float`, `str`, `bool`, or `CellError`. Errors
+remain distinct from text values such as the string `"#DIV/0!"`.
 
 ## Render a sheet
 
@@ -50,60 +49,137 @@ png = wb.render_png("Sheet1", scale=2.0, range="A1:H40")
 png.write("preview.png")
 ```
 
-This is the same grid layout and display list the browser editor uses, and the
-raster backend embeds Carlito to measure and draw cell text, so nothing has to be
-registered first. Opening, recalculating, rendering, and saving release the GIL,
-so they run in parallel across threads instead of serializing your workers.
+Spreadsheet rendering uses the bundled Carlito font. Opening, recalculating,
+rendering, and saving release the GIL, allowing these operations to run across
+Python threads.
 
-## What a save keeps
+## Saving
 
-`save()` returns bytes and `save_path()` writes a file. The parts the model does
-not represent — charts, pivot tables, comments, macros, custom XML — are kept,
-and sheets an edit did not touch are copied through byte for byte. A sheet you do
-edit is reserialized from the model, so unmodeled markup on that one sheet is
-lost.
+`save()` returns bytes; `save_path()` writes a file. Both preserve untouched
+package parts, including charts, pivot tables, comments, macros, and custom XML.
+Changed worksheets are patched to retain unmodified row, column, and cell markup.
+Worksheets with missing or out-of-order row or cell addresses, and worksheets
+reconstructed from collaboration updates, are serialized from the model instead.
 
 ## Collaboration and agent proposals
 
-`Workbook.open_collaborative` makes the workbook a Yrs replica and exposes the
-byte-level primitives — `state_vector`, `state_as_update`, `diff`,
-`apply_update` — rather than a transport, so it drops into a WebSocket server, a
-queue, or a test harness without committing you to asyncio. `propose` stages an
-agent's edits with the before and after text of each one, and nothing reaches the
-sheet until `accept_proposal` applies it as a single undo step.
+`Workbook.open_collaborative` creates a Yrs replica. Use `state_vector`,
+`state_as_update`, `diff`, and `apply_update` to exchange updates over your
+transport.
 
-The package README on PyPI carries the full API table, the openpyxl comparison,
-and the error hierarchy.
+`propose` stages agent edits with before-and-after text for review.
+`accept_proposal` applies the edits as a single undo step.
+
+## Version-checked edit batches
+
+`read_cells` and `find_text` return cells with the workbook version they were
+read at; `apply_edits` applies a batch against that version as one recalculated
+undo step, or returns a refusal dictionary with nothing changed. Requests and
+results are the same camelCase dictionaries JavaScript uses:
+
+```python
+read = wb.read_cells({"ranges": [{"sheetId": "sheet:0", "range": {"kind": "a1", "a1": "B3"}}]})
+result = wb.apply_edits({
+    "expectVersion": read["version"],
+    "steps": [{
+        "op": "setCellInputs",
+        "target": {"sheetId": "sheet:0", "range": {"kind": "a1", "a1": "B3"}},
+        "inputs": [["120"]],
+    }],
+})
+if not result["ok"]:
+    print(result["failure"]["code"])   # e.g. "stale-version"
+```
+
+Batches do not insert or delete rows, columns or sheets, and refuse writes to
+merged-cell followers, array-formula cells and protected sheets.
+
+## Structured export
+
+`export_structured` and `export_markdown` return a workbook's sparse cells,
+sheet metadata and diagnostics, or bounded Markdown with anchor markers, with the
+version they were read at. Formula results are the stored values; nothing is
+recalculated. Hidden sheets, rows, columns and names are opt-in:
+
+```python
+from betteroffice_xlsx import export_xlsx_markdown
+
+result = wb.export_structured(scope=[{"sheet": 0, "range": "A1:H40"}], max_cells=20_000)
+if result["ok"]:
+    cells = result["content"]["sheets"][0]["cells"]
+
+print(export_xlsx_markdown(wb.save(), markdown_options={"maxRows": 100})["markdown"])
+```
+
+See the [package README](https://pypi.org/project/betteroffice-xlsx/) for the full
+API, error types, and an openpyxl comparison.
 
 ## DOCX
 
 [`betteroffice-docx`](https://pypi.org/project/betteroffice-docx/) reads
-paragraphs, tables, and sections, rewrites the text of
-a plain single-run paragraph, and saves back to DOCX with everything the model
-does not represent reused from the package it opened. It paginates and
-rasterizes too: the layout pass takes an already-measured projection of the
-document, because the Rust crates do not lower the DOCX model into measured
-blocks yet, and `render_png` draws one page of the resulting display list. No
-font is compiled into that wheel, and a page whose text names a family you never
-registered is an error rather than a page of invisible text.
+paragraphs, tables, and sections, edits plain single-run paragraphs, and saves
+DOCX files while preserving unsupported package content.
+
+`layout` paginates an input containing measured blocks and layout options.
+`render_png` renders a page from that layout. Register the required fonts before
+rendering; a missing font produces an error.
+
+`export_structured` returns anchored content in the shared camelCase schema;
+`export_markdown` renders Markdown:
+
+```python
+from betteroffice_docx import Document
+
+document = Document.open_path("contract.docx")
+content = document.export_structured(revision_view="accepted", stories=["body", "footnotes"])
+markdown = document.export_markdown(revision_view="markup")["markdown"]
+```
+
+Omitted and unsupported content is listed in `diagnostics`; unusable limits raise
+`ExportError`. Python exports do not yet generate page maps; the JavaScript
+packages attach them from a layout of the current document.
+
+`list_content_controls` lists the document's content controls as a dict in the
+same camelCase schema, and `find_content_controls` returns every exact match of a
+tag, alias, `ooxmlId` (the authored `w:id`) or control id:
+
+```python
+controls = document.list_content_controls()["controls"]
+named = document.find_content_controls({"kind": "tag", "tag": "customer.name"})
+```
+
+Each control carries its tag, alias, type, lock, placement, anchor and current
+`value`. Filling controls needs a JavaScript editing session and is not available
+from Python yet.
+
+Comparing two DOCX files into tracked changes is not available from Python yet;
+the JavaScript package's `compareDocx` offers it today.
 
 ## PPTX
 
 [`betteroffice-pptx`](https://pypi.org/project/betteroffice-pptx/) reads decks,
-edits shapes and text, saves the edits back to `.pptx` bytes, and lays slides
-out into the same display-list contract the canvas paints. `render_slide` fails
-until `register_font` has supplied at least one face — no font is compiled into
-that wheel. `render_png` rasterizes a slide to PNG bytes from that same layout,
-resolving pictures out of the package, so only fonts need registering. A `Presentation` is also pinned to the thread that opened it, and
-must be released there.
+edits shapes and text, and saves `.pptx` files. `render_slide` returns a display
+list; `render_png` produces PNG bytes and reads embedded images from the file.
+Call `register_font` with at least one font face before rendering.
 
-Comments read and write in both PowerPoint formats. `comments()` returns every
-comment on the deck and `comment_flavor` reports which system it uses: `legacy`
-reads in every version of PowerPoint plus LibreOffice and Google Slides, while
-`modern` carries replies and a resolved state but only shows in PowerPoint 365.
-A file commits to one at its first comment and never carries both, so
-`set_comment_flavor` only works while the deck has no comments, and
-`reply_to_comment` and `set_comment_status` raise on a legacy deck.
+A `Presentation` must be used and released on the thread that opened it.
+
+`read_content` returns slides and story text with the session version, and
+`apply_edits` applies a batch of text, speaker-notes and shape steps against
+that version as one undo step, or returns `{"ok": False, "failure": ...}` with
+nothing changed. Requests are the typed dictionaries `PptxEditRequest` and
+friends, shared with the JavaScript core.
+
+`export_structured` and `export_markdown` return the committed deck as
+structured content or Markdown with the version it was read at, and
+`export_pptx_structured(data)` reads bytes as a snapshot. Records carry anchors
+and source provenance, hidden slides and shapes, notes and comments are keyword
+options, and every omission is listed in `diagnostics`.
+
+`comments()` returns the deck's comments, and `comment_flavor` identifies the
+legacy or modern format. Modern comments support replies and resolved status in
+PowerPoint 365. Set the format with `set_comment_flavor` before adding comments.
+`reply_to_comment` and `set_comment_status` raise an error on legacy decks.
 
 ```python
 from betteroffice_pptx import Presentation
@@ -121,6 +197,4 @@ deck.add_comment(
 deck.save_path("reviewed.pptx")
 ```
 
-Positions are EMU, like every other coordinate in the API. `created` is
-caller-supplied rather than read from a clock, so the same edits replay to the
-same bytes.
+Positions use EMUs. Supply the creation timestamp through `created`.

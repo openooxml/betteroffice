@@ -2,6 +2,11 @@
 /* eslint-disable */
 
 /**
+ * Decodes TIFF bytes to PNG bytes for browsers without a TIFF decoder.
+ */
+export function decodeTiffPng(data: Uint8Array): Uint8Array;
+
+/**
  * Wasm control-plane entry: safe ZIP -> bounded XML -> typed relationships.
  */
 export function parse_docx_relationships(data: Uint8Array): string;
@@ -80,6 +85,13 @@ export function write_docx_s13_wasm_with_warnings(request_json: string, original
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
+    readonly __externref_table_dealloc: (a: number) => void;
+    readonly __wbindgen_externrefs: WebAssembly.Table;
+    readonly __wbindgen_free: (a: number, b: number, c: number) => void;
+    readonly __wbindgen_malloc: (a: number, b: number) => number;
+    readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
+    readonly __wbindgen_start: () => void;
+    readonly decodeTiffPng: (a: number, b: number) => [number, number, number, number];
     readonly memory: WebAssembly.Memory;
     readonly parse_docx_relationships: (a: number, b: number) => [number, number, number, number];
     readonly parse_docx_s2: (a: number, b: number) => [number, number, number, number];
@@ -96,12 +108,6 @@ export interface InitOutput {
     readonly serialize_docx_s12: (a: number, b: number) => [number, number, number, number];
     readonly write_docx_s13_wasm: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly write_docx_s13_wasm_with_warnings: (a: number, b: number, c: number, d: number) => [number, number, number, number];
-    readonly __wbindgen_externrefs: WebAssembly.Table;
-    readonly __wbindgen_malloc: (a: number, b: number) => number;
-    readonly __externref_table_dealloc: (a: number) => void;
-    readonly __wbindgen_free: (a: number, b: number, c: number) => void;
-    readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
-    readonly __wbindgen_start: () => void;
 }
 
 export type SyncInitInput = BufferSource | WebAssembly.Module;

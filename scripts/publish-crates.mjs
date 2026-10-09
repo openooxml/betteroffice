@@ -1,3 +1,5 @@
+import { appendFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import {
   RUST_PUBLISH_CRATES,
   cargoMetadata,
@@ -37,6 +39,150 @@ async function fetchRegistry(url) {
     await sleep(2 ** attempt * 1000);
   }
   throw lastError;
+}
+
+export function selectPublishToken({ name, exists, oidcToken, bootstrapToken }) {
+  if (exists) {
+    if (oidcToken) return { token: oidcToken, source: 'oidc' };
+    if (bootstrapToken) return { token: bootstrapToken, source: 'bootstrap-fallback' };
+    throw new Error(
+      `${name} is on crates.io but CARGO_REGISTRY_TOKEN and CRATES_IO_BOOTSTRAP_TOKEN are both missing`
+    );
+  }
+  if (!bootstrapToken) {
+    throw new Error(
+      `${name} is not on crates.io and CRATES_IO_BOOTSTRAP_TOKEN is missing: OIDC cannot create a crate`
+    );
+  }
+  return { token: bootstrapToken, source: 'bootstrap' };
+}
+
+export function cargoPublishEnv(selectedToken) {
+  return {
+    CARGO_REGISTRY_TOKEN: selectedToken,
+    CARGO_REGISTRIES_CRATES_IO_TOKEN: selectedToken,
+    CRATES_IO_BOOTSTRAP_TOKEN: undefined
+  };
+}
+
+export function cargoNoAuthEnv() {
+  return {
+    CARGO_REGISTRY_TOKEN: undefined,
+    CARGO_REGISTRIES_CRATES_IO_TOKEN: undefined,
+    CRATES_IO_BOOTSTRAP_TOKEN: undefined
+  };
+}
+
+function appendStepSummary(text) {
+  console.log(text);
+  if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${text}\n`);
+}
+
+const TRUSTED_PUBLISHER_REMINDER =
+  'Add a Trusted Publisher to each on crates.io (owner openooxml, repository betteroffice, workflow release.yml) before its next release.';
+
+export function formatBootstrapSummary(created, fallback = []) {
+  const lines = [];
+  if (created.length > 0) {
+    lines.push(
+      `Created with CRATES_IO_BOOTSTRAP_TOKEN: ${created.join(', ')}. ${TRUSTED_PUBLISHER_REMINDER}`
+    );
+  }
+  if (fallback.length > 0) {
+    lines.push(
+      `Published with CRATES_IO_BOOTSTRAP_TOKEN fallback (existing crates, OIDC unavailable or failed): ${fallback.join(', ')}. ${TRUSTED_PUBLISHER_REMINDER}`
+    );
+  }
+  return lines.join('\n');
+}
+
+export function recordBootstrapUse(name, kind) {
+  appendStepSummary(
+    kind === 'bootstrap' ? formatBootstrapSummary([name], []) : formatBootstrapSummary([], [name])
+  );
+}
+
+export async function attemptPublishWithFallback({
+  name,
+  version,
+  exists,
+  oidcToken,
+  bootstrapToken,
+  checkVersion,
+  runPublish
+}) {
+  const selected = selectPublishToken({ name, exists, oidcToken, bootstrapToken });
+  const attempts = [selected];
+  if (selected.source === 'oidc' && bootstrapToken) {
+    attempts.push({ token: bootstrapToken, source: 'bootstrap-fallback' });
+  }
+  for (let index = 0; index < attempts.length; index++) {
+    const attempt = attempts[index];
+    const last = index === attempts.length - 1;
+    console.log(`${name}: publishing with ${attempt.source}.`);
+    const result = await runPublish(attempt.token, attempt.source);
+    if (result.status === 0) return { source: attempt.source };
+    const found = await checkVersion();
+    if (found) {
+      if (found.yanked) throw new Error(`${name}@${version} is yanked`);
+      return { source: 'unknown' };
+    }
+    if (!last) continue;
+    if (attempts.length > 1) {
+      throw new Error(
+        `Failed to publish ${name}@${version} with OIDC and with the bootstrap token fallback`
+      );
+    }
+    if (attempt.source === 'bootstrap') {
+      throw new Error(`Failed to publish ${name}@${version} with the bootstrap token`);
+    }
+    if (attempt.source === 'oidc') {
+      throw new Error(
+        `Failed to publish ${name}@${version} with OIDC and CRATES_IO_BOOTSTRAP_TOKEN is missing: cannot fall back`
+      );
+    }
+    throw new Error(
+      `Failed to publish ${name}@${version} with the bootstrap token fallback (OIDC unavailable)`
+    );
+  }
+}
+
+export async function publishOneCrate({
+  name,
+  version,
+  exists,
+  oidcToken,
+  bootstrapToken,
+  checkVersion,
+  runPublish,
+  recordUse = recordBootstrapUse,
+  waitRegistry
+}) {
+  const { source } = await attemptPublishWithFallback({
+    name,
+    version,
+    exists,
+    oidcToken,
+    bootstrapToken,
+    checkVersion,
+    runPublish
+  });
+  if (source === 'bootstrap') recordUse(name, 'bootstrap');
+  else if (source === 'bootstrap-fallback') recordUse(name, 'bootstrap-fallback');
+  else if (source === 'unknown') {
+    appendStepSummary(
+      `${name}@${version} is visible on crates.io after a failed publish attempt; the publishing credential could not be confirmed.`
+    );
+  }
+  await waitRegistry();
+  return { source };
+}
+
+async function crateExists(name) {
+  const response = await fetchRegistry(
+    `https://crates.io/api/v1/crates/${encodeURIComponent(name)}`
+  );
+  return response.status !== 404;
 }
 
 async function crateVersion(name, version) {
@@ -97,26 +243,33 @@ async function waitForRegistry(name, version) {
   await waitFor(`${name}@${version} in the sparse index`, () => indexHasVersion(name, version));
 }
 
-function publishDryRun() {
+function publishDryRun(env) {
   for (const crate of RUST_PUBLISH_CRATES) {
-    run('cargo', [
-      'package',
-      '--no-verify',
-      '--exclude-lockfile',
-      '--allow-dirty',
-      '--locked',
-      '-p',
-      crate.name
-    ]);
+    run(
+      'cargo',
+      [
+        'package',
+        '--no-verify',
+        '--exclude-lockfile',
+        '--allow-dirty',
+        '--locked',
+        '-p',
+        crate.name
+      ],
+      { env }
+    );
   }
 }
 
 async function publish() {
+  const oidcToken = process.env.CARGO_REGISTRY_TOKEN;
+  const bootstrapToken = process.env.CRATES_IO_BOOTSTRAP_TOKEN;
+  const noAuthEnv = cargoNoAuthEnv();
   const version = rustReleaseVersion();
-  const packages = validateRustTrain(cargoMetadata(), version);
+  const packages = validateRustTrain(cargoMetadata({ env: noAuthEnv }), version);
 
   if (process.argv.includes('--dry-run')) {
-    publishDryRun();
+    publishDryRun(noAuthEnv);
     return;
   }
   if (version === '0.0.0') {
@@ -142,20 +295,24 @@ async function publish() {
       await waitForRegistry(dependency.name, version);
     }
 
-    if (!process.env.CARGO_REGISTRY_TOKEN) {
-      throw new Error('CARGO_REGISTRY_TOKEN is required to publish Rust crates');
-    }
-
-    const result = run(
-      'cargo',
-      ['publish', '--locked', '--registry', 'crates-io', '-p', crate.name],
-      { allowFailure: true }
-    );
-    if (result.status !== 0 && !(await crateVersion(crate.name, version))) {
-      throw new Error(`Failed to publish ${crate.name}@${version}`);
-    }
-    await waitForRegistry(crate.name, version);
+    const exists = await crateExists(crate.name);
+    await publishOneCrate({
+      name: crate.name,
+      version,
+      exists,
+      oidcToken,
+      bootstrapToken,
+      checkVersion: () => crateVersion(crate.name, version),
+      runPublish: (token) =>
+        run('cargo', ['publish', '--locked', '--registry', 'crates-io', '-p', crate.name], {
+          allowFailure: true,
+          env: cargoPublishEnv(token)
+        }),
+      waitRegistry: () => waitForRegistry(crate.name, version)
+    });
   }
 }
 
-await publish();
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  await publish();
+}

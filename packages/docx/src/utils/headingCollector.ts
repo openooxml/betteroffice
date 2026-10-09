@@ -23,6 +23,9 @@ export interface HeadingInfo {
  * Detection logic:
  * 1. Check `outlineLevel` attr (set by OOXML parsing or style resolution)
  * 2. Fallback to `styleId` matching /^[Hh]eading(\d)$/
+ *
+ * @deprecated A legacy tree walker kept for compatibility. `YrsSession.headings(story)` classifies
+ * headings with the engine's resolver, which also reads style inheritance and document defaults.
  */
 export function collectHeadings(doc: EditorTreeNode): HeadingInfo[] {
   const headings: HeadingInfo[] = [];

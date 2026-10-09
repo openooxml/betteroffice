@@ -50,6 +50,7 @@ fn matrix_stroke(color: &str) -> Stroke {
         width: 3.0,
         dashed: true,
         paint: None,
+        join: Some("bevel".to_owned()),
         head_end: Some(StrokeEnd {
             kind: "triangle".to_owned(),
             width: 15.0,
@@ -119,6 +120,7 @@ fn theme_matrix_renders_reference_colours_indices_and_explicit_line_defaults() {
                 width: 4.0,
                 dashed: false,
                 paint: None,
+                join: None,
                 head_end: None,
                 tail_end: None,
             },
@@ -140,6 +142,7 @@ fn placeholder_properties_outrank_shape_and_layout_style_references() {
             width: 8.0,
             dashed: true,
             paint: None,
+            join: Some("bevel".to_owned()),
             head_end: Some(StrokeEnd {
                 kind: "triangle".to_owned(),
                 width: 40.0,
@@ -188,6 +191,7 @@ fn master_shapes_render_theme_fills() {
             width: 2.0,
             dashed: false,
             paint: None,
+            join: Some("miter".to_owned()),
             head_end: None,
             tail_end: None,
         })
@@ -218,6 +222,7 @@ fn edited_outlines_override_the_resolved_style() {
             width: 2.0,
             dashed: false,
             paint: None,
+            join: None,
             head_end: None,
             tail_end: None,
         })
@@ -241,6 +246,7 @@ fn edited_outlines_override_the_resolved_style() {
             width: 2.0,
             dashed: false,
             paint: None,
+            join: None,
             head_end: None,
             tail_end: None,
         })

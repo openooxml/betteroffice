@@ -1,11 +1,27 @@
-import type { Affine, PageDisplayList, PagePrimitive, Paint, PlaceholderPrimitive, ShapePrimitive, Stroke, TextBoxPrimitive, TextRun } from '../types';
+import type { Affine, PageDisplayList, PagePrimitive, Paint, PlaceholderPrimitive, ShapePrimitive, ShapeShadow, Stroke, TextBoxPrimitive, TextRun } from '../types';
 
 export type CanvasImageResolver = (assetId: string) => CanvasImageSource | Promise<CanvasImageSource | null> | null;
 export interface PaintPageOptions { resolveImage?: CanvasImageResolver; signal?: AbortSignal; }
 export interface PageCanvasLike { width: number; height: number; style: { width: string; height: string }; }
-export function sizeCanvasForPage(canvas: PageCanvasLike, list: Pick<PageDisplayList, 'width' | 'height'>, dpr: number, scale = 1): void {
-  canvas.width = Math.round(list.width * scale * dpr); canvas.height = Math.round(list.height * scale * dpr);
-  canvas.style.width = `${list.width * scale}px`; canvas.style.height = `${list.height * scale}px`;
+export function sizeCanvasForPage(canvas: PageCanvasLike, list: Pick<PageDisplayList, 'width' | 'height'>, dpr: number, scale = 1): number {
+  const cssWidth = list.width * scale, cssHeight = list.height * scale;
+  const effective = effectiveDprForSurface(cssWidth, cssHeight, dpr);
+  canvas.width = Math.max(1, Math.floor(cssWidth * effective)); canvas.height = Math.max(1, Math.floor(cssHeight * effective));
+  canvas.style.width = `${cssWidth}px`; canvas.style.height = `${cssHeight}px`;
+  return effective;
+}
+/** Conservative backing-store side limit. */
+export const MAX_CANVAS_DIMENSION = 8192;
+/** 128 MiB RGBA budget per canvas. */
+export const MAX_CANVAS_AREA = MAX_CANVAS_DIMENSION * 4096;
+/** Clamp DPR to the backing-store budgets. */
+export function effectiveDprForSurface(cssWidth: number, cssHeight: number, dpr: number): number {
+  const requested = Number.isFinite(dpr) && dpr > 0 ? dpr : 1;
+  if (!Number.isFinite(cssWidth) || !Number.isFinite(cssHeight) || cssWidth <= 0 || cssHeight <= 0) {
+    throw new RangeError('Canvas dimensions must be finite and positive');
+  }
+  const bySide = Math.min(MAX_CANVAS_DIMENSION / cssWidth, MAX_CANVAS_DIMENSION / cssHeight);
+  return Math.min(requested, bySide, Math.sqrt(MAX_CANVAS_AREA / cssWidth / cssHeight));
 }
 export interface ModelPoint { x: number; y: number; }
 export function canvasPointToModel(paintTransform: Affine, x: number, y: number, scale = 1): ModelPoint {
@@ -21,7 +37,7 @@ export function modelPointToCanvas(paintTransform: Affine, x: number, y: number,
 }
 const paintRequests = new WeakMap<CanvasRenderingContext2D, object>();
 export async function paintPage(ctx: CanvasRenderingContext2D, list: PageDisplayList, dpr = 1, scale = 1, options: PaintPageOptions = {}): Promise<void> {
-  if (list.contractVersion !== 4) throw new Error(`unsupported VSDX display-list contract version ${list.contractVersion}`);
+  if (list.contractVersion !== 7) throw new Error(`unsupported VSDX display-list contract version ${list.contractVersion}`);
   const request = {};
   paintRequests.set(ctx, request);
   const images = new Map<string, CanvasImageSource | null>();
@@ -39,25 +55,62 @@ export async function paintPage(ctx: CanvasRenderingContext2D, list: PageDisplay
   await Promise.all(pending.values());
   if (options.signal?.aborted || paintRequests.get(ctx) !== request) return;
   ctx.save();
-  try { ctx.setTransform(dpr * scale, 0, 0, dpr * scale, 0, 0); ctx.clearRect(0, 0, list.width, list.height); for (const primitive of [...list.primitives].sort((a, b) => a.zOrder - b.zOrder)) paintPrimitive(ctx, primitive, list.paintTransform, images); }
+  try { ctx.setTransform(dpr * scale, 0, 0, dpr * scale, 0, 0); ctx.clearRect(0, 0, list.width, list.height); const device = { a: dpr * scale, b: 0, c: 0, d: dpr * scale }; for (const primitive of [...list.primitives].sort((a, b) => a.zOrder - b.zOrder)) paintPrimitive(ctx, primitive, list.paintTransform, images, device); }
   finally { ctx.restore(); }
 }
-function paintPrimitive(ctx: CanvasRenderingContext2D, primitive: PagePrimitive, paintTransform: Affine, images: Map<string, CanvasImageSource | null>): void {
+function paintPrimitive(ctx: CanvasRenderingContext2D, primitive: PagePrimitive, paintTransform: Affine, images: Map<string, CanvasImageSource | null>, device: Linear): void {
   ctx.save();
   try {
     const transform = 'transform' in primitive ? primitive.transform ?? identity() : identity(); ctx.transform(paintTransform.a, paintTransform.b, paintTransform.c, paintTransform.d, paintTransform.e, paintTransform.f); ctx.transform(transform.a, transform.b, transform.c, transform.d, transform.e, transform.f);
+    const linear = compose(compose(device, paintTransform), transform);
     switch (primitive.kind) {
-      case 'shape': paintShape(ctx, primitive); break;
+      case 'shape': paintShape(ctx, primitive, linear); break;
       case 'image': { const source = images.get(primitive.assetId); if (source) { ctx.translate(0, 2 * primitive.y + primitive.height); ctx.scale(1, -1); ctx.drawImage(source, primitive.x, primitive.y, primitive.width, primitive.height); } break; }
       case 'textBox': paintTextBox(ctx, primitive); break;
       case 'placeholder': paintPlaceholder(ctx, primitive); break;
-      case 'group': for (const child of [...primitive.primitives].sort((a, b) => a.zOrder - b.zOrder)) paintPrimitive(ctx, child, identity(), images); break;
+      case 'group': for (const child of [...primitive.primitives].sort((a, b) => a.zOrder - b.zOrder)) paintPrimitive(ctx, child, identity(), images, linear); break;
     }
   } finally { ctx.restore(); }
 }
 function identity(): Affine { return { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 }; }
-function paintShape(ctx: CanvasRenderingContext2D, shape: ShapePrimitive): void { ctx.beginPath(); for (const command of shape.path) { if (command.type === 'move') ctx.moveTo(Number(command.x), Number(command.y)); else if (command.type === 'line') ctx.lineTo(Number(command.x), Number(command.y)); else if (command.type === 'quad') ctx.quadraticCurveTo(Number(command.cpx), Number(command.cpy), Number(command.x), Number(command.y)); else if (command.type === 'cubic') ctx.bezierCurveTo(Number(command.cp1x), Number(command.cp1y), Number(command.cp2x), Number(command.cp2y), Number(command.x), Number(command.y)); else if (command.type === 'close') ctx.closePath(); } if (shape.fill) { ctx.fillStyle = paintStyle(ctx, shape.fill); ctx.fill(); } if (shape.stroke) stroke(ctx, shape.stroke); }
-function paintStyle(ctx: CanvasRenderingContext2D, paint: Paint): string | CanvasGradient { if (paint.kind === 'solid') return paint.color; const gradient = ctx.createLinearGradient(0, 0, 1, 1); for (const stop of paint.stops) gradient.addColorStop(Math.max(0, Math.min(1, stop.position)), stop.color); return gradient; }
+interface Linear { a: number; b: number; c: number; d: number; }
+function compose(outer: Linear, inner: Linear): Linear {
+  return { a: outer.a * inner.a + outer.c * inner.b, b: outer.b * inner.a + outer.d * inner.b, c: outer.a * inner.c + outer.c * inner.d, d: outer.b * inner.c + outer.d * inner.d };
+}
+function paintShape(ctx: CanvasRenderingContext2D, shape: ShapePrimitive, linear: Linear): void { ctx.beginPath(); for (const command of shape.path) { if (command.type === 'move') ctx.moveTo(Number(command.x), Number(command.y)); else if (command.type === 'line') ctx.lineTo(Number(command.x), Number(command.y)); else if (command.type === 'quad') ctx.quadraticCurveTo(Number(command.cpx), Number(command.cpy), Number(command.x), Number(command.y)); else if (command.type === 'cubic') ctx.bezierCurveTo(Number(command.cp1x), Number(command.cp1y), Number(command.cp2x), Number(command.cp2y), Number(command.x), Number(command.y)); else if (command.type === 'close') ctx.closePath(); } if (shape.shadow) castShadow(ctx, shape.shadow, linear); if (shape.fill) { ctx.fillStyle = paintStyle(ctx, shape.fill, shapeBounds(shape.path)); ctx.fill(); if (shape.shadow) clearShadow(ctx); } if (shape.stroke) stroke(ctx, shape.stroke); }
+/** Canvas shadow offsets and blur ignore the transform, so they are mapped to device pixels here. */
+function castShadow(ctx: CanvasRenderingContext2D, shadow: ShapeShadow, linear: Linear): void {
+  const determinant = Math.abs(linear.a * linear.d - linear.b * linear.c);
+  ctx.shadowColor = shadow.color;
+  ctx.shadowOffsetX = linear.a * shadow.offsetXIn + linear.c * shadow.offsetYIn;
+  ctx.shadowOffsetY = linear.b * shadow.offsetXIn + linear.d * shadow.offsetYIn;
+  ctx.shadowBlur = shadow.blurIn * Math.sqrt(determinant);
+}
+function clearShadow(ctx: CanvasRenderingContext2D): void { ctx.shadowColor = 'rgba(0, 0, 0, 0)'; ctx.shadowOffsetX = 0; ctx.shadowOffsetY = 0; ctx.shadowBlur = 0; }
+function shapeBounds(path: ShapePrimitive['path']): { x: number; y: number; width: number; height: number } {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const command of path) for (const key of ['x', 'y', 'cpx', 'cpy', 'cp1x', 'cp1y', 'cp2x', 'cp2y'] as const) {
+    const value = Number(command[key]);
+    if (!Number.isFinite(value)) continue;
+    if (key === 'y' || key === 'cpy' || key === 'cp1y' || key === 'cp2y') { if (value < minY) minY = value; if (value > maxY) maxY = value; }
+    else { if (value < minX) minX = value; if (value > maxX) maxX = value; }
+  }
+  if (!Number.isFinite(minX) || !Number.isFinite(minY) || !Number.isFinite(maxX) || !Number.isFinite(maxY)) return { x: 0, y: 0, width: 0, height: 0 };
+  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+}
+function paintStyle(ctx: CanvasRenderingContext2D, paint: Paint, box: { x: number; y: number; width: number; height: number }): string | CanvasGradient {
+  if (paint.kind === 'solid') return paint.color;
+  const first = paint.stops[0]?.color ?? '#000000';
+  if (paint.stops.length === 0) return first;
+  const radians = ((paint.angleDeg ?? 0) * Math.PI) / 180;
+  const centerX = box.x + box.width / 2, centerY = box.y + box.height / 2;
+  const cos = Math.cos(radians), sin = Math.sin(radians);
+  const radius = (Math.abs(box.width * cos) + Math.abs(box.height * sin)) / 2;
+  if (!Number.isFinite(radius) || radius === 0) return first;
+  const gradient = ctx.createLinearGradient(centerX - cos * radius, centerY - sin * radius, centerX + cos * radius, centerY + sin * radius);
+  for (const stop of paint.stops) gradient.addColorStop(Math.max(0, Math.min(1, stop.position)), stop.color);
+  return gradient;
+}
 function stroke(ctx: CanvasRenderingContext2D, value: Stroke): void { ctx.strokeStyle = value.color; ctx.lineWidth = value.width; ctx.setLineDash(value.dashed ? [Math.max(3, value.width * 2), Math.max(2, value.width)] : []); ctx.stroke(); }
 function paintTextBox(ctx: CanvasRenderingContext2D, text: TextBoxPrimitive): void {
   ctx.translate(0, 2 * text.y + text.height); ctx.scale(1, -1); ctx.textBaseline = 'top';

@@ -158,10 +158,32 @@ impl std::fmt::Display for FontError {
 
 impl std::error::Error for FontError {}
 
+/// `head.unitsPerEm`, the `hhea` line metrics and the advance pitch of a face
+/// a document asked for but the host could not supply, carried by the
+/// substitute that stands in for it. See [`FontStore::register_substitute`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RequestedLineMetrics {
+    pub units_per_em: u16,
+    pub hhea_ascender: i16,
+    pub hhea_descender: i16,
+    pub hhea_line_gap: i16,
+    /// Whether Word measures the requested family with the East Asian pitch
+    /// ([`crate::word_metrics::EAST_ASIAN_CODE_PAGES`]) rather than the Latin
+    /// win-box rule. Decides which fields the view has to move.
+    pub east_asian: bool,
+    /// How much wider the requested face's advances run than the substitute's.
+    /// `1.0` leaves the substitute's own pitch alone, which is what every
+    /// family whose ratio is unmeasured carries — see [`crate::word_fonts`].
+    pub advance_scale: f32,
+}
+
 /// Design-space metrics extracted at registration time, in font units.
 ///
 /// Both the `hhea` and `OS/2` variants support the line-metric experiments in
-/// [`crate::word_metrics`].
+/// [`crate::word_metrics`]. On an entry made by
+/// [`FontStore::register_substitute`] the vertical fields describe the face the
+/// document asked for rather than the bytes; `units_per_em` always describes
+/// the bytes, so shaping and outlines are unaffected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FontMetrics {
     pub units_per_em: u16,
@@ -177,6 +199,8 @@ pub struct FontMetrics {
     pub os2_fs_selection: u16,
     /// `OS/2` table version, which decides how much of the table is defined.
     pub os2_version: u16,
+    /// `OS/2` ulCodePageRange1, or 0 before table version 1 defined it.
+    pub os2_code_page_range1: u32,
 }
 
 impl FontMetrics {
@@ -189,9 +213,18 @@ impl FontMetrics {
         self.os2_version >= 4
             && self.os2_fs_selection & SelectionFlags::USE_TYPO_METRICS.bits() != 0
     }
+
+    /// Whether Word measures this face with the East Asian line pitch — see
+    /// [`crate::word_metrics::EAST_ASIAN_CODE_PAGES`].
+    pub fn east_asian_line_metrics(&self) -> bool {
+        self.os2_code_page_range1 & crate::word_metrics::EAST_ASIAN_CODE_PAGES != 0
+    }
 }
 
 struct FontEntry {
+    /// Entry owning the bytes, for a metrics-only view of another face;
+    /// `None` when this entry owns its own.
+    bytes_of: Option<usize>,
     // Declared before `data` so the borrowing parser views drop first.
     //
     // SAFETY invariants for the `'static` lifetimes below: both views borrow
@@ -203,6 +236,9 @@ struct FontEntry {
     face: Option<rustybuzz::Face<'static>>,
     data: Box<[u8]>,
     metrics: FontMetrics,
+    /// Horizontal multiplier every advance, offset and outline this entry
+    /// reports is scaled by. See [`FontStore::advance_scale`].
+    advance_scale: f32,
     char_cache: RefCell<HashMap<char, CharEntry>>,
 }
 
@@ -239,6 +275,12 @@ impl FontStore {
         self.id
     }
 
+    /// How many fonts the store holds. Fonts are only ever added, so a store with the same id
+    /// and count holds the same fonts.
+    pub fn font_count(&self) -> usize {
+        self.fonts.len()
+    }
+
     /// Parse and register a font from raw bytes, returning its handle.
     ///
     /// Metrics are extracted eagerly so later queries are infallible cheap
@@ -263,6 +305,7 @@ impl FontStore {
             os2_win_descent: os2.us_win_descent(),
             os2_fs_selection: os2.fs_selection().bits(),
             os2_version: os2.version(),
+            os2_code_page_range1: os2.ul_code_page_range_1().unwrap_or(0),
         };
 
         let data: Box<[u8]> = bytes.into_boxed_slice();
@@ -276,12 +319,89 @@ impl FontStore {
 
         let id = FontId(self.fonts.len() as u32);
         self.fonts.push(FontEntry {
+            bytes_of: None,
             face,
             data,
             metrics,
+            advance_scale: 1.0,
             char_cache: RefCell::new(HashMap::new()),
         });
         Ok(id)
+    }
+
+    /// A measurement view of `base` carrying `requested`'s line metrics and
+    /// advance pitch. Shares `base`'s bytes, so the glyph repertoire is
+    /// unchanged; hosts put the returned id at the head of the fallback chain.
+    /// A Latin entry mirrors the span into the win box and clears the East
+    /// Asian code pages, so the view measures the same under either line rule
+    /// whatever the substitute claims. A `requested.advance_scale` other than
+    /// `1.0` widens every advance, offset and outline the view reports, so the
+    /// same id measures and paints at the requested face's pitch.
+    pub fn register_substitute(
+        &mut self,
+        base: FontId,
+        requested: RequestedLineMetrics,
+    ) -> Result<FontId, FontError> {
+        let entry = self.entry(base)?;
+        let owner = entry.bytes_of.unwrap_or(base.0 as usize);
+        let mut metrics = entry.metrics;
+        if requested.units_per_em == 0 || metrics.units_per_em == 0 {
+            return Ok(base);
+        }
+        let advance_scale = if requested.advance_scale.is_finite() && requested.advance_scale > 0.0
+        {
+            requested.advance_scale
+        } else {
+            1.0
+        };
+        let scale = f32::from(metrics.units_per_em) / f32::from(requested.units_per_em);
+        let rescale = |design: i16| {
+            (f32::from(design) * scale)
+                .round()
+                .clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16
+        };
+        metrics.hhea_ascender = rescale(requested.hhea_ascender);
+        metrics.hhea_descender = rescale(requested.hhea_descender);
+        metrics.hhea_line_gap = rescale(requested.hhea_line_gap);
+        if requested.east_asian {
+            metrics.os2_code_page_range1 |= crate::word_metrics::EAST_ASIAN_CODE_PAGES;
+        } else {
+            metrics.os2_code_page_range1 &= !crate::word_metrics::EAST_ASIAN_CODE_PAGES;
+            metrics.os2_win_ascent = metrics.hhea_ascender.max(0) as u16;
+            metrics.os2_win_descent = metrics.hhea_descender.saturating_neg().max(0) as u16;
+        }
+
+        let id = FontId(self.fonts.len() as u32);
+        self.fonts.push(FontEntry {
+            bytes_of: Some(owner),
+            face: None,
+            data: Box::default(),
+            metrics,
+            advance_scale,
+            char_cache: RefCell::new(HashMap::new()),
+        });
+        Ok(id)
+    }
+
+    /// Horizontal multiplier this id reports advances, offsets and outlines
+    /// with — `1.0` for anything but a substitute view whose requested face
+    /// has a measured advance ratio.
+    ///
+    /// Measurement and painting both read it here, so the two projections
+    /// cannot disagree about how wide a substituted run is.
+    pub fn advance_scale(&self, id: FontId) -> Result<f32, FontError> {
+        self.entry(id).map(|entry| entry.advance_scale)
+    }
+
+    /// What `id` measures with: the bytes it shapes, its metrics and its advance scale. Two
+    /// ids that answer the same measure identically.
+    pub fn measured_face(&self, id: FontId) -> Result<(&[u8], &FontMetrics, f32), FontError> {
+        let entry = self.entry(id)?;
+        Ok((
+            &self.byte_entry(id)?.data,
+            &entry.metrics,
+            entry.advance_scale,
+        ))
     }
 
     /// Per-font design-space metrics captured at registration.
@@ -305,7 +425,7 @@ impl FontStore {
 
     /// Raw bytes of a registered font (for shaping / outline extraction).
     pub fn font_bytes(&self, id: FontId) -> Result<&[u8], FontError> {
-        self.entry(id).map(|e| &*e.data)
+        self.byte_entry(id).map(|e| &*e.data)
     }
 
     /// Parsed shaping face memoized at registration. `None` when rustybuzz
@@ -314,7 +434,7 @@ impl FontStore {
         &self,
         id: FontId,
     ) -> Result<Option<&rustybuzz::Face<'_>>, FontError> {
-        self.entry(id).map(|e| e.face.as_ref())
+        self.byte_entry(id).map(|e| e.face.as_ref())
     }
 
     pub(crate) fn cached_shape(&self, key: &ShapeCacheKey) -> Option<Vec<ShapedGlyph>> {
@@ -348,7 +468,7 @@ impl FontStore {
 
     /// Memoized cmap (+advance) lookup for one character of one font.
     fn char_entry(&self, id: FontId, ch: char) -> Result<CharEntry, FontError> {
-        let entry = self.entry(id)?;
+        let entry = self.byte_entry(id)?;
         if let Some(cached) = entry.char_cache.borrow().get(&ch) {
             return Ok(*cached);
         }
@@ -379,14 +499,16 @@ impl FontStore {
         Ok(self.char_entry(id, ch)?.mapped.filter(|&g| g != 0))
     }
 
-    /// Horizontal advance width for a character, in font units.
-    /// `None` if the character is not covered by this font's cmap.
+    /// Horizontal advance width for a character, in font units, at this id's
+    /// [`FontStore::advance_scale`]. `None` if the character is not covered by
+    /// this font's cmap.
     pub fn advance_width(&self, id: FontId, ch: char) -> Result<Option<f32>, FontError> {
         let entry = self.char_entry(id, ch)?;
         if entry.mapped.is_none() {
             return Ok(None);
         }
-        Ok(entry.advance)
+        let scale = self.advance_scale(id)?;
+        Ok(entry.advance.map(|advance| advance * scale))
     }
 
     /// Whether the font's cmap covers `ch`.
@@ -404,6 +526,15 @@ impl FontStore {
 
     fn entry(&self, id: FontId) -> Result<&FontEntry, FontError> {
         self.fonts.get(id.0 as usize).ok_or(FontError::UnknownFont)
+    }
+
+    /// Entry holding `id`'s bytes: itself, or the face a measurement view
+    /// stands in for.
+    fn byte_entry(&self, id: FontId) -> Result<&FontEntry, FontError> {
+        match self.entry(id)?.bytes_of {
+            Some(base) => self.fonts.get(base).ok_or(FontError::UnknownFont),
+            None => self.entry(id),
+        }
     }
 
     // registration already proved the bytes parse, so this cannot fail

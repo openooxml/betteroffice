@@ -1,6 +1,7 @@
 //! ast -> formula text; printing a parsed formula and re-parsing it yields an
 //! equivalent ast.
 
+use crate::TableSpec;
 use crate::parser::{BinaryOp, Expr, UnaryOp};
 use xlsx_model::CellRef;
 
@@ -76,6 +77,8 @@ impl Expr {
         match self {
             Expr::Number(n) => n.to_string(),
             Expr::Text(t) => format!("\"{}\"", t.replace('"', "\"\"")),
+            Expr::Literal(value) => literal(value),
+            Expr::ArrayLiteral { cols, values } => array_literal(*cols, values),
             Expr::Bool(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
             Expr::Error(e) => e.as_str().to_string(),
             Expr::Ref { sheet, cell } => format!("{}{}", sheet_prefix(sheet), cell.to_a1()),
@@ -85,6 +88,10 @@ impl Expr {
             Expr::ColumnRange { sheet, range } => {
                 format!("{}{}", sheet_prefix(sheet), range.to_a1())
             }
+            Expr::RowRange { sheet, range } => {
+                format!("{}{}", sheet_prefix(sheet), range.to_a1())
+            }
+            Expr::TableRef { table, spec } => format!("{table}{}", table_spec(spec)),
             Expr::Name { scope, name } => format!("{}{name}", sheet_prefix(scope)),
             Expr::Unary { op, expr } => {
                 // 6 > every binary bp: unary minus binds tighter than all binary ops
@@ -95,18 +102,76 @@ impl Expr {
                 }
             }
             Expr::Percent(expr) => format!("{}%", expr.print(6)),
+            // 7 > every other bp: `:` binds tighter than anything around it
+            Expr::RangeJoin { start, end } => format!("{}:{}", start.print(7), end.print(7)),
             Expr::Binary { op, lhs, rhs } => {
                 let bp = binary_bp(op);
                 // left-associative: the right child needs parens at equal bp
                 let s = format!("{}{}{}", lhs.print(bp), binary_token(op), rhs.print(bp + 1));
                 if bp < parent_bp { format!("({s})") } else { s }
             }
-            Expr::FuncCall { name, args } => {
+            Expr::FuncCall { name, args, .. } => {
                 let inner: Vec<String> = args.iter().map(|a| a.print(0)).collect();
                 format!("{}({})", name, inner.join(","))
             }
         }
     }
+}
+
+/// print the bracket body in the always-bracketed form, which re-parses to the
+/// same spec whatever the source used.
+fn table_spec(spec: &TableSpec) -> String {
+    let mut items: Vec<String> = spec
+        .bands
+        .iter()
+        .map(|band| format!("[{}]", band.keyword()))
+        .collect();
+    let columns: Vec<String> = spec
+        .first_column
+        .iter()
+        .chain(spec.last_column.iter())
+        .map(|name| format!("[{}]", escape_table_name(name)))
+        .collect();
+    let span = columns.join(":");
+    if !span.is_empty() {
+        items.push(span);
+    }
+    format!("[{}]", items.join(","))
+}
+
+fn escape_table_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for c in name.chars() {
+        if matches!(c, '\'' | '[' | ']' | '#' | '@') {
+            out.push('\'');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// print a spliced value the way the same literal would be written.
+fn literal(value: &xlsx_model::CellValue) -> String {
+    match value {
+        xlsx_model::CellValue::Empty => "\"\"".to_string(),
+        xlsx_model::CellValue::Number { value } => crate::eval::format_number(*value),
+        xlsx_model::CellValue::Text { value } => format!("\"{}\"", value.replace('"', "\"\"")),
+        xlsx_model::CellValue::Bool { value } => if *value { "TRUE" } else { "FALSE" }.to_string(),
+        xlsx_model::CellValue::Error { value } => value.as_str().to_string(),
+    }
+}
+
+fn array_literal(cols: usize, values: &[Expr]) -> String {
+    let rows: Vec<String> = values
+        .chunks(cols.max(1))
+        .map(|row| {
+            row.iter()
+                .map(|value| value.print(0))
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .collect();
+    format!("{{{}}}", rows.join(";"))
 }
 
 #[cfg(test)]
@@ -141,6 +206,13 @@ mod tests {
             "1-2-3",
             "2^3^2",
             "-(1+2)",
+            "A1:INDEX(A1:A9,3)",
+            "MIN(AA9:INDEX(AA9:AH9,MATCH(4,AI9:AP9,0)))",
+            "SUM($B$4:OFFSET($B$4,0,2))",
+            "INDEX(A:A,1):INDEX(A:A,4)",
+            "-A1:B2",
+            "Sheet1!A1:INDEX(Sheet1!A:A,2)",
+            "A1:B2:C3",
         ] {
             round_trips(src);
         }

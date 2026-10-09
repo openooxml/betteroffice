@@ -10,6 +10,7 @@
     "noEmit": true,
     "strict": true,
     "ignoreDeprecations": "6.0",
+    "types": ["bun"],
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,

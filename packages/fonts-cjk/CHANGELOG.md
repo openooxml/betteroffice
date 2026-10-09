@@ -1,5 +1,15 @@
 # @betteroffice/fonts-cjk
 
+## 0.4.0
+
+## 0.3.0
+
+## 0.2.0
+
+### Patch Changes
+
+- faa81f3: The version moves in step with `@betteroffice/fonts`; the font binaries are unchanged.
+
 ## 0.1.0
 
 ### Minor Changes

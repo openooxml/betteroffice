@@ -19,6 +19,15 @@ export interface PositionCoordinates {
   height: number;
 }
 
+/** A caret position within a page's body, header, footer, or note. */
+export interface PointPosition {
+  position: number;
+  pageIndex: number;
+  region: 'body' | 'header' | 'footer' | 'footnote' | 'endnote';
+  rId?: string;
+  noteId?: number;
+}
+
 /**
  * Context for accessing rendered-page geometry in the paged editor.
  *
@@ -39,6 +48,12 @@ export interface RenderedDomContext {
    * Returns null if the position cannot be found.
    */
   getCoordinatesForPosition(position: number): PositionCoordinates | null;
+
+  /**
+   * Client coordinates to a region-local caret; null outside text or without ready canvas queries.
+   * Optional so contexts written before it keep compiling; a context without it answers null.
+   */
+  getPositionAtPoint?(clientX: number, clientY: number): PointPosition | null;
 
   /**
    * Find DOM elements that overlap with a display-position range.
@@ -85,6 +100,7 @@ export interface RenderedDomContext {
 
 /**
  * Props passed to plugin panel components (framework-agnostic base).
+ * @deprecated Use `DocxPluginPanel` from `@betteroffice/docx-react`.
  */
 export interface PluginPanelProps<TState = unknown> {
   /** Current serializer-facing document snapshot. */
@@ -111,6 +127,7 @@ export interface PluginPanelProps<TState = unknown> {
 
 /**
  * Configuration for plugin panel rendering.
+ * @deprecated Use `DocxPluginPanel` from `@betteroffice/docx-react`.
  */
 export interface PanelConfig {
   /** Where to render the panel */
@@ -145,6 +162,7 @@ export interface PanelConfig {
  *
  * Framework adapters (ReactEditorPlugin, VueEditorPlugin) extend this
  * with their own Panel component type and renderOverlay function.
+ * @deprecated Use `defineDocxPlugin` and the `plugins` prop of `@betteroffice/docx-react`.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export interface EditorPluginCore<TState = any> {
@@ -209,6 +227,7 @@ export interface SidebarItem {
 
 /**
  * Context provided to plugins when computing sidebar items.
+ * @deprecated Use `DocxPluginSidebarItem` from `@betteroffice/docx-react`.
  */
 export interface SidebarItemContext {
   document: Document | null;

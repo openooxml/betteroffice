@@ -1,9 +1,18 @@
 {
   "_lang": "tr",
+  "worker": {
+    "previousRecovery": null,
+    "preparing": "Düzenleyici hazırlanıyor. Düzenleme kısa süre içinde kullanılabilir olacak.",
+    "failed": "Düzenleme kullanılamıyor. Kurtarılan sunuyu indirin.",
+    "disabled": "Bu özellik bu düzenleme modunda kullanılamıyor.",
+    "recovery": null,
+    "image": null
+  },
   "toolbar": {
     "label": null,
     "save": "Kaydet",
     "exportPng": null,
+    "present": "Sun",
     "historyLabel": null,
     "undo": null,
     "redo": null,
@@ -79,7 +88,13 @@
       "upArrow": null,
       "downArrow": null,
       "chevron": null
-    }
+    },
+    "insertImage": null,
+    "arrange": null,
+    "bringToFront": null,
+    "bringForward": null,
+    "sendBackward": null,
+    "sendToBack": null
   },
   "slides": {
     "panelLabel": null,
@@ -94,9 +109,104 @@
     "openPrompt": null
   },
   "objects": {
-    "defaultTextBoxName": null
+    "defaultTextBoxName": null,
+    "defaultPictureName": null
+  },
+  "presentation": {
+    "label": "Slayt gösterisi",
+    "exit": "Sunudan çık (Esc)",
+    "slideCounter": "{current} / {total}",
+    "previousSlide": "Önceki slayt",
+    "nextSlide": "Sonraki slayt"
+  },
+  "notes": {
+    "panelLabel": "Konuşmacı notları",
+    "placeholder": "Konuşmacı notu ekle…"
   },
   "errors": {
     "decodeSlideImage": null
+  },
+  "proposals": {
+    "title": "Aracı önerileri",
+    "close": "Kapat",
+    "empty": "İncelenmeyi bekleyen değişiklik yok.",
+    "preview": "Değişiklikleri önizle",
+    "previewTitle": "Önerilen değişiklikleri incele",
+    "before": "Geçerli slayt",
+    "after": "Önerilen slayt",
+    "accept": "Öneriyi kabul et",
+    "reject": "Reddet",
+    "force": "Güncellenmiş öneriyi uygula",
+    "blank": "Boş",
+    "target": "Slayt {slide} · {name}",
+    "targetLabel": "Değişiklik",
+    "targetMissing": "Hedef artık kullanılamıyor",
+    "stale": "Öneri oluşturulduktan sonra bu nesneler değişti. Uygulamadan önce geçerli değişiklikleri önizle.",
+    "stalePreview": "Bu önizleme güncellenmiş slaydı kullanıyor. Uygulama, değişen hedeflerin üzerine yazacak.",
+    "geometry": "Konum ve boyut (x, y, genişlik, yükseklik)",
+    "appearance": "Görünüm veya metin biçimlendirmesi değişti",
+    "changedAgain": "Hedef yine değişti. Uygulamadan önce yenilenen önizlemeyi incele.",
+    "canvasTitle": "Bu slayttaki değişiklikler",
+    "editSlide": "Slaydı düzenle",
+    "showDiff": "Değişiklikleri göster",
+    "details": "İnceleme ayrıntıları",
+    "removed": "Kaldırıldı",
+    "added": "Eklendi",
+    "reviewHint": "İnceleme modu · değişiklikler kabul edilince uygulanır",
+    "canvasStale": "Hedefler değişti. Uygulamadan önce güncellenmiş önizlemeyi incelemek için inceleme ayrıntılarını aç.",
+    "previousPosition": "Önceki",
+    "proposedPosition": "Önerilen",
+    "loadingDiff": "Değişiklikler yükleniyor…"
+  },
+  "commands": {
+    "moreControls": "Diğer denetimler",
+    "selectTool": "Seç",
+    "fontSizeStep": "Yazı tipi boyutunu değiştir",
+    "customFontSize": "Özel boyut…",
+    "fontSizePoints": "Punto cinsinden boyut",
+    "customColor": "Özel renk…",
+    "hexColor": "Onaltılık renk",
+    "apply": "Uygula",
+    "cancel": "İptal",
+    "reasons": {
+      "editorUnavailable": "Düzenleyici hazır değil.",
+      "documentLoading": "Sunu hâlâ açılıyor.",
+      "noDocument": "Açık sunu yok.",
+      "readOnly": "Sunu salt okunur.",
+      "nothingToUndo": "Geri alınacak bir şey yok.",
+      "nothingToRedo": "Yinelenecek bir şey yok.",
+      "textSelectionRequired": "Önce metin veya bir metin kutusu seçin.",
+      "shapeRequired": "Önce bir şekil seçin.",
+      "objectRequired": "Önce bir şekil veya resim seçin.",
+      "slideRequired": "Önce bir slayt ekleyin.",
+      "unsupportedSelection": "Bu, geçerli seçime uygulanamaz.",
+      "invalidLayout": "Bu düzen bu sunuda kullanılamıyor.",
+      "invalidAdjustment": "Bu ayar bu şekil için kullanılamıyor.",
+      "zOrderBoundary": "Nesne bu yönde daha fazla hareket edemez.",
+      "reviewActive": "Önce öneri incelemesinden çıkın.",
+      "previewPending": "Değişiklik önizlemesi hâlâ yükleniyor.",
+      "previewFailed": "Değişiklik önizlemesi gösterilemedi.",
+      "proposalStale": "Önerinin hedefleri değişti. Uygulamadan önce güncellenen önizlemeyi inceleyin.",
+      "proposalNotFound": "Bu öneri artık beklemede değil.",
+      "proposalsUnavailable": "Öneriler kullanılamıyor.",
+      "hostDisabled": "Bu işlem burada kullanılamıyor.",
+      "unsupportedCommand": "Bu komut desteklenmiyor.",
+      "invalidArguments": "Komut geçersiz bağımsız değişkenler aldı.",
+      "inputFailed": "Önceki giriş uygulanamadı.",
+      "documentReplaced": "Sunu değiştirildi.",
+      "targetChanged": "Komut çalışmadan önce seçim değişti.",
+      "gestureActive": "Önce işaretçi hareketini tamamlayın.",
+      "commandFailed": "Komut başarısız oldu.",
+      "permissionDenied": "Ana uygulama bu eklentinin bu komutu kullanmasına izin vermedi.",
+      "unsupportedPolicy": "Eklentiler bu komutu henüz çalıştıramaz. Bunun yerine bir düzenleme toplu işlemi kullanın.",
+      "pluginUnavailable": "Eklenti artık etkin değil.",
+      "aborted": "Eklenti eylemi komut çalışmadan önce iptal edildi."
+    }
+  },
+  "plugins": {
+    "toolbarGroup": "Eklentiler",
+    "panelTabs": "Eklenti panelleri",
+    "collapsePanel": "{title} daralt",
+    "expandPanel": "{title} genişlet"
   }
 }

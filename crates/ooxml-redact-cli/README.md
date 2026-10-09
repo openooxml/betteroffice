@@ -1,6 +1,6 @@
 # BetterOffice redaction CLI
 
-Redact a local DOCX, XLSX, or PPTX file:
+Redact a local DOCX, XLSX, PPTX, VSDX, or VSTX file:
 
 ```sh
 cargo run -p betteroffice-redact-cli -- report.docx -o report.redacted.docx

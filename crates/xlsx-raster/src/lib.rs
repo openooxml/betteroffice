@@ -200,7 +200,7 @@ fn paint_line(
     y2: f32,
     width: f32,
     color: &str,
-    style: &Option<String>,
+    style: &Option<std::sync::Arc<str>>,
     transform: Transform,
     mask: Option<&Mask>,
 ) -> Result<(), String> {

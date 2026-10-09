@@ -6,6 +6,7 @@ use crate::mask::{TextMasker, placeholder};
 use crate::rels::{self, attribute_local, is_unqualified};
 use crate::schema;
 use crate::styles::StyleMap;
+use crate::visio;
 use crate::{Format, RedactError, RedactionReport};
 
 #[cfg(test)]
@@ -45,6 +46,7 @@ pub(crate) fn redact_xml_with_styles(
         current_style: None,
         cell_type: None,
         custom_property: 0,
+        visio_sections: Vec::new(),
         masker,
     };
     let mut skipped_depth = 0;
@@ -91,7 +93,7 @@ pub(crate) fn redact_xml_with_styles(
             && let Some(value) = fixed_metadata_value(path, &reader, start.name())
         {
             let local = local_name(start.local_name().as_ref());
-            let rewritten = rewrite_start(&reader, start.to_owned(), &local, &mut state)?;
+            let rewritten = rewrite_start(&reader, start.to_owned(), &local, &mut state, true)?;
             writer
                 .write_event(Event::Start(rewritten.borrow()))
                 .map_err(|error| xml_error(path, error))?;
@@ -115,7 +117,7 @@ pub(crate) fn redact_xml_with_styles(
                     skipped_depth = 1;
                     continue;
                 }
-                let rewritten = rewrite_start(&reader, start, &local, &mut state)?;
+                let rewritten = rewrite_start(&reader, start, &local, &mut state, false)?;
                 stack.push(local);
                 writer
                     .write_event(Event::Start(rewritten))
@@ -127,7 +129,7 @@ pub(crate) fn redact_xml_with_styles(
                     continue;
                 }
                 let empty_style = local == "style" && word_node(&reader, start.name());
-                let rewritten = rewrite_start(&reader, start, &local, &mut state)?;
+                let rewritten = rewrite_start(&reader, start, &local, &mut state, true)?;
                 if empty_style {
                     state.current_style = None;
                 }
@@ -143,6 +145,14 @@ pub(crate) fn redact_xml_with_styles(
                     && word_node(&reader, end.name())
                 {
                     state.current_style = None;
+                }
+                if visio::is_visio(format)
+                    && local_name(end.name().local_name().as_ref()) == "Section"
+                    && matches!(reader.resolver().resolve_element(end.name()).0,
+                        ResolveResult::Bound(ns) if ns.as_ref() == visio::NAMESPACE)
+                    && state.visio_sections.pop().is_none()
+                {
+                    return Err(visio::ambiguous(path, "unbalanced Section end"));
                 }
                 stack.pop();
                 writer
@@ -244,6 +254,7 @@ struct RewriteState<'a> {
     current_style: Option<String>,
     cell_type: Option<String>,
     custom_property: usize,
+    visio_sections: Vec<Option<String>>,
     masker: &'a mut TextMasker,
 }
 
@@ -252,6 +263,7 @@ fn rewrite_start(
     start: BytesStart<'_>,
     element: &str,
     state: &mut RewriteState<'_>,
+    is_empty: bool,
 ) -> Result<BytesStart<'static>, RedactError> {
     let format = state.format;
     let path = state.path;
@@ -288,6 +300,28 @@ fn rewrite_start(
             .map(|(_, value)| value.clone());
     }
 
+    let visio_active = visio::is_visio(format);
+    let visio_node = matches!(reader.resolver().resolve_element(start.name()).0,
+        ResolveResult::Bound(ns) if ns.as_ref() == visio::NAMESPACE);
+    let drawingml_node = matches!(reader.resolver().resolve_element(start.name()).0,
+        ResolveResult::Bound(ns) if matches!(ns.as_ref(),
+            b"http://schemas.openxmlformats.org/drawingml/2006/main" | b"http://purl.oclc.org/ooxml/drawingml/main"));
+    if visio_active && visio_node && element == "Section" {
+        if !state.visio_sections.is_empty() {
+            return Err(visio::ambiguous(path, "nested Section"));
+        }
+        if !is_empty {
+            state
+                .visio_sections
+                .push(visio::attribute_named(&attributes, "N"));
+        }
+    }
+    let visio_section = state
+        .visio_sections
+        .last()
+        .map(|name| name.as_deref().unwrap_or(""));
+    let visio_cell = visio::attribute_named(&attributes, "N");
+    let visio_cached = visio::attribute_named(&attributes, "V");
     let (relationship, external) = relationship_mode(path, element, &attributes);
     let mut wrote_target_mode = false;
     if format == Format::Xlsx && element == "c" {
@@ -355,11 +389,68 @@ fn rewrite_start(
                     }
                     .to_owned(),
                 )
+            } else if visio_active
+                && visio::package_plumbing(path)
+                && key != "xmlns"
+                && !key.starts_with("xmlns:")
+            {
+                if visio::preserve_package_attribute(element, &key) {
+                    None
+                } else {
+                    Some(state.masker.replace(&value)?)
+                }
+            } else if visio_active
+                && !visio::package_plumbing(path)
+                && key != "xmlns"
+                && !key.starts_with("xmlns:")
+            {
+                let is_relationship = matches!(
+                    reader.resolver().resolve_attribute(QName(key.as_bytes())).0,
+                    ResolveResult::Bound(ns) if visio::relationship_namespace(ns.as_ref())
+                );
+                let preserve = if visio_node {
+                    visio::preserve_attribute(
+                        element,
+                        &key,
+                        &value,
+                        visio_section,
+                        visio_cell.as_deref(),
+                        is_relationship,
+                    )
+                } else {
+                    visio::preserve_other_attribute(
+                        element,
+                        &key,
+                        &value,
+                        drawingml_node,
+                        is_relationship,
+                    )
+                };
+                if preserve {
+                    None
+                } else {
+                    Some(if visio_node && element == "Cell" && key == "F" {
+                        visio::cached_formula(
+                            visio_cell.as_deref(),
+                            visio_section,
+                            visio_cached.as_deref(),
+                        )
+                    } else {
+                        visio::redacted_value(element, &key, &value, state.masker)?
+                    })
+                }
             } else if !key.starts_with("xmlns")
                 && !(schema && is_unqualified(&key) && schema::preserve_attribute(element, local))
-                && sensitive_attribute(format, path, element, local, &value)
+                && let Some(kind) = sensitive_attribute_kind(format, path, element, local, &value)
             {
-                Some(state.masker.replace(&value)?)
+                Some(match kind {
+                    Replacement::Text => state.masker.replace(&value)?,
+                    Replacement::Number => numeric_placeholder(&value),
+                    Replacement::Formula => "0".to_owned(),
+                    Replacement::Date => "1970-01-01T00:00:00Z".to_owned(),
+                    Replacement::Boolean => "false".to_owned(),
+                    Replacement::Error => "#N/A".to_owned(),
+                })
             } else {
                 None
             };
@@ -470,6 +561,34 @@ fn replacement_kind(
 ) -> Option<Replacement> {
     let element = stack.last().map(String::as_str)?;
     let lower = path.to_ascii_lowercase();
+    if visio::is_visio(format) {
+        return Some(match (lower.as_str(), element) {
+            ("docprops/core.xml", "created" | "modified" | "lastPrinted")
+            | ("docprops/custom.xml", "date" | "filetime") => Replacement::Date,
+            ("docprops/core.xml", "revision")
+            | (
+                "docprops/app.xml",
+                "TotalTime"
+                | "Pages"
+                | "Words"
+                | "Characters"
+                | "CharactersWithSpaces"
+                | "Lines"
+                | "Paragraphs"
+                | "Slides"
+                | "Notes"
+                | "HiddenSlides"
+                | "MMClips"
+                | "DocSecurity",
+            ) => Replacement::Number,
+            ("docprops/custom.xml", "bool")
+            | (
+                "docprops/app.xml",
+                "ScaleCrop" | "LinksUpToDate" | "SharedDoc" | "HyperlinksChanged",
+            ) => Replacement::Boolean,
+            _ => Replacement::Text,
+        });
+    }
     if lower.ends_with(".rels") {
         return None;
     }
@@ -530,15 +649,21 @@ fn replacement_kind(
             }),
         Format::Pptx => matches!(element, "t" | "text").then_some(Replacement::Text),
         Format::Xlsx => match element {
-            "t" | "author" | "oddHeader" | "oddFooter" | "evenHeader" | "evenFooter"
-            | "firstHeader" | "firstFooter" => Some(Replacement::Text),
-            "f" | "formula1" | "formula2" | "definedName" => Some(Replacement::Formula),
+            "t" | "author" | "text" | "rvb" | "oddHeader" | "oddFooter" | "evenHeader"
+            | "evenFooter" | "firstHeader" | "firstFooter" => Some(Replacement::Text),
+            "f"
+            | "formula"
+            | "formula1"
+            | "formula2"
+            | "definedName"
+            | "calculatedColumnFormula" => Some(Replacement::Formula),
             "v" if cell_type == Some("s") => None,
             "v" if matches!(cell_type, Some("str" | "inlineStr")) => Some(Replacement::Text),
             "v" if cell_type == Some("e") => Some(Replacement::Error),
             "v" => Some(Replacement::Number),
             _ => None,
         },
+        Format::Vsdx | Format::Vstx => Some(Replacement::Text),
         Format::Auto => None,
     }
 }
@@ -561,59 +686,123 @@ fn replace_text(
     })
 }
 
-fn sensitive_attribute(
+fn sensitive_attribute_kind(
     format: Format,
     path: &str,
     element: &str,
     attribute: &str,
     value: &str,
-) -> bool {
+) -> Option<Replacement> {
     let lower = path.to_ascii_lowercase();
     if lower.ends_with(".rels") {
-        return false;
+        return None;
     }
     if lower == "docprops/custom.xml" && attribute == "name" {
-        return true;
+        return Some(Replacement::Text);
     }
     if lower.starts_with("customxml/") && !lower.contains("itemprops") {
-        return !matches!(attribute, "id" | "Id");
+        return (!matches!(attribute, "id" | "Id")).then_some(Replacement::Text);
     }
     if matches!(element, "docPr" | "cNvPr") && matches!(attribute, "name" | "descr" | "title") {
-        return true;
+        return Some(Replacement::Text);
     }
     if element == "textpath" && attribute == "string" {
-        return true;
+        return Some(Replacement::Text);
     }
     match format {
-        Format::Docx => {
-            matches!(attribute, "author" | "initials")
-                || element == "fldSimple" && attribute == "instr"
-                || element == "hyperlink" && matches!(attribute, "tooltip" | "tgtFrame")
-                || matches!(element, "alias" | "tag" | "docVar")
-                    && matches!(attribute, "name" | "val")
-        }
+        Format::Docx => (matches!(attribute, "author" | "initials")
+            || element == "fldSimple" && attribute == "instr"
+            || element == "hyperlink" && matches!(attribute, "tooltip" | "tgtFrame")
+            || matches!(element, "alias" | "tag" | "docVar")
+                && matches!(attribute, "name" | "val"))
+        .then_some(Replacement::Text),
         Format::Xlsx => {
-            element == "sheet" && attribute == "name"
+            if element == "definedName" && attribute == "refersTo"
+                || element == "calculatedItem" && attribute == "formula"
+                || element == "tableColumn" && attribute == "totalsRowFormula"
+            {
+                return Some(Replacement::Formula);
+            }
+            if element == "threadedComment" && attribute == "dT" {
+                return Some(Replacement::Date);
+            }
+            if matches!(element, "s" | "n" | "d" | "e" | "b") && attribute == "v" {
+                return Some(match element {
+                    "n" => Replacement::Number,
+                    "d" => Replacement::Date,
+                    "e" => Replacement::Error,
+                    "b" => Replacement::Boolean,
+                    _ => Replacement::Text,
+                });
+            }
+            (element == "sheet" && attribute == "name"
                 || element == "definedName" && attribute == "name" && !value.starts_with("_xlnm.")
                 || matches!(element, "table" | "tableColumn")
                     && matches!(attribute, "name" | "displayName")
+                || element == "table" && attribute == "comment"
+                || element == "tableColumn" && attribute == "totalsRowLabel"
+                || element == "queryTable" && attribute == "name"
+                || element == "queryTableField" && attribute == "name"
                 || element == "dataValidation"
                     && matches!(attribute, "prompt" | "promptTitle" | "error" | "errorTitle")
-                || element == "hyperlink" && matches!(attribute, "display" | "tooltip" | "location")
-                || element == "filter" && attribute == "val"
+                || element == "hyperlink"
+                    && matches!(attribute, "display" | "tooltip" | "location")
+                || matches!(element, "filter" | "customFilter") && attribute == "val"
+                || element == "cfRule" && attribute == "text"
+                || element == "person" && matches!(attribute, "displayName" | "userId")
+                || element == "cacheField" && matches!(attribute, "name" | "caption")
+                || element == "cacheHierarchy" && attribute == "caption"
+                || element == "sharedItems" && attribute == "caption"
+                || element == "pivotTableDefinition"
+                    && matches!(
+                        attribute,
+                        "name"
+                            | "dataCaption"
+                            | "grandTotalCaption"
+                            | "rowHeaderCaption"
+                            | "colHeaderCaption"
+                            | "errorCaption"
+                            | "missingCaption"
+                    )
+                || element == "pivotTable" && attribute == "name"
+                || element == "slicerCacheDefinition" && attribute == "name"
+                || element == "dataField" && attribute == "name"
+                || element == "pivotField" && matches!(attribute, "name" | "subtotalCaption")
+                || element == "pageField" && matches!(attribute, "name" | "cap")
+                || element == "calculatedMember" && matches!(attribute, "name" | "mname" | "mdx")
+                || element == "i" && attribute == "c"
+                || element == "k" && attribute == "n"
+                || element == "connection" && matches!(attribute, "name" | "description")
+                || element == "dbPr" && matches!(attribute, "connection" | "command")
+                || element == "textPr" && attribute == "sourceFile"
+                || element == "webPr" && matches!(attribute, "url" | "post")
+                || element == "parameter" && matches!(attribute, "name" | "prompt")
+                || element == "rangePr" && attribute == "sourceName"
+                || element == "worksheetSource" && attribute == "sheet"
+                || element == "sheetName" && attribute == "val"
+                || element == "ddeLink" && matches!(attribute, "ddeService" | "ddeTopic")
+                || element == "ddeItem" && attribute == "name"
+                || element == "oleLink" && attribute == "progId"
+                || element == "oleItem" && attribute == "name"
+                || element == "oleObject" && matches!(attribute, "progId" | "link")
+                || element == "control" && attribute == "name"
+                || element == "slicer" && matches!(attribute, "name" | "caption")
+                || element == "timeline" && matches!(attribute, "name" | "caption")
+                || element == "scenario" && matches!(attribute, "name" | "comment" | "user")
+                || element == "webPublishItem" && matches!(attribute, "title" | "destinationFile"))
+            .then_some(Replacement::Text)
         }
-        Format::Pptx => {
-            element == "cSld" && attribute == "name"
-                || element == "sldLayout" && attribute == "matchingName"
-                || matches!(element, "theme" | "clrScheme" | "fontScheme" | "fmtScheme")
-                    && attribute == "name"
-                || element == "tblStyle" && attribute == "styleName"
-                || element == "cmAuthor" && matches!(attribute, "name" | "initials")
-                || element == "author" && matches!(attribute, "name" | "initials" | "userId")
-                || element == "tag" && matches!(attribute, "name" | "val")
-                || element == "custShow" && attribute == "name"
-        }
-        Format::Auto => false,
+        Format::Pptx => (element == "cSld" && attribute == "name"
+            || element == "sldLayout" && attribute == "matchingName"
+            || matches!(element, "theme" | "clrScheme" | "fontScheme" | "fmtScheme")
+                && attribute == "name"
+            || element == "tblStyle" && attribute == "styleName"
+            || element == "cmAuthor" && matches!(attribute, "name" | "initials")
+            || element == "author" && matches!(attribute, "name" | "initials" | "userId")
+            || element == "tag" && matches!(attribute, "name" | "val")
+            || element == "custShow" && attribute == "name")
+            .then_some(Replacement::Text),
+        Format::Vsdx | Format::Vstx | Format::Auto => None,
     }
 }
 

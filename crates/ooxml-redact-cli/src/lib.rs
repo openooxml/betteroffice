@@ -92,6 +92,8 @@ fn content_type(format: Format) -> &'static str {
         Format::Docx => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         Format::Xlsx => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         Format::Pptx => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        Format::Vsdx => "application/vnd.ms-visio.drawing",
+        Format::Vstx => "application/vnd.ms-visio.template",
         Format::Auto => "application/octet-stream",
     }
 }
@@ -207,13 +209,43 @@ mod tests {
     }
 
     #[test]
-    fn refuses_visio_before_producing_uploadable_bytes() {
+    fn local_visio_redaction_uses_the_detected_extension_and_content_type() {
+        for (source, format, mime) in [
+            (
+                include_bytes!("../../../apps/demo/public/betteroffice-demo.vsdx").as_slice(),
+                Format::Vsdx,
+                "application/vnd.ms-visio.drawing",
+            ),
+            (
+                include_bytes!("../../vsdx-parse/tests/fixtures/template.vstx").as_slice(),
+                Format::Vstx,
+                "application/vnd.ms-visio.template",
+            ),
+        ] {
+            let redacted = redact_local(source).unwrap();
+            assert_eq!(redacted.format(), format);
+            assert_eq!(content_type(redacted.format()), mime);
+            assert_ne!(redacted.bytes(), source);
+            assert!(
+                ooxml_opc::sanitize_package_for_format(
+                    redacted.bytes(),
+                    format.extension().unwrap()
+                )
+                .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_visio_without_package_metadata() {
         let source = ooxml_opc::rezip_parts(&[(
             "visio/document.xml".to_owned(),
             br#"<VisioDocument><CommentList><CommentEntry Author="PRIVATE_AUTHOR">PRIVATE_COMMENT</CommentEntry></CommentList></VisioDocument>"#.to_vec(),
         )]).unwrap();
-        let error = redact_local(&source).err().expect("Visio must be rejected");
-        assert!(error.contains("Visio redaction is not supported"));
+        let error = redact_local(&source)
+            .err()
+            .expect("missing package metadata must be rejected");
+        assert!(error.contains("unsupported or ambiguous Visio format"));
     }
 
     fn fixture() -> Vec<u8> {
@@ -228,5 +260,51 @@ mod tests {
             ),
         ])
         .unwrap()
+    }
+
+    #[test]
+    fn local_redaction_removes_xlsx_person_and_pivot_secrets() {
+        let input = ooxml_opc::rezip_parts(&[
+            (
+                "[Content_Types].xml".to_owned(),
+                br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/></Types>"#.to_vec(),
+            ),
+            (
+                "xl/workbook.xml".to_owned(),
+                br#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheets/></workbook>"#.to_vec(),
+            ),
+            (
+                "xl/persons/person.xml".to_owned(),
+                br#"<personList xmlns="http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments"><person displayName="CLI_SECRET_PERSON" id="{11111111-1111-1111-1111-111111111111}" userId="cli.secret@example.com" providerId="AD"/></personList>"#.to_vec(),
+            ),
+            (
+                "xl/pivotCache/pivotCacheDefinition1.xml".to_owned(),
+                br#"<pivotCacheDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cacheFields count="1"><cacheField name="CLI_SECRET_FIELD" numFmtId="0"><sharedItems count="1"><s v="CLI_SECRET_SHARED"/></sharedItems></cacheField></cacheFields></pivotCacheDefinition>"#.to_vec(),
+            ),
+        ])
+        .unwrap();
+        let redacted = redact_local(&input).unwrap();
+        assert_eq!(redacted.format(), Format::Xlsx);
+        let parts = ooxml_opc::unzip_parts(redacted.bytes()).unwrap();
+        for secret in [
+            "CLI_SECRET_PERSON",
+            "cli.secret@example.com",
+            "CLI_SECRET_FIELD",
+            "CLI_SECRET_SHARED",
+        ] {
+            assert!(
+                parts
+                    .iter()
+                    .all(|(_, bytes)| !String::from_utf8_lossy(bytes).contains(secret)),
+                "secret survived: {secret}"
+            );
+        }
+        let persons = parts
+            .iter()
+            .find(|(path, _)| path == "xl/persons/person.xml")
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&persons.1).contains("{11111111-1111-1111-1111-111111111111}")
+        );
     }
 }

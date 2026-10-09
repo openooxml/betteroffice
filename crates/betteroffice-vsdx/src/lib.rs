@@ -6,12 +6,23 @@ use vsdx_eval::{
 pub use vsdx_parse::StructuralEdit;
 use vsdx_parse::{Cell, ParseLimits, Shape, VsdxError, VsdxPackage};
 pub use vsdx_parse::{CellLocator, CellRow, CellSheet, MutationGesture, SemanticCellEdit};
-use vsdx_resolve::{PageConnectivity, ResolveError, ResolvedShape, Resolver};
+pub use vsdx_resolve::{
+    PROPERTY_SECTION, ShapeDataProperty, ShapeDataType, ShapeDataValue,
+    shape_data as resolve_shape_data,
+};
+use vsdx_resolve::{
+    PageConnectivity, PageContainers, ResolveError, ResolvedShape, Resolver, shape_data,
+};
+pub use vsdx_validate::{
+    RULE_CONNECTOR_CROSSING, RULE_DANGLING_CONNECTOR, RULE_EMPTY_SHAPE_DATA, RULE_ISOLATED_SHAPE,
+    RULE_OVERLAPPING_SHAPES, RuleDescriptor, Severity, ValidationIssue, ValidationReport,
+};
 
 #[derive(Debug)]
 pub enum Error {
     Parse(VsdxError),
     Resolve(ResolveError),
+    Render(String),
     Policy(String),
 }
 
@@ -45,6 +56,35 @@ impl Diagram {
     }
     pub fn package(&self) -> &VsdxPackage {
         &self.package
+    }
+    /// Renders every diagram page to a vector PDF with selectable text.
+    pub fn export_pdf(&self) -> Result<Vec<u8>> {
+        vsdx_render::Renderer::default()
+            .export_pdf(&self.package)
+            .map_err(|error| Error::Render(error.to_string()))
+    }
+    /// Renders every diagram page to one SVG string per page, sized from the PageSheet.
+    pub fn export_svg(&self) -> Result<Vec<String>> {
+        vsdx_render::Renderer::default()
+            .export_svg(&self.package)
+            .map_err(|error| Error::Render(error.to_string()))
+    }
+    /// Renders one diagram page to an SVG string sized from the PageSheet.
+    pub fn export_svg_page(&self, page_index: usize) -> Result<String> {
+        vsdx_render::Renderer::default()
+            .export_svg_page(&self.package, page_index)
+            .map_err(|error| Error::Render(error.to_string()))
+    }
+    /// Renders one diagram page to PNG at `scale` times the 96 dpi display list.
+    #[cfg(feature = "raster")]
+    pub fn export_png(&self, page_index: usize, scale: f32) -> Result<vsdx_raster::RenderedPage> {
+        vsdx_raster::render_page(
+            &vsdx_render::Renderer::default(),
+            &self.package,
+            page_index,
+            scale,
+        )
+        .map_err(Error::Render)
     }
     /// Applies formula edits sequentially, recomputing caches and enforcing current locks.
     pub fn save_cell_edits(&self, edits: &[SemanticCellEdit]) -> Result<Vec<u8>> {
@@ -80,6 +120,7 @@ impl Diagram {
                         gesture: edit.gesture,
                         formula: Some(formula),
                         value,
+                        row_type: edit.row_type.clone(),
                     }
                 }
                 MutationOutcome::Refused { reason } | MutationOutcome::Unsupported { reason } => {
@@ -132,6 +173,10 @@ impl Diagram {
             diagram: self,
             part,
         })
+    }
+    /// Runs the read-only default rule set over every page.
+    pub fn validate(&self) -> ValidationReport {
+        vsdx_validate::validate_package(&self.package)
     }
 }
 
@@ -351,6 +396,7 @@ impl MutationContext for PackageMutationContext<'_> {
                 Error::Policy(reason) => format!("cannot evaluate {lock}: {reason}"),
                 Error::Parse(error) => error.to_string(),
                 Error::Resolve(error) => error.to_string(),
+                Error::Render(reason) => reason,
             })?
             .ok_or_else(|| {
                 format!("cannot evaluate {lock}: it is outside the display evaluation profile")
@@ -425,6 +471,14 @@ impl<'a> Page<'a> {
     pub fn connectivity(&self) -> Result<PageConnectivity> {
         Ok(Resolver::new(&self.diagram.package).resolve_page_connectivity(self.part)?)
     }
+    pub fn containers(&self) -> Result<PageContainers> {
+        Ok(Resolver::new(&self.diagram.package).resolve_page_containers(self.part)?)
+    }
+
+    /// Runs the read-only default rule set over this page.
+    pub fn validate(&self) -> Vec<ValidationIssue> {
+        vsdx_validate::validate_page(&self.diagram.package, self.part)
+    }
 }
 
 pub struct ShapeView<'a> {
@@ -439,6 +493,9 @@ impl<'a> ShapeView<'a> {
     pub fn resolved(&self) -> Result<ResolvedShape> {
         Ok(Resolver::new(&self.page.diagram.package)
             .resolve_shape(self.page.part, self.shape.id)?)
+    }
+    pub fn shape_data(&self) -> Result<Vec<ShapeDataProperty>> {
+        Ok(shape_data(&self.resolved()?))
     }
 }
 

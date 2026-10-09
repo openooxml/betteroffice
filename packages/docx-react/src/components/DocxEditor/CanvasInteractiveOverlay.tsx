@@ -12,32 +12,61 @@
  * listener on the overlay root): a synthetic React handler here would fire at
  * the React root, after the canvas host's native pointer routing already moved
  * the caret. Rebuilt whenever the page's display list changes — the same
- * trigger that re-rasters the canvas.
+ * trigger that re-rasters the canvas — and at once, since its buttons carry
+ * the positions and values they dispatch.
  */
 
-import { useEffect, useRef } from 'react';
-import { buildInteractiveOverlayPage, type DisplayPage } from '@betteroffice/docx/layout/render';
+import { useMemo, useRef } from 'react';
+import {
+  buildInteractiveOverlayPage,
+  displayPageRevision,
+  interactiveOverlayHasTabStops,
+  type DisplayPage,
+} from '@betteroffice/docx/layout/render';
+import type { TFunction } from '@betteroffice/docx-i18n';
 import { useTranslation } from '../../i18n';
+import { usePageChrome, type PageChromeHandle } from './usePageChrome';
 
-export function CanvasInteractiveOverlay({ page, zoom = 1 }: { page: DisplayPage; zoom?: number }) {
+const makeOverlay = (page: DisplayPage, t: TFunction): HTMLElement =>
+  buildInteractiveOverlayPage(page, {
+    labels: {
+      control: t('a11y.contentControl'),
+      addRepeatingItem: t('a11y.addRepeatingItem'),
+      removeRepeatingItem: t('a11y.removeRepeatingItem'),
+    },
+  });
+
+export function CanvasInteractiveOverlay({
+  page,
+  zoom = 1,
+  active = true,
+  defer = false,
+  register,
+}: {
+  page: DisplayPage;
+  zoom?: number;
+  /** See {@link CanvasPageMirror}. */
+  active?: boolean;
+  /** The first build may wait for idle time. */
+  defer?: boolean;
+  /** Receives the handle that builds the overlay at once. */
+  register?: (handle: PageChromeHandle | null) => void;
+}) {
   const hostRef = useRef<HTMLDivElement>(null);
   const { t } = useTranslation();
-
-  useEffect(() => {
-    const host = hostRef.current;
-    if (!host) return;
-    const overlay = buildInteractiveOverlayPage(page, {
-      labels: {
-        control: t('a11y.contentControl'),
-        addRepeatingItem: t('a11y.addRepeatingItem'),
-        removeRepeatingItem: t('a11y.removeRepeatingItem'),
-      },
-    });
-    host.replaceChildren(overlay);
-    return () => {
-      host.replaceChildren();
-    };
-  }, [page, t]);
+  // Controls stay built on every page, so Tab and assistive technology reach them.
+  const controls = useMemo(() => interactiveOverlayHasTabStops(page), [page]);
+  usePageChrome(hostRef, {
+    page,
+    t,
+    active: active || controls,
+    defer,
+    rebuildAtOnce: true,
+    // Its buttons carry the positions a shift moves.
+    urgentRevision: displayPageRevision(page),
+    register,
+    make: makeOverlay,
+  });
 
   return (
     <div

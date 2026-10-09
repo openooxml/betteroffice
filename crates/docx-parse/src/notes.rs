@@ -18,6 +18,10 @@ pub struct Note {
     pub custom_root_bindings: Vec<crate::paragraph::RawAttribute>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verbatim_xml: Option<String>,
+    /// The occurrence of the first `w:p` inside `verbatim_xml` in its part,
+    /// when the parse records source ordinals.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_ordinal: Option<u32>,
 }
 
 impl Note {
@@ -43,6 +47,9 @@ pub fn parse_notes(
     let mut notes = Vec::new();
     for element in root.children_named("w", note_name) {
         parser.budget.charge_note(parser.part)?;
+        let Some(id) = element.parse_numeric_attribute(Some("w"), "id", 1.0) else {
+            continue;
+        };
         let note_type = parse_note_type(element.attribute(Some("w"), "type"));
         let content = parser.parse_blocks(element, 0, false)?;
         let custom_root_bindings = if has_foreign_content(element) {
@@ -60,15 +67,18 @@ pub fn parse_notes(
             }
             bound.to_raw_inline_xml()
         });
+        let source_ordinal = verbatim_xml
+            .as_ref()
+            .filter(|_| parser.budget.records_source_ordinals())
+            .and_then(|_| element.first_paragraph_ordinal());
         notes.push(Note {
             story_type: note_name.to_owned(),
-            id: element
-                .parse_numeric_attribute(Some("w"), "id", 1.0)
-                .unwrap_or(0.0),
+            id,
             note_type: note_type.to_owned(),
             content,
             custom_root_bindings,
             verbatim_xml,
+            source_ordinal,
         });
     }
     Ok(notes)
@@ -308,6 +318,25 @@ mod tests {
     }
 
     #[test]
+    fn keeps_note_zero_and_drops_notes_without_an_id() {
+        for (footnotes, name) in [(true, "footnote"), (false, "endnote")] {
+            let notes = parse_story(
+                &format!(
+                    r#"<w:{name}s xmlns:w="w"><w:{name}><w:p/></w:{name}><w:{name} w:id="x"><w:p/></w:{name}><w:{name} w:id="-1" w:type="separator"><w:p/></w:{name}><w:{name} w:id="0" w:type="continuationSeparator"><w:p/></w:{name}></w:{name}s>"#,
+                ),
+                footnotes,
+                &ParseLimits::default(),
+            );
+            assert_eq!(notes.len(), 2);
+            assert_eq!(notes[0].id, -1.0);
+            assert_eq!(notes[0].note_type, "separator");
+            assert_eq!(notes[1].id, 0.0);
+            assert_eq!(notes[1].note_type, "continuationSeparator");
+            assert_eq!(notes[1].content.len(), 1);
+        }
+    }
+
+    #[test]
     fn note_owner_preserves_full_block_order_and_special_type_quirks() {
         let notes = parse_story(
             r#"<w:footnotes xmlns:w="w"><w:footnote w:id="-1"><w:p/></w:footnote><w:footnote w:id="0" w:type="continuationSeparator"><w:p/><w:tbl><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl><w:sdt><w:sdtContent><w:p/></w:sdtContent></w:sdt></w:footnote></w:footnotes>"#,
@@ -352,7 +381,7 @@ mod tests {
         limits.max_notes = 1;
         let mut budget = ParseBudget::new(&limits);
         let document = parse_xml(
-            br#"<w:footnotes xmlns:w="w"><w:footnote w:id="1"/><w:footnote w:id="2"/></w:footnotes>"#,
+            br#"<w:footnotes xmlns:w="w"><w:footnote/><w:footnote w:id="2"/></w:footnotes>"#,
             "word/footnotes.xml",
             &mut budget,
         )

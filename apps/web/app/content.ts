@@ -40,9 +40,9 @@ export const ECOSYSTEMS = [
 
 export const SUITE = {
   label: "Suite",
-  heading: "One suite, three editors",
+  heading: "One suite, four editors",
   prose:
-    "DOCX, XLSX and PPTX editors are published on npm and render inside your app.",
+    "DOCX, XLSX and PPTX editors are published on npm and render inside your app. The VSDX diagram editor is available from source.",
 };
 
 export const EDITORS = [
@@ -61,8 +61,14 @@ export const EDITORS = [
   {
     name: "Slides",
     format: "pptx",
-    desc: "Slide model, masters and shape editing, with browser rendering of supported bitmap-only WMF images.",
+    desc: "Slide model, masters and shape editing on the same shared core.",
     status: "available",
+  },
+  {
+    name: "Diagrams",
+    format: "vsdx",
+    desc: "Source preview: edit diagrams with pan and zoom, update shape data in batches, and export to Word or PowerPoint through Rust. Controls the engine would refuse are disabled rather than offered.",
+    status: "source preview",
   },
 ];
 
@@ -76,61 +82,61 @@ export const PACKAGES_SECTION = {
 export const PACKAGES = [
   {
     name: "@betteroffice/docx",
-    desc: "Framework-free .docx core — parsing, CRDT editing and page layout in Rust, compiled to WebAssembly. Standard legacy horizontal rules render and survive editing and saving. Elliptical pictures render with crops and borders. Unrecognized drawing markup inside runs round-trips verbatim. Other picture presets retain rectangular rendering; soft-edge effects are unsupported. Hidden content is omitted by default and can be revealed through the render options.",
+    desc: "Framework-free .docx core — parsing, CRDT editing and page layout on the Rust engine, with unrecognized drawing markup preserved through editor saves, version-checked atomic text, paragraph and content-control batches, content-control discovery, structured JSON and Markdown export with page references, document comparison into tracked changes, host proposals with reversible accept and reject previews, undoable reanchoring of existing comments, and font loading kept apart between editors on one page.",
   },
   {
     name: "@betteroffice/docx-react",
-    desc: "The full DOCX editor as a React component — toolbar, pages, comments, tracked changes.",
+    desc: "The DOCX editor as a drop-in React component, with host-controlled saving, awaited input flushing, composable toolbar controls, version-checked edit batches, host proposals a read-only viewer can preview, host-owned plugins with explicitly granted access, content-control discovery, page-referenced structured export, and several editors per page.",
   },
   {
     name: "@betteroffice/xlsx",
-    desc: "Framework-free spreadsheet core — parsing, calculation and rendering on the Rust engine.",
+    desc: "Framework-free spreadsheet core — parsing, calculation and rendering on the Rust engine, with version-checked atomic cell batches, anchored JSON and Markdown export, and opt-in operation timings.",
   },
   {
     name: "@betteroffice/xlsx-react",
-    desc: "The spreadsheet editor as a drop-in React component.",
+    desc: "The spreadsheet editor as a drop-in React component, with composable toolbar controls, version-checked edit batches that flush pending input first, and host-owned plugins with explicitly granted access.",
   },
   {
     name: "@betteroffice/pptx",
-    desc: "Framework-free slides core — parsing, editing and rendering on the Rust engine. Custom browser image loaders can use presentationImageBlob for supported bitmap-only WMF wrappers.",
+    desc: "Framework-free slides core — parsing, editing and rendering on the Rust engine, with version-checked atomic edit batches, structured JSON and Markdown export with anchors, opt-in operation timings, manual undo boundaries, comment repositioning, and caret anchors.",
   },
   {
     name: "@betteroffice/pptx-react",
-    desc: "The slides editor as a drop-in React component.",
+    desc: "The slides editor as a drop-in React component, with host-controlled saving, awaited input flushing, pointer position queries, composable toolbar controls, version-checked edit batches, and host-owned plugins with explicitly granted access.",
   },
 ];
 
 export const FOUNDATION = {
-  label: "Foundation",
-  heading: "Built on our own engines",
+  label: "Features",
+  heading: "Office editing for people and agents",
   prose:
-    "BetterOffice is built by OpenOOXML, the open-source project writing native OOXML engines in Rust — parsing, layout, editing and rendering, from the file format up. Owning the whole stack is what makes the output Word-faithful.",
+    "OpenOOXML's Rust engines power every BetterOffice editor, from opening and editing files to layout and rendering. The same engines run in your browser and in headless workflows.",
 };
 
 export const CAPABILITIES = [
   {
-    name: "Own engines",
-    desc: "We build the OOXML engines ourselves, in Rust — from the file format up. No wrapper around someone else's suite.",
+    name: "Documents, spreadsheets, and slides",
+    desc: "Open, edit, render, and save DOCX, XLSX and PPTX files with high fidelity. Native OOXML editing preserves untouched file parts losslessly when round-tripping.",
   },
   {
-    name: "Native OOXML editing",
-    desc: "Documents are edited in their own format. No lossy conversion on open, none on save.",
-  },
-  {
-    name: "Word-faithful output",
-    desc: "What you see is what Word shows — layout, pagination and styling match the original.",
+    name: "Agent editing with human review",
+    desc: "Review attributed agent edits through tracked changes, inline diffs, and before-and-after previews. Accept or reject changes directly in the editor.",
   },
   {
     name: "Real-time collaboration",
-    desc: "The document is a CRDT — concurrent edits merge in the engine, not on a server.",
+    desc: "People and agents edit the same file together, with live cursors and selections. Concurrent changes merge automatically, and offline edits sync when peers reconnect.",
   },
   {
-    name: "Agent-ready",
-    desc: "Runs headless too — parse, edit and render documents server-side or inside agent pipelines.",
+    name: "Undo and redo",
+    desc: "Navigate editing history and undo accepted agent proposals as a single step. DOCX hosts can set explicit boundaries and choose automatic or manual grouping.",
   },
   {
-    name: "Apache 2.0",
-    desc: "Permissive license, developed in the open, self-hostable without exceptions.",
+    name: "Embed or automate",
+    desc: "Drop React editors into your app, build on the framework-free JavaScript cores, or use Rust and Python APIs for headless processing and agent workflows. DOCX paragraphs with saved Word IDs resolve to the same anchor after reopening. DOCX hosts can query pointer positions for drops and hover tools.",
+  },
+  {
+    name: "Open source and self-hostable",
+    desc: "Apache-2.0 licensed, with control over your document storage, deployment, and collaboration infrastructure.",
   },
 ];
 

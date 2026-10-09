@@ -6,7 +6,7 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 publish = false
-description = "Structure-preserving redaction for DOCX, XLSX, and PPTX packages."
+description = "Structure-preserving redaction for DOCX, XLSX, PPTX, and Visio packages."
 
 [lib]
 name = "ooxml_redact"
@@ -18,8 +18,10 @@ ooxml-opc.workspace = true
 quick-xml = "0.41"
 thiserror = "2"
 unicode-script = "0.5"
+vsdx-parse.workspace = true
 
 [dev-dependencies]
 docx-parse.workspace = true
 pptx-parse.workspace = true
 xlsx-parse.workspace = true
+vsdx-render.workspace = true

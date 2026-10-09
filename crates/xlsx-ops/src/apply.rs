@@ -69,8 +69,21 @@ impl fmt::Display for OpError {
 
 impl std::error::Error for OpError {}
 
-/// apply one op, mutating `wb` and returning its inverse.
+/// apply one op, returning its inverse; refused structural ops leave `wb`
+/// untouched.
 pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
+    match op {
+        Op::InsertRows { .. }
+        | Op::DeleteRows { .. }
+        | Op::InsertCols { .. }
+        | Op::DeleteCols { .. } => apply_atomically(wb, |next| apply_in_place(next, op)),
+        _ => apply_in_place(wb, op),
+    }
+}
+
+/// apply one op directly with no rollback clone; only for models the caller
+/// drops on error.
+pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
     match op {
         Op::SetCell { sheet, at, cell } => {
             let s = sheet_mut(wb, *sheet)?;
@@ -131,6 +144,14 @@ pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
             Ok(InvertedOp(vec![Op::SetHyperlinks {
                 sheet: *sheet,
                 hyperlinks: old,
+            }]))
+        }
+        Op::RestoreColStyles { sheet, styles } => {
+            let s = sheet_mut(wb, *sheet)?;
+            let old = std::mem::replace(&mut s.col_styles, styles.clone());
+            Ok(InvertedOp(vec![Op::RestoreColStyles {
+                sheet: *sheet,
+                styles: old,
             }]))
         }
         Op::SetCharts { sheet, charts } => {
@@ -313,18 +334,10 @@ pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
                 defined_names: previous,
             }]))
         }
-        Op::InsertRows { sheet, at, count } => {
-            apply_atomically(wb, |next| insert_rows(next, *sheet, *at, *count, op))
-        }
-        Op::DeleteRows { sheet, at, count } => {
-            apply_atomically(wb, |next| delete_rows(next, *sheet, *at, *count, op))
-        }
-        Op::InsertCols { sheet, at, count } => {
-            apply_atomically(wb, |next| insert_cols(next, *sheet, *at, *count, op))
-        }
-        Op::DeleteCols { sheet, at, count } => {
-            apply_atomically(wb, |next| delete_cols(next, *sheet, *at, *count, op))
-        }
+        Op::InsertRows { sheet, at, count } => insert_rows(wb, *sheet, *at, *count, op),
+        Op::DeleteRows { sheet, at, count } => delete_rows(wb, *sheet, *at, *count, op),
+        Op::InsertCols { sheet, at, count } => insert_cols(wb, *sheet, *at, *count, op),
+        Op::DeleteCols { sheet, at, count } => delete_cols(wb, *sheet, *at, *count, op),
     }
 }
 
@@ -437,6 +450,22 @@ fn apply_range_formats(
 /// apply a sequence of ops, returning the combined inverse (per-op inverses
 /// concatenated in reverse order).
 pub fn apply_ops(wb: &mut Workbook, ops: &[Op]) -> Result<Vec<Op>, OpError> {
+    if let [op @ Op::SetCell { .. }] = ops {
+        #[cfg(test)]
+        if FORCE_CLONE_ROLLBACK.get() {
+            return apply_ops_cloned(wb, ops);
+        }
+        return apply_in_place(wb, op).map(|inverse| inverse.0);
+    }
+    apply_ops_cloned(wb, ops)
+}
+
+#[cfg(test)]
+thread_local! {
+    static FORCE_CLONE_ROLLBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn apply_ops_cloned(wb: &mut Workbook, ops: &[Op]) -> Result<Vec<Op>, OpError> {
     let mut next = wb.clone();
     let inverse = apply_ops_in_place(&mut next, ops)?;
     *wb = next;
@@ -446,7 +475,7 @@ pub fn apply_ops(wb: &mut Workbook, ops: &[Op]) -> Result<Vec<Op>, OpError> {
 fn apply_ops_in_place(wb: &mut Workbook, ops: &[Op]) -> Result<Vec<Op>, OpError> {
     let mut per_op: Vec<Vec<Op>> = Vec::with_capacity(ops.len());
     for op in ops {
-        per_op.push(apply(wb, op)?.0);
+        per_op.push(apply_in_place(wb, op)?.0);
     }
     let mut inverse = Vec::new();
     for chunk in per_op.into_iter().rev() {
@@ -621,12 +650,20 @@ fn insert_cols(
     let hyperlink_restores = remap_hyperlink_locations(wb, op);
     let s = sheet_mut(wb, sheet)?;
     let old_hyperlinks = s.hyperlinks.clone();
+    let old_col_styles = s.col_styles.clone();
     let dropped = shift_cells(s, op);
     shift_col_widths_up(s, at, count);
+    shift_col_styles_up(s, at, count);
     remap_merges_keep(s, op);
     remap_hyperlinks(s, op);
 
     let mut inv = vec![Op::DeleteCols { sheet, at, count }];
+    if !old_col_styles.is_empty() {
+        inv.push(Op::RestoreColStyles {
+            sheet,
+            styles: old_col_styles,
+        });
+    }
     for (r, c) in dropped {
         inv.push(Op::SetCell {
             sheet,
@@ -659,12 +696,20 @@ fn delete_cols(
     let hyperlink_restores = remap_hyperlink_locations(wb, op);
     let s = sheet_mut(wb, sheet)?;
     let old_hyperlinks = s.hyperlinks.clone();
+    let old_col_styles = s.col_styles.clone();
     let deleted = shift_cells(s, op);
     let dropped_widths = shift_col_widths_down(s, at, count);
+    shift_col_styles_down(s, at, count);
     let dropped_merges = remap_merges_drop(s, op);
     remap_hyperlinks(s, op);
 
     let mut inv = vec![Op::InsertCols { sheet, at, count }];
+    if !old_col_styles.is_empty() {
+        inv.push(Op::RestoreColStyles {
+            sheet,
+            styles: old_col_styles,
+        });
+    }
     for (r, c) in deleted {
         inv.push(Op::SetCell {
             sheet,
@@ -765,6 +810,44 @@ fn shift_col_widths_down(s: &mut Sheet, at: ColId, count: u32) -> Vec<(ColId, f6
     }
     s.col_widths = kept;
     dropped
+}
+
+/// a run the insert splits widens over the new columns; a run that ends where
+/// the insert begins does not extend, matching how the widths beside it shift.
+fn shift_col_styles_up(s: &mut Sheet, at: ColId, count: u32) {
+    let last_col = MAX_COLS.saturating_sub(1);
+    for run in &mut s.col_styles {
+        if run.last < at {
+            continue;
+        }
+        if run.first >= at {
+            run.first = run.first.saturating_add(count).min(last_col);
+        }
+        run.last = run.last.saturating_add(count).min(last_col);
+    }
+}
+
+/// a run the delete consumes entirely is dropped; one it clips keeps the
+/// columns that survive. the inverse insert widens a clipped run back, but no
+/// op carries column styles, so a consumed run does not return on undo.
+fn shift_col_styles_down(s: &mut Sheet, at: ColId, count: u32) {
+    let end = at.saturating_add(count);
+    s.col_styles.retain_mut(|run| {
+        if run.first >= at && run.last < end {
+            return false;
+        }
+        if run.first >= end {
+            run.first -= count;
+        } else if run.first >= at {
+            run.first = at;
+        }
+        if run.last >= end {
+            run.last -= count;
+        } else if run.last >= at {
+            run.last = at - 1;
+        }
+        true
+    });
 }
 
 /// remap merges under an insert (no corner is ever deleted).
@@ -888,6 +971,12 @@ fn remove_sheet(wb: &mut Workbook, index: usize) -> Result<InvertedOp, OpError> 
             hyperlinks: removed.hyperlinks,
         });
     }
+    if !removed.col_styles.is_empty() {
+        inv.push(Op::RestoreColStyles {
+            sheet,
+            styles: removed.col_styles,
+        });
+    }
     if !removed.charts.is_empty() {
         inv.push(Op::SetCharts {
             sheet,
@@ -949,7 +1038,7 @@ fn sheet_mut(wb: &mut Workbook, sheet: SheetId) -> Result<&mut Sheet, OpError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xlsx_model::{CellProvider, CellValue, FreezePane, Hyperlink};
+    use xlsx_model::{CellProvider, CellValue, ColStyle, FreezePane, Hyperlink};
 
     fn r(a1: &str) -> CellRef {
         CellRef::parse_a1(a1).unwrap()
@@ -966,6 +1055,76 @@ mod tests {
         let mut wb = Workbook::default();
         wb.sheets.push(Sheet::new("Sheet1"));
         wb
+    }
+
+    #[test]
+    fn singleton_set_cell_matches_clone_rollback() {
+        let states = [
+            CellState::default(),
+            num(123.0),
+            CellState {
+                value: CellValue::Text {
+                    value: "rich text".into(),
+                },
+                style: Some(7),
+                ..Default::default()
+            },
+            CellState {
+                value: CellValue::Number { value: 42.0 },
+                formula: Some("A1+1".into()),
+                style: Some(0),
+            },
+            CellState {
+                style: Some(u32::MAX),
+                ..Default::default()
+            },
+        ];
+        for before in &states {
+            for after in &states {
+                for at in [r("B2"), CellRef::new(MAX_ROWS, MAX_COLS)] {
+                    let mut initial = wb_one_sheet();
+                    initial.sheets.push(Sheet::new("Second"));
+                    initial.sheets[1].set_cell(at, before.clone().into());
+                    initial.sheets[1].set_array_formula(at, CellRange::new(at, at));
+                    let op = Op::SetCell {
+                        sheet: SheetId(1),
+                        at,
+                        cell: after.clone(),
+                    };
+                    let mut fast = initial.clone();
+                    let mut oracle = initial.clone();
+                    let result = apply_ops(&mut fast, std::slice::from_ref(&op));
+                    FORCE_CLONE_ROLLBACK.set(true);
+                    let expected = apply_ops(&mut oracle, std::slice::from_ref(&op));
+                    FORCE_CLONE_ROLLBACK.set(false);
+                    assert_eq!(result, expected);
+                    assert_eq!(fast, oracle);
+                    apply_ops(&mut fast, &result.unwrap()).unwrap();
+                    assert_eq!(fast, initial);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn failing_singleton_set_cell_leaves_model_unchanged() {
+        for initial in [Workbook::default(), wb_one_sheet()] {
+            for sheet in [SheetId(initial.sheets.len() as u32), SheetId(u32::MAX)] {
+                let op = Op::SetCell {
+                    sheet,
+                    at: r("B2"),
+                    cell: num(123.0),
+                };
+                let mut fast = initial.clone();
+                let mut oracle = initial.clone();
+                let result = apply_ops(&mut fast, std::slice::from_ref(&op));
+                let expected = apply_ops_cloned(&mut oracle, std::slice::from_ref(&op));
+                assert_eq!(result, Err(OpError::SheetNotFound(sheet)));
+                assert_eq!(result, expected);
+                assert_eq!(fast, initial);
+                assert_eq!(oracle, initial);
+            }
+        }
     }
 
     #[test]
@@ -1294,6 +1453,164 @@ mod tests {
             apply(&mut wb, operation).unwrap();
         }
         assert_eq!(wb, before);
+    }
+
+    #[test]
+    fn column_style_runs_survive_structural_undo_and_redo() {
+        let runs = vec![
+            ColStyle {
+                first: 0,
+                last: 6,
+                xf: 1,
+            },
+            ColStyle {
+                first: 2,
+                last: 3,
+                xf: 2,
+            },
+            ColStyle {
+                first: 3,
+                last: 7,
+                xf: 3,
+            },
+            ColStyle {
+                first: MAX_COLS - 1,
+                last: MAX_COLS - 1,
+                xf: 4,
+            },
+        ];
+        for op in [
+            Op::DeleteCols {
+                sheet: SheetId(0),
+                at: 2,
+                count: 2,
+            },
+            Op::DeleteCols {
+                sheet: SheetId(0),
+                at: 0,
+                count: 8,
+            },
+            Op::InsertCols {
+                sheet: SheetId(0),
+                at: 3,
+                count: 2,
+            },
+            Op::RemoveSheet { index: 0 },
+        ] {
+            let mut workbook = wb_one_sheet();
+            workbook.sheets[0].col_styles = runs.clone();
+            let before = workbook.clone();
+            let inverse = apply_ops(&mut workbook, &[op]).unwrap();
+            let edited = workbook.clone();
+            let redo = apply_ops(&mut workbook, &inverse).unwrap();
+            assert_eq!(workbook, before);
+            let undo = apply_ops(&mut workbook, &redo).unwrap();
+            assert_eq!(workbook, edited);
+            apply_ops(&mut workbook, &undo).unwrap();
+            assert_eq!(workbook, before);
+        }
+    }
+
+    #[test]
+    fn column_styles_follow_the_columns_they_format() {
+        let mut wb = wb_one_sheet();
+        let runs = vec![
+            ColStyle {
+                first: 0,
+                last: 1,
+                xf: 7,
+            },
+            ColStyle {
+                first: 3,
+                last: 5,
+                xf: 9,
+            },
+        ];
+        wb.sheet_mut(SheetId(0)).unwrap().col_styles = runs.clone();
+        apply(
+            &mut wb,
+            &Op::InsertCols {
+                sheet: SheetId(0),
+                at: 1,
+                count: 2,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            wb.sheets[0].col_styles,
+            vec![
+                ColStyle {
+                    first: 0,
+                    last: 3,
+                    xf: 7
+                },
+                ColStyle {
+                    first: 5,
+                    last: 7,
+                    xf: 9
+                },
+            ],
+            "the run the insert splits widens; the one to its right shifts"
+        );
+        assert_eq!(wb.sheets[0].col_style(3), Some(7));
+        assert_eq!(wb.sheets[0].col_style(4), None);
+
+        apply(
+            &mut wb,
+            &Op::DeleteCols {
+                sheet: SheetId(0),
+                at: 1,
+                count: 2,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            wb.sheets[0].col_styles, runs,
+            "the delete undoes the insert"
+        );
+
+        apply(
+            &mut wb,
+            &Op::DeleteCols {
+                sheet: SheetId(0),
+                at: 3,
+                count: 3,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            wb.sheets[0].col_styles,
+            vec![ColStyle {
+                first: 0,
+                last: 1,
+                xf: 7
+            }],
+            "a run the delete consumes whole is dropped, as excel drops it"
+        );
+
+        wb.sheet_mut(SheetId(0)).unwrap().col_styles.push(ColStyle {
+            first: 2,
+            last: 9,
+            xf: 9,
+        });
+        apply(
+            &mut wb,
+            &Op::DeleteCols {
+                sheet: SheetId(0),
+                at: 0,
+                count: 4,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            wb.sheets[0].col_styles,
+            vec![ColStyle {
+                first: 0,
+                last: 5,
+                xf: 9
+            }],
+            "a clipped run keeps the columns that survive"
+        );
     }
 
     #[test]

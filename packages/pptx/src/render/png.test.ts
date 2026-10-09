@@ -85,6 +85,12 @@ describe('slideToPng', () => {
     expect(sizes).toEqual([[640, 360]]);
   });
 
+  test('covers a fractional extent, the way the on-screen canvas does', async () => {
+    const { sizes } = stubOffscreenCanvas();
+    await slideToPng({ ...list, width: 1122.1667, height: 793.2 });
+    expect(sizes).toEqual([[1123, 794]]);
+  });
+
   test('refuses a scale that is not positive', async () => {
     stubOffscreenCanvas();
     await expect(slideToPng(list, { scale: 0 })).rejects.toThrow('finite and positive');

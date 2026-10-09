@@ -5,6 +5,44 @@
  * (lint-enforced).
  */
 
+/** @experimental */
+export { openWorkbookSession } from './session/client';
+/** @internal */
+export { hydratePeer } from './session/client';
+/** @experimental */
+export { WorkbookPeerHydrationError } from './session/peerHydrationError';
+/** @experimental */
+export type { OpenWorkbookSessionOptions, WorkbookSession } from './session/client';
+/** @internal */
+export { createWorkbookEditPeer } from './session/editPeer';
+/** @internal */
+export { localNowSerial } from './session/calculationClock';
+/** @internal */
+export type { WorkbookEditPeer, WorkbookEditPeerOptions } from './session/editPeer';
+/** @experimental */
+export { WorkbookEditPeerFailedError } from './session/editPeer';
+/** @internal */
+export {
+  createWorkbookRecoveryMutators, failWorkbookEditPeer, WorkbookRecoveryRefusal, workbookEditPeerOperations,
+} from './session/editPeerInternals';
+/** @internal */
+export { workbookSessionInternals } from './session/replay';
+/** @internal */
+export type { WorkbookReplayOp } from './session/replay';
+/** @experimental */
+export type {
+  WorkbookCellGeometry,
+  WorkbookCellInputs,
+  WorkbookFrame,
+  WorkbookFrameOptions,
+  WorkbookSessionEvents,
+  WorkbookSessionMethods,
+  WorkbookSessionOpenOptions,
+  WorkbookSessionState,
+  WorkbookSheetSummary,
+  WorkbookSheetView,
+} from './session/methods';
+
 export type {
   Rect,
   TextAlign,
@@ -85,20 +123,32 @@ export {
   openWorkbook,
   wasmVersion,
   StaleProposalError,
+  DisplayTooLargeError,
+  getDisplayListCellLimit,
+  exportXlsxMarkdown,
+  exportXlsxStructured,
+  renderXlsxMarkdown,
 } from './wasm/loader';
 export type {
   WasmInitInput,
   OpenWorkbookOptions,
+  WorkbookCalculationContext,
   Viewport,
   PrintMetrics,
   SheetInfo,
   WorkbookHandle,
+  XlsxTextMatch,
+  XlsxTextSearchOptions,
   WorkbookUpdateListener,
   WorkbookUpdateOrigin,
   CellEdit,
   CellPosition,
   CellInputEdit,
   EditResult,
+  EditProfile,
+  ProfiledEditResult,
+  DisplayListProfile,
+  ProfiledDisplayList,
   CalculationStatus,
   BorderPatch,
   BorderPreset,
@@ -115,7 +165,72 @@ export type {
   ProposalEdit,
   RangeStylePatch,
   SelectionFormatting,
+  StaleProposalTarget,
   StyleProperty,
   TextWrapping,
   VerticalAlignment,
 } from './wasm/loader';
+export type {
+  EditSuccess,
+  OperationFailure,
+  OperationRefusal,
+  ValidationSuccess,
+  XlsxCellAddress,
+  XlsxCellGuard,
+  XlsxCellPosition,
+  XlsxCellRead,
+  XlsxCellValue,
+  XlsxEditCalculation,
+  XlsxEditFailure,
+  XlsxEditFailureCode,
+  XlsxEditHistory,
+  XlsxEditOperation,
+  XlsxEditPreview,
+  XlsxEditReceipt,
+  XlsxEditRefusal,
+  XlsxEditRequest,
+  XlsxEditResult,
+  XlsxEditSource,
+  XlsxEditStep,
+  XlsxErrorValue,
+  XlsxFindMatch,
+  XlsxFindRequest,
+  XlsxFindResult,
+  XlsxRangeAddress,
+  XlsxRangeRead,
+  XlsxRangeTarget,
+  XlsxReadCalculation,
+  XlsxReadRequest,
+  XlsxReadResult,
+  XlsxSheetEntry,
+  XlsxValidationResult,
+} from './edits';
+export type {
+  ExportCompletion,
+  ExportDiagnostic,
+  ExportSeverity,
+  MarkdownAnchor,
+  XlsxAnchor,
+  XlsxExportCell,
+  XlsxExportDefinedName,
+  XlsxExportDiagnostic,
+  XlsxExportDiagnosticCode,
+  XlsxExportFailure,
+  XlsxExportFailureCode,
+  XlsxExportHyperlink,
+  XlsxExportMerge,
+  XlsxExportObject,
+  XlsxExportOptions,
+  XlsxExportResult,
+  XlsxExportScope,
+  XlsxExportSheet,
+  XlsxExportTable,
+  XlsxExportValue,
+  XlsxFormulaResult,
+  XlsxMarkdownContent,
+  XlsxMarkdownOptions,
+  XlsxObjectKind,
+  XlsxSheetIdentity,
+  XlsxSourcePart,
+  XlsxStructuredContent,
+} from './exports';

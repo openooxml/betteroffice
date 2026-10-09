@@ -33,7 +33,7 @@ fn builtin_table_ids() {
     assert_eq!(builtin_format_code(11), Some("0.00E+00"));
     assert_eq!(builtin_format_code(12), Some("# ?/?"));
     assert_eq!(builtin_format_code(13), Some("# ??/??"));
-    assert_eq!(builtin_format_code(14), Some("m/d/yyyy"));
+    assert_eq!(builtin_format_code(14), Some("m/d/yy"));
     assert_eq!(builtin_format_code(15), Some("d-mmm-yy"));
     assert_eq!(builtin_format_code(16), Some("d-mmm"));
     assert_eq!(builtin_format_code(17), Some("mmm-yy"));
@@ -41,7 +41,7 @@ fn builtin_table_ids() {
     assert_eq!(builtin_format_code(19), Some("h:mm:ss AM/PM"));
     assert_eq!(builtin_format_code(20), Some("h:mm"));
     assert_eq!(builtin_format_code(21), Some("h:mm:ss"));
-    assert_eq!(builtin_format_code(22), Some("m/d/yyyy h:mm"));
+    assert_eq!(builtin_format_code(22), Some("m/d/yy h:mm"));
     assert_eq!(builtin_format_code(37), Some("#,##0 ;(#,##0)"));
     assert_eq!(builtin_format_code(38), Some("#,##0 ;[Red](#,##0)"));
     assert_eq!(builtin_format_code(39), Some("#,##0.00;(#,##0.00)"));
@@ -72,6 +72,17 @@ fn builtin_number_renders() {
     assert_eq!(fv(12345.0, "0.00E+00"), "1.23E+04");
     assert_eq!(fv(12345.0, "##0.0E+0"), "12.3E+3");
     assert_eq!(fv(1234.0, "@"), "1234");
+}
+
+/// ids 14 and 22 carry a two-digit year: excel 16.112.3 prints `1/1/22` for
+/// both, matched against its own pdf exports of the fidelity corpus.
+#[test]
+fn builtin_short_date_ids_print_two_digit_years() {
+    assert_eq!(fv(44562.0, builtin_format_code(14).unwrap()), "1/1/22");
+    assert_eq!(
+        fv(44562.5, builtin_format_code(22).unwrap()),
+        "1/1/22 12:00"
+    );
 }
 
 #[test]
@@ -329,6 +340,24 @@ fn unsupported_constructs_degrade() {
     assert_eq!(fv(1234.0, "$#,##0"), "$1,234");
     assert_eq!(fv(5.0, "0_)"), "5 ");
     assert_eq!(fv(5.0, "0*x"), "5");
+}
+
+#[test]
+fn approximate_formats_are_the_ones_that_degrade() {
+    let n = CellValue::Number { value: 0.5 };
+    assert!(format_is_approximate(&n, "# ?/?"));
+    assert!(!format_is_approximate(&n, "0.00;# ??/??"));
+    assert!(format_is_approximate(
+        &CellValue::Number { value: -0.5 },
+        "0.00;# ??/??"
+    ));
+    assert!(!format_is_approximate(&n, "0.00"));
+    assert!(!format_is_approximate(&n, "General"));
+    assert!(!format_is_approximate(&n, "m/d/yyyy"));
+    assert!(!format_is_approximate(
+        &CellValue::Text { value: "x".into() },
+        "# ?/?"
+    ));
 }
 
 #[test]

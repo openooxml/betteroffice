@@ -17,7 +17,9 @@
 // VERSION
 // ============================================================================
 
-export const VERSION = '0.0.2';
+import { version as packageVersion } from '../package.json';
+
+export const VERSION: string = packageVersion;
 
 // ============================================================================
 // PARSER / SERIALIZER
@@ -32,6 +34,45 @@ export {
 export { repackDocx, repackDocxWithWarnings, createDocx, updateMultipleFiles } from './docx/rezip';
 export type { RepackResult } from './docx/rezip';
 export { attemptSelectiveSave } from './docx/selectiveSave';
+
+// ============================================================================
+// STRUCTURED EXPORT
+// ============================================================================
+
+export {
+  DocxExportError,
+  exportDocxMarkdown,
+  exportDocxStructured,
+  exportDocxStructuredWithPages,
+  renderDocxMarkdown,
+  renderDocxMarkdownWithPages,
+} from './docx/structuredExport';
+export type * from './yrs/structuredExport';
+export type * from './yrs/pagedExport';
+export type * from './yrs/readTypes';
+
+export { compareDocx } from './docx/compare';
+export type {
+  DocxCompareDiagnostic,
+  DocxCompareDiagnosticCode,
+  DocxCompareLimits,
+  DocxCompareLocation,
+  DocxCompareOptions,
+  DocxCompareResult,
+  DocxComparedChange,
+  DocxCompareTextSpan,
+} from './docx/compare';
+
+// ============================================================================
+// CONTENT CONTROLS
+// ============================================================================
+
+export {
+  DocxContentControlsError,
+  findDocxContentControls,
+  listDocxContentControls,
+} from './docx/contentControls';
+export type * from './yrs/contentControls';
 
 // ============================================================================
 // UTILITIES
@@ -162,6 +203,7 @@ export type {
   PanelConfig,
   RenderedDomContext,
   PositionCoordinates,
+  PointPosition,
 } from './plugin-api/types';
 
 // ============================================================================

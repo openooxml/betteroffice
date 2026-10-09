@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { initWasm, openDiagram } from '@betteroffice/vsdx';
 import type { GeometryPathCommand, PagePrimitive } from '@betteroffice/vsdx';
-import { standardShapes } from './shapeLibrary';
+import { arrowShapes, standardShapes } from './shapeLibrary';
 
 const root = resolve(import.meta.dir, '../../../../..');
 let fixture: Uint8Array;
@@ -80,7 +80,7 @@ function outlineDistance(points: Point[], outline: Point[]): number {
   }))));
 }
 
-for (const shape of standardShapes) {
+for (const shape of [...standardShapes, ...arrowShapes]) {
   test(`${shape.id} keeps its geometry through collaboration and save`, () => {
     const diagram = openDiagram(fixture, { clientId: 501 });
     const peer = openDiagram(fixture, { clientId: 502 });
@@ -119,12 +119,13 @@ for (const shape of standardShapes) {
 
 test('inserts the whole gallery on one page and reopens the saved package', () => {
   const diagram = openDiagram(fixture, { clientId: 601 });
+  const gallery = [...standardShapes, ...arrowShapes];
   try {
-    standardShapes.forEach((shape, index) => {
+    gallery.forEach((shape, index) => {
       diagram.addShape('page:1', shape.draft(index % 8, Math.floor(index / 8), 1, 1));
     });
     const geometry = paths(diagram.layoutPage(0).primitives);
-    expect(geometry.length).toBeGreaterThanOrEqual(standardShapes.length);
+    expect(geometry.length).toBeGreaterThanOrEqual(gallery.length);
     const reopened = openDiagram(diagram.save(), { clientId: 602 });
     try {
       expect(paths(reopened.layoutPage(0).primitives)).toEqual(geometry);

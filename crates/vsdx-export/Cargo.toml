@@ -1,0 +1,28 @@
+[package]
+name = "betteroffice-vsdx-export"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = false
+description = "Headless VSDX diagram export to PPTX slides and DOCX documents."
+readme = "README.md"
+keywords = ["vsdx", "visio", "pptx", "docx", "export"]
+categories = ["rendering"]
+
+[lib]
+name = "vsdx_export"
+
+[dependencies]
+ooxml-drawingml.workspace = true
+ooxml-opc.workspace = true
+vsdx-parse.workspace = true
+vsdx-render.workspace = true
+vsdx-resolve.workspace = true
+
+[dev-dependencies]
+docx-parse.workspace = true
+ooxml-opc.workspace = true
+pptx-parse.workspace = true
+serde_json = "1"

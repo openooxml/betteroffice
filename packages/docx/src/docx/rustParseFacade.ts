@@ -10,7 +10,8 @@ import type {
   Relationship,
   RelationshipMap,
 } from '../types/document';
-import { parseDocxS9Wire, parseRelationshipsXmlWire } from './parseWasm';
+import { decodeTiffImage, parseDocxS9Wire, parseRelationshipsXmlWire } from './parseWasm';
+import { maybeTranscodeTiffMedia } from './tiffMedia';
 
 const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
@@ -304,14 +305,20 @@ function decodeMediaEntries(value: unknown): Map<string, MediaFile> {
     let file = bySourcePath.get(sourcePath);
     if (!file) {
       const bytes = decodeBase64(stringAt(wireFile.base64, `${filePath}.base64`));
+      const media = maybeTranscodeTiffMedia(
+        bytes,
+        stringAt(wireFile.mimeType, `${filePath}.mimeType`),
+        stringAt(wireFile.dataUrl, `${filePath}.dataUrl`),
+        decodeTiffImage
+      );
       const created: MediaFile = {
         path: sourcePath,
         ...(wireFile.filename === undefined
           ? {}
           : { filename: stringAt(wireFile.filename, `${filePath}.filename`) }),
-        mimeType: stringAt(wireFile.mimeType, `${filePath}.mimeType`),
-        data: exactArrayBuffer(bytes),
-        dataUrl: stringAt(wireFile.dataUrl, `${filePath}.dataUrl`),
+        mimeType: media.mimeType,
+        data: exactArrayBuffer(media.bytes),
+        dataUrl: media.dataUrl,
       };
       file = created;
       bySourcePath.set(sourcePath, created);

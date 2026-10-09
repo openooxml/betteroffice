@@ -29,6 +29,54 @@
       "id": 11075538,
       "signed_at": "2026-09-06T20:02:42Z",
       "pull_request_no": 341
+    },
+    {
+      "name": "elliothux",
+      "id": 23466520,
+      "signed_at": "2026-09-15T09:52:41Z",
+      "pull_request_no": 526
+    },
+    {
+      "name": "f-i-t-s-u-m",
+      "id": 79186700,
+      "signed_at": "2026-09-18T23:04:31Z",
+      "pull_request_no": 613
+    },
+    {
+      "name": "d3enyuy",
+      "id": 84236515,
+      "signed_at": "2026-09-19T00:23:40Z",
+      "pull_request_no": 619
+    },
+    {
+      "name": "yimnai-dev",
+      "id": 131532657,
+      "signed_at": "2026-09-19T18:54:55Z",
+      "pull_request_no": 634
+    },
+    {
+      "name": "xhayankhan",
+      "id": 87603317,
+      "signed_at": "2026-09-22T17:42:51Z",
+      "pull_request_no": 798
+    },
+    {
+      "name": "mirza-asjad",
+      "id": 125024331,
+      "signed_at": "2026-10-01T19:49:08Z",
+      "pull_request_no": 1121
+    },
+    {
+      "name": "Abdulsamikamran",
+      "id": 130117954,
+      "signed_at": "2026-10-01T19:49:13Z",
+      "pull_request_no": 1123
+    },
+    {
+      "name": "jaitd",
+      "id": 1367593,
+      "signed_at": "2026-10-08T10:31:35Z",
+      "pull_request_no": 1257
     }
   ]
 }

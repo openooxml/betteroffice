@@ -9,6 +9,13 @@ import {
 
 export interface RustTextEngine {
   registerFont(bytes: Uint8Array): number;
+  /**
+   * Measurement view of `id` carrying the vertical metrics and advance pitch
+   * Word measures `family` with; `id` when the engine knows none. Optional so
+   * a host that predates it still measures, with the substitute's own
+   * metrics.
+   */
+  registerSubstituteFont?(id: number, family: string): number;
   clearFonts(): void;
 }
 
@@ -22,7 +29,7 @@ export interface ResidentFontRequirement {
 
 export interface ResidentMeasurementConfig {
   fontChains: Record<string, number[]>;
-  defaults: { fontSize: 11; fontFamily: 'Calibri' };
+  defaults: { fontSize: number; fontFamily: string };
   compat: { noLeading: boolean; doNotExpandShiftReturn: boolean };
   authoritativeShaping: true;
 }
@@ -46,6 +53,7 @@ export function getRustTextEngine(): Promise<RustTextEngine> {
     await module.preloadLayoutWasm();
     return {
       registerFont: module.registerMeasureFont,
+      registerSubstituteFont: module.registerSubstituteMeasureFont,
       clearFonts: module.clearMeasureFonts,
     };
   });
@@ -57,8 +65,15 @@ export function createRustMeasureSource(options: {
   engine: RustTextEngine;
   bundled?: BundledFontProvider;
 }): RustMeasureSource {
+  const engine = options.engine;
   const registry = new TextMeasureFontRegistry(
-    { registerFont: (bytes) => options.engine.registerFont(bytes) },
+    {
+      registerFont: (bytes) => engine.registerFont(bytes),
+      ...(engine.registerSubstituteFont && {
+        registerSubstituteFont: (id, family) =>
+          engine.registerSubstituteFont!(id, family),
+      }),
+    },
     { bundled: options.bundled ?? resolveDefaultFontProvider },
   );
   let compat: CompatibilityFlags | undefined;

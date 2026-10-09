@@ -1,6 +1,6 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
-use vsdx_parse::{CellLocator, CellRow, CellSheet};
+use vsdx_parse::{CellLocator, CellRow, CellSheet, MutationGesture};
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -50,8 +50,16 @@ pub struct ShapeSnapshot {
     pub id: String,
     pub source_id: u32,
     pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub master: Option<u32>,
     pub cells: Vec<CellSnapshot>,
     pub children: Vec<ShapeSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_source_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_source_page_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_refusal: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -79,6 +87,79 @@ pub struct CellFormulaReceipt {
     pub after: String,
 }
 
+/// One shape's pin move in a batch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShapeMove {
+    pub page_id: String,
+    pub shape_id: String,
+    pub x: String,
+    pub y: String,
+}
+
+/// One shape's deletion in a batch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShapeDelete {
+    pub page_id: String,
+    pub shape_id: String,
+}
+
+/// One cell write in a batch that may span shapes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CellFormulaWrite {
+    pub page_id: String,
+    pub shape_id: String,
+    pub cell_name: String,
+    pub formula: String,
+}
+
+/// One shape-data row write in a batch against a single shape.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShapeDataWrite {
+    pub row: CellRow,
+    pub section_index: Option<u32>,
+    pub formula: String,
+}
+
+/// Per-row decision; `after` is present only when the batch succeeds.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShapeDataReceipt {
+    pub page_id: String,
+    pub shape_id: String,
+    pub row_name: Option<String>,
+    pub row_index: Option<u32>,
+    pub section_index: Option<u32>,
+    pub before: Option<String>,
+    pub after: Option<String>,
+    pub refusal: Option<String>,
+}
+
+impl ShapeDataReceipt {
+    pub fn refused(&self) -> bool {
+        self.refusal.is_some()
+    }
+}
+
+/// One cell to probe, with the gesture to probe it as; the cell name picks one when absent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CellWriteQuery {
+    pub locator: CellLocator,
+    pub gesture: Option<MutationGesture>,
+}
+
+/// What the mutation policy would do with a write to one cell, without writing it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CellWriteProbe {
+    pub cell_name: String,
+    pub allowed: bool,
+    /// Cell the write would land on after SETATREF redirection; absent when refused.
+    pub target_cell_name: Option<String>,
+    /// `guard`, `lock` or `unsupported`; absent when the write is allowed.
+    pub refusal: Option<String>,
+    pub reason: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShapeReceipt {
@@ -98,11 +179,64 @@ pub struct TextReceipt {
     pub after: String,
 }
 
+/// Paired receipts for a shape inserted with its connector in one transaction.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectedShapeReceipt {
+    pub shape: ShapeReceipt,
+    pub connector: ShapeReceipt,
+}
+
+/// A hand-routed connector path written in scene-space points.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectorRouteReceipt {
+    pub page_id: String,
+    pub shape_id: String,
+    pub points: u32,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShapeDraft {
     pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub master: Option<u32>,
     pub cells: Vec<CellSnapshot>,
+}
+
+/// A pasted group subtree; every node names its live copy source.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShapeTreeDraft {
+    pub name: Option<String>,
+    pub cells: Vec<CellSnapshot>,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub copy_source_id: Option<u32>,
+    #[serde(default)]
+    pub copy_source_page_id: Option<u32>,
+    #[serde(default)]
+    pub source_shape_id: Option<String>,
+    #[serde(default)]
+    pub source_id: Option<u32>,
+    #[serde(default)]
+    pub copy_refusal: Option<String>,
+    #[serde(default)]
+    pub glue: Vec<ShapeTreeGlue>,
+    #[serde(default)]
+    pub children: Vec<ShapeTreeDraft>,
+}
+
+/// One internal glue record of a copied subtree, addressed by copy sources.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShapeTreeGlue {
+    pub connector_source: String,
+    pub endpoint: String,
+    pub target_source: String,
+    pub to_cell: String,
 }
 
 /// One glued connector endpoint; `to_cell` defaults to `PinX` when absent.

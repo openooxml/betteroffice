@@ -1,9 +1,18 @@
 {
   "_lang": "pt-BR",
+  "worker": {
+    "previousRecovery": null,
+    "preparing": "Preparando o editor. A edição estará disponível em breve.",
+    "failed": "A edição está indisponível. Baixe a apresentação recuperada.",
+    "disabled": "Este recurso está indisponível neste modo de edição.",
+    "recovery": null,
+    "image": null
+  },
   "toolbar": {
     "label": null,
     "save": "Salvar",
     "exportPng": null,
+    "present": "Apresentar",
     "historyLabel": null,
     "undo": null,
     "redo": null,
@@ -79,7 +88,13 @@
       "upArrow": null,
       "downArrow": null,
       "chevron": null
-    }
+    },
+    "insertImage": null,
+    "arrange": null,
+    "bringToFront": null,
+    "bringForward": null,
+    "sendBackward": null,
+    "sendToBack": null
   },
   "slides": {
     "panelLabel": null,
@@ -94,9 +109,104 @@
     "openPrompt": null
   },
   "objects": {
-    "defaultTextBoxName": null
+    "defaultTextBoxName": null,
+    "defaultPictureName": null
+  },
+  "presentation": {
+    "label": "Apresentação de slides",
+    "exit": "Sair da apresentação (Esc)",
+    "slideCounter": "{current} / {total}",
+    "previousSlide": "Slide anterior",
+    "nextSlide": "Próximo slide"
+  },
+  "notes": {
+    "panelLabel": "Notas do apresentador",
+    "placeholder": "Adicionar notas do apresentador…"
   },
   "errors": {
     "decodeSlideImage": null
+  },
+  "proposals": {
+    "title": "Propostas do agente",
+    "close": "Fechar",
+    "empty": "Nenhuma alteração aguardando revisão.",
+    "preview": "Visualizar alterações",
+    "previewTitle": "Revisar alterações propostas",
+    "before": "Slide atual",
+    "after": "Slide proposto",
+    "accept": "Aceitar proposta",
+    "reject": "Rejeitar",
+    "force": "Aplicar proposta atualizada",
+    "blank": "Vazio",
+    "target": "Slide {slide} · {name}",
+    "targetLabel": "Alteração",
+    "targetMissing": "O destino não está mais disponível",
+    "stale": "Estes objetos foram alterados após a criação da proposta. Visualize as alterações atuais antes de aplicar.",
+    "stalePreview": "Esta visualização usa o slide atualizado. Aplicar substituirá os destinos alterados.",
+    "geometry": "Posição e tamanho (x, y, largura, altura)",
+    "appearance": "Aparência ou formatação do texto alterada",
+    "changedAgain": "O destino mudou novamente. Revise a visualização atualizada antes de aplicar.",
+    "canvasTitle": "Alterações neste slide",
+    "editSlide": "Editar slide",
+    "showDiff": "Mostrar alterações",
+    "details": "Detalhes da revisão",
+    "removed": "Removido",
+    "added": "Adicionado",
+    "reviewHint": "Modo de revisão · as alterações se aplicam quando aceitas",
+    "canvasStale": "Destinos alterados. Abra os detalhes da revisão para inspecionar a visualização atualizada antes de aplicar.",
+    "previousPosition": "Anterior",
+    "proposedPosition": "Proposto",
+    "loadingDiff": "Carregando alterações…"
+  },
+  "commands": {
+    "moreControls": "Mais controles",
+    "selectTool": "Selecionar",
+    "fontSizeStep": "Alterar tamanho da fonte",
+    "customFontSize": "Tamanho personalizado…",
+    "fontSizePoints": "Tamanho em pontos",
+    "customColor": "Cor personalizada…",
+    "hexColor": "Cor hexadecimal",
+    "apply": "Aplicar",
+    "cancel": "Cancelar",
+    "reasons": {
+      "editorUnavailable": "O editor não está pronto.",
+      "documentLoading": "A apresentação ainda está sendo aberta.",
+      "noDocument": "Nenhuma apresentação está aberta.",
+      "readOnly": "A apresentação é somente leitura.",
+      "nothingToUndo": "Não há nada para desfazer.",
+      "nothingToRedo": "Não há nada para refazer.",
+      "textSelectionRequired": "Selecione primeiro um texto ou uma caixa de texto.",
+      "shapeRequired": "Selecione primeiro uma forma.",
+      "objectRequired": "Selecione primeiro uma forma ou imagem.",
+      "slideRequired": "Adicione primeiro um slide.",
+      "unsupportedSelection": "Isso não se aplica à seleção atual.",
+      "invalidLayout": "Esse layout não está disponível nesta apresentação.",
+      "invalidAdjustment": "Esse ajuste não está disponível para esta forma.",
+      "zOrderBoundary": "O objeto não pode se mover mais nessa direção.",
+      "reviewActive": "Saia primeiro da revisão da proposta.",
+      "previewPending": "A visualização das alterações ainda está carregando.",
+      "previewFailed": "Não foi possível mostrar a visualização das alterações.",
+      "proposalStale": "Os alvos da proposta mudaram. Revise a visualização atualizada antes de aplicar.",
+      "proposalNotFound": "Essa proposta não está mais pendente.",
+      "proposalsUnavailable": "As propostas não estão disponíveis.",
+      "hostDisabled": "Esta ação não está disponível aqui.",
+      "unsupportedCommand": "Este comando não é compatível.",
+      "invalidArguments": "O comando recebeu argumentos inválidos.",
+      "inputFailed": "Não foi possível aplicar uma entrada anterior.",
+      "documentReplaced": "A apresentação foi substituída.",
+      "targetChanged": "A seleção mudou antes da execução do comando.",
+      "gestureActive": "Conclua primeiro o gesto do ponteiro.",
+      "commandFailed": "O comando falhou.",
+      "permissionDenied": "O aplicativo host não permitiu que este plugin usasse este comando.",
+      "unsupportedPolicy": "Os plugins ainda não podem executar este comando. Use um lote de edições.",
+      "pluginUnavailable": "O plugin não está mais ativo.",
+      "aborted": "A ação do plugin foi cancelada antes de o comando ser executado."
+    }
+  },
+  "plugins": {
+    "toolbarGroup": "Plugins",
+    "panelTabs": "Painéis de plugins",
+    "collapsePanel": "Recolher {title}",
+    "expandPanel": "Expandir {title}"
   }
 }

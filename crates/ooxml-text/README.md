@@ -25,6 +25,8 @@ native shells.
 
 No `wasm-bindgen` here by design; a thin facade can wrap it.
 
-Snap-to-grid (`w:docGrid`) is not implemented.
+Snap-to-grid (`snap_line_box`) rounds an auto-spaced line's content height up
+to whole grid rows before applying its spacing multiple. Paragraph and run
+`w:snapToGrid` opt-outs are honoured.
 
 Part of [BetterOffice](https://betteroffice.dev). Apache-2.0.

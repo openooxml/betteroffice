@@ -13,7 +13,7 @@ use yrs::{
 use crate::model::validate_xml_text;
 use crate::{
     CaretAnchor, DeckSession, EditError, EditResult, KIND, PARA_ID, PILCROW_KIND,
-    ParagraphSnapshot, STORIES, StorySnapshot, TextReceipt, TextRunSnapshot, TextStyle,
+    ParagraphSnapshot, STORIES, StorySnapshot, TextCaps, TextReceipt, TextRunSnapshot, TextStyle,
     TextStylePatch,
 };
 
@@ -93,7 +93,7 @@ pub(crate) fn validate_style_values(
     Ok(())
 }
 
-fn validate_alignment(alignment: Option<&str>) -> EditResult<()> {
+pub(crate) fn validate_alignment(alignment: Option<&str>) -> EditResult<()> {
     if let Some(alignment) = alignment
         && !ALIGNMENTS.contains(&alignment)
     {
@@ -198,7 +198,7 @@ pub(crate) fn import_source_numbering_restarts(
     let mut txn = doc.transact_mut_with(crate::MIGRATE_ORIGIN);
     let stories = crate::deck::required_map(&txn, STORIES)?;
     let mut updates = Vec::new();
-    for (_, value) in stories.iter(&txn) {
+    for (story_id, value) in stories.iter(&txn) {
         let Out::YText(story) = value else { continue };
         for diff in story.diff(&txn, YChange::identity) {
             let Out::YMap(map) = diff.insert else {
@@ -213,11 +213,12 @@ pub(crate) fn import_source_numbering_restarts(
             let current = map_string(&map, &txn, "bulletJson")
                 .and_then(|json| serde_json::from_str::<pptx_parse::Bullet>(&json).ok());
             if current.as_ref() == Some(legacy) {
-                updates.push((map, source.clone()));
+                updates.push(((story_id.to_owned(), id), map, source.clone()));
             }
         }
     }
-    for (map, json) in updates {
+    updates.sort_by(|left, right| left.0.cmp(&right.0));
+    for (_, map, json) in updates {
         map.insert(&mut txn, "bulletJson", json);
     }
     Ok(())
@@ -365,12 +366,16 @@ impl DeckSession {
         check_text_bounds(&story, &txn, start, end)?;
         let text = text_in_range(&story, &txn, start, end);
         for (segment_start, segment_end) in paragraph_text_segments(&story, &txn, start, end) {
-            story.format(
-                &mut txn,
-                segment_start,
-                segment_end - segment_start,
-                attrs_from_patch(patch),
-            );
+            for (key, value) in patch_values(patch) {
+                if let Some(value) = value {
+                    story.format(
+                        &mut txn,
+                        segment_start,
+                        segment_end - segment_start,
+                        Attrs::from([(Arc::from(key), value)]),
+                    );
+                }
+            }
         }
         Ok(TextReceipt {
             story_id: story_id.to_owned(),
@@ -420,16 +425,20 @@ impl DeckSession {
         story_id: &str,
         index: u32,
     ) -> EditResult<TextReceipt> {
-        let mut txn = self.transact_for(context);
-        let story = story_ref(&txn, story_id)?;
-        let final_pilcrow = final_pilcrow_index(&story, &txn)?;
-        if index > final_pilcrow {
-            return Err(EditError::OutOfBounds {
-                index,
-                length: final_pilcrow,
-            });
-        }
+        let story = {
+            let txn = self.doc.transact();
+            let story = story_ref(&txn, story_id)?;
+            let final_pilcrow = final_pilcrow_index(&story, &txn)?;
+            if index > final_pilcrow {
+                return Err(EditError::OutOfBounds {
+                    index,
+                    length: final_pilcrow,
+                });
+            }
+            story
+        };
         let paragraph_id = self.next_id("para");
+        let mut txn = self.transact_for(context);
         let pilcrow = story.insert_embed_with_attributes(
             &mut txn,
             index,
@@ -517,6 +526,84 @@ pub(crate) fn validate_story<T: ReadTxn>(
     Ok(())
 }
 
+/// The snapshot `snapshot_story` reads back from a story `seed_story` wrote,
+/// computed without materializing a scratch document.
+pub(crate) fn baseline_story(
+    story_id: &str,
+    body: &TextBody,
+    theme: Option<&Theme>,
+) -> EditResult<StorySnapshot> {
+    let mut paragraphs = Vec::with_capacity(body.paragraphs.len().max(1));
+    let mut length = 1_u32;
+    if body.paragraphs.is_empty() {
+        paragraphs.push(ParagraphSnapshot {
+            id: format!("para:{story_id}:0"),
+            alignment: None,
+            level: 0,
+            bullet_json: None,
+            runs: Vec::new(),
+        });
+    } else {
+        length = 0;
+        for (paragraph_index, paragraph) in body.paragraphs.iter().enumerate() {
+            let mut runs: Vec<TextRunSnapshot> = Vec::new();
+            let mut last_attrs: Option<TextStyle> = None;
+            for run in &paragraph.runs {
+                if run.text.is_empty() {
+                    continue;
+                }
+                let style = style_from_run_properties(&run.properties, theme);
+                // yrs' format-gap cleanup deletes every marker between two
+                // identically styled runs, so their text items squash into a
+                // single run in the snapshot.
+                if last_attrs.as_ref() == Some(&style) {
+                    if let Some(last) = runs.last_mut() {
+                        last.text.push_str(&run.text);
+                    }
+                } else {
+                    runs.push(TextRunSnapshot {
+                        text: run.text.clone(),
+                        style: baseline_style(style.clone()),
+                    });
+                }
+                last_attrs = Some(style);
+                length += run.text.encode_utf16().count() as u32;
+            }
+            length += 1;
+            let bullet_json = paragraph
+                .properties
+                .bullet
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|error| EditError::Json(error.to_string()))?;
+            paragraphs.push(ParagraphSnapshot {
+                id: format!("para:{story_id}:{paragraph_index}"),
+                alignment: paragraph.properties.alignment.clone(),
+                level: paragraph.properties.level,
+                bullet_json,
+                runs,
+            });
+        }
+    }
+    Ok(StorySnapshot {
+        id: story_id.to_owned(),
+        length,
+        paragraphs,
+    })
+}
+
+/// Attribute reads drop non-finite numbers, so the snapshot applies the same
+/// normalization the seeded `Any::Number` attributes go through.
+fn baseline_style(style: TextStyle) -> TextStyle {
+    TextStyle {
+        font_size_pt: style.font_size_pt.filter(|value| value.is_finite()),
+        spacing_pt: style.spacing_pt.filter(|value| value.is_finite()),
+        baseline_pct: style.baseline_pct.filter(|value| value.is_finite()),
+        ..style
+    }
+}
+
 pub(crate) fn snapshot_story<T: ReadTxn>(
     story: &TextRef,
     txn: &T,
@@ -550,7 +637,7 @@ pub(crate) fn snapshot_story<T: ReadTxn>(
     })
 }
 
-fn story_ref<T: ReadTxn>(txn: &T, story_id: &str) -> EditResult<TextRef> {
+pub(crate) fn story_ref<T: ReadTxn>(txn: &T, story_id: &str) -> EditResult<TextRef> {
     txn.get_map(STORIES)
         .and_then(|stories| stories.get(txn, story_id))
         .and_then(|value| value.cast::<TextRef>().ok())
@@ -586,8 +673,14 @@ fn check_text_bounds<T: ReadTxn>(story: &TextRef, txn: &T, start: u32, end: u32)
     Ok(())
 }
 
-/// The pilcrow of every paragraph the range touches. A collapsed caret picks
-/// the paragraph it sits in; a range stopping at a paragraph start does not.
+/// Whether a paragraph-level edit over `start..end` touches the paragraph spanning
+/// `paragraph_start..=pilcrow`. A collapsed caret picks the paragraph it sits in; a range
+/// stopping at a paragraph start does not.
+pub(crate) fn selects_paragraph(start: u32, end: u32, paragraph_start: u32, pilcrow: u32) -> bool {
+    start <= pilcrow && (end > paragraph_start || (start == end && start >= paragraph_start))
+}
+
+/// The pilcrow of every paragraph the range touches, as [`selects_paragraph`] decides.
 fn selected_pilcrows<T: ReadTxn>(story: &TextRef, txn: &T, start: u32, end: u32) -> Vec<MapRef> {
     let start = start.min(story.len(txn).saturating_sub(1));
     let mut pilcrows = Vec::new();
@@ -596,9 +689,7 @@ fn selected_pilcrows<T: ReadTxn>(story: &TextRef, txn: &T, start: u32, end: u32)
     for diff in story.diff(txn, YChange::identity) {
         let item_length = out_len(&diff.insert);
         if let Out::YMap(map) = diff.insert {
-            let touches = start <= offset
-                && (end > paragraph_start || (start == end && start >= paragraph_start));
-            if touches {
+            if selects_paragraph(start, end, paragraph_start, offset) {
                 pilcrows.push(map);
             }
             paragraph_start = offset + item_length;
@@ -669,7 +760,7 @@ fn insert_styled_text(
     }
 }
 
-fn style_values(style: &TextStyle) -> [(&'static str, Any); 8] {
+fn style_values(style: &TextStyle) -> [(&'static str, Any); 9] {
     [
         ("bold", style.bold.map(Any::Bool).unwrap_or(Any::Null)),
         ("italic", style.italic.map(Any::Bool).unwrap_or(Any::Null)),
@@ -705,34 +796,27 @@ fn style_values(style: &TextStyle) -> [(&'static str, Any); 8] {
             "baseline",
             style.baseline_pct.map(Any::Number).unwrap_or(Any::Null),
         ),
+        (
+            "caps",
+            style
+                .caps
+                .map(|caps| Any::from(caps.as_attribute()))
+                .unwrap_or(Any::Null),
+        ),
     ]
 }
 
-fn attrs_from_patch(patch: &TextStylePatch) -> Attrs {
-    let mut attrs = Attrs::default();
-    insert_option(&mut attrs, "bold", patch.bold.map(Any::Bool));
-    insert_option(&mut attrs, "italic", patch.italic.map(Any::Bool));
-    insert_option(&mut attrs, "fontSize", patch.font_size_pt.map(Any::Number));
-    insert_option(&mut attrs, "color", patch.color.as_deref().map(Any::from));
-    insert_option(
-        &mut attrs,
-        "fontFamily",
-        patch.font_family.as_deref().map(Any::from),
-    );
-    insert_option(
-        &mut attrs,
-        "underline",
-        patch.underline.as_deref().map(Any::from),
-    );
-    insert_option(&mut attrs, "spacing", patch.spacing_pt.map(Any::Number));
-    insert_option(&mut attrs, "baseline", patch.baseline_pct.map(Any::Number));
-    attrs
-}
-
-fn insert_option(attrs: &mut Attrs, key: &str, value: Option<Any>) {
-    if let Some(value) = value {
-        attrs.insert(Arc::from(key), value);
-    }
+fn patch_values(patch: &TextStylePatch) -> [(&'static str, Option<Any>); 8] {
+    [
+        ("bold", patch.bold.map(Any::Bool)),
+        ("italic", patch.italic.map(Any::Bool)),
+        ("fontSize", patch.font_size_pt.map(Any::Number)),
+        ("color", patch.color.as_deref().map(Any::from)),
+        ("fontFamily", patch.font_family.as_deref().map(Any::from)),
+        ("underline", patch.underline.as_deref().map(Any::from)),
+        ("spacing", patch.spacing_pt.map(Any::Number)),
+        ("baseline", patch.baseline_pct.map(Any::Number)),
+    ]
 }
 
 fn style_from_run_properties(properties: &RunProperties, theme: Option<&Theme>) -> TextStyle {
@@ -745,10 +829,11 @@ fn style_from_run_properties(properties: &RunProperties, theme: Option<&Theme>) 
         underline: properties.underline.clone(),
         spacing_pt: properties.spacing_pt,
         baseline_pct: properties.baseline_pct,
+        caps: properties.caps,
     }
 }
 
-fn style_from_attrs(attrs: Option<&Attrs>) -> TextStyle {
+pub(crate) fn style_from_attrs(attrs: Option<&Attrs>) -> TextStyle {
     TextStyle {
         bold: attrs.and_then(|attrs| any_bool(attrs.get("bold"))),
         italic: attrs.and_then(|attrs| any_bool(attrs.get("italic"))),
@@ -758,6 +843,10 @@ fn style_from_attrs(attrs: Option<&Attrs>) -> TextStyle {
         underline: attrs.and_then(|attrs| any_string(attrs.get("underline"))),
         spacing_pt: attrs.and_then(|attrs| any_number(attrs.get("spacing"))),
         baseline_pct: attrs.and_then(|attrs| any_number(attrs.get("baseline"))),
+        caps: attrs
+            .and_then(|attrs| any_string(attrs.get("caps")))
+            .as_deref()
+            .and_then(TextCaps::from_attribute),
     }
 }
 

@@ -2,12 +2,13 @@ use std::collections::BTreeMap;
 
 pub use ooxml_drawingml::ShapeStyle;
 use ooxml_drawingml::{
-    ColorValue, GeometryPathCommand, ShapeEffects, ShapeFill, ShapeOutline, TableStyleList, Theme,
-    ThemeFormatScheme,
+    ColorMap, ColorValue, GeometryPathCommand, ShapeEffects, ShapeFill, ShapeOutline,
+    StyleReference, TableStyleList, Theme, ThemeFormatScheme,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::comments::{Comment, CommentAuthor, CommentFlavor};
+use crate::inventory::{NotesSource, SlideSource};
 use crate::relationships::Relationship;
 
 pub use ooxml_drawingml::chart::{
@@ -35,7 +36,7 @@ impl ShapeElements {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PptxPackage {
     pub presentation: Presentation,
@@ -46,6 +47,9 @@ pub struct PptxPackage {
     /// Absent from packages serialized before charts were parsed.
     #[serde(default)]
     pub charts: Vec<ChartPart>,
+    /// The drawing PowerPoint saves beside each SmartArt graphic.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagram_drawings: Vec<DiagramDrawing>,
     pub media: Vec<MediaPart>,
     /// Absent from packages serialized before table styles were parsed.
     #[serde(default, skip_serializing_if = "TableStyleList::is_empty")]
@@ -59,8 +63,17 @@ pub struct PptxPackage {
     pub relationships: BTreeMap<String, Vec<Relationship>>,
     #[serde(skip)]
     pub(crate) parts: Vec<PackagePart>,
+    /// Source bytes for verbatim member passthrough on save.
+    #[serde(skip)]
+    pub(crate) source_container: ooxml_opc::SourceContainer,
     #[serde(default, skip_serializing_if = "ShapeElements::is_legacy")]
     pub(crate) shape_elements: ShapeElements,
+    /// Source inventories of the slide parts, by part path, found while parsing.
+    #[serde(skip)]
+    pub(crate) sources: BTreeMap<String, SlideSource>,
+    /// Notes pages, by the part path of the slide they belong to.
+    #[serde(skip)]
+    pub(crate) notes_sources: BTreeMap<String, NotesSource>,
 }
 
 impl PptxPackage {
@@ -75,6 +88,17 @@ impl PptxPackage {
     /// the parsed model but not the raw part bytes.
     pub fn has_parts(&self) -> bool {
         !self.parts.is_empty()
+    }
+
+    /// Where a slide part's shapes sit in its XML and what the model leaves out; `None` for
+    /// packages not parsed from file bytes.
+    pub fn slide_source(&self, part_path: &str) -> Option<&SlideSource> {
+        self.sources.get(part_path)
+    }
+
+    /// The notes page of the slide at `slide_part_path`, when the package was parsed with one.
+    pub fn notes_source(&self, slide_part_path: &str) -> Option<&NotesSource> {
+        self.notes_sources.get(slide_part_path)
     }
 
     /// Whether source ordinals include connectors.
@@ -97,7 +121,7 @@ pub(crate) struct PackagePart {
     pub bytes: Vec<u8>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Presentation {
     pub part_path: String,
@@ -111,6 +135,12 @@ pub struct Presentation {
     pub first_slide_num: i32,
     pub slides: Vec<SlideReference>,
     pub master_part_paths: Vec<String>,
+    /// `p:defaultTextStyle`, one entry per list level.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub default_text_style: Vec<ParagraphProperties>,
+    /// `p:defaultTextStyle/a:defPPr`, under every level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_text_paragraph: Option<Box<ParagraphProperties>>,
 }
 
 fn default_first_slide_num() -> i32 {
@@ -137,9 +167,19 @@ pub struct Slide {
     pub layout_part_path: Option<String>,
     pub show_master_shapes: bool,
     pub background: Option<ShapeFill>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_picture: Option<Box<PictureFill>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_reference: Option<StyleReference>,
     pub shapes: Vec<ShapeNode>,
+    /// `p:clrMapOvr/a:overrideClrMapping`; absent when the parent map applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_map_override: Option<ColorMap>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub notes: String,
+    /// `p:sld/@show` negated; `None` in packages stored before slide visibility was read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -151,7 +191,14 @@ pub struct SlideLayout {
     pub master_part_path: Option<String>,
     pub show_master_shapes: bool,
     pub background: Option<ShapeFill>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_picture: Option<Box<PictureFill>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_reference: Option<StyleReference>,
     pub shapes: Vec<ShapeNode>,
+    /// `p:clrMapOvr/a:overrideClrMapping`; absent when the master map applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_map_override: Option<ColorMap>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -162,8 +209,15 @@ pub struct SlideMaster {
     pub theme_part_path: Option<String>,
     pub layout_part_paths: Vec<String>,
     pub background: Option<ShapeFill>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_picture: Option<Box<PictureFill>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_reference: Option<StyleReference>,
     pub shapes: Vec<ShapeNode>,
     pub text_styles: TextStyleSet,
+    /// `p:clrMap`; absent from packages serialized before it was parsed.
+    #[serde(default, skip_serializing_if = "ColorMap::is_identity")]
+    pub color_map: ColorMap,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -174,6 +228,9 @@ pub struct ThemePart {
     /// Absent from packages serialized before `a:fmtScheme` was parsed.
     #[serde(default, skip_serializing_if = "ThemeFormatScheme::is_empty")]
     pub format_scheme: ThemeFormatScheme,
+    /// `a:bgFillStyleLst` picture entries, indexed as `p:bgRef` names them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub background_pictures: Vec<Option<PictureFill>>,
 }
 
 /// A chart part resolved against one referenced presentation theme.
@@ -190,7 +247,43 @@ pub struct ChartPart {
 pub struct MediaPart {
     pub part_path: String,
     pub content_type: String,
+    #[serde(
+        serialize_with = "serialize_media_bytes",
+        deserialize_with = "deserialize_media_bytes"
+    )]
     pub bytes: Vec<u8>,
+}
+
+/// Writes base64: a JSON integer array inflates the payload about fourfold.
+fn serialize_media_bytes<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use base64::Engine as _;
+    serializer.serialize_str(&base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+/// Also accepts the integer arrays written before schema 2.2.
+fn deserialize_media_bytes<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use base64::Engine as _;
+    use serde::de::Error as _;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Bytes {
+        Base64(String),
+        Integers(Vec<u8>),
+    }
+
+    match Bytes::deserialize(deserializer)? {
+        Bytes::Base64(encoded) => base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(D::Error::custom),
+        Bytes::Integers(bytes) => Ok(bytes),
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -253,12 +346,48 @@ pub struct Placeholder {
     pub size: Option<String>,
 }
 
+/// A slide holds one of each of these, so they inherit by type: PowerPoint
+/// writes a slide number as `idx="12"` over a master's `idx="4"` and still
+/// draws it where the master put it (#797).
+const SINGLETON_PLACEHOLDERS: [&str; 5] = ["title", "sldNum", "dt", "ftr", "hdr"];
+
+impl Placeholder {
+    /// Whether this placeholder and `other` fill the same slot, so one
+    /// inherits from the other.
+    pub fn matches(&self, other: &Placeholder) -> bool {
+        let left_type = normalize_placeholder_type(self.placeholder_type.as_deref());
+        let right_type = normalize_placeholder_type(other.placeholder_type.as_deref());
+        if SINGLETON_PLACEHOLDERS.contains(&left_type)
+            || SINGLETON_PLACEHOLDERS.contains(&right_type)
+        {
+            return left_type == right_type;
+        }
+        match (self.index, other.index) {
+            (Some(left), Some(right)) => left == right,
+            _ => left_type == right_type,
+        }
+    }
+}
+
+fn normalize_placeholder_type(value: Option<&str>) -> &str {
+    match value.unwrap_or("body") {
+        "ctrTitle" => "title",
+        "obj" => "body",
+        value => value,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Shape {
     #[serde(flatten)]
     pub base: ShapeBase,
     pub geometry: String,
+    #[serde(
+        default = "has_preset_geometry_default",
+        skip_serializing_if = "is_preset_geometry"
+    )]
+    pub has_preset_geometry: bool,
     /// Custom paths in shape-relative coordinates.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub paths: Vec<CustomGeometryPath>,
@@ -278,7 +407,7 @@ pub struct Shape {
 }
 
 /// An `a:blipFill` on a shape: the image, and the box it stretches into.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PictureFill {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -290,6 +419,19 @@ pub struct PictureFill {
     /// `a:stretch/a:fillRect` insets, in thousandths of a percent of the box.
     #[serde(default, skip_serializing_if = "PictureCrop::is_whole")]
     pub fill_rect: PictureCrop,
+    /// `a:tile`: the picture repeats at its own size instead of stretching.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tile: Option<PictureTile>,
+}
+
+/// `a:blipFill/a:tile`. The offset, alignment and flip it can also carry are
+/// not read: every tile in the corpus starts at the top left, unflipped.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PictureTile {
+    /// `@sx` and `@sy` as a fraction, 1.0 for the picture's own size.
+    pub scale_x: f64,
+    pub scale_y: f64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -334,6 +476,14 @@ fn is_rect(geometry: &str) -> bool {
     geometry == "rect"
 }
 
+fn has_preset_geometry_default() -> bool {
+    true
+}
+
+fn is_preset_geometry(value: &bool) -> bool {
+    *value
+}
+
 /// Bitmap effects with unresolved colours.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -342,6 +492,8 @@ pub enum BlipEffect {
     BiLevel { threshold: f64 },
     /// `a:grayscl`.
     Grayscale,
+    /// `a:alphaModFix`: the whole bitmap drawn at `amount` opacity.
+    Alpha { amount: f64 },
     /// `a:lum`: brightness and contrast, each a fraction in `-1.0..=1.0`.
     Luminance { brightness: f64, contrast: f64 },
     /// `a:duotone`: luminance interpolates between the two colours.
@@ -406,12 +558,25 @@ pub enum GraphicFrameData {
     },
     Diagram {
         relationship_ids: Vec<String>,
+        /// `ppt/diagrams/drawing#.xml`, the shapes PowerPoint saves beside a
+        /// SmartArt graphic so a reader that cannot lay the diagram out can
+        /// still draw it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        drawing_part_path: Option<String>,
     },
     Unknown {
         uri: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         picture: Option<Box<Picture>>,
     },
+}
+
+/// One `ppt/diagrams/drawing#.xml`: the shapes a SmartArt graphic resolves to.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagramDrawing {
+    pub part_path: String,
+    pub shapes: Vec<ShapeNode>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -603,7 +768,15 @@ pub struct TextBody {
     /// Use a 1.2 em percentage pitch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compat_line_spacing: Option<bool>,
+    /// `a:bodyPr/@spcFirstLastPara`: honour the first paragraph's space-before
+    /// and the last one's space-after.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_first_last_para: Option<bool>,
     pub autofit: Option<TextAutofit>,
+    /// `a:bodyPr/@wrap`: `false` for `none`, which lays every paragraph on one
+    /// line and lets it run past the shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrap: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vertical_overflow: Option<TextOverflow>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -685,6 +858,16 @@ pub struct ParagraphProperties {
     pub bullet_color: Option<BulletColor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bullet_size: Option<BulletSize>,
+    /// `a:pPr/@defTabSz` in EMU: the pitch of the implicit tab stops.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_tab_size: Option<i64>,
+    /// `a:pPr/a:tabLst` positions in EMU. A declared empty list clears the
+    /// stops the list style would otherwise contribute.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_stops: Option<Vec<i64>>,
+    /// `a:pPr/@rtl`: the paragraph reads right to left.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtl: Option<bool>,
     pub default_run: Option<RunProperties>,
 }
 
@@ -739,6 +922,35 @@ pub struct TextRun {
     pub line_break: bool,
 }
 
+/// `a:rPr/@cap`: how a run is cased when drawn. Display only — the stored text
+/// keeps the author's casing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TextCaps {
+    None,
+    Small,
+    All,
+}
+
+impl TextCaps {
+    pub fn from_attribute(value: &str) -> Option<Self> {
+        match value {
+            "none" => Some(Self::None),
+            "small" => Some(Self::Small),
+            "all" => Some(Self::All),
+            _ => None,
+        }
+    }
+
+    pub fn as_attribute(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Small => "small",
+            Self::All => "all",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunProperties {
@@ -751,10 +963,15 @@ pub struct RunProperties {
     pub bold: Option<bool>,
     pub italic: Option<bool>,
     pub underline: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caps: Option<TextCaps>,
     pub font_family: Option<String>,
     pub color: Option<ColorValue>,
     pub language: Option<String>,
     pub hyperlink_relationship_id: Option<String>,
+    /// `a:rPr/a:effectLst`: the shadow PowerPoint draws behind the glyphs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effects: Option<ShapeEffects>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

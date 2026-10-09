@@ -6,11 +6,10 @@
 //! values below are dyadic and exact in f32 unless noted:
 //!   '0' = 1139/128 = 8.8984375     ' ' = 569/128 = 4.4453125
 //!   'A' = 1366/128 = 10.671875
-//!   ascent  = 16 × 1854/2048 = 14.484375
-//!   descent = 16 ×  434/2048 =  3.390625
-//!   external leading = 16 × max(0, (1854+434+67)−(1854+434))/2048 = 0.5234375
-//!   single line = 16 × (1854+434)/2048 + leading = 17.875 + 0.5234375 = 18.3984375
-//!   External leading is included in the line height.
+//!   ascent  = 16 × (1854+67)/2048 = 15.0078125
+//!   descent = 16 ×  434/2048      =  3.390625
+//!   single line = 16 × (1854+434+67)/2048 = 18.3984375
+//!   The hhea line gap rides above the ascender, inside the ascent.
 //!
 //! Because the numbers are exact, expectations are written as literal
 //! arithmetic rather than tolerances, and wrap behaviour is pinned by feeding
@@ -35,10 +34,9 @@ const NOTO_NASKH_ARABIC: &[u8] =
 const W0: f64 = 1139.0 / 128.0;
 const SP: f64 = 569.0 / 128.0;
 const WA: f64 = 1366.0 / 128.0;
-const ASC: f64 = 14.484375;
+const ASC: f64 = 15.0078125;
 const DESC: f64 = 3.390625;
-const LEAD: f64 = 0.5234375;
-const LH: f64 = 17.875 + LEAD;
+const LH: f64 = ASC + DESC;
 
 fn store() -> FontStore {
     let mut s = FontStore::new();
@@ -182,6 +180,152 @@ fn trailing_spaces_can_overhang_without_wrapping_the_word() {
 }
 
 #[test]
+fn trailing_ideographic_spaces_overhang_like_ascii_spaces() {
+    const W_IDEO: f64 = 16.0;
+    let value = measure(json!([{ "kind": "text", "text": "00\u{3000}" }]), 2.0 * W0).unwrap();
+    assert_eq!(spans(&value), vec![(0, 0, 0, 3)]);
+    approx(
+        value["lines"][0]["width"].as_f64().unwrap(),
+        2.0 * W0 + W_IDEO,
+        "retained ideographic advance",
+    );
+    let value = measure(
+        json!([{ "kind": "text", "text": "00\u{3000}\u{3000}\u{3000}" }]),
+        2.0 * W0,
+    )
+    .unwrap();
+    assert_eq!(spans(&value), vec![(0, 0, 0, 5)]);
+    approx(
+        value["lines"][0]["width"].as_f64().unwrap(),
+        2.0 * W0 + 3.0 * W_IDEO,
+        "retained ideographic advances",
+    );
+}
+
+#[test]
+fn ideographic_space_breaks_words_keeping_full_advance() {
+    const W_IDEO: f64 = 16.0;
+    let value = measure(
+        json!([{ "kind": "text", "text": "00\u{3000}00" }]),
+        2.0 * W0 + 1.0,
+    )
+    .unwrap();
+    assert_eq!(spans(&value), vec![(0, 0, 0, 3), (0, 3, 0, 5)]);
+    let lines = value["lines"].as_array().unwrap();
+    approx(
+        lines[0]["width"].as_f64().unwrap(),
+        2.0 * W0 + W_IDEO,
+        "first line keeps the trailing ideographic advance",
+    );
+    approx(
+        lines[1]["width"].as_f64().unwrap(),
+        2.0 * W0,
+        "second line width",
+    );
+}
+
+#[test]
+fn justified_text_does_not_compress_ideographic_spaces() {
+    const W_IDEO: f64 = 16.0;
+    let natural = 12.0 * W0 + 3.0 * W_IDEO;
+    let minimum = natural - 0.25 * 3.0 * W_IDEO;
+    for (alignment, width, expected_lines) in [
+        ("justify", natural, 1),
+        ("justify", minimum, 2),
+        ("left", minimum, 2),
+    ] {
+        let input = json!({
+            "block":{"kind":"paragraph","runs":[{"kind":"text","text":"000\u{3000}000\u{3000}000\u{3000}000"}],"attrs":{"alignment":alignment}},
+            "maxWidth":width,"fontChains":{"liberation sans|0|0":[0]},
+            "defaults":{"fontFamily":"Liberation Sans","fontSize":12},"authoritativeShaping":true
+        });
+        let measured: Value =
+            serde_json::from_str(&measure_paragraph_json(&store(), &input.to_string()).unwrap())
+                .unwrap();
+        assert_eq!(
+            measured["lines"].as_array().unwrap().len(),
+            expected_lines,
+            "{alignment} at {width}"
+        );
+    }
+    let input = json!({
+        "block":{"kind":"paragraph","runs":[{"kind":"text","text":"000\u{3000}000\u{3000}000\u{3000}000"}]},
+        "maxWidth":natural,"fontChains":{"liberation sans|0|0":[0]},
+        "defaults":{"fontFamily":"Liberation Sans","fontSize":12},"authoritativeShaping":true
+    });
+    let measured: Value =
+        serde_json::from_str(&measure_paragraph_json(&store(), &input.to_string()).unwrap())
+            .unwrap();
+    approx(
+        measured["lines"][0]["clusterAdvances"][3]["advance"]
+            .as_f64()
+            .unwrap(),
+        W_IDEO,
+        "ideographic advance uncompressed",
+    );
+}
+
+#[test]
+fn justified_mixed_ascii_and_trailing_ideographic_keeps_spaces_uncompressed() {
+    const W_IDEO: f64 = 16.0;
+    let natural = 12.0 * W0 + 3.0 * SP;
+    for trailing in ["\u{3000}", "\u{3000}\u{3000}"] {
+        let count = trailing.chars().count() as f64;
+        let text = format!("000 000 000 000{trailing}");
+        let input = json!({
+            "block":{"kind":"paragraph","runs":[{"kind":"text","text":text}],"attrs":{"alignment":"justify"}},
+            "maxWidth":natural,"fontChains":{"liberation sans|0|0":[0]},
+            "defaults":{"fontFamily":"Liberation Sans","fontSize":12},"authoritativeShaping":true
+        });
+        let measured: Value =
+            serde_json::from_str(&measure_paragraph_json(&store(), &input.to_string()).unwrap())
+                .unwrap();
+        assert_eq!(
+            measured["lines"].as_array().unwrap().len(),
+            1,
+            "trailing {count}"
+        );
+        let line = &measured["lines"][0];
+        approx(
+            line["width"].as_f64().unwrap(),
+            natural + count * W_IDEO,
+            "full width retained",
+        );
+        for idx in [3, 7, 11] {
+            approx(
+                line["clusterAdvances"][idx]["advance"].as_f64().unwrap(),
+                SP,
+                "ascii space uncompressed",
+            );
+        }
+        approx(
+            line["clusterAdvances"][0]["advance"].as_f64().unwrap(),
+            W0,
+            "unchanged glyph advance",
+        );
+        let base = 15;
+        for offset in 0..count as usize {
+            approx(
+                line["clusterAdvances"][base + offset]["advance"]
+                    .as_f64()
+                    .unwrap(),
+                W_IDEO,
+                "trailing ideographic advance",
+            );
+        }
+    }
+}
+
+#[test]
+fn ideographic_space_only_run_measures_like_empty_paragraph() {
+    for text in ["\u{3000}", "\u{3000}\u{3000}"] {
+        let v = measure(json!([{ "kind": "text", "text": text }]), 200.0).unwrap();
+        assert_eq!(spans(&v), vec![(0, 0, 0, 0)]);
+        assert_eq!(v["lines"][0]["width"].as_f64().unwrap(), 0.0);
+    }
+}
+
+#[test]
 fn justified_text_compresses_spaces_before_wrapping() {
     let natural = 12.0 * W0 + 3.0 * SP;
     let minimum = natural - 0.25 * 3.0 * SP;
@@ -254,7 +398,7 @@ fn soft_return_forces_new_line() {
     .unwrap();
     assert_eq!(spans(&v), vec![(0, 0, 1, 0), (2, 0, 2, 1)]);
 
-    // A trailing soft return uses the fontless 0.8/0.2 em fallback.
+    // A trailing soft return takes the paragraph mark's own face.
     let v = measure(
         json!([{ "kind": "text", "text": "0" }, { "kind": "lineBreak" }]),
         200.0,
@@ -262,21 +406,9 @@ fn soft_return_forces_new_line() {
     .unwrap();
     assert_eq!(spans(&v), vec![(0, 0, 1, 0), (2, 0, 2, 0)]);
     let last = &v["lines"][1];
-    approx(
-        last["ascent"].as_f64().unwrap(),
-        16.0 * 0.8,
-        "fallback ascent",
-    );
-    approx(
-        last["descent"].as_f64().unwrap(),
-        16.0 * 0.2,
-        "fallback descent",
-    );
-    approx(
-        last["lineHeight"].as_f64().unwrap(),
-        16.0 * 1.15,
-        "fallback lineHeight",
-    );
+    approx(last["ascent"].as_f64().unwrap(), ASC, "mark ascent");
+    approx(last["descent"].as_f64().unwrap(), DESC, "mark descent");
+    approx(last["lineHeight"].as_f64().unwrap(), LH, "mark lineHeight");
 }
 
 // 5. multi-run line: metrics follow the largest font on the line
@@ -394,11 +526,11 @@ fn a_shorter_font_does_not_add_leading_below_a_taller_font() {
         let out = measure_paragraph_json(&store, &input.to_string()).unwrap();
         let result: Value = serde_json::from_str(&out).unwrap();
         let line = &result["lines"][0];
-        approx(line["ascent"].as_f64().unwrap(), 16.0 * 1.405, "ascent");
+        approx(line["ascent"].as_f64().unwrap(), 16.0 * 1.069, "ascent");
         approx(line["descent"].as_f64().unwrap(), 16.0 * 0.634, "descent");
         approx(
             line["lineHeight"].as_f64().unwrap(),
-            16.0 * 2.039,
+            16.0 * 1.703,
             "line height",
         );
     }
@@ -958,6 +1090,34 @@ fn automatic_tabs_resume_on_grid_multiples_after_custom_stops() {
     }
 }
 
+// An `end` stop parks the pen exactly on itself; the hanging indent's implicit
+// stop is the next one past it, not the default grid an inch further right.
+#[test]
+fn a_tab_after_an_end_stop_lands_on_the_hanging_indent() {
+    let v = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [
+                { "kind": "tab" },
+                { "kind": "text", "text": "0" },
+                { "kind": "tab" },
+                { "kind": "text", "text": "0" }
+            ],
+            "attrs": {
+                "tabs": [{ "val": "end", "pos": 1531.0 }],
+                "indent": { "left": 109.6, "hanging": 109.6 }
+            }
+        }),
+        400.0,
+    )
+    .unwrap();
+    approx(
+        v["lines"][0]["width"].as_f64().unwrap(),
+        109.6 + W0,
+        "second tab lands on the hanging indent, not the default grid",
+    );
+}
+
 #[test]
 fn paragraph_indent_does_not_shift_the_automatic_tab_grid() {
     let v = measure_with(
@@ -1078,6 +1238,129 @@ fn right_aligned_tab_clamps_to_line_edge() {
     .unwrap();
     assert_eq!(spans(&v), vec![(0, 0, 1, 1)]);
     approx(v["lines"][0]["width"].as_f64().unwrap(), 100.0, "clamped");
+}
+
+/// Measured against Word's `bo-corpus-4` reference PDF: a `start` stop at
+/// 362.3pt under a 396.4pt line limit leaves 34.1pt, and Word takes the tab and
+/// the 36.68pt word after it to the next line together rather than stranding
+/// that word at the paragraph indent. Scaled here onto the 48px grid.
+#[test]
+fn a_start_tab_wraps_with_the_word_it_cannot_fit() {
+    let v = measure(
+        json!([
+            { "kind": "text", "text": "0".repeat(7) },
+            { "kind": "tab" },
+            { "kind": "text", "text": "0".repeat(5) }
+        ]),
+        110.0,
+    )
+    .unwrap();
+    // 7 zeros end at 62.29; the 96px stop leaves 14px and the word needs 44.49
+    assert_eq!(spans(&v), vec![(0, 0, 0, 7), (1, 0, 2, 5)]);
+    approx(
+        v["lines"][0]["width"].as_f64().unwrap(),
+        7.0 * W0,
+        "the tab leaves the line it could not serve",
+    );
+    approx(
+        v["lines"][1]["width"].as_f64().unwrap(),
+        48.0 + 5.0 * W0,
+        "the wrapped tab takes its word to the 48px stop",
+    );
+}
+
+/// The same rule costs a line when no stop can hold the word: it follows the
+/// tab onto a third line instead of riding the first.
+#[test]
+fn a_stranding_start_tab_costs_a_line() {
+    let v = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [
+                { "kind": "text", "text": "0".repeat(5) },
+                { "kind": "tab" },
+                { "kind": "text", "text": "0".repeat(2) }
+            ],
+            "attrs": { "tabs": [{ "val": "start", "pos": 1500.0 }] }
+        }),
+        110.0,
+    )
+    .unwrap();
+    assert_eq!(
+        spans(&v),
+        vec![(0, 0, 0, 5), (1, 0, 1, 1), (2, 0, 2, 2)],
+        "the 100px stop plus a 17.8px word overruns the 110px line"
+    );
+}
+
+/// The wrap serves the word that would otherwise be stranded, so a tab holds
+/// its line for anything it cannot strand: an own-line image opens a line of
+/// its own, a floating image carries no line width, and content wider than the
+/// whole line gains nothing from the break. Each case keeps the tab on the
+/// 96px stop, as it did before the wrap rule existed.
+#[test]
+fn a_start_tab_holds_its_line_for_content_it_cannot_strand() {
+    for width in [400.0, 20.0] {
+        for image in [
+            json!({ "kind": "image", "width": width, "height": 20.0, "wrapType": "topAndBottom" }),
+            json!({ "kind": "image", "width": width, "height": 20.0, "displayMode": "block" }),
+            json!({ "kind": "image", "width": width, "height": 20.0,
+                    "displayMode": "float", "position": { "x": 0.0, "y": 0.0 } }),
+            json!({ "kind": "image", "width": width, "height": 20.0,
+                    "wrapType": "square", "position": { "x": 0.0, "y": 0.0 } }),
+        ] {
+            let v = measure(
+                json!([
+                    { "kind": "text", "text": "0".repeat(7) },
+                    { "kind": "tab" },
+                    image.clone()
+                ]),
+                110.0,
+            )
+            .unwrap();
+            approx(
+                v["lines"][0]["width"].as_f64().unwrap(),
+                96.0,
+                &format!("{width}px {image}"),
+            );
+        }
+    }
+    // An image too wide for any line is not worth a break either.
+    let v = measure(
+        json!([
+            { "kind": "text", "text": "0".repeat(7) },
+            { "kind": "tab" },
+            { "kind": "image", "width": 400.0, "height": 20.0 }
+        ]),
+        110.0,
+    )
+    .unwrap();
+    approx(
+        v["lines"][0]["width"].as_f64().unwrap(),
+        96.0,
+        "inline image wider than the line",
+    );
+}
+
+/// An inline image does share the tab's line, so it strands like a word.
+#[test]
+fn a_start_tab_wraps_with_an_inline_image_it_cannot_fit() {
+    let v = measure(
+        json!([
+            { "kind": "text", "text": "0".repeat(7) },
+            { "kind": "tab" },
+            { "kind": "image", "width": 20.0, "height": 20.0 }
+        ]),
+        110.0,
+    )
+    .unwrap();
+    assert_eq!(spans(&v), vec![(0, 0, 0, 7), (1, 0, 2, 1)]);
+    approx(v["lines"][0]["width"].as_f64().unwrap(), 7.0 * W0, "text");
+    approx(
+        v["lines"][1]["width"].as_f64().unwrap(),
+        48.0 + 20.0,
+        "the tab takes the image to the 48px stop",
+    );
 }
 
 #[test]
@@ -1249,6 +1532,70 @@ fn field_measures_at_fallback_text() {
         v["lines"][0]["lineHeight"].as_f64().unwrap(),
         2.0 * LH,
         "24pt field line",
+    );
+}
+
+/// Pinned line rules never snap: the `exact` box is fixed regardless of
+/// content, so the 10px box keeps its height under an active 24px grid;
+/// the `atLeast` floor is author-set, so the 30px floor (above the 18.4px
+/// content) likewise keeps its resolved height instead of snapping to 48px,
+/// and a content-winning `atLeast` floor (10px, below the content) keeps
+/// the natural height instead of snapping to 24px. Only `auto`-ruled lines
+/// snap (see `grid_active_section_snaps_line_height_up`).
+#[test]
+fn pinned_line_rules_do_not_snap() {
+    let exact = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [{ "kind": "text", "text": "0" }],
+            "attrs": {
+                "docGridPitchPx": 24.0,
+                "spacing": { "line": 10.0, "lineUnit": "px", "lineRule": "exact" }
+            }
+        }),
+        200.0,
+    )
+    .unwrap();
+    approx(
+        exact["lines"][0]["lineHeight"].as_f64().unwrap(),
+        10.0,
+        "exact lineHeight",
+    );
+    let at_least = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [{ "kind": "text", "text": "0" }],
+            "attrs": {
+                "docGridPitchPx": 24.0,
+                "spacing": { "line": 30.0, "lineUnit": "px", "lineRule": "atLeast" }
+            }
+        }),
+        200.0,
+    )
+    .unwrap();
+    approx(
+        at_least["lines"][0]["lineHeight"].as_f64().unwrap(),
+        30.0,
+        "atLeast keeps its resolved height",
+    );
+    let at_least_content_wins = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [{ "kind": "text", "text": "0" }],
+            "attrs": {
+                "docGridPitchPx": 24.0,
+                "spacing": { "line": 10.0, "lineUnit": "px", "lineRule": "atLeast" }
+            }
+        }),
+        200.0,
+    )
+    .unwrap();
+    approx(
+        at_least_content_wins["lines"][0]["lineHeight"]
+            .as_f64()
+            .unwrap(),
+        LH,
+        "content-winning atLeast keeps its natural height",
     );
 }
 
@@ -1448,6 +1795,275 @@ fn visible_list_marker_reserves_the_hanging_slot_on_the_first_line() {
     }
 }
 
+/// Attributes for a 12pt marker wider than its 113.4px hanging indent.
+fn overrun_marker_attrs() -> Value {
+    json!({
+        "listMarker": "1.2.3.4.5.6.7.8.9",
+        "listMarkerFontFamily": "Liberation Sans",
+        "listMarkerFontSize": 12.0,
+        "defaultTabStopTwips": 709.0,
+        "indent": { "left": 113.4, "hanging": 113.4 }
+    })
+}
+
+/// Measures a marker's natural width with the standard 12pt font.
+fn marker_natural_width(marker: &Value) -> f64 {
+    measure(json!([{ "kind": "text", "text": marker }]), 1000.0).unwrap()["lines"][0]["width"]
+        .as_f64()
+        .unwrap()
+}
+
+/// An overrun narrows the first full line and leaves following lines unchanged.
+#[test]
+fn list_marker_tab_overrun_narrows_only_the_first_line() {
+    let attrs = overrun_marker_attrs();
+    let left = 113.4;
+    let natural_width = marker_natural_width(&attrs["listMarker"]);
+    assert!(natural_width > left);
+    let grid_interval = 709.0 / 1440.0 * 96.0;
+    let grid_stop = ((natural_width / grid_interval).floor() + 1.0) * grid_interval;
+    let overrun = grid_stop - left;
+    let glyph_advance = overrun / 4.0;
+    let body_width = 20.0 * glyph_advance;
+    let runs = json!([{
+        "kind": "text",
+        "text": "0".repeat(80),
+        "horizontalScale": glyph_advance / W0 * 100.0
+    }]);
+    for suffix in [None, Some("tab")] {
+        let mut attrs = attrs.clone();
+        if let Some(suffix) = suffix {
+            attrs["listMarkerSuffix"] = json!(suffix);
+        }
+        let measured = measure_with(
+            json!({ "kind": "paragraph", "runs": runs, "attrs": attrs }),
+            left + body_width,
+        )
+        .unwrap();
+        let lines = measured["lines"].as_array().unwrap();
+        let mut expected_keys = BASE_LINE_KEYS.to_vec();
+        expected_keys.push("markerTabOffset");
+        expected_keys.sort_unstable();
+        assert_eq!(line_keys(&measured, 0), expected_keys);
+        approx(
+            lines[0]["markerTabOffset"].as_f64().unwrap(),
+            overrun,
+            "marker advances to the next column grid line",
+        );
+        let first_width = lines[0]["width"].as_f64().unwrap();
+        let second_width = lines[1]["width"].as_f64().unwrap();
+        approx(first_width, body_width - overrun, "first full line width");
+        approx(second_width, body_width, "second full line width");
+        approx(second_width - first_width, overrun, "first-line narrowing");
+        assert!(
+            lines[1..]
+                .iter()
+                .all(|line| line.get("markerTabOffset").is_none())
+        );
+
+        attrs["listMarker"] = json!("1.");
+        let short = measure_with(
+            json!({ "kind": "paragraph", "runs": runs, "attrs": attrs }),
+            left + body_width,
+        )
+        .unwrap();
+        assert!(short["lines"][0].get("markerTabOffset").is_none());
+        approx(
+            short["lines"][0]["width"].as_f64().unwrap(),
+            body_width,
+            "short marker keeps the existing first-line width",
+        );
+    }
+}
+
+/// Custom stops beat farther grid lines, while clear and bar stops are ignored.
+#[test]
+fn list_marker_tab_overrun_chooses_the_closest_stop() {
+    for (left, hanging) in [(113.4, 113.4), (150.0, 113.4)] {
+        let mut attrs = overrun_marker_attrs();
+        attrs["indent"] = json!({ "left": left, "hanging": hanging });
+        let natural_width = marker_natural_width(&attrs["listMarker"]);
+        let marker_end = left - hanging + natural_width;
+        assert!(marker_end > left);
+        let grid_interval = 709.0 / 1440.0 * 96.0;
+        let grid_stop = ((marker_end / grid_interval).floor() + 1.0) * grid_interval;
+        let custom_stop = (marker_end + grid_stop) / 2.0;
+        for (stop, expected) in [(custom_stop, custom_stop), (grid_stop + 10.0, grid_stop)] {
+            attrs["tabs"] = json!([
+                { "val": "clear", "pos": (marker_end + 1.0) * 15.0 },
+                { "val": "bar", "pos": (marker_end + 2.0) * 15.0 },
+                { "val": "start", "pos": stop * 15.0 }
+            ]);
+            let measured = measure_with(
+                json!({
+                    "kind": "paragraph",
+                    "runs": [{ "kind": "text", "text": "item" }],
+                    "attrs": attrs
+                }),
+                400.0,
+            )
+            .unwrap();
+            approx(
+                measured["lines"][0]["markerTabOffset"].as_f64().unwrap(),
+                expected - left,
+                "closest stop from the column left edge wins",
+            );
+        }
+    }
+}
+
+/// An overrun that leaves less than an em for the text keeps today's text start.
+#[test]
+fn list_marker_tab_overrun_without_room_keeps_the_text_at_the_indent() {
+    let mut attrs = overrun_marker_attrs();
+    let natural_width = marker_natural_width(&attrs["listMarker"]);
+    let grid_interval = 709.0 / 1440.0 * 96.0;
+    let overrun = ((natural_width / grid_interval).floor() + 1.0) * grid_interval - 113.4;
+    attrs["indent"]["right"] = json!(0.0);
+    for room in [-1.0, 5.0, 15.0] {
+        let measured = measure_with(
+            json!({
+                "kind": "paragraph",
+                "runs": [{ "kind": "text", "text": "00" }],
+                "attrs": attrs
+            }),
+            113.4 + overrun + room,
+        )
+        .unwrap();
+        assert!(measured["lines"][0].get("markerTabOffset").is_none());
+        approx(
+            measured["lines"][0]["width"].as_f64().unwrap(),
+            2.0 * W0,
+            "text stays on the first line at the indent",
+        );
+    }
+    let measured = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [{ "kind": "text", "text": "00" }],
+            "attrs": attrs
+        }),
+        113.4 + overrun + 17.0,
+    )
+    .unwrap();
+    approx(
+        measured["lines"][0]["markerTabOffset"].as_f64().unwrap(),
+        overrun,
+        "an em of room keeps the overrun",
+    );
+}
+
+/// Without grid or custom stops, an overrunning marker receives a half-em gap.
+#[test]
+fn list_marker_tab_overrun_without_stops_uses_half_an_em() {
+    let mut attrs = overrun_marker_attrs();
+    attrs["defaultTabStopTwips"] = json!(0.0);
+    let natural_width = marker_natural_width(&attrs["listMarker"]);
+    let measured = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [{ "kind": "text", "text": "item" }],
+            "attrs": attrs
+        }),
+        400.0,
+    )
+    .unwrap();
+    approx(
+        measured["lines"][0]["markerTabOffset"].as_f64().unwrap(),
+        natural_width + 8.0 - 113.4,
+        "half-em gap after the marker",
+    );
+}
+
+/// First-line tabs resolve from the overrun, while subsequent tabs keep the body origin.
+#[test]
+fn list_marker_tab_overrun_shifts_only_first_line_tab_positions() {
+    let attrs = overrun_marker_attrs();
+    let natural_width = marker_natural_width(&attrs["listMarker"]);
+    let grid_interval = 709.0 / 1440.0 * 96.0;
+    let body_start = ((natural_width / grid_interval).floor() + 1.0) * grid_interval;
+    let measured = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [
+                { "kind": "tab" },
+                { "kind": "text", "text": "0" },
+                { "kind": "lineBreak" },
+                { "kind": "tab" },
+                { "kind": "text", "text": "0" }
+            ],
+            "attrs": attrs
+        }),
+        400.0,
+    )
+    .unwrap();
+    assert_eq!(measured["lines"].as_array().unwrap().len(), 2);
+    approx(
+        measured["lines"][0]["width"].as_f64().unwrap(),
+        144.0 - body_start + W0,
+        "first-line tab advances from the marker stop",
+    );
+    approx(
+        measured["lines"][1]["width"].as_f64().unwrap(),
+        144.0 - 113.4 + W0,
+        "second-line tab advances from the left indent",
+    );
+    assert!(measured["lines"][1].get("markerTabOffset").is_none());
+}
+
+/// Excluded marker and indent cases preserve their measurement and font lookup behavior.
+#[test]
+fn list_marker_tab_overrun_leaves_other_cases_unchanged() {
+    for excluded in [
+        json!({ "bidi": true }),
+        json!({ "listMarkerSuffix": "space" }),
+        json!({ "listMarkerSuffix": "nothing" }),
+        json!({ "listMarkerSuffix": "unknown" }),
+        json!({ "listMarkerHidden": true }),
+        json!({ "listMarker": "" }),
+        json!({ "listMarker": null }),
+        json!({ "indent": { "left": 0.0, "hanging": 113.4 } }),
+        json!({ "indent": { "left": -24.0, "hanging": 113.4 } }),
+        json!({ "indent": { "left": 113.4, "hanging": 150.0 } }),
+    ] {
+        let mut attrs = overrun_marker_attrs();
+        attrs
+            .as_object_mut()
+            .unwrap()
+            .extend(excluded.as_object().unwrap().clone());
+        attrs["listMarkerFontFamily"] = json!("Nope");
+        let measured = measure_with(
+            json!({
+                "kind": "paragraph",
+                "runs": [{ "kind": "text", "text": "00 00" }],
+                "attrs": attrs
+            }),
+            500.0,
+        )
+        .expect("excluded cases skip marker font resolution");
+        assert!(measured["lines"][0].get("markerTabOffset").is_none());
+        approx(
+            measured["lines"][0]["width"].as_f64().unwrap(),
+            TEXT_00_00,
+            "excluded case keeps its text width",
+        );
+    }
+    for hanging in [0.0, -12.0] {
+        let mut attrs = overrun_marker_attrs();
+        attrs["indent"]["hanging"] = json!(hanging);
+        let measured = measure_with(
+            json!({
+                "kind": "paragraph",
+                "runs": [{ "kind": "text", "text": "00 00" }],
+                "attrs": attrs
+            }),
+            500.0,
+        )
+        .unwrap();
+        assert!(measured["lines"][0].get("markerTabOffset").is_none());
+    }
+}
+
 // ---- inline images ------------------------------------------------------
 //
 // Lines without a font-bearing run use the fallback at the 12pt default: ascent
@@ -1465,11 +2081,11 @@ fn inline_image_grows_the_line_box() {
     approx(line["width"].as_f64().unwrap(), 50.0, "image width");
     approx(
         line["lineHeight"].as_f64().unwrap(),
-        103.2,
-        "alone: image height plus descent",
+        100.0,
+        "alone: exactly the image",
     );
     approx(line["ascent"].as_f64().unwrap(), 100.0, "alone ascent");
-    approx(line["descent"].as_f64().unwrap(), 3.2, "alone descent");
+    approx(line["descent"].as_f64().unwrap(), 0.0, "alone descent");
 
     // image flowing with text: baseline-seated, text descent below only
     let v = measure(
@@ -1527,6 +2143,28 @@ fn inline_image_grows_the_line_box() {
 }
 
 #[test]
+fn a_multiple_rule_adds_its_room_below_an_image_alone_on_its_line() {
+    for multiple in [1.0, 1.5, 2.0] {
+        let measured = measure_with(
+            json!({
+                "kind": "paragraph",
+                "runs": [{ "kind": "image", "width": 50.0, "height": 100.0 }],
+                "attrs": { "spacing": { "line": multiple, "lineUnit": "multiplier", "lineRule": "auto" } }
+            }),
+            200.0,
+        )
+        .unwrap();
+        let line = &measured["lines"][0];
+        approx(line["ascent"].as_f64().unwrap(), 100.0, "image at the top");
+        approx(
+            line["lineHeight"].as_f64().unwrap(),
+            100.0 + (multiple - 1.0) * LH,
+            &format!("{multiple}x: image plus the rule's added room"),
+        );
+    }
+}
+
+#[test]
 fn inline_images_keep_the_same_top_with_or_without_text() {
     let image = json!({ "kind": "image", "width": 50.0, "height": 100.0 });
     for runs in [
@@ -1562,7 +2200,7 @@ fn inline_wrap_distances_do_not_move_text_or_resize_image_only_lines() {
 }
 
 #[test]
-fn inline_image_wrapping_and_column_fit() {
+fn inline_image_wrapping_keeps_the_declared_box() {
     // 22 zeros fill 195.77px; the 50px image wraps to its own line
     let v = measure(
         json!([
@@ -1575,29 +2213,24 @@ fn inline_image_wrapping_and_column_fit() {
     assert_eq!(spans(&v), vec![(0, 0, 0, 22), (1, 0, 1, 1)]);
     approx(
         v["lines"][1]["lineHeight"].as_f64().unwrap(),
-        30.0 + 3.2,
+        30.0,
         "wrapped image line",
     );
 
-    // A 400px image wraps from a 200px empty line and reserves half height.
+    // A 400px image stays on the empty 200px line at its declared height.
     let v = measure(
         json!([{ "kind": "image", "width": 400.0, "height": 100.0 }]),
         200.0,
     )
     .unwrap();
-    assert_eq!(spans(&v), vec![(0, 0, 0, 0), (0, 0, 0, 1)]);
+    assert_eq!(spans(&v), vec![(0, 0, 0, 1)]);
     approx(
         v["lines"][0]["lineHeight"].as_f64().unwrap(),
-        16.0 * 1.15,
-        "empty leading row",
+        100.0,
+        "declared height reserved",
     );
     approx(
-        v["lines"][1]["lineHeight"].as_f64().unwrap(),
-        50.0 + 3.2,
-        "rendered (fitted) height reserved",
-    );
-    approx(
-        v["lines"][1]["width"].as_f64().unwrap(),
+        v["lines"][0]["width"].as_f64().unwrap(),
         400.0,
         "declared width kept",
     );
@@ -1679,27 +2312,27 @@ fn own_line_image_takes_its_own_line() {
             0.0,
             "own-line image adds no width",
         );
-        // maxImageHeightPx = 100 + 6 + 6 = 112; alone → + 2 × 3.2 descent
+        // maxImageHeightPx = 100 + 6 + 6 = 112; alone → + 2 × mark descent
         approx(
             img["lineHeight"].as_f64().unwrap(),
-            112.0 + 2.0 * 3.2,
+            112.0 + 2.0 * DESC,
             "own-line height",
         );
         approx(
             img["ascent"].as_f64().unwrap(),
-            112.0 + 3.2,
+            112.0 + DESC,
             "own-line ascent",
         );
-        approx(img["descent"].as_f64().unwrap(), 3.2, "fallback descent");
-        // trailing empty line at the metrics-less fallback height
+        approx(img["descent"].as_f64().unwrap(), DESC, "mark descent");
+        // trailing empty line at the paragraph mark's height
         approx(
             v["lines"][1]["lineHeight"].as_f64().unwrap(),
-            16.0 * 1.15,
+            LH,
             "trailing empty line",
         );
         approx(
             v["totalHeight"].as_f64().unwrap(),
-            112.0 + 2.0 * 3.2 + 16.0 * 1.15,
+            112.0 + 2.0 * DESC + LH,
             "total height",
         );
     }
@@ -1726,10 +2359,10 @@ fn own_line_image_finishes_the_current_line_first() {
         LH,
         "text line kept",
     );
-    // image alone: 80 + 2 × 3.2 (no distances), no width advance
+    // image alone: 80 + 2 × mark descent (no distances), no width advance
     approx(
         v["lines"][1]["lineHeight"].as_f64().unwrap(),
-        80.0 + 2.0 * 3.2,
+        80.0 + 2.0 * DESC,
         "image line height",
     );
     approx(
@@ -1739,7 +2372,7 @@ fn own_line_image_finishes_the_current_line_first() {
     );
     approx(
         v["lines"][2]["lineHeight"].as_f64().unwrap(),
-        16.0 * 1.15,
+        LH,
         "trailing empty line",
     );
 }
@@ -1769,6 +2402,41 @@ fn own_line_image_width_counts_after_a_tab() {
     );
 }
 
+// 24d′. a paragraph carrying only an anchored float keeps the paragraph
+// mark's line height, the way an empty paragraph does.
+#[test]
+fn float_only_paragraph_keeps_the_mark_line_height() {
+    let v = measure(
+        json!([{
+            "kind": "image",
+            "width": 50.0,
+            "height": 400.0,
+            "wrapType": "square",
+            "displayMode": "float",
+            "position": {}
+        }]),
+        200.0,
+    )
+    .unwrap();
+    assert_eq!(spans(&v), vec![(0, 0, 0, 1)]);
+    approx(v["lines"][0]["width"].as_f64().unwrap(), 0.0, "no width");
+    approx(
+        v["lines"][0]["lineHeight"].as_f64().unwrap(),
+        LH,
+        "mark height",
+    );
+    approx(
+        v["lines"][0]["ascent"].as_f64().unwrap(),
+        ASC,
+        "mark ascent",
+    );
+    approx(
+        v["lines"][0]["descent"].as_f64().unwrap(),
+        DESC,
+        "mark descent",
+    );
+}
+
 // 24d. a dimensionless image measures as zero size
 #[test]
 fn dimensionless_image_is_zero_size() {
@@ -1778,8 +2446,8 @@ fn dimensionless_image_is_zero_size() {
     approx(v["lines"][0]["width"].as_f64().unwrap(), 0.0, "zero width");
     approx(
         v["lines"][0]["lineHeight"].as_f64().unwrap(),
-        16.0 * 1.15,
-        "no growth (fallback height)",
+        LH,
+        "no growth (mark height)",
     );
 
     // inline after text: contributes nothing to the line width or height
@@ -1870,6 +2538,43 @@ fn small_caps_scales_uppercased_lowercase() {
         v["lines"][0]["width"].as_f64().unwrap(),
         WA * 0.7 * 2.0,
         "smallCaps × horizontalScale",
+    );
+}
+
+// ---- pair kerning (w:kern) ----------------------------------------------
+
+// 25b. Word kerns only above a nonzero w:kern threshold, so a run that
+// carries none measures at the plain hmtx sum — "AV" is a kerned pair in the
+// fixture, so a missing gate would show up as a narrower line
+#[test]
+fn absent_kerning_threshold_measures_unkerned() {
+    let v = measure(json!([{ "kind": "text", "text": "AV" }]), 200.0).unwrap();
+    approx(
+        v["lines"][0]["width"].as_f64().unwrap(),
+        WA * 2.0,
+        "no w:kern",
+    );
+
+    let v = measure(
+        json!([{ "kind": "text", "text": "AV", "kerningMinPt": 1.0 }]),
+        200.0,
+    )
+    .unwrap();
+    let kerned = v["lines"][0]["width"].as_f64().unwrap();
+    assert!(
+        kerned < WA * 2.0 - 1e-3,
+        "w:kern at or below the font size tightens AV: got {kerned}"
+    );
+
+    let v = measure(
+        json!([{ "kind": "text", "text": "AV", "kerningMinPt": 14.0 }]),
+        200.0,
+    )
+    .unwrap();
+    approx(
+        v["lines"][0]["width"].as_f64().unwrap(),
+        WA * 2.0,
+        "w:kern above the font size",
     );
 }
 
@@ -2613,6 +3318,38 @@ fn east_asia_hint_moves_only_ambiguous_characters() {
     );
 }
 
+/// A script slot whose family has no chain, because its text arrived after
+/// the fonts were collected, measures with the run's own family.
+#[test]
+fn script_slot_without_a_chain_measures_with_the_run_family() {
+    let mut store = FontStore::new();
+    store.register(FIXTURE.to_vec()).expect("base registers");
+    let measure = |text: &str, slots: Value, complex_script: bool, chains: Value| {
+        let input = json!({
+            "block": { "kind": "paragraph", "runs": [{
+                "kind": "text", "text": text, "fontSlots": slots,
+                "complexScript": complex_script, "bold": true, "boldCs": false, "italicCs": true
+            }] },
+            "maxWidth": 500.0,
+            "fontChains": chains,
+            "defaults": { "fontSize": 12.0, "fontFamily": "base" }
+        });
+        measure_paragraph_json(&store, &input.to_string()).expect("measures")
+    };
+    let named = json!({ "hAnsi": "base", "eastAsia": "SimSun", "cs": "Traditional Arabic" });
+    let plain = json!({ "hAnsi": "base" });
+    // Only the run's own style was collected, as for a tab-formatted run.
+    let collected = json!({ "base|1|0": [0] });
+    let all = json!({ "base|0|0": [0], "base|1|0": [0], "base|0|1": [0], "base|1|1": [0] });
+    for (text, complex_script) in [("日", false), ("א", false), ("A", true)] {
+        assert_eq!(
+            measure(text, named.clone(), complex_script, collected.clone()),
+            measure(text, plain.clone(), complex_script, all.clone()),
+            "{text:?}"
+        );
+    }
+}
+
 /// A chain longer than a run keeps resolved is rebuilt per character; it must
 /// still measure exactly as the short chain it resolves to.
 #[test]
@@ -2640,4 +3377,396 @@ fn an_oversized_fallback_chain_measures_like_its_head() {
         ids.resize(len, 1);
         assert_eq!(short, measure_chain(ids), "chain of {len} ids");
     }
+}
+
+// 37. document-grid snap-to-grid (w:docGrid §17.6.5, w:snapToGrid §17.3.1/2)
+//
+// At 12pt the single-spacing line is LH = 18.3984375px; a 360-twips grid
+// pitch is 24px, so an active grid snaps the content box to 24. Only an
+// activating grid type reaches measurement (the host withholds the pitch
+// for `default` or a bare linePitch), and either opt-out disables the snap.
+// The grid quantizes the content box, so an `auto` multiple scales the
+// quantized row; `exact` and `atLeast` are pinned and never snap.
+
+/// A grid-active section snaps the content box up to the next pitch
+/// multiple.
+#[test]
+fn grid_active_section_snaps_line_height_up() {
+    let v = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [{ "kind": "text", "text": "0" }],
+            "attrs": { "docGridPitchPx": 24.0 }
+        }),
+        200.0,
+    )
+    .unwrap();
+    approx(
+        v["lines"][0]["lineHeight"].as_f64().unwrap(),
+        24.0,
+        "snapped lineHeight",
+    );
+    approx(
+        v["totalHeight"].as_f64().unwrap(),
+        24.0,
+        "snapped totalHeight",
+    );
+    // Ascent/descent stay put; the snap slack lands below the descent.
+    approx(v["lines"][0]["ascent"].as_f64().unwrap(), ASC, "ascent");
+    approx(v["lines"][0]["descent"].as_f64().unwrap(), DESC, "descent");
+}
+
+/// A content box past one row takes the next whole row: at 24pt the content
+/// line is 2×LH = 36.796875px, which a 24px pitch rounds up to two rows.
+#[test]
+fn grid_rounds_a_tall_content_box_up_to_two_rows() {
+    let v = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [{ "kind": "text", "text": "0", "fontSize": 24.0 }],
+            "attrs": { "docGridPitchPx": 24.0 }
+        }),
+        200.0,
+    )
+    .unwrap();
+    approx(
+        v["lines"][0]["lineHeight"].as_f64().unwrap(),
+        48.0,
+        "two grid rows",
+    );
+}
+
+/// The `auto` multiple scales the snapped row, not the natural height: a
+/// 1.5-spaced line on a one-row grid is 1.5 rows tall, not two. This is the
+/// rule Word's own rasters of a `linesAndChars` thesis grid show.
+#[test]
+fn grid_multiple_spacing_scales_the_snapped_row() {
+    let v = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [{ "kind": "text", "text": "0" }],
+            "attrs": {
+                "docGridPitchPx": 24.0,
+                "spacing": { "line": 1.5, "lineUnit": "multiplier" }
+            }
+        }),
+        200.0,
+    )
+    .unwrap();
+    approx(
+        v["lines"][0]["lineHeight"].as_f64().unwrap(),
+        36.0,
+        "1.5 grid rows",
+    );
+}
+
+/// An `exact` rule pins the box, so the grid never touches it.
+#[test]
+fn grid_does_not_snap_an_exact_rule() {
+    let v = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [{ "kind": "text", "text": "0" }],
+            "attrs": {
+                "docGridPitchPx": 24.0,
+                "spacing": { "line": 20.0, "lineRule": "exact" }
+            }
+        }),
+        200.0,
+    )
+    .unwrap();
+    approx(
+        v["lines"][0]["lineHeight"].as_f64().unwrap(),
+        20.0,
+        "exact lineHeight",
+    );
+}
+
+/// An `atLeast` floor is author-set, so the grid never touches it either.
+#[test]
+fn grid_does_not_snap_an_at_least_rule() {
+    let v = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [{ "kind": "text", "text": "0" }],
+            "attrs": {
+                "docGridPitchPx": 24.0,
+                "spacing": { "line": 30.0, "lineRule": "atLeast" }
+            }
+        }),
+        200.0,
+    )
+    .unwrap();
+    approx(
+        v["lines"][0]["lineHeight"].as_f64().unwrap(),
+        30.0,
+        "atLeast lineHeight",
+    );
+}
+
+/// A `default`-type grid never reaches measurement (the host passes no
+/// pitch), so the line keeps its ruled height.
+#[test]
+fn default_type_grid_does_not_snap() {
+    let v = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [{ "kind": "text", "text": "0" }]
+        }),
+        200.0,
+    )
+    .unwrap();
+    approx(
+        v["lines"][0]["lineHeight"].as_f64().unwrap(),
+        LH,
+        "unsnapped lineHeight",
+    );
+}
+
+/// A paragraph-level opt-out (`w:snapToGrid` on pPr) disables the snap.
+#[test]
+fn paragraph_opt_out_does_not_snap() {
+    let v = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [{ "kind": "text", "text": "0" }],
+            "attrs": { "docGridPitchPx": 24.0, "snapToGrid": false }
+        }),
+        200.0,
+    )
+    .unwrap();
+    approx(
+        v["lines"][0]["lineHeight"].as_f64().unwrap(),
+        LH,
+        "opt-out lineHeight",
+    );
+}
+
+/// A run-level opt-out (`w:snapToGrid` on rPr) disables the snap for lines
+/// containing that run.
+#[test]
+fn run_opt_out_does_not_snap() {
+    let v = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [{ "kind": "text", "text": "0", "snapToGrid": false }],
+            "attrs": { "docGridPitchPx": 24.0 }
+        }),
+        200.0,
+    )
+    .unwrap();
+    approx(
+        v["lines"][0]["lineHeight"].as_f64().unwrap(),
+        LH,
+        "opt-out lineHeight",
+    );
+}
+
+// 38. a `fullWidthBlock` band the per-line probe misses: it estimates with the
+// default font size (16px at 12pt), short of the real box (LH = 18.398px), so
+// the line is re-tested against bands once it closes.
+
+/// A band the estimate clears but the real box reaches still moves the line.
+#[test]
+fn a_band_below_the_probe_estimate_still_moves_the_closed_line() {
+    let v = measure_floats(
+        json!([{ "kind": "text", "text": "000" }]),
+        100.0,
+        json!([{ "leftMargin": 0.0, "rightMargin": 0.0, "topY": 17.0, "bottomY": 18.0,
+                 "fullWidthBlock": true }]),
+    )
+    .unwrap();
+    approx(
+        v["lines"][0]["floatSkipBefore"].as_f64().unwrap(),
+        18.0,
+        "late hop to the band bottom",
+    );
+    approx(
+        v["lines"][0]["width"].as_f64().unwrap(),
+        3.0 * W0,
+        "full-width line below the band",
+    );
+    approx(
+        v["totalHeight"].as_f64().unwrap(),
+        LH + 18.0,
+        "totalHeight includes the late skip",
+    );
+}
+
+/// An empty paragraph has no width to narrow, so a band moves it outright.
+#[test]
+fn an_empty_paragraph_drops_below_a_band() {
+    let v = measure_block_floats(
+        json!({ "kind": "paragraph", "runs": [] }),
+        100.0,
+        json!([{ "leftMargin": 0.0, "rightMargin": 0.0, "topY": 0.0, "bottomY": 12.0,
+                 "fullWidthBlock": true }]),
+        0.0,
+    )
+    .unwrap();
+    approx(
+        v["lines"][0]["floatSkipBefore"].as_f64().unwrap(),
+        12.0,
+        "empty paragraph hop",
+    );
+    approx(
+        v["totalHeight"].as_f64().unwrap(),
+        v["lines"][0]["lineHeight"].as_f64().unwrap() + 12.0,
+        "totalHeight includes the hop",
+    );
+}
+
+/// A narrowed line moves too, taking the room it lands in.
+#[test]
+fn a_narrowed_line_moves_below_a_band_and_takes_the_new_room() {
+    let v = measure_floats(
+        json!([{ "kind": "text", "text": "000" }]),
+        100.0,
+        json!([
+            { "leftMargin": 40.0, "rightMargin": 0.0, "topY": 0.0, "bottomY": 5.0 },
+            { "leftMargin": 0.0, "rightMargin": 0.0, "topY": 17.0, "bottomY": 18.0,
+              "fullWidthBlock": true }
+        ]),
+    )
+    .unwrap();
+    approx(
+        v["lines"][0]["floatSkipBefore"].as_f64().unwrap(),
+        18.0,
+        "narrowed line still hops",
+    );
+    assert!(
+        v["lines"][0].get("leftOffset").is_none(),
+        "below the float it takes the full width"
+    );
+}
+
+/// A float outliving the band keeps narrowing the line it pushed down.
+#[test]
+fn a_line_pushed_below_a_band_keeps_a_float_that_outlives_it() {
+    let v = measure_floats(
+        json!([{ "kind": "text", "text": "000" }]),
+        100.0,
+        json!([
+            { "leftMargin": 40.0, "rightMargin": 0.0, "topY": 0.0, "bottomY": 60.0 },
+            { "leftMargin": 0.0, "rightMargin": 0.0, "topY": 17.0, "bottomY": 18.0,
+              "fullWidthBlock": true }
+        ]),
+    )
+    .unwrap();
+    approx(
+        v["lines"][0]["floatSkipBefore"].as_f64().unwrap(),
+        18.0,
+        "hops",
+    );
+    approx(
+        v["lines"][0]["leftOffset"].as_f64().unwrap(),
+        40.0,
+        "still narrowed below the band",
+    );
+}
+
+/// Narrower room below leaves the line where it is: its fill would overflow.
+#[test]
+fn a_band_is_left_alone_when_the_room_below_is_narrower() {
+    let v = measure_floats(
+        json!([{ "kind": "text", "text": "000" }]),
+        100.0,
+        json!([
+            { "leftMargin": 0.0, "rightMargin": 0.0, "topY": 17.0, "bottomY": 18.0,
+              "fullWidthBlock": true },
+            { "leftMargin": 90.0, "rightMargin": 0.0, "topY": 18.0, "bottomY": 60.0 }
+        ]),
+    )
+    .unwrap();
+    assert!(
+        v["lines"][0].get("floatSkipBefore").is_none(),
+        "declines the hop"
+    );
+}
+
+/// An image grows the line past its text height; the band test uses that box.
+#[test]
+fn an_image_grown_line_clears_a_band_inside_its_growth() {
+    let v = measure_floats(
+        json!([{ "kind": "image", "width": 20.0, "height": 40.0 }]),
+        100.0,
+        json!([{ "leftMargin": 0.0, "rightMargin": 0.0, "topY": 25.0, "bottomY": 30.0,
+                 "fullWidthBlock": true }]),
+    )
+    .unwrap();
+    approx(
+        v["lines"][0]["floatSkipBefore"].as_f64().unwrap(),
+        30.0,
+        "the image box reaches the band",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// East Asian auto-spacing (w:autoSpaceDE / w:autoSpaceDN)
+// ---------------------------------------------------------------------------
+
+/// Word widens each East Asian / Latin boundary by a quarter em, measured off
+/// its own PDF exports. Two boundaries in `国a国` cost half an em at 12pt.
+#[test]
+fn east_asian_latin_boundaries_take_a_quarter_em_each() {
+    let boundary = measure_with(
+        json!({ "kind": "paragraph", "runs": [{ "kind": "text", "text": "国a国" }] }),
+        400.0,
+    )
+    .unwrap()["lines"][0]["width"]
+        .as_f64()
+        .unwrap();
+    let off = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [{ "kind": "text", "text": "国a国" }],
+            "attrs": { "autoSpaceDE": false }
+        }),
+        400.0,
+    )
+    .unwrap()["lines"][0]["width"]
+        .as_f64()
+        .unwrap();
+    approx(boundary - off, 8.0, "two boundaries at 0.25em of 12pt");
+}
+
+/// A boundary that straddles two runs is spaced once, and `w:autoSpaceDN`
+/// gates the digit side on its own.
+#[test]
+fn auto_spacing_crosses_runs_and_gates_digits_separately() {
+    let width = |runs: Value, attrs: Value| {
+        measure_with(
+            json!({ "kind": "paragraph", "runs": runs, "attrs": attrs }),
+            400.0,
+        )
+        .unwrap()["lines"][0]["width"]
+            .as_f64()
+            .unwrap()
+    };
+    let split = width(
+        json!([
+            { "kind": "text", "text": "国" },
+            { "kind": "text", "text": "a" }
+        ]),
+        json!({}),
+    );
+    let joined = width(json!([{ "kind": "text", "text": "国a" }]), json!({}));
+    approx(split, joined, "a boundary between runs");
+    let digits = width(json!([{ "kind": "text", "text": "国1" }]), json!({}));
+    let digits_off = width(
+        json!([{ "kind": "text", "text": "国1" }]),
+        json!({ "autoSpaceDN": false }),
+    );
+    approx(digits - digits_off, 4.0, "one digit boundary");
+    approx(
+        width(
+            json!([{ "kind": "text", "text": "国a" }]),
+            json!({ "autoSpaceDN": false }),
+        ) - width(
+            json!([{ "kind": "text", "text": "国a" }]),
+            json!({ "autoSpaceDE": false }),
+        ),
+        4.0,
+        "the digit opt-out leaves the letter boundary alone",
+    );
 }

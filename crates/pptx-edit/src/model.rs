@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use ooxml_drawingml::{ShapeFill, ShapeOutline};
 use pptx_parse::{BlipEffect, GraphicFrameData, Placeholder};
 
-pub use pptx_parse::CommentFlavor;
+pub use pptx_parse::{CommentFlavor, TextCaps};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -46,6 +46,8 @@ pub struct TextStyle {
     pub spacing_pt: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baseline_pct: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caps: Option<TextCaps>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -118,6 +120,10 @@ pub struct ShapeSnapshot {
     pub rotation_deg: f64,
     pub flip_h: bool,
     pub flip_v: bool,
+    /// The geometry the shape draws at, present only while it has none of
+    /// its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherited: Option<InheritedGeometry>,
     /// Hides this shape and its descendants.
     #[serde(default, skip_serializing_if = "is_false")]
     pub hidden: bool,
@@ -129,11 +135,35 @@ pub struct ShapeSnapshot {
     pub outline: Option<ShapeOutline>,
     pub resolved_outline_color: Option<String>,
     pub media_part_path: Option<String>,
+    /// Image data added to this session, retained across saves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_media: Option<PendingMedia>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blip_effects: Vec<BlipEffect>,
     pub graphic: Option<GraphicFrameData>,
     pub text_stories: Vec<StorySnapshot>,
     pub children: Vec<ShapeSnapshot>,
+}
+
+/// The transform a placeholder takes from its layout or master.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InheritedGeometry {
+    pub x: i64,
+    pub y: i64,
+    pub width: i64,
+    pub height: i64,
+    pub rotation_deg: f64,
+    pub flip_h: bool,
+    pub flip_v: bool,
+}
+
+/// Image data shared by editing peers.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingMedia {
+    pub content_type: String,
+    pub base64: String,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -159,6 +189,17 @@ pub struct SlideSnapshot {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub notes: String,
     pub shapes: Vec<ShapeSnapshot>,
+}
+
+/// One slide's snapshot plus deck geometry — the slide-scoped render input.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlideScope {
+    /// The slide's position in deck order.
+    pub index: usize,
+    pub slide: SlideSnapshot,
+    pub width_emu: i64,
+    pub height_emu: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -219,6 +260,15 @@ pub struct ShapeReceipt {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ShapeZOrderReceipt {
+    pub slide_id: String,
+    pub shape_id: String,
+    pub from_index: u32,
+    pub to_index: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TransformReceipt {
     pub slide_id: String,
     pub shape_id: String,
@@ -259,6 +309,14 @@ pub struct PresetShapeDraft {
     pub geometry: String,
     pub rect: ShapeRect,
     pub fill: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PictureDraft {
+    pub name: String,
+    pub rect: ShapeRect,
+    pub content_type: String,
+    pub media_bytes: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

@@ -11,7 +11,7 @@ if (!GlobalRegistrator.isRegistered) GlobalRegistrator.register();
 
 const { cleanup, fireEvent, render } = await import('@testing-library/react');
 
-const LEAF_IDS: readonly RibbonCommandId[] = ['delete', 'bringToFront', 'bringForward', 'sendBackward', 'sendToBack'];
+const LEAF_IDS: readonly RibbonCommandId[] = ['delete', 'bringToFront', 'bringForward', 'sendBackward', 'sendToBack', 'rotateRight', 'rotateLeft', 'flipHorizontal', 'flipVertical'];
 
 type Selection = { pageId: string; shapeId: string; hit: { kind: 'shape'; shapeId: string } };
 
@@ -30,21 +30,31 @@ function snapshot(cells: Array<ReturnType<typeof cell>>): DiagramSnapshot {
   return { pages: [{ id: 'page', sourcePartPath: 'page', name: 'Page', shapes: ids.map((id) => ({ id, sourceId: 1, name: id, children: [], cells })) }] };
 }
 
-function stubHandle(state: DiagramSnapshot, calls: Calls): DiagramHandle {
+function stubHandle(state: DiagramSnapshot, calls: Calls, refusals: ReadonlyMap<string, string> = new Map()): DiagramHandle {
   return {
     snapshot: () => state,
     canUndo: () => false,
     canRedo: () => false,
     deleteShape: (...args: [string, string]) => { calls.deletes.push([...args]); return {}; },
+    deleteShapes: (deletes: ReadonlyArray<{ pageId: string; shapeId: string }>) => { calls.deletes.push([...deletes]); return []; },
     reorderShape: (...args: [string, string, number]) => { calls.reorders.push([...args]); return {}; },
     setCellFormula: (pageId: string, shapeId: string, locator: { cellName: string }, formula: string) => {
       calls.formulas.push({ pageId, shapeId, cell: locator.cellName, formula });
       return {};
     },
+    probeCellWrites: (_pageId: string, _shapeId: string, queries: ReadonlyArray<{ cellName: string }>) =>
+      queries.map(({ cellName }) => {
+        const refusal = refusals.get(cellName);
+        return { cellName, allowed: refusal === undefined, targetCellName: refusal === undefined ? cellName : null, refusal: refusal === undefined ? null : 'guard', reason: refusal ?? null };
+      }),
+    setCellFormulas: (writes: ReadonlyArray<{ pageId: string; shapeId: string; cellName: string; formula: string }>) => {
+      for (const write of writes) calls.formulas.push({ pageId: write.pageId, shapeId: write.shapeId, cell: write.cellName, formula: write.formula });
+      return [];
+    },
   } as unknown as DiagramHandle;
 }
 
-function Host({ diagram, selection, position, closed, focusTarget }: { diagram: DiagramHandle; selection: Selection; position: { top: number; left: number }; closed: string[]; focusTarget?: HTMLElement }) {
+function Host({ diagram, selection, position, closed, focusTarget }: { diagram: DiagramHandle; selection: Selection[]; position: { top: number; left: number }; closed: string[]; focusTarget?: HTMLElement }) {
   const [open, setOpen] = useState(true);
   if (!open) return null;
   return (
@@ -54,14 +64,14 @@ function Host({ diagram, selection, position, closed, focusTarget }: { diagram: 
   );
 }
 
-function renderMenu(options: { cells?: Array<ReturnType<typeof cell>>; position?: { top: number; left: number }; withFocusTarget?: boolean; shapeId?: string } = {}) {
+function renderMenu(options: { cells?: Array<ReturnType<typeof cell>>; refused?: readonly string[]; position?: { top: number; left: number }; withFocusTarget?: boolean; shapeId?: string } = {}) {
   cleanup();
   const calls: Calls = { deletes: [], reorders: [], formulas: [] };
   const state = snapshot(options.cells ?? [cell('Angle', '0'), cell('FlipX', '0'), cell('FlipY', '0')]);
-  const diagram = stubHandle(state, calls);
+  const diagram = stubHandle(state, calls, new Map((options.refused ?? []).map((name) => [name, `${name} refuses this gesture`])));
   const closed: string[] = [];
   const shapeId = options.shapeId ?? 'three';
-  const selection: Selection = { pageId: 'page', shapeId, hit: { kind: 'shape', shapeId } };
+  const selection: Selection[] = [{ pageId: 'page', shapeId, hit: { kind: 'shape', shapeId } }];
   let focusTarget: HTMLElement | undefined;
   if (options.withFocusTarget) {
     focusTarget = document.createElement('button');
@@ -104,20 +114,23 @@ afterEach(() => {
 test('the shape menu follows Visio order with a single divider and focuses delete', () => {
   const { view } = renderMenu();
   try {
-    expect(SHAPE_CONTEXT_ENTRIES.map((entry) => entry.id)).toEqual(['delete', 'bringToFront', 'sendToBack']);
+    expect(SHAPE_CONTEXT_ENTRIES.map((entry) => entry.id)).toEqual(['delete', 'bringToFront', 'sendToBack', 'rotateRight']);
     expect(SHAPE_CONTEXT_ENTRIES[1].children?.map((child) => child.id)).toEqual(['bringToFront', 'bringForward']);
     expect(SHAPE_CONTEXT_ENTRIES[2].children?.map((child) => child.id)).toEqual(['sendBackward', 'sendToBack']);
+    expect(SHAPE_CONTEXT_ENTRIES[3].children?.map((child) => child.id)).toEqual(['rotateRight', 'rotateLeft', 'flipHorizontal', 'flipVertical']);
     const menu = parentMenu();
     expect(menu.getAttribute('aria-label')).toBe(en.contextMenu.label);
-    expect(topLevelButtons().map(topLevelId)).toEqual(['delete', 'bringToFront', 'sendToBack']);
+    expect(topLevelButtons().map(topLevelId)).toEqual(['delete', 'bringToFront', 'sendToBack', 'rotateRight']);
     expect(menu.querySelectorAll('[role="separator"]')).toHaveLength(1);
     expect(menu.querySelector('[data-command-id="delete"]')).not.toBeNull();
     expect(menu.querySelector('[data-submenu-id="bringToFront"]')).not.toBeNull();
     expect(menu.querySelector('[data-submenu-id="sendToBack"]')).not.toBeNull();
-    for (const id of ['rotateLeft', 'rotateRight', 'flipHorizontal', 'flipVertical']) expect(menu.querySelector(`[data-command-id="${id}"]`)).toBeNull();
+    expect(menu.querySelector('[data-submenu-id="rotateRight"]')).not.toBeNull();
     for (const trigger of Array.from(menu.querySelectorAll('[data-submenu-id]'))) expect(trigger.textContent).toContain('▸');
     expect(menu.querySelector('[aria-keyshortcuts]')).toBeNull();
     expect(document.activeElement?.getAttribute('data-command-id')).toBe('delete');
+    const submenu = openSubmenu('rotateRight');
+    for (const id of ['rotateRight', 'rotateLeft', 'flipHorizontal', 'flipVertical']) expect(submenu.querySelector(`[data-command-id="${id}"]`)).not.toBeNull();
   } finally {
     view.unmount();
   }
@@ -137,11 +150,15 @@ test('each entry runs its command and closes the menu', () => {
       }
       expect(item).not.toBeNull();
       fireEvent.click(item);
-      if (id === 'delete') expect(calls.deletes).toEqual([['page', 'three']]);
+      if (id === 'delete') expect(calls.deletes).toEqual([[{ pageId: 'page', shapeId: 'three' }]]);
       else if (id === 'bringToFront') expect(last(calls.reorders)).toEqual(['page', 'three', 4]);
       else if (id === 'bringForward') expect(last(calls.reorders)).toEqual(['page', 'three', 3]);
       else if (id === 'sendBackward') expect(last(calls.reorders)).toEqual(['page', 'three', 1]);
-      else expect(last(calls.reorders)).toEqual(['page', 'three', 0]);
+      else if (id === 'sendToBack') expect(last(calls.reorders)).toEqual(['page', 'three', 0]);
+      else if (id === 'rotateRight') expect(calls.formulas).toEqual([{ pageId: 'page', shapeId: 'three', cell: 'Angle', formula: String(Math.PI / 2) }]);
+      else if (id === 'rotateLeft') expect(calls.formulas).toEqual([{ pageId: 'page', shapeId: 'three', cell: 'Angle', formula: String(-Math.PI / 2) }]);
+      else if (id === 'flipHorizontal') expect(calls.formulas).toEqual([{ pageId: 'page', shapeId: 'three', cell: 'FlipX', formula: '1' }]);
+      else expect(calls.formulas).toEqual([{ pageId: 'page', shapeId: 'three', cell: 'FlipY', formula: '1' }]);
       expect(document.querySelector('[role="menu"]')).toBeNull();
       expect(closed[0]).toBe('focus');
     } finally {
@@ -153,7 +170,11 @@ test('each entry runs its command and closes the menu', () => {
   runLeaf('bringToFront', 'bringForward');
   runLeaf('sendToBack', 'sendBackward');
   runLeaf('sendToBack', 'sendToBack');
-  expect(LEAF_IDS).toEqual(['delete', 'bringToFront', 'bringForward', 'sendBackward', 'sendToBack']);
+  runLeaf('rotateRight', 'rotateRight');
+  runLeaf('rotateRight', 'rotateLeft');
+  runLeaf('rotateRight', 'flipHorizontal');
+  runLeaf('rotateRight', 'flipVertical');
+  expect(LEAF_IDS).toEqual(['delete', 'bringToFront', 'bringForward', 'sendBackward', 'sendToBack', 'rotateRight', 'rotateLeft', 'flipHorizontal', 'flipVertical']);
 });
 
 test('escape closes the menu and returns focus', () => {
@@ -195,11 +216,13 @@ test('arrow keys wrap and home and end jump across the top level', () => {
     fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'ArrowDown' });
     expect(document.activeElement?.getAttribute('data-submenu-id')).toBe('sendToBack');
     fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'ArrowDown' });
+    expect(document.activeElement?.getAttribute('data-submenu-id')).toBe('rotateRight');
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'ArrowDown' });
     expect(document.activeElement?.getAttribute('data-command-id')).toBe('delete');
     fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'ArrowUp' });
-    expect(document.activeElement?.getAttribute('data-submenu-id')).toBe('sendToBack');
+    expect(document.activeElement?.getAttribute('data-submenu-id')).toBe('rotateRight');
     fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'End' });
-    expect(document.activeElement?.getAttribute('data-submenu-id')).toBe('sendToBack');
+    expect(document.activeElement?.getAttribute('data-submenu-id')).toBe('rotateRight');
     fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'Home' });
     expect(document.activeElement?.getAttribute('data-command-id')).toBe('delete');
     fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'ArrowDown' });
@@ -259,8 +282,34 @@ test('the menu flips inside the viewport near an edge', () => {
   }
 });
 
+test('the menu re-clamps when the viewport shrinks while it is open', () => {
+  const originalRect = HTMLElement.prototype.getBoundingClientRect;
+  HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement) {
+    if (this.getAttribute?.('role') === 'menu' && !this.hasAttribute('data-submenu')) return { x: 0, y: 0, width: 220, height: 340, top: 0, left: 0, right: 220, bottom: 340, toJSON: () => ({}) } as DOMRect;
+    return originalRect.call(this);
+  };
+  const originalWidth = window.innerWidth;
+  const originalHeight = window.innerHeight;
+  const { view } = renderMenu({ position: { top: 100, left: 100 } });
+  try {
+    const menu = parentMenu() as HTMLElement;
+    expect(menu.style.top).toBe('100px');
+    expect(menu.style.left).toBe('100px');
+    Object.defineProperty(window, 'innerWidth', { value: 300, configurable: true });
+    Object.defineProperty(window, 'innerHeight', { value: 200, configurable: true });
+    fireEvent(window, new window.Event('resize'));
+    expect(menu.style.left).toBe('76px');
+    expect(menu.style.top).toBe('4px');
+  } finally {
+    Object.defineProperty(window, 'innerWidth', { value: originalWidth, configurable: true });
+    Object.defineProperty(window, 'innerHeight', { value: originalHeight, configurable: true });
+    HTMLElement.prototype.getBoundingClientRect = originalRect;
+    view.unmount();
+  }
+});
+
 test('a locked shape disables its refused operation and focuses the first allowed entry', () => {
-  const { view } = renderMenu({ cells: [cell('LockDelete', '1'), cell('Angle', 'GUARD(0)'), cell('FlipX', '0'), cell('FlipY', '0')] });
+  const { view } = renderMenu({ cells: [cell('LockDelete', '1'), cell('Angle', 'GUARD(0)'), cell('FlipX', '0'), cell('FlipY', '0')], refused: ['LockDelete', 'Angle'] });
   try {
     const menu = parentMenu() as HTMLElement;
     expect(menu).not.toBeNull();
@@ -273,13 +322,49 @@ test('a locked shape disables its refused operation and focuses the first allowe
   }
 });
 
+test('a click on a hover-opened submenu trigger keeps the submenu open', () => {
+  const { view } = renderMenu();
+  try {
+    const trigger = parentMenu().querySelector('[data-submenu-id="bringToFront"]') as HTMLElement;
+    expect(trigger).not.toBeNull();
+    fireEvent.mouseEnter(trigger);
+    expect(document.querySelector('[data-submenu="bringToFront"]')).not.toBeNull();
+    fireEvent.click(trigger);
+    expect(document.querySelector('[data-submenu="bringToFront"]')).not.toBeNull();
+    expect(document.querySelector('[role="menu"]')).not.toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
 test('a submenu with no enabled child stays closed to keyboard and pointer', () => {
   const { view } = renderMenu({ shapeId: 'five' });
   try {
     const menu = parentMenu() as HTMLElement;
     expect((menu.querySelector('[data-submenu-id="bringToFront"]') as HTMLButtonElement).disabled).toBe(true);
     expect((menu.querySelector('[data-submenu-id="sendToBack"]') as HTMLButtonElement).disabled).toBe(false);
+    expect((menu.querySelector('[data-submenu-id="rotateRight"]') as HTMLButtonElement).disabled).toBe(false);
     expect(document.activeElement?.getAttribute('data-command-id')).toBe('delete');
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'ArrowDown' });
+    expect(document.activeElement?.getAttribute('data-submenu-id')).toBe('sendToBack');
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'ArrowDown' });
+    expect(document.activeElement?.getAttribute('data-submenu-id')).toBe('rotateRight');
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'ArrowDown' });
+    expect(document.activeElement?.getAttribute('data-command-id')).toBe('delete');
+  } finally {
+    view.unmount();
+  }
+});
+
+test('a fully guarded rotate submenu stays closed to keyboard and pointer', () => {
+  const { view } = renderMenu({ cells: [cell('Angle', 'GUARD(0)'), cell('FlipX', 'GUARD(0)'), cell('FlipY', 'GUARD(0)')], refused: ['Angle', 'FlipX', 'FlipY'] });
+  try {
+    const menu = parentMenu() as HTMLElement;
+    expect((menu.querySelector('[data-submenu-id="rotateRight"]') as HTMLButtonElement).disabled).toBe(true);
+    expect((menu.querySelector('[data-submenu-id="sendToBack"]') as HTMLButtonElement).disabled).toBe(false);
+    expect(document.activeElement?.getAttribute('data-command-id')).toBe('delete');
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'ArrowDown' });
+    expect(document.activeElement?.getAttribute('data-submenu-id')).toBe('bringToFront');
     fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'ArrowDown' });
     expect(document.activeElement?.getAttribute('data-submenu-id')).toBe('sendToBack');
     fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'ArrowDown' });
@@ -289,7 +374,25 @@ test('a submenu with no enabled child stays closed to keyboard and pointer', () 
   }
 });
 
-for (const nearRight of [false, true]) test(`z-order submenu ${nearRight ? 'flips left' : 'opens right'} and stays above the viewport bottom`, () => {
+test('a guarded Angle leaves the rotate submenu open with only the flips enabled', () => {
+  const { view, calls } = renderMenu({ cells: [cell('Angle', 'GUARD(0)'), cell('FlipX', '0'), cell('FlipY', '0')], refused: ['Angle'] });
+  try {
+    expect((parentMenu().querySelector('[data-submenu-id="rotateRight"]') as HTMLButtonElement).disabled).toBe(false);
+    const submenu = openSubmenu('rotateRight');
+    const disabled = (id: string) => (submenu.querySelector(`[data-command-id="${id}"]`) as HTMLButtonElement).disabled;
+    expect(disabled('rotateRight')).toBe(true);
+    expect(disabled('rotateLeft')).toBe(true);
+    expect(disabled('flipHorizontal')).toBe(false);
+    expect(disabled('flipVertical')).toBe(false);
+    expect(document.activeElement?.getAttribute('data-command-id')).toBe('flipHorizontal');
+    fireEvent.click(submenu.querySelector('[data-command-id="rotateRight"]') as HTMLElement);
+    expect(calls.formulas).toEqual([]);
+  } finally {
+    view.unmount();
+  }
+});
+
+for (const submenuId of ['bringToFront', 'rotateRight']) for (const nearRight of [false, true]) test(`${submenuId} submenu ${nearRight ? 'flips left' : 'opens right'} and stays above the viewport bottom`, () => {
   const originalRect = HTMLElement.prototype.getBoundingClientRect;
   const left = nearRight ? window.innerWidth - 224 : 20;
   HTMLElement.prototype.getBoundingClientRect = function () {
@@ -299,7 +402,7 @@ for (const nearRight of [false, true]) test(`z-order submenu ${nearRight ? 'flip
   };
   try {
     renderMenu();
-    const submenu = openSubmenu('bringToFront');
+    const submenu = openSubmenu(submenuId);
     expect(submenu.style.position).toBe('fixed');
     expect(Number.parseFloat(submenu.style.left)).toBe(nearRight ? left - 200 : left + 220);
     expect(Number.parseFloat(submenu.style.top)).toBe(window.innerHeight - 84);

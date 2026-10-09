@@ -21,10 +21,9 @@ midpoint, so the outermost band sits half a band inside its vertex colour
 to the far end of the shape, so neighbouring bands overlap and no antialiased
 crack shows between them.
 
-`metafile-gradient.before.png` was rendered on main `0f474aa5`, where an
-unsupported record rejects the whole metafile and the picture is skipped; the
-after image uses this implementation. Both are the picture box with a 16 px
-margin, at scale 2.
+Review: [PR #357](https://github.com/openooxml/betteroffice/pull/357).
+
+The comparison renders the picture box with a 16 px margin at scale 2.
 
 LibreOffice's EMF import draws the rectangle gradient and the pattern blit but
 leaves triangle-mode gradients blank, so its render of this file is not a full

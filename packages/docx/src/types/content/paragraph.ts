@@ -61,17 +61,32 @@ export type ParagraphContent =
  * Every paragraph carries direct formatting (`formatting`), tracked
  * property changes (`propertyChanges`), inline content (`content`), and
  * optional list rendering / section break metadata. `paraId` is Word's
- * stable identifier (`w14:paraId`) and is what `EditorBridge` and the
- * agent toolkit use to address paragraphs.
+ * paragraph identifier (`w14:paraId`); editing sessions address paragraphs
+ * by their own session keys instead.
  *
  * See ECMA-376 §17.3.1.
  */
 export interface Paragraph {
   type: 'paragraph';
-  /** Unique paragraph ID */
+  /**
+   * Word paragraph ID (`w14:paraId`), when the paragraph has a valid one.
+   * Invalid authored values are kept verbatim in `extraAttributes` but are
+   * not an identity.
+   */
   paraId?: string;
+  /** Set when `paraId` repeats an ID used earlier in the package; it is still this paragraph's own. */
+  repeatedParaId?: boolean;
+  /**
+   * The extra attribute holding an invalid Word 2010 `paraId` under a prefix
+   * other than `w14`; a save that sets `paraId` replaces it.
+   */
+  paraIdAttribute?: string;
+  /** This paragraph's `w:p` occurrence in its source part, on documents parsed for an editing session. */
+  sourceOrdinal?: number;
   /** Text ID */
   textId?: string;
+  /** `w:p` attributes the model does not type, kept verbatim so a save re-emits them. */
+  extraAttributes?: { name: string; value: string }[];
   /** Paragraph formatting */
   formatting?: ParagraphFormatting;
   /** Paragraph-level tracked property changes (w:pPrChange) */

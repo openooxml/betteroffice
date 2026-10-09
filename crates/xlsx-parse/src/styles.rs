@@ -15,17 +15,22 @@ use crate::{MAX_STYLE_ENTRIES, ParseError};
 pub(crate) fn parse_stylesheet(
     styles: Option<&[u8]>,
     theme: Option<&[u8]>,
-) -> Result<Stylesheet, ParseError> {
+) -> Result<(Stylesheet, Option<Stylesheet>), ParseError> {
     let theme = match theme {
         Some(bytes) => parse_theme(bytes)?,
         None => Theme::default(),
     };
-    let mut sheet = match styles {
+    let (mut sheet, legacy_xfs) = match styles {
         Some(bytes) => parse_styles(bytes)?,
-        None => Stylesheet::default(),
+        None => (Stylesheet::default(), Vec::new()),
     };
     sheet.theme = theme;
-    Ok(sheet)
+    let legacy = (legacy_xfs != sheet.cell_xfs).then(|| {
+        let mut legacy = sheet.clone();
+        legacy.cell_xfs = legacy_xfs;
+        legacy
+    });
+    Ok((sheet, legacy))
 }
 
 /// which top-level pool the cursor is inside; disambiguates elements that recur
@@ -42,7 +47,7 @@ enum Section {
 
 /// parse the style pools (numFmts, fonts, fills, borders, cellXfs). the theme is
 /// filled in by the caller.
-fn parse_styles(data: &[u8]) -> Result<Stylesheet, ParseError> {
+fn parse_styles(data: &[u8]) -> Result<(Stylesheet, Vec<Xf>), ParseError> {
     let mut reader = reader(data);
     let mut buf = Vec::new();
     let mut depth = 0;
@@ -54,6 +59,8 @@ fn parse_styles(data: &[u8]) -> Result<Stylesheet, ParseError> {
     let mut border: Option<Border> = None;
     let mut edge: Option<(u8, BorderEdge)> = None;
     let mut xf: Option<Xf> = None;
+    let mut explicit = [false; 4];
+    let mut legacy_cell_xfs: Vec<Xf> = Vec::new();
     let mut colors_depth = None;
     let mut indexed_colors_depth = None;
 
@@ -129,7 +136,11 @@ fn parse_styles(data: &[u8]) -> Result<Stylesheet, ParseError> {
                         ed.color = parse_color(&e)?;
                     }
                 }
-                b"xf" if section == Section::CellXfs => xf = Some(parse_xf(&e)?),
+                b"xf" if section == Section::CellXfs => {
+                    let (parsed, flags) = parse_xf(&e)?;
+                    xf = Some(parsed);
+                    explicit = flags;
+                }
                 b"alignment" if xf.is_some() && section == Section::CellXfs => {
                     let a = parse_alignment(&e)?;
                     if !a.is_empty() {
@@ -174,6 +185,7 @@ fn parse_styles(data: &[u8]) -> Result<Stylesheet, ParseError> {
                 b"xf" if section == Section::CellXfs => {
                     if let Some(x) = xf.take() {
                         cap(ss.cell_xfs.len())?;
+                        legacy_cell_xfs.push(held_back(&x, explicit));
                         ss.cell_xfs.push(x);
                     }
                 }
@@ -183,7 +195,7 @@ fn parse_styles(data: &[u8]) -> Result<Stylesheet, ParseError> {
             _ => {}
         }
     }
-    Ok(ss)
+    Ok((ss, legacy_cell_xfs))
 }
 
 /// reject a pool that would grow past the cap before pushing another entry.
@@ -227,26 +239,48 @@ fn begin_edge(e: &BytesStart, kind: u8) -> Result<Option<(u8, BorderEdge)>, Pars
 }
 
 /// build an `Xf`, folding the `applyX` flags in: an index is stored only when
-/// its facet is applied.
-fn parse_xf(e: &BytesStart) -> Result<Xf, ParseError> {
+/// its facet is applied. an absent `applyX` applies, per ECMA-376 §18.8.45;
+/// only an explicit falsy flag holds the facet back.
+fn parse_xf(e: &BytesStart) -> Result<(Xf, [bool; 4]), ParseError> {
     let num_fmt = index_u16(e, b"numFmtId")?;
     let font = index_u32(e, b"fontId")?;
     let fill = index_u32(e, b"fillId")?;
     let border = index_u32(e, b"borderId")?;
-    Ok(Xf {
-        font: applied(e, b"applyFont")?.then_some(font).flatten(),
-        fill: applied(e, b"applyFill")?.then_some(fill).flatten(),
-        border: applied(e, b"applyBorder")?.then_some(border).flatten(),
-        num_fmt_id: applied(e, b"applyNumberFormat")?
-            .then_some(num_fmt)
-            .flatten(),
-        alignment: None,
+    let (font_on, font_set) = applied(e, b"applyFont")?;
+    let (fill_on, fill_set) = applied(e, b"applyFill")?;
+    let (border_on, border_set) = applied(e, b"applyBorder")?;
+    let (num_fmt_on, num_fmt_set) = applied(e, b"applyNumberFormat")?;
+    Ok((
+        Xf {
+            font: font_on.then_some(font).flatten(),
+            fill: fill_on.then_some(fill).flatten(),
+            border: border_on.then_some(border).flatten(),
+            num_fmt_id: num_fmt_on.then_some(num_fmt).flatten(),
+            alignment: None,
+        },
+        [font_set, fill_set, border_set, num_fmt_set],
+    ))
+}
+
+/// whether an `applyX` flag applies, and whether it was written at all: absent
+/// applies, present follows its value.
+fn applied(e: &BytesStart, name: &[u8]) -> Result<(bool, bool), ParseError> {
+    Ok(match attr(e, name)? {
+        Some(value) => (is_truthy(&value), true),
+        None => (true, false),
     })
 }
 
-/// whether an `applyX` flag is set (truthy).
-fn applied(e: &BytesStart, name: &[u8]) -> Result<bool, ParseError> {
-    Ok(attr(e, name)?.map(|v| is_truthy(&v)).unwrap_or(false))
+/// the `Xf` releases that needed an explicit `applyX` read; a legacy
+/// collaboration fingerprint is the only thing that asks for it.
+fn held_back(xf: &Xf, explicit: [bool; 4]) -> Xf {
+    Xf {
+        font: explicit[0].then_some(xf.font).flatten(),
+        fill: explicit[1].then_some(xf.fill).flatten(),
+        border: explicit[2].then_some(xf.border).flatten(),
+        num_fmt_id: explicit[3].then_some(xf.num_fmt_id).flatten(),
+        alignment: xf.alignment.clone(),
+    }
 }
 
 fn index_u32(e: &BytesStart, name: &[u8]) -> Result<Option<u32>, ParseError> {

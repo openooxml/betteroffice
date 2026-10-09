@@ -945,6 +945,11 @@ fn prepare_paint(paint: &Paint, bounds: Rect) -> Result<PreparedPaint, String> {
 fn prepare_stroke(stroke: &DisplayStroke, bounds: Rect) -> Result<(Stroke, PreparedPaint), String> {
     let width = nonnegative(stroke.width, "stroke width")?;
     let mut style = Stroke::new(f64::from(width));
+    style.join = match stroke.join.as_deref() {
+        Some("round") => vello::kurbo::Join::Round,
+        Some("bevel") => vello::kurbo::Join::Bevel,
+        _ => vello::kurbo::Join::Miter,
+    };
     if stroke.dashed && width > 0.0 {
         style = with_dashes(
             style,
@@ -1141,6 +1146,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn stroke_joins_match_canvas_and_raster() {
+        for (join, expected) in [
+            (Some("round"), vello::kurbo::Join::Round),
+            (Some("bevel"), vello::kurbo::Join::Bevel),
+            (Some("miter"), vello::kurbo::Join::Miter),
+            (None, vello::kurbo::Join::Miter),
+        ] {
+            let stroke = DisplayStroke {
+                color: "#000000".to_owned(),
+                width: 2.0,
+                dashed: false,
+                paint: None,
+                head_end: None,
+                tail_end: None,
+                join: join.map(str::to_owned),
+            };
+            let (style, _) = prepare_stroke(&stroke, Rect::new(0.0, 0.0, 100.0, 100.0)).unwrap();
+            assert_eq!(style.join, expected);
+        }
+    }
+
+    #[test]
     fn prepares_gradient_outlines_in_the_primitive_bounds() {
         for kind in [
             GradientType::Linear,
@@ -1149,6 +1176,7 @@ mod tests {
             GradientType::Path,
         ] {
             let stroke = DisplayStroke {
+                join: None,
                 color: "#00FF00".into(),
                 width: 8.0,
                 dashed: true,
@@ -1461,6 +1489,7 @@ mod tests {
             height: 200.0,
             background: None,
             primitives: vec![Primitive::Image {
+                geometry_fallback: false,
                 object_id: 1,
                 shape_id: None,
                 name: "Photo".to_owned(),
@@ -1473,6 +1502,7 @@ mod tests {
                 crop,
                 path: Some(ELLIPSE.to_vec()),
                 stroke: Some(DisplayStroke {
+                    join: None,
                     color: "#ff00ff".to_owned(),
                     width: 2.0,
                     dashed: false,
@@ -1553,6 +1583,7 @@ mod tests {
                 w: 40.0,
                 h: 30.0,
                 geometry: "rect".to_owned(),
+                geometry_fallback: false,
                 path: vec![
                     GeometryPathCommand::Move { x: 0.0, y: 0.0 },
                     GeometryPathCommand::Line { x: 1.0, y: 0.0 },

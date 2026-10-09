@@ -1,13 +1,16 @@
 import { expect, test } from 'bun:test';
-import type { DiagramSnapshot, PageDisplayList } from '@betteroffice/vsdx';
+import type { DiagramSnapshot, PageDisplayList, ShapeSnapshot } from '@betteroffice/vsdx';
 import type { PointerEvent } from 'react';
-import { canvasPointerPosition, centreInsertPoint, clientPointToModel, inchFormula, resolveDragGeometry, selectionCorners, stillSelectable } from './VsdxEditor';
-import { previewOutline, resolveNudgeGeometry, resolveRotationAngle } from './interactions';
+import { MAX_PAGE_BREAK_LINES, SCROLL_MARGIN, anchoredZoomScroll, canvasPointerPosition, centredPageScroll, centreInsertPoint, clampScrollToSurface, clientPointToModel, connectorTargetForPoint, inchFormula, marqueeEnclosedShapes, pageBreakLines, resolveDragGeometry, selectionCorners, stillSelectable, surfaceSize, viewportCentreKey, zoomForWheelDelta } from './VsdxEditor';
+import { normalizeMarquee, previewOutline, resolveNudgeGeometry, resolveRotationAngle } from './interactions';
+import { modelToPage } from './connector';
 
 const frame: PageDisplayList = {
-  contractVersion: 4,
+  contractVersion: 7,
   width: 816,
   height: 1056,
+  printWidth: 816,
+  printHeight: 1056,
   paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 1056 },
   primitives: [],
 };
@@ -207,4 +210,189 @@ test('a nudge inside a rotated and scaled group matches the equivalent drag', ()
   expect(nudged.x).toBeCloseTo(dragged.x, 10);
   expect(nudged.y).toBeCloseTo(dragged.y, 10);
   expect(nudged.x).not.toBeCloseTo(2 + dx, 6);
+});
+
+test('page breaks fall on printer-paper boundaries inside the page', () => {
+  const plan = { width: 45.27165 * 96, height: 39.33858 * 96, printWidth: 11.69291 * 96, printHeight: 8.26772 * 96 };
+  const lines = pageBreakLines(plan, 1);
+  expect(lines.vertical).toHaveLength(3);
+  expect(lines.horizontal).toHaveLength(4);
+  expect(lines.vertical[0]).toBeCloseTo(plan.printWidth, 8);
+  expect(lines.horizontal[0]).toBeCloseTo(plan.printHeight, 8);
+  for (let i = 1; i < lines.vertical.length; i += 1) expect(lines.vertical[i] - lines.vertical[i - 1]).toBeCloseTo(plan.printWidth, 8);
+  for (let i = 1; i < lines.horizontal.length; i += 1) expect(lines.horizontal[i] - lines.horizontal[i - 1]).toBeCloseTo(plan.printHeight, 8);
+  expect(lines.vertical.every((x) => x < plan.width)).toBe(true);
+  expect(lines.horizontal.every((y) => y < plan.height)).toBe(true);
+});
+
+test('page breaks scale with the zoom and vanish for a page that fits one sheet', () => {
+  const plan = { width: 45.27165 * 96, height: 39.33858 * 96, printWidth: 11.69291 * 96, printHeight: 8.26772 * 96 };
+  expect(pageBreakLines(plan, 1.5).vertical[0]).toBeCloseTo(plan.printWidth * 1.5, 8);
+  expect(pageBreakLines(frame, 1)).toEqual({ vertical: [], horizontal: [] });
+  expect(pageBreakLines({ width: frame.width, height: frame.height, printWidth: frame.width * 2, printHeight: frame.height * 2 }, 1)).toEqual({ vertical: [], horizontal: [] });
+});
+
+test('a degenerate print tile draws no page-break guides', () => {
+  const dense = { width: frame.width, height: frame.height, printWidth: 1e-4 * 96, printHeight: 1e-4 * 96 };
+  expect(pageBreakLines(dense, 1)).toEqual({ vertical: [], horizontal: [] });
+  const legible = { width: frame.width, height: frame.height, printWidth: frame.width / MAX_PAGE_BREAK_LINES, printHeight: frame.height / MAX_PAGE_BREAK_LINES };
+  expect(pageBreakLines(legible, 1).vertical).toHaveLength(MAX_PAGE_BREAK_LINES - 1);
+  expect(pageBreakLines({ width: frame.width, height: frame.height, printWidth: 0, printHeight: -1 }, 1)).toEqual({ vertical: [], horizontal: [] });
+});
+
+function cellShape(id: string, cells: Record<string, string>): ShapeSnapshot {
+  return {
+    id,
+    sourceId: id === 'a' ? 1 : 2,
+    name: null,
+    children: [],
+    cells: Object.entries(cells).map(([name, formula]) => ({
+      locator: { sheet: { page: 1 }, shapeId: 1, section: null, row: null, cellName: name },
+      name,
+      formula,
+      value: formula,
+    })),
+  };
+}
+
+function pointerForModel(model: { x: number; y: number }, zoom: number): PointerEvent<HTMLCanvasElement> {
+  const page = modelToPage(frame, model);
+  return pointerAt(page.x * zoom, page.y * zoom, zoom);
+}
+
+/** A centre-to-centre drag must resolve at 50%, 100% and 150% zoom. */
+test('resolves a connector drag at every review zoom', () => {
+  const shapes = [
+    cellShape('a', { PinX: '2', PinY: '2', Width: '1', Height: '1' }),
+    cellShape('b', { PinX: '5', PinY: '2', Width: '1', Height: '1' }),
+  ];
+  const silentHandle = { hitTest: () => null };
+  for (const zoom of [0.5, 1, 1.5]) {
+    const from = canvasPointerPosition(pointerForModel({ x: 2, y: 2 }, zoom), frame);
+    expect(from.model.x).toBeCloseTo(2, 8);
+    expect(from.model.y).toBeCloseTo(2, 8);
+    expect(connectorTargetForPoint(shapes, silentHandle as never, from.canvas, from.model)?.shapeId).toBe('a');
+    const to = canvasPointerPosition(pointerForModel({ x: 5, y: 2 }, zoom), frame);
+    expect(connectorTargetForPoint(shapes, silentHandle as never, to.canvas, to.model)?.shapeId).toBe('b');
+    const interior = canvasPointerPosition(pointerForModel({ x: 5.2, y: 2.1 }, zoom), frame);
+    expect(connectorTargetForPoint(shapes, silentHandle as never, interior.canvas, interior.model)?.shapeId).toBe('b');
+  }
+});
+
+/** A hit-tested shape still glues when the pointer misses every connection point. */
+test('falls back to the hit-tested shape for rotated frames', () => {
+  const shapes = [cellShape('a', { PinX: '2', PinY: '2', Width: '1', Height: '1' })];
+  const handle = { hitTest: () => ({ kind: 'shape', shapeId: 'a' }) };
+  const target = connectorTargetForPoint(shapes, handle as never, { x: 0, y: 0 }, { x: 2.1, y: 2.05 });
+  expect(target?.shapeId).toBe('a');
+  expect(target?.point.side).toBe('centre');
+});
+
+function marqueeCell(name: string, value: string) {
+  return { locator: { sheet: 'document' as const, shapeId: null, section: null, row: null, cellName: name }, name, formula: value, value };
+}
+function marqueeShape(id: string, cells: Array<ReturnType<typeof marqueeCell>>) {
+  return { id, sourceId: Number(id.replace('shape', '')) || 1, name: id, children: [], cells };
+}
+function marqueePage() {
+  const identity = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
+  const frame: PageDisplayList = { contractVersion: 7, width: 816, height: 1056, printWidth: 816, printHeight: 1056, paintTransform: identity, primitives: [] };
+  const page = {
+    id: 'page',
+    sourcePartPath: 'page',
+    name: 'Page',
+    shapes: [
+      marqueeShape('shape1', [marqueeCell('PinX', '100'), marqueeCell('PinY', '100'), marqueeCell('Width', '40'), marqueeCell('Height', '40')]),
+      marqueeShape('shape2', [marqueeCell('PinX', '400'), marqueeCell('PinY', '400'), marqueeCell('Width', '40'), marqueeCell('Height', '40')]),
+      marqueeShape('shape3', [marqueeCell('PinX', '600'), marqueeCell('PinY', '100'), marqueeCell('Width', '40'), marqueeCell('Height', '20'), marqueeCell('Angle', String(Math.PI / 2))]),
+      marqueeShape('shape4', [marqueeCell('PinX', '100'), marqueeCell('PinY', '600'), marqueeCell('Width', '40'), marqueeCell('Height', '40'), marqueeCell('FlipX', '1')]),
+    ],
+  };
+  return { page: page as never, frame };
+}
+test('a marquee selects every fully enclosed shape and nothing partially overlapped', () => {
+  const { page, frame } = marqueePage();
+  const enclosed = marqueeEnclosedShapes(page, frame, normalizeMarquee({ x: 10, y: 10 }, { x: 200, y: 200 }));
+  expect(enclosed.map((item) => item.shapeId)).toEqual(['shape1']);
+  expect(enclosed[0]).toEqual({ pageId: 'page', shapeId: 'shape1', hit: { kind: 'shape', shapeId: 'shape1' } });
+  const clipped = marqueeEnclosedShapes(page, frame, normalizeMarquee({ x: 10, y: 10 }, { x: 110, y: 110 }));
+  expect(clipped).toEqual([]);
+});
+test('a marquee encloses rotated and flipped shapes through the selection corners', () => {
+  const { page, frame } = marqueePage();
+  const rotated = marqueeEnclosedShapes(page, frame, normalizeMarquee({ x: 580, y: 70 }, { x: 620, y: 130 }));
+  expect(rotated.map((item) => item.shapeId)).toEqual(['shape3']);
+  const rotatedClipped = marqueeEnclosedShapes(page, frame, normalizeMarquee({ x: 580, y: 70 }, { x: 605, y: 130 }));
+  expect(rotatedClipped).toEqual([]);
+  const flipped = marqueeEnclosedShapes(page, frame, normalizeMarquee({ x: 70, y: 570 }, { x: 130, y: 630 }));
+  expect(flipped.map((item) => item.shapeId)).toEqual(['shape4']);
+});
+
+function pageCanvasPointerAt(clientX: number, clientY: number, zoom: number, left = 0, top = 0): PointerEvent<HTMLCanvasElement> {
+  return {
+    clientX,
+    clientY,
+    currentTarget: { getBoundingClientRect: () => ({ left, top, width: frame.width * zoom, height: frame.height * zoom }) },
+  } as unknown as PointerEvent<HTMLCanvasElement>;
+}
+
+test('the page canvas keeps the model point stable across zoom', () => {
+  for (const zoom of [0.5, 1, 1.5, 4]) {
+    const point = canvasPointerPosition(pageCanvasPointerAt(192 * zoom, 864 * zoom, zoom), frame, zoom);
+    expect(point.canvas.x).toBeCloseTo(192, 9);
+    expect(point.canvas.y).toBeCloseTo(864, 9);
+    expect(point.model.x).toBeCloseTo(2, 9);
+    expect(point.model.y).toBeCloseTo(2, 9);
+  }
+});
+
+test('a pointer past the page edge maps to a point outside it', () => {
+  const outside = canvasPointerPosition(pageCanvasPointerAt(-192, -192, 1), frame, 1);
+  expect(outside.canvas).toEqual({ x: -192, y: -192 });
+  expect(outside.model.x).toBeCloseTo(-2, 9);
+  const origin = canvasPointerPosition(pageCanvasPointerAt(0, 0, 1), frame, 1);
+  expect(origin.canvas).toEqual({ x: 0, y: 0 });
+});
+
+test('the pointer mapping ignores element offset and scroll position', () => {
+  const offset = canvasPointerPosition(pageCanvasPointerAt(137 + 192, 91 + 864, 1, 137, 91), frame, 1);
+  expect(offset.model.x).toBeCloseTo(2, 9);
+  expect(offset.model.y).toBeCloseTo(2, 9);
+  const zoomed = canvasPointerPosition(pageCanvasPointerAt(4000 + 192 * 2, 91 + 864 * 2, 2, 4000, 91), frame, 2);
+  expect(zoomed.model.x).toBeCloseTo(2, 9);
+  expect(zoomed.model.y).toBeCloseTo(2, 9);
+});
+
+test('the scroll surface pads the page extent and centres it in the viewport', () => {
+  const surface = surfaceSize(frame.width, frame.height, 1);
+  expect(surface).toEqual({ width: frame.width + SCROLL_MARGIN * 2, height: frame.height + SCROLL_MARGIN * 2 });
+  const centred = centredPageScroll(frame.width, frame.height, 1, 1200, 800);
+  expect(centred).toEqual({ left: SCROLL_MARGIN + frame.width / 2 - 600, top: SCROLL_MARGIN + frame.height / 2 - 400 });
+  expect(viewportCentreKey({ pages: [{ id: 'p1' }] } as never, 0)).toBe('p1');
+  expect(viewportCentreKey(null, 2)).toBe('index:2');
+});
+
+test('a pointer-anchored zoom keeps the page point under the cursor', () => {
+  for (const [oldZoom, newZoom] of [[1, 1.5], [1.5, 1], [1, 0.5], [0.5, 1], [1, 4], [4, 1]] as const) {
+    const cssX = 192 * oldZoom;
+    const cssY = 192 * oldZoom;
+    const target = anchoredZoomScroll(2000, 2000, cssX, cssY, oldZoom, newZoom);
+    expect((cssX / oldZoom) * newZoom - (target.left - 2000)).toBeCloseTo(cssX, 8);
+    expect((cssY / oldZoom) * newZoom - (target.top - 2000)).toBeCloseTo(cssY, 8);
+  }
+});
+
+test('the zoom anchor clamps to the scrollable range at a surface edge', () => {
+  const surface = surfaceSize(frame.width, frame.height, 1);
+  expect(clampScrollToSurface(-50, 1e9, surface.width, surface.height, 1200, 800)).toEqual({ left: 0, top: surface.height - 800 });
+  expect(clampScrollToSurface(2000, 2000, surface.width, surface.height, 1200, 800)).toEqual({ left: 2000, top: 2000 });
+  expect(clampScrollToSurface(10, 10, 400, 300, 1200, 800)).toEqual({ left: 0, top: 0 });
+});
+
+test('ctrl+wheel steps the zoom multiplicatively in both directions', () => {
+  expect(zoomForWheelDelta(1, -100)).toBeGreaterThan(1);
+  expect(zoomForWheelDelta(1, 100)).toBeLessThan(1);
+  expect(zoomForWheelDelta(1, 0)).toBeCloseTo(1, 10);
+  expect(zoomForWheelDelta(1, -1000)).toBe(4);
+  expect(zoomForWheelDelta(1, 1000)).toBe(0.1);
 });

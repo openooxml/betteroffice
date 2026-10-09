@@ -6,6 +6,8 @@ const DOCX_TYPE =
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 const TYPES = {
   docx: DOCX_TYPE,
+  vsdx: "application/vnd.ms-visio.drawing",
+  vstx: "application/vnd.ms-visio.template",
   xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
 } as const;
@@ -83,20 +85,31 @@ describe("redaction worker", () => {
     expect(bucket.objects.size).toBe(0);
   });
 
-  test("accepts the XLSX and PPTX upload labels", async () => {
+  test("accepts and retrieves each supported upload format", async () => {
     const bucket = new MemoryBucket();
     const formats: string[] = [];
     const worker = createWorker((bytes, format) => {
       formats.push(format);
       return bytes;
     });
-    expect(
-      (await worker.fetch(uploadRequest(new Uint8Array([1]), "xlsx"), env(bucket))).status,
-    ).toBe(200);
-    expect(
-      (await worker.fetch(uploadRequest(new Uint8Array([2]), "pptx"), env(bucket))).status,
-    ).toBe(200);
-    expect(formats).toEqual(["xlsx", "pptx"]);
+    for (const format of ["xlsx", "pptx", "vsdx", "vstx"] as const) {
+      const uploaded = await worker.fetch(
+        uploadRequest(new Uint8Array([1]), format),
+        env(bucket),
+      );
+      expect(uploaded.status).toBe(200);
+      const { id } = (await uploaded.json()) as { id: string };
+      const downloaded = await worker.fetch(
+        new Request(`https://redact.test/f/${id}`),
+        env(bucket),
+      );
+      expect(downloaded.status).toBe(200);
+      expect(downloaded.headers.get("Content-Type")).toBe(TYPES[format]);
+      expect(new Uint8Array(await downloaded.arrayBuffer())).toEqual(
+        new Uint8Array([1]),
+      );
+    }
+    expect(formats).toEqual(["xlsx", "pptx", "vsdx", "vstx"]);
   });
 
   test("rejects sanitizer failures and limits repeated clients", async () => {

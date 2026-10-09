@@ -1,36 +1,45 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::sync::{Arc, Mutex};
 
 use ooxml_drawingml::chart::{PlotRect, PlotTextAlign};
 use ooxml_drawingml::{
     ColorValue, GeometryPathCommand, GradientFill, LineEnd, ResolvedCellStyle, ShapeEffects,
-    ShapeFill, ShapeOutline, ShapeStyle, TableCellBorder, TableCellBorders as StyleCellBorders,
-    TableCellPosition, TableCellStyle, TableStyleFlags, Theme, ThemeFormatScheme,
-    normalize_table_column_widths, preset_geometry_to_path, resolve_color_value_to_hex_with_theme,
+    ShapeFill, ShapeOutline, ShapeStyle, StyleReference, TableCellBorder,
+    TableCellBorders as StyleCellBorders, TableCellPosition, TableCellStyle, TableStyle,
+    TableStyleFlags, Theme, ThemeFormatScheme, get_theme_color, normalize_table_column_widths,
+    preset_geometry_to_path, resolve_color_value_to_hex_with_theme,
     resolve_color_value_to_rgba_hex, resolve_theme_font_ref, style_fill, style_outline,
 };
 use ooxml_text::{
-    CompatFlags, FontId, FontStore, ShapeFeature, break_opportunities, shape, single_line_box,
+    CompatFlags, FontId, FontStore, ShapeFeature, WORD_SMALL_CAPS_ADVANCE_SCALE,
+    presentation_break_opportunities, shape, single_line_box, uppercase_for_language,
 };
-use pptx_edit::{DeckSnapshot, ShapeKind, ShapeSnapshot, StorySnapshot, TextStyle};
+use pptx_edit::paragraph::{ListCounters, ParagraphCascade, SlideParents, find_placeholder};
+use pptx_edit::{
+    DeckSnapshot, ShapeKind, ShapeSnapshot, SlideScope, SlideSnapshot, StorySnapshot, TextStyle,
+};
 use pptx_parse::{
-    BlipEffect, Bullet, BulletColor, BulletFont, BulletSize, ChartSpace, CustomGeometryPath,
-    GraphicFrameData, LineSpacing, ParagraphProperties, Picture, PictureCrop, PictureFill,
-    Placeholder, PptxPackage, RunProperties, ShapeNode, ShapeTransform, Slide, SlideLayout,
-    SlideMaster, Table, TableCell, TextAutofit, TextBody, TextOverflow,
+    BlipEffect, Bullet, BulletColor, BulletFont, BulletSize, ChartPart, ChartSpace,
+    CustomGeometryPath, GraphicFrameData, LineSpacing, MediaPart, ParagraphProperties, Picture,
+    PictureCrop, PictureFill, Placeholder, PptxPackage, RunProperties, ShapeNode, ShapeTransform,
+    Slide, SlideLayout, SlideMaster, Table, TableCell, TextAutofit, TextBody, TextCaps,
+    TextOverflow, builtin_table_style, effective_color_map,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::chart::{ChartFrame, ChartText, chart_primitive};
-use crate::metafile::{MetafileDrawing, decode as decode_metafile, is_metafile};
+use crate::family_metrics::{FamilyMetrics, family_advance, family_metrics};
 use crate::{
-    CONTRACT_VERSION, CaretStop, GradientStop, GradientType, ImageCrop, ImageEffect, Paint,
-    PositionedGlyph, PositionedTextLine, PositionedTextRun, Primitive, Shadow, Stroke, StrokeEnd,
-    SurfaceDisplayList, TextAlign, TextAnchor, TextParagraph, TextRun, Transform,
+    CONTRACT_VERSION, CaretStop, GradientStop, GradientType, ImageCrop, ImageEffect, ImageTile,
+    Paint, PositionedGlyph, PositionedTextLine, PositionedTextRun, Primitive, Shadow, Stroke,
+    StrokeEnd, SurfaceDisplayList, TextAlign, TextAnchor, TextParagraph, TextRun, Transform,
 };
+use ooxml_metafile::{MetafileDrawing, decode as decode_metafile, is_metafile};
 
 const EMU_PER_CSS_PIXEL: f32 = 9_525.0;
+const EMU_PER_POINT: f64 = 12_700.0;
+const CSS_PIXELS_PER_POINT: f64 = 96.0 / 72.0;
 const PICTURE_FILL: &str = "picture";
 const LINE_END_MIN_BASE_PX: f32 = 0.7 / 25.4 * 96.0;
 const ANGLE_UNITS_PER_DEGREE: f64 = 60_000.0;
@@ -39,16 +48,16 @@ const DEFAULT_INSET_VERTICAL_EMU: i64 = 45_720;
 const DEFAULT_FONT_SIZE_PT: f32 = 18.0;
 /// Size a super/subscript run shapes at, relative to its own `sz`.
 const SCRIPT_SIZE_RATIO: f32 = 0.58;
-const MIN_AUTOFIT_SCALE: f32 = 0.5;
-/// Compatibility line pitch in ems.
+/// `p:bgRef/@idx` counts `a:bgFillStyleLst` entries from here.
+const BACKGROUND_FILL_BASE: u32 = 1_001;
+/// Measured on PowerPoint 16.113 exports: 1.2 em for every face.
 const SINGLE_LINE_PITCH_EM: f32 = 1.2;
 const MAX_FONT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_FONTS: usize = 256;
-const MAX_RENDER_SHAPES: usize = 20_000;
+pub(crate) const MAX_RENDER_SHAPES: usize = 20_000;
 const MAX_TEXT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_TEXT_LINES: usize = 100_000;
 const MAX_TEXT_PARAGRAPHS: usize = 20_000;
-const MAX_AUTONUM_VALUE: u32 = 32_767 + MAX_TEXT_PARAGRAPHS as u32;
 const MAX_TEXT_RUNS: usize = 100_000;
 /// Chart parts one slide may draw, shared across its charts.
 pub(crate) const MAX_CHART_PRIMITIVES: usize = 100_000;
@@ -71,15 +80,66 @@ pub enum RenderError {
 struct FontFace {
     id: FontId,
     family: String,
+    requested_family: String,
+    /// The named family's own advance widths, where this face stands in for a
+    /// family that does not already run at them.
+    widths: Option<&'static FamilyMetrics>,
+    /// The same family's `hhea` metrics, which decide where the line box sits.
+    line: Option<&'static FamilyMetrics>,
+    /// The face whose own metrics size the line when `line` names none: the
+    /// face itself, or for a coverage fallback the face of the run it stands in.
+    line_id: FontId,
+}
+
+/// A font family the deck asked for that is not registered, the family drawn
+/// instead, and the first shape that asked for it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FontSubstitution {
+    pub requested_family: String,
+    pub selected_family: String,
+    pub shape_id: String,
+}
+
+/// Collects one `FontSubstitution` per requested family over a slide.
+#[derive(Default)]
+struct SubstitutionLog {
+    shape_id: String,
+    seen: HashSet<String>,
+    entries: Vec<FontSubstitution>,
+}
+
+impl SubstitutionLog {
+    fn enter_shape(&mut self, shape_id: &str) {
+        self.shape_id.clear();
+        self.shape_id.push_str(shape_id);
+    }
+
+    fn record(&mut self, requested: &str, normalized: &str, selected: &str) {
+        if normalized.is_empty() || self.seen.contains(normalized) {
+            return;
+        }
+        self.seen.insert(normalized.to_owned());
+        self.entries.push(FontSubstitution {
+            requested_family: requested.trim().to_owned(),
+            selected_family: selected.to_owned(),
+            shape_id: self.shape_id.clone(),
+        });
+    }
 }
 
 pub struct SlideRenderer {
     fonts: FontStore,
     faces: HashMap<(String, bool, bool), FontFace>,
+    /// Faces drawn only for characters a run's own face has no glyph for,
+    /// with the weight and slant each was registered for.
+    coverage_faces: Vec<(bool, bool, FontFace)>,
     fallback: Option<FontFace>,
     /// Normalized fallback family.
     fallback_family: Option<String>,
     font_count: usize,
+    /// Laid-out text reused across display-list builds and slides.
+    text_layouts: Mutex<TextLayoutCache>,
 }
 
 impl Default for SlideRenderer {
@@ -93,9 +153,11 @@ impl SlideRenderer {
         Self {
             fonts: FontStore::new(),
             faces: HashMap::new(),
+            coverage_faces: Vec::new(),
             fallback: None,
             fallback_family: None,
             font_count: 0,
+            text_layouts: Mutex::new(TextLayoutCache::default()),
         }
     }
 
@@ -124,17 +186,164 @@ impl SlideRenderer {
             .fonts
             .register(bytes.to_vec())
             .map_err(|error| RenderError::Font(error.to_string()))?;
+        let requested = normalize_family(family);
+        let metrics = family_metrics(&requested, bold, italic);
         let face = FontFace {
             id,
             family: family.to_owned(),
+            requested_family: requested.clone(),
+            widths: metrics.filter(|metrics| !runs_at_own_widths(&self.fonts, id, metrics)),
+            line: metrics.filter(|metrics| !sits_on_own_baseline(&self.fonts, id, metrics)),
+            line_id: id,
         };
-        self.faces
-            .insert((normalize_family(family), bold, italic), face.clone());
+        self.faces.insert((requested, bold, italic), face.clone());
         self.fallback.get_or_insert(face);
         self.fallback_family
             .get_or_insert_with(|| normalize_family(family));
         self.font_count += 1;
+        if let Ok(cache) = self.text_layouts.get_mut() {
+            cache.clear();
+        }
         Ok(id.to_u32())
+    }
+
+    /// Registers a face drawn only where a run's own face has no glyph, the way
+    /// PowerPoint reaches for a script's font when the named one cannot draw a
+    /// character. The first registered face that covers a character draws it.
+    pub fn register_fallback_font(
+        &mut self,
+        family: &str,
+        bold: bool,
+        italic: bool,
+        bytes: &[u8],
+    ) -> Result<u32, RenderError> {
+        if bytes.len() > MAX_FONT_BYTES {
+            return Err(RenderError::ResourceLimit(format!(
+                "font exceeds {MAX_FONT_BYTES} bytes"
+            )));
+        }
+        if self.font_count >= MAX_FONTS {
+            return Err(RenderError::ResourceLimit(format!(
+                "more than {MAX_FONTS} font faces"
+            )));
+        }
+        let family = family.trim();
+        if family.is_empty() {
+            return Err(RenderError::Font("font family is empty".to_owned()));
+        }
+        let id = self
+            .fonts
+            .register(bytes.to_vec())
+            .map_err(|error| RenderError::Font(error.to_string()))?;
+        self.coverage_faces.push((
+            bold,
+            italic,
+            FontFace {
+                id,
+                family: family.to_owned(),
+                requested_family: normalize_family(family),
+                widths: None,
+                line: None,
+                line_id: id,
+            },
+        ));
+        self.font_count += 1;
+        if let Ok(cache) = self.text_layouts.get_mut() {
+            cache.clear();
+        }
+        Ok(id.to_u32())
+    }
+
+    /// The fallback face that draws `character` for a run in `face`: one of the
+    /// same weight and slant where there is one, sized on the run's own line.
+    fn coverage_face(
+        &self,
+        face: &FontFace,
+        character: char,
+        bold: bool,
+        italic: bool,
+    ) -> Option<FontFace> {
+        let covering = || {
+            self.coverage_faces.iter().filter(|(_, _, candidate)| {
+                self.fonts.covers(candidate.id, character).unwrap_or(false)
+            })
+        };
+        covering()
+            .find(|(face_bold, face_italic, _)| (*face_bold, *face_italic) == (bold, italic))
+            .or_else(|| covering().find(|(face_bold, _, _)| *face_bold == bold))
+            .or_else(|| covering().next())
+            .map(|(_, _, candidate)| FontFace {
+                line: face.line,
+                line_id: face.line_id,
+                ..candidate.clone()
+            })
+    }
+
+    /// Where `text` in `face` needs a fallback: each piece's byte start and the
+    /// face that draws it, `None` for `face` itself. Spaces and punctuation
+    /// stay with the fallback text around them.
+    fn coverage_pieces(
+        &self,
+        face: &FontFace,
+        text: &str,
+        bold: bool,
+        italic: bool,
+    ) -> Vec<(usize, Option<FontFace>)> {
+        let mut pieces: Vec<(usize, Option<FontFace>)> = Vec::new();
+        if self.coverage_faces.is_empty()
+            || text
+                .chars()
+                .all(|character| self.fonts.covers(face.id, character).unwrap_or(true))
+        {
+            return vec![(0, None)];
+        }
+        for (index, character) in text.char_indices() {
+            let current = pieces.last().and_then(|(_, face)| face.as_ref());
+            let own = self.fonts.covers(face.id, character).unwrap_or(true);
+            let neutral = character.is_whitespace() || character.is_ascii_punctuation();
+            let chosen = match current {
+                Some(current)
+                    if neutral && self.fonts.covers(current.id, character).unwrap_or(false) =>
+                {
+                    Some(current.clone())
+                }
+                _ if own => None,
+                _ => self.coverage_face(face, character, bold, italic),
+            };
+            let same = pieces.last().is_some_and(|(_, last)| {
+                last.as_ref().map(|face| face.id) == chosen.as_ref().map(|face| face.id)
+            });
+            if !same {
+                pieces.push((index, chosen));
+            }
+        }
+        pieces
+    }
+
+    /// Splits `run` where its face has no glyph and a fallback does, so each
+    /// part is shaped, measured and drawn in a face that can draw it.
+    fn split_by_coverage(&self, run: ResolvedRun, out: &mut Vec<ResolvedRun>) {
+        let pieces =
+            self.coverage_pieces(&run.style.face, &run.text, run.style.bold, run.style.italic);
+        if let [(0, None)] = pieces.as_slice() {
+            out.push(run);
+            return;
+        }
+        for (position, (start, face)) in pieces.iter().enumerate() {
+            let end = pieces
+                .get(position + 1)
+                .map_or(run.text.len(), |(next, _)| *next);
+            let mut style = run.style.clone();
+            if let Some(face) = face {
+                style.family = face.family.clone();
+                style.face = face.clone();
+            }
+            out.push(ResolvedRun {
+                text: run.text[*start..end].to_owned(),
+                start: run.start + utf16_len(&run.text[..*start]),
+                style,
+            });
+        }
     }
 
     /// The store holding every registered face, so a raster backend can resolve
@@ -158,63 +367,113 @@ impl SlideRenderer {
             .slides
             .get(slide_index)
             .ok_or(RenderError::SlideNotFound(slide_index))?;
-        let parsed_slide = deck_slide
-            .source_part_path
-            .as_deref()
-            .and_then(|path| package.slides.iter().find(|slide| slide.part_path == path));
-        let layout_path = deck_slide
-            .layout_part_path
-            .as_deref()
-            .or_else(|| parsed_slide.and_then(|slide| slide.layout_part_path.as_deref()));
-        let layout = layout_path
-            .and_then(|path| {
-                package
-                    .layouts
-                    .iter()
-                    .find(|layout| layout.part_path == path)
-            })
-            .or_else(|| package.layouts.first());
-        let master = layout
-            .and_then(|layout| layout.master_part_path.as_deref())
-            .and_then(|path| {
-                package
-                    .masters
-                    .iter()
-                    .find(|master| master.part_path == path)
-            })
-            .or_else(|| {
-                layout.and_then(|layout| {
-                    package.masters.iter().find(|master| {
-                        master
-                            .layout_part_paths
-                            .iter()
-                            .any(|path| path == &layout.part_path)
-                    })
-                })
-            })
-            .or_else(|| package.masters.first());
+        self.layout_resolved(
+            package,
+            deck_slide,
+            deck.width_emu,
+            deck.height_emu,
+            slide_index,
+        )
+    }
+
+    /// Render one slide from a [`pptx_edit::DeckSession::slide_scope`] snapshot,
+    /// which materializes only that slide instead of the whole deck.
+    pub fn layout_scoped_slide(
+        &self,
+        package: &PptxPackage,
+        scope: &SlideScope,
+    ) -> Result<RenderedSlide, RenderError> {
+        self.layout_resolved(
+            package,
+            &scope.slide,
+            scope.width_emu,
+            scope.height_emu,
+            scope.index,
+        )
+    }
+
+    fn layout_resolved(
+        &self,
+        package: &PptxPackage,
+        deck_slide: &SlideSnapshot,
+        width_emu: i64,
+        height_emu: i64,
+        slide_index: usize,
+    ) -> Result<RenderedSlide, RenderError> {
+        let SlideParents {
+            slide: parsed_slide,
+            layout,
+            master,
+        } = SlideParents::resolve(
+            package,
+            deck_slide.source_part_path.as_deref(),
+            deck_slide.layout_part_path.as_deref(),
+        );
         let theme_part = master
             .and_then(|master| master.theme_part_path.as_deref())
             .and_then(|path| package.themes.iter().find(|theme| theme.part_path == path))
             .or_else(|| package.themes.first());
         let default_theme = Theme::default();
-        let theme = theme_part.map(|part| &part.theme).unwrap_or(&default_theme);
+        let base_theme = theme_part.map(|part| &part.theme).unwrap_or(&default_theme);
+        // The slot mapping is per slide, not per theme part.
+        let color_map = effective_color_map(parsed_slide, layout, master);
+        let mapped_theme;
+        let theme = if color_map.is_identity() {
+            base_theme
+        } else {
+            mapped_theme = Theme {
+                color_map,
+                ..base_theme.clone()
+            };
+            &mapped_theme
+        };
         let default_format_scheme = ThemeFormatScheme::default();
         let format_scheme = theme_part
             .map(|part| &part.format_scheme)
             .unwrap_or(&default_format_scheme);
-        let background = parsed_slide
-            .and_then(|slide| slide.background.as_ref())
-            .or_else(|| layout.and_then(|layout| layout.background.as_ref()))
-            .or_else(|| master.and_then(|master| master.background.as_ref()))
+        let background_source = [
+            parsed_slide.map(BackgroundSource::from_slide),
+            layout.map(BackgroundSource::from_layout),
+            master.map(BackgroundSource::from_master),
+        ]
+        .into_iter()
+        .flatten()
+        .find(BackgroundSource::is_declared);
+        let background_fill =
+            background_source
+                .as_ref()
+                .and_then(|source| match source.reference {
+                    Some(reference) => Some(style_fill(format_scheme, reference, theme)),
+                    None => source.fill.cloned(),
+                });
+        let background_picture = background_source.as_ref().and_then(|source| {
+            source.picture.or_else(|| {
+                let index = source.reference?.index.checked_sub(BACKGROUND_FILL_BASE)?;
+                theme_part?
+                    .background_pictures
+                    .get(index as usize)?
+                    .as_ref()
+            })
+        });
+        // A referenced picture style carries no colour of its own, so keep the
+        // reference's own colour for the fills we cannot paint, such as a tile.
+        let background = background_fill
+            .as_ref()
             .and_then(|fill| paint(fill, theme))
+            .or_else(|| {
+                background_source
+                    .as_ref()
+                    .and_then(|source| source.fill)
+                    .and_then(|fill| paint(fill, theme))
+            })
+            .filter(|paint| !is_invisible(paint))
             .or_else(|| {
                 Some(Paint::Solid {
                     color: "#ffffff".to_owned(),
                 })
             });
-        let width = emu_to_px(deck.width_emu);
-        let height = emu_to_px(deck.height_emu);
+        let width = slide_extent_px(width_emu);
+        let height = slide_extent_px(height_emu);
         let mut builder = LayoutBuilder {
             renderer: self,
             package,
@@ -226,17 +485,47 @@ impl SlideRenderer {
             parsed_slide,
             primitives: Vec::new(),
             hit_regions: Vec::new(),
+            substitutions: SubstitutionLog::default(),
             shape_count: 0,
             line_count: 0,
             chart_budget: MAX_CHART_PRIMITIVES,
             metafile_budget: MAX_METAFILE_PRIMITIVES,
             metafile_bytes: 32 * 1024 * 1024,
             metafiles: HashMap::new(),
+            media_parts: None,
+            chart_parts: None,
             slide_number: i64::from(package.presentation.first_slide_num) + slide_index as i64,
         };
         let root_space = Space::root();
-        let show_master = parsed_slide.is_none_or(|slide| slide.show_master_shapes)
-            && layout.is_none_or(|layout| layout.show_master_shapes);
+        if let Some(picture) = background_picture
+            && let Some(asset_id) = picture.media_part_path.clone()
+        {
+            let background_dpi = builder
+                .media_part(&asset_id)
+                .and_then(|part| image_dpi(&part.bytes));
+            builder.primitives.push(Primitive::Image {
+                geometry_fallback: false,
+                object_id: 0,
+                shape_id: None,
+                name: "Background".to_owned(),
+                x: 0.0,
+                y: 0.0,
+                w: width,
+                h: height,
+                asset_id: Some(asset_id),
+                effects: Vec::new(),
+                crop: picture_fill_crop(picture),
+                tile: picture_fill_tile(picture, background_dpi),
+                path: None,
+                stroke: None,
+                shadow: None,
+                transform: Transform::default(),
+            });
+        }
+        // `p:sld/@showMasterSp` hides the layout's own decoration as well as the
+        // master's, because the master reaches the slide through the layout.
+        let show_layout = parsed_slide.is_none_or(|slide| slide.show_master_shapes);
+        let show_master = show_layout && layout.is_none_or(|layout| layout.show_master_shapes);
         if show_master && let Some(master) = master {
             for (index, shape) in master.shapes.iter().enumerate() {
                 if node_placeholder(shape).is_none() {
@@ -248,7 +537,7 @@ impl SlideRenderer {
                 }
             }
         }
-        if let Some(layout) = layout {
+        if show_layout && let Some(layout) = layout {
             for (index, shape) in layout.shapes.iter().enumerate() {
                 if node_placeholder(shape).is_none() {
                     builder.render_parsed_shape(
@@ -270,6 +559,7 @@ impl SlideRenderer {
                 background,
                 primitives: builder.primitives,
             },
+            font_substitutions: builder.substitutions.entries,
             hit_regions: builder.hit_regions,
         })
     }
@@ -279,6 +569,7 @@ impl SlideRenderer {
         family: &str,
         bold: bool,
         italic: bool,
+        substitutions: &mut SubstitutionLog,
     ) -> Result<FontFace, RenderError> {
         let requested = normalize_family(family);
         let styles = [
@@ -287,12 +578,17 @@ impl SlideRenderer {
             (false, italic),
             (false, false),
         ];
-        for (bold, italic) in styles {
-            if let Some(face) = self.faces.get(&(requested.clone(), bold, italic)) {
-                return Ok(face.clone());
+        for (face_bold, face_italic) in styles {
+            if let Some(face) = self.faces.get(&(requested.clone(), face_bold, face_italic)) {
+                return Ok(if (face_bold, face_italic) == (bold, italic) {
+                    face.clone()
+                } else {
+                    self.with_requested_metrics(face, &requested, bold, italic)
+                });
             }
         }
-        self.faces
+        let face = self
+            .faces
             .iter()
             .filter(|((name, _, _), _)| Some(name) == self.fallback_family.as_ref())
             .min_by_key(|((_, face_bold, face_italic), _)| {
@@ -302,8 +598,28 @@ impl SlideRenderer {
                     *face_italic,
                 )
             })
-            .map(|(_, face)| face.clone())
-            .ok_or(RenderError::NoFont)
+            .map(|(_, face)| self.with_requested_metrics(face, &requested, bold, italic))
+            .ok_or(RenderError::NoFont)?;
+        if normalize_family(&face.family) != requested {
+            substitutions.record(family, &requested, &face.family);
+        }
+        Ok(face)
+    }
+
+    fn with_requested_metrics(
+        &self,
+        face: &FontFace,
+        requested: &str,
+        bold: bool,
+        italic: bool,
+    ) -> FontFace {
+        let metrics = family_metrics(requested, bold, italic);
+        FontFace {
+            requested_family: requested.to_owned(),
+            widths: metrics.filter(|metrics| !runs_at_own_widths(&self.fonts, face.id, metrics)),
+            line: metrics.filter(|metrics| !sits_on_own_baseline(&self.fonts, face.id, metrics)),
+            ..face.clone()
+        }
     }
 }
 
@@ -324,8 +640,47 @@ pub enum HitTestResult {
     },
 }
 
+/// The first of slide, layout and master that declares `p:bg`.
+struct BackgroundSource<'a> {
+    fill: Option<&'a ShapeFill>,
+    picture: Option<&'a PictureFill>,
+    reference: Option<&'a StyleReference>,
+}
+
+impl<'a> BackgroundSource<'a> {
+    fn from_slide(slide: &'a Slide) -> Self {
+        Self {
+            fill: slide.background.as_ref(),
+            picture: slide.background_picture.as_deref(),
+            reference: slide.background_reference.as_ref(),
+        }
+    }
+
+    fn from_layout(layout: &'a SlideLayout) -> Self {
+        Self {
+            fill: layout.background.as_ref(),
+            picture: layout.background_picture.as_deref(),
+            reference: layout.background_reference.as_ref(),
+        }
+    }
+
+    fn from_master(master: &'a SlideMaster) -> Self {
+        Self {
+            fill: master.background.as_ref(),
+            picture: master.background_picture.as_deref(),
+            reference: master.background_reference.as_ref(),
+        }
+    }
+
+    fn is_declared(&self) -> bool {
+        self.fill.is_some() || self.picture.is_some() || self.reference.is_some()
+    }
+}
+
 pub struct RenderedSlide {
     pub display_list: SurfaceDisplayList,
+    /// Families the slide asked for that no registered face matched.
+    pub font_substitutions: Vec<FontSubstitution>,
     hit_regions: Vec<HitRegion>,
 }
 
@@ -375,12 +730,18 @@ struct LayoutBuilder<'a> {
     parsed_slide: Option<&'a Slide>,
     primitives: Vec<Primitive>,
     hit_regions: Vec<HitRegion>,
+    substitutions: SubstitutionLog,
     shape_count: usize,
     line_count: usize,
     chart_budget: usize,
     metafile_budget: usize,
     metafile_bytes: usize,
     metafiles: HashMap<&'a str, Option<Arc<MetafileDrawing>>>,
+    /// Package media keyed by part path, built on first picture lookup so
+    /// per-shape work stays independent of the deck's part count.
+    media_parts: Option<HashMap<&'a str, &'a MediaPart>>,
+    /// Package charts keyed by (part path, theme part path); same rationale.
+    chart_parts: Option<HashMap<(&'a str, Option<&'a str>), &'a ChartPart>>,
     /// The number a `slidenum` field resolves to on this slide.
     slide_number: i64,
 }
@@ -511,18 +872,27 @@ impl<'a> LayoutBuilder<'a> {
                     self.theme,
                     space,
                     rect,
-                    shape.rotation_deg as f32,
-                    shape.flip_h,
-                    shape.flip_v,
+                    resolved.rotation_deg as f32,
+                    resolved.flip_h,
+                    resolved.flip_v,
                 )
             });
         let transform = Transform {
-            rotation_deg: shape.rotation_deg as f32,
-            flip_h: shape.flip_h,
-            flip_v: shape.flip_v,
+            rotation_deg: resolved.rotation_deg as f32,
+            flip_h: resolved.flip_h,
+            flip_v: resolved.flip_v,
         };
         match shape.kind {
             ShapeKind::Shape => {
+                let paths = custom_paths(original);
+                let (path, mut geometry_fallback) = geometry_path_with_fallback(
+                    &shape.geometry,
+                    &shape.adjust_values,
+                    f64::from(rect.w) / f64::from(rect.h),
+                );
+                if shape.geometry == "custom" && !paths.is_empty() {
+                    geometry_fallback = false;
+                }
                 self.push_shape(
                     Primitive::Shape {
                         clip: None,
@@ -535,11 +905,8 @@ impl<'a> LayoutBuilder<'a> {
                         w: rect.w,
                         h: rect.h,
                         geometry: shape.geometry.clone(),
-                        path: geometry_path(
-                            &shape.geometry,
-                            &shape.adjust_values,
-                            f64::from(rect.w) / f64::from(rect.h),
-                        ),
+                        path,
+                        geometry_fallback,
                         adjust_values: shape
                             .adjust_values
                             .iter()
@@ -550,22 +917,25 @@ impl<'a> LayoutBuilder<'a> {
                         shadow,
                         transform,
                     },
-                    custom_paths(original),
+                    paths,
                     picture,
                 )?;
             }
             ShapeKind::Picture => {
                 let source = picture_source(original);
+                let asset_id = picture_asset_id(shape);
                 self.render_picture(
                     shape.source_id,
                     &stable_id,
                     &shape.name,
                     rect,
                     transform,
-                    shape.media_part_path.as_deref(),
+                    asset_id.as_deref(),
                     &shape.blip_effects,
                     source.map(|picture| &picture.crop),
-                    source.and_then(|picture| picture_mask(picture, rect)),
+                    source
+                        .map(|picture| picture_mask(picture, rect))
+                        .unwrap_or_default(),
                     outline,
                     shadow,
                 );
@@ -589,6 +959,8 @@ impl<'a> LayoutBuilder<'a> {
             layout: layout_node.and_then(node_text),
             master: master_node.and_then(node_text),
             master_slide: self.master,
+            default_style: &self.package.presentation.default_text_style,
+            default_paragraph: self.package.presentation.default_text_paragraph.as_deref(),
             placeholder: shape.placeholder.as_ref(),
             style_color: shape_style_color(original),
         };
@@ -604,6 +976,8 @@ impl<'a> LayoutBuilder<'a> {
                 &stable_id,
                 rect,
                 transform,
+                space,
+                geometry_text_inset(original, rect),
                 content,
                 body_cascade,
             )?)
@@ -673,6 +1047,14 @@ impl<'a> LayoutBuilder<'a> {
                             transform.flip_v,
                         )
                     });
+                let (path, mut geometry_fallback) = geometry_path_with_fallback(
+                    &value.geometry,
+                    &value.adjust_values,
+                    f64::from(rect.w) / f64::from(rect.h),
+                );
+                if value.geometry == "custom" && !value.paths.is_empty() {
+                    geometry_fallback = false;
+                }
                 self.push_shape(
                     Primitive::Shape {
                         clip: None,
@@ -685,11 +1067,8 @@ impl<'a> LayoutBuilder<'a> {
                         w: rect.w,
                         h: rect.h,
                         geometry: value.geometry.clone(),
-                        path: geometry_path(
-                            &value.geometry,
-                            &value.adjust_values,
-                            f64::from(rect.w) / f64::from(rect.h),
-                        ),
+                        path,
+                        geometry_fallback,
                         adjust_values: value
                             .adjust_values
                             .iter()
@@ -753,12 +1132,16 @@ impl<'a> LayoutBuilder<'a> {
                 stable_id,
                 rect,
                 transform,
+                space,
+                geometry_text_inset(Some(shape), rect),
                 content,
                 BodyCascade {
                     primary: Some(body),
                     layout: None,
                     master: None,
                     master_slide: self.master,
+                    default_style: &self.package.presentation.default_text_style,
+                    default_paragraph: self.package.presentation.default_text_paragraph.as_deref(),
                     placeholder: base.placeholder.as_ref(),
                     style_color: shape_style_color(Some(shape)),
                 },
@@ -787,7 +1170,7 @@ impl<'a> LayoutBuilder<'a> {
         media_part_path: Option<&str>,
         effects: &[BlipEffect],
         crop: Option<&PictureCrop>,
-        mask: Option<Vec<GeometryPathCommand>>,
+        mask: PictureMask,
         outline: Option<Stroke>,
         shadow: Option<Shadow>,
     ) {
@@ -799,7 +1182,7 @@ impl<'a> LayoutBuilder<'a> {
                 transform,
                 media_part_path,
                 crop,
-                mask.as_deref(),
+                &mask,
             )
         {
             if let Some(outline) = outline {
@@ -815,8 +1198,10 @@ impl<'a> LayoutBuilder<'a> {
                     h: rect.h,
                     geometry: "rect".to_owned(),
                     path: mask
+                        .path
                         .clone()
                         .unwrap_or_else(|| geometry_path("rect", &BTreeMap::new(), 1.0)),
+                    geometry_fallback: mask.geometry_fallback,
                     adjust_values: BTreeMap::new(),
                     fill: None,
                     stroke: Some(outline),
@@ -837,7 +1222,9 @@ impl<'a> LayoutBuilder<'a> {
             asset_id: media_part_path.map(str::to_owned),
             effects: image_effects(effects, self.theme),
             crop: crop.map(image_crop).unwrap_or_default(),
-            path: mask,
+            tile: None,
+            path: mask.path,
+            geometry_fallback: mask.geometry_fallback,
             stroke: outline,
             shadow,
             transform,
@@ -853,7 +1240,7 @@ impl<'a> LayoutBuilder<'a> {
         transform: Transform,
         media_part_path: Option<&str>,
         crop: Option<&PictureCrop>,
-        mask: Option<&[GeometryPathCommand]>,
+        mask: &PictureMask,
     ) -> bool {
         if self.metafile_budget == 0 {
             return false;
@@ -868,13 +1255,30 @@ impl<'a> LayoutBuilder<'a> {
         let Some(crop) = source_rect(crop) else {
             return true;
         };
+        let masked = mask.path.is_some();
         let clip = mask
-            .map(<[_]>::to_vec)
+            .path
+            .clone()
             .unwrap_or_else(|| geometry_path("rect", &BTreeMap::new(), 1.0));
         for mut op in drawing.ops.iter().cloned() {
             place_in_source_rect(&mut op.path, crop);
+            // one clip per primitive, so a picture mask and the metafile's own
+            // clip cannot both be carried: draw under the mask only where the
+            // metafile clip would remove nothing, and drop the op otherwise
+            // rather than paint what either region hides.
+            let op_clip = match (op.clip, masked) {
+                (Some(rect), false) => match metafile_clip_path(rect, crop) {
+                    Some(path) => path,
+                    None => continue,
+                },
+                (Some(rect), true) => match clipped_away(&op.path, rect, crop) {
+                    true => continue,
+                    false => clip.clone(),
+                },
+                (None, _) => clip.clone(),
+            };
             self.primitives.push(Primitive::Shape {
-                clip: Some(clip.clone()),
+                clip: Some(op_clip),
                 even_odd: op.even_odd,
                 object_id,
                 shape_id: None,
@@ -885,9 +1289,11 @@ impl<'a> LayoutBuilder<'a> {
                 h: rect.h,
                 geometry: "custom".to_owned(),
                 path: op.path,
+                geometry_fallback: mask.geometry_fallback,
                 adjust_values: BTreeMap::new(),
                 fill: op.fill.map(|color| Paint::Solid { color }),
                 stroke: op.stroke.map(|stroke| Stroke {
+                    join: None,
                     color: stroke.color,
                     paint: None,
                     width: ((stroke.width * crop.2 * f64::from(rect.w)) as f32).max(1.0),
@@ -902,25 +1308,33 @@ impl<'a> LayoutBuilder<'a> {
         true
     }
 
+    fn media_part(&mut self, part_path: &str) -> Option<&'a MediaPart> {
+        self.media_parts
+            .get_or_insert_with(|| {
+                let mut index = HashMap::new();
+                for part in &self.package.media {
+                    index.entry(part.part_path.as_str()).or_insert(part);
+                }
+                index
+            })
+            .get(part_path)
+            .copied()
+    }
+
     fn metafile(&mut self, media_part_path: Option<&str>) -> Option<Arc<MetafileDrawing>> {
         let part_path = media_part_path?;
-        let part = self
-            .package
-            .media
-            .iter()
-            .find(|part| part.part_path == part_path)?;
-        if !is_metafile(&part.bytes) {
-            return None;
-        }
         if let Some(drawing) = self.metafiles.get(part_path) {
             return drawing.clone();
         }
-        if part.bytes.len() > self.metafile_bytes {
+        let part = self.media_part(part_path)?;
+        if !is_metafile(&part.bytes) || part.bytes.len() > self.metafile_bytes {
+            self.metafiles.insert(part.part_path.as_str(), None);
             return None;
         }
         self.metafile_bytes -= part.bytes.len();
         let drawing = decode_metafile(&part.bytes).map(Arc::new);
-        self.metafiles.insert(&part.part_path, drawing.clone());
+        self.metafiles
+            .insert(part.part_path.as_str(), drawing.clone());
         drawing
     }
 
@@ -933,7 +1347,21 @@ impl<'a> LayoutBuilder<'a> {
         if paths.is_empty()
             || !matches!(&primitive, Primitive::Shape { geometry, .. } if geometry == "custom")
         {
-            self.primitives.push(picture_filled(primitive, picture));
+            for (index, (primitive, has_fill)) in crate::geometry::preset_primitives(primitive)
+                .into_iter()
+                .enumerate()
+            {
+                if index > 0 {
+                    self.charge_shape()?;
+                }
+                let picture = picture.filter(|_| has_fill);
+                let dpi = picture
+                    .and_then(|fill| fill.media_part_path.as_deref())
+                    .and_then(|path| self.media_part(path))
+                    .and_then(|part| image_dpi(&part.bytes));
+                self.primitives
+                    .push(picture_filled(primitive, picture, dpi));
+            }
             return Ok(());
         }
         for (index, custom) in paths.iter().enumerate() {
@@ -961,7 +1389,12 @@ impl<'a> LayoutBuilder<'a> {
                 }
             }
             let picture = picture.filter(|_| !custom.no_fill);
-            self.primitives.push(picture_filled(primitive, picture));
+            let dpi = picture
+                .and_then(|fill| fill.media_part_path.as_deref())
+                .and_then(|path| self.media_part(path))
+                .and_then(|part| image_dpi(&part.bytes));
+            self.primitives
+                .push(picture_filled(primitive, picture, dpi));
         }
         Ok(())
     }
@@ -995,12 +1428,14 @@ impl<'a> LayoutBuilder<'a> {
             };
             let (renderer, theme) = (self.renderer, self.theme);
             let default_font = resolve_theme_font_ref(Some(theme), "+mn-lt");
+            self.substitutions.enter_shape(shape_id);
+            let substitutions = &mut self.substitutions;
             let chart = chart_primitive(
                 frame,
                 space,
                 &default_font,
                 self.chart_budget,
-                &mut |text| chart_text_primitive(renderer, theme, shape_id, text),
+                &mut |text| chart_text_primitive(renderer, theme, shape_id, text, substitutions),
             )?;
             if let Primitive::Chart { primitives, .. } = &chart {
                 self.chart_budget -= primitives.len();
@@ -1043,7 +1478,39 @@ impl<'a> LayoutBuilder<'a> {
             return Ok(());
         }
         if let Some(GraphicFrameData::Table(table)) = graphic {
-            return self.render_table(object_id, shape_id, name, rect, transform, table, stories);
+            return self.render_table(
+                object_id,
+                shape_id,
+                name,
+                rect,
+                transform,
+                frame_space,
+                table,
+                stories,
+            );
+        }
+        if let Some(GraphicFrameData::Diagram {
+            drawing_part_path: Some(part_path),
+            ..
+        }) = graphic
+            && let Some(drawing) = self
+                .package
+                .diagram_drawings
+                .iter()
+                .find(|drawing| drawing.part_path == *part_path)
+        {
+            // The drawing's shapes are written in the frame's own coordinates,
+            // at the slide's scale, so they only need the frame's origin.
+            let space = Space {
+                origin_x: rect.x,
+                origin_y: rect.y,
+                scale_x: frame_space.scale_x,
+                scale_y: frame_space.scale_y,
+            };
+            for (index, shape) in drawing.shapes.iter().enumerate() {
+                self.render_parsed_shape(shape, &format!("{shape_id}:{index}"), space)?;
+            }
+            return Ok(());
         }
         self.primitives.push(Primitive::Placeholder {
             object_id,
@@ -1069,6 +1536,7 @@ impl<'a> LayoutBuilder<'a> {
         name: &str,
         rect: PxRect,
         transform: Transform,
+        space: Space,
         table: &Table,
         stories: &[StorySnapshot],
     ) -> Result<(), RenderError> {
@@ -1092,6 +1560,13 @@ impl<'a> LayoutBuilder<'a> {
             last_column: table.properties.last_col,
             band_row: table.properties.band_row,
         };
+        let package = self.package;
+        let table_style = table.properties.style_id.as_deref().and_then(|id| {
+            package
+                .table_styles
+                .style(Some(id))
+                .or_else(|| builtin_table_style(id))
+        });
         let mut heights: Vec<f32> = table.rows.iter().map(|row| emu_to_px(row.height)).collect();
         let mut spans = Vec::new();
         let mut plans = Vec::new();
@@ -1118,27 +1593,24 @@ impl<'a> LayoutBuilder<'a> {
                         self.slide_number,
                     ),
                 };
-                let style_id = table.properties.style_id.as_deref();
                 let position = TableCellPosition {
                     row: row_index,
                     column,
                     row_count,
                     column_count,
                 };
-                let mut style = self
-                    .package
-                    .table_styles
-                    .resolve_cell(style_id, flags, position);
+                let resolve = |position| {
+                    table_style
+                        .map(|style: &TableStyle| style.resolve_cell(flags, position))
+                        .unwrap_or_default()
+                };
+                let mut style = resolve(position);
                 if span > 1 || row_span > 1 {
-                    let far = self.package.table_styles.resolve_cell(
-                        style_id,
-                        flags,
-                        TableCellPosition {
-                            row: row_index + row_span - 1,
-                            column: column + span - 1,
-                            ..position
-                        },
-                    );
+                    let far = resolve(TableCellPosition {
+                        row: row_index + row_span - 1,
+                        column: column + span - 1,
+                        ..position
+                    });
                     style.right = far.right;
                     style.bottom = far.bottom;
                 }
@@ -1214,6 +1686,8 @@ impl<'a> LayoutBuilder<'a> {
                 shape_id,
                 plan.rect(&columns, &rows),
                 Transform::default(),
+                space,
+                (0.0, 0.0),
                 plan.content.clone(),
                 cell_cascade(plan.text, &plan.inherited),
             )?;
@@ -1252,7 +1726,13 @@ impl<'a> LayoutBuilder<'a> {
         if TextFlow::from_body_vert(cascade.vertical()) != TextFlow::Horizontal {
             return Ok(0.0);
         }
-        let resolved = resolve_content(self.renderer, self.theme, content, cascade)?;
+        let resolved = resolve_content(
+            self.renderer,
+            self.theme,
+            content,
+            cascade,
+            &mut SubstitutionLog::default(),
+        )?;
         let left = cascade.inset_left().unwrap_or(DEFAULT_INSET_HORIZONTAL_EMU);
         let right = cascade
             .inset_right()
@@ -1265,11 +1745,11 @@ impl<'a> LayoutBuilder<'a> {
             w: (width - emu_to_px(left + right)).max(1.0),
             h: 0.0,
         };
-        let text = layout_content(&self.renderer.fonts, &resolved, rect, 1.0, false)?;
+        let text = self.layout_text(&resolved, rect, 1.0, false, true)?;
         Ok(text.total_height + emu_to_px(top + bottom))
     }
 
-    fn chart_space(&self, graphic: Option<&GraphicFrameData>) -> Option<&'a ChartSpace> {
+    fn chart_space(&mut self, graphic: Option<&GraphicFrameData>) -> Option<&'a ChartSpace> {
         let GraphicFrameData::Chart {
             part_path: Some(part_path),
             ..
@@ -1277,26 +1757,41 @@ impl<'a> LayoutBuilder<'a> {
         else {
             return None;
         };
-        self.package
-            .charts
-            .iter()
-            .find(|part| {
-                &part.part_path == part_path
-                    && part.theme_part_path.as_deref() == self.theme_part_path
+        let theme_part_path = self.theme_part_path;
+        self.chart_parts
+            .get_or_insert_with(|| {
+                let mut index = HashMap::new();
+                for part in &self.package.charts {
+                    index
+                        .entry((part.part_path.as_str(), part.theme_part_path.as_deref()))
+                        .or_insert(part);
+                }
+                index
             })
+            .get(&(part_path.as_str(), theme_part_path))
             .map(|part| &part.chart)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_text_box(
         &mut self,
         object_id: u32,
         shape_id: &str,
         rect: PxRect,
         transform: Transform,
+        space: Space,
+        preset_inset: (f32, f32),
         content: TextContent,
         cascade: BodyCascade<'_>,
     ) -> Result<TextHit, RenderError> {
-        let resolved = resolve_content(self.renderer, self.theme, &content, cascade)?;
+        self.substitutions.enter_shape(shape_id);
+        let resolved = resolve_content(
+            self.renderer,
+            self.theme,
+            &content,
+            cascade,
+            &mut self.substitutions,
+        )?;
         let flow = TextFlow::from_body_vert(cascade.vertical());
         let text_transform = text_transform(transform, flow);
         let text_rect = flow.layout_rect(rect);
@@ -1307,42 +1802,17 @@ impl<'a> LayoutBuilder<'a> {
         let top = cascade.inset_top().unwrap_or(DEFAULT_INSET_VERTICAL_EMU);
         let bottom = cascade.inset_bottom().unwrap_or(DEFAULT_INSET_VERTICAL_EMU);
         let [left, top, right, bottom] = flow.layout_insets([left, top, right, bottom]);
+        let (preset_x, preset_y) = preset_inset;
         let content_rect = PxRect {
-            x: text_rect.x + emu_to_px(left),
-            y: text_rect.y + emu_to_px(top),
-            w: (text_rect.w - emu_to_px(left + right)).max(1.0),
-            h: (text_rect.h - emu_to_px(top + bottom)).max(1.0),
+            x: text_rect.x + emu_to_px(left) + preset_x,
+            y: text_rect.y + emu_to_px(top) + preset_y,
+            w: (text_rect.w - emu_to_px(left + right) - preset_x * 2.0).max(1.0),
+            h: (text_rect.h - emu_to_px(top + bottom) - preset_y * 2.0).max(1.0),
         };
-        let autofit = cascade.autofit();
-        let mut scale = match autofit {
-            Some(TextAutofit::Normal { font_scale, .. }) => {
-                font_scale.unwrap_or(1.0).clamp(0.1, 1.0) as f32
-            }
-            _ => 1.0,
-        };
+        let scale = autofit_font_scale(cascade.autofit());
         let stacked = flow == TextFlow::Stacked;
-        let mut laid_out = layout_content(
-            &self.renderer.fonts,
-            &resolved,
-            content_rect,
-            scale,
-            stacked,
-        )?;
-        if !stacked && matches!(autofit, Some(TextAutofit::Normal { .. })) {
-            while laid_out.total_height > content_rect.h && scale > MIN_AUTOFIT_SCALE {
-                scale = (scale * 0.9).max(MIN_AUTOFIT_SCALE);
-                laid_out = layout_content(
-                    &self.renderer.fonts,
-                    &resolved,
-                    content_rect,
-                    scale,
-                    stacked,
-                )?;
-                if scale == MIN_AUTOFIT_SCALE {
-                    break;
-                }
-            }
-        }
+        let mut laid_out =
+            self.layout_text(&resolved, content_rect, scale, stacked, cascade.wraps())?;
         self.line_count += laid_out.lines.len();
         if self.line_count > MAX_TEXT_LINES {
             return Err(RenderError::ResourceLimit(format!(
@@ -1383,7 +1853,7 @@ impl<'a> LayoutBuilder<'a> {
                     .map(|run| TextRun {
                         text: run.text.clone(),
                         font_family: run.style.family.clone(),
-                        font_size_pt: run.style.font_size_pt * scale,
+                        font_size_pt: autofit_size_pt(run.style.font_size_pt, scale),
                         bold: run.style.bold,
                         italic: run.style.italic,
                         underline: run.style.underline,
@@ -1393,9 +1863,21 @@ impl<'a> LayoutBuilder<'a> {
             })
             .collect();
         let overflow = laid_out.total_height > content_rect.h && !cascade.clips_overflow();
+        let text_shadow = cascade.text_shadow().and_then(|effects| {
+            shadow(
+                effects,
+                self.theme,
+                space,
+                text_rect,
+                text_transform.rotation_deg,
+                text_transform.flip_h,
+                text_transform.flip_v,
+            )
+        });
         let story_id = content.story_id;
         let lines = laid_out.lines;
         self.primitives.push(Primitive::TextBox {
+            text_shadow,
             object_id,
             shape_id: Some(shape_id.to_owned()),
             story_id: Some(story_id.clone()),
@@ -1416,6 +1898,32 @@ impl<'a> LayoutBuilder<'a> {
             transform: text_transform,
             lines,
         })
+    }
+
+    /// `layout_content` behind the renderer cache.
+    fn layout_text(
+        &self,
+        content: &ResolvedContent,
+        rect: PxRect,
+        scale: f32,
+        stacked: bool,
+        wraps: bool,
+    ) -> Result<LayoutText, RenderError> {
+        let key = text_layout_key(content, rect, scale, stacked, wraps);
+        if let Some(text) = self
+            .renderer
+            .text_layouts
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(&key))
+        {
+            return Ok(text);
+        }
+        let laid_out = layout_content(&self.renderer.fonts, content, rect, scale, stacked, wraps)?;
+        if let Ok(mut cache) = self.renderer.text_layouts.lock() {
+            cache.insert(key, &laid_out);
+        }
+        Ok(laid_out)
     }
 }
 
@@ -1510,6 +2018,8 @@ fn cell_cascade<'a>(text: &'a TextBody, inherited: &'a TextBody) -> BodyCascade<
         layout: None,
         master: Some(inherited),
         master_slide: None,
+        default_style: &[],
+        default_paragraph: None,
         placeholder: None,
         style_color: None,
     }
@@ -1532,6 +2042,7 @@ fn cell_fill(object_id: u32, rect: PxRect, fill: Paint) -> Primitive {
             &BTreeMap::new(),
             f64::from(rect.w) / f64::from(rect.h),
         ),
+        geometry_fallback: false,
         adjust_values: BTreeMap::new(),
         fill: Some(fill),
         stroke: None,
@@ -1556,6 +2067,7 @@ fn cell_border(object_id: u32, from: (f32, f32), to: (f32, f32), stroke: Stroke)
             GeometryPathCommand::Move { x: 0.0, y: 0.0 },
             GeometryPathCommand::Line { x: 1.0, y: 1.0 },
         ],
+        geometry_fallback: false,
         adjust_values: BTreeMap::new(),
         fill: None,
         stroke: Some(stroke),
@@ -1651,11 +2163,26 @@ struct BodyCascade<'a> {
     layout: Option<&'a TextBody>,
     master: Option<&'a TextBody>,
     master_slide: Option<&'a SlideMaster>,
+    /// `p:defaultTextStyle`, which outranks the master's `otherStyle` for
+    /// text outside placeholders.
+    default_style: &'a [ParagraphProperties],
+    /// `p:defaultTextStyle/a:defPPr`, under every level of `default_style`.
+    default_paragraph: Option<&'a ParagraphProperties>,
     placeholder: Option<&'a Placeholder>,
     style_color: Option<&'a ColorValue>,
 }
 
 impl BodyCascade<'_> {
+    /// The shadow the body's text is drawn with. PowerPoint keeps one per run;
+    /// the first any level declares stands for the whole box, because a body
+    /// that shadows one run shadows them all.
+    fn text_shadow(&self) -> Option<&ShapeEffects> {
+        [self.primary, self.layout, self.master]
+            .into_iter()
+            .flatten()
+            .find_map(body_text_effects)
+    }
+
     fn clips_overflow(&self) -> bool {
         let vertical = cascade_value(self.primary, self.layout, self.master, |body| {
             body.vertical_overflow
@@ -1683,18 +2210,24 @@ impl BodyCascade<'_> {
             .or_else(|| self.master.and_then(|body| body.vertical.as_deref()))
     }
 
+    fn space_first_last_para(&self) -> bool {
+        cascade_value(self.primary, self.layout, self.master, |body| {
+            body.space_first_last_para
+        })
+        .unwrap_or(false)
+    }
+
+    /// `a:bodyPr/@wrap="none"`: every paragraph is one line, however far it
+    /// runs past the shape.
+    fn wraps(&self) -> bool {
+        cascade_value(self.primary, self.layout, self.master, |body| body.wrap).unwrap_or(true)
+    }
+
     fn autofit(&self) -> Option<&TextAutofit> {
         self.primary
             .and_then(|body| body.autofit.as_ref())
             .or_else(|| self.layout.and_then(|body| body.autofit.as_ref()))
             .or_else(|| self.master.and_then(|body| body.autofit.as_ref()))
-    }
-
-    fn compat_line_spacing(&self) -> bool {
-        cascade_value(self.primary, self.layout, self.master, |body| {
-            body.compat_line_spacing
-        })
-        .unwrap_or(false)
     }
 
     fn inset_left(&self) -> Option<i64> {
@@ -1721,50 +2254,36 @@ impl BodyCascade<'_> {
         })
     }
 
-    fn paragraph_properties(&self, index: usize, level: u32) -> ParagraphProperties {
-        let mut properties = self
-            .master_slide
-            .and_then(|master| master_style(master, self.placeholder, level))
-            .cloned()
-            .unwrap_or_default();
-        if let Some(color) = self.style_color {
-            properties
-                .default_run
-                .get_or_insert_with(RunProperties::default)
-                .color = Some(color.clone());
-        }
-        for body in [self.master, self.layout, self.primary]
+    /// `a:endParaRPr`: what PowerPoint sizes a paragraph by when it carries no
+    /// runs of its own.
+    fn end_run_properties(&self, index: usize) -> Option<&RunProperties> {
+        [self.primary, self.layout, self.master]
             .into_iter()
             .flatten()
-        {
-            if let Some(source) = &body.default_list_style {
-                merge_paragraph_properties(&mut properties, source);
-            }
-            if let Some(source) = body.list_style.get(level as usize) {
-                merge_paragraph_properties(&mut properties, source);
-            }
-            if let Some(source) = body
-                .paragraphs
-                .get(index)
-                .or_else(|| body.paragraphs.get(level as usize))
-                .map(|paragraph| &paragraph.properties)
-            {
-                merge_paragraph_properties(&mut properties, source);
-            }
+            .find_map(|body| {
+                body.paragraphs
+                    .get(index)
+                    .and_then(|paragraph| paragraph.end_properties.as_ref())
+            })
+    }
+
+    fn paragraph_properties(
+        &self,
+        index: usize,
+        level: u32,
+        authored: Option<&Bullet>,
+    ) -> ParagraphProperties {
+        ParagraphCascade {
+            primary: self.primary,
+            layout: self.layout,
+            master: self.master,
+            master_slide: self.master_slide,
+            default_style: self.default_style,
+            default_paragraph: self.default_paragraph,
+            placeholder: self.placeholder,
+            style_color: self.style_color,
         }
-        if let Some(Bullet::AutoNumber { restart, .. }) = &mut properties.bullet {
-            *restart = self
-                .primary
-                .and_then(|body| body.paragraphs.get(index))
-                .is_some_and(|paragraph| {
-                    matches!(
-                        paragraph.properties.bullet,
-                        Some(Bullet::AutoNumber { restart: true, .. })
-                            | Some(Bullet::AutoNumber { start_at: 2.., .. })
-                    )
-                });
-        }
-        properties
+        .properties(index, level, authored)
     }
 }
 
@@ -1864,6 +2383,8 @@ fn content_from_body(
 
 struct ResolvedContent {
     paragraphs: Vec<ResolvedParagraph>,
+    /// `a:bodyPr/@spcFirstLastPara`: the outer paragraphs keep their spacing.
+    space_first_last_para: bool,
 }
 
 struct ResolvedParagraph {
@@ -1875,10 +2396,16 @@ struct ResolvedParagraph {
     line_spacing: Option<LineSpacing>,
     space_before: Option<LineSpacing>,
     space_after: Option<LineSpacing>,
-    compat_line_spacing: bool,
+    line_space_reduction: f32,
     indent_px: f32,
+    /// `a:tabLst` stops in pixels from the text area's left edge, ascending.
+    tab_stops: Vec<f32>,
+    /// Pitch of the implicit stops past the last declared one.
+    default_tab_px: f32,
     marker: Option<String>,
     bullet_style: Option<ResolvedStyle>,
+    /// `a:pPr/@rtl`: margins, indent, bullet and run order mirror.
+    rtl: bool,
     runs: Vec<ResolvedRun>,
 }
 
@@ -1893,6 +2420,9 @@ struct ResolvedStyle {
     face: FontFace,
     family: String,
     font_size_pt: f32,
+    /// Size the line box and percentage line spacing read. Small caps shape
+    /// smaller than the run was authored at without shortening its line.
+    line_font_size_pt: f32,
     /// `spc`: tracking added after every cluster, in points.
     spacing_pt: f32,
     baseline_shift_px: f32,
@@ -1900,6 +2430,7 @@ struct ResolvedStyle {
     italic: bool,
     underline: bool,
     color: String,
+    caps: TextCaps,
 }
 
 fn resolve_content(
@@ -1907,6 +2438,7 @@ fn resolve_content(
     theme: &Theme,
     content: &TextContent,
     cascade: BodyCascade<'_>,
+    substitutions: &mut SubstitutionLog,
 ) -> Result<ResolvedContent, RenderError> {
     let total_bytes = content
         .paragraphs
@@ -1934,42 +2466,55 @@ fn resolve_content(
             "more than {MAX_TEXT_RUNS} text runs"
         )));
     }
-    let compat_line_spacing = cascade.compat_line_spacing();
+    let line_space_reduction = autofit_line_space_reduction(cascade.autofit());
     let mut story_offset = 0_u32;
     let mut paragraphs = Vec::with_capacity(content.paragraphs.len());
-    let mut counters = [0_u32; 9];
+    let mut numbering = ListCounters::default();
     for (index, paragraph) in content.paragraphs.iter().enumerate() {
-        let mut properties = cascade.paragraph_properties(index, paragraph.level);
-        if matches!(paragraph.bullet, Some(Bullet::AutoNumber { .. })) {
-            properties.bullet = paragraph.bullet.clone();
-            if let Some(Bullet::AutoNumber {
-                restart, start_at, ..
-            }) = &mut properties.bullet
-            {
-                *restart |= *start_at != 1;
-            }
-        }
+        let properties =
+            cascade.paragraph_properties(index, paragraph.level, paragraph.bullet.as_ref());
+        let language = properties
+            .default_run
+            .as_ref()
+            .and_then(|value| value.language.as_deref());
         let mut runs = Vec::with_capacity(paragraph.runs.len().max(1));
         for run in &paragraph.runs {
-            let style =
-                resolve_style(renderer, theme, &run.style, properties.default_run.as_ref())?;
+            let style = resolve_style(
+                renderer,
+                theme,
+                &run.style,
+                properties.default_run.as_ref(),
+                substitutions,
+            )?;
             let start = story_offset;
             story_offset = story_offset.saturating_add(utf16_len(&run.text));
-            runs.push(ResolvedRun {
-                text: run.text.clone(),
-                start,
-                style,
-            });
+            let mut cased = Vec::new();
+            push_cased_runs(&mut cased, &run.text, start, language, style);
+            if properties.rtl == Some(true) {
+                let mut directed = Vec::new();
+                for run in cased {
+                    split_by_direction(run, &mut directed);
+                }
+                cased = directed;
+            }
+            for run in cased {
+                renderer.split_by_coverage(run, &mut runs);
+            }
         }
         if runs.is_empty() {
+            let end_style = cascade
+                .end_run_properties(index)
+                .map(|end| style_from_properties(end, theme))
+                .unwrap_or_default();
             runs.push(ResolvedRun {
                 text: String::new(),
                 start: story_offset,
                 style: resolve_style(
                     renderer,
                     theme,
-                    &TextStyle::default(),
+                    &end_style,
                     properties.default_run.as_ref(),
+                    substitutions,
                 )?,
             });
         }
@@ -1977,7 +2522,16 @@ fn resolve_content(
             .alignment
             .as_deref()
             .or(properties.alignment.as_deref());
-        let marker = resolve_marker(properties.bullet.as_ref(), paragraph.level, &mut counters);
+        let written_marker = numbering
+            .next(
+                properties.bullet.as_ref(),
+                paragraph.level,
+                paragraph.runs.iter().any(|run| !run.text.is_empty()),
+            )
+            .map(|marker| marker.text());
+        let marker = written_marker
+            .as_deref()
+            .map(|marker| symbol_bullet(marker, properties.bullet_font.as_ref(), theme));
         paragraphs.push(ResolvedParagraph {
             align: parse_align(alignment),
             justify: is_full_justification(alignment),
@@ -1987,18 +2541,119 @@ fn resolve_content(
             line_spacing: properties.line_spacing,
             space_before: properties.space_before,
             space_after: properties.space_after,
-            compat_line_spacing,
+            line_space_reduction,
             indent_px: emu_to_px(properties.indent.unwrap_or_default()),
-            bullet_style: marker
-                .is_some()
-                .then(|| resolve_bullet_style(renderer, theme, &properties, &runs[0].style))
+            tab_stops: resolve_tab_stops(
+                properties.tab_stops.as_deref(),
+                properties.margin_left.unwrap_or_default(),
+                properties.indent.unwrap_or_default(),
+            ),
+            default_tab_px: resolve_default_tab(properties.default_tab_size),
+            bullet_style: written_marker
+                .as_deref()
+                .map(|written| {
+                    resolve_bullet_style(
+                        renderer,
+                        theme,
+                        &properties,
+                        &runs[0].style,
+                        written,
+                        substitutions,
+                    )
+                })
                 .transpose()?,
             marker,
+            rtl: properties.rtl.unwrap_or(false),
             runs,
         });
         story_offset = story_offset.saturating_add(1);
     }
-    Ok(ResolvedContent { paragraphs })
+    Ok(ResolvedContent {
+        paragraphs,
+        space_first_last_para: cascade.space_first_last_para(),
+    })
+}
+
+/// Cases one run for drawing. `a:rPr/@cap` is a display property: the stored
+/// run text keeps the author's casing, so only the runs handed to the shaper
+/// change and the save projection is untouched.
+fn push_cased_runs(
+    out: &mut Vec<ResolvedRun>,
+    text: &str,
+    start: u32,
+    language: Option<&str>,
+    style: ResolvedStyle,
+) {
+    if text.is_empty() || style.caps == TextCaps::None {
+        out.push(ResolvedRun {
+            text: text.to_owned(),
+            start,
+            style,
+        });
+        return;
+    }
+    if style.caps == TextCaps::All {
+        out.push(ResolvedRun {
+            text: display_uppercase(text, language),
+            start,
+            style,
+        });
+        return;
+    }
+    let mut small = style.clone();
+    small.font_size_pt = style.font_size_pt * WORD_SMALL_CAPS_ADVANCE_SCALE;
+    let mut offset = start;
+    for (lowercase, segment) in case_segments(text) {
+        let cased = display_uppercase(segment, language);
+        let length = utf16_len(&cased);
+        out.push(ResolvedRun {
+            text: cased,
+            start: offset,
+            style: if lowercase {
+                small.clone()
+            } else {
+                style.clone()
+            },
+        });
+        offset = offset.saturating_add(length);
+    }
+}
+
+/// Uppercases for drawing only, keeping every character's UTF-16 width so the
+/// display list still reports the authored story offsets. A character whose
+/// uppercase form is wider (ß → SS) stays as authored.
+fn display_uppercase(text: &str, language: Option<&str>) -> String {
+    text.chars()
+        .map(|character| {
+            let mut upper = uppercase_for_language(character, language).into_iter();
+            match (upper.next(), upper.next()) {
+                (Some(single), None) if single.len_utf16() == character.len_utf16() => single,
+                _ => character,
+            }
+        })
+        .collect()
+}
+
+/// Splits `text` where its characters stop being lowercase, so small caps can
+/// draw the lowercase stretches at a reduced size.
+fn case_segments(text: &str) -> Vec<(bool, &str)> {
+    let mut segments = Vec::new();
+    let mut start = 0;
+    let mut current = None;
+    for (index, character) in text.char_indices() {
+        let lowercase = character.is_lowercase();
+        if current != Some(lowercase) {
+            if let Some(previous) = current {
+                segments.push((previous, &text[start..index]));
+            }
+            start = index;
+            current = Some(lowercase);
+        }
+    }
+    if let Some(previous) = current {
+        segments.push((previous, &text[start..]));
+    }
+    segments
 }
 
 fn resolve_bullet_style(
@@ -2006,6 +2661,8 @@ fn resolve_bullet_style(
     theme: &Theme,
     properties: &ParagraphProperties,
     text: &ResolvedStyle,
+    written_marker: &str,
+    substitutions: &mut SubstitutionLog,
 ) -> Result<ResolvedStyle, RenderError> {
     let mut style = text.clone();
     if let Some(BulletFont::Typeface(family)) = &properties.bullet_font {
@@ -2014,7 +2671,18 @@ fn resolve_bullet_style(
         } else {
             family.clone()
         };
-        style.face = renderer.resolve_face(&family, style.bold, style.italic)?;
+        let emulated = ooxml_text::SymbolFont::named(&family).is_some_and(|font| {
+            written_marker
+                .chars()
+                .all(|character| font.substitute(character).is_some())
+        });
+        let mut ignored = SubstitutionLog::default();
+        let log = if emulated {
+            &mut ignored
+        } else {
+            substitutions
+        };
+        style.face = renderer.resolve_face(&family, style.bold, style.italic, log)?;
         style.family = style.face.family.clone();
     }
     if let Some(BulletColor::Color(color)) = &properties.bullet_color
@@ -2036,6 +2704,7 @@ fn resolve_style(
     theme: &Theme,
     direct: &TextStyle,
     fallback: Option<&RunProperties>,
+    substitutions: &mut SubstitutionLog,
 ) -> Result<ResolvedStyle, RenderError> {
     let bold = direct
         .bold
@@ -2062,7 +2731,7 @@ fn resolve_style(
             }
         })
         .unwrap_or_else(|| resolve_theme_font_ref(Some(theme), "+mn-lt"));
-    let face = renderer.resolve_face(&family, bold, italic)?;
+    let face = renderer.resolve_face(&family, bold, italic, substitutions)?;
     let color = direct
         .color
         .as_deref()
@@ -2104,6 +2773,7 @@ fn resolve_style(
         family: face.family.clone(),
         face,
         font_size_pt,
+        line_font_size_pt: font_size_pt,
         spacing_pt,
         baseline_shift_px,
         bold,
@@ -2114,11 +2784,82 @@ fn resolve_style(
             .or_else(|| fallback.and_then(|value| value.underline.as_deref()))
             .is_some_and(|value| value != "none"),
         color,
+        caps: direct
+            .caps
+            .or_else(|| fallback.and_then(|value| value.caps))
+            .unwrap_or(TextCaps::None),
     })
 }
 
-/// Optional ligatures are off once glyphs are tracked apart.
-fn tracking_features(tracking: f32) -> &'static [ShapeFeature] {
+/// Characters used to check whether a registered face matches a metric table.
+const ADVANCE_SAMPLE: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,";
+
+/// Preserve the face's kerning when its individual advances already match.
+fn runs_at_own_widths(fonts: &FontStore, id: FontId, metrics: &FamilyMetrics) -> bool {
+    let Ok(own) = fonts.metrics(id) else {
+        return true;
+    };
+    let units = f32::from(own.units_per_em);
+    if units <= 0.0 {
+        return true;
+    }
+    for character in ADVANCE_SAMPLE.chars() {
+        let Some(wanted) = family_advance(metrics, character) else {
+            continue;
+        };
+        let Ok(Some(advance)) = fonts.advance_width(id, character) else {
+            return false;
+        };
+        if (wanted - advance / units).abs() > 0.002 {
+            return false;
+        }
+    }
+    true
+}
+
+/// Whether `id` already stacks its lines the way `metrics` does.
+fn sits_on_own_baseline(fonts: &FontStore, id: FontId, metrics: &FamilyMetrics) -> bool {
+    let Ok(own) = fonts.metrics(id) else {
+        return true;
+    };
+    let units = f32::from(own.units_per_em);
+    if units <= 0.0 {
+        return true;
+    }
+    let same =
+        |theirs: i32, ours: i16| (theirs as f32 / 1000.0 - f32::from(ours) / units).abs() <= 0.002;
+    same(metrics.ascent, own.hhea_ascender)
+        && same(metrics.descent, own.hhea_descender)
+        && same(metrics.line_gap, own.hhea_line_gap)
+}
+
+/// The line box the named family measures at `size_px`, in the shape
+/// [`single_line_box`] gives a registered face.
+fn family_line_box(metrics: &FamilyMetrics, size_px: f32) -> ooxml_text::LineBox {
+    let em = size_px / 1000.0;
+    ooxml_text::LineBox {
+        ascent: (metrics.ascent + metrics.line_gap).max(0) as f32 * em,
+        descent: (-metrics.descent).max(0) as f32 * em,
+        leading: 0.0,
+    }
+}
+
+/// How wide the family a run names draws `text`, when that family is one we
+/// have widths but no face for. `None` for anything the table cannot measure,
+/// which keeps the substitute's own advance.
+fn named_cluster_width(style: &ResolvedStyle, text: &str, size_px: f32) -> Option<f32> {
+    let metrics = style.face.widths?;
+    let mut total = 0.0;
+    for character in text.chars() {
+        total += family_advance(metrics, character)?;
+    }
+    Some(total * size_px)
+}
+
+/// Optional ligatures are off once glyphs are tracked apart or advanced by the
+/// named family's widths: either way every character needs its own cluster, or
+/// the browser draws the substitute's narrower ligature into a wider slot.
+fn ligature_features(separate: bool) -> &'static [ShapeFeature] {
     const OFF: [ShapeFeature; 2] = [
         ShapeFeature {
             tag: *b"liga",
@@ -2129,7 +2870,7 @@ fn tracking_features(tracking: f32) -> &'static [ShapeFeature] {
             value: 0,
         },
     ];
-    if tracking == 0.0 { &[] } else { &OFF }
+    if separate { &OFF } else { &[] }
 }
 
 /// One shaped line of chart text, in the family, weight, slant and pixel size
@@ -2139,6 +2880,7 @@ fn chart_text_primitive(
     theme: &Theme,
     shape_id: &str,
     text: ChartText<'_>,
+    substitutions: &mut SubstitutionLog,
 ) -> Result<Primitive, RenderError> {
     let bold = text.font.weight >= 600;
     let italic = text.font.italic;
@@ -2147,35 +2889,48 @@ fn chart_text_primitive(
     } else {
         text.font.family.clone()
     };
-    let face = renderer.resolve_face(&family, bold, italic)?;
+    let face = renderer.resolve_face(&family, bold, italic, substitutions)?;
     let size_px = safe_geometry(text.font.size_px as f32).clamp(1.0, 4_096.0);
     let tracking = safe_geometry(text.font.letter_spacing_px as f32);
-    let shaped = shape(
-        &renderer.fonts,
-        face.id,
-        text.text,
-        size_px,
-        tracking_features(tracking),
-    )
-    .map_err(|error| RenderError::Font(error.to_string()))?;
     let metrics = renderer
         .fonts
         .metrics(face.id)
         .map_err(|error| RenderError::Font(error.to_string()))?;
     let line_box = single_line_box(metrics, size_px, &CompatFlags::default());
-    let mut offsets = Vec::with_capacity(shaped.len());
+    let pieces = renderer.coverage_pieces(&face, text.text, bold, italic);
+    let mut shaped_pieces = Vec::with_capacity(pieces.len());
     let mut cursor = 0.0_f32;
     let mut cluster_advance = 0.0_f32;
-    let mut cluster = None;
-    for glyph in &shaped {
-        if cluster.is_some_and(|previous| previous != glyph.cluster) {
-            cursor += tracking.max(-cluster_advance);
-            cluster_advance = 0.0;
+    let mut started = false;
+    for (index, (start, piece_face)) in pieces.iter().enumerate() {
+        let end = pieces
+            .get(index + 1)
+            .map_or(text.text.len(), |(next, _)| *next);
+        let piece_face = piece_face.clone().unwrap_or_else(|| face.clone());
+        let shaped = shape(
+            &renderer.fonts,
+            piece_face.id,
+            &text.text[*start..end],
+            size_px,
+            ligature_features(tracking != 0.0),
+        )
+        .map_err(|error| RenderError::Font(error.to_string()))?;
+        let piece_x = cursor;
+        let mut offsets = Vec::with_capacity(shaped.len());
+        let mut cluster = None;
+        for glyph in &shaped {
+            if started && cluster != Some(glyph.cluster) {
+                cursor += tracking.max(-cluster_advance);
+                cluster_advance = 0.0;
+            }
+            offsets.push(cursor);
+            cursor += glyph.x_advance;
+            cluster_advance += glyph.x_advance;
+            cluster = Some(glyph.cluster);
+            started = true;
         }
-        offsets.push(cursor);
-        cursor += glyph.x_advance;
-        cluster_advance += glyph.x_advance;
-        cluster = Some(glyph.cluster);
+        let piece_x = offsets.first().copied().unwrap_or(piece_x);
+        shaped_pieces.push((*start, end, piece_face, shaped, offsets, piece_x, cursor));
     }
     let advance = cursor;
     let box_x = safe_geometry(text.x as f32);
@@ -2189,37 +2944,46 @@ fn chart_text_primitive(
         _ => box_x,
     };
     let baseline = safe_geometry(text.baseline_y as f32);
-    let glyphs = shaped
-        .iter()
-        .zip(&offsets)
-        .map(|(glyph, offset)| PositionedGlyph {
-            glyph_id: glyph.glyph_id,
-            cluster: glyph.cluster,
-            x: x + offset,
-            advance: glyph.x_advance,
-            x_offset: glyph.x_offset,
-            y_offset: baseline + glyph.y_offset,
-        })
+    let runs: Vec<PositionedTextRun> = shaped_pieces
+        .into_iter()
+        .map(
+            |(start, end, piece_face, shaped, offsets, piece_x, piece_end)| {
+                let glyphs = shaped
+                    .iter()
+                    .zip(&offsets)
+                    .map(|(glyph, offset)| PositionedGlyph {
+                        glyph_id: glyph.glyph_id,
+                        cluster: utf16_len(&text.text[..start + glyph.cluster as usize]),
+                        x: x + offset,
+                        advance: glyph.x_advance,
+                        x_offset: glyph.x_offset,
+                        y_offset: baseline + glyph.y_offset,
+                    })
+                    .collect();
+                PositionedTextRun {
+                    text: text.text[start..end].to_owned(),
+                    start: utf16_len(&text.text[..start]),
+                    end: utf16_len(&text.text[..end]),
+                    x: x + piece_x,
+                    width: (piece_end - piece_x).max(0.0),
+                    font_id: piece_face.id.to_u32(),
+                    font_family: piece_face.family.clone(),
+                    font_size_px: size_px,
+                    bold,
+                    italic,
+                    underline: false,
+                    color: text.color.to_owned(),
+                    letter_spacing_px: tracking,
+                    baseline_offset_px: 0.0,
+                    glyphs,
+                }
+            },
+        )
         .collect();
-    let run = PositionedTextRun {
-        text: text.text.to_owned(),
-        start: 0,
-        end: utf16_len(text.text),
-        x,
-        width: advance.max(0.0),
-        font_id: face.id.to_u32(),
-        font_family: face.family.clone(),
-        font_size_px: size_px,
-        bold,
-        italic,
-        underline: false,
-        color: text.color.to_owned(),
-        letter_spacing_px: tracking,
-        baseline_offset_px: 0.0,
-        glyphs,
-    };
-    let width = run.width;
+    let width = advance.max(0.0);
+    let end = utf16_len(text.text);
     Ok(Primitive::TextBox {
+        text_shadow: None,
         object_id: text.object_id,
         shape_id: Some(shape_id.to_owned()),
         story_id: None,
@@ -2248,12 +3012,15 @@ fn chart_text_primitive(
             height: line_box.height(),
             baseline,
             start: 0,
-            end: run.end,
-            runs: vec![run],
+            end,
+            runs,
             caret_stops: Vec::new(),
         }],
         overflow: false,
-        transform: Transform::default(),
+        transform: Transform {
+            rotation_deg: safe_geometry(text.rotation_deg as f32),
+            ..Transform::default()
+        },
     })
 }
 
@@ -2262,12 +3029,260 @@ struct LayoutText {
     total_height: f32,
 }
 
+/// Byte cap on retained text layouts; oldest entry evicts first.
+const MAX_TEXT_LAYOUT_BYTES: usize = 16 * 1024 * 1024;
+
+/// Laid-out text keyed by every `layout_content` input.
+#[derive(Default)]
+struct TextLayoutCache {
+    entries: HashMap<Vec<u8>, CachedTextLayout>,
+    order: VecDeque<Vec<u8>>,
+    bytes: usize,
+}
+
+struct CachedTextLayout {
+    lines: Vec<PositionedTextLine>,
+    total_height: f32,
+    bytes: usize,
+}
+
+impl TextLayoutCache {
+    fn get(&self, key: &[u8]) -> Option<LayoutText> {
+        self.entries.get(key).map(|entry| LayoutText {
+            lines: entry.lines.clone(),
+            total_height: entry.total_height,
+        })
+    }
+
+    fn insert(&mut self, key: Vec<u8>, text: &LayoutText) {
+        let bytes = key.len() * 2 + text_layout_bytes(&text.lines);
+        if bytes > MAX_TEXT_LAYOUT_BYTES || self.entries.contains_key(&key) {
+            return;
+        }
+        self.bytes += bytes;
+        self.order.push_back(key.clone());
+        self.entries.insert(
+            key,
+            CachedTextLayout {
+                lines: text.lines.clone(),
+                total_height: text.total_height,
+                bytes,
+            },
+        );
+        while self.bytes > MAX_TEXT_LAYOUT_BYTES {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(entry) = self.entries.remove(&oldest) {
+                self.bytes -= entry.bytes;
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+        self.bytes = 0;
+    }
+}
+
+fn text_layout_bytes(lines: &[PositionedTextLine]) -> usize {
+    lines
+        .iter()
+        .map(|line| {
+            size_of::<PositionedTextLine>()
+                + line.caret_stops.capacity() * size_of::<CaretStop>()
+                + line
+                    .runs
+                    .iter()
+                    .map(|run| {
+                        size_of::<PositionedTextRun>()
+                            + run.text.capacity()
+                            + run.font_family.capacity()
+                            + run.color.capacity()
+                            + run.glyphs.capacity() * size_of::<PositionedGlyph>()
+                    })
+                    .sum::<usize>()
+        })
+        .sum()
+}
+
+/// Encodes every argument `layout_content` reads.
+fn text_layout_key(
+    content: &ResolvedContent,
+    rect: PxRect,
+    scale: f32,
+    stacked: bool,
+    wraps: bool,
+) -> Vec<u8> {
+    let ResolvedContent {
+        paragraphs,
+        space_first_last_para,
+    } = content;
+    let text_len: usize = paragraphs
+        .iter()
+        .flat_map(|paragraph| &paragraph.runs)
+        .map(|run| run.text.len())
+        .sum();
+    let mut key = Vec::with_capacity(64 + text_len);
+    key_f32(&mut key, rect.x);
+    key_f32(&mut key, rect.y);
+    key_f32(&mut key, rect.w);
+    key_f32(&mut key, scale);
+    key.push(u8::from(stacked));
+    key.push(u8::from(wraps));
+    key.push(u8::from(*space_first_last_para));
+    key_u32(&mut key, paragraphs.len() as u32);
+    for paragraph in paragraphs {
+        let ResolvedParagraph {
+            align,
+            justify,
+            level,
+            margin_left_px,
+            margin_right_px,
+            line_spacing,
+            space_before,
+            space_after,
+            line_space_reduction,
+            indent_px,
+            tab_stops,
+            default_tab_px,
+            marker,
+            bullet_style,
+            rtl,
+            runs,
+        } = paragraph;
+        key.push(match align {
+            TextAlign::Left => 0,
+            TextAlign::Center => 1,
+            TextAlign::Right => 2,
+            TextAlign::Justify => 3,
+        });
+        key.push(u8::from(*justify));
+        key_u32(&mut key, *level);
+        key_f32(&mut key, *margin_left_px);
+        key_f32(&mut key, *margin_right_px);
+        key_f32(&mut key, *indent_px);
+        key_f32(&mut key, *line_space_reduction);
+        key_spacing(&mut key, line_spacing);
+        key_spacing(&mut key, space_before);
+        key_spacing(&mut key, space_after);
+        key_u32(&mut key, tab_stops.len() as u32);
+        for stop in tab_stops {
+            key_f32(&mut key, *stop);
+        }
+        key_f32(&mut key, *default_tab_px);
+        key.push(u8::from(*rtl));
+        key_opt_str(&mut key, marker);
+        match bullet_style {
+            Some(style) => {
+                key.push(1);
+                key_style(&mut key, style);
+            }
+            None => key.push(0),
+        }
+        key_u32(&mut key, runs.len() as u32);
+        for ResolvedRun { text, start, style } in runs {
+            key_u32(&mut key, *start);
+            key_str(&mut key, text);
+            key_style(&mut key, style);
+        }
+    }
+    key
+}
+
+fn key_u32(key: &mut Vec<u8>, value: u32) {
+    key.extend_from_slice(&value.to_le_bytes());
+}
+
+fn key_f32(key: &mut Vec<u8>, value: f32) {
+    key_u32(key, value.to_bits());
+}
+
+fn key_f64(key: &mut Vec<u8>, value: f64) {
+    key.extend_from_slice(&value.to_bits().to_le_bytes());
+}
+
+fn key_str(key: &mut Vec<u8>, value: &str) {
+    key_u32(key, value.len() as u32);
+    key.extend_from_slice(value.as_bytes());
+}
+
+fn key_opt_str(key: &mut Vec<u8>, value: &Option<String>) {
+    match value {
+        Some(value) => {
+            key.push(1);
+            key_str(key, value);
+        }
+        None => key.push(0),
+    }
+}
+
+fn key_spacing(key: &mut Vec<u8>, spacing: &Option<LineSpacing>) {
+    match spacing {
+        Some(LineSpacing::Percent { value }) => {
+            key.push(1);
+            key_f64(key, *value);
+        }
+        Some(LineSpacing::Points { value }) => {
+            key.push(2);
+            key_f64(key, *value);
+        }
+        None => key.push(0),
+    }
+}
+
+fn key_style(key: &mut Vec<u8>, style: &ResolvedStyle) {
+    let ResolvedStyle {
+        face:
+            FontFace {
+                id,
+                family: face_family,
+                requested_family,
+                widths,
+                line,
+                line_id,
+            },
+        family,
+        font_size_pt,
+        line_font_size_pt,
+        spacing_pt,
+        baseline_shift_px,
+        bold,
+        italic,
+        underline,
+        color,
+        caps,
+    } = style;
+    key_u32(key, id.to_u32());
+    key_u32(key, line_id.to_u32());
+    key_str(key, face_family);
+    key_str(key, requested_family);
+    key.push(u8::from(widths.is_some()));
+    key.push(u8::from(line.is_some()));
+    key_str(key, family);
+    key_f32(key, *font_size_pt);
+    key_f32(key, *line_font_size_pt);
+    key_f32(key, *spacing_pt);
+    key_f32(key, *baseline_shift_px);
+    key.push(u8::from(*bold));
+    key.push(u8::from(*italic));
+    key.push(u8::from(*underline));
+    key_str(key, color);
+    key.push(match caps {
+        TextCaps::None => 0,
+        TextCaps::Small => 1,
+        TextCaps::All => 2,
+    });
+}
+
 fn layout_content(
     fonts: &FontStore,
     content: &ResolvedContent,
     rect: PxRect,
     scale: f32,
     stacked: bool,
+    wraps: bool,
 ) -> Result<LayoutText, RenderError> {
     let mut lines = Vec::new();
     let mut y = rect.y;
@@ -2276,9 +3291,16 @@ fn layout_content(
         if let Some(previous) = previous {
             y += spacing_px(previous.space_after, previous, scale)
                 + spacing_px(paragraph.space_before, paragraph, scale);
+        } else if content.space_first_last_para {
+            y += spacing_px(paragraph.space_before, paragraph, scale);
         }
         previous = Some(paragraph);
-        let paragraph_x = rect.x + paragraph.margin_left_px.max(0.0);
+        let start_margin = if paragraph.rtl {
+            paragraph.margin_right_px
+        } else {
+            paragraph.margin_left_px
+        };
+        let paragraph_x = rect.x + start_margin.max(0.0);
         let paragraph_width =
             (rect.w - paragraph.margin_left_px.max(0.0) - paragraph.margin_right_px.max(0.0))
                 .max(1.0);
@@ -2290,11 +3312,17 @@ fn layout_content(
             paragraph_width,
             scale,
             stacked,
+            wraps,
         )?;
         if let Some(last) = paragraph_lines.last() {
             y = last.y + last.height;
         }
         lines.append(&mut paragraph_lines);
+    }
+    if content.space_first_last_para
+        && let Some(last) = previous
+    {
+        y += spacing_px(last.space_after, last, scale);
     }
     Ok(LayoutText {
         total_height: (y - rect.y).max(0.0),
@@ -2302,7 +3330,7 @@ fn layout_content(
     })
 }
 
-/// Height of a `spcBef` or `spcAft`, whose percentages measure the text size.
+/// Height of a `spcBef` or `spcAft`, whose percentages measure a single line.
 fn spacing_px(spacing: Option<LineSpacing>, paragraph: &ResolvedParagraph, scale: f32) -> f32 {
     let height = match spacing {
         Some(LineSpacing::Percent { value }) => {
@@ -2311,9 +3339,11 @@ fn spacing_px(spacing: Option<LineSpacing>, paragraph: &ResolvedParagraph, scale
                 .iter()
                 .map(|run| run.style.font_size_pt)
                 .fold(0.0_f32, f32::max);
-            value as f32 * points_to_px(size_pt * scale)
+            value as f32 * SINGLE_LINE_PITCH_EM * points_to_px(autofit_size_pt(size_pt, scale))
         }
-        Some(LineSpacing::Points { value }) => points_to_px(value as f32 * scale),
+        // An autofit font scale shrinks the text, never a spacing written in
+        // points: PowerPoint keeps `a:spcBef`/`a:spcAft` at their stated size.
+        Some(LineSpacing::Points { value }) => points_to_px(value as f32),
         None => 0.0,
     };
     if height.is_finite() {
@@ -2323,6 +3353,87 @@ fn spacing_px(spacing: Option<LineSpacing>, paragraph: &ResolvedParagraph, scale
     }
 }
 
+/// `a:pPr/@defTabSz` when the cascade declares none: one inch.
+const DEFAULT_TAB_EMU: i64 = 914_400;
+
+/// Pitch of the implicit tab stops, in pixels.
+fn resolve_default_tab(size: Option<i64>) -> f32 {
+    let pitch = emu_to_px(size.unwrap_or(DEFAULT_TAB_EMU));
+    if pitch.is_finite() && pitch >= 1.0 {
+        pitch
+    } else {
+        emu_to_px(DEFAULT_TAB_EMU)
+    }
+}
+
+/// Declared `a:tabLst` stops, plus the implicit stop a hanging indent
+/// puts at the paragraph's left margin — the one a leading tab lands on.
+fn resolve_tab_stops(stops: Option<&[i64]>, margin_left: i64, indent: i64) -> Vec<f32> {
+    let mut resolved = stops
+        .unwrap_or_default()
+        .iter()
+        .map(|position| emu_to_px(*position))
+        .filter(|position| position.is_finite() && *position > 0.0)
+        .collect::<Vec<_>>();
+    if indent < 0 {
+        let hanging = emu_to_px(margin_left);
+        if hanging.is_finite() && hanging > 0.0 {
+            resolved.push(hanging);
+        }
+    }
+    resolved.sort_by(f32::total_cmp);
+    resolved.dedup();
+    resolved
+}
+
+/// `a:pPr/@indent` as the first line's own offset from the paragraph's left
+/// margin. A marker takes the indent instead — it is drawn there and the text
+/// still starts at the margin — so only an unmarked paragraph moves, and never
+/// past the left edge of the text box.
+fn first_line_indent(paragraph: &ResolvedParagraph) -> f32 {
+    if paragraph.marker.is_some() || !paragraph.indent_px.is_finite() {
+        return 0.0;
+    }
+    paragraph.indent_px.max(-paragraph.margin_left_px.max(0.0))
+}
+
+/// The width a `wrap="none"` body lays its lines against: wide enough that no
+/// paragraph in a slide-sized shape reaches it, so each one stays on one line.
+const NO_WRAP_WIDTH_PX: f32 = 1.0e6;
+
+/// A stop the pen already sits on does not hold the tab.
+const TAB_EPSILON_PX: f32 = 0.01;
+
+/// Width one tab takes. The stop is chosen from `offset` — where PowerPoint's
+/// pen would be — and the width is measured from `pen`, where ours is; the two
+/// differ only for the tab that stands in a hanging indent. The first declared
+/// stop past `offset` wins, otherwise the next multiple of the default pitch,
+/// and a tab never moves backwards or reaches past the line.
+fn tab_advance(offset: f32, pen: f32, stops: &[f32], default_px: f32, limit: f32) -> f32 {
+    let limit = if limit.is_finite() {
+        limit.max(0.0)
+    } else {
+        0.0
+    };
+    if !offset.is_finite() || !pen.is_finite() {
+        return 0.0;
+    }
+    let next = stops
+        .iter()
+        .copied()
+        .find(|stop| *stop > offset + TAB_EPSILON_PX)
+        .unwrap_or_else(|| {
+            let steps = (offset / default_px).floor() + 1.0;
+            if steps.is_finite() {
+                steps * default_px
+            } else {
+                offset + default_px
+            }
+        });
+    (next - pen).clamp(0.0, limit)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn layout_paragraph(
     fonts: &FontStore,
     paragraph: &ResolvedParagraph,
@@ -2331,15 +3442,15 @@ fn layout_paragraph(
     width: f32,
     scale: f32,
     stacked: bool,
+    wraps: bool,
 ) -> Result<Vec<PositionedTextLine>, RenderError> {
-    let clusters = shape_paragraph(fonts, paragraph, scale)?;
+    let mut clusters = shape_paragraph(fonts, paragraph, scale)?;
     if clusters.is_empty() {
         let style = &paragraph.runs[0].style;
         let line_box = spaced_line_box(
             style_line_box(fonts, style, scale)?,
             paragraph,
-            points_to_px(style.font_size_pt * scale),
-            scale,
+            points_to_px(autofit_size_pt(style.font_size_pt, scale)),
         );
         return Ok(vec![PositionedTextLine {
             x,
@@ -2363,14 +3474,21 @@ fn layout_paragraph(
             .map(|index| (index, index + 1))
             .collect()
     } else {
-        wrap_clusters(&clusters, width)
+        wrap_clusters(
+            &mut clusters,
+            if wraps { width } else { NO_WRAP_WIDTH_PX },
+            paragraph.margin_left_px.max(0.0),
+            first_line_indent(paragraph),
+            &paragraph.tab_stops,
+            paragraph.default_tab_px,
+        )
     };
     let line_count = ranges.len();
     let mut output = Vec::with_capacity(line_count);
     let mut line_y = y;
     for (line_index, (start, end)) in ranges.into_iter().enumerate() {
         let slice = &clusters[start..end];
-        let natural_width = line_advance(slice);
+        let natural_width = line_advance(aligned_slice(slice));
         let stretchable = paragraph.justify
             && line_index + 1 < line_count
             && !slice.last().is_some_and(|cluster| cluster.mandatory);
@@ -2402,16 +3520,22 @@ fn layout_paragraph(
             })
             .collect::<Vec<_>>();
         let line_width = advances.iter().sum::<f32>() - trailing_tracking(&slice[..visible]);
-        let line_x = match paragraph.align {
-            TextAlign::Center => x + ((width - natural_width) / 2.0).max(0.0),
-            TextAlign::Right => x + (width - natural_width).max(0.0),
-            TextAlign::Left | TextAlign::Justify => x,
+        let indent = if line_index == 0 {
+            first_line_indent(paragraph)
+        } else {
+            0.0
         };
-        let line_box = spaced_line_box(
-            clusters_line_box(fonts, slice, scale)?,
-            paragraph,
-            line_font_size_px(slice, scale),
-            scale,
+        let line_start = if paragraph.rtl { x } else { x + indent };
+        let line_room = width - indent;
+        let line_x = match paragraph.align {
+            TextAlign::Center => line_start + ((line_room - natural_width) / 2.0).max(0.0),
+            TextAlign::Right => line_start + (line_room - natural_width).max(0.0),
+            TextAlign::Left | TextAlign::Justify => line_start,
+        };
+        let (natural, extents) = clusters_line_box(fonts, slice, scale)?;
+        let line_box = shifted_line_box(
+            spaced_line_box(natural, paragraph, line_font_size_px(slice, scale)),
+            extents,
         );
         let mut caret_stops = vec![CaretStop {
             position: slice[0].start,
@@ -2428,7 +3552,10 @@ fn layout_paragraph(
         caret_stops.dedup_by(|left, right| {
             left.position == right.position && left.x.to_bits() == right.x.to_bits()
         });
-        let runs = positioned_runs(slice, &advances, line_x, line_y + line_box.ascent, scale);
+        let mut runs = positioned_runs(slice, &advances, line_x, line_y + line_box.ascent, scale);
+        if paragraph.rtl {
+            mirror_line(&mut runs, &mut caret_stops, line_x, line_width);
+        }
         output.push(PositionedTextLine {
             x: line_x,
             y: line_y,
@@ -2445,15 +3572,130 @@ fn layout_paragraph(
         });
         line_y += line_box.height();
     }
-    prepend_bullet(fonts, paragraph, x, &mut output, scale)?;
+    prepend_bullet(fonts, paragraph, (x, width), &mut output, scale)?;
     Ok(output)
+}
+
+/// Lays a right-to-left line out from its right edge, in bidi visual order:
+/// the runs reverse, except that a stretch of consecutive left-to-right runs
+/// keeps its own order. A run of spaces or punctuation reads the way its
+/// strong neighbours agree on, else right to left. A right-to-left run mirrors
+/// glyph by glyph so it paints in reading order; a left-to-right run keeps its
+/// glyphs and moves as a block. Each caret stop sits at the leading edge of
+/// the character after it, or at the trailing edge of the line's last run.
+fn mirror_line(
+    runs: &mut [PositionedTextRun],
+    caret_stops: &mut [CaretStop],
+    line_x: f32,
+    line_width: f32,
+) {
+    let mirror = 2.0 * line_x + line_width;
+    let strong: Vec<Option<bool>> = runs.iter().map(|run| direction(&run.text)).collect();
+    let ltr: Vec<bool> = (0..runs.len())
+        .map(|position| match strong[position] {
+            Some(rtl) => !rtl,
+            None => {
+                let before = strong[..position].iter().rev().find_map(|value| *value);
+                let after = strong[position + 1..].iter().find_map(|value| *value);
+                before == Some(false) && after == Some(false)
+            }
+        })
+        .collect();
+    let old: Vec<f32> = runs.iter().map(|run| run.x).collect();
+    let mut placed: Vec<f32> = runs.iter().map(|run| mirror - run.width - run.x).collect();
+    let mut index = 0;
+    while index < runs.len() {
+        if !ltr[index] {
+            index += 1;
+            continue;
+        }
+        let end = (index..runs.len())
+            .find(|position| !ltr[*position])
+            .unwrap_or(runs.len());
+        let mut x = placed[index..end].iter().copied().fold(f32::MAX, f32::min);
+        for position in index..end {
+            placed[position] = x;
+            x += runs[position].width;
+        }
+        index = end;
+    }
+    let last = runs.len().checked_sub(1);
+    for stop in caret_stops.iter_mut() {
+        let home = (0..runs.len()).find(|&position| {
+            let run = &runs[position];
+            (run.start..run.end).contains(&stop.position)
+                || Some(position) == last && stop.position == run.end
+        });
+        stop.x = match home {
+            Some(position) if ltr[position] => placed[position] + (stop.x - old[position]),
+            _ => mirror - stop.x,
+        };
+    }
+    for (position, run) in runs.iter_mut().enumerate() {
+        if ltr[position] {
+            for glyph in &mut run.glyphs {
+                glyph.x += placed[position] - old[position];
+            }
+        } else {
+            for glyph in &mut run.glyphs {
+                glyph.x = mirror - glyph.x - glyph.advance;
+            }
+        }
+        run.x = placed[position];
+    }
+}
+
+/// The strong direction of `text`: `Some(true)` for right-to-left script,
+/// `Some(false)` for letters and digits of any other, `None` for neither.
+fn direction(text: &str) -> Option<bool> {
+    text.chars().find_map(char_direction)
+}
+
+fn char_direction(character: char) -> Option<bool> {
+    if matches!(
+        character as u32,
+        0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF | 0x10800..=0x10FFF | 0x1E800..=0x1EFFF
+    ) {
+        Some(true)
+    } else if character.is_alphanumeric() {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// Splits a right-to-left paragraph's run where its strong direction turns, so
+/// each part reads one way. Spaces and punctuation stay with the text before.
+fn split_by_direction(run: ResolvedRun, out: &mut Vec<ResolvedRun>) {
+    let mut cuts = vec![0];
+    let mut current = None;
+    for (index, character) in run.text.char_indices() {
+        if let Some(next) = char_direction(character) {
+            if current.is_some_and(|current| current != next) {
+                cuts.push(index);
+            }
+            current = Some(next);
+        }
+    }
+    if cuts.len() == 1 {
+        out.push(run);
+        return;
+    }
+    for (position, start) in cuts.iter().enumerate() {
+        let end = cuts.get(position + 1).copied().unwrap_or(run.text.len());
+        out.push(ResolvedRun {
+            text: run.text[*start..end].to_owned(),
+            start: run.start + utf16_len(&run.text[..*start]),
+            style: run.style.clone(),
+        });
+    }
 }
 
 /// Prepends a marker outside the story's character space.
 fn prepend_bullet(
     fonts: &FontStore,
     paragraph: &ResolvedParagraph,
-    x: f32,
+    (x, width): (f32, f32),
     lines: &mut [PositionedTextLine],
     scale: f32,
 ) -> Result<(), RenderError> {
@@ -2476,10 +3718,13 @@ fn prepend_bullet(
         line_spacing: None,
         space_before: None,
         space_after: None,
-        compat_line_spacing: false,
+        line_space_reduction: 0.0,
         indent_px: 0.0,
+        tab_stops: Vec::new(),
+        default_tab_px: resolve_default_tab(None),
         marker: None,
         bullet_style: None,
+        rtl: false,
         runs: vec![ResolvedRun {
             text: value.clone(),
             start: paragraph.runs[0].start,
@@ -2494,6 +3739,15 @@ fn prepend_bullet(
         .iter()
         .map(|cluster| cluster.width)
         .collect::<Vec<_>>();
+    // A right-to-left marker hangs off the right edge the way a left-to-right
+    // one hangs off the left.
+    let bullet_x = if paragraph.rtl {
+        let right =
+            (x + width - paragraph.indent_px).min(x + width + paragraph.margin_left_px.max(0.0));
+        right - advances.iter().sum::<f32>()
+    } else {
+        bullet_x
+    };
     let mut runs = positioned_runs(&clusters, &advances, bullet_x, first.baseline, scale);
     for run in &mut runs {
         run.start = paragraph.runs[0].start;
@@ -2520,6 +3774,8 @@ struct ShapedCluster {
     glyphs: Vec<ClusterGlyph>,
     break_after: bool,
     mandatory: bool,
+    /// A `U+0009` cluster, whose width the tab stops decide per line.
+    tab: bool,
 }
 
 struct ClusterGlyph {
@@ -2541,7 +3797,7 @@ fn shape_paragraph(
         .iter()
         .map(|run| run.text.as_str())
         .collect::<String>();
-    let breaks = break_opportunities(&full_text)
+    let breaks = presentation_break_opportunities(&full_text)
         .into_iter()
         .map(|value| (value.byte_index, value.mandatory))
         .collect::<HashMap<_, _>>();
@@ -2550,7 +3806,7 @@ fn shape_paragraph(
     for (run_index, run) in paragraph.runs.iter().enumerate() {
         let mut segment_start = 0_usize;
         for (byte_index, character) in run.text.char_indices() {
-            if character != '\n' {
+            if character != '\n' && character != '\t' {
                 continue;
             }
             add_shaped_segment(
@@ -2567,8 +3823,9 @@ fn shape_paragraph(
                 &mut clusters,
             )?;
             let start = run.start + utf16_len(&run.text[..byte_index]);
+            let hard = character == '\n';
             clusters.push(ShapedCluster {
-                text: "\n".to_owned(),
+                text: character.to_string(),
                 start,
                 end: start + 1,
                 width: 0.0,
@@ -2577,7 +3834,8 @@ fn shape_paragraph(
                 style: run.style.clone(),
                 glyphs: Vec::new(),
                 break_after: true,
-                mandatory: true,
+                mandatory: hard,
+                tab: !hard,
             });
             segment_start = byte_index + character.len_utf8();
         }
@@ -2627,14 +3885,14 @@ fn add_shaped_segment(
     if text.is_empty() {
         return Ok(());
     }
-    let size_px = points_to_px(run.style.font_size_pt * scale);
+    let size_px = points_to_px(autofit_size_pt(run.style.font_size_pt, scale));
     let tracking = points_to_px(run.style.spacing_pt * scale);
     let shaped = shape(
         fonts,
         run.style.face.id,
         text,
         size_px,
-        tracking_features(tracking),
+        ligature_features(tracking != 0.0 || run.style.face.widths.is_some()),
     )
     .map_err(|error| RenderError::Font(error.to_string()))?;
     let mut starts = shaped
@@ -2670,22 +3928,39 @@ fn add_shaped_segment(
             });
             glyph_x += glyph.x_advance;
         }
+        let text_slice = &text[start_byte..end_byte];
+        // The glyphs keep the advances of the face that draws them, so a
+        // backend laying the run out itself still sees where each one ends and
+        // places the next cluster at the x this width put it.
+        let cluster_width = named_cluster_width(&run.style, text_slice, size_px).unwrap_or(glyph_x);
         let global_end = global_run_byte + run_byte_start + end_byte;
-        let tracking = tracking.max(-glyph_x);
+        let tracking = tracking.max(-cluster_width);
         output.push(ShapedCluster {
-            text: text[start_byte..end_byte].to_owned(),
+            text: text_slice.to_owned(),
             start: source_start,
             end: source_end,
-            width: glyph_x + tracking,
+            width: cluster_width + tracking,
             tracking,
             run_index,
             style: run.style.clone(),
             glyphs,
             break_after: breaks.contains_key(&global_end),
             mandatory: breaks.get(&global_end).copied().unwrap_or(false),
+            tab: false,
         });
     }
     Ok(())
+}
+
+/// The part of a line that centring and right alignment measure: a space at
+/// the end of a wrapped line hangs past the margin, so PowerPoint does not
+/// count it when it places the line.
+fn aligned_slice(clusters: &[ShapedCluster]) -> &[ShapedCluster] {
+    let end = clusters
+        .iter()
+        .rposition(|cluster| !cluster.text.chars().all(char::is_whitespace))
+        .map_or(0, |index| index + 1);
+    &clusters[..end]
 }
 
 /// Measures a line without its trailing tracking gap.
@@ -2701,17 +3976,45 @@ fn trailing_tracking(clusters: &[ShapedCluster]) -> f32 {
         .map_or(0.0, |cluster| cluster.tracking)
 }
 
-fn wrap_clusters(clusters: &[ShapedCluster], width: f32) -> Vec<(usize, usize)> {
+/// Greedy line fill. Tab clusters take their width here, from the pen's offset
+/// in the text area, so the wrap and the painted line agree on where a tab
+/// lands: the greedy walk reaches a cluster in its final line's position last.
+fn wrap_clusters(
+    clusters: &mut [ShapedCluster],
+    width: f32,
+    left_offset: f32,
+    first_line_indent: f32,
+    stops: &[f32],
+    default_tab_px: f32,
+) -> Vec<(usize, usize)> {
     let mut ranges = Vec::new();
     let mut start = 0;
+    let mut line_index = 0;
     while start < clusters.len() {
+        let indent = if line_index == 0 {
+            first_line_indent
+        } else {
+            0.0
+        };
+        let width = (width - indent).max(1.0);
+        let left_offset = left_offset + indent;
         let mut cursor = start;
         let mut line_width = 0.0;
         let mut last_break = None;
         let mut end = clusters.len();
         while cursor < clusters.len() {
+            if clusters[cursor].tab {
+                let pen = left_offset + line_width;
+                clusters[cursor].width =
+                    tab_advance(pen, pen, stops, default_tab_px, width - line_width);
+            }
             let cluster = &clusters[cursor];
+            // A space that lands at the end of a line hangs past the edge
+            // instead of pushing the word before it down, which is what lets
+            // PowerPoint fit a word we were breaking one early (#797).
             if cluster.text != "\n"
+                && !cluster.tab
+                && !cluster.text.chars().all(char::is_whitespace)
                 && line_width + cluster.width - cluster.tracking > width
                 && cursor > start
             {
@@ -2738,6 +4041,17 @@ fn wrap_clusters(clusters: &[ShapedCluster], width: f32) -> Vec<(usize, usize)> 
         }
         ranges.push((start, end));
         start = end;
+        line_index += 1;
+    }
+    // A paragraph ending in `a:br` keeps the empty line the break opened, the
+    // way PowerPoint does; a centred or bottom-anchored body is half a line
+    // out without it (#797).
+    if clusters.last().is_some_and(|cluster| cluster.text == "\n")
+        && let Some(last) = ranges.last_mut()
+        && last.1 - last.0 > 1
+    {
+        last.1 -= 1;
+        ranges.push((clusters.len() - 1, clusters.len()));
     }
     ranges
 }
@@ -2752,24 +4066,32 @@ fn positioned_runs(
     let mut output: Vec<PositionedTextRun> = Vec::new();
     let mut cursor_x = line_x;
     let mut trailing_tracking = 0.0_f32;
+    let mut run_direction = None;
     for (index, cluster) in clusters.iter().enumerate() {
         if cluster.text == "\n" {
             continue;
         }
         let baseline_offset_px = cluster.style.baseline_shift_px * scale;
-        let append = output.last().is_some_and(|run| {
-            run.end == cluster.start
-                && run.font_id == cluster.style.face.id.to_u32()
-                && run.letter_spacing_px == cluster.tracking
-                && run.baseline_offset_px == baseline_offset_px
-                && run.font_family == cluster.style.family
-                && run.font_size_px == points_to_px(cluster.style.font_size_pt * scale)
-                && run.bold == cluster.style.bold
-                && run.italic == cluster.style.italic
-                && run.underline == cluster.style.underline
-                && run.color == cluster.style.color
-        });
+        let turns = matches!(
+            (run_direction, direction(&cluster.text)),
+            (Some(current), Some(next)) if current != next
+        );
+        let append = !turns
+            && output.last().is_some_and(|run| {
+                run.end == cluster.start
+                    && run.font_id == cluster.style.face.id.to_u32()
+                    && run.letter_spacing_px == cluster.tracking
+                    && run.baseline_offset_px == baseline_offset_px
+                    && run.font_family == cluster.style.family
+                    && run.font_size_px
+                        == points_to_px(autofit_size_pt(cluster.style.font_size_pt, scale))
+                    && run.bold == cluster.style.bold
+                    && run.italic == cluster.style.italic
+                    && run.underline == cluster.style.underline
+                    && run.color == cluster.style.color
+            });
         if !append {
+            run_direction = None;
             if let Some(previous) = output.last_mut() {
                 previous.width -= trailing_tracking;
             }
@@ -2781,7 +4103,7 @@ fn positioned_runs(
                 width: 0.0,
                 font_id: cluster.style.face.id.to_u32(),
                 font_family: cluster.style.family.clone(),
-                font_size_px: points_to_px(cluster.style.font_size_pt * scale),
+                font_size_px: points_to_px(autofit_size_pt(cluster.style.font_size_pt, scale)),
                 bold: cluster.style.bold,
                 italic: cluster.style.italic,
                 underline: cluster.style.underline,
@@ -2791,6 +4113,7 @@ fn positioned_runs(
                 glyphs: Vec::new(),
             });
         }
+        run_direction = run_direction.or_else(|| direction(&cluster.text));
         let Some(run) = output.last_mut() else {
             continue;
         };
@@ -2889,10 +4212,12 @@ fn clusters_line_box(
     fonts: &FontStore,
     clusters: &[ShapedCluster],
     scale: f32,
-) -> Result<ooxml_text::LineBox, RenderError> {
+) -> Result<(ooxml_text::LineBox, ShiftExtents), RenderError> {
     let mut ascent: f32 = 0.0;
     let mut descent: f32 = 0.0;
     let mut leading: f32 = 0.0;
+    let mut shifted_ascent: f32 = 0.0;
+    let mut shifted_descent: f32 = 0.0;
     let mut seen = HashSet::new();
     for cluster in clusters {
         if !seen.insert(cluster.run_index) {
@@ -2900,15 +4225,40 @@ fn clusters_line_box(
         }
         let line = style_line_box(fonts, &cluster.style, scale)?;
         let shift = cluster.style.baseline_shift_px * scale;
-        ascent = ascent.max((line.ascent + shift).max(0.0));
-        descent = descent.max((line.descent - shift).max(0.0));
+        ascent = ascent.max(line.ascent);
+        descent = descent.max(line.descent);
         leading = leading.max(line.leading);
+        shifted_ascent = shifted_ascent.max((line.ascent + shift).max(0.0));
+        shifted_descent = shifted_descent.max((line.descent - shift).max(0.0));
     }
-    Ok(ooxml_text::LineBox {
-        ascent,
-        descent,
-        leading,
-    })
+    Ok((
+        ooxml_text::LineBox {
+            ascent,
+            descent,
+            leading,
+        },
+        ShiftExtents {
+            ascent: (shifted_ascent - ascent).max(0.0),
+            descent: (shifted_descent - descent).max(0.0),
+        },
+    ))
+}
+
+/// How far super/subscript ink reaches past the unshifted line box.
+#[derive(Clone, Copy, Default)]
+struct ShiftExtents {
+    ascent: f32,
+    descent: f32,
+}
+
+/// Spacing sets the pitch of the unshifted box; shifted ink then pushes the
+/// edges back out so a raised or lowered run is never clipped.
+fn shifted_line_box(line: ooxml_text::LineBox, extents: ShiftExtents) -> ooxml_text::LineBox {
+    ooxml_text::LineBox {
+        ascent: line.ascent + extents.ascent,
+        descent: line.descent + extents.descent,
+        leading: line.leading,
+    }
 }
 
 fn style_line_box(
@@ -2916,22 +4266,52 @@ fn style_line_box(
     style: &ResolvedStyle,
     scale: f32,
 ) -> Result<ooxml_text::LineBox, RenderError> {
+    let size_px = points_to_px(autofit_size_pt(style.line_font_size_pt, scale));
+    if let Some(named) = style.face.line {
+        return Ok(family_line_box(named, size_px));
+    }
     let metrics = fonts
-        .metrics(style.face.id)
+        .metrics(style.face.line_id)
         .map_err(|error| RenderError::Font(error.to_string()))?;
-    Ok(single_line_box(
-        metrics,
-        points_to_px(style.font_size_pt * scale),
-        &CompatFlags::default(),
-    ))
+    Ok(single_line_box(metrics, size_px, &CompatFlags::default()))
 }
 
 /// Largest font size on this line.
 fn line_font_size_px(clusters: &[ShapedCluster], scale: f32) -> f32 {
     clusters
         .iter()
-        .map(|cluster| points_to_px(cluster.style.font_size_pt * scale))
+        .map(|cluster| points_to_px(autofit_size_pt(cluster.style.line_font_size_pt, scale)))
         .fold(0.0_f32, f32::max)
+}
+
+/// Round normal-autofit sizes to whole points, preserving authored sizes otherwise.
+fn autofit_size_pt(size_pt: f32, scale: f32) -> f32 {
+    if scale >= 1.0 {
+        return size_pt;
+    }
+    (size_pt * scale).round().max(1.0)
+}
+
+/// `a:normAutofit/@fontScale`, applied verbatim: PowerPoint stores the scale it
+/// computed when the text last changed and re-fits only on edit, never on render.
+fn autofit_font_scale(autofit: Option<&TextAutofit>) -> f32 {
+    match autofit {
+        Some(TextAutofit::Normal { font_scale, .. }) => {
+            font_scale.unwrap_or(1.0).clamp(0.1, 1.0) as f32
+        }
+        _ => 1.0,
+    }
+}
+
+/// `a:normAutofit/@lnSpcReduction`, subtracted from percentage line spacing.
+fn autofit_line_space_reduction(autofit: Option<&TextAutofit>) -> f32 {
+    match autofit {
+        Some(TextAutofit::Normal {
+            line_space_reduction,
+            ..
+        }) => line_space_reduction.unwrap_or(0.0).clamp(0.0, 0.9) as f32,
+        _ => 0.0,
+    }
 }
 
 /// Apply paragraph spacing to a measured line box.
@@ -2939,31 +4319,30 @@ fn spaced_line_box(
     content: ooxml_text::LineBox,
     paragraph: &ResolvedParagraph,
     size_px: f32,
-    scale: f32,
 ) -> ooxml_text::LineBox {
-    let Some(spacing) = paragraph.line_spacing else {
-        return content;
-    };
     if content.height() <= 0.0 {
         return content;
     }
-    let target = match spacing {
-        LineSpacing::Percent { value } => {
-            let single = if paragraph.compat_line_spacing {
-                SINGLE_LINE_PITCH_EM * size_px
-            } else {
-                content.height()
-            };
-            value as f32 * single
-        }
-        LineSpacing::Points { value } => points_to_px(value as f32 * scale),
+    let reduction = paragraph.line_space_reduction;
+    let single = SINGLE_LINE_PITCH_EM * size_px;
+    let target = match paragraph.line_spacing {
+        // An exact line spacing is a measurement, not a font size, so the
+        // autofit scale leaves it alone.
+        Some(LineSpacing::Points { value }) => points_to_px(value as f32),
+        Some(LineSpacing::Percent { value }) => (value as f32 - reduction).max(0.0) * single,
+        None => (1.0 - reduction) * single,
     };
     if !target.is_finite() || target < 0.0 {
         return content;
     }
+    // PowerPoint splits the room a line box does not fill evenly above and
+    // below it, so a paragraph whose spacing asks for more than its face
+    // measures starts that much lower.
     if target >= content.height() {
+        let slack = (target - content.ascent - content.descent) / 2.0;
         return ooxml_text::LineBox {
-            leading: target - content.ascent - content.descent,
+            ascent: content.ascent + slack,
+            leading: slack,
             ..content
         };
     }
@@ -3139,38 +4518,6 @@ fn find_node(nodes: &[ShapeNode], id: u32) -> Option<&ShapeNode> {
     None
 }
 
-fn find_placeholder<'a>(nodes: &'a [ShapeNode], target: &Placeholder) -> Option<&'a ShapeNode> {
-    for node in nodes {
-        if node_placeholder(node).is_some_and(|value| placeholders_match(value, target)) {
-            return Some(node);
-        }
-        if let ShapeNode::Group(group) = node
-            && let Some(found) = find_placeholder(&group.children, target)
-        {
-            return Some(found);
-        }
-    }
-    None
-}
-
-fn placeholders_match(left: &Placeholder, right: &Placeholder) -> bool {
-    match (left.index, right.index) {
-        (Some(left), Some(right)) => left == right,
-        _ => {
-            normalize_placeholder_type(left.placeholder_type.as_deref())
-                == normalize_placeholder_type(right.placeholder_type.as_deref())
-        }
-    }
-}
-
-fn normalize_placeholder_type(value: Option<&str>) -> &str {
-    match value.unwrap_or("body") {
-        "ctrTitle" => "title",
-        "obj" => "body",
-        value => value,
-    }
-}
-
 fn node_base(node: &ShapeNode) -> &pptx_parse::ShapeBase {
     match node {
         ShapeNode::Shape(shape) => &shape.base,
@@ -3258,6 +4605,63 @@ fn source_rect(crop: Option<&PictureCrop>) -> Option<(f64, f64, f64, f64)> {
     Some((-left / width, -top / height, 1.0 / width, 1.0 / height))
 }
 
+/// Maps a metafile clip rectangle into the picture box, or `None` when the clip
+/// leaves nothing of the box visible.
+/// whether a metafile clip would hide any of `path`, in the normalised space
+/// `metafile_clip_path` works in.
+fn clipped_away(path: &[GeometryPathCommand], clip: [f64; 4], rect: (f64, f64, f64, f64)) -> bool {
+    let Some(bounds) = metafile_clip_path(clip, rect) else {
+        return true;
+    };
+    let (mut left, mut top, mut right, mut bottom) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    for command in &bounds {
+        if let GeometryPathCommand::Move { x, y } | GeometryPathCommand::Line { x, y } = command {
+            left = left.min(*x);
+            top = top.min(*y);
+            right = right.max(*x);
+            bottom = bottom.max(*y);
+        }
+    }
+    let outside = |x: &f64, y: &f64| *x < left || *x > right || *y < top || *y > bottom;
+    path.iter().any(|command| match command {
+        GeometryPathCommand::Move { x, y } | GeometryPathCommand::Line { x, y } => outside(x, y),
+        GeometryPathCommand::Quad { cpx, cpy, x, y } => outside(cpx, cpy) || outside(x, y),
+        GeometryPathCommand::Cubic {
+            cp1x,
+            cp1y,
+            cp2x,
+            cp2y,
+            x,
+            y,
+        } => outside(cp1x, cp1y) || outside(cp2x, cp2y) || outside(x, y),
+        GeometryPathCommand::Close => false,
+    })
+}
+
+fn metafile_clip_path(
+    clip: [f64; 4],
+    rect: (f64, f64, f64, f64),
+) -> Option<Vec<GeometryPathCommand>> {
+    let (x0, y0, w, h) = rect;
+    let left = (x0 + clip[0] * w).max(0.0);
+    let top = (y0 + clip[1] * h).max(0.0);
+    let right = (x0 + clip[2] * w).min(1.0);
+    let bottom = (y0 + clip[3] * h).min(1.0);
+    if !(left < right && top < bottom) {
+        return None;
+    }
+    Some(vec![
+        GeometryPathCommand::Move { x: left, y: top },
+        GeometryPathCommand::Line { x: right, y: top },
+        GeometryPathCommand::Line {
+            x: right,
+            y: bottom,
+        },
+        GeometryPathCommand::Line { x: left, y: bottom },
+        GeometryPathCommand::Close,
+    ])
+}
+
 /// Maps a path measured in the metafile's frame into the picture box.
 fn place_in_source_rect(path: &mut [GeometryPathCommand], rect: (f64, f64, f64, f64)) {
     if rect == (0.0, 0.0, 1.0, 1.0) {
@@ -3314,143 +4718,85 @@ fn node_group_transform(node: &ShapeNode) -> Option<&ShapeTransform> {
     }
 }
 
-fn master_style<'a>(
-    master: &'a SlideMaster,
-    placeholder: Option<&Placeholder>,
-    level: u32,
-) -> Option<&'a ParagraphProperties> {
-    let styles = match placeholder {
-        Some(placeholder) => {
-            match normalize_placeholder_type(placeholder.placeholder_type.as_deref()) {
-                "title" => &master.text_styles.title,
-                "body" | "subTitle" => &master.text_styles.body,
-                _ => &master.text_styles.other,
-            }
-        }
-        None => &master.text_styles.other,
-    };
-    styles.get(level as usize).or_else(|| styles.first())
+/// The first `a:effectLst` any of a body's runs or level defaults declares.
+fn body_text_effects(body: &TextBody) -> Option<&ShapeEffects> {
+    let paragraph_runs = body.paragraphs.iter().flat_map(|paragraph| {
+        paragraph
+            .runs
+            .iter()
+            .map(|run| &run.properties)
+            .chain(paragraph.properties.default_run.as_ref())
+    });
+    let level_defaults = body
+        .list_style
+        .iter()
+        .chain(body.default_list_style.as_deref())
+        .filter_map(|properties| properties.default_run.as_ref());
+    paragraph_runs
+        .chain(level_defaults)
+        .find_map(|properties| properties.effects.as_ref())
+        .filter(|effects| effects.outer_shadow.is_some())
 }
 
-fn merge_paragraph_properties(target: &mut ParagraphProperties, source: &ParagraphProperties) {
-    if source.alignment.is_some() {
-        target.alignment.clone_from(&source.alignment);
-    }
-    if source.margin_left.is_some() {
-        target.margin_left = source.margin_left;
-    }
-    if source.margin_right.is_some() {
-        target.margin_right = source.margin_right;
-    }
-    if source.indent.is_some() {
-        target.indent = source.indent;
-    }
-    if source.bullet.is_some() {
-        target.bullet.clone_from(&source.bullet);
-    }
-    if source.line_spacing.is_some() {
-        target.line_spacing = source.line_spacing;
-    }
-    if source.space_before.is_some() {
-        target.space_before = source.space_before;
-    }
-    if source.space_after.is_some() {
-        target.space_after = source.space_after;
-    }
-    if source.bullet_font.is_some() {
-        target.bullet_font.clone_from(&source.bullet_font);
-    }
-    if source.bullet_color.is_some() {
-        target.bullet_color.clone_from(&source.bullet_color);
-    }
-    if source.bullet_size.is_some() {
-        target.bullet_size.clone_from(&source.bullet_size);
-    }
-    if let Some(source) = &source.default_run {
-        let target = target
-            .default_run
-            .get_or_insert_with(RunProperties::default);
-        merge_run_properties(target, source);
-    }
-}
-
-fn merge_run_properties(target: &mut RunProperties, source: &RunProperties) {
-    if source.font_size_pt.is_some() {
-        target.font_size_pt = source.font_size_pt;
-    }
-    if source.bold.is_some() {
-        target.bold = source.bold;
-    }
-    if source.italic.is_some() {
-        target.italic = source.italic;
-    }
-    if source.underline.is_some() {
-        target.underline.clone_from(&source.underline);
-    }
-    if source.font_family.is_some() {
-        target.font_family.clone_from(&source.font_family);
-    }
-    if source.color.is_some() {
-        target.color.clone_from(&source.color);
-    }
-    if source.language.is_some() {
-        target.language.clone_from(&source.language);
-    }
-    if source.spacing_pt.is_some() {
-        target.spacing_pt = source.spacing_pt;
-    }
-    if source.baseline_pct.is_some() {
-        target.baseline_pct = source.baseline_pct;
-    }
-}
-
+/// A run that carries an `a:hlinkClick` is drawn in the theme's `hlink` colour
+/// and underlined, over whatever the placeholder would otherwise give it.
 fn style_from_properties(properties: &RunProperties, theme: &Theme) -> TextStyle {
+    let linked = properties.hyperlink_relationship_id.is_some();
     TextStyle {
         bold: properties.bold,
         italic: properties.italic,
         font_size_pt: properties.font_size_pt,
-        color: resolve_color_value_to_hex_with_theme(properties.color.as_ref(), Some(theme)),
+        color: resolve_color_value_to_hex_with_theme(properties.color.as_ref(), Some(theme))
+            .or_else(|| linked.then(|| format!("#{}", get_theme_color(Some(theme), "hlink")))),
         font_family: properties.font_family.clone(),
-        underline: properties.underline.clone(),
+        underline: properties
+            .underline
+            .clone()
+            .or_else(|| linked.then(|| "sng".to_owned())),
         spacing_pt: properties.spacing_pt,
         baseline_pct: properties.baseline_pct,
+        caps: properties.caps,
     }
 }
 
+/// The transform a shape draws at. Without an extent it takes the inherited
+/// one, keeping its own orientation when its node spells out a transform.
 fn resolved_transform_value(
     shape: &ShapeSnapshot,
     original: Option<&ShapeNode>,
     layout: Option<&ShapeNode>,
     master: Option<&ShapeNode>,
 ) -> ShapeTransform {
+    let own = ShapeTransform {
+        x: shape.x,
+        y: shape.y,
+        width: shape.width,
+        height: shape.height,
+        rotation_deg: shape.rotation_deg,
+        flip_h: shape.flip_h,
+        flip_v: shape.flip_v,
+        ..ShapeTransform::default()
+    };
     if shape.width > 0 && shape.height > 0 {
+        return own;
+    }
+    let Some(inherited) = [original, layout, master]
+        .into_iter()
+        .flatten()
+        .map(|node| &node_base(node).transform)
+        .find(|transform| transform.width > 0 && transform.height > 0)
+    else {
+        return own;
+    };
+    if original.is_some_and(|node| node_base(node).transform != ShapeTransform::default()) {
         ShapeTransform {
-            x: shape.x,
-            y: shape.y,
-            width: shape.width,
-            height: shape.height,
-            rotation_deg: shape.rotation_deg,
-            flip_h: shape.flip_h,
-            flip_v: shape.flip_v,
-            ..ShapeTransform::default()
+            rotation_deg: own.rotation_deg,
+            flip_h: own.flip_h,
+            flip_v: own.flip_v,
+            ..inherited.clone()
         }
     } else {
-        [original, layout, master]
-            .into_iter()
-            .flatten()
-            .map(|node| &node_base(node).transform)
-            .find(|transform| transform.width > 0 && transform.height > 0)
-            .cloned()
-            .unwrap_or_else(|| ShapeTransform {
-                x: shape.x,
-                y: shape.y,
-                width: shape.width,
-                height: shape.height,
-                rotation_deg: shape.rotation_deg,
-                flip_h: shape.flip_h,
-                flip_v: shape.flip_v,
-                ..ShapeTransform::default()
-            })
+        inherited.clone()
     }
 }
 
@@ -3464,6 +4810,9 @@ fn image_effects(effects: &[BlipEffect], theme: &Theme) -> Vec<ImageEffect> {
                 threshold: (*threshold as f32).clamp(0.0, 1.0),
             }),
             BlipEffect::Grayscale => Some(ImageEffect::Grayscale),
+            BlipEffect::Alpha { amount } => Some(ImageEffect::Alpha {
+                amount: *amount as f32,
+            }),
             BlipEffect::Luminance {
                 brightness,
                 contrast,
@@ -3570,6 +4919,7 @@ fn shadow(
     }
     let (anchor_x, anchor_y) = shadow_anchor(&outer.alignment, rect);
     Some(Shadow {
+        paths: Vec::new(),
         color,
         blur: safe_geometry(outer.blur_radius as f32 * (space.scale_x + space.scale_y) / 2.0),
         dx: safe_geometry(dx + anchor_x * (1.0 - scale_x)),
@@ -3651,6 +5001,7 @@ fn stroke(outline: &ShapeOutline, theme: &Theme) -> Option<Stroke> {
         .map(|width| width as f32 / EMU_PER_CSS_PIXEL)
         .unwrap_or(1.0);
     Some(Stroke {
+        join: outline.join.clone(),
         color,
         width,
         dashed: outline
@@ -3671,6 +5022,16 @@ fn picture_source(shape: Option<&ShapeNode>) -> Option<&Picture> {
     }
 }
 
+/// A picture's part path, or a marker resolving to its unsaved pending bytes.
+fn picture_asset_id(shape: &ShapeSnapshot) -> Option<String> {
+    shape.media_part_path.clone().or_else(|| {
+        shape
+            .pending_media
+            .as_ref()
+            .map(|_| format!("pending-media:{}", shape.id))
+    })
+}
+
 /// Clamps outsets and discards empty crops.
 fn image_crop(crop: &PictureCrop) -> ImageCrop {
     let fraction = |value: i32| (value as f32 / 100_000.0).clamp(0.0, 1.0);
@@ -3688,20 +5049,25 @@ fn image_crop(crop: &PictureCrop) -> ImageCrop {
     }
 }
 
-/// Resolves a picture's nonrectangular preset mask.
-fn picture_mask(
-    picture: &Picture,
-    rect: PxRect,
-) -> Option<Vec<ooxml_drawingml::GeometryPathCommand>> {
+#[derive(Default)]
+struct PictureMask {
+    path: Option<Vec<GeometryPathCommand>>,
+    geometry_fallback: bool,
+}
+
+fn picture_mask(picture: &Picture, rect: PxRect) -> PictureMask {
     if picture.geometry.is_empty() || picture.geometry == "rect" || rect.h <= 0.0 {
-        return None;
+        return PictureMask::default();
     }
-    let path = geometry_path(
+    let (path, geometry_fallback) = geometry_path_with_fallback(
         &picture.geometry,
         &picture.adjust_values,
         f64::from(rect.w) / f64::from(rect.h),
     );
-    (!path.is_empty()).then_some(path)
+    PictureMask {
+        path: (!path.is_empty()).then_some(path),
+        geometry_fallback,
+    }
 }
 
 fn custom_paths(shape: Option<&ShapeNode>) -> &[CustomGeometryPath] {
@@ -3724,7 +5090,11 @@ fn picture_fill<'a>(nodes: &[Option<&'a ShapeNode>]) -> Option<&'a PictureFill> 
 }
 
 /// Redraws a picture-filled shape as an image masked by the shape's own outline.
-fn picture_filled(primitive: Primitive, picture: Option<&PictureFill>) -> Primitive {
+fn picture_filled(
+    primitive: Primitive,
+    picture: Option<&PictureFill>,
+    dpi: Option<f32>,
+) -> Primitive {
     let Some(picture) = picture else {
         return primitive;
     };
@@ -3739,6 +5109,7 @@ fn picture_filled(primitive: Primitive, picture: Option<&PictureFill>) -> Primit
             h,
             geometry,
             path,
+            geometry_fallback,
             stroke,
             shadow,
             transform,
@@ -3754,7 +5125,9 @@ fn picture_filled(primitive: Primitive, picture: Option<&PictureFill>) -> Primit
             asset_id: picture.media_part_path.clone(),
             effects: Vec::new(),
             crop: picture_fill_crop(picture),
+            tile: picture_fill_tile(picture, dpi),
             path: (geometry != "rect").then_some(path),
+            geometry_fallback,
             stroke,
             shadow,
             transform,
@@ -3797,13 +5170,25 @@ fn geometry_path(
     adjustments: &BTreeMap<String, f64>,
     aspect_ratio: f64,
 ) -> Vec<ooxml_drawingml::GeometryPathCommand> {
+    geometry_path_with_fallback(geometry, adjustments, aspect_ratio).0
+}
+
+fn geometry_path_with_fallback(
+    geometry: &str,
+    adjustments: &BTreeMap<String, f64>,
+    aspect_ratio: f64,
+) -> (Vec<ooxml_drawingml::GeometryPathCommand>, bool) {
     let adjustments = adjustments
         .iter()
         .map(|(name, value)| (name.clone(), *value))
         .collect();
-    preset_geometry_to_path(geometry, &adjustments, aspect_ratio)
-        .or_else(|| preset_geometry_to_path("rect", &HashMap::new(), aspect_ratio))
-        .unwrap_or_default()
+    match preset_geometry_to_path(geometry, &adjustments, aspect_ratio) {
+        Some(path) => (path, false),
+        None => (
+            preset_geometry_to_path("rect", &HashMap::new(), aspect_ratio).unwrap_or_default(),
+            true,
+        ),
+    }
 }
 
 fn graphic_label(graphic: Option<&GraphicFrameData>) -> Option<String> {
@@ -3812,6 +5197,101 @@ fn graphic_label(graphic: Option<&GraphicFrameData>) -> Option<String> {
         Some(GraphicFrameData::Chart { .. }) => Some("Chart".to_owned()),
         Some(GraphicFrameData::Diagram { .. }) => Some("Diagram".to_owned()),
         Some(GraphicFrameData::Unknown { .. }) | None => None,
+    }
+}
+
+/// A tile repeats at the picture's own printed size, which is its pixels over
+/// its own resolution — PowerPoint reads the density the file declares, so a
+/// 75 dpi bitmap tiles 28% larger than the 96 dpi the canvas assumes.
+fn picture_fill_tile(picture: &PictureFill, dpi: Option<f32>) -> Option<ImageTile> {
+    let density = dpi
+        .filter(|value| value.is_finite() && *value > 1.0)
+        .map_or(1.0, |value| 96.0 / value);
+    picture.tile.map(|tile| ImageTile {
+        scale_x: tile.scale_x as f32 * density,
+        scale_y: tile.scale_y as f32 * density,
+    })
+}
+
+/// The resolution a PNG or JPEG declares, in dots per inch. `None` where the
+/// file names none, which reads as the 96 dpi a canvas assumes.
+fn image_dpi(bytes: &[u8]) -> Option<f32> {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        let mut offset = 8;
+        while offset + 8 <= bytes.len() {
+            let length = u32::from_be_bytes(bytes[offset..offset + 4].try_into().ok()?) as usize;
+            let kind = &bytes[offset + 4..offset + 8];
+            if kind == b"pHYs" && length >= 9 && offset + 8 + 9 <= bytes.len() {
+                let body = &bytes[offset + 8..offset + 17];
+                if body[8] != 1 {
+                    return None;
+                }
+                let per_metre = u32::from_be_bytes(body[0..4].try_into().ok()?);
+                return (per_metre > 0).then_some(per_metre as f32 * 0.0254);
+            }
+            offset = offset.checked_add(length)?.checked_add(12)?;
+        }
+        return None;
+    }
+    if !bytes.starts_with(&[0xFF, 0xD8]) {
+        return None;
+    }
+    let mut offset = 2;
+    while offset + 4 <= bytes.len() {
+        if bytes[offset] != 0xFF {
+            return None;
+        }
+        let marker = bytes[offset + 1];
+        let length = u16::from_be_bytes(bytes[offset + 2..offset + 4].try_into().ok()?) as usize;
+        if marker == 0xE0 && length >= 14 && offset + 2 + length <= bytes.len() {
+            let body = &bytes[offset + 4..offset + 2 + length];
+            let units = body[7];
+            let x = u16::from_be_bytes(body[8..10].try_into().ok()?);
+            return match (units, x) {
+                (1, density) if density > 0 => Some(f32::from(density)),
+                (2, density) if density > 0 => Some(f32::from(density) * 2.54),
+                _ => None,
+            };
+        }
+        offset = offset.checked_add(2)?.checked_add(length)?;
+    }
+    None
+}
+
+/// The rectangle a preset holds its text in. Most presets use the whole frame,
+/// but a rounded box and an ellipse inset theirs so the text clears the curve —
+/// the `a:rect` each preset declares, for the two the corpus writes text into.
+fn geometry_text_inset(shape: Option<&ShapeNode>, rect: PxRect) -> (f32, f32) {
+    let Some(ShapeNode::Shape(shape)) = shape else {
+        return (0.0, 0.0);
+    };
+    preset_text_inset(
+        &shape.geometry,
+        shape.adjust_values.get("adj").copied(),
+        rect.w,
+        rect.h,
+    )
+    .unwrap_or((0.0, 0.0))
+}
+
+fn preset_text_inset(
+    geometry: &str,
+    adjust: Option<f64>,
+    width: f32,
+    height: f32,
+) -> Option<(f32, f32)> {
+    const DIAGONAL: f32 = std::f32::consts::FRAC_1_SQRT_2;
+    match geometry {
+        "roundRect" | "round1Rect" | "round2SameRect" | "round2DiagRect" => {
+            let adjust = adjust.unwrap_or(16_667.0).clamp(0.0, 50_000.0) as f32 / 100_000.0;
+            let inset = width.min(height) * adjust * (1.0 - DIAGONAL);
+            Some((inset, inset))
+        }
+        "ellipse" => Some((
+            width * (1.0 - DIAGONAL) / 2.0,
+            height * (1.0 - DIAGONAL) / 2.0,
+        )),
+        _ => None,
     }
 }
 
@@ -3853,96 +5333,26 @@ fn rect_covering_text(rect: PxRect, text: Option<&TextHit>) -> PxRect {
     }
 }
 
-/// Resolves a marker once per paragraph.
-fn resolve_marker(bullet: Option<&Bullet>, level: u32, counters: &mut [u32; 9]) -> Option<String> {
-    let level = (level as usize).min(counters.len() - 1);
-    counters[level + 1..].fill(0);
-    match bullet {
-        Some(Bullet::AutoNumber {
-            scheme,
-            start_at,
-            restart,
-        }) => {
-            counters[level] = match counters[level] {
-                0 => (*start_at).clamp(1, 32_767),
-                _ if *restart => (*start_at).clamp(1, 32_767),
-                current => current.saturating_add(1),
-            };
-            Some(format_autonum(counters[level], scheme))
-        }
-        _ => {
-            counters[level] = 0;
-            match bullet {
-                Some(Bullet::Character { value }) if !value.trim().is_empty() => {
-                    Some(value.clone())
-                }
-                _ => None,
-            }
-        }
-    }
-}
-
-/// Formats Latin, Roman and decimal markers.
-fn format_autonum(value: u32, scheme: &str) -> String {
-    let value = value.clamp(1, MAX_AUTONUM_VALUE);
-    let (numeral, suffix) = ["ParenBoth", "ParenR", "Period", "Plain"]
-        .into_iter()
-        .find_map(|suffix| Some((scheme.strip_suffix(suffix)?, suffix)))
-        .unwrap_or((scheme, "Period"));
-    let body = match numeral {
-        "alphaLc" => format_alpha(value, false),
-        "alphaUc" => format_alpha(value, true),
-        "romanLc" => format_roman(value, false),
-        "romanUc" => format_roman(value, true),
-        "arabic" => value.to_string(),
-        _ => return format!("{value}."),
+/// A `buFont` symbol face reaches its glyphs by font position, so `buChar`
+/// names a slot rather than the character to draw. Checked against
+/// PowerPoint's own render of the corpus: Wingdings `§` draws a small filled
+/// square, Wingdings 3's `U+F075` a solid right-pointing triangle.
+fn symbol_bullet(marker: &str, font: Option<&BulletFont>, theme: &Theme) -> String {
+    let Some(BulletFont::Typeface(typeface)) = font else {
+        return marker.to_owned();
     };
-    match suffix {
-        "ParenBoth" => format!("({body})"),
-        "ParenR" => format!("{body})"),
-        "Plain" => body,
-        _ => format!("{body}."),
-    }
-}
-
-fn format_alpha(value: u32, upper: bool) -> String {
-    let base = if upper { b'A' } else { b'a' };
-    let mut value = value.max(1);
-    let mut out = Vec::new();
-    while value > 0 {
-        let index = (value - 1) % 26;
-        out.push(base + index as u8);
-        value = (value - 1) / 26;
-    }
-    out.reverse();
-    String::from_utf8(out).unwrap_or_default()
-}
-
-fn format_roman(value: u32, upper: bool) -> String {
-    const NUMERALS: [(u32, &str); 13] = [
-        (1000, "m"),
-        (900, "cm"),
-        (500, "d"),
-        (400, "cd"),
-        (100, "c"),
-        (90, "xc"),
-        (50, "l"),
-        (40, "xl"),
-        (10, "x"),
-        (9, "ix"),
-        (5, "v"),
-        (4, "iv"),
-        (1, "i"),
-    ];
-    let mut value = value.max(1);
-    let mut out = String::new();
-    for (amount, numeral) in NUMERALS {
-        while value >= amount {
-            out.push_str(numeral);
-            value -= amount;
-        }
-    }
-    if upper { out.to_uppercase() } else { out }
+    let typeface = if typeface.starts_with('+') {
+        resolve_theme_font_ref(Some(theme), typeface)
+    } else {
+        typeface.clone()
+    };
+    let Some(font) = ooxml_text::SymbolFont::named(&typeface) else {
+        return marker.to_owned();
+    };
+    marker
+        .chars()
+        .map(|character| font.substitute(character).unwrap_or(character))
+        .collect()
 }
 
 fn normalize_family(value: &str) -> String {
@@ -3960,6 +5370,24 @@ fn points_to_px(value: f32) -> f32 {
 
 fn emu_to_px(value: i64) -> f32 {
     safe_geometry(value as f32 / EMU_PER_CSS_PIXEL)
+}
+
+/// A slide's page box is a whole number of points, the unit PowerPoint
+/// exports and prints it in, so the extent snaps there before the px scale.
+/// a slide is white paper, so a background the deck made fully transparent is
+/// not a hole onto whatever is behind it.
+fn is_invisible(paint: &Paint) -> bool {
+    fn clear(color: &str) -> bool {
+        color.len() == 9 && color.as_bytes()[7..] == *b"00"
+    }
+    match paint {
+        Paint::Solid { color } => clear(color),
+        Paint::Gradient { stops, .. } => !stops.is_empty() && stops.iter().all(|s| clear(&s.color)),
+    }
+}
+
+fn slide_extent_px(value: i64) -> f32 {
+    safe_geometry(((value as f64 / EMU_PER_POINT).round() * CSS_PIXELS_PER_POINT) as f32)
 }
 
 fn safe_geometry(value: f32) -> f32 {
@@ -3991,6 +5419,8 @@ mod tests {
     const NUMBERED_FIXTURE: &[u8] =
         include_bytes!("../../pptx-parse/tests/fixtures/slide-number-fields.pptx");
     const STYLE_FIXTURE: &[u8] = include_bytes!("../../pptx-parse/tests/fixtures/shape-style.pptx");
+    const STYLE_MATRIX_FIXTURE: &[u8] =
+        include_bytes!("../../pptx-parse/tests/fixtures/style-matrix-deck.pptx");
     const HIDDEN_FIXTURE: &[u8] =
         include_bytes!("../../pptx-edit/tests/fixtures/hidden-shapes.pptx");
     const V2_UPDATE: &[u8] =
@@ -4002,6 +5432,22 @@ mod tests {
         include_bytes!("../../../packages/fonts/assets/LiberationSans-Italic.ttf");
     const BOLD_ITALIC_FONT: &[u8] =
         include_bytes!("../../../packages/fonts/assets/LiberationSans-BoldItalic.ttf");
+
+    #[test]
+    fn a_slide_extent_matches_the_page_powerpoint_exports() {
+        let page_px = |emu| (f64::from(slide_extent_px(emu)) * 150.0 / 96.0).ceil() as u32;
+        for (emu, px, dots) in [
+            (12_192_000, 1280.0, 2000),
+            (6_858_000, 720.0, 1125),
+            (10_691_813, 1122.6666, 1755),
+            (7_559_675, 793.3333, 1240),
+            (7_556_500, 793.3333, 1240),
+            (10_693_400, 1122.6666, 1755),
+        ] {
+            assert!((slide_extent_px(emu) - px).abs() < 0.001, "{emu}");
+            assert_eq!(page_px(emu), dots, "{emu}");
+        }
+    }
 
     #[test]
     fn a_source_crop_converts_to_fractions_and_refuses_what_cannot_be_drawn() {
@@ -4068,9 +5514,9 @@ mod tests {
             w: 100.0,
             h: 50.0,
         };
-        assert!(picture_mask(&picture, rect).is_none());
+        assert!(picture_mask(&picture, rect).path.is_none());
         picture.geometry = "ellipse".to_owned();
-        let path = picture_mask(&picture, rect).unwrap();
+        let path = picture_mask(&picture, rect).path.unwrap();
         assert_eq!(path.len(), 6);
         assert_eq!(
             path[0],
@@ -4191,149 +5637,123 @@ mod tests {
     }
 
     #[test]
-    fn autonumbering_counts_per_level_and_resumes_across_other_levels() {
-        let mut counters = [0_u32; 9];
-        let number = |level, counters: &mut [u32; 9]| {
-            resolve_marker(
-                Some(&Bullet::AutoNumber {
-                    scheme: "arabicPeriod".to_owned(),
-                    start_at: 1,
-                    restart: false,
-                }),
-                level,
-                counters,
-            )
-        };
-        let dash = |level, counters: &mut [u32; 9]| {
-            resolve_marker(
-                Some(&Bullet::Character {
-                    value: "-".to_owned(),
-                }),
-                level,
-                counters,
-            )
-        };
-        assert_eq!(number(0, &mut counters).as_deref(), Some("1."));
-        assert_eq!(dash(1, &mut counters).as_deref(), Some("-"));
-        assert_eq!(dash(1, &mut counters).as_deref(), Some("-"));
-        assert_eq!(number(0, &mut counters).as_deref(), Some("2."));
-        assert_eq!(number(0, &mut counters).as_deref(), Some("3."));
-        assert_eq!(number(1, &mut counters).as_deref(), Some("1."));
-        assert_eq!(number(1, &mut counters).as_deref(), Some("2."));
-        assert_eq!(number(0, &mut counters).as_deref(), Some("4."));
-        assert_eq!(number(1, &mut counters).as_deref(), Some("1."));
-        assert_eq!(resolve_marker(Some(&Bullet::None), 0, &mut counters), None);
+    fn a_character_its_face_cannot_draw_moves_to_a_fallback_that_can() {
+        let arabic: &[u8] =
+            include_bytes!("../../../packages/fonts/assets/NotoSansArabic-Regular.ttf");
+        let mut renderer = renderer();
+        let run = paragraph(
+            &renderer,
+            "l",
+            "Hello \u{645}\u{631}\u{62d}\u{628}\u{627} world",
+        )
+        .runs
+        .remove(0);
+        let mut unchanged = Vec::new();
+        renderer.split_by_coverage(
+            ResolvedRun {
+                text: run.text.clone(),
+                start: 3,
+                style: run.style.clone(),
+            },
+            &mut unchanged,
+        );
+        assert_eq!(unchanged.len(), 1, "no fallback registered, nothing moves");
+
+        renderer
+            .register_fallback_font("Noto Sans Arabic", false, false, arabic)
+            .unwrap();
+        let mut pieces = Vec::new();
+        renderer.split_by_coverage(
+            ResolvedRun {
+                text: run.text.clone(),
+                start: 3,
+                style: run.style.clone(),
+            },
+            &mut pieces,
+        );
+        let parts: Vec<(&str, u32, &str)> = pieces
+            .iter()
+            .map(|piece| {
+                (
+                    piece.text.as_str(),
+                    piece.start,
+                    piece.style.family.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            parts,
+            [
+                ("Hello ", 3, "Arial"),
+                (
+                    "\u{645}\u{631}\u{62d}\u{628}\u{627} ",
+                    9,
+                    "Noto Sans Arabic"
+                ),
+                ("world", 15, "Arial"),
+            ]
+        );
+        assert_eq!(pieces[1].style.face.line_id, run.style.face.id);
+        assert_ne!(pieces[1].style.face.id, run.style.face.id);
     }
 
     #[test]
-    fn inherited_autonumber_start_at_applies_only_to_the_first_item() {
-        let mut counters = [0_u32; 9];
-        let number = |counters: &mut [u32; 9]| {
-            resolve_marker(
-                Some(&Bullet::AutoNumber {
-                    scheme: "arabicPeriod".to_owned(),
-                    start_at: 7,
-                    restart: false,
-                }),
-                0,
-                counters,
-            )
+    fn a_chart_label_draws_what_its_face_lacks_in_a_fallback() {
+        let arabic: &[u8] =
+            include_bytes!("../../../packages/fonts/assets/NotoSansArabic-Regular.ttf");
+        let mut renderer = renderer();
+        renderer
+            .register_fallback_font("Noto Sans Arabic", false, false, arabic)
+            .unwrap();
+        let label = "Sales \u{645}\u{628}\u{64a}\u{639}\u{627}\u{62a}";
+        let primitive = chart_text_primitive(
+            &renderer,
+            &Theme::default(),
+            "chart:1",
+            ChartText {
+                object_id: 1,
+                text: label,
+                x: 10.0,
+                baseline_y: 40.0,
+                width: 200.0,
+                font: ooxml_drawingml::chart::PlotFont {
+                    weight: 400,
+                    size_px: 14.0,
+                    family: "Arial".to_owned(),
+                    italic: false,
+                    letter_spacing_px: 2.0,
+                },
+                color: "#000000",
+                align: PlotTextAlign::Start,
+                rotation_deg: 0.0,
+            },
+            &mut SubstitutionLog::default(),
+        )
+        .unwrap();
+        let Primitive::TextBox { lines, .. } = primitive else {
+            panic!("a text box");
         };
-        assert_eq!(number(&mut counters).as_deref(), Some("7."));
-        assert_eq!(number(&mut counters).as_deref(), Some("8."));
-        let mut counters = [0; 9];
-        let last_start = Bullet::AutoNumber {
-            scheme: "arabicPeriod".to_owned(),
-            start_at: 32_767,
-            restart: false,
-        };
+        for run in &lines[0].runs {
+            assert_eq!(run.x, run.glyphs[0].x, "a run starts at its first glyph");
+        }
+        let runs: Vec<(&str, &str)> = lines[0]
+            .runs
+            .iter()
+            .map(|run| (run.text.as_str(), run.font_family.as_str()))
+            .collect();
         assert_eq!(
-            resolve_marker(Some(&last_start), 0, &mut counters).as_deref(),
-            Some("32767.")
+            runs,
+            [
+                ("Sales ", "Arial"),
+                (
+                    "\u{645}\u{628}\u{64a}\u{639}\u{627}\u{62a}",
+                    "Noto Sans Arabic"
+                ),
+            ]
         );
-        assert_eq!(
-            resolve_marker(Some(&last_start), 0, &mut counters).as_deref(),
-            Some("32768.")
-        );
-    }
-
-    #[test]
-    fn autonumber_schemes_format_their_numeral_and_suffix() {
-        assert_eq!(format_autonum(4, "arabicPeriod"), "4.");
-        assert_eq!(format_autonum(4, "arabicParenR"), "4)");
-        assert_eq!(format_autonum(4, "arabicParenBoth"), "(4)");
-        assert_eq!(format_autonum(4, "arabicPlain"), "4");
-        assert_eq!(format_autonum(1, "alphaLcParenR"), "a)");
-        assert_eq!(format_autonum(27, "alphaUcPeriod"), "AA.");
-        assert_eq!(format_autonum(9, "romanLcPeriod"), "ix.");
-        assert_eq!(format_autonum(2024, "romanUcPeriod"), "MMXXIV.");
-        assert_eq!(format_autonum(3, "somethingElse"), "3.");
-        assert_eq!(format_autonum(3, "somethingElsePlain"), "3.");
-        assert_eq!(format_autonum(3, "somethingElseParenBoth"), "3.");
-    }
-
-    #[test]
-    fn autonumber_sequences_restart_after_plain_paragraphs_and_explicit_starts() {
-        let mut counters = [0; 9];
-        let number = Bullet::AutoNumber {
-            scheme: "arabicPeriod".to_owned(),
-            start_at: 1,
-            restart: false,
-        };
-        let restart = Bullet::AutoNumber {
-            scheme: "arabicPeriod".to_owned(),
-            start_at: 7,
-            restart: true,
-        };
-        assert_eq!(
-            resolve_marker(Some(&number), 0, &mut counters).as_deref(),
-            Some("1.")
-        );
-        assert_eq!(
-            resolve_marker(Some(&restart), 0, &mut counters).as_deref(),
-            Some("7.")
-        );
-        assert_eq!(
-            resolve_marker(Some(&number), 0, &mut counters).as_deref(),
-            Some("8.")
-        );
-        assert_eq!(resolve_marker(None, 0, &mut counters), None);
-        assert_eq!(
-            resolve_marker(Some(&number), 0, &mut counters).as_deref(),
-            Some("1.")
-        );
-        assert_eq!(
-            resolve_marker(Some(&number), 1, &mut counters).as_deref(),
-            Some("1.")
-        );
-        assert_eq!(
-            resolve_marker(
-                Some(&Bullet::Character {
-                    value: "•".to_owned()
-                }),
-                0,
-                &mut counters
-            )
-            .as_deref(),
-            Some("•")
-        );
-        assert_eq!(
-            resolve_marker(Some(&number), 1, &mut counters).as_deref(),
-            Some("1.")
-        );
-        assert_eq!(
-            resolve_marker(Some(&number), 0, &mut counters).as_deref(),
-            Some("1.")
-        );
-    }
-
-    #[test]
-    fn autonumber_roman_markers_bound_untrusted_start_values() {
-        assert_eq!(format_autonum(0, "arabicPeriod"), "1.");
-        assert_eq!(format_autonum(u32::MAX, "romanUcPeriod").len(), 61);
-        assert_eq!(
-            format_autonum(u32::MAX, "romanUcPeriod"),
-            format!("{}DCCLXVII.", "M".repeat(52))
+        assert!(
+            (lines[0].runs[1].x - (lines[0].runs[0].x + lines[0].runs[0].width + 2.0)).abs() < 0.01,
+            "the tracked gap sits between the pieces"
         );
     }
 
@@ -4343,6 +5763,284 @@ mod tests {
             renderer.register_font("Arial", bold, false, FONT).unwrap();
         }
         renderer
+    }
+
+    fn tabbed(
+        renderer: &SlideRenderer,
+        text: &str,
+        stops: Vec<f32>,
+        default_px: f32,
+    ) -> ResolvedParagraph {
+        let mut paragraph = paragraph(renderer, "l", text);
+        paragraph.tab_stops = stops;
+        paragraph.default_tab_px = default_px;
+        paragraph
+    }
+
+    fn glyph_positions(lines: &[PositionedTextLine]) -> Vec<f32> {
+        lines
+            .iter()
+            .flat_map(|line| line.runs.iter())
+            .flat_map(|run| run.glyphs.iter())
+            .map(|glyph| glyph.x)
+            .collect()
+    }
+
+    #[test]
+    fn an_unmarked_hanging_indent_starts_its_first_line_at_the_indent() {
+        let renderer = renderer();
+        let mut paragraph = paragraph(&renderer, "l", "one two three four five six seven");
+        paragraph.margin_left_px = 30.0;
+        paragraph.indent_px = -30.0;
+        let lines = layout_paragraph(
+            &renderer.fonts,
+            &paragraph,
+            30.0,
+            0.0,
+            120.0,
+            1.0,
+            false,
+            true,
+        )
+        .unwrap();
+        assert!((lines[0].x - 0.0).abs() < 0.01, "{:?}", lines[0].x);
+        assert!((lines[1].x - 30.0).abs() < 0.01, "{:?}", lines[1].x);
+        assert!(lines[0].width > lines[1].width, "the first line is wider");
+    }
+
+    #[test]
+    fn a_body_that_does_not_wrap_keeps_its_paragraph_on_one_line() {
+        let renderer = renderer();
+        let paragraph = paragraph(&renderer, "l", "one two three four five six seven eight");
+        let wrapped = layout_paragraph(
+            &renderer.fonts,
+            &paragraph,
+            0.0,
+            0.0,
+            120.0,
+            1.0,
+            false,
+            true,
+        )
+        .unwrap();
+        let flat = layout_paragraph(
+            &renderer.fonts,
+            &paragraph,
+            0.0,
+            0.0,
+            120.0,
+            1.0,
+            false,
+            false,
+        )
+        .unwrap();
+        assert!(wrapped.len() > 1, "{}", wrapped.len());
+        assert_eq!(flat.len(), 1);
+        assert!(flat[0].width > 120.0, "the line runs past the shape");
+    }
+
+    #[test]
+    fn a_bitmap_reports_the_resolution_it_declares() {
+        let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
+        jpeg.extend(b"JFIF\0");
+        jpeg.extend([0x01, 0x02, 0x01, 0x00, 0x4B, 0x00, 0x4B, 0x00, 0x00]);
+        assert_eq!(image_dpi(&jpeg), Some(75.0));
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        png.extend(9_u32.to_be_bytes());
+        png.extend(b"pHYs");
+        png.extend(2835_u32.to_be_bytes());
+        png.extend(2835_u32.to_be_bytes());
+        png.push(1);
+        png.extend([0, 0, 0, 0]);
+        assert_eq!(image_dpi(&png).map(|dpi| dpi.round()), Some(72.0));
+        assert_eq!(image_dpi(b"not an image"), None);
+    }
+
+    #[test]
+    fn a_rounded_box_and_an_ellipse_hold_their_text_inside_the_curve() {
+        let frame = PxRect {
+            x: 10.0,
+            y: 20.0,
+            w: 400.0,
+            h: 200.0,
+        };
+        assert_eq!(preset_text_inset("rect", None, frame.w, frame.h), None);
+        let (x, y) = preset_text_inset("roundRect", None, frame.w, frame.h).unwrap();
+        assert!((x - 9.76).abs() < 0.05, "{x}");
+        assert!((x - y).abs() < 1e-3);
+        let (x, y) = preset_text_inset("ellipse", None, frame.w, frame.h).unwrap();
+        assert!((x - 58.58).abs() < 0.05, "{x}");
+        assert!((y - 29.29).abs() < 0.05, "{y}");
+    }
+
+    #[test]
+    fn a_tab_advances_to_the_next_default_stop_without_painting_a_glyph() {
+        let renderer = renderer();
+        let paragraph = tabbed(&renderer, "A\tB", Vec::new(), 96.0);
+        let lines = layout_paragraph(
+            &renderer.fonts,
+            &paragraph,
+            0.0,
+            0.0,
+            1_000.0,
+            1.0,
+            false,
+            true,
+        )
+        .unwrap();
+        let positions = glyph_positions(&lines);
+        assert_eq!(positions.len(), 2, "the tab paints nothing");
+        assert!(positions[0].abs() < 0.01, "{positions:?}");
+        assert!((positions[1] - 96.0).abs() < 0.01, "{positions:?}");
+    }
+
+    #[test]
+    fn a_declared_stop_wins_over_the_default_pitch() {
+        let renderer = renderer();
+        let paragraph = tabbed(&renderer, "A\tB", vec![40.0, 300.0], 96.0);
+        let lines = layout_paragraph(
+            &renderer.fonts,
+            &paragraph,
+            0.0,
+            0.0,
+            1_000.0,
+            1.0,
+            false,
+            true,
+        )
+        .unwrap();
+        let positions = glyph_positions(&lines);
+        assert!((positions[1] - 40.0).abs() < 0.01, "{positions:?}");
+    }
+
+    #[test]
+    fn the_left_margin_offsets_the_stop_a_tab_reaches() {
+        let renderer = renderer();
+        let mut paragraph = tabbed(&renderer, "A\tB", vec![40.0, 200.0], 96.0);
+        paragraph.margin_left_px = 50.0;
+        let lines = layout_paragraph(
+            &renderer.fonts,
+            &paragraph,
+            50.0,
+            0.0,
+            950.0,
+            1.0,
+            false,
+            true,
+        )
+        .unwrap();
+        let positions = glyph_positions(&lines);
+        assert!((positions[1] - 200.0).abs() < 0.01, "{positions:?}");
+    }
+
+    #[test]
+    fn a_tab_never_reaches_past_the_line() {
+        let renderer = renderer();
+        let paragraph = tabbed(&renderer, "A\tB", Vec::new(), 96.0);
+        let lines = layout_paragraph(
+            &renderer.fonts,
+            &paragraph,
+            0.0,
+            0.0,
+            40.0,
+            1.0,
+            false,
+            true,
+        )
+        .unwrap();
+        for line in &lines {
+            assert!(line.width <= 40.01, "{}", line.width);
+        }
+    }
+
+    #[test]
+    fn a_leading_tab_in_a_hanging_indent_lands_on_the_margin_the_line_already_starts_at() {
+        let renderer = renderer();
+        let mut paragraph = tabbed(&renderer, "\tItem", Vec::new(), 96.0);
+        paragraph.margin_left_px = 30.0;
+        paragraph.indent_px = -30.0;
+        paragraph.tab_stops = resolve_tab_stops(None, 285_750, -285_750);
+        let lines = layout_paragraph(
+            &renderer.fonts,
+            &paragraph,
+            30.0,
+            0.0,
+            300.0,
+            1.0,
+            false,
+            true,
+        )
+        .unwrap();
+        let positions = glyph_positions(&lines);
+        assert!((positions[0] - 30.0).abs() < 0.01, "{positions:?}");
+    }
+
+    #[test]
+    fn only_the_first_tab_of_a_hanging_paragraph_measures_from_the_hanging_position() {
+        let renderer = renderer();
+        let mut paragraph = tabbed(&renderer, "\tItem\tNote", Vec::new(), 96.0);
+        paragraph.margin_left_px = 30.0;
+        paragraph.indent_px = -30.0;
+        paragraph.tab_stops = resolve_tab_stops(None, 285_750, -285_750);
+        let lines = layout_paragraph(
+            &renderer.fonts,
+            &paragraph,
+            30.0,
+            0.0,
+            400.0,
+            1.0,
+            false,
+            true,
+        )
+        .unwrap();
+        let positions = glyph_positions(&lines);
+        assert!((positions[0] - 30.0).abs() < 0.01, "{positions:?}");
+        assert!((positions[4] - 96.0).abs() < 0.01, "{positions:?}");
+    }
+
+    #[test]
+    fn a_marker_leaves_no_hanging_space_for_a_tab_to_take() {
+        let renderer = renderer();
+        let mut paragraph = tabbed(&renderer, "\tItem", Vec::new(), 96.0);
+        paragraph.margin_left_px = 30.0;
+        paragraph.indent_px = -30.0;
+        paragraph.marker = Some("\u{2022}".to_owned());
+        paragraph.tab_stops = resolve_tab_stops(None, 285_750, -285_750);
+        let lines = layout_paragraph(
+            &renderer.fonts,
+            &paragraph,
+            30.0,
+            0.0,
+            300.0,
+            1.0,
+            false,
+            true,
+        )
+        .unwrap();
+        let text = lines[0]
+            .runs
+            .iter()
+            .find(|run| run.text.contains("Item"))
+            .unwrap();
+        assert!(
+            (text.glyphs[0].x - 96.0).abs() < 0.01,
+            "{}",
+            text.glyphs[0].x
+        );
+    }
+
+    #[test]
+    fn tab_advance_bounds_a_hostile_pitch_and_offset() {
+        assert_eq!(tab_advance(0.0, 0.0, &[], 96.0, 1_000.0), 96.0);
+        assert_eq!(tab_advance(96.0, 96.0, &[], 96.0, 1_000.0), 96.0);
+        assert_eq!(tab_advance(1.0, 1.0, &[40.0], 96.0, 1_000.0), 39.0);
+        assert_eq!(tab_advance(10.0, 40.0, &[30.0], 96.0, 1_000.0), 0.0);
+        assert_eq!(tab_advance(f32::NAN, 0.0, &[], 96.0, 1_000.0), 0.0);
+        assert_eq!(tab_advance(0.0, f32::NAN, &[], 96.0, 1_000.0), 0.0);
+        assert_eq!(tab_advance(0.0, 0.0, &[], 96.0, f32::NAN), 0.0);
+        assert!((0.0..=10.0).contains(&tab_advance(f32::MAX, f32::MAX, &[], 96.0, 10.0)));
+        assert_eq!(resolve_default_tab(Some(0)), 96.0);
+        assert_eq!(resolve_default_tab(Some(-914_400)), 96.0);
     }
 
     fn justify(widths: &[(f32, bool, bool)]) -> Vec<JustifyCluster> {
@@ -4356,8 +6054,37 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn the_layout_cache_key_changes_with_every_input_layout_reads() {
+        let renderer = renderer();
+        let rect = PxRect {
+            x: 0.0,
+            y: 0.0,
+            w: 200.0,
+            h: 100.0,
+        };
+        let content = |space_first_last_para| ResolvedContent {
+            paragraphs: vec![paragraph(&renderer, "l", "Text")],
+            space_first_last_para,
+        };
+        let key = |content: &ResolvedContent| text_layout_key(content, rect, 1.0, false, true);
+        let base = key(&content(false));
+        assert_ne!(base, key(&content(true)));
+        let mut changed = content(false);
+        changed.paragraphs[0].tab_stops = vec![40.0];
+        assert_ne!(base, key(&changed));
+        let mut changed = content(false);
+        changed.paragraphs[0].default_tab_px = 48.0;
+        assert_ne!(base, key(&changed));
+        let mut changed = content(false);
+        changed.paragraphs[0].runs[0].style.line_font_size_pt = 24.0;
+        assert_ne!(base, key(&changed));
+    }
+
     fn paragraph(renderer: &SlideRenderer, alignment: &str, text: &str) -> ResolvedParagraph {
-        let face = renderer.resolve_face("Arial", false, false).unwrap();
+        let face = renderer
+            .resolve_face("Arial", false, false, &mut SubstitutionLog::default())
+            .unwrap();
         ResolvedParagraph {
             align: parse_align(Some(alignment)),
             justify: is_full_justification(Some(alignment)),
@@ -4367,10 +6094,13 @@ mod tests {
             line_spacing: None,
             space_before: None,
             space_after: None,
-            compat_line_spacing: false,
+            line_space_reduction: 0.0,
             indent_px: 0.0,
+            tab_stops: Vec::new(),
+            default_tab_px: resolve_default_tab(None),
             marker: None,
             bullet_style: None,
+            rtl: false,
             runs: vec![ResolvedRun {
                 text: text.to_owned(),
                 start: 0,
@@ -4378,12 +6108,14 @@ mod tests {
                     face,
                     family: "Arial".to_owned(),
                     font_size_pt: 18.0,
+                    line_font_size_pt: 18.0,
                     spacing_pt: 0.0,
                     baseline_shift_px: 0.0,
                     bold: false,
                     italic: false,
                     underline: false,
                     color: "#000000".to_owned(),
+                    caps: TextCaps::None,
                 },
             }],
         }
@@ -4452,13 +6184,13 @@ mod tests {
     #[test]
     fn justified_layout_stretches_non_last_lines_only() {
         let renderer = renderer();
-        let text = "alpha beta \t  gamma delta";
+        let text = "alpha beta    gamma delta";
         let justified = paragraph(&renderer, "just", text);
         let clusters = shape_paragraph(&renderer.fonts, &justified, 1.0).unwrap();
         let second_break = clusters
             .iter()
             .enumerate()
-            .find(|(_, cluster)| cluster.end == utf16_len("alpha beta \t  "))
+            .find(|(_, cluster)| cluster.end == utf16_len("alpha beta    "))
             .map(|(index, _)| index + 1)
             .unwrap();
         let prefix_width = clusters[..second_break]
@@ -4471,8 +6203,17 @@ mod tests {
             .take_while(|cluster| cluster_is_blank(cluster))
             .count();
         let width = prefix_width + clusters[second_break].width / 2.0;
-        let lines =
-            layout_paragraph(&renderer.fonts, &justified, 20.0, 30.0, width, 1.0, false).unwrap();
+        let lines = layout_paragraph(
+            &renderer.fonts,
+            &justified,
+            20.0,
+            30.0,
+            width,
+            1.0,
+            false,
+            true,
+        )
+        .unwrap();
         let natural = layout_paragraph(
             &renderer.fonts,
             &paragraph(&renderer, "justLow", text),
@@ -4481,6 +6222,7 @@ mod tests {
             width,
             1.0,
             false,
+            true,
         )
         .unwrap();
 
@@ -4599,15 +6341,19 @@ mod tests {
     fn adjacent_runs_keep_their_own_paint_attributes() {
         let renderer = renderer();
         let style = ResolvedStyle {
-            face: renderer.resolve_face("Arial", false, false).unwrap(),
+            face: renderer
+                .resolve_face("Arial", false, false, &mut SubstitutionLog::default())
+                .unwrap(),
             family: "Arial".to_owned(),
             font_size_pt: 14.0,
+            line_font_size_pt: 14.0,
             spacing_pt: 0.0,
             baseline_shift_px: 0.0,
             bold: false,
             italic: false,
             underline: false,
             color: "#000000".to_owned(),
+            caps: TextCaps::None,
         };
         let mut variants = vec![style.clone(); 7];
         variants[0].color = "#A99A72".to_owned();
@@ -4616,7 +6362,9 @@ mod tests {
         variants[3].underline = true;
         variants[4].font_size_pt = 28.0;
         variants[5].family = "Fallback".to_owned();
-        variants[6].face = renderer.resolve_face("Arial", true, false).unwrap();
+        variants[6].face = renderer
+            .resolve_face("Arial", true, false, &mut SubstitutionLog::default())
+            .unwrap();
         for changed in variants {
             let paragraph = ResolvedParagraph {
                 align: TextAlign::Left,
@@ -4627,10 +6375,13 @@ mod tests {
                 line_spacing: None,
                 space_before: None,
                 space_after: None,
-                compat_line_spacing: false,
+                line_space_reduction: 0.0,
                 indent_px: 0.0,
+                tab_stops: Vec::new(),
+                default_tab_px: resolve_default_tab(None),
                 marker: None,
                 bullet_style: None,
+                rtl: false,
                 runs: [style.clone(), changed.clone(), style.clone()]
                     .into_iter()
                     .enumerate()
@@ -4650,6 +6401,7 @@ mod tests {
                     10_000.0,
                     scale,
                     false,
+                    true,
                 )
                 .unwrap();
                 assert_eq!(lines.len(), 1);
@@ -4669,7 +6421,7 @@ mod tests {
                     assert_eq!(actual.font_family, expected.style.family);
                     assert_eq!(
                         actual.font_size_px,
-                        points_to_px(expected.style.font_size_pt * scale)
+                        points_to_px(autofit_size_pt(expected.style.font_size_pt, scale))
                     );
                 }
             }
@@ -4680,15 +6432,19 @@ mod tests {
     fn identical_adjacent_runs_keep_the_same_display_list() {
         let renderer = renderer();
         let style = ResolvedStyle {
-            face: renderer.resolve_face("Arial", false, false).unwrap(),
+            face: renderer
+                .resolve_face("Arial", false, false, &mut SubstitutionLog::default())
+                .unwrap(),
             family: "Arial".to_owned(),
             font_size_pt: 14.0,
+            line_font_size_pt: 14.0,
             spacing_pt: 0.0,
             baseline_shift_px: 0.0,
             bold: false,
             italic: false,
             underline: true,
             color: "#A99A72".to_owned(),
+            caps: TextCaps::None,
         };
         let paragraph = |parts: &[&str]| {
             let mut start = 0;
@@ -4701,10 +6457,13 @@ mod tests {
                 line_spacing: None,
                 space_before: None,
                 space_after: None,
-                compat_line_spacing: false,
+                line_space_reduction: 0.0,
                 indent_px: 0.0,
+                tab_stops: Vec::new(),
+                default_tab_px: resolve_default_tab(None),
                 marker: None,
                 bullet_style: None,
+                rtl: false,
                 runs: parts
                     .iter()
                     .map(|text| {
@@ -4723,7 +6482,17 @@ mod tests {
         let joined = paragraph(&["alpha beta gamma delta"]);
         for width in [100.0, 10_000.0] {
             let render = |paragraph| {
-                layout_paragraph(&renderer.fonts, paragraph, 10.0, 20.0, width, 1.0, false).unwrap()
+                layout_paragraph(
+                    &renderer.fonts,
+                    paragraph,
+                    10.0,
+                    20.0,
+                    width,
+                    1.0,
+                    false,
+                    true,
+                )
+                .unwrap()
             };
             assert_eq!(render(&split), render(&joined));
         }
@@ -4741,15 +6510,19 @@ mod tests {
             )
             .unwrap();
         let style = ResolvedStyle {
-            face: renderer.resolve_face("Arial", false, false).unwrap(),
+            face: renderer
+                .resolve_face("Arial", false, false, &mut SubstitutionLog::default())
+                .unwrap(),
             family: "Arial".to_owned(),
             font_size_pt: 24.0,
+            line_font_size_pt: 24.0,
             spacing_pt: 0.0,
             baseline_shift_px: 0.0,
             bold: false,
             italic: false,
             underline: false,
             color: "#000000".to_owned(),
+            caps: TextCaps::None,
         };
         let stack = |text: &str| {
             let paragraph = ResolvedParagraph {
@@ -4761,26 +6534,38 @@ mod tests {
                 space_before: None,
                 space_after: None,
                 line_spacing: None,
-                compat_line_spacing: false,
+                line_space_reduction: 0.0,
                 indent_px: 0.0,
+                tab_stops: Vec::new(),
+                default_tab_px: resolve_default_tab(None),
                 marker: None,
                 bullet_style: None,
+                rtl: false,
                 runs: vec![ResolvedRun {
                     text: text.to_owned(),
                     start: 0,
                     style: style.clone(),
                 }],
             };
-            layout_paragraph(&renderer.fonts, &paragraph, 0.0, 0.0, 1000.0, 1.0, true)
-                .unwrap()
-                .iter()
-                .map(|line| {
-                    line.runs
-                        .iter()
-                        .map(|run| run.text.clone())
-                        .collect::<String>()
-                })
-                .collect::<Vec<_>>()
+            layout_paragraph(
+                &renderer.fonts,
+                &paragraph,
+                0.0,
+                0.0,
+                1000.0,
+                1.0,
+                true,
+                true,
+            )
+            .unwrap()
+            .iter()
+            .map(|line| {
+                line.runs
+                    .iter()
+                    .map(|run| run.text.clone())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
         };
 
         assert_eq!(stack("A\nB"), ["A", "B"]);
@@ -4790,7 +6575,7 @@ mod tests {
 
     #[test]
     fn gradient_stops_reach_the_display_list_in_position_order() {
-        use ooxml_drawingml::{ColorValue, GradientFill, GradientStop as ModelStop};
+        use ooxml_drawingml::{ColorValue, GradientStop as ModelStop};
 
         let stop = |position, rgb: &str, alpha| ModelStop {
             position,
@@ -4816,7 +6601,7 @@ mod tests {
                 let fill = ShapeFill {
                     fill_type: "gradient".to_owned(),
                     color: None,
-                    gradient: Some(GradientFill {
+                    gradient: Some(ooxml_drawingml::GradientFill {
                         gradient_type: kind.to_owned(),
                         angle: Some(45.0),
                         stops: indices.map(|index| ordered[index].clone()).to_vec(),
@@ -4873,7 +6658,9 @@ mod tests {
             .register_font("Arial", true, false, BOLD_FONT)
             .unwrap();
 
-        let resolved = renderer.resolve_face("Segoe UI", true, false).unwrap();
+        let resolved = renderer
+            .resolve_face("Segoe UI", true, false, &mut SubstitutionLog::default())
+            .unwrap();
         assert_eq!(resolved.id.to_u32(), bold);
         assert_eq!(renderer.fonts.font_bytes(resolved.id).unwrap(), BOLD_FONT);
     }
@@ -4886,7 +6673,9 @@ mod tests {
             .register_font("Arial", false, true, ITALIC_FONT)
             .unwrap();
 
-        let resolved = renderer.resolve_face("Segoe UI", false, true).unwrap();
+        let resolved = renderer
+            .resolve_face("Segoe UI", false, true, &mut SubstitutionLog::default())
+            .unwrap();
         assert_eq!(resolved.id.to_u32(), italic);
         assert_eq!(renderer.fonts.font_bytes(resolved.id).unwrap(), ITALIC_FONT);
     }
@@ -4908,9 +6697,13 @@ mod tests {
             .register_font("Georgia", false, false, FONT)
             .unwrap();
 
-        let resolved = renderer.resolve_face(" geORGia ", true, true).unwrap();
+        let resolved = renderer
+            .resolve_face(" geORGia ", true, true, &mut SubstitutionLog::default())
+            .unwrap();
         assert_eq!(resolved.id.to_u32(), georgia);
-        let resolved = renderer.resolve_face("Segoe UI", true, true).unwrap();
+        let resolved = renderer
+            .resolve_face("Segoe UI", true, true, &mut SubstitutionLog::default())
+            .unwrap();
         assert_eq!(resolved.id.to_u32(), bold_italic);
         assert_eq!(renderer.fallback_font().unwrap().to_u32(), regular);
     }
@@ -4947,7 +6740,12 @@ mod tests {
         }
 
         assert!(matches!(
-            SlideRenderer::new().resolve_face("Segoe UI", false, false),
+            SlideRenderer::new().resolve_face(
+                "Segoe UI",
+                false,
+                false,
+                &mut SubstitutionLog::default()
+            ),
             Err(RenderError::NoFont)
         ));
         let package = pptx_parse::parse_pptx(FIXTURE).unwrap();
@@ -4969,7 +6767,10 @@ mod tests {
                     .register_font("Arial", bold, italic, bytes)
                     .unwrap();
             }
-            let bold_id = renderer.resolve_face("Arial", true, false).unwrap().id;
+            let bold_id = renderer
+                .resolve_face("Arial", true, false, &mut SubstitutionLog::default())
+                .unwrap()
+                .id;
             let mut slides = Vec::new();
             for index in 0..snapshot.slides.len() {
                 let mut rendered = renderer.layout_slide(&package, &snapshot, index).unwrap();
@@ -4987,7 +6788,9 @@ mod tests {
                 (false, true, ITALIC_FONT),
                 (true, true, BOLD_FONT),
             ] {
-                let resolved = renderer.resolve_face("Segoe UI", bold, italic).unwrap();
+                let resolved = renderer
+                    .resolve_face("Segoe UI", bold, italic, &mut SubstitutionLog::default())
+                    .unwrap();
                 assert!(
                     renderer.fonts.font_bytes(resolved.id).unwrap() == expected,
                     "wrong fallback for bold={bold}, italic={italic}"
@@ -5392,6 +7195,241 @@ mod tests {
     }
 
     #[test]
+    fn a_placeholder_without_a_transform_draws_with_the_orientation_it_inherits() {
+        let mut package = pptx_parse::parse_pptx(STYLE_MATRIX_FIXTURE).unwrap();
+        let session = DeckSession::open(STYLE_MATRIX_FIXTURE, 8_320).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let title = snapshot.slides[1].shapes[0].id.clone();
+        let layout = package
+            .layouts
+            .iter_mut()
+            .find(|layout| layout.part_path == "ppt/slideLayouts/slideLayout2.xml")
+            .unwrap();
+        let ShapeNode::Shape(placeholder) = &mut layout.shapes[0] else {
+            panic!("the layout title is a shape")
+        };
+        placeholder.base.transform.rotation_deg = 30.0;
+        placeholder.base.transform.flip_v = true;
+
+        let rendered = renderer().layout_slide(&package, &snapshot, 1).unwrap();
+        assert_eq!(
+            drawn_transform(&rendered, &title),
+            Transform {
+                rotation_deg: 30.0,
+                flip_h: false,
+                flip_v: true,
+            }
+        );
+    }
+
+    fn drawn_transform(rendered: &RenderedSlide, shape_id: &str) -> Transform {
+        rendered
+            .display_list
+            .primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                Primitive::Shape {
+                    shape_id: Some(id),
+                    transform,
+                    ..
+                } if id == shape_id => Some(*transform),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{shape_id} was not drawn"))
+    }
+
+    #[test]
+    fn hiding_master_shapes_drops_the_layout_decoration_too() {
+        let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
+        let session = DeckSession::open(FIXTURE, 8_301).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        package.layouts[0]
+            .shapes
+            .push(package.slides[0].shapes[0].clone());
+        let shown = renderer().layout_slide(&package, &snapshot, 0).unwrap();
+        assert!(
+            painted_shape_ids(&shown)
+                .iter()
+                .any(|id| id.starts_with("layout:"))
+        );
+        package.slides[0].show_master_shapes = false;
+        let hidden = renderer().layout_slide(&package, &snapshot, 0).unwrap();
+        assert!(
+            painted_shape_ids(&hidden)
+                .iter()
+                .all(|id| !id.starts_with("layout:") && !id.starts_with("master:"))
+        );
+        assert_eq!(
+            hidden.display_list.background,
+            shown.display_list.background
+        );
+    }
+
+    #[test]
+    fn a_background_picture_paints_first_from_the_slide_or_the_theme() {
+        let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
+        let session = DeckSession::open(FIXTURE, 8_302).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let picture = PictureFill {
+            relationship_id: None,
+            media_part_path: Some("ppt/media/image1.png".to_owned()),
+            tile: None,
+            crop: PictureCrop::default(),
+            fill_rect: PictureCrop {
+                top: -6_000,
+                bottom: -6_000,
+                ..PictureCrop::default()
+            },
+        };
+        package.slides[0].background_picture = Some(Box::new(picture.clone()));
+        let rendered = renderer().layout_slide(&package, &snapshot, 0).unwrap();
+        let Primitive::Image {
+            object_id,
+            asset_id,
+            x,
+            y,
+            w,
+            h,
+            crop,
+            ..
+        } = &rendered.display_list.primitives[0]
+        else {
+            panic!("the background paints before every shape")
+        };
+        assert_eq!(*object_id, 0);
+        assert_eq!(asset_id.as_deref(), Some("ppt/media/image1.png"));
+        assert_eq!(
+            (*x, *y, *w, *h),
+            (
+                0.0,
+                0.0,
+                rendered.display_list.width,
+                rendered.display_list.height
+            )
+        );
+        assert!(crop.top > 0.0 && crop.bottom > 0.0);
+
+        package.slides[0].background_picture = None;
+        package.slides[0].background = None;
+        package.slides[0].background_reference = Some(StyleReference {
+            index: 1_003,
+            color: None,
+        });
+        package.themes[0].background_pictures = vec![None, None, Some(picture)];
+        let referenced = renderer().layout_slide(&package, &snapshot, 0).unwrap();
+        assert_eq!(
+            referenced.display_list.primitives[0],
+            rendered.display_list.primitives[0]
+        );
+    }
+
+    /// a deck whose master fills the slide at alpha 0 still renders on paper.
+    #[test]
+    fn a_fully_transparent_background_renders_as_white_paper() {
+        let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
+        let session = DeckSession::open(FIXTURE, 8_311).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        package.slides[0].background_reference = None;
+        package.slides[0].background = Some(ShapeFill {
+            fill_type: "solid".to_owned(),
+            color: Some(ColorValue {
+                rgb: Some("123456".to_owned()),
+                alpha: Some(0.0),
+                ..ColorValue::default()
+            }),
+            gradient: None,
+        });
+        let rendered = renderer().layout_slide(&package, &snapshot, 0).unwrap();
+        assert_eq!(
+            rendered.display_list.background,
+            Some(Paint::Solid {
+                color: "#ffffff".to_owned()
+            })
+        );
+    }
+
+    /// a gradient whose every stop is transparent is paper too, while one
+    /// visible stop keeps the gradient.
+    #[test]
+    fn a_gradient_paints_unless_every_stop_is_transparent() {
+        let clear = |alpha: f64| ColorValue {
+            rgb: Some("123456".to_owned()),
+            alpha: Some(alpha),
+            ..ColorValue::default()
+        };
+        let gradient = |stops: Vec<ColorValue>| ShapeFill {
+            fill_type: "gradient".to_owned(),
+            color: None,
+            gradient: Some(ooxml_drawingml::GradientFill {
+                gradient_type: "linear".to_owned(),
+                angle: None,
+                stops: stops
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, color)| ooxml_drawingml::GradientStop {
+                        position: index as f64,
+                        color,
+                    })
+                    .collect(),
+            }),
+        };
+        let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
+        let session = DeckSession::open(FIXTURE, 8_317).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        package.slides[0].background_reference = None;
+        package.slides[0].background = Some(gradient(vec![clear(0.0), clear(0.0)]));
+        assert_eq!(
+            renderer()
+                .layout_slide(&package, &snapshot, 0)
+                .unwrap()
+                .display_list
+                .background,
+            Some(Paint::Solid {
+                color: "#ffffff".to_owned()
+            })
+        );
+        package.slides[0].background = Some(gradient(vec![clear(0.0), clear(1.0)]));
+        assert!(matches!(
+            renderer()
+                .layout_slide(&package, &snapshot, 0)
+                .unwrap()
+                .display_list
+                .background,
+            Some(Paint::Gradient { .. })
+        ));
+    }
+
+    #[test]
+    fn an_unpaintable_background_style_keeps_the_reference_colour() {
+        let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
+        let session = DeckSession::open(FIXTURE, 8_303).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let color = ColorValue {
+            rgb: Some("123456".to_owned()),
+            ..ColorValue::default()
+        };
+        package.slides[0].background = Some(ShapeFill {
+            fill_type: "theme".to_owned(),
+            color: Some(color),
+            gradient: None,
+        });
+        package.slides[0].background_reference = Some(StyleReference {
+            index: 1_003,
+            color: None,
+        });
+        package.themes[0].format_scheme.background_fills =
+            vec![None, None, Some(ShapeFill::named("picture"))];
+        package.themes[0].background_pictures = Vec::new();
+        let rendered = renderer().layout_slide(&package, &snapshot, 0).unwrap();
+        assert_eq!(
+            rendered.display_list.background,
+            Some(Paint::Solid {
+                color: "#123456".to_owned()
+            })
+        );
+    }
+
+    #[test]
     fn seeded_hidden_shapes_are_neither_painted_nor_hit_testable() {
         let package = pptx_parse::parse_pptx(HIDDEN_FIXTURE).unwrap();
         let session = DeckSession::open(HIDDEN_FIXTURE, 8_103).unwrap();
@@ -5530,6 +7568,7 @@ mod tests {
                 background: None,
                 primitives: Vec::new(),
             },
+            font_substitutions: Vec::new(),
             hit_regions: vec![HitRegion {
                 shape_id: "rotated".to_owned(),
                 rect: PxRect {
@@ -5580,6 +7619,7 @@ mod tests {
                 background: None,
                 primitives: Vec::new(),
             },
+            font_substitutions: Vec::new(),
             hit_regions: vec![HitRegion {
                 shape_id: "mirrored".to_owned(),
                 rect: PxRect {
@@ -5669,6 +7709,7 @@ mod tests {
                 background: None,
                 primitives: Vec::new(),
             },
+            font_substitutions: Vec::new(),
             hit_regions: vec![HitRegion {
                 shape_id: "sideways".to_owned(),
                 hit_rect: rect,
@@ -5800,6 +7841,7 @@ mod tests {
         package.masters[0]
             .shapes
             .push(ShapeNode::Shape(pptx_parse::Shape {
+                has_preset_geometry: true,
                 effects: None,
                 base: pptx_parse::ShapeBase {
                     id: 9_001,
@@ -5819,9 +7861,11 @@ mod tests {
                 text: Some(TextBody {
                     vertical_overflow: None,
                     horizontal_overflow: None,
+                    wrap: None,
                     anchor: Some("ctr".to_owned()),
                     vertical: vertical.map(str::to_owned),
                     compat_line_spacing: None,
+                    space_first_last_para: None,
                     autofit: None,
                     inset_left: None,
                     inset_top: None,
@@ -6249,22 +8293,23 @@ mod tests {
             1_524_000,
             true,
         );
-        let (font_based, _) = wrapped_text_box(8_017, percent(0.8), None, 1_524_000, false);
+        let (no_compat, _) = wrapped_text_box(8_017, percent(0.8), None, 1_524_000, false);
+        let (tighter, _) = wrapped_text_box(8_018, percent(0.6), None, 1_524_000, true);
         let pitch = |lines: &[PositionedTextLine]| {
             assert!(lines.len() > 1, "expected the text to wrap");
             lines[1].y - lines[0].y
         };
         let size_px = points_to_px(size_pt);
 
-        assert!((pitch(&single) - single[0].height).abs() < 0.01);
+        assert!((pitch(&single) - 1.2 * size_px).abs() < 0.05);
         assert!((pitch(&tight) - 0.8 * 1.2 * size_px).abs() < 0.05);
-        assert!((pitch(&font_based) - 0.8 * single[0].height).abs() < 0.05);
+        assert!((pitch(&no_compat) - pitch(&tight)).abs() < 0.05);
         assert!(pitch(&tight) < pitch(&single));
         assert!((pitch(&loose) - points_to_px(40.0)).abs() < 0.05);
 
-        let share = (tight[0].baseline - tight[0].y) / pitch(&tight);
-        let font_share = (single[0].baseline - single[0].y) / single[0].height;
-        assert!((share - font_share).abs() < 0.01);
+        let share =
+            |lines: &[PositionedTextLine]| (lines[0].baseline - lines[0].y) / lines[0].height;
+        assert!((share(&tight) - share(&tighter)).abs() < 0.01);
     }
 
     #[test]
@@ -6280,8 +8325,11 @@ mod tests {
         let pitch = lines[1].y - lines[0].y;
         assert!((pitch - 1.5 * 1.2 * points_to_px(size_pt)).abs() < 0.05);
 
+        // The room the spacing adds is split above and below the line, so a
+        // looser paragraph starts lower by half of what it added.
         let (single, _) = wrapped_text_box(8_016, None, None, 1_524_000, true);
-        assert!((lines[0].baseline - single[0].baseline).abs() < 0.001);
+        let added = (lines[0].height - single[0].height) / 2.0;
+        assert!((lines[0].baseline - single[0].baseline - added).abs() < 0.001);
     }
 
     #[test]
@@ -6295,8 +8343,17 @@ mod tests {
         };
         second.style.spacing_pt = 6.0;
         paragraph.runs.push(second);
-        let lines =
-            layout_paragraph(&renderer.fonts, &paragraph, 0.0, 0.0, 1000.0, 1.0, false).unwrap();
+        let lines = layout_paragraph(
+            &renderer.fonts,
+            &paragraph,
+            0.0,
+            0.0,
+            1000.0,
+            1.0,
+            false,
+            true,
+        )
+        .unwrap();
         assert_eq!(lines[0].runs.len(), 2);
         assert_eq!(lines[0].runs[0].letter_spacing_px, 0.0);
         assert_eq!(lines[0].runs[1].letter_spacing_px, 8.0);
@@ -6332,8 +8389,17 @@ mod tests {
         let renderer = renderer();
         let mut paragraph = paragraph(&renderer, "just", "AA BB CC AA BB CC");
         paragraph.runs[0].style.spacing_pt = 6.0;
-        let lines =
-            layout_paragraph(&renderer.fonts, &paragraph, 0.0, 0.0, 160.0, 1.0, false).unwrap();
+        let lines = layout_paragraph(
+            &renderer.fonts,
+            &paragraph,
+            0.0,
+            0.0,
+            160.0,
+            1.0,
+            false,
+            true,
+        )
+        .unwrap();
         assert!(lines.len() > 1);
         assert!((lines[0].width - 160.0).abs() < 0.001, "{}", lines[0].width);
     }
@@ -6343,8 +8409,17 @@ mod tests {
         let renderer = renderer();
         let mut paragraph = paragraph(&renderer, "ctr", "AA\nAA");
         paragraph.runs[0].style.spacing_pt = 6.0;
-        let lines =
-            layout_paragraph(&renderer.fonts, &paragraph, 0.0, 0.0, 1000.0, 1.0, false).unwrap();
+        let lines = layout_paragraph(
+            &renderer.fonts,
+            &paragraph,
+            0.0,
+            0.0,
+            1000.0,
+            1.0,
+            false,
+            true,
+        )
+        .unwrap();
         assert_eq!(lines.len(), 2);
         assert!((lines[0].width - lines[1].width).abs() < 0.001);
         assert!((lines[0].x - lines[1].x).abs() < 0.001);
@@ -6356,6 +8431,7 @@ mod tests {
             lines[1].width + 0.001,
             1.0,
             false,
+            true,
         )
         .unwrap();
         assert_eq!(tight.len(), 2);
@@ -6501,7 +8577,7 @@ mod tests {
     }
 
     #[test]
-    fn normal_autofit_scales_text_until_the_shape_height_is_respected() {
+    fn normal_autofit_steps_the_type_down_by_its_stored_scale() {
         let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
         let session = DeckSession::open(FIXTURE, 8_003).unwrap();
         let initial = session.snapshot().unwrap();
@@ -6573,7 +8649,21 @@ mod tests {
             panic!("expected text shape");
         };
         parsed.text.as_mut().unwrap().autofit = Some(TextAutofit::None);
-        assert!(scaled < font_size(&package));
+        let natural = font_size(&package);
+        assert!((scaled - natural).abs() < 0.001);
+        let ShapeNode::Shape(parsed) = package.slides[0]
+            .shapes
+            .iter_mut()
+            .find(|shape| shape.id() == source_id)
+            .unwrap()
+        else {
+            panic!("expected text shape");
+        };
+        parsed.text.as_mut().unwrap().autofit = Some(TextAutofit::Normal {
+            font_scale: Some(0.5),
+            line_space_reduction: None,
+        });
+        assert!((font_size(&package) - (natural * 0.5).round()).abs() < 0.001);
     }
 
     #[test]
@@ -6810,6 +8900,32 @@ mod tests {
         bytes
     }
 
+    /// `triangle_emf` with the left-top quarter of the frame selected as the
+    /// clip path before the fill.
+    fn clipped_triangle_emf() -> Vec<u8> {
+        let mut bytes = triangle_emf();
+        let record = |kind: u32, body: Vec<u8>| {
+            let mut out = kind.to_le_bytes().to_vec();
+            out.extend_from_slice(&((8 + body.len()) as u32).to_le_bytes());
+            out.extend(body);
+            out
+        };
+        let i32s =
+            |values: &[i32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_le_bytes()).collect() };
+        let mut polyline = i32s(&[0, 0, 0, 0, 4]);
+        for (x, y) in [(0i16, 0i16), (0, 50), (50, 50), (50, 0)] {
+            polyline.extend_from_slice(&x.to_le_bytes());
+            polyline.extend_from_slice(&y.to_le_bytes());
+        }
+        let mut clip = record(59, Vec::new());
+        clip.extend(record(27, i32s(&[0, 0])));
+        clip.extend(record(89, polyline));
+        clip.extend(record(60, Vec::new()));
+        clip.extend(record(67, i32s(&[5])));
+        bytes.splice(88..88, clip);
+        bytes
+    }
+
     /// The demo deck with one extra master picture pointing at `media`.
     fn deck_with_master_picture(media: Vec<u8>) -> (PptxPackage, DeckSnapshot) {
         deck_with_cropped_master_picture(media, PictureCrop::default())
@@ -6886,6 +9002,7 @@ mod tests {
                     h: 96.0,
                 },
             )
+            .path
             .unwrap();
             let rendered = renderer().layout_slide(&package, &snapshot, 0).unwrap();
             let shapes = rendered
@@ -6916,6 +9033,34 @@ mod tests {
             assert_eq!(*path, mask);
             assert!(fill.is_none());
             assert_eq!(stroke.color, "#0000FF");
+        }
+    }
+
+    #[test]
+    fn unsupported_picture_masks_report_fallbacks_for_bitmaps_and_metafiles() {
+        for media in [b"not a metafile".to_vec(), triangle_emf()] {
+            let (mut package, snapshot) = deck_with_master_picture(media);
+            let ShapeNode::Picture(picture) = package.masters[0].shapes.last_mut().unwrap() else {
+                panic!()
+            };
+            picture.geometry = "unknownPreset".into();
+            let rendered = renderer().layout_slide(&package, &snapshot, 0).unwrap();
+            let primitives: Vec<_> = rendered
+                .display_list
+                .primitives
+                .iter()
+                .filter(|p| match p {
+                    Primitive::Shape { name, .. } | Primitive::Image { name, .. } => name == "Logo",
+                    _ => false,
+                })
+                .collect();
+            assert!(!primitives.is_empty());
+            for primitive in primitives {
+                assert_eq!(
+                    serde_json::to_value(primitive).unwrap()["geometryFallback"],
+                    true
+                );
+            }
         }
     }
 
@@ -6994,6 +9139,34 @@ mod tests {
         assert_eq!(
             path[1],
             ooxml_drawingml::GeometryPathCommand::Line { x: 0.5, y: 0.0 }
+        );
+    }
+
+    #[test]
+    fn a_metafile_clip_narrows_the_shape_clip_to_the_clipped_region() {
+        let (package, snapshot) = deck_with_master_picture(clipped_triangle_emf());
+        let primitives = renderer()
+            .layout_slide(&package, &snapshot, 0)
+            .unwrap()
+            .display_list
+            .primitives;
+
+        let clip = primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                Primitive::Shape { name, clip, .. } if name == "Logo" => clip.clone(),
+                _ => None,
+            })
+            .expect("the clipped metafile paints");
+        assert_eq!(
+            clip,
+            vec![
+                ooxml_drawingml::GeometryPathCommand::Move { x: 0.0, y: 0.0 },
+                ooxml_drawingml::GeometryPathCommand::Line { x: 0.5, y: 0.0 },
+                ooxml_drawingml::GeometryPathCommand::Line { x: 0.5, y: 0.5 },
+                ooxml_drawingml::GeometryPathCommand::Line { x: 0.0, y: 0.5 },
+                ooxml_drawingml::GeometryPathCommand::Close,
+            ]
         );
     }
 
@@ -7217,8 +9390,16 @@ mod tests {
             orientation: None,
             size: None,
         };
-        assert!(placeholders_match(&indexed, &same_index));
-        assert!(placeholders_match(&centered_title, &title));
+        assert!(!indexed.matches(&same_index));
+        assert!(centered_title.matches(&title));
+        let slide_number = |index| Placeholder {
+            placeholder_type: Some("sldNum".to_owned()),
+            index: Some(index),
+            orientation: None,
+            size: None,
+        };
+        assert!(slide_number(12).matches(&slide_number(4)));
+        assert!(!slide_number(12).matches(&indexed));
 
         let snapshot = ShapeSnapshot {
             id: "placeholder".to_owned(),
@@ -7232,6 +9413,7 @@ mod tests {
             rotation_deg: 0.0,
             flip_h: false,
             flip_v: false,
+            inherited: None,
             hidden: false,
             geometry: "rect".to_owned(),
             adjust_values: BTreeMap::new(),
@@ -7241,12 +9423,14 @@ mod tests {
             outline: None,
             resolved_outline_color: None,
             media_part_path: None,
+            pending_media: None,
             blip_effects: Vec::new(),
             graphic: None,
             text_stories: Vec::new(),
             children: Vec::new(),
         };
         let layout_shape = ShapeNode::Shape(pptx_parse::Shape {
+            has_preset_geometry: true,
             style: None,
             paths: Vec::new(),
             base: pptx_parse::ShapeBase {
@@ -7510,5 +9694,224 @@ mod tests {
         let end = line_end(Some(&end("oval", Some("sm"), Some("lg"))), 1.0).unwrap();
         assert!((end.width - 5.291_339).abs() < 1e-6);
         assert!((end.length - 13.228_347).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_family_we_cannot_ship_lends_its_own_metrics_to_the_substitute() {
+        let mut renderer = SlideRenderer::new();
+        renderer
+            .register_font("Trebuchet MS", false, false, FONT)
+            .unwrap();
+        renderer.register_font("Arial", false, false, FONT).unwrap();
+        let substituted = renderer
+            .resolve_face(
+                "Trebuchet MS",
+                false,
+                false,
+                &mut SubstitutionLog::default(),
+            )
+            .unwrap();
+        let plain = renderer
+            .resolve_face("Arial", false, false, &mut SubstitutionLog::default())
+            .unwrap();
+        assert!(plain.widths.is_none() && plain.line.is_none());
+
+        let metrics = substituted.widths.expect("trebuchet ms widths");
+        assert!((family_advance(metrics, 'M').unwrap() - 0.709).abs() < 1e-6);
+        assert!((family_advance(metrics, ' ').unwrap() - 0.301).abs() < 1e-6);
+        assert!((family_advance(metrics, '\u{2019}').unwrap() - 0.367).abs() < 1e-6);
+        assert_eq!(family_advance(metrics, '\u{4e00}'), None);
+        assert!(family_metrics("trebuchet ms", true, false).is_some());
+        assert!(family_metrics("Trebuchet MS", false, false).is_none());
+        assert!(family_metrics("calibri", false, false).is_none());
+
+        let line = family_line_box(substituted.line.expect("trebuchet ms lines"), 1000.0);
+        assert!((line.ascent - 939.0).abs() < 1e-3);
+        assert!((line.descent - 222.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_run_on_the_named_family_widths_keeps_one_cluster_per_character() {
+        const CARLITO: &[u8] = include_bytes!("../../../packages/fonts/assets/Carlito-Regular.ttf");
+        let mut renderer = SlideRenderer::new();
+        renderer
+            .register_font("Arial", false, false, CARLITO)
+            .unwrap();
+        renderer
+            .register_font("Trebuchet MS", false, false, CARLITO)
+            .unwrap();
+        let text = "Transmigration";
+        let lay = |family: &str| {
+            let mut paragraph = paragraph(&renderer, "l", text);
+            paragraph.runs[0].style.face = renderer
+                .resolve_face(family, false, false, &mut SubstitutionLog::default())
+                .unwrap();
+            paragraph.runs[0].style.family = family.to_owned();
+            layout_paragraph(
+                &renderer.fonts,
+                &paragraph,
+                0.0,
+                0.0,
+                1_000.0,
+                1.0,
+                false,
+                true,
+            )
+            .unwrap()
+        };
+        assert!(
+            glyph_positions(&lay("Arial")).len() < text.len(),
+            "Carlito ligates ti on its own widths"
+        );
+        let named = lay("Trebuchet MS");
+        let positions = glyph_positions(&named);
+        assert_eq!(positions.len(), text.len());
+        let metrics = family_metrics("trebuchet ms", false, false).unwrap();
+        let size = points_to_px(18.0);
+        let mut pen = positions[0];
+        for (character, x) in text.chars().zip(&positions) {
+            assert!((x - pen).abs() < 0.01, "{character} at {x}, expected {pen}");
+            pen += family_advance(metrics, character).unwrap() * size;
+        }
+    }
+
+    #[test]
+    fn missing_faces_keep_the_requested_family_and_style_metrics() {
+        for registered in ["Arial", "Trebuchet MS"] {
+            let mut renderer = SlideRenderer::new();
+            renderer
+                .register_font(registered, false, false, FONT)
+                .unwrap();
+            for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
+                let face = renderer
+                    .resolve_face(
+                        "Trebuchet MS",
+                        bold,
+                        italic,
+                        &mut SubstitutionLog::default(),
+                    )
+                    .unwrap();
+                let expected = family_metrics("trebuchet ms", bold, italic).unwrap();
+                assert_eq!(renderer.fonts.font_bytes(face.id).unwrap(), FONT);
+                assert!(std::ptr::eq(face.widths.unwrap(), expected));
+                assert!(std::ptr::eq(face.line.unwrap(), expected));
+            }
+            let unknown = renderer
+                .resolve_face(
+                    "Unknown family",
+                    false,
+                    false,
+                    &mut SubstitutionLog::default(),
+                )
+                .unwrap();
+            assert!(unknown.widths.is_none() && unknown.line.is_none());
+        }
+    }
+
+    #[test]
+    fn an_empty_family_draws_the_fallback_without_reporting_it() {
+        let mut renderer = SlideRenderer::new();
+        renderer.register_font("Arial", false, false, FONT).unwrap();
+        let mut log = SubstitutionLog::default();
+        renderer.resolve_face("", false, false, &mut log).unwrap();
+        renderer.resolve_face("  ", false, false, &mut log).unwrap();
+        assert!(log.entries.is_empty());
+        renderer
+            .resolve_face("Missing", false, false, &mut log)
+            .unwrap();
+        assert_eq!(log.entries.len(), 1);
+    }
+
+    #[test]
+    fn only_a_different_drawn_family_is_reported() {
+        let mut renderer = SlideRenderer::new();
+        renderer.register_font("Arial", true, false, FONT).unwrap();
+        let mut log = SubstitutionLog::default();
+        let face = renderer
+            .resolve_face("Arial", false, false, &mut log)
+            .unwrap();
+        assert_eq!(face.family, "Arial");
+        assert!(log.entries.is_empty());
+
+        let mut renderer = SlideRenderer::new();
+        renderer
+            .register_font("Liberation Sans", false, false, FONT)
+            .unwrap();
+        renderer.register_font("Arial", true, false, FONT).unwrap();
+        renderer
+            .resolve_face("Arial", false, false, &mut log)
+            .unwrap();
+        assert_eq!(log.entries.len(), 1);
+        assert_eq!(log.entries[0].requested_family, "Arial");
+        assert_eq!(log.entries[0].selected_family, "Liberation Sans");
+    }
+
+    #[test]
+    fn a_symbol_bullet_is_reported_unless_every_character_is_emulated() {
+        let mut renderer = SlideRenderer::new();
+        renderer.register_font("Arial", false, false, FONT).unwrap();
+        let text = paragraph(&renderer, "l", "Item").runs[0].style.clone();
+        let properties = ParagraphProperties {
+            bullet_font: Some(BulletFont::Typeface("Wingdings".to_owned())),
+            ..ParagraphProperties::default()
+        };
+        let theme = Theme::default();
+        let mut log = SubstitutionLog::default();
+        resolve_bullet_style(&renderer, &theme, &properties, &text, "\u{a7}", &mut log).unwrap();
+        assert!(log.entries.is_empty());
+        resolve_bullet_style(&renderer, &theme, &properties, &text, "\u{2192}", &mut log).unwrap();
+        assert_eq!(log.entries.len(), 1);
+        assert_eq!(log.entries[0].requested_family, "Wingdings");
+    }
+
+    #[test]
+    fn different_requested_metrics_do_not_share_cached_fallback_layouts() {
+        let session = DeckSession::open(
+            include_bytes!("../tests/fixtures/paragraph-spacing.pptx"),
+            8_020,
+        )
+        .unwrap();
+        let new_renderer = || {
+            let mut renderer = SlideRenderer::new();
+            renderer.register_font("Arial", false, false, FONT).unwrap();
+            renderer
+        };
+        let render = |renderer: &SlideRenderer, family: &str| {
+            let mut snapshot = session.snapshot().unwrap();
+            let story = &mut snapshot.slides[0]
+                .shapes
+                .iter_mut()
+                .find(|shape| shape.source_id == 2)
+                .unwrap()
+                .text_stories[0];
+            for paragraph in &mut story.paragraphs {
+                for run in &mut paragraph.runs {
+                    run.style.font_family = Some(family.to_owned());
+                    run.style.font_size_pt = Some(24.0);
+                    run.text = "MMMMMMMM".to_owned();
+                }
+            }
+            renderer
+                .layout_slide(session.package(), &snapshot, 0)
+                .unwrap()
+                .display_list
+                .primitives
+                .into_iter()
+                .find_map(|primitive| match primitive {
+                    Primitive::TextBox {
+                        object_id: 2,
+                        lines,
+                        ..
+                    } => Some(lines),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let renderer = new_renderer();
+        let trebuchet = render(&renderer, "Trebuchet MS");
+        let consolas = render(&renderer, "Consolas");
+        assert!((trebuchet[0].width - consolas[0].width).abs() > 1.0);
+        assert_eq!(consolas, render(&new_renderer(), "Consolas"));
+        assert_eq!(trebuchet, render(&renderer, "Trebuchet MS"));
     }
 }

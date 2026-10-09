@@ -4,7 +4,9 @@
 
 use std::collections::BTreeMap;
 
-use pptx_edit::{CommentFlavor, DeckSession, EditCtx, EditError, TextStyle};
+use pptx_edit::{
+    CommentFlavor, DeckSession, EditCtx, EditError, PresetShapeDraft, ShapeRect, TextStyle,
+};
 
 const CONTENT_TYPES: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
@@ -57,6 +59,9 @@ const SLIDE1: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:sp><p:nvSpPr><p:cNvPr id="7" name="Tracked"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
 <p:spPr><a:xfrm><a:off x="10" y="20"/><a:ext cx="300" cy="400"/></a:xfrm></p:spPr>
 <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr spc="300"/><a:t>Wide</a:t></a:r><a:r><a:rPr spc="300" b="1"/><a:t>Caps</a:t></a:r></a:p></p:txBody></p:sp>
+<p:sp><p:nvSpPr><p:cNvPr id="8" name="Linked"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+<p:spPr><a:xfrm><a:off x="10" y="20"/><a:ext cx="3000" cy="400"/></a:xfrm></p:spPr>
+<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US"/><a:t>See </a:t></a:r><a:r><a:rPr lang="en-US"><a:hlinkClick r:id="rId2"/></a:rPr><a:t>the docs</a:t></a:r><a:r><a:rPr lang="en-US"/><a:t> today </a:t></a:r><a:fld id="{5C2A3F1E-8B7D-4C6A-9E0F-1A2B3C4D5E6F}" type="slidenum"><a:rPr lang="en-US"/><a:t>1</a:t></a:fld></a:p></p:txBody></p:sp>
 </p:spTree></p:cSld></p:sld>"#;
 
 const SLIDE1_RELS: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -460,6 +465,231 @@ fn a_shape_added_to_an_emptied_slide_lands_after_the_group_properties() {
 }
 
 #[test]
+fn an_added_picture_mints_its_media_part_content_type_and_relationship() {
+    let session = open();
+    let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+    let png_bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4];
+    session
+        .add_picture(
+            &context(),
+            &slide_id,
+            &pptx_edit::PictureDraft {
+                name: "Logo".to_owned(),
+                rect: pptx_edit::ShapeRect {
+                    x: 10,
+                    y: 20,
+                    width: 3_000,
+                    height: 4_000,
+                },
+                content_type: "image/png".to_owned(),
+                media_bytes: png_bytes.clone(),
+            },
+        )
+        .unwrap();
+
+    let saved = parts(&session.save().unwrap());
+    assert_relationships_resolve(&saved);
+
+    let content_types = part_text(&saved, "[Content_Types].xml");
+    assert!(
+        content_types.contains(r#"Extension="png""#),
+        "{content_types}"
+    );
+    assert!(
+        content_types.contains(r#"ContentType="image/png""#),
+        "{content_types}"
+    );
+
+    let media = saved
+        .get("ppt/media/image1.png")
+        .expect("the picture's bytes land in a fresh media part");
+    assert_eq!(media, &png_bytes);
+
+    let slide_rels = part_text(&saved, "ppt/slides/_rels/slide1.xml.rels");
+    assert!(
+        slide_rels
+            .contains("http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"),
+        "{slide_rels}"
+    );
+    assert!(
+        slide_rels.contains(r#"Target="../media/image1.png""#),
+        "{slide_rels}"
+    );
+    // The slide already had rId1 (layout) and rId2 (hyperlink); the image gets its own id.
+    assert!(slide_rels.contains(r#"Id="rId3""#), "{slide_rels}");
+    assert!(slide_rels.contains(r#"Id="rId1""#), "{slide_rels}");
+    assert!(slide_rels.contains(r#"Id="rId2""#), "{slide_rels}");
+
+    let slide = part_text(&saved, "ppt/slides/slide1.xml");
+    assert!(slide.contains(r#"<p:pic>"#), "{slide}");
+    assert!(slide.contains(r#"name="Logo""#), "{slide}");
+    assert!(slide.contains(r#"r:embed="rId3""#), "{slide}");
+    assert!(slide.contains(r#"<a:off x="10" y="20"/>"#), "{slide}");
+    assert!(slide.contains(r#"<a:ext cx="3000" cy="4000"/>"#), "{slide}");
+}
+
+#[test]
+fn an_unsupported_or_oversized_picture_is_rejected_before_it_touches_the_deck() {
+    let session = open();
+    let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+    let rect = pptx_edit::ShapeRect {
+        x: 0,
+        y: 0,
+        width: 100,
+        height: 100,
+    };
+
+    let error = session
+        .add_picture(
+            &context(),
+            &slide_id,
+            &pptx_edit::PictureDraft {
+                name: "Bad type".to_owned(),
+                rect,
+                content_type: "image/avif".to_owned(),
+                media_bytes: vec![1, 2, 3, 4],
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(error, EditError::InvalidState(_)), "{error:?}");
+
+    let error = session
+        .add_picture(
+            &context(),
+            &slide_id,
+            &pptx_edit::PictureDraft {
+                name: "Too big".to_owned(),
+                rect,
+                content_type: "image/png".to_owned(),
+                media_bytes: vec![0; 8 * 1024 * 1024 + 1],
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(error, EditError::InvalidState(_)), "{error:?}");
+
+    // Neither rejected draft left a shape behind.
+    assert_eq!(parts(&session.save().unwrap()), parts(&fixture(256)));
+}
+
+#[test]
+fn shape_z_order_operations_reorder_within_the_slide() {
+    let session = open();
+    let snapshot = session.snapshot().unwrap();
+    let slide = snapshot.slides[0].clone();
+    let names: Vec<&str> = slide
+        .shapes
+        .iter()
+        .map(|shape| shape.name.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "Title",
+            "Connector",
+            "Box",
+            "Halfway",
+            "Script",
+            "Tracked",
+            "Linked"
+        ]
+    );
+    let box_id = slide.shapes[2].id.clone();
+
+    let names_after = |session: &DeckSession| -> Vec<String> {
+        session.snapshot().unwrap().slides[0]
+            .shapes
+            .iter()
+            .map(|shape| shape.name.clone())
+            .collect()
+    };
+
+    let receipt = session
+        .bring_to_front(&context(), &slide.id, &box_id)
+        .unwrap();
+    assert_eq!((receipt.from_index, receipt.to_index), (2, 6));
+    assert_eq!(
+        names_after(&session),
+        [
+            "Title",
+            "Connector",
+            "Halfway",
+            "Script",
+            "Tracked",
+            "Linked",
+            "Box"
+        ]
+    );
+
+    let receipt = session
+        .send_to_back(&context(), &slide.id, &box_id)
+        .unwrap();
+    assert_eq!((receipt.from_index, receipt.to_index), (6, 0));
+    assert_eq!(
+        names_after(&session),
+        [
+            "Box",
+            "Title",
+            "Connector",
+            "Halfway",
+            "Script",
+            "Tracked",
+            "Linked"
+        ]
+    );
+
+    let receipt = session
+        .bring_forward(&context(), &slide.id, &box_id)
+        .unwrap();
+    assert_eq!((receipt.from_index, receipt.to_index), (0, 1));
+    assert_eq!(
+        names_after(&session),
+        [
+            "Title",
+            "Box",
+            "Connector",
+            "Halfway",
+            "Script",
+            "Tracked",
+            "Linked"
+        ]
+    );
+
+    let receipt = session
+        .send_backward(&context(), &slide.id, &box_id)
+        .unwrap();
+    assert_eq!((receipt.from_index, receipt.to_index), (1, 0));
+    assert_eq!(
+        names_after(&session),
+        [
+            "Box",
+            "Title",
+            "Connector",
+            "Halfway",
+            "Script",
+            "Tracked",
+            "Linked"
+        ]
+    );
+
+    // Already at the edge: stepping further is a clamped no-op.
+    let receipt = session
+        .send_backward(&context(), &slide.id, &box_id)
+        .unwrap();
+    assert_eq!((receipt.from_index, receipt.to_index), (0, 0));
+
+    let saved = parts(&session.save().unwrap());
+    let slide_xml = part_text(&saved, "ppt/slides/slide1.xml");
+    let box_pos = slide_xml.find(r#"name="Box""#).unwrap();
+    let title_pos = slide_xml.find(r#"name="Title""#).unwrap();
+    assert!(box_pos < title_pos, "{slide_xml}");
+
+    let error = session
+        .bring_to_front(&context(), &slide.id, "missing-shape")
+        .unwrap_err();
+    assert!(matches!(error, EditError::ShapeNotFound(_)));
+}
+
+#[test]
 fn junk_style_values_are_rejected_at_the_edit() {
     let session = open();
     let snapshot = session.snapshot().unwrap();
@@ -685,6 +915,213 @@ fn an_edit_spanning_two_runs_keeps_both_baselines() {
     );
 }
 
+const LINK_RUN: &str = r#"<a:r><a:rPr lang="en-US"><a:hlinkClick r:id="rId2"/></a:rPr>"#;
+const SLIDE_NUMBER_FIELD: &str = r#"<a:fld id="{5C2A3F1E-8B7D-4C6A-9E0F-1A2B3C4D5E6F}" type="slidenum"><a:rPr lang="en-US"/><a:t>1</a:t></a:fld>"#;
+
+fn linked_story(session: &DeckSession) -> String {
+    session.snapshot().unwrap().slides[0]
+        .shapes
+        .iter()
+        .find(|shape| shape.name == "Linked")
+        .unwrap()
+        .text_stories[0]
+        .id
+        .clone()
+}
+
+fn linked_shape_xml(saved: &[u8]) -> String {
+    part_text(&parts(saved), "ppt/slides/slide1.xml")
+        .split(r#"name="Linked""#)
+        .nth(1)
+        .unwrap()
+        .split("</p:sp>")
+        .next()
+        .unwrap()
+        .to_owned()
+}
+
+fn linked_runs(saved: &[u8]) -> Vec<(String, Option<String>, Option<bool>)> {
+    let package = pptx_parse::parse_pptx(saved).unwrap();
+    let shape = package.slides[0]
+        .shapes
+        .iter()
+        .find_map(|node| match node {
+            pptx_parse::ShapeNode::Shape(shape) if shape.base.name == "Linked" => Some(shape),
+            _ => None,
+        })
+        .unwrap();
+    shape.text.as_ref().unwrap().paragraphs[0]
+        .runs
+        .iter()
+        .map(|run| {
+            (
+                run.text.clone(),
+                run.properties.hyperlink_relationship_id.clone(),
+                run.properties.bold,
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn an_edit_spanning_plain_and_linked_runs_keeps_the_link_and_the_field() {
+    let session = open();
+    let story_id = linked_story(&session);
+    session.delete_text(&context(), &story_id, 3, 4).unwrap();
+    session.delete_text(&context(), &story_id, 10, 11).unwrap();
+    session.delete_text(&context(), &story_id, 11, 16).unwrap();
+    session
+        .insert_text(&context(), &story_id, 11, "now", &TextStyle::default())
+        .unwrap();
+
+    let saved = session.save().unwrap();
+    let shape = linked_shape_xml(&saved);
+    assert!(
+        shape.contains(r#"<a:r><a:rPr lang="en-US"/><a:t>See</a:t></a:r>"#),
+        "{shape}"
+    );
+    assert!(
+        shape.contains(&format!("{LINK_RUN}<a:t>the doc</a:t></a:r>")),
+        "{shape}"
+    );
+    assert!(
+        shape.contains(r#"<a:r><a:rPr lang="en-US"/><a:t> now </a:t></a:r>"#),
+        "{shape}"
+    );
+    assert!(shape.contains(SLIDE_NUMBER_FIELD), "{shape}");
+    assert_eq!(
+        linked_runs(&saved),
+        vec![
+            ("See".to_owned(), None, None),
+            ("the doc".to_owned(), Some("rId2".to_owned()), None),
+            (" now ".to_owned(), None, None),
+            ("1".to_owned(), None, None),
+        ]
+    );
+
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    assert_eq!(
+        reopened.story(&story_id).unwrap().plain_text(),
+        "Seethe doc now 1"
+    );
+}
+
+#[test]
+fn a_field_in_an_edited_span_keeps_its_binding_until_its_text_changes() {
+    let session = open();
+    let story_id = linked_story(&session);
+    session.delete_text(&context(), &story_id, 13, 18).unwrap();
+
+    let saved = session.save().unwrap();
+    let shape = linked_shape_xml(&saved);
+    assert!(shape.contains(SLIDE_NUMBER_FIELD), "{shape}");
+    assert!(
+        shape.contains(&format!("{LINK_RUN}<a:t>the docs</a:t></a:r>")),
+        "{shape}"
+    );
+    assert!(
+        shape.contains(r#"<a:r><a:rPr lang="en-US"/><a:t>  </a:t></a:r>"#),
+        "{shape}"
+    );
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    assert_eq!(
+        reopened.story(&story_id).unwrap().plain_text(),
+        "See the docs  1"
+    );
+
+    let session = open();
+    let story_id = linked_story(&session);
+    session.delete_text(&context(), &story_id, 19, 20).unwrap();
+    session
+        .insert_text(&context(), &story_id, 19, "2", &TextStyle::default())
+        .unwrap();
+
+    let saved = session.save().unwrap();
+    let shape = linked_shape_xml(&saved);
+    assert!(!shape.contains("<a:fld"), "{shape}");
+    assert!(
+        shape.contains(r#"<a:r><a:rPr lang="en-US"/><a:t>2</a:t></a:r>"#),
+        "{shape}"
+    );
+    assert!(
+        shape.contains(&format!("{LINK_RUN}<a:t>the docs</a:t></a:r>")),
+        "{shape}"
+    );
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    assert_eq!(
+        reopened.story(&story_id).unwrap().plain_text(),
+        "See the docs today 2"
+    );
+}
+
+#[test]
+fn text_typed_at_the_end_of_a_link_stays_linked() {
+    let session = open();
+    let story_id = linked_story(&session);
+    session
+        .insert_text(
+            &context(),
+            &story_id,
+            12,
+            "X",
+            &TextStyle {
+                bold: Some(true),
+                ..TextStyle::default()
+            },
+        )
+        .unwrap();
+
+    let saved = session.save().unwrap();
+    let shape = linked_shape_xml(&saved);
+    assert!(
+        shape.contains(&format!(
+            r#"{LINK_RUN}<a:t>the docs</a:t></a:r><a:r><a:rPr b="1" lang="en-US"><a:hlinkClick r:id="rId2"/></a:rPr><a:t>X</a:t></a:r><a:r><a:rPr lang="en-US"/><a:t> today </a:t></a:r>"#
+        )),
+        "{shape}"
+    );
+    assert!(shape.contains(SLIDE_NUMBER_FIELD), "{shape}");
+    assert_eq!(
+        linked_runs(&saved),
+        vec![
+            ("See ".to_owned(), None, None),
+            ("the docs".to_owned(), Some("rId2".to_owned()), None),
+            ("X".to_owned(), Some("rId2".to_owned()), Some(true)),
+            (" today ".to_owned(), None, None),
+            ("1".to_owned(), None, None),
+        ]
+    );
+
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    assert_eq!(
+        reopened.story(&story_id).unwrap().plain_text(),
+        "See the docsX today 1"
+    );
+}
+
+#[test]
+fn deleting_a_linked_run_drops_its_link() {
+    let session = open();
+    let story_id = linked_story(&session);
+    session.delete_text(&context(), &story_id, 4, 12).unwrap();
+
+    let saved = session.save().unwrap();
+    let shape = linked_shape_xml(&saved);
+    assert!(!shape.contains("hlinkClick"), "{shape}");
+    assert!(
+        shape.contains(
+            r#"<a:r><a:rPr lang="en-US"/><a:t>See </a:t></a:r><a:r><a:rPr lang="en-US"/><a:t> today </a:t></a:r>"#
+        ),
+        "{shape}"
+    );
+    assert!(shape.contains(SLIDE_NUMBER_FIELD), "{shape}");
+
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    assert_eq!(
+        reopened.story(&story_id).unwrap().plain_text(),
+        "See  today 1"
+    );
+}
+
 #[test]
 fn deleting_a_slide_prunes_its_notes_and_custom_show_entry() {
     let session = open();
@@ -760,6 +1197,158 @@ fn an_exhausted_slide_id_space_errors_instead_of_panicking() {
     assert!(matches!(error, EditError::Write(message) if message.contains("slide id")));
 }
 
+const CUSTOM_SHAPE: &str = r#"<p:sp><p:nvSpPr><p:cNvPr id="8" name="Custom"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="10" y="20"/><a:ext cx="300" cy="400"/></a:xfrm><a:custGeom><a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst/><a:rect l="0" t="0" r="21600" b="21600"/><a:pathLst><a:path w="21600" h="21600"><a:moveTo><a:pt x="0" y="0"/></a:moveTo><a:lnTo><a:pt x="21600" y="0"/></a:lnTo><a:close/></a:path></a:pathLst></a:custGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Custom</a:t></a:r></a:p></p:txBody></p:sp>"#;
+
+fn cust_geom_fixture() -> Vec<u8> {
+    let mut part_list = fixture_parts(256);
+    for (path, body) in part_list.iter_mut() {
+        if path == "ppt/slides/slide1.xml" {
+            *body = body.replace("</p:spTree>", &format!("{CUSTOM_SHAPE}</p:spTree>"));
+        }
+    }
+    zip(part_list)
+}
+
+#[test]
+fn adjust_edits_on_custom_geometry_are_refused_and_leave_state_untouched() {
+    let session = DeckSession::open(&cust_geom_fixture(), 11).unwrap();
+    let snapshot = session.snapshot().unwrap();
+    let slide = &snapshot.slides[0];
+    let shape = slide
+        .shapes
+        .iter()
+        .find(|shape| shape.name == "Custom")
+        .unwrap();
+    assert_eq!(shape.geometry, "custom");
+    let before = session.snapshot().unwrap();
+    let mut adjustments = BTreeMap::new();
+    adjustments.insert("adj".to_owned(), 0.25);
+    let error = session
+        .set_shape_adjust(&context(), &slide.id, &shape.id, &adjustments)
+        .unwrap_err();
+    assert!(matches!(error, EditError::InvalidGeometry(_)));
+    assert_eq!(session.snapshot().unwrap(), before);
+}
+
+#[test]
+fn adjust_edits_on_shapes_without_preset_geometry_are_refused() {
+    let session = open();
+    let snapshot = session.snapshot().unwrap();
+    let slide = &snapshot.slides[0];
+    let missing = slide
+        .shapes
+        .iter()
+        .find(|shape| shape.name == "Tracked")
+        .unwrap();
+    assert_eq!(missing.geometry, "rect");
+    let before = session.snapshot().unwrap();
+    let mut adjustments = BTreeMap::new();
+    adjustments.insert("adj".to_owned(), 0.25);
+    let error = session
+        .set_shape_adjust(&context(), &slide.id, &missing.id, &adjustments)
+        .unwrap_err();
+    assert!(matches!(error, EditError::InvalidGeometry(_)));
+    assert_eq!(session.snapshot().unwrap(), before);
+
+    let preset = slide
+        .shapes
+        .iter()
+        .find(|shape| shape.name == "Box")
+        .unwrap();
+    assert_eq!(preset.geometry, "roundRect");
+    session
+        .set_shape_adjust(&context(), &slide.id, &preset.id, &adjustments)
+        .unwrap();
+}
+
+#[test]
+fn an_exhausted_shape_id_space_errors_instead_of_panicking() {
+    let mut part_list = fixture_parts(256);
+    for (path, body) in part_list.iter_mut() {
+        if path == "ppt/slides/slide1.xml" {
+            *body = body.replace(
+                r#"<p:cNvPr id="7" name="Tracked""#,
+                r#"<p:cNvPr id="4294967295" name="Tracked""#,
+            );
+        }
+    }
+    let session = DeckSession::open(&zip(part_list), 11).unwrap();
+    let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+    session
+        .add_shape(
+            &context(),
+            &slide_id,
+            &PresetShapeDraft {
+                name: "Overflow".to_owned(),
+                geometry: "rect".to_owned(),
+                rect: ShapeRect {
+                    x: 0,
+                    y: 0,
+                    width: 1_000_000,
+                    height: 1_000_000,
+                },
+                fill: None,
+            },
+        )
+        .unwrap();
+    let error = session.save().unwrap_err();
+    assert!(matches!(error, EditError::Write(message) if message.contains("shape id")));
+}
+
+#[test]
+fn an_exhausted_shape_id_space_still_saves_edits_that_allocate_nothing() {
+    let mut part_list = fixture_parts(256);
+    for (path, body) in part_list.iter_mut() {
+        if path == "ppt/slides/slide1.xml" {
+            *body = body.replace(
+                r#"<p:cNvPr id="7" name="Tracked""#,
+                r#"<p:cNvPr id="4294967295" name="Tracked""#,
+            );
+        }
+    }
+    let session = DeckSession::open(&zip(part_list.clone()), 11).unwrap();
+    let story_id = tracked_story(&session);
+    session
+        .insert_text(&context(), &story_id, 0, "X", &TextStyle::default())
+        .unwrap();
+    let saved = session.save().unwrap();
+    let slide = part_text(&parts(&saved), "ppt/slides/slide1.xml");
+    assert!(slide.contains("<a:t>X</a:t>"), "{slide}");
+    let reopened = DeckSession::open(&saved, 13).unwrap();
+    assert_eq!(
+        reopened
+            .story(&tracked_story(&reopened))
+            .unwrap()
+            .plain_text(),
+        "XWideCaps"
+    );
+
+    let session = DeckSession::open(&zip(part_list), 12).unwrap();
+    let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+    session
+        .add_shape(
+            &context(),
+            &slide_id,
+            &PresetShapeDraft {
+                name: "Overflow".to_owned(),
+                geometry: "rect".to_owned(),
+                rect: ShapeRect {
+                    x: 0,
+                    y: 0,
+                    width: 1_000_000,
+                    height: 1_000_000,
+                },
+                fill: None,
+            },
+        )
+        .unwrap();
+    let error = session.save().unwrap_err();
+    assert!(
+        matches!(error, EditError::Write(ref message) if message.contains("shape id space is exhausted")),
+        "{error:?}"
+    );
+}
+
 #[test]
 fn a_colour_write_replaces_an_existing_no_fill() {
     let session = open();
@@ -826,6 +1415,17 @@ fn a_resize_keeps_a_partial_transforms_own_offset_and_rotation() {
     session
         .resize_shape(&context(), &slide.id, &halfway.id, 5_000_000, 900_000)
         .unwrap();
+
+    let edited = session.snapshot().unwrap();
+    let resized = edited.slides[0]
+        .shapes
+        .iter()
+        .find(|shape| shape.name == "Halfway")
+        .unwrap();
+    assert_eq!(
+        (resized.x, resized.y, resized.rotation_deg),
+        (123_456, 654_321, 20.0)
+    );
 
     let saved = parts(&session.save().unwrap());
     let slide = part_text(&saved, "ppt/slides/slide1.xml");
@@ -1476,5 +2076,215 @@ fn an_older_collaboration_document_recovers_notes_without_resurrecting_cleared_t
             .slides[0]
             .notes
             .is_empty()
+    );
+}
+
+fn picture_draft() -> pptx_edit::PictureDraft {
+    pptx_edit::PictureDraft {
+        name: "Inserted picture".to_owned(),
+        rect: ShapeRect {
+            x: 10,
+            y: 20,
+            width: 3000,
+            height: 4000,
+        },
+        content_type: "image/png".to_owned(),
+        media_bytes: vec![0x89, b'P', b'N', b'G', 13, 10, 26, 10],
+    }
+}
+
+#[test]
+fn concurrent_shape_arrangement_can_be_rearranged_and_deleted() {
+    let first = open();
+    let second = DeckSession::open(&fixture(256), 12).unwrap();
+    let slide = first.snapshot().unwrap().slides.remove(0);
+    let shape_id = &slide.shapes[2].id;
+    first
+        .bring_to_front(&context(), &slide.id, shape_id)
+        .unwrap();
+    second
+        .send_to_back(&context(), &slide.id, shape_id)
+        .unwrap();
+    first
+        .apply_update_v1(&second.encode_state_as_update_v1())
+        .unwrap();
+    second
+        .apply_update_v1(&first.encode_state_as_update_v1())
+        .unwrap();
+    assert_eq!(first.snapshot().unwrap(), second.snapshot().unwrap());
+    first
+        .bring_to_front(&context(), &slide.id, shape_id)
+        .unwrap();
+    assert_eq!(
+        first.snapshot().unwrap().slides[0]
+            .shapes
+            .last()
+            .unwrap()
+            .id,
+        *shape_id
+    );
+    first.remove_shape(&context(), &slide.id, shape_id).unwrap();
+    second
+        .apply_update_v1(&first.encode_state_as_update_v1())
+        .unwrap();
+    assert_eq!(first.snapshot().unwrap(), second.snapshot().unwrap());
+    first.save().unwrap();
+}
+
+#[test]
+fn concurrent_shape_arrangement_and_deletion_converge() {
+    let first = open();
+    let second = DeckSession::open(&fixture(256), 12).unwrap();
+    let slide = first.snapshot().unwrap().slides.remove(0);
+    let shape_id = &slide.shapes[2].id;
+    first
+        .bring_to_front(&context(), &slide.id, shape_id)
+        .unwrap();
+    second
+        .remove_shape(&context(), &slide.id, shape_id)
+        .unwrap();
+    first
+        .apply_update_v1(&second.encode_state_as_update_v1())
+        .unwrap();
+    second
+        .apply_update_v1(&first.encode_state_as_update_v1())
+        .unwrap();
+    assert_eq!(first.snapshot().unwrap(), second.snapshot().unwrap());
+    assert!(
+        !first.snapshot().unwrap().slides[0]
+            .shapes
+            .iter()
+            .any(|s| s.id == *shape_id)
+    );
+    first.save().unwrap();
+    first.search_text("Title", false, None).unwrap();
+    first.delete_slide(&context(), &slide.id).unwrap();
+    first.save().unwrap();
+}
+
+#[test]
+fn inserted_picture_preserves_conflicting_content_type_defaults() {
+    let mut source = fixture_parts(256);
+    source[0].1 = source[0].1.replace(
+        "</Types>",
+        r#"<Default Extension="png" ContentType="application/octet-stream"/></Types>"#,
+    );
+    let session = DeckSession::open(&zip(source), 11).unwrap();
+    let slide = session.snapshot().unwrap().slides.remove(0);
+    session
+        .add_picture(&context(), &slide.id, &picture_draft())
+        .unwrap();
+    let saved = session.save().unwrap();
+    let package = pptx_parse::parse_pptx(&saved).unwrap();
+    assert_eq!(
+        package
+            .media
+            .iter()
+            .find(|m| m.part_path.ends_with(".png"))
+            .unwrap()
+            .content_type,
+        "image/png"
+    );
+    assert!(
+        part_text(&parts(&saved), "[Content_Types].xml")
+            .contains(r#"ContentType="application/octet-stream""#)
+    );
+}
+
+#[test]
+fn pictures_on_existing_and_new_slides_survive_sync_undo_and_repeated_save() {
+    let first = open();
+    let second = DeckSession::open(&fixture(256), 12).unwrap();
+    let slide = first.snapshot().unwrap().slides[0].id.clone();
+    let added = first.insert_slide(&context(), 1, None).unwrap();
+    first
+        .add_picture(&context(), &slide, &picture_draft())
+        .unwrap();
+    first.add_undo_barrier();
+    first
+        .add_picture(&context(), &added.slide_id, &picture_draft())
+        .unwrap();
+    let expected = first.snapshot().unwrap();
+    assert!(first.undo());
+    assert!(first.snapshot().unwrap().slides[1].shapes.is_empty());
+    assert!(first.redo());
+    assert_eq!(first.snapshot().unwrap(), expected);
+    second
+        .apply_update_v1(&first.encode_state_as_update_v1())
+        .unwrap();
+    assert_eq!(second.snapshot().unwrap(), expected);
+    let saved = first.save().unwrap();
+    assert_eq!(parts(&saved), parts(&first.save().unwrap()));
+    assert_eq!(parts(&saved), parts(&second.save().unwrap()));
+    assert_relationships_resolve(&parts(&saved));
+    let reopened = DeckSession::open(&saved, 13).unwrap();
+    for slide in &reopened.snapshot().unwrap().slides[..2] {
+        let picture = slide
+            .shapes
+            .iter()
+            .find(|s| s.name == picture_draft().name)
+            .unwrap();
+        assert_eq!(picture.kind, pptx_edit::ShapeKind::Picture);
+        assert!(picture.media_part_path.is_some());
+    }
+}
+
+#[test]
+fn picture_insertion_preserves_prefixed_metadata_and_exhausted_numeric_names() {
+    let mut source = fixture_parts(256);
+    for (path, xml) in &mut source {
+        if path == "[Content_Types].xml" {
+            *xml = xml
+                .replace("xmlns=", "xmlns:ct=")
+                .replace("<Types", "<ct:Types")
+                .replace("</Types>", "</ct:Types>")
+                .replace("<Default", "<ct:Default")
+                .replace("<Override", "<ct:Override");
+        }
+        if path == "ppt/slides/_rels/slide1.xml.rels" {
+            *xml = xml
+                .replace("xmlns=", "xmlns:rel=")
+                .replace("<Relationships", "<rel:Relationships")
+                .replace("</Relationships>", "</rel:Relationships>")
+                .replace("<Relationship ", "<rel:Relationship ")
+                .replace("rId2", "rId18446744073709551615");
+        }
+        if path == "ppt/slides/slide1.xml" {
+            *xml = xml
+                .replace("rId2", "rId18446744073709551615")
+                .replace("xmlns:r=", "xmlns:links=")
+                .replace("r:id=", "links:id=")
+                .replace("<p:sld ", r#"<p:sld xmlns:r="urn:preserved" "#);
+        }
+    }
+    source.push((
+        "ppt/media/image18446744073709551615.png".to_owned(),
+        "existing".to_owned(),
+    ));
+    let session = DeckSession::open(&zip(source), 11).unwrap();
+    let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+    session
+        .add_picture(&context(), &slide_id, &picture_draft())
+        .unwrap();
+    let saved = session.save().unwrap();
+    let package = pptx_parse::parse_pptx(&saved).unwrap();
+    let image = package
+        .media
+        .iter()
+        .find(|media| media.bytes == picture_draft().media_bytes)
+        .unwrap();
+    assert_eq!(image.content_type, "image/png");
+    let saved_parts = parts(&saved);
+    assert!(part_text(&saved_parts, "[Content_Types].xml").contains("<ct:Default"));
+    assert!(
+        part_text(&saved_parts, "ppt/slides/_rels/slide1.xml.rels")
+            .contains("<rel:Relationship Id=\"rId2\"")
+    );
+    assert!(
+        part_text(&saved_parts, "ppt/slides/slide1.xml").contains(r#"xmlns:r="urn:preserved""#)
+    );
+    assert_eq!(
+        saved_parts["ppt/media/image18446744073709551615.png"],
+        b"existing"
     );
 }

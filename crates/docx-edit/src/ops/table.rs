@@ -7,7 +7,7 @@
 //! rewrites them together in one transaction, and creates/removes cell stories
 //! in that same transaction.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -17,11 +17,12 @@ use yrs::{
     Any, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextPrelim, TextRef, Transact, TransactionMut,
 };
 
+use crate::identity::IdAllocator;
 use crate::op::{OpError, OpResult};
 use crate::seed::border_side_sources;
 use crate::{
-    EditCtx, EditingDoc, KIND_KEY, Position, STORIES, check_position, insertion_attrs, map_string,
-    out_len, revision_value, story_ref, write_pilcrow_properties,
+    EditCtx, EditingDoc, KIND_KEY, ParagraphIdOrigin, Position, STORIES, check_position,
+    insertion_attrs, map_string, out_len, revision_value, story_ref, write_pilcrow_properties,
 };
 
 const TR_INS: &str = "trIns";
@@ -102,6 +103,9 @@ pub struct TableReceipt {
     pub columns: u32,
     pub created_story_ids: Vec<String>,
     pub deleted_story_ids: Vec<String>,
+    /// Existing stories whose content changed: the table's story, plus a merge's surviving cell.
+    #[serde(default)]
+    pub changed_story_ids: Vec<String>,
     pub new_para_ids: Vec<String>,
     pub deleted_table: bool,
     #[serde(default)]
@@ -643,6 +647,7 @@ fn fresh_cell_story(
 fn create_cell_story(
     doc: &EditingDoc,
     txn: &mut TransactionMut<'_>,
+    ids: &mut IdAllocator,
     story_id: &str,
 ) -> OpResult<String> {
     let stories = txn
@@ -651,7 +656,7 @@ fn create_cell_story(
     if stories.contains_key(txn, story_id) {
         return Err(OpError::StoryExists(story_id.to_owned()));
     }
-    let para_id = doc.next_id();
+    let para_id = ids.session_key(doc);
     let story = stories.insert(txn, story_id, TextPrelim::new(""));
     let pilcrow = story.insert_embed_with_attributes(
         txn,
@@ -660,6 +665,7 @@ fn create_cell_story(
         insertion_attrs(None, None),
     );
     write_pilcrow_properties(&pilcrow, txn, &para_id, "Normal", "left");
+    ids.bind(txn, &pilcrow, &para_id, ParagraphIdOrigin::Authored);
     Ok(para_id)
 }
 
@@ -779,6 +785,7 @@ fn receipt(
         (0, 0, true)
     };
     Ok(TableReceipt {
+        changed_story_ids: vec![locator.story.clone()],
         table: locator,
         rows,
         columns,
@@ -818,6 +825,39 @@ fn remove_row_at(
     data.rows.remove(row);
     data.rows = reconstruct_rows(std::mem::take(&mut data.rows), kept)?;
     Ok(())
+}
+
+pub(crate) fn table_revisions<T: ReadTxn>(table: &MapRef, txn: &T) -> [Option<Any>; 2] {
+    let Ok(data) = read_table(table, txn) else {
+        return [None, None];
+    };
+    [TR_INS, TR_DEL].map(|key| {
+        let stamp = data.rows.first()?.tr_pr.get(key)?;
+        data.rows
+            .iter()
+            .all(|row| row.tr_pr.get(key).and_then(row_revision_parts).is_some())
+            .then(|| stamp.clone())
+    })
+}
+
+pub(crate) fn table_revision_stamps<T: ReadTxn>(
+    map: &MapRef,
+    txn: &T,
+) -> Vec<(String, String, String)> {
+    if map_string(map, txn, KIND_KEY).as_deref() != Some("table") {
+        return Vec::new();
+    }
+    let Ok(data) = read_table(map, txn) else {
+        return Vec::new();
+    };
+    data.rows
+        .iter()
+        .flat_map(|row| {
+            [TR_INS, TR_DEL]
+                .into_iter()
+                .filter_map(move |key| row.tr_pr.get(key).and_then(row_revision_parts))
+        })
+        .collect()
 }
 
 /// Collects structural row revisions at their containing table embed. Multiple
@@ -898,7 +938,7 @@ pub(crate) fn resolve_table_row_revisions(
     span: Option<(u32, u32)>,
     filter: Option<&str>,
     resolved: &mut Vec<String>,
-) -> OpResult<()> {
+) -> OpResult<u32> {
     let (span_start, span_end) = span.unwrap_or((0, u32::MAX));
     let mut tables = Vec::new();
     let mut offset = 0u32;
@@ -916,6 +956,7 @@ pub(crate) fn resolve_table_row_revisions(
         offset += len;
     }
 
+    let mut removed_tables = 0;
     for (table_offset, table_index, table) in tables.into_iter().rev() {
         let mut data = read_table(&table, txn)?;
         let mut remove = Vec::new();
@@ -944,6 +985,7 @@ pub(crate) fn resolve_table_row_revisions(
         if remove.len() == data.rows.len() {
             let locator = TableLocator::new(story_id, table_index);
             delete_table_in_txn(txn, &locator, story, table_offset, &data)?;
+            removed_tables += 1;
             continue;
         }
         let mut deleted = Vec::new();
@@ -952,7 +994,7 @@ pub(crate) fn resolve_table_row_revisions(
         }
         write_table(txn, &table, &data);
     }
-    Ok(())
+    Ok(removed_tables)
 }
 
 fn delete_table_in_txn(
@@ -973,6 +1015,14 @@ fn delete_table_in_txn(
 }
 
 impl EditingDoc {
+    /// The payload of `locator`'s table embed, as [`EditingDoc::story_segments`]
+    /// gives it, without reading the rest of the story's segments.
+    pub fn table_payload(&self, locator: &TableLocator) -> OpResult<BTreeMap<String, Any>> {
+        let txn = self.yrs_doc().transact();
+        let (_, table, _) = table_at(&txn, locator)?;
+        Ok(crate::embed_payload(&table, &txn))
+    }
+
     /// Story-global position of the table embed. Used by wasm awareness state
     /// to make a cell selection sticky without putting it in the document.
     #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
@@ -1086,7 +1136,7 @@ impl EditingDoc {
     pub fn insert_table(
         &self,
         ctx: &EditCtx,
-        at: Position,
+        mut at: Position,
         rows: u32,
         columns: u32,
     ) -> OpResult<TableReceipt> {
@@ -1097,6 +1147,7 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &at.story)?;
         check_position(&story, &txn, at.index)?;
+        at.index = crate::ops::code_point_range(&story, &txn, at.index, at.index).0;
 
         let mut ordinal = 0u32;
         let mut offset = 0u32;
@@ -1113,6 +1164,7 @@ impl EditingDoc {
         }
         let locator = TableLocator::new(at.story.clone(), ordinal);
         let mut used = story_ids(&txn);
+        let mut ids = IdAllocator::new(self, &txn);
         let table_slot = fresh_table_slot(&used, &at.story, ordinal as usize);
         let base = format!("{}:t{table_slot}", at.story);
         let mut created_story_ids = Vec::with_capacity((rows * columns) as usize);
@@ -1126,7 +1178,7 @@ impl EditingDoc {
             let mut cells = Vec::with_capacity(columns as usize);
             for column in 0..columns as usize {
                 let story_id = fresh_cell_story(&mut used, &base, row, column);
-                let para_id = create_cell_story(self, &mut txn, &story_id)?;
+                let para_id = create_cell_story(self, &mut txn, &mut ids, &story_id)?;
                 cells.push(CellData {
                     tc_pr: HashMap::from([
                         ("rowspan".to_owned(), Any::Number(1.0)),
@@ -1200,6 +1252,7 @@ impl EditingDoc {
             );
         }
         let used = story_ids(&txn);
+        let mut ids = IdAllocator::new(self, &txn);
         let base = table_base(&locator);
         let row_slot = fresh_row_slot(&used, &base, data.rows.len(), columns);
         let mut used = used;
@@ -1232,7 +1285,7 @@ impl EditingDoc {
                     story: String::new(),
                 });
             let story_id = fresh_cell_story(&mut used, &base, row_slot, column);
-            let para_id = create_cell_story(self, &mut txn, &story_id)?;
+            let para_id = create_cell_story(self, &mut txn, &mut ids, &story_id)?;
             let mut cell = reset_cell_spans(template);
             cell.story = story_id.clone();
             inserted_anchors.push(CellAnchor {
@@ -1285,6 +1338,7 @@ impl EditingDoc {
             target.column
         };
         let used = story_ids(&txn);
+        let mut ids = IdAllocator::new(self, &txn);
         let base = table_base(&locator);
         let column_slot = fresh_column_slot(&used, &base, data.rows.len(), columns);
         let mut used = used;
@@ -1322,7 +1376,7 @@ impl EditingDoc {
                     story: String::new(),
                 });
             let story_id = fresh_cell_story(&mut used, &base, row, column_slot);
-            let para_id = create_cell_story(self, &mut txn, &story_id)?;
+            let para_id = create_cell_story(self, &mut txn, &mut ids, &story_id)?;
             let mut cell = reset_cell_spans(template);
             cell.story = story_id.clone();
             inserted.push(CellAnchor {
@@ -1523,7 +1577,9 @@ impl EditingDoc {
         survivor.colspan = rect.right - rect.left;
         data.rows = reconstruct_rows(data.rows, kept)?;
         write_table(&mut txn, &table, &data);
-        receipt(locator, Some(&data), Vec::new(), deleted, Vec::new())
+        let mut receipt = receipt(locator, Some(&data), Vec::new(), deleted, Vec::new())?;
+        receipt.changed_story_ids.push(target.cell.story);
+        Ok(receipt)
     }
 
     /// Splits the merged cell covering `at` back into one cell per grid slot.
@@ -1602,6 +1658,7 @@ impl EditingDoc {
 
         let base = table_base(&locator);
         let mut used = story_ids(&txn);
+        let mut ids = IdAllocator::new(self, &txn);
         let mut created = Vec::new();
         let mut new_para_ids = Vec::new();
         for row in target.row..target.row + requested_rows {
@@ -1619,7 +1676,7 @@ impl EditingDoc {
                     continue;
                 }
                 let story_id = fresh_cell_story(&mut used, &base, row, column);
-                let para_id = create_cell_story(self, &mut txn, &story_id)?;
+                let para_id = create_cell_story(self, &mut txn, &mut ids, &story_id)?;
                 let mut cell = reset_cell_spans(target.cell.clone());
                 cell.story = story_id.clone();
                 next_anchors.push(CellAnchor {
@@ -1975,6 +2032,40 @@ mod tests {
     }
 
     #[test]
+    fn a_table_payload_is_the_one_its_story_segment_carries() {
+        let doc = seed_table();
+        doc.insert_table(&direct(), Position::new("body", 1), 1, 2)
+            .unwrap();
+        let tables: Vec<_> = doc
+            .story_segments("body")
+            .unwrap()
+            .into_iter()
+            .filter_map(|segment| match segment.content {
+                crate::SegmentContent::OtherEmbed { kind, payload } if kind == "table" => {
+                    Some(payload)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tables.len(), 2);
+        for (index, payload) in tables.iter().enumerate() {
+            assert_eq!(
+                &doc.table_payload(&TableLocator::new("body", index as u32))
+                    .unwrap(),
+                payload
+            );
+        }
+        assert!(matches!(
+            doc.table_payload(&TableLocator::new("body", 2)),
+            Err(OpError::UnknownTable { .. })
+        ));
+        assert!(matches!(
+            doc.table_payload(&TableLocator::new("missing", 0)),
+            Err(OpError::UnknownStory(_))
+        ));
+    }
+
+    #[test]
     fn insert_row_creates_stories_and_still_lowers_to_layout_table() {
         let doc = seed_table();
         let receipt = doc.insert_row(&direct(), &cell(0, 0), true).unwrap();
@@ -2010,6 +2101,41 @@ mod tests {
         doc.insert_table(ctx, Position::new("body", 0), rows, columns)
             .unwrap();
         doc
+    }
+
+    #[test]
+    fn revision_stamps_keep_distinct_dates_for_rows_sharing_a_revision() {
+        for key in [TR_INS, TR_DEL] {
+            let doc = seed_table();
+            let stamp = |date: &str| {
+                Any::from_json(&format!(
+                    r#"{{"id":"shared","author":"Ada","date":"{date}"}}"#
+                ))
+                .unwrap()
+            };
+            {
+                let mut txn = doc.yrs_doc().transact_mut();
+                let (_, table, _) = table_at(&txn, &TableLocator::new("body", 0)).unwrap();
+                let mut data = read_table(&table, &txn).unwrap();
+                data.rows[0]
+                    .tr_pr
+                    .insert(key.into(), stamp("2026-07-14T10:00:00Z"));
+                data.rows[1]
+                    .tr_pr
+                    .insert(key.into(), stamp("2026-07-14T10:01:00Z"));
+                write_table(&mut txn, &table, &data);
+            }
+            assert_eq!(
+                doc.revision_stamps(&["shared".into()]).unwrap(),
+                BTreeMap::from([(
+                    "shared".into(),
+                    std::collections::BTreeSet::from([
+                        ("Ada".into(), "2026-07-14T10:00:00Z".into()),
+                        ("Ada".into(), "2026-07-14T10:01:00Z".into()),
+                    ]),
+                )])
+            );
+        }
     }
 
     fn assert_grid_borders(doc: &EditingDoc) {
@@ -2291,6 +2417,7 @@ mod tests {
         let range = TableRange::new(cell(0, 0), cell(1, 1));
         let merged = doc.merge_cells(&direct(), &range).unwrap();
         assert_eq!(merged.deleted_story_ids.len(), 3);
+        assert_eq!(merged.changed_story_ids, ["body", "body:t0:r0c0"]);
         let (_, _, rows) = table_value(&doc);
         assert_eq!(rows[0]["cells"].as_array().unwrap().len(), 1);
         assert_eq!(rows[1]["cells"].as_array().unwrap().len(), 0);

@@ -12,17 +12,18 @@ semantics. No GPL/AGPL or proprietary spreadsheet source was consulted.
 - `lexer.rs` / `parser.rs` — source → position-tagged tokens → `Expr`.
 - `eval.rs` — the evaluator and coercion machinery (`to_number`, `to_text`,
   `to_bool`, `cmp_values`), range/`Area` access, and error propagation. It owns
-  no functions; `Expr::FuncCall` dispatches into `functions::lookup`.
-- `functions/` — the builtin library. `mod.rs` holds the name → implementation
-  registry and shared argument collectors; one module per category
+  no functions; `Expr::FuncCall` carries a `Func` interned at parse time and
+  dispatches via `Func::call`.
+- `functions/` — the builtin library. `mod.rs` holds the name → `Func` registry
+  (`resolve`), the `Func` → implementation dispatch (`Func::call`), and shared
+  argument collectors; one module per category
   (`math`, `stats`, `text`, `datetime`, `logical`, `lookups`, `info`) plus
   `criteria.rs` (the shared Excel criteria-string parser and the *IF/*IFS
   driver).
 
 Every builtin has the signature `fn(&[Expr], &EvalContext) -> CellValue` and
 receives its arguments **unevaluated**, so control-flow functions (`IF`, `IFS`,
-`SWITCH`, `IFERROR`, `IFNA`, `CHOOSE`, `AND`, `OR`) evaluate only the branches
-they take.
+`SWITCH`, `IFERROR`, `IFNA`, `CHOOSE`) evaluate only the branches they take.
 
 Whole-column references (`S:V`, `$S:$V`, `'Data Sheet'!S:V`) retain their anchors
 and full-height dependencies. Lookups read cells on demand; the existing
@@ -45,6 +46,7 @@ function). Aliases map to a single implementation: `CONCAT`/`CONCATENATE`,
 | `SUMIF(range, criteria, [sum_range])` | `sum_range` is anchored at its top-left with the criteria shape. |
 | `SUMIFS(sum_range, crit_range, crit, …)` | All ranges must share dimensions. |
 | `SUMPRODUCT(array1, [array2], …)` | Element-wise product summed; non-numeric cells = 0; arrays must match length. |
+| `MMULT(array1, array2)` | `cols(array1)` must equal `rows(array2)`. The scalar evaluator gives `#VALUE!` for any non-numeric operand cell; array evaluation reads blanks, logicals and numeric text as numbers. Returns the whole product as an array (see Dynamic arrays). |
 | `PRODUCT` | No numbers → 0. |
 | `ABS`, `SIGN` | — |
 | `ROUND` | Half away from zero. |
@@ -57,6 +59,8 @@ function). Aliases map to a single implementation: `CONCAT`/`CONCATENATE`,
 | `POWER`, `SQRT`, `EXP` | Non-finite result → `#NUM!`; `SQRT` of a negative → `#NUM!`. |
 | `LN`, `LOG10`, `LOG(n, [base])` | Non-positive input → `#NUM!`; `LN`/`LOG10` use the dedicated libm routine. |
 | `PI` | — |
+| `TANH` | Hyperbolic tangent. |
+| `RANDBETWEEN(bottom, top)` | Volatile. `bottom > top` → `#NUM!`; draws from `ceil(bottom)..=floor(top)`; an empty span yields `ceil(bottom)`. |
 
 ### Statistics
 
@@ -80,14 +84,14 @@ function). Aliases map to a single implementation: `CONCAT`/`CONCATENATE`,
 |---|---|
 | `LEN`, `UPPER`, `LOWER`, `TRIM` | `TRIM` collapses runs of the ASCII space only. |
 | `LEFT`/`RIGHT(text, [n])`, `MID(text, start, count)` | 1-based; positions counted in Unicode scalar values (see below). |
-| `FIND` / `SEARCH` | `FIND` case-sensitive, `SEARCH` case-insensitive; not found → `#VALUE!`. **No wildcards in `SEARCH`.** |
+| `FIND` / `SEARCH` | `FIND` case-sensitive, `SEARCH` case-insensitive; not found → `#VALUE!`. |
 | `SUBSTITUTE(text, old, new, [instance])` | Empty `old` returns the text unchanged. |
 | `REPLACE(old, start, count, new)` | Positional. |
 | `REPT`, `EXACT`, `PROPER`, `CLEAN` | `CLEAN` strips control characters. |
 | `T` | Text passes through, everything else → `""`. |
-| `CHAR(n)` / `CODE(text)` | `CHAR` for code points 1..=255; `CODE` returns the first char's code point (Unicode, not a code page). |
+| `CHAR(n)` / `CODE(text)` | `CHAR` for code points 1..=255; `CODE` returns the first char's code point (Unicode). |
 | `VALUE`, `NUMBERVALUE(text, [dec], [grp])` | `VALUE` handles a trailing `%`. |
-| `TEXT(value, format)` | **Minimal**: only `0`, `0.00`, `#,##0`, `#,##0.00`, `0%`; any other code → `#VALUE!`. |
+| `TEXT(value, format)` | Formats through the number-format interpreter, dates in the workbook's date system. |
 | `TEXTJOIN(delim, ignore_empty, …)` | `ignore_empty` also skips empty strings; ranges flatten row-major. |
 | `CONCAT` / `CONCATENATE` | Ranges flatten row-major. |
 
@@ -99,15 +103,15 @@ function). Aliases map to a single implementation: `CONCAT`/`CONCATENATE`,
 | `YEAR` / `MONTH` / `DAY` | Serial < 0 → `#NUM!`; serial 0 renders as 1900-01-00. |
 | `WEEKDAY(serial, [type])` | Types 1 (default), 2, 3, and 11..17. |
 | `EDATE` / `EOMONTH(start, months)` | `EDATE` clamps the day to the target month length. |
-| `TODAY` / `NOW` | Read `ctx.now_serial`; **absent clock → `#VALUE!`** (documented pure-engine boundary). |
+| `TODAY` / `NOW` | Read `ctx.now_serial`; absent clock keeps the cell's cached result, or returns `#VALUE!` when there is none. |
 | `HOUR` / `MINUTE` / `SECOND` | Time portion rounded to the nearest second. |
 | `TIME(h, m, s)` | Fraction of a day in [0, 1); values beyond a day wrap. |
 | `DATEDIF(start, end, unit)` | Units `Y`, `M`, `D`, `YM`, `YD`, `MD`; `end < start` → `#NUM!`. |
 
 Serial ↔ calendar math is the Excel **1900 system including the deliberate leap
 bug** (serial 60 = the phantom 1900-02-29), matching `xlsx_model::date`. The
-workbook date system is not reachable through `CellProvider`, so the 1904 epoch
-is not yet wired — a follow-up.
+workbook's date system reaches the evaluator as `EvalContext::date_system`, and
+`TEXT` formats dates in it.
 
 ### Logical
 
@@ -124,13 +128,15 @@ is not yet wired — a follow-up.
 
 | Name | Notes / deviations |
 |---|---|
-| `VLOOKUP` / `HLOOKUP(value, table, index, [range_lookup])` | `range_lookup` defaults to TRUE (approximate on a sorted first column/row); index out of range → `#REF!`. **No wildcards in exact mode.** |
-| `MATCH(value, area, [type])` | Types 1 (default, ascending), 0 (exact), -1 (descending). **No wildcards in type 0.** |
+| `VLOOKUP` / `HLOOKUP(value, table, index, [range_lookup])` | `range_lookup` defaults to TRUE (approximate on a sorted first column/row); index out of range → `#REF!`. |
+| `MATCH(value, area, [type])` | Types 1 (default, ascending), 0 (exact), -1 (descending). |
 | `INDEX(area, row, [col])` | Single-row/column areas accept one index; out of range → `#REF!`. |
-| `XLOOKUP(value, lookup, return, [if_not_found], …)` | **Exact match only**; match/search modes beyond exact are not yet implemented. |
+| `OFFSET(reference, rows, cols, [height], [width])` | Returns a reference, so it feeds the area-taking functions. Sizes default to the reference's own; a negative size extends back from the shifted corner; a zero size or a rectangle off the sheet → `#REF!`. A multi-cell result in scalar context is `#VALUE!` (see below). |
+| `XLOOKUP(value, lookup, return, [if_not_found], …)` | Scalar: exact, forward. Array evaluation: exact, approximate or wildcard, either direction. |
 | `CHOOSE(index, …)` | Only the chosen argument is evaluated. |
-| `ROW` / `COLUMN([ref])` | **A reference is required** — the evaluator has no notion of the calling cell, so the no-arg form is `#VALUE!`. |
-| `ROWS` / `COLUMNS(area)` | Dimension counts. |
+| `TRANSPOSE(array)` | Swaps rows and columns of an array or range; blanks transpose to `0`. |
+| `ROW` / `COLUMN([ref])` | The reference's top-left position; with no reference, the calling cell's own. |
+| `ROWS` / `COLUMNS(area)` | Dimension counts; the area is required. |
 
 ### Information
 
@@ -141,6 +147,17 @@ is not yet wired — a follow-up.
 | `NA` | The `#N/A` literal. |
 | `N` | Numbers/bools → numbers, text → 0, errors pass through. |
 
+### Dynamic arrays
+
+Array-aware evaluation covers `SEQUENCE`, `FILTER`, `SORT`, `SORTBY`,
+`UNIQUE`, `TRANSPOSE`, `MMULT`, `LINEST`, `TREND`, `FREQUENCY`, `TAKE`,
+`DROP`, `EXPAND`, `CHOOSEROWS`, `CHOOSECOLS`, `HSTACK`, `VSTACK`, `TOCOL`,
+`TOROW`, `WRAPROWS`, `WRAPCOLS`, `TEXTSPLIT`, `XLOOKUP`, `XMATCH`, `INDEX`,
+`LET`, `LAMBDA`, `MAP`, `REDUCE`, `SCAN`, `BYROW`, `MAKEARRAY`, plus element-wise
+`IF`, `IFERROR`, `IFNA` and the aggregates that read arrays (`SUM`,
+`SUMPRODUCT`, `AVERAGE`, `COUNT`, `COUNTA`, `MIN`, `MAX`, `PRODUCT`,
+`TEXTJOIN`, `CONCAT`).
+
 ## Criteria strings
 
 Shared by the *IF/*IFS family (`criteria.rs`). A criterion is an optional
@@ -150,19 +167,36 @@ numbers; everything else compares as case-insensitive text. For `=`/`<>` the
 text may contain the wildcards `*` (any run) and `?` (any single character),
 with `~` escaping a literal `*`, `?`, or `~`.
 
-## Deviations & boundaries (summary)
+## Evaluation behavior
 
-- **Text positions** are counted in Unicode scalar values; Excel counts UTF-16
-  code units. This differs only for astral (supplementary-plane) characters.
-- **`SEARCH`, and `VLOOKUP` / `HLOOKUP` / `MATCH` in exact mode**, do not
-  implement wildcards yet.
-- **`TEXT`** implements only the five format codes listed above; the full
-  §18.8.31 number-format interpreter is a separate PR.
-- **1904 date system** is not yet wired (see Date & time).
-- **`RAND` / `RANDBETWEEN`** are intentionally **not implemented** here — the
-  engine is kept pure and deterministic; volatility is handled generically by
-  the dependency graph.
+- **Text positions** count Unicode scalar values.
+- **`RANDBETWEEN`** draws from
+  `EvalContext::rand_seed` — pin it before the first draw and the sequence
+  replays exactly. Left `None`, each context takes a fresh stream from a
+  process-local counter, so sibling cells differ and every recalc re-draws,
+  while a process that evaluates in the same order replays the same draws.
+  Volatility itself is handled generically by the dependency graph.
 - **`TODAY` / `NOW`** return `#VALUE!` when no clock is injected via
   `EvalContext::with_now`.
+- **Array results** spill from a dynamic-array anchor into the cells beside
+  it and report `#SPILL!` when an authored value or formula is in the way.
+  Array evaluation is charged against the recalculation budget, and a formula
+  that exceeds it keeps its cached value.
+- **`ROW` / `COLUMN`** with no reference answer the calling cell's own position,
+  which recalculation supplies.
+- **`ROW` / `COLUMN` / `ROWS` / `COLUMNS` of a direct reference** are positional
+  queries, not value reads, so they contribute no dependency edge: `ROW($X$1)`
+  written in `$X$1` is not a cycle. A computed argument
+  (`ROW(OFFSET(A1,B1,0))`) is still walked for the cells it reads.
+- **`OFFSET` in scalar context** follows the evaluator's no-implicit-intersection
+  rule: a multi-cell result is `#VALUE!`, exactly as a bare `A1:A5` would be.
+- **`OFFSET`'s anchor** gives coordinates, never a value, so it is no more a
+  dependency than the reference under `ROW`. A cell may offset from its own
+  position without being a cycle.
+- **`OFFSET`'s dependencies** are exact — the resolved rectangle is a graph edge
+  — whenever its offsets and sizes are literal numbers over a literal anchor.
+  When any of them is computed, the target is unknowable before evaluation, so
+  the calling cell is marked volatile and re-evaluates on every recalc.
+  Volatility guarantees the cell is never skipped.
 
 Part of [BetterOffice](https://betteroffice.dev). Apache-2.0.

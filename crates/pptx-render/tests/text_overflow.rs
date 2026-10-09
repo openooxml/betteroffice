@@ -160,7 +160,7 @@ fn explicit_and_inherited_clipping_keep_hidden_text_out_of_hit_testing() {
 }
 
 #[test]
-fn normal_autofit_still_shrinks_and_fitting_text_keeps_its_size() {
+fn normal_autofit_keeps_the_stored_size_and_lets_outgrown_text_overflow() {
     let rendered = slide(0);
     let Primitive::TextBox {
         lines, overflow, ..
@@ -168,9 +168,9 @@ fn normal_autofit_still_shrinks_and_fitting_text_keeps_its_size() {
     else {
         unreachable!()
     };
-    assert!(!*overflow);
-    assert!(lines[0].runs[0].font_size_px < 64.0);
-    assert!(lines[0].height <= 48.0);
+    assert!(*overflow);
+    assert_eq!(lines[0].runs[0].font_size_px, 64.0);
+    assert!(lines[0].height > 48.0);
     let Primitive::TextBox {
         lines, overflow, ..
     } = text(&rendered, 7)

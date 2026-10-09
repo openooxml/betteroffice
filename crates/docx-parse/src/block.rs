@@ -1,5 +1,7 @@
 //! Shared story dispatcher for body and recursively nested block content.
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 use crate::chart::ChartPartsMap;
@@ -35,13 +37,16 @@ pub struct BlockSdt {
     pub content: Vec<BlockContent>,
 }
 
+/// Block payloads live behind `Arc` so derived views (section content,
+/// structured field caches) share the parsed allocation instead of
+/// deep-cloning it. Mutation goes through `Arc::make_mut` copy-on-write.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum BlockContent {
-    Paragraph(Paragraph),
-    Table(Table),
-    BlockSdt(BlockSdt),
-    RawXml(crate::inline::RawInlineXml),
+    Paragraph(Arc<Paragraph>),
+    Table(Arc<Table>),
+    BlockSdt(Arc<BlockSdt>),
+    RawXml(Arc<crate::inline::RawInlineXml>),
 }
 
 impl BlockContent {
@@ -97,6 +102,47 @@ pub struct StoryParser<'a, 'limits> {
     pub part: &'a str,
 }
 
+pub const PREVIEW_MIN_BLOCKS: usize = 32;
+
+pub(crate) struct LegacyBodyCut {
+    limit: usize,
+    blocks: usize,
+    open_fields: usize,
+    stopped: bool,
+}
+
+impl LegacyBodyCut {
+    pub(crate) fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            blocks: 0,
+            open_fields: 0,
+            stopped: false,
+        }
+    }
+
+    pub(crate) fn read_child(&mut self, name: &str) {
+        if is_story_block_name(name) {
+            self.stopped |= self.blocks >= self.limit && self.open_fields == 0;
+            self.blocks = self.blocks.saturating_add(1);
+        }
+    }
+
+    pub(crate) fn finish_block(&mut self, external_ends: usize, unmatched_fields: usize) {
+        if !self.stopped {
+            // Unparsed field openings can only overestimate the fields the dispatcher retains.
+            self.open_fields = self
+                .open_fields
+                .saturating_sub(external_ends)
+                .saturating_add(unmatched_fields);
+        }
+    }
+
+    pub(crate) fn is_partial(&self) -> bool {
+        self.stopped
+    }
+}
+
 impl StoryParser<'_, '_> {
     pub fn parse_blocks(
         &mut self,
@@ -104,25 +150,110 @@ impl StoryParser<'_, '_> {
         depth: usize,
         in_header_footer: bool,
     ) -> Result<Vec<BlockContent>, ParseError> {
+        self.parse_blocks_until(parent, depth, in_header_footer, None)
+            .map(|(content, _)| content)
+    }
+
+    /// [`Self::parse_blocks`] that stops once it holds `limit` blocks and no
+    /// field it opened is still open. Also returns how many of the parent's
+    /// children it read.
+    pub fn parse_blocks_until(
+        &mut self,
+        parent: &XmlElement,
+        depth: usize,
+        in_header_footer: bool,
+        limit: Option<usize>,
+    ) -> Result<(Vec<BlockContent>, usize), ParseError> {
+        self.parse_blocks_until_with_read_limit(
+            parent,
+            depth,
+            in_header_footer,
+            limit,
+            None,
+            None,
+            None,
+        )
+        .map(|(content, read, _)| (content, read))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn parse_blocks_until_with_read_limit(
+        &mut self,
+        parent: &XmlElement,
+        depth: usize,
+        in_header_footer: bool,
+        limit: Option<usize>,
+        read_limit: Option<usize>,
+        paragraph_budget: Option<usize>,
+        mut legacy_partial: Option<bool>,
+    ) -> Result<(Vec<BlockContent>, usize, bool), ParseError> {
         self.budget.check_nesting_depth(depth, self.part)?;
         let mut content = Vec::new();
         let mut records: Vec<FieldRecord> = Vec::new();
         let mut open_fields: Vec<OpenField> = Vec::new();
+        let mut read = 0;
+        let mut weight = 0usize;
+        let mut budget_stopped = false;
+        let mut legacy_cut = paragraph_budget
+            .filter(|_| legacy_partial.is_none())
+            .and_then(|_| limit.map(LegacyBodyCut::new));
 
-        for child in transparent_children(parent, false) {
-            let recognized = matches!(
-                child.local_name(),
-                "p" | "tbl" | "sdt" | "oMath" | "oMathPara"
-            );
-            if !recognized {
-                if let Some(crate::inline::InlineNode::RawXml(raw)) =
-                    crate::inline::raw_foreign_inline(child)
-                {
-                    content.push(BlockContent::RawXml(*raw));
+        let children = transparent_children(parent, false);
+        for child in &children {
+            if read_limit.is_some_and(|limit| read >= limit) {
+                break;
+            }
+            let budget_reached = paragraph_budget.is_some_and(|budget| weight >= budget)
+                && content.len() >= PREVIEW_MIN_BLOCKS
+                && is_story_block(child)
+                && open_fields.is_empty()
+                && *legacy_partial.get_or_insert_with(|| {
+                    let Some(mut cut) = legacy_cut.take() else {
+                        return false;
+                    };
+                    for child in children
+                        .iter()
+                        .take(read_limit.unwrap_or(children.len()))
+                        .skip(read)
+                    {
+                        cut.read_child(&child.name);
+                        if cut.is_partial() {
+                            return true;
+                        }
+                        if typed_block(child) {
+                            let events = scan_field_block_events(child);
+                            cut.finish_block(events.external_ends, events.unmatched_modes.len());
+                        }
+                    }
+                    false
+                });
+            if open_fields.is_empty()
+                && (limit.is_some_and(|limit| content.len() >= limit) || budget_reached)
+            {
+                budget_stopped = budget_reached;
+                break;
+            }
+            read += 1;
+            if let Some(cut) = &mut legacy_cut {
+                cut.read_child(&child.name);
+            }
+            let paragraphs_before = self.budget.paragraph_count();
+            if !typed_block(child) {
+                if let Some(raw) = crate::inline::raw_foreign_node(child, self.budget) {
+                    content.push(BlockContent::RawXml(Arc::new(raw)));
+                    weight = weight.saturating_add(
+                        self.budget
+                            .paragraph_count()
+                            .saturating_sub(paragraphs_before)
+                            .max(1),
+                    );
                 }
                 continue;
             }
             let events = scan_field_block_events(child);
+            if let Some(cut) = &mut legacy_cut {
+                cut.finish_block(events.external_ends, events.unmatched_modes.len());
+            }
             if events.external_separates > 0
                 && let Some(open) = open_fields.last_mut()
             {
@@ -151,15 +282,21 @@ impl StoryParser<'_, '_> {
                         depth,
                     )?;
                     self.enrich_paragraph_text_boxes(&mut paragraph, child, depth)?;
-                    BlockContent::Paragraph(paragraph)
+                    BlockContent::Paragraph(Arc::new(paragraph))
                 }
-                "tbl" => BlockContent::Table(self.parse_table(child, depth, in_header_footer)?),
-                "sdt" => {
-                    BlockContent::BlockSdt(self.parse_block_sdt(child, depth, in_header_footer)?)
-                }
+                "tbl" => BlockContent::Table(Arc::new(self.parse_table(
+                    child,
+                    depth,
+                    in_header_footer,
+                )?)),
+                "sdt" => BlockContent::BlockSdt(Arc::new(self.parse_block_sdt(
+                    child,
+                    depth,
+                    in_header_footer,
+                )?)),
                 "oMath" | "oMathPara" => {
                     self.budget.charge_paragraph(self.part)?;
-                    BlockContent::Paragraph(math_paragraph(child))
+                    BlockContent::Paragraph(Arc::new(math_paragraph(child)))
                 }
                 _ => unreachable!(),
             };
@@ -179,6 +316,12 @@ impl StoryParser<'_, '_> {
                 }
             }
             content.push(parsed);
+            weight = weight.saturating_add(
+                self.budget
+                    .paragraph_count()
+                    .saturating_sub(paragraphs_before)
+                    .max(1),
+            );
 
             if !events.unmatched_modes.is_empty() {
                 let candidates = top_level_complex_field_indices(&content[parsed_index]);
@@ -203,7 +346,7 @@ impl StoryParser<'_, '_> {
         }
 
         attach_recorded_field_blocks(&mut content, records);
-        Ok(content)
+        Ok((content, read, budget_stopped))
     }
 
     fn parse_block_sdt(
@@ -298,7 +441,7 @@ impl StoryParser<'_, '_> {
         if content.is_empty() {
             self.budget.charge_block(self.part)?;
             self.budget.charge_paragraph(self.part)?;
-            content.push(BlockContent::Paragraph(empty_paragraph()));
+            content.push(BlockContent::Paragraph(Arc::new(empty_paragraph())));
         }
         Ok(TableCell {
             node_type: "tableCell".to_owned(),
@@ -429,26 +572,86 @@ impl StoryParser<'_, '_> {
 /// and `w:smartTag` wrappers, and through `w:sdt`/`w:sdtContent` when `through_sdt`.
 pub(crate) fn transparent_children(parent: &XmlElement, through_sdt: bool) -> Vec<&XmlElement> {
     let mut children = Vec::new();
-    collect_transparent_children(parent, through_sdt, &mut children);
+    visit_transparent_children(parent, through_sdt, &mut Vec::new(), &mut |_, child| {
+        children.push(child)
+    });
     children
 }
 
-fn collect_transparent_children<'a>(
+fn visit_transparent_children<'a>(
     parent: &'a XmlElement,
     through_sdt: bool,
-    children: &mut Vec<&'a XmlElement>,
+    path: &mut Vec<u32>,
+    visit: &mut impl FnMut(&[u32], &'a XmlElement),
 ) {
-    for child in parent.child_elements() {
+    for (ordinal, child) in parent.child_elements().enumerate() {
+        path.push(ordinal as u32);
         if child.matches_name("w", "customXml") || child.matches_name("w", "smartTag") {
-            collect_transparent_children(child, through_sdt, children);
+            visit_transparent_children(child, through_sdt, path, visit);
         } else if through_sdt && child.matches_name("w", "sdt") {
-            if let Some(content) = child.child("w", "sdtContent") {
-                collect_transparent_children(content, through_sdt, children);
+            if let Some((index, content)) = child
+                .child_elements()
+                .enumerate()
+                .find(|(_, element)| element.matches_name("w", "sdtContent"))
+            {
+                path.push(index as u32);
+                visit_transparent_children(content, through_sdt, path, visit);
+                path.pop();
             }
         } else {
-            children.push(child);
+            visit(path, child);
         }
+        path.pop();
     }
+}
+
+/// Whether the story dispatcher reads `element` as a typed block.
+fn typed_block(element: &XmlElement) -> bool {
+    typed_block_name(&element.name)
+}
+
+pub(crate) fn typed_block_name(name: &str) -> bool {
+    matches!(
+        crate::xml::local_name(name),
+        "p" | "tbl" | "sdt" | "oMath" | "oMathPara"
+    )
+}
+
+/// Whether the story dispatcher reads `element` as a block: a typed one, or foreign markup it
+/// keeps as a raw block.
+fn is_story_block(element: &XmlElement) -> bool {
+    is_story_block_name(&element.name)
+}
+
+fn is_story_block_name(name: &str) -> bool {
+    typed_block_name(name) || crate::inline::is_foreign_name(name)
+}
+
+/// The elements [`StoryParser::parse_blocks`] reads as blocks from `parent`, in order, each with
+/// its element-child ordinals below `parent`.
+pub fn story_block_elements(parent: &XmlElement) -> Vec<(Vec<u32>, &XmlElement)> {
+    let mut blocks = Vec::new();
+    visit_transparent_children(parent, false, &mut Vec::new(), &mut |path, child| {
+        if is_story_block(child) {
+            blocks.push((path.to_vec(), child));
+        }
+    });
+    blocks
+}
+
+/// The rows of a `w:tbl`, or the cells of a `w:tr`, as the table parser reads them, each with
+/// its element-child ordinals below `parent`.
+pub fn table_part_elements<'a>(
+    parent: &'a XmlElement,
+    local: &str,
+) -> Vec<(Vec<u32>, &'a XmlElement)> {
+    let mut parts = Vec::new();
+    visit_transparent_children(parent, true, &mut Vec::new(), &mut |path, child| {
+        if child.matches_name("w", local) {
+            parts.push((path.to_vec(), child));
+        }
+    });
+    parts
 }
 
 fn scan_field_block_events(root: &XmlElement) -> FieldEvents {
@@ -565,7 +768,7 @@ fn complex_field_mut(
         return None;
     };
     let ParagraphContent::Inline(InlineNode::ComplexField(field)) =
-        paragraph.content.get_mut(content_index)?
+        Arc::make_mut(paragraph).content.get_mut(content_index)?
     else {
         return None;
     };
@@ -587,7 +790,7 @@ fn remove_external_field_end_runs(block: &mut BlockContent, count: usize) {
         return;
     };
     let mut remaining = count;
-    paragraph.content.retain(|content| {
+    Arc::make_mut(paragraph).content.retain(|content| {
         if remaining == 0 {
             return true;
         }
@@ -619,6 +822,9 @@ fn math_paragraph(element: &XmlElement) -> Paragraph {
     Paragraph {
         node_type: "paragraph".to_owned(),
         para_id: None,
+        repeated_para_id: None,
+        para_id_attribute: None,
+        source_ordinal: None,
         text_id: None,
         extra_attributes: Vec::new(),
         formatting: None,
@@ -650,6 +856,9 @@ fn empty_paragraph() -> Paragraph {
     Paragraph {
         node_type: "paragraph".to_owned(),
         para_id: None,
+        repeated_para_id: None,
+        para_id_attribute: None,
+        source_ordinal: None,
         text_id: None,
         extra_attributes: Vec::new(),
         formatting: None,

@@ -1,13 +1,14 @@
-use std::sync::Arc;
-
 use ooxml_drawingml::ShapeOutline;
-use pptx_parse::PptxPackage;
 use serde_json::Value;
 use yrs::{Any, Map, MapRef, ReadTxn, Transact};
 
+use crate::deck::SourceImport;
 use crate::{DeckSession, EditError, EditResult, META, MIGRATE_ORIGIN, ShapeSnapshot};
 
-pub(crate) fn import_source(session: &DeckSession, source: &PptxPackage) -> EditResult<()> {
+pub(crate) fn import_source(
+    session: &DeckSession,
+    import: &mut SourceImport<'_>,
+) -> EditResult<()> {
     let pending = {
         let txn = session.doc.transact();
         txn.get_map(META).is_some_and(|meta| {
@@ -17,25 +18,24 @@ pub(crate) fn import_source(session: &DeckSession, source: &PptxPackage) -> Edit
     if !pending {
         return Ok(());
     }
-    let fresh = DeckSession::from_package(source.clone(), 32200)?;
-    let original = fresh.snapshot()?;
     let mut sources = Vec::new();
-    for slide in &original.slides {
-        collect_outlines(&slide.shapes, &mut sources);
+    {
+        let original = import.source_snapshot()?;
+        for slide in &original.slides {
+            collect_outlines(&slide.shapes, &mut sources);
+        }
     }
-    let mut package = serde_json::to_value(crate::deck::package_from_doc(&session.doc)?)
+    let mut package = serde_json::to_value(&import.package)
         .map_err(|error| EditError::Json(error.to_string()))?;
     let source =
-        serde_json::to_value(source).map_err(|error| EditError::Json(error.to_string()))?;
-    let bytes = if merge_gradients(&mut package, &source) {
-        let package: PptxPackage =
-            serde_json::from_value(package).map_err(|error| EditError::Json(error.to_string()))?;
-        Some(serde_json::to_vec(&package).map_err(|error| EditError::Json(error.to_string()))?)
-    } else {
-        None
-    };
-    if bytes.is_none() && sources.is_empty() {
+        serde_json::to_value(import.source).map_err(|error| EditError::Json(error.to_string()))?;
+    let merged = merge_gradients(&mut package, &source);
+    if !merged && sources.is_empty() {
         return Ok(());
+    }
+    if merged {
+        import.package =
+            serde_json::from_value(package).map_err(|error| EditError::Json(error.to_string()))?;
     }
     let mut txn = session.doc.transact_mut_with(MIGRATE_ORIGIN);
     let shapes = txn
@@ -43,7 +43,7 @@ pub(crate) fn import_source(session: &DeckSession, source: &PptxPackage) -> Edit
         .ok_or_else(|| EditError::InvalidState("missing shapes".into()))?;
     for (id, outline) in sources {
         let Some(shape) = shapes
-            .get(&txn, id)
+            .get(&txn, &id)
             .and_then(|value| value.cast::<MapRef>().ok())
         else {
             continue;
@@ -56,7 +56,7 @@ pub(crate) fn import_source(session: &DeckSession, source: &PptxPackage) -> Edit
         let mut legacy = outline.clone();
         legacy.gradient = None;
         if current == legacy {
-            let json = serde_json::to_string(outline)
+            let json = serde_json::to_string(&outline)
                 .map_err(|error| EditError::Json(error.to_string()))?;
             shape.insert(&mut txn, "outlineJson", json);
         }
@@ -64,22 +64,16 @@ pub(crate) fn import_source(session: &DeckSession, source: &PptxPackage) -> Edit
     let meta = txn
         .get_map(META)
         .ok_or_else(|| EditError::InvalidState("missing metadata".into()))?;
-    if let Some(bytes) = bytes {
-        meta.insert(&mut txn, "packageJson", Any::Buffer(Arc::from(bytes)));
-    }
     meta.remove(&mut txn, "outlineGradientsPendingSource");
     Ok(())
 }
 
-fn collect_outlines<'a>(
-    shapes: &'a [ShapeSnapshot],
-    outlines: &mut Vec<(&'a str, &'a ShapeOutline)>,
-) {
+fn collect_outlines(shapes: &[ShapeSnapshot], outlines: &mut Vec<(String, ShapeOutline)>) {
     for shape in shapes {
         if let Some(outline) = &shape.outline
             && outline.gradient.is_some()
         {
-            outlines.push((&shape.id, outline));
+            outlines.push((shape.id.clone(), outline.clone()));
         }
         collect_outlines(&shape.children, outlines);
     }

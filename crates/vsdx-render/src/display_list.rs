@@ -1,7 +1,7 @@
 use ooxml_drawingml::GeometryPathCommand;
 use serde::{Deserialize, Serialize};
 
-pub const CONTRACT_VERSION: u32 = 4;
+pub const CONTRACT_VERSION: u32 = 7;
 
 /// Replay primitives in ascending `z_order` (back-to-front); hit test in descending order.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -10,9 +10,15 @@ pub struct VsdxDisplayList {
     pub contract_version: u32,
     pub width: f32,
     pub height: f32,
+    /// One sheet of printer paper in the same page pixels as `width` and `height`.
+    pub print_width: f32,
+    pub print_height: f32,
     /// The only transform from Visio inches/Y-up into canvas pixels/Y-down.
     pub paint_transform: PaintTransform,
     pub primitives: Vec<Primitive>,
+    /// Selection chrome for 1D connectors, keyed by primitive id.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connectors: Vec<ConnectorChrome>,
 }
 
 impl<'de> Deserialize<'de> for VsdxDisplayList {
@@ -26,8 +32,12 @@ impl<'de> Deserialize<'de> for VsdxDisplayList {
             contract_version: u32,
             width: f32,
             height: f32,
+            print_width: f32,
+            print_height: f32,
             paint_transform: PaintTransform,
             primitives: Vec<Primitive>,
+            #[serde(default)]
+            connectors: Vec<ConnectorChrome>,
         }
 
         let wire = WireDisplayList::deserialize(deserializer)?;
@@ -41,8 +51,11 @@ impl<'de> Deserialize<'de> for VsdxDisplayList {
             contract_version: wire.contract_version,
             width: wire.width,
             height: wire.height,
+            print_width: wire.print_width,
+            print_height: wire.print_height,
             paint_transform: wire.paint_transform,
             primitives: wire.primitives,
+            connectors: wire.connectors,
         })
     }
 }
@@ -141,8 +154,14 @@ impl Affine {
     rename_all_fields = "camelCase"
 )]
 pub enum Paint {
-    Solid { color: String },
-    Gradient { stops: Vec<GradientStop> },
+    Solid {
+        color: String,
+    },
+    Gradient {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        angle_deg: Option<f32>,
+        stops: Vec<GradientStop>,
+    },
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -159,6 +178,14 @@ pub struct Stroke {
     pub dashed: bool,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Shadow {
+    pub color: String,
+    pub blur_in: f32,
+    pub offset_x_in: f32,
+    pub offset_y_in: f32,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
     rename_all = "camelCase",
@@ -171,6 +198,8 @@ pub enum Primitive {
         path: Vec<GeometryPathCommand>,
         fill: Option<Paint>,
         stroke: Option<Stroke>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shadow: Option<Shadow>,
         #[serde(default, skip_serializing_if = "Affine::is_identity")]
         transform: Affine,
         /// Paint channels that fell back to the Visio default; empty when fully resolved.
@@ -301,8 +330,11 @@ impl DiagnosticCategory {
             | "unresolvable-character-pos"
             | "unresolvable-character-case"
             | "unresolvable-fill-colour"
+            | "unresolvable-fill-gradient"
+            | "lossy-fill-gradient"
             | "unresolvable-stroke-colour"
-            | "unresolvable-stroke-width" => Self::Fidelity,
+            | "unresolvable-stroke-width"
+            | "unsupported-shadow-oblique" => Self::Fidelity,
             _ => Self::Integrity,
         }
     }
@@ -353,6 +385,26 @@ pub struct CaretStop {
     pub x: f32,
     pub y: f32,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ConnectorEndpointGlue {
+    Free,
+    Shape,
+    Point,
+}
+
+/// How a connector endpoint is glued, for selection chrome.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectorChrome {
+    pub id: String,
+    pub begin: ConnectorEndpointGlue,
+    pub end: ConnectorEndpointGlue,
+    /// Whether a filed route on this connector would survive back into the render.
+    #[serde(default)]
+    pub routable: bool,
+}
+
 fn is_false(value: &bool) -> bool {
     !*value
 }

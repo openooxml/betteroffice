@@ -1,9 +1,18 @@
 {
   "_lang": "de",
+  "worker": {
+    "previousRecovery": null,
+    "preparing": "Editor wird vorbereitet. Die Bearbeitung ist in Kürze verfügbar.",
+    "failed": "Die Bearbeitung ist nicht verfügbar. Laden Sie die wiederhergestellte Präsentation herunter.",
+    "disabled": "Diese Funktion ist in diesem Bearbeitungsmodus nicht verfügbar.",
+    "recovery": null,
+    "image": null
+  },
   "toolbar": {
     "label": null,
     "save": "Speichern",
     "exportPng": null,
+    "present": "Präsentieren",
     "historyLabel": null,
     "undo": null,
     "redo": null,
@@ -79,7 +88,13 @@
       "upArrow": null,
       "downArrow": null,
       "chevron": null
-    }
+    },
+    "insertImage": null,
+    "arrange": null,
+    "bringToFront": null,
+    "bringForward": null,
+    "sendBackward": null,
+    "sendToBack": null
   },
   "slides": {
     "panelLabel": null,
@@ -94,9 +109,104 @@
     "openPrompt": null
   },
   "objects": {
-    "defaultTextBoxName": null
+    "defaultTextBoxName": null,
+    "defaultPictureName": null
+  },
+  "presentation": {
+    "label": "Präsentation",
+    "exit": "Präsentation beenden (Esc)",
+    "slideCounter": "{current} / {total}",
+    "previousSlide": "Vorherige Folie",
+    "nextSlide": "Nächste Folie"
+  },
+  "notes": {
+    "panelLabel": "Sprechernotizen",
+    "placeholder": "Sprechernotizen hinzufügen…"
   },
   "errors": {
     "decodeSlideImage": null
+  },
+  "proposals": {
+    "title": "Agent-Vorschläge",
+    "close": "Schließen",
+    "empty": "Keine Änderungen zur Überprüfung.",
+    "preview": "Vorschau der Änderungen",
+    "previewTitle": "Vorgeschlagene Änderungen überprüfen",
+    "before": "Aktuelle Folie",
+    "after": "Vorgeschlagene Folie",
+    "accept": "Vorschlag annehmen",
+    "reject": "Ablehnen",
+    "force": "Aktualisierten Vorschlag übernehmen",
+    "blank": "Leer",
+    "target": "Folie {slide} · {name}",
+    "targetLabel": "Änderung",
+    "targetMissing": "Das Ziel ist nicht mehr verfügbar",
+    "stale": "Diese Objekte wurden geändert, nachdem der Vorschlag erstellt wurde. Sehen Sie sich vor dem Übernehmen die aktuellen Änderungen an.",
+    "stalePreview": "Diese Vorschau verwendet die aktualisierte Folie. Beim Übernehmen werden die geänderten Ziele überschrieben.",
+    "geometry": "Position und Größe (x, y, Breite, Höhe)",
+    "appearance": "Darstellung oder Textformatierung geändert",
+    "changedAgain": "Das Ziel hat sich erneut geändert. Prüfen Sie vor dem Übernehmen die aktualisierte Vorschau.",
+    "canvasTitle": "Änderungen auf dieser Folie",
+    "editSlide": "Folie bearbeiten",
+    "showDiff": "Änderungen anzeigen",
+    "details": "Details zur Überprüfung",
+    "removed": "Entfernt",
+    "added": "Hinzugefügt",
+    "reviewHint": "Überprüfungsmodus · Änderungen werden beim Annehmen übernommen",
+    "canvasStale": "Ziele haben sich geändert. Öffnen Sie die Details zur Überprüfung, um die aktualisierte Vorschau vor dem Übernehmen zu prüfen.",
+    "previousPosition": "Vorher",
+    "proposedPosition": "Vorgeschlagen",
+    "loadingDiff": "Änderungen werden geladen…"
+  },
+  "commands": {
+    "moreControls": "Weitere Steuerelemente",
+    "selectTool": "Auswählen",
+    "fontSizeStep": "Schriftgröße ändern",
+    "customFontSize": "Benutzerdefinierte Größe…",
+    "fontSizePoints": "Größe in Punkt",
+    "customColor": "Benutzerdefinierte Farbe…",
+    "hexColor": "Hex-Farbe",
+    "apply": "Übernehmen",
+    "cancel": "Abbrechen",
+    "reasons": {
+      "editorUnavailable": "Der Editor ist nicht bereit.",
+      "documentLoading": "Die Präsentation wird noch geöffnet.",
+      "noDocument": "Keine Präsentation geöffnet.",
+      "readOnly": "Die Präsentation ist schreibgeschützt.",
+      "nothingToUndo": "Es gibt nichts rückgängig zu machen.",
+      "nothingToRedo": "Es gibt nichts wiederherzustellen.",
+      "textSelectionRequired": "Markieren Sie zuerst Text oder ein Textfeld.",
+      "shapeRequired": "Wählen Sie zuerst eine Form aus.",
+      "objectRequired": "Wählen Sie zuerst eine Form oder ein Bild aus.",
+      "slideRequired": "Fügen Sie zuerst eine Folie hinzu.",
+      "unsupportedSelection": "Dies gilt nicht für die aktuelle Auswahl.",
+      "invalidLayout": "Dieses Layout ist in dieser Präsentation nicht verfügbar.",
+      "invalidAdjustment": "Diese Anpassung ist für diese Form nicht verfügbar.",
+      "zOrderBoundary": "Das Objekt kann nicht weiter in diese Richtung verschoben werden.",
+      "reviewActive": "Beenden Sie zuerst die Vorschlagsprüfung.",
+      "previewPending": "Die Änderungsvorschau wird noch geladen.",
+      "previewFailed": "Die Änderungsvorschau konnte nicht angezeigt werden.",
+      "proposalStale": "Die Ziele des Vorschlags haben sich geändert. Prüfen Sie vor dem Übernehmen die aktualisierte Vorschau.",
+      "proposalNotFound": "Dieser Vorschlag steht nicht mehr aus.",
+      "proposalsUnavailable": "Vorschläge sind nicht verfügbar.",
+      "hostDisabled": "Diese Aktion ist hier nicht verfügbar.",
+      "unsupportedCommand": "Dieser Befehl wird nicht unterstützt.",
+      "invalidArguments": "Der Befehl hat ungültige Argumente erhalten.",
+      "inputFailed": "Eine vorherige Eingabe konnte nicht angewendet werden.",
+      "documentReplaced": "Die Präsentation wurde ersetzt.",
+      "targetChanged": "Die Auswahl hat sich geändert, bevor der Befehl ausgeführt wurde.",
+      "gestureActive": "Beenden Sie zuerst die Zeigergeste.",
+      "commandFailed": "Der Befehl ist fehlgeschlagen.",
+      "permissionDenied": "Die Host-Anwendung hat diesem Plugin diesen Befehl nicht erlaubt.",
+      "unsupportedPolicy": "Plugins können diesen Befehl noch nicht ausführen. Verwenden Sie stattdessen einen Bearbeitungsstapel.",
+      "pluginUnavailable": "Das Plugin ist nicht mehr aktiv.",
+      "aborted": "Die Plugin-Aktion wurde abgebrochen, bevor der Befehl ausgeführt wurde."
+    }
+  },
+  "plugins": {
+    "toolbarGroup": "Plugins",
+    "panelTabs": "Plugin-Bereiche",
+    "collapsePanel": "{title} einklappen",
+    "expandPanel": "{title} ausklappen"
   }
 }

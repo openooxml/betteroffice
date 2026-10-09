@@ -16,10 +16,14 @@ import type {
   TextBoxPrimitive,
 } from '../types';
 import type { ProposalTextChange } from '../proposals';
+import { imageDecodeScale, setImageDecodeScale } from './image';
 
-export type CanvasImageResolver = (
+export type CanvasImageResolver = ((
   assetId: string
-) => CanvasImageSource | Promise<CanvasImageSource | null> | null;
+) => CanvasImageSource | Promise<CanvasImageSource | null> | null) & {
+  acquire?(): CanvasImageResolver;
+  release?(): void;
+};
 
 export interface PaintSlideOptions {
   resolveImage?: CanvasImageResolver;
@@ -39,14 +43,27 @@ export interface SlideCanvasLike {
   style: { width: string; height: string };
 }
 
+/** The backing store a slide needs: a fractional extent covers its last pixel. */
+export function slideBackingStore(
+  list: Pick<SlideDisplayList, 'width' | 'height'>,
+  dpr: number,
+  scale = 1
+): { width: number; height: number } {
+  return {
+    width: Math.ceil(list.width * scale * dpr),
+    height: Math.ceil(list.height * scale * dpr),
+  };
+}
+
 export function sizeCanvasForSlide(
   canvas: SlideCanvasLike,
   list: Pick<SlideDisplayList, 'width' | 'height'>,
   dpr: number,
   scale = 1
 ): void {
-  canvas.width = Math.round(list.width * scale * dpr);
-  canvas.height = Math.round(list.height * scale * dpr);
+  const store = slideBackingStore(list, dpr, scale);
+  canvas.width = store.width;
+  canvas.height = store.height;
   canvas.style.width = `${list.width * scale}px`;
   canvas.style.height = `${list.height * scale}px`;
 }
@@ -61,8 +78,10 @@ export async function paintSlide(
   const shadowBudget = { remaining: options.maxShadowPixels ?? MAX_SHADOW_PIXELS };
   if (!Number.isSafeInteger(shadowBudget.remaining) || shadowBudget.remaining < 0)
     throw new Error('invalid shadow pixel budget');
-  ctx.save();
+  const images = options.resolveImage?.acquire?.() ?? options.resolveImage;
+  const paintOptions = { ...options, resolveImage: images };
   try {
+    ctx.save();
     ctx.setTransform(dpr * scale, 0, 0, dpr * scale, 0, 0);
     ctx.clearRect(0, 0, list.width, list.height);
     if (list.background) {
@@ -70,9 +89,9 @@ export async function paintSlide(
       ctx.fillRect(0, 0, list.width, list.height);
     }
     for (const primitive of list.primitives)
-      await paintPrimitive(ctx, primitive, options, dpr * scale, shadowBudget);
+      await paintPrimitive(ctx, primitive, paintOptions, dpr * scale, shadowBudget);
   } finally {
-    ctx.restore();
+    try { ctx.restore(); } finally { images?.release?.(); }
   }
 }
 
@@ -147,7 +166,7 @@ function paintShape(
     buildPath(ctx, shape.clip, shape.x, shape.y, shape.w, shape.h);
     ctx.clip();
   }
-  if (shape.shadow && (shape.fill || shape.stroke)) {
+  if (shape.shadow && (shape.fill || shape.stroke || shape.shadow.paths?.some((part) => part.stroke))) {
     paintShadowedShape(ctx, shape, deviceScale, shadowBudget);
   }
   buildPath(ctx, shape.path, shape.x, shape.y, shape.w, shape.h);
@@ -167,14 +186,20 @@ function paintShadowedShape(
   deviceScale: number,
   shadowBudget: ShadowBudget
 ): void {
+  const parts: ShapePrimitive[] = shape.shadow?.paths?.length
+    ? shape.shadow.paths.map((part) => ({ ...shape, path: part.path,
+        fill: part.fill ? shape.fill : undefined, stroke: part.stroke, shadow: undefined }))
+    : [{ ...shape, shadow: undefined }];
   paintShadowLayer(
     ctx,
     shape.shadow!,
-    pathPoints(shape.path, shape),
-    shape.stroke?.width ?? 0,
+    parts.flatMap((part) => pathPoints(part.path, part)),
+    parts.reduce((reach, part) => Math.max(reach, part.stroke?.width ?? 0), 0),
     deviceScale,
     shadowBudget,
-    (scratch) => paintShape(scratch, { ...shape, shadow: undefined }, deviceScale, shadowBudget)
+    (scratch) => {
+      for (const part of parts) paintShape(scratch, part, deviceScale, shadowBudget);
+    }
   );
 }
 
@@ -219,8 +244,7 @@ function paintShadowLayer(
   const bottom = Math.ceil(Math.min(maxY + outline, ctx.canvas.height + spread - dy));
   if (right <= left || bottom <= top) return;
   const pixels = (right - left) * (bottom - top);
-  if (!Number.isSafeInteger(pixels) || pixels > shadowBudget.remaining)
-    throw new Error('shadows exceed the pixel budget on one slide');
+  if (!Number.isSafeInteger(pixels) || pixels > shadowBudget.remaining) return;
   shadowBudget.remaining -= pixels;
   const layer = typeof OffscreenCanvas !== 'undefined'
     ? new OffscreenCanvas(right - left, bottom - top)
@@ -373,6 +397,10 @@ function drawCropped(
   source: CanvasImageSource,
   image: ImagePrimitive
 ): void {
+  if (image.tile) {
+    drawTiled(ctx, source, image, image.tile);
+    return;
+  }
   const crop = image.crop;
   const left = clampCrop(crop?.left);
   const top = clampCrop(crop?.top);
@@ -403,6 +431,62 @@ function drawCropped(
     ctx.drawImage(source, image.x, image.y, image.w, image.h);
   }
   if (masked) ctx.restore();
+}
+
+/** Repeats the cropped source from the box's top left, at its own size times the scale. */
+function drawTiled(
+  ctx: CanvasRenderingContext2D,
+  source: CanvasImageSource,
+  image: ImagePrimitive,
+  tile: { scaleX: number; scaleY: number }
+): void {
+  const width = sourceWidth(source);
+  const height = sourceHeight(source);
+  if (width <= 0 || height <= 0) return;
+  const decodeScale = imageDecodeScale(source);
+  const originalWidth = width * decodeScale.x;
+  const originalHeight = height * decodeScale.y;
+  const left = Math.round(clampCrop(image.crop?.left) * originalWidth) / decodeScale.x;
+  const top = Math.round(clampCrop(image.crop?.top) * originalHeight) / decodeScale.y;
+  const right = (originalWidth - Math.round(clampCrop(image.crop?.right) * originalWidth)) / decodeScale.x;
+  const bottom = (originalHeight - Math.round(clampCrop(image.crop?.bottom) * originalHeight)) / decodeScale.y;
+  if (right <= left || bottom <= top) return;
+  const cropped = left > 0 || top > 0 || right < width || bottom < height;
+  const tileSource = cropped ? croppedTile(source, left, top, right - left, bottom - top) : source;
+  const pattern = ctx.createPattern(tileSource, 'repeat');
+  if (!pattern) return;
+  ctx.save();
+  buildImageOutline(ctx, image);
+  ctx.clip();
+  const tileDecodeScale = imageDecodeScale(tileSource);
+  pattern.setTransform(
+    new DOMMatrix().translateSelf(image.x, image.y)
+      .scaleSelf(tile.scaleX * tileDecodeScale.x, tile.scaleY * tileDecodeScale.y)
+  );
+  ctx.fillStyle = pattern;
+  ctx.fillRect(image.x, image.y, image.w, image.h);
+  ctx.restore();
+}
+
+/** The `a:srcRect` part of a tile's source, which the pattern repeats in its place. */
+function croppedTile(
+  source: CanvasImageSource,
+  x: number,
+  y: number,
+  width: number,
+  height: number
+): CanvasImageSource {
+  try {
+    const canvas = offscreen(Math.max(1, Math.ceil(width)), Math.max(1, Math.ceil(height)));
+    const ctx = canvas?.getContext('2d') as CanvasRenderingContext2D | null;
+    if (!canvas || !ctx) return source;
+    ctx.drawImage(source, x, y, width, height, 0, 0, canvas.width, canvas.height);
+    const scale = imageDecodeScale(source);
+    setImageDecodeScale(canvas, { x: scale.x * width / canvas.width, y: scale.y * height / canvas.height });
+    return canvas as CanvasImageSource;
+  } catch {
+    return source;
+  }
 }
 
 /** The picture's own outline when it has one, else its frame. */
@@ -486,6 +570,7 @@ function strokeCurrentPath(
   ctx.strokeStyle = stroke.paint ? paintStyle(ctx, stroke.paint, x, y, width, height) : stroke.color;
   ctx.lineWidth = stroke.width;
   ctx.setLineDash(stroke.dashed ? [Math.max(3, stroke.width * 2), Math.max(2, stroke.width)] : []);
+  ctx.lineJoin = stroke.join ?? 'miter';
   ctx.stroke();
 }
 
@@ -524,21 +609,39 @@ async function paintImage(
 ): Promise<void> {
   let source: CanvasImageSource | undefined;
   if (image.assetId && resolver) {
-    const resolved = await resolver(image.assetId);
+    const resolved = await resolveSource(resolver, image.assetId);
     if (resolved) source = image.effects?.length ? recolourImage(resolved, image.effects) : resolved;
   }
-  if (image.shadow && (source || image.stroke)) {
+  if (image.shadow && (source || image.stroke || image.shadow.paths?.some((part) => part.stroke))) {
+    const parts = image.shadow.paths?.length
+      ? image.shadow.paths.map((part) => ({ image: { ...image, path: part.path, stroke: part.stroke },
+          source: part.fill ? source : undefined }))
+      : [{ image, source }];
     paintShadowLayer(
       ctx,
       image.shadow,
-      imagePoints(image),
-      image.stroke?.width ?? 0,
+      parts.flatMap((part) => imagePoints(part.image)),
+      parts.reduce((reach, part) => Math.max(reach, part.image.stroke?.width ?? 0), 0),
       deviceScale,
       shadowBudget,
-      (scratch) => drawImageContent(scratch, image, source)
+      (scratch) => {
+        for (const part of parts) drawImageContent(scratch, part.image, part.source);
+      }
     );
   }
   drawImageContent(ctx, image, source);
+}
+
+/** Media the host cannot decode leaves the picture blank and the rest of the slide intact. */
+async function resolveSource(
+  resolver: CanvasImageResolver,
+  assetId: string
+): Promise<CanvasImageSource | null> {
+  try {
+    return await resolver(assetId);
+  } catch {
+    return null;
+  }
 }
 
 function drawImageContent(
@@ -663,6 +766,11 @@ function recolourImage(source: CanvasImageSource, effects: ImageEffect[]): Canva
     applyImageEffects(data.data, effects);
     ctx.putImageData(data, 0, 0);
     const result = canvas as CanvasImageSource;
+    const scale = imageDecodeScale(source);
+    setImageDecodeScale(result, {
+      x: scale.x * size.width / bounds.width,
+      y: scale.y * size.height / bounds.height,
+    });
     if (reusable) retainRecolouring(source as object, key, result, bounds.width * bounds.height);
     return result;
   } catch {
@@ -712,6 +820,13 @@ export function applyImageEffects(data: Uint8ClampedArray, effects: ImageEffect[
           data[index] = value;
           data[index + 1] = value;
           data[index + 2] = value;
+        }
+        break;
+      }
+      case 'alpha': {
+        const amount = Math.min(Math.max(effect.amount, 0), 1);
+        for (let index = 3; index < data.length; index += 4) {
+          data[index] = Math.round(data[index] * amount);
         }
         break;
       }
@@ -784,9 +899,20 @@ function paintTextBox(
   ctx.textBaseline = 'alphabetic';
   const changes = textChanges.filter((change) => change.storyId === textBox.storyId);
   paintTextChanges(ctx, textBox, changes, false);
+  const shadow = textBox.textShadow;
+  if (shadow) {
+    ctx.save();
+    // The canvas blurs by a radius of about twice the Gaussian sigma, and a
+    // shape's shadow halves the authored radius for the same reason.
+    ctx.shadowColor = shadow.color;
+    ctx.shadowBlur = Math.max(shadow.blur ?? 0, 0);
+    ctx.shadowOffsetX = shadow.dx ?? 0;
+    ctx.shadowOffsetY = shadow.dy ?? 0;
+  }
   for (const line of textBox.lines) {
     for (const run of line.runs) paintTextRun(ctx, run, line.baseline);
   }
+  if (shadow) ctx.restore();
   paintTextChanges(ctx, textBox, changes, true);
 }
 
@@ -849,11 +975,39 @@ function paintTextRun(
 }
 
 function positionedTextChunks(run: PositionedTextRun): Array<{ text: string; x: number }> {
-  if (run.glyphs.length < 2) return [{ text: run.text, x: run.x }];
+  if (run.glyphs.length === 0) return [{ text: run.text, x: run.x }];
+  // A right-to-left run's glyphs step leftward: the canvas orders each tab-free
+  // piece itself, drawn from that piece's leftmost glyph.
+  if (run.glyphs.length > 1 && run.glyphs[1].x < run.glyphs[0].x) {
+    const texts = run.text.split('\t');
+    const ends: number[] = [];
+    let end = -1;
+    for (const text of texts) {
+      end += text.length + 1;
+      ends.push(end);
+    }
+    const lefts = texts.map(() => Infinity);
+    for (const glyph of run.glyphs) {
+      const offset = glyph.cluster - run.start;
+      let low = 0;
+      let high = ends.length - 1;
+      while (low < high) {
+        const middle = (low + high) >> 1;
+        if (ends[middle] < offset) low = middle + 1;
+        else high = middle;
+      }
+      if (offset >= 0 && offset < ends[low]) lefts[low] = Math.min(lefts[low], glyph.x);
+    }
+    return texts.flatMap((text, index) =>
+      text.length > 0 && lefts[index] < Infinity ? [{ text, x: lefts[index] }] : [],
+    );
+  }
   const chunks: Array<{ text: string; x: number }> = [];
   let textStart = 0;
   let x = run.x;
-  let expectedX = run.glyphs[0].x;
+  // The pen starts at the run's own x, so a leading tab, which paints no glyph,
+  // splits the run where the text after it lands.
+  let expectedX = run.x;
   for (const glyph of run.glyphs) {
     const offset = glyph.cluster - run.start;
     if (

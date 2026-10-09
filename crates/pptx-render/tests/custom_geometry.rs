@@ -23,6 +23,7 @@ fn custom_paths_keep_coordinates_paints_and_fallbacks() {
             fill,
             stroke,
             shape_id,
+            geometry_fallback,
             ..
         } = primitive
         else {
@@ -35,6 +36,7 @@ fn custom_paths_keep_coordinates_paints_and_fallbacks() {
         );
         assert_eq!(fill.is_none(), index == 1 || index == 3);
         assert_eq!(stroke.is_none(), index == 2 || index == 3);
+        assert!(!geometry_fallback);
         if let Some(fill) = fill {
             assert_eq!(
                 *fill,
@@ -78,9 +80,15 @@ fn custom_paths_keep_coordinates_paints_and_fallbacks() {
         };
         assert_eq!(*path, expected);
     }
-    let Primitive::Shape { path, .. } = &primitives[4] else {
+    let Primitive::Shape {
+        path,
+        geometry_fallback,
+        ..
+    } = &primitives[4]
+    else {
         panic!()
     };
+    assert!(!geometry_fallback);
     assert_eq!(path.len(), 4);
     assert!(
         matches!(path[1], C::Cubic { x, y, .. } if (x - 0.5).abs() < 1e-12 && (y - 0.5).abs() < 1e-12)
@@ -93,30 +101,48 @@ fn custom_paths_keep_coordinates_paints_and_fallbacks() {
         C::Close,
     ];
     for primitive in &primitives[5..7] {
-        let Primitive::Shape { path, fill, .. } = primitive else {
+        let Primitive::Shape {
+            path,
+            fill,
+            geometry_fallback,
+            ..
+        } = primitive
+        else {
             panic!()
         };
         assert_eq!(*path, rectangle);
         assert!(fill.is_some());
+        assert!(geometry_fallback);
     }
     let preset =
         ooxml_drawingml::preset_geometry_to_path("ellipse", &Default::default(), 100.0 / 70.0)
             .unwrap();
-    let Primitive::Shape { path, .. } = &primitives[7] else {
+    let Primitive::Shape {
+        path,
+        geometry_fallback,
+        ..
+    } = &primitives[7]
+    else {
         panic!()
     };
     assert_eq!(*path, preset);
+    assert!(!geometry_fallback);
 
     let mut deck = deck;
-    deck.slides[0].shapes[0].geometry = "ellipse".into();
+    deck.slides[0].shapes[0].geometry = "unknownPreset".into();
     let rendered = renderer.layout_slide(session.package(), &deck, 0).unwrap();
-    let Primitive::Shape { path, .. } = &rendered.display_list.primitives[0] else {
+    let Primitive::Shape {
+        geometry,
+        path,
+        geometry_fallback,
+        ..
+    } = &rendered.display_list.primitives[0]
+    else {
         panic!()
     };
-    assert_eq!(
-        *path,
-        ooxml_drawingml::preset_geometry_to_path("ellipse", &Default::default(), 2.0).unwrap()
-    );
+    assert_eq!(geometry, "unknownPreset");
+    assert_eq!(*path, rectangle);
+    assert!(geometry_fallback);
 }
 
 #[test]

@@ -10,7 +10,7 @@ const USAGE: &str = "\
 betteroffice-redact — locally redact an OOXML repro file
 
 usage:
-  betteroffice-redact <file.docx|file.xlsx|file.pptx> [options]
+  betteroffice-redact <file.docx|file.xlsx|file.pptx|file.vsdx|file.vstx> [options]
 
 options:
   -o, --output <path>    output path (default: <input>.redacted.<ext>)
@@ -138,7 +138,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, String>
         }
         index += 1;
     }
-    let input = input.ok_or("an input DOCX, XLSX, or PPTX file is required")?;
+    let input = input.ok_or("an input file is required")?;
     if endpoint.is_some() && !share {
         return Err("--endpoint requires --share".to_owned());
     }

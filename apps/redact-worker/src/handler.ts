@@ -8,7 +8,7 @@ export type Sanitizer = (
   format: SupportedFormat,
 ) => Uint8Array | Promise<Uint8Array>;
 
-export type SupportedFormat = "docx" | "xlsx" | "pptx";
+export type SupportedFormat = "docx" | "xlsx" | "pptx" | "vsdx" | "vstx";
 
 interface FormatSpec {
   contentType: string;
@@ -24,6 +24,8 @@ const MAX_FILE_BYTES = 64 * 1024 * 1024;
 const DEFAULT_RATE_LIMIT = 10;
 const DEFAULT_RATE_WINDOW_MS = 60 * 60 * 1000;
 const FORMATS: Record<SupportedFormat, FormatSpec> = {
+  vsdx: { contentType: "application/vnd.ms-visio.drawing" },
+  vstx: { contentType: "application/vnd.ms-visio.template" },
   docx: {
     contentType:
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -72,7 +74,7 @@ async function upload(
   }
   const format = request.headers.get("X-BetterOffice-Format")?.toLowerCase();
   if (!isSupportedFormat(format)) {
-    return errorResponse(415, "DOCX, XLSX, or PPTX format header required");
+    return errorResponse(415, "DOCX, XLSX, PPTX, VSDX, or VSTX format header required");
   }
   const contentType = request.headers.get("Content-Type")?.split(";", 1)[0].trim();
   const spec = FORMATS[format];
@@ -195,7 +197,13 @@ function allowUpload(
 }
 
 function isSupportedFormat(value: string | undefined): value is SupportedFormat {
-  return value === "docx" || value === "xlsx" || value === "pptx";
+  return (
+    value === "docx" ||
+    value === "xlsx" ||
+    value === "pptx" ||
+    value === "vsdx" ||
+    value === "vstx"
+  );
 }
 
 function errorResponse(status: number, error: string): Response {

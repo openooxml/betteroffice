@@ -1,8 +1,8 @@
 import enJson from '../en.json';
 
-export type LocaleStrings = typeof enJson;
+export type LocaleStrings = typeof en;
 export type LocaleCode = 'en';
-export const en: LocaleStrings = enJson;
+export const en = enJson;
 export const locales: Record<LocaleCode, PartialLocaleStrings> = { en };
 
 export type DeepPartial<T> = { [K in keyof T]?: T[K] extends object ? DeepPartial<T[K]> : T[K] | null };

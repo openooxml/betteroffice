@@ -1,12 +1,12 @@
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::Ordering;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
-use yrs::Transact;
+use yrs::{ReadTxn, Transact};
 
+use crate::staging::Adoption;
 use crate::{
-    DeckSession, DeckSnapshot, DeckUndoManager, EditCtx, EditError, ShapeRect, ShapeSnapshot,
-    ShapeStroke, TextStyle, TextStylePatch, decode_update_v1, doc_with_client_id, hydrate_doc,
+    DeckSession, DeckSnapshot, EditCtx, EditError, ShapeRect, ShapeSnapshot, ShapeStroke,
+    TextStyle, TextStylePatch,
 };
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -83,7 +83,7 @@ pub struct ProposalChange {
 }
 
 impl ProposalChange {
-    fn key(&self) -> String {
+    pub(crate) fn key(&self) -> String {
         self.shape_id
             .clone()
             .unwrap_or_else(|| self.slide_id.clone())
@@ -134,6 +134,28 @@ pub type ProposalResult<T> = Result<T, ProposalError>;
 pub(crate) struct ProposalStore {
     next_id: u64,
     pending: Vec<Proposal>,
+    /// Memoized previews of pending proposals, keyed on proposal id and the
+    /// doc's epoch; a preview is a pure function of the proposal's edits and
+    /// the doc state.
+    pub(crate) previews: HashMap<String, (u64, ProposalPreview)>,
+}
+
+impl ProposalStore {
+    pub(crate) fn counters(&self) -> (u64, usize) {
+        (self.next_id, self.pending.len())
+    }
+
+    pub(crate) fn adopt_counter(&mut self, counter: u64) {
+        self.next_id = counter;
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CompactProposalAcceptance {
+    pub proposal_id: String,
+    pub applied: bool,
+    pub changed_targets: Vec<String>,
 }
 
 impl DeckSession {
@@ -152,8 +174,8 @@ impl DeckSession {
             ));
         }
         let before = self.snapshot()?;
-        let preview = self.preview_edits(&request.edits)?;
-        let changes = changes_for(&before, &preview.snapshot()?, &request.edits)?;
+        let (_, snapshot) = self.preview_edits(&before, &request.edits)?;
+        let changes = changes_for(&before, &snapshot, &request.edits)?;
         let mut store = self.proposals.borrow_mut();
         store.next_id += 1;
         let proposal = Proposal {
@@ -165,6 +187,17 @@ impl DeckSession {
             stale_targets: Vec::new(),
         };
         store.pending.push(proposal.clone());
+        let epoch = self.epoch();
+        store.previews.insert(
+            proposal.id.clone(),
+            (
+                epoch,
+                ProposalPreview {
+                    proposal: proposal.clone(),
+                    snapshot,
+                },
+            ),
+        );
         Ok(proposal)
     }
 
@@ -185,57 +218,101 @@ impl DeckSession {
 
     pub fn preview_proposal(&self, id: &str) -> ProposalResult<ProposalPreview> {
         let mut proposal = self.pending_proposal(id)?;
+        let epoch = self.epoch();
+        if let Some((cached_epoch, preview)) = self.proposals.borrow().previews.get(id)
+            && *cached_epoch == epoch
+        {
+            return Ok(preview.clone());
+        }
+        self.proposals.borrow_mut().previews.remove(id);
         let before = self.snapshot()?;
-        let snapshot = self.preview_edits(&proposal.edits)?.snapshot()?;
+        let (_, snapshot) = self.preview_edits(&before, &proposal.edits)?;
         proposal.stale_targets = stale_targets(&before, &proposal);
         proposal.changes = changes_for(&before, &snapshot, &proposal.edits)?;
-        Ok(ProposalPreview { proposal, snapshot })
+        let preview = ProposalPreview { proposal, snapshot };
+        self.proposals
+            .borrow_mut()
+            .previews
+            .insert(id.to_owned(), (epoch, preview.clone()));
+        Ok(preview)
     }
 
     pub fn proposal_preview_session(&self, id: &str) -> ProposalResult<DeckSession> {
-        self.preview_edits(&self.pending_proposal(id)?.edits)
+        let proposal = self.pending_proposal(id)?;
+        let before = self.snapshot()?;
+        Ok(self.preview_edits(&before, &proposal.edits)?.0)
     }
 
     pub fn accept_proposal(&self, id: &str, force: bool) -> ProposalResult<ProposalAcceptance> {
+        let (outcome, snapshot) = self.accept_proposal_inner(id, force)?;
+        Ok(ProposalAcceptance {
+            proposal_id: outcome.proposal_id,
+            applied: outcome.applied,
+            snapshot,
+        })
+    }
+
+    pub(crate) fn accept_proposal_compact(
+        &self,
+        id: &str,
+        force: bool,
+    ) -> ProposalResult<CompactProposalAcceptance> {
+        self.accept_proposal_inner(id, force)
+            .map(|(outcome, _)| outcome)
+    }
+
+    fn accept_proposal_inner(
+        &self,
+        id: &str,
+        force: bool,
+    ) -> ProposalResult<(CompactProposalAcceptance, DeckSnapshot)> {
         let proposal = self.pending_proposal(id)?;
         let before = self.snapshot()?;
         let stale = stale_targets(&before, &proposal);
         if !force && !stale.is_empty() {
             return Err(ProposalError::Stale(stale));
         }
-        let preview = self.preview_edits(&proposal.edits)?;
-        let snapshot = preview.snapshot()?;
+        let (preview, snapshot) = self.preview_edits(&before, &proposal.edits)?;
         let applied = before != snapshot;
         if applied {
-            let update = preview.encode_diff_v1(&self.encode_state_vector_v1())?;
-            let update = decode_update_v1(&update).map_err(EditError::InvalidUpdate)?;
-            self.add_undo_barrier();
-            self.doc
-                .transact_mut_with(self.client_id)
-                .apply_update(update)
-                .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
-            self.id_counter.store(
-                preview.id_counter.load(Ordering::Relaxed),
-                Ordering::Relaxed,
-            );
-            self.add_undo_barrier();
+            let (_, update) = preview.staged_update(&self.doc.transact().state_vector())?;
+            self.adopt(&preview, update, Adoption::Proposal)?;
         }
         self.reject_proposal(id);
-        Ok(ProposalAcceptance {
-            proposal_id: id.to_owned(),
-            applied,
+        let changed_targets = proposal
+            .changes
+            .iter()
+            .filter(|change| {
+                capture(&snapshot, &change.slide_id, change.shape_id.as_deref()).is_ok_and(
+                    |after| {
+                        capture(&before, &change.slide_id, change.shape_id.as_deref())
+                            .is_ok_and(|before| after != before)
+                    },
+                )
+            })
+            .map(ProposalChange::key)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        Ok((
+            CompactProposalAcceptance {
+                proposal_id: id.to_owned(),
+                applied,
+                changed_targets,
+            },
             snapshot,
-        })
+        ))
     }
 
     pub fn reject_proposal(&self, id: &str) -> bool {
         let mut store = self.proposals.borrow_mut();
+        store.previews.remove(id);
         let before = store.pending.len();
         store.pending.retain(|proposal| proposal.id != id);
         before != store.pending.len()
     }
 
-    fn pending_proposal(&self, id: &str) -> ProposalResult<Proposal> {
+    pub(crate) fn pending_proposal(&self, id: &str) -> ProposalResult<Proposal> {
         self.proposals
             .borrow()
             .pending
@@ -245,32 +322,29 @@ impl DeckSession {
             .ok_or_else(|| ProposalError::NotFound(id.to_owned()))
     }
 
-    fn preview_edits(&self, edits: &[ProposalEdit]) -> ProposalResult<DeckSession> {
-        let snapshot = self.snapshot()?;
+    /// Applies `edits` to a hydrated clone of the live doc — never the live
+    /// doc itself, so a preview produces no observable update events and
+    /// leaves `encode_state_as_update_v1` byte-identical — validates it, and
+    /// returns the scratch session together with the validated snapshot.
+    fn preview_edits(
+        &self,
+        before: &DeckSnapshot,
+        edits: &[ProposalEdit],
+    ) -> ProposalResult<(DeckSession, DeckSnapshot)> {
         for edit in edits {
-            let (slide_id, shape_id) = target(&snapshot, edit)?;
-            capture(&snapshot, &slide_id, shape_id.as_deref())?;
+            let (slide_id, shape_id) = target(before, edit)?;
+            check_target(before, &slide_id, shape_id.as_deref())?;
         }
-        let doc = doc_with_client_id(self.client_id);
-        hydrate_doc(&doc, &self.encode_state_as_update_v1())?;
-        let undo = DeckUndoManager::new(&doc, self.client_id)?;
-        let preview = DeckSession {
-            doc,
-            client_id: self.client_id,
-            id_counter: self.id_counter.load(Ordering::Relaxed).into(),
-            package: self.package.clone(),
-            undo: std::cell::RefCell::new(undo),
-            proposals: Default::default(),
-        };
+        let preview = self.stage()?;
         for edit in edits {
             apply_edit(&preview, edit)?;
         }
-        crate::deck::validate_doc(&preview.doc)?;
-        Ok(preview)
+        let snapshot = preview.validated_snapshot()?;
+        Ok((preview, snapshot))
     }
 }
 
-fn apply_edit(session: &DeckSession, edit: &ProposalEdit) -> Result<(), EditError> {
+pub(crate) fn apply_edit(session: &DeckSession, edit: &ProposalEdit) -> Result<(), EditError> {
     let context = EditCtx::local("proposal");
     match edit {
         ProposalEdit::ReplaceText {
@@ -348,7 +422,7 @@ fn apply_edit(session: &DeckSession, edit: &ProposalEdit) -> Result<(), EditErro
     Ok(())
 }
 
-fn inherited_style(story: &crate::StorySnapshot, at: u32) -> TextStyle {
+pub(crate) fn inherited_style(story: &crate::StorySnapshot, at: u32) -> TextStyle {
     let mut offset = 0;
     let mut previous = TextStyle::default();
     for paragraph in &story.paragraphs {
@@ -387,7 +461,7 @@ fn find_story_shape<'a>(shapes: &'a [ShapeSnapshot], id: &str) -> Option<&'a Sha
     })
 }
 
-fn shape_text(shape: &ShapeSnapshot) -> String {
+pub(crate) fn shape_text(shape: &ShapeSnapshot) -> String {
     shape
         .text_stories
         .iter()
@@ -425,6 +499,22 @@ fn target(
         } => Ok((slide_id.clone(), Some(shape_id.clone()))),
         ProposalEdit::SetSlideNotes { slide_id, .. } => Ok((slide_id.clone(), None)),
     }
+}
+
+fn check_target(
+    snapshot: &DeckSnapshot,
+    slide_id: &str,
+    shape_id: Option<&str>,
+) -> Result<(), EditError> {
+    let slide = snapshot
+        .slides
+        .iter()
+        .find(|slide| slide.id == slide_id)
+        .ok_or_else(|| EditError::SlideNotFound(slide_id.to_owned()))?;
+    if let Some(id) = shape_id {
+        find_shape(&slide.shapes, id).ok_or_else(|| EditError::ShapeNotFound(id.to_owned()))?;
+    }
+    Ok(())
 }
 
 fn capture(
@@ -485,4 +575,77 @@ fn stale_targets(snapshot: &DeckSnapshot, proposal: &Proposal) -> Vec<String> {
         })
         .map(ProposalChange::key)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{DeckSession, EditCtx, ProposalEdit, ProposalError, ProposalRequest};
+
+    const DECK: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-demo.pptx");
+
+    fn request(edit: ProposalEdit) -> ProposalRequest {
+        ProposalRequest {
+            agent_id: "agent".into(),
+            note: None,
+            edits: vec![edit],
+        }
+    }
+
+    fn notes(slide_id: &str, text: &str) -> ProposalRequest {
+        request(ProposalEdit::SetSlideNotes {
+            slide_id: slide_id.into(),
+            text: text.into(),
+        })
+    }
+
+    #[test]
+    fn previews_leave_the_cache_with_their_proposal() {
+        let session = DeckSession::open(DECK, 97).unwrap();
+        let slide = session.snapshot().unwrap().slides[0].clone();
+        let cached = || session.proposals.borrow().previews.len();
+        let missing = |id: &str| {
+            matches!(
+                session.preview_proposal(id),
+                Err(ProposalError::NotFound(_))
+            )
+        };
+        let accept = |id: &str| session.accept_proposal(id, false).unwrap().applied;
+
+        let rejected = session.propose(notes(&slide.id, "Rejected")).unwrap();
+        session.preview_proposal(&rejected.id).unwrap();
+        assert!(session.reject_proposal(&rejected.id));
+        assert!(missing(&rejected.id));
+        let unchanged = session.propose(notes(&slide.id, &slide.notes)).unwrap();
+        assert!(!accept(&unchanged.id));
+        assert!(missing(&unchanged.id));
+        let accepted = session.propose(notes(&slide.id, "Accepted")).unwrap();
+        assert!(accept(&accepted.id));
+        assert!(missing(&accepted.id));
+        assert_eq!(cached(), 0);
+
+        for cycle in 0..50 {
+            let proposal = session
+                .propose(notes(&slide.id, &format!("Cycle {cycle}")))
+                .unwrap();
+            session.preview_proposal(&proposal.id).unwrap();
+            assert!(session.reject_proposal(&proposal.id));
+        }
+        assert_eq!(cached(), 0);
+
+        let shape = &slide.shapes[0];
+        let removed = session
+            .propose(request(ProposalEdit::SetShapeFill {
+                slide_id: slide.id.clone(),
+                shape_id: shape.id.clone(),
+                color: Some("#FF0000".into()),
+            }))
+            .unwrap();
+        assert_eq!(cached(), 1);
+        session
+            .remove_shape(&EditCtx::local("human"), &slide.id, &shape.id)
+            .unwrap();
+        assert!(session.preview_proposal(&removed.id).is_err());
+        assert_eq!(session.proposals().unwrap().len(), 1);
+        assert_eq!(cached(), 0);
+    }
 }

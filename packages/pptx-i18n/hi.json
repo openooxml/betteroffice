@@ -1,9 +1,18 @@
 {
   "_lang": "hi",
+  "worker": {
+    "previousRecovery": null,
+    "preparing": "संपादक तैयार किया जा रहा है। संपादन जल्द ही उपलब्ध होगा।",
+    "failed": "संपादन उपलब्ध नहीं है। पुनर्प्राप्त प्रस्तुति डाउनलोड करें।",
+    "disabled": "यह सुविधा इस संपादन मोड में उपलब्ध नहीं है।",
+    "recovery": null,
+    "image": null
+  },
   "toolbar": {
     "label": null,
     "save": "सहेजें",
     "exportPng": null,
+    "present": "प्रस्तुत करें",
     "historyLabel": null,
     "undo": null,
     "redo": null,
@@ -79,7 +88,13 @@
       "upArrow": null,
       "downArrow": null,
       "chevron": null
-    }
+    },
+    "insertImage": null,
+    "arrange": null,
+    "bringToFront": null,
+    "bringForward": null,
+    "sendBackward": null,
+    "sendToBack": null
   },
   "slides": {
     "panelLabel": null,
@@ -94,9 +109,104 @@
     "openPrompt": null
   },
   "objects": {
-    "defaultTextBoxName": null
+    "defaultTextBoxName": null,
+    "defaultPictureName": null
+  },
+  "presentation": {
+    "label": "स्लाइड प्रस्तुति",
+    "exit": "प्रस्तुति से बाहर निकलें (Esc)",
+    "slideCounter": "{current} / {total}",
+    "previousSlide": "पिछली स्लाइड",
+    "nextSlide": "अगली स्लाइड"
+  },
+  "notes": {
+    "panelLabel": "वक्ता नोट्स",
+    "placeholder": "वक्ता नोट्स जोड़ें…"
   },
   "errors": {
     "decodeSlideImage": null
+  },
+  "proposals": {
+    "title": "एजेंट प्रस्ताव",
+    "close": "बंद करें",
+    "empty": "समीक्षा हेतु कोई बदलाव लंबित नहीं है।",
+    "preview": "बदलावों का पूर्वावलोकन करें",
+    "previewTitle": "प्रस्तावित बदलावों की समीक्षा करें",
+    "before": "वर्तमान स्लाइड",
+    "after": "प्रस्तावित स्लाइड",
+    "accept": "प्रस्ताव स्वीकार करें",
+    "reject": "अस्वीकार करें",
+    "force": "अद्यतन प्रस्ताव लागू करें",
+    "blank": "खाली",
+    "target": "स्लाइड {slide} · {name}",
+    "targetLabel": "बदलाव",
+    "targetMissing": "लक्ष्य अब उपलब्ध नहीं है",
+    "stale": "प्रस्ताव बनने के बाद ये ऑब्जेक्ट बदल गए हैं। लागू करने से पहले वर्तमान बदलावों का पूर्वावलोकन करें।",
+    "stalePreview": "यह पूर्वावलोकन अद्यतन स्लाइड का उपयोग करता है। लागू करने पर बदले गए लक्ष्य ओवरराइट हो जाएंगे।",
+    "geometry": "स्थिति और आकार (x, y, चौड़ाई, ऊंचाई)",
+    "appearance": "रूप या टेक्स्ट फ़ॉर्मैटिंग बदली गई",
+    "changedAgain": "लक्ष्य फिर से बदल गया है। लागू करने से पहले ताज़ा पूर्वावलोकन की समीक्षा करें।",
+    "canvasTitle": "इस स्लाइड पर बदलाव",
+    "editSlide": "स्लाइड संपादित करें",
+    "showDiff": "बदलाव दिखाएं",
+    "details": "समीक्षा विवरण",
+    "removed": "हटाया गया",
+    "added": "जोड़ा गया",
+    "reviewHint": "समीक्षा मोड · स्वीकार करने पर बदलाव लागू होंगे",
+    "canvasStale": "लक्ष्य बदल गए हैं। लागू करने से पहले अद्यतन पूर्वावलोकन देखने के लिए समीक्षा विवरण खोलें।",
+    "previousPosition": "पिछला",
+    "proposedPosition": "प्रस्तावित",
+    "loadingDiff": "बदलाव लोड हो रहे हैं…"
+  },
+  "commands": {
+    "moreControls": "और नियंत्रण",
+    "selectTool": "चुनें",
+    "fontSizeStep": "फ़ॉन्ट आकार बदलें",
+    "customFontSize": "कस्टम आकार…",
+    "fontSizePoints": "पॉइंट में आकार",
+    "customColor": "कस्टम रंग…",
+    "hexColor": "हेक्स रंग",
+    "apply": "लागू करें",
+    "cancel": "रद्द करें",
+    "reasons": {
+      "editorUnavailable": "एडिटर तैयार नहीं है।",
+      "documentLoading": "प्रस्तुति अभी खुल रही है।",
+      "noDocument": "कोई प्रस्तुति खुली नहीं है।",
+      "readOnly": "प्रस्तुति केवल पढ़ने के लिए है।",
+      "nothingToUndo": "पूर्ववत करने के लिए कुछ नहीं है।",
+      "nothingToRedo": "फिर से करने के लिए कुछ नहीं है।",
+      "textSelectionRequired": "पहले टेक्स्ट या टेक्स्ट बॉक्स चुनें।",
+      "shapeRequired": "पहले कोई आकृति चुनें।",
+      "objectRequired": "पहले कोई आकृति या चित्र चुनें।",
+      "slideRequired": "पहले एक स्लाइड जोड़ें।",
+      "unsupportedSelection": "यह वर्तमान चयन पर लागू नहीं होता।",
+      "invalidLayout": "यह लेआउट इस प्रस्तुति में उपलब्ध नहीं है।",
+      "invalidAdjustment": "यह समायोजन इस आकृति के लिए उपलब्ध नहीं है।",
+      "zOrderBoundary": "ऑब्जेक्ट उस दिशा में और आगे नहीं जा सकता।",
+      "reviewActive": "पहले प्रस्ताव की समीक्षा से बाहर निकलें।",
+      "previewPending": "बदलावों का पूर्वावलोकन अभी लोड हो रहा है।",
+      "previewFailed": "बदलावों का पूर्वावलोकन नहीं दिखाया जा सका।",
+      "proposalStale": "प्रस्ताव के लक्ष्य बदल गए हैं। लागू करने से पहले अपडेट किया गया पूर्वावलोकन देखें।",
+      "proposalNotFound": "यह प्रस्ताव अब लंबित नहीं है।",
+      "proposalsUnavailable": "प्रस्ताव उपलब्ध नहीं हैं।",
+      "hostDisabled": "यह कार्रवाई यहाँ उपलब्ध नहीं है।",
+      "unsupportedCommand": "यह कमांड समर्थित नहीं है।",
+      "invalidArguments": "कमांड को अमान्य आर्ग्युमेंट मिले।",
+      "inputFailed": "पिछला इनपुट लागू नहीं किया जा सका।",
+      "documentReplaced": "प्रस्तुति बदल दी गई।",
+      "targetChanged": "कमांड चलने से पहले चयन बदल गया।",
+      "gestureActive": "पहले पॉइंटर जेस्चर पूरा करें।",
+      "commandFailed": "कमांड विफल रहा।",
+      "permissionDenied": "होस्ट एप्लिकेशन ने इस प्लगइन को यह कमांड उपयोग करने की अनुमति नहीं दी है।",
+      "unsupportedPolicy": "प्लगइन अभी यह कमांड नहीं चला सकते। इसके बजाय संपादन बैच का उपयोग करें।",
+      "pluginUnavailable": "प्लगइन अब सक्रिय नहीं है।",
+      "aborted": "कमांड चलने से पहले प्लगइन की कार्रवाई रद्द कर दी गई।"
+    }
+  },
+  "plugins": {
+    "toolbarGroup": "प्लगइन",
+    "panelTabs": "प्लगइन पैनल",
+    "collapsePanel": "{title} संक्षिप्त करें",
+    "expandPanel": "{title} विस्तृत करें"
   }
 }

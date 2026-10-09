@@ -2,7 +2,7 @@ import io
 import json
 import zipfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import pytest
 
@@ -100,6 +100,43 @@ def nested_table_bytes() -> bytes:
         '</w:tc></w:tr></w:tbl><w:sectPr/></w:body></w:document>'
     )
     return _package({**PARTS, "word/document.xml": document})
+
+
+@pytest.fixture(scope="session")
+def duplicate_id_package() -> "Callable[..., bytes]":
+    """Builds a package as Word writes it: `1A2B3C4D` repeats in the body, a
+    nested table cell and a content control, and the last paragraph's ID is
+    `last_id` as authored, `0B000003` with a character reference by default."""
+
+    def paragraph(para_id: str, text: str) -> str:
+        return (
+            f'<w:p w14:paraId="{para_id}" w14:textId="77777777">'
+            f"<w:r><w:t>{text}</w:t></w:r></w:p>"
+        )
+
+    def cell(content: str) -> str:
+        return f"<w:tbl><w:tr><w:tc>{content}</w:tc></w:tr></w:tbl>"
+
+    def build(last_id: str = "0B00000&#x33;") -> bytes:
+        document = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+            f'<w:document xmlns:w="{W}" xmlns:w14="{W14}" xmlns:r="{R}"><w:body>'
+            f'{paragraph("1A2B3C4D", "first")}{paragraph("1A2B3C4D", "second")}'
+            f'{cell(cell(paragraph("1A2B3C4D", "nested")) + paragraph("0B000002", ""))}'
+            '<w:sdt><w:sdtPr><w:alias w:val="Clause"/></w:sdtPr><w:sdtContent>'
+            f'{paragraph("1A2B3C4D", "control")}</w:sdtContent></w:sdt>'
+            f'{paragraph(last_id, "third")}'
+            '<w:sectPr><w:headerReference w:type="default" r:id="rIdHeader"/></w:sectPr>'
+            "</w:body></w:document>"
+        )
+        return _package({**PARTS, "word/document.xml": document})
+
+    return build
+
+
+@pytest.fixture(scope="session")
+def duplicate_id_bytes(duplicate_id_package: "Callable[..., bytes]") -> bytes:
+    return duplicate_id_package()
 
 
 @pytest.fixture(scope="session")

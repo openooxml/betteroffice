@@ -8,7 +8,15 @@ import type {
   TablePrimitive,
   TextBoxPrimitive,
 } from '../types';
-import { applyImageEffects, paintSlide } from './canvas';
+import { applyImageEffects, paintSlide, sizeCanvasForSlide } from './canvas';
+
+test('sizes the backing store to cover a slide whose page is a fractional pixel', () => {
+  const canvas = { width: 0, height: 0, style: { width: '', height: '' } };
+  sizeCanvasForSlide(canvas, { width: 1122.6666, height: 793.3333 }, 150 / 96);
+  expect([canvas.width, canvas.height]).toEqual([1755, 1240]);
+  sizeCanvasForSlide(canvas, { width: 1280, height: 720 }, 150 / 96);
+  expect([canvas.width, canvas.height]).toEqual([2000, 1125]);
+});
 
 describe('PPTX canvas replay', () => {
   test('paints shape geometry and positioned text in display-list order', async () => {
@@ -397,6 +405,198 @@ describe('PPTX canvas replay', () => {
       { text: 'two', x: 100 },
     ]);
   });
+
+  test('paints a right-to-left run as one string from its left edge', async () => {
+    const calls: Array<{ text: string; x: number }> = [];
+    const ctx = new Proxy(
+      { fillText: (text: string, x: number) => calls.push({ text, x }) } as Record<string, unknown>,
+      {
+        get: (target, property) => (property in target ? target[property as string] : () => undefined),
+        set: (target, property, value) => {
+          target[property as string] = value;
+          return true;
+        },
+      }
+    ) as unknown as CanvasRenderingContext2D;
+    const glyphs = [0, 1, 2].map((cluster) => ({
+      glyphId: cluster + 1,
+      cluster,
+      x: 60 - 10 * cluster,
+      advance: 10,
+      xOffset: 0,
+      yOffset: 68,
+    }));
+    await paintSlide(
+      ctx,
+      {
+        contractVersion: 1,
+        width: 320,
+        height: 180,
+        primitives: [
+          {
+            kind: 'textBox', objectId: 1, shapeId: 'shape:1', storyId: 'story:1',
+            x: 40, y: 50, w: 240, h: 80, anchor: 'top', paragraphs: [],
+            lines: [
+              {
+                x: 40, y: 50, width: 30, height: 24, baseline: 68, start: 0, end: 3,
+                caretStops: [],
+                runs: [
+                  {
+                    text: '\u05d0\u05d1\u05d2', start: 0, end: 3, x: 40, width: 30, fontId: 1,
+                    fontFamily: 'Liberation Sans', fontSizePx: 20, bold: false, italic: false,
+                    underline: false, color: '#000000', glyphs,
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+      1
+    );
+    expect(calls).toEqual([{ text: '\u05d0\u05d1\u05d2', x: 40 }]);
+  });
+
+  test('paints the text after a leading tab at its tab stop', async () => {
+    const calls: Array<{ text: string; x: number }> = [];
+    const ctx = new Proxy(
+      { fillText: (text: string, x: number) => calls.push({ text, x }) } as Record<string, unknown>,
+      {
+        get: (target, property) => (property in target ? target[property as string] : () => undefined),
+        set: (target, property, value) => {
+          target[property as string] = value;
+          return true;
+        },
+      }
+    ) as unknown as CanvasRenderingContext2D;
+    const glyph = (cluster: number, x: number) => ({
+      glyphId: cluster + 1, cluster, x, advance: 10, xOffset: 0, yOffset: 68,
+    });
+    await paintSlide(
+      ctx,
+      {
+        contractVersion: 1,
+        width: 320,
+        height: 180,
+        primitives: [
+          {
+            kind: 'textBox', objectId: 1, shapeId: 'shape:1', storyId: 'story:1',
+            x: 40, y: 50, w: 240, h: 80, anchor: 'top', paragraphs: [],
+            lines: [
+              {
+                x: 40, y: 50, width: 140, height: 24, baseline: 68, start: 0, end: 3,
+                caretStops: [],
+                runs: [
+                  {
+                    text: '\tAB', start: 0, end: 3, x: 40, width: 140, fontId: 1,
+                    fontFamily: 'Liberation Sans', fontSizePx: 20, bold: false, italic: false,
+                    underline: false, color: '#000000',
+                    glyphs: [glyph(1, 136), glyph(2, 146)],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+      1
+    );
+    expect(calls.find((call) => call.text === 'AB')).toEqual({ text: 'AB', x: 136 });
+  });
+
+  test('paints a lone letter after a leading tab at its tab stop', async () => {
+    const calls: Array<{ text: string; x: number }> = [];
+    const ctx = new Proxy(
+      { fillText: (text: string, x: number) => calls.push({ text, x }) } as Record<string, unknown>,
+      {
+        get: (target, property) => (property in target ? target[property as string] : () => undefined),
+        set: (target, property, value) => {
+          target[property as string] = value;
+          return true;
+        },
+      }
+    ) as unknown as CanvasRenderingContext2D;
+    await paintSlide(
+      ctx,
+      {
+        contractVersion: 1,
+        width: 320,
+        height: 180,
+        primitives: [
+          {
+            kind: 'textBox', objectId: 1, shapeId: 'shape:1', storyId: 'story:1',
+            x: 40, y: 50, w: 240, h: 80, anchor: 'top', paragraphs: [],
+            lines: [
+              {
+                x: 40, y: 50, width: 140, height: 24, baseline: 68, start: 0, end: 2,
+                caretStops: [],
+                runs: [
+                  {
+                    text: '\tA', start: 0, end: 2, x: 40, width: 106, fontId: 1,
+                    fontFamily: 'Liberation Sans', fontSizePx: 20, bold: false, italic: false,
+                    underline: false, color: '#000000',
+                    glyphs: [{ glyphId: 2, cluster: 1, x: 136, advance: 10, xOffset: 0, yOffset: 68 }],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+      1
+    );
+    expect(calls.find((call) => call.text === 'A')).toEqual({ text: 'A', x: 136 });
+  });
+
+  test('paints each tab-separated piece of a right-to-left run at its own glyphs', async () => {
+    const calls: Array<{ text: string; x: number }> = [];
+    const ctx = new Proxy(
+      { fillText: (text: string, x: number) => calls.push({ text, x }) } as Record<string, unknown>,
+      {
+        get: (target, property) => (property in target ? target[property as string] : () => undefined),
+        set: (target, property, value) => {
+          target[property as string] = value;
+          return true;
+        },
+      }
+    ) as unknown as CanvasRenderingContext2D;
+    const glyph = (cluster: number, x: number) => ({
+      glyphId: cluster + 1, cluster, x, advance: 10, xOffset: 0, yOffset: 68,
+    });
+    await paintSlide(
+      ctx,
+      {
+        contractVersion: 1,
+        width: 320,
+        height: 180,
+        primitives: [
+          {
+            kind: 'textBox', objectId: 1, shapeId: 'shape:1', storyId: 'story:1',
+            x: 40, y: 50, w: 240, h: 80, anchor: 'top', paragraphs: [],
+            lines: [
+              {
+                x: 40, y: 50, width: 120, height: 24, baseline: 68, start: 0, end: 5,
+                caretStops: [],
+                runs: [
+                  {
+                    text: '\u05d0\u05d1\t\u05d2\u05d3', start: 0, end: 5, x: 40, width: 120, fontId: 1,
+                    fontFamily: 'Liberation Sans', fontSizePx: 20, bold: false, italic: false,
+                    underline: false, color: '#000000',
+                    glyphs: [glyph(0, 150), glyph(1, 140), glyph(3, 50), glyph(4, 40)],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+      1
+    );
+    expect(calls).toEqual([
+      { text: '\u05d0\u05d1', x: 140 },
+      { text: '\u05d2\u05d3', x: 40 },
+    ]);
+  });
 });
 
 type Call = [string, ...number[]];
@@ -779,6 +979,39 @@ describe('PPTX picture cropping', () => {
     expect(calls).not.toContain('clip');
   });
 
+  test('a picture the host cannot decode still leaves the rest of the slide painted', async () => {
+    const { calls, ctx } = harness();
+    const display = {
+      contractVersion: 1,
+      width: 320,
+      height: 180,
+      primitives: [
+        {
+          kind: 'image', objectId: 1, name: 'Metafile', x: 10, y: 20, w: 100, h: 50,
+          assetId: 'ppt/media/image1.emf', stroke: { color: '#ff00ff', width: 2 },
+        },
+        {
+          kind: 'image', objectId: 2, name: 'Screenshot', x: 10, y: 90, w: 200, h: 100,
+          assetId: 'ppt/media/image2.png',
+        },
+      ],
+    } as SlideDisplayList;
+    const attempted: string[] = [];
+    await paintSlide(ctx, display, 1, 1, {
+      resolveImage: async (assetId) => {
+        attempted.push(assetId);
+        if (assetId.endsWith('.emf'))
+          throw new Error('The source image could not be decoded.');
+        return source;
+      },
+    });
+    expect(attempted).toEqual(['ppt/media/image1.emf', 'ppt/media/image2.png']);
+    expect(calls).toContain('draw:0,0,400,300,10,90,200,100');
+    expect(calls.filter((call) => call.startsWith('draw:'))).toHaveLength(1);
+    expect(calls).toContain('rect:10,20,100,50');
+    expect(calls).toContain('stroke');
+  });
+
   test('a two-contour mask keeps both contours, so a counter can be punched out', async () => {
     const { calls, ctx } = harness();
     const ring: GeometryPathCommand[] = [
@@ -886,8 +1119,8 @@ describe('PPTX shape shadows', () => {
     } finally { restore(); }
   });
 
-  test('shadow work shares a slide budget, fails before allocation, and resets for each paint', async () => {
-    const { surfaces, ctx, restore } = harness();
+  test('shadow work shares a slide budget, skips before allocation, and resets for each paint', async () => {
+    const { calls, surfaces, ctx, restore } = harness();
     try {
       const display = list({ color: '#00000066' });
       const shape = display.primitives[0] as ShapePrimitive;
@@ -896,14 +1129,17 @@ describe('PPTX shape shadows', () => {
       await paintSlide(ctx, display, 3, 1, options);
       await paintSlide(ctx, display, 3, 1, options);
       expect(surfaces).toHaveLength(2);
-      await expect(paintSlide(ctx, display, 3, 1, { maxShadowPixels: 120 * 120 - 1 })).rejects.toThrow('pixel budget');
-      expect(surfaces).toHaveLength(2);
-      const many = { ...display, primitives: Array.from({ length: 10_000 }, () => shape) };
-      await expect(paintSlide(ctx, many, 3, 1, options)).rejects.toThrow('pixel budget');
+      const many = { ...display, primitives: Array.from({ length: 3 }, () => shape) };
+      await expect(paintSlide(ctx, many, 3, 1, options)).resolves.toBeUndefined();
       expect(surfaces).toHaveLength(3);
+      expect(calls.filter((call) => call === 'main:fill')).toHaveLength(5);
       const chart = { kind: 'chart', objectId: 9, x: 0, y: 0, w: 160, h: 160, primitives: [shape, shape] };
-      await expect(paintSlide(ctx, { ...display, primitives: [chart] } as SlideDisplayList, 3, 1, options)).rejects.toThrow('pixel budget');
+      await expect(paintSlide(ctx, { ...display, primitives: [chart] } as SlideDisplayList, 3, 1, options)).resolves.toBeUndefined();
       expect(surfaces).toHaveLength(4);
+      expect(calls.filter((call) => call === 'main:fill')).toHaveLength(7);
+      await expect(paintSlide(ctx, display, 3, 1, { maxShadowPixels: 120 * 120 - 1 })).resolves.toBeUndefined();
+      expect(surfaces).toHaveLength(4);
+      expect(calls.filter((call) => call === 'main:fill')).toHaveLength(8);
     } finally { restore(); }
   });
 
@@ -916,6 +1152,64 @@ describe('PPTX shape shadows', () => {
         'main:shadow:blur(12px):126,126', 'main:fill', 'main:stroke',
       ]);
       expect(ctx.filter).toBe('none');
+    } finally { restore(); }
+  });
+
+  test('layered fills share one shadow mask and one budget charge', async () => {
+    const { calls, surfaces, ctx, restore } = harness();
+    try {
+      const display = list({ color: '#00000066' });
+      const shape = display.primitives[0] as ShapePrimitive;
+      shape.stroke = undefined;
+      shape.shadow!.paths = [
+        { path: shape.path, fill: true }, { path: shape.path, fill: true },
+      ];
+      await paintSlide(ctx, display, 3, 1, { maxShadowPixels: 120 * 120 });
+      expect(surfaces).toEqual([[120, 120]]);
+      expect(calls).toEqual([
+        'mask:fill', 'mask:fill', 'mask:tint:source-in:#00000066',
+        'main:shadow:blur(0px):120,120', 'main:fill',
+      ]);
+    } finally { restore(); }
+  });
+
+  test('an empty first layer still casts the later open stroke shadow', async () => {
+    const { calls, surfaces, ctx, restore } = harness();
+    try {
+      const display = list({ color: '#00000066' });
+      const shape = display.primitives[0] as ShapePrimitive;
+      shape.shadow!.paths = [{ path: shape.path.slice(0, 4), fill: false, stroke: shape.stroke }];
+      shape.fill = undefined;
+      shape.stroke = undefined;
+      await paintSlide(ctx, display, 3, 1);
+      expect(surfaces).toHaveLength(1);
+      expect(calls).toEqual([
+        'mask:stroke', 'mask:tint:source-in:#00000066', 'main:shadow:blur(0px):108,108',
+      ]);
+    } finally { restore(); }
+  });
+
+  test('picture layers combine bitmap alpha before tinting their shadow', async () => {
+    const { calls, surfaces, ctx, restore } = harness();
+    try {
+      const shape = list(undefined).primitives[0] as ShapePrimitive;
+      const display: SlideDisplayList = {
+        contractVersion: 1, width: 160, height: 160,
+        primitives: [{
+          kind: 'image', objectId: 2, name: 'mark', x: 40, y: 40, w: 40, h: 40,
+          assetId: 'mark', shadow: { color: '#00000066', paths: [
+            { path: shape.path, fill: true }, { path: shape.path, fill: true },
+          ] },
+        }],
+      };
+      await paintSlide(ctx, display, 3, 1, {
+        resolveImage: () => ({} as CanvasImageSource), maxShadowPixels: 120 * 120,
+      });
+      expect(surfaces).toEqual([[120, 120]]);
+      expect(calls).toEqual([
+        'mask:shadow:none:40,40', 'mask:shadow:none:40,40', 'mask:tint:source-in:#00000066',
+        'main:shadow:blur(0px):120,120', 'main:shadow:none:40,40',
+      ]);
     } finally { restore(); }
   });
 
@@ -973,7 +1267,7 @@ describe('PPTX shape shadows', () => {
   });
 
   test('picture shadows draw from the same slide budget as shape shadows', async () => {
-    const { surfaces, ctx, restore } = harness();
+    const { calls, surfaces, ctx, restore } = harness();
     try {
       const picture = {
         kind: 'image', objectId: 2, name: 'mark', x: 40, y: 40, w: 40, h: 40,
@@ -983,11 +1277,15 @@ describe('PPTX shape shadows', () => {
       const options = { resolveImage: () => ({} as CanvasImageSource), maxShadowPixels: 120 * 120 };
       await paintSlide(ctx, display, 3, 1, options);
       expect(surfaces).toEqual([[120, 120]]);
+      const many = { ...display, primitives: Array.from({ length: 3 }, () => picture) } as SlideDisplayList;
+      await expect(paintSlide(ctx, many, 3, 1, options)).resolves.toBeUndefined();
+      expect(surfaces).toHaveLength(2);
+      expect(calls.filter((call) => call === 'main:shadow:none:40,40')).toHaveLength(4);
       await expect(
         paintSlide(ctx, display, 3, 1, { ...options, maxShadowPixels: 120 * 120 - 1 })
-      ).rejects.toThrow('pixel budget');
-      const many = { ...display, primitives: Array.from({ length: 10_000 }, () => picture) } as SlideDisplayList;
-      await expect(paintSlide(ctx, many, 3, 1, options)).rejects.toThrow('pixel budget');
+      ).resolves.toBeUndefined();
+      expect(surfaces).toHaveLength(2);
+      expect(calls.filter((call) => call === 'main:shadow:none:40,40')).toHaveLength(5);
     } finally { restore(); }
   });
 
@@ -1690,4 +1988,67 @@ test('keeps inline revision marks inside their run at bidi boundaries and applie
   await paintSlide(ctx, frame, 2, 0.5, { textChanges: [{ storyId: 'mixed', start: 0, end: 2, kind: 'deletion' }] });
   expect(rectangles).toEqual([{ x: 0, width: 20, color: '#fee2e2cc' }, { x: 0, width: 20, color: '#b91c1c' }]);
   expect(rotations).toEqual([Math.PI / 6, Math.PI / 6]);
+});
+
+test('stroke joins follow each shape and reset for legacy display lists', async () => {
+  const joins: string[] = [];
+  const state: Record<string, any> = {};
+  const ctx = new Proxy(state, {
+    get: (target, key) => key === 'stroke'
+      ? () => joins.push(target.lineJoin)
+      : target[key as string] ?? (() => undefined),
+    set: (target, key, value) => { target[key as string] = value; return true; },
+  }) as CanvasRenderingContext2D;
+  const primitives: ShapePrimitive[] = (['round', 'bevel', undefined] as const).map((join, index) => ({
+    kind: 'shape', objectId: index, name: 'Tip', geometry: 'swooshArrow',
+    x: index * 20, y: 0, w: 20, h: 20,
+    path: [{ type: 'move', x: 0, y: 1 }, { type: 'line', x: 1, y: 0 }],
+    stroke: { color: '#000000', width: 1, join },
+  }));
+  await paintSlide(ctx, { contractVersion: 1, width: 60, height: 20, primitives }, 1, 1);
+  expect(joins).toEqual(['round', 'bevel', 'miter']);
+});
+
+test('a tiled picture repeats only the part its crop keeps', async () => {
+  const globals = globalThis as unknown as Record<string, unknown>;
+  const saved = { OffscreenCanvas: globals.OffscreenCanvas, DOMMatrix: globals.DOMMatrix };
+  const cuts: unknown[][] = [];
+  class Surface {
+    constructor(public width: number, public height: number) {}
+    getContext() {
+      return { drawImage: (...args: unknown[]) => cuts.push(args) };
+    }
+  }
+  class Matrix {
+    translateSelf() { return this; }
+    scaleSelf() { return this; }
+  }
+  try {
+    globals.OffscreenCanvas = Surface;
+    globals.DOMMatrix = Matrix;
+    const source = { width: 40, height: 20 };
+    const patterns: unknown[] = [];
+    const ctx = new Proxy({} as CanvasRenderingContext2D, {
+      get: (_, key) => key === 'createPattern'
+        ? (image: unknown) => { patterns.push(image); return { setTransform: () => {} }; }
+        : () => {},
+      set: () => true,
+    });
+    await paintSlide(ctx, {
+      contractVersion: 1,
+      width: 100,
+      height: 100,
+      primitives: [
+        { kind: 'image', objectId: 1, name: 'Tiled', x: 0, y: 0, w: 100, h: 100, assetId: 'image',
+          crop: { left: 0.25, bottom: 0.5 }, tile: { scaleX: 1, scaleY: 1 } },
+      ],
+    }, 1, 1, { resolveImage: async () => source as unknown as CanvasImageSource });
+    expect(cuts).toEqual([[source, 10, 0, 30, 10, 0, 0, 30, 10]]);
+    expect(patterns).toHaveLength(1);
+    expect(patterns[0]).toBeInstanceOf(Surface);
+    expect([(patterns[0] as Surface).width, (patterns[0] as Surface).height]).toEqual([30, 10]);
+  } finally {
+    globals.OffscreenCanvas = saved.OffscreenCanvas;
+    globals.DOMMatrix = saved.DOMMatrix;
+  }
 });

@@ -18,6 +18,4 @@ shape's position, fill and text; the `pptx-edit` test fills the fallback shape t
 edit API and checks that the fill lands inside the `mc:Fallback` with the `mc:Choice` intact, which
 is what keeps parsed shape ordinals and the writer's source ordinals aligned.
 
-`alternate-content.before.png` and `alternate-content.after.png` are the slide rendered at 1280x720
-on `d2aaf9cb` and on this branch, with the harness's Liberation fonts. Before, the fallback shape is
-absent; after, it matches the LibreOffice reference.
+Review: [PR #344](https://github.com/openooxml/betteroffice/pull/344).

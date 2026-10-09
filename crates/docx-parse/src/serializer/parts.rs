@@ -8,6 +8,7 @@ use crate::header_footer::HeaderFooter;
 use crate::inline::{InlineNode, Run, RunContent};
 use crate::notes::Note;
 use crate::paragraph::{Paragraph, ParagraphContent};
+use crate::paragraph_identity::parse_paragraph_id;
 use crate::xml::ParseError;
 
 use super::context::SerializerContext;
@@ -410,11 +411,17 @@ fn serialize_comment(
     para_infos: &mut Vec<CommentParaInfo>,
     context: &mut SerializerContext,
 ) -> String {
-    // Minting fresh ids every save would never reach a fixed point.
-    let comment_para_id = comment
-        .para_id
-        .clone()
-        .unwrap_or_else(|| context.allocate_hex_id());
+    let valid = |id: Option<&str>| {
+        id.filter(|id| parse_paragraph_id(id).is_some())
+            .map(str::to_owned)
+    };
+    // The companion parts key a comment by its last paragraph's ID; one
+    // allocated from the comment ID reaches a fixed point across saves.
+    let comment_para_id = valid(comment.content.last().and_then(|p| p.para_id.as_deref()))
+        .or_else(|| valid(comment.para_id.as_deref()))
+        .unwrap_or_else(|| {
+            context.allocate_paragraph_id(&format!("comment:{}", js_number(comment.id)))
+        });
     let mut output = String::new();
     output.push_str("<w:comment w:id=\"");
     output.push_str(&js_number(comment.id));
@@ -442,30 +449,23 @@ fn serialize_comment(
     }
     output.push('>');
 
-    match comment.content.as_slice() {
-        [] => {
-            output.push_str("<w:p w14:paraId=\"");
-            output.push_str(&comment_para_id);
-            output.push_str("\"><w:r><w:rPr><w:rStyle w:val=\"CommentReference\"/></w:rPr><w:annotationRef/></w:r></w:p>");
-        }
-        [paragraph] => {
-            output.push_str(&serialize_comment_paragraph(
-                paragraph,
-                Some(&comment_para_id),
-                true,
-            ));
-        }
-        paragraphs => {
-            output.push_str(&serialize_comment_paragraph(&paragraphs[0], None, true));
-            for paragraph in &paragraphs[1..paragraphs.len() - 1] {
-                output.push_str(&serialize_comment_paragraph(paragraph, None, false));
-            }
-            output.push_str(&serialize_comment_paragraph(
-                &paragraphs[paragraphs.len() - 1],
-                Some(&comment_para_id),
-                false,
-            ));
-        }
+    if comment.content.is_empty() {
+        output.push_str("<w:p w14:paraId=\"");
+        output.push_str(&comment_para_id);
+        output.push_str("\"><w:r><w:rPr><w:rStyle w:val=\"CommentReference\"/></w:rPr><w:annotationRef/></w:r></w:p>");
+    }
+    let last = comment.content.len().saturating_sub(1);
+    for (index, paragraph) in comment.content.iter().enumerate() {
+        let para_id = if index == last {
+            Some(comment_para_id.clone())
+        } else {
+            valid(paragraph.para_id.as_deref())
+        };
+        output.push_str(&serialize_comment_paragraph(
+            paragraph,
+            para_id.as_deref(),
+            index == 0,
+        ));
     }
     output.push_str("</w:comment>");
     para_infos.push(CommentParaInfo {
@@ -610,6 +610,8 @@ fn same_number(left: f64, right: f64) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use crate::block::BlockContent;
     use crate::comments::Comment;
     use crate::formatting::TextFormatting;
@@ -653,9 +655,12 @@ mod tests {
     }
 
     fn paragraph(text: &str) -> BlockContent {
-        BlockContent::Paragraph(Paragraph {
+        BlockContent::Paragraph(Arc::new(Paragraph {
             node_type: "paragraph".to_owned(),
             para_id: None,
+            repeated_para_id: None,
+            para_id_attribute: None,
+            source_ordinal: None,
             text_id: None,
             extra_attributes: Vec::new(),
             formatting: None,
@@ -674,14 +679,16 @@ mod tests {
             list_rendering: None,
             rendered_page_break_before: None,
             section_properties: None,
-        })
+        }))
     }
 
     fn comment(id: f64, parent_id: Option<f64>, text: &str) -> Comment {
         let BlockContent::Paragraph(mut paragraph) = paragraph(text) else {
             unreachable!()
         };
-        if let ParagraphContent::Inline(InlineNode::Run(run)) = &mut paragraph.content[0] {
+        if let ParagraphContent::Inline(InlineNode::Run(run)) =
+            &mut Arc::make_mut(&mut paragraph).content[0]
+        {
             run.formatting = Some(TextFormatting {
                 bold: Some(true),
                 italic: Some(true),
@@ -693,7 +700,7 @@ mod tests {
             author: "Alice <&>".to_owned(),
             initials: None,
             date: Some("2024-01-01T12:30:45.123Z".to_owned()),
-            content: vec![paragraph.clone()],
+            content: vec![paragraph.as_ref().clone()],
             parent_id,
             done: Some(parent_id.is_none()),
             status: "active".to_owned(),
@@ -767,6 +774,7 @@ mod tests {
                 content: vec![paragraph("safe <&>")],
                 custom_root_bindings: Vec::new(),
                 verbatim_xml: None,
+                source_ordinal: None,
             }],
             &mut context(),
         )
@@ -792,6 +800,7 @@ mod tests {
             verbatim_xml: Some(
                 "<w:endnote w:id=\"4\"><w:customXml><w:p/></w:customXml></w:endnote>".to_owned(),
             ),
+            source_ordinal: None,
         };
         let xml = serialize_endnotes_part(&[valid.clone()], &mut context()).unwrap();
         assert!(xml.contains(valid.verbatim_xml.as_deref().unwrap()));

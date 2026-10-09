@@ -5,6 +5,7 @@
  */
 
 import wasmInit, {
+  decodeTiffPng,
   initSync,
   parse_docx_s9,
   parse_relationships_xml,
@@ -79,4 +80,15 @@ export function writeDocxS13WithWarningsWire(
     throw new Error('Rust save response carries malformed warnings');
   }
   return { bytes: framed.subarray(8 + warningsLength), warnings };
+}
+
+export function decodeTiffImage(bytes: Uint8Array): Uint8Array {
+  state.ensure();
+  try {
+    return decodeTiffPng(bytes);
+  } catch (error) {
+    throw error instanceof Error
+      ? error
+      : new Error(typeof error === 'string' ? error : String(error));
+  }
 }

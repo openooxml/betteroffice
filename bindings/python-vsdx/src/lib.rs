@@ -16,6 +16,7 @@ fn map_error(error: CoreError) -> PyErr {
     match error {
         CoreError::Parse(error) => ParseError::new_err(error.to_string()),
         CoreError::Resolve(error) => RenderError::new_err(error.to_string()),
+        CoreError::Render(reason) => RenderError::new_err(reason),
         CoreError::Policy(error) => RangeError::new_err(error),
     }
 }
@@ -86,6 +87,29 @@ struct PyPage {
     shapes: Vec<PyShape>,
     #[pyo3(get)]
     connects: Vec<PyConnect>,
+}
+
+#[pyclass(name = "ValidationIssue", frozen, skip_from_py_object)]
+#[derive(Clone)]
+struct PyValidationIssue {
+    #[pyo3(get)]
+    id: String,
+    #[pyo3(get)]
+    rule: String,
+    #[pyo3(get)]
+    severity: String,
+    #[pyo3(get)]
+    page_part: String,
+    #[pyo3(get)]
+    page_id: Option<u32>,
+    #[pyo3(get)]
+    shape_id: u32,
+    #[pyo3(get)]
+    other_shape_id: Option<u32>,
+    #[pyo3(get)]
+    endpoint: Option<String>,
+    #[pyo3(get)]
+    row: Option<String>,
 }
 
 #[pyclass(name = "Diagram", unsendable)]
@@ -208,6 +232,29 @@ impl PyDiagram {
     fn __repr__(&self) -> String {
         format!("Diagram(pages={})", self.__len__())
     }
+
+    /// Runs the read-only default validation rule set over every page.
+    fn validate(&self) -> Vec<PyValidationIssue> {
+        self.diagram
+            .validate()
+            .issues
+            .into_iter()
+            .map(|issue| PyValidationIssue {
+                id: issue.id,
+                rule: issue.rule,
+                severity: match issue.severity {
+                    betteroffice_vsdx::Severity::Error => "error".to_owned(),
+                    betteroffice_vsdx::Severity::Warning => "warning".to_owned(),
+                },
+                page_part: issue.page_part,
+                page_id: issue.page_id,
+                shape_id: issue.shape_id,
+                other_shape_id: issue.other_shape_id,
+                endpoint: issue.endpoint,
+                row: issue.row,
+            })
+            .collect()
+    }
 }
 
 #[pymodule]
@@ -219,6 +266,7 @@ fn _betteroffice_vsdx(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyShape>()?;
     module.add_class::<PyCell>()?;
     module.add_class::<PyConnect>()?;
+    module.add_class::<PyValidationIssue>()?;
     module.add("VsdxError", py.get_type::<VsdxError>())?;
     module.add("ParseError", py.get_type::<ParseError>())?;
     module.add("RangeError", py.get_type::<RangeError>())?;

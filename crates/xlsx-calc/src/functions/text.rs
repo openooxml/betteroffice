@@ -1,15 +1,16 @@
 //! text functions. positions are 1-based, counted in unicode scalar values
 //! (excel counts utf-16 units). FIND is case-sensitive, SEARCH case-insensitive.
 
+use std::borrow::Cow;
+
 use xlsx_model::{CellValue, ErrorValue};
 
 use crate::eval::{
     EvalContext, MAX_CELL_TEXT_CHARS, as_area, boolean, err, evaluate, num, parse_num, text,
-    to_number, to_text,
+    text_unmetered, to_number, to_text,
 };
 use crate::parser::Expr;
 
-use xlsx_model::DateSystem;
 use xlsx_model::numfmt;
 
 use super::nth_int;
@@ -31,6 +32,134 @@ pub(crate) fn lower(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
 
 /// TRIM: collapse runs of spaces to one and strip the ends (excel trims only
 /// the ascii space, u+0020).
+/// TEXTBEFORE(text, delimiter, [instance], [match_mode], [match_end],
+/// [if_not_found]). a negative instance counts from the end. missing
+/// delimiter is `#N/A` unless `if_not_found` is given.
+pub(crate) fn textbefore(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    split_at_delimiter(args, ctx, true)
+}
+
+/// TEXTAFTER, the same rules taking the remainder instead.
+pub(crate) fn textafter(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    split_at_delimiter(args, ctx, false)
+}
+
+/// byte spans in `source` that `delimiter` matches, left to right and
+/// non-overlapping. the end is returned rather than assumed from the
+/// delimiter's own length, because a case-insensitive match can cover a
+/// different number of bytes than it.
+fn delimiter_spans(source: &str, delimiter: &str, insensitive: bool) -> Vec<(usize, usize)> {
+    let span_at = |rest: &str| -> Option<usize> {
+        if !insensitive {
+            return rest.starts_with(delimiter).then_some(delimiter.len());
+        }
+        let mut wanted = delimiter.chars().flat_map(char::to_lowercase).peekable();
+        let mut taken = 0;
+        for character in rest.chars() {
+            if wanted.peek().is_none() {
+                break;
+            }
+            for lowered in character.to_lowercase() {
+                match wanted.next() {
+                    Some(expected) if expected == lowered => {}
+                    _ => return None,
+                }
+            }
+            taken += character.len_utf8();
+        }
+        wanted.peek().is_none().then_some(taken)
+    };
+    let mut spans = Vec::new();
+    let mut at = 0;
+    while at < source.len() {
+        match span_at(&source[at..]).filter(|length| *length > 0) {
+            Some(length) => {
+                spans.push((at, at + length));
+                at += length;
+            }
+            None => at += source[at..].chars().next().map_or(1, char::len_utf8),
+        }
+    }
+    spans
+}
+
+fn split_at_delimiter(args: &[Expr], ctx: &EvalContext<'_>, before: bool) -> CellValue {
+    if args.len() < 2 || args.len() > 6 {
+        return err(ErrorValue::Value);
+    }
+    let source = match nth_text(args, ctx, 0) {
+        Ok(t) => t,
+        Err(e) => return err(e),
+    };
+    let delimiter = match nth_text(args, ctx, 1) {
+        Ok(d) => d,
+        Err(e) => return err(e),
+    };
+    let instance = match given(args, 2) {
+        Some(_) => match nth_int(args, ctx, 2) {
+            Ok(0) => return err(ErrorValue::Value),
+            Ok(i) => i,
+            Err(e) => return err(e),
+        },
+        None => 1,
+    };
+    let insensitive = match given(args, 3) {
+        Some(_) => match nth_int(args, ctx, 3) {
+            Ok(m) => m != 0,
+            Err(e) => return err(e),
+        },
+        None => false,
+    };
+    let match_end = match given(args, 4) {
+        Some(_) => match nth_int(args, ctx, 4) {
+            Ok(m) => m != 0,
+            Err(e) => return err(e),
+        },
+        None => false,
+    };
+    if delimiter.is_empty() {
+        return text(ctx, if before { String::new() } else { source });
+    }
+    // offsets must index `source`, so a case-insensitive search compares in
+    // place rather than searching a lowercased copy: unicode case mappings
+    // change byte length, and `İ` would slide every later offset.
+    let mut spans = delimiter_spans(&source, &delimiter, insensitive);
+    if match_end {
+        spans.push((source.len(), source.len()));
+    }
+    let index = if instance > 0 {
+        instance as usize - 1
+    } else {
+        match spans.len().checked_sub(instance.unsigned_abs() as usize) {
+            Some(i) => i,
+            None => return not_found(args, ctx),
+        }
+    };
+    let Some(&(start, end)) = spans.get(index) else {
+        return not_found(args, ctx);
+    };
+    let out = if before {
+        source[..start].to_owned()
+    } else {
+        source[end..].to_owned()
+    };
+    text(ctx, out)
+}
+
+fn not_found(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    match given(args, 5) {
+        Some(fallback) => evaluate(fallback, ctx),
+        None => err(ErrorValue::NA),
+    }
+}
+
+/// an argument the call actually supplies; `f(a,b,,,,c)` leaves the skipped
+/// ones as blanks, which mean "use the default", not "use zero".
+fn given(args: &[Expr], index: usize) -> Option<&Expr> {
+    args.get(index)
+        .filter(|arg| !crate::functions::omitted(arg))
+}
+
 pub(crate) fn trim(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     map_text(args, ctx, |s| {
         s.split(' ')
@@ -105,7 +234,7 @@ pub(crate) fn mid(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         .min(chars.len());
     let count = usize::try_from(count).unwrap_or(usize::MAX);
     let to = from.saturating_add(count).min(chars.len());
-    limited_text(chars[from..to].iter().collect())
+    limited_text(ctx, chars[from..to].iter().collect())
 }
 
 /// FIND(find_text, within_text, [start]): case-sensitive; 1-based; not found
@@ -138,7 +267,7 @@ pub(crate) fn substitute(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         Err(e) => return err(e),
     };
     if old.is_empty() {
-        return limited_text(s);
+        return limited_text(ctx, s);
     }
     let instance = if args.len() == 4 {
         match nth_int(args, ctx, 3) {
@@ -171,7 +300,7 @@ pub(crate) fn substitute(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if !append_limited(&mut out, rest, &mut chars) {
         return err(ErrorValue::Value);
     }
-    text(out)
+    text(ctx, out)
 }
 
 /// REPLACE(old_text, start, num_chars, new_text): positional replacement.
@@ -214,7 +343,7 @@ pub(crate) fn replace(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     {
         return err(ErrorValue::Value);
     }
-    text(out)
+    text(ctx, out)
 }
 
 /// REPT(text, count): repeat. negative count -> #VALUE!.
@@ -228,7 +357,7 @@ pub(crate) fn rept(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     };
     match nth_int(args, ctx, 1) {
         Ok(n) if n < 0 => err(ErrorValue::Value),
-        Ok(_) if s.is_empty() => text(""),
+        Ok(_) if s.is_empty() => text(ctx, ""),
         Ok(n) => {
             let Ok(count) = usize::try_from(n) else {
                 return err(ErrorValue::Value);
@@ -236,10 +365,16 @@ pub(crate) fn rept(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
             let Some(chars) = s.chars().count().checked_mul(count) else {
                 return err(ErrorValue::Value);
             };
-            if chars > MAX_CELL_TEXT_CHARS || s.len().checked_mul(count).is_none() {
+            let Some(bytes) = s.len().checked_mul(count) else {
+                return err(ErrorValue::Value);
+            };
+            if chars > MAX_CELL_TEXT_CHARS {
                 return err(ErrorValue::Value);
             }
-            text(s.repeat(count))
+            if !ctx.consume_text(bytes) {
+                return err(ErrorValue::Num);
+            }
+            text_unmetered(s.repeat(count))
         }
         Err(e) => err(e),
     }
@@ -264,7 +399,7 @@ pub(crate) fn t(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     match evaluate(&args[0], ctx) {
         v @ CellValue::Text { .. } => v,
         CellValue::Error { value } => err(value),
-        _ => text(""),
+        _ => text(ctx, ""),
     }
 }
 
@@ -275,7 +410,7 @@ pub(crate) fn char_(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     }
     match nth_int(args, ctx, 0) {
         Ok(n) if (1..=255).contains(&n) => match char::from_u32(n as u32) {
-            Some(c) => text(c.to_string()),
+            Some(c) => text(ctx, c.to_string()),
             None => err(ErrorValue::Value),
         },
         Ok(_) => err(ErrorValue::Value),
@@ -353,10 +488,10 @@ pub(crate) fn text_fn(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     };
     // TEXT(x, "") yields an empty string in excel
     if format.is_empty() {
-        return text("");
+        return text(ctx, "");
     }
-    let formatted = numfmt::format_value(&value, &format, DateSystem::V1900);
-    limited_text(formatted.text)
+    let formatted = numfmt::format_value(&value, &format, ctx.date_system);
+    limited_text(ctx, formatted.text)
 }
 
 /// TEXTJOIN(delimiter, ignore_empty, text1, ...): join, optionally skipping
@@ -377,20 +512,23 @@ pub(crate) fn textjoin(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     let mut output_chars = 0;
     let mut first = true;
     for arg in &args[2..] {
-        let values = match as_area(arg, ctx) {
-            Some(area) => match area.values(ctx) {
-                Ok(v) => v,
+        let (values, unread) = match as_area(arg, ctx) {
+            Some(area) => match area.values_ref(ctx) {
+                Ok(v) => {
+                    let unread = area.unread(v.len() as u64);
+                    (v, unread)
+                }
                 Err(e) => return err(e),
             },
-            None => vec![evaluate(arg, ctx)],
+            None => (vec![Cow::Owned(evaluate(arg, ctx))], 0),
         };
         for v in values {
-            let empty = matches!(v, CellValue::Empty)
-                || matches!(&v, CellValue::Text { value } if value.is_empty());
+            let empty = matches!(v.as_ref(), CellValue::Empty)
+                || matches!(v.as_ref(), CellValue::Text { value } if value.is_empty());
             if ignore_empty && empty {
                 continue;
             }
-            match to_text(&v) {
+            match to_text(v.as_ref()) {
                 Ok(s) => {
                     if !first && !append_limited(&mut output, &delim, &mut output_chars) {
                         return err(ErrorValue::Value);
@@ -403,8 +541,21 @@ pub(crate) fn textjoin(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
                 Err(e) => return err(e),
             }
         }
+        // the blanks past a whole-column or whole-row read still join, each
+        // one a delimiter wide
+        if !ignore_empty && unread > 0 {
+            let separators = unread - u64::from(first);
+            first = false;
+            if !delim.is_empty() {
+                for _ in 0..separators {
+                    if !append_limited(&mut output, &delim, &mut output_chars) {
+                        return err(ErrorValue::Value);
+                    }
+                }
+            }
+        }
     }
-    text(output)
+    text(ctx, output)
 }
 
 /// CONCAT / CONCATENATE: join every argument (ranges flattened, row-major).
@@ -413,21 +564,21 @@ pub(crate) fn concat(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     let mut output_chars = 0;
     for arg in args {
         let values = match as_area(arg, ctx) {
-            Some(area) => match area.values(ctx) {
+            Some(area) => match area.values_ref(ctx) {
                 Ok(v) => v,
                 Err(e) => return err(e),
             },
-            None => vec![evaluate(arg, ctx)],
+            None => vec![Cow::Owned(evaluate(arg, ctx))],
         };
         for v in values {
-            match to_text(&v) {
+            match to_text(v.as_ref()) {
                 Ok(s) if append_limited(&mut out, &s, &mut output_chars) => {}
                 Ok(_) => return err(ErrorValue::Value),
                 Err(e) => return err(e),
             }
         }
     }
-    text(out)
+    text(ctx, out)
 }
 
 fn one_text(args: &[Expr], ctx: &EvalContext<'_>) -> Result<String, ErrorValue> {
@@ -448,7 +599,7 @@ fn nth_text(args: &[Expr], ctx: &EvalContext<'_>, i: usize) -> Result<String, Er
 
 fn map_text(args: &[Expr], ctx: &EvalContext<'_>, f: fn(&str) -> String) -> CellValue {
     match one_text(args, ctx) {
-        Ok(s) => limited_text(f(&s)),
+        Ok(s) => limited_text(ctx, f(&s)),
         Err(e) => err(e),
     }
 }
@@ -477,7 +628,7 @@ fn take_end(args: &[Expr], ctx: &EvalContext<'_>, from_left: bool) -> CellValue 
     } else {
         &chars[chars.len() - take..]
     };
-    limited_text(slice.iter().collect())
+    limited_text(ctx, slice.iter().collect())
 }
 
 fn locate(args: &[Expr], ctx: &EvalContext<'_>, case_sensitive: bool) -> CellValue {
@@ -550,12 +701,8 @@ fn parse_numeric_text(s: &str) -> Option<f64> {
     parse_num(trimmed)
 }
 
-fn limited_text(value: String) -> CellValue {
-    if value.chars().count() > MAX_CELL_TEXT_CHARS {
-        err(ErrorValue::Value)
-    } else {
-        text(value)
-    }
+fn limited_text(ctx: &EvalContext<'_>, value: String) -> CellValue {
+    text(ctx, value)
 }
 
 fn append_limited(output: &mut String, value: &str, chars: &mut usize) -> bool {

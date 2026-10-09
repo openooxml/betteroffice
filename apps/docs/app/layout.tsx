@@ -12,10 +12,10 @@ export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),
   title: {
     default: `${appName} documentation`,
-    template: `%s — ${appName}`,
+    template: `%s | ${appName}`,
   },
   description:
-    'Guides and API reference for the BetterOffice DOCX, XLSX and PPTX editors, plus VSDX support in development — Apache-2.0 OOXML engines written in Rust for React, JavaScript and native servers.',
+    'Install and use BetterOffice editors and APIs for React, JavaScript, Rust, and Python.',
   openGraph: {
     type: 'website',
     siteName: `${appName} documentation`,

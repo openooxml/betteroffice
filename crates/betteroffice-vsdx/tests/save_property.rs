@@ -182,6 +182,7 @@ fn run_refusal_case(case: usize) {
             gesture,
             formula: Some("42".to_owned()),
             value: None,
+            row_type: None,
         }])
         .expect_err("generated guarded, locked, or redirected edit must refuse");
     assert!(
@@ -267,6 +268,7 @@ fn generated_case(case: usize) -> GeneratedCase {
             gesture: MutationGesture::CellEdit,
             formula: Some(formula),
             value: None,
+            row_type: None,
         },
         existing_target,
         expected_cache,

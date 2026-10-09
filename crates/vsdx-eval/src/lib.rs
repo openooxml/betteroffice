@@ -433,11 +433,7 @@ pub fn evaluate_with_shape_themes(
     shape: &ResolvedShape,
     themes: &BTreeMap<u32, Theme>,
 ) -> Evaluation {
-    let theme = shape
-        .theme_index()
-        .or_else(|| shape.color_scheme_index())
-        .and_then(|index| themes.get(&index));
-    evaluate_with_theme(input, refs, limits, theme)
+    evaluate_with_theme(input, refs, limits, map_shape_theme(shape, themes))
 }
 
 /// Evaluates with one-based ThemeIndex, falling back to ColorSchemeIndex.
@@ -448,11 +444,7 @@ pub fn evaluate_with_shape_package_theme(
     shape: &ResolvedShape,
     package: &VsdxPackage,
 ) -> Evaluation {
-    let theme = shape
-        .theme_index()
-        .or_else(|| shape.color_scheme_index())
-        .and_then(|index| package.themes.get(&index));
-    evaluate_with_theme(input, refs, limits, theme)
+    evaluate_with_theme_at(input, refs, limits, shape_theme(shape, package), None)
 }
 
 /// Evaluates a host cell using the shape's selected package theme.
@@ -464,11 +456,7 @@ pub fn evaluate_cell_with_shape_package_theme(
     shape: &ResolvedShape,
     package: &VsdxPackage,
 ) -> Evaluation {
-    let theme = shape
-        .theme_index()
-        .or_else(|| shape.color_scheme_index())
-        .and_then(|index| package.themes.get(&index));
-    evaluate_cell_with_theme(name, input, refs, limits, theme)
+    evaluate_cell_with_theme(name, input, refs, limits, shape_theme(shape, package))
 }
 
 /// Evaluates a sheet cell with the package's default theme when one is available.
@@ -479,7 +467,33 @@ pub fn evaluate_cell_with_package_theme(
     limits: &ParseLimits,
     package: &VsdxPackage,
 ) -> Evaluation {
-    evaluate_cell_with_theme(name, input, refs, limits, package.themes.get(&1))
+    evaluate_cell_with_theme(name, input, refs, limits, package_theme(package))
+}
+
+/// Selects the shape theme, falling back to the package default.
+fn shape_theme<'a>(shape: &ResolvedShape, package: &'a VsdxPackage) -> Option<&'a Theme> {
+    map_shape_theme(shape, &package.themes)
+}
+
+/// Selects the shape theme from a theme map, falling back to the default.
+fn map_shape_theme<'a>(
+    shape: &ResolvedShape,
+    themes: &'a BTreeMap<u32, Theme>,
+) -> Option<&'a Theme> {
+    let indexed = shape.theme_index().or_else(|| shape.color_scheme_index());
+    match indexed {
+        Some(0) => None,
+        Some(index) => themes.get(&index),
+        None => themes.get(&1).or_else(|| themes.values().next()),
+    }
+}
+
+/// Selects the package default theme when one is available.
+fn package_theme(package: &VsdxPackage) -> Option<&Theme> {
+    package
+        .themes
+        .get(&1)
+        .or_else(|| package.themes.values().next())
 }
 
 struct Engine<'a, R> {
@@ -884,12 +898,10 @@ impl<R: References> Engine<'_, R> {
         )
     }
     fn themeval(&mut self, args: &[Expr], d: usize) -> Evaluation {
-        let host = self
-            .host
-            .as_deref()
-            .and_then(|host| host.rsplit('.').next());
         let name = match args.first() {
-            Some(Expr::String(name)) => name.clone(),
+            Some(Expr::String(name)) => theme_index_name(name)
+                .map(str::to_owned)
+                .unwrap_or_else(|| name.clone()),
             Some(expr) => match numeric(self.expr(expr, d)) {
                 Ok((value, _)) if value.unit == Unit::Number && value.number.fract() == 0.0 => {
                     match value.number as i32 {
@@ -909,12 +921,11 @@ impl<R: References> Engine<'_, R> {
                 Ok(_) => return unsupported("THEMEVAL requires a string or integer theme value"),
                 Err(error) => return error,
             },
-            None => match host {
-                Some("FillForegnd") => "FillColor".to_owned(),
-                Some("FillBkgnd") => "FillColor2".to_owned(),
-                Some("LineColor") => "LineColor".to_owned(),
-                Some("Color") => "TextColor".to_owned(),
-                _ => return unsupported("THEMEVAL host-cell lookup requires theme-cell context"),
+            None => match self.host.as_deref().and_then(host_theme_value) {
+                Some(name) => name.to_owned(),
+                None => {
+                    return unsupported("THEMEVAL host-cell lookup requires theme-cell context");
+                }
             },
         };
         let Some(theme) = self.theme else {
@@ -924,31 +935,12 @@ impl<R: References> Engine<'_, R> {
             );
         };
         let name = name.as_str();
-        let slot = match name {
-            "BackgroundColor" => "lt1",
-            "Light" => "lt1",
-            "FillColor" => "accent1",
-            "FillColor2" => "accent2",
-            "LineColor" => "dk1",
-            "TextColor" => "dk1",
-            "AccentColor1" => "accent1",
-            "AccentColor2" => "accent2",
-            "AccentColor3" => "accent3",
-            "AccentColor4" => "accent4",
-            "AccentColor5" => "accent5",
-            "AccentColor6" => "accent6",
-            "VariantColor1" => "accent1",
-            "VariantColor2" => "accent2",
-            "VariantColor3" => "accent3",
-            "VariantColor4" => "accent4",
-            _ => {
-                return args.get(1).map_or_else(
-                    || unsupported("unresolvable THEMEVAL value"),
-                    |arg| self.expr(arg, d),
-                );
-            }
+        let Some(slot) = theme_slot(name) else {
+            return args.get(1).map_or_else(
+                || unsupported("unresolvable THEMEVAL value"),
+                |arg| self.expr(arg, d),
+            );
         };
-        // Theme values use DrawingML colour slots; unknown named Visio theme values intentionally remain unsupported.
         let color = ColorValue {
             theme_color: Some(slot.to_ascii_lowercase()),
             ..ColorValue::default()
@@ -1055,6 +1047,60 @@ fn host_cell_unit(name: &str) -> Option<Unit> {
         _ => None,
     }
 }
+
+/// Maps a host colour cell to the theme value it reads.
+fn host_theme_value(host: &str) -> Option<&'static str> {
+    Some(
+        match host
+            .rsplit(['!', '.'])
+            .next()?
+            .to_ascii_uppercase()
+            .as_str()
+        {
+            "FILLFOREGND" => "FillColor",
+            "FILLBKGND" => "FillColor2",
+            "LINECOLOR" => "LineColor",
+            "COLOR" => "TextColor",
+            _ => return None,
+        },
+    )
+}
+
+/// Maps a documented colour theme value to its scheme slot.
+fn theme_slot(name: &str) -> Option<&'static str> {
+    Some(match name.to_ascii_uppercase().as_str() {
+        "DARK" => "dk1",
+        "LIGHT" => "lt1",
+        "BACKGROUNDCOLOR" => "lt1",
+        "ACCENTCOLOR" => "accent1",
+        "ACCENTCOLOR1" => "accent1",
+        "ACCENTCOLOR2" => "accent2",
+        "ACCENTCOLOR3" => "accent3",
+        "ACCENTCOLOR4" => "accent4",
+        "ACCENTCOLOR5" => "accent5",
+        "ACCENTCOLOR6" => "accent6",
+        "FILLCOLOR" => "accent1",
+        "FILLCOLOR2" => "accent2",
+        "LINECOLOR" => "dk1",
+        "TEXTCOLOR" => "dk1",
+        _ => return None,
+    })
+}
+
+/// Maps documented numeric-string theme indices to colour names.
+fn theme_index_name(name: &str) -> Option<&'static str> {
+    Some(match name.trim() {
+        "1" => "Dark",
+        "2" => "Light",
+        "3" => "AccentColor1",
+        "4" => "AccentColor2",
+        "5" => "AccentColor3",
+        "6" => "AccentColor4",
+        "7" => "AccentColor5",
+        "8" => "AccentColor6",
+        _ => return None,
+    })
+}
 fn numeric_result(number: f64, unit: Unit, guarded: bool) -> Evaluation {
     if number.is_finite() {
         result(Value::Number(Number { number, unit }), guarded)
@@ -1123,14 +1169,54 @@ fn tint(color: Color, amount: f64) -> Color {
     hls_to_rgb(hue, saturation, (luminosity + amount).clamp(0.0, 240.0))
 }
 fn mso_tint(color: Color, percentage: f64) -> Color {
-    let target = if percentage < 0.0 { 0.0 } else { 255.0 };
-    let fraction = percentage.abs() / 100.0;
-    let channel = |value: u8| (f64::from(value) + (target - f64::from(value)) * fraction) as u8;
+    let (hue, saturation, luminosity) = rgb_to_hsl(color);
+    let fraction = percentage / 100.0;
+    let luminosity = if fraction < 0.0 {
+        luminosity * (1.0 + fraction)
+    } else {
+        luminosity + (1.0 - luminosity) * fraction
+    };
+    hsl_to_rgb(hue, saturation, luminosity.clamp(0.0, 1.0), color.alpha)
+}
+fn rgb_to_hsl(color: Color) -> (f64, f64, f64) {
+    let red = f64::from(color.red) / 255.0;
+    let green = f64::from(color.green) / 255.0;
+    let blue = f64::from(color.blue) / 255.0;
+    let high = red.max(green).max(blue);
+    let low = red.min(green).min(blue);
+    let luminosity = (high + low) / 2.0;
+    let delta = high - low;
+    if delta == 0.0 {
+        return (0.0, 0.0, luminosity);
+    }
+    let saturation = (delta / (1.0 - (2.0 * luminosity - 1.0).abs())).min(1.0);
+    let hue = if high == red {
+        ((green - blue) / delta).rem_euclid(6.0)
+    } else if high == green {
+        (blue - red) / delta + 2.0
+    } else {
+        (red - green) / delta + 4.0
+    } / 6.0;
+    (hue, saturation, luminosity)
+}
+fn hsl_to_rgb(hue: f64, saturation: f64, luminosity: f64, alpha: Option<u8>) -> Color {
+    let chroma = (1.0 - (2.0 * luminosity - 1.0).abs()) * saturation;
+    let x = chroma * (1.0 - ((hue * 6.0).rem_euclid(2.0) - 1.0).abs());
+    let (red, green, blue) = match (hue * 6.0).floor() as i32 {
+        0 => (chroma, x, 0.0),
+        1 => (x, chroma, 0.0),
+        2 => (0.0, chroma, x),
+        3 => (0.0, x, chroma),
+        4 => (x, 0.0, chroma),
+        _ => (chroma, 0.0, x),
+    };
+    let offset = luminosity - chroma / 2.0;
+    let channel = |value: f64| ((value + offset) * 255.0).clamp(0.0, 255.0) as u8;
     Color {
-        red: channel(color.red),
-        green: channel(color.green),
-        blue: channel(color.blue),
-        alpha: color.alpha,
+        red: channel(red),
+        green: channel(green),
+        blue: channel(blue),
+        alpha,
     }
 }
 fn rgb_to_hls(color: Color) -> (f64, f64, f64) {
@@ -1606,6 +1692,74 @@ mod tests {
     }
 
     #[test]
+    fn missing_shape_theme_index_leaves_theme_unresolved() {
+        fn indexed_shape(name: &str, value: &str) -> ResolvedShape {
+            let mut shape = ResolvedShape::default();
+            shape.cells.insert(
+                name.into(),
+                Lookup::Found(vsdx_resolve::ResolvedCell {
+                    cell: vsdx_parse::Cell {
+                        name: name.into(),
+                        formula: None,
+                        value: Some(value.into()),
+                        unit: None,
+                        del: false,
+                        other_attrs: Vec::new(),
+                    },
+                    provenance: vsdx_resolve::Provenance::Local,
+                }),
+            );
+            shape
+        }
+        let mut theme = Theme::default();
+        theme.color_scheme.accent1 = "A0B0C0".into();
+        let themes = BTreeMap::from([(1, theme)]);
+        for shape in [
+            indexed_shape("ThemeIndex", "7"),
+            indexed_shape("ColorSchemeIndex", "7"),
+        ] {
+            assert!(matches!(
+                evaluate_with_shape_themes(
+                    "THEMEVAL(\"FillColor\")",
+                    &BTreeMap::new(),
+                    &limits(),
+                    &shape,
+                    &themes
+                ),
+                Evaluation::Unsupported(_)
+            ));
+            assert_eq!(
+                evaluate_with_shape_themes(
+                    "THEMEVAL(\"FillColor\",RGB(4,5,6))",
+                    &BTreeMap::new(),
+                    &limits(),
+                    &shape,
+                    &themes
+                ),
+                Evaluation::Evaluated(Evaluated {
+                    value: Value::Color(Color {
+                        red: 4,
+                        green: 5,
+                        blue: 6,
+                        alpha: None
+                    }),
+                    guarded: false
+                })
+            );
+        }
+        assert!(matches!(
+            evaluate_with_shape_themes(
+                "THEMEVAL(\"FillColor\")",
+                &BTreeMap::new(),
+                &limits(),
+                &ResolvedShape::default(),
+                &themes
+            ),
+            Evaluation::Evaluated(_)
+        ));
+    }
+
+    #[test]
     fn resolves_shape_cell_literals_and_host_inheritance() {
         let mut shape = ResolvedShape::default();
         shape.cells.insert(
@@ -1729,6 +1883,20 @@ mod tests {
                 red: 165,
                 green: 165,
                 blue: 165,
+                alpha: None
+            }
+        );
+    }
+
+    /// MSOTINT tints in HSL; linear RGB would shade this near-white to grey.
+    #[test]
+    fn msotint_tints_near_white_in_hsl() {
+        assert_eq!(
+            color("MSOTINT(RGB(254,255,255),-10)", None),
+            Color {
+                red: 203,
+                green: 255,
+                blue: 255,
                 alpha: None
             }
         );
@@ -2045,11 +2213,11 @@ mod tests {
             "corpus formula denominator changed"
         );
         assert_eq!(
-            measurement.evaluated, 3_679,
+            measurement.evaluated, 3_714,
             "published corpus evaluation count changed"
         );
         assert_eq!(
-            measurement.oracle_agreement, 3_670,
+            measurement.oracle_agreement, 3_697,
             "published corpus oracle agreement count changed"
         );
         assert_eq!(
@@ -2057,7 +2225,7 @@ mod tests {
             "published corpus oracle disagreement count changed"
         );
         assert_eq!(
-            oracle_compared, 3_670,
+            oracle_compared, 3_697,
             "published corpus comparable-oracle count changed"
         );
         assert_eq!(
@@ -2065,15 +2233,15 @@ mod tests {
             "published corpus stale-oracle exclusion count changed"
         );
         assert_eq!(
-            measurement.unsupported_known, 1_892,
+            measurement.unsupported_known, 1_919,
             "published corpus known non-goal count changed"
         );
         assert_eq!(
-            measurement.unsupported_other, 1_256,
+            measurement.unsupported_other, 1_190,
             "published corpus other unsupported count changed"
         );
         assert_eq!(
-            measurement.error, 165,
+            measurement.error, 169,
             "published corpus error count changed"
         );
         assert_eq!(
@@ -2348,6 +2516,222 @@ mod tests {
             counts.redirected_root,
             counts.redirected_nested_or_multiple,
             counts.lock_protected
+        );
+    }
+
+    struct MasterShapeReferences<'a> {
+        shape: &'a ResolvedShape,
+        page: &'a ResolvedShape,
+        document: Option<&'a ResolvedShape>,
+    }
+
+    impl<'a> MasterShapeReferences<'a> {
+        fn new(
+            shape: &'a ResolvedShape,
+            page: &'a ResolvedShape,
+            document: Option<&'a ResolvedShape>,
+        ) -> Self {
+            Self {
+                shape,
+                page,
+                document,
+            }
+        }
+
+        fn scoped(&self, name: &str) -> Option<&ResolvedShape> {
+            match name.split_once('!') {
+                Some(("ThePage", _)) => Some(self.page),
+                Some(("TheDoc", _)) => self.document,
+                _ => Some(self.shape),
+            }
+        }
+
+        fn cell<'b>(&self, name: &'b str) -> &'b str {
+            name.split_once('!').map_or(name, |(_, name)| name)
+        }
+    }
+
+    impl References for MasterShapeReferences<'_> {
+        fn formula(&self, name: &str) -> Option<&str> {
+            self.formula_in(None, name)
+        }
+
+        fn value(&self, name: &str) -> Option<(&str, Option<&str>)> {
+            self.value_in(None, name)
+        }
+
+        fn formula_in(&self, _sheet: Option<u32>, name: &str) -> Option<&str> {
+            self.scoped(name)?.formula(self.cell(name))
+        }
+
+        fn value_in(&self, _sheet: Option<u32>, name: &str) -> Option<(&str, Option<&str>)> {
+            self.scoped(name)?.value(self.cell(name))
+        }
+    }
+
+    #[test]
+    fn corpus_control_handle_moves_master_geometry_chain() {
+        let Some(directory) = std::env::var_os("VSDX_CORPUS_DIR") else {
+            eprintln!("SKIPPED CORPUS CONTROL TEST: VSDX_CORPUS_DIR is unset");
+            return;
+        };
+        let path = std::path::Path::new(&directory).join("lichtsysteme.vsdx");
+        let package =
+            parse_vsdx(&fs::read(&path).expect("read corpus file")).expect("parse corpus package");
+        let (part, id) = package
+            .master_contents
+            .iter()
+            .flat_map(|(part, sheet)| {
+                shapes(sheet)
+                    .into_iter()
+                    .map(move |shape| (part.clone(), shape))
+            })
+            .find(|(_, shape)| {
+                let names = shape_formulas(shape)
+                    .iter()
+                    .map(|(name, _)| name.clone())
+                    .collect::<std::collections::BTreeSet<_>>();
+                names.contains("Control.Row_1.Y") && names.contains("Control.Row_2.X")
+            })
+            .map(|(part, shape)| (part, shape.id))
+            .expect("corpus shape with a Control section");
+        let resolve = |package: &VsdxPackage| {
+            let resolver = Resolver::new(package);
+            let sheet = package
+                .master_contents
+                .get(&part)
+                .expect("corpus master sheet");
+            let shape = shapes(sheet)
+                .into_iter()
+                .find(|shape| shape.id == id)
+                .expect("corpus master shape");
+            let resolved = resolver
+                .resolve_shape_in_sheet(shape, sheet)
+                .expect("resolve corpus master shape");
+            let page_part = package.page_part_paths.first().expect("corpus page part");
+            let page_sheet = package
+                .page_part_ids
+                .get(page_part)
+                .and_then(|id| package.page_sheets.get(id))
+                .expect("corpus page sheet");
+            let page = resolver
+                .resolve_sheet(page_sheet)
+                .expect("resolve corpus page sheet");
+            let document = package
+                .document_sheet
+                .as_ref()
+                .map(|sheet| resolver.resolve_sheet(sheet))
+                .transpose()
+                .expect("resolve corpus document sheet");
+            (page, document, resolved)
+        };
+        let cached = |resolved: &ResolvedShape, input: &str| match resolved.cell(input) {
+            Some(Lookup::Found(cell)) => cell
+                .cell
+                .value
+                .as_deref()
+                .and_then(|value| value.parse::<f64>().ok())
+                .filter(|value| value.is_finite()),
+            _ => None,
+        };
+        let number = |package: &VsdxPackage,
+                      page: &ResolvedShape,
+                      document: Option<&ResolvedShape>,
+                      resolved: &ResolvedShape,
+                      input: &str| {
+            let refs = MasterShapeReferences::new(resolved, page, document);
+            match evaluate_with_shape_package_theme(input, &refs, &limits(), resolved, package) {
+                Evaluation::Evaluated(Evaluated {
+                    value: Value::Number(number),
+                    ..
+                }) if number.number.is_finite() => number.number,
+                _ => cached(resolved, input)
+                    .unwrap_or_else(|| panic!("{input} neither evaluated nor cached")),
+            }
+        };
+        let (page, document, resolved) = resolve(&package);
+        let before = [
+            "Controls.Row_2",
+            "Controls.Row_1.Y",
+            "User.ControlX2",
+            "Scratch.X1",
+        ]
+        .map(|input| number(&package, &page, document.as_ref(), &resolved, input));
+        let handles = vsdx_resolve::control_handles(&resolved, |name| {
+            let refs = MasterShapeReferences::new(&resolved, &page, document.as_ref());
+            match evaluate_with_shape_package_theme(name, &refs, &limits(), &resolved, &package) {
+                Evaluation::Evaluated(Evaluated {
+                    value: Value::Number(number),
+                    ..
+                }) if number.number.is_finite() => Some(number.number),
+                _ => cached(&resolved, name),
+            }
+        });
+        assert!(
+            handles.iter().any(|handle| handle.row == "Row_2"
+                && (handle.x - before[0]).abs() < 1e-9
+                && !handle.hidden()),
+            "expected a visible Row_2 handle, found {handles:?}"
+        );
+        let mut moved = package.clone();
+        let sheet = moved
+            .master_contents
+            .get_mut(&part)
+            .expect("corpus master sheet");
+        let mut replaced = false;
+        for child in &mut sheet.children {
+            let vsdx_parse::SheetChild::Shapes(shapes) = child else {
+                continue;
+            };
+            for child in shapes.iter_mut() {
+                let vsdx_parse::ShapesChild::Shape(shape) = child else {
+                    continue;
+                };
+                if shape.id != id {
+                    continue;
+                }
+                for child in &mut shape.children {
+                    let vsdx_parse::ShapeChild::Section(section) = child else {
+                        continue;
+                    };
+                    if section.name != "Control" {
+                        continue;
+                    }
+                    for child in &mut section.children {
+                        let vsdx_parse::SectionChild::Row(row) = child else {
+                            continue;
+                        };
+                        if row.name.as_deref() != Some("Row_2") {
+                            continue;
+                        }
+                        for child in &mut row.children {
+                            let vsdx_parse::RowChild::Cell(cell) = child else {
+                                continue;
+                            };
+                            if cell.name == "X" {
+                                cell.formula = Some("0 in".to_owned());
+                                replaced = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(replaced, "Control.Row_2.X formula was not replaced");
+        let (page, document, resolved) = resolve(&moved);
+        let after = [
+            "Controls.Row_2",
+            "Controls.Row_1.Y",
+            "User.ControlX2",
+            "Scratch.X1",
+        ]
+        .map(|input| number(&moved, &page, document.as_ref(), &resolved, input));
+        assert_eq!(after[0], 0.0);
+        assert!(
+            (after[1] - before[1]).abs() > 1e-9,
+            "Controls.Row_1.Y did not move with the handle: {} -> {}",
+            before[1],
+            after[1]
         );
     }
 

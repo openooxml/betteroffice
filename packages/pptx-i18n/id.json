@@ -1,9 +1,18 @@
 {
   "_lang": "id",
+  "worker": {
+    "previousRecovery": null,
+    "preparing": "Menyiapkan editor. Pengeditan akan segera tersedia.",
+    "failed": "Pengeditan tidak tersedia. Unduh presentasi yang dipulihkan.",
+    "disabled": "Fitur ini tidak tersedia dalam mode pengeditan ini.",
+    "recovery": null,
+    "image": null
+  },
   "toolbar": {
     "label": null,
     "save": "Simpan",
     "exportPng": null,
+    "present": "Presentasikan",
     "historyLabel": null,
     "undo": null,
     "redo": null,
@@ -79,7 +88,13 @@
       "upArrow": null,
       "downArrow": null,
       "chevron": null
-    }
+    },
+    "insertImage": null,
+    "arrange": null,
+    "bringToFront": null,
+    "bringForward": null,
+    "sendBackward": null,
+    "sendToBack": null
   },
   "slides": {
     "panelLabel": null,
@@ -94,9 +109,104 @@
     "openPrompt": null
   },
   "objects": {
-    "defaultTextBoxName": null
+    "defaultTextBoxName": null,
+    "defaultPictureName": null
+  },
+  "presentation": {
+    "label": "Presentasi slide",
+    "exit": "Keluar dari presentasi (Esc)",
+    "slideCounter": "{current} / {total}",
+    "previousSlide": "Slide sebelumnya",
+    "nextSlide": "Slide berikutnya"
+  },
+  "notes": {
+    "panelLabel": "Catatan pembicara",
+    "placeholder": "Tambahkan catatan pembicara…"
   },
   "errors": {
     "decodeSlideImage": null
+  },
+  "proposals": {
+    "title": "Usulan agen",
+    "close": "Tutup",
+    "empty": "Tidak ada perubahan yang menunggu peninjauan.",
+    "preview": "Pratinjau perubahan",
+    "previewTitle": "Tinjau perubahan yang diusulkan",
+    "before": "Slide saat ini",
+    "after": "Slide yang diusulkan",
+    "accept": "Terima usulan",
+    "reject": "Tolak",
+    "force": "Terapkan usulan yang diperbarui",
+    "blank": "Kosong",
+    "target": "Slide {slide} · {name}",
+    "targetLabel": "Perubahan",
+    "targetMissing": "Target tidak lagi tersedia",
+    "stale": "Objek-objek ini berubah setelah usulan dibuat. Pratinjau perubahan saat ini sebelum menerapkannya.",
+    "stalePreview": "Pratinjau ini menggunakan slide yang diperbarui. Menerapkannya akan menimpa target yang berubah.",
+    "geometry": "Posisi dan ukuran (x, y, lebar, tinggi)",
+    "appearance": "Tampilan atau pemformatan teks berubah",
+    "changedAgain": "Target berubah lagi. Tinjau pratinjau yang dimuat ulang sebelum menerapkannya.",
+    "canvasTitle": "Perubahan pada slide ini",
+    "editSlide": "Edit slide",
+    "showDiff": "Tampilkan perubahan",
+    "details": "Detail peninjauan",
+    "removed": "Dihapus",
+    "added": "Ditambahkan",
+    "reviewHint": "Mode peninjauan · perubahan diterapkan setelah diterima",
+    "canvasStale": "Target berubah. Buka detail peninjauan untuk memeriksa pratinjau terbaru sebelum menerapkannya.",
+    "previousPosition": "Sebelumnya",
+    "proposedPosition": "Diusulkan",
+    "loadingDiff": "Memuat perubahan…"
+  },
+  "commands": {
+    "moreControls": "Kontrol lainnya",
+    "selectTool": "Pilih",
+    "fontSizeStep": "Ubah ukuran font",
+    "customFontSize": "Ukuran khusus…",
+    "fontSizePoints": "Ukuran dalam poin",
+    "customColor": "Warna khusus…",
+    "hexColor": "Warna heksadesimal",
+    "apply": "Terapkan",
+    "cancel": "Batal",
+    "reasons": {
+      "editorUnavailable": "Editor belum siap.",
+      "documentLoading": "Presentasi masih dibuka.",
+      "noDocument": "Tidak ada presentasi yang terbuka.",
+      "readOnly": "Presentasi hanya dapat dibaca.",
+      "nothingToUndo": "Tidak ada yang dapat dibatalkan.",
+      "nothingToRedo": "Tidak ada yang dapat diulang.",
+      "textSelectionRequired": "Pilih teks atau kotak teks terlebih dahulu.",
+      "shapeRequired": "Pilih bentuk terlebih dahulu.",
+      "objectRequired": "Pilih bentuk atau gambar terlebih dahulu.",
+      "slideRequired": "Tambahkan slide terlebih dahulu.",
+      "unsupportedSelection": "Ini tidak berlaku untuk pilihan saat ini.",
+      "invalidLayout": "Tata letak tersebut tidak tersedia dalam presentasi ini.",
+      "invalidAdjustment": "Penyesuaian tersebut tidak tersedia untuk bentuk ini.",
+      "zOrderBoundary": "Objek tidak dapat bergerak lebih jauh ke arah tersebut.",
+      "reviewActive": "Keluar dari tinjauan usulan terlebih dahulu.",
+      "previewPending": "Pratinjau perubahan masih dimuat.",
+      "previewFailed": "Pratinjau perubahan tidak dapat ditampilkan.",
+      "proposalStale": "Target usulan telah berubah. Tinjau pratinjau yang diperbarui sebelum menerapkan.",
+      "proposalNotFound": "Usulan tersebut tidak lagi tertunda.",
+      "proposalsUnavailable": "Usulan tidak tersedia.",
+      "hostDisabled": "Tindakan ini tidak tersedia di sini.",
+      "unsupportedCommand": "Perintah ini tidak didukung.",
+      "invalidArguments": "Perintah menerima argumen yang tidak valid.",
+      "inputFailed": "Input sebelumnya tidak dapat diterapkan.",
+      "documentReplaced": "Presentasi telah diganti.",
+      "targetChanged": "Pilihan berubah sebelum perintah dijalankan.",
+      "gestureActive": "Selesaikan gerakan penunjuk terlebih dahulu.",
+      "commandFailed": "Perintah gagal.",
+      "permissionDenied": "Aplikasi host tidak mengizinkan plugin ini menggunakan perintah ini.",
+      "unsupportedPolicy": "Plugin belum dapat menjalankan perintah ini. Gunakan batch edit sebagai gantinya.",
+      "pluginUnavailable": "Plugin tidak lagi aktif.",
+      "aborted": "Tindakan plugin dibatalkan sebelum perintah dijalankan."
+    }
+  },
+  "plugins": {
+    "toolbarGroup": "Plugin",
+    "panelTabs": "Panel plugin",
+    "collapsePanel": "Ciutkan {title}",
+    "expandPanel": "Luaskan {title}"
   }
 }

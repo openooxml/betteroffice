@@ -27,12 +27,73 @@ fn a1(workbook: &Workbook) -> CellValue {
 }
 
 fn restored(source: &[u8], snapshot: &[u8], client_id: u64) -> Workbook {
-    let mut workbook = Workbook::open_collaborative(source, client_id).unwrap();
+    let mut workbook =
+        Workbook::open_collaborative_recalculated(source, client_id, CalculationOptions::default())
+            .unwrap();
     let result = workbook
         .apply_update_v1(snapshot, CalculationOptions::default())
         .unwrap();
     assert!(result.applied);
     workbook
+}
+
+#[test]
+fn a_published_npm_snapshot_restores_after_initial_recalculation() {
+    let source = include_bytes!("../../../packages/xlsx/test-fixtures/sample.xlsx");
+    let snapshot = include_bytes!("fixtures/workbook-npm-0.2.1.update.bin");
+    let mut workbook = restored(source, snapshot, 5_020);
+    let marker = CellRef::parse_a1("A43").unwrap();
+    let expected = CellValue::Text {
+        value: "PublishedReleaseState".into(),
+    };
+    assert_eq!(
+        workbook
+            .sheet(SheetId(0))
+            .unwrap()
+            .cell(marker)
+            .unwrap()
+            .value,
+        expected
+    );
+    assert!(!workbook.can_undo());
+    workbook
+        .edit_cell(
+            SheetId(0),
+            CellRef::parse_a1("B43").unwrap(),
+            "after restore",
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let mut peer =
+        Workbook::open_collaborative_recalculated(source, 5_021, CalculationOptions::default())
+            .unwrap();
+    peer.apply_update_v1(
+        &workbook.encode_state_as_update_v1(),
+        CalculationOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(peer.model(), workbook.model());
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    assert_eq!(
+        reopened
+            .sheet(SheetId(0))
+            .unwrap()
+            .cell(marker)
+            .unwrap()
+            .value,
+        expected
+    );
+    assert_eq!(
+        reopened
+            .sheet(SheetId(0))
+            .unwrap()
+            .cell(CellRef::parse_a1("B43").unwrap())
+            .unwrap()
+            .value,
+        CellValue::Text {
+            value: "after restore".into()
+        }
+    );
 }
 
 #[test]
@@ -116,7 +177,9 @@ fn a_restored_snapshot_round_trips_at_the_current_schema() {
 /// A snapshot only supersedes a replica that has not been edited yet.
 #[test]
 fn an_edited_replica_does_not_adopt_a_legacy_snapshot() {
-    let mut workbook = Workbook::open_collaborative(SAMPLE, 5_006).unwrap();
+    let mut workbook =
+        Workbook::open_collaborative_recalculated(SAMPLE, 5_006, CalculationOptions::default())
+            .unwrap();
     workbook
         .edit_cell(
             SheetId(0),
@@ -138,12 +201,50 @@ fn an_edited_replica_does_not_adopt_a_legacy_snapshot() {
     );
 }
 
+#[test]
+fn a_cleared_cell_prevents_snapshot_replacement() {
+    for legacy in [false, true] {
+        let mut workbook =
+            Workbook::open_collaborative_recalculated(SAMPLE, 5_022, CalculationOptions::default())
+                .unwrap();
+        let original = a1(&workbook);
+        assert_ne!(original, CellValue::Empty);
+        let snapshot = if legacy {
+            SAMPLE_V5.to_vec()
+        } else {
+            workbook.encode_state_as_update_v1()
+        };
+        workbook
+            .edit_cell(
+                SheetId(0),
+                CellRef::parse_a1("A1").unwrap(),
+                "",
+                CalculationOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(a1(&workbook), CellValue::Empty);
+        assert!(workbook.can_undo());
+        let result = workbook.apply_update_v1(&snapshot, CalculationOptions::default());
+        if legacy {
+            assert!(result.is_err());
+        } else {
+            result.unwrap();
+        }
+        assert_eq!(a1(&workbook), CellValue::Empty);
+        assert!(workbook.can_undo());
+        workbook.undo(CalculationOptions::default()).unwrap();
+        assert_eq!(a1(&workbook), original);
+    }
+}
+
 /// Adoption is gated on the base fingerprint, so a snapshot of some other
 /// workbook is never taken as this one's state. (Merging one is a separate,
 /// older problem: it lands a partial contamination either way.)
 #[test]
 fn a_snapshot_from_another_workbook_is_never_adopted() {
-    let mut workbook = Workbook::open_collaborative(SAMPLE, 5_008).unwrap();
+    let mut workbook =
+        Workbook::open_collaborative_recalculated(SAMPLE, 5_008, CalculationOptions::default())
+            .unwrap();
     let before = workbook
         .model()
         .sheets
@@ -196,7 +297,9 @@ fn a_workbook_with_hidden_dimensions_restores_its_released_snapshot() {
 /// It says nothing about what the snapshot then did to the frozen structure.
 #[test]
 fn a_structurally_tampered_snapshot_is_refused() {
-    let mut workbook = Workbook::open_collaborative(SAMPLE, 5_010).unwrap();
+    let mut workbook =
+        Workbook::open_collaborative_recalculated(SAMPLE, 5_010, CalculationOptions::default())
+            .unwrap();
     let before = workbook.model().clone();
     let tampered = rename_first_sheet(SAMPLE_V5, "Tampered");
     assert!(matches!(
@@ -212,7 +315,9 @@ fn a_structurally_tampered_snapshot_is_refused() {
 #[test]
 fn incremental_updates_converge_after_a_migration() {
     let broadcast: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
-    let mut left = Workbook::open_collaborative(SAMPLE, 5_011).unwrap();
+    let mut left =
+        Workbook::open_collaborative_recalculated(SAMPLE, 5_011, CalculationOptions::default())
+            .unwrap();
     let sink = Arc::clone(&broadcast);
     let _subscription = left
         .observe_update_v1(move |event| {

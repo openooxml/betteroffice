@@ -8,6 +8,8 @@ pub mod relationship_types {
     pub const PAGES: &str = "http://schemas.microsoft.com/visio/2010/relationships/pages";
     pub const MASTERS: &str = "http://schemas.microsoft.com/visio/2010/relationships/masters";
     pub const THEME: &str = "http://schemas.microsoft.com/visio/2010/relationships/theme";
+    pub const THEME_OOX: &str =
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme";
     pub const WINDOWS: &str = "http://schemas.microsoft.com/visio/2010/relationships/windows";
     pub const PAGE: &str = "http://schemas.microsoft.com/visio/2010/relationships/page";
     pub const MASTER: &str = "http://schemas.microsoft.com/visio/2010/relationships/master";

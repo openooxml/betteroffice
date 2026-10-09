@@ -3,6 +3,7 @@
 
 use ooxml_drawingml::GeometryPathCommand;
 use serde::Serialize;
+use std::sync::Arc;
 
 /// horizontal text anchoring within a cell's clip rect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -32,7 +33,7 @@ pub enum DrawCmd {
         y: f32,
         w: f32,
         h: f32,
-        color: String,
+        color: Arc<str>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         clip: Option<Rect>,
     },
@@ -42,16 +43,16 @@ pub enum DrawCmd {
         x2: f32,
         y2: f32,
         width: f32,
-        color: String,
+        color: Arc<str>,
         /// `None` = solid; `"dashed"`/`"dotted"`/`"double"` request a backend stroke pattern.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        style: Option<String>,
+        style: Option<Arc<str>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         clip: Option<Rect>,
     },
     Path {
         commands: Vec<GeometryPathCommand>,
-        fill: String,
+        fill: Arc<str>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stroke: Option<PathStroke>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -61,10 +62,10 @@ pub enum DrawCmd {
     Text {
         x: f32,
         y: f32,
-        text: String,
+        text: Arc<str>,
         font_size: f32,
         /// resolved font color, `#rrggbb` (a number-format `[Red]` prefix already applied).
-        color: String,
+        color: Arc<str>,
         clip: Rect,
         align: Align,
         #[serde(default, skip_serializing_if = "is_false")]
@@ -76,12 +77,12 @@ pub enum DrawCmd {
         #[serde(default, skip_serializing_if = "is_false")]
         strike: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        highlight: Option<String>,
+        highlight: Option<Arc<str>>,
         #[serde(default, skip_serializing_if = "is_false")]
         dashed_underline: bool,
         /// font family from the style font; the backend falls back to its default face.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        font_family: Option<String>,
+        font_family: Option<Arc<str>>,
         /// preview text that is not the cell's committed value (a ghost `new`);
         /// excluded from a11y text recovery.
         #[serde(default, skip_serializing_if = "is_false")]
@@ -97,7 +98,7 @@ fn is_false(b: &bool) -> bool {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct PathStroke {
-    pub color: String,
+    pub color: Arc<str>,
     pub width: f32,
 }
 
@@ -462,7 +463,7 @@ mod tests {
                 x, y, w, h, color, ..
             } => {
                 assert_eq!((*x, *y, *w, *h), (2.0, 4.0, 20.0, 40.0));
-                assert_eq!(color, "#ffffff");
+                assert_eq!(&**color, "#ffffff");
             }
             _ => panic!("expected fill rect"),
         }
@@ -504,7 +505,7 @@ mod tests {
                 assert_eq!(*x, 6.0);
                 assert_eq!(*font_size, 22.0);
                 assert_eq!((clip.x, clip.w), (4.0, 24.0));
-                assert_eq!(text, "hi");
+                assert_eq!(&**text, "hi");
             }
             _ => panic!("expected text"),
         }
