@@ -187,6 +187,123 @@ fn formatting_an_implicit_header_does_not_add_an_empty_font() {
 }
 
 #[test]
+fn clearing_fill_from_red_xf_zero_stores_an_explicit_default() {
+    let mut source = parts(&package(VARIANTS[0].1));
+    source.insert(
+        "xl/worksheets/sheet2.xml".into(),
+        worksheet("<sheetData/>").into_bytes(),
+    );
+    source.insert("xl/styles.xml".into(), br#"<styleSheet><fonts count="1"><font/></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFF0000"/></patternFill></fill></fills><cellXfs count="1"><xf fillId="1"/></cellXfs></styleSheet>"#.to_vec());
+    source.insert(
+        "xl/worksheets/sheet1.xml".into(),
+        worksheet(r#"<sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>"#).into_bytes(),
+    );
+    let source = ooxml_opc::rezip_parts(&source.into_iter().collect::<Vec<_>>()).unwrap();
+    let mut workbook = Workbook::open(&source).unwrap();
+    workbook
+        .patch_range_style(
+            SheetId(0),
+            CellRange::parse_a1("A1").unwrap(),
+            xlsx_ops::StylePatch {
+                clear: vec![xlsx_ops::StyleProperty::FillColor],
+                ..Default::default()
+            },
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert!(
+        workbook.model().sheets[0]
+            .cell(cell("A1"))
+            .unwrap()
+            .style
+            .is_some()
+    );
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    for workbook in [&workbook, &reopened] {
+        let cell = workbook.model().sheets[0].cell(cell("A1")).unwrap();
+        assert_eq!(
+            workbook.model().styles.cell_format(cell.style),
+            xlsx_model::CellFormat::default()
+        );
+    }
+}
+
+#[test]
+fn explicit_style_selection_and_copy_use_the_selected_xf() {
+    let source = package(VARIANTS[0].1);
+    for selected in [1, 3] {
+        let mut workbook = Workbook::open(&source).unwrap();
+        workbook
+            .apply_ops(
+                vec![Op::SetCell {
+                    sheet: SheetId(0),
+                    at: cell("B1"),
+                    cell: CellState {
+                        value: CellValue::Number { value: 2.0 },
+                        style: Some(selected),
+                        ..Default::default()
+                    },
+                }],
+                CalculationOptions::default(),
+            )
+            .unwrap();
+        let saved = parts(&workbook.save().unwrap());
+        let xml = text(&saved, "xl/styles.xml");
+        let selected_xml = cell_xf(&text(&parts(&source), "xl/styles.xml"), selected as usize);
+        let written = style_index(&cells(&text(&saved, "xl/worksheets/sheet1.xml"))["B1"]);
+        assert_eq!(cell_xf(&xml, written), selected_xml);
+    }
+    let mut workbook = Workbook::open(&source).unwrap();
+    let captured = workbook
+        .capture_format(SheetId(0), CellRange::parse_a1("D1").unwrap())
+        .unwrap();
+    workbook
+        .apply_format(
+            SheetId(0),
+            CellRange::parse_a1("B1").unwrap(),
+            captured,
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let saved = parts(&workbook.save().unwrap());
+    let written = style_index(&cells(&text(&saved, "xl/worksheets/sheet1.xml"))["B1"]);
+    assert_eq!(
+        cell_xf(&text(&saved, "xl/styles.xml"), written),
+        cell_xf(&text(&parts(&source), "xl/styles.xml"), 3)
+    );
+}
+
+#[test]
+fn unstyled_cells_keep_general_display_and_default_toolbar_formatting() {
+    let mut source = parts(&package(VARIANTS[0].1));
+    let xml = styles(VARIANTS[0].1).replace(
+        "<xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/>",
+        "<xf numFmtId=\"2\" fontId=\"1\" fillId=\"1\" borderId=\"0\" xfId=\"0\"/>",
+    );
+    source.insert("xl/styles.xml".into(), xml.into_bytes());
+    source.insert(
+        "xl/worksheets/sheet1.xml".into(),
+        worksheet(r#"<sheetData><row r="1"><c r="A1"><v>1.234</v></c></row></sheetData>"#)
+            .into_bytes(),
+    );
+    let source = ooxml_opc::rezip_parts(&source.into_iter().collect::<Vec<_>>()).unwrap();
+    let workbook = Workbook::open(&source).unwrap();
+    let summary = workbook
+        .selection_formatting(SheetId(0), CellRange::parse_a1("A1").unwrap())
+        .unwrap();
+    assert_eq!(summary.bold, Some(false));
+    assert_eq!(workbook.search_text("1.234", true, None).len(), 1);
+    assert_eq!(
+        workbook.model().styles.cell_format(None),
+        xlsx_model::CellFormat::default()
+    );
+    assert_eq!(
+        parts(&workbook.save().unwrap())["xl/worksheets/sheet1.xml"],
+        parts(&source)["xl/worksheets/sheet1.xml"]
+    );
+}
+
+#[test]
 fn formatting_keeps_each_cells_base_font_and_unmodeled_style_properties() {
     let mut source = parts(&package(VARIANTS[0].1));
     let xml = styles(VARIANTS[0].1).replace("Calibri", "DejaVu Sans")
@@ -211,7 +328,8 @@ fn formatting_keeps_each_cells_base_font_and_unmodeled_style_properties() {
                 workbook.model().sheets[0]
                     .cell(cell(address))
                     .unwrap()
-                    .style,
+                    .style
+                    .or(Some(0)),
             )
         })
         .collect();

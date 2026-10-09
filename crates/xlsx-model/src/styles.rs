@@ -1,7 +1,7 @@
 //! style types (fonts, fills, borders, xf chains, theme colors). pure data;
 //! the cellXfs indirection chain is walked through the `Stylesheet` accessors.
 
-use std::collections::{HashMap, hash_map::DefaultHasher};
+use std::collections::{BTreeMap, HashMap, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 
 use serde::{Deserialize, Serialize};
@@ -461,6 +461,12 @@ pub struct Stylesheet {
     /// `#rrggbb` entries; empty strings preserve omitted colors and use the default index.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub indexed_colors: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    format_sources: BTreeMap<u32, Option<u32>>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    exact_style_indices: bool,
+    #[serde(skip)]
+    derived_memo: HashMap<(u32, Xf), u32>,
     #[serde(skip)]
     font_memo: PoolMemo,
     #[serde(skip)]
@@ -482,6 +488,7 @@ impl PartialEq for Stylesheet {
             && self.num_fmts == other.num_fmts
             && self.theme == other.theme
             && self.indexed_colors == other.indexed_colors
+            && self.format_sources == other.format_sources
     }
 }
 
@@ -560,6 +567,9 @@ impl Stylesheet {
             num_fmts,
             theme: _,
             indexed_colors,
+            format_sources: _,
+            exact_style_indices: _,
+            derived_memo: _,
             font_memo: _,
             fill_memo: _,
             border_memo: _,
@@ -663,7 +673,6 @@ impl Stylesheet {
     /// borrows the resolved format for a cell style without cloning; unset
     /// facets resolve to defaults.
     pub fn resolved_format(&self, style_index: Option<u32>) -> ResolvedFormat<'_> {
-        let style_index = Some(style_index.unwrap_or(0));
         let xf = style_index.and_then(|index| self.xf(index));
         ResolvedFormat {
             font: xf
@@ -715,10 +724,85 @@ impl Stylesheet {
         if self.borders.is_empty() && format.border != Border::default() {
             self.borders.push(Border::default());
         }
-        match &format.number_format {
+        let previous_len = self.cell_xfs.len();
+        let result = match &format.number_format {
             NumberFormat::Builtin { id } => Ok(Some(self.intern_builtin_cell_format(format, *id))),
             NumberFormat::Custom { pattern } => self.intern_custom_cell_format(format, pattern),
+        };
+        if let Ok(Some(index)) = result
+            && index as usize >= previous_len
+        {
+            self.format_sources.insert(index, None);
         }
+        result
+    }
+
+    #[doc(hidden)]
+    pub fn format_source(&self, index: u32) -> (Option<u32>, Option<u32>) {
+        match self.format_sources.get(&index) {
+            None => (Some(index), None),
+            Some(None) => (None, None),
+            Some(Some(source)) => (None, Some(*source)),
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn preserve_style_identity(&mut self) {
+        self.exact_style_indices = true;
+    }
+
+    #[doc(hidden)]
+    pub fn has_style_identity(&self) -> bool {
+        self.exact_style_indices
+    }
+
+    #[doc(hidden)]
+    pub fn mark_generated_format(&mut self, index: u32) {
+        self.format_sources.insert(index, None);
+    }
+
+    #[doc(hidden)]
+    pub fn intern_derived_cell_format(
+        &mut self,
+        source: u32,
+        format: &CellFormat,
+    ) -> Result<u32, NumFmtTableFull> {
+        let source = self
+            .format_sources
+            .get(&source)
+            .copied()
+            .flatten()
+            .unwrap_or(source);
+        let previous_len = self.cell_xfs.len();
+        let index = match self.intern_cell_format(format)? {
+            Some(index) => index,
+            None => self.intern_builtin_cell_format(format, 0),
+        };
+        let canonical_index = index;
+        let xf = self.cell_xfs[index as usize].clone();
+        let xf_key = fingerprint(&xf);
+        let key = (source, xf.clone());
+        if let Some(index) = self.derived_memo.get(&key) {
+            return Ok(*index);
+        }
+        let index = if index as usize >= previous_len
+            || self.format_sources.get(&index) == Some(&Some(source))
+        {
+            index
+        } else {
+            let index = self.cell_xfs.len() as u32;
+            self.cell_xfs.push(xf);
+            index
+        };
+        self.format_sources.insert(index, Some(source));
+        self.derived_memo.insert(key, index);
+        seed_memo(
+            &mut self.xf_memo,
+            self.cell_xfs.len(),
+            Some(xf_key),
+            canonical_index,
+        );
+        Ok(index)
     }
 
     #[inline(never)]
@@ -881,6 +965,10 @@ impl Stylesheet {
         self.borders.truncate(marks.borders);
         self.cell_xfs.truncate(marks.cell_xfs);
         self.num_fmts.truncate(marks.num_fmts);
+        self.format_sources
+            .retain(|index, _| (*index as usize) < marks.cell_xfs);
+        self.derived_memo
+            .retain(|_, index| (*index as usize) < marks.cell_xfs);
     }
 
     fn intern_font(&mut self, value: &Font) -> u32 {
@@ -1765,7 +1853,7 @@ mod tests {
     }
 
     #[test]
-    fn implicit_format_uses_xf_zero_and_interning_omits_unused_facets() {
+    fn implicit_format_uses_defaults_and_interning_omits_unused_facets() {
         let mut styles = Stylesheet::default();
         styles.fonts.push(Font {
             name: Some("DejaVu Sans".into()),
@@ -1776,7 +1864,7 @@ mod tests {
             font: Some(0),
             ..Xf::default()
         });
-        assert_eq!(styles.cell_format(None), styles.cell_format(Some(0)));
+        assert_eq!(styles.cell_format(None), CellFormat::default());
         for count in [1, INTERN_CACHE_MIN_POOL, INTERN_CACHE_MIN_POOL + 1] {
             styles.cell_xfs.resize(count, Xf::default());
             let format = CellFormat {

@@ -3057,8 +3057,7 @@ fn sync_cell_formats(
     for index in 0..stylesheet.cell_xfs.len() {
         let index =
             u32::try_from(index).map_err(|_| "cell format table is too large".to_string())?;
-        let format = stylesheet.cell_format(Some(index));
-        let (key, payload) = cell_format_entry(&format)?;
+        let (key, payload) = style_entry(stylesheet, index)?;
         map.try_update(txn, key, payload);
     }
     Ok(())
@@ -3077,16 +3076,17 @@ fn materialize_cell_formats<T: ReadTxn>(
         if payload.len() > MAX_CELL_FORMAT_BYTES {
             return Err(format!("cell format {key} exceeds its size limit"));
         }
-        let format = serde_json::from_str::<CellFormat>(&payload)
+        let stored = serde_json::from_str::<StoredCellFormat>(&payload)
             .map_err(|error| format!("invalid cell format {key}: {error}"))?;
-        let (expected, canonical) = cell_format_entry(&format)?;
+        let (expected, canonical) = stored_format_entry(&stored)?;
         if key != expected || *payload != canonical {
             return Err(format!("cell format {key} is not canonical"));
         }
-        catalog.insert(key.to_string(), format);
+        catalog.insert(key.to_string(), stored);
     }
 
     let mut styles = base.clone();
+    styles.preserve_style_identity();
     let mut known = BTreeMap::new();
     for index in 0..base.cell_xfs.len() {
         let index =
@@ -3094,13 +3094,26 @@ fn materialize_cell_formats<T: ReadTxn>(
         known.entry(style_key(base, index)?).or_insert(Some(index));
     }
     let mut indices = BTreeMap::new();
-    for (key, format) in catalog {
+    for (key, stored) in catalog {
         let index = match known.get(&key) {
             Some(index) => *index,
             None => {
-                let index = styles
-                    .intern_cell_format(&format)
-                    .map_err(|_| "number format table is full".to_string())?;
+                let index = match stored.derived_from {
+                    Some(source) => Some(
+                        styles
+                            .intern_derived_cell_format(source, &stored.format)
+                            .map_err(|_| "number format table is full".to_string())?,
+                    ),
+                    None => styles
+                        .intern_cell_format(&stored.format)
+                        .map_err(|_| "number format table is full".to_string())?,
+                };
+                if stored.source_xf.is_none()
+                    && stored.derived_from.is_none()
+                    && let Some(index) = index
+                {
+                    styles.mark_generated_format(index);
+                }
                 known.insert(key.clone(), index);
                 index
             }
@@ -3130,16 +3143,24 @@ fn remap_styles<'a>(
             return Err(format!("cell style index {index} is out of range"));
         }
         let format = source.cell_format(Some(index));
-        let resolved = if target.xf(index).is_some() && target.cell_format(Some(index)) == format {
+        let source_key = style_key(source, index)?;
+        let resolved = if target.xf(index).is_some() && style_key(target, index)? == source_key {
             Some(index)
         } else {
             match (0..target.cell_xfs.len() as u32)
-                .find(|&candidate| target.cell_format(Some(candidate)) == format)
+                .find(|&candidate| style_key(target, candidate).is_ok_and(|key| key == source_key))
             {
                 Some(found) => Some(found),
-                None => target
-                    .intern_cell_format(&format)
-                    .map_err(|_| "number format table is full".to_string())?,
+                None => match source.format_source(index).1 {
+                    Some(source) => Some(
+                        target
+                            .intern_derived_cell_format(source, &format)
+                            .map_err(|_| "number format table is full".to_string())?,
+                    ),
+                    None => target
+                        .intern_cell_format(&format)
+                        .map_err(|_| "number format table is full".to_string())?,
+                },
             }
         };
         mapped.insert(index, resolved);
@@ -3209,11 +3230,38 @@ fn style_key(stylesheet: &Stylesheet, style: u32) -> Result<String, String> {
     if stylesheet.xf(style).is_none() {
         return Err(format!("cell style index {style} is out of range"));
     }
-    cell_format_entry(&stylesheet.cell_format(Some(style))).map(|(key, _)| key)
+    style_entry(stylesheet, style).map(|(key, _)| key)
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StoredCellFormat {
+    #[serde(flatten)]
+    format: CellFormat,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_xf: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    derived_from: Option<u32>,
+}
+
+fn style_entry(stylesheet: &Stylesheet, index: u32) -> Result<(String, String), String> {
+    let (source_xf, derived_from) = stylesheet.format_source(index);
+    stored_format_entry(&StoredCellFormat {
+        format: stylesheet.cell_format(Some(index)),
+        source_xf,
+        derived_from,
+    })
 }
 
 fn cell_format_entry(format: &CellFormat) -> Result<(String, String), String> {
-    let payload = serde_json::to_string(format)
+    stored_format_entry(&StoredCellFormat {
+        format: format.clone(),
+        source_xf: None,
+        derived_from: None,
+    })
+}
+
+fn stored_format_entry(stored: &StoredCellFormat) -> Result<(String, String), String> {
+    let payload = serde_json::to_string(stored)
         .map_err(|error| format!("cannot encode cell format: {error}"))?;
     let digest = Sha256::digest(payload.as_bytes());
     Ok((format!("{digest:x}"), payload))

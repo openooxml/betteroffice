@@ -10,6 +10,9 @@ impl SheetPatch<'_> {
         };
         let original = self.styles.original;
         let written = &self.workbook.styles;
+        if written.has_style_identity() && original.xf(current).is_some() {
+            return false;
+        }
         let Some(source_xf) = original.cell_xfs.get(source as usize) else {
             return false;
         };
@@ -443,10 +446,7 @@ impl SheetPatch<'_> {
                 .source(at.row)
                 .zip(self.axes.cols.source(at.col))
                 .is_some())
-            && let Some(derived) = self.styles.derived.get(&(
-                original.and_then(|cell| cell.style).unwrap_or(0),
-                cell.style.unwrap_or(0),
-            ))
+            && let Some(derived) = self.styles.derived.get(&cell.style.unwrap_or(u32::MAX))
         {
             style = Some(*derived);
         }

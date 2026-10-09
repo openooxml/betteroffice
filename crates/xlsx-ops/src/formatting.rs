@@ -131,6 +131,8 @@ pub struct CapturedFormat {
     pub rows: u32,
     pub columns: u32,
     pub formats: Vec<CellFormat>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_styles: Vec<Option<u32>>,
 }
 
 pub(crate) fn patch_cell_format(

@@ -10,7 +10,7 @@ pub(super) struct StyleOverrides {
 
 pub(super) struct StylePlan {
     pub styles: Stylesheet,
-    pub pairs: HashMap<(u32, u32), u32>,
+    pub pairs: HashMap<u32, u32>,
     pub overrides: StyleOverrides,
 }
 
@@ -18,8 +18,8 @@ impl StylePlan {
     pub fn new(
         wb: &Workbook,
         package: &PreservedPackage,
-        origins: &[Option<usize>],
-        axes: &[Option<SheetAxes>],
+        _origins: &[Option<usize>],
+        _axes: &[Option<SheetAxes>],
     ) -> Result<Self, ParseError> {
         let mut plan = Self {
             styles: wb.styles.clone(),
@@ -48,103 +48,83 @@ impl StylePlan {
             &original.cell_xfs,
             write_xf,
         )?;
-        for (index, sheet) in wb.sheets.iter().enumerate() {
-            let Some((origin, axes)) = origins[index].zip(axes.get(index).and_then(Option::as_ref))
-            else {
+        for current in 0..wb.styles.cell_xfs.len() as u32 {
+            let Some(old) = wb.styles.format_source(current).1 else {
                 continue;
             };
-            let source = &package.original_workbook.sheets[origin];
-            for (at, cell) in sheet.iter_cells() {
-                let Some((row, col)) = axes.rows.source(at.row).zip(axes.cols.source(at.col))
-                else {
-                    continue;
-                };
-                let old = source
-                    .cell(CellRef::new(row, col))
-                    .and_then(|cell| cell.style)
-                    .unwrap_or(0);
-                let Some(current) = cell.style else {
-                    continue;
-                };
-                if plan.pairs.contains_key(&(old, current))
-                    || original.resolved_format(Some(old))
-                        == wb.styles.resolved_format(Some(current))
-                {
-                    continue;
-                }
-                let (Some(base), Some(target)) = (original.xf(old), wb.styles.xf(current)) else {
-                    continue;
-                };
-                let Some(source_xml) = source_xfs.get(old as usize) else {
-                    continue;
-                };
-                let mut xf = target.clone();
-                let before = original.cell_format(Some(old));
-                let after = wb.styles.cell_format(Some(current));
-                if before.number_format == after.number_format {
-                    xf.num_fmt_id = base.num_fmt_id;
-                }
-                if before.alignment == after.alignment {
-                    xf.alignment = base.alignment.clone();
-                }
-                xf.font = if before.font == after.font {
-                    base.font
-                } else {
-                    let bytes = source_fonts.get(base.font.unwrap_or(0) as usize);
-                    let bytes = match bytes {
-                        Some(bytes) => patch_font(bytes, &before.font, &after.font)?,
-                        None => fragment(|writer| write_font(writer, &after.font))?,
-                    };
-                    Some(intern_xml(
-                        &mut plan.styles.fonts,
-                        &mut fonts,
-                        &mut plan.overrides.fonts,
-                        after.font.clone(),
-                        bytes,
-                    ))
-                };
-                xf.fill = if before.fill == after.fill {
-                    base.fill
-                } else {
-                    let bytes = source_fills.get(base.fill.unwrap_or(0) as usize);
-                    let bytes = match bytes {
-                        Some(bytes) => patch_fill(bytes, &after.fill)?,
-                        None => fragment(|writer| write_fill(writer, &after.fill))?,
-                    };
-                    Some(intern_xml(
-                        &mut plan.styles.fills,
-                        &mut fills,
-                        &mut plan.overrides.fills,
-                        after.fill.clone(),
-                        bytes,
-                    ))
-                };
-                xf.border = if before.border == after.border {
-                    base.border
-                } else {
-                    let bytes = source_borders.get(base.border.unwrap_or(0) as usize);
-                    let bytes = match bytes {
-                        Some(bytes) => patch_border(bytes, &before.border, &after.border)?,
-                        None => fragment(|writer| write_border(writer, &after.border))?,
-                    };
-                    Some(intern_xml(
-                        &mut plan.styles.borders,
-                        &mut borders,
-                        &mut plan.overrides.borders,
-                        after.border.clone(),
-                        bytes,
-                    ))
-                };
-                let bytes = patch_xf(source_xml, base, &xf)?;
-                let index = intern_xml(
-                    &mut plan.styles.cell_xfs,
-                    &mut xfs,
-                    &mut plan.overrides.xfs,
-                    xf,
-                    bytes,
-                );
-                plan.pairs.insert((old, current), index);
+            let (Some(base), Some(target)) = (original.xf(old), wb.styles.xf(current)) else {
+                continue;
+            };
+            let Some(source_xml) = source_xfs.get(old as usize) else {
+                continue;
+            };
+            let mut xf = target.clone();
+            let before = original.cell_format(Some(old));
+            let after = wb.styles.cell_format(Some(current));
+            if before.number_format == after.number_format {
+                xf.num_fmt_id = base.num_fmt_id;
             }
+            if before.alignment == after.alignment {
+                xf.alignment = base.alignment.clone();
+            }
+            xf.font = if before.font == after.font {
+                base.font
+            } else {
+                let bytes = source_fonts.get(base.font.unwrap_or(0) as usize);
+                let bytes = match bytes {
+                    Some(bytes) => patch_font(bytes, &before.font, &after.font)?,
+                    None => fragment(|writer| write_font(writer, &after.font))?,
+                };
+                Some(intern_xml(
+                    &mut plan.styles.fonts,
+                    &mut fonts,
+                    &mut plan.overrides.fonts,
+                    after.font.clone(),
+                    bytes,
+                ))
+            };
+            xf.fill = if before.fill == after.fill {
+                base.fill
+            } else {
+                let bytes = source_fills.get(base.fill.unwrap_or(0) as usize);
+                let bytes = match bytes {
+                    Some(bytes) => patch_fill(bytes, &after.fill)?,
+                    None => fragment(|writer| write_fill(writer, &after.fill))?,
+                };
+                Some(intern_xml(
+                    &mut plan.styles.fills,
+                    &mut fills,
+                    &mut plan.overrides.fills,
+                    after.fill.clone(),
+                    bytes,
+                ))
+            };
+            xf.border = if before.border == after.border {
+                base.border
+            } else {
+                let bytes = source_borders.get(base.border.unwrap_or(0) as usize);
+                let bytes = match bytes {
+                    Some(bytes) => patch_border(bytes, &before.border, &after.border)?,
+                    None => fragment(|writer| write_border(writer, &after.border))?,
+                };
+                Some(intern_xml(
+                    &mut plan.styles.borders,
+                    &mut borders,
+                    &mut plan.overrides.borders,
+                    after.border.clone(),
+                    bytes,
+                ))
+            };
+            let bytes = patch_xf(source_xml, base, &xf)?;
+            let key = xml_key(&bytes);
+            let index = xfs
+                .iter()
+                .position(|candidate| candidate == &bytes || xml_key(candidate) == key)
+                .map_or(current, |index| index as u32);
+            xfs[current as usize] = bytes.clone();
+            plan.styles.cell_xfs[current as usize] = xf;
+            plan.overrides.xfs.insert(current as usize, bytes);
+            plan.pairs.insert(current, index);
         }
         Ok(plan)
     }
@@ -438,10 +418,17 @@ mod tests {
         let parsed = parse_workbook_with_package(&parts).unwrap();
         let mut workbook = parsed.workbook;
         for col in 0..2 {
+            let source = if col == 0 { 1 } else { 0 };
+            let mut format = workbook.styles.cell_format(Some(source));
+            format.font.bold = true;
+            let style = workbook
+                .styles
+                .intern_derived_cell_format(source, &format)
+                .unwrap();
             workbook.sheets[0]
                 .cell_mut(CellRef::new(0, col))
                 .unwrap()
-                .style = Some(2);
+                .style = Some(style);
         }
         let plan = StylePlan::new(
             &workbook,
@@ -450,11 +437,14 @@ mod tests {
             &[Some(SheetAxes::default())],
         )
         .unwrap();
-        assert_eq!(plan.pairs[&(0, 2)], 2);
-        assert_eq!(plan.pairs[&(1, 2)], 3);
+        let style = workbook.sheets[0]
+            .cell(CellRef::new(0, 0))
+            .unwrap()
+            .style
+            .unwrap();
+        assert_ne!(plan.pairs[&style], 2);
         assert_eq!(plan.styles.fonts.len(), 2);
-        assert_eq!(plan.styles.cell_xfs.len(), 4);
-        let derived = std::str::from_utf8(&plan.overrides.xfs[&3]).unwrap();
+        let derived = std::str::from_utf8(&plan.overrides.xfs[&(style as usize)]).unwrap();
         assert!(derived.contains(r#"fontId="1""#));
         assert!(derived.contains(r#"applyProtection="1""#));
         assert!(derived.contains(r#"<protection locked="0"/>"#));

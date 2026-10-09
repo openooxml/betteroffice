@@ -1529,6 +1529,15 @@ impl Workbook {
         Ok(CapturedFormat {
             rows: rows as u32,
             columns: columns as u32,
+            source_styles: self
+                .range_formats(sheet, range)?
+                .into_iter()
+                .map(|(at, _)| {
+                    self.model.sheets[sheet.0 as usize]
+                        .cell(at)
+                        .and_then(|cell| cell.style)
+                })
+                .collect(),
             formats: self
                 .range_formats(sheet, range)?
                 .into_iter()
