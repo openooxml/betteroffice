@@ -23,9 +23,9 @@ import type {
   DocxProposalWithdrawRequest,
   DocxReadParagraphsRequest,
   DocxReadParagraphsResult,
+  DocxListStoriesResult,
+  DocxReadStoriesRequest,
   DocxReadStoriesResult,
-  DocxReadStorySelectionRequest,
-  DocxStoryParts,
   ProposalGeometryMirror,
   ProposalGeometryTarget,
   ResidentProposalReply,
@@ -96,13 +96,9 @@ export interface WorkerProposalAuthority {
     request: DocxReadParagraphsRequest,
     main: (request: DocxReadParagraphsRequest) => Promise<DocxReadParagraphsResult>
   ): Promise<DocxReadParagraphsResult>;
-  /** Every story id, with the version it was read at. */
-  storyIds(
-    main: () => Promise<{ version: string; ids: string[] }>
-  ): Promise<{ version: string; ids: string[] }>;
+  listStories(main: () => Promise<DocxListStoriesResult>): Promise<DocxListStoriesResult>;
   readStories(
-    request: DocxReadStorySelectionRequest,
-    parts: DocxStoryParts,
+    request: DocxReadStoriesRequest,
     main: () => Promise<DocxReadStoriesResult>
   ): Promise<DocxReadStoriesResult>;
   paragraphIdentities(
@@ -598,13 +594,13 @@ export function registerWorkerProposalAuthority(
       assertCurrent();
       return read.value;
     }, () => main(request)),
-    storyIds: (main) => route(async () => {
-      const read = await worker.documentRead({ kind: 'storyIds' });
+    listStories: (main) => route(async () => {
+      const read = await worker.documentRead({ kind: 'listStories' });
       assertCurrent();
-      return { version: read.version, ids: read.value };
+      return read.value;
     }, main),
-    readStories: (request, parts, main) => route(async () => {
-      const read = await worker.documentRead({ kind: 'readStories', request, parts });
+    readStories: (request, main) => route(async () => {
+      const read = await worker.documentRead({ kind: 'readStories', request });
       assertCurrent();
       return read.value;
     }, main),

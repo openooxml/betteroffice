@@ -463,16 +463,16 @@ test('mirrored proposal navigation uses no worker reads and unknown targets use 
 test('story reads take one worker read each', async () => {
   const h = harness();
   await h.authority.initialize();
-  h.worker.documentRead.mockResolvedValueOnce({ version: 'worker-1', value: ['body', 'hf:rId1'] } as never);
-  expect(await h.authority.storyIds(unusedMain)).toEqual({ version: 'worker-1', ids: ['body', 'hf:rId1'] });
-  const parts = { headers: new Map([['rId1', []]]), footers: new Map() };
-  const request = { stories: ['header'], view: 'accepted' } as const;
-  const value = { ok: true as const, version: 'worker-1', view: 'accepted' as const, stories: [] };
+  const listed = { ok: true as const, version: 'worker-1', stories: [{ story: 'body', kind: 'body' as const, root: 'body' }] };
+  h.worker.documentRead.mockResolvedValueOnce({ version: 'worker-1', value: listed } as never);
+  expect(await h.authority.listStories(unusedMain)).toEqual(listed);
+  const request = { stories: ['header'], byRoot: true, view: 'accepted' } as const;
+  const value = { ok: true as const, version: 'worker-1', view: 'accepted' as const, stories: [], truncated: false };
   h.worker.documentRead.mockResolvedValueOnce({ version: 'worker-1', value } as never);
-  expect(await h.authority.readStories(request, parts, unusedMain)).toEqual(value);
+  expect(await h.authority.readStories(request, unusedMain)).toEqual(value);
   expect(h.worker.documentRead.mock.calls.map(([read]): unknown => read)).toEqual([
-    { kind: 'storyIds' },
-    { kind: 'readStories', request, parts },
+    { kind: 'listStories' },
+    { kind: 'readStories', request },
   ]);
 });
 

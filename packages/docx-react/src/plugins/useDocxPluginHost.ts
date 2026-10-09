@@ -19,7 +19,6 @@ import {
   resolveDisplayPageClientRect,
   type DisplayListQueries,
 } from '@betteroffice/docx/layout/render';
-import type { Document } from '@betteroffice/docx/types/document';
 import type { RenderedDomContext } from '@betteroffice/docx/plugin-api';
 import type { ResidentDocumentReadValues } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
 import type { ResidentEngineWorkerClient, YrsSession } from '@betteroffice/docx/yrs';
@@ -70,8 +69,6 @@ export interface UseDocxPluginHostOptions extends DocxEditorPluginProps {
   commands: DocxCommandController;
   /** The authoritative session once a document is ready, else null. */
   session: YrsSession | null;
-  /** The document the editor lays out. */
-  document?: Document | null;
   /** Changes whenever a new document load starts. */
   loadGeneration: number;
   queries: DisplayListQueries | null;
@@ -138,7 +135,6 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
       writeMode: () => latest.current.writeModeRef.current ?? 'viewing',
       viewer: () => latest.current.viewerDocumentRead !== undefined,
       workerOpen: () => latest.current.experimentalWorkerOpen === true,
-      hostDocument: () => latest.current.document ?? null,
       commands: () => latest.current.commands,
       translate: (key) => translateRef.current(key),
       geometry: () => geometryRef.current,

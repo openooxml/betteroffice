@@ -1,12 +1,5 @@
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
-import {
-  describeStories,
-  readStorySelection,
-  resolveNavigationTarget,
-  storyParts,
-  type YrsSession,
-} from '@betteroffice/docx/yrs';
-import type { Document } from '@betteroffice/docx/types/document';
+import { resolveNavigationTarget, type YrsSession } from '@betteroffice/docx/yrs';
 import { grantsCommand, grantsEditBatch, grantsWrite } from '../../../../shared/plugin-host/grants';
 import type { InvocationRefusal, PluginInvocation } from '../../../../shared/plugin-host/runtime';
 import {
@@ -58,8 +51,6 @@ export interface DocxPluginEditorAccess {
   /** Whether the document is open for viewing only, with no copy on this thread. */
   viewer?(): boolean;
   workerOpen?(): boolean;
-  /** The document the editor lays out, which holds its header and footer parts and sections. */
-  hostDocument?(): Document | null;
 }
 
 const LAYOUT_WAIT_MS = 30_000;
@@ -213,29 +204,21 @@ export function createPluginClients(
         (authority, main) => authority.readParagraphs(request, main),
         (session) => session.readParagraphs(request)
       ),
-    listStories: async () => {
-      const read = await ownerRead<{ version: string; ids: string[] }>(
-        (authority, main) => authority.storyIds(main),
-        (session) => ({ version: session.version(), ids: session.storyIds() })
-      );
-      if (!('ids' in read)) return read;
-      const parts = storyParts(access.hostDocument?.());
-      return { ok: true as const, version: read.version, stories: describeStories(read.ids, parts) };
-    },
-    readStories: (request) => {
-      const parts = storyParts(access.hostDocument?.());
-      return ownerRead(
-        (authority, main) => authority.readStories(request, parts, main),
+    listStories: () =>
+      ownerRead(
+        (authority, main) => authority.listStories(main),
+        (session) => session.listStories()
+      ),
+    readStories: (request) =>
+      ownerRead(
+        (authority, main) => authority.readStories(request, main),
         (session) =>
-          readStorySelection(
-            session,
+          session.readStories(
             request.expectVersion === undefined
               ? request
-              : handedOverRequest(session, { ...request, expectVersion: request.expectVersion }),
-            parts
+              : handedOverRequest(session, { ...request, expectVersion: request.expectVersion })
           )
-      );
-    },
+      ),
     findText: async (request) => {
       const session = access.pagedEditorRef.current?.getYrsSession();
       if (session && workerOpenDocumentHeld(session)) {

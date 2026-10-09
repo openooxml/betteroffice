@@ -7,9 +7,6 @@ import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import {
   createYrsSession,
   computeProposalGeometryMirror,
-  describeStories,
-  readStorySelection,
-  storyParts,
   proposalSetIdentity,
   type DocxEditRequest,
   type ResidentProposalReply,
@@ -132,7 +129,7 @@ async function setup(
 ) {
   const session = await createYrsSession();
   sessions.push(session);
-  const host = session.openDocx(fixture(), true);
+  session.openDocx(fixture(), true);
   const events: string[] = [];
   const editor = {
     getYrsSession: () => session,
@@ -192,7 +189,6 @@ async function setup(
     pagedEditorRef,
     writeMode: () => state.mode,
     viewer: () => state.viewer,
-    hostDocument: () => host.document,
     commands: () => null,
     layout: () => ({
       queries: state.layoutReady ? queries : null,
@@ -213,7 +209,6 @@ async function setup(
     createPluginClients(invocation, access, () => state.grant, UNAVAILABLE_DOCX_COMMANDS);
   return {
     session,
-    host,
     events,
     pagedEditorRef,
     editor,
@@ -246,7 +241,7 @@ function texts(session: YrsSession): string[] {
 function routeWorker(env: Awaited<ReturnType<typeof setup>>) {
   const authority: Pick<
     workerProposals.WorkerProposalAuthority,
-    'initialized' | 'navigationTarget' | 'readParagraphs' | 'findText' | 'storyIds' | 'readStories'
+    'initialized' | 'navigationTarget' | 'readParagraphs' | 'findText' | 'listStories' | 'readStories'
   > = {
     initialized: true,
     async navigationTarget(story: string, paraId: string) {
@@ -258,8 +253,8 @@ function routeWorker(env: Awaited<ReturnType<typeof setup>>) {
     async findText() {
       return { ok: true as const, version: env.session.version(), matches: [], truncated: false };
     },
-    storyIds: (main) => main(),
-    readStories: (_request, _parts, main) => main(),
+    listStories: (main) => main(),
+    readStories: (_request, main) => main(),
     async readParagraphs(request) {
       return {
         ok: true as const,
@@ -1546,17 +1541,12 @@ describe('plugin story reads', () => {
 
   test('list and read stories from the session after flushing input', async () => {
     const env = await setup();
-    const parts = storyParts(env.host.document);
-    expect(await env.clients.read.listStories()).toEqual({
-      ok: true,
-      version: env.session.version(),
-      stories: describeStories(env.session.storyIds(), parts),
-    });
-    expect(await env.clients.read.readStories(headers)).toEqual(readStorySelection(env.session, headers, parts));
+    expect(await env.clients.read.listStories()).toEqual(env.session.listStories());
+    expect(await env.clients.read.readStories(headers)).toEqual(env.session.readStories(headers));
     expect(await env.clients.read.readStories(headers)).toMatchObject({
       stories: [
-        { story: 'body:sdt0', paragraphs: [expect.objectContaining({ text: 'Locked' })] },
-        { story: 'hf:rIdHeader', paragraphs: [expect.objectContaining({ text: 'Header' })] },
+        { story: 'hf:rIdHeader', ok: true, paragraphs: [expect.objectContaining({ text: 'Header' })] },
+        { story: 'body:sdt0', ok: true, paragraphs: [expect.objectContaining({ text: 'Locked' })] },
       ],
     });
     expect(env.events).toEqual(['flush', 'flush', 'flush']);
@@ -1575,30 +1565,30 @@ describe('plugin story reads', () => {
       read: await env.clients.read.readStories(headers),
     };
     const worker = routeWorker(env);
-    const storyIds = spyOn(worker.authority, 'storyIds').mockImplementation(async () => ({
-      version: env.session.version(),
-      ids: owner.storyIds(),
-    }));
-    const read = spyOn(worker.authority, 'readStories').mockImplementation(async (request, parts) => ({
-      ...readStorySelection(owner, request, parts),
+    const list = spyOn(worker.authority, 'listStories').mockImplementation(async () => ({
+      ...owner.listStories(),
       version: env.session.version(),
     }));
+    const read = spyOn(worker.authority, 'readStories').mockImplementation(async (request) => {
+      const result = owner.readStories(request);
+      return result.ok ? { ...result, version: env.session.version() } : result;
+    });
     restoreWorkers.push(() => {
-      storyIds.mockRestore();
+      list.mockRestore();
       read.mockRestore();
     });
     expect(await env.clients.read.listStories()).toEqual(local.list);
     expect(await env.clients.read.readStories(headers)).toEqual(local.read);
-    expect(storyIds).toHaveBeenCalledTimes(1);
+    expect(list).toHaveBeenCalledTimes(1);
     expect(read).toHaveBeenCalledTimes(1);
-    expect(read.mock.calls[0]?.[1]).toEqual(storyParts(env.host.document));
+    expect(read.mock.calls[0]?.[0]).toEqual(headers);
     expect(worker.flush).not.toHaveBeenCalled();
   });
 
   test('worker story reads keep the refusal of a flushed fallback', async () => {
     const env = await setup();
     const worker = routeWorker(env);
-    const read = spyOn(worker.authority, 'readStories').mockImplementation((_request, _parts, main) => main());
+    const read = spyOn(worker.authority, 'readStories').mockImplementation((_request, main) => main());
     restoreWorkers.push(() => read.mockRestore());
     const flush = spyOn(env.editor, 'flushPendingInput').mockImplementationOnce(async () => {
       env.state.ended = 'document-replaced';

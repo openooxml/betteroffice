@@ -456,9 +456,9 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
       { sectionIndex: 1, variant: 'default' as const },
     ];
     const listed = await context.read.listStories();
-    expect(listed.ok && listed.stories.filter((story) => story.relationshipId)).toEqual([
-      { story: 'hf:rId3', kind: 'header', relationshipId: 'rId3', uses },
-      { story: 'hf:rId4', kind: 'footer', relationshipId: 'rId4', uses },
+    expect(listed.ok && listed.stories.filter((story) => story.uses)).toEqual([
+      { story: 'hf:rId3', kind: 'header', root: 'hf:rId3', part: expect.stringContaining('header'), uses },
+      { story: 'hf:rId4', kind: 'footer', root: 'hf:rId4', part: expect.stringContaining('footer'), uses },
     ]);
     const validation = await context.read.validateEdits(appendRequest(read.version, target.paraId));
     expect(validation).toMatchObject({ ok: true, wouldApply: true });
@@ -1123,20 +1123,31 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
       const post = worker.postMessage.bind(worker);
       worker.postMessage = (message, transfer) => {
         const read = (message as { read?: { kind?: string } }).read?.kind;
-        if (read === 'storyIds' || read === 'readStories') reads.push(read);
+        if (read === 'listStories' || read === 'readStories') reads.push(read);
         post(message, transfer);
       };
     }
     const context = contexts.at(-1)!;
+    const replicaLoads = () =>
+      workers.reduce((count, worker) => count + worker.requests.filter((type) => type === 'encodeState').length, 0);
+    const loadsBefore = replicaLoads();
     const listed = await context.read.listStories();
-    expect(listed.ok && listed.stories.filter((story) => story.relationshipId).map((story) => story.kind))
-      .toEqual(['header', 'footer']);
+    const uses = [
+      { sectionIndex: 0, variant: 'default' as const },
+      { sectionIndex: 1, variant: 'default' as const },
+    ];
+    expect(listed.ok && listed.stories.filter((story) => story.uses).map(({ story, kind, uses }) => ({ story, kind, uses })))
+      .toEqual([
+        { story: 'hf:rId3', kind: 'header', uses },
+        { story: 'hf:rId4', kind: 'footer', uses },
+      ]);
     const read = await context.read.readStories({ stories: ['header', 'footer'], view: 'accepted' });
-    expect(read.ok && read.stories.map((story) => [story.story, 'paragraphs' in story])).toEqual([
+    expect(read.ok && read.stories.map((story) => [story.story, story.ok])).toEqual([
       ['hf:rId3', true],
       ['hf:rId4', true],
     ]);
-    expect(reads).toEqual(experimentalWorkerOpen === false ? [] : ['storyIds', 'readStories']);
+    expect(reads).toEqual(experimentalWorkerOpen === false ? [] : ['listStories', 'readStories']);
+    expect(replicaLoads()).toBe(loadsBefore);
   });
 
   test('host proposals anchor through the editor ref in a read-only viewer', async () => {
