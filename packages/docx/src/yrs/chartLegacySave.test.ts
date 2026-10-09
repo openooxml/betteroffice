@@ -10,6 +10,8 @@ import { preloadEditWasm } from '../wasm/edit';
 import { documentToYrs } from './documentToYrs';
 import { createYrsSession } from './index';
 import { yrsToDocument } from './yrsToDocument';
+import { residentWorkerFactory } from './__fixtures__/residentWorker';
+import { ResidentEngineWorkerClient } from './residentEngineWorkerClient';
 
 const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
 const OFFICE_DOC = 'application/vnd.openxmlformats-officedocument';
@@ -286,5 +288,34 @@ it('recovers legacy chart placements per story when relationship ids collide', a
     expect(saved.warnings ?? []).toEqual([]);
   } finally {
     session.destroy();
+  }
+});
+
+it('worker saves recover legacy chart placements after edits', async () => {
+  const bytes = fixture();
+  const parsed = await parseDocx(bytes.buffer, { preloadFonts: false });
+  const block = parsed.package.document.content[1] as Paragraph;
+  const run = block.content.find((child) => child.type === 'run');
+  const content = run?.content.find((child) => child.type === 'chart');
+  if (content?.type !== 'chart') throw new Error('expected chart content');
+  const stored = { ...content.chart };
+  delete stored.drawingXml;
+  const startWorker = await residentWorkerFactory();
+  const worker = startWorker(74034);
+  const client = new ResidentEngineWorkerClient(worker);
+  try {
+    await client.open(bytes);
+    const resident = worker.sessions[0]!;
+    resident.applyRawOps('body', [
+      { op: 'setEmbedAttr', index: 5, key: 'chartJson', value: JSON.stringify(stored) },
+      { op: 'insert', index: 5, text: 'Edited ' },
+    ]);
+    const saved = await client.save({ comments: [] });
+    const container = readDocxContainer(saved.bytes);
+    expect(container.text('word/document.xml')).toContain('Edited ');
+    expect(container.text('word/document.xml')).toContain(CHART_DRAWING);
+    expect(container.text('word/charts/chart1.xml')).toBe(BAR_CHART);
+  } finally {
+    client.destroy();
   }
 });

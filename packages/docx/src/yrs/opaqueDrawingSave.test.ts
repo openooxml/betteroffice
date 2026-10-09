@@ -10,6 +10,8 @@ import { preloadEditWasm } from '../wasm/edit';
 import { documentToYrs } from './documentToYrs';
 import { createYrsSession } from './index';
 import { yrsToDocument } from './yrsToDocument';
+import { residentWorkerFactory } from './__fixtures__/residentWorker';
+import { ResidentEngineWorkerClient } from './residentEngineWorkerClient';
 
 const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
 const OFFICE_DOC = 'application/vnd.openxmlformats-officedocument';
@@ -87,5 +89,32 @@ it('native and projected seeders agree on opaque drawing state', async () => {
   } finally {
     native.destroy();
     projected.destroy();
+  }
+});
+
+it('worker saves retain edited opaque atoms and remove deleted ones', async () => {
+  const bytes = fixture();
+  const parsed = await parseDocx(bytes.buffer, { preloadFonts: false });
+  const startWorker = await residentWorkerFactory();
+  const worker = startWorker(74022);
+  const client = new ResidentEngineWorkerClient(worker);
+  try {
+    await client.open(bytes);
+    const resident = worker.sessions[0]!;
+    resident.applyRawOps('body', [{ op: 'insert', index: 5, text: 'Edited ' }]);
+    const first = await client.save({ comments: [] });
+    const firstXml = readDocxContainer(first.bytes).text('word/document.xml') ?? '';
+    expect(firstXml).toContain('Edited ');
+    for (const xml of opaqueXml(parsed)) {
+      expect(firstXml.split(xml)).toHaveLength(2);
+    }
+    resident.applyRawOps('body', [{ op: 'delete', index: 12, len: 1 }]);
+    const second = await client.save({ comments: [] });
+    const secondXml = readDocxContainer(second.bytes).text('word/document.xml') ?? '';
+    expect(secondXml).not.toContain(OBJECT);
+    expect(secondXml).toContain(UNREADABLE_CHART);
+    expect(secondXml).toContain(ALT_CONTENT);
+  } finally {
+    client.destroy();
   }
 });

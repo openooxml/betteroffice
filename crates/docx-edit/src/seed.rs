@@ -6361,7 +6361,7 @@ mod tests {
                     original = original.replace(" xml:space=\"preserve\"", "");
                 }
                 let content = format!(
-                    r#"{}<m:oMath><m:r><m:t>x=1</m:t></m:r></m:oMath><w:r><w:br w:type="page"/><w:br w:type="column"/></w:r>{}"#,
+                    r#"{}<x:mark xmlns:x="urn:example:unmodeled"/><m:oMath><m:r><m:t>x=1</m:t></m:r></m:oMath><w:r><w:br w:type="page"/><w:br w:type="column"/></w:r>{}"#,
                     fixture::run("a😀b"),
                     fixture::run(text)
                 );

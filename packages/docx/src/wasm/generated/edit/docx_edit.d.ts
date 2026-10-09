@@ -1808,6 +1808,7 @@ export interface InitOutput {
     readonly wasm_live_bytes: () => number;
     readonly wasm_peak_bytes: () => number;
     readonly write_docx_s13_wasm: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly write_docx_s13_wasm_with_warnings: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 }
 
 export type SyncInitInput = BufferSource | WebAssembly.Module;
