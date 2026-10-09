@@ -36,7 +36,7 @@ export function registerPptxTools(tool: PptxToolRegistrar, workspace: FileWorksp
     output.content.push({ type: 'image', mimeType: 'image/png', data: Buffer.from(png).toString('base64') });
     return output;
   });
-  if (!readOnly) tool('pptx_edit', 'PPTX: apply 1–32 edits atomically using version from a fresh read. Replace shape text, set paragraphs/runs, find_replace, add/duplicate/delete/move slides, add_text_box/add_shape/add_image_file, or set_notes. Rectangles are points; indices are one-based final positions. layout is an ID from outline. add_image_file reads a workspace path; add_image accepts raster base64. Returns each edit’s changed IDs; export to save.', {
+  if (!readOnly) tool('pptx_edit', 'PPTX: apply 1–32 edits atomically using version from a fresh read. Replace shape text, set paragraphs/runs (bullet:true adds real bullets), find_replace, add/duplicate/delete/move slides, add_text_box/add_shape/add_image_file, or set_notes. Rectangles are points; indices are one-based final positions. add_slide is empty and links a layout ID from outline; it does not clone placeholders. Each add_text_box creates one shape. Put a bullet list in one body shape with set_paragraphs. add_image_file reads a workspace path; add_image accepts raster base64. Returns each edit’s changed IDs; export to save.', {
     document, version: z.string().min(1).max(256), edits: z.array(z.union([pptxEditSchema, imageFile])).min(1).max(32),
   }, false, async args => {
     const opened = deck(args.document);
