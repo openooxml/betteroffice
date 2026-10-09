@@ -161,41 +161,28 @@ fn cell_text_lower(v: &CellValue) -> String {
     }
 }
 
-/// route patterns through the glob matcher when they contain wildcards or a
-/// valid escape. Other uses of `~` are literal text.
 fn has_wildcard(s: &str) -> bool {
-    let chars: Vec<char> = s.chars().collect();
-    let mut index = 0;
-    while index < chars.len() {
-        match chars[index] {
-            '*' | '?' => return true,
-            '~' if chars
-                .get(index + 1)
-                .is_some_and(|next| matches!(*next, '*' | '?' | '~')) =>
-            {
-                return true;
-            }
-            _ => index += 1,
-        }
-    }
-    false
+    s.contains(['*', '?']) || s.contains("~~")
 }
 
-/// glob match with `*` and `?`; `~` escapes only `*`, `?`, or `~`.
-/// pattern and text are already lowercased.
+/// match lowercased text with `*`, `?`, and tilde escapes.
 pub(crate) fn wildcard_match(pattern: &str, text: &str) -> bool {
     let p: Vec<char> = pattern.chars().collect();
     let t: Vec<char> = text.chars().collect();
     let (mut pi, mut ti) = (0usize, 0usize);
     let (mut star_p, mut star_t): (Option<usize>, usize) = (None, 0);
     while ti < t.len() {
-        let (lit, is_star, is_any) = classify(&p, pi);
-        if is_star {
+        let (ch, width) = match &p[pi..] {
+            ['~', ch @ ('*' | '?' | '~'), ..] => (Some(*ch), 2),
+            [ch, ..] => (Some(*ch), 1),
+            [] => (None, 0),
+        };
+        if ch == Some('*') && width == 1 {
             star_p = Some(pi);
             star_t = ti;
             pi += 1;
-        } else if pi < p.len() && (is_any || lit == Some(t[ti])) {
-            pi += advance(&p, pi);
+        } else if ch == Some(t[ti]) || (ch == Some('?') && width == 1) {
+            pi += width;
             ti += 1;
         } else if let Some(sp) = star_p {
             pi = sp + 1;
@@ -205,43 +192,7 @@ pub(crate) fn wildcard_match(pattern: &str, text: &str) -> bool {
             return false;
         }
     }
-    while pi < p.len() {
-        let (_, is_star, _) = classify(&p, pi);
-        if !is_star {
-            return false;
-        }
-        pi += 1;
-    }
-    true
-}
-
-/// interpret the pattern element at `pi`: (literal char, is `*`, is `?`).
-fn classify(p: &[char], pi: usize) -> (Option<char>, bool, bool) {
-    match p.get(pi) {
-        Some('~')
-            if p.get(pi + 1)
-                .is_some_and(|next| matches!(*next, '*' | '?' | '~')) =>
-        {
-            (p.get(pi + 1).copied(), false, false)
-        }
-        Some('~') => (Some('~'), false, false),
-        Some('*') => (None, true, false),
-        Some('?') => (None, false, true),
-        Some(&c) => (Some(c), false, false),
-        None => (None, false, false),
-    }
-}
-
-/// how many pattern chars a single match consumes (2 for an escape `~x`).
-fn advance(p: &[char], pi: usize) -> usize {
-    if p.get(pi) == Some(&'~')
-        && p.get(pi + 1)
-            .is_some_and(|next| matches!(*next, '*' | '?' | '~'))
-    {
-        2
-    } else {
-        1
-    }
+    p[pi..].iter().all(|&ch| ch == '*')
 }
 
 /// build a criterion from a criteria argument's evaluated value.
@@ -457,6 +408,47 @@ mod tests {
         assert!(Criterion::parse("~~").matches(&txt("~")));
         assert!(Criterion::parse("~*").matches(&txt("*")));
         assert!(Criterion::parse("~?").matches(&txt("?")));
+    }
+
+    #[test]
+    fn tilde_patterns_preserve_literals_and_escape_pairs() {
+        for (pattern, text, expected) in [
+            ("*~a", "prefix~a", true),
+            ("*~a", "prefixa", false),
+            ("*~", "prefix~", true),
+            ("*~", "prefix", false),
+            ("?~", "é~", true),
+            ("?~", "é", false),
+            ("~é*", "~éclair", true),
+            ("~é*", "éclair", false),
+            ("~~", "~~", false),
+            ("~~~", "~~", true),
+            ("~~~", "~", false),
+            ("~~~~", "~~", true),
+            ("~~*", "~suffix", true),
+            ("~~*", "suffix", false),
+            ("~~~*", "~*", true),
+            ("~~~*", "~suffix", false),
+            ("~~~?", "~?", true),
+            ("~~~?", "~x", false),
+            ("~*", "~anything", false),
+            ("~?", "~x", false),
+            ("*~*?~", "a*b*c~", true),
+            ("*~*?~", "a*b*c", false),
+        ] {
+            assert_eq!(
+                wildcard_match(pattern, text),
+                expected,
+                "{pattern:?} against {text:?}"
+            );
+            for (prefix, expected) in [("", expected), ("=", expected), ("<>", !expected)] {
+                assert_eq!(
+                    Criterion::parse(&format!("{prefix}{pattern}")).matches(&txt(text)),
+                    expected,
+                    "{prefix}{pattern:?} against {text:?}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -508,6 +508,14 @@ fn tilde_criteria_match_literal_text_across_if_functions() {
         ("MAXIFS(B1:B7,A1:A7,\"~\")", n(50.0)),
         ("MINIFS(B1:B7,A1:A7,\"~a\")", n(10.0)),
         ("MINIFS(B1:B7,A1:A7,\"~\")", n(50.0)),
+        ("COUNTIF(A1:A7,\"~~\")", n(1.0)),
+        ("COUNTIF(A1:A7,\"=~A\")", n(3.0)),
+        ("COUNTIF(A1:A7,\"<>~a\")", n(4.0)),
+        ("COUNTIF(A1:A7,\"~~*\")", n(6.0)),
+        ("COUNTIF(A1:A7,\"*~\")", n(2.0)),
+        ("COUNTIFS(A1:A7,\"~a\",B1:B7,\">10\")", n(2.0)),
+        ("SUMIFS(B1:B7,A1:A7,\"~a\",B1:B7,\">10\")", n(50.0)),
+        ("AVERAGEIFS(B1:B7,A1:A7,\"~a\",B1:B7,\">10\")", n(25.0)),
     ] {
         let expr = parse_formula(formula).expect("parse");
         let ctx = EvalContext::new(&wb, SheetId(0));
