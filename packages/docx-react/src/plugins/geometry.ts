@@ -595,9 +595,9 @@ export function createPluginGeometry(
     const root = resolved ? anchorDisplayRoot(resolved.paragraph.story) : 'body';
     if (root === null) return anchorFailure('unsupported', 'The target has no display position');
     if (resolved && root !== 'body') {
-      const shown = anchorDisplayTarget(session, resolved, revisionPreviewOf(session));
-      if (!shown.ok) return shown;
-      const placed = placeDisplay(shown, deferUnbuilt);
+      const repeated = anchorDisplayTarget(session, resolved, revisionPreviewOf(session));
+      if (!repeated.ok) return repeated;
+      const placed = placeDisplay(repeated, deferUnbuilt);
       return placed.ok ? answer(placed, deferUnbuilt ? placed.unbuiltPages : undefined) : placed;
     }
     const display = (range: RawAnchorRange): Interval | null => {

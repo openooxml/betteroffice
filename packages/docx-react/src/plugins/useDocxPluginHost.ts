@@ -103,7 +103,6 @@ export interface DocxPluginHostBinding {
   publishViewerSelection(selection: ViewerSelectionChange): void;
 }
 
-/** Owns the plugin host of one `DocxEditor` and binds it to the editor's authority. */
 /** Whether `queries` show the editor's whole, final layout. */
 function layoutComplete(editor: PagedEditorRef | null, queries: DisplayListQueries | null): boolean {
   const layout = editor?.getLayout();
@@ -116,6 +115,7 @@ function layoutComplete(editor: PagedEditorRef | null, queries: DisplayListQueri
   );
 }
 
+/** Owns the plugin host of one `DocxEditor` and binds it to the editor's authority. */
 export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPluginHostBinding {
   const latest = useRef(options);
   latest.current = options;
