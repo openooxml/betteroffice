@@ -283,7 +283,7 @@ export function createPluginGeometry(
   current: () => boolean,
   resolve: (hit: PointPosition | null) => DocxPointPosition | null,
   queries: DisplayListQueries,
-  access: () => AnchorGeometryAccess | null,
+  access: (target: DocxGeometryTarget) => AnchorGeometryAccess | null,
   held: () => boolean = () => false,
   readPoint?: (clientX: number, clientY: number) => Promise<DocxPointPosition | null>,
   workerReads?: { read: ReadAnchorTargets; cache: AnchorReadCache }
@@ -471,6 +471,67 @@ export function createPluginGeometry(
       ...(unbuiltPages ? { unbuiltPages } : {}),
     };
   };
+  /** Resolves `target` on the main thread; `deferUnbuilt` lists unbuilt pages instead of refusing. */
+  const resolveLocally = (
+    target: DocxGeometryTarget,
+    deferUnbuilt: boolean
+  ): DocxAnchorGeometryResult => {
+    if (!shown()) return unavailable();
+    const live = access(target);
+    if (!live || !live.presented || live.editor.hasPendingInput()) return unavailable();
+    const { session, editor } = live;
+    if (session.version() !== layout.version) return stale();
+    const snapshot = proposalSnapshot(session);
+    if (
+      (snapshot?.previewVersion ?? 0) !== layout.previewVersion ||
+      currentPreviewKey(session) !== renderedPreviewKey(queries)
+    )
+      return unavailable();
+    const mirror = live.proposalGeometry;
+    if (
+      mirror &&
+      (target.kind !== 'proposal' ||
+        mirror.version !== layout.version ||
+        mirror.previewVersion !== layout.previewVersion ||
+        !snapshot ||
+        mirror.proposals !== proposalSetIdentity(snapshot))
+    )
+      return unavailable();
+    const mirrored =
+      mirror && target.kind === 'proposal'
+        ? Object.hasOwn(mirror.targets, target.id)
+          ? mirror.targets[target.id]
+          : anchorFailure('unknown-proposal', 'The proposal is not registered in this document')
+        : null;
+    if (mirrored && !mirrored.ok) return mirrored;
+    const resolved = mirror ? null : resolveAnchorTarget(session, target, layout.version);
+    if (resolved && !resolved.ok) return resolved;
+    const display = (range: RawAnchorRange): Interval | null => {
+      const from = editor.yrsLocToDisplayPosition(range.start);
+      const to = editor.yrsLocToDisplayPosition(range.end);
+      return from === null || to === null ? null : { from, to };
+    };
+    const ranges: Interval[] = mirrored?.ok ? [...mirrored.ranges] : [];
+    for (const range of resolved?.ok ? resolved.ranges : []) {
+      const mapped = display(range);
+      if (!mapped) return anchorFailure('unsupported', 'The target has no body display position');
+      ranges.push(mapped);
+    }
+    const hidden =
+      (mirror && (!hasEditorWorkerProposalRounds(session) || !workerOpenReplicaReady(session))
+        ? mirror.hidden
+        : undefined) ??
+      hiddenRanges(session, layout.version)
+        .map(display)
+        .filter((range): range is Interval => range !== null);
+    const paragraph = mirrored?.ok
+      ? mirrored.paragraph
+      : resolved?.ok
+        ? editor.yrsLocToDisplayPosition(resolved.paragraph)
+        : null;
+    const placed = place(ranges, hidden, paragraph, deferUnbuilt);
+    return placed.ok ? answer(placed, deferUnbuilt ? placed.unbuiltPages : undefined) : placed;
+  };
   const geometry: DocxPluginGeometry = {
     layout,
     dom,
@@ -491,63 +552,7 @@ export function createPluginGeometry(
       return shown() && position && position.version === layout.version
         ? { ...position, layoutId: layout.id } : null;
     },
-    getAnchorGeometry(target) {
-      if (!shown()) return unavailable();
-      const live = access();
-      if (!live || !live.presented || live.editor.hasPendingInput()) return unavailable();
-      const { session, editor } = live;
-      if (session.version() !== layout.version) return stale();
-      const snapshot = proposalSnapshot(session);
-      if (
-        (snapshot?.previewVersion ?? 0) !== layout.previewVersion ||
-        currentPreviewKey(session) !== renderedPreviewKey(queries)
-      )
-        return unavailable();
-      const mirror = live.proposalGeometry;
-      if (
-        mirror &&
-        (target.kind !== 'proposal' ||
-          mirror.version !== layout.version ||
-          mirror.previewVersion !== layout.previewVersion ||
-          !snapshot ||
-          mirror.proposals !== proposalSetIdentity(snapshot))
-      )
-        return unavailable();
-      const mirrored =
-        mirror && target.kind === 'proposal'
-          ? Object.hasOwn(mirror.targets, target.id)
-            ? mirror.targets[target.id]
-            : anchorFailure('unknown-proposal', 'The proposal is not registered in this document')
-          : null;
-      if (mirrored && !mirrored.ok) return mirrored;
-      const resolved = mirror ? null : resolveAnchorTarget(session, target, layout.version);
-      if (resolved && !resolved.ok) return resolved;
-      const display = (range: RawAnchorRange): Interval | null => {
-        const from = editor.yrsLocToDisplayPosition(range.start);
-        const to = editor.yrsLocToDisplayPosition(range.end);
-        return from === null || to === null ? null : { from, to };
-      };
-      const ranges: Interval[] = mirrored?.ok ? [...mirrored.ranges] : [];
-      for (const range of resolved?.ok ? resolved.ranges : []) {
-        const mapped = display(range);
-        if (!mapped) return anchorFailure('unsupported', 'The target has no body display position');
-        ranges.push(mapped);
-      }
-      const hidden =
-        (mirror && (!hasEditorWorkerProposalRounds(session) || !workerOpenReplicaReady(session))
-          ? mirror.hidden
-          : undefined) ??
-        hiddenRanges(session, layout.version)
-          .map(display)
-          .filter((range): range is Interval => range !== null);
-      const paragraph = mirrored?.ok
-        ? mirrored.paragraph
-        : resolved?.ok
-          ? editor.yrsLocToDisplayPosition(resolved.paragraph)
-          : null;
-      const placed = place(ranges, hidden, paragraph, false);
-      return placed.ok ? answer(placed) : placed;
-    },
+    getAnchorGeometry: (target) => resolveLocally(target, false),
     async readAnchorGeometry(target) {
       return (await geometry.readAnchorGeometries([target]))[0]!;
     },
@@ -588,7 +593,7 @@ export function createPluginGeometry(
       );
       const shown = painted();
       return targets.map((target, index) => {
-        if (target.kind === 'proposal') return geometry.getAnchorGeometry(target);
+        if (target.kind === 'proposal') return resolveLocally(target, true);
         const entry = entries[index];
         if (!entry) return version === null ? unavailable() : stale();
         if (!shown) return unavailable();

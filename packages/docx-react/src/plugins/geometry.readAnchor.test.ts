@@ -2,7 +2,13 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, expect, test } from 'bun:test';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
 import { createRenderedDomContext } from '@betteroffice/docx/plugin-api/RenderedDomContext';
-import type { AnchorDisplayTarget, YrsSession } from '@betteroffice/docx/yrs';
+import {
+  proposalSetIdentity,
+  type AnchorDisplayTarget,
+  type DocxProposalSnapshot,
+  type ProposalGeometryMirror,
+  type YrsSession,
+} from '@betteroffice/docx/yrs';
 import {
   clearPresented,
   markPresented,
@@ -46,6 +52,7 @@ function viewerGeometry(options: {
   paragraph?: { from: number; length: number };
   layout?: { id?: string; version?: string; previewVersion?: number; zoom?: number };
   previewKey?: string;
+  proposals?: ProposalGeometryMirror['targets'];
 }) {
   const pages = document.createElement('div');
   const pageList = options.pages ?? [{}];
@@ -74,9 +81,26 @@ function viewerGeometry(options: {
   if (options.presented !== false) markPresented(pages, queries.displayList);
   stampRevisionPreviewKey(queries, options.previewKey ?? '');
   if (options.workerVersion !== null) stampWorkerFrameVersion(queries, options.workerVersion ?? 'w1');
+  const snapshot: DocxProposalSnapshot | null = options.proposals
+    ? {
+        version: 'v1',
+        previewVersion: 0,
+        proposals: Object.keys(options.proposals).map((id) => ({
+          id,
+          state: 'proposed',
+          paragraph: { kind: 'session', sessionId: 's', story: 'body', paraId: 'p' },
+          revisionIds: [],
+          changed: false,
+        })),
+      }
+    : null;
+  const mirror: ProposalGeometryMirror | undefined =
+    snapshot && options.proposals
+      ? { version: 'v1', previewVersion: 0, proposals: proposalSetIdentity(snapshot), targets: options.proposals, hidden: [] }
+      : undefined;
   const session = {
     version: () => 'v1',
-    getProposals: () => null,
+    getProposals: () => snapshot,
     resolveParagraphAnchor: (anchor: unknown) =>
       options.paragraph ? { status: 'found', anchor } : { status: 'missing' },
     paragraphSpans: () => [{ paraId: 'p', length: options.paragraph?.length ?? 0 }],
@@ -89,11 +113,12 @@ function viewerGeometry(options: {
     options.shown ?? (() => true),
     () => null,
     queries,
-    () =>
-      options.read && !options.paragraph
+    (target) =>
+      options.read && !options.paragraph && !(mirror && target.kind === 'proposal')
         ? null
         : {
             session,
+            ...(mirror ? { proposalGeometry: mirror } : {}),
             presented: true,
             editor: {
               hasPendingInput: () => false,
@@ -585,4 +610,35 @@ test('without a worker read a batch answers like getAnchorGeometry', async () =>
   expect(await geometry.readAnchorGeometries(targets)).toEqual(
     targets.map((target) => geometry.getAnchorGeometry(target))
   );
+});
+
+test('a batch keeps ranges ending where an unbuilt page starts on the built page', async () => {
+  const { read, calls } = counted(() => ({ ok: true, ranges: [{ from: 2, to: 10 }], paragraph: 2, hidden: [] }));
+  const geometry = viewerGeometry({ read, pages: NEXT_UNBUILT });
+  for (let round = 0; round < 2; round += 1) {
+    expect(await geometry.readAnchorGeometries([REVISION, RANGE])).toEqual([
+      expect.objectContaining({ ok: true, rects: [expect.objectContaining({ pageIndex: 0, x: 2, width: 8 })], unbuiltPages: [], anchor: expect.objectContaining({ pageIndex: 0, x: 10 }) }),
+      expect.objectContaining({ ok: true, unbuiltPages: [], anchor: expect.objectContaining({ pageIndex: 0 }) }),
+    ]);
+  }
+  expect(calls).toHaveLength(1);
+});
+
+test('a proposal in a batch lists the unbuilt pages it reaches like the worker targets', async () => {
+  const spanning = { ok: true as const, ranges: [{ from: 2, to: 15 }], paragraph: 2 };
+  const { read, calls } = counted(() => ({ ...spanning, hidden: [] }));
+  const geometry = viewerGeometry({ read, pages: NEXT_UNBUILT, proposals: { p1: spanning } });
+  const provisional = expect.objectContaining({
+    ok: true,
+    rects: [expect.objectContaining({ pageIndex: 0, x: 2, width: 8 })],
+    unbuiltPages: [1],
+    anchor: expect.objectContaining({ pageIndex: 1 }),
+  });
+  for (let round = 0; round < 2; round += 1) {
+    expect(await geometry.readAnchorGeometries([PROPOSAL, REVISION, RANGE])).toEqual([provisional, provisional, provisional]);
+  }
+  expect(calls).toEqual([[REVISION, { ...RANGE, version: 'w1' }]]);
+  const sync = geometry.getAnchorGeometry(PROPOSAL);
+  expect(sync).toMatchObject({ ok: true, anchor: { pageIndex: 0 } });
+  expect(sync).not.toHaveProperty('unbuiltPages');
 });

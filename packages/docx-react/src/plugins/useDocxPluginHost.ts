@@ -349,7 +349,6 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
   const geometry = useMemo(() => {
     if (!currentLayout || !dom || dom.queries !== options.queries || !layer) return null;
     const shownList = dom.queries.displayList;
-    let proposalTarget = false;
     const created: DocxPluginGeometry = createPluginGeometry(
       currentLayout,
       dom.context,
@@ -368,7 +367,8 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
           dom.queries
         ),
       dom.queries,
-      () => {
+      (target) => {
+        const proposalTarget = target.kind === 'proposal';
         const editor = latest.current.pagedEditorRef.current;
         const session = editor?.getYrsSession();
         const active = session && hasEditorWorkerProposalRounds(session);
@@ -401,13 +401,6 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
           }
         : undefined
     );
-    const resolveAnchor = created.getAnchorGeometry;
-    created.getAnchorGeometry = (target) => {
-      const previous = proposalTarget;
-      proposalTarget = target.kind === 'proposal';
-      try { return resolveAnchor(target); }
-      finally { proposalTarget = previous; }
-    };
     return created;
     // `moved` rebuilds the geometry when its elements move without a new frame.
     // eslint-disable-next-line react-hooks/exhaustive-deps
