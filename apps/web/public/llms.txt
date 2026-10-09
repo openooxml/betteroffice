@@ -100,6 +100,8 @@ Published to PyPI, Apache-2.0. The Rust engine is compiled into each wheel — n
 
 Every editor replica is a Yrs (Rust Yjs) document, and the provider speaks the standard Yjs sync-v1 wire protocol used by y-websocket. Room routing, authentication, awareness, and reconnection stay transport concerns, so any reliable binary transport works. Updates flow between the connection and the Rust replica without a second JavaScript `Y.Doc`.
 
+The reference Cloudflare relay atomically checkpoints retained binary updates plus a newer tail and rehydrates them on room restart. Joining peers exchange state vectors with the relay to supply missing seeds and offline edits. Checkpoints preserve CRDT identities and pending dependencies; they compact the log without garbage-collecting deleted content or resetting history. The checkpoint must fit the 16 MiB frame budget, and the reference room still expires after 24 idle hours. Permanent file storage and backups remain host responsibilities.
+
 ## Docs and demos
 
 - [Documentation](https://docs.betteroffice.dev): guides and API reference.
