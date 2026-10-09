@@ -86,6 +86,7 @@ interface GeometryProbe {
   pending(): boolean | null;
   events: { load: number; 'proposal-change': number; 'layout-change': number };
   errors: string[];
+  mainDocumentLoads: number;
   readParagraphs(): Promise<{ version: string; paragraphs: Paragraph[] }>;
   anchorGeometry(targets: GeometryTarget[]): (GeometryResult | null)[];
 }
@@ -125,6 +126,7 @@ async function status(page: Page) {
       readOnly: probe.context?.snapshot.readOnly,
       events: { ...probe.events },
       errors: [...probe.errors],
+      mainDocumentLoads: probe.mainDocumentLoads,
     };
   });
 }
@@ -295,10 +297,11 @@ async function geometry(
   expect(new Set(paragraphPages).size).toBeGreaterThanOrEqual(2);
   const after = await status(page);
   expect.soft(after.pending, `${phase}: replica pending after geometry`).toBe(transcript.worker);
+  if (transcript.worker) expect(after.mainDocumentLoads).toBe(0);
   expect(after.errors).toEqual([]);
 }
 
-test('worker-held proposals preserve plugin anchor geometry without hydrating the read-only replica', async ({ page }) => {
+test('worker viewers preserve plugin anchor geometry without loading a main-thread document', async ({ page }) => {
   const arms: ArmTranscript[] = [];
   for (const worker of [false, true]) {
     const transcript: ArmTranscript = { worker };

@@ -228,12 +228,12 @@ export function registerWorkerProposalAuthority(
     entry.batch = null;
     const keys = [...batch.keys()];
     const forget = () => { for (const key of keys) entry.requested.delete(key); };
+    const current = () => anchorTargets === entry && geometry === entry.geometry &&
+      initialized && !handingOver && !failure && hooks.current();
+    if (!current()) return forget();
     void interruptible(worker.documentRead({ kind: 'anchorTargets', targets: [...batch.values()] }))
       .then((read) => {
-        if (
-          anchorTargets !== entry || geometry !== entry.geometry ||
-          read.version !== entry.geometry.version || !hooks.current()
-        ) return forget();
+        if (!current() || read.version !== entry.geometry.version) return forget();
         keys.forEach((key, index) => entry.resolved.set(key, read.value[index]!));
         notify();
       }, forget);

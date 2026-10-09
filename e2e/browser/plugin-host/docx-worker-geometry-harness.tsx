@@ -20,6 +20,7 @@ const worker = new URLSearchParams(window.location.search).get('worker') === '1'
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 setGoogleFontsEnabled(false);
 
+const sessions = new Set<YrsSession>();
 const probe = {
   editor: null as DocxEditorRef | null,
   session: null as YrsSession | null,
@@ -27,6 +28,7 @@ const probe = {
   layoutComplete: null as number | null,
   events: { load: 0, 'proposal-change': 0, 'layout-change': 0 },
   errors: [] as string[],
+  mainDocumentLoads: 0,
   sourceParagraphs: [] as { text: string; anchor: DocxSourceParagraphAnchor }[],
   pending() {
     return this.session ? workerOpenReplicaPending(this.session) : null;
@@ -57,7 +59,17 @@ const probe = {
   __workerProposalTest: { captureSession(session: YrsSession): void };
 }).__workerProposalTest = {
   captureSession(session) {
+    if (sessions.has(session)) return;
+    sessions.add(session);
     probe.session = session;
+    const target = session as unknown as Record<string, (...args: unknown[]) => unknown>;
+    for (const method of ['openDocx', 'openDocxPreview', 'loadState', 'applyUpdate']) {
+      const original = target[method]!;
+      target[method] = (...args) => {
+        probe.mainDocumentLoads += 1;
+        return original.apply(session, args);
+      };
+    }
   },
 };
 

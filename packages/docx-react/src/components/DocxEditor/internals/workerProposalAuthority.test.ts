@@ -25,7 +25,9 @@ import {
 import {
   deferWorkerOpenReplica,
   ensureWorkerOpenReplica,
+  holdWorkerOpenDocument,
   requestWorkerOpenReplica,
+  workerOpenDocumentHeld,
 } from './workerOpenReplica';
 
 function deferred<T>() {
@@ -102,6 +104,36 @@ function harness(laidOut = () => Promise.resolve()) {
 
 const request: DocxProposalRequest = { expectVersion: 'worker-1', proposals: [] };
 const unusedMain = async () => { throw new Error('unexpected main call'); };
+
+test('a worker viewer resolves anchor targets while its document stays held', async () => {
+  const h = harness();
+  holdWorkerOpenDocument(h.session, () => { throw new Error('unexpected editor peer'); });
+  await h.authority.initialize();
+  const target = { kind: 'revision', revisionId: 'r1' } as const;
+  const value: ProposalGeometryTarget = { ok: true, ranges: [{ from: 2, to: 4 }], paragraph: 1 };
+  h.worker.documentRead.mockResolvedValueOnce({ version: 'worker-1', value: [value] } as never);
+  expect(h.authority.anchorTarget(target)).toBeUndefined();
+  await new Promise((done) => setTimeout(done, 0));
+  expect(h.authority.anchorTarget(target)).toEqual(value);
+  expect(workerOpenDocumentHeld(h.session)).toBe(true);
+  expect(h.worker.handOver).not.toHaveBeenCalled();
+  expect(h.events).toEqual(['snapshot']);
+});
+
+test.each(['restart', 'failure', 'replacement', 'handover'] as const)(
+  'an anchor batch queued before %s posts no reads', async (transition) => {
+    const h = harness();
+    await h.authority.initialize();
+    expect(h.authority.anchorTarget({ kind: 'revision', revisionId: 'r1' })).toBeUndefined();
+    if (transition === 'restart') h.authority.restart();
+    if (transition === 'failure') failWorkerProposalAuthority(h.session, new Error('worker unavailable'));
+    if (transition === 'replacement') h.replace();
+    const handover = transition === 'handover' ? beginWorkerProposalHandover(h.session) : null;
+    await new Promise((done) => setTimeout(done, 0));
+    expect(h.worker.documentRead).not.toHaveBeenCalled();
+    (await handover)?.complete();
+  }
+);
 
 test('anchor targets before initialization return undefined without posting reads', async () => {
   const laidOut = deferred<void>();

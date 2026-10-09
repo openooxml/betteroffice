@@ -544,10 +544,7 @@ export function computeProposalGeometryMirror(
   };
 }
 
-/**
- * @internal Display geometry of targets other than proposals at the reader's version, as
- * `computeProposalGeometryMirror` resolves proposals.
- */
+/** @internal Display geometry of non-proposal targets. */
 export function computeAnchorTargetGeometry(
   reader: ProposalGeometryReader,
   targets: readonly Exclude<AnchorGeometryTarget, { kind: 'proposal' }>[]
