@@ -1899,6 +1899,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     commands: commandController,
     viewerSelection: viewerSession,
     session: pluginHostSession,
+    document: history.state,
     loadGeneration: yrsSeedGeneration,
     queries: canvasRenderer.queries,
     viewerDocumentRead: viewerReads ? canvasRenderer.readWorkerDocument : undefined,

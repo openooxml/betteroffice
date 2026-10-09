@@ -460,6 +460,22 @@ test('mirrored proposal navigation uses no worker reads and unknown targets use 
   expect(main).not.toHaveBeenCalled();
 });
 
+test('story reads take one worker read each', async () => {
+  const h = harness();
+  await h.authority.initialize();
+  h.worker.documentRead.mockResolvedValueOnce({ version: 'worker-1', value: ['body', 'hf:rId1'] } as never);
+  expect(await h.authority.storyIds(unusedMain)).toEqual({ version: 'worker-1', ids: ['body', 'hf:rId1'] });
+  const parts = { headers: new Map([['rId1', []]]), footers: new Map() };
+  const request = { stories: ['header'], view: 'accepted' } as const;
+  const value = { ok: true as const, version: 'worker-1', view: 'accepted' as const, stories: [] };
+  h.worker.documentRead.mockResolvedValueOnce({ version: 'worker-1', value } as never);
+  expect(await h.authority.readStories(request, parts, unusedMain)).toEqual(value);
+  expect(h.worker.documentRead.mock.calls.map(([read]): unknown => read)).toEqual([
+    { kind: 'storyIds' },
+    { kind: 'readStories', request, parts },
+  ]);
+});
+
 test('mirrored navigation waits for preceding mutations and reads their new geometry', async () => {
   const h = harness();
   h.worker.proposal.mockResolvedValueOnce(navigationReply());

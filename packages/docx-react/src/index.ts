@@ -126,6 +126,7 @@ export type {
   DocxPluginSelection,
   DocxPluginSidebarItem,
   DocxPluginSnapshot,
+  DocxPluginStoryList,
   MaybePromise,
   PluginCleanupReason,
   PluginGrant,

@@ -8,6 +8,9 @@ import type {
   DocxParagraphAnchor,
   DocxReadParagraphsRequest,
   DocxReadParagraphsResult,
+  DocxReadStoriesResult,
+  DocxReadStorySelectionRequest,
+  DocxSessionStory,
   DocxTextRange,
   DocxValidationResult,
 } from '@betteroffice/docx/yrs';
@@ -63,6 +66,13 @@ export type DocxPluginFailureCode = PluginFailureCode;
  */
 export type DocxPluginRefusal = PluginRefusal<DocxPluginFailureCode>;
 
+/** The document's stories at one version. */
+export interface DocxPluginStoryList {
+  ok: true;
+  version: string;
+  stories: DocxSessionStory[];
+}
+
 /**
  * Versioned document reads. Each flushes pending input first.
  *
@@ -73,6 +83,12 @@ export interface DocxPluginReadClient {
   readParagraphs(
     request: DocxReadParagraphsRequest
   ): Promise<DocxReadParagraphsResult | DocxPluginRefusal>;
+  /** Every story with its kind, in one read. */
+  listStories(): Promise<DocxPluginStoryList | DocxPluginRefusal>;
+  /** The paragraphs of every selected story in one read; a story that cannot be read reports why. */
+  readStories(
+    request: DocxReadStorySelectionRequest
+  ): Promise<DocxReadStoriesResult | DocxPluginRefusal>;
   findText(request: DocxFindTextRequest): Promise<DocxFindTextResult | DocxPluginRefusal>;
   /** Checks a batch without granting anything; a later apply is checked again. */
   validateEdits(request: DocxEditRequest): Promise<DocxValidationResult | DocxPluginRefusal>;
