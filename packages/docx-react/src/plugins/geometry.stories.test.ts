@@ -30,7 +30,7 @@ import {
 } from '../components/DocxEditor/internals/layoutProvenance';
 import { bindDisplayWindow } from '../components/DocxEditor/internals/displayWindow';
 import { sectionedDocx, storyAnchorsDocx } from './__fixtures__/storyAnchorsDocx';
-import { createAnchorReadCache, createPluginGeometry } from './geometry';
+import { createAnchorReadCache, createPluginGeometry, type AnchorReadCache } from './geometry';
 import type { DocxAnchorGeometryResult, DocxGeometryTarget } from './types';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -62,6 +62,8 @@ interface LaidOut {
   main: YrsSession;
   engine: ResidentEngineSession;
   queries: DisplayListQueries;
+  /** Queries over the same layout with every page built. */
+  buildAll(): DisplayListQueries;
 }
 
 /** The fixture laid out on the main session, with pages outside `[first, end)` left unbuilt. */
@@ -95,11 +97,16 @@ async function laidOut(
   main.setDisplayWindow(first, end);
   main.setDisplayRetainBuiltPages(false);
   const extras = encodeDisplayListFrameExtras({ fontChains, headersFooters } as DisplayListBuildInputs);
-  const { displayList } = applyFrameDelta(null, decodeFrameDelta(main.buildDisplayListFrame(extras, 0)));
-  const queries = createDisplayListQueries(displayList, main as never);
+  const frame = applyFrameDelta(null, decodeFrameDelta(main.buildDisplayListFrame(extras, 0)));
+  const queries = createDisplayListQueries(frame.displayList, main as never);
   if (window) bindDisplayWindow(queries, { read: () => window, subscribe: () => () => {} });
   engine.loadState(main.encodeState());
-  return { main, engine, queries };
+  const buildAll = () => {
+    main.setDisplayWindow(0, 2 ** 32 - 1);
+    const built = applyFrameDelta(frame, decodeFrameDelta(main.buildDisplayListFrame(extras, frame.frameEpoch)));
+    return createDisplayListQueries(built.displayList, main as never);
+  };
+  return { main, engine, queries, buildAll };
 }
 
 function pagesOf(queries: DisplayListQueries) {
@@ -121,7 +128,11 @@ function pagesOf(queries: DisplayListQueries) {
 }
 
 /** Plugin geometry over the main session (`viewer` false) or a worker viewer reading `engine`. */
-function geometryOf({ main, engine, queries }: LaidOut, viewer: boolean) {
+function geometryOf(
+  { main, engine, queries }: Pick<LaidOut, 'main' | 'engine' | 'queries'>,
+  viewer: boolean,
+  reads: { cache: AnchorReadCache; log: unknown[][] } = { cache: createAnchorReadCache(), log: [] }
+) {
   const pages = pagesOf(queries);
   const layer = document.createElement('div');
   layer.getBoundingClientRect = () => pages.getBoundingClientRect();
@@ -151,8 +162,11 @@ function geometryOf({ main, engine, queries }: LaidOut, viewer: boolean) {
     undefined,
     viewer
       ? {
-          read: async (targets) => computeAnchorDisplayTargets(engine.geometryReader, targets, undefined),
-          cache: createAnchorReadCache(),
+          read: async (targets) => {
+            reads.log.push([...targets]);
+            return computeAnchorDisplayTargets(engine.geometryReader, targets, undefined);
+          },
+          cache: reads.cache,
         }
       : undefined
   );
@@ -332,6 +346,40 @@ describe('header and footer targets', () => {
       expect(read.anchor.pageIndex).toBe(pages[0]);
       expect(pageIndices(await both(full, sessionParagraph(full, `hf:${rId}`, `1000000${index + 1}`)))).toEqual(pages);
     }
+  });
+
+  test('a batch reads header and footer targets once and completes cached answers as pages build', async () => {
+    const laid = await laidOut(0, 3);
+    const reads = { cache: createAnchorReadCache(), log: [] as unknown[][] };
+    const targets = [
+      range(laid, 'hf:rIdH1', '10000001', '{{odd}}'),
+      sessionParagraph(laid, 'hf:rIdH2', '10000011'),
+      range(laid, 'hf:rIdF1', '10000021', '{{first}}'),
+      range(laid, 'body:t0:r0c0', '00000002', '{{cell}}'),
+    ];
+    const partial = geometryOf(laid, true, reads);
+    const first = (await partial.readAnchorGeometries(targets)).map(ok);
+    expect(reads.log).toHaveLength(1);
+    expect(reads.log[0]).toHaveLength(4);
+    expect(first.map((answer) => [pageIndices(answer), answer.unbuiltPages])).toEqual([
+      [[2], [4]],
+      [[1], [3, 5]],
+      [[0], []],
+      [[0], []],
+    ]);
+    expect(await partial.readAnchorGeometries(targets)).toEqual(first);
+    expect(reads.log).toHaveLength(1);
+
+    const built = geometryOf({ ...laid, queries: laid.buildAll() }, true, reads);
+    const complete = (await built.readAnchorGeometries(targets)).map(ok);
+    expect(reads.log).toHaveLength(1);
+    expect(complete.map((answer) => [pageIndices(answer), answer.unbuiltPages])).toEqual([
+      [[2, 4], []],
+      [[1, 3, 5], []],
+      [[0], []],
+      [[0], []],
+    ]);
+    expect(complete[0]!.anchor).toEqual(first[0]!.anchor);
   });
 
   test('footnote stories stay unsupported', async () => {
