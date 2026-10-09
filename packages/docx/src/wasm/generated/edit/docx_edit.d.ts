@@ -587,6 +587,11 @@ export class EditSession {
      */
     list_revisions(): string;
     /**
+     * Every story: `{"ok":true,"version","stories":[{"story","kind","parent"?,"root","part"?,
+     * "uses"?}]}`, sorted by id.
+     */
+    list_stories_json(): string;
+    /**
      * Hydrates from a yrs v1 update. The first load after an unseeded open retains prior
      * comment writes and marks loaded fields differing from seed placeholders as authored.
      */
@@ -775,9 +780,10 @@ export class EditSession {
      */
     read_paragraphs_json(request: string): string;
     /**
-     * Paragraph texts of many stories in one read:
-     * `{"stories"?:[…],"view","expectVersion"?}` -> `{"ok":true,"version","view",
-     * "stories":[{"story","paragraphs":[…]}|{"story","failure"}]}`. Every story when `stories` is absent.
+     * Paragraph texts of selected stories in one read:
+     * `{"stories"?:"all"|[kind|id…],"byRoot"?,"view","expectVersion"?}` -> `{"ok":true,
+     * "version","view","truncated","stories":[{"story","ok":true,"paragraphs"}|{"story",
+     * "ok":false,"failure"}]}`. Listed entries keep their order; a kind expands in id order.
      */
     read_stories_json(request: string): string;
     /**
@@ -1665,6 +1671,7 @@ export interface InitOutput {
     readonly editsession_list_comments: (a: number) => [number, number, number, number];
     readonly editsession_list_content_controls_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_list_revisions: (a: number) => [number, number, number, number];
+    readonly editsession_list_stories_json: (a: number) => [number, number, number, number];
     readonly editsession_load: (a: number, b: number, c: number) => [number, number];
     readonly editsession_load_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_load_media_sources: (a: number, b: number, c: number) => [number, number];

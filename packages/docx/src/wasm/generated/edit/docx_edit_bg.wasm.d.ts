@@ -101,6 +101,7 @@ export const editsession_layout_font_requirements_json: (a: number, b: number, c
 export const editsession_list_comments: (a: number) => [number, number, number, number];
 export const editsession_list_content_controls_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_list_revisions: (a: number) => [number, number, number, number];
+export const editsession_list_stories_json: (a: number) => [number, number, number, number];
 export const editsession_load: (a: number, b: number, c: number) => [number, number];
 export const editsession_load_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_load_media_sources: (a: number, b: number, c: number) => [number, number];

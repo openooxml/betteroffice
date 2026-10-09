@@ -4202,12 +4202,20 @@ impl EditSession {
         outcome_json(&self.engine.doc().read_paragraphs(&request)).map_err(js_err)
     }
 
-    /// Paragraph texts of many stories in one read:
-    /// `{"stories"?:[…],"view","expectVersion"?}` -> `{"ok":true,"version","view",
-    /// "stories":[{"story","paragraphs":[…]}|{"story","failure"}]}`. Every story when `stories` is absent.
+    /// Paragraph texts of selected stories in one read:
+    /// `{"stories"?:"all"|[kind|id…],"byRoot"?,"view","expectVersion"?}` -> `{"ok":true,
+    /// "version","view","truncated","stories":[{"story","ok":true,"paragraphs"}|{"story",
+    /// "ok":false,"failure"}]}`. Listed entries keep their order; a kind expands in id order.
     pub fn read_stories_json(&self, request: &str) -> Result<String, JsValue> {
         let request: ReadStoriesRequest = serde_json::from_str(request).map_err(js_err)?;
         outcome_json(&self.engine.doc().read_stories(&request)).map_err(js_err)
+    }
+
+    /// Every story: `{"ok":true,"version","stories":[{"story","kind","parent"?,"root","part"?,
+    /// "uses"?}]}`, sorted by id.
+    pub fn list_stories_json(&self) -> Result<String, JsValue> {
+        let listed: Result<_, EditRefusal> = Ok(self.engine.doc().list_stories());
+        outcome_json(&listed).map_err(js_err)
     }
 
     /// Until the matching `end_shared_reads`, committed reads share story projections of each document state.

@@ -1061,98 +1061,15 @@ impl<'a> Exporter<'a> {
 
     /// Reads the body's sections and indexes them by the paragraph ending each.
     fn read_sections<T: ReadTxn>(&mut self, views: &mut Views<'_, T>) {
-        self.sections = self.body_sections(views);
+        let final_section = self.read().and_then(|read| read.final_section.as_ref());
+        let capacity = self.capacity();
+        self.sections = body_sections(views, final_section, |size| size <= capacity);
         self.section_ends = HashMap::new();
         for (index, section) in self.sections.iter().enumerate() {
             if let Some(end) = &section.end {
                 self.section_ends.entry(end.clone()).or_insert(index);
             }
         }
-    }
-
-    /// The body's sections in order, each with the paragraph ending it, then the final section.
-    fn body_sections<T: ReadTxn>(&mut self, views: &mut Views<'_, T>) -> Vec<Section> {
-        let mut sections = Vec::new();
-        let txn = views.txn();
-        if let Ok(text) = story_ref(txn, "body") {
-            let chunks = views.doc().chunk_snapshot("body", &text, txn);
-            for chunk in chunks.iter() {
-                let ChunkKind::Pilcrow(map) = &chunk.kind else {
-                    continue;
-                };
-                let value = |key: &str| match map.get(txn, key) {
-                    Some(Out::Any(value)) if !matches!(value, Any::Null | Any::Undefined) => {
-                        Some(value)
-                    }
-                    _ => None,
-                };
-                let (section, break_type) = (value("sectPr"), value("sectionBreakType"));
-                if section.is_none() && break_type.is_none() {
-                    continue;
-                }
-                let properties = section
-                    .filter(|value| self.fits(json_len(value)))
-                    .and_then(|value| serde_json::to_value(value).ok())
-                    .and_then(|value| {
-                        serde_json::from_value::<docx_parse::SectionProperties>(value).ok()
-                    });
-                let start = properties
-                    .as_ref()
-                    .and_then(|section| section.section_start.clone())
-                    .or_else(|| any_text(break_type.as_ref()));
-                sections.push(Section {
-                    end: Some(map_string(map, txn, crate::PARA_ID).unwrap_or_default()),
-                    start,
-                    properties,
-                });
-            }
-        }
-        let last = self
-            .read()
-            .and_then(|read| read.final_section.clone())
-            .and_then(|value| serde_json::from_value::<docx_parse::SectionProperties>(value).ok());
-        sections.push(Section {
-            end: None,
-            start: last
-                .as_ref()
-                .and_then(|section| section.section_start.clone()),
-            properties: last,
-        });
-        sections
-    }
-
-    /// The sections referencing each header and footer story, with inherited references.
-    fn story_uses(&self) -> HashMap<String, Vec<StoryUse>> {
-        let mut properties: Vec<docx_parse::SectionProperties> = self
-            .sections
-            .iter()
-            .map(|section| section.properties.clone().unwrap_or_default())
-            .collect();
-        docx_parse::apply_section_inheritance(&mut properties);
-        let mut uses: HashMap<String, Vec<StoryUse>> = HashMap::new();
-        let mut seen: HashSet<(String, u32, u8)> = HashSet::new();
-        for (index, section) in properties.iter().enumerate() {
-            for reference in section
-                .header_references
-                .iter()
-                .chain(section.footer_references.iter())
-                .flatten()
-            {
-                let variant = match reference.reference_type.as_str() {
-                    "first" => HeaderFooterVariant::First,
-                    "even" => HeaderFooterVariant::Even,
-                    _ => HeaderFooterVariant::Default,
-                };
-                let story = format!("hf:{}", reference.relationship_id);
-                if seen.insert((story.clone(), index as u32, variant as u8)) {
-                    uses.entry(story).or_default().push(StoryUse {
-                        section_index: index as u32,
-                        variant,
-                    });
-                }
-            }
-        }
-        uses
     }
 
     /// The stories to export in output order, plus the envelope diagnostics.
@@ -1211,7 +1128,7 @@ impl<'a> Exporter<'a> {
                 });
             }
         }
-        let uses = self.story_uses();
+        let uses = story_uses(&inherited_properties(&self.sections));
         let mut stories: Vec<(StorySelection, ExportStory)> = Vec::new();
         let mut known: HashSet<&str> = HashSet::new();
         let mut unclassified = 0usize;
@@ -4426,6 +4343,139 @@ fn set_identities_aside(value: &mut Value, prefix: &str) {
             }
         }
         _ => {}
+    }
+}
+
+/// The body's sections in order, each with the paragraph ending it, then the final section.
+fn body_sections<T: ReadTxn>(
+    views: &mut Views<'_, T>,
+    final_section: Option<&Value>,
+    fits: impl Fn(usize) -> bool,
+) -> Vec<Section> {
+    let mut sections = Vec::new();
+    let txn = views.txn();
+    if let Ok(text) = story_ref(txn, "body") {
+        let chunks = views.doc().chunk_snapshot("body", &text, txn);
+        for chunk in chunks.iter() {
+            let ChunkKind::Pilcrow(map) = &chunk.kind else {
+                continue;
+            };
+            let value = |key: &str| match map.get(txn, key) {
+                Some(Out::Any(value)) if !matches!(value, Any::Null | Any::Undefined) => {
+                    Some(value)
+                }
+                _ => None,
+            };
+            let (section, break_type) = (value("sectPr"), value("sectionBreakType"));
+            if section.is_none() && break_type.is_none() {
+                continue;
+            }
+            let properties = section
+                .filter(|value| fits(json_len(value)))
+                .and_then(|value| serde_json::to_value(value).ok())
+                .and_then(|value| {
+                    serde_json::from_value::<docx_parse::SectionProperties>(value).ok()
+                });
+            let start = properties
+                .as_ref()
+                .and_then(|section| section.section_start.clone())
+                .or_else(|| any_text(break_type.as_ref()));
+            sections.push(Section {
+                end: Some(map_string(map, txn, crate::PARA_ID).unwrap_or_default()),
+                start,
+                properties,
+            });
+        }
+    }
+    let last = final_section.and_then(|value| {
+        serde_json::from_value::<docx_parse::SectionProperties>(value.clone()).ok()
+    });
+    sections.push(Section {
+        end: None,
+        start: last
+            .as_ref()
+            .and_then(|section| section.section_start.clone()),
+        properties: last,
+    });
+    sections
+}
+
+/// The sections referencing each header and footer story, with inherited references.
+fn story_uses(properties: &[docx_parse::SectionProperties]) -> HashMap<String, Vec<StoryUse>> {
+    let mut uses: HashMap<String, Vec<StoryUse>> = HashMap::new();
+    let mut seen: HashSet<(String, u32, u8)> = HashSet::new();
+    for (index, section) in properties.iter().enumerate() {
+        for reference in section
+            .header_references
+            .iter()
+            .chain(section.footer_references.iter())
+            .flatten()
+        {
+            let variant = match reference.reference_type.as_str() {
+                "first" => HeaderFooterVariant::First,
+                "even" => HeaderFooterVariant::Even,
+                _ => HeaderFooterVariant::Default,
+            };
+            let story = format!("hf:{}", reference.relationship_id);
+            if seen.insert((story.clone(), index as u32, variant as u8)) {
+                uses.entry(story).or_default().push(StoryUse {
+                    section_index: index as u32,
+                    variant,
+                });
+            }
+        }
+    }
+    uses
+}
+
+/// Each section's properties with the header and footer references it inherits.
+fn inherited_properties(sections: &[Section]) -> Vec<docx_parse::SectionProperties> {
+    let mut properties: Vec<docx_parse::SectionProperties> = sections
+        .iter()
+        .map(|section| section.properties.clone().unwrap_or_default())
+        .collect();
+    docx_parse::apply_section_inheritance(&mut properties);
+    properties
+}
+
+/// The session's header and footer stories: each one's role and part, and the sections
+/// referencing it with inheritance applied.
+pub(crate) struct HeaderFooterIndex {
+    pub(crate) roles: HashMap<String, (StoryKind, Option<String>)>,
+    pub(crate) uses: HashMap<String, Vec<StoryUse>>,
+}
+
+/// Reads roles from the retained source, else from the section references naming each story.
+pub(crate) fn header_footer_index<T: ReadTxn>(views: &mut Views<'_, T>) -> HeaderFooterIndex {
+    let source = views.doc().source_metadata();
+    let read = source.as_deref().map(SourceMetadata::read);
+    let sections = body_sections(
+        views,
+        read.and_then(|read| read.final_section.as_ref()),
+        |_| true,
+    );
+    let properties = inherited_properties(&sections);
+    let mut roles = HashMap::new();
+    for section in &properties {
+        for (references, kind) in [
+            (&section.header_references, StoryKind::Header),
+            (&section.footer_references, StoryKind::Footer),
+        ] {
+            for reference in references.iter().flatten() {
+                roles
+                    .entry(format!("hf:{}", reference.relationship_id))
+                    .or_insert((kind, None));
+            }
+        }
+    }
+    for story in read.iter().flat_map(|read| &read.stories) {
+        if matches!(story.kind, StoryKind::Header | StoryKind::Footer) {
+            roles.insert(story.story.clone(), (story.kind, story.part.clone()));
+        }
+    }
+    HeaderFooterIndex {
+        roles,
+        uses: story_uses(&properties),
     }
 }
 

@@ -100,6 +100,7 @@ mod search;
 mod seed;
 mod segment_json;
 mod segments;
+mod stories;
 pub mod structured;
 mod target;
 mod undo;
@@ -152,6 +153,7 @@ pub use seed::{
     seed_docx_preview, seed_from_docx, seed_from_docx_with_generation,
 };
 use segments::{ParagraphIndex, SegmentIndex, build_indexes};
+pub use stories::{AllStories, ListStoriesResponse, StoryInfo, StoryInfoKind, StorySelection};
 pub use target::{
     AtomKind, EditTextView, FindTextRequest, FindTextResponse, ParagraphTarget, ParagraphText,
     ReadParagraphsRequest, ReadParagraphsResponse, ReadStoriesRequest, ReadStoriesResponse,
