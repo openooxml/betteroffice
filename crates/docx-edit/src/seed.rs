@@ -7583,8 +7583,12 @@ mod tests {
                 .root()
                 .unwrap()
                 .clone();
-            serde_json::to_value(docx_parse::parse_paragraph_properties(Some(&root), None).unwrap())
-                .unwrap()
+            serde_json::to_string(
+                &docx_parse::parse_paragraph_properties(Some(&root), None).unwrap(),
+            )
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .unwrap()
         }
         let style_ppr = ppr(r#"<w:pPr><w:ind w:left="1450" w:hanging="730"/></w:pPr>"#);
         assert_eq!(style_ppr["indentFirstLine"], json!(-730.0));

@@ -4850,8 +4850,9 @@ impl EngineSession {
             if !template.resident_safe {
                 return None;
             }
-            let block: LayoutBlock =
-                serde_json::from_value(template.envelope.get("block")?.clone()).ok()?;
+            let block: LayoutBlock = serde_json::to_string(template.envelope.get("block")?)
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())?;
             (block == *previous_block).then(|| template.envelope.clone())
         })
     }
@@ -4957,7 +4958,9 @@ impl EngineSession {
             );
         }
         if let Some(body_story) = body_story {
-            let mut render_env: RenderEnv = serde_json::from_value(render_env)
+            let render_env_json = serde_json::to_string(&render_env)
+                .map_err(|error| format!("serialize render environment: {error}"))?;
+            let mut render_env: RenderEnv = serde_json::from_str(&render_env_json)
                 .map_err(|error| format!("parse render environment: {error}"))?;
             if cache_key.is_some() {
                 render_env.revision_preview.clear();
@@ -5499,10 +5502,12 @@ impl EngineSession {
         let mut parsed_render_env = if render_env.is_null() {
             None
         } else {
-            Some(
-                serde_json::from_value::<RenderEnv>(render_env)
-                    .map_err(|error| format!("parse render environment: {error}"))?,
-            )
+            Some({
+                let json = serde_json::to_string(&render_env)
+                    .map_err(|error| format!("serialize render environment: {error}"))?;
+                serde_json::from_str::<RenderEnv>(&json)
+                    .map_err(|error| format!("parse render environment: {error}"))?
+            })
         };
         let revision_preview_key = parsed_render_env
             .as_ref()
@@ -6030,7 +6035,8 @@ impl EngineSession {
             .as_mut()
             .map(|payload| {
                 resolve_header_footer_field_widths(payload, layout, &measurement)?;
-                serde_json::to_value(&*payload)
+                serde_json::to_string(&*payload)
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s))
                     .map_err(|error| format!("serialize headers/footers: {error}"))
             })
             .transpose()?;
@@ -7582,8 +7588,10 @@ impl EngineSession {
                     })?;
                     fields.insert(
                         "block".to_owned(),
-                        serde_json::to_value(&*next_block)
-                            .map_err(|error| format!("serialize dirty paragraph: {error}"))?,
+                        serde_json::to_string(&*next_block)
+                            .ok()
+                            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                            .ok_or_else(|| "serialize dirty paragraph".to_owned())?,
                     );
                     let envelope_json = serde_json::to_string(&envelope)
                         .map_err(|error| format!("serialize measurement envelope: {error}"))?;

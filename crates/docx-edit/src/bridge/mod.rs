@@ -1231,7 +1231,7 @@ fn walk_story_chunks<T: ReadTxn>(
                         })
                         .and_then(|value| any_json(&value))
                         .and_then(|value| {
-                            serde_json::from_value::<docx_parse::vml::HorizontalRule>(value).ok()
+                            serde_json::to_string(&value).ok().and_then(|s| serde_json::from_str::<docx_parse::vml::HorizontalRule>(&s).ok())
                         })
                     else {
                         return Err(BridgeError::UnsupportedEmbed {
@@ -2009,7 +2009,9 @@ fn dark_cell_background(color: &str) -> bool {
 }
 
 fn any_json(value: &Any) -> Option<Value> {
-    let value = serde_json::to_value(value).ok()?;
+    let value: Value = serde_json::to_string(value)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())?;
     (!value.is_null()).then_some(value)
 }
 
@@ -2149,7 +2151,9 @@ fn lower_image_values(
                     serde_json::json!(height as u64),
                 );
             }
-            serde_json::from_value::<ImageRunPosition>(value).ok()
+            serde_json::to_string(&value)
+                .ok()
+                .and_then(|s| serde_json::from_str::<ImageRunPosition>(&s).ok())
         });
 
     ImageRun {
@@ -3631,8 +3635,12 @@ fn formatting_equal(left: &RunFormatting, right: &RunFormatting) -> bool {
     left == right
         || (has_nonfinite(left)
             && has_nonfinite(right)
-            && serde_json::to_value(left).expect("RunFormatting serializes")
-                == serde_json::to_value(right).expect("RunFormatting serializes"))
+            && serde_json::to_string(left)
+                .and_then(|s| serde_json::from_str::<Value>(&s))
+                .expect("RunFormatting serializes")
+                == serde_json::to_string(right)
+                    .and_then(|s| serde_json::from_str::<Value>(&s))
+                    .expect("RunFormatting serializes"))
 }
 
 fn has_nonfinite(formatting: &RunFormatting) -> bool {
@@ -3826,7 +3834,9 @@ fn lower_run_formatting(attributes: Option<&Attrs>, env: &RenderEnv) -> RunForma
             _ => value,
         };
         if !is_nullish(effects) {
-            result.modern_effects = serde_json::to_value(effects).ok();
+            result.modern_effects = serde_json::to_string(effects)
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok());
         }
     }
 
@@ -6638,6 +6648,14 @@ mod tests {
             comment_ids: Some(vec![f64::NAN]),
             ..RunFormatting::default()
         };
+        let positive_zero = RunFormatting {
+            letter_spacing: Some(0.0),
+            ..nan_size.clone()
+        };
+        let negative_zero = RunFormatting {
+            letter_spacing: Some(-0.0),
+            ..nan_size.clone()
+        };
 
         for (a, b) in [
             (&finite, &nan_size),
@@ -6648,6 +6666,7 @@ mod tests {
             (&nan_comments, &nan_comments2),
             (&nan_comments, &nan_in_field),
             (&nan_size, &nan_in_field),
+            (&positive_zero, &negative_zero),
         ] {
             assert_eq!(
                 formatting_equal(a, b),
