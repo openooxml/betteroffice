@@ -430,6 +430,8 @@ fn deserialize_page_start<'de, D: serde::Deserializer<'de>>(
 #[serde(rename_all = "camelCase")]
 pub struct RegionLayoutInput {
     #[serde(default)]
+    pub cached_page_totals: bool,
+    #[serde(default)]
     pub measured: Vec<crate::types::MeasuredBlock>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_story: Option<String>,
@@ -573,9 +575,32 @@ impl RegionBlock for LayoutBlock {
 /// its `w:pgNumType w:start` and otherwise continue from the previous page, whatever the format;
 /// a page whose number is not its physical one always carries a label.
 pub fn apply_document_regions(layout: &mut Layout, regions: &DocumentRegions) {
+    apply_document_regions_with(layout, regions, |_| {});
+}
+
+/// Stamps page regions and appends indices whose section or numbering changed.
+pub fn apply_document_regions_tracked(
+    layout: &mut Layout,
+    regions: &DocumentRegions,
+    changed: &mut Vec<usize>,
+) {
+    apply_document_regions_with(layout, regions, |index| changed.push(index));
+}
+
+/// Stamps page regions and reports changed section and numbering stamps.
+fn apply_document_regions_with(
+    layout: &mut Layout,
+    regions: &DocumentRegions,
+    mut changed: impl FnMut(usize),
+) {
     let mut page_counts = BTreeMap::<usize, u64>::new();
     let mut previous_number = 0_u64;
     for (page_index, page) in layout.pages.iter_mut().enumerate() {
+        let section_id = std::mem::take(&mut page.section_id);
+        let section_index_before = page.section_index;
+        let section_page_index_before = page.section_page_index;
+        let section_page_number = page.section_page_number;
+        let page_label = std::mem::take(&mut page.page_label);
         let section_index = page.region_section_index;
         page.section_index = Some(section_index as u64);
         let section = regions
@@ -615,7 +640,9 @@ pub fn apply_document_regions(layout: &mut Layout, regions: &DocumentRegions) {
                     number as i64,
                     numbering.format.as_deref().unwrap_or("decimal"),
                 ));
-                page.page_numbering = serde_json::to_value(numbering).ok();
+                page.page_numbering = serde_json::to_string(&numbering)
+                    .ok()
+                    .and_then(|s| serde_json::from_str(&s).ok());
             } else if number != u64::from(page.number) {
                 page.section_page_number = Some(number);
                 page.page_label = Some(number.to_string());
@@ -636,6 +663,14 @@ pub fn apply_document_regions(layout: &mut Layout, regions: &DocumentRegions) {
             if !selected.is_empty() {
                 page.note_areas = Some(selected);
             }
+        }
+        if section_id.as_deref() != page.section_id.as_deref()
+            || section_index_before != page.section_index
+            || section_page_index_before != page.section_page_index
+            || section_page_number != page.section_page_number
+            || page_label.as_deref() != page.page_label.as_deref()
+        {
+            changed(page_index);
         }
     }
 }
@@ -842,6 +877,7 @@ mod tests {
             footnote_ids: None,
             footnote_reserved_height: None,
             float_bands: Vec::new(),
+            opening_fragment_geometry: None,
             footnote_columns: None,
             columns: None,
             section_id: None,
@@ -872,6 +908,7 @@ mod tests {
             footers: None,
             page_gap: Some(20.0),
             partial: false,
+            cached_page_totals: false,
         };
         let regions = DocumentRegions {
             sections: vec![
@@ -935,6 +972,7 @@ mod tests {
             footers: None,
             page_gap: None,
             partial: false,
+            cached_page_totals: false,
         };
         let regions = DocumentRegions {
             sections: vec![RegionSection::default(), RegionSection::default()],
@@ -960,6 +998,7 @@ mod tests {
             footers: None,
             page_gap: None,
             partial: false,
+            cached_page_totals: false,
         };
         let restarted = DocumentRegions {
             sections: vec![
@@ -990,6 +1029,45 @@ mod tests {
         );
     }
 
+    /// Tracking appends only pages whose five display stamps changed.
+    #[test]
+    fn tracked_regions_report_only_changed_stamps() {
+        let mut layout = Layout {
+            page_size: Size {
+                w: 816.0,
+                h: 1056.0,
+            },
+            pages: (1..=6).map(|number| page(number, 0)).collect(),
+            columns: None,
+            headers: None,
+            footers: None,
+            page_gap: None,
+            partial: false,
+            cached_page_totals: false,
+        };
+        let regions = DocumentRegions {
+            sections: vec![RegionSection::default()],
+            ..DocumentRegions::default()
+        };
+        apply_document_regions(&mut layout, &regions);
+        let expected = layout.clone();
+        layout.pages[0].section_id = Some("other".to_owned());
+        layout.pages[1].section_index = None;
+        layout.pages[2].section_page_index = None;
+        layout.pages[3].section_page_number = Some(50);
+        layout.pages[4].page_label = Some("i".to_owned());
+        layout.pages[5].header_distance = Some(18.0);
+        let mut changed = vec![usize::MAX];
+        apply_document_regions_tracked(&mut layout, &regions, &mut changed);
+        assert_eq!(changed, [usize::MAX, 0, 1, 2, 3, 4]);
+        assert_eq!(
+            serde_json::to_value(&layout).unwrap(),
+            serde_json::to_value(&expected).unwrap(),
+        );
+        apply_document_regions_tracked(&mut layout, &regions, &mut changed);
+        assert_eq!(changed, [usize::MAX, 0, 1, 2, 3, 4]);
+    }
+
     #[test]
     fn restart_and_continued_roman_labels_match_pg_num_type() {
         let mut layout = Layout {
@@ -1003,6 +1081,7 @@ mod tests {
             footers: None,
             page_gap: Some(20.0),
             partial: false,
+            cached_page_totals: false,
         };
         let regions = DocumentRegions {
             sections: vec![

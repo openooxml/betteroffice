@@ -306,4 +306,16 @@ mod tests {
             "docx-document-canonical-v1\n{\"a\":[true,false],\"z\":2}\n"
         );
     }
+
+    #[test]
+    fn converts_deeply_nested_serde_values() {
+        let mut value = serde_json::json!(1);
+        for _ in 0..140 {
+            value = serde_json::Value::Array(vec![value]);
+        }
+        assert_eq!(
+            body(&from_serializable(&value).unwrap()),
+            format!("{VERSION}\n{}1{}\n", "[".repeat(140), "]".repeat(140))
+        );
+    }
 }

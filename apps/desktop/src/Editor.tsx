@@ -10,7 +10,6 @@ import {
   CollaborationProvider as PptxProvider,
   type PptxFontFace,
 } from "@betteroffice/pptx";
-import type { Document } from "@betteroffice/docx/types/document";
 import {
   loadBundledFontBytes,
   resolveLastResortFace,
@@ -28,7 +27,6 @@ setGoogleFontsEnabled(false);
 export interface PreparedFile {
   bytes: Uint8Array;
   format: Format;
-  document?: Document;
   fonts?: PptxFontFace[];
 }
 
@@ -38,7 +36,8 @@ export async function prepareFile(
 ): Promise<PreparedFile> {
   if (format === "docx") {
     const { parseDocx } = await import("@betteroffice/docx/docx");
-    return { bytes, format, document: await parseDocx(bytes) };
+    await parseDocx(bytes);
+    return { bytes, format };
   }
   if (format === "xlsx") {
     const { initWasm, openWorkbook } = await import("@betteroffice/xlsx");
@@ -208,7 +207,7 @@ export default function Editor({
     return (
       <DocxEditor
         ref={docx}
-        document={file.document}
+        documentBuffer={file.bytes}
         downloadOnSave={false}
         onSave={(buffer) => {
           if (!serialization.current) saveBytes(new Uint8Array(buffer));

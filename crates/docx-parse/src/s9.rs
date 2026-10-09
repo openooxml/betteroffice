@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use indexmap::IndexMap;
+use ooxml_opc::PackageBytes;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -216,7 +217,16 @@ pub fn parse_docx_s9_wire_with_media_table(
     options: S9ParseOptions,
     limits: &ParseLimits,
 ) -> Result<(S9WireEnvelope, Vec<(String, Vec<u8>)>, MediaTable), ParseError> {
-    let (parts, table) = media_table_parts(&data)?;
+    parse_docx_s9_wire_with_media_table_bytes(data.into(), options, limits)
+}
+
+/// [`parse_docx_s9_wire_with_media_table`] with shared or owned package bytes.
+pub fn parse_docx_s9_wire_with_media_table_bytes(
+    data: PackageBytes,
+    options: S9ParseOptions,
+    limits: &ParseLimits,
+) -> Result<(S9WireEnvelope, Vec<(String, Vec<u8>)>, MediaTable), ParseError> {
+    let (parts, table) = media_table_parts_bytes(&data)?;
     let envelope = parse_s9_package(&parts, &data, options, limits, None, Some(&table))?
         .expect("a whole body is never refused");
     Ok((envelope, parts, table))
@@ -226,7 +236,14 @@ pub fn parse_docx_s9_wire_with_media_table(
 pub fn media_table_parts(
     data: &Arc<[u8]>,
 ) -> Result<(Vec<(String, Vec<u8>)>, MediaTable), ParseError> {
-    media_table_parts_within(data, ooxml_opc::MAX_TOTAL_UNCOMPRESSED_BYTES)
+    media_table_parts_bytes(&Arc::clone(data).into())
+}
+
+/// [`media_table_parts`] with shared or owned package bytes.
+pub fn media_table_parts_bytes(
+    data: &PackageBytes,
+) -> Result<(Vec<(String, Vec<u8>)>, MediaTable), ParseError> {
+    media_table_parts_within_bytes(data, ooxml_opc::MAX_TOTAL_UNCOMPRESSED_BYTES)
 }
 
 /// Bounded extraction before transcoding, reserving compressed images' sizes.
@@ -235,8 +252,17 @@ pub fn media_table_parts_within(
     data: &Arc<[u8]>,
     budget: u64,
 ) -> Result<(Vec<(String, Vec<u8>)>, MediaTable), ParseError> {
+    media_table_parts_within_bytes(&Arc::clone(data).into(), budget)
+}
+
+/// [`media_table_parts_within`] with shared or owned package bytes.
+#[doc(hidden)]
+pub fn media_table_parts_within_bytes(
+    data: &PackageBytes,
+    budget: u64,
+) -> Result<(Vec<(String, Vec<u8>)>, MediaTable), ParseError> {
     let package =
-        ooxml_opc::RetainedPackage::new(Arc::clone(data)).map_err(ParseError::Container)?;
+        ooxml_opc::RetainedPackage::from_bytes(data.clone()).map_err(ParseError::Container)?;
     let scan = MediaScan::new(package, budget).map_err(ParseError::Container)?;
     let mut parts = ooxml_opc::unzip_parts_where(data, scan.remaining_budget(), |path| {
         !scan.keeps_compressed(path)
@@ -259,12 +285,33 @@ pub fn parse_docx_s9_preview_from_parts(
     options: S9ParseOptions,
     limits: &ParseLimits,
 ) -> Result<Option<S9WireEnvelope>, ParseError> {
+    parse_docx_s9_preview_from_parts_with_budget(parts, blocks, options, limits, None)
+        .map(|preview| preview.map(|(envelope, _)| envelope))
+}
+
+/// Returns the preview and whether its paragraph budget stopped the cut.
+pub fn parse_docx_s9_preview_from_parts_with_budget(
+    parts: &[(String, Vec<u8>)],
+    blocks: usize,
+    options: S9ParseOptions,
+    limits: &ParseLimits,
+    paragraph_budget: Option<usize>,
+) -> Result<Option<(S9WireEnvelope, bool)>, ParseError> {
     if options.determinism_seed.is_none() || options.include_canonical {
         return Err(ParseError::Canonical(
             "parsing parts needs a determinism seed and no canonical envelope".to_owned(),
         ));
     }
-    parse_s9_package(parts, &[], options, limits, Some(blocks), None)
+    parse_s9_package_impl(
+        parts,
+        &[],
+        options,
+        limits,
+        Some(blocks),
+        None,
+        true,
+        paragraph_budget,
+    )
 }
 
 #[doc(hidden)]
@@ -274,12 +321,33 @@ pub fn parse_docx_s9_preview_from_parts_full_dom(
     options: S9ParseOptions,
     limits: &ParseLimits,
 ) -> Result<Option<S9WireEnvelope>, ParseError> {
+    parse_docx_s9_preview_from_parts_full_dom_with_budget(parts, blocks, options, limits, None)
+        .map(|preview| preview.map(|(envelope, _)| envelope))
+}
+
+#[doc(hidden)]
+pub fn parse_docx_s9_preview_from_parts_full_dom_with_budget(
+    parts: &[(String, Vec<u8>)],
+    blocks: usize,
+    options: S9ParseOptions,
+    limits: &ParseLimits,
+    paragraph_budget: Option<usize>,
+) -> Result<Option<(S9WireEnvelope, bool)>, ParseError> {
     if options.determinism_seed.is_none() || options.include_canonical {
         return Err(ParseError::Canonical(
             "parsing parts needs a determinism seed and no canonical envelope".to_owned(),
         ));
     }
-    parse_s9_package_impl(parts, &[], options, limits, Some(blocks), None, false)
+    parse_s9_package_impl(
+        parts,
+        &[],
+        options,
+        limits,
+        Some(blocks),
+        None,
+        false,
+        paragraph_budget,
+    )
 }
 
 /// [`parse_docx_s9_preview_from_parts`] with images naming their parts by
@@ -292,12 +360,34 @@ pub fn parse_docx_s9_preview_with_media_table(
     options: S9ParseOptions,
     limits: &ParseLimits,
 ) -> Result<Option<S9WireEnvelope>, ParseError> {
+    parse_docx_s9_preview_with_media_table_with_budget(parts, table, blocks, options, limits, None)
+        .map(|preview| preview.map(|(envelope, _)| envelope))
+}
+
+/// Returns a media-token preview and whether its paragraph budget stopped the cut.
+pub fn parse_docx_s9_preview_with_media_table_with_budget(
+    parts: &[(String, Vec<u8>)],
+    table: &MediaTable,
+    blocks: usize,
+    options: S9ParseOptions,
+    limits: &ParseLimits,
+    paragraph_budget: Option<usize>,
+) -> Result<Option<(S9WireEnvelope, bool)>, ParseError> {
     if options.determinism_seed.is_none() || options.include_canonical {
         return Err(ParseError::Canonical(
             "parsing parts needs a determinism seed and no canonical envelope".to_owned(),
         ));
     }
-    parse_s9_package(parts, &[], options, limits, Some(blocks), Some(table))
+    parse_s9_package_impl(
+        parts,
+        &[],
+        options,
+        limits,
+        Some(blocks),
+        Some(table),
+        true,
+        paragraph_budget,
+    )
 }
 
 /// `None` only when `body_blocks` would cut a body the preview refuses; see
@@ -310,7 +400,17 @@ fn parse_s9_package(
     body_blocks: Option<usize>,
     media_table: Option<&MediaTable>,
 ) -> Result<Option<S9WireEnvelope>, ParseError> {
-    parse_s9_package_impl(parts, data, options, limits, body_blocks, media_table, true)
+    parse_s9_package_impl(
+        parts,
+        data,
+        options,
+        limits,
+        body_blocks,
+        media_table,
+        true,
+        None,
+    )
+    .map(|preview| preview.map(|(envelope, _)| envelope))
 }
 
 fn parse_s9_package_impl(
@@ -321,7 +421,8 @@ fn parse_s9_package_impl(
     body_blocks: Option<usize>,
     media_table: Option<&MediaTable>,
     prefix_preview: bool,
-) -> Result<Option<S9WireEnvelope>, ParseError> {
+    paragraph_budget: Option<usize>,
+) -> Result<Option<(S9WireEnvelope, bool)>, ParseError> {
     if media_table.is_some() && options.include_canonical {
         return Err(ParseError::Canonical(
             "a canonical envelope needs the media inflated".to_owned(),
@@ -401,18 +502,24 @@ fn parse_s9_package_impl(
     let mut ids = HexIdAllocator::from_sha256(&digest)?;
 
     let document_part = find_part(parts, &document_path);
-    let mut warnings = Vec::new();
-    let mut body = match document_part.filter(|(_, xml)| !xml.is_empty()) {
+    let mut warnings = crate::package_integrity::package_warnings(parts, media_table, limits);
+    let (mut body, budget_stopped) = match document_part.filter(|(_, xml)| !xml.is_empty()) {
         Some((path, xml)) => {
             let mut scanned_budget = body_blocks
                 .filter(|_| prefix_preview)
                 .map(|_| budget.clone());
+            let mut legacy_partial = None;
             let prefix = if let Some(blocks) = body_blocks.filter(|_| prefix_preview) {
-                match crate::document::streaming_body_cut(xml, scanned_budget.as_mut().unwrap()) {
-                    Ok(refused) => {
+                match crate::document::streaming_body_cut_with_limit(
+                    xml,
+                    scanned_budget.as_mut().unwrap(),
+                    body_blocks.filter(|_| paragraph_budget.is_some()),
+                ) {
+                    Ok((refused, partial)) => {
                         if refused {
                             return Ok(None);
                         }
+                        legacy_partial = paragraph_budget.map(|_| partial);
                         let keep = blocks.saturating_mul(2).max(blocks.saturating_add(64));
                         crate::document::body_prefix(xml, keep).map(|xml| (xml, keep))
                     }
@@ -460,12 +567,15 @@ fn parse_s9_package_impl(
                                 })
                                 .sum::<usize>()
                         });
-                        let (body, read) = crate::document::parse_document_body_compact_with_read(
-                            root,
-                            &mut parser,
-                            body_blocks,
-                            kept_children,
-                        )?;
+                        let (body, read, budget_stopped) =
+                            crate::document::parse_document_body_compact_with_read(
+                                root,
+                                &mut parser,
+                                body_blocks,
+                                kept_children,
+                                paragraph_budget,
+                                legacy_partial,
+                            )?;
                         if read >= kept_children {
                             return parse_s9_package_impl(
                                 parts,
@@ -475,19 +585,26 @@ fn parse_s9_package_impl(
                                 body_blocks,
                                 media_table,
                                 false,
+                                paragraph_budget,
                             );
                         }
-                        body
+                        (body, budget_stopped)
                     } else {
-                        parse_document_body_compact(root, &mut parser, body_blocks)?
+                        parse_document_body_compact(
+                            root,
+                            &mut parser,
+                            body_blocks,
+                            paragraph_budget,
+                            legacy_partial,
+                        )?
                     }
                 }
-                None => DocumentBody::default(),
+                None => (DocumentBody::default(), false),
             }
         }
         None => {
             warnings.push("No document.xml found in DOCX".to_owned());
-            DocumentBody::default()
+            (DocumentBody::default(), false)
         }
     };
 
@@ -602,7 +719,7 @@ fn parse_s9_package_impl(
         remove_orphan_comment_ranges(&mut note.content, &comment_ids);
     }
 
-    dedupe_package_paragraph_ids(
+    let repeated_para_ids = dedupe_package_paragraph_ids(
         &mut body,
         headers.as_mut(),
         footers.as_mut(),
@@ -611,6 +728,11 @@ fn parse_s9_package_impl(
         footnote_separators.as_mut(),
         endnote_separators.as_mut(),
     );
+    if repeated_para_ids > 0 {
+        warnings.push(format!(
+            "BetterOffice found {repeated_para_ids} paragraphs sharing a `w14:paraId` on open. A host addressing paragraphs by that raw Word ID should not assume it is unique; prefer a session anchor with `resolveParagraphAnchor()` or call `persistParagraphIds()` to repair the duplicates."
+        ));
+    }
 
     let template_variables = options
         .detect_variables
@@ -675,14 +797,17 @@ fn parse_s9_package_impl(
         .filter(|(_, xml)| is_valid_utf8_xml_text(xml))
         .map(|(_, xml)| String::from_utf8_lossy(xml).into_owned());
 
-    Ok(Some(S9WireEnvelope {
-        wire_version: 1,
-        document,
-        embedded_font_parts,
-        font_table_relationships_xml,
-        canonical_base64,
-        canonical_sha256,
-    }))
+    Ok(Some((
+        S9WireEnvelope {
+            wire_version: 1,
+            document,
+            embedded_font_parts,
+            font_table_relationships_xml,
+            canonical_base64,
+            canonical_sha256,
+        },
+        budget_stopped,
+    )))
 }
 
 /// Flags every paragraph whose ID repeats one earlier in the package,
@@ -695,14 +820,14 @@ fn dedupe_package_paragraph_ids(
     endnotes: Option<&mut Vec<Note>>,
     footnote_separators: Option<&mut Vec<Note>>,
     endnote_separators: Option<&mut Vec<Note>>,
-) {
+) -> usize {
     let mut seen = HashSet::new();
-    dedupe_blocks(&mut body.content, &mut seen);
+    let mut repeated = dedupe_blocks(&mut body.content, &mut seen);
     for story in headers.into_iter().flat_map(IndexMap::values_mut) {
-        dedupe_blocks(&mut story.content, &mut seen);
+        repeated += dedupe_blocks(&mut story.content, &mut seen);
     }
     for story in footers.into_iter().flat_map(IndexMap::values_mut) {
-        dedupe_blocks(&mut story.content, &mut seen);
+        repeated += dedupe_blocks(&mut story.content, &mut seen);
     }
     for note in footnotes
         .into_iter()
@@ -719,33 +844,42 @@ fn dedupe_package_paragraph_ids(
                 .flat_map(|notes| notes.iter_mut()),
         )
     {
-        dedupe_blocks(&mut note.content, &mut seen);
+        repeated += dedupe_blocks(&mut note.content, &mut seen);
     }
+    repeated
 }
 
-fn dedupe_blocks(blocks: &mut [BlockContent], seen: &mut HashSet<u32>) {
+fn dedupe_blocks(blocks: &mut [BlockContent], seen: &mut HashSet<u32>) -> usize {
+    let mut repeated = 0;
     for block in blocks {
         match block {
-            BlockContent::Paragraph(paragraph) => dedupe_paragraph(Arc::make_mut(paragraph), seen),
+            BlockContent::Paragraph(paragraph) => {
+                repeated += dedupe_paragraph(Arc::make_mut(paragraph), seen);
+            }
             BlockContent::Table(table) => {
                 for row in &mut Arc::make_mut(table).rows {
                     for cell in &mut row.cells {
-                        dedupe_blocks(&mut cell.content, seen);
+                        repeated += dedupe_blocks(&mut cell.content, seen);
                     }
                 }
             }
-            BlockContent::BlockSdt(sdt) => dedupe_blocks(&mut Arc::make_mut(sdt).content, seen),
+            BlockContent::BlockSdt(sdt) => {
+                repeated += dedupe_blocks(&mut Arc::make_mut(sdt).content, seen);
+            }
             BlockContent::RawXml(_) => {}
         }
     }
+    repeated
 }
 
-fn dedupe_paragraph(paragraph: &mut Paragraph, seen: &mut HashSet<u32>) {
+fn dedupe_paragraph(paragraph: &mut Paragraph, seen: &mut HashSet<u32>) -> usize {
     if let Some(id) = paragraph.para_id.as_deref().and_then(parse_paragraph_id)
         && !seen.insert(id)
     {
         paragraph.repeated_para_id = Some(true);
+        return 1;
     }
+    0
 }
 
 fn canonical_document(

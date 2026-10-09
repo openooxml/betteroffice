@@ -2,7 +2,9 @@ use std::borrow::Cow;
 
 use serde::Serialize;
 
-use crate::measure_blocks::{MeasurementConfig, extent_height, measure_blocks, measure_paragraph};
+use crate::measure_blocks::{
+    MeasurementConfig, extent_height, measure_blocks_without_table_compat_shift, measure_paragraph,
+};
 use crate::paragraph_spacing::apply_contextual_spacing_blocks;
 use crate::types::{
     AxisPosition, BlockExtent, BlockId, BoxEdges, FieldRun, ImageRun, ImageRunPosition, Layout,
@@ -120,9 +122,10 @@ pub fn measure_header_footer(
     let mut blocks = blocks;
     apply_contextual_spacing_blocks(&mut blocks);
     let mut detached = float_detached_top_and_bottom_images(&mut blocks);
-    let mut measures = measure_blocks(&mut blocks, content_width, config)?;
+    let mut measures =
+        measure_blocks_without_table_compat_shift(&mut blocks, content_width, config)?;
     if restore_overlapping_detached_images(&mut blocks, &measures, &mut detached, metrics) {
-        measures = measure_blocks(&mut blocks, content_width, config)?;
+        measures = measure_blocks_without_table_compat_shift(&mut blocks, content_width, config)?;
     }
     let height = measures.iter().map(extent_height).sum();
     let mut flow = HeaderFooterFlow::default();
@@ -330,9 +333,13 @@ pub fn resolve_header_footer_field_widths(
                                 u64::from(page.number),
                             )
                         };
-                        // A partial layout's NUMPAGES renders empty.
                         if layout.partial && field.field_type == "NUMPAGES" {
-                            Ok(0.0)
+                            match field.fallback.as_deref().filter(|value| !value.is_empty()) {
+                                Some(text) if layout.cached_page_totals => {
+                                    measure_field_text(field, text, config)
+                                }
+                                _ => Ok(0.0),
+                            }
                         } else {
                             measure_field_text(field, &text, config)
                         }
@@ -869,6 +876,7 @@ pub fn extend_body_margins(
 #[cfg(test)]
 mod tests {
     use crate::display_list::{DisplayList, Primitive, build_display_list_json};
+    use crate::measure_blocks::measure_blocks;
     use serde_json::json;
 
     use super::*;
@@ -941,6 +949,36 @@ mod tests {
         .unwrap()
         .unwrap();
         (variant, size, margins)
+    }
+
+    #[test]
+    fn percentage_width_header_footer_mode_14_keeps_content_basis() {
+        for kind in [HeaderFooterKind::Header, HeaderFooterKind::Footer] {
+            for algorithm in [None, Some("autofit"), Some("fixed")] {
+                let (variant, _, _) = header_footer_with_blocks(
+                    kind,
+                    vec![json!({
+                        "kind": "table", "id": "table", "compatibilityMode": 14,
+                        "cellMarginLeft": 7.2, "cellMarginRight": 7.2,
+                        "width": 5000, "widthType": "pct", "widthAlgorithm": algorithm,
+                        "columnWidths": [100, 100], "rows": [{"id": "row", "cells": [
+                            {"id": "left", "blocks": [], "minContentWidth": 20, "maxContentWidth": 400,
+                             "padding": {"top": 0, "bottom": 0, "left": 7.2, "right": 0}},
+                            {"id": "right", "blocks": [], "minContentWidth": 20, "maxContentWidth": 400,
+                             "padding": {"top": 0, "bottom": 0, "left": 0, "right": 7.2}}
+                        ]}]
+                    })],
+                );
+                let BlockExtent::Table(table) = &variant.measured[0].measure else {
+                    panic!("table expected");
+                };
+                assert!(
+                    (table.total_width - 308.0).abs() < 1e-6,
+                    "{kind:?} {algorithm:?}: width {}, expected 308",
+                    table.total_width
+                );
+            }
+        }
     }
 
     #[test]
@@ -1821,5 +1859,23 @@ mod tests {
         let mut partial = payload();
         resolve_header_footer_field_widths(&mut partial, &layout, &config).unwrap();
         assert_eq!(partial.variants[0].field_widths[0].per_page[0], 0.0);
+
+        layout.cached_page_totals = true;
+        let mut cached = payload();
+        resolve_header_footer_field_widths(&mut cached, &layout, &config).unwrap();
+        let widths = &cached.variants[0].field_widths[0];
+        assert!(widths.per_page[0] > 0.0);
+        assert_eq!(widths.per_page[0], widths.fallback_width);
+
+        for fallback in [None, Some(String::new())] {
+            if let LayoutBlock::Paragraph(paragraph) = &mut cached.variants[0].measured[0].block {
+                let Run::Field(field) = &mut paragraph.runs[0] else {
+                    panic!("expected a field");
+                };
+                field.fallback = fallback;
+            }
+            resolve_header_footer_field_widths(&mut cached, &layout, &config).unwrap();
+            assert_eq!(cached.variants[0].field_widths[0].per_page[0], 0.0);
+        }
     }
 }

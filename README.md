@@ -29,7 +29,9 @@
 
 - **Real-time collaboration.** People and agents edit the same file together,
   with live cursors and selections. Concurrent changes merge automatically,
-  and offline edits sync when peers reconnect.
+  and offline edits sync when peers reconnect. The reference relay checkpoints
+  stored updates and rehydrates rooms after restarts, preserving CRDT identities.
+  Its 24-hour idle expiration still applies.
 
 - **Undo and redo.** Navigate editing history and undo accepted agent
   proposals as a single step.
@@ -37,6 +39,9 @@
 - **Embed or automate.** Drop React editors into your app, build on the
   framework-free JavaScript cores, or use Rust and Python APIs for headless
   processing and agent workflows.
+
+- **Host-controlled XLSX editing.** XLSX hosts can intercept saving, flush drafts and accepted clipboard input,
+  and query the cell under a pointer without moving the selection.
 
 - **Open source and self-hostable.** Apache-2.0 licensed, with control over
   your document storage, deployment, and collaboration infrastructure.
@@ -54,6 +59,8 @@
 | [`@betteroffice/docx`](https://www.npmjs.com/package/@betteroffice/docx) | npm | framework-free .docx editor core — parsing, CRDT editing, and page layout in Rust through WebAssembly |
 | [`@betteroffice/docx-react`](https://www.npmjs.com/package/@betteroffice/docx-react) | npm | drop-in React .docx editor |
 | [`betteroffice-docx`](https://pypi.org/project/betteroffice-docx/) | PyPI | Python API for reading, editing, laying out, and rasterizing DOCX documents |
+
+Unrecognized drawing markup inside DOCX runs survives editor saves.
 
 ### Spreadsheets — `.xlsx`
 

@@ -48,13 +48,73 @@ function isStyleSourcedNumPr(attrs: ParagraphSaveAttrs): boolean {
   );
 }
 
+function sameValue(left: unknown, right: unknown): boolean {
+  return left === right || JSON.stringify(left) === JSON.stringify(right);
+}
+
+/** Whether `attrs[key]` only restates what the paragraph inherits and `orig` leaves unset. */
+function inheritsValue(
+  attrs: ParagraphSaveAttrs,
+  orig: ParagraphFormatting,
+  inherited: ParagraphFormatting | undefined,
+  key: keyof ParagraphFormatting
+): boolean {
+  return (
+    orig[key] === undefined &&
+    inherited?.[key] !== undefined &&
+    sameValue(attrs[key], inherited[key])
+  );
+}
+
+/**
+ * `formatting` without the values that only restate `inherited`, the
+ * docDefaults and style properties the paragraph inherits.
+ */
+function withoutInherited(
+  formatting: ParagraphFormatting,
+  inherited: ParagraphFormatting
+): ParagraphFormatting | undefined {
+  const result: ParagraphFormatting = { ...formatting };
+  const drop = (keys: (keyof ParagraphFormatting)[], same: boolean) => {
+    if (same) for (const key of keys) delete result[key];
+  };
+  for (const key of Object.keys(result) as (keyof ParagraphFormatting)[]) {
+    if (
+      key === 'styleId' ||
+      key === 'numPr' ||
+      key === 'lineSpacing' ||
+      key === 'lineSpacingRule' ||
+      key === 'indentFirstLine' ||
+      key === 'hangingIndent'
+    ) {
+      continue;
+    }
+    drop([key], inherited[key] !== undefined && sameValue(result[key], inherited[key]));
+  }
+  drop(
+    ['lineSpacing', 'lineSpacingRule'],
+    inherited.lineSpacing !== undefined &&
+      result.lineSpacing === inherited.lineSpacing &&
+      (result.lineSpacingRule ?? 'auto') === (inherited.lineSpacingRule ?? 'auto')
+  );
+  return Object.values(result).some((value) => value !== undefined) ? result : undefined;
+}
+
+/**
+ * The paragraph formatting `attrs` save as. `inherited`, when given, is what
+ * the paragraph inherits from docDefaults and its style: values that only
+ * restate it are left out, so inherited properties stay inherited.
+ */
 export function paragraphAttrsToFormatting(
-  attrs: ParagraphSaveAttrs
+  attrs: ParagraphSaveAttrs,
+  inherited?: ParagraphFormatting
 ): ParagraphFormatting | undefined {
   if (attrs._originalFormatting) {
     const orig = attrs._originalFormatting;
     const result = { ...orig };
-    if (attrs.alignment !== (orig.alignment || undefined)) {
+    const inherits = (key: keyof ParagraphFormatting) =>
+      inheritsValue(attrs, orig, inherited, key);
+    if (!inherits('alignment') && attrs.alignment !== (orig.alignment || undefined)) {
       result.alignment = attrs.alignment || undefined;
     }
     if (isStyleSourcedNumPr(attrs)) {
@@ -70,19 +130,22 @@ export function paragraphAttrsToFormatting(
     if (attrs.styleId !== (orig.styleId || undefined)) {
       result.styleId = attrs.styleId || undefined;
     }
-    if (attrs.pageBreakBefore !== (orig.pageBreakBefore || undefined)) {
+    if (
+      !inherits('pageBreakBefore') &&
+      attrs.pageBreakBefore !== (orig.pageBreakBefore || undefined)
+    ) {
       result.pageBreakBefore = attrs.pageBreakBefore || undefined;
     }
-    if (attrs.widowControl !== (orig.widowControl ?? undefined)) {
+    if (!inherits('widowControl') && attrs.widowControl !== (orig.widowControl ?? undefined)) {
       result.widowControl = attrs.widowControl ?? undefined;
     }
-    if (attrs.autoSpaceDE !== (orig.autoSpaceDE ?? undefined)) {
+    if (!inherits('autoSpaceDE') && attrs.autoSpaceDE !== (orig.autoSpaceDE ?? undefined)) {
       result.autoSpaceDE = attrs.autoSpaceDE ?? undefined;
     }
-    if (attrs.autoSpaceDN !== (orig.autoSpaceDN ?? undefined)) {
+    if (!inherits('autoSpaceDN') && attrs.autoSpaceDN !== (orig.autoSpaceDN ?? undefined)) {
       result.autoSpaceDN = attrs.autoSpaceDN ?? undefined;
     }
-    if (attrs.bidi !== (orig.bidi || undefined)) {
+    if (!inherits('bidi') && attrs.bidi !== (orig.bidi || undefined)) {
       result.bidi = attrs.bidi || undefined;
     }
     return result;
@@ -114,7 +177,7 @@ export function paragraphAttrsToFormatting(
     attrs.bidi;
   if (!hasFormatting) return undefined;
 
-  return {
+  const formatting: ParagraphFormatting = {
     alignment: attrs.alignment || undefined,
     spaceBefore: attrs.spaceBefore ?? undefined,
     spaceAfter: attrs.spaceAfter ?? undefined,
@@ -141,6 +204,7 @@ export function paragraphAttrsToFormatting(
     autoSpaceDN: attrs.autoSpaceDN ?? undefined,
     bidi: attrs.bidi || undefined,
   };
+  return inherited ? withoutInherited(formatting, inherited) : formatting;
 }
 
 export interface TableSaveAttrs extends Record<string, unknown> {

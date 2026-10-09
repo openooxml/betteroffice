@@ -564,6 +564,13 @@ impl SlideRenderer {
         })
     }
 
+    /// Whether a face was registered under `family` itself, rather than one
+    /// resolution would fall back to.
+    fn has_face_for(&self, family: &str) -> bool {
+        let requested = normalize_family(family);
+        self.faces.keys().any(|(name, _, _)| *name == requested)
+    }
+
     fn resolve_face(
         &self,
         family: &str,
@@ -2532,6 +2539,25 @@ fn resolve_content(
         let marker = written_marker
             .as_deref()
             .map(|marker| symbol_bullet(marker, properties.bullet_font.as_ref(), theme));
+        let bullet_style = written_marker
+            .as_deref()
+            .zip(marker.as_deref())
+            .map(|(written, marker)| {
+                let mut style = resolve_bullet_style(
+                    renderer,
+                    theme,
+                    &properties,
+                    &runs[0].style,
+                    written,
+                    substitutions,
+                )?;
+                let font = properties.bullet_font.as_ref();
+                if !bullet_font_draws(renderer, theme, font, style.face.id, marker) {
+                    style.color = TRANSPARENT.to_owned();
+                }
+                Ok::<_, RenderError>(style)
+            })
+            .transpose()?;
         paragraphs.push(ResolvedParagraph {
             align: parse_align(alignment),
             justify: is_full_justification(alignment),
@@ -2549,19 +2575,7 @@ fn resolve_content(
                 properties.indent.unwrap_or_default(),
             ),
             default_tab_px: resolve_default_tab(properties.default_tab_size),
-            bullet_style: written_marker
-                .as_deref()
-                .map(|written| {
-                    resolve_bullet_style(
-                        renderer,
-                        theme,
-                        &properties,
-                        &runs[0].style,
-                        written,
-                        substitutions,
-                    )
-                })
-                .transpose()?,
+            bullet_style,
             marker,
             rtl: properties.rtl.unwrap_or(false),
             runs,
@@ -5331,6 +5345,36 @@ fn rect_covering_text(rect: PxRect, text: Option<&TextHit>) -> PxRect {
         w: (right - left).max(rect.w),
         h: (bottom - top).max(rect.h),
     }
+}
+
+const TRANSPARENT: &str = "#00000000";
+
+/// Whether the `buFont` a deck names can draw `marker`. PowerPoint paints no
+/// marker when that font lacks the character, where a browser would borrow
+/// another font's glyph; it is judged only when the host registered a face for
+/// that family, and never for a symbol font, whose slots are translated first.
+fn bullet_font_draws(
+    renderer: &SlideRenderer,
+    theme: &Theme,
+    font: Option<&BulletFont>,
+    face: FontId,
+    marker: &str,
+) -> bool {
+    let Some(BulletFont::Typeface(typeface)) = font else {
+        return true;
+    };
+    let family = if typeface.starts_with('+') {
+        resolve_theme_font_ref(Some(theme), typeface)
+    } else {
+        typeface.clone()
+    };
+    if ooxml_text::SymbolFont::named(&family).is_some() || !renderer.has_face_for(&family) {
+        return true;
+    }
+    marker
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .all(|character| renderer.fonts.covers(face, character).unwrap_or(true))
 }
 
 /// A `buFont` symbol face reaches its glyphs by font position, so `buChar`
@@ -9728,6 +9772,29 @@ mod tests {
         let line = family_line_box(substituted.line.expect("trebuchet ms lines"), 1000.0);
         assert!((line.ascent - 939.0).abs() < 1e-3);
         assert!((line.descent - 222.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_bullet_font_without_the_marker_character_paints_no_marker() {
+        let mut renderer = SlideRenderer::new();
+        renderer
+            .register_font("Georgia", false, false, FONT)
+            .unwrap();
+        let theme = Theme::default();
+        let face = renderer
+            .resolve_face("Georgia", false, false, &mut SubstitutionLog::default())
+            .unwrap()
+            .id;
+        let draws = |family: Option<&str>, marker: &str| {
+            let font = family.map(|family| BulletFont::Typeface(family.to_owned()));
+            bullet_font_draws(&renderer, &theme, font.as_ref(), face, marker)
+        };
+        assert!(!renderer.fonts.covers(face, '\u{2713}').unwrap());
+        assert!(draws(Some("Georgia"), "\u{2022}"));
+        assert!(!draws(Some("Georgia"), "\u{2713}"));
+        assert!(draws(Some("Wingdings"), "\u{2713}"));
+        assert!(draws(Some("Futura"), "\u{2713}"));
+        assert!(draws(None, "\u{2713}"));
     }
 
     #[test]

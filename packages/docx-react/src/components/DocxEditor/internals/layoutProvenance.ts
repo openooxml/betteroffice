@@ -12,11 +12,51 @@ export function sourceVersionOf(target: object | null | undefined): string | nul
   return target ? (sourceVersions.get(target) ?? null) : null;
 }
 
+export interface WorkerFrameProvenance {
+  version: string;
+  preview: boolean;
+  asOpened: boolean;
+}
+
+const workerFrames = new WeakMap<object, WorkerFrameProvenance>();
+
+/** Records the worker document version a worker frame's display list and queries show. */
+export function stampWorkerFrameVersion(
+  target: object,
+  version: string | null | undefined,
+  preview = false,
+  asOpened = false
+): void {
+  if (version != null) workerFrames.set(target, { version, preview, asOpened });
+}
+
+/** The worker document version `target` shows, or null for a frame the worker did not lay out. */
+export function workerFrameVersionOf(target: object | null | undefined): string | null {
+  return target ? (workerFrames.get(target)?.version ?? null) : null;
+}
+
+/** The provenance of the presented worker frame. */
+export function presentedWorkerFrame(
+  queries: { readonly displayList: object } | null | undefined
+): WorkerFrameProvenance | null {
+  return queries
+    ? (workerFrames.get(queries) ?? workerFrames.get(queries.displayList) ?? null)
+    : null;
+}
+
+/** The worker document version the frame `queries` query lays out, or null. */
+export function presentedWorkerVersion(
+  queries: { readonly displayList: object } | null | undefined
+): string | null {
+  return presentedWorkerFrame(queries)?.version ?? null;
+}
+
 const supersededLayouts = new WeakSet<object>();
 
 /** Records that the document changed past `layout` before it was shown. */
-export function markSupersededLayout(layout: object): void {
-  supersededLayouts.add(layout);
+export function markSupersededLayout(layout: object, superseded = true): void {
+  if (superseded) supersededLayouts.add(layout);
+  else supersededLayouts.delete(layout);
 }
 
 /** Whether the document changed past `layout` before it was shown; such a layout never settles. */

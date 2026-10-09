@@ -55,9 +55,40 @@ export function App() {
 
 Without `onSave`, the save button downloads the edited bytes.
 
-Props: `file`, `fileName`, `onSave`, `onChange`, `onReady` (a handle for
+Props: `file`, `fileName`, `onSave`, `onSaveRequest`, `onChange`, `onReady` (a handle for
 host/agent-driven edits and the editor's `commands`), `collaboration`, `i18n`,
 `readOnly`, `toolbar`, `showToolbar`, and `className`.
+
+## Host editing controls
+
+`onSaveRequest` runs for toolbar, `commands.execute('save', null)` and
+Ctrl/Cmd+S saves before serialization.
+Return `true` to continue built-in saving; `false` or `void` handles or cancels
+it. Promises are awaited and concurrent requests are coalesced. `onSave` still
+receives the resulting bytes when built-in saving continues. A request waiting
+on a replaced or closed document is discarded.
+
+The API received by `onReady` exposes `flushPendingInput(): Promise<void>`.
+Await it before inspecting or mutating the core from a host workflow, then call
+`api.save()` for explicit serialization without re-entering `onSaveRequest`.
+`save()` remains synchronous and rejects while asynchronous input is pending.
+On the editable worker path (`experimentalWorkerOpen`), `save()` is asynchronous and
+`flushPendingInput()` also flushes edits to the worker; `flush()` is an alias.
+Flush rejects stale document handles, failed input, and unfinished pointer
+gestures. Finish or cancel the gesture before retrying.
+
+XLSX flushing commits cell/formula drafts and chart nudges, waits for IME
+composition to finish, and waits for accepted asynchronous clipboard edits.
+Refused drafts must be corrected or discarded before flushing can complete.
+
+`api.getPositionAtPoint(clientX, clientY)` returns `{ sheet, row, col }`, all
+zero-based, from the painted grid. It respects scrolling and zoom without
+changing focus or selection. Chart overlays, headers, outside points, stale
+handles, and unavailable geometry return `null`.
+
+For grouped host edits, use the core's existing `editCells(sheet, edits)` or
+`applyOps(ops)` batch APIs. Each successful batch is one undo step. XLSX does
+not currently expose editable comments, so it has no comment reanchoring API.
 
 ## What works today
 

@@ -1,6 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 import type { YrsStorySegment } from './index';
-import { YrsPositionProjection, yrsLocToProjectedDisplayPosition } from './yrsPositionProjection';
+import {
+  createYrsLocProjectionFromOutline,
+  YrsPositionProjection,
+  yrsLocToProjectedDisplayPosition,
+} from './yrsPositionProjection';
 
 const segments: Record<string, YrsStorySegment[]> = {
   body: [
@@ -123,5 +127,34 @@ describe('yrsLocToProjectedDisplayPosition', () => {
         { story: 'absent', paraId: 'p', offset: 0 }
       )
     ).toBeNull();
+  });
+
+  test('the flat outline preserves first paragraph lookup, clamps and wrapper fallbacks', () => {
+    const old = new YrsPositionProjection(session, 'body');
+    const fast = createYrsLocProjectionFromOutline({
+      body: { contentStart: 0, size: 27, paragraphs: [
+        { paraId: 'body:p0', displayStart: 0, length: 6, leading: 0 },
+        { paraId: 'body:p1', displayStart: 20, length: 5, leading: 1 },
+        { paraId: 'body:p1', displayStart: 100, length: 20, leading: 0 },
+      ] },
+      'body:t0:r0c0': { contentStart: 11, size: 6, paragraphs: [
+        { paraId: 'cell:p0', displayStart: 0, length: 4, leading: 0 },
+      ] },
+    });
+    for (const [story, paraId] of [
+      ['body', 'body:p0'], ['body', 'body:p1'], ['body:t0:r0c0', 'cell:p0'],
+      ['body', 'missing'], ['body:t0:r0c0', 'missing'], ['absent', 'missing'],
+    ]) {
+      for (const offset of [-Infinity, -1, 0, 1, 3, 6, 100, Infinity, NaN]) {
+        const loc = { story, paraId, offset };
+        expect(fast.positionForLoc(loc)).toBe(old.positionForLoc(loc));
+        expect(yrsLocToProjectedDisplayPosition(reader, () => fast, loc)).toBe(
+          yrsLocToProjectedDisplayPosition(reader, () => old, loc)
+        );
+      }
+    }
+    expect(yrsLocToProjectedDisplayPosition(reader, () => fast,
+      { story: 'body', paraId: 'body:p0', offset: 0 }, 'body', () => null
+    )).toBeNull();
   });
 });

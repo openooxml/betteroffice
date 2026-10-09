@@ -1,3 +1,4 @@
+import { layoutMetaSummary, type LayoutMetaV1 } from '../yrs/layoutMeta';
 import type { ResidentMeasurementConfig } from '../layout/measure';
 import type { Layout, LayoutOptions, MeasuredBlock } from '../layout/pagination';
 import type { DisplayListHeadersFooters } from '../layout/render/rustDisplayList';
@@ -18,6 +19,8 @@ interface RetainedKernelInputs {
 
 export interface ResidentRegionLayoutRequest {
   bodyStory: 'body';
+  /** @internal Use saved page totals while the layout is partial. */
+  cachedPageTotals?: boolean;
   options: Pick<LayoutOptions, 'contractVersion' | 'pageGap'>;
   regions: {
     sections: Array<{
@@ -49,6 +52,8 @@ export interface ComputeLayoutInputs {
   >;
   renderEnv: YrsRenderEnv;
   measurement: ResidentMeasurementConfig;
+  /** @internal See `ResidentRegionLayoutRequest.cachedPageTotals`. */
+  cachedPageTotals?: boolean;
 }
 
 export interface LayoutComputation {
@@ -157,6 +162,7 @@ export function computeLayout(inputs: ComputeLayoutInputs): LayoutComputation {
     inputs.renderEnv
   );
   request.measurement = inputs.measurement;
+  if (inputs.cachedPageTotals) request.cachedPageTotals = true;
   const session = inputs.session;
   const output = JSON.parse(
     session.layoutDocumentWithRegionsRetainedJson(JSON.stringify(request))
@@ -189,10 +195,17 @@ export function computeLayout(inputs: ComputeLayoutInputs): LayoutComputation {
  * to lay the document out on this thread first.
  */
 export function workerLayoutComputation(
-  layoutJson: string,
-  layoutRevision?: number
+  layoutReply: string | LayoutMetaV1,
+  layoutRevision?: number,
+  headersFooters?: string
 ): LayoutComputation {
-  const output = JSON.parse(layoutJson) as ResidentRegionLayoutRetainedOutput;
+  const output: ResidentRegionLayoutRetainedOutput = typeof layoutReply === 'string'
+    ? JSON.parse(layoutReply) as ResidentRegionLayoutRetainedOutput
+    : {
+        layout: layoutMetaSummary(layoutReply),
+        notesConverged: layoutReply.notesConverged,
+        headersFooters: JSON.parse(layoutReply.headersFooters ?? headersFooters ?? 'null') ?? undefined,
+      };
   const unavailable = (): never => {
     throw new Error('the measured blocks of a worker-run layout live in the worker');
   };

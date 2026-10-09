@@ -315,7 +315,12 @@ fn parse_drawing_run_formatting(run: &XmlElement) -> Option<serde_json::Value> {
     if let Some(solid) = properties.child_by_full_name("a:solidFill") {
         property_count += 1;
         if let Some(color) = crate::drawingml::parse_color_element(Some(solid)) {
-            formatting.insert("color".to_owned(), serde_json::to_value(color).unwrap());
+            formatting.insert(
+                "color".to_owned(),
+                serde_json::to_string(&color)
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s))
+                    .unwrap(),
+            );
         }
     }
     (property_count > 0).then_some(serde_json::Value::Object(formatting))

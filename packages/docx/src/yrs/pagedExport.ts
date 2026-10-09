@@ -163,7 +163,8 @@ export interface DocxPageDiagnostic {
     | 'unsupported-note-layout'
     | 'clipped-content'
     | 'geometry-unavailable'
-    | 'truncated';
+    | 'truncated'
+    | 'note-layout-fallback';
   nodeId: string | null;
   pageIndex: number | null;
   message: string;
