@@ -53,6 +53,7 @@ function viewerGeometry(options: {
   layout?: { id?: string; version?: string; previewVersion?: number; zoom?: number };
   previewKey?: string;
   proposals?: ProposalGeometryMirror['targets'];
+  complete?: boolean;
 }) {
   const pages = document.createElement('div');
   const pageList = options.pages ?? [{}];
@@ -127,7 +128,8 @@ function viewerGeometry(options: {
           },
     () => false,
     undefined,
-    options.read && { read: options.read, cache: options.cache ?? createAnchorReadCache() }
+    options.read && { read: options.read, cache: options.cache ?? createAnchorReadCache() },
+    () => options.complete ?? false
   );
 }
 
@@ -643,13 +645,20 @@ test('a proposal in a batch lists the unbuilt pages it reaches like the worker t
   expect(sync).not.toHaveProperty('unbuiltPages');
 });
 
-test('a header or footer no laid-out page paints is unavailable', async () => {
-  const geometry = viewerGeometry({
-    pages: [{}, { unbuilt: true, positionSpan: [100, 200], hfParts: { header: 'rIdOther' } }],
-    read: reply({ ok: true, root: 'hf:rIdH', ranges: [{ from: 1, to: 4 }], paragraph: 1, hidden: [] }),
-  });
-  expect(await geometry.readAnchorGeometry(RANGE)).toEqual({
+test('a header or footer no page paints is missing once the layout is complete, else unavailable', async () => {
+  const read = reply({ ok: true, root: 'hf:rIdH', ranges: [{ from: 1, to: 4 }], paragraph: 1, hidden: [] });
+  const built = [{}, {}];
+  const unbuilt = [{}, { unbuilt: true, positionSpan: [100, 200] as [number, number], hfParts: { header: 'rIdOther' } }];
+  const unavailable = {
     ok: false,
     failure: { code: 'layout-unavailable', message: 'No laid-out page paints this header or footer' },
+  } as const;
+  expect(await viewerGeometry({ pages: built, read, complete: true }).readAnchorGeometry(RANGE)).toEqual({
+    ok: false,
+    failure: { code: 'missing-target', message: 'No page paints this header or footer' },
   });
+  expect(await viewerGeometry({ pages: built, read }).readAnchorGeometry(RANGE)).toEqual(unavailable);
+  expect(await viewerGeometry({ pages: unbuilt, read, complete: true }).readAnchorGeometry(RANGE)).toEqual(
+    unavailable
+  );
 });

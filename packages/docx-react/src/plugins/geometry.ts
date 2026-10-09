@@ -304,7 +304,8 @@ export function createPluginGeometry(
   access: (target: DocxGeometryTarget) => AnchorGeometryAccess | null,
   held: () => boolean = () => false,
   readPoint?: (clientX: number, clientY: number) => Promise<DocxPointPosition | null>,
-  workerReads?: { read: ReadAnchorTargets; cache: AnchorReadCache }
+  workerReads?: { read: ReadAnchorTargets; cache: AnchorReadCache },
+  complete: () => boolean = () => false
 ): DocxPluginGeometry {
   const shown = () => dom.zoom === layout.zoom && current();
   const painted = () => shown() && isPresented(dom.pagesContainer, queries.displayList);
@@ -484,7 +485,9 @@ export function createPluginGeometry(
           : null;
     const region = pages.map(regionOf).find((found) => found !== null);
     if (!region) {
-      return anchorFailure('layout-unavailable', 'No laid-out page paints this header or footer');
+      return complete() && !pages.some(({ unbuilt }) => unbuilt)
+        ? anchorFailure('missing-target', 'No page paints this header or footer')
+        : anchorFailure('layout-unavailable', 'No laid-out page paints this header or footer');
     }
     const unbuilt = pages.flatMap((page, pageIndex) =>
       page.unbuilt && page.hfParts?.[region] === rId ? [pageIndex] : []
@@ -589,7 +592,9 @@ export function createPluginGeometry(
     if (mirrored && !mirrored.ok) return mirrored;
     const resolved = mirror ? null : resolveAnchorTarget(session, target, layout.version);
     if (resolved && !resolved.ok) return resolved;
-    if (resolved && anchorDisplayRoot(resolved.paragraph.story) !== 'body') {
+    const root = resolved ? anchorDisplayRoot(resolved.paragraph.story) : 'body';
+    if (root === null) return anchorFailure('unsupported', 'The target has no display position');
+    if (resolved && root !== 'body') {
       const shown = anchorDisplayTarget(session, resolved, revisionPreviewOf(session));
       if (!shown.ok) return shown;
       const placed = placeDisplay(shown, deferUnbuilt);
@@ -603,7 +608,7 @@ export function createPluginGeometry(
     const ranges: Interval[] = mirrored?.ok ? [...mirrored.ranges] : [];
     for (const range of resolved?.ok ? resolved.ranges : []) {
       const mapped = display(range);
-      if (!mapped) return anchorFailure('unsupported', 'The target has no body display position');
+      if (!mapped) return anchorFailure('unsupported', 'The target has no display position');
       ranges.push(mapped);
     }
     const hidden =

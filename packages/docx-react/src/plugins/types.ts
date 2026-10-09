@@ -210,8 +210,9 @@ export interface DocxPluginGeometry {
    * Every visible fragment in overlay-layer pixels. The anchor is the collapsed end of the
    * last fragment, a wholly hidden target's boundary, or its paragraph; pageRect is its page.
    * A header or footer target has fragments on every page that paints it and anchors on the
-   * first such page. Refuses stale or unrendered layouts, and all but proposals in worker
-   * viewers, which use {@link readAnchorGeometry}.
+   * first such page; one no page paints is `missing-target` once the layout is complete and
+   * `layout-unavailable` before. Refuses stale or unrendered layouts, and all but proposals in
+   * worker viewers, which use {@link readAnchorGeometry}.
    */
   getAnchorGeometry(target: DocxGeometryTarget): DocxAnchorGeometryResult;
   /**
