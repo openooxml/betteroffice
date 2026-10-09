@@ -162,6 +162,44 @@ fn count_data_urls(value: &Value) -> usize {
 }
 
 #[test]
+fn retained_media_integrity_warnings_match_the_default_parse() {
+    let parts = vec![
+        (
+            "[Content_Types].xml".to_owned(),
+            br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/></Types>"#.to_vec(),
+        ),
+        (
+            "word/document.xml".to_owned(),
+            br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p/></w:body></w:document>"#.to_vec(),
+        ),
+        ("word/media/image1.png".to_owned(), png(4, 4, 1)),
+        ("word/media/image2.PNG".to_owned(), png(4, 4, 2)),
+        ("word/media/metadata.bin".to_owned(), b"metadata".to_vec()),
+    ];
+    let bytes: Arc<[u8]> = ooxml_opc::rezip_parts(&parts).unwrap().into();
+    let limits = ParseLimits::default();
+    let (eager, _) = parse_docx_s9_wire_parts_with_limits(&bytes, options(), &limits).unwrap();
+    let (tokens, parts, table) =
+        parse_docx_s9_wire_with_media_table(bytes, options(), &limits).unwrap();
+
+    assert!(table.keeps_compressed("word/media/image1.png"));
+    assert!(table.keeps_compressed("word/media/image2.PNG"));
+    assert!(
+        parts
+            .iter()
+            .any(|(path, _)| path == "word/media/metadata.bin")
+    );
+    assert_eq!(
+        eager.document.warnings.as_deref(),
+        Some(
+            ["DOCX contains 3 orphan OPC parts with no declared content type.".to_owned()]
+                .as_slice()
+        )
+    );
+    assert_eq!(tokens.document.warnings, eager.document.warnings);
+}
+
+#[test]
 fn a_media_table_parse_equals_the_default_one_read_through_its_tokens() {
     let bytes: Arc<[u8]> = package().into();
     let limits = ParseLimits::default();

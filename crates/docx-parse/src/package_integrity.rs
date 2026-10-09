@@ -4,9 +4,14 @@ use quick_xml::events::Event;
 use quick_xml::name::{Namespace, ResolveResult};
 use quick_xml::{NsReader, XmlVersion};
 
+use crate::media::MediaTable;
 use crate::xml::{ParseLimits, namespaces};
 
-pub(crate) fn package_warnings(parts: &[(String, Vec<u8>)], limits: &ParseLimits) -> Vec<String> {
+pub(crate) fn package_warnings(
+    parts: &[(String, Vec<u8>)],
+    media_table: Option<&MediaTable>,
+    limits: &ParseLimits,
+) -> Vec<String> {
     let mut warnings = Vec::new();
     let content_types = ooxml_opc::parse_content_types(parts);
     if content_types.is_ok()
@@ -17,7 +22,15 @@ pub(crate) fn package_warnings(parts: &[(String, Vec<u8>)], limits: &ParseLimits
     {
         let uncovered = parts
             .iter()
-            .filter(|(path, _)| {
+            .map(|(path, _)| path.as_str())
+            .chain(
+                media_table
+                    .into_iter()
+                    .flat_map(|table| (0..table.len()).filter_map(|index| table.path(index))),
+            )
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .filter(|path| {
                 !path.eq_ignore_ascii_case("[Content_Types].xml")
                     && !path.to_ascii_lowercase().ends_with(".rels")
                     && content_types

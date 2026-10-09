@@ -502,7 +502,7 @@ fn parse_s9_package_impl(
     let mut ids = HexIdAllocator::from_sha256(&digest)?;
 
     let document_part = find_part(parts, &document_path);
-    let mut warnings = crate::package_integrity::package_warnings(parts, limits);
+    let mut warnings = crate::package_integrity::package_warnings(parts, media_table, limits);
     let (mut body, budget_stopped) = match document_part.filter(|(_, xml)| !xml.is_empty()) {
         Some((path, xml)) => {
             let mut scanned_budget = body_blocks
