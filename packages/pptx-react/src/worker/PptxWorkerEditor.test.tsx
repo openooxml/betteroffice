@@ -7,6 +7,8 @@ import type {
   PptxWorkerEditorSession, PptxWorkerEditorState, SlideDisplayList, StorySnapshot,
 } from '@betteroffice/pptx';
 import { PptxEditor } from '../PptxEditor';
+import type { PptxWorkerViewerApi } from '../PptxEditor';
+import { PptxCommandAdmissionError } from '../commands/createPptxCommandStore';
 import { definePptxPlugin } from '../plugins/definePptxPlugin';
 import type { PptxPluginContext } from '../plugins/types';
 import { presentationSessionOpener } from '../viewer/useSessionPresentation';
@@ -151,7 +153,7 @@ test('dispatches_only_flagged_editable_props', async () => {
   expect(local).not.toHaveBeenCalled();
   expect(viewer).not.toHaveBeenCalled();
   expect(worker.mock.calls[0][1]?.clientId).toBe(42);
-  view.rerender(<PptxEditor fonts={[]} file={file} experimentalWorkerOpen readOnly />);
+  view.rerender(<PptxEditor fonts={[]} file={new Uint8Array([2])} experimentalWorkerOpen readOnly />);
   await waitFor(() => expect(viewer).toHaveBeenCalledTimes(1));
   expect(worker).toHaveBeenCalledTimes(1);
   expect(main).not.toHaveBeenCalled();
@@ -193,6 +195,212 @@ test('preparing_state_disables_every_edit_entry', async () => {
   expect(view.getByTestId('pptx-worker-status').textContent).toBe('Preparing editor. Editing will be available shortly.');
   await act(async () => { value.hydrate(); });
   await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+});
+
+test('readOnly_toggles_keep_edits_and_live_api_guards_in_the_same_session', async () => {
+  const value = session();
+  const worker = open(value);
+  const viewer = spyOn(presentationSessionOpener, 'open').mockRejectedValue(new Error('viewer sentinel'));
+  restorers.push(() => viewer.mockRestore());
+  let api!: PptxWorkerEditorApi;
+  const ready = mock((opened: PptxWorkerEditorApi | PptxWorkerViewerApi) => {
+    if ('handleAsync' in opened) api = opened;
+  });
+  const view = render(<PptxEditor fonts={[]} file={file} experimentalWorkerOpen onReady={ready} />);
+  await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+  const retained = api;
+  const access = await act(() => api.handleAsync());
+  const insert = access.insertText;
+  await act(async () => {
+    insert('story', 1, 'first');
+    await api.flushPendingInput();
+    api.selectText({ slide: 1, shapeId: 'shape', storyId: 'story', start: 1, end: 1 });
+  });
+  view.rerender(<PptxEditor fonts={[]} file={file} experimentalWorkerOpen readOnly onReady={ready} />);
+  expect(viewer).not.toHaveBeenCalled();
+  expect(worker).toHaveBeenCalledTimes(1);
+  expect(value.owner.dispose).not.toHaveBeenCalled();
+  expect(api).toBe(retained);
+  expect(ready).toHaveBeenCalledTimes(1);
+  expect(await act(() => api.handleAsync())).toBe(access);
+  expect(new TextDecoder().decode(await api.saveAsync())).toBe('xfirst');
+  expect(await api.readContent()).toMatchObject({ stories: [{ text: 'xfirst' }] });
+  const before = value.methods.slice();
+  const request = { expectVersion: value.owner.state.version!,
+    steps: [{ op: 'setSlideNotes' as const, target: { slideId: 's' }, text: 'refused' }] };
+  expect(await api.applyEdits(request)).toMatchObject({ ok: false, failure: { code: 'read-only' } });
+  expect(await api.validateEdits(request)).toMatchObject({ ok: false, failure: { code: 'read-only' } });
+  expect(access.applyEdits(request)).toMatchObject({ ok: false, failure: { code: 'read-only' } });
+  expect(() => insert('story', 0, 'refused')).toThrow(PptxCommandAdmissionError);
+  expect(() => access.setSlideNotes('s', 'refused')).toThrow(PptxCommandAdmissionError);
+  try { access.setSlideNotes('s', 'refused'); }
+  catch (error) { expect(error).toMatchObject({ code: 'read-only' }); }
+  expect(await api.commands.execute('undo', null)).toMatchObject({ ok: false, failure: { code: 'read-only' } });
+  expect((view.getByTestId('pptx-notes-textarea') as HTMLTextAreaElement).disabled).toBe(true);
+  expect((view.getByTestId('pptx-insert-image-input') as HTMLInputElement).disabled).toBe(true);
+  expect(view.queryByTestId('pptx-bold')).toBeNull();
+  fireEvent.change(view.getByTestId('pptx-notes-textarea'), { target: { value: 'refused' } });
+  fireEvent.keyDown(view.getByRole('application'), { key: 'a' });
+  expect(value.methods).toEqual(before);
+  view.rerender(<PptxEditor fonts={[]} file={file} experimentalWorkerOpen readOnly={false} onReady={ready} />);
+  await act(async () => {
+    insert('story', 6, 'second');
+    expect(await api.applyEdits({ ...request, expectVersion: await api.version() }))
+      .toMatchObject({ ok: true, applied: true });
+  });
+  expect(new TextDecoder().decode(await api.saveAsync())).toBe('xfirstsecond');
+  expect(worker).toHaveBeenCalledTimes(1);
+  expect(viewer).not.toHaveBeenCalled();
+  expect(api).toBe(retained);
+  expect(ready).toHaveBeenCalledTimes(1);
+});
+
+test('readOnly_flip_during_hydration_keeps_preparing_input_visibly_refused', async () => {
+  const value = session(false);
+  const worker = open(value);
+  let api!: PptxWorkerEditorApi;
+  const ready = mock((opened: PptxWorkerEditorApi | PptxWorkerViewerApi) => {
+    if ('handleAsync' in opened) api = opened;
+  });
+  const errors = mock((_error: Error) => {});
+  const view = render(<PptxEditor fonts={[]} file={file} experimentalWorkerOpen onReady={ready} onError={errors} />);
+  await waitFor(() => expect(view.getByTestId('pptx-worker-status')).toBeDefined());
+  fireEvent.keyDown(view.getByRole('application'), { key: 'a' });
+  expect(errors).toHaveBeenCalledWith(expect.any(pptx.PptxPeerNotReadyError));
+  expect(value.methods).toEqual([]);
+  view.rerender(<PptxEditor fonts={[]} file={file} experimentalWorkerOpen readOnly onReady={ready} onError={errors} />);
+  expect(ready).not.toHaveBeenCalled();
+  await act(async () => { value.hydrate(); });
+  await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+  const access = await api.handleAsync();
+  expect(() => access.insertText('story', 1, 'refused')).toThrow(PptxCommandAdmissionError);
+  expect(new TextDecoder().decode(await api.saveAsync())).toBe('x');
+  expect(await api.readContent()).toMatchObject({ stories: [{ text: 'x' }] });
+  expect(value.methods).toEqual([]);
+  expect(worker).toHaveBeenCalledTimes(1);
+  expect(value.owner.dispose).not.toHaveBeenCalled();
+});
+
+test('readOnly_flip_visibly_refuses_an_image_finishing_preparation', async () => {
+  const value = session();
+  open(value);
+  let api!: PptxWorkerEditorApi;
+  const ready = (opened: PptxWorkerEditorApi | PptxWorkerViewerApi) => {
+    if ('handleAsync' in opened) api = opened;
+  };
+  const errors = mock((_error: Error) => {});
+  const originalImage = globalThis.Image;
+  const image = new Image();
+  Object.defineProperties(image, { src: { value: '', writable: true },
+    naturalWidth: { value: 400 }, naturalHeight: { value: 200 } });
+  globalThis.Image = function () { return image; } as unknown as typeof Image;
+  restorers.push(() => { globalThis.Image = originalImage; });
+  const view = render(<PptxEditor fonts={[]} file={file} experimentalWorkerOpen onReady={ready} onError={errors} />);
+  await waitFor(() => expect(api).toBeDefined());
+  fireEvent.change(view.getByTestId('pptx-insert-image-input'), {
+    target: { files: [new File(['png'], 'pending.png', { type: 'image/png' })] },
+  });
+  await waitFor(() => expect(image.src).toContain('data:image/png;base64,'));
+  expect(errors).not.toHaveBeenCalled();
+  expect(value.methods).toEqual([]);
+  view.rerender(<PptxEditor fonts={[]} file={file} experimentalWorkerOpen readOnly onReady={ready} onError={errors} />);
+  await act(async () => { fireEvent.load(image); });
+  await waitFor(() => expect(errors).toHaveBeenCalledWith(
+    expect.objectContaining({ message: 'The presentation changed before the image was inserted' })
+  ));
+  expect(view.getByText('The presentation changed before the image was inserted')).toBeDefined();
+  expect(value.methods).toEqual([]);
+  expect(new TextDecoder().decode(await api.saveAsync())).toBe('x');
+  expect(await api.readContent()).toMatchObject({ stories: [{ text: 'x' }] });
+});
+
+test('readOnly_flip_refuses_a_pending_plugin_batch', async () => {
+  const value = session();
+  open(value);
+  let api!: PptxWorkerEditorApi;
+  let context!: PptxPluginContext<null>;
+  const ready = (opened: PptxWorkerEditorApi | PptxWorkerViewerApi) => {
+    if ('handleAsync' in opened) api = opened;
+  };
+  const plugin = definePptxPlugin({ id: 'writer', createState: () => null, initialize(ctx) { context = ctx; } });
+  const plugins = [plugin];
+  const grants = { writer: { document: 'write' as const, editBatches: true as const } };
+  const view = render(<PptxEditor fonts={[]} file={file} experimentalWorkerOpen plugins={plugins}
+    pluginGrants={grants} onReady={ready} />);
+  await waitFor(() => expect(api).toBeDefined());
+  await waitFor(() => expect(context).toBeDefined());
+  const held = deferred<void>();
+  const started = deferred<void>();
+  const request = { expectVersion: value.owner.state.version!,
+    steps: [{ op: 'setSlideNotes' as const, target: { slideId: 's' }, text: 'refused' }] };
+  let result: unknown;
+  const pending = context.run(async (fresh) => {
+    started.resolve();
+    await held.promise;
+    result = await fresh.edits!.applyEdits(request);
+  });
+  await started.promise;
+  view.rerender(<PptxEditor fonts={[]} file={file} experimentalWorkerOpen readOnly plugins={plugins}
+    pluginGrants={grants} onReady={ready} />);
+  await act(async () => {
+    held.resolve();
+    await pending;
+  });
+  expect(result).toMatchObject({ ok: false, failure: { code: 'read-only' } });
+  expect(value.methods).toEqual([]);
+  expect(value.snapshot.slides[0].notes).toBe('');
+  expect(new TextDecoder().decode(await api.saveAsync())).toBe('x');
+  expect(await api.readContent()).toMatchObject({ stories: [{ text: 'x' }] });
+});
+
+test('readOnly_flip_cancels_an_active_shape_drag_without_mutating', async () => {
+  const value = session();
+  open(value);
+  let api!: PptxWorkerEditorApi;
+  const ready = (opened: PptxWorkerEditorApi | PptxWorkerViewerApi) => {
+    if ('handleAsync' in opened) api = opened;
+  };
+  const errors = mock((_error: Error) => {});
+  const view = render(<PptxEditor fonts={[]} file={file} experimentalWorkerOpen onReady={ready} onError={errors} />);
+  await waitFor(() => expect(api).toBeDefined());
+  const canvas = view.getByTestId('pptx-slide-canvas');
+  canvas.getBoundingClientRect = () => new DOMRect(0, 0, 960, 540);
+  canvas.setPointerCapture = () => {};
+  canvas.hasPointerCapture = () => false;
+  fireEvent.pointerDown(canvas, { isPrimary: true, button: 0, pointerId: 7, clientX: 20, clientY: 20 });
+  fireEvent.pointerMove(canvas, { pointerId: 7, clientX: 140, clientY: 90 });
+  await expect(api.flushPendingInput()).rejects.toThrow('Finish the pointer gesture');
+  expect(value.methods).toEqual([]);
+  view.rerender(<PptxEditor fonts={[]} file={file} experimentalWorkerOpen readOnly onReady={ready} onError={errors} />);
+  await api.flushPendingInput();
+  fireEvent.pointerMove(canvas, { pointerId: 7, clientX: 200, clientY: 120 });
+  fireEvent.pointerUp(canvas, { pointerId: 7, clientX: 200, clientY: 120 });
+  view.rerender(<PptxEditor fonts={[]} file={file} experimentalWorkerOpen onReady={ready} onError={errors} />);
+  fireEvent.pointerUp(canvas, { pointerId: 7, clientX: 200, clientY: 120 });
+  await api.flushPendingInput();
+  expect(errors).not.toHaveBeenCalled();
+  expect(value.methods).toEqual([]);
+  expect(value.snapshot.slides[0].shapes[0]).toMatchObject({ x: 0, y: 0 });
+  expect(new TextDecoder().decode(await api.saveAsync())).toBe('x');
+});
+
+test('new_worker_session_inputs_reset_readOnly_dispatch', async () => {
+  const value = session();
+  const worker = open(value);
+  const viewer = spyOn(presentationSessionOpener, 'open').mockRejectedValue(new Error('viewer sentinel'));
+  const main = spyOn(pptx, 'initWasm').mockResolvedValue(undefined);
+  restorers.push(() => viewer.mockRestore(), () => main.mockRestore());
+  const next = new Uint8Array([2]);
+  const view = render(<PptxEditor fonts={[]} file={file} experimentalWorkerOpen readOnly />);
+  await waitFor(() => expect(viewer).toHaveBeenCalledTimes(1));
+  expect(worker).not.toHaveBeenCalled();
+  view.rerender(<PptxEditor fonts={[]} file={file} experimentalWorkerOpen />);
+  await waitFor(() => expect(worker).toHaveBeenCalledTimes(1));
+  view.rerender(<PptxEditor fonts={[]} file={next} experimentalWorkerOpen readOnly />);
+  await waitFor(() => expect(viewer).toHaveBeenCalledTimes(2));
+  expect(worker).toHaveBeenCalledTimes(1);
+  expect(value.owner.dispose).toHaveBeenCalledTimes(1);
+  expect(main).not.toHaveBeenCalled();
 });
 
 test('hydration_keeps_navigation_and_the_painted_worker_slide', async () => {

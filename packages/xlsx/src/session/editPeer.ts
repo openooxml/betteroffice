@@ -2,6 +2,7 @@ import { SessionFailure } from '../../../../shared/office-session';
 import {
   adoptWorkbookPeerVersion, StaleProposalError, type WorkbookCalculationContext, type WorkbookHandle,
 } from '../wasm/loader';
+import { localNowSerial } from './calculationClock';
 import type { WorkbookSession } from './client';
 import { WorkbookRecoveryRefusal, workbookEditPeerInternals } from './editPeerInternals';
 import { WorkbookPeerHydrationError } from './peerHydrationError';
@@ -172,7 +173,7 @@ export function createWorkbookEditPeer(options: WorkbookEditPeerOptions): Workbo
     if (applying.has(op)) throw new Error('Workbook queued operation is already applying');
     const previousCalculation = precedingCalculation;
     const calculation: WorkbookCalculationContext = op.calculation ?? {
-      nowSerial: now() / 86_400_000 + 25_569,
+      nowSerial: localNowSerial(now()),
       randSeed: seed(),
     };
     const slot: typeof pending[number] = { resolved: false };

@@ -340,6 +340,35 @@ export class StaleProposalError extends Error {
   }
 }
 
+/** A display-list viewport exceeds the counted cell limit. */
+export class DisplayTooLargeError extends Error {
+  readonly code = 'displayTooLarge';
+  constructor(readonly cells: number, readonly maxCells: number) {
+    super(`requested viewport spans ${cells} cells, exceeds the ${maxCells}-cell display-list cap`);
+    this.name = 'DisplayTooLargeError';
+  }
+}
+
+function displayErrorFrom(message: string): DisplayTooLargeError | null {
+  if (!message.startsWith('{')) return null;
+  try {
+    const parsed = JSON.parse(message) as {
+      code?: unknown;
+      cells?: unknown;
+      maxCells?: unknown;
+    };
+    if (
+      parsed.code !== 'displayTooLarge' ||
+      typeof parsed.cells !== 'number' || !Number.isSafeInteger(parsed.cells) ||
+      typeof parsed.maxCells !== 'number' || !Number.isSafeInteger(parsed.maxCells) ||
+      parsed.maxCells <= 0 || parsed.cells <= parsed.maxCells
+    ) return null;
+    return new DisplayTooLargeError(parsed.cells, parsed.maxCells);
+  } catch {
+    return null;
+  }
+}
+
 // the wasm reports a stale accept as a JSON error naming each drifted cell.
 function staleErrorFrom(message: string): StaleProposalError | null {
   if (!message.startsWith('{')) return null;
@@ -379,6 +408,7 @@ export interface WorkbookHandle extends CollaborationReplica {
   /** Metadata for `sheet`, with that index in `activeSheet`; leaves the workbook unchanged. */
   sheetInfoFor(sheet: number): SheetInfo;
   calculationStatus(): CalculationStatus;
+  /** Clamps tracks to the grid; throws {@link DisplayTooLargeError} above {@link getDisplayListCellLimit}. */
   displayList(viewport: Viewport): DisplayList;
   /** `displayList` with build and encode time measured inside the core. */
   displayListProfiled(viewport: Viewport): ProfiledDisplayList;
@@ -543,7 +573,14 @@ function requireInitialized(): void {
 // wasm rejects throw strings; normalize them (and anything else) to Error.
 function toError(e: unknown): Error {
   if (e instanceof Error) return e;
-  return new Error(typeof e === 'string' ? e : String(e));
+  const message = typeof e === 'string' ? e : String(e);
+  return displayErrorFrom(message) ?? new Error(message);
+}
+
+/** Maximum counted cells per frame, including boundary and frozen tracks; call after `initWasm`. */
+export function getDisplayListCellLimit(): number {
+  requireInitialized();
+  return xlsxWasm.displayListCellLimit();
 }
 
 /**

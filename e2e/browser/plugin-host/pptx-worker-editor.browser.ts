@@ -36,6 +36,45 @@ async function recovery(page: Page, index: number, text: string) {
   expect(saved.text).toBe(text);
 }
 
+test('readOnly_toggles_preserve_worker_edits_and_refuse_api_writes', async ({ page }) => {
+  await page.goto('/pptx-worker-editor.html');
+  await page.waitForFunction(() => '__pptxWorkerEditor' in window);
+  await page.evaluate(() => window.__pptxWorkerEditor.mounted);
+  await page.evaluate(() => window.__pptxWorkerEditor.releaseHydration());
+  expect(await page.evaluate(() => window.__pptxWorkerEditor.edit(' first'))).toBe('accepted');
+  await page.evaluate(() => window.__pptxWorkerEditor.parity());
+  await page.evaluate(() => window.__pptxWorkerEditor.baseline());
+  expect(await page.evaluate(() => {
+    const probe = window.__pptxWorkerEditor;
+    const end = probe.text().length;
+    const selected = probe.select(end, end);
+    probe.hold();
+    return selected;
+  })).toBe(true);
+  await page.getByRole('application').focus();
+  await page.keyboard.type(' pending');
+  const pending = await page.evaluate(() => window.__pptxWorkerEditor.state());
+  expect(pending.sequence).toBeGreaterThan(pending.acknowledged);
+  expect(await page.evaluate(() => window.__pptxWorkerEditor.toggleReadOnly(true)))
+    .toEqual({ sessions: 1, ready: 1 });
+  expect(await page.evaluate(() => window.__pptxWorkerEditor.text())).toBe('initial first pending');
+  expect(await page.evaluate(() => window.__pptxWorkerEditor.unchanged())).toBe(true);
+  await page.keyboard.press('!');
+  expect(await page.evaluate(() => window.__pptxWorkerEditor.text())).toBe('initial first pending');
+  await page.evaluate(() => window.__pptxWorkerEditor.release());
+  assertParity(await page.evaluate(() => window.__pptxWorkerEditor.parity()), 1);
+  expect(await page.evaluate(() => window.__pptxWorkerEditor.edit(' refused'))).toBe('read-only');
+  const readOnlySave = await page.evaluate(() => window.__pptxWorkerEditor.save());
+  expect(readOnlySave.text).toBe('initial first pending');
+  expect(await page.evaluate(() => window.__pptxWorkerEditor.toggleReadOnly(false)))
+    .toEqual({ sessions: 1, ready: 1 });
+  expect(await page.evaluate(() => window.__pptxWorkerEditor.edit(' second'))).toBe('accepted');
+  assertParity(await page.evaluate(() => window.__pptxWorkerEditor.parity()), 1);
+  const saved = await page.evaluate(() => window.__pptxWorkerEditor.save());
+  expect(saved.bytes).toBeGreaterThan(0);
+  expect(saved.text).toBe('initial first pending second');
+});
+
 for (const dpr of [1, 2]) {
   test.describe(`worker editor DPR ${dpr}`, () => {
     test.use({ deviceScaleFactor: dpr });

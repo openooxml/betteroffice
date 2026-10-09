@@ -1,6 +1,7 @@
 import { PptxPeerNotReadyError, PptxWorkerEditorDisposedError } from '@betteroffice/pptx';
 import type { PptxWorkerEditorAccess, PptxWorkerEditorOperation, PptxWorkerEditorSession } from '@betteroffice/pptx';
 import type { PptxInputCoordinator } from './inputCoordinator';
+import { PptxCommandAdmissionError } from './createPptxCommandStore';
 
 const mutations = {
   insertText: true, deleteText: true, formatText: true, insertParagraphBreak: true,
@@ -24,6 +25,7 @@ export interface WorkerInputCoordinator extends PptxInputCoordinator {
 export function createWorkerInputCoordinator(hooks: {
   session(): PptxWorkerEditorSession | null;
   gestureActive(): boolean;
+  readOnly?(): boolean;
   changed?(): void;
 }): WorkerInputCoordinator {
   let typing = false;
@@ -40,7 +42,12 @@ export function createWorkerInputCoordinator(hooks: {
     try { require(); return Promise.resolve(operation()); }
     catch (error) { return Promise.reject(error); }
   };
-  const boundary = () => require().apply({ method: 'addUndoBoundary', args: [] });
+  const writable = () => {
+    const session = require();
+    if (hooks.readOnly?.()) throw new PptxCommandAdmissionError('read-only');
+    return session;
+  };
+  const boundary = () => writable().apply({ method: 'addUndoBoundary', args: [] });
   return {
     busy: () => false,
     keyboardQueued: () => false,
@@ -49,7 +56,7 @@ export function createWorkerInputCoordinator(hooks: {
     reset() { typing = false; previous = undefined; },
     breakTyping() { previous = undefined; },
     beginTyping(target, time = Date.now()) {
-      require();
+      writable();
       if (!previous || previous.target !== target || time - previous.time > 500) boundary();
       previous = { target, time };
       typing = true;
@@ -76,6 +83,13 @@ export function createWorkerInputCoordinator(hooks: {
             if (typeof key !== 'string' || !Object.hasOwn(mutations, key)) return Reflect.get(peer, key);
             return (...args: unknown[]) => {
               const session = requireAccess();
+              if (hooks.readOnly?.()) {
+                if (key === 'applyEdits') return {
+                  ok: false, version: peer.version(),
+                  failure: { code: 'read-only', message: 'The editor is read-only' },
+                };
+                throw new PptxCommandAdmissionError('read-only');
+              }
               if (!typing && key !== 'addUndoBoundary') previous = undefined;
               const discrete = !typing && !['addUndoBoundary', 'undo', 'redo', 'applyEdits'].includes(key);
               if (discrete) { previous = undefined; boundary(); }

@@ -15,10 +15,13 @@ import { createTestWorkbookSession } from './testHelpers';
 let bytes: Uint8Array<ArrayBuffer>;
 let wasm: Uint8Array<ArrayBuffer>;
 const calculation: WorkbookCalculationContext = { nowSerial: 46_000.5, randSeed: 123456789 };
+const editMs = (calculation.nowSerial - 25_569) * 86_400_000;
 const editOptions = {
-  now: () => (calculation.nowSerial - 25_569) * 86_400_000,
+  now: () => editMs,
   randomSeed: () => calculation.randSeed,
 };
+const editedCalculation: WorkbookCalculationContext = { ...calculation,
+  nowSerial: (editMs - new Date(editMs).getTimezoneOffset() * 60_000) / 86_400_000 + 25_569 };
 
 beforeAll(async () => {
   wasm = new Uint8Array(await readFile(new URL('../wasm/generated/xlsx_wasm_bg.wasm', import.meta.url)));
@@ -128,7 +131,7 @@ test('snapshot-hydrated peer equals source hydration and replays cell and sheet 
     restoreReplay = () => replaying.mockRestore();
     edits = createWorkbookEditPeer({ session, peer, ...editOptions });
     await edits.flush();
-    source.setCalculationContext(calculation);
+    source.setCalculationContext(editedCalculation);
     expect(edits.editCell(0, 1, 0, '91')).toEqual(source.editCell(0, 1, 0, '91'));
     await edits.flush();
     expect(peer.save()).toEqual(source.save());
@@ -151,7 +154,7 @@ test('snapshot-hydrated peer equals source hydration and replays cell and sheet 
       expect(await session.call.calculationStatus()).toEqual(peer!.calculationStatus());
       expect(edits!.acknowledgedSequence).toBe(edits!.sentSequence);
     };
-    let precedingCalculation = calculation;
+    let precedingCalculation = editedCalculation;
     const apply = async (op: WorkbookReplayOp, refused = false) => {
       if (!op.calculation) throw new Error('Missing operation calculation context');
       const before = edits!.sentSequence;
@@ -199,7 +202,7 @@ test('snapshot-hydrated peer equals source hydration and replays cell and sheet 
     await apply({ method: 'redo', args: [], calculation: { nowSerial: 48_002, randSeed: 45 } });
     expect(replaying).toHaveBeenCalledTimes(initialReplays + 27);
     expect(sourceOpening).not.toHaveBeenCalled();
-    source.setCalculationContext(calculation);
+    source.setCalculationContext(editedCalculation);
     expect(edits.applyOps([{ type: 'insertRows', sheet: 1, at: 0, count: 1 }]))
       .toEqual(source.applyOps([{ type: 'insertRows', sheet: 1, at: 0, count: 1 }]));
     await edits.flush();
@@ -302,7 +305,7 @@ test.each(['explicit', 'worker-default'] as const)('successful snapshot releases
         inputs: [['refused']],
       }] })).toMatchObject({ ok: false });
       await edits.flush();
-      expect(setting.mock.calls).toEqual([[calculation], [expected]]);
+      expect(setting.mock.calls).toEqual([[editedCalculation], [expected]]);
       expect(edits.sentSequence).toBe(0);
       await equalPeer(peer, session);
       expect(edits.editCell(0, 1, 0, '91').applied).toBe(true);

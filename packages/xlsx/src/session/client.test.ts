@@ -4,11 +4,12 @@ import {
   isClientMessage, isHostMessage, SessionFailure, type SessionTransport,
 } from '../../../../shared/office-session';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
+import type { XlsxCellRead } from '../edits';
 import * as workbookWasm from '../wasm/loader';
 import { wasmAssetUrl } from '../wasm/asset';
 import { XlsxDocument } from '../wasm/generated/xlsx_wasm.js';
 import { openWorkbook, type WorkbookCalculationContext, type WorkbookHandle } from '../wasm/loader';
-import { createWorkbookSession, hydratePeer } from './client';
+import { createWorkbookSession, hydratePeer, type WorkbookSession } from './client';
 import { createWorkbookEditPeer, WorkbookEditPeerFailedError, type WorkbookEditPeer } from './editPeer';
 import { workbookEditPeerOperations } from './editPeerInternals';
 import { createWorkbookSessionHost } from './host';
@@ -24,6 +25,16 @@ const calculation: WorkbookCalculationContext = { nowSerial: 46_000.5, randSeed:
 beforeAll(async () => {
   ({ fixture, wasmBytes } = await loadWorkbookSessionFixtures());
 });
+
+async function volatileWorkbookBytes(): Promise<Uint8Array> {
+  const zip = new JSZip();
+  zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>');
+  zip.file('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>');
+  zip.file('xl/workbook.xml', '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Volatile" sheetId="1" r:id="rId1"/></sheets></workbook>');
+  zip.file('xl/_rels/workbook.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>');
+  zip.file('xl/worksheets/sheet1.xml', '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><f>NOW()</f><v>0</v></c><c r="B1"><f>TODAY()</f><v>0</v></c><c r="C1"><f>RAND()</f><v>0</v></c></row></sheetData></worksheet>');
+  return zip.generateAsync({ type: 'uint8array' });
+}
 
 function crashableHost(): {
   wrap(transport: SessionTransport): SessionTransport;
@@ -448,14 +459,62 @@ describe('workbook peer hydration', () => {
     }
   });
 
+  test.each([
+    ['east of UTC', Date.UTC(2026, 0, 1, 23, 30), -120, Date.UTC(2026, 0, 2, 1, 30)],
+    ['west of UTC', Date.UTC(2026, 0, 2, 2), 300, Date.UTC(2026, 0, 1, 21)],
+    ['half-hour offset', Date.UTC(2026, 0, 1, 20), -330, Date.UTC(2026, 0, 2, 1, 30)],
+  ] as const)('shares local NOW and TODAY across retained open and edit replay (%s)', async (_, ms, offset, localMs) => {
+    const clock = spyOn(Date, 'now').mockReturnValue(ms);
+    const timezone = spyOn(Date.prototype, 'getTimezoneOffset').mockReturnValue(offset);
+    let session: WorkbookSession | undefined;
+    let peer: WorkbookHandle | undefined;
+    let edits: WorkbookEditPeer | undefined;
+    const nowSerial = localMs / 86_400_000 + 25_569;
+    const read = { ranges: [{ sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A1:C1' } }] } as const;
+    try {
+      session = await createTestWorkbookSession(await volatileWorkbookBytes(), undefined, {
+        wasm: wasmBytes.buffer, retainPeerHydration: true,
+      });
+      const opening = await session.call.readCells(read);
+      if (!opening.ok) throw new Error(opening.failure.message);
+      expect(opening.ranges[0].cells[0].slice(0, 2).map((cell: XlsxCellRead) => cell.value)).toEqual([
+        { kind: 'number', value: nowSerial },
+        { kind: 'number', value: Math.floor(nowSerial) },
+      ]);
+      peer = await hydratePeer(session);
+      expect(peer.readCells(read)).toEqual(opening);
+      edits = createWorkbookEditPeer({ session, peer, randomSeed: () => 42 });
+      clock.mockReturnValue(ms + 86_400_000);
+      expect(edits.editCell(0, 1, 0, '1').applied).toBe(true);
+      await edits.flush();
+      const edited = peer.readCells(read);
+      if (!edited.ok) throw new Error(edited.failure.message);
+      expect(edited.ranges[0].cells[0].slice(0, 2).map((cell: XlsxCellRead) => cell.value)).toEqual([
+        { kind: 'number', value: nowSerial + 1 },
+        { kind: 'number', value: Math.floor(nowSerial) + 1 },
+      ]);
+      const workerEdited = await session.call.readCells(read);
+      if (!workerEdited.ok) throw new Error(workerEdited.failure.message);
+      expect(edited).toEqual(workerEdited);
+      clock.mockReturnValue(ms + 2 * 86_400_000);
+      expect(new Uint8Array(await edits.save())).toEqual(new Uint8Array(peer.save()));
+      expect(peer.readCells(read)).toEqual(edited);
+      expect(await session.call.readCells(read)).toEqual(edited);
+      expect(session.failure).toBeUndefined();
+    } finally {
+      try {
+        edits?.dispose();
+        peer?.dispose();
+        await session?.dispose();
+      } finally {
+        timezone.mockRestore();
+        clock.mockRestore();
+      }
+    }
+  });
+
   test('adopts worker volatile values and version without recalculating during hydration', async () => {
-    const zip = new JSZip();
-    zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>');
-    zip.file('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>');
-    zip.file('xl/workbook.xml', '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Volatile" sheetId="1" r:id="rId1"/></sheets></workbook>');
-    zip.file('xl/_rels/workbook.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>');
-    zip.file('xl/worksheets/sheet1.xml', '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><f>NOW()</f><v>0</v></c><c r="B1"><f>TODAY()</f><v>0</v></c><c r="C1"><f>RAND()</f><v>0</v></c></row></sheetData></worksheet>');
-    const bytes = await zip.generateAsync({ type: 'uint8array' });
+    const bytes = await volatileWorkbookBytes();
     const session = await createTestWorkbookSession(bytes, undefined, {
       wasm: wasmBytes.buffer, retainPeerHydration: true,
     });

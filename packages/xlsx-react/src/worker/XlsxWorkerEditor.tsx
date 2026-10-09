@@ -1,6 +1,6 @@
 import {
   buildA11yGrid, cellAtPoint, cellRect, chartRegionAtPoint, createWorkbookRecoveryMutators,
-  extendTo, fromTsv, hyperlinkAtCell, isProposalsAvailable, moveFocus, normalizeRange,
+  extendTo, fromTsv, hyperlinkAtCell, isProposalsAvailable, localNowSerial, moveFocus, normalizeRange,
   paintDisplayList, parseHyperlinkLocation, rangeRect, safeExternalHyperlink, selectionAt,
   selectionKeyReducer, toTsv, WorkbookEditPeerFailedError, WorkbookRecoveryRefusal,
   workbookEditPeerOperations, workbookSessionInternals,
@@ -284,7 +284,7 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       acceptedCells.set(key, draft.value);
       const op: WorkbookReplayOp = draftOperations.get(draft) ?? {
         method: 'editCell', args: [draft.sheet, draft.row, draft.col, draft.value], calculation: {
-          nowSerial: Date.now() / 86400000 + 25569,
+          nowSerial: localNowSerial(Date.now()),
           randSeed: globalThis.crypto.getRandomValues(new Uint32Array(1))[0] >>> 0,
         },
       };
@@ -386,7 +386,7 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       return async () => { unpreviewedOps.delete(operation); };
     }
     if (operation) operation.calculation ??= {
-      nowSerial: Date.now() / 86400000 + 25569,
+      nowSerial: localNowSerial(Date.now()),
       randSeed: globalThis.crypto.getRandomValues(new Uint32Array(1))[0] >>> 0,
     };
     const preceding = new Map<string, PreviewPredecessor>();

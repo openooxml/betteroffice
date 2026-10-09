@@ -10,8 +10,9 @@ use crate::cell_layout::{nested_table_float_offset, nested_table_horizontal_offs
 use crate::floating_objects::{MIN_WRAP_SEGMENT_WIDTH, table_wrap_gaps};
 use crate::table_grid::{
     ResolvedGridCell, content_sized_columns, count_table_columns, fits_columns_to_words,
-    grow_content_sized_columns, resolve_cell_grid, resolve_table_column_widths,
-    resolve_table_width_px, widen_columns_to_minimums,
+    grow_content_sized_columns, resolve_cell_grid,
+    resolve_table_column_widths_with_percentage_basis, resolve_table_width_px,
+    table_percentage_basis, widen_columns_to_minimums,
 };
 use crate::types::{
     BlockExtent, BlockId, ChartExtent, FloatingTablePosition, ImageExtent, ImageRunPosition,
@@ -624,6 +625,23 @@ pub fn measure_blocks(
         .collect()
 }
 
+pub fn measure_blocks_without_table_compat_shift(
+    blocks: &mut [LayoutBlock],
+    content_width: f64,
+    config: &MeasurementConfig,
+) -> Result<Vec<BlockExtent>, String> {
+    blocks
+        .iter_mut()
+        .map(|block| match block {
+            LayoutBlock::Table(table) => {
+                measure_table_with_compat_shift(table, content_width, config, false)
+                    .map(BlockExtent::Table)
+            }
+            _ => measure_block(block, content_width, config),
+        })
+        .collect()
+}
+
 /// Whether any block anchors a floating zone (wrapped image, floating table,
 /// or text box). Callers use this to gate float-free fast paths; extraction is
 /// a read-only scan of the same zones `measure_blocks_with_floats` consumes.
@@ -1227,18 +1245,52 @@ fn measure_paragraph_with_context(
     #[cfg(test)]
     EXTENT_MEASURE_CALLS.with(|calls| calls.set(calls.get() + 1));
     let (extent, dependencies) = FontChainDependencies::capture(|| {
-        if !content_width.is_finite() || content_width <= 0.0 {
-            synthetic_paragraph_extent(paragraph, content_width)
-        } else {
-            crate::typed_measure::measure_paragraph(
-                paragraph,
-                content_width,
-                config,
-                floating_zones,
-                cumulative_y,
-            )
-            .unwrap_or_else(|| synthetic_paragraph_extent(paragraph, content_width))
+        let measure = |paragraph: &ParagraphBlock| {
+            if !content_width.is_finite() || content_width <= 0.0 {
+                synthetic_paragraph_extent(paragraph, content_width)
+            } else {
+                crate::typed_measure::measure_paragraph(
+                    paragraph,
+                    content_width,
+                    config,
+                    floating_zones,
+                    cumulative_y,
+                )
+                .unwrap_or_else(|| synthetic_paragraph_extent(paragraph, content_width))
+            }
+        };
+        let mut extent = measure(paragraph);
+        if extent.lines.len() == 1
+            && let Some(attrs) = &paragraph.attrs
+            && let Some(size) = attrs.default_font_size.filter(|size| *size > 0.0)
+            && attrs.horizontal_rules.is_empty()
+            && attrs.list_marker.as_deref().is_none_or(str::is_empty)
+            && !paragraph.runs.is_empty()
+            && paragraph.runs.iter().all(|run| {
+                matches!(run, Run::Text(text)
+                    if text.fmt.font_size.is_some_and(|run_size| run_size > size)
+                        && (attrs.doc_grid_pitch_px.is_none()
+                            || text.fmt.snap_to_grid != Some(false))
+                        && text.text.chars().all(|ch| matches!(ch, ' ' | '\u{3000}')))
+            })
+        {
+            let mark_extent = measure(&ParagraphBlock {
+                runs: Vec::new(),
+                ..paragraph.clone()
+            });
+            let line = &mut extent.lines[0];
+            if let [mark_line] = mark_extent.lines.as_slice()
+                && mark_line.line_height < line.line_height
+                && mark_extent.total_height < extent.total_height
+                && mark_line.float_skip_before == line.float_skip_before
+            {
+                line.line_height = mark_line.line_height;
+                line.ascent = mark_line.ascent;
+                line.descent = mark_line.descent;
+                extent.total_height = mark_extent.total_height;
+            }
         }
+        extent
     });
     let mut extent = extent;
     measure_horizontal_rules(paragraph, &mut extent);
@@ -2799,10 +2851,25 @@ fn measure_table(
     content_width: f64,
     config: &MeasurementConfig,
 ) -> Result<TableExtent, String> {
+    measure_table_with_compat_shift(table, content_width, config, true)
+}
+
+fn measure_table_with_compat_shift(
+    table: &mut TableBlock,
+    content_width: f64,
+    config: &MeasurementConfig,
+    apply_compat_shift: bool,
+) -> Result<TableExtent, String> {
+    let percentage_basis = if apply_compat_shift {
+        table_percentage_basis(table, content_width)
+    } else {
+        content_width
+    };
     let explicit_width =
-        resolve_table_width_px(table.width, table.width_type.as_deref(), content_width);
+        resolve_table_width_px(table.width, table.width_type.as_deref(), percentage_basis);
     let target_width = explicit_width.unwrap_or(content_width);
-    let mut column_widths = resolve_table_column_widths(table, content_width);
+    let mut column_widths =
+        resolve_table_column_widths_with_percentage_basis(table, content_width, percentage_basis);
     let content_sized = content_sized_columns(table, content_width, &column_widths);
     if !content_sized.is_empty() {
         let maximums = column_content_maximums(table, &content_sized, content_width, config)?;
@@ -3145,6 +3212,42 @@ mod tests {
             font_chains: BTreeMap::from([("liberation sans|0|0".to_owned(), vec![font])]),
             defaults: json!({"fontFamily": "Liberation Sans", "fontSize": 12}),
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn grid_spacers_with_run_opt_out_keep_original_height_between_mark_and_run() {
+        let fonts = crate::MeasureFonts::default();
+        let _fonts = fonts.enter();
+        let config = cache_measurement_config();
+        for run_snaps in [[false, false], [false, true], [true, false]] {
+            let paragraph: ParagraphBlock = serde_json::from_value(json!({
+                "id": "grid-spacer",
+                "attrs": {"defaultFontSize": 9, "docGridPitchPx": 20},
+                "runs": [
+                    {"kind": "text", "text": " ", "fontSize": 18, "snapToGrid": run_snaps[0]},
+                    {"kind": "text", "text": " ", "fontSize": 18, "snapToGrid": run_snaps[1]}
+                ]
+            }))
+            .unwrap();
+            let original =
+                crate::typed_measure::measure_paragraph(&paragraph, 300.0, &config, None, 0.0)
+                    .unwrap();
+            let mut ungridded = paragraph.clone();
+            ungridded.attrs.as_mut().unwrap().doc_grid_pitch_px = None;
+            assert_eq!(
+                original,
+                crate::typed_measure::measure_paragraph(&ungridded, 300.0, &config, None, 0.0)
+                    .unwrap()
+            );
+            ungridded.runs.clear();
+            let mark =
+                crate::typed_measure::measure_paragraph(&ungridded, 300.0, &config, None, 0.0)
+                    .unwrap();
+            assert!(mark.total_height < 20.0 && 20.0 < original.total_height);
+            let actual = measure_paragraph(&paragraph, 300.0, &config).unwrap();
+            assert_eq!(actual.total_height, original.total_height);
+            assert_eq!(actual.lines, original.lines);
         }
     }
 
@@ -4726,6 +4829,46 @@ mod tests {
         assert_eq!(lines(&tall).len(), 1);
         assert!(lines(&tall)[0].width > 200.0);
         assert_eq!(tall.rows[0].height, 508.0);
+    }
+
+    #[test]
+    fn percentage_width_nested_keeps_compat_basis_in_unshifted_story() {
+        for measure in [measure_blocks, measure_blocks_without_table_compat_shift] {
+            for algorithm in [None, Some("autofit"), Some("fixed")] {
+                let nested = json!({
+                    "kind": "table", "id": "nested", "compatibilityMode": 14,
+                    "cellMarginLeft": 7.2, "cellMarginRight": 7.2,
+                    "width": 5000, "widthType": "pct", "widthAlgorithm": algorithm,
+                    "columnWidths": [100, 100], "rows": [{"id": "nested-row", "cells": [
+                        {"id": "left", "blocks": [], "minContentWidth": 20, "maxContentWidth": 400,
+                         "padding": {"top": 0, "bottom": 0, "left": 7.2, "right": 0}},
+                        {"id": "right", "blocks": [], "minContentWidth": 20, "maxContentWidth": 400,
+                         "padding": {"top": 0, "bottom": 0, "left": 0, "right": 7.2}}
+                    ]}]
+                });
+                let mut blocks = serde_json::from_value::<Vec<LayoutBlock>>(json!([{
+                    "kind": "table", "id": "outer", "width": 8313, "widthType": "dxa",
+                    "columnWidths": [554.2], "rows": [{"id": "outer-row", "cells": [{
+                        "id": "outer-cell", "padding": {"top": 0, "bottom": 0, "left": 0, "right": 0},
+                        "blocks": [nested]
+                    }]}]
+                }]))
+                .unwrap();
+                let measured = measure(&mut blocks, 554.2, &MeasurementConfig::default()).unwrap();
+                let BlockExtent::Table(outer) = &measured[0] else {
+                    panic!("outer table expected");
+                };
+                let BlockExtent::Table(nested) = &outer.rows[0].cells[0].blocks[0] else {
+                    panic!("nested table expected");
+                };
+                assert!((outer.total_width - 554.2).abs() < 1e-6);
+                assert!(
+                    (nested.total_width - 568.6).abs() < 1e-6,
+                    "{algorithm:?}: nested width {}, expected 568.6",
+                    nested.total_width
+                );
+            }
+        }
     }
 
     #[test]

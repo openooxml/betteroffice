@@ -6804,11 +6804,12 @@ impl EngineSession {
                         resolve_doc_grid_pitch(block, grid_pitch);
                     }
                     apply_contextual_spacing_blocks(&mut blocks);
-                    let measures = docx_layout::measure_blocks::measure_blocks(
-                        &mut blocks,
-                        width,
-                        measurement,
-                    )?;
+                    let measures =
+                        docx_layout::measure_blocks::measure_blocks_without_table_compat_shift(
+                            &mut blocks,
+                            width,
+                            measurement,
+                        )?;
                     let mut height = 0.0;
                     let mut previous_after = 0.0_f64;
                     for (block, measure) in blocks.iter().zip(&measures) {
@@ -6897,8 +6898,11 @@ impl EngineSession {
                 content.display_number.unwrap_or(1),
                 content.display_label.as_deref().unwrap_or("1"),
             );
-            let measures =
-                docx_layout::measure_blocks::measure_blocks(&mut blocks, width, measurement)?;
+            let measures = docx_layout::measure_blocks::measure_blocks_without_table_compat_shift(
+                &mut blocks,
+                width,
+                measurement,
+            )?;
             content.height = measures
                 .iter()
                 .map(docx_layout::measure_blocks::extent_height)

@@ -1058,6 +1058,104 @@ mod tests {
         );
     }
 
+    #[test]
+    fn clockless_today_and_now_keep_caches_and_recalculate_dependents() {
+        for (formula, clocked) in [("TODAY()", 46_000.0), ("NOW()", 46_000.25)] {
+            let (mut wb, s) = one_sheet();
+            put_cached_formula(&mut wb, s, "A1", formula, num(45_000.75));
+            put_cached_formula(&mut wb, s, "B1", "A1+1", num(-1.0));
+            let (mut graph, result) = rebuild_and_recalc_all(&mut wb, None);
+            assert_eq!(value(&wb, s, "A1"), num(45_000.75));
+            assert_eq!(value(&wb, s, "B1"), num(45_001.75));
+            assert_eq!(changed_a1(&result), vec!["B1"]);
+            recalc_after(&mut wb, &mut graph, &[], Some(46_000.25));
+            assert_eq!(value(&wb, s, "A1"), num(clocked));
+            assert_eq!(value(&wb, s, "B1"), num(clocked + 1.0));
+        }
+    }
+
+    #[test]
+    fn clockless_today_without_a_cache_reports_value() {
+        let (mut wb, s) = one_sheet();
+        put_formula(&mut wb, s, "A1", "TODAY()");
+        rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(
+            value(&wb, s, "A1"),
+            CellValue::Error {
+                value: ErrorValue::Value
+            }
+        );
+        rebuild_and_recalc_all(&mut wb, Some(46_000.25));
+        assert_eq!(value(&wb, s, "A1"), num(46_000.0));
+    }
+
+    #[test]
+    fn clockless_today_expression_keeps_its_stale_cache_after_an_input_changes() {
+        let (mut wb, s) = one_sheet();
+        put_num(&mut wb, s, "A2", 44_999.0);
+        put_cached_formula(&mut wb, s, "A1", "TODAY()-A2", num(1.0));
+        put_formula(&mut wb, s, "B1", "A1+1");
+        let mut graph = DepGraph::build(&wb);
+        put_num(&mut wb, s, "A2", 44_998.0);
+        recalc_after(&mut wb, &mut graph, &[(s, a1("A2"))], None);
+        assert_eq!(value(&wb, s, "A1"), num(1.0));
+        assert_eq!(value(&wb, s, "B1"), num(2.0));
+        recalc_after(&mut wb, &mut graph, &[], Some(46_000.25));
+        assert_eq!(value(&wb, s, "A1"), num(1_002.0));
+        assert_eq!(value(&wb, s, "B1"), num(1_003.0));
+    }
+
+    #[test]
+    fn iferror_handles_clockless_today_and_overwrites_the_cache() {
+        let (mut wb, s) = one_sheet();
+        put_cached_formula(&mut wb, s, "A1", "IFERROR(TODAY(),0)", num(99.0));
+        rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "A1"), num(0.0));
+        rebuild_and_recalc_all(&mut wb, Some(46_000.25));
+        assert_eq!(value(&wb, s, "A1"), num(46_000.0));
+    }
+
+    #[test]
+    fn clockless_date_text_keeps_caches_only_when_it_needs_the_current_year() {
+        for (formula, clocked) in [
+            ("DATEVALUE(\"1/1\")", 43_831.0),
+            ("YEAR(\"1/1\")", 2020.0),
+            ("MONTH(\"1/1\")", 1.0),
+            ("DAYS(\"1/1\",1)", 43_830.0),
+        ] {
+            let (mut wb, s) = one_sheet();
+            put_cached_formula(&mut wb, s, "A1", formula, num(-1.0));
+            put_cached_formula(&mut wb, s, "B1", "DATEVALUE(\"1/1/2020\")", num(-1.0));
+            rebuild_and_recalc_all(&mut wb, None);
+            assert_eq!(value(&wb, s, "A1"), num(-1.0), "{formula}");
+            assert_eq!(value(&wb, s, "B1"), num(43_831.0));
+            rebuild_and_recalc_all(&mut wb, Some(43_831.5));
+            assert_eq!(value(&wb, s, "A1"), num(clocked), "{formula}");
+            assert_eq!(value(&wb, s, "B1"), num(43_831.0));
+        }
+    }
+
+    #[test]
+    fn clockless_today_array_keeps_its_cached_rectangle() {
+        let (mut wb, s) = one_sheet();
+        put_recorded(&mut wb, s, "A1", "{1;2}+TODAY()", "A1:A2");
+        set_cached(&mut wb, s, "A1", num(45_001.0));
+        put_num(&mut wb, s, "A2", 45_002.0);
+        put_formula(&mut wb, s, "B1", "SUM(A1:A2)");
+        rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "A1"), num(45_001.0));
+        assert_eq!(value(&wb, s, "A2"), num(45_002.0));
+        assert_eq!(value(&wb, s, "B1"), num(90_003.0));
+        assert_eq!(
+            wb.sheet(s).unwrap().array_formula(a1("A1")),
+            Some(CellRange::parse_a1("A1:A2").unwrap())
+        );
+        rebuild_and_recalc_all(&mut wb, Some(46_000.25));
+        assert_eq!(value(&wb, s, "A1"), num(46_001.0));
+        assert_eq!(value(&wb, s, "A2"), num(46_002.0));
+        assert_eq!(value(&wb, s, "B1"), num(92_003.0));
+    }
+
     /// the array form of a supported function is still a gap in the engine, so
     /// it must leave the cached value alone exactly as an unknown name does.
     /// `nanogpt-excel` reaches this through

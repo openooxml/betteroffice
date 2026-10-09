@@ -16,10 +16,14 @@ import type {
   TextBoxPrimitive,
 } from '../types';
 import type { ProposalTextChange } from '../proposals';
+import { imageDecodeScale, setImageDecodeScale } from './image';
 
-export type CanvasImageResolver = (
+export type CanvasImageResolver = ((
   assetId: string
-) => CanvasImageSource | Promise<CanvasImageSource | null> | null;
+) => CanvasImageSource | Promise<CanvasImageSource | null> | null) & {
+  acquire?(): CanvasImageResolver;
+  release?(): void;
+};
 
 export interface PaintSlideOptions {
   resolveImage?: CanvasImageResolver;
@@ -74,8 +78,10 @@ export async function paintSlide(
   const shadowBudget = { remaining: options.maxShadowPixels ?? MAX_SHADOW_PIXELS };
   if (!Number.isSafeInteger(shadowBudget.remaining) || shadowBudget.remaining < 0)
     throw new Error('invalid shadow pixel budget');
-  ctx.save();
+  const images = options.resolveImage?.acquire?.() ?? options.resolveImage;
+  const paintOptions = { ...options, resolveImage: images };
   try {
+    ctx.save();
     ctx.setTransform(dpr * scale, 0, 0, dpr * scale, 0, 0);
     ctx.clearRect(0, 0, list.width, list.height);
     if (list.background) {
@@ -83,9 +89,9 @@ export async function paintSlide(
       ctx.fillRect(0, 0, list.width, list.height);
     }
     for (const primitive of list.primitives)
-      await paintPrimitive(ctx, primitive, options, dpr * scale, shadowBudget);
+      await paintPrimitive(ctx, primitive, paintOptions, dpr * scale, shadowBudget);
   } finally {
-    ctx.restore();
+    try { ctx.restore(); } finally { images?.release?.(); }
   }
 }
 
@@ -238,8 +244,7 @@ function paintShadowLayer(
   const bottom = Math.ceil(Math.min(maxY + outline, ctx.canvas.height + spread - dy));
   if (right <= left || bottom <= top) return;
   const pixels = (right - left) * (bottom - top);
-  if (!Number.isSafeInteger(pixels) || pixels > shadowBudget.remaining)
-    throw new Error('shadows exceed the pixel budget on one slide');
+  if (!Number.isSafeInteger(pixels) || pixels > shadowBudget.remaining) return;
   shadowBudget.remaining -= pixels;
   const layer = typeof OffscreenCanvas !== 'undefined'
     ? new OffscreenCanvas(right - left, bottom - top)
@@ -438,22 +443,25 @@ function drawTiled(
   const width = sourceWidth(source);
   const height = sourceHeight(source);
   if (width <= 0 || height <= 0) return;
-  const left = Math.round(clampCrop(image.crop?.left) * width);
-  const top = Math.round(clampCrop(image.crop?.top) * height);
-  const right = width - Math.round(clampCrop(image.crop?.right) * width);
-  const bottom = height - Math.round(clampCrop(image.crop?.bottom) * height);
+  const decodeScale = imageDecodeScale(source);
+  const originalWidth = width * decodeScale.x;
+  const originalHeight = height * decodeScale.y;
+  const left = Math.round(clampCrop(image.crop?.left) * originalWidth) / decodeScale.x;
+  const top = Math.round(clampCrop(image.crop?.top) * originalHeight) / decodeScale.y;
+  const right = (originalWidth - Math.round(clampCrop(image.crop?.right) * originalWidth)) / decodeScale.x;
+  const bottom = (originalHeight - Math.round(clampCrop(image.crop?.bottom) * originalHeight)) / decodeScale.y;
   if (right <= left || bottom <= top) return;
   const cropped = left > 0 || top > 0 || right < width || bottom < height;
-  const pattern = ctx.createPattern(
-    cropped ? croppedTile(source, left, top, right - left, bottom - top) : source,
-    'repeat'
-  );
+  const tileSource = cropped ? croppedTile(source, left, top, right - left, bottom - top) : source;
+  const pattern = ctx.createPattern(tileSource, 'repeat');
   if (!pattern) return;
   ctx.save();
   buildImageOutline(ctx, image);
   ctx.clip();
+  const tileDecodeScale = imageDecodeScale(tileSource);
   pattern.setTransform(
-    new DOMMatrix().translateSelf(image.x, image.y).scaleSelf(tile.scaleX, tile.scaleY)
+    new DOMMatrix().translateSelf(image.x, image.y)
+      .scaleSelf(tile.scaleX * tileDecodeScale.x, tile.scaleY * tileDecodeScale.y)
   );
   ctx.fillStyle = pattern;
   ctx.fillRect(image.x, image.y, image.w, image.h);
@@ -469,10 +477,12 @@ function croppedTile(
   height: number
 ): CanvasImageSource {
   try {
-    const canvas = offscreen(width, height);
+    const canvas = offscreen(Math.max(1, Math.ceil(width)), Math.max(1, Math.ceil(height)));
     const ctx = canvas?.getContext('2d') as CanvasRenderingContext2D | null;
     if (!canvas || !ctx) return source;
-    ctx.drawImage(source, x, y, width, height, 0, 0, width, height);
+    ctx.drawImage(source, x, y, width, height, 0, 0, canvas.width, canvas.height);
+    const scale = imageDecodeScale(source);
+    setImageDecodeScale(canvas, { x: scale.x * width / canvas.width, y: scale.y * height / canvas.height });
     return canvas as CanvasImageSource;
   } catch {
     return source;
@@ -756,6 +766,11 @@ function recolourImage(source: CanvasImageSource, effects: ImageEffect[]): Canva
     applyImageEffects(data.data, effects);
     ctx.putImageData(data, 0, 0);
     const result = canvas as CanvasImageSource;
+    const scale = imageDecodeScale(source);
+    setImageDecodeScale(result, {
+      x: scale.x * size.width / bounds.width,
+      y: scale.y * size.height / bounds.height,
+    });
     if (reusable) retainRecolouring(source as object, key, result, bounds.width * bounds.height);
     return result;
   } catch {

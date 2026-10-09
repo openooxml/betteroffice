@@ -171,6 +171,8 @@ export class XlsxSnapshotBuilder {
     push(chunk: Uint8Array): void;
 }
 
+export function displayListCellLimit(): number;
+
 export function exportXlsxMarkdownJson(bytes: Uint8Array, options: string, markdown_options: string): string;
 
 /**
@@ -193,6 +195,7 @@ export interface InitOutput {
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_start: () => void;
+    readonly displayListCellLimit: () => number;
     readonly exportXlsxMarkdownJson: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly exportXlsxStructuredJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly memory: WebAssembly.Memory;

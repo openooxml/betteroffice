@@ -8,7 +8,7 @@ import { workbookSessionInternals, type WorkbookReplayEnvelope, type WorkbookRep
 import { XlsxEditor, type XlsxWorkerViewerApi } from '../XlsxEditor';
 import { EditorToolbar } from '../components/EditorToolbar';
 import { defineXlsxPlugin } from '../plugins/defineXlsxPlugin';
-import type { XlsxPluginContext } from '../plugins/types';
+import type { XlsxPluginContext, XlsxPluginSelection } from '../plugins/types';
 import { workbookSessionOpener } from '../viewer/useSessionWorkbook';
 import { XlsxWorkerEditorCollaborationError, type XlsxWorkerEditorApi } from './createWorkerEditorApi';
 import { editableWorkbookSessionBackend } from './useEditableSessionWorkbook';
@@ -1763,6 +1763,88 @@ describe('workbook worker editor', () => {
     expect(host.cells.get('0:0:0')).toBe('r');
   });
 
+  it('publishes the initial A1 selection to plugins after worker hydration', async () => {
+    const host = harness();
+    const hydration = deferred<WorkbookHandle>();
+    host.hydrate.mockReturnValue(hydration.promise);
+    const snapshots: XlsxPluginSelection[] = [];
+    const selections: XlsxPluginSelection[] = [];
+    const plugin = defineXlsxPlugin({
+      id: 'selection', createState: () => null,
+      onEvent(context, event) {
+        snapshots.push(context.snapshot.selection);
+        if (event.type === 'selection-change') selections.push(event.selection);
+      },
+      overlay: ({ context }) => <span data-testid="plugin-selection">{JSON.stringify(context.snapshot.selection)}</span>,
+    });
+    const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false} plugins={[plugin]} />);
+    await opened();
+    expect(host.hydrate).toHaveBeenCalledTimes(1);
+    expect(snapshots).toEqual([]);
+    expect(view.queryByTestId('plugin-selection')).toBeNull();
+    expect(view.queryByTestId('xlsx-selection')).not.toBeNull();
+    await act(async () => hydration.resolve(host.peer));
+    await waitFor(() => expect(view.queryByTestId('plugin-selection')).not.toBeNull());
+    const sheetIndex = host.session.state.activeSheet;
+    const initial = { sheetId: host.session.state.sheets[sheetIndex].id, sheetIndex,
+      cells: xlsx.selectionAt({ row: 0, col: 0 }), chartId: null };
+    expect(snapshots[snapshots.length - 1]).toEqual(initial);
+    expect(selections).toEqual([initial]);
+    expect(view.getByTestId('plugin-selection').textContent).toBe(JSON.stringify(initial));
+  });
+
+  it('publishes the replacement workbook selection without the previous selection', async () => {
+    const host = harness();
+    let api!: XlsxWorkerEditorApi;
+    const onReady = (value: XlsxWorkerEditorApi | XlsxWorkerViewerApi) => { if ('whenHydrated' in value) api = value; };
+    const contexts: XlsxPluginContext<null>[] = [];
+    const selections: { generation: string; selection: XlsxPluginSelection }[] = [];
+    const plugin = defineXlsxPlugin({
+      id: 'selection', createState: () => null,
+      onEvent(context, event) {
+        contexts.push(context);
+        if (event.type === 'selection-change') selections.push({ generation: event.generation, selection: event.selection });
+      },
+      overlay: ({ context }) => {
+        contexts.push(context);
+        return <span data-testid="plugin-selection">{JSON.stringify(context.snapshot.selection)}</span>;
+      },
+    });
+    const plugins = [plugin];
+    const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false} plugins={plugins} onReady={onReady} />);
+    await opened();
+    await waitFor(() => expect(view.queryByTestId('plugin-selection')).not.toBeNull());
+    const previous = { sheetId: 'sheet:0', sheetIndex: 0, cells: xlsx.selectionAt({ row: 2, col: 1 }), chartId: null };
+    act(() => { expect(api.selectCells(0, previous.cells)).toBe(true); });
+    await waitFor(() => expect(view.getByTestId('plugin-selection').textContent).toBe(JSON.stringify(previous)));
+    const previousContext = contexts[contexts.length - 1];
+    for (const restore of restorers.splice(-3).reverse()) restore();
+    const replacement = harness();
+    const hydration = deferred<WorkbookHandle>();
+    replacement.hydrate.mockReturnValue(hydration.promise);
+    const replacementFile = new Uint8Array([4, 5, 6]);
+    view.rerender(<XlsxEditor file={replacementFile} experimentalWorkerOpen showToolbar={false} plugins={plugins} onReady={onReady} />);
+    await opened();
+    expect(previousContext.lifetimeSignal.aborted).toBe(true);
+    expect(host.session.dispose).toHaveBeenCalledTimes(1);
+    expect(replacement.peer).not.toBe(host.peer);
+    expect(view.queryByTestId('plugin-selection')).toBeNull();
+    await act(async () => hydration.resolve(replacement.peer));
+    await waitFor(() => expect(view.queryByTestId('plugin-selection')).not.toBeNull());
+    const sheetIndex = replacement.session.state.activeSheet;
+    const initial = { sheetId: replacement.session.state.sheets[sheetIndex].id, sheetIndex,
+      cells: xlsx.selectionAt({ row: 0, col: 0 }), chartId: null };
+    const current = contexts.filter((context) => context.snapshot.generation !== previousContext.snapshot.generation);
+    expect(current.length).toBeGreaterThan(0);
+    expect(current[current.length - 1].snapshot.selection).toEqual(initial);
+    for (const context of current) {
+      if (context.snapshot.selection !== null) expect(context.snapshot.selection).toEqual(initial);
+    }
+    expect(selections.filter((event) => event.generation !== previousContext.snapshot.generation)
+      .map((event) => event.selection)).toEqual([initial]);
+    expect(view.getByTestId('plugin-selection').textContent).toBe(JSON.stringify(initial));
+  });
+
   it('activates plugins after the real peer and routes granted batches through the facade', async () => {
     const host = harness();
     const hydration = deferred<WorkbookHandle>();
@@ -2496,7 +2578,9 @@ for (const route of ['cell', 'formula', 'host'] as const) {
       const captured = structuredClone(op);
       expect(op.method).toBe('editCell');
       expect(op.args).toEqual([0, 0, 0, input]);
-      expect(op.calculation.nowSerial).toBe(1_750_000_000_000 / 86400000 + 25569);
+      expect(op.calculation.nowSerial).toBe(
+        (1_750_000_000_000 - new Date(1_750_000_000_000).getTimezoneOffset() * 60_000) / 86_400_000 + 25_569
+      );
       expect(Number.isInteger(seed)).toBe(true);
       expect(seed).toBeGreaterThanOrEqual(0);
       expect(seed).toBeLessThanOrEqual(0xffff_ffff);
@@ -3507,6 +3591,38 @@ for (const [input, normalized] of [['001', '1'], ['true', 'TRUE'], ['false', 'FA
       expect(painted[painted.length - 1].commands.some((cmd) => cmd.op === 'text' && cmd.text === `worker:${normalized}`)).toBe(true);
     });
   }
+}
+
+for (const route of ['draft', 'bulk'] as const) {
+  it(`captures local serials for preview and replay (${route})`, async () => {
+    const host = harness(true);
+    const hydration = deferred<WorkbookHandle>();
+    host.hydrate.mockReturnValue(hydration.promise);
+    const clock = spyOn(Date, 'now').mockReturnValue(Date.UTC(2026, 0, 1, 23, 30));
+    const timezone = spyOn(Date.prototype, 'getTimezoneOffset').mockReturnValue(-120);
+    restorers.push(() => timezone.mockRestore(), () => clock.mockRestore());
+    let api!: XlsxWorkerEditorApi;
+    const view = render(<XlsxEditor file={file} experimentalWorkerOpen onReady={(value) => { api = value; }} />);
+    await opened();
+    const input = '=NOW()';
+    let pending: Promise<unknown> | undefined;
+    if (route === 'draft') reviewEdit(view, input);
+    else act(() => { pending = api.applyEdits(reviewBatch(input)); });
+    await advance();
+    const op = host.preview.mock.calls[0][2][0];
+    expect(op.method).toBe(route === 'draft' ? 'editCell' : 'applyEdits');
+    if (!op.calculation) throw new Error('Missing preview calculation context');
+    expect(op.calculation.nowSerial).toBe(Date.UTC(2026, 0, 2, 1, 30) / 86_400_000 + 25_569);
+    const calculation = structuredClone(op.calculation);
+    clock.mockReturnValue(Date.UTC(2026, 0, 3));
+    await act(async () => hydration.resolve(host.peer));
+    await advance();
+    await pending;
+    expect(host.replay).toHaveBeenCalledTimes(1);
+    expect(host.replay.mock.calls[0][0].op).toEqual(op);
+    expect(host.replay.mock.calls[0][0].calculation).toEqual(calculation);
+    expect(host.peerMethods.setCalculationContext).toHaveBeenCalledWith(calculation);
+  });
 }
 
 for (const route of ['cell', 'formula'] as const) {

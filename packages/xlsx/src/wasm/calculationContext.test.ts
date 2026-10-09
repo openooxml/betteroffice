@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it } from 'bun:test';
+import { beforeAll, describe, expect, it, spyOn } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -8,6 +8,10 @@ import { initWasm, openWorkbook } from './loader';
 const CONTEXT: WorkbookCalculationContext = { nowSerial: 45_000.75, randSeed: 42 };
 const WASM = resolve(import.meta.dir, './generated/xlsx_wasm_bg.wasm');
 const VIEWPORT = { x: 0, y: 0, width: 800, height: 800 };
+
+function localSerial(ms: number): number {
+  return (ms - new Date(ms).getTimezoneOffset() * 60_000) / 86_400_000 + 25_569;
+}
 
 function bytes(name = 'sample'): Uint8Array {
   return new Uint8Array(readFileSync(resolve(import.meta.dir, `../../test-fixtures/${name}.xlsx`)));
@@ -52,6 +56,43 @@ async function saveHash(handle: WorkbookHandle): Promise<Uint8Array> {
 
 describe('workbook calculation context', () => {
   beforeAll(() => initWasm(new Uint8Array(readFileSync(WASM))));
+
+  it.each([
+    ['east of UTC', Date.UTC(2026, 0, 1, 23, 30), -120, Date.UTC(2026, 0, 2, 1, 30)],
+    ['west of UTC', Date.UTC(2026, 0, 2, 2), 300, Date.UTC(2026, 0, 1, 21)],
+    ['half-hour offset', Date.UTC(2026, 0, 1, 20), -330, Date.UTC(2026, 0, 2, 1, 30)],
+  ] as const)('uses local NOW and TODAY for ordinary opens and cleared contexts (%s)', (_, ms, offset, localMs) => {
+    const clock = spyOn(Date, 'now').mockReturnValue(ms);
+    const timezone = spyOn(Date.prototype, 'getTimezoneOffset').mockReturnValue(offset);
+    let handle: WorkbookHandle | undefined;
+    const nowSerial = localMs / 86_400_000 + 25_569;
+    try {
+      handle = openWorkbook(volatileBytes());
+      expect(values(handle).slice(0, 2)).toEqual([
+        { kind: 'number', value: nowSerial },
+        { kind: 'number', value: Math.floor(nowSerial) },
+      ]);
+      handle.setCalculationContext(CONTEXT);
+      handle.editCell(0, 39, 25, '1');
+      expect(values(handle).slice(0, 2)).toEqual([
+        { kind: 'number', value: CONTEXT.nowSerial },
+        { kind: 'number', value: Math.floor(CONTEXT.nowSerial) },
+      ]);
+      clock.mockReturnValue(ms + 86_400_000);
+      handle.setCalculationContext(null);
+      handle.editCell(0, 39, 25, '2');
+      expect(values(handle).slice(0, 2)).toEqual([
+        { kind: 'number', value: nowSerial + 1 },
+        { kind: 'number', value: Math.floor(nowSerial) + 1 },
+      ]);
+    } finally {
+      try { handle?.dispose(); }
+      finally {
+        timezone.mockRestore();
+        clock.mockRestore();
+      }
+    }
+  });
 
   it('opens and replays identical calls to identical values and SHA-256 save hashes', async () => {
     const source = volatileBytes();
@@ -187,9 +228,9 @@ describe('workbook calculation context', () => {
       handle.editCell(0, 39, 25, '2');
       expect(values(handle)).toEqual(pinned);
       handle.setCalculationContext(null);
-      const before = Date.now() / 86_400_000 + 25569;
+      const before = localSerial(Date.now());
       handle.editCell(0, 39, 25, '3');
-      const after = Date.now() / 86_400_000 + 25569;
+      const after = localSerial(Date.now());
       const now = values(handle)[0] as { kind: string; value: number };
       expect(now.kind).toBe('number');
       expect(now.value).toBeGreaterThanOrEqual(before);
@@ -200,8 +241,10 @@ describe('workbook calculation context', () => {
         draws.push(values(handle)[3]);
       }
       expect(draws.some((draw) => JSON.stringify(draw) !== JSON.stringify(pinned[3]))).toBe(true);
+      const cached = values(handle)[0];
+      expect(cached).toMatchObject({ kind: 'number' });
       expect(handle.applyEdits(request(handle, '7')).ok).toBe(true);
-      expect(values(handle)[0]).toMatchObject({ kind: 'error' });
+      expect(values(handle)[0]).toEqual(cached);
     } finally {
       handle.dispose();
     }

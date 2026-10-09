@@ -32,6 +32,7 @@ export type {
   PresentationSlideSummary,
 } from './session/methods';
 export { decodePresentationImage, needsElementDecode, presentationImageBlob } from './render/image';
+export type { PresentationImageDecodeOptions } from './render/image';
 export { StaleProposalError } from './proposals';
 export type { Proposal, ProposalAcceptance, ProposalChange, ProposalDiffSlide, ProposalEdit, ProposalPreview, ProposalTextChange } from './proposals';
 export type { CanvasImageResolver, PaintSlideOptions, SlideCanvasLike } from './render/canvas';
@@ -105,6 +106,7 @@ export type {
   PptxTextSpan,
 } from './structuredExport';
 export type {
+  InspectPresentationOptions,
   OpenPresentationOptions,
   PresentationHandle,
   UndoCaptureMode,

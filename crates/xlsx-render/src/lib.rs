@@ -144,11 +144,14 @@ impl AxisLayout {
             }
         }
 
-        if frozen < limit && frozen_extent < extent {
+        let sheet_extent = edge(limit);
+        if frozen < limit && frozen_extent < extent && sheet_extent - scroll > frozen_extent {
             let body_extent = extent - frozen_extent;
             let origin = frozen_extent + scroll;
             let first = at(origin).max(frozen).min(limit - 1);
-            let last = at(origin + body_extent).max(first).min(limit - 1);
+            let last = at((origin + body_extent).min(sheet_extent))
+                .max(first)
+                .min(limit - 1);
             for index in first..=last {
                 let raw_start = edge(index) - scroll;
                 let raw_end = edge(index + 1) - scroll;
@@ -283,6 +286,13 @@ fn emit_grid_segments(
     print: Option<&PrintMetrics>,
     color: Arc<str>,
 ) -> Vec<DrawCmd> {
+    if (rows.tracks.is_empty()
+        && geometry.row_y(MAX_ROWS) - rows.scroll <= geometry.row_y(rows.frozen))
+        || (cols.tracks.is_empty()
+            && geometry.col_x(MAX_COLS) - cols.scroll <= geometry.col_x(cols.frozen))
+    {
+        return Vec::new();
+    }
     let merges: Vec<_> = merges
         .iter()
         .filter(|range| {
@@ -432,22 +442,32 @@ fn viewport_axes(
             .freeze_pane
             .map_or((0, 0), |pane| (pane.rows, pane.cols))
     };
+    let cols_axis = |extent: f32| {
+        AxisLayout::new(
+            MAX_COLS,
+            frozen_cols,
+            viewport.x,
+            extent,
+            |col| geometry.col_x(col),
+            |x| geometry.col_at_x(x),
+        )
+    };
+    let mut cols = cols_axis(viewport.width);
+    let cols_off_grid = cols.tracks.is_empty()
+        && geometry.col_x(MAX_COLS) - cols.scroll <= geometry.col_x(cols.frozen);
     let mut rows = AxisLayout::new(
         MAX_ROWS,
         frozen_rows,
         viewport.y,
-        viewport.height,
+        if cols_off_grid { 0.0 } else { viewport.height },
         |row| geometry.row_y(row),
         |y| geometry.row_at_y(y),
     );
-    let mut cols = AxisLayout::new(
-        MAX_COLS,
-        frozen_cols,
-        viewport.x,
-        viewport.width,
-        |col| geometry.col_x(col),
-        |x| geometry.col_at_x(x),
-    );
+    if rows.tracks.is_empty()
+        && geometry.row_y(MAX_ROWS) - rows.scroll <= geometry.row_y(rows.frozen)
+    {
+        cols = cols_axis(0.0);
+    }
     if print {
         rows.print_extent = Some(viewport.height);
         cols.print_extent = Some(viewport.width);

@@ -1,6 +1,6 @@
 import { PptxPeerNotReadyError, PptxWorkerEditorDisposedError } from '@betteroffice/pptx';
 import type {
-  PptxWorkerEditorAccess, PptxWorkerEditorFailedError, PptxWorkerEditorRecovery, PptxWorkerEditorSession,
+  PptxEditRefusal, PptxWorkerEditorAccess, PptxWorkerEditorFailedError, PptxWorkerEditorRecovery, PptxWorkerEditorSession,
 } from '@betteroffice/pptx';
 import type { PptxEditorApi } from '../PptxEditor';
 import type { PptxCommandStore } from '../commands/types';
@@ -25,7 +25,8 @@ export function createWorkerEditorApi(
   access: () => PptxWorkerEditorAccess | null,
   afterPaint: (slide: number) => Promise<boolean>,
   gestureActive: () => boolean = () => false,
-  isCurrent: () => boolean = () => true
+  isCurrent: () => boolean = () => true,
+  readOnly: () => boolean = () => false
 ): PptxWorkerEditorApi {
   const retired = () => {
     if (!isCurrent() || session.state.stage === 'disposed') throw new PptxWorkerEditorDisposedError();
@@ -44,6 +45,11 @@ export function createWorkerEditorApi(
     const value = peer();
     if (gestureActive()) throw new Error('Finish the pointer gesture before flushing input');
     return value;
+  };
+  const refusal = (): PptxEditRefusal | null => {
+    const value = peer();
+    return readOnly() ? { ok: false, version: value.version(),
+      failure: { code: 'read-only', message: 'The editor is read-only' } } : null;
   };
   const read = async <T,>(operation: (value: PptxWorkerEditorAccess) => T): Promise<T> => {
     const value = peer();
@@ -72,8 +78,10 @@ export function createWorkerEditorApi(
     version: () => read((value) => value.version()),
     readContent: (request) => read((value) => value.readContent(request)),
     findText: (request) => read((value) => value.findText(request)),
-    validateEdits: (request) => read((value) => value.validateEdits(request)),
+    validateEdits: async (request) => refusal() ?? read((value) => refusal() ?? value.validateEdits(request)),
     applyEdits: async (request) => {
+      const early = refusal();
+      if (early) return early;
       admit();
       const result = await ui.applyEdits(request);
       await ui.flushPendingInput();

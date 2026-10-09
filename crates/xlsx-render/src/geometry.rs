@@ -8,7 +8,7 @@ use std::ops::Range;
 
 use xlsx_model::styles::{Font, Stylesheet};
 use xlsx_model::workbook::Sheet;
-use xlsx_model::{CellRef, ColId, RowId};
+use xlsx_model::{CellRef, ColId, MAX_COLS, MAX_ROWS, RowId};
 
 use crate::Viewport;
 
@@ -424,11 +424,29 @@ impl GridGeometry {
 
     /// half-open (row, col) ranges of cells intersecting the viewport.
     pub fn viewport_range(&self, vp: &Viewport) -> (Range<RowId>, Range<ColId>) {
-        let r0 = self.row_at_y(vp.y);
-        let r1 = self.row_at_y(vp.y + vp.height);
-        let c0 = self.col_at_x(vp.x);
-        let c1 = self.col_at_x(vp.x + vp.width);
-        (r0..r1 + 1, c0..c1 + 1)
+        let bottom = self.row_y(MAX_ROWS);
+        let right = self.col_x(MAX_COLS);
+        let rows = if bottom - vp.y <= 0.0 {
+            MAX_ROWS..MAX_ROWS
+        } else {
+            let r0 = self.row_at_y(vp.y).min(MAX_ROWS - 1);
+            let r1 = self
+                .row_at_y((vp.y + vp.height).min(bottom))
+                .saturating_add(1)
+                .min(MAX_ROWS);
+            r0..r1
+        };
+        let cols = if right - vp.x <= 0.0 {
+            MAX_COLS..MAX_COLS
+        } else {
+            let c0 = self.col_at_x(vp.x).min(MAX_COLS - 1);
+            let c1 = self
+                .col_at_x((vp.x + vp.width).min(right))
+                .saturating_add(1)
+                .min(MAX_COLS);
+            c0..c1
+        };
+        (rows, cols)
     }
 }
 

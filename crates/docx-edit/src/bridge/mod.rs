@@ -1918,10 +1918,12 @@ fn lower_table<T: ReadTxn>(
     });
     let layout_mode = map_string(tbl_pr, "tableLayout")
         .filter(|value| matches!(value.as_str(), "fixed" | "autofit"));
-    let cell_margin_left = table_margins
-        .and_then(|margins| map_number(margins, "left"))
-        .map(twips_to_pixels)
-        .filter(|value| value.is_finite() && *value > 0.0);
+    let table_margin = |side: &str| {
+        table_margins
+            .and_then(|margins| map_number(margins, side))
+            .map(twips_to_pixels)
+            .filter(|value| value.is_finite() && *value > 0.0)
+    };
 
     Ok((
         TableBlock {
@@ -1942,7 +1944,8 @@ fn lower_table<T: ReadTxn>(
             indent,
             floating,
             compatibility_mode,
-            cell_margin_left,
+            cell_margin_left: table_margin("left"),
+            cell_margin_right: table_margin("right"),
             pm_start: Some(pm_start as f64),
             pm_end: Some((pm_start + node_size) as f64),
         },
