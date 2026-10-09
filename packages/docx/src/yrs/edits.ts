@@ -25,6 +25,8 @@ export type {
 import type { DocxContentControlSelector } from './contentControls';
 import type { DocxAnchor } from './readTypes';
 
+import type { DocxStoryInfoKind } from './stories';
+
 export type DocxTextView = 'accepted' | 'original';
 
 /** Provenance only: history and revision authorship are chosen separately. */
@@ -244,8 +246,13 @@ export type DocxReadParagraphsResult =
   | DocxEditRefusal;
 
 export interface DocxReadStoriesRequest {
-  /** Every story, in sorted id order, when omitted. */
-  stories?: readonly string[];
+  /**
+   * `'all'` (the default) reads every story in id order. Listed entries are read in their order
+   * without repeats; a story kind stands for its stories in id order.
+   */
+  stories?: 'all' | ReadonlyArray<DocxStoryInfoKind | (string & {})>;
+  /** Matches listed kinds against each story's root, so `header` also selects header cells. */
+  byRoot?: boolean;
   view: DocxTextView;
   /** Refuses with `stale-version` when the document is at another version. */
   expectVersion?: string;
@@ -253,11 +260,18 @@ export interface DocxReadStoriesRequest {
 
 /** One story's paragraphs, or why it could not be read. */
 export type DocxStoryText =
-  | { story: string; paragraphs: DocxParagraphText[] }
-  | { story: string; failure: DocxEditFailure };
+  | { story: string; ok: true; paragraphs: DocxParagraphText[] }
+  | { story: string; ok: false; failure: DocxEditFailure };
 
 export type DocxReadStoriesResult =
-  | { ok: true; version: string; view: DocxTextView; stories: DocxStoryText[] }
+  | {
+      ok: true;
+      version: string;
+      view: DocxTextView;
+      stories: DocxStoryText[];
+      /** The read limits stopped the read before the next selected story. */
+      truncated: boolean;
+    }
   | DocxEditRefusal;
 
 export interface DocxFindTextRequest {

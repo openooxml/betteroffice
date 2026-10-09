@@ -9,7 +9,7 @@ import { syntheticDocx } from './__fixtures__/previewChain';
 import { isLayoutMetaV1, type LayoutMetaV1 } from './layoutMeta';
 import type { Layout } from '../layout/pagination';
 import { proposalRevisionPreview } from './proposals';
-import { createYrsSession, readStorySelection, storyParts } from './index';
+import { createYrsSession } from './index';
 import { storiesDocx } from './__fixtures__/storiesDocx';
 import { readSidebar, readOutlineHeadings } from './sidebarReads';
 import { sidebarDocx } from './__fixtures__/sidebarDocx';
@@ -570,30 +570,29 @@ test('story reads answer from the worker as the session would', async () => {
   const engine = await createResidentEngineSession();
   const w = worker();
   try {
-    const parts = storyParts(main.openDocx(storiesDocx(), true).document);
+    main.openDocx(storiesDocx(), true);
     engine.openDocx(storiesDocx());
     await w.bootstrap();
     Object.assign(w.harness.session, {
       proposalEngine: engine.proposalEngine,
-      geometryReader: engine.geometryReader,
+      listStories: engine.listStories,
       readStories: engine.readStories,
     });
     const version = engine.proposalEngine.version();
-    expect(await w.send({ type: 'documentRead', read: { kind: 'storyIds' } })).toMatchObject({
-      ok: true,
-      read: { version, value: main.storyIds() },
-    });
-    for (const stories of ['all', ['header', 'table-cell'], ['footer', 'missing']] as const) {
+    const value = (reply: unknown) => (reply as { read?: { value?: Record<string, unknown> } }).read?.value;
+    const listed = await w.send({ type: 'documentRead', read: { kind: 'listStories' } });
+    expect(listed).toMatchObject({ ok: true, read: { version, value: { ok: true, version } } });
+    expect(value(listed)?.stories).toEqual(main.listStories().stories);
+    for (const stories of ['all', ['header', 'table-cell'], ['missing', 'footer']] as const) {
       const request = { stories, view: 'accepted' as const };
-      const reply = await w.send({ type: 'documentRead', read: { kind: 'readStories', request, parts } });
-      const local = readStorySelection(main, request, parts);
+      const reply = await w.send({ type: 'documentRead', read: { kind: 'readStories', request } });
+      const local = main.readStories(request);
       expect(reply).toMatchObject({ ok: true, read: { value: { ok: true, version } } });
-      const read = (reply as { read?: { value?: { stories?: unknown } } }).read;
-      expect(read?.value?.stories).toEqual(local.ok ? local.stories : undefined);
+      expect(value(reply)?.stories).toEqual(local.ok ? local.stories : undefined);
     }
     const stale = await w.send({
       type: 'documentRead',
-      read: { kind: 'readStories', request: { stories: 'all', view: 'accepted', expectVersion: 'older' }, parts },
+      read: { kind: 'readStories', request: { view: 'accepted', expectVersion: 'older' } },
     });
     expect(stale).toMatchObject({
       ok: true,

@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 
 import { preloadEditWasm } from '../wasm/edit';
 import { storiesDocx } from './__fixtures__/storiesDocx';
-import { createYrsSession, describeStories, readStorySelection, storyParts, type YrsSession } from './index';
+import { createYrsSession, type DocxReadStoriesRequest, type YrsSession } from './index';
 
 const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm');
 
@@ -18,88 +18,89 @@ afterEach(() => {
 async function open(bytes = storiesDocx()) {
   const session = await createYrsSession({ clientId: 76201 });
   sessions.push(session);
-  const host = session.openDocx(bytes, true);
-  return { session, parts: storyParts(host.document) };
+  session.openDocx(bytes, true);
+  return session;
 }
 
-function texts(result: ReturnType<YrsSession['readStories']>) {
+function texts(session: YrsSession, request: Omit<DocxReadStoriesRequest, 'view'>) {
+  const result = session.readStories({ ...request, view: 'accepted' });
   if (!result.ok) throw new Error(result.failure.message);
-  return Object.fromEntries(
-    result.stories.map((story) => [
-      story.story,
-      'paragraphs' in story ? story.paragraphs.map((paragraph) => paragraph.text) : story.failure.code,
-    ])
-  );
+  return result.stories.map((story) => [
+    story.story,
+    story.ok ? story.paragraphs.map((paragraph) => paragraph.text) : story.failure.code,
+  ]);
 }
 
-it('describes every story with its kind, container and header or footer uses', async () => {
-  const { session, parts } = await open();
-  expect(describeStories(session.storyIds(), parts)).toEqual([
-    { story: 'body', kind: 'body' },
-    { story: 'body:sdt0', kind: 'content-control', parent: 'body' },
-    { story: 'body:t0:r0c0', kind: 'table-cell', parent: 'body' },
-    { story: 'body:t0:r0c1', kind: 'table-cell', parent: 'body' },
-    { story: 'body:t0:r0c1:t0:r0c0', kind: 'table-cell', parent: 'body:t0:r0c1' },
-    { story: 'en:1', kind: 'endnote' },
-    { story: 'fn:1', kind: 'footnote' },
+it('lists every story with its kind, container, root and header or footer uses', async () => {
+  const session = await open();
+  const listed = session.listStories();
+  expect(listed.version).toBe(session.version());
+  expect(listed.stories.map(({ part, ...story }) => (part === undefined ? story : { ...story, part: 'part' }))).toEqual([
+    { story: 'body', kind: 'body', root: 'body' },
+    { story: 'body:sdt0', kind: 'content-control', parent: 'body', root: 'body' },
+    { story: 'body:t0:r0c0', kind: 'table-cell', parent: 'body', root: 'body' },
+    { story: 'body:t0:r0c1', kind: 'table-cell', parent: 'body', root: 'body' },
+    { story: 'body:t0:r0c1:t0:r0c0', kind: 'table-cell', parent: 'body:t0:r0c1', root: 'body' },
+    { story: 'en:1', kind: 'endnote', root: 'en:1' },
+    { story: 'fn:1', kind: 'footnote', root: 'fn:1' },
     {
       story: 'hf:rIdF1',
       kind: 'footer',
-      relationshipId: 'rIdF1',
+      root: 'hf:rIdF1',
+      part: 'part',
       uses: [
         { sectionIndex: 0, variant: 'default' },
         { sectionIndex: 1, variant: 'default' },
       ],
     },
-    { story: 'hf:rIdH1', kind: 'header', relationshipId: 'rIdH1', uses: [{ sectionIndex: 0, variant: 'default' }] },
-    { story: 'hf:rIdH1:t0:r0c0', kind: 'table-cell', parent: 'hf:rIdH1' },
+    { story: 'hf:rIdH1', kind: 'header', root: 'hf:rIdH1', part: 'part', uses: [{ sectionIndex: 0, variant: 'default' }] },
+    { story: 'hf:rIdH1:t0:r0c0', kind: 'table-cell', parent: 'hf:rIdH1', root: 'hf:rIdH1' },
     {
       story: 'hf:rIdH2',
       kind: 'header',
-      relationshipId: 'rIdH2',
+      root: 'hf:rIdH2',
+      part: 'part',
       uses: [
         { sectionIndex: 0, variant: 'first' },
         { sectionIndex: 1, variant: 'first' },
       ],
     },
-    { story: 'hf:rIdH3', kind: 'header', relationshipId: 'rIdH3', uses: [{ sectionIndex: 1, variant: 'default' }] },
+    { story: 'hf:rIdH3', kind: 'header', root: 'hf:rIdH3', part: 'part', uses: [{ sectionIndex: 1, variant: 'default' }] },
   ]);
+  expect(listed.stories.find((story) => story.story === 'hf:rIdH1')?.part).toEndWith('header1.xml');
 });
 
-it('calls a header or footer story without a host part other', () => {
-  expect(describeStories(['hf:rId9', 'hf:rId9:t0:r0c0', 'side'], storyParts(null))).toEqual([
-    { story: 'hf:rId9', kind: 'other' },
-    { story: 'hf:rId9:t0:r0c0', kind: 'table-cell', parent: 'hf:rId9' },
-    { story: 'side', kind: 'other' },
-  ]);
-});
-
-it('reads every story, the selected kinds or the named stories in one read', async () => {
-  const { session, parts } = await open();
-  const all = readStorySelection(session, { stories: 'all', view: 'accepted' }, parts);
+it('reads every story, kinds, roots or ids in one read, keeping the listed order', async () => {
+  const session = await open();
+  const all = session.readStories({ view: 'accepted' });
   expect(all.ok && all.stories.map((story) => story.story)).toEqual(session.storyIds());
   const body = session.readParagraphs({ story: 'body', view: 'accepted' });
-  expect(all.ok && all.stories[0]).toEqual({ story: 'body', paragraphs: body.ok ? body.paragraphs : [] });
+  expect(all.ok && all.stories[0]).toEqual({ story: 'body', ok: true, paragraphs: body.ok ? body.paragraphs : [] });
+  expect(all.ok && all.truncated).toBe(false);
 
-  expect(texts(readStorySelection(session, { stories: ['header', 'footer'], view: 'accepted' }, parts))).toEqual({
-    'hf:rIdF1': ['Footer {{e}}'],
-    'hf:rIdH1': ['Header one'],
-    'hf:rIdH2': ['First page {{d}}'],
-    'hf:rIdH3': ['Header three'],
-  });
-  expect(
-    texts(readStorySelection(session, { stories: ['footnote', 'hf:rIdH1:t0:r0c0', 'missing'], view: 'accepted' }, parts))
-  ).toEqual({
-    'fn:1': ['Footnote text'],
-    'hf:rIdH1:t0:r0c0': ['Header cell {{c}}'],
-    missing: 'missing-target',
-  });
+  expect(texts(session, { stories: ['footer', 'header'] })).toEqual([
+    ['hf:rIdF1', ['Footer {{e}}']],
+    ['hf:rIdH1', ['Header one']],
+    ['hf:rIdH2', ['First page {{d}}']],
+    ['hf:rIdH3', ['Header three']],
+  ]);
+  expect(texts(session, { stories: ['header'], byRoot: true }).map(([story]) => story)).toEqual([
+    'hf:rIdH1',
+    'hf:rIdH1:t0:r0c0',
+    'hf:rIdH2',
+    'hf:rIdH3',
+  ]);
+  expect(texts(session, { stories: ['missing', 'fn:1', 'footnote', 'hf:rIdH1:t0:r0c0', 'fn:1'] })).toEqual([
+    ['missing', 'missing-target'],
+    ['fn:1', ['Footnote text']],
+    ['hf:rIdH1:t0:r0c0', ['Header cell {{c}}']],
+  ]);
 });
 
-it('refuses a stale version', async () => {
-  const { session, parts } = await open();
+it('refuses a stale version before reading', async () => {
+  const session = await open();
   const version = session.version();
-  expect(readStorySelection(session, { stories: ['body'], view: 'accepted', expectVersion: version }, parts)).toMatchObject({
+  expect(session.readStories({ stories: ['body'], view: 'accepted', expectVersion: version })).toMatchObject({
     ok: true,
     version,
   });
@@ -111,7 +112,7 @@ it('refuses a stale version', async () => {
       steps: [{ op: 'insertText', target: { kind: 'paragraph', story: 'body', paraId }, at: 'end', text: '!' }],
     }).ok
   ).toBe(true);
-  expect(readStorySelection(session, { stories: 'all', view: 'accepted', expectVersion: version }, parts)).toMatchObject({
+  expect(session.readStories({ view: 'accepted', expectVersion: version })).toMatchObject({
     ok: false,
     version: session.version(),
     failure: { code: 'stale-version' },
@@ -119,9 +120,21 @@ it('refuses a stale version', async () => {
 });
 
 it('reads thousands of stories in one read', async () => {
-  const { session, parts } = await open(storiesDocx({ tables: 1500 }));
-  const cells = readStorySelection(session, { stories: ['table-cell'], view: 'accepted' }, parts);
+  const session = await open(storiesDocx({ tables: 1500 }));
+  const cells = session.readStories({ stories: ['table-cell'], view: 'accepted' });
   if (!cells.ok) throw new Error(cells.failure.message);
   expect(cells.stories).toHaveLength(3004);
-  expect(cells.stories.every((story) => 'paragraphs' in story)).toBe(true);
+  expect(cells.stories.every((story) => story.ok)).toBe(true);
+});
+
+it('lists and reads the stories of a first-page preview', async () => {
+  const session = await createYrsSession({ clientId: 76202 });
+  sessions.push(session);
+  expect(session.openDocxPreview(storiesDocx({ tables: 50 }), 3)).not.toBeNull();
+  const listed = session.listStories();
+  expect(listed.stories.map((story) => story.story)).toEqual(session.storyIds());
+  const read = session.readStories({ view: 'accepted' });
+  expect(read.ok && read.stories.map((story) => [story.story, story.ok])).toEqual(
+    listed.stories.map((story) => [story.story, true])
+  );
 });
