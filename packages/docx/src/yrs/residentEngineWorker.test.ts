@@ -8,7 +8,8 @@ import type { ResidentSaveRecord } from './residentSave';
 import { syntheticDocx } from './__fixtures__/previewChain';
 import { isLayoutMetaV1, type LayoutMetaV1 } from './layoutMeta';
 import type { Layout } from '../layout/pagination';
-import { proposalRevisionPreview } from './proposals';
+import { proposalRevisionPreview, type DocxProposalSnapshot } from './proposals';
+import { computeAnchorDisplayTargets, sessionAnchorTarget } from './proposalGeometry';
 import { createYrsSession } from './index';
 import { readSidebar, readOutlineHeadings } from './sidebarReads';
 import { sidebarDocx } from './__fixtures__/sidebarDocx';
@@ -361,7 +362,11 @@ function worker() {
     },
     async bootstrap(
       pageCount = 3,
-      { keepSurfaces = false, heapLimitBytes }: { keepSurfaces?: boolean; heapLimitBytes?: number } = {}
+      { keepSurfaces = false, heapLimitBytes, state = new Uint8Array() }: {
+        keepSurfaces?: boolean;
+        heapLimitBytes?: number;
+        state?: Uint8Array;
+      } = {}
     ) {
       delta(Array.from({ length: pageCount }, (_, index) => index + 1), true, 100, pageCount);
       return send({
@@ -372,7 +377,7 @@ function worker() {
         ...(heapLimitBytes !== undefined ? { heapLimitBytes } : {}),
         snapshot: {
           clientId: 1,
-          state: new Uint8Array(),
+          state,
           fontsRevision: 0,
           fonts: [],
           renderInputs: [],
@@ -562,6 +567,58 @@ test('document reads skip stale versions and read the current version', async ()
   });
   expect(current).not.toHaveProperty('superseded');
   expect(reads).toBe(1);
+});
+
+test('anchor target reads resolve against the worker reader at the expected version', async () => {
+  const w = worker();
+  await w.bootstrap();
+  const anchors: unknown[] = [];
+  Object.assign(w.harness.session, {
+    proposalEngine: { version: () => 'current' },
+    geometryReader: {
+      version: () => 'current',
+      resolveParagraphAnchor: (anchor: unknown) => {
+        anchors.push(anchor);
+        return { status: 'missing' };
+      },
+    },
+  });
+  const paragraph = { kind: 'session', sessionId: 'session', story: 'body', paraId: '00000001' } as const;
+  const persisted = { kind: 'persisted', story: { partUri: '/word/document.xml', kind: 'body' }, paraId: '00000002' } as const;
+  const missing = await w.send({
+    type: 'documentRead',
+    read: {
+      kind: 'anchorTargets',
+      targets: [
+        { kind: 'paragraph', paragraph },
+        { kind: 'search', paragraph: persisted, text: 'x' },
+      ],
+      revisionPreview: undefined,
+      expectVersion: 'current',
+    },
+  });
+  expect(missing).toMatchObject({
+    ok: true,
+    read: {
+      version: 'current',
+      value: [
+        { ok: false, failure: { code: 'missing-target' } },
+        { ok: false, failure: { code: 'missing-target' } },
+      ],
+    },
+  });
+  expect(anchors).toEqual([paragraph, persisted]);
+  const stale = await w.send({
+    type: 'documentRead',
+    read: {
+      kind: 'anchorTargets',
+      targets: [{ kind: 'paragraph', paragraph }],
+      revisionPreview: undefined,
+      expectVersion: 'older',
+    },
+  });
+  expect(stale).toMatchObject({ ok: true, read: { version: 'current', value: null } });
+  expect(anchors).toHaveLength(2);
 });
 
 test.each([false, true])(
@@ -2745,6 +2802,56 @@ describe('worker proposals during sliced completion', () => {
     }
   });
 
+  test('persisted anchors resolved on main answer from a worker bootstrapped from main state', async () => {
+    const main = await createYrsSession();
+    const engine = await createResidentEngineSession();
+    const w = worker();
+    try {
+      main.openDocx(sidebarDocx(), true);
+      Object.assign(w.harness.session, {
+        loadState: (state: Uint8Array) => engine.loadState(state),
+        proposalEngine: engine.proposalEngine,
+        geometryReader: engine.geometryReader,
+      });
+      expect((await w.bootstrap(3, { state: main.encodeState() })).ok).toBe(true);
+      const paragraph = {
+        kind: 'persisted',
+        story: { partUri: '/word/document.xml', kind: 'body' },
+        paraId: '00000002',
+      } as const;
+      expect(engine.geometryReader.resolveParagraphAnchor(paragraph)).toEqual({
+        status: 'unsupported',
+        reason: 'no-source-package',
+      });
+      const targets = [
+        { kind: 'paragraph', paragraph },
+        { kind: 'search', paragraph, text: 'text' },
+      ] as const;
+      const posted = targets.map((target) => sessionAnchorTarget(main, target, main.version()));
+      expect(posted).toMatchObject(targets.map(() => ({ paragraph: { kind: 'session' } })));
+      const reply = await w.send({
+        type: 'documentRead',
+        read: {
+          kind: 'anchorTargets',
+          targets: posted as Exclude<(typeof posted)[number], { ok: false }>[],
+          revisionPreview: undefined,
+          expectVersion: engine.proposalEngine.version(),
+        },
+      });
+      if (!reply.ok || !reply.read) throw new Error('expected an anchor read');
+      const expected = computeAnchorDisplayTargets(main, targets, undefined);
+      expect(expected).toMatchObject(targets.map(() => ({ ok: true, ranges: [expect.any(Object)] })));
+      expect(reply.read.value).toEqual(expected);
+      expect(sessionAnchorTarget(main, {
+        kind: 'paragraph',
+        paragraph: { ...paragraph, paraId: '0000FFFF' },
+      }, main.version())).toMatchObject({ ok: false, failure: { code: 'missing-target' } });
+    } finally {
+      main.destroy();
+      engine.destroy();
+    }
+  });
+
   async function proposalWorker(extraBody = '', comments?: string, bytes?: Uint8Array, options: { clientId?: number; headersFooters?: boolean } = {}) {
     const parts: PartsMap = new Map();
     parts.set('[Content_Types].xml', toBytes(
@@ -2969,6 +3076,61 @@ describe('worker proposals during sliced completion', () => {
       });
       expect(projectionReads).toBe(1);
     } finally {
+      engine.destroy();
+    }
+  });
+
+  test('anchor target hidden ranges under a worker proposal preview match the main thread', async () => {
+    const { w, engine, proposal } = await proposalWorker();
+    const main = await createYrsSession();
+    try {
+      const applied = await w.send({
+        type: 'proposal', operation: {
+          kind: 'propose',
+          request: { expectVersion: engine.proposalEngine.version(), proposals: [proposal(1), proposal(2)] },
+        },
+      });
+      if (!applied.ok || !applied.proposal?.result?.ok) throw new Error('expected proposals');
+      const decided = await w.send({
+        type: 'proposal', operation: {
+          kind: 'setStates', request: {
+            expectVersion: applied.proposal.mirror.version,
+            expectPreviewVersion: applied.proposal.mirror.proposals.previewVersion,
+            changes: [{ id: 'p1', state: 'accepted' }, { id: 'p2', state: 'rejected' }],
+          },
+        },
+      });
+      if (!decided.ok || !decided.proposal?.result?.ok) throw new Error('expected decisions');
+      const { mirror, geometry } = decided.proposal;
+      const workerSnapshot: DocxProposalSnapshot = {
+        version: mirror.version,
+        previewVersion: mirror.proposals.previewVersion,
+        proposals: mirror.proposals.entries.map(({ record }) => record),
+      };
+      const preview = proposalRevisionPreview(workerSnapshot);
+      expect(preview).toBeDefined();
+      main.loadState(engine.encodeState());
+      const target = {
+        kind: 'paragraph',
+        paragraph: {
+          kind: 'session',
+          sessionId: main.paragraphIdentities().sessionId,
+          story: 'body',
+          paraId: '00000003',
+        },
+      } as const;
+      const reply = await w.send({
+        type: 'documentRead',
+        read: { kind: 'anchorTargets', targets: [target], revisionPreview: preview, expectVersion: mirror.version },
+      });
+      if (!reply.ok || !reply.read) throw new Error('expected an anchor read');
+      const [expected] = computeAnchorDisplayTargets(main, [target], preview);
+      if (!expected?.ok) throw new Error('expected an anchor');
+      expect(expected.hidden).toHaveLength(2);
+      expect(reply.read.value).toEqual([expected]);
+      expect(expected.hidden).toEqual(geometry.hidden);
+    } finally {
+      main.destroy();
       engine.destroy();
     }
   });

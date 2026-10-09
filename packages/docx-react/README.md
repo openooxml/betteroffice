@@ -478,6 +478,18 @@ const review = defineDocxPlugin<State>({
   stale or unpainted layout, and `layout-change` repeats once the pages have painted
   a layout that arrived before its pixels; `layout.previewVersion` is the proposal
   preview the pixels show.
+  `geometry.readAnchorGeometry(target)` answers the same targets asynchronously.
+  Worker viewers, the default for read-only editors without `collaboration`, keep
+  the document in the worker, where `getAnchorGeometry` refuses all but proposals;
+  use `readAnchorGeometry` there. It leaves fragments on pages not built yet out
+  of `rects` and lists their zero-based indexes in `unbuiltPages`; elsewhere it
+  answers like `getAnchorGeometry`. It does not wait for paint: until the pages
+  show the layout it refuses with `layout-unavailable`, so retry on the next
+  `layout-change`.
+  `geometry.readAnchorGeometries(targets)` answers many targets in order by the
+  same rules, proposals included. In worker viewers it makes at most one worker
+  read per call and reuses the worker's answers until the version or proposal
+  preview changes; main-thread and proposal answers are not cached.
   The layer ignores the
   pointer; interactive overlay elements set `pointer-events: auto`.
   `snapshot.selection.displayRange` belongs to one layout and is never an edit

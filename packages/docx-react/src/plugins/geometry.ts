@@ -7,10 +7,16 @@ import type { PointPosition, RenderedDomContext } from '@betteroffice/docx/plugi
 import { createCanvasHostProjector } from '@betteroffice/docx/plugin-api/RenderedDomContext';
 import {
   proposalSetIdentity,
+  type AnchorDisplayTarget,
+  type DocxParagraphAnchor,
   type ProposalGeometryMirror,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
-import { sourceVersionOf } from '../components/DocxEditor/internals/layoutProvenance';
+import {
+  isPresented,
+  sourceVersionOf,
+  workerFrameVersionOf,
+} from '../components/DocxEditor/internals/layoutProvenance';
 import { displayWindowOf } from '../components/DocxEditor/internals/displayWindow';
 import type { PagedEditorRef } from '../components/DocxEditor/PagedEditor';
 import type { DocxPointPosition } from '../components/DocxEditor/types';
@@ -21,7 +27,14 @@ import {
   type RawAnchorRange,
 } from './anchorGeometry';
 import { currentPreviewKey, proposalSnapshot, renderedPreviewKey } from './proposalPreview';
-import type { DocxAnchorRect, DocxPluginGeometry, DocxPluginLayout, DocxPluginRect } from './types';
+import type {
+  DocxAnchorGeometryResult,
+  DocxAnchorRect,
+  DocxGeometryTarget,
+  DocxPluginGeometry,
+  DocxPluginLayout,
+  DocxPluginRect,
+} from './types';
 
 import { flushEditorInput } from '../components/DocxEditor/editorBatches';
 import { isWorkerViewer } from '../components/DocxEditor/internals/workerViewer';
@@ -111,6 +124,93 @@ export interface AnchorGeometryAccess {
   presented: boolean;
 }
 
+type WorkerTarget = Exclude<DocxGeometryTarget, { kind: 'proposal' }>;
+
+/**
+ * Resolves targets in the worker at the worker `version` under the rendered `previewKey`, in input
+ * order; null once the worker moved past it.
+ */
+export type ReadAnchorTargets = (
+  targets: readonly WorkerTarget[],
+  version: string,
+  previewVersion: number,
+  previewKey: string
+) => Promise<readonly AnchorDisplayTarget[] | null>;
+
+interface AnchorPlacement {
+  rects: readonly DisplayListRect[];
+  anchor: DisplayListRect;
+}
+
+/**
+ * Resolved worker replies of one worker version and rendered preview, placed again on every
+ * layout; at most `limit` are kept. `pending` holds reads in flight.
+ */
+export interface AnchorReadCache {
+  key: string;
+  limit: number;
+  replies: Map<string, Extract<AnchorDisplayTarget, { ok: true }>>;
+  pending: Map<string, Promise<AnchorDisplayTarget | null | undefined>>;
+}
+
+export function createAnchorReadCache(limit = 4096): AnchorReadCache {
+  return { key: '', limit, replies: new Map(), pending: new Map() };
+}
+
+function paragraphAnchor(anchor: DocxParagraphAnchor): DocxParagraphAnchor {
+  switch (anchor.kind) {
+    case 'session':
+      return { kind: 'session', sessionId: anchor.sessionId, story: anchor.story, paraId: anchor.paraId };
+    case 'source':
+      return {
+        kind: 'source',
+        packageSha256: anchor.packageSha256,
+        partUri: anchor.partUri,
+        paragraphOrdinal: anchor.paragraphOrdinal,
+      };
+    case 'persisted': {
+      const { story } = anchor;
+      return {
+        kind: 'persisted',
+        story: 'itemId' in story
+          ? { partUri: story.partUri, kind: story.kind, itemId: story.itemId }
+          : { partUri: story.partUri, kind: story.kind },
+        paraId: anchor.paraId,
+      };
+    }
+  }
+}
+
+/** `target` with only the fields that resolve it. */
+function normalTarget(target: WorkerTarget): WorkerTarget {
+  switch (target.kind) {
+    case 'revision':
+      return { kind: 'revision', revisionId: target.revisionId };
+    case 'paragraph':
+      return { kind: 'paragraph', paragraph: paragraphAnchor(target.paragraph) };
+    case 'search':
+      return {
+        kind: 'search',
+        paragraph: paragraphAnchor(target.paragraph),
+        text: target.text,
+        ...(target.occurrence === undefined ? {} : { occurrence: target.occurrence }),
+      };
+    case 'range': {
+      const { story, start, end, view } = target.range;
+      return {
+        kind: 'range',
+        version: target.version,
+        range: {
+          story,
+          start: { paraId: start.paraId, offset: start.offset },
+          end: { paraId: end.paraId, offset: end.offset },
+          view,
+        },
+      };
+    }
+  }
+}
+
 interface Interval {
   from: number;
   to: number;
@@ -183,11 +283,13 @@ export function createPluginGeometry(
   current: () => boolean,
   resolve: (hit: PointPosition | null) => DocxPointPosition | null,
   queries: DisplayListQueries,
-  access: () => AnchorGeometryAccess | null,
+  access: (target: DocxGeometryTarget) => AnchorGeometryAccess | null,
   held: () => boolean = () => false,
-  readPoint?: (clientX: number, clientY: number) => Promise<DocxPointPosition | null>
+  readPoint?: (clientX: number, clientY: number) => Promise<DocxPointPosition | null>,
+  workerReads?: { read: ReadAnchorTargets; cache: AnchorReadCache }
 ): DocxPluginGeometry {
   const shown = () => dom.zoom === layout.zoom && current();
+  const painted = () => shown() && isPresented(dom.pagesContainer, queries.displayList);
   const projector = createCanvasHostProjector(dom.pagesContainer, queries, dom.zoom);
   const project = (rect: DisplayListRect): DocxAnchorRect | null => {
     const projected = projector.projectRect(rect);
@@ -200,6 +302,7 @@ export function createPluginGeometry(
   };
   const unavailable = () =>
     anchorFailure('layout-unavailable', 'No rendered layout shows this target yet');
+  const stale = () => anchorFailure('stale-version', 'The document changed after that version');
   /** Just past the last unit of `[from, to)` that draws, found by bisecting its visible suffix. */
   const lastUnitEnd = (from: number, to: number): number | null => {
     const draws = (start: number) => queries.rangeRects(start, to).some((rect) => rect.width > 0);
@@ -247,7 +350,189 @@ export function createPluginGeometry(
     const end = lastUnitEnd(from, to);
     return end === null ? null : caretAt(end, true);
   };
-  return {
+  const pageOrigin = (pageIndex: number): DisplayListRect | null => {
+    const bounds = queries.pageBounds(pageIndex);
+    return bounds && { ...bounds, pageIndex, width: 0, height: 0 };
+  };
+  /**
+   * Places display `ranges` less `hidden`. Unless `deferUnbuilt`, a fragment on a visible
+   * unbuilt page refuses; with it, such fragments are left out and their pages listed.
+   */
+  const place = (
+    ranges: Interval[],
+    hidden: readonly Interval[],
+    paragraph: number | null,
+    deferUnbuilt: boolean
+  ):
+    | (AnchorPlacement & { ok: true; unbuiltPages: number[] })
+    | Extract<DocxAnchorGeometryResult, { ok: false }> => {
+    ranges.sort((a, b) => a.from - b.from || a.to - b.to);
+    const window = displayWindowOf(queries)?.read();
+    const pages = queries.displayList?.pages ?? [];
+    const pendingPage = (pageIndex: number): boolean =>
+      pages[pageIndex]?.unbuilt === true &&
+      (deferUnbuilt || (!!window && pageIndex >= window[0] && pageIndex < window[1]));
+    const reaches = (
+      { unbuilt, positionSpan }: (typeof pages)[number],
+      spans: readonly Interval[] = ranges
+    ) =>
+      !!unbuilt &&
+      !!positionSpan &&
+      spans.some(({ from, to }) =>
+        from < to
+          ? from < positionSpan[1] && to > positionSpan[0]
+          : from >= positionSpan[0] && from <= positionSpan[1]
+      );
+    const unbuiltAt = (unit: number): number | undefined => {
+      const index = pages.findIndex(
+        ({ unbuilt, positionSpan }) =>
+          unbuilt && positionSpan && unit >= positionSpan[0] && unit < positionSpan[1]
+      );
+      return index < 0 ? undefined : index;
+    };
+    const shownRanges = subtract(ranges, hidden);
+    const drawable = shownRanges.filter(({ from, to }) => from < to);
+    const unbuiltPages = deferUnbuilt
+      ? pages.flatMap((page, pageIndex) => (reaches(page, drawable) ? [pageIndex] : []))
+      : [];
+    if (!deferUnbuilt && window && pages.slice(window[0], window[1]).some((page) => reaches(page))) return unavailable();
+    const union: Interval[] = [];
+    for (const range of shownRanges) {
+      const previous = union.at(-1);
+      if (previous && range.from < previous.to) previous.to = Math.max(previous.to, range.to);
+      else union.push({ ...range });
+    }
+    const drawn: DisplayListRect[] = [];
+    let tail: Interval | null = null;
+    for (const { from, to } of union) {
+      if (from >= to) continue;
+      let placed = false;
+      for (const rect of queries.rangeRects(from, to)) {
+        if (rect.width <= 0) continue;
+        if (pendingPage(rect.pageIndex)) {
+          if (deferUnbuilt) continue;
+          return unavailable();
+        }
+        drawn.push(rect);
+        placed = true;
+      }
+      if (placed) tail = { from, to };
+    }
+    let anchor: DisplayListRect | null;
+    const lastUnbuilt = unbuiltPages.at(-1);
+    if (lastUnbuilt !== undefined && drawn.every(({ pageIndex }) => pageIndex < lastUnbuilt)) {
+      anchor = pageOrigin(lastUnbuilt);
+    } else {
+      const last = ranges.at(-1);
+      const gap = last && widen(last, hidden);
+      const caret = tail === null && gap ? (caretAt(gap.from, true) ?? caretAt(gap.to)) : null;
+      const caretPage =
+        deferUnbuilt && tail === null && gap && !caret
+          ? [gap.from - 1, gap.from, gap.to, gap.to - 1].map(unbuiltAt).find((index) => index !== undefined)
+          : undefined;
+      const end =
+        tail !== null
+          ? (endOf(tail) ?? lastInReadingOrder(drawn))
+          : caretPage !== undefined
+            ? null
+            : (caret ?? (paragraph === null ? null : caretAt(paragraph)));
+      const fallback =
+        end || paragraph === null || caretPage !== undefined ? null : queries.anchorRect(paragraph);
+      const pending =
+        caretPage ?? [end, fallback].find((rect) => rect && pendingPage(rect.pageIndex))?.pageIndex;
+      if (pending !== undefined && !deferUnbuilt) return unavailable();
+      if (pending !== undefined && !unbuiltPages.includes(pending)) {
+        unbuiltPages.push(pending);
+        unbuiltPages.sort((a, b) => a - b);
+      }
+      anchor = pending !== undefined
+        ? pageOrigin(pending)
+        : (end ?? (fallback && { ...fallback, width: 0 }));
+    }
+    return anchor ? { ok: true, rects: drawn, anchor, unbuiltPages } : unavailable();
+  };
+  /** Projects a placement onto the pages as they stand now. */
+  const answer = (
+    { rects, anchor }: AnchorPlacement,
+    unbuiltPages?: readonly number[]
+  ): DocxAnchorGeometryResult => {
+    const projected = rects.map(project);
+    const anchorRect = project(anchor);
+    const page = projector.getPageBounds(anchor.pageIndex);
+    if (!anchorRect || !page || projected.some((rect) => rect === null)) return unavailable();
+    return {
+      ok: true,
+      version: layout.version,
+      previewVersion: layout.previewVersion,
+      layoutId: layout.id,
+      rects: projected as DocxAnchorRect[],
+      anchor: anchorRect,
+      pageRect: toOverlayRect(dom.pagesContainer, layer, dom.zoom, page),
+      ...(unbuiltPages ? { unbuiltPages } : {}),
+    };
+  };
+  /** Resolves `target` on the main thread; `deferUnbuilt` lists unbuilt pages instead of refusing. */
+  const resolveLocally = (
+    target: DocxGeometryTarget,
+    deferUnbuilt: boolean
+  ): DocxAnchorGeometryResult => {
+    if (!shown()) return unavailable();
+    const live = access(target);
+    if (!live || !live.presented || live.editor.hasPendingInput()) return unavailable();
+    const { session, editor } = live;
+    if (session.version() !== layout.version) return stale();
+    const snapshot = proposalSnapshot(session);
+    if (
+      (snapshot?.previewVersion ?? 0) !== layout.previewVersion ||
+      currentPreviewKey(session) !== renderedPreviewKey(queries)
+    )
+      return unavailable();
+    const mirror = live.proposalGeometry;
+    if (
+      mirror &&
+      (target.kind !== 'proposal' ||
+        mirror.version !== layout.version ||
+        mirror.previewVersion !== layout.previewVersion ||
+        !snapshot ||
+        mirror.proposals !== proposalSetIdentity(snapshot))
+    )
+      return unavailable();
+    const mirrored =
+      mirror && target.kind === 'proposal'
+        ? Object.hasOwn(mirror.targets, target.id)
+          ? mirror.targets[target.id]
+          : anchorFailure('unknown-proposal', 'The proposal is not registered in this document')
+        : null;
+    if (mirrored && !mirrored.ok) return mirrored;
+    const resolved = mirror ? null : resolveAnchorTarget(session, target, layout.version);
+    if (resolved && !resolved.ok) return resolved;
+    const display = (range: RawAnchorRange): Interval | null => {
+      const from = editor.yrsLocToDisplayPosition(range.start);
+      const to = editor.yrsLocToDisplayPosition(range.end);
+      return from === null || to === null ? null : { from, to };
+    };
+    const ranges: Interval[] = mirrored?.ok ? [...mirrored.ranges] : [];
+    for (const range of resolved?.ok ? resolved.ranges : []) {
+      const mapped = display(range);
+      if (!mapped) return anchorFailure('unsupported', 'The target has no body display position');
+      ranges.push(mapped);
+    }
+    const hidden =
+      (mirror && (!hasEditorWorkerProposalRounds(session) || !workerOpenReplicaReady(session))
+        ? mirror.hidden
+        : undefined) ??
+      hiddenRanges(session, layout.version)
+        .map(display)
+        .filter((range): range is Interval => range !== null);
+    const paragraph = mirrored?.ok
+      ? mirrored.paragraph
+      : resolved?.ok
+        ? editor.yrsLocToDisplayPosition(resolved.paragraph)
+        : null;
+    const placed = place(ranges, hidden, paragraph, deferUnbuilt);
+    return placed.ok ? answer(placed, deferUnbuilt ? placed.unbuiltPages : undefined) : placed;
+  };
+  const geometry: DocxPluginGeometry = {
     layout,
     dom,
     toOverlayRect: (rect) =>
@@ -267,124 +552,63 @@ export function createPluginGeometry(
       return shown() && position && position.version === layout.version
         ? { ...position, layoutId: layout.id } : null;
     },
-    getAnchorGeometry(target) {
-      if (!shown()) return unavailable();
-      const live = access();
-      if (!live || !live.presented || live.editor.hasPendingInput()) return unavailable();
-      const { session, editor } = live;
-      if (session.version() !== layout.version) {
-        return anchorFailure('stale-version', 'The document changed after that version');
+    getAnchorGeometry: (target) => resolveLocally(target, false),
+    async readAnchorGeometry(target) {
+      return (await geometry.readAnchorGeometries([target]))[0]!;
+    },
+    async readAnchorGeometries(targets) {
+      if (!workerReads) return targets.map((target) => geometry.getAnchorGeometry(target));
+      const version = painted() ? workerFrameVersionOf(queries) : null;
+      const { read, cache } = workerReads;
+      const previewKey = renderedPreviewKey(queries);
+      const key = JSON.stringify([version, layout.previewVersion, previewKey]);
+      if (version !== null && cache.key !== key) {
+        Object.assign(cache, createAnchorReadCache(cache.limit), { key });
       }
-      const snapshot = proposalSnapshot(session);
-      if (
-        (snapshot?.previewVersion ?? 0) !== layout.previewVersion ||
-        currentPreviewKey(session) !== renderedPreviewKey(queries)
-      )
-        return unavailable();
-      const mirror = live.proposalGeometry;
-      if (
-        mirror &&
-        (target.kind !== 'proposal' ||
-          mirror.version !== layout.version ||
-          mirror.previewVersion !== layout.previewVersion ||
-          !snapshot ||
-          mirror.proposals !== proposalSetIdentity(snapshot))
-      )
-        return unavailable();
-      const mirrored =
-        mirror && target.kind === 'proposal'
-          ? Object.hasOwn(mirror.targets, target.id)
-            ? mirror.targets[target.id]
-            : anchorFailure('unknown-proposal', 'The proposal is not registered in this document')
-          : null;
-      if (mirrored && !mirrored.ok) return mirrored;
-      const resolved = mirror ? null : resolveAnchorTarget(session, target, layout.version);
-      if (resolved && !resolved.ok) return resolved;
-      const window = displayWindowOf(queries)?.read();
-      const pendingPage = (pageIndex: number): boolean =>
-        !!window &&
-        pageIndex >= window[0] &&
-        pageIndex < window[1] &&
-        queries.displayList?.pages[pageIndex]?.unbuilt === true;
-      const display = (range: RawAnchorRange): Interval | null => {
-        const from = editor.yrsLocToDisplayPosition(range.start);
-        const to = editor.yrsLocToDisplayPosition(range.end);
-        return from === null || to === null ? null : { from, to };
-      };
-      const ranges: Interval[] = mirrored?.ok ? [...mirrored.ranges] : [];
-      for (const range of resolved?.ok ? resolved.ranges : []) {
-        const mapped = display(range);
-        if (!mapped) return anchorFailure('unsupported', 'The target has no body display position');
-        ranges.push(mapped);
+      const { replies, pending } = cache;
+      const entries = targets.map((target) => {
+        if (version === null || target.kind === 'proposal') return null;
+        if (target.kind === 'range' && target.version !== layout.version) return null;
+        const sent = normalTarget(target.kind === 'range' ? { ...target, version } : target);
+        return { id: JSON.stringify(sent), sent };
+      });
+      const missing = new Map<string, WorkerTarget>();
+      for (const entry of entries) {
+        if (entry && !replies.has(entry.id) && !pending.has(entry.id)) missing.set(entry.id, entry.sent);
       }
-      ranges.sort((a, b) => a.from - b.from || a.to - b.to);
-      if (
-        window &&
-        queries.displayList?.pages.slice(window[0], window[1]).some(
-          ({ unbuilt, positionSpan }) =>
-            unbuilt &&
-            positionSpan &&
-            ranges.some(({ from, to }) => from <= positionSpan[1] && to >= positionSpan[0])
-        )
-      )
-        return unavailable();
-      const hidden =
-        (mirror && (!hasEditorWorkerProposalRounds(session) || !workerOpenReplicaReady(session))
-          ? mirror.hidden
-          : undefined) ??
-        hiddenRanges(session, layout.version)
-          .map(display)
-          .filter((range): range is Interval => range !== null);
-      const union: Interval[] = [];
-      for (const range of subtract(ranges, hidden)) {
-        const previous = union.at(-1);
-        if (previous && range.from < previous.to) previous.to = Math.max(previous.to, range.to);
-        else union.push({ ...range });
+      if (version !== null && missing.size > 0) {
+        const request = new Promise<readonly AnchorDisplayTarget[] | null>((resolve) =>
+          resolve(read([...missing.values()], version, layout.previewVersion, previewKey))
+        );
+        [...missing.keys()].forEach((id, index) => {
+          const reply = request.then((answers) => (answers ? answers[index]! : null), () => undefined);
+          pending.set(id, reply);
+          void reply.then(() => {
+            if (pending.get(id) === reply) pending.delete(id);
+          });
+        });
       }
-      const rects: DocxAnchorRect[] = [];
-      const drawn: DisplayListRect[] = [];
-      let tail: Interval | null = null;
-      for (const { from, to } of union) {
-        if (from >= to) continue;
-        const visible = queries.rangeRects(from, to).filter((rect) => rect.width > 0);
-        for (const rect of visible) {
-          if (pendingPage(rect.pageIndex)) return unavailable();
-          const projected = project(rect);
-          if (!projected) return unavailable();
-          rects.push(projected);
-          drawn.push(rect);
+      const resolved = await Promise.all(
+        entries.map((entry) => entry && (replies.get(entry.id) ?? pending.get(entry.id)))
+      );
+      const shown = painted();
+      return targets.map((target, index) => {
+        if (target.kind === 'proposal') return resolveLocally(target, true);
+        const entry = entries[index];
+        if (!entry) return version === null ? unavailable() : stale();
+        if (!shown) return unavailable();
+        const reply = resolved[index];
+        if (reply === undefined) return unavailable();
+        if (reply === null) return stale();
+        if (!reply.ok) return reply;
+        if (cache.key === key && !cache.replies.has(entry.id)) {
+          if (cache.replies.size >= cache.limit) cache.replies.clear();
+          cache.replies.set(entry.id, reply);
         }
-        if (visible.length > 0) tail = { from, to };
-      }
-      const last = ranges.at(-1);
-      const gap = last && widen(last, hidden);
-      const paragraph = mirrored?.ok
-        ? mirrored.paragraph
-        : resolved?.ok
-          ? editor.yrsLocToDisplayPosition(resolved.paragraph)
-          : null;
-      const end =
-        tail !== null
-          ? (endOf(tail) ?? lastInReadingOrder(drawn))
-          : ((gap && (caretAt(gap.from, true) ?? caretAt(gap.to))) ??
-            (paragraph === null ? null : caretAt(paragraph)));
-      const fallback = end || paragraph === null ? null : queries.anchorRect(paragraph);
-      if ((end && pendingPage(end.pageIndex)) || (fallback && pendingPage(fallback.pageIndex))) {
-        return unavailable();
-      }
-      const anchor = end ? project(end) : fallback ? project({ ...fallback, width: 0 }) : null;
-      if (!anchor) return unavailable();
-      const page = projector.getPageBounds(anchor.pageIndex);
-      if (!page) return unavailable();
-      return {
-        ok: true,
-        version: layout.version,
-        previewVersion: layout.previewVersion,
-        layoutId: layout.id,
-        rects,
-        anchor,
-        pageRect: toOverlayRect(dom.pagesContainer, layer, dom.zoom, page),
-      };
+        const placement = place([...reply.ranges], reply.hidden, reply.paragraph, true);
+        return placement.ok ? answer(placement, placement.unbuiltPages) : placement;
+      });
     },
   };
+  return geometry;
 }
