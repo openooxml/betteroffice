@@ -775,6 +775,12 @@ export class EditSession {
      */
     read_paragraphs_json(request: string): string;
     /**
+     * Paragraph texts of many stories in one read:
+     * `{"stories"?:[…],"view","expectVersion"?}` -> `{"ok":true,"version","view",
+     * "stories":[{"story","paragraphs":[…]}|{"story","failure"}]}`. Every story when `stories` is absent.
+     */
+    read_stories_json(request: string): string;
+    /**
      * Reconciles and publishes the `[owner, paraId]` pairs a save captured,
      * an owner being a session key or a source occurrence's
      * `{partUri}#{ordinal}`; returns the stale pairs as the same JSON shape.
@@ -1686,6 +1692,7 @@ export interface InitOutput {
     readonly editsession_persist_paragraph_ids: (a: number) => [number, number, number, number];
     readonly editsession_proposal_revision_ranges_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_read_paragraphs_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_read_stories_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_record_saved_paragraph_ids: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_redo: (a: number) => number;
     readonly editsession_register_measure_font: (a: number, b: number, c: number) => [number, number, number];

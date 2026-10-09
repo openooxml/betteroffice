@@ -52,6 +52,7 @@ import type {
   DocxEditResult,
   DocxFindTextResult,
   DocxReadParagraphsResult,
+  DocxReadStoriesResult,
   DocxTextTarget,
   DocxValidationResult,
 } from './edits';
@@ -1377,6 +1378,8 @@ export function wrapSession(
     version: () => workerDocumentVersion ?? session.version(),
     readParagraphs: (request) =>
       JSON.parse(session.read_paragraphs_json(JSON.stringify(request))) as DocxReadParagraphsResult,
+    readStories: (request) =>
+      JSON.parse(session.read_stories_json(JSON.stringify(request))) as DocxReadStoriesResult,
     findText: (request) =>
       JSON.parse(session.find_text_json(JSON.stringify(request))) as DocxFindTextResult,
     validateEdits: (request) =>

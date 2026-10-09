@@ -22,6 +22,7 @@ import {
   resolveNavigationTarget,
 } from './proposalGeometry';
 import { findBodyMatches } from './findMatches';
+import { readStorySelection } from './stories';
 import { readResidentSearch, residentBodyPositions } from './residentSearch';
 import type { ResidentSaveRecord } from './residentSave';
 import { proposalProjectionStories } from './dirtyProjectionStories';
@@ -705,6 +706,16 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         break;
       case 'readParagraphs':
         value = engine.readParagraphs(request.read.request);
+        break;
+      case 'storyIds':
+        value = session.geometryReader.storyIds();
+        break;
+      case 'readStories':
+        value = readStorySelection(
+          { storyIds: session.geometryReader.storyIds, readStories: session.readStories },
+          request.read.request,
+          request.read.parts
+        );
         break;
       case 'findText':
         value = engine.findText(request.read.request);

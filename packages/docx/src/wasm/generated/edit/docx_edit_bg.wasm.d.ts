@@ -128,6 +128,7 @@ export const editsession_paragraphs: (a: number, b: number, c: number) => [numbe
 export const editsession_persist_paragraph_ids: (a: number) => [number, number, number, number];
 export const editsession_proposal_revision_ranges_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_read_paragraphs_json: (a: number, b: number, c: number) => [number, number, number, number];
+export const editsession_read_stories_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_record_saved_paragraph_ids: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_redo: (a: number) => number;
 export const editsession_register_measure_font: (a: number, b: number, c: number) => [number, number, number];

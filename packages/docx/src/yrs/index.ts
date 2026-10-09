@@ -39,6 +39,8 @@ import type {
   DocxFindTextResult,
   DocxReadParagraphsRequest,
   DocxReadParagraphsResult,
+  DocxReadStoriesRequest,
+  DocxReadStoriesResult,
   DocxTextTarget,
   DocxValidationResult,
 } from './edits';
@@ -82,6 +84,7 @@ export * from './structuredExport';
 export * from './pagedExport';
 export * from './inputPositionMap';
 export * from './storyPlainText';
+export * from './stories';
 export type { DocxResolvedPointPosition } from './pointPosition';
 export type { ResidentDocumentRead } from './residentEngineWorkerProtocol';
 export type {
@@ -1418,6 +1421,8 @@ export interface YrsSession extends CollaborationReplica {
   version(): string;
   /** Paragraph texts in one view, with the version they were read at. */
   readParagraphs(request: DocxReadParagraphsRequest): DocxReadParagraphsResult;
+  /** Paragraph texts of many stories in one read; a story that cannot be read reports why. */
+  readStories(request: DocxReadStoriesRequest): DocxReadStoriesResult;
   /** Exact, case-sensitive, paragraph-local search; overlapping matches count separately. */
   findText(request: DocxFindTextRequest): DocxFindTextResult;
   /** Resolves and checks an edit batch without changing anything or reserving ids. */

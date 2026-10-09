@@ -243,6 +243,23 @@ export type DocxReadParagraphsResult =
   | { ok: true; version: string; view: DocxTextView; paragraphs: DocxParagraphText[] }
   | DocxEditRefusal;
 
+export interface DocxReadStoriesRequest {
+  /** Every story, in sorted id order, when omitted. */
+  stories?: readonly string[];
+  view: DocxTextView;
+  /** Refuses with `stale-version` when the document is at another version. */
+  expectVersion?: string;
+}
+
+/** One story's paragraphs, or why it could not be read. */
+export type DocxStoryText =
+  | { story: string; paragraphs: DocxParagraphText[] }
+  | { story: string; failure: DocxEditFailure };
+
+export type DocxReadStoriesResult =
+  | { ok: true; version: string; view: DocxTextView; stories: DocxStoryText[] }
+  | DocxEditRefusal;
+
 export interface DocxFindTextRequest {
   text: string;
   within: DocxSearchScope;

@@ -7,7 +7,7 @@
 //! mark nor the block embeds leading a paragraph are part of it. The accepted view shows pending
 //! insertions and hides pending deletions; the original view does the reverse.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -153,6 +153,40 @@ pub struct ReadParagraphsResponse {
     pub version: DocumentVersion,
     pub view: EditTextView,
     pub paragraphs: Vec<ParagraphText>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReadStoriesRequest {
+    /// Every story, in sorted id order, when absent.
+    #[serde(default)]
+    pub stories: Option<Vec<String>>,
+    pub view: EditTextView,
+    /// Refuses with `stale-version` when the document is at another version.
+    #[serde(default)]
+    pub expect_version: Option<DocumentVersion>,
+}
+
+/// One story's paragraphs, or why it could not be read.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum StoryText {
+    Read {
+        story: String,
+        paragraphs: Vec<ParagraphText>,
+    },
+    Refused {
+        story: String,
+        failure: EditFailure,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadStoriesResponse {
+    pub version: DocumentVersion,
+    pub view: EditTextView,
+    pub stories: Vec<StoryText>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1099,6 +1133,72 @@ impl<'a, T: ReadTxn> Views<'a, T> {
     }
 }
 
+/// What one read has returned so far, against the read limits.
+#[derive(Clone, Copy, Default)]
+struct ReadBudget {
+    paragraphs: usize,
+    text_units: usize,
+}
+
+fn read_story<T: ReadTxn>(
+    views: &mut Views<'_, T>,
+    story_id: &str,
+    para_ids: Option<&[String]>,
+    view: EditTextView,
+    budget: &mut ReadBudget,
+) -> Result<Vec<ParagraphText>, EditFailure> {
+    let Some(story) = views.story(story_id, view) else {
+        return Err(failure(
+            EditFailureCode::MissingTarget,
+            format!("story {story_id:?} was not found"),
+            None,
+        ));
+    };
+    views.check_story_readable(story_id)?;
+    let indices: Vec<usize> = match para_ids {
+        None => (0..story.paragraphs.len()).collect(),
+        Some(ids) => {
+            let mut indices = Vec::with_capacity(ids.len());
+            for para_id in ids {
+                let target = ParagraphTarget {
+                    story: story_id.to_owned(),
+                    para_id: para_id.clone(),
+                };
+                let (_, index) = views.paragraph(&target, view)?;
+                indices.push(index);
+            }
+            indices.sort_unstable();
+            indices.dedup();
+            indices
+        }
+    };
+    budget.paragraphs += indices.len();
+    if budget.paragraphs > READ_PARAGRAPH_LIMIT {
+        return Err(failure(
+            EditFailureCode::LimitExceeded,
+            format!("a read returns at most {READ_PARAGRAPH_LIMIT} paragraphs"),
+            None,
+        ));
+    }
+    let mut paragraphs = Vec::with_capacity(indices.len());
+    for index in indices {
+        if story.structurally_revised(index) {
+            return Err(structural_read_failure(&story, index));
+        }
+        let paragraph = &story.paragraphs[index];
+        budget.text_units += paragraph.len() as usize;
+        if budget.text_units > READ_TEXT_LIMIT {
+            return Err(failure(
+                EditFailureCode::LimitExceeded,
+                format!("a read returns at most {READ_TEXT_LIMIT} UTF-16 units of text"),
+                None,
+            ));
+        }
+        paragraphs.push(paragraph.record(story_id));
+    }
+    Ok(paragraphs)
+}
+
 fn structural_read_failure(story: &StoryView, index: usize) -> EditFailure {
     let paragraph = &story.paragraphs[index];
     failure(
@@ -1135,61 +1235,79 @@ impl EditingDoc {
     ) -> Result<ReadParagraphsResponse, EditRefusal> {
         let story_id = request.story.as_deref().unwrap_or("body");
         let (version, paragraphs) = self.read_scope(|views| {
-            let Some(story) = views.story(story_id, request.view) else {
-                return Err(failure(
-                    EditFailureCode::MissingTarget,
-                    format!("story {story_id:?} was not found"),
-                    None,
-                ));
-            };
-            views.check_story_readable(story_id)?;
-            let indices: Vec<usize> = match &request.para_ids {
-                None => (0..story.paragraphs.len()).collect(),
-                Some(ids) => {
-                    let mut indices = Vec::with_capacity(ids.len());
-                    for para_id in ids {
-                        let target = ParagraphTarget {
-                            story: story_id.to_owned(),
-                            para_id: para_id.clone(),
-                        };
-                        let (_, index) = views.paragraph(&target, request.view)?;
-                        indices.push(index);
-                    }
-                    indices.sort_unstable();
-                    indices.dedup();
-                    indices
-                }
-            };
-            if indices.len() > READ_PARAGRAPH_LIMIT {
-                return Err(failure(
-                    EditFailureCode::LimitExceeded,
-                    format!("a read returns at most {READ_PARAGRAPH_LIMIT} paragraphs"),
-                    None,
-                ));
-            }
-            let mut text_units = 0usize;
-            let mut paragraphs = Vec::with_capacity(indices.len());
-            for index in indices {
-                if story.structurally_revised(index) {
-                    return Err(structural_read_failure(&story, index));
-                }
-                let paragraph = &story.paragraphs[index];
-                text_units += paragraph.len() as usize;
-                if text_units > READ_TEXT_LIMIT {
-                    return Err(failure(
-                        EditFailureCode::LimitExceeded,
-                        format!("a read returns at most {READ_TEXT_LIMIT} UTF-16 units of text"),
-                        None,
-                    ));
-                }
-                paragraphs.push(paragraph.record(story_id));
-            }
-            Ok(paragraphs)
+            read_story(
+                views,
+                story_id,
+                request.para_ids.as_deref(),
+                request.view,
+                &mut ReadBudget::default(),
+            )
         })?;
         Ok(ReadParagraphsResponse {
             version,
             view: request.view,
             paragraphs,
+        })
+    }
+
+    /// Paragraph texts of many stories in one view and one read; a story that cannot be read
+    /// reports its failure instead.
+    pub fn read_stories(
+        &self,
+        request: &ReadStoriesRequest,
+    ) -> Result<ReadStoriesResponse, EditRefusal> {
+        let (version, stories) = self.read_scope(|views| {
+            let ids = match &request.stories {
+                Some(ids) => {
+                    let mut seen = HashSet::new();
+                    ids.iter()
+                        .filter(|id| seen.insert(id.as_str()))
+                        .cloned()
+                        .collect()
+                }
+                None => {
+                    let txn = views.txn();
+                    let mut ids: Vec<String> = txn
+                        .get_map(crate::STORIES)
+                        .map(|stories| stories.keys(txn).map(str::to_owned).collect())
+                        .unwrap_or_default();
+                    ids.sort();
+                    ids
+                }
+            };
+            let mut budget = ReadBudget::default();
+            let mut stories = Vec::with_capacity(ids.len());
+            for story in ids {
+                let before = budget;
+                match read_story(views, &story, None, request.view, &mut budget) {
+                    Ok(paragraphs) => stories.push(StoryText::Read { story, paragraphs }),
+                    Err(failure) if failure.code == EditFailureCode::LimitExceeded => {
+                        return Err(failure);
+                    }
+                    Err(failure) => {
+                        budget = before;
+                        stories.push(StoryText::Refused { story, failure });
+                    }
+                }
+            }
+            Ok(stories)
+        })?;
+        if let Some(expected) = &request.expect_version
+            && *expected != version
+        {
+            return Err(refusal(
+                version,
+                failure(
+                    EditFailureCode::StaleVersion,
+                    "the document changed since the expected version was read".to_owned(),
+                    None,
+                ),
+            ));
+        }
+        Ok(ReadStoriesResponse {
+            version,
+            view: request.view,
+            stories,
         })
     }
 

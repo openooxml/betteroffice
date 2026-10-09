@@ -21,7 +21,12 @@ import type {
   CollaborationTextInsertion,
   CollaborationUpdateOrigin,
 } from '../collaboration/types';
-import type { DocxEditResult, DocxFindTextResult, DocxReadParagraphsResult } from './edits';
+import type {
+  DocxEditResult,
+  DocxFindTextResult,
+  DocxReadParagraphsResult,
+  DocxReadStoriesResult,
+} from './edits';
 import type {
   DocxParagraphAnchorResult,
   DocxParagraphIdentitySnapshot,
@@ -84,6 +89,7 @@ export type ResidentEngineSession = Pick<
   | 'setDisplayRetainBuiltPages'
   | 'setDisplayWindow'
   | 'setSelection'
+  | 'readStories'
   | 'storiesChangedSince'
   | 'yrsBlocksForStory'
 > & {
@@ -350,6 +356,8 @@ export async function createResidentEngineSession(
     },
     paragraphIdentities: () =>
       JSON.parse(session.paragraph_identities()) as DocxParagraphIdentitySnapshot,
+    readStories: (request) =>
+      JSON.parse(session.read_stories_json(JSON.stringify(request))) as DocxReadStoriesResult,
     exportStructuredWithPagesJson: (options, currentRequest) =>
       session.export_structured_with_pages_json(JSON.stringify(options), currentRequest),
     listContentControls: (options = {}) =>

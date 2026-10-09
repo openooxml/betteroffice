@@ -69,9 +69,9 @@ use crate::{
     FontFamilyPatch, FormatPolicy, InlineFormatDelta, Loc, LocRange, MergeDirection, OpError,
     ParaAttrDelta, ParaSelector, ParagraphAnchor, ParagraphIdDiagnostic, ParagraphIdOrigin,
     ParagraphIdRefusal, ParagraphOrigin, ParagraphRef, Patch, PersistedParagraphIds, Position,
-    RawOp, ReadParagraphsRequest, SeedParagraph, SegmentContent, SimpleFormat, SourceParagraphRef,
-    SourceStory, SourceStoryKind, SpliceAnchor, StoryRange, TabStop, TableLocator, TableRange,
-    TextTarget, TriState, UndoCaptureMode, UndoSession, story_ref,
+    RawOp, ReadParagraphsRequest, ReadStoriesRequest, SeedParagraph, SegmentContent, SimpleFormat,
+    SourceParagraphRef, SourceStory, SourceStoryKind, SpliceAnchor, StoryRange, TabStop,
+    TableLocator, TableRange, TextTarget, TriState, UndoCaptureMode, UndoSession, story_ref,
 };
 
 #[wasm_bindgen]
@@ -4200,6 +4200,14 @@ impl EditSession {
     pub fn read_paragraphs_json(&self, request: &str) -> Result<String, JsValue> {
         let request: ReadParagraphsRequest = serde_json::from_str(request).map_err(js_err)?;
         outcome_json(&self.engine.doc().read_paragraphs(&request)).map_err(js_err)
+    }
+
+    /// Paragraph texts of many stories in one read:
+    /// `{"stories"?:[…],"view","expectVersion"?}` -> `{"ok":true,"version","view",
+    /// "stories":[{"story","paragraphs":[…]}|{"story","failure"}]}`. Every story when `stories` is absent.
+    pub fn read_stories_json(&self, request: &str) -> Result<String, JsValue> {
+        let request: ReadStoriesRequest = serde_json::from_str(request).map_err(js_err)?;
+        outcome_json(&self.engine.doc().read_stories(&request)).map_err(js_err)
     }
 
     /// Until the matching `end_shared_reads`, committed reads share story projections of each document state.
