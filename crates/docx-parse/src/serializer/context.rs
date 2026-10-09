@@ -28,8 +28,20 @@ pub struct SerializerContext {
 #[derive(Clone, Debug, Default)]
 struct SpliceRecorder {
     expected: HashSet<u32>,
-    written: HashMap<u32, String>,
+    recorded: RecordedParagraphs,
     conflict: bool,
+}
+
+/// The paragraphs written for a spliced part, outside any other paragraph.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RecordedParagraphs {
+    /// The XML of each paragraph written from a source paragraph, by `sourceOrdinal`.
+    pub(crate) written: HashMap<u32, String>,
+    /// The XML of each paragraph without a `sourceOrdinal`, in writing order.
+    pub(crate) inserted: Vec<String>,
+    /// Every recorded paragraph in writing order: its `sourceOrdinal`, or `None` for the next
+    /// of `inserted`.
+    pub(crate) order: Vec<Option<u32>>,
 }
 
 impl SerializerContext {
@@ -111,16 +123,16 @@ impl SerializerContext {
     }
 
     /// The recorded paragraphs; `None` when one source paragraph was written twice differently,
-    /// or a paragraph the part does not address was written.
-    pub(crate) fn end_splice(&mut self) -> Option<HashMap<u32, String>> {
+    /// or one with a `sourceOrdinal` the part does not address was written.
+    pub(crate) fn end_splice(&mut self) -> Option<RecordedParagraphs> {
         self.splice
             .take()
             .filter(|recorder| !recorder.conflict)
-            .map(|recorder| recorder.written)
+            .map(|recorder| recorder.recorded)
     }
 
-    /// Records a paragraph written outside any other paragraph. One the part does not address,
-    /// such as a paragraph the source does not hold, refuses the splice.
+    /// Records a paragraph written outside any other paragraph: by its `sourceOrdinal`, which
+    /// must be one the part addresses, or as a paragraph the source lacks.
     pub(crate) fn record_paragraph(&mut self, ordinal: Option<u32>, xml: &str) {
         if !self.rendered_page_breaks.is_empty() {
             return;
@@ -128,16 +140,22 @@ impl SerializerContext {
         let Some(recorder) = self.splice.as_mut() else {
             return;
         };
-        let Some(ordinal) = ordinal.filter(|ordinal| recorder.expected.contains(ordinal)) else {
-            recorder.conflict = true;
-            return;
-        };
-        match recorder.written.get(&ordinal) {
-            Some(previous) => recorder.conflict |= previous != xml,
-            None => {
-                recorder.written.insert(ordinal, xml.to_owned());
+        let recorded = &mut recorder.recorded;
+        match ordinal {
+            None => recorded.inserted.push(xml.to_owned()),
+            Some(ordinal) if recorder.expected.contains(&ordinal) => {
+                if let Some(previous) = recorded.written.get(&ordinal) {
+                    recorder.conflict |= previous != xml;
+                    return;
+                }
+                recorded.written.insert(ordinal, xml.to_owned());
+            }
+            Some(_) => {
+                recorder.conflict = true;
+                return;
             }
         }
+        recorded.order.push(ordinal);
     }
 
     pub(crate) fn enter_paragraph(&mut self, rendered_page_break_before: bool) {
