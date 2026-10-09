@@ -7,7 +7,7 @@ use quick_xml::Reader;
 use quick_xml::events::{BytesDecl, Event};
 use serde::{Deserialize, Serialize};
 
-use crate::block::{BlockContent, StoryParser, transparent_children};
+use crate::block::{BlockContent, LegacyBodyCut, StoryParser, transparent_children};
 use crate::comments::Comment;
 use crate::inline::{InlineNode, RunContent};
 use crate::paragraph::RawAttribute;
@@ -90,6 +90,76 @@ struct CutFrame {
     drawing: bool,
 }
 
+struct StreamingLegacyBodyCut {
+    cut: LegacyBodyCut,
+    stack: Vec<bool>,
+    document: bool,
+    body_seen: bool,
+    block_depth: Option<usize>,
+    unmatched_fields: usize,
+    external_ends: usize,
+}
+
+impl StreamingLegacyBodyCut {
+    fn new(limit: usize) -> Self {
+        Self {
+            cut: LegacyBodyCut::new(limit),
+            stack: Vec::new(),
+            document: false,
+            body_seen: false,
+            block_depth: None,
+            unmatched_fields: 0,
+            external_ends: 0,
+        }
+    }
+
+    fn start(&mut self, name: &str, field_type: Option<&str>, empty: bool) {
+        if self.cut.is_partial() {
+            return;
+        }
+        let local = crate::xml::local_name(name);
+        if self.stack.is_empty() {
+            self.document = local == "document";
+        }
+        let body = self.document && self.stack.len() == 1 && local == "body" && !self.body_seen;
+        self.body_seen |= body;
+        let story_child = self.stack.last() == Some(&true);
+        let wrapper = story_child && matches!(local, "customXml" | "smartTag");
+        if story_child && !wrapper {
+            self.cut.read_child(name);
+            if crate::block::typed_block_name(name) {
+                self.block_depth = Some(self.stack.len() + 1);
+                self.unmatched_fields = 0;
+                self.external_ends = 0;
+            }
+        }
+        if self.block_depth.is_some() && local == "fldChar" {
+            match field_type {
+                Some("begin") => self.unmatched_fields += 1,
+                Some("end") if self.unmatched_fields == 0 => self.external_ends += 1,
+                Some("end") => self.unmatched_fields -= 1,
+                _ => {}
+            }
+        }
+        self.stack.push(body || wrapper);
+        if empty {
+            self.end();
+        }
+    }
+
+    fn end(&mut self) {
+        if self.cut.is_partial() {
+            return;
+        }
+        if self.block_depth == Some(self.stack.len()) {
+            self.cut
+                .finish_block(self.external_ends, self.unmatched_fields);
+            self.block_depth = None;
+        }
+        self.stack.pop();
+    }
+}
+
 #[derive(Default)]
 struct CutDrawing {
     bindings: IndexMap<String, String>,
@@ -164,6 +234,14 @@ pub(crate) fn streaming_body_cut(
     xml: &[u8],
     budget: &mut crate::xml::ParseBudget<'_>,
 ) -> Result<bool, ParseError> {
+    streaming_body_cut_with_limit(xml, budget, None).map(|(refused, _)| refused)
+}
+
+pub(crate) fn streaming_body_cut_with_limit(
+    xml: &[u8],
+    budget: &mut crate::xml::ParseBudget<'_>,
+    block_limit: Option<usize>,
+) -> Result<(bool, bool), ParseError> {
     let repaired = crate::xml::escape_stray_ampersands(xml);
     let xml = repaired.as_ref();
     let part = "word/document.xml";
@@ -182,6 +260,7 @@ pub(crate) fn streaming_body_cut(
     let mut drawings: Vec<CutDrawing> = Vec::new();
     let mut roots = 0;
     let mut refused = false;
+    let mut legacy_cut = block_limit.map(StreamingLegacyBodyCut::new);
     loop {
         let event = reader
             .read_event()
@@ -255,6 +334,8 @@ pub(crate) fn streaming_body_cut(
                 }
                 let mut unprefixed = None;
                 let mut prefixed = None;
+                let mut field_type = None;
+                let mut prefixed_field_type = None;
                 let mut attribute_bytes = 0usize;
                 for (index, attribute) in start.attributes().enumerate() {
                     if index >= budget.limits().max_attributes_per_element {
@@ -292,6 +373,18 @@ pub(crate) fn streaming_body_cut(
                         });
                     }
                     budget.charge_text(key.len() + value.len(), part)?;
+                    if legacy_cut.is_some() && local == "fldChar" {
+                        let kind = match value.as_ref() {
+                            "begin" => "begin",
+                            "end" => "end",
+                            _ => "",
+                        };
+                        match key.as_ref() {
+                            "fldCharType" => field_type = Some(kind),
+                            "w:fldCharType" => prefixed_field_type = Some(kind),
+                            _ => {}
+                        }
+                    }
                     if key == "xmlns" || key.starts_with("xmlns:") {
                         frame
                             .namespace_declarations
@@ -339,6 +432,13 @@ pub(crate) fn streaming_body_cut(
                     "cols" => refused |= prefixed.or(unprefixed).unwrap_or(false),
                     _ => {}
                 }
+                if let Some(cut) = &mut legacy_cut {
+                    cut.start(
+                        &name,
+                        prefixed_field_type.or(field_type),
+                        matches!(event, Event::Empty(_)),
+                    );
+                }
                 if matches!(event, Event::Start(_)) {
                     stack.push(frame);
                 } else if frame.drawing {
@@ -346,6 +446,9 @@ pub(crate) fn streaming_body_cut(
                 }
             }
             Event::End(_) => {
+                if let Some(cut) = &mut legacy_cut {
+                    cut.end();
+                }
                 let frame = stack.pop().ok_or_else(|| {
                     error(
                         reader.buffer_position(),
@@ -428,7 +531,7 @@ pub(crate) fn streaming_body_cut(
             "unclosed element".to_owned(),
         ));
     }
-    Ok(refused)
+    Ok((refused, legacy_cut.is_some_and(|cut| cut.cut.is_partial())))
 }
 
 // Reader offsets index the input and raw attribute names are the decoded ones only for
@@ -585,7 +688,8 @@ pub fn parse_document_body(
     document: &XmlElement,
     parser: &mut StoryParser<'_, '_>,
 ) -> Result<DocumentBody, ParseError> {
-    parse_document_body_impl(document, parser, true, None, None).map(|(body, _)| body)
+    parse_document_body_impl(document, parser, true, None, None, None, None)
+        .map(|(body, _, _)| body)
 }
 
 /// Parses a body without cloning blocks into section content.
@@ -593,8 +697,19 @@ pub(crate) fn parse_document_body_compact(
     document: &XmlElement,
     parser: &mut StoryParser<'_, '_>,
     body_blocks: Option<usize>,
-) -> Result<DocumentBody, ParseError> {
-    parse_document_body_impl(document, parser, false, body_blocks, None).map(|(body, _)| body)
+    paragraph_budget: Option<usize>,
+    legacy_partial: Option<bool>,
+) -> Result<(DocumentBody, bool), ParseError> {
+    parse_document_body_impl(
+        document,
+        parser,
+        false,
+        body_blocks,
+        None,
+        paragraph_budget,
+        legacy_partial,
+    )
+    .map(|(body, _, budget_stopped)| (body, budget_stopped))
 }
 
 pub(crate) fn parse_document_body_compact_with_read(
@@ -602,8 +717,18 @@ pub(crate) fn parse_document_body_compact_with_read(
     parser: &mut StoryParser<'_, '_>,
     body_blocks: Option<usize>,
     kept_children: usize,
-) -> Result<(DocumentBody, usize), ParseError> {
-    parse_document_body_impl(document, parser, false, body_blocks, Some(kept_children))
+    paragraph_budget: Option<usize>,
+    legacy_partial: Option<bool>,
+) -> Result<(DocumentBody, usize, bool), ParseError> {
+    parse_document_body_impl(
+        document,
+        parser,
+        false,
+        body_blocks,
+        Some(kept_children),
+        paragraph_budget,
+        legacy_partial,
+    )
 }
 
 fn parse_document_body_impl(
@@ -612,15 +737,24 @@ fn parse_document_body_impl(
     clone_section_content: bool,
     body_blocks: Option<usize>,
     read_limit: Option<usize>,
-) -> Result<(DocumentBody, usize), ParseError> {
+    paragraph_budget: Option<usize>,
+    legacy_partial: Option<bool>,
+) -> Result<(DocumentBody, usize, bool), ParseError> {
     if document.local_name() != "document" {
-        return Ok((DocumentBody::default(), 0));
+        return Ok((DocumentBody::default(), 0, false));
     }
     let Some(body) = document.child("w", "body") else {
-        return Ok((DocumentBody::default(), 0));
+        return Ok((DocumentBody::default(), 0, false));
     };
-    let (content, read) =
-        parser.parse_blocks_until_with_read_limit(body, 0, false, body_blocks, read_limit)?;
+    let (content, read, budget_stopped) = parser.parse_blocks_until_with_read_limit(
+        body,
+        0,
+        false,
+        body_blocks,
+        read_limit,
+        paragraph_budget,
+        legacy_partial,
+    )?;
     // A body cut short ends inside the section whose properties the next
     // section-ending paragraph carries.
     let cut_section = body_blocks.and_then(|_| {
@@ -655,6 +789,7 @@ fn parse_document_body_impl(
             comments: None,
         },
         read,
+        budget_stopped,
     ))
 }
 

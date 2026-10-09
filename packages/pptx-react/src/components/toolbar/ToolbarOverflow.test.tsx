@@ -147,6 +147,141 @@ describe('PPTX toolbar overflow', () => {
     expect(screen().queryByTestId('pptx-toolbar-more')).toBeNull();
   });
 
+  test.each([
+    ['converges when hidden groups measure narrower', false],
+    ['converges when groups measure narrower while More takes row space', true],
+  ] as const)('%s', (_name, rowDependent) => {
+    const previousRect = HTMLElement.prototype.getBoundingClientRect;
+    railWidth = 100;
+    HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement) {
+      if (rowDependent && this.hasAttribute('data-toolbar-items')) {
+        const trigger = this.parentElement?.querySelector<HTMLElement>(
+          '[data-testid="pptx-toolbar-more"]'
+        )?.parentElement?.parentElement;
+        const moreWidth =
+          trigger && trigger.style.position !== 'absolute'
+            ? trigger.getBoundingClientRect().width +
+              (parseFloat(getComputedStyle(trigger).marginLeft) || 0)
+            : 0;
+        return rect(railWidth - moreWidth);
+      }
+      if (this.parentElement?.hasAttribute('data-toolbar-items')) {
+        if (rowDependent) return rect(this.parentElement.getBoundingClientRect().width * 0.6);
+        return rect(this.style.position === 'absolute' ? 20 : 100);
+      }
+      if (this.querySelector(':scope > span > [data-testid="pptx-toolbar-more"]')) return rect(28);
+      return previousRect.call(this);
+    };
+    try {
+      const controller = createPptxCommandController();
+      controller.attach(testBinding().binding);
+      const tree = (
+        <PptxCommandProvider commands={controller.store}>
+          <EditorToolbar mode="commands">
+            <EditorToolbar.Toolbar style={{ padding: 0 }}>
+              <ToolbarGroup label="A">
+                <ToolbarCommandButton id="bold" />
+              </ToolbarGroup>
+              <ToolbarGroup label="B">
+                <ToolbarCommandButton id="italic" />
+              </ToolbarGroup>
+            </EditorToolbar.Toolbar>
+          </EditorToolbar>
+        </PptxCommandProvider>
+      );
+      expect(() => render(tree)).not.toThrow();
+      const groups = document.querySelectorAll('[data-toolbar-items] > [role="group"]');
+      const expectedHidden = [rowDependent ? null : 'true', 'true'];
+      expect(Array.from(groups, (group) => group.getAttribute('aria-hidden'))).toEqual(expectedHidden);
+      const trigger = screen().getByRole('button', { name: 'More' });
+      expect(trigger).toBe(more());
+      expect(trigger.parentElement?.parentElement?.style.position).toBe('');
+      expect(() => resize(100)).not.toThrow();
+      expect(Array.from(groups, (group) => group.getAttribute('aria-hidden'))).toEqual(expectedHidden);
+      expect(screen().getByRole('button', { name: 'More' })).toBe(trigger);
+      expect(trigger.parentElement?.parentElement?.style.position).toBe('');
+      expect(items(openMenu()).map((item) => item.dataset.label)).toEqual(
+        rowDependent ? ['Italic'] : ['Bold', 'Italic']
+      );
+    } finally {
+      cleanup();
+      HTMLElement.prototype.getBoundingClientRect = previousRect;
+    }
+  });
+
+  test('preserves scrolling on an unchanged measurement with focus outside the row', () => {
+    railWidth = 10;
+    const controller = createPptxCommandController();
+    controller.attach(testBinding().binding);
+    const tree = () => (
+      <>
+        <button type="button">Outside</button>
+        <PptxCommandProvider commands={controller.store}>
+          <EditorToolbar mode="commands">
+            <EditorToolbar.Toolbar style={{ padding: 0 }}>
+              <span data-testid="unrepresented" style={{ flexShrink: 0 }}>
+                Plain
+              </span>
+              <ToolbarGroup label="Formatting">
+                <ToolbarCommandButton id="bold" />
+              </ToolbarGroup>
+            </EditorToolbar.Toolbar>
+          </EditorToolbar>
+        </PptxCommandProvider>
+      </>
+    );
+    const view = render(tree());
+    const row = screen().getByRole('toolbar').querySelector<HTMLElement>('[data-toolbar-items]')!;
+    const units = Array.from(row.children) as HTMLElement[];
+    const trigger = more();
+    const wrapper = trigger.parentElement!.parentElement!;
+    const moreWidth = 28 + (parseFloat(getComputedStyle(wrapper).marginLeft) || 0);
+    const unitWidth = (unit: HTMLElement) => (unit.dataset.testid === 'unrepresented' ? 100 : 20);
+    let scrollLeft = 0;
+    Object.defineProperties(row, {
+      clientWidth: {
+        get: () => railWidth - (wrapper.style.position === 'absolute' ? 0 : moreWidth),
+      },
+      scrollWidth: {
+        get: () =>
+          Math.max(
+            row.clientWidth,
+            units.reduce(
+              (sum, unit) => sum + (unit.style.position === 'absolute' ? 0 : unitWidth(unit)),
+              0
+            )
+          ),
+      },
+      scrollLeft: {
+        get: () => scrollLeft,
+        set: (value: number) => {
+          scrollLeft = Math.max(0, Math.min(value, row.scrollWidth - row.clientWidth));
+        },
+      },
+    });
+    const mockRect = (element: HTMLElement, width: () => number) => {
+      element.getBoundingClientRect = () => {
+        row.scrollLeft = row.scrollLeft;
+        return rect(width());
+      };
+    };
+    mockRect(row, () => row.clientWidth);
+    mockRect(wrapper, () => 28);
+    units.forEach((unit) => mockRect(unit, () => unitWidth(unit)));
+    resize(100);
+    expect(row.style.overflowX).toBe('auto');
+    expect(units[0].getAttribute('aria-hidden')).toBeNull();
+    expect(units[1].getAttribute('aria-hidden')).toBe('true');
+    act(() => screen().getByRole('button', { name: 'Outside' }).focus());
+    expect(row.contains(document.activeElement)).toBe(false);
+    expect(row.scrollWidth - row.clientWidth).toBe(32);
+    row.scrollLeft = 32;
+    expect(row.scrollLeft).toBe(32);
+    view.rerender(tree());
+    expect(more()).toBe(trigger);
+    expect(row.scrollLeft).toBe(32);
+  });
+
   test('moves trailing units into an accessible More menu, in host order', () => {
     mount();
     resize(200);

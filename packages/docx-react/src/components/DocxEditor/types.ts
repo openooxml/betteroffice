@@ -31,7 +31,10 @@ export interface DocxEditorCollaborationOptions {
   presence?: CollaborationPresence;
 }
 
-/** Framework-neutral selection state published by the Yrs-backed editor. */
+/**
+ * Framework-neutral selection state published by the Yrs-backed editor.
+ * In a viewer session formatting is empty and paragraph indices are -1; read the selection with the editor ref's `readSelectionInfo`.
+ */
 export interface SelectionState {
   hasSelection: boolean;
   isMultiParagraph: boolean;

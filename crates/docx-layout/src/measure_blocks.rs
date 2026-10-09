@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use ooxml_text::measure::{FontChainDependencies, FontChains};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -9,8 +10,9 @@ use crate::cell_layout::{nested_table_float_offset, nested_table_horizontal_offs
 use crate::floating_objects::{MIN_WRAP_SEGMENT_WIDTH, table_wrap_gaps};
 use crate::table_grid::{
     ResolvedGridCell, content_sized_columns, count_table_columns, fits_columns_to_words,
-    grow_content_sized_columns, resolve_cell_grid, resolve_table_column_widths,
-    resolve_table_width_px, widen_columns_to_minimums,
+    grow_content_sized_columns, resolve_cell_grid,
+    resolve_table_column_widths_with_percentage_basis, resolve_table_width_px,
+    table_percentage_basis, widen_columns_to_minimums,
 };
 use crate::types::{
     BlockExtent, BlockId, ChartExtent, FloatingTablePosition, ImageExtent, ImageRunPosition,
@@ -623,6 +625,23 @@ pub fn measure_blocks(
         .collect()
 }
 
+pub fn measure_blocks_without_table_compat_shift(
+    blocks: &mut [LayoutBlock],
+    content_width: f64,
+    config: &MeasurementConfig,
+) -> Result<Vec<BlockExtent>, String> {
+    blocks
+        .iter_mut()
+        .map(|block| match block {
+            LayoutBlock::Table(table) => {
+                measure_table_with_compat_shift(table, content_width, config, false)
+                    .map(BlockExtent::Table)
+            }
+            _ => measure_block(block, content_width, config),
+        })
+        .collect()
+}
+
 /// Whether any block anchors a floating zone (wrapped image, floating table,
 /// or text box). Callers use this to gate float-free fast paths; extraction is
 /// a read-only scan of the same zones `measure_blocks_with_floats` consumes.
@@ -763,7 +782,28 @@ pub fn measure_float_segment_with_table_wrap_frames(
     page_geometry: Option<&FloatPageGeometry>,
     section_break_marks: &[bool],
 ) -> Result<Option<Vec<BlockExtent>>, String> {
-    let extracted = extract_floating_zones(
+    measure_float_segment_with_font_dependencies(
+        blocks,
+        widths,
+        default_width,
+        table_wrap_frames,
+        config,
+        page_geometry,
+        section_break_marks,
+    )
+    .map(|measured| measured.map(|(extents, _)| extents))
+}
+
+pub fn measure_float_segment_with_font_dependencies(
+    blocks: &mut [LayoutBlock],
+    widths: &[f64],
+    default_width: f64,
+    table_wrap_frames: &[bool],
+    config: &MeasurementConfig,
+    page_geometry: Option<&FloatPageGeometry>,
+    section_break_marks: &[bool],
+) -> Result<Option<(Vec<BlockExtent>, Vec<FontChainDependencies>)>, String> {
+    let (extracted, zone_dependencies) = extract_floating_zones_recorded(
         blocks,
         default_width,
         widths,
@@ -771,12 +811,13 @@ pub fn measure_float_segment_with_table_wrap_frames(
         config,
         page_geometry,
         &BTreeMap::new(),
+        true,
     )?;
     if extracted.iter().any(|zone| zone.margin_relative) {
         return Ok(None);
     }
     let (paragraph_zones, zones_by_anchor) = group_floating_zones(extracted);
-    measure_float_flow(
+    measure_float_flow_recorded(
         blocks,
         widths,
         default_width,
@@ -784,6 +825,7 @@ pub fn measure_float_segment_with_table_wrap_frames(
         &paragraph_zones,
         &zones_by_anchor,
         section_break_marks,
+        &zone_dependencies,
     )
     .map(Some)
 }
@@ -835,13 +877,25 @@ pub fn section_break_marks(blocks: &[LayoutBlock]) -> Vec<bool> {
         .iter()
         .enumerate()
         .map(|(index, block)| {
-            let opens_its_section =
-                index == 0 || matches!(blocks.get(index - 1), Some(LayoutBlock::SectionBreak(_)));
-            matches!(block, LayoutBlock::Paragraph(paragraph) if paragraph.runs.is_empty())
-                && matches!(blocks.get(index + 1), Some(LayoutBlock::SectionBreak(_)))
-                && !opens_its_section
+            is_section_break_mark(
+                block,
+                index
+                    .checked_sub(1)
+                    .and_then(|previous| blocks.get(previous)),
+                blocks.get(index + 1),
+            )
         })
         .collect()
+}
+
+pub fn is_section_break_mark(
+    block: &LayoutBlock,
+    previous: Option<&LayoutBlock>,
+    next: Option<&LayoutBlock>,
+) -> bool {
+    matches!(block, LayoutBlock::Paragraph(paragraph) if paragraph.runs.is_empty())
+        && matches!(next, Some(LayoutBlock::SectionBreak(_)))
+        && previous.is_some_and(|block| !matches!(block, LayoutBlock::SectionBreak(_)))
 }
 
 fn measure_float_flow(
@@ -868,6 +922,43 @@ fn measure_float_flow(
         )?);
     }
     Ok(measured)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn measure_float_flow_recorded(
+    blocks: &mut [LayoutBlock],
+    widths: &[f64],
+    default_width: f64,
+    config: &MeasurementConfig,
+    paragraph_zones: &ParagraphZones,
+    zones_by_anchor: &AnchorZones,
+    section_break_marks: &[bool],
+    zone_dependencies: &[FontChainDependencies],
+) -> Result<(Vec<BlockExtent>, Vec<FontChainDependencies>), String> {
+    let mut flow = FlowState::default();
+    let mut measured = Vec::with_capacity(blocks.len());
+    let mut dependencies = Vec::with_capacity(blocks.len());
+    for (index, block) in blocks.iter_mut().enumerate() {
+        let (extent, mut reads) = FontChainDependencies::capture(|| {
+            flow.measure(
+                index,
+                block,
+                widths,
+                default_width,
+                config,
+                paragraph_zones,
+                zones_by_anchor,
+                section_break_marks,
+            )
+        });
+        let unknown = FontChainDependencies::unknown();
+        let zones = zone_dependencies.get(index).unwrap_or(&unknown);
+        reads.extend(zones);
+        zones.record();
+        measured.push(extent?);
+        dependencies.push(reads);
+    }
+    Ok((measured, dependencies))
 }
 
 /// Where the float flow stands between two blocks.
@@ -958,6 +1049,8 @@ pub struct FloatFlow {
     marks: Vec<bool>,
     state: FlowState,
     measured: Vec<BlockExtent>,
+    font_dependencies: Vec<FontChainDependencies>,
+    zone_dependencies: Vec<FontChainDependencies>,
 }
 
 impl FloatFlow {
@@ -978,7 +1071,7 @@ impl FloatFlow {
         page_geometry: Option<&FloatPageGeometry>,
     ) -> Result<Self, String> {
         let default_width = widths.first().copied().unwrap_or(0.0);
-        let extracted = extract_floating_zones(
+        let (extracted, zone_dependencies) = extract_floating_zones_recorded(
             blocks,
             default_width,
             widths,
@@ -986,6 +1079,7 @@ impl FloatFlow {
             config,
             page_geometry,
             &BTreeMap::new(),
+            true,
         )?;
         let (paragraph_zones, zones_by_anchor) = group_floating_zones(extracted);
         Ok(Self {
@@ -995,6 +1089,8 @@ impl FloatFlow {
             marks: section_break_marks(blocks),
             state: FlowState::default(),
             measured: Vec::with_capacity(blocks.len()),
+            font_dependencies: Vec::with_capacity(blocks.len()),
+            zone_dependencies,
         })
     }
 
@@ -1008,6 +1104,10 @@ impl FloatFlow {
         &self.measured
     }
 
+    pub fn font_dependencies(&self) -> &[FontChainDependencies] {
+        &self.font_dependencies
+    }
+
     /// Measures the next blocks up to `end`, exclusive. `blocks` and `widths`
     /// are the ones the flow was created for.
     pub fn measure_until(
@@ -1018,17 +1118,22 @@ impl FloatFlow {
         end: usize,
     ) -> Result<(), String> {
         for index in self.measured.len()..end.min(blocks.len()) {
-            let extent = self.state.measure(
-                index,
-                &mut blocks[index],
-                widths,
-                self.default_width,
-                config,
-                &self.paragraph_zones,
-                &self.zones_by_anchor,
-                &self.marks,
-            )?;
-            self.measured.push(extent);
+            let (extent, mut dependencies) = FontChainDependencies::capture(|| {
+                self.state.measure(
+                    index,
+                    &mut blocks[index],
+                    widths,
+                    self.default_width,
+                    config,
+                    &self.paragraph_zones,
+                    &self.zones_by_anchor,
+                    &self.marks,
+                )
+            });
+            dependencies.extend(&self.zone_dependencies[index]);
+            dependencies.record();
+            self.measured.push(extent?);
+            self.font_dependencies.push(dependencies);
         }
         Ok(())
     }
@@ -1137,22 +1242,65 @@ fn measure_paragraph_with_context(
     if let ExtentLookup::Hit(extent) = lookup {
         return Ok(extent);
     }
-    let mut extent = if !content_width.is_finite() || content_width <= 0.0 {
-        synthetic_paragraph_extent(paragraph, content_width)
-    } else {
-        crate::typed_measure::measure_paragraph(
-            paragraph,
-            content_width,
-            config,
-            floating_zones,
-            cumulative_y,
-        )
-        .unwrap_or_else(|| synthetic_paragraph_extent(paragraph, content_width))
-    };
+    #[cfg(test)]
+    EXTENT_MEASURE_CALLS.with(|calls| calls.set(calls.get() + 1));
+    let (extent, dependencies) = FontChainDependencies::capture(|| {
+        let measure = |paragraph: &ParagraphBlock| {
+            if !content_width.is_finite() || content_width <= 0.0 {
+                synthetic_paragraph_extent(paragraph, content_width)
+            } else {
+                crate::typed_measure::measure_paragraph(
+                    paragraph,
+                    content_width,
+                    config,
+                    floating_zones,
+                    cumulative_y,
+                )
+                .unwrap_or_else(|| synthetic_paragraph_extent(paragraph, content_width))
+            }
+        };
+        let mut extent = measure(paragraph);
+        if extent.lines.len() == 1
+            && let Some(attrs) = &paragraph.attrs
+            && let Some(size) = attrs.default_font_size.filter(|size| *size > 0.0)
+            && attrs.horizontal_rules.is_empty()
+            && attrs.list_marker.as_deref().is_none_or(str::is_empty)
+            && !paragraph.runs.is_empty()
+            && paragraph.runs.iter().all(|run| {
+                matches!(run, Run::Text(text)
+                    if text.fmt.font_size.is_some_and(|run_size| run_size > size)
+                        && (attrs.doc_grid_pitch_px.is_none()
+                            || text.fmt.snap_to_grid != Some(false))
+                        && text.text.chars().all(|ch| matches!(ch, ' ' | '\u{3000}')))
+            })
+        {
+            let mark_extent = measure(&ParagraphBlock {
+                runs: Vec::new(),
+                ..paragraph.clone()
+            });
+            let line = &mut extent.lines[0];
+            if let [mark_line] = mark_extent.lines.as_slice()
+                && mark_line.line_height < line.line_height
+                && mark_extent.total_height < extent.total_height
+                && mark_line.float_skip_before == line.float_skip_before
+            {
+                line.line_height = mark_line.line_height;
+                line.ascent = mark_line.ascent;
+                line.descent = mark_line.descent;
+                extent.total_height = mark_extent.total_height;
+            }
+        }
+        extent
+    });
+    let mut extent = extent;
     measure_horizontal_rules(paragraph, &mut extent);
     if let ExtentLookup::Miss(Some(key)) = lookup {
-        let weight = extent_weight(&extent);
-        EXTENT_CACHE.with(|cache| cache.borrow_mut().insert_hot(key, extent.clone(), weight));
+        let weight = extent_weight(&extent) + dependencies.retained_bytes();
+        EXTENT_CACHE.with(|cache| {
+            cache
+                .borrow_mut()
+                .insert_hot(key, extent.clone(), dependencies, weight)
+        });
     }
     Ok(extent)
 }
@@ -1193,7 +1341,11 @@ const MAX_EXTENT_KEY_BYTES: usize = 256 * 1024;
 
 #[derive(Default)]
 struct ExtentCacheGeneration {
-    entries: HashMap<Vec<u8>, (ParagraphExtent, usize), foldhash::fast::RandomState>,
+    entries: HashMap<
+        Vec<u8>,
+        (ParagraphExtent, FontChainDependencies, usize),
+        foldhash::fast::RandomState,
+    >,
     key_bytes: usize,
     value_bytes: usize,
 }
@@ -1205,18 +1357,24 @@ impl ExtentCacheGeneration {
             || self.value_bytes.saturating_add(weight) > MAX_EXTENT_CACHE_VALUE_BYTES
     }
 
-    fn insert(&mut self, key: Vec<u8>, extent: ParagraphExtent, weight: usize) {
-        self.entries.remove(&key);
+    fn insert(
+        &mut self,
+        key: Vec<u8>,
+        extent: ParagraphExtent,
+        dependencies: FontChainDependencies,
+        weight: usize,
+    ) {
+        self.remove(&key);
         self.key_bytes += key.len();
         self.value_bytes += weight;
-        self.entries.insert(key, (extent, weight));
+        self.entries.insert(key, (extent, dependencies, weight));
     }
 
-    fn remove(&mut self, key: &[u8]) -> Option<(ParagraphExtent, usize)> {
-        let (extent, weight) = self.entries.remove(key)?;
+    fn remove(&mut self, key: &[u8]) -> Option<(ParagraphExtent, FontChainDependencies, usize)> {
+        let (extent, dependencies, weight) = self.entries.remove(key)?;
         self.key_bytes = self.key_bytes.saturating_sub(key.len());
         self.value_bytes = self.value_bytes.saturating_sub(weight);
-        Some((extent, weight))
+        Some((extent, dependencies, weight))
     }
 }
 
@@ -1229,25 +1387,41 @@ struct ExtentCache {
 }
 
 impl ExtentCache {
-    fn get(&mut self, key: &[u8]) -> Option<ParagraphExtent> {
-        if let Some((extent, _)) = self.hot.entries.get(key) {
-            return Some(extent.clone());
+    fn get(&mut self, key: &[u8], chains: FontChains<'_>) -> Option<ParagraphExtent> {
+        if let Some((extent, dependencies, _)) = self.hot.entries.get(key) {
+            if dependencies.matches(chains) {
+                dependencies.record();
+                return Some(extent.clone());
+            }
+            self.hot.remove(key);
         }
-        let (extent, weight) = self.cold.remove(key)?;
-        self.insert_hot(key.to_vec(), extent.clone(), weight);
+        let (extent, dependencies, weight) = self.cold.remove(key)?;
+        if !dependencies.matches(chains) {
+            return None;
+        }
+        dependencies.record();
+        self.insert_hot(key.to_vec(), extent.clone(), dependencies, weight);
         Some(extent)
     }
 
-    fn insert_hot(&mut self, key: Vec<u8>, extent: ParagraphExtent, weight: usize) {
+    fn insert_hot(
+        &mut self,
+        key: Vec<u8>,
+        extent: ParagraphExtent,
+        dependencies: FontChainDependencies,
+        weight: usize,
+    ) {
         if self.hot.would_overflow(&key, weight) {
             self.cold = std::mem::take(&mut self.hot);
         }
-        self.hot.insert(key, extent, weight);
+        self.hot.insert(key, extent, dependencies, weight);
     }
 }
 
 thread_local! {
     static EXTENT_CACHE: RefCell<ExtentCache> = RefCell::new(ExtentCache::default());
+    #[cfg(test)]
+    static EXTENT_MEASURE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Key scratch reused per lookup so a hit allocates nothing.
     static EXTENT_KEY_BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
@@ -1316,10 +1490,14 @@ fn extent_cache_lookup(
             }
         }
         key.extend_from_slice(&config_fingerprint(config).to_le_bytes());
-        let (store, fonts) = crate::measure_fonts_generation();
+        let (store, availability) = crate::measure_font_cache_identity(&config.font_chains);
         key.extend_from_slice(&store.to_le_bytes());
-        key.extend_from_slice(&(fonts as u64).to_le_bytes());
-        match EXTENT_CACHE.with(|cache| cache.borrow_mut().get(key)) {
+        key.extend_from_slice(&availability.to_le_bytes());
+        match EXTENT_CACHE.with(|cache| {
+            cache
+                .borrow_mut()
+                .get(key, FontChains::BTree(&config.font_chains))
+        }) {
             Some(extent) => ExtentLookup::Hit(extent),
             None => ExtentLookup::Miss(Some(key.clone())),
         }
@@ -1336,12 +1514,6 @@ fn fnv1a(mut hash: u64, bytes: &[u8]) -> u64 {
 
 fn config_fingerprint(config: &MeasurementConfig) -> u64 {
     let mut hash = fnv1a(0xcbf29ce484222325, &[config.authoritative_shaping as u8]);
-    for (name, ids) in &config.font_chains {
-        hash = fnv1a(hash, name.as_bytes());
-        for id in ids {
-            hash = fnv1a(hash, &id.to_le_bytes());
-        }
-    }
     hash = fnv1a(hash, config.defaults.to_string().as_bytes());
     fnv1a(hash, config.compat.to_string().as_bytes())
 }
@@ -1626,44 +1798,83 @@ fn extract_floating_zones(
     page_geometry: Option<&FloatPageGeometry>,
     shape_offsets: &BTreeMap<usize, f64>,
 ) -> Result<Vec<AnchoredFloatingZone>, String> {
+    extract_floating_zones_recorded(
+        blocks,
+        content_width,
+        widths,
+        table_wrap_frames,
+        config,
+        page_geometry,
+        shape_offsets,
+        false,
+    )
+    .map(|(zones, _)| zones)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn extract_floating_zones_recorded(
+    blocks: &[LayoutBlock],
+    content_width: f64,
+    widths: &[f64],
+    table_wrap_frames: &[bool],
+    config: &MeasurementConfig,
+    page_geometry: Option<&FloatPageGeometry>,
+    shape_offsets: &BTreeMap<usize, f64>,
+    record_dependencies: bool,
+) -> Result<(Vec<AnchoredFloatingZone>, Vec<FontChainDependencies>), String> {
     let mut zones = Vec::new();
+    let mut dependencies = if record_dependencies {
+        Vec::with_capacity(blocks.len())
+    } else {
+        Vec::new()
+    };
     for (block_index, block) in blocks.iter().enumerate() {
-        match block {
-            LayoutBlock::Paragraph(paragraph) => {
-                extract_image_zones(paragraph, block_index, content_width, &mut zones);
-            }
-            LayoutBlock::Table(table) => {
-                extract_table_zone(
-                    table,
+        let mut extract = || -> Result<(), String> {
+            match block {
+                LayoutBlock::Paragraph(paragraph) => {
+                    extract_image_zones(paragraph, block_index, content_width, &mut zones);
+                }
+                LayoutBlock::Table(table) => {
+                    extract_table_zone(
+                        table,
+                        block_index,
+                        content_width,
+                        widths
+                            .get(block_index)
+                            .copied()
+                            .filter(|_| table_wrap_frames.get(block_index) == Some(&true)),
+                        config,
+                        &mut zones,
+                    )?;
+                }
+                LayoutBlock::TextBox(text_box) => extract_text_box_zone(
+                    text_box,
                     block_index,
                     content_width,
-                    widths
-                        .get(block_index)
-                        .copied()
-                        .filter(|_| table_wrap_frames.get(block_index) == Some(&true)),
-                    config,
+                    page_geometry,
                     &mut zones,
-                )?;
+                ),
+                LayoutBlock::Shape(shape) => extract_shape_zone(
+                    shape,
+                    block_index,
+                    content_width,
+                    page_geometry,
+                    shape_offsets.get(&block_index).copied(),
+                    &mut zones,
+                ),
+                _ => {}
             }
-            LayoutBlock::TextBox(text_box) => extract_text_box_zone(
-                text_box,
-                block_index,
-                content_width,
-                page_geometry,
-                &mut zones,
-            ),
-            LayoutBlock::Shape(shape) => extract_shape_zone(
-                shape,
-                block_index,
-                content_width,
-                page_geometry,
-                shape_offsets.get(&block_index).copied(),
-                &mut zones,
-            ),
-            _ => {}
+            Ok(())
+        };
+        if record_dependencies {
+            let (result, reads) = FontChainDependencies::capture(extract);
+            result?;
+            dependencies.push(reads);
+        } else {
+            extract()?;
         }
     }
-    Ok(zones)
+    Ok((zones, dependencies))
 }
 
 /// Whether a line runs past a float rather than stopping at its wider side.
@@ -2640,10 +2851,25 @@ fn measure_table(
     content_width: f64,
     config: &MeasurementConfig,
 ) -> Result<TableExtent, String> {
+    measure_table_with_compat_shift(table, content_width, config, true)
+}
+
+fn measure_table_with_compat_shift(
+    table: &mut TableBlock,
+    content_width: f64,
+    config: &MeasurementConfig,
+    apply_compat_shift: bool,
+) -> Result<TableExtent, String> {
+    let percentage_basis = if apply_compat_shift {
+        table_percentage_basis(table, content_width)
+    } else {
+        content_width
+    };
     let explicit_width =
-        resolve_table_width_px(table.width, table.width_type.as_deref(), content_width);
+        resolve_table_width_px(table.width, table.width_type.as_deref(), percentage_basis);
     let target_width = explicit_width.unwrap_or(content_width);
-    let mut column_widths = resolve_table_column_widths(table, content_width);
+    let mut column_widths =
+        resolve_table_column_widths_with_percentage_basis(table, content_width, percentage_basis);
     let content_sized = content_sized_columns(table, content_width, &column_widths);
     if !content_sized.is_empty() {
         let maximums = column_content_maximums(table, &content_sized, content_width, config)?;
@@ -2989,6 +3215,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn grid_spacers_with_run_opt_out_keep_original_height_between_mark_and_run() {
+        let fonts = crate::MeasureFonts::default();
+        let _fonts = fonts.enter();
+        let config = cache_measurement_config();
+        for run_snaps in [[false, false], [false, true], [true, false]] {
+            let paragraph: ParagraphBlock = serde_json::from_value(json!({
+                "id": "grid-spacer",
+                "attrs": {"defaultFontSize": 9, "docGridPitchPx": 20},
+                "runs": [
+                    {"kind": "text", "text": " ", "fontSize": 18, "snapToGrid": run_snaps[0]},
+                    {"kind": "text", "text": " ", "fontSize": 18, "snapToGrid": run_snaps[1]}
+                ]
+            }))
+            .unwrap();
+            let original =
+                crate::typed_measure::measure_paragraph(&paragraph, 300.0, &config, None, 0.0)
+                    .unwrap();
+            let mut ungridded = paragraph.clone();
+            ungridded.attrs.as_mut().unwrap().doc_grid_pitch_px = None;
+            assert_eq!(
+                original,
+                crate::typed_measure::measure_paragraph(&ungridded, 300.0, &config, None, 0.0)
+                    .unwrap()
+            );
+            ungridded.runs.clear();
+            let mark =
+                crate::typed_measure::measure_paragraph(&ungridded, 300.0, &config, None, 0.0)
+                    .unwrap();
+            assert!(mark.total_height < 20.0 && 20.0 < original.total_height);
+            let actual = measure_paragraph(&paragraph, 300.0, &config).unwrap();
+            assert_eq!(actual.total_height, original.total_height);
+            assert_eq!(actual.lines, original.lines);
+        }
+    }
+
     fn cache_paragraph(fonts: &crate::MeasureFonts) {
         let _fonts = fonts.enter();
         let config = cache_measurement_config();
@@ -3053,6 +3315,326 @@ mod tests {
             );
         }
         assert_eq!(extent_cache_stats().0, paragraphs.len());
+    }
+
+    #[test]
+    fn appended_fonts_only_invalidate_dependent_extents() {
+        let regular = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+        let appended = include_bytes!("../../docx-raster/tests/assets/Carlito-Regular.ttf");
+        for (label, run, initial, final_chain, expected_calls) in [
+            (
+                "unused",
+                json!({"kind": "text", "text": "Latin", "fontFamily": "Requested"}),
+                json!({"requested|0|0": [0]}),
+                json!({"unrelated|0|0": [1]}),
+                0,
+            ),
+            (
+                "completed chain",
+                json!({"kind": "text", "text": "Latin", "fontFamily": "Requested"}),
+                json!({"requested|0|0": [0]}),
+                json!({"requested|0|0": [0, 1]}),
+                1,
+            ),
+            (
+                "changed chain",
+                json!({"kind": "text", "text": "Latin", "fontFamily": "Requested"}),
+                json!({"requested|0|0": [0]}),
+                json!({"requested|0|0": [1]}),
+                1,
+            ),
+            (
+                "script slot",
+                json!({"kind": "text", "text": "العربية", "fontFamily": "Requested",
+                "fontSlots": {"hAnsi": "Requested", "cs": "Script"}}),
+                json!({"requested|0|0": [0]}),
+                json!({"script|0|0": [1]}),
+                1,
+            ),
+            (
+                "missing alternative",
+                json!({"kind": "text", "text": "العربية", "fontFamily": "Requested",
+                "boldCs": true, "fontSlots": {"hAnsi": "Requested", "cs": "Script"}}),
+                json!({"requested|0|0": [0]}),
+                json!({"requested|1|0": [1]}),
+                1,
+            ),
+            (
+                "missing primary",
+                json!({"kind": "text", "text": "Latin", "fontFamily": "Requested"}),
+                json!({}),
+                json!({"requested|0|0": [1]}),
+                1,
+            ),
+        ] {
+            let fonts = crate::MeasureFonts::default();
+            let _scope = fonts.enter();
+            assert_eq!(crate::register_measure_font_bytes(regular).unwrap(), 0);
+            let mut config = MeasurementConfig {
+                font_chains: serde_json::from_value(initial).unwrap(),
+                defaults: json!({"fontFamily": "Stable", "fontSize": 12}),
+                ..Default::default()
+            };
+            config.font_chains.insert("stable|0|0".to_owned(), vec![0]);
+            let paragraphs: Vec<ParagraphBlock> = serde_json::from_value(json!([
+                {"id": "dependent", "runs": [run]},
+                {"id": "stable", "runs": [{"kind": "text", "text": "Unchanged", "fontFamily": "Stable"}]}
+            ])).unwrap();
+            for paragraph in &paragraphs {
+                measure_paragraph(paragraph, 300.0, &config).unwrap();
+            }
+            assert_eq!(crate::register_measure_font_bytes(appended).unwrap(), 1);
+            config
+                .font_chains
+                .extend(serde_json::from_value::<BTreeMap<String, Vec<u32>>>(final_chain).unwrap());
+            let before = EXTENT_MEASURE_CALLS.with(|calls| calls.get());
+            let warm: Vec<_> = paragraphs
+                .iter()
+                .map(|paragraph| measure_paragraph(paragraph, 300.0, &config).unwrap())
+                .collect();
+            assert_eq!(
+                EXTENT_MEASURE_CALLS.with(|calls| calls.get()) - before,
+                expected_calls,
+                "{label}"
+            );
+            let cold = crate::with_private_measure_fonts(|| {
+                assert_eq!(crate::register_measure_font_bytes(regular).unwrap(), 0);
+                assert_eq!(crate::register_measure_font_bytes(appended).unwrap(), 1);
+                paragraphs
+                    .iter()
+                    .map(|paragraph| measure_paragraph(paragraph, 300.0, &config).unwrap())
+                    .collect::<Vec<_>>()
+            });
+            assert_eq!(
+                serde_json::to_vec(&warm).unwrap(),
+                serde_json::to_vec(&cold).unwrap(),
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn first_font_invalidates_extents_without_a_matching_chain() {
+        let fonts = crate::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let mut config = MeasurementConfig {
+            defaults: json!({"fontFamily": "Requested", "fontSize": 12}),
+            ..Default::default()
+        };
+        let paragraph: ParagraphBlock = serde_json::from_value(json!({
+            "id": "empty-run", "runs": [
+                {"kind": "text", "text": "", "fontFamily": "Requested"},
+                {"kind": "lineBreak"}
+            ]
+        }))
+        .unwrap();
+        let (empty, dependencies) = FontChainDependencies::capture(|| {
+            measure_paragraph(&paragraph, 300.0, &config).unwrap()
+        });
+        assert_eq!(empty.lines.len(), 2);
+        assert_ne!(empty.lines[0].synthetic_fallback, Some(true));
+        assert!(matches!(
+            extent_cache_lookup(&paragraph, 300.0, &config, None, 0.0),
+            ExtentLookup::Hit(_)
+        ));
+        let font = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+        assert_eq!(crate::register_measure_font_bytes(font).unwrap(), 0);
+        config
+            .font_chains
+            .insert("unrelated|0|0".to_owned(), vec![0]);
+        assert!(dependencies.matches(FontChains::BTree(&config.font_chains)));
+        assert!(matches!(
+            extent_cache_lookup(&paragraph, 300.0, &config, None, 0.0),
+            ExtentLookup::Miss(_)
+        ));
+        let before = EXTENT_MEASURE_CALLS.with(|calls| calls.get());
+        let warm = measure_paragraph(&paragraph, 300.0, &config).unwrap();
+        assert_eq!(EXTENT_MEASURE_CALLS.with(|calls| calls.get()) - before, 1);
+        assert_ne!(
+            serde_json::to_vec(&empty).unwrap(),
+            serde_json::to_vec(&warm).unwrap()
+        );
+        let cold = crate::with_private_measure_fonts(|| {
+            assert_eq!(crate::register_measure_font_bytes(font).unwrap(), 0);
+            measure_paragraph(&paragraph, 300.0, &config).unwrap()
+        });
+        assert_eq!(
+            serde_json::to_vec(&warm).unwrap(),
+            serde_json::to_vec(&cold).unwrap()
+        );
+    }
+
+    #[test]
+    fn registered_chain_font_invalidates_synthetic_extents() {
+        let fonts = crate::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let regular = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+        let appended = include_bytes!("../../docx-raster/tests/assets/Carlito-Regular.ttf");
+        assert_eq!(crate::register_measure_font_bytes(regular).unwrap(), 0);
+        let config = MeasurementConfig {
+            font_chains: BTreeMap::from([("requested|0|0".to_owned(), vec![1])]),
+            defaults: json!({"fontFamily": "Requested", "fontSize": 12}),
+            ..Default::default()
+        };
+        let paragraph: ParagraphBlock = serde_json::from_value(json!({
+            "id": "pending-font", "runs": [
+                {"kind": "text", "text": "Latin", "fontFamily": "Requested"}
+            ]
+        }))
+        .unwrap();
+        let (synthetic, dependencies) = FontChainDependencies::capture(|| {
+            measure_paragraph(&paragraph, 300.0, &config).unwrap()
+        });
+        assert_eq!(synthetic.lines[0].synthetic_fallback, Some(true));
+        assert!(matches!(
+            extent_cache_lookup(&paragraph, 300.0, &config, None, 0.0),
+            ExtentLookup::Hit(_)
+        ));
+        assert_eq!(crate::register_measure_font_bytes(appended).unwrap(), 1);
+        assert!(dependencies.matches(FontChains::BTree(&config.font_chains)));
+        assert!(matches!(
+            extent_cache_lookup(&paragraph, 300.0, &config, None, 0.0),
+            ExtentLookup::Miss(_)
+        ));
+        let before = EXTENT_MEASURE_CALLS.with(|calls| calls.get());
+        let warm = measure_paragraph(&paragraph, 300.0, &config).unwrap();
+        assert_eq!(EXTENT_MEASURE_CALLS.with(|calls| calls.get()) - before, 1);
+        assert_ne!(warm.lines[0].synthetic_fallback, Some(true));
+        assert_ne!(
+            serde_json::to_vec(&synthetic).unwrap(),
+            serde_json::to_vec(&warm).unwrap()
+        );
+        let cold = crate::with_private_measure_fonts(|| {
+            assert_eq!(crate::register_measure_font_bytes(regular).unwrap(), 0);
+            assert_eq!(crate::register_measure_font_bytes(appended).unwrap(), 1);
+            measure_paragraph(&paragraph, 300.0, &config).unwrap()
+        });
+        assert_eq!(
+            serde_json::to_vec(&warm).unwrap(),
+            serde_json::to_vec(&cold).unwrap()
+        );
+        assert_eq!(crate::register_measure_font_bytes(regular).unwrap(), 2);
+        let before = EXTENT_MEASURE_CALLS.with(|calls| calls.get());
+        assert_eq!(measure_paragraph(&paragraph, 300.0, &config).unwrap(), warm);
+        assert_eq!(EXTENT_MEASURE_CALLS.with(|calls| calls.get()), before);
+    }
+
+    #[test]
+    fn extent_dependencies_cover_marks_markers_tabs_fields_and_caps() {
+        let fonts = crate::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let mut config = cache_measurement_config();
+        config
+            .font_chains
+            .insert("requested|0|0".to_owned(), vec![0]);
+        let appended = crate::register_measure_font_bytes(include_bytes!(
+            "../../docx-raster/tests/assets/Carlito-Regular.ttf"
+        ))
+        .unwrap();
+        for (label, runs, attrs) in [
+            (
+                "paragraph mark",
+                json!([]),
+                json!({"defaultFontFamily": "Requested"}),
+            ),
+            (
+                "marker",
+                json!([{"kind": "text", "text": "Body"}]),
+                json!({"listMarker": "1.", "listMarkerFontFamily": "Requested"}),
+            ),
+            (
+                "tab",
+                json!([{"kind": "tab", "fontFamily": "Requested"}]),
+                json!(null),
+            ),
+            (
+                "field",
+                json!([{"kind": "field", "fieldType": "PAGE", "fallback": "1", "fontFamily": "Requested"}]),
+                json!(null),
+            ),
+            (
+                "caps",
+                json!([{"kind": "text", "text": "ßabc", "allCaps": true, "fontFamily": "Requested"}]),
+                json!(null),
+            ),
+            (
+                "small caps",
+                json!([{"kind": "text", "text": "abc", "smallCaps": true, "fontFamily": "Requested"}]),
+                json!(null),
+            ),
+        ] {
+            config
+                .font_chains
+                .insert("requested|0|0".to_owned(), vec![0]);
+            let paragraph: ParagraphBlock = serde_json::from_value(json!({
+                "id": label, "runs": runs, "attrs": attrs
+            }))
+            .unwrap();
+            let (extent, dependencies) = FontChainDependencies::capture(|| {
+                measure_paragraph(&paragraph, 300.0, &config).unwrap()
+            });
+            assert_ne!(extent.lines[0].synthetic_fallback, Some(true), "{label}");
+            config
+                .font_chains
+                .insert("requested|0|0".to_owned(), vec![appended]);
+            assert!(
+                !dependencies.matches(FontChains::BTree(&config.font_chains)),
+                "{label}"
+            );
+            assert!(
+                matches!(
+                    extent_cache_lookup(&paragraph, 300.0, &config, None, 0.0),
+                    ExtentLookup::Miss(_)
+                ),
+                "{label}"
+            );
+        }
+        let paragraph: ParagraphBlock = serde_json::from_value(json!({
+            "id": "minimum", "runs": [{"kind": "text", "text": "unbreakableword", "fontFamily": "Requested"}]
+        })).unwrap();
+        let (width, dependencies) = FontChainDependencies::capture(|| {
+            crate::typed_measure::min_content_width(&paragraph, 300.0, &config)
+        });
+        assert!(width.is_some());
+        config.font_chains.remove("requested|0|0");
+        assert!(!dependencies.matches(FontChains::BTree(&config.font_chains)));
+    }
+
+    #[test]
+    fn extent_dependencies_survive_cache_hits_and_store_changes() {
+        let fonts = crate::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let mut config = cache_measurement_config();
+        let paragraph: ParagraphBlock = serde_json::from_value(json!({
+            "id": "cached", "runs": [{"kind": "text", "text": "Cached paragraph"}]
+        }))
+        .unwrap();
+        measure_paragraph(&paragraph, 300.0, &config).unwrap();
+        let (_, dependencies) = FontChainDependencies::capture(|| {
+            measure_paragraph(&paragraph, 300.0, &config).unwrap()
+        });
+        config.font_chains.remove("liberation sans|0|0");
+        assert!(!dependencies.matches(FontChains::BTree(&config.font_chains)));
+        config = cache_measurement_config();
+        assert!(matches!(
+            extent_cache_lookup(&paragraph, 300.0, &config, None, 0.0),
+            ExtentLookup::Miss(_)
+        ));
+        measure_paragraph(&paragraph, 300.0, &config).unwrap();
+        crate::with_private_measure_fonts(|| {
+            crate::register_measure_font_bytes(include_bytes!(
+                "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+            ))
+            .unwrap();
+            crate::register_measure_font_bytes(include_bytes!(
+                "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+            ))
+            .unwrap();
+            assert!(matches!(
+                extent_cache_lookup(&paragraph, 300.0, &config, None, 0.0),
+                ExtentLookup::Miss(_)
+            ));
+        });
     }
 
     #[test]
@@ -4247,6 +4829,46 @@ mod tests {
         assert_eq!(lines(&tall).len(), 1);
         assert!(lines(&tall)[0].width > 200.0);
         assert_eq!(tall.rows[0].height, 508.0);
+    }
+
+    #[test]
+    fn percentage_width_nested_keeps_compat_basis_in_unshifted_story() {
+        for measure in [measure_blocks, measure_blocks_without_table_compat_shift] {
+            for algorithm in [None, Some("autofit"), Some("fixed")] {
+                let nested = json!({
+                    "kind": "table", "id": "nested", "compatibilityMode": 14,
+                    "cellMarginLeft": 7.2, "cellMarginRight": 7.2,
+                    "width": 5000, "widthType": "pct", "widthAlgorithm": algorithm,
+                    "columnWidths": [100, 100], "rows": [{"id": "nested-row", "cells": [
+                        {"id": "left", "blocks": [], "minContentWidth": 20, "maxContentWidth": 400,
+                         "padding": {"top": 0, "bottom": 0, "left": 7.2, "right": 0}},
+                        {"id": "right", "blocks": [], "minContentWidth": 20, "maxContentWidth": 400,
+                         "padding": {"top": 0, "bottom": 0, "left": 0, "right": 7.2}}
+                    ]}]
+                });
+                let mut blocks = serde_json::from_value::<Vec<LayoutBlock>>(json!([{
+                    "kind": "table", "id": "outer", "width": 8313, "widthType": "dxa",
+                    "columnWidths": [554.2], "rows": [{"id": "outer-row", "cells": [{
+                        "id": "outer-cell", "padding": {"top": 0, "bottom": 0, "left": 0, "right": 0},
+                        "blocks": [nested]
+                    }]}]
+                }]))
+                .unwrap();
+                let measured = measure(&mut blocks, 554.2, &MeasurementConfig::default()).unwrap();
+                let BlockExtent::Table(outer) = &measured[0] else {
+                    panic!("outer table expected");
+                };
+                let BlockExtent::Table(nested) = &outer.rows[0].cells[0].blocks[0] else {
+                    panic!("nested table expected");
+                };
+                assert!((outer.total_width - 554.2).abs() < 1e-6);
+                assert!(
+                    (nested.total_width - 568.6).abs() < 1e-6,
+                    "{algorithm:?}: nested width {}, expected 568.6",
+                    nested.total_width
+                );
+            }
+        }
     }
 
     #[test]

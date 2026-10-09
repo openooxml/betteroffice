@@ -1,5 +1,13 @@
 {
   "_lang": "tr",
+  "worker": {
+    "previousRecovery": null,
+    "preparing": "Düzenleyici hazırlanıyor. Düzenleme kısa süre içinde kullanılabilir olacak.",
+    "failed": "Düzenleme kullanılamıyor. Kurtarılan sunuyu indirin.",
+    "disabled": "Bu özellik bu düzenleme modunda kullanılamıyor.",
+    "recovery": null,
+    "image": null
+  },
   "toolbar": {
     "label": null,
     "save": "Kaydet",

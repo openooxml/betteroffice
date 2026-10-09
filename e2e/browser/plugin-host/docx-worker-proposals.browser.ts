@@ -63,6 +63,14 @@ interface ViewState {
 interface WorkerProposalProbe {
   editor: {
     getTotalPages(): number;
+    exportStructuredWithPages(options: {
+      revisionView: 'markup';
+      stories: string[];
+      expectLayoutVersion?: string;
+    }): Promise<
+      | { ok: true; version: string; content: { layout: { documentVersion: string; layoutVersion: string; pages: unknown[] } } }
+      | { ok: false; version: string; failure: { code: string } }
+    >;
     getParagraphIdentities(): Promise<DocxParagraphIdentitySnapshot>;
     resolveParagraphAnchors(anchors: readonly DocxPersistedParagraphAnchor[]): Promise<{
       version: string;
@@ -82,11 +90,16 @@ interface WorkerProposalProbe {
       ids: readonly string[];
     }): Promise<DocxProposalResult>;
     getProposals(): Promise<DocxProposalSnapshot>;
+    listContentControls(): Promise<{ ok: boolean; version: string; content?: { controls: unknown[] } }>;
+    findContentControls(query: { kind: 'tag'; tag: string }): Promise<{ ok: boolean; version: string; content?: { controls: unknown[] } }>;
+    readSelectionInfo(): Promise<{ selectedText: string; paragraphText: string } | null>;
+    commands: { execute(id: string, args: unknown): Promise<{ ok: boolean; failure?: { code: string } }> };
   } | null;
   session: { selection(): ViewState['selection'] } | null;
   status(): {
     pending: boolean | null;
     captures: number;
+    mainDocumentLoads: { sessionsCaptured: number; total: number; sessions: Record<string, number>[] };
     hydratedBeforeSidebar: boolean;
     sidebarOpen: boolean;
     sidebarOpenChanges: boolean[];
@@ -94,6 +107,7 @@ interface WorkerProposalProbe {
     layoutComplete: number | null;
     renderedDomContextCalls: number;
     contentChanges: { bodyContainsProposedText: boolean }[];
+    documentChanges: string[];
     load: { version: string; sessionVersion: string; snapshotVersion: string } | null;
     events: { load: number; 'proposal-change': number; 'layout-change': number };
     errors: string[];
@@ -106,6 +120,7 @@ interface WorkerProposalProbe {
 interface ProbeWindow {
   __workerProposalProbe: WorkerProposalProbe;
   __workerRequests: string[];
+  __workerReads: string[];
   __workerInstrumentation: {
     firstEncodeState: number | null;
     deliberateScroll: boolean;
@@ -122,6 +137,7 @@ async function instrument(page: Page) {
     const requests: string[] = [];
     const windowProbe = window as unknown as ProbeWindow;
     windowProbe.__workerRequests = requests;
+    windowProbe.__workerReads = [];
     const instrumentation = windowProbe.__workerInstrumentation = {
       firstEncodeState: null as number | null,
       deliberateScroll: false,
@@ -132,6 +148,10 @@ async function instrument(page: Page) {
     Worker.prototype.postMessage = function (message: unknown, ...args: unknown[]) {
       if (message && typeof message === 'object' && 'type' in message) {
         requests.push(String(message.type));
+        if (message.type === 'documentRead' && 'read' in message && message.read &&
+          typeof message.read === 'object' && 'kind' in message.read) {
+          windowProbe.__workerReads.push(String(message.read.kind));
+        }
         if (message.type === 'encodeState') {
           instrumentation.firstEncodeState ??= performance.now();
         }
@@ -168,43 +188,17 @@ async function status(page: Page) {
 async function assertReplica(page: Page, readOnly: boolean, sidebarOpen = false) {
   const current = await status(page);
   expect(current.openedInWorker).toBe(true);
-  expect(current.captures).toBe(1);
+  expect(current.captures).toBeGreaterThan(0);
   expect(current.errors).toEqual([]);
   expect(current.pending).toBe(readOnly);
   expect(current.encodeState).toBe(readOnly ? 0 : 1);
   expect(current.sidebarOpen).toBe(sidebarOpen);
   if (readOnly) {
+    expect(current.mainDocumentLoads.sessionsCaptured).toBeGreaterThan(0);
+    expect(current.mainDocumentLoads.total).toBe(0);
     expect(current.hydratedBeforeSidebar).toBe(false);
     expect(current.layoutComplete).not.toBeNull();
   }
-}
-
-async function view(page: Page) {
-  const scroller = page.locator('.docx-editor__scroll-container');
-  return scroller.evaluate((element) => ({
-    scrollTop: element.scrollTop,
-    selection: (window as unknown as ProbeWindow).__workerProposalProbe.session!.selection(),
-  }));
-}
-
-async function assertHydration(
-  page: Page,
-  before: ReturnType<WorkerProposalProbe['view']>,
-  options: { checkLayoutOrder?: boolean } = {}
-) {
-  await expect.poll(async () => {
-    const current = await status(page);
-    return { encodeState: current.encodeState, pending: current.pending };
-  }).toEqual({ encodeState: 1, pending: false });
-  const current = await status(page);
-  expect(current.layoutComplete).not.toBeNull();
-  expect(current.firstEncodeState).not.toBeNull();
-  if (options.checkLayoutOrder !== false) {
-    expect(current.firstEncodeState!).toBeGreaterThan(current.layoutComplete!);
-  }
-  const after = await view(page);
-  expect(Math.abs(after.scrollTop - before.scrollTop)).toBeLessThanOrEqual(1);
-  expect(after.selection).toEqual(before.selection);
 }
 
 async function openEditor(page: Page, readOnly: boolean, options = '') {
@@ -490,7 +484,7 @@ test('host proposals, overlay geometry and plugin navigation match the hydrated 
   expect((await status(page)).unexpectedScrolls).toBe(0);
 });
 
-test('opening the built-in sidebar hydrates the worker replica once and preserves host proposal records', async ({ page }) => {
+test('opening the built-in sidebar reads worker cards and preserves host proposal records', async ({ page }) => {
   await instrument(page);
   await open(page, true);
   const prepared = await prepare(page, true);
@@ -506,12 +500,9 @@ test('opening the built-in sidebar hydrates the worker replica once and preserve
   const openSidebar = () => page.evaluate(() =>
     (window as unknown as ProbeWindow).__workerProposalProbe.toggleSidebar()
   );
-  const beforeHydration = await view(page);
   expect(await openSidebar()).toMatchObject({ ok: true });
   await expect.poll(async () => (await status(page)).sidebarOpen).toBe(true);
-  await expect.poll(async () => (await status(page)).pending).toBe(false);
-  expect((await status(page)).encodeState).toBe(1);
-  await assertHydration(page, beforeHydration);
+  await assertReplica(page, true, true);
   const after = await getProposals(page);
   expect(after.previewVersion).toBe(before.previewVersion);
   expect(after.proposals).toEqual(before.proposals);
@@ -520,6 +511,7 @@ test('opening the built-in sidebar hydrates the worker replica once and preserve
   await expect(sidebar).toHaveCSS('opacity', '1');
   const cards = sidebar.locator('.docx-tracked-change-card');
   await expect(cards).toHaveCount(after.proposals.length);
+  expect(await page.evaluate(() => (window as unknown as ProbeWindow).__workerReads)).toContain('sidebar');
   for (let index = 0; index < after.proposals.length; index += 1) {
     await expect(cards.nth(index)).toBeVisible();
     await expect(cards.nth(index)).toContainText(SUGGEST.author);
@@ -531,7 +523,10 @@ test('opening the built-in sidebar hydrates the worker replica once and preserve
   await expect.poll(async () => (await status(page)).sidebarOpen).toBe(true);
   expect(await getProposals(page)).toEqual(after);
   const current = await status(page);
-  expect(current.encodeState).toBe(1);
+  expect(current.mainDocumentLoads.sessionsCaptured).toBeGreaterThan(0);
+  expect(current.mainDocumentLoads.total).toBe(0);
+  expect(current.encodeState).toBe(0);
+  expect(current.pending).toBe(true);
   expect(current.hydratedBeforeSidebar).toBe(false);
   expect(current.errors).toEqual([]);
   expect(current.unexpectedScrolls).toBe(0);
@@ -546,6 +541,8 @@ test('existing revisions keep the controlled sidebar and host replica closed', a
   expect(current.revisionCount).toBe(1);
   expect(current.sidebarOpen).toBe(false);
   expect(current.pending).toBe(true);
+  expect(current.mainDocumentLoads.sessionsCaptured).toBeGreaterThan(0);
+  expect(current.mainDocumentLoads.total).toBe(0);
   expect(current.encodeState).toBe(0);
   expect(current.layoutComplete).not.toBeNull();
   expect(current.hydratedBeforeSidebar).toBe(false);
@@ -555,40 +552,40 @@ test('existing revisions keep the controlled sidebar and host replica closed', a
   expect((await status(page)).unexpectedScrolls).toBe(0);
 });
 
-test('existing revisions open the sidebar and hydrate once', async ({ page }) => {
+test('existing revisions open worker sidebar cards without a replica', async ({ page }) => {
   await instrument(page);
   await openEditor(page, true, 'revisions=1');
   await expect.poll(async () => (await status(page)).sidebarOpen).toBe(true);
-  await expect.poll(async () => (await status(page)).pending).toBe(false);
-  const beforeHydration = (await status(page)).beforeSidebarOpen;
-  expect(beforeHydration).not.toBeNull();
-  await assertHydration(page, beforeHydration!, { checkLayoutOrder: false });
+  await assertReplica(page, true, true);
   const requests = await page.evaluate(() => (window as unknown as ProbeWindow).__workerRequests);
   expect(requests.indexOf('revisionCount')).toBeGreaterThanOrEqual(0);
-  expect(requests.indexOf('encodeState')).toBeGreaterThan(requests.indexOf('revisionCount'));
+  expect(requests).not.toContain('encodeState');
   const sidebar = page.locator('.docx-unified-sidebar');
   await expect(sidebar).toBeAttached();
   await expect(sidebar).toHaveCSS('opacity', '1');
   await expect(sidebar.locator('.docx-tracked-change-card')).toBeVisible();
   await expect(page.locator('.docx-tracked-change-card')).toHaveCount(1);
   await expect(page.locator('.docx-tracked-change-card')).toContainText('Document reviewer');
+  expect(await page.evaluate(() => (window as unknown as ProbeWindow).__workerReads)).toContain('sidebar');
   expect((await getProposals(page)).proposals).toEqual([]);
   const current = await status(page);
   expect(current.openedInWorker).toBe(true);
-  expect(current.captures).toBe(1);
+  expect(current.captures).toBeGreaterThan(0);
   expect(current.sidebarOpenChanges).toEqual([true]);
   expect(current.revisionCount).toBe(1);
-  expect(current.encodeState).toBe(1);
+  expect(current.mainDocumentLoads.sessionsCaptured).toBeGreaterThan(0);
+  expect(current.mainDocumentLoads.total).toBe(0);
+  expect(current.encodeState).toBe(0);
+  expect(current.pending).toBe(true);
   expect(current.hydratedBeforeSidebar).toBe(false);
   expect(current.errors).toEqual([]);
   expect(current.unexpectedScrolls).toBe(0);
 });
 
-test('onChange hydrates the first worker proposal once and preserves records', async ({ page }) => {
+test('a worker viewer reports a proposal through onDocumentChange without opening the main-thread copy', async ({ page }) => {
   await instrument(page);
   await open(page, true, 'onChange=1');
   const prepared = await prepare(page, true);
-  const beforeHydration = await view(page);
   const result = await page.evaluate(
     (request) =>
       (window as unknown as ProbeWindow).__workerProposalProbe.editor!.proposeChanges(request),
@@ -597,11 +594,7 @@ test('onChange hydrates the first worker proposal once and preserves records', a
   const proposed = snapshotOf(result);
   expect(proposed.proposals.map(({ id }) => id)).toEqual([IDS[0]]);
   expect(proposed.proposals[0]!.changed).toBe(true);
-  await expect.poll(async () => (await status(page)).pending).toBe(false);
-  await assertHydration(page, beforeHydration);
-  await expect.poll(async () => (await status(page)).contentChanges.some((change) =>
-    change.bodyContainsProposedText
-  )).toBe(true);
+  await expect.poll(async () => (await status(page)).documentChanges.length).toBeGreaterThan(0);
   const after = await getProposals(page);
   expect(after.previewVersion).toBe(proposed.previewVersion);
   expect(after.proposals).toEqual(proposed.proposals);
@@ -610,9 +603,138 @@ test('onChange hydrates the first worker proposal once and preserves records', a
   expect(await getProposals(page)).toEqual(after);
   const current = await status(page);
   expect(current.openedInWorker).toBe(true);
-  expect(current.captures).toBe(1);
-  expect(current.encodeState).toBe(1);
+  expect(current.captures).toBeGreaterThan(0);
+  expect(current.pending).toBe(true);
+  expect(current.mainDocumentLoads.sessionsCaptured).toBeGreaterThan(0);
+  expect(current.mainDocumentLoads.total).toBe(0);
+  expect(current.encodeState).toBe(0);
+  expect(current.contentChanges).toEqual([]);
   expect(current.sidebarOpen).toBe(false);
   expect(current.errors).toEqual([]);
   expect(current.unexpectedScrolls).toBe(0);
+});
+
+test('a worker viewer exports its retained page layout without opening the main-thread copy', async ({ page }) => {
+  await instrument(page);
+  await open(page, true);
+  const prepared = await prepare(page, true);
+  const exportPages = (expectLayoutVersion?: string) => page.evaluate(async (layoutVersion) => {
+    const result = await (window as unknown as ProbeWindow).__workerProposalProbe.editor!.exportStructuredWithPages({
+      revisionView: 'markup',
+      stories: ['body', 'headers', 'footers', 'footnotes', 'endnotes'],
+      ...(layoutVersion === null ? {} : { expectLayoutVersion: layoutVersion }),
+    });
+    return {
+      ok: result.ok,
+      version: result.version,
+      documentVersion: result.ok ? result.content.layout.documentVersion : null,
+      layoutVersion: result.ok ? result.content.layout.layoutVersion : null,
+      pages: result.ok ? result.content.layout.pages.length : 0,
+    };
+  }, expectLayoutVersion ?? null);
+  const first = await exportPages();
+  expect(first.ok).toBe(true);
+  expect(first.version).toBe(prepared.resolved.version);
+  expect(first.documentVersion).toBe(first.version);
+  expect(first.pages).toBeGreaterThan(0);
+  expect(first.layoutVersion).not.toBeNull();
+  const pinned = await exportPages(first.layoutVersion!);
+  expect(pinned.ok).toBe(true);
+  expect(pinned.layoutVersion).toBe(first.layoutVersion);
+  const result = await page.evaluate(
+    (request) => (window as unknown as ProbeWindow).__workerProposalProbe.editor!.proposeChanges(request),
+    { expectVersion: first.version, proposals: prepared.proposals.slice(0, 1) }
+  );
+  const proposed = snapshotOf(result);
+  expect(proposed.proposals.map(({ id }) => id)).toEqual([IDS[0]]);
+  expect(proposed.proposals[0]!.changed).toBe(true);
+  await expect.poll(async () => {
+    const current = await exportPages();
+    return current.ok && current.version !== first.version;
+  }).toBe(true);
+  const current = await status(page);
+  expect(current.openedInWorker).toBe(true);
+  expect(current.mainDocumentLoads.sessionsCaptured).toBeGreaterThan(0);
+  expect(current.mainDocumentLoads.total).toBe(0);
+  expect(current.encodeState).toBe(0);
+  expect(current.errors).toEqual([]);
+});
+
+test('a worker viewer reads content controls and refuses revision commands without the main-thread copy while host decisions apply', async ({ page }) => {
+  await instrument(page);
+  await open(page, true);
+  const reads = await page.evaluate(async () => {
+    const editor = (window as unknown as ProbeWindow).__workerProposalProbe.editor!;
+    return {
+      list: await editor.listContentControls(),
+      find: await editor.findContentControls({ kind: 'tag', tag: 'missing' }),
+      accept: await editor.commands.execute('reviewAccept', { revisionId: 'missing' }),
+      reject: await editor.commands.execute('reviewReject', null),
+    };
+  });
+  expect(reads.list).toMatchObject({ ok: true, content: { controls: [] } });
+  expect(reads.find).toMatchObject({ ok: true, content: { controls: [] } });
+  expect(reads.accept).toMatchObject({ ok: false, failure: { code: 'read-only' } });
+  expect(reads.reject).toMatchObject({ ok: false, failure: { code: 'read-only' } });
+  const prepared = await prepare(page, true);
+  const proposed = snapshotOf(await page.evaluate(
+    (request) => (window as unknown as ProbeWindow).__workerProposalProbe.editor!.proposeChanges(request),
+    { expectVersion: prepared.resolved.version, proposals: prepared.proposals.slice(0, 1) }
+  ));
+  const accepted = snapshotOf(await page.evaluate(
+    (request) => (window as unknown as ProbeWindow).__workerProposalProbe.editor!.setProposalStates(request),
+    {
+      expectVersion: proposed.version,
+      expectPreviewVersion: proposed.previewVersion,
+      changes: [{ id: IDS[0]!, state: 'accepted' as const }],
+    }
+  ));
+  expect(accepted.proposals.map(({ id, state }) => ({ id, state }))).toEqual([{ id: IDS[0], state: 'accepted' }]);
+  expect(accepted.previewVersion).toBe(proposed.previewVersion + 1);
+  const current = await status(page);
+  expect(current.pending).toBe(true);
+  expect(current.mainDocumentLoads.sessionsCaptured).toBeGreaterThan(0);
+  expect(current.mainDocumentLoads.total).toBe(0);
+  expect(current.encodeState).toBe(0);
+  expect(current.errors).toEqual([]);
+});
+
+test('Find in a worker viewer steps through worker matches without the main-thread copy', async ({ page }) => {
+  await instrument(page);
+  await open(page, true);
+  const prepared = await prepare(page, true);
+  const selection = () => page.evaluate(() =>
+    (window as unknown as ProbeWindow).__workerProposalProbe.editor!.readSelectionInfo()
+  );
+  expect(await page.evaluate(() =>
+    (window as unknown as ProbeWindow).__workerProposalProbe.editor!.commands.execute('find', null)
+  )).toMatchObject({ ok: true });
+  const dialog = page.locator('.docx-find-replace-dialog');
+  await expect(dialog).toBeVisible();
+  const input = dialog.locator('.docx-find-replace-dialog-input').first();
+  await input.fill('paragraph 12:');
+  await expect(dialog.locator('.docx-find-replace-dialog-status')).toHaveText(/\b1\b\D+\b6\b/);
+  await expect.poll(selection).toMatchObject({
+    selectedText: 'paragraph 12:', paragraphText: 'Page 1 paragraph 12: Original text.',
+  });
+  snapshotOf(await page.evaluate(
+    (request) => (window as unknown as ProbeWindow).__workerProposalProbe.editor!.proposeChanges(request),
+    { expectVersion: prepared.resolved.version, proposals: prepared.proposals.slice(0, 2) }
+  ));
+  await input.press('Enter');
+  await expect(dialog.locator('.docx-find-replace-dialog-status')).toHaveText(/\b2\b\D+\b6\b/);
+  await expect.poll(selection).toMatchObject({
+    selectedText: 'paragraph 12:', paragraphText: 'Page 2 paragraph 12: Original text.',
+  });
+  await input.press('Enter');
+  await expect(dialog.locator('.docx-find-replace-dialog-status')).toHaveText(/\b3\b\D+\b6\b/);
+  await expect.poll(selection).toMatchObject({
+    selectedText: 'paragraph 12:', paragraphText: 'Page 3 paragraph 12: Original text.',
+  });
+  const current = await status(page);
+  expect(current.pending).toBe(true);
+  expect(current.mainDocumentLoads.sessionsCaptured).toBeGreaterThan(0);
+  expect(current.mainDocumentLoads.total).toBe(0);
+  expect(current.encodeState).toBe(0);
+  expect(current.errors).toEqual([]);
 });

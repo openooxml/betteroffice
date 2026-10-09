@@ -387,6 +387,7 @@ export function FindReplaceDialog({
     if (!isOpen) return;
 
     if (!searchText.trim()) {
+      onFindRef.current(searchText, { matchCase, matchWholeWord });
       clearSearchResult();
       return;
     }

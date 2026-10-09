@@ -1119,8 +1119,8 @@ describe('PPTX shape shadows', () => {
     } finally { restore(); }
   });
 
-  test('shadow work shares a slide budget, fails before allocation, and resets for each paint', async () => {
-    const { surfaces, ctx, restore } = harness();
+  test('shadow work shares a slide budget, skips before allocation, and resets for each paint', async () => {
+    const { calls, surfaces, ctx, restore } = harness();
     try {
       const display = list({ color: '#00000066' });
       const shape = display.primitives[0] as ShapePrimitive;
@@ -1129,14 +1129,17 @@ describe('PPTX shape shadows', () => {
       await paintSlide(ctx, display, 3, 1, options);
       await paintSlide(ctx, display, 3, 1, options);
       expect(surfaces).toHaveLength(2);
-      await expect(paintSlide(ctx, display, 3, 1, { maxShadowPixels: 120 * 120 - 1 })).rejects.toThrow('pixel budget');
-      expect(surfaces).toHaveLength(2);
-      const many = { ...display, primitives: Array.from({ length: 10_000 }, () => shape) };
-      await expect(paintSlide(ctx, many, 3, 1, options)).rejects.toThrow('pixel budget');
+      const many = { ...display, primitives: Array.from({ length: 3 }, () => shape) };
+      await expect(paintSlide(ctx, many, 3, 1, options)).resolves.toBeUndefined();
       expect(surfaces).toHaveLength(3);
+      expect(calls.filter((call) => call === 'main:fill')).toHaveLength(5);
       const chart = { kind: 'chart', objectId: 9, x: 0, y: 0, w: 160, h: 160, primitives: [shape, shape] };
-      await expect(paintSlide(ctx, { ...display, primitives: [chart] } as SlideDisplayList, 3, 1, options)).rejects.toThrow('pixel budget');
+      await expect(paintSlide(ctx, { ...display, primitives: [chart] } as SlideDisplayList, 3, 1, options)).resolves.toBeUndefined();
       expect(surfaces).toHaveLength(4);
+      expect(calls.filter((call) => call === 'main:fill')).toHaveLength(7);
+      await expect(paintSlide(ctx, display, 3, 1, { maxShadowPixels: 120 * 120 - 1 })).resolves.toBeUndefined();
+      expect(surfaces).toHaveLength(4);
+      expect(calls.filter((call) => call === 'main:fill')).toHaveLength(8);
     } finally { restore(); }
   });
 
@@ -1264,7 +1267,7 @@ describe('PPTX shape shadows', () => {
   });
 
   test('picture shadows draw from the same slide budget as shape shadows', async () => {
-    const { surfaces, ctx, restore } = harness();
+    const { calls, surfaces, ctx, restore } = harness();
     try {
       const picture = {
         kind: 'image', objectId: 2, name: 'mark', x: 40, y: 40, w: 40, h: 40,
@@ -1274,11 +1277,15 @@ describe('PPTX shape shadows', () => {
       const options = { resolveImage: () => ({} as CanvasImageSource), maxShadowPixels: 120 * 120 };
       await paintSlide(ctx, display, 3, 1, options);
       expect(surfaces).toEqual([[120, 120]]);
+      const many = { ...display, primitives: Array.from({ length: 3 }, () => picture) } as SlideDisplayList;
+      await expect(paintSlide(ctx, many, 3, 1, options)).resolves.toBeUndefined();
+      expect(surfaces).toHaveLength(2);
+      expect(calls.filter((call) => call === 'main:shadow:none:40,40')).toHaveLength(4);
       await expect(
         paintSlide(ctx, display, 3, 1, { ...options, maxShadowPixels: 120 * 120 - 1 })
-      ).rejects.toThrow('pixel budget');
-      const many = { ...display, primitives: Array.from({ length: 10_000 }, () => picture) } as SlideDisplayList;
-      await expect(paintSlide(ctx, many, 3, 1, options)).rejects.toThrow('pixel budget');
+      ).resolves.toBeUndefined();
+      expect(surfaces).toHaveLength(2);
+      expect(calls.filter((call) => call === 'main:shadow:none:40,40')).toHaveLength(5);
     } finally { restore(); }
   });
 

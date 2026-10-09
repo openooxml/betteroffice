@@ -14,7 +14,7 @@ import {
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
-const { act, cleanup, render } = await import('@testing-library/react');
+const { act, cleanup, render, waitFor } = await import('@testing-library/react');
 
 afterEach(cleanup);
 afterAll(async () => {
@@ -118,7 +118,32 @@ function fixture() {
   };
 }
 
-const frame = () => act(() => new Promise<void>((resolve) => setTimeout(resolve, 40)));
+test('passes the visible page window to range rect queries', () => {
+  const { host, target, queries, matches } = fixture();
+  const calls: number[][] = [];
+  queries.rangeRectsOnPages = (from, to, firstPage, lastPage) => {
+    calls.push([from, to, firstPage, lastPage]);
+    return [{ pageIndex: Math.floor(from / 100), x: 100, y: 200, width: 30, height: 12 }];
+  };
+  queries.rangeRects = () => {
+    throw new Error('unexpected unrestricted range query');
+  };
+  const view = render(
+    <CanvasFindHighlightOverlay
+      matches={matches}
+      currentIndex={1}
+      overlayTarget={target}
+      canvasHostRef={{ current: host }}
+      displayListQueries={queries}
+      sidebarOpen={false}
+      zoom={1}
+    />
+  );
+  expect(calls).toEqual([[10, 13, 0, 1], [110, 113, 0, 1]]);
+  expect(target.querySelectorAll('.docx-find-highlight')).toHaveLength(1);
+  expect(target.querySelectorAll('.docx-find-highlight-current')).toHaveLength(1);
+  view.unmount();
+});
 
 test('resolves only the matches on the pages in view, and follows scrolling', async () => {
   const { host, target, queries, matches, queried, mountPage, scrollTo } = fixture();
@@ -143,15 +168,15 @@ test('resolves only the matches on the pages in view, and follows scrolling', as
   act(() => {
     document.dispatchEvent(new Event('scroll'));
   });
-  await frame();
-  expect(queried).toEqual([9, 10, 11]);
+  await waitFor(() => expect(queried).toEqual([9, 10, 11]));
   // those pages are not painted yet
   expect(target.querySelector('[data-testid="canvas-find-highlights"]')).toBeNull();
 
   queried.length = 0;
   act(() => mountPage(10));
-  await frame();
-  expect(queried).toEqual([9, 10, 11]);
-  expect(target.querySelectorAll('.docx-find-highlight')).toHaveLength(1);
+  await waitFor(() => {
+    expect(queried).toEqual([9, 10, 11]);
+    expect(target.querySelectorAll('.docx-find-highlight')).toHaveLength(1);
+  });
   view.unmount();
 });
