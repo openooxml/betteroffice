@@ -1160,6 +1160,9 @@ pub enum DecoKind {
 /// The parsed build envelope: the measured blocks and options pagination also
 /// saw, the `Layout` it produced, and the display-only extras.
 pub struct BuildInput {
+    defer_stale_block_pruning: bool,
+    #[cfg(any(test, feature = "test-support"))]
+    stale_block_pruning_passes: usize,
     contract_version: Option<u32>,
     measured: Vec<MeasuredBlockIn>,
     options: Value,
@@ -1184,13 +1187,29 @@ pub struct ResidentDisplayInput {
     input: BuildInput,
 }
 
+impl ResidentDisplayInput {
+    #[doc(hidden)]
+    pub fn defer_stale_block_pruning(&mut self, defer: bool) {
+        self.input.defer_stale_block_pruning = defer;
+    }
+
+    pub fn font_chains(&self) -> &HashMap<String, Vec<u32>> {
+        &self.input.font_chains
+    }
+}
+
 impl std::fmt::Debug for ResidentDisplayInput {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("ResidentDisplayInput")
+        let mut debug = formatter.debug_struct("ResidentDisplayInput");
+        debug
             .field("measured_blocks", &self.input.measured.len())
-            .field("pages", &self.input.layout.pages.len())
-            .finish_non_exhaustive()
+            .field("pages", &self.input.layout.pages.len());
+        #[cfg(any(test, feature = "test-support"))]
+        debug.field(
+            "stale_block_pruning_passes",
+            &self.input.stale_block_pruning_passes,
+        );
+        debug.finish_non_exhaustive()
     }
 }
 
@@ -1253,6 +1272,9 @@ impl<'de> Deserialize<'de> for BuildInput {
             .transpose()
             .map_err(serde::de::Error::custom)?;
         Ok(Self {
+            defer_stale_block_pruning: false,
+            #[cfg(any(test, feature = "test-support"))]
+            stale_block_pruning_passes: 0,
             contract_version: wire.contract_version,
             measured: wire.measured,
             options: wire.options,
@@ -2984,6 +3006,8 @@ pub(crate) struct TableFragmentIn {
     #[serde(default)]
     pub(crate) clip_bottom: Option<f64>,
     #[serde(default)]
+    pub(crate) cell_clips: Option<Vec<crate::types::CellClip>>,
+    #[serde(default)]
     pub(crate) header_row_count: Option<usize>,
     #[serde(default)]
     pub(crate) carried_from_prev: Option<bool>,
@@ -3146,10 +3170,10 @@ impl BlockRef {
 }
 
 /// Returns the canonical string key for a block identifier.
-fn block_key(id: &Value) -> String {
+fn block_key(id: &Value) -> Cow<'_, str> {
     match id {
-        Value::String(s) => s.clone(),
-        other => other.to_string(),
+        Value::String(s) => Cow::Borrowed(s),
+        other => Cow::Owned(other.to_string()),
     }
 }
 
@@ -3521,16 +3545,9 @@ fn runs_base_is_rtl(runs: &[RunIn]) -> bool {
     true
 }
 
-fn is_floating_wrap_type(wrap: Option<&str>) -> bool {
-    matches!(
-        wrap,
-        Some("square") | Some("tight") | Some("through") | Some("behind") | Some("inFront")
-    )
-}
-
 /// Returns whether an image is positioned outside inline flow.
 fn is_floating_image_run(run: &ImageRunIn) -> bool {
-    is_floating_wrap_type(run.wrap_type.as_deref()) || run.display_mode.as_deref() == Some("float")
+    crate::cell_layout::is_floating_image(run.wrap_type.as_deref(), run.display_mode.as_deref())
 }
 
 /// parse "rotate(NNdeg)" out of a CSS transform string, normalized to [0, 360)
@@ -4383,7 +4400,6 @@ fn page_content_geometry(page: &PageIn) -> (DisplayBounds, Vec<DisplayBounds>) {
 }
 
 const NOTE_COLUMN_GAP_PX: f64 = 24.0;
-const NOTE_SEPARATOR_HEIGHT_PX: f64 = 12.0;
 /// note reference-label cap (display numbers / custom marks are tiny)
 pub const MAX_NOTE_LABEL_CHARS: usize = 64;
 
@@ -4494,6 +4510,7 @@ fn emit_note_item(
                     row_end: block.rows.len(),
                     clip_top: None,
                     clip_bottom: None,
+                    cell_clips: None,
                     header_row_count: None,
                     carried_from_prev: None,
                     carried_to_next: None,
@@ -4592,7 +4609,11 @@ fn emit_note_regions(page: &PageIn, ctx: &RenderCtx<'_>) -> Vec<NoteRegion> {
         let column_width =
             ((content_width - (columns - 1) as f64 * NOTE_COLUMN_GAP_PX) / columns as f64).max(1.0);
         let mut separator_primitives = Vec::new();
-        if let Some(separator) = &area.separator {
+        if let Some(separator) = area
+            .separator
+            .as_ref()
+            .filter(|item| !item.blocks.is_empty())
+        {
             emit_note_item(
                 &mut separator_primitives,
                 separator,
@@ -4624,7 +4645,11 @@ fn emit_note_regions(page: &PageIn, ctx: &RenderCtx<'_>) -> Vec<NoteRegion> {
         let partitions = note_partitions(&area.notes, columns);
         for (column, notes) in partitions.into_iter().enumerate() {
             let x = page.margins.left + column as f64 * (column_width + NOTE_COLUMN_GAP_PX);
-            let mut cursor = y + NOTE_SEPARATOR_HEIGHT_PX;
+            let mut cursor = y + area
+                .separator
+                .as_ref()
+                .and_then(|separator| separator.height)
+                .unwrap_or(crate::footnotes::FOOTNOTE_SEPARATOR_HEIGHT);
             for note in notes {
                 cursor += emit_note_item(&mut primitives, note, kind, x, cursor, column_width, ctx);
             }
@@ -4884,6 +4909,7 @@ fn recompose_hf_region(
                     row_end: block.rows.len(),
                     clip_top: None,
                     clip_bottom: None,
+                    cell_clips: None,
                     header_row_count: None,
                     carried_from_prev: None,
                     carried_to_next: None,
@@ -4919,7 +4945,7 @@ fn recompose_hf_region(
             }
             (BlockIn::TextBox(block), MeasureIn::TextBox(measure)) => {
                 let flow_y = if block.display_mode.as_deref() != Some("float")
-                    && !is_floating_wrap_type(block.wrap_type.as_deref())
+                    && !crate::cell_layout::is_floating_image(block.wrap_type.as_deref(), None)
                 {
                     hf_flow.place(measure.height, 0.0, 0.0)
                 } else {
@@ -4986,7 +5012,7 @@ fn build_display_list_selected(
         serde_json::from_value::<RenderOptionsIn>(input.options.clone()).unwrap_or_default();
 
     // Index measured blocks by canonical block key.
-    let mut by_id: HashMap<String, &MeasuredBlockIn> = HashMap::new();
+    let mut by_id: HashMap<Cow<'_, str>, &MeasuredBlockIn> = HashMap::new();
     for mb in &input.measured {
         let key = match &mb.block {
             BlockIn::Paragraph(p) => block_key(&p.id),
@@ -5061,7 +5087,7 @@ fn build_display_list_selected(
                     {
                         continue;
                     }
-                    let Some(measured) = by_id.get(&block_key(&fragment.block_id)) else {
+                    let Some(measured) = by_id.get(block_key(&fragment.block_id).as_ref()) else {
                         continue;
                     };
                     let BlockIn::Paragraph(block) = &measured.block else {
@@ -5081,7 +5107,7 @@ fn build_display_list_selected(
                     }
                 }
                 FragmentIn::Shape(fragment) => {
-                    let Some(measured) = by_id.get(&block_key(&fragment.block_id)) else {
+                    let Some(measured) = by_id.get(block_key(&fragment.block_id).as_ref()) else {
                         continue;
                     };
                     if let BlockIn::Shape(block) = &measured.block
@@ -5113,7 +5139,7 @@ fn build_display_list_selected(
         // Paragraph border grouping uses neighboring fragment borders.
         let para_borders_of = |frag: &FragmentIn| -> Option<ParaBordersIn> {
             if let FragmentIn::Paragraph(p) = frag
-                && let Some(mb) = by_id.get(&block_key(&p.block_id))
+                && let Some(mb) = by_id.get(block_key(&p.block_id).as_ref())
                 && let BlockIn::Paragraph(b) = &mb.block
             {
                 return b.attrs.as_ref().and_then(|a| a.borders.clone());
@@ -5125,7 +5151,7 @@ fn build_display_list_selected(
         for (i, frag) in page.fragments.iter().enumerate() {
             match frag {
                 FragmentIn::Paragraph(pf) => {
-                    let Some(mb) = by_id.get(&block_key(&pf.block_id)) else {
+                    let Some(mb) = by_id.get(block_key(&pf.block_id).as_ref()) else {
                         prev_para_borders = None;
                         continue;
                     };
@@ -5154,7 +5180,7 @@ fn build_display_list_selected(
                 }
                 FragmentIn::Table(tf) => {
                     prev_para_borders = None;
-                    let Some(mb) = by_id.get(&block_key(&tf.block_id)) else {
+                    let Some(mb) = by_id.get(block_key(&tf.block_id).as_ref()) else {
                         continue;
                     };
                     let (BlockIn::Table(block), MeasureIn::Table(measure)) =
@@ -5166,7 +5192,7 @@ fn build_display_list_selected(
                 }
                 FragmentIn::Image(imf) => {
                     prev_para_borders = None;
-                    let block = by_id.get(&block_key(&imf.block_id)).and_then(|mb| {
+                    let block = by_id.get(block_key(&imf.block_id).as_ref()).and_then(|mb| {
                         if let BlockIn::Image(b) = &mb.block {
                             Some(b)
                         } else {
@@ -5203,7 +5229,7 @@ fn build_display_list_selected(
                 }
                 FragmentIn::TextBox(tf) => {
                     prev_para_borders = None;
-                    let Some(mb) = by_id.get(&block_key(&tf.block_id)) else {
+                    let Some(mb) = by_id.get(block_key(&tf.block_id).as_ref()) else {
                         continue;
                     };
                     let (BlockIn::TextBox(block), MeasureIn::TextBox(measure)) =
@@ -5215,7 +5241,7 @@ fn build_display_list_selected(
                 }
                 FragmentIn::Shape(sf) => {
                     prev_para_borders = None;
-                    let Some(mb) = by_id.get(&block_key(&sf.block_id)) else {
+                    let Some(mb) = by_id.get(block_key(&sf.block_id).as_ref()) else {
                         continue;
                     };
                     let BlockIn::Shape(block) = &mb.block else {
@@ -5227,7 +5253,7 @@ fn build_display_list_selected(
                 }
                 FragmentIn::Chart(cf) => {
                     prev_para_borders = None;
-                    let Some(mb) = by_id.get(&block_key(&cf.block_id)) else {
+                    let Some(mb) = by_id.get(block_key(&cf.block_id).as_ref()) else {
                         continue;
                     };
                     let BlockIn::Chart(block) = &mb.block else {
@@ -5246,7 +5272,7 @@ fn build_display_list_selected(
         for frag in &page.fragments {
             if let FragmentIn::Paragraph(pf) = frag
                 && float_paragraphs.insert((block_key(&pf.block_id), pf.x.to_bits()))
-                && let Some(mb) = by_id.get(&block_key(&pf.block_id))
+                && let Some(mb) = by_id.get(block_key(&pf.block_id).as_ref())
                 && let BlockIn::Paragraph(block) = &mb.block
             {
                 emit_paragraph_floating_images(&mut prims, block, pf.y, &float_geom, false);
@@ -9008,6 +9034,7 @@ struct VisibleRow {
     row_index: usize,
     frag_y: f64,
     is_first_in_fragment: bool,
+    band_height: Option<f64>,
 }
 
 /// A cell a table fragment paints: a grid cell, its box in fragment coordinates, and whether it
@@ -9076,7 +9103,9 @@ impl TablePaintPlan {
         let win_top =
             row_tops.get(frag.row_start).copied().unwrap_or(0.0) + frag.clip_top.unwrap_or(0.0);
         let to_frag_y = |full_y: f64| header_height + (full_y - win_top);
-        let visible_height = if full_bottom_border {
+        let visible_height = if frag.cell_clips.is_some() {
+            frag.height
+        } else if full_bottom_border {
             frag.height
         } else if frag.clip_bottom.is_some() {
             frag.height.round()
@@ -9094,20 +9123,45 @@ impl TablePaintPlan {
                     row_index: r,
                     frag_y: hy,
                     is_first_in_fragment: r == 0,
+                    band_height: None,
                 });
                 hy += measure.rows[r].height;
             }
         }
+        let mut row_shift = 0.0;
         for row_index in frag.row_start..frag.row_end.min(block.rows.len()) {
             let is_first_in_fragment = if header_row_count > 0 {
                 false
             } else {
                 carried && row_index == frag.row_start && frag.clip_top.unwrap_or(0.0) == 0.0
             };
+            let band_height = frag.cell_clips.as_ref().and_then(|clips| {
+                clips
+                    .iter()
+                    .filter(|clip| clip.row == row_index)
+                    .map(|clip| clip.bottom - clip.top)
+                    .reduce(f64::max)
+            });
+            let mut frag_y = to_frag_y(row_tops.get(row_index).copied().unwrap_or(0.0));
+            if frag.cell_clips.is_some() {
+                frag_y += row_shift;
+            }
+            if let Some(height) = band_height {
+                let skipped = if row_index == frag.row_start {
+                    frag.clip_top.unwrap_or(0.0)
+                } else {
+                    0.0
+                };
+                frag_y += skipped;
+                let row_h = row_tops.get(row_index + 1).copied().unwrap_or(0.0)
+                    - row_tops.get(row_index).copied().unwrap_or(0.0);
+                row_shift += height - (row_h - skipped);
+            }
             visible.push(VisibleRow {
                 row_index,
-                frag_y: to_frag_y(row_tops.get(row_index).copied().unwrap_or(0.0)),
+                frag_y,
                 is_first_in_fragment,
+                band_height,
             });
         }
 
@@ -9141,8 +9195,10 @@ impl TablePaintPlan {
             });
         }
         for vr in &visible {
-            let row_h = row_tops.get(vr.row_index + 1).copied().unwrap_or(0.0)
-                - row_tops.get(vr.row_index).copied().unwrap_or(0.0);
+            let row_h = vr.band_height.unwrap_or_else(|| {
+                row_tops.get(vr.row_index + 1).copied().unwrap_or(0.0)
+                    - row_tops.get(vr.row_index).copied().unwrap_or(0.0)
+            });
             for (grid_index, g) in grid.iter().enumerate() {
                 if g.row_index != vr.row_index {
                     continue;
@@ -9183,6 +9239,28 @@ impl TablePaintPlan {
             self.clip_top_y
         } else {
             self.clip_top_y + self.header_height
+        }
+    }
+
+    fn cell_content_window(
+        &self,
+        frag: &TableFragmentIn,
+        g: &GridCell,
+        paint: &CellPaint,
+    ) -> (f64, f64, f64) {
+        let cy = frag.y + paint.cell_y;
+        if let Some(clip) = frag.cell_clips.as_ref().and_then(|clips| {
+            clips
+                .iter()
+                .find(|clip| clip.row == g.row_index && clip.cell == g.cell_index)
+        }) {
+            (
+                cy - clip.top,
+                cy.max(self.cell_clip_top(g)),
+                (cy + (clip.bottom - clip.top)).min(self.clip_bottom_y),
+            )
+        } else {
+            (cy, self.cell_clip_top(g), self.clip_bottom_y)
         }
     }
 }
@@ -9260,8 +9338,10 @@ pub(crate) fn emit_table_fragment(
                 continue;
             };
             let full_top = frag.y + vr.frag_y;
-            let row_h = row_tops.get(vr.row_index + 1).copied().unwrap_or(0.0)
-                - row_tops.get(vr.row_index).copied().unwrap_or(0.0);
+            let row_h = vr.band_height.unwrap_or_else(|| {
+                row_tops.get(vr.row_index + 1).copied().unwrap_or(0.0)
+                    - row_tops.get(vr.row_index).copied().unwrap_or(0.0)
+            });
             let t = full_top.max(clip_top_y);
             let b = (full_top + row_h).min(clip_bottom_y);
             if b - t <= 0.0 {
@@ -9476,22 +9556,34 @@ pub(crate) fn emit_table_fragment(
             }
         }
 
-        emit_cell_content(
-            prims,
-            cell,
-            measure,
-            &CellPaintRef::from(p.g),
-            cx,
-            cy,
-            p.cell_h,
-            is_first_col,
-            clip_top_y,
-            clip_bottom_y,
-            ctx,
-            p.selectable,
-            &cell_ref,
-            &block_ref,
-        );
+        let content_stamp_from = prims.len();
+        let cell_window = frag.cell_clips.as_ref().and_then(|clips| {
+            clips
+                .iter()
+                .find(|clip| clip.row == g.row_index && clip.cell == g.cell_index)
+        });
+        let windowed_lines = cell_window.is_some();
+        let (content_y, content_clip_top, content_clip_bottom) =
+            plan.cell_content_window(frag, g, paint);
+        let content_frame = if frag.cell_clips.is_none() || content_clip_bottom > content_clip_top {
+            cell_content_frame(
+                cell,
+                measure,
+                &CellPaintRef::from(p.g),
+                cx,
+                content_y,
+                p.cell_h,
+                is_first_col,
+                content_clip_top,
+                content_clip_bottom,
+            )
+        } else {
+            None
+        };
+        let continues_on_next = windowed_lines
+            && content_frame
+                .as_ref()
+                .is_some_and(|(frame, _)| frame.content_end > frame.clip_bottom_y + 1e-6);
 
         let cell_clip_top = cy.max(clip_top_y);
         let cell_clip_bottom = (cy + p.cell_h).min(clip_bottom_y);
@@ -9501,9 +9593,40 @@ pub(crate) fn emit_table_fragment(
             w: Some(px(p.g.width)),
             h: Some(px((cell_clip_bottom - cell_clip_top).max(0.0))),
         };
+        let line_clip_top = if cell_window.is_some_and(|clip| clip.top > 0.0) {
+            content_clip_top.max(cell_clip_top)
+        } else {
+            cell_clip_top
+        };
+        let line_clip_bottom = if continues_on_next {
+            content_clip_bottom.min(cell_clip_bottom)
+        } else {
+            cell_clip_bottom
+        };
+        if let Some((frame, cell_measure)) = content_frame {
+            emit_cell_content(
+                prims,
+                cell,
+                cell_measure,
+                frame,
+                windowed_lines.then_some((line_clip_top, line_clip_bottom)),
+                ctx,
+                p.selectable,
+                &cell_ref,
+                &block_ref,
+            );
+        }
         let clip_id = format!("clip-{table_id}-r{}-c{}", p.g.row_index, p.g.column_index);
-        for primitive in &mut prims[cell_stamp_from..] {
-            if let Some(attrs) = doc_attrs_mut(primitive) {
+        for (index, primitive) in prims.iter_mut().enumerate().skip(cell_stamp_from) {
+            if windowed_lines
+                && index >= content_stamp_from
+                && let Primitive::Line(line) = primitive
+            {
+                let mut line_clip = cell_clip.clone();
+                line_clip.y = Some(px(line_clip_top));
+                line_clip.h = Some(px((line_clip_bottom - line_clip_top).max(0.0)));
+                apply_clip_group(&mut line.attrs, clip_id.clone(), line_clip);
+            } else if let Some(attrs) = doc_attrs_mut(primitive) {
                 apply_clip_group(attrs, clip_id.clone(), cell_clip.clone());
             }
         }
@@ -9604,8 +9727,8 @@ pub(crate) fn emit_table_fragment(
         };
         if let Some(attrs) = attrs {
             if let Some(inner) = &mut attrs.table {
-                if inner.table_id != table_id && inner.parent_table_id.is_none() {
-                    inner.parent_table_id = Some(table_id.clone());
+                if inner.table_id.as_str() != table_id.as_ref() && inner.parent_table_id.is_none() {
+                    inner.parent_table_id = Some(table_id.clone().into_owned());
                 }
             } else {
                 attrs.table = Some(Box::new(metadata.clone()));
@@ -9626,6 +9749,7 @@ struct CellContentFrame {
     content_x: f64,
     content_top: f64,
     content_width: f64,
+    content_end: f64,
     clip_top_y: f64,
     clip_bottom_y: f64,
     /// Index-aligned with the cell's blocks.
@@ -9782,6 +9906,13 @@ fn cell_content_frame<'m>(
             content_x: cx + border_left + pad_left,
             content_top: cy + border_top + pad_top + v_offset,
             content_width,
+            content_end: cy
+                + border_top
+                + pad_top
+                + v_offset
+                + content_height
+                + pad_bottom
+                + border_bottom,
             clip_top_y,
             clip_bottom_y,
             block_tops,
@@ -9795,33 +9926,15 @@ fn cell_content_frame<'m>(
 fn emit_cell_content(
     prims: &mut Vec<Primitive>,
     cell: &TableCellIn,
-    measure: &TableExtentIn,
-    p: &CellPaintRef,
-    cx: f64,
-    cy: f64,
-    cell_h: f64,
-    is_first_col: bool,
-    clip_top_y: f64,
-    clip_bottom_y: f64,
+    cell_measure: &TableCellExtentIn,
+    frame: CellContentFrame,
+    line_clip: Option<(f64, f64)>,
     ctx: &RenderCtx<'_>,
     selectable: bool,
     cell_ref: &TableCellRef,
     block_ref: &BlockRef,
 ) {
     let stamp_from = prims.len();
-    let Some((frame, cell_measure)) = cell_content_frame(
-        cell,
-        measure,
-        p,
-        cx,
-        cy,
-        cell_h,
-        is_first_col,
-        clip_top_y,
-        clip_bottom_y,
-    ) else {
-        return;
-    };
     let CellContentFrame {
         rotation,
         physical,
@@ -9831,8 +9944,11 @@ fn emit_cell_content(
         clip_top_y,
         clip_bottom_y,
         block_tops,
+        ..
     } = frame;
     let rotated = rotation != 0.0;
+    let windowed_lines = line_clip.is_some();
+    let (cull_top_y, cull_bottom_y) = line_clip.unwrap_or((clip_top_y, clip_bottom_y));
 
     // Behind-document floats paint below cell content.
     emit_cell_floating_images(
@@ -9854,6 +9970,19 @@ fn emit_cell_content(
         let Some(m) = cell_measure.blocks.get(i) else {
             continue;
         };
+        if windowed_lines && !matches!(cell_block, BlockIn::Paragraph(_)) {
+            let height = match m {
+                MeasureIn::Table(table) => table.total_height,
+                MeasureIn::Image(image) => image.height,
+                MeasureIn::TextBox(text_box) => text_box.height,
+                MeasureIn::Shape(shape) | MeasureIn::Chart(shape) => shape.height,
+                _ => 0.0,
+            };
+            let block_y = content_top + block_tops[i];
+            if block_y + height <= cull_top_y + 1e-6 || block_y >= cull_bottom_y - 1e-6 {
+                continue;
+            }
+        }
         if let (BlockIn::Paragraph(pb), MeasureIn::Paragraph(pm)) = (cell_block, m) {
             // cell paragraphs never split; fabricate a whole-paragraph fragment
             let total_height: f64 = pm
@@ -9864,18 +9993,35 @@ fn emit_cell_content(
             // y of this paragraph's first line = the collapsed-spacing stack
             // offset computed above (block_tops is index-aligned with cell.blocks)
             let para_y = content_top + block_tops[i];
+            let (lines, para_y, total_height) = if windowed_lines {
+                let Some((lines, _)) = shown_line_window(pm, para_y, clip_top_y, clip_bottom_y)
+                else {
+                    continue;
+                };
+                let skipped: f64 = pm.lines[..lines.start]
+                    .iter()
+                    .map(|line| line.line_height + line.float_skip_before.unwrap_or(0.0))
+                    .sum();
+                let height = pm.lines[lines.clone()]
+                    .iter()
+                    .map(|line| line.line_height + line.float_skip_before.unwrap_or(0.0))
+                    .sum();
+                (lines, para_y + skipped, height)
+            } else {
+                (0..pm.lines.len(), para_y, total_height)
+            };
             let synthetic = ParagraphFragmentIn {
                 block_id: pb.id.clone(),
                 x: content_x,
                 y: para_y,
                 width: content_width,
                 height: total_height,
-                from_line: 0,
-                to_line: pm.lines.len(),
+                from_line: lines.start,
+                to_line: lines.end,
                 pm_start: if selectable { pb.pm_start } else { None },
                 pm_end: if selectable { pb.pm_end } else { None },
-                carried_from_prev: None,
-                carried_to_next: None,
+                carried_from_prev: windowed_lines.then_some(lines.start > 0),
+                carried_to_next: windowed_lines.then_some(lines.end < pm.lines.len()),
             };
             let before = prims.len();
             emit_paragraph_fragment(
@@ -9886,8 +10032,9 @@ fn emit_cell_content(
             postprocess_cell_primitives(
                 prims,
                 before,
-                clip_top_y,
-                clip_bottom_y,
+                cull_top_y,
+                cull_bottom_y,
+                windowed_lines,
                 selectable,
                 Some(cell_ref),
             );
@@ -9903,6 +10050,7 @@ fn emit_cell_content(
                 row_end: tb.rows.len(),
                 clip_top: None,
                 clip_bottom: None,
+                cell_clips: None,
                 header_row_count: None,
                 carried_from_prev: None,
                 carried_to_next: None,
@@ -9912,7 +10060,15 @@ fn emit_cell_content(
             // Preserve the nested table's own inner `cell` refs so the mirror can
             // surface its table semantics; only clip to the outer cell fragment
             // and strip doc positions on a vmerge continuation repaint.
-            postprocess_cell_primitives(prims, before, clip_top_y, clip_bottom_y, selectable, None);
+            postprocess_cell_primitives(
+                prims,
+                before,
+                cull_top_y,
+                cull_bottom_y,
+                windowed_lines,
+                selectable,
+                None,
+            );
         } else if let (BlockIn::Image(image), MeasureIn::Image(image_measure)) = (cell_block, m) {
             let image_x = content_x;
             let image_y = content_top + block_tops[i];
@@ -9943,8 +10099,9 @@ fn emit_cell_content(
             postprocess_cell_primitives(
                 prims,
                 before,
-                clip_top_y,
-                clip_bottom_y,
+                cull_top_y,
+                cull_bottom_y,
+                windowed_lines,
                 selectable,
                 Some(cell_ref),
             );
@@ -9968,8 +10125,9 @@ fn emit_cell_content(
             postprocess_cell_primitives(
                 prims,
                 before,
-                clip_top_y,
-                clip_bottom_y,
+                cull_top_y,
+                cull_bottom_y,
+                windowed_lines,
                 selectable,
                 Some(cell_ref),
             );
@@ -9997,8 +10155,9 @@ fn emit_cell_content(
             postprocess_cell_primitives(
                 prims,
                 before,
-                clip_top_y,
-                clip_bottom_y,
+                cull_top_y,
+                cull_bottom_y,
+                windowed_lines,
                 selectable,
                 Some(cell_ref),
             );
@@ -10024,8 +10183,9 @@ fn emit_cell_content(
             postprocess_cell_primitives(
                 prims,
                 before,
-                clip_top_y,
-                clip_bottom_y,
+                cull_top_y,
+                cull_bottom_y,
+                windowed_lines,
                 selectable,
                 Some(cell_ref),
             );
@@ -10047,6 +10207,17 @@ fn emit_cell_content(
         selectable,
         false,
     );
+    if windowed_lines {
+        let mut index = stamp_from;
+        while index < prims.len() {
+            let (top, bottom) = primitive_painted_v_extent(&prims[index]);
+            if bottom <= cull_top_y || top >= cull_bottom_y {
+                prims.remove(index);
+            } else {
+                index += 1;
+            }
+        }
+    }
     if rotated {
         rotate_cell_content(&mut prims[stamp_from..], physical, rotation);
     }
@@ -10177,12 +10348,17 @@ fn postprocess_cell_primitives(
     start: usize,
     clip_top_y: f64,
     clip_bottom_y: f64,
+    windowed_lines: bool,
     selectable: bool,
     cell_ref: Option<&TableCellRef>,
 ) {
     let mut k = start;
     while k < prims.len() {
-        let (top, bottom) = primitive_v_extent(&prims[k]);
+        let (top, bottom) = if windowed_lines {
+            primitive_painted_v_extent(&prims[k])
+        } else {
+            primitive_v_extent(&prims[k])
+        };
         if bottom < clip_top_y || top > clip_bottom_y {
             prims.remove(k);
         } else {
@@ -10333,6 +10509,33 @@ fn emit_cell_floating_images(
 /// clean row breaks on rounded row offsets leave slivers that thin.
 const MIN_SHOWN_PX: f64 = 1.0;
 
+fn shown_line_window(
+    extent: &ParagraphExtentIn,
+    y: f64,
+    top: f64,
+    bottom: f64,
+) -> Option<(std::ops::Range<usize>, bool)> {
+    let mut line_top = y;
+    let mut first = None;
+    let mut last = 0;
+    let mut clipped = false;
+    for (line_index, line) in extent.lines.iter().enumerate() {
+        line_top += line.float_skip_before.unwrap_or(0.0);
+        let inside = (line_top + line.line_height).min(bottom) - line_top.max(top);
+        if inside > MIN_SHOWN_PX.min(line.line_height / 2.0) {
+            first.get_or_insert(line_index);
+            last = line_index + 1;
+            clipped |= inside < line.line_height - MIN_SHOWN_PX;
+        }
+        line_top += line.line_height;
+    }
+    match first {
+        Some(first) => Some((first..last, clipped)),
+        None if extent.lines.is_empty() && y >= top && y < bottom => Some((0..0, false)),
+        None => None,
+    }
+}
+
 /// What of one table cell block a table fragment shows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ShownPart {
@@ -10399,8 +10602,9 @@ fn visit_table_fragment(
             continue;
         };
         let cy = frag.y + paint.cell_y;
-        let clip_top = plan.cell_clip_top(g).max(band.0);
-        let clip_bottom = plan.clip_bottom_y.min(band.1);
+        let (content_y, clip_top, clip_bottom) = plan.cell_content_window(frag, g, paint);
+        let clip_top = clip_top.max(band.0);
+        let clip_bottom = clip_bottom.min(band.1);
         let (top, bottom) = (cy.max(clip_top), (cy + paint.cell_h).min(clip_bottom));
         if bottom <= top {
             continue;
@@ -10410,7 +10614,7 @@ fn visit_table_fragment(
             measure,
             &CellPaintRef::from(g),
             frag.x + g.x,
-            cy,
+            content_y,
             paint.cell_h,
             is_first_grid_column(g, block, measure),
             clip_top,
@@ -10437,26 +10641,8 @@ fn visit_table_fragment(
             path.push((g.row_index, g.cell_index, index));
             let shown = match (cell_block, cell_block_measure) {
                 (BlockIn::Paragraph(_), MeasureIn::Paragraph(extent)) => {
-                    let mut line_top = y;
-                    let mut first = None;
-                    let mut last = 0;
-                    let mut clipped = false;
-                    for (line_index, line) in extent.lines.iter().enumerate() {
-                        line_top += line.float_skip_before.unwrap_or(0.0);
-                        if let Some(cut) = shown(line_top, line.line_height) {
-                            first.get_or_insert(line_index);
-                            last = line_index + 1;
-                            clipped |= cut;
-                        }
-                        line_top += line.line_height;
-                    }
-                    match first {
-                        Some(first) => Some(ShownPart::Lines(first..last, clipped)),
-                        None if extent.lines.is_empty() && y >= top && y < bottom => {
-                            Some(ShownPart::Lines(0..0, false))
-                        }
-                        None => None,
-                    }
+                    shown_line_window(extent, y, top, bottom)
+                        .map(|(lines, clipped)| ShownPart::Lines(lines, clipped))
                 }
                 (BlockIn::Table(nested), MeasureIn::Table(nested_measure)) => {
                     let fragment = TableFragmentIn {
@@ -10470,6 +10656,7 @@ fn visit_table_fragment(
                         row_end: nested.rows.len(),
                         clip_top: None,
                         clip_bottom: None,
+                        cell_clips: None,
                         header_row_count: None,
                         carried_from_prev: None,
                         carried_to_next: None,
@@ -10553,6 +10740,31 @@ impl<'a> From<&'a GridCell> for CellPaintRef {
             width: g.width,
         }
     }
+}
+
+fn primitive_painted_v_extent(p: &Primitive) -> (f64, f64) {
+    let (top, bottom) = primitive_v_extent(p);
+    let Primitive::Line(line) = p else {
+        return (top, bottom);
+    };
+    let width = num_f64(&line.stroke_width);
+    let border_width = width.max(0.5);
+    let outset = match line.border_style {
+        Some(DisplayBorderStyle::Double) => {
+            border_width / 2.0 + (border_width / 3.0).max(0.5) / 2.0
+        }
+        Some(DisplayBorderStyle::Triple) => border_width + (border_width / 3.0).max(0.5) / 2.0,
+        Some(DisplayBorderStyle::ThinThick | DisplayBorderStyle::ThickThin) => {
+            (border_width * 0.45 + (border_width * 0.25).max(0.5) / 2.0)
+                .max(border_width * 0.3 + (border_width * 0.55).max(0.75) / 2.0)
+        }
+        Some(DisplayBorderStyle::Wave) => border_width.max(1.0) / 2.0 + border_width / 2.0,
+        Some(DisplayBorderStyle::DoubleWave) => {
+            border_width.max(1.0) * 1.5 + (border_width / 2.0).max(0.5) / 2.0
+        }
+        _ => width / 2.0,
+    };
+    (top - outset, bottom + outset)
 }
 
 fn primitive_v_extent(p: &Primitive) -> (f64, f64) {
@@ -10738,7 +10950,15 @@ pub fn build_resident_display_list_partial_with_fonts_observed(
         .into_iter()
         .map(|page| (page.page_index as usize, page))
         .collect();
-    let blocks = source_blocks_by_key(pagination);
+    let blocks = source_blocks_by_key(
+        pagination,
+        layout
+            .pages
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !selected.contains(index))
+            .map(|(_, page)| page),
+    );
     let pages = input
         .layout
         .pages
@@ -10825,12 +11045,13 @@ pub fn release_resident_display_pages(
         .collect();
     wanted.sort_unstable();
     wanted.dedup();
-    let blocks = source_blocks_by_key(pagination);
+    let blocks = source_blocks_by_key(pagination, wanted.iter().map(|&index| &layout.pages[index]));
+    let mut transcoder = crate::transcode::Transcoder::default();
     let replacements = wanted
         .iter()
         .map(|&index| {
-            let page: PageIn =
-                convert_resident_value(&layout.pages[index], "resident display layout page")?;
+            let page = convert_resident_page(&mut transcoder, &layout.pages[index], false)
+                .map_err(|error| format!("parse resident display layout page: {error}"))?;
             let placeholder = unbuilt_page_with_span(
                 &page,
                 index,
@@ -10848,28 +11069,37 @@ pub fn release_resident_display_pages(
 }
 
 fn prune_resident_display_measured(resident: &mut ResidentDisplayInput, list: &DisplayList) {
-    let keys: HashSet<String> = list
+    let keys: HashSet<Cow<'_, str>> = list
         .pages
         .iter()
         .zip(&resident.input.layout.pages)
         .filter(|(page, _)| !page.unbuilt)
-        .flat_map(|(_, page)| page.fragments.iter().filter_map(fragment_block_key))
+        .flat_map(|(_, page)| page.fragments.iter().filter_map(fragment_block_key_ref))
         .collect();
-    resident
-        .input
-        .measured
-        .retain(|measured| measured_block_key(measured).is_some_and(|key| keys.contains(&key)));
+    resident.input.measured.retain(|measured| {
+        measured_block_key(measured).is_some_and(|key| keys.contains(key.as_ref()))
+    });
 }
 
-/// The pagination's rendered measured blocks by key, first occurrence winning
-/// as in [`build_display_list_selected`].
-fn source_blocks_by_key(
-    pagination: &crate::types::Input,
-) -> HashMap<String, &crate::types::MeasuredBlock> {
+/// The affected pages' source blocks by canonical key, first occurrence winning.
+fn source_blocks_by_key<'a, 'b>(
+    pagination: &'a crate::types::Input,
+    pages: impl IntoIterator<Item = &'b crate::types::Page>,
+) -> HashMap<Cow<'a, str>, &'a crate::types::MeasuredBlock> {
+    let mut pending: HashSet<_> = pages
+        .into_iter()
+        .flat_map(|page| &page.fragments)
+        .map(resident_fragment_block_key)
+        .collect();
     let mut blocks = HashMap::new();
     for measured in &pagination.measured {
-        if let Some(key) = resident_block_key(&measured.block) {
-            blocks.entry(key.into_owned()).or_insert(measured);
+        if pending.is_empty() {
+            break;
+        }
+        if let Some(key) = resident_block_key(&measured.block)
+            && pending.remove(key.as_ref())
+        {
+            blocks.insert(key, measured);
         }
     }
     blocks
@@ -10910,7 +11140,7 @@ fn unbuilt_page_with_span(
 /// out-of-range one is an error.
 fn layout_page_position_span(
     page: &crate::types::Page,
-    blocks: &HashMap<String, &crate::types::MeasuredBlock>,
+    blocks: &HashMap<Cow<'_, str>, &crate::types::MeasuredBlock>,
 ) -> Result<Option<[i64; 2]>, String> {
     use crate::types::{Fragment, LayoutBlock, TableRow};
     fn block(block: &LayoutBlock, positions: &mut Vec<Option<f64>>) {
@@ -10997,14 +11227,13 @@ fn resident_build_input_for(
     let extras: ResidentExtrasWire =
         serde_json::from_value(wire).map_err(|e| format!("parse resident display input: {e}"))?;
     let mut transcoder = crate::transcode::Transcoder::default();
-    let layout: LayoutIn = transcoder
-        .convert(layout)
+    let layout = convert_resident_layout(&mut transcoder, layout, pages)
         .map_err(|e| format!("parse resident display input: {e}"))?;
-    let placed: Option<HashSet<String>> = pages.map(|pages| {
+    let placed: Option<HashSet<Cow<'_, str>>> = pages.map(|pages| {
         pages
             .iter()
             .filter_map(|&index| layout.pages.get(index))
-            .flat_map(|page| page.fragments.iter().filter_map(fragment_block_key))
+            .flat_map(|page| page.fragments.iter().filter_map(fragment_block_key_ref))
             .collect()
     });
     let measured = pagination
@@ -11018,6 +11247,7 @@ fn resident_build_input_for(
         .map(|measured| transcoder.convert(measured))
         .collect::<Result<Vec<MeasuredBlockIn>, _>>()
         .map_err(|e| format!("parse resident display input: {e}"))?;
+    drop(placed);
     let options = transcoder
         .convert(&pagination.options)
         .map_err(|e| format!("parse resident display input: {e}"))?;
@@ -11033,6 +11263,9 @@ fn resident_build_input_for(
         .transpose()
         .map_err(|e| format!("parse resident display input: {e}"))?;
     Ok(BuildInput {
+        defer_stale_block_pruning: false,
+        #[cfg(any(test, feature = "test-support"))]
+        stale_block_pruning_passes: 0,
         contract_version: extras.contract_version,
         measured,
         options,
@@ -11044,6 +11277,108 @@ fn resident_build_input_for(
         comment_authors: extras.comment_authors,
         comment_threads: extras.comment_threads,
     })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResidentPageMetadata<'a> {
+    size: &'a crate::types::Size,
+    margins: &'a crate::types::PageMargins,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    body_margins: &'a Option<crate::types::PageMargins>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    columns: &'a Option<crate::types::ColumnLayout>,
+    section_id: &'a Option<String>,
+    section_index: Option<u64>,
+    section_page_index: Option<u64>,
+    section_page_number: Option<u64>,
+    page_label: &'a Option<String>,
+}
+
+fn convert_resident_page(
+    transcoder: &mut crate::transcode::Transcoder,
+    page: &crate::types::Page,
+    build: bool,
+) -> Result<PageIn, String> {
+    #[cfg(any(test, feature = "test-support"))]
+    let build = build || resident_conversion_test_support::force_full();
+    if build {
+        #[cfg(any(test, feature = "test-support"))]
+        resident_conversion_test_support::count_pages(1);
+        return transcoder.convert(page);
+    }
+    transcoder.convert(&ResidentPageMetadata {
+        size: &page.size,
+        margins: &page.margins,
+        body_margins: &page.body_margins,
+        columns: &page.columns,
+        section_id: &page.section_id,
+        section_index: page.section_index,
+        section_page_index: page.section_page_index,
+        section_page_number: page.section_page_number,
+        page_label: &page.page_label,
+    })
+}
+
+fn convert_resident_layout(
+    transcoder: &mut crate::transcode::Transcoder,
+    layout: &crate::types::Layout,
+    pages: Option<&HashSet<usize>>,
+) -> Result<LayoutIn, String> {
+    #[cfg(any(test, feature = "test-support"))]
+    let force_full = resident_conversion_test_support::force_full();
+    #[cfg(not(any(test, feature = "test-support")))]
+    let force_full = false;
+    if pages.is_none() || force_full {
+        #[cfg(any(test, feature = "test-support"))]
+        resident_conversion_test_support::count_pages(layout.pages.len());
+        return transcoder.convert(layout);
+    }
+    let pages = pages.unwrap();
+    Ok(LayoutIn {
+        pages: layout
+            .pages
+            .iter()
+            .enumerate()
+            .map(|(index, page)| convert_resident_page(transcoder, page, pages.contains(&index)))
+            .collect::<Result<_, _>>()?,
+        partial: layout.partial,
+        cached_page_totals: layout.cached_page_totals,
+    })
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod resident_conversion_test_support {
+    use std::cell::Cell;
+
+    std::thread_local! {
+        static STATE: Cell<(bool, usize)> = const { Cell::new((false, 0)) };
+    }
+
+    pub(super) fn force_full() -> bool {
+        STATE.with(|state| state.get().0)
+    }
+
+    pub(super) fn count_pages(pages: usize) {
+        STATE.with(|state| {
+            let (force_full, converted) = state.get();
+            state.set((force_full, converted + pages));
+        });
+    }
+
+    pub fn with_layout_conversion<T>(force_full: bool, build: impl FnOnce() -> T) -> (T, usize) {
+        struct Restore((bool, usize));
+
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                STATE.with(|state| state.set(self.0));
+            }
+        }
+
+        let _restore = Restore(STATE.with(|state| state.replace((force_full, 0))));
+        let result = build();
+        (result, STATE.with(|state| state.get().1))
+    }
 }
 
 /// Rebuild only pages dirtied by incremental pagination, retain the remaining
@@ -11085,11 +11420,7 @@ pub fn build_display_list_value_from_resident_incremental_with_fonts(
         page.page_index = page_index as u64;
         if page_index >= rebuilt_page_end {
             shift_page_body_positions(&mut page, position_deltas);
-            shift_unbuilt_span(
-                &mut page,
-                parsed.layout.pages.get(page_index),
-                position_deltas,
-            );
+            shift_unbuilt_span(&mut page, layout.pages.get(page_index), position_deltas);
         }
         pages.push(page);
     }
@@ -11161,7 +11492,7 @@ pub fn update_display_list_value_from_resident_incremental_with_fonts_observed(
     for (page_index, page) in previous.pages.iter_mut().enumerate().skip(rebuilt_page_end) {
         page.page_index = page_index as u64;
         shift_page_body_positions(page, position_deltas);
-        shift_unbuilt_span(page, parsed.layout.pages.get(page_index), position_deltas);
+        shift_unbuilt_span(page, layout.pages.get(page_index), position_deltas);
     }
     Ok(true)
 }
@@ -11216,10 +11547,87 @@ pub fn update_resident_display_list_incremental_partial_with_fonts_observed(
     build: &dyn Fn(usize) -> bool,
     observe_phase: &mut impl FnMut(),
 ) -> Result<bool, String> {
+    update_resident_display_list_incremental_partial_with_fonts_shifts(
+        pagination,
+        layout,
+        fonts,
+        resident,
+        previous,
+        rebuilt_page_start,
+        rebuilt_page_end,
+        extra_pages,
+        position_deltas,
+        build,
+        observe_phase,
+    )
+    .map(|result| result.is_some())
+}
+
+/// A contiguous range of retained pages shifted by one position delta.
+#[derive(Debug, PartialEq, Eq)]
+pub struct DisplayShiftRun {
+    pub start: usize,
+    pub end: usize,
+    pub delta: i64,
+}
+
+/// Position changes on retained pages after an incremental display update.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct IncrementalDisplayShifts {
+    pub runs: Vec<DisplayShiftRun>,
+    pub mixed: Vec<usize>,
+}
+
+impl IncrementalDisplayShifts {
+    /// Appends a page's shift, coalescing adjacent uniform and inert pages.
+    fn push(&mut self, index: usize, shift: DisplayShift) {
+        match shift {
+            DisplayShift::Uniform(delta) => {
+                if let Some(last) = self.runs.last_mut()
+                    && last.end == index
+                    && last.delta == delta
+                {
+                    last.end = index + 1;
+                } else {
+                    self.runs.push(DisplayShiftRun {
+                        start: index,
+                        end: index + 1,
+                        delta,
+                    });
+                }
+            }
+            DisplayShift::Inert => {
+                if let Some(last) = self.runs.last_mut()
+                    && last.end == index
+                {
+                    last.end = index + 1;
+                }
+            }
+            DisplayShift::Mixed => self.mixed.push(index),
+            DisplayShift::Unchanged => {}
+        }
+    }
+}
+
+/// Updates selected pages and reports position shifts on retained suffix pages.
+#[allow(clippy::too_many_arguments)]
+pub fn update_resident_display_list_incremental_partial_with_fonts_shifts(
+    pagination: &crate::types::Input,
+    layout: &crate::types::Layout,
+    fonts: &ooxml_text::FontStore,
+    resident: &mut ResidentDisplayInput,
+    previous: &mut DisplayList,
+    rebuilt_page_start: usize,
+    rebuilt_page_end: usize,
+    extra_pages: &[usize],
+    position_deltas: &HashMap<String, i64>,
+    build: &dyn Fn(usize) -> bool,
+    observe_phase: &mut impl FnMut(),
+) -> Result<Option<IncrementalDisplayShifts>, String> {
     if previous.pages.len() != layout.pages.len()
         || resident.input.layout.pages.len() != layout.pages.len()
     {
-        return Ok(false);
+        return Ok(None);
     }
     if rebuilt_page_start > rebuilt_page_end
         || rebuilt_page_end > layout.pages.len()
@@ -11236,8 +11644,6 @@ pub fn update_resident_display_list_incremental_partial_with_fonts_observed(
         .copied()
         .filter(|&page| build(page))
         .collect();
-    // Only a built page reads its blocks' display form; a placeholder takes its
-    // position span from the pagination blocks directly.
     refresh_resident_display_pages_reading(
         &mut resident.input,
         pagination,
@@ -11255,7 +11661,12 @@ pub fn update_resident_display_list_incremental_partial_with_fonts_observed(
         previous.pages[page_index] = page;
     }
     if built.len() < selected.len() {
-        let blocks = source_blocks_by_key(pagination);
+        let blocks = source_blocks_by_key(
+            pagination,
+            selected
+                .difference(&built)
+                .map(|&index| &layout.pages[index]),
+        );
         for &page_index in selected.difference(&built) {
             previous.pages[page_index] = unbuilt_page_with_span(
                 &resident.input.layout.pages[page_index],
@@ -11264,24 +11675,20 @@ pub fn update_resident_display_list_incremental_partial_with_fonts_observed(
             );
         }
     }
+    let mut shifts = IncrementalDisplayShifts::default();
     for (page_index, page) in previous.pages.iter_mut().enumerate().skip(rebuilt_page_end) {
         if selected.contains(&page_index) {
             continue;
         }
         page.page_index = page_index as u64;
-        shift_page_body_positions(page, position_deltas);
-        // The retained layout page may predate this edit, but a converged
-        // page holds the same blocks, which is all the shift reads.
-        shift_unbuilt_span(
-            page,
-            resident.input.layout.pages.get(page_index),
-            position_deltas,
-        );
+        let body = shift_page_body_positions(page, position_deltas);
+        let span = shift_unbuilt_span(page, layout.pages.get(page_index), position_deltas);
+        shifts.push(page_index, body.combine(span));
     }
     if built.len() < selected.len() {
         prune_resident_display_measured(resident, previous);
     }
-    Ok(true)
+    Ok(Some(shifts))
 }
 
 fn refresh_resident_display_pages(
@@ -11305,14 +11712,17 @@ fn refresh_resident_display_pages_reading(
     reading: &HashSet<usize>,
 ) -> Result<(), String> {
     let mut selected_blocks = HashSet::new();
+    let mut transcoder = crate::transcode::Transcoder::default();
     for page_index in rebuilt_pages {
-        let page: PageIn =
-            convert_resident_value(&layout.pages[page_index], "resident display layout page")?;
+        let page = convert_resident_page(
+            &mut transcoder,
+            &layout.pages[page_index],
+            reading.contains(&page_index),
+        )
+        .map_err(|error| format!("parse resident display layout page: {error}"))?;
         if reading.contains(&page_index) {
-            for fragment in &page.fragments {
-                if let Some(key) = fragment_block_key(fragment) {
-                    selected_blocks.insert(key);
-                }
+            for fragment in &layout.pages[page_index].fragments {
+                selected_blocks.insert(resident_fragment_block_key(fragment));
             }
         }
         input.layout.pages[page_index] = page;
@@ -11321,13 +11731,14 @@ fn refresh_resident_display_pages_reading(
     if selected_blocks.is_empty() {
         return Ok(());
     }
-    let current_indices: HashMap<String, usize> = input
-        .measured
-        .iter()
-        .enumerate()
-        .filter_map(|(index, measured)| measured_block_key(measured).map(|key| (key, index)))
-        .collect();
+    let mut current_indices = HashMap::new();
+    for (index, measured) in input.measured.iter().enumerate() {
+        if let Some(key) = measured_block_key(measured) {
+            current_indices.entry(key.into_owned()).or_insert(index);
+        }
+    }
     let mut pending_blocks = selected_blocks;
+    let mut added_blocks = false;
     for measured in &pagination.measured {
         if pending_blocks.is_empty() {
             break;
@@ -11341,13 +11752,30 @@ fn refresh_resident_display_pages_reading(
         let block = convert_resident_value(measured, "resident display measured block")?;
         match current_indices.get(key.as_ref()) {
             Some(&index) => input.measured[index] = block,
-            None => input.measured.push(block),
+            None => {
+                input.measured.push(block);
+                added_blocks = true;
+            }
         }
     }
     if let Some(key) = pending_blocks.into_iter().next() {
         return Err(format!(
             "resident pagination measured block {key:?} is missing"
         ));
+    }
+    if added_blocks && !input.defer_stale_block_pruning {
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            input.stale_block_pruning_passes += 1;
+        }
+        let keys: HashSet<_> = pagination
+            .measured
+            .iter()
+            .filter_map(|measured| resident_block_key(&measured.block))
+            .collect();
+        input.measured.retain(|measured| {
+            measured_block_key(measured).is_none_or(|key| keys.contains(key.as_ref()))
+        });
     }
     Ok(())
 }
@@ -11377,6 +11805,20 @@ fn resident_block_key(block: &crate::types::LayoutBlock) -> Option<Cow<'_, str>>
     }
 }
 
+/// Borrows pagination fragment ids with the resident display key text.
+fn resident_fragment_block_key(fragment: &crate::types::Fragment) -> Cow<'_, str> {
+    use crate::types::Fragment;
+    let id = match fragment {
+        Fragment::Paragraph(value) => &value.block_id,
+        Fragment::Table(value) => &value.block_id,
+        Fragment::Image(value) => &value.block_id,
+        Fragment::TextBox(value) => &value.block_id,
+        Fragment::Shape(value) => &value.block_id,
+        Fragment::Chart(value) => &value.block_id,
+    };
+    resident_block_id_key(id)
+}
+
 /// [`block_key`] of `id` once transcoded, which reads an integral number back
 /// as an integer.
 fn resident_block_id_key(id: &crate::types::BlockId) -> Cow<'_, str> {
@@ -11394,7 +11836,8 @@ fn resident_block_id_key(id: &crate::types::BlockId) -> Cow<'_, str> {
     }
 }
 
-fn measured_block_key(measured: &MeasuredBlockIn) -> Option<String> {
+/// Borrows rendered measured block ids with their canonical key text.
+fn measured_block_key(measured: &MeasuredBlockIn) -> Option<Cow<'_, str>> {
     match &measured.block {
         BlockIn::Paragraph(value) => Some(block_key(&value.id)),
         BlockIn::Table(value) => Some(block_key(&value.id)),
@@ -11406,43 +11849,83 @@ fn measured_block_key(measured: &MeasuredBlockIn) -> Option<String> {
     }
 }
 
-fn fragment_block_key(fragment: &FragmentIn) -> Option<String> {
-    match fragment {
-        FragmentIn::Paragraph(value) => Some(block_key(&value.block_id)),
-        FragmentIn::Table(value) => Some(block_key(&value.block_id)),
-        FragmentIn::Image(value) => Some(block_key(&value.block_id)),
-        FragmentIn::TextBox(value) => Some(block_key(&value.block_id)),
-        FragmentIn::Shape(value) => Some(block_key(&value.block_id)),
-        FragmentIn::Chart(value) => Some(block_key(&value.block_id)),
-        FragmentIn::Unsupported => None,
+/// Borrows string block ids while preserving their canonical key text.
+fn fragment_block_key_ref(fragment: &FragmentIn) -> Option<Cow<'_, str>> {
+    let id = match fragment {
+        FragmentIn::Paragraph(value) => &value.block_id,
+        FragmentIn::Table(value) => &value.block_id,
+        FragmentIn::Image(value) => &value.block_id,
+        FragmentIn::TextBox(value) => &value.block_id,
+        FragmentIn::Shape(value) => &value.block_id,
+        FragmentIn::Chart(value) => &value.block_id,
+        FragmentIn::Unsupported => return None,
+    };
+    Some(block_key(id))
+}
+
+/// Classifies effective position changes without revisiting primitives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DisplayShift {
+    Inert,
+    Uniform(i64),
+    Unchanged,
+    Mixed,
+}
+
+impl DisplayShift {
+    /// Combines the movements of two positioned parts of a page.
+    fn combine(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Inert, shift) | (shift, Self::Inert) => shift,
+            (Self::Uniform(left), Self::Uniform(right)) if left == right => Self::Uniform(left),
+            (Self::Unchanged, Self::Unchanged) => Self::Unchanged,
+            _ => Self::Mixed,
+        }
     }
 }
 
 /// Moves an unbuilt page's position span with the blocks `layout_page` places.
 fn shift_unbuilt_span(
     page: &mut DisplayPage,
-    layout_page: Option<&PageIn>,
+    layout_page: Option<&crate::types::Page>,
     deltas: &HashMap<String, i64>,
-) {
+) -> DisplayShift {
     let Some(span) = &mut page.position_span else {
-        return;
+        return DisplayShift::Inert;
     };
     let delta = layout_page
-        .and_then(|layout_page| layout_page.fragments.iter().find_map(fragment_block_key))
-        .and_then(|key| deltas.get(&key));
-    if let Some(delta) = delta {
+        .and_then(|layout_page| layout_page.fragments.first())
+        .map(|fragment| {
+            use crate::types::Fragment;
+            resident_block_id_key(match fragment {
+                Fragment::Paragraph(value) => &value.block_id,
+                Fragment::Table(value) => &value.block_id,
+                Fragment::Image(value) => &value.block_id,
+                Fragment::TextBox(value) => &value.block_id,
+                Fragment::Shape(value) => &value.block_id,
+                Fragment::Chart(value) => &value.block_id,
+            })
+        })
+        .and_then(|key| deltas.get(key.as_ref()))
+        .filter(|&&delta| delta != 0);
+    if let Some(&delta) = delta {
         span[0] += delta;
         span[1] += delta;
+        DisplayShift::Uniform(delta)
+    } else {
+        DisplayShift::Unchanged
     }
 }
 
-fn shift_page_body_positions(page: &mut DisplayPage, deltas: &HashMap<String, i64>) {
-    if deltas.is_empty() {
-        return;
-    }
+/// Shifts body positions and classifies the deltas applied to positioned primitives.
+fn shift_page_body_positions(
+    page: &mut DisplayPage,
+    deltas: &HashMap<String, i64>,
+) -> DisplayShift {
     // Looked up by reference: a clone per primitive is an allocation per
     // primitive on every page after the edit.
     let mut id_key = String::new();
+    let mut shift = DisplayShift::Inert;
     for primitive in &mut page.primitives {
         let attrs = match primitive {
             Primitive::Text(value) => &mut value.attrs,
@@ -11453,19 +11936,35 @@ fn shift_page_body_positions(page: &mut DisplayPage, deltas: &HashMap<String, i6
             Primitive::Shape(value) => &mut value.attrs,
             Primitive::Decoration(value) => &mut value.attrs,
         };
+        if attrs.doc_start.is_none()
+            && attrs.doc_end.is_none()
+            && attrs.fragment_doc_start.is_none()
+            && attrs.fragment_doc_end.is_none()
+            && attrs.inline_sdt_widget.is_none()
+        {
+            continue;
+        }
+        if deltas.is_empty() {
+            return DisplayShift::Unchanged;
+        }
         let key = match (&attrs.block_key, &attrs.block_id) {
-            (Some(key), _) => key.as_str(),
+            (Some(key), _) => Some(key.as_str()),
             (None, Some(id)) => {
                 id_key.clear();
                 std::fmt::Write::write_fmt(&mut id_key, format_args!("{id}"))
                     .expect("writing to a String cannot fail");
-                id_key.as_str()
+                Some(id_key.as_str())
             }
-            (None, None) => continue,
+            (None, None) => None,
         };
-        let Some(&delta) = deltas.get(key) else {
+        let Some(&delta) = key
+            .and_then(|key| deltas.get(key))
+            .filter(|&&delta| delta != 0)
+        else {
+            shift = shift.combine(DisplayShift::Unchanged);
             continue;
         };
+        shift = shift.combine(DisplayShift::Uniform(delta));
         attrs.doc_start = attrs.doc_start.map(|value| value + delta);
         attrs.doc_end = attrs.doc_end.map(|value| value + delta);
         attrs.fragment_doc_start = attrs.fragment_doc_start.map(|value| value + delta);
@@ -11474,6 +11973,7 @@ fn shift_page_body_positions(page: &mut DisplayPage, deltas: &HashMap<String, i6
             widget.pos += delta;
         }
     }
+    shift
 }
 
 /// Rewrites losslessly-integral JSON floats as integers.
@@ -11674,6 +12174,8 @@ mod tests {
 
     #[test]
     fn a_partial_resident_build_converts_only_built_pages_and_completes_to_a_full_build() {
+        use resident_conversion_test_support::with_layout_conversion;
+
         let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
         let mut names: Vec<String> = std::fs::read_dir(&fixtures)
             .unwrap()
@@ -11700,15 +12202,40 @@ mod tests {
                 &fonts,
             ))
             .unwrap();
-            let (mut resident, mut list) = build_resident_display_list_partial_with_fonts_observed(
-                &pagination,
-                &layout,
-                extras,
-                &fonts,
-                &|index| index == 0,
-                &mut || {},
-            )
-            .unwrap();
+            let build = || {
+                build_resident_display_list_partial_with_fonts_observed(
+                    &pagination,
+                    &layout,
+                    extras,
+                    &fonts,
+                    &|index| index == 0,
+                    &mut || {},
+                )
+                .unwrap()
+            };
+            let ((mut resident, mut list), converted) = with_layout_conversion(false, build);
+            let ((_, legacy), legacy_converted) = with_layout_conversion(true, build);
+            assert_eq!(converted, usize::from(!layout.pages.is_empty()), "{name}");
+            assert_eq!(legacy_converted, layout.pages.len(), "{name}");
+            assert_eq!(
+                serde_json::to_value(&list).unwrap(),
+                serde_json::to_value(&legacy).unwrap(),
+                "{name} placeholders"
+            );
+            assert_eq!(resident.input.layout.partial, layout.partial);
+            assert_eq!(
+                resident.input.layout.cached_page_totals,
+                layout.cached_page_totals
+            );
+            assert!(
+                resident
+                    .input
+                    .layout
+                    .pages
+                    .iter()
+                    .skip(1)
+                    .all(|page| { page.fragments.is_empty() && page.note_areas.is_empty() })
+            );
             if layout.pages.len() > 1 {
                 assert!(list.pages[1].unbuilt, "{name}");
                 if resident.input.measured.len() < pagination.measured.len() {
@@ -11737,6 +12264,361 @@ mod tests {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/table-splits-with-repeated-header.input.json");
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    fn selective_conversion_fixture() -> (crate::types::Input, crate::types::Layout, String) {
+        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let read = |name: &str| -> Value {
+            serde_json::from_str(
+                &std::fs::read_to_string(fixtures.join(format!("{name}.input.json"))).unwrap(),
+            )
+            .unwrap()
+        };
+        let mut pagination = table_split_fixture();
+        let crate::types::LayoutBlock::Table(table) = &mut pagination.measured[0].block else {
+            panic!("expected a table");
+        };
+        for (index, cell) in table
+            .rows
+            .iter_mut()
+            .flat_map(|row| &mut row.cells)
+            .enumerate()
+        {
+            for block in &mut cell.blocks {
+                if let crate::types::LayoutBlock::Paragraph(paragraph) = block {
+                    paragraph.pm_start = Some(1.0 + index as f64 * 10.0);
+                    paragraph.pm_end = Some(9.0 + index as f64 * 10.0);
+                }
+            }
+        }
+        let mut layout = crate::compute_layout_input(&mut pagination).unwrap();
+        assert!(layout.pages.len() > 1);
+        while layout.pages.len() < 4 {
+            layout.pages.push(layout.pages.last().unwrap().clone());
+        }
+        let mut float_input: crate::types::Input =
+            serde_json::from_value(read("floating-image-with-text-wrap")).unwrap();
+        let float_layout = crate::compute_layout_input(&mut float_input).unwrap();
+        let float = float_layout.pages[0]
+            .fragments
+            .iter()
+            .find(|fragment| matches!(fragment, crate::types::Fragment::Image(_)))
+            .unwrap()
+            .clone();
+        pagination.measured.extend(float_input.measured);
+        let notes = read("notes/two-footnotes")["layout"]["pages"][0]["noteAreas"].clone();
+        for (index, page) in layout.pages.iter_mut().enumerate() {
+            let section = usize::from(index >= 2);
+            page.number = index as u32 + 1;
+            page.size.w += section as f64 * 80.0;
+            page.size.h += section as f64 * 40.0;
+            page.body_margins = Some(page.margins.clone());
+            page.body_margins.as_mut().unwrap().top += 12.0;
+            page.body_anchor_margins = Some(page.margins.clone());
+            page.columns = Some(
+                serde_json::from_value(json!({
+                    "count": 2, "gap": 18, "equalWidth": false,
+                    "columns": [{"width": 120, "space": 24}, {"width": 180}]
+                }))
+                .unwrap(),
+            );
+            page.section_id = Some(format!("s{section}"));
+            page.section_index = Some(section as u64);
+            page.section_page_index = Some(index.saturating_sub(section * 2) as u64);
+            page.section_page_number = Some(index.saturating_sub(section * 2) as u64 + 1);
+            page.page_label = Some(if section == 0 {
+                ["i", "ii"][index].to_owned()
+            } else {
+                (index - 1).to_string()
+            });
+            page.page_numbering = Some(json!({
+                "format": if section == 0 { "lowerRoman" } else { "decimal" }, "start": 1
+            }));
+            page.header_footer_refs = Some(
+                serde_json::from_value(json!({
+                    "headerDefault": "header", "footerDefault": "footer"
+                }))
+                .unwrap(),
+            );
+            page.note_areas = Some(serde_json::from_value(notes.clone()).unwrap());
+            page.fragments.push(float.clone());
+        }
+        let band = |kind: &str| {
+            json!({
+                "rId": kind, "kind": kind, "type": "default", "height": 16, "flowHeight": 16,
+                "measured": [{
+                    "block": {"kind": "paragraph", "id": kind, "runs": [
+                        {"kind": "field", "fieldType": "PAGE", "fallback": "0"},
+                        {"kind": "field", "fieldType": "NUMPAGES", "fallback": "97"}
+                    ]},
+                    "measure": {"kind": "paragraph", "totalHeight": 16, "lines": [{
+                        "headRun": 0, "headChar": 0, "tailRun": 1, "tailChar": 2,
+                        "width": 60, "ascent": 11, "descent": 3, "lineHeight": 16
+                    }]}
+                }]
+            })
+        };
+        let extras = json!({
+            "contractVersion": 2,
+            "headersFooters": {"variants": [band("header"), band("footer")]}
+        })
+        .to_string();
+        (pagination, layout, extras)
+    }
+
+    #[test]
+    fn selective_resident_conversion_matches_legacy_across_refresh_release_and_completion() {
+        use resident_conversion_test_support::with_layout_conversion;
+
+        let (mut pagination, mut layout, extras) = selective_conversion_fixture();
+        let fonts = ooxml_text::FontStore::default();
+        let last = layout.pages.len() - 1;
+        let all: Vec<_> = (0..layout.pages.len()).collect();
+        for (partial, cached_page_totals) in [(false, false), (true, false), (true, true)] {
+            layout.partial = partial;
+            layout.cached_page_totals = cached_page_totals;
+            let build = || {
+                build_resident_display_list_partial_with_fonts_observed(
+                    &pagination,
+                    &layout,
+                    &extras,
+                    &fonts,
+                    &|index| index == 0 || index == last,
+                    &mut || {},
+                )
+                .unwrap()
+            };
+            let ((mut resident, mut list), converted) = with_layout_conversion(false, build);
+            let ((mut legacy_resident, mut legacy), legacy_converted) =
+                with_layout_conversion(true, build);
+            assert_eq!(converted, 2);
+            assert_eq!(legacy_converted, layout.pages.len());
+            let equal = |list: &DisplayList, legacy: &DisplayList| {
+                assert_eq!(
+                    serde_json::to_value(list).unwrap(),
+                    serde_json::to_value(legacy).unwrap()
+                );
+            };
+            equal(&list, &legacy);
+            assert!(list.pages[0].header.is_some() && list.pages[0].footer.is_some());
+            assert!(!list.pages[0].note_areas.is_empty());
+            assert!(
+                list.pages[0]
+                    .primitives
+                    .iter()
+                    .any(|p| matches!(p, Primitive::Image(_)))
+            );
+            let page = serde_json::to_value(&list.pages[0]).unwrap();
+            let total = if partial {
+                if cached_page_totals {
+                    "97".to_owned()
+                } else {
+                    String::new()
+                }
+            } else {
+                layout.pages.len().to_string()
+            };
+            for kind in ["header", "footer"] {
+                let primitives = page[kind]["primitives"].as_array().unwrap();
+                assert!(
+                    primitives
+                        .iter()
+                        .any(|p| p["field"]["category"] == "PAGE" && p["text"] == "i")
+                );
+                if !total.is_empty() {
+                    assert!(
+                        primitives
+                            .iter()
+                            .any(|p| p["field"]["category"] == "NUMPAGES" && p["text"] == total)
+                    );
+                } else {
+                    assert!(
+                        !primitives
+                            .iter()
+                            .any(|p| p["field"]["category"] == "NUMPAGES"
+                                && p["text"].as_str().is_some_and(|text| !text.is_empty()))
+                    );
+                }
+            }
+            let crate::types::LayoutBlock::Table(table) = &mut pagination.measured[0].block else {
+                panic!("expected a table");
+            };
+            for cell in table.rows.iter_mut().flat_map(|row| &mut row.cells) {
+                for block in &mut cell.blocks {
+                    if let crate::types::LayoutBlock::Paragraph(paragraph) = block {
+                        paragraph.pm_start = paragraph.pm_start.map(|position| position + 3.0);
+                        paragraph.pm_end = paragraph.pm_end.map(|position| position + 3.0);
+                    }
+                }
+            }
+            layout.pages[1].body_margins.as_mut().unwrap().top += 4.0;
+            let deltas = HashMap::from([("50".to_owned(), 3)]);
+            let suffix_span = list.pages[2].position_span.unwrap();
+            let refresh = |resident: &mut ResidentDisplayInput, list: &mut DisplayList| {
+                update_resident_display_list_incremental_partial_with_fonts_observed(
+                    &pagination,
+                    &layout,
+                    &fonts,
+                    resident,
+                    list,
+                    0,
+                    2,
+                    &[last],
+                    &deltas,
+                    &|index| index == 0,
+                    &mut || {},
+                )
+                .unwrap()
+            };
+            let (updated, converted) =
+                with_layout_conversion(false, || refresh(&mut resident, &mut list));
+            assert!(updated);
+            assert_eq!(converted, 1);
+            let (updated, converted) =
+                with_layout_conversion(true, || refresh(&mut legacy_resident, &mut legacy));
+            assert!(updated);
+            assert_eq!(converted, 3);
+            equal(&list, &legacy);
+            assert_eq!(
+                list.pages[2].position_span,
+                Some([suffix_span[0] + 3, suffix_span[1] + 3])
+            );
+            let full = build_display_list(
+                &resident_build_input(&pagination, &layout, &extras).unwrap(),
+                &fonts,
+            );
+            for (force_full, resident, list) in [
+                (false, &mut resident, &mut list),
+                (true, &mut legacy_resident, &mut legacy),
+            ] {
+                with_layout_conversion(force_full, || {
+                    build_resident_display_pages_with_fonts(
+                        &pagination,
+                        &layout,
+                        &fonts,
+                        resident,
+                        list,
+                        &all,
+                    )
+                    .unwrap()
+                });
+                equal(list, &full);
+            }
+            let (released, converted) = with_layout_conversion(false, || {
+                release_resident_display_pages(&pagination, &layout, &mut resident, &mut list, &all)
+                    .unwrap()
+            });
+            assert_eq!(released, all);
+            assert_eq!(converted, 0);
+            let (_, converted) = with_layout_conversion(true, || {
+                release_resident_display_pages(
+                    &pagination,
+                    &layout,
+                    &mut legacy_resident,
+                    &mut legacy,
+                    &all,
+                )
+                .unwrap()
+            });
+            assert_eq!(converted, all.len());
+            equal(&list, &legacy);
+            assert!(
+                resident
+                    .input
+                    .layout
+                    .pages
+                    .iter()
+                    .all(|page| page.fragments.is_empty() && page.note_areas.is_empty())
+            );
+            build_resident_display_pages_with_fonts(
+                &pagination,
+                &layout,
+                &fonts,
+                &mut resident,
+                &mut list,
+                &all,
+            )
+            .unwrap();
+            equal(&list, &full);
+        }
+    }
+
+    #[test]
+    fn native_unbuilt_span_shifts_match_converted_block_keys() {
+        use crate::types::{BlockId, Fragment};
+
+        let (_, mut layout, _) = selective_conversion_fixture();
+        for id in [
+            BlockId::Num(50.0),
+            BlockId::Num(-0.0),
+            BlockId::Num(-42.0),
+            BlockId::Num(50.5),
+            BlockId::Num(1e30),
+            BlockId::Num(f64::NAN),
+            BlockId::Num(f64::INFINITY),
+            BlockId::Str("50".to_owned()),
+            BlockId::Str("50.0".to_owned()),
+        ] {
+            let Fragment::Table(table) = &mut layout.pages[0].fragments[0] else {
+                panic!("expected a table");
+            };
+            table.block_id = id;
+            let converted: PageIn = convert_resident_value(&layout.pages[0], "page").unwrap();
+            let key = converted
+                .fragments
+                .iter()
+                .find_map(fragment_block_key_ref)
+                .unwrap()
+                .into_owned();
+            let metadata = convert_resident_page(
+                &mut crate::transcode::Transcoder::default(),
+                &layout.pages[0],
+                false,
+            )
+            .unwrap();
+            assert!(metadata.fragments.is_empty());
+            let mut page = unbuilt_page_with_span(&metadata, 0, Some([10, 20]));
+            shift_unbuilt_span(
+                &mut page,
+                Some(&layout.pages[0]),
+                &HashMap::from([(key.clone(), 7)]),
+            );
+            assert_eq!(page.position_span, Some([17, 27]));
+            let missing = if key == "0" { "unplaced" } else { "0" };
+            shift_unbuilt_span(
+                &mut page,
+                Some(&layout.pages[0]),
+                &HashMap::from([(missing.to_owned(), 9)]),
+            );
+            assert_eq!(page.position_span, Some([17, 27]));
+        }
+    }
+
+    /// Source lookup keeps the first required block and excludes unplaced keys.
+    #[test]
+    fn source_block_lookup_is_scoped_and_keeps_the_first_occurrence() {
+        let mut pagination = table_split_fixture();
+        let crate::types::LayoutBlock::Table(table) = &mut pagination.measured[0].block else {
+            panic!("expected a table");
+        };
+        table.id = crate::types::BlockId::Str("selected".to_owned());
+        let layout = crate::compute_layout_input(&mut pagination).unwrap();
+        let duplicate = pagination.measured[0].clone();
+        let mut unplaced = duplicate.clone();
+        let crate::types::LayoutBlock::Table(table) = &mut unplaced.block else {
+            panic!("expected a table");
+        };
+        table.id = crate::types::BlockId::Str("unplaced".to_owned());
+        pagination.measured.insert(0, unplaced);
+        pagination.measured.push(duplicate);
+        let blocks = source_blocks_by_key(&pagination, &layout.pages[..1]);
+        assert!(std::ptr::eq(blocks["selected"], &pagination.measured[1]));
+        assert!(!blocks.contains_key("unplaced"));
+        assert!(matches!(
+            blocks.keys().find(|key| key.as_ref() == "selected"),
+            Some(Cow::Borrowed("selected")),
+        ));
+        assert!(source_blocks_by_key(&pagination, std::iter::empty()).is_empty());
     }
 
     #[test]
@@ -11911,6 +12793,7 @@ mod tests {
             .measured
             .iter()
             .filter_map(measured_block_key)
+            .map(Cow::into_owned)
             .collect::<Vec<_>>();
         let last = layout.pages.len() - 1;
         assert!(last > 0);
@@ -11943,6 +12826,7 @@ mod tests {
                 .measured
                 .iter()
                 .filter_map(measured_block_key)
+                .map(Cow::into_owned)
                 .collect::<Vec<_>>(),
             measured
         );
@@ -12173,6 +13057,203 @@ mod tests {
                 (Some(50), None, None),
             ]
         );
+    }
+
+    /// Positioned primitives classify uniformly only when all effective deltas agree.
+    #[test]
+    fn body_position_shifts_classify_uniform_mixed_unchanged_and_inert_pages() {
+        let template: Primitive = serde_json::from_value(serde_json::json!({
+            "kind": "text", "text": "a", "x": 0, "baselineY": 10, "width": 5,
+            "font": "10px serif", "color": "#000"
+        }))
+        .unwrap();
+        let positioned = |key: Option<&str>, start| DocAttrs {
+            block_key: key.map(str::to_owned),
+            doc_start: Some(start),
+            ..Default::default()
+        };
+        let widget: DocAttrs = serde_json::from_value(serde_json::json!({
+            "blockKey": "a",
+            "inlineSdtWidget": {"kind": "checkbox", "groupId": "widget", "pos": 7}
+        }))
+        .unwrap();
+        let deltas = HashMap::from([("a".to_owned(), 3), ("b".to_owned(), -2)]);
+        for (attrs, expected) in [
+            (
+                vec![positioned(Some("a"), 10), widget],
+                DisplayShift::Uniform(3),
+            ),
+            (
+                vec![positioned(Some("a"), 10), positioned(None, 20)],
+                DisplayShift::Mixed,
+            ),
+            (
+                vec![positioned(Some("a"), 10), positioned(Some("b"), 20)],
+                DisplayShift::Mixed,
+            ),
+            (
+                vec![positioned(Some("a"), 10), positioned(Some("absent"), 20)],
+                DisplayShift::Mixed,
+            ),
+            (
+                vec![positioned(Some("absent"), 10), positioned(None, 20)],
+                DisplayShift::Unchanged,
+            ),
+            (vec![DocAttrs::default()], DisplayShift::Inert),
+            (vec![], DisplayShift::Inert),
+        ] {
+            let mut page: DisplayPage = serde_json::from_value(serde_json::json!({
+                "pageIndex": 0, "width": 816, "height": 1056, "primitives": []
+            }))
+            .unwrap();
+            for attrs in attrs {
+                let mut primitive = template.clone();
+                let Primitive::Text(value) = &mut primitive else {
+                    unreachable!()
+                };
+                value.attrs = attrs;
+                page.primitives.push(primitive);
+            }
+            assert_eq!(shift_page_body_positions(&mut page, &deltas), expected);
+            assert_eq!(
+                shift_page_body_positions(&mut page, &HashMap::new()),
+                if expected == DisplayShift::Inert {
+                    DisplayShift::Inert
+                } else {
+                    DisplayShift::Unchanged
+                }
+            );
+        }
+    }
+
+    /// Span shifts borrow string ids and combine with body movements exactly.
+    #[test]
+    fn unbuilt_span_shifts_classify_and_preserve_block_key_text() {
+        let mut page: DisplayPage = serde_json::from_value(serde_json::json!({
+            "pageIndex": 0, "width": 816, "height": 1056, "primitives": [], "unbuilt": true
+        }))
+        .unwrap();
+        let deltas = HashMap::from([("a".to_owned(), 3)]);
+        assert_eq!(
+            shift_unbuilt_span(&mut page, None, &deltas),
+            DisplayShift::Inert
+        );
+        page.position_span = Some([10, 20]);
+        assert_eq!(
+            shift_unbuilt_span(&mut page, None, &deltas),
+            DisplayShift::Unchanged
+        );
+        let layout: PageIn = serde_json::from_value(serde_json::json!({
+            "size": {"width": 816, "height": 1056},
+            "fragments": [{"kind": "paragraph", "blockId": "a"}]
+        }))
+        .unwrap();
+        assert!(matches!(
+            fragment_block_key_ref(&layout.fragments[0]),
+            Some(Cow::Borrowed("a"))
+        ));
+        let (_, mut native, _) = selective_conversion_fixture();
+        let crate::types::Fragment::Table(table) = &mut native.pages[0].fragments[0] else {
+            panic!("expected a table");
+        };
+        table.block_id = crate::types::BlockId::Str("a".to_owned());
+        assert_eq!(
+            shift_unbuilt_span(&mut page, native.pages.first(), &deltas),
+            DisplayShift::Uniform(3)
+        );
+        assert_eq!(page.position_span, Some([13, 23]));
+        for id in [
+            serde_json::json!(7),
+            serde_json::json!(7.5),
+            serde_json::json!(-0.0),
+        ] {
+            let fragment: FragmentIn = serde_json::from_value(serde_json::json!({
+                "kind": "paragraph", "blockId": id
+            }))
+            .unwrap();
+            assert_eq!(
+                fragment_block_key_ref(&fragment).unwrap().as_ref(),
+                block_key(&id).as_ref()
+            );
+        }
+        assert_eq!(
+            DisplayShift::Inert.combine(DisplayShift::Uniform(3)),
+            DisplayShift::Uniform(3)
+        );
+        assert_eq!(
+            DisplayShift::Uniform(3).combine(DisplayShift::Inert),
+            DisplayShift::Uniform(3)
+        );
+        assert_eq!(
+            DisplayShift::Uniform(3).combine(DisplayShift::Uniform(3)),
+            DisplayShift::Uniform(3)
+        );
+        assert_eq!(
+            DisplayShift::Uniform(3).combine(DisplayShift::Uniform(4)),
+            DisplayShift::Mixed
+        );
+        assert_eq!(
+            DisplayShift::Uniform(3).combine(DisplayShift::Unchanged),
+            DisplayShift::Mixed
+        );
+        assert_eq!(
+            DisplayShift::Unchanged.combine(DisplayShift::Unchanged),
+            DisplayShift::Unchanged
+        );
+    }
+
+    /// Runs join equal adjacent shifts and inert extensions while leaving gaps separate.
+    #[test]
+    fn display_shift_runs_coalesce_and_split() {
+        let mut shifts = IncrementalDisplayShifts::default();
+        for (index, shift) in [
+            (0, DisplayShift::Inert),
+            (1, DisplayShift::Uniform(3)),
+            (2, DisplayShift::Uniform(3)),
+            (3, DisplayShift::Inert),
+            (4, DisplayShift::Uniform(3)),
+            (5, DisplayShift::Uniform(-2)),
+            (6, DisplayShift::Unchanged),
+            (7, DisplayShift::Inert),
+            (8, DisplayShift::Uniform(-2)),
+            (9, DisplayShift::Mixed),
+            (10, DisplayShift::Inert),
+            (11, DisplayShift::Uniform(-2)),
+            (13, DisplayShift::Uniform(-2)),
+        ] {
+            shifts.push(index, shift);
+        }
+        assert_eq!(
+            shifts.runs,
+            [
+                DisplayShiftRun {
+                    start: 1,
+                    end: 5,
+                    delta: 3
+                },
+                DisplayShiftRun {
+                    start: 5,
+                    end: 6,
+                    delta: -2
+                },
+                DisplayShiftRun {
+                    start: 8,
+                    end: 9,
+                    delta: -2
+                },
+                DisplayShiftRun {
+                    start: 11,
+                    end: 12,
+                    delta: -2
+                },
+                DisplayShiftRun {
+                    start: 13,
+                    end: 14,
+                    delta: -2
+                },
+            ]
+        );
+        assert_eq!(shifts.mixed, [9]);
     }
 
     #[test]

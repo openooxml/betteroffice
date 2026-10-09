@@ -276,6 +276,16 @@ export function hiddenRanges(
   revisions?: readonly ProposalGeometryRevision[]
 ): RawAnchorRange[] {
   const preview = snapshot ? proposalRevisionPreview(snapshot) : undefined;
+  return hiddenRangesForPreview(session, version, preview, revisions);
+}
+
+/** @internal */
+export function hiddenRangesForPreview(
+  session: AnchorReader,
+  version: string,
+  preview: ReturnType<typeof proposalRevisionPreview>,
+  revisions?: readonly ProposalGeometryRevision[]
+): RawAnchorRange[] {
   if (!preview) return [];
   return (revisions ?? revisionsAt(session, version))
     .filter(

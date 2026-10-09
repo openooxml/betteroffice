@@ -71,6 +71,12 @@
       "id": 130117954,
       "signed_at": "2026-10-01T19:49:13Z",
       "pull_request_no": 1123
+    },
+    {
+      "name": "jaitd",
+      "id": 1367593,
+      "signed_at": "2026-10-08T10:31:35Z",
+      "pull_request_no": 1257
     }
   ]
 }

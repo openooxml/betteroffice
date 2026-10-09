@@ -1,13 +1,19 @@
 import { expect, mock, test } from 'bun:test';
 import {
   proposalSetIdentity,
+  type DocxContentControlsResult,
+  type DocxExportResult,
+  type DocxLayoutMap,
+  type DocxPagedStructuredContent,
   type DocxProposalRequest,
   type DocxProposalResult,
   type DocxProposalSnapshot,
   type ProposalGeometryTarget,
+  type ResidentDocumentRead,
   type ResidentProposalReply,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
+import { createProposalRegistry, type DocxProposalSession } from '@betteroffice/docx/yrs/proposals';
 import type { WorkerOpenedDocument } from '../hooks/useDisplayList';
 import {
   beginWorkerProposalHandover,
@@ -77,17 +83,18 @@ function harness(laidOut = () => Promise.resolve()) {
   };
   const relayout = mock(() => {});
   const contentChanged = mock(() => {});
+  const projectionChanged = mock((_stories: readonly string[]) => {});
   let current = true;
   const authority = registerWorkerProposalAuthority(
     session, worker as unknown as WorkerOpenedDocument,
     {
-      relayout, current: () => current, laidOut, contentChanged,
+      relayout, current: () => current, laidOut, contentChanged, projectionChanged,
       adopted: () => {}, handedOver: () => {},
     }
   );
   deferWorkerOpenReplica(session, () => new Promise(() => {}), () => {}, () => {});
   return {
-    session, worker, events, authority, proposalChange, relayout, contentChanged,
+    session, worker, events, authority, proposalChange, relayout, contentChanged, projectionChanged,
     replace: () => { current = false; },
     mainVersion: (version: string) => { mainVersion = version; },
   };
@@ -318,6 +325,67 @@ test('anchor targets during hand-over or after failure return undefined without 
   expect(failed.authority.anchorTarget(target)).toBeUndefined();
   await new Promise((done) => setTimeout(done, 0));
   expect(failed.worker.documentRead).not.toHaveBeenCalled();
+});
+
+test('worker mutation marks reach the peer before mirror listeners and queued saves', async () => {
+  const h = harness();
+  await h.authority.initialize();
+  h.worker.proposal.mockResolvedValueOnce({ ...reply('worker-2', ['body']), projectionStories: ['hf:rId7'] });
+  h.projectionChanged.mockImplementation((stories) => {
+    expect(h.session.version()).toBe('worker-1~');
+    expect(stories).toEqual(['hf:rId7']);
+  });
+  await h.authority.propose(request, unusedMain);
+  expect(h.projectionChanged).toHaveBeenCalledWith(['hf:rId7']);
+  h.projectionChanged.mockImplementation(() => {});
+  await h.authority.save(async () => {
+    expect(h.projectionChanged).toHaveBeenCalledWith(['hf:rId7']);
+    return new ArrayBuffer(1);
+  });
+});
+
+test('save runs after every proposal call already queued without opening the replica', async () => {
+  const h = harness();
+  await h.authority.initialize();
+  const held = deferred<ResidentProposalReply>();
+  h.worker.proposal.mockImplementationOnce(async () => {
+    h.events.push('propose');
+    return held.promise;
+  });
+  const proposal = h.authority.propose(request, unusedMain);
+  const save = mock(async () => {
+    h.events.push('save');
+    return new ArrayBuffer(1);
+  });
+  const saving = h.authority.save(save);
+  await Promise.resolve();
+  expect(save).not.toHaveBeenCalled();
+  held.resolve(reply());
+  await proposal;
+  expect(await saving).toBeInstanceOf(ArrayBuffer);
+  expect(h.events).toEqual(['snapshot', 'propose', 'save', 'snapshot']);
+});
+
+test('a failed authority rejects queued saves without running them', async () => {
+  const h = harness();
+  const error = new Error('Worker stopped');
+  failWorkerProposalAuthority(h.session, error);
+  const save = mock(async () => new ArrayBuffer(1));
+  expect(await h.authority.save(save).catch((failure) => failure)).toBe(error);
+  expect(save).not.toHaveBeenCalled();
+});
+
+test('save remains queued after the peer has taken over proposal calls', async () => {
+  const h = harness();
+  await h.authority.initialize();
+  const handover = await beginWorkerProposalHandover(h.session);
+  handover!.complete();
+  const bytes = new ArrayBuffer(1);
+  expect(await h.authority.save(async () => {
+    h.events.push('save');
+    return bytes;
+  })).toBe(bytes);
+  expect(h.events).toEqual(['snapshot', 'handOver', 'save']);
 });
 
 function navigationReply(version = 'worker-1', position = 42): ResidentProposalReply {
@@ -618,6 +686,77 @@ test('a completed hand-over releases exclusive worker state and keeps routing re
   expect(main).toHaveBeenCalledTimes(1);
   expect(h.worker.proposal).toHaveBeenCalledTimes(2);
   expect(h.worker.handOver).toHaveBeenCalledTimes(1);
+});
+
+test('comment deletion queues with proposals and reads and stores changed worker state', async () => {
+  const h = harness();
+  await h.authority.initialize();
+  const pending = deferred<ResidentProposalReply>();
+  const posted = deferred<void>();
+  h.worker.proposal.mockImplementationOnce(async (op) => {
+    h.events.push(op.kind);
+    posted.resolve();
+    return pending.promise;
+  });
+  const main = mock(() => {});
+  const deletion = h.authority.removeComment('7', main);
+  await posted.promise;
+  expect(h.worker.proposal.mock.calls.at(-1)![0]).toEqual({ kind: 'removeComment', id: '7' });
+  expect(h.session.version()).toBe('worker-1~');
+  expect(h.authority.holdsWorkerState()).toBe(true);
+  expect(h.authority.holdsCommittedWorkerState()).toBe(false);
+  const propose = h.authority.propose(request, unusedMain);
+  const read = h.authority.readParagraphs({ view: 'accepted' }, unusedMain);
+  expect(h.events).toEqual(['snapshot', 'removeComment']);
+
+  const changed = reply('worker-2', ['body']);
+  delete changed.result;
+  pending.resolve(changed);
+  expect(await deletion).toBeUndefined();
+  expect(h.session.version()).toBe('worker-2');
+  expect(h.authority.geometry()).toBe(changed.geometry);
+  expect(h.authority.holdsCommittedWorkerState()).toBe(true);
+  expect(h.relayout).toHaveBeenCalledTimes(1);
+  expect(h.contentChanged).toHaveBeenCalledTimes(1);
+  expect(main).not.toHaveBeenCalled();
+  await propose;
+  await read;
+  expect(h.events).toEqual(['snapshot', 'removeComment', 'propose', 'readParagraphs']);
+});
+
+test('unchanged comment deletion does not hold worker state or relayout', async () => {
+  const h = harness();
+  await h.authority.initialize();
+  const unchanged = reply();
+  delete unchanged.result;
+  h.worker.proposal.mockResolvedValueOnce(unchanged);
+  await h.authority.removeComment('missing', unusedMain);
+  expect(h.authority.holdsWorkerState()).toBe(false);
+  expect(h.authority.geometry()).toBe(unchanged.geometry);
+  expect(h.relayout).not.toHaveBeenCalled();
+  expect(h.contentChanged).not.toHaveBeenCalled();
+});
+
+test('comment deletion queued after hand-over waits for and runs the main continuation', async () => {
+  const h = harness();
+  await h.authority.initialize();
+  const handover = await beginWorkerProposalHandover(h.session)!;
+  const replica = deferred<() => void>();
+  deferWorkerOpenReplica(h.session, () => replica.promise, () => {
+    throw new Error('unexpected fallback');
+  }, () => {});
+  const ready = requestWorkerOpenReplica(h.session)!;
+  const main = mock(async () => {});
+  const deletion = h.authority.removeComment('7', main);
+  expect(main).not.toHaveBeenCalled();
+  replica.resolve(() => { h.mainVersion('main-2'); handover.complete(); });
+  await ready;
+  expect(await deletion).toBeUndefined();
+  expect(main).toHaveBeenCalledTimes(1);
+  expect(h.events).toEqual(['snapshot', 'handOver']);
+  expect(h.worker.proposal).toHaveBeenCalledTimes(1);
+  expect(h.relayout).not.toHaveBeenCalled();
+  expect(h.contentChanged).not.toHaveBeenCalled();
 });
 
 test('propose and withdraw relayout only when stories change', async () => {
@@ -1046,4 +1185,190 @@ test('a call made before the hand-over began runs in the worker ahead of it', as
   await ready;
   expect((await after).version).toBe('main-3');
   expect(h.events).toEqual(['snapshot', 'propose', 'withdraw', 'handOver']);
+});
+
+test('paged exports send the current request and parse the worker result', async () => {
+  const h = harness();
+  const options = { revisionView: 'markup', expectLayoutVersion: 'layout-1' } as const;
+  const currentRequest = JSON.stringify({ renderEnv: {} });
+  const result = {
+    ok: true, version: 'worker-1',
+    content: { structured: {}, layout: { documentVersion: 'worker-1', layoutVersion: 'layout-1', pages: [] } },
+  } as unknown as DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>;
+  h.worker.documentRead.mockImplementation(async (read) => {
+    h.events.push(read.kind);
+    return { version: 'worker-1', value: JSON.stringify(result) } as never;
+  });
+  expect(await h.authority.exportStructuredWithPages(options, async () => currentRequest, unusedMain)).toEqual(result);
+  expect(h.worker.documentRead).toHaveBeenCalledWith({ kind: 'exportStructuredWithPages', options, currentRequest });
+  expect(h.events).toEqual(['snapshot', 'exportStructuredWithPages']);
+});
+
+test('content-control reads route options to the worker and use main after hand-over', async () => {
+  const h = harness();
+  const options = { stories: ['body'], maxControls: 1 } as const;
+  const query = { kind: 'tag', tag: 'field' } as const;
+  const result: DocxContentControlsResult = {
+    ok: true, version: 'worker-1',
+    content: { schemaVersion: 1, anchorScope: 'session', includedStories: ['body'], controls: [], complete: true, diagnostics: [] },
+  };
+  h.worker.documentRead.mockResolvedValue({ version: 'worker-1', value: result } as never);
+  expect(await h.authority.listContentControls(options, unusedMain)).toEqual(result);
+  expect(await h.authority.findContentControls(query, options, unusedMain)).toEqual(result);
+  expect(await h.authority.listContentControls(undefined, unusedMain)).toEqual(result);
+  expect(await h.authority.findContentControls(query, undefined, unusedMain)).toEqual(result);
+  expect(h.worker.documentRead.mock.calls.map(([read]) => read)).toEqual<ResidentDocumentRead[]>([
+    { kind: 'listContentControls', options },
+    { kind: 'findContentControls', query, options },
+    { kind: 'listContentControls', options: {} },
+    { kind: 'findContentControls', query, options: {} },
+  ]);
+  deferWorkerOpenReplica(h.session, async () => {
+    const handover = await beginWorkerProposalHandover(h.session)!;
+    return () => { h.mainVersion('main-2'); handover.complete(); };
+  }, () => { throw new Error('unexpected fallback'); }, () => {});
+  const ready = requestWorkerOpenReplica(h.session)!;
+  const mainResult = { ...result, version: 'main-2' };
+  const main = mock(async () => mainResult);
+  const listed = h.authority.listContentControls(options, main);
+  const found = h.authority.findContentControls(query, options, main);
+  await ready;
+  expect(await listed).toEqual(mainResult);
+  expect(await found).toEqual(mainResult);
+  expect(main).toHaveBeenCalledTimes(2);
+  expect(h.worker.documentRead).toHaveBeenCalledTimes(4);
+});
+
+test('paged exports queued after hand-over run the main continuation', async () => {
+  const h = harness();
+  await h.authority.initialize();
+  deferWorkerOpenReplica(h.session, async () => {
+    const handover = await beginWorkerProposalHandover(h.session)!;
+    return () => { h.mainVersion('main-2'); handover.complete(); };
+  }, () => { throw new Error('unexpected fallback'); }, () => {});
+  const ready = requestWorkerOpenReplica(h.session)!;
+  const result = {
+    ok: false, version: 'main-2',
+    failure: { code: 'layout-unavailable', target: null, message: 'No layout is ready.' },
+  } as const;
+  const main = mock(async () => result);
+  const exportResult = h.authority.exportStructuredWithPages({ revisionView: 'markup' }, async () => '{}', main);
+  await ready;
+  expect(await exportResult).toEqual(result);
+  expect(main).toHaveBeenCalledTimes(1);
+  expect(h.worker.documentRead).not.toHaveBeenCalled();
+  expect(h.events).toEqual(['snapshot', 'handOver']);
+});
+
+test('paged exports read their layout request after the calls queued ahead of them', async () => {
+  const h = harness();
+  await h.authority.initialize();
+  h.worker.documentRead.mockImplementation(async (read) => {
+    h.events.push(read.kind);
+    return { version: 'worker-1', value: JSON.stringify({ ok: true }) } as never;
+  });
+  const ahead = h.authority.getProposals(unusedMain);
+  const read = h.authority.exportStructuredWithPages({ revisionView: 'markup' }, async () => {
+    h.events.push('request');
+    return null;
+  }, unusedMain);
+  await ahead;
+  expect(await read).toBeNull();
+  expect(h.events.indexOf('request')).toBeGreaterThan(h.events.indexOf('snapshot'));
+  expect(h.worker.documentRead).not.toHaveBeenCalled();
+});
+
+function editorRoundHarness(laidOut = async () => {}) {
+  const local = { version: 'worker-1', previewVersion: 0, proposals: [] };
+  const session = {
+    version: () => 'worker-1', encodeStateVector: () => new Uint8Array(),
+    getProposals: () => local,
+    createWorkerProposalRegistry: (state: ResidentProposalReply['mirror']['proposals']) => {
+      const registry = createProposalRegistry(session);
+      registry.mirror({ version: session.version(), proposals: state });
+      registry.mirror(null);
+      return registry;
+    },
+    storiesChangedSince: () => ({ revision: 0, stories: [] }),
+  } as unknown as YrsSession & DocxProposalSession;
+  const events: string[] = [];
+  const worker = {
+    proposal: mock(async (op: Parameters<WorkerOpenedDocument['proposal']>[0]): Promise<ResidentProposalReply> => {
+      events.push(op.kind);
+      return { ...reply(), peerDiff: new Uint8Array() };
+    }),
+    documentRead: mock(async () => { throw new Error('unexpected document read'); }),
+    handOver: mock(async () => { throw new Error('unexpected handover'); }),
+    integrateProposalUpdate: mock((_update: Uint8Array, _stories: readonly string[]): readonly string[] => []),
+  };
+  const peerUpdated = mock((_stories: readonly string[]) => {});
+  const authority = registerWorkerProposalAuthority(session, worker as unknown as WorkerOpenedDocument, {
+    editorPeer: true, current: () => true, laidOut, relayout: () => {}, adopted: () => {},
+    contentChanged: () => {}, peerUpdated,
+  });
+  return { session, worker, authority, peerUpdated, events };
+}
+
+test('integrated proposal updates notify peerUpdated only for changed stories', async () => {
+  const h = editorRoundHarness();
+  await h.authority.initialize();
+  const states = { expectVersion: 'worker-1', expectPreviewVersion: 0, changes: [] };
+  expect(await h.authority.setStates(states, unusedMain)).toMatchObject({ ok: true });
+  expect(h.worker.integrateProposalUpdate).toHaveBeenCalledTimes(1);
+  expect(h.peerUpdated).not.toHaveBeenCalled();
+  h.worker.integrateProposalUpdate.mockReturnValueOnce(['body', 'hf:rId7']);
+  h.worker.proposal.mockResolvedValueOnce({ ...reply('worker-1', ['body']), peerDiff: new Uint8Array() });
+  expect(await h.authority.setStates(states, unusedMain)).toMatchObject({ ok: true });
+  expect(h.peerUpdated).toHaveBeenCalledTimes(1);
+  expect(h.peerUpdated).toHaveBeenCalledWith(['body', 'hf:rId7']);
+});
+
+test('editor save stays behind a round admitted before the first layout', async () => {
+  const layout = deferred<void>();
+  const waiting = deferred<void>();
+  const h = editorRoundHarness(() => { waiting.resolve(); return layout.promise; });
+  const round = h.authority.propose(request, unusedMain);
+  const save = mock(async () => { h.events.push('save'); return 'saved'; });
+  const saving = h.authority.save(save);
+  await waiting.promise;
+  expect(h.worker.proposal).not.toHaveBeenCalled();
+  expect(save).not.toHaveBeenCalled();
+  layout.resolve();
+  expect(await round).toMatchObject({ ok: true });
+  expect(await saving).toBe('saved');
+  expect(h.events).toEqual(['snapshot', 'propose', 'save', 'snapshot']);
+});
+
+test('editor save stays behind a round admitted during initialization', async () => {
+  const h = editorRoundHarness();
+  const initializing = deferred<ResidentProposalReply>();
+  const posted = deferred<void>();
+  h.worker.proposal.mockImplementationOnce(async () => { h.events.push('snapshot'); posted.resolve(); return initializing.promise; });
+  const initialization = h.authority.initialize();
+  await posted.promise;
+  const round = h.authority.propose(request, unusedMain);
+  const saving = h.authority.save(async () => { h.events.push('save'); return 'saved'; });
+  initializing.resolve(reply());
+  await initialization;
+  expect(await round).toMatchObject({ ok: true });
+  expect(await saving).toBe('saved');
+  expect(h.events).toEqual(['snapshot', 'propose', 'save', 'snapshot']);
+});
+
+test('a queued editor round reuses the failed initialization rejection', async () => {
+  const h = editorRoundHarness();
+  const failure = new Error('snapshot failed');
+  h.worker.proposal.mockRejectedValueOnce(failure);
+  await expect(h.authority.initialize()).rejects.toBe(failure);
+  await expect(h.authority.propose(request, unusedMain)).rejects.toBe(failure);
+  expect(h.worker.proposal).toHaveBeenCalledTimes(1);
+});
+
+test('an unchanged empty editor decision keeps the worker rebuildable', async () => {
+  const h = editorRoundHarness();
+  expect(await h.authority.setStates({ expectVersion: 'worker-1', expectPreviewVersion: 0, changes: [] }, unusedMain))
+    .toMatchObject({ ok: true });
+  expect(h.authority.holdsCommittedWorkerState()).toBe(false);
+  h.authority.restart();
+  expect(h.authority.initialized).toBe(false);
 });

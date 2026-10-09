@@ -158,6 +158,15 @@ pub(crate) fn table_rect(
     spec: &TableSpec,
     cell: Option<CellRef>,
 ) -> Result<CellRange, ErrorValue> {
+    table_rect_with_columns(table, spec, cell, |name| table.column_index(name))
+}
+
+pub(crate) fn table_rect_with_columns(
+    table: &Table,
+    spec: &TableSpec,
+    cell: Option<CellRef>,
+    column_index: impl Fn(&str) -> Option<u32>,
+) -> Result<CellRange, ErrorValue> {
     const DEFAULT: [TableBand; 1] = [TableBand::Data];
     let bands = if spec.bands.is_empty() {
         &DEFAULT[..]
@@ -190,20 +199,41 @@ pub(crate) fn table_rect(
     if top > bottom {
         return Err(ErrorValue::Ref);
     }
-    let width = table.range.end.col - table.range.start.col;
+    let width = table
+        .range
+        .end
+        .col
+        .checked_sub(table.range.start.col)
+        .ok_or(ErrorValue::Ref)?;
     let first = match &spec.first_column {
-        Some(name) => table.column_index(name).ok_or(ErrorValue::Ref)?,
+        Some(name) => column_index(name).ok_or(ErrorValue::Ref)?,
         None => 0,
     };
     let last = match &spec.last_column {
-        Some(name) => table.column_index(name).ok_or(ErrorValue::Ref)?,
+        Some(name) => column_index(name).ok_or(ErrorValue::Ref)?,
         None if spec.first_column.is_some() => first,
         None => width,
     };
     let (first, last) = (first.min(last), first.max(last));
     Ok(CellRange::new(
-        CellRef::new(top, table.range.start.col + first),
-        CellRef::new(bottom, table.range.start.col + last),
+        CellRef::new(
+            top,
+            table
+                .range
+                .start
+                .col
+                .checked_add(first)
+                .ok_or(ErrorValue::Ref)?,
+        ),
+        CellRef::new(
+            bottom,
+            table
+                .range
+                .start
+                .col
+                .checked_add(last)
+                .ok_or(ErrorValue::Ref)?,
+        ),
     ))
 }
 

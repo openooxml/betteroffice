@@ -127,7 +127,7 @@ export function useXlsxPluginHost(options: UseXlsxPluginHostOptions): XlsxPlugin
 
   useEffect(() => {
     if (managed) host.selectionChanged(options.selection);
-  }, [host, managed, options.selection]);
+  }, [host, managed, options.handle, options.selection]);
 
   useEffect(() => {
     publish();

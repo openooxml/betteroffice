@@ -103,7 +103,7 @@ function). Aliases map to a single implementation: `CONCAT`/`CONCATENATE`,
 | `YEAR` / `MONTH` / `DAY` | Serial < 0 → `#NUM!`; serial 0 renders as 1900-01-00. |
 | `WEEKDAY(serial, [type])` | Types 1 (default), 2, 3, and 11..17. |
 | `EDATE` / `EOMONTH(start, months)` | `EDATE` clamps the day to the target month length. |
-| `TODAY` / `NOW` | Read `ctx.now_serial`; **absent clock → `#VALUE!`** (documented pure-engine boundary). |
+| `TODAY` / `NOW` | Read `ctx.now_serial`; absent clock keeps the cell's cached result, or returns `#VALUE!` when there is none. |
 | `HOUR` / `MINUTE` / `SECOND` | Time portion rounded to the nearest second. |
 | `TIME(h, m, s)` | Fraction of a day in [0, 1); values beyond a day wrap. |
 | `DATEDIF(start, end, unit)` | Units `Y`, `M`, `D`, `YM`, `YD`, `MD`; `end < start` → `#NUM!`. |

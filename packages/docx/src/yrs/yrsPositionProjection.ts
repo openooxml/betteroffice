@@ -138,6 +138,7 @@ export class YrsPositionProjection {
   private readonly stories = new Map<string, StoryProjection>();
   private readonly nodes = new Map<number, YrsProjectedNode>();
   private readonly tables: YrsProjectedTable[] = [];
+  private readonly blockBoundaries = new Map<number, YrsLoc>();
   private readonly source: YrsStorySegmentSource;
   private readonly paragraphsById = new Map<
     StoryProjection,
@@ -225,6 +226,15 @@ export class YrsPositionProjection {
     );
   }
 
+  /** The location of a block embed's start or end at `position`, in the offsets of the paragraph after it. */
+  blockBoundaryAt(position: number): YrsLoc | null {
+    return this.blockBoundaries.get(position) ?? null;
+  }
+
+  private setBlockBoundary(position: number, loc: YrsLoc): void {
+    if (!this.blockBoundaries.has(position)) this.blockBoundaries.set(position, loc);
+  }
+
   /** First paragraph for each paraId. */
   private paragraphIndex(
     story: StoryProjection
@@ -287,6 +297,7 @@ export class YrsPositionProjection {
     let paragraphStart = 0;
     let inputStart = 0;
     let tableIndex = 0;
+    let blocks: Array<{ start: number; size: number; offset: number }> = [];
     for (const segment of segments) {
       if (segment.kind === 'text') {
         inlineLength += segment.text.length;
@@ -303,6 +314,11 @@ export class YrsPositionProjection {
           story: storyId,
         };
         this.nodes.set(start, node);
+        for (const block of blocks) {
+          this.setBlockBoundary(block.start, { story: storyId, paraId: segment.paraId, offset: block.offset });
+          this.setBlockBoundary(block.start + block.size, { story: storyId, paraId: segment.paraId, offset: block.offset + 1 });
+        }
+        blocks = [];
         story.paragraphs.push({
           paraId: segment.paraId,
           displayStart: paragraphStart,
@@ -323,6 +339,7 @@ export class YrsPositionProjection {
         story.tables.push(table);
         this.tables.push(table);
         this.nodes.set(table.start, table);
+        blocks.push({ start: table.start, size: table.nodeSize, offset: leading });
         tableIndex += 1;
         cursor += table.nodeSize;
         paragraphStart = cursor;
@@ -341,6 +358,7 @@ export class YrsPositionProjection {
           story: storyId,
         };
         this.nodes.set(start, node);
+        blocks.push({ start, size: node.nodeSize, offset: leading });
         cursor += node.nodeSize;
         paragraphStart = cursor;
         leading += 1;
@@ -358,6 +376,7 @@ export class YrsPositionProjection {
           story: storyId,
         };
         this.nodes.set(node.start, node);
+        blocks.push({ start: node.start, size: node.nodeSize, offset: leading });
         cursor += 1;
         paragraphStart = cursor;
         leading += 1;

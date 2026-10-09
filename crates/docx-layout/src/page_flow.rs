@@ -71,6 +71,7 @@ pub struct PageFlowGeometry {
     /// before it differs in parity from its physical one.
     pub continued_parity_offset: bool,
     pub section_page_float_bands: SharedPageFloatBands,
+    pub footnote_reserved_heights: Option<Arc<std::collections::BTreeMap<String, f64>>>,
     /// Whether this page opened a column region that placement balances.
     pub balanced_region: bool,
 }
@@ -89,6 +90,57 @@ pub struct FlowState {
     pub content_limit: f64,
     /// Accumulated trailing spacing (space after previous block).
     pub deferred_spacing: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct OpeningFragmentGeometry {
+    size: Size,
+    margins: PageMargins,
+    active_margins: PageMargins,
+    body_margins: PageMargins,
+    body_anchor_margins: PageMargins,
+    content_width: f64,
+    column_width: f64,
+    columns: Option<ColumnLayout>,
+    float_bands: Vec<PageFloatBand>,
+    footnote_reserved_height: Option<f64>,
+}
+
+impl OpeningFragmentGeometry {
+    fn capture(paginator: &Paginator, idx: usize) -> Self {
+        let page = &paginator.pages[paginator.states[idx].page_index];
+        Self {
+            size: page.size.clone(),
+            margins: page.margins.clone(),
+            active_margins: paginator.margins.clone(),
+            body_margins: page.body_margins.as_ref().unwrap_or(&page.margins).clone(),
+            body_anchor_margins: page
+                .body_anchor_margins
+                .as_ref()
+                .unwrap_or(&page.margins)
+                .clone(),
+            content_width: paginator.get_content_width(),
+            column_width: paginator.column_width(),
+            columns: page.columns.clone(),
+            float_bands: page.float_bands.clone(),
+            footnote_reserved_height: page.footnote_reserved_height,
+        }
+    }
+
+    fn matches(&self, paginator: &Paginator, idx: usize) -> bool {
+        let page = &paginator.pages[paginator.states[idx].page_index];
+        self.size == page.size
+            && self.margins == page.margins
+            && self.active_margins == paginator.margins
+            && &self.body_margins == page.body_margins.as_ref().unwrap_or(&page.margins)
+            && &self.body_anchor_margins
+                == page.body_anchor_margins.as_ref().unwrap_or(&page.margins)
+            && self.content_width == paginator.get_content_width()
+            && self.column_width == paginator.column_width()
+            && self.columns == page.columns
+            && self.float_bands == page.float_bands
+            && self.footnote_reserved_height == page.footnote_reserved_height
+    }
 }
 
 /// Splits the content width evenly after subtracting the inter-column gaps.
@@ -149,7 +201,7 @@ pub struct Paginator {
     column_width: f64,
     column_region_top: f64,
     column_region_bottom: f64,
-    footnote_reserved_heights: Option<std::collections::BTreeMap<String, f64>>,
+    footnote_reserved_heights: Option<Arc<std::collections::BTreeMap<String, f64>>>,
     start_page_number: u32,
     section_index: usize,
     section_page_margins: Vec<SectionPageMargins>,
@@ -207,7 +259,7 @@ impl Paginator {
             column_width,
             column_region_top,
             column_region_bottom: column_region_top,
-            footnote_reserved_heights,
+            footnote_reserved_heights: footnote_reserved_heights.map(Arc::new),
             start_page_number: 1,
             section_index: 0,
             section_page_margins: Vec::new(),
@@ -274,6 +326,25 @@ impl Paginator {
         section_index: usize,
         footnote_reserved_heights: Option<std::collections::BTreeMap<String, f64>>,
     ) -> Result<Self, LayoutError> {
+        let previous = geometry.footnote_reserved_heights.as_deref();
+        let next = footnote_reserved_heights.as_ref();
+        let reservation = |heights: Option<&std::collections::BTreeMap<String, f64>>, page: u32| {
+            heights
+                .and_then(|heights| heights.get(&page.to_string()).copied())
+                .unwrap_or(0.0)
+        };
+        if previous
+            .into_iter()
+            .flat_map(|heights| heights.keys())
+            .chain(next.into_iter().flat_map(|heights| heights.keys()))
+            .filter_map(|key| key.parse::<u32>().ok())
+            .filter(|&page| page > 0 && page <= start_page_number)
+            .any(|page| reservation(previous, page) != reservation(next, page))
+        {
+            return Err(LayoutError::Unsupported(
+                "checkpoint note reservations changed".into(),
+            ));
+        }
         let mut paginator = Self::new(
             geometry.page_size.clone(),
             geometry.margins.clone(),
@@ -365,6 +436,7 @@ impl Paginator {
                 self.continued_parity_offset
             },
             section_page_float_bands: self.section_page_float_bands.clone(),
+            footnote_reserved_heights: self.footnote_reserved_heights.clone(),
             balanced_region: self
                 .states
                 .last()
@@ -665,6 +737,7 @@ impl Paginator {
             number: page_number,
             fragments: Vec::new(),
             float_bands,
+            opening_fragment_geometry: None,
             margins,
             body_margins,
             body_anchor_margins,
@@ -882,6 +955,8 @@ impl Paginator {
             .leading_spacing(space_before)
             .max(self.states[cur].deferred_spacing);
         let total_height = effective_space_before + height;
+        let opening_geometry = (!self.fits(total_height, cur))
+            .then(|| Box::new(OpeningFragmentGeometry::capture(self, cur)));
 
         let idx = self.ensure_fits(total_height);
 
@@ -894,6 +969,10 @@ impl Paginator {
 
         fragment.set_xy(x, y);
         let page_index = self.states[idx].page_index;
+        if self.pages[page_index].fragments.is_empty() {
+            let opening_geometry = opening_geometry.filter(|geometry| !geometry.matches(self, idx));
+            self.pages[page_index].opening_fragment_geometry = opening_geometry;
+        }
         self.pages[page_index].fragments.push(fragment);
         if self.pages[page_index].fragments.len() == 1 {
             self.page_start_spacing_spent = self.leading_spacing_spent;

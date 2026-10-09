@@ -1310,6 +1310,7 @@ export type TableFragment = FragmentBase & {
    * visible band of that single row is `[clipTop, clipBottom)`.
    */
   clipBottom?: number;
+  cellClips?: { row: number; cell: number; top: number; bottom: number }[];
 };
 
 /**
@@ -1543,6 +1544,7 @@ export type HeaderFooterLayout = {
  * The paginator's complete result — everything the painter needs.
  */
 export type Layout = {
+  summaryOnly?: true;
   /** Serialization contract version. Undefined reads as legacy version 0. */
   contractVersion?: number;
   /** Default page size for the document. */
