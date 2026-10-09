@@ -451,6 +451,15 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
     expect(read.ok).toBe(true);
     if (!read.ok) return;
     const target = read.paragraphs.find((paragraph) => paragraph.text.length > 0)!;
+    const uses = [
+      { sectionIndex: 0, variant: 'default' as const },
+      { sectionIndex: 1, variant: 'default' as const },
+    ];
+    const listed = await context.read.listStories();
+    expect(listed.ok && listed.stories.filter((story) => story.relationshipId)).toEqual([
+      { story: 'hf:rId3', kind: 'header', relationshipId: 'rId3', uses },
+      { story: 'hf:rId4', kind: 'footer', relationshipId: 'rId4', uses },
+    ]);
     const validation = await context.read.validateEdits(appendRequest(read.version, target.paraId));
     expect(validation).toMatchObject({ ok: true, wouldApply: true });
     expect(
