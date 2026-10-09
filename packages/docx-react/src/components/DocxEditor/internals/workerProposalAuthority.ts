@@ -1,5 +1,6 @@
 import * as baseAuthority from './baseWorkerProposalAuthority';
 import type {
+  AnchorGeometryTarget,
   DocxContentControlQuery,
   DocxContentControlsOptions,
   DocxContentControlsResult,
@@ -23,6 +24,7 @@ import type {
   DocxReadParagraphsRequest,
   DocxReadParagraphsResult,
   ProposalGeometryMirror,
+  ProposalGeometryTarget,
   ResidentProposalReply,
   ResidentEngineWorkerClient,
   YrsLoc,
@@ -42,6 +44,7 @@ import {
   workerOpenRequest,
 } from './workerOpenReplica';
 
+type NonProposalTarget = Exclude<AnchorGeometryTarget, { kind: 'proposal' }>;
 type SearchRead = Awaited<ReturnType<typeof ResidentEngineWorkerClient.prototype.documentRead<'searchText'>>>;
 type StickyAnchorsRead = Awaited<ReturnType<typeof ResidentEngineWorkerClient.prototype.documentRead<'stickyAnchors'>>>;
 
@@ -63,6 +66,8 @@ export interface WorkerProposalAuthority {
   initialize(): Promise<void>;
   /** Geometry of the worker registry. */
   geometry(): ProposalGeometryMirror | null;
+  /** Cached worker geometry; listeners hear when a target resolves. */
+  anchorTarget(target: NonProposalTarget): ProposalGeometryTarget | undefined;
   /** Reseeding would lose worker changes, including those of a state change still in flight. */
   holdsWorkerState(): boolean;
   /** Reseeding would lose worker changes the main thread has already observed. */
@@ -538,6 +543,7 @@ export function registerWorkerProposalAuthority(
       return initializing;
     },
     geometry: () => geometry,
+    anchorTarget: () => undefined,
     holdsWorkerState: () => !retirementReason && (holdsState || mutating > 0),
     holdsCommittedWorkerState: () => holdsState,
     failure: () => failure?.error,

@@ -369,13 +369,20 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
         const editor = latest.current.pagedEditorRef.current;
         const session = editor?.getYrsSession();
         const active = session && hasEditorWorkerProposalRounds(session);
-        const proposalGeometry = session ? (active ? proposalTarget ? workerProposalRoundAuthority(session)?.geometry() : null : workerProposalAuthority(session)?.geometry()) : null;
+        const authority = session
+          ? active
+            ? proposalTarget ? workerProposalRoundAuthority(session) : null
+            : workerProposalAuthority(session)
+          : null;
+        const proposalGeometry = authority?.geometry();
         return editor && session && (!active || proposalTarget || workerOpenReplicaReady(session))
           ? {
               session,
               editor,
               presented: isPresented(dom.context.pagesContainer, dom.queries.displayList),
-              ...(proposalGeometry ? { proposalGeometry } : {}),
+              ...(authority && proposalGeometry
+                ? { proposalGeometry, anchorTarget: authority.anchorTarget }
+                : {}),
             }
           : null;
       },
