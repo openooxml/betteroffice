@@ -462,6 +462,14 @@ const review = defineDocxPlugin<State>({
   `preferredSize` is clamped to 40% of the editor. In a narrow editor side docks
   show their tabs, and a tab opens its panel as a drawer over the document that
   Escape closes. Collapsing a panel keeps the plugin running.
+- **Story reads.** `read.listStories()` lists every story with its kind
+  (`body`, `table-cell`, `content-control`, `header`, `footer`, `footnote`,
+  `endnote` or `other`), the story a cell or block control sits in, and a
+  header's or footer's relationship id and the sections using it.
+  `read.readStories({ stories, view, expectVersion })` reads `'all'` stories,
+  those of the listed kinds, or listed story ids in one call, from the worker in
+  viewers opened with `experimentalWorkerOpen`. A story that cannot be read
+  reports its failure, and a changed document refuses with `stale-version`.
 - **Geometry.** `context.geometry` is null until a rendered layout shows the
   current version, and whenever it falls behind. `geometry.dom` answers in
   pages-container units divided by zoom; `geometry.toOverlayRect(rect)` converts

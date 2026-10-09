@@ -185,6 +185,15 @@ shows toolbar contributions with
 `<DocxPluginToolbar />`, and `ToolbarCommandButton`, `ToolbarCommand`,
 `useDocxCommand` and `useDocxCommandState` accept contributed ids.
 
+**Story reads.** `read.listStories()` lists every story with its kind (`body`,
+`table-cell`, `content-control`, `header`, `footer`, `footnote`, `endnote` or
+`other`), the story a cell or block control sits in, and a header's or footer's
+relationship id and the sections using it. `read.readStories({ stories, view })`
+reads `'all'` stories, those of the listed kinds, or listed story ids in one
+call, also in viewers opened with `experimentalWorkerOpen`; a story that cannot
+be read reports its failure, and `expectVersion` refuses a changed document with
+`stale-version`.
+
 **Coordinates.** `context.geometry` exists only while a rendered layout shows
 the current version. An overlay may render during a pending layout with that and
 `context.snapshot.layout` null, its `geometry` prop then being the previous

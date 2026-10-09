@@ -191,6 +191,13 @@ U+FFFC listed in `atoms`, tabs stay `\t`, and paragraph marks are excluded. The
 `original` does the reverse. `findText` is exact, case-sensitive and
 paragraph-local, and a `search` target must match exactly once in its scope.
 
+`readStories({ stories, view, expectVersion })` reads the listed stories, or every
+story, in one read; a story that cannot be read reports its failure instead.
+`describeStories(session.storyIds(), storyParts(document))` gives each story's kind
+(`body`, `table-cell`, `content-control`, `header`, `footer`, `footnote`, `endnote`
+or `other`), the story a cell or block control sits in, and a header's or footer's
+relationship id and the sections using it; `readStorySelection` also takes kinds.
+
 | Step | Effect |
 | --- | --- |
 | `insertText` | Inserts at the start or end of a target, formatted like typing there. |
