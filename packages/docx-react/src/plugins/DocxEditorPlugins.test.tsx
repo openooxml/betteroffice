@@ -1114,6 +1114,31 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
     ).toMatchObject({ ok: false, failure: { code: 'stale-version' } });
   });
 
+  test('story reads answer in a read-only viewer with one worker read each', async () => {
+    const { plugin, contexts, log } = recorder();
+    await mount({ plugins: [plugin], readOnly: true });
+    await until(() => log.includes('load:loaded'));
+    const reads: string[] = [];
+    for (const worker of workers) {
+      const post = worker.postMessage.bind(worker);
+      worker.postMessage = (message, transfer) => {
+        const read = (message as { read?: { kind?: string } }).read?.kind;
+        if (read === 'storyIds' || read === 'readStories') reads.push(read);
+        post(message, transfer);
+      };
+    }
+    const context = contexts.at(-1)!;
+    const listed = await context.read.listStories();
+    expect(listed.ok && listed.stories.filter((story) => story.relationshipId).map((story) => story.kind))
+      .toEqual(['header', 'footer']);
+    const read = await context.read.readStories({ stories: ['header', 'footer'], view: 'accepted' });
+    expect(read.ok && read.stories.map((story) => [story.story, 'paragraphs' in story])).toEqual([
+      ['hf:rId3', true],
+      ['hf:rId4', true],
+    ]);
+    expect(reads).toEqual(experimentalWorkerOpen === false ? [] : ['storyIds', 'readStories']);
+  });
+
   test('host proposals anchor through the editor ref in a read-only viewer', async () => {
     let geometry: DocxPluginGeometry | null = null;
     const events: DocxPluginEvent[] = [];
