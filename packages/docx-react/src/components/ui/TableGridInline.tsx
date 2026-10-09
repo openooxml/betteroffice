@@ -35,93 +35,108 @@ const labelStyle: CSSProperties = {
 };
 
 export function TableGridInline({ onInsert, gridRows = 6, gridColumns = 6 }: TableGridInlineProps) {
-  const [hoverRows, setHoverRows] = useState(0);
-  const [hoverCols, setHoverCols] = useState(0);
+  const [selection, setSelection] = useState({ row: 0, col: 0 });
   const [focusedCell, setFocusedCell] = useState({ row: 1, col: 1 });
-  const cellRefs = useRef(new Map<string, HTMLDivElement>());
+  const gridRef = useRef<HTMLDivElement>(null);
 
-  const gridCells: ReactElement[] = [];
+  const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    const cell = (event.target as HTMLElement).closest<HTMLElement>('[role="gridcell"]');
+    if (!cell) return;
+    let row = Number(cell.dataset.row);
+    let col = Number(cell.dataset.column);
+    switch (event.key) {
+      case 'ArrowUp':
+        row = Math.max(1, row - 1);
+        break;
+      case 'ArrowDown':
+        row = Math.min(gridRows, row + 1);
+        break;
+      case 'ArrowLeft':
+        col = Math.max(1, col - 1);
+        break;
+      case 'ArrowRight':
+        col = Math.min(gridColumns, col + 1);
+        break;
+      case 'Home':
+        col = 1;
+        if (event.ctrlKey) row = 1;
+        break;
+      case 'End':
+        col = gridColumns;
+        if (event.ctrlKey) row = gridRows;
+        break;
+      case 'Enter':
+      case ' ':
+        event.preventDefault();
+        event.stopPropagation();
+        onInsert(row, col);
+        return;
+      default:
+        return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    setSelection({ row, col });
+    gridRef.current
+      ?.querySelector<HTMLElement>(`[data-row="${row}"][data-column="${col}"]`)
+      ?.focus();
+  };
+
+  const gridRowsContent: ReactElement[] = [];
   for (let row = 1; row <= gridRows; row++) {
+    const cells: ReactElement[] = [];
     for (let col = 1; col <= gridColumns; col++) {
-      const isSelected = row <= hoverRows && col <= hoverCols;
+      const isSelected = row <= selection.row && col <= selection.col;
       const isFocused = focusedCell.row === row && focusedCell.col === col;
-      const key = `${row}-${col}`;
-      const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-        const movement: Record<string, [number, number]> = {
-          ArrowUp: [-1, 0],
-          ArrowDown: [1, 0],
-          ArrowLeft: [0, -1],
-          ArrowRight: [0, 1],
-        };
-        const delta = movement[event.key];
-        if (delta) {
-          event.preventDefault();
-          event.stopPropagation();
-          const next = {
-            row: Math.max(1, Math.min(gridRows, row + delta[0])),
-            col: Math.max(1, Math.min(gridColumns, col + delta[1])),
-          };
-          setFocusedCell(next);
-          setHoverRows(next.row);
-          setHoverCols(next.col);
-          cellRefs.current.get(`${next.row}-${next.col}`)?.focus();
-        } else if (event.key === 'Enter' || event.key === ' ') {
-          event.preventDefault();
-          event.stopPropagation();
-          onInsert(row, col);
-        }
-      };
-
-      gridCells.push(
+      cells.push(
         <div
-          key={key}
-          ref={(element) => {
-            if (element) cellRefs.current.set(key, element);
-            else cellRefs.current.delete(key);
-          }}
+          key={col}
           style={isSelected ? cellSelectedStyle : cellStyle}
-          onMouseEnter={() => {
-            setHoverRows(row);
-            setHoverCols(col);
-          }}
+          onMouseEnter={() => setSelection({ row, col })}
           onFocus={() => {
             setFocusedCell({ row, col });
-            setHoverRows(row);
-            setHoverCols(col);
+            setSelection({ row, col });
           }}
-          onKeyDown={handleKeyDown}
           onClick={() => onInsert(row, col)}
           role="gridcell"
           aria-label={`${col} columns, ${row} rows`}
           aria-selected={isSelected}
-          aria-rowindex={row}
-          aria-colindex={col}
           data-row={row}
           data-column={col}
           tabIndex={isFocused ? 0 : -1}
         />
       );
     }
+    gridRowsContent.push(
+      <div key={row} role="row" style={{ display: 'flex', gap: CELL_GAP }}>
+        {cells}
+      </div>
+    );
   }
 
-  const gridLabel = hoverRows > 0 && hoverCols > 0 ? `${hoverCols} × ${hoverRows}` : 'Select size';
+  const gridLabel =
+    selection.row > 0 && selection.col > 0 ? `${selection.col} × ${selection.row}` : 'Select size';
 
   return (
     <div>
       <div
+        ref={gridRef}
+        onKeyDown={handleKeyDown}
         style={{
-          display: 'grid',
+          display: 'flex',
+          flexDirection: 'column',
           gap: CELL_GAP,
-          gridTemplateColumns: `repeat(${gridColumns}, ${CELL_SIZE}px)`,
         }}
         onMouseLeave={() => {
-          setHoverRows(0);
-          setHoverCols(0);
+          setSelection(
+            gridRef.current?.contains(document.activeElement) ? focusedCell : { row: 0, col: 0 }
+          );
         }}
         role="grid"
         aria-label="Table size selector"
+        aria-multiselectable="true"
       >
-        {gridCells}
+        {gridRowsContent}
       </div>
       <div style={labelStyle} aria-live="polite">
         {gridLabel}

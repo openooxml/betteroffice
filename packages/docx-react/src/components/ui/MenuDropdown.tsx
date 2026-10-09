@@ -5,7 +5,7 @@
  * Supports submenu panels that appear to the right on hover (Google Docs style).
  */
 
-import { useState, useRef, useEffect, useCallback, useId } from 'react';
+import { useState, useRef, useEffect, useLayoutEffect, useCallback, useId } from 'react';
 import type { CSSProperties, KeyboardEvent, ReactNode } from 'react';
 import { MaterialSymbol } from './MaterialSymbol';
 
@@ -21,7 +21,7 @@ export interface MenuItem {
   customContent?: ReactNode;
   /** Submenu content that appears to the right on hover */
   submenuContent?: (closeMenu: () => void) => ReactNode;
-  submenuRole?: 'menu' | 'group';
+  submenuRole?: 'menu' | 'dialog';
 }
 
 export interface MenuSeparator {
@@ -38,6 +38,8 @@ interface MenuDropdownProps {
   label: string;
   items: MenuEntry[];
   disabled?: boolean;
+  tabIndex?: number;
+  onFocus?: () => void;
   /** When true, the trigger renders a down-arrow caret next to the label.
    *  Default `false` — every in-tree caller is a top-level menubar button. */
   showChevron?: boolean;
@@ -111,60 +113,86 @@ const submenuPanelStyle: CSSProperties = {
   zIndex: 1001,
 };
 
-export function MenuDropdown({ label, items, disabled, showChevron = false }: MenuDropdownProps) {
+function focusMenuItem(menu: HTMLElement, key: string) {
+  const items = Array.from(menu.querySelectorAll<HTMLElement>('[role="menuitem"]')).filter(
+    (item) => item.closest('[role="menu"]') === menu
+  );
+  if (items.length === 0) return;
+  const current = items.indexOf(document.activeElement as HTMLElement);
+  const index =
+    key === 'Home'
+      ? 0
+      : key === 'End'
+      ? items.length - 1
+      : key === 'ArrowDown'
+      ? (current + 1) % items.length
+      : (current <= 0 ? items.length : current) - 1;
+  items[index]?.focus();
+}
+
+export function MenuDropdown({
+  label,
+  items,
+  disabled,
+  tabIndex = 0,
+  onFocus,
+  showChevron = false,
+}: MenuDropdownProps) {
   const menuId = useId();
   const [isOpen, setIsOpen] = useState(false);
   const [openSubmenuLabel, setOpenSubmenuLabel] = useState<string | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
-  const focusFirstMenuItem = useRef(false);
-  const focusSubmenu = useRef(false);
-  const [focusRequest, setFocusRequest] = useState(0);
+  const submenuRef = useRef<HTMLDivElement>(null);
+  const pendingFocus = useRef<'Home' | 'End' | 'submenu' | null>(null);
   const [dropdownPos, setDropdownPos] = useState<{ top: number; left: number }>({
     top: 0,
     left: 0,
   });
 
   const closeMenu = useCallback(() => {
+    if (dropdownRef.current?.contains(document.activeElement)) triggerRef.current?.focus();
+    pendingFocus.current = null;
     setIsOpen(false);
     setOpenSubmenuLabel(null);
   }, []);
 
-  const openSubmenu = (submenuLabel: string) => {
-    focusSubmenu.current = true;
-    setOpenSubmenuLabel(submenuLabel);
-    setFocusRequest((request) => request + 1);
+  const focusSubmenu = () => {
+    submenuRef.current
+      ?.querySelector<HTMLElement>('[role="gridcell"][tabindex="0"], [role="menuitem"]')
+      ?.focus();
   };
 
-  // Calculate position when opening
-  useEffect(() => {
+  const openMenu = (key: 'Home' | 'End') => {
+    if (isOpen && dropdownRef.current) {
+      focusMenuItem(dropdownRef.current, key);
+    } else {
+      pendingFocus.current = key;
+      setIsOpen(true);
+    }
+  };
+
+  const openSubmenu = (submenuLabel: string) => {
+    if (openSubmenuLabel === submenuLabel) {
+      focusSubmenu();
+    } else {
+      pendingFocus.current = 'submenu';
+      setOpenSubmenuLabel(submenuLabel);
+    }
+  };
+
+  useLayoutEffect(() => {
     if (!isOpen || !triggerRef.current) return;
     const rect = triggerRef.current.getBoundingClientRect();
     setDropdownPos({ top: rect.bottom + 2, left: rect.left });
   }, [isOpen]);
 
-  useEffect(() => {
-    if (!isOpen || !focusFirstMenuItem.current) return;
-    focusFirstMenuItem.current = false;
-    dropdownRef.current
-      ?.querySelector<HTMLElement>(
-        '[role="menuitem"]:not([aria-disabled="true"]):not(:disabled)'
-      )
-      ?.focus();
-  }, [isOpen, focusRequest]);
-
-  useEffect(() => {
-    if (!openSubmenuLabel || !focusSubmenu.current) return;
-    focusSubmenu.current = false;
-    const panel = Array.from(
-      dropdownRef.current?.querySelectorAll<HTMLElement>('[data-submenu-label]') ?? []
-    ).find((element) => element.dataset.submenuLabel === openSubmenuLabel);
-    panel
-      ?.querySelector<HTMLElement>(
-        '[role="gridcell"][tabindex="0"], [role="menuitem"]:not([aria-disabled="true"]):not(:disabled)'
-      )
-      ?.focus();
-  }, [openSubmenuLabel, focusRequest]);
+  useLayoutEffect(() => {
+    const target = pendingFocus.current;
+    pendingFocus.current = null;
+    if (target === 'submenu') focusSubmenu();
+    else if (target && dropdownRef.current) focusMenuItem(dropdownRef.current, target);
+  });
 
   useEffect(() => {
     if (!isOpen) return;
@@ -182,21 +210,30 @@ export function MenuDropdown({ label, items, disabled, showChevron = false }: Me
     }
 
     function handleEscape(e: globalThis.KeyboardEvent) {
-      if (e.key === 'Escape') {
+      if (e.key === 'Escape' && !e.defaultPrevented) {
+        e.preventDefault();
         closeMenu();
         triggerRef.current?.focus();
       }
     }
 
-    // Close on scroll of any ancestor (dropdown position would be stale)
     function handleScroll() {
       closeMenu();
     }
 
+    function handleFocusOutside(e: FocusEvent) {
+      const target = e.target as Node;
+      if (!triggerRef.current?.contains(target) && !dropdownRef.current?.contains(target)) {
+        closeMenu();
+      }
+    }
+
+    document.addEventListener('focusin', handleFocusOutside);
     document.addEventListener('mousedown', handleClickOutside);
     document.addEventListener('keydown', handleEscape);
     window.addEventListener('scroll', handleScroll, true);
     return () => {
+      document.removeEventListener('focusin', handleFocusOutside);
       document.removeEventListener('mousedown', handleClickOutside);
       document.removeEventListener('keydown', handleEscape);
       window.removeEventListener('scroll', handleScroll, true);
@@ -210,41 +247,54 @@ export function MenuDropdown({ label, items, disabled, showChevron = false }: Me
     closeMenu();
   };
 
+  const moveMenubarFocus = (key: string, open = false) => {
+    const menubar = triggerRef.current?.closest('[role="menubar"]');
+    if (!menubar) return false;
+    const triggers = Array.from(
+      menubar.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')
+    ).filter((item) => item.closest('[role="menu"], [role="menubar"]') === menubar);
+    const current = triggers.indexOf(triggerRef.current!);
+    const index =
+      key === 'Home'
+        ? 0
+        : key === 'End'
+        ? triggers.length - 1
+        : (current + (key === 'ArrowRight' ? 1 : -1) + triggers.length) % triggers.length;
+    const next = triggers[index];
+    if (next === triggerRef.current) {
+      next?.focus();
+      return true;
+    }
+    closeMenu();
+    next?.focus();
+    if (open) next?.click();
+    return true;
+  };
+
   const handleMenuKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (event.target instanceof Element && event.target.closest('[role="menu"]') !== event.currentTarget) {
+    if (event.key === 'Tab') {
+      closeMenu();
       return;
     }
-    if (event.key === 'ArrowLeft') {
+    if (
+      event.target instanceof Element &&
+      event.target.closest('[role="menu"]') !== event.currentTarget
+    )
+      return;
+    if (event.key === 'Escape') {
       event.preventDefault();
+      event.stopPropagation();
       closeMenu();
       triggerRef.current?.focus();
-      return;
+    } else if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+      event.preventDefault();
+      event.stopPropagation();
+      if (!moveMenubarFocus(event.key, true) && event.key === 'ArrowLeft') closeMenu();
+    } else if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+      event.preventDefault();
+      event.stopPropagation();
+      focusMenuItem(event.currentTarget, event.key);
     }
-    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
-    event.preventDefault();
-    const menuItems = Array.from(
-      event.currentTarget.querySelectorAll<HTMLElement>('[role="menuitem"]')
-    ).filter(
-      (item) =>
-        item.closest('[role="menu"]') === event.currentTarget &&
-        item.getAttribute('aria-disabled') !== 'true' &&
-        !item.hasAttribute('disabled')
-    );
-    if (menuItems.length === 0) return;
-    const active =
-      event.target instanceof Element
-        ? event.target.closest<HTMLElement>('[role="menuitem"]')
-        : null;
-    const currentIndex = menuItems.indexOf(active as HTMLElement);
-    const index =
-      event.key === 'Home'
-        ? 0
-        : event.key === 'End'
-          ? menuItems.length - 1
-          : event.key === 'ArrowDown'
-            ? (currentIndex + 1 + menuItems.length) % menuItems.length
-            : (currentIndex <= 0 ? menuItems.length : currentIndex) - 1;
-    menuItems[index]?.focus();
   };
 
   return (
@@ -256,20 +306,32 @@ export function MenuDropdown({ label, items, disabled, showChevron = false }: Me
         aria-haspopup="menu"
         aria-expanded={isOpen}
         aria-controls={menuId}
+        tabIndex={tabIndex}
+        onFocus={onFocus}
         onKeyDown={(event) => {
-          if (!disabled && (event.key === 'ArrowRight' || event.key === 'ArrowDown')) {
+          if (event.key === 'Tab') {
+            closeMenu();
+            return;
+          }
+          if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
+            if (moveMenubarFocus(event.key)) {
+              event.preventDefault();
+              return;
+            }
+          }
+          if (disabled) return;
+          if (['Enter', ' ', 'ArrowDown', 'ArrowUp', 'ArrowRight'].includes(event.key)) {
             event.preventDefault();
-            focusFirstMenuItem.current = true;
-            setFocusRequest((request) => request + 1);
-            setIsOpen(true);
-          } else if (!isOpen && (event.key === 'Enter' || event.key === ' ')) {
-            focusFirstMenuItem.current = true;
-            setFocusRequest((request) => request + 1);
+            openMenu(event.key === 'ArrowUp' ? 'End' : 'Home');
           }
         }}
-        onClick={() => !disabled && setIsOpen(!isOpen)}
+        onClick={() => {
+          if (disabled) return;
+          if (isOpen) closeMenu();
+          else setIsOpen(true);
+        }}
         onMouseDown={(e) => e.preventDefault()}
-        disabled={disabled}
+        aria-disabled={disabled || undefined}
         style={isOpen ? triggerOpenStyle : triggerStyle}
       >
         {label}
@@ -300,7 +362,7 @@ export function MenuDropdown({ label, items, disabled, showChevron = false }: Me
         >
           {items.map((entry, i) => {
             if (isSeparator(entry)) {
-              return <div key={`sep-${i}`} style={separatorStyle} />;
+              return <div key={`sep-${i}`} role="separator" style={separatorStyle} />;
             }
             const item = entry;
             if (item.customContent) {
@@ -321,17 +383,30 @@ export function MenuDropdown({ label, items, disabled, showChevron = false }: Me
               <div
                 key={item.label}
                 style={{ position: 'relative' }}
-                onMouseEnter={() => hasSubmenu && setOpenSubmenuLabel(item.label)}
-                onMouseLeave={() => hasSubmenu && setOpenSubmenuLabel(null)}
+                onMouseEnter={(event) => {
+                  if (!hasSubmenu || item.disabled) return;
+                  if (submenuRef.current?.contains(document.activeElement) && !isSubmenuOpen) {
+                    event.currentTarget
+                      .querySelector<HTMLButtonElement>('button[aria-haspopup]')
+                      ?.focus();
+                  }
+                  setOpenSubmenuLabel(item.label);
+                }}
+                onMouseLeave={(event) => {
+                  if (isSubmenuOpen && !event.currentTarget.contains(document.activeElement))
+                    setOpenSubmenuLabel(null);
+                }}
               >
                 <button
                   type="button"
                   role="menuitem"
-                  aria-haspopup={
-                    hasSubmenu ? (item.submenuRole === 'group' ? 'grid' : 'menu') : undefined
-                  }
+                  aria-haspopup={hasSubmenu ? item.submenuRole ?? 'menu' : undefined}
                   aria-expanded={hasSubmenu ? isSubmenuOpen : undefined}
                   aria-controls={hasSubmenu ? submenuId : undefined}
+                  tabIndex={-1}
+                  onFocus={() => {
+                    if (!isSubmenuOpen) setOpenSubmenuLabel(null);
+                  }}
                   style={item.disabled ? menuItemDisabledStyle : menuItemStyle}
                   onKeyDown={(event) => {
                     if (
@@ -355,8 +430,7 @@ export function MenuDropdown({ label, items, disabled, showChevron = false }: Me
                   onMouseOut={(e) => {
                     (e.currentTarget as HTMLButtonElement).style.backgroundColor = 'transparent';
                   }}
-                  disabled={item.disabled && !reason}
-                  aria-disabled={reason ? true : undefined}
+                  aria-disabled={item.disabled || undefined}
                   aria-describedby={reasonId}
                   title={reason}
                 >
@@ -376,14 +450,17 @@ export function MenuDropdown({ label, items, disabled, showChevron = false }: Me
                 </button>
                 {hasSubmenu && isSubmenuOpen && (
                   <div
+                    ref={submenuRef}
                     id={submenuId}
                     role={item.submenuRole ?? 'menu'}
                     aria-label={item.label}
-                    data-submenu-label={item.label}
                     style={submenuPanelStyle}
                     onMouseDown={(e) => e.preventDefault()}
                     onKeyDown={(event) => {
-                      if (event.key !== 'ArrowLeft') return;
+                      if (event.key !== 'ArrowLeft' && event.key !== 'Escape') {
+                        if (item.submenuRole !== 'dialog') handleMenuKeyDown(event);
+                        return;
+                      }
                       event.preventDefault();
                       event.stopPropagation();
                       setOpenSubmenuLabel(null);
