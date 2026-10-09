@@ -74,21 +74,24 @@ fn spacing_opens_between_paragraphs_and_cascades_from_the_master_and_layout() {
 }
 
 #[test]
-fn spacing_shrinks_with_the_autofit_scale() {
+fn only_percentage_spacing_shrinks_with_the_autofit_scale() {
     let session = DeckSession::open(DECK, 4_241).unwrap();
     let snapshot = session.snapshot().unwrap();
     let mut package = session.package().clone();
-    let ShapeNode::Shape(shape) = &mut package.slides[0].shapes[1] else {
-        panic!("text shape")
-    };
-    shape.text.as_mut().unwrap().autofit = Some(pptx_parse::TextAutofit::Normal {
-        font_scale: Some(0.5),
-        line_space_reduction: None,
-    });
+    for index in [1, 2] {
+        let ShapeNode::Shape(shape) = &mut package.slides[0].shapes[index] else {
+            panic!("text shape")
+        };
+        shape.text.as_mut().unwrap().autofit = Some(pptx_parse::TextAutofit::Normal {
+            font_scale: Some(0.5),
+            line_space_reduction: None,
+        });
+    }
     let list = renderer()
         .layout_slide(&package, &snapshot, 0)
         .unwrap()
         .display_list;
 
-    assert_gaps(lines(&list, 3), points(14.0));
+    assert_gaps(lines(&list, 3), points(28.0));
+    assert_gaps(lines(&list, 4), points(9.6));
 }

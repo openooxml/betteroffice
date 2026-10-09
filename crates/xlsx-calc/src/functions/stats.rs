@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use xlsx_model::{CellValue, ErrorValue};
 
-use crate::eval::{Area, EvalContext, as_area, bound_area, err, evaluate, num};
+use crate::eval::{Area, EvalContext, as_area, err, evaluate, num};
 use crate::parser::Expr;
 
 use super::criteria::{self, Criterion};
@@ -43,8 +43,17 @@ fn pairs(args: &[Expr], ctx: &EvalContext<'_>) -> Result<(Vec<f64>, Vec<f64>), E
     if args.len() != 2 {
         return Err(ErrorValue::Value);
     }
-    let ys = positioned(&args[0], ctx)?;
-    let xs = positioned(&args[1], ctx)?;
+    let mut areas = [as_area(&args[0], ctx), as_area(&args[1], ctx)];
+    if let [Some(y), Some(x)] = &areas
+        && y.cell_count() != x.cell_count()
+    {
+        return Err(ErrorValue::NA);
+    }
+    // two references are cut to one extent, so a whole column on each of two
+    // sheets still pairs row for row
+    criteria::cut_references(&mut areas, ctx);
+    let ys = positioned(&args[0], areas[0], ctx)?;
+    let xs = positioned(&args[1], areas[1], ctx)?;
     if xs.len() != ys.len() {
         return Err(ErrorValue::NA);
     }
@@ -63,10 +72,14 @@ fn pairs(args: &[Expr], ctx: &EvalContext<'_>) -> Result<(Vec<f64>, Vec<f64>), E
 
 /// every cell of an argument in order, `None` where it is not a number, so two
 /// ranges stay aligned by position.
-fn positioned(arg: &Expr, ctx: &EvalContext<'_>) -> Result<Vec<Option<f64>>, ErrorValue> {
-    match as_area(arg, ctx) {
+fn positioned(
+    arg: &Expr,
+    area: Option<Area>,
+    ctx: &EvalContext<'_>,
+) -> Result<Vec<Option<f64>>, ErrorValue> {
+    match area {
         Some(area) => area
-            .values_ref(ctx)?
+            .cells_ref(ctx)?
             .into_iter()
             .map(|value| match value.as_ref() {
                 CellValue::Number { value } => Ok(Some(*value)),
@@ -623,33 +636,24 @@ pub(crate) fn countblank(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
             matches!(v.as_ref(), CellValue::Empty)
                 || matches!(v.as_ref(), CellValue::Text { value } if value.is_empty())
         })
-        .count();
-    num(n as f64)
+        .count() as u64;
+    num((n + area.unread(values.len() as u64)) as f64)
 }
 
 pub(crate) fn countif(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if args.len() != 2 {
         return err(ErrorValue::Value);
     }
-    let area = match as_area(&args[0], ctx) {
-        Some(a) => bound_area(a, ctx),
-        None => return err(ErrorValue::Value),
-    };
-    let criterion = criteria::criterion_from_arg(&args[1], ctx);
-    let pairs = [(area, criterion)];
-    match criteria::matching_indices(&pairs, ctx) {
-        Ok(indices) => num(indices.len() as f64),
-        Err(error) => err(error),
-    }
+    countifs(args, ctx)
 }
 
 pub(crate) fn countifs(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
-    match criteria::collect_pairs(args, ctx) {
-        Some(pairs) => match criteria::matching_indices(&pairs, ctx) {
-            Ok(indices) => num(indices.len() as f64),
-            Err(error) => err(error),
-        },
-        None => err(ErrorValue::Value),
+    let Some(criteria) = criteria::collect_pairs(args, None, ctx) else {
+        return err(ErrorValue::Value);
+    };
+    match criteria::matching_indices(&criteria.pairs, ctx) {
+        Ok(indices) => num((indices.len() as u64 + criteria.unread_matches()) as f64),
+        Err(error) => err(error),
     }
 }
 
@@ -659,17 +663,14 @@ pub(crate) fn averageif(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         return err(ErrorValue::Value);
     }
     let crit_area = match as_area(&args[0], ctx) {
-        Some(a) => bound_area(a, ctx),
+        Some(a) => a,
         None => return err(ErrorValue::Value),
     };
     let value_spec = if args.len() == 3 { &args[2] } else { &args[0] };
-    let value_area = match criteria::aligned_area(value_spec, ctx, crit_area.rows, crit_area.cols) {
-        Some(a) => a,
-        None => match as_area(value_spec, ctx) {
-            Some(a) => a,
-            None => return err(ErrorValue::Value),
-        },
+    let Some(value_area) = as_area(value_spec, ctx) else {
+        return err(ErrorValue::Value);
     };
+    let (crit_area, value_area) = criteria::single_pair(crit_area, value_area, ctx);
     let criterion = criteria::criterion_from_arg(&args[1], ctx);
     average_of(&[(crit_area, criterion)], &value_area, ctx)
 }
@@ -679,15 +680,13 @@ pub(crate) fn averageifs(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if args.len() < 3 {
         return err(ErrorValue::Value);
     }
-    match criteria::collect_pairs(&args[1..], ctx) {
-        Some(pairs) => {
-            let (rows, cols) = (pairs[0].0.rows, pairs[0].0.cols);
-            match criteria::aligned_area(&args[0], ctx, rows, cols) {
-                Some(value_area) => average_of(&pairs, &value_area, ctx),
-                None => err(ErrorValue::Value),
-            }
-        }
-        None => err(ErrorValue::Value),
+    match criteria::collect_pairs(&args[1..], Some(&args[0]), ctx) {
+        Some(criteria::Criteria {
+            pairs,
+            values: Some(value_area),
+            ..
+        }) => average_of(&pairs, &value_area, ctx),
+        _ => err(ErrorValue::Value),
     }
 }
 
@@ -705,13 +704,13 @@ fn extreme_ifs(args: &[Expr], ctx: &EvalContext<'_>, largest: bool) -> CellValue
     if args.len() < 3 {
         return err(ErrorValue::Value);
     }
-    let pairs = match criteria::collect_pairs(&args[1..], ctx) {
-        Some(pairs) => pairs,
-        None => return err(ErrorValue::Value),
-    };
-    let value_area = match criteria::aligned_area(&args[0], ctx, pairs[0].0.rows, pairs[0].0.cols) {
-        Some(area) => area,
-        None => return err(ErrorValue::Value),
+    let Some(criteria::Criteria {
+        pairs,
+        values: Some(value_area),
+        ..
+    }) = criteria::collect_pairs(&args[1..], Some(&args[0]), ctx)
+    else {
+        return err(ErrorValue::Value);
     };
     let nums = match matching_numbers(&pairs, &value_area, ctx) {
         Ok(nums) => nums,

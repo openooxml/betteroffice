@@ -33,14 +33,17 @@ sizeCanvasForSlide(canvas, frame, devicePixelRatio);
 await paintSlide(canvas.getContext('2d')!, frame, devicePixelRatio);
 ```
 
-`initWasm()` with no argument only works where `fetch` of a same-origin URL works (browsers); Node and SSR must pass the wasm bytes.
+Browsers can call `initWasm()`; Node and SSR pass wasm bytes to `initWasm(bytes)`.
+`openPresentationSession` is an experimental, opt-in worker session for async reads, edits, slide metadata, and saving.
 
 All parsing, edits, collaboration state, text shaping, layout, hit-testing, and
 display-list emission stay in Rust. The package decodes the typed boundary and
 replays the resulting primitives on canvas. Font bytes are supplied by the host
 and registered with the Rust shaper through `openPresentation`.
 
-Beyond rendering, `PresentationHandle` covers editing: text
+Beyond rendering, `PresentationHandle` covers editing: version-checked batches
+(`readContent` / `findText` / `validateEdits` / `applyEdits`), read-only
+structured export (`exportStructured` / `exportMarkdown`), text
 (`insertText` / `deleteText` / `formatText` / `setParagraphAlignment`), slides
 (`insertSlide` / `deleteSlide` / `moveSlide`), shapes
 (`addTextBox` / `addShape` / `addPicture` / `moveShape` / `resizeShape` /
@@ -91,8 +94,7 @@ unchanged words as context and retaining fonts and emphasis. Pass its
 `textChanges` to `paintSlide()` for red highlights and strikethrough on deletions,
 and green highlights and underlines on insertions. Its snapshot and UTF-16
 ranges describe a temporary review layout; use the live handle for editing and
-the ordinary proposed layout for the result after acceptance. Review rendering
-does not replace the live hit-test state or add markup to saved presentations.
+the ordinary proposed layout for the result after acceptance.
 
 Supported edits replace text within one paragraph, format text, align paragraphs,
 set shape geometry/fill/stroke/adjustments, and replace speaker notes. Text offsets
@@ -106,15 +108,115 @@ with target IDs. Review a fresh preview before calling
 Unrelated peer edits survive acceptance and Undo. Up to 64 proposals, each with
 1–256 edits, may be pending.
 
-Pending proposals belong to this open session: they are excluded from PPTX
-exports and collaboration updates. Accepted edits save and sync normally.
+Pending proposals live in the open session; accepted edits save and synchronize.
 `isProposalsAvailable()` supports hosts that load an older WASM build.
+
+## Version-checked edit batches
+
+Read the deck with its session version, then apply a batch against that
+version: every step commits in one transaction, one update and one undo step,
+or the batch returns a typed refusal and nothing changes.
+
+```ts
+const read = deck.readContent();
+if (!read.ok) throw new Error(read.failure.message);
+const story = read.stories[0];
+const within = { slideId: story.slideId, shapeId: story.shapeId, storyId: story.storyId };
+
+const result = deck.applyEdits({
+  expectVersion: read.version,
+  steps: [
+    { op: 'replaceText', target: { kind: 'search', within, text: 'Q3' }, text: 'Q4' },
+    { op: 'setSlideNotes', target: { slideId: story.slideId }, text: 'Updated for Q4' },
+  ],
+});
+if (!result.ok) console.warn(result.failure.code, result.failure.stepIndex);
+```
+
+A story reads as its paragraphs joined by `\n`. Offsets are story-local UTF-16
+positions, and each entry of `paragraphs` gives a paragraph's span, its soft
+line breaks (which also read as `\n`) and its field results. `findText()`
+searches exactly, case-sensitively and within paragraphs; a `search` target
+must match exactly once in its story, overlapping occurrences included. Every
+target and guard resolves against `expectVersion`, so a later step never sees
+an earlier step's offsets.
+
+Steps insert, replace and delete text within one paragraph, format text, align
+paragraphs, replace speaker notes, and set the rectangle, fill or outline of a
+shape at the top of a slide (fill and outline on preset shapes). An `expect`
+guard refuses its step unless the target still reads as expected. Receipts
+locate each change in the final state. `validateEdits()` runs every check,
+staging included, without changing anything. `history: 'none'` keeps a batch
+out of undo history and existing undo and redo entries in place;
+`source: 'agent'` records provenance only.
+
+Refusals carry a `code` (`stale-version`, `missing-target`, `ambiguous-target`,
+`content-mismatch`, `overlapping-steps`, `unsupported`, `invalid-step`,
+`limit-exceeded`), the failing `stepIndex` and the target; malformed requests
+throw, and so do NaN or infinite numbers. Slide, shape, story and paragraph
+ids and versions are session-scoped.
+
+## Structured export
+
+`exportStructured()` returns the committed deck as JSON with the version it was
+read at, and `exportMarkdown()` renders that same read as Markdown. Neither
+flushes editor input or changes anything. `exportPptxStructured(bytes)`,
+`exportPptxMarkdown(bytes)` and `renderPptxMarkdown(content)` do the same
+headless, with anchors that address the returned snapshot only.
+
+```ts
+import { exportPptxMarkdown } from '@betteroffice/pptx';
+
+const read = deck.exportStructured({ includeNotes: true });
+if (!read.ok) throw new Error(read.failure.message);
+console.log(read.content.slides);
+const { markdown, anchors } = await exportPptxMarkdown(bytes);
+```
+
+Slides come in deck order with their original index; shapes follow the current
+shape tree depth first, a group's descendants at the group's position and table
+cells row by row. This is the authored order, not a reading order inferred from
+geometry. Paragraphs carry their level, effective alignment, authored
+`bulletJson` and the resolved list marker (inherited from the layout, master
+and text styles and numbered as the renderer numbers them); runs carry
+formatting marks, links, soft line breaks, fields with their cached result and
+zero-width placeholders for inline content such as equations. Tables keep their
+grid, spans and merge continuations with each cell's current story. Pictures,
+video, audio, charts, SmartArt, embedded objects and unmodelled shape-tree
+elements become placeholders with their alternative text and relationships.
+Each slide exports its own shapes, with an `inherited-content-omitted`
+diagnostic for layout and master shapes drawn on it.
+
+Every record carries an anchor: `range` anchors are batch text targets in the
+story offsets of `readContent()`, so a session export's `range` anchor can be a
+step's `target` at the version it was read at; `notes` and `comment` ranges
+index their plain text, and records seeded from the file carry `provenance`
+(part, SHA-256, element path, `sldId`, `cNvPr` id). Session anchors belong to
+the returned version. A collaboration
+session opened from an update seeded by an older release, without its source
+file, may not know which slides are hidden:
+those slides are exported with `hidden: null` and a `visibility-unknown`
+diagnostic, and reopening the session with its source file restores their
+visibility. Hidden slides and shapes, speaker notes (plain text)
+and comments are excluded unless `includeHiddenSlides`, `includeHiddenShapes`,
+`includeNotes` or `includeComments` asks for them, and `includeFormatting:
+false` drops marks. Everything left out or not represented is listed in
+`diagnostics`. `maxBlocks` (10,000 by default; slides, shapes, paragraphs,
+notes and comments count) and `maxBytes` (8 MiB of compact JSON) stop the
+export at a whole record and set `truncated`. Unusable limits come back as an
+`invalid-options` or `limit-exceeded` refusal (`PptxExportError` for the
+headless functions); malformed options throw.
+
+Markdown renders slide headings, title placeholders as headings, paragraphs
+with literal list markers, pipe or entity-escaped HTML tables, object
+placeholders, notes and comments, with a `<!-- pptx-export:N -->` marker before
+each block that `anchors` maps back to its source.
 
 ## Comments
 
 PowerPoint has two comment systems and a file only ever uses one: `legacy`
 reads in every version of PowerPoint plus LibreOffice and Google Slides, while
-`modern` carries replies and a resolved state but only shows in PowerPoint 365.
+`modern` carries replies and resolution for PowerPoint 365.
 A deck commits to one at its first comment, so `setCommentFlavor` only works
 while `comments()` is empty, and `replyToComment` / `setCommentStatus` throw on
 a legacy deck.
@@ -177,3 +279,25 @@ serialization durations in milliseconds. Profiled mutation methods such as
 `undoProfiled` reports undo, snapshot, and serialization timings. These methods
 share the normal operations and add stage timing. See the
 [corpus and browser tests](../../e2e/README.md) for usage and timing limits.
+
+## Host undo and comment controls
+
+`handle.setUndoCaptureMode('manual')` groups tracked local edits across pauses
+and operation types until `handle.addUndoBoundary()`. The getter
+`handle.undoCaptureMode()` returns `'auto'` or `'manual'`. Changing modes closes
+the current group and preserves history; setting the same mode is a no-op.
+Auto preserves the existing policy (500 ms capture on native targets, separate
+transactions in the browser). Remote and agent origins remain outside local
+undo. These controls group history; edit batches make edits atomic.
+
+`handle.anchorCaret(storyId, index)` returns a caret anchor, plain data that
+later edits, undo, redo and remote updates carry along with the text;
+`handle.resolveCaretAnchor(anchor)` returns its current UTF-16 offset, or `null`
+once the story is gone.
+
+`handle.setCommentPosition(commentId, { xEmu, yEmu })` moves an existing root
+comment on its current slide, preserving identity, author, text, replies, and
+resolution state through collaboration, undo/redo, and export. Coordinates must
+be safe integers in EMU. Replies share their root's position. Unknown IDs,
+reply IDs, and invalid coordinates fail before mutation. Legacy PowerPoint
+comments quantize exported positions to master units (1/576 inch).

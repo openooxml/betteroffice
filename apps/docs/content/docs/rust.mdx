@@ -35,10 +35,64 @@ unmodified row, column, and cell markup. Worksheets with missing or out-of-order
 row or cell addresses, and worksheets reconstructed from collaboration updates,
 are serialized from the model instead.
 
+`Workbook::read_cells`, `find_text`, `validate_edits` and `apply_edits` take the
+same serializable requests as JavaScript and Python. A batch commits every step
+as one recalculated change, or returns an `EditRefusal` with the workbook
+untouched:
+
+```rust
+use betteroffice_xlsx::{EditRequest, Workbook};
+
+let request: EditRequest = serde_json::from_value(serde_json::json!({
+    "expectVersion": workbook.version(),
+    "steps": [{
+        "op": "setCellInputs",
+        "target": { "sheetId": "sheet:0", "range": { "kind": "a1", "a1": "B3" } },
+        "inputs": [["120"]],
+    }],
+}))?;
+match workbook.apply_edits(&request)? {
+    Ok(applied) => println!("now at {}", applied.version),
+    Err(refused) => println!("refused: {:?}", refused.failure.code),
+}
+```
+
+Batches do not insert or delete rows, columns or sheets, and refuse writes to
+merged-cell followers, array-formula cells and protected sheets.
+
+`Workbook::export_structured` and `export_markdown` read the committed workbook
+with its version as sparse cells, sheet metadata and diagnostics, or as bounded
+Markdown with anchor markers; `export_xlsx_structured`, `export_xlsx_markdown`
+and `render_xlsx_markdown` work from bytes or content. None recalculates:
+formula results are the stored values.
+
+```rust
+use betteroffice_xlsx::{XlsxExportOptions, XlsxMarkdownOptions, export_xlsx_markdown};
+
+if let Ok(export) = workbook.export_structured(&XlsxExportOptions::default())? {
+    for cell in &export.content.sheets[0].cells {
+        println!("{:?} {:?} {}", cell.anchor, cell.formula, cell.display_text);
+    }
+}
+let markdown = export_xlsx_markdown(&xlsx_bytes, &XlsxExportOptions::default(), &XlsxMarkdownOptions::default())?;
+```
+
 `Workbook::edit_cell_profiled` and `apply_ops_profiled` return the usual edit
 outcome with an `EditProfile`. Supply a monotonic clock reporting milliseconds
 to collect validate, apply, recalculation, and result-building durations. Normal
 edit methods do not read a profiling clock.
+
+Formula evaluation in `betteroffice-xlsx-calc` computes the date functions in the
+1900 date system; only `TEXT` formats dates in a workbook's 1904 system. `RAND` is
+not implemented, and the `RANDBETWEEN` seed is set on `EvalContext::rand_seed`, not
+through `CalculationOptions`. `ROW()` and `COLUMN()` without a reference return
+`#VALUE!` in a context built by `EvalContext::new`, which has no calling cell. A
+defined name under `ROW`, `COLUMN`, `ROWS` or `COLUMNS` counts as a direct
+reference, so a name bound to a computed reference keeps no dependency edge to
+the cells that reference reads, and an `OFFSET` with a computed target
+re-evaluates on every recalculation but may read a same-pass write to that target
+one recalculation late. `SEARCH` and exact-mode `VLOOKUP`, `HLOOKUP` and `MATCH`
+match `*` and `?` literally.
 
 Open and save DOCX and PPTX files through their format APIs:
 
@@ -65,6 +119,96 @@ let saved = presentation.save()?;
 
 `open_with_limits` on DOCX and PPTX accepts custom parser resource limits. Files
 that exceed those limits are rejected.
+
+`Document::export_structured` exports the current DOCX model as read-only
+structured content, and `export_markdown` renders it as Markdown with source
+anchors:
+
+```rust
+use betteroffice_docx::{Document, ExportOptions, RevisionView, StorySelection};
+
+let document = Document::open(&docx_bytes)?;
+let content = document.export_structured(&ExportOptions {
+    stories: Some(vec![StorySelection::Body, StorySelection::Headers]),
+    ..ExportOptions::new(RevisionView::Accepted)
+})?;
+let markdown = document.export_markdown(&ExportOptions::new(RevisionView::Markup))?;
+```
+
+The export reads edits made through the model, lists omitted and unsupported
+content in `diagnostics`, and returns `Error::Export` for unusable limits. The
+same content comes from `docx_edit::structured` for a live `EditingDoc` or raw
+bytes. `Document` exports do not yet generate page maps: `Document::layout`
+paginates measurements you supply, which prove nothing about the current model.
+An `EngineSession` in `betteroffice-docx-edit` that lays a document out itself
+attaches one with `export_structured_with_pages`, refusing a stale or incomplete
+layout as the JavaScript API does.
+
+`Document::list_content_controls` lists the content controls of the current model
+in document order, with the structured export's control metadata plus placement,
+anchor, parent control, current text and effective lock; `find_content_controls`
+keeps the exact matches of an id, tag, authored `w:id` or alias:
+
+```rust
+use betteroffice_docx::{ContentControlQuery, ContentControlsOptions, Document};
+
+let document = Document::open(&docx_bytes)?;
+let controls = document.list_content_controls(&ContentControlsOptions::default())?;
+let query = ContentControlQuery::Tag { tag: "customer.name".to_owned() };
+let named = document.find_content_controls(&query, &ContentControlsOptions::default())?;
+```
+
+Ids and anchors address the returned snapshot. A live `EditingDoc` lists the same
+controls with its version and fills plain- and rich-text ones through
+`setContentControlText` steps of `apply_edits`; the `Document` facade has no
+fill yet.
+
+Comparing two DOCX files into tracked changes is available from the
+JavaScript package's `compareDocx`. The native Rust and Python APIs do not
+offer it yet: they follow once edited sessions save natively.
+
+PPTX edits can also run as version-checked batches. `Presentation::read_content`
+and `find_text` return story text with the session version, and `apply_edits`
+applies every step against that version as one transaction and one undo step.
+Policy refusals, such as a stale version or an ambiguous search, come back as the
+inner `Err(EditRefusal)` with the deck unchanged:
+
+```rust
+use betteroffice_pptx::{EditRequest, ReadRequest};
+
+let read = presentation.read_content(&ReadRequest::default())?.expect("readable deck");
+let request: EditRequest = serde_json::from_value(serde_json::json!({
+    "expectVersion": read.version,
+    "steps": [{"op": "setSlideNotes", "target": {"slideId": read.slides[0].id}, "text": "Updated"}],
+}))?;
+match presentation.apply_edits(&request)? {
+    Ok(applied) => assert!(applied.applied),
+    Err(refusal) => eprintln!("{:?}: {}", refusal.failure.code, refusal.failure.message),
+}
+```
+
+The request types are the JSON contract the JavaScript core and Python binding
+use; `validate_edits` runs the same checks without changing anything.
+
+`export_structured` and `export_markdown` read the committed deck as structured
+content or Markdown with the version it was read at, and
+`betteroffice_pptx::export_pptx_structured` reads bytes as a snapshot. Records
+carry session or snapshot anchors and source provenance, and every omission is
+a diagnostic:
+
+```rust
+use betteroffice_pptx::PptxExportOptions;
+
+let options = PptxExportOptions {
+    include_notes: Some(true),
+    ..PptxExportOptions::default()
+};
+let read = presentation.export_structured(&options)?.expect("usable options");
+for slide in &read.content.slides {
+    println!("slide {}: {} shapes", slide.index, slide.shapes.len());
+}
+let markdown = betteroffice_pptx::export_pptx_markdown(&pptx_bytes, &options)?;
+```
 
 ## PowerPoint comments
 
@@ -104,7 +248,11 @@ cargo add betteroffice-pptx --features raster
 
 `render_slide` returns a display list and hit-test metadata. Register at least
 one font face before rendering. With the `raster` feature enabled, `render_png`
-produces PNG bytes and reads embedded images from the presentation.
+produces PNG bytes and reads embedded images from the presentation. SVG pictures
+draw their paths, basic shapes, gradients, clip paths, symbols, `use` references
+and hyperlinked content, and leave out their text and embedded raster images. A
+picture that uses markers, filters, masks, patterns, scripts or animation is
+skipped and counted in `skipped_images`.
 
 PPTX saves preserve untouched parts and patch edited slides to retain unsupported
 XML. The ZIP container is rebuilt, so the complete file may differ byte for byte.
@@ -114,7 +262,7 @@ XML. The ZIP container is rebuilt, so the complete file may differ byte for byte
 | Crate | What it is |
 | --- | --- |
 | `betteroffice-docx` | Typed native API for opening, editing, laying out, and saving DOCX documents. |
-| `betteroffice-xlsx` | Typed native API for opening, editing, collaborating, calculating, rendering, and saving XLSX workbooks. |
+| `betteroffice-xlsx` | Typed native API for opening, editing, collaborating, calculating, rendering, and saving XLSX workbooks, including version-checked atomic cell batches and anchored JSON and Markdown export. |
 | `betteroffice-pptx` | Typed native API for opening, editing, collaborating on, and rendering PPTX presentations. |
 
 ## The layers
@@ -123,7 +271,9 @@ XML. The ZIP container is rebuilt, so the complete file may differ byte for byte
 | --- | --- |
 | `betteroffice-opc` | The OPC container reader and writer, with ZIP expansion limits and path validation. |
 | `betteroffice-ooxml-text` | Shared text shaping, measurement, line breaking, and bidirectional text. |
+| `betteroffice-ooxml-diff` | The bounded token LCS diff behind PPTX proposal previews and DOCX comparison. |
 | `betteroffice-drawingml` | The DrawingML colors, themes, shape models, and preset geometry shared by all three formats. |
+| `betteroffice-metafile` | Bounded EMF, EMF+ and WMF replay into vector drawings and SVG. |
 | `betteroffice-docx-parse` | WordprocessingML parsing, typed relationship models, and the typed document model. |
 | `betteroffice-docx-layout` | DOCX pagination, line flow, tables, floats, notes, and display lists. |
 | `betteroffice-docx-edit` | CRDT editing and history for DOCX. |

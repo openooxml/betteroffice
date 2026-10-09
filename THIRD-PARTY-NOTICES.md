@@ -47,13 +47,13 @@ License: SIL Open Font License, Version 1.1
 
 ## Bundled font binaries (`packages/fonts`, `packages/fonts-cjk`)
 
-Thirty font binaries are vendored unmodified and redistributed in the published
+Seventy font binaries are vendored unmodified and redistributed in the published
 `@betteroffice/fonts` and `@betteroffice/fonts-cjk` packages. All are licensed
 under the SIL Open Font License, Version 1.1. Each package ships the applicable
 license texts, with the copyright notices they cover, under its `LICENSES/`
 directory; those files are the authoritative copies for redistribution.
 
-`packages/fonts/assets` — 25 faces:
+`packages/fonts/assets` — 65 faces:
 
 - **Carlito** (4 faces) — Copyright 2013 The Carlito Project Authors, with
   Reserved Font Name "Carlito". From google/fonts `ofl/carlito`; upstream
@@ -74,6 +74,30 @@ directory; those files are the authoritative copies for redistribution.
   https://github.com/notofonts/hebrew. `LICENSES/OFL-NotoSansHebrew.txt`. The
   regular face is also compiled into the `betteroffice-vsdx-raster` tests via
   `include_bytes!`.
+- **Gelasio** (4 faces): Copyright 2022 The Gelasio Project Authors,
+  https://github.com/SorkinType/Gelasio. `LICENSES/OFL-Gelasio.txt`.
+- **Comic Relief** (2 faces): Copyright 2013 The Comic Relief Project Authors,
+  https://github.com/loudifier/Comic-Relief. `LICENSES/OFL-ComicRelief.txt`.
+- **Inter** (4 faces): Copyright 2020 The Inter Project Authors,
+  https://github.com/rsms/inter. `LICENSES/OFL-Inter.txt`.
+- **Roboto** (4 faces): Copyright 2011 The Roboto Project Authors,
+  https://github.com/googlefonts/roboto-classic. `LICENSES/OFL-Roboto.txt`.
+- **Source Sans 3** (4 faces): Copyright 2010-2020 Adobe, with Reserved Font
+  Name "Source". `LICENSES/OFL-SourceSans3.txt`.
+- **DM Sans** (4 faces): Copyright 2014 The DM Sans Project Authors,
+  https://github.com/googlefonts/dm-fonts. `LICENSES/OFL-DMSans.txt`.
+- **DM Serif Display** (2 faces): Copyright 2014-2018 Adobe, with Reserved Font
+  Name "Source"; Copyright 2019 Google LLC. `LICENSES/OFL-DMSerifDisplay.txt`.
+- **Open Sans** (4 faces): Copyright 2020 The Open Sans Project Authors,
+  https://github.com/googlefonts/opensans. `LICENSES/OFL-OpenSans.txt`.
+- **Montserrat** (4 faces): Copyright 2024 The Montserrat.Git Project Authors,
+  https://github.com/JulietaUla/Montserrat. `LICENSES/OFL-Montserrat.txt`.
+- **Poppins** (4 faces): Copyright 2020 The Poppins Project Authors,
+  https://github.com/itfoundry/Poppins. `LICENSES/OFL-Poppins.txt`.
+- **Oswald** (2 faces): Copyright 2016 The Oswald Project Authors,
+  https://github.com/googlefonts/OswaldFont. `LICENSES/OFL-Oswald.txt`.
+- **Heebo** (2 faces): Copyright 2014 The Heebo Project Authors,
+  https://github.com/OdedEzer/heebo. `LICENSES/OFL-Heebo.txt`.
 
 `packages/fonts-cjk/assets` — 5 faces:
 

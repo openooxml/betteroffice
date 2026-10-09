@@ -5,7 +5,7 @@ use crate::xml::{ParseBudget, ParseError, ParseLimits, XmlElement, parse_xml_str
 /// Complete namespace context used by WordprocessingML content fragments.
 /// The wrapper is never emitted; it only makes captured prefixed subtrees
 /// independently parseable under the safe XML budget.
-pub(super) const CONTENT_FRAGMENT_PREFIX: &str = concat!(
+pub(crate) const CONTENT_FRAGMENT_PREFIX: &str = concat!(
     "<s11:root xmlns:s11=\"urn:openooxml:serializer-fragment\" ",
     "xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" ",
     "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" ",

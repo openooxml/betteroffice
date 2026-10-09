@@ -390,7 +390,7 @@ describe('PPTX wasm boundary', () => {
         await paintSlide(ctx, frame);
       }
 
-      expect(expected).toHaveLength(288);
+      expect(expected).toHaveLength(272);
       expect(calls).toHaveLength(expected.length);
       expect(calls).toEqual(expected);
     } finally {
@@ -720,4 +720,108 @@ test('inserted pictures render, synchronize, arrange and reopen with their bytes
       expect(reopened.mediaBytes(picture.mediaPartPath!)).toEqual(bytes);
     } finally { reopened.dispose(); }
   } finally { source.dispose(); peer.dispose(); }
+});
+
+describe('host undo and comment controls', () => {
+  test('manual capture groups different operations and keeps explicit boundaries', () => {
+    const deck = openPresentation(fixture, { clientId: 9981 });
+    try {
+      const before = deck.snapshot();
+      const story = before.slides[0].shapes.find((shape) => shape.textStories.length)!.textStories[0];
+      expect(deck.undoCaptureMode()).toBe('auto');
+      deck.setUndoCaptureMode('manual');
+      deck.insertText(story.id, 0, 'First ');
+      deck.setUndoCaptureMode('manual');
+      deck.addComment(before.slides[0].id, { author: 'Host', text: 'Grouped', created: '2026-09-23T00:00:00Z' });
+      const grouped = deck.snapshot();
+      deck.addUndoBoundary();
+      deck.insertText(story.id, 0, 'Second ');
+      expect(deck.undo().snapshot).toEqual(grouped);
+      expect(deck.undo().snapshot).toEqual(before);
+      expect(deck.redo().snapshot).toEqual(grouped);
+      expect(() => deck.setUndoCaptureMode('invalid' as 'auto')).toThrow();
+      expect(deck.undoCaptureMode()).toBe('manual');
+      deck.setUndoCaptureMode('auto');
+      expect(deck.canRedo()).toBe(true);
+    } finally { deck.dispose(); }
+  });
+
+  test('caret anchors follow typing, undo, redo and remote edits as plain data', () => {
+    const deck = openPresentation(fixture, { clientId: 9982 });
+    const peer = openPresentation(fixture, { clientId: 9983, initialUpdate: deck.encodeStateAsUpdate() });
+    try {
+      const story = deck.snapshot().slides[0].shapes.find((shape) => shape.textStories.length)!
+        .textStories[0];
+      const first = deck.story(story.id).paragraphs[0].runs[0].text[0];
+      deck.addUndoBoundary();
+      deck.insertText(story.id, 0, first);
+      const anchor = JSON.parse(JSON.stringify(deck.anchorCaret(story.id, 1)));
+      expect(Object.keys(anchor).sort()).toEqual(['position', 'storyId']);
+      deck.undo();
+      expect(deck.resolveCaretAnchor(anchor)).toBe(0);
+      deck.redo();
+      expect(deck.resolveCaretAnchor(anchor)).toBe(1);
+      peer.applyUpdate(deck.encodeStateAsUpdate());
+      peer.insertText(story.id, 0, 'Remote ');
+      deck.applyUpdate(peer.encodeStateAsUpdate());
+      expect(deck.resolveCaretAnchor(anchor)).toBe(8);
+      expect(peer.resolveCaretAnchor(anchor)).toBe(8);
+      expect(() => deck.anchorCaret(story.id, 100_000)).toThrow();
+      expect(() => deck.resolveCaretAnchor({ storyId: story.id, position: 'not base64!' })).toThrow();
+    } finally {
+      peer.dispose();
+      deck.dispose();
+    }
+  });
+
+  test('moves modern comments without losing their thread or exported position', async () => {
+    const bytes = await readFile(resolve(root, 'crates/pptx-edit/tests/fixtures/modern-comments.pptx'));
+    const deck = openPresentation(bytes, { clientId: 9982 });
+    try {
+      const before = deck.comments();
+      const root = before.find((comment) => !comment.parentId)!;
+      const expected = before.map((comment) => comment.id === root.id
+        ? { ...comment, xEmu: 914400, yEmu: 1828800 } : comment);
+      deck.setCommentPosition(root.id, { xEmu: 914400, yEmu: 1828800 });
+      expect(() => deck.setCommentPosition(root.id, { xEmu: NaN, yEmu: 0 })).toThrow();
+      expect(() => deck.setCommentPosition('missing', { xEmu: 1, yEmu: 2 })).toThrow();
+      for (let cycle = 0; cycle < 3; cycle++) {
+        expect(deck.comments()).toEqual(expected);
+        const reopened = openPresentation(deck.save(), { clientId: 9983 });
+        try { expect(reopened.comments()).toEqual(expected); } finally { reopened.dispose(); }
+        deck.undo();
+        expect(deck.comments()).toEqual(before);
+        deck.redo();
+      }
+    } finally { deck.dispose(); }
+  });
+});
+
+test('a fallback font draws the characters the run face has no glyph for', async () => {
+  const arabic = new Uint8Array(
+    await readFile(resolve(root, 'packages/fonts/assets/NotoSansArabic-Regular.ttf'))
+  );
+  const source = openPresentation(fixture, {
+    clientId: 9301,
+    fonts: [{ family: 'Liberation Sans', bytes: fontBytes }],
+    fallbackFonts: [{ family: 'Noto Sans Arabic', bytes: arabic }],
+  });
+  try {
+    const story = source
+      .snapshot()
+      .slides[0].shapes.find((shape) => shape.textStories.length > 0)!.textStories[0];
+    source.insertText(story.id, 0, 'مرحبا ');
+    const runs = source
+      .layoutSlide(0)
+      .primitives.filter(
+        (primitive): primitive is TextBoxPrimitive =>
+          primitive.kind === 'textBox' && primitive.storyId === story.id
+      )
+      .flatMap((box) => box.lines.flatMap((line) => line.runs));
+    const drawn = runs.find((run) => run.text.includes('مرحبا'));
+    expect(drawn?.fontFamily).toBe('Noto Sans Arabic');
+    expect(runs.some((run) => run.fontFamily === 'Liberation Sans')).toBe(true);
+  } finally {
+    source.dispose();
+  }
 });

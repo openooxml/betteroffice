@@ -221,12 +221,23 @@ export interface RustDisplayListEngine {
     goalX: number
   ): string;
   displayRangeRectsJson?(from: number, to: number): string;
+  /** @internal */
+  displayRangeRectsOnPagesJson?(
+    from: number,
+    to: number,
+    firstPage: number,
+    lastPage: number
+  ): string;
   displayRangeRectsRegionJson?(
     region: string,
     partId: string,
     from: number,
     to: number
   ): string;
+  /** The bytes and media type of the part a `media:{n}` image source names. */
+  mediaSource?(token: string): { bytes: Uint8Array; mimeType: string } | null;
+  /** Changes whenever the package `mediaSource` reads changes. */
+  mediaScope?(): number;
 }
 
 export type RustDisplayListSourceErrorStage = 'load' | 'build' | 'parse' | 'decode' | 'apply';
@@ -285,6 +296,16 @@ export interface RustDisplayListQueryEngine {
   ): string;
   /** body document range → JSON array of `{pageIndex,x,y,width,height}` rects */
   rangeRectsJson(displayList: string, from: number, to: number): string;
+  /** @internal */
+  rangeRectsOnPagesJson?(
+    displayList: string,
+    from: number,
+    to: number,
+    firstPage: number,
+    lastPage: number
+  ): string;
+  /** @internal */
+  hasRangeRectsOnPages?(): boolean;
   /**
    * Region-aware document range → JSON array of rects. `region` is a
    * `DisplayListHitRegion` discriminant; `partId` names the instance — a
@@ -321,6 +342,14 @@ export interface RustDisplayListQueryEngine {
   ): string;
   /** body document range against a stored display list (by handle) */
   rangeRectsByHandle?(handle: number, from: number, to: number): string;
+  /** @internal */
+  rangeRectsOnPagesByHandle?(
+    handle: number,
+    from: number,
+    to: number,
+    firstPage: number,
+    lastPage: number
+  ): string;
   /** region-aware document range against a stored display list (by handle) */
   rangeRectsRegionByHandle?(
     handle: number,
@@ -332,15 +361,18 @@ export interface RustDisplayListQueryEngine {
 }
 
 let enginePromise: Promise<RustDisplayListEngine & RustDisplayListQueryEngine> | null = null;
+let loadedEngine: (RustDisplayListEngine & RustDisplayListQueryEngine) | null = null;
 
 function loadEngine(): Promise<RustDisplayListEngine & RustDisplayListQueryEngine> {
   enginePromise ??= import('../wasm/index').then(async (m) => {
     await m.preloadLayoutWasm();
-    return {
+    return (loadedEngine = {
     buildDisplayListJson: m.buildDisplayListJson,
     hitTestRegionsJson: m.hitTestRegionsJson,
     verticalMoveJson: m.verticalMoveJson,
     rangeRectsJson: m.rangeRectsJson,
+    rangeRectsOnPagesJson: m.rangeRectsOnPagesJson,
+    hasRangeRectsOnPages: m.hasRangeRectsOnPages,
     rangeRectsRegionJson: m.rangeRectsRegionJson,
     hasRangeRectsRegion: m.hasRangeRectsRegion,
     hasDisplayListSession: m.hasDisplayListSession,
@@ -351,10 +383,16 @@ function loadEngine(): Promise<RustDisplayListEngine & RustDisplayListQueryEngin
     hitTestRegionsByHandle: m.hitTestRegionsByHandle,
     verticalMoveByHandle: m.verticalMoveByHandle,
     rangeRectsByHandle: m.rangeRectsByHandle,
+    rangeRectsOnPagesByHandle: m.rangeRectsOnPagesByHandle,
     rangeRectsRegionByHandle: m.rangeRectsRegionByHandle,
-  };
+  });
   });
   return enginePromise;
+}
+
+/** The wasm query surface once {@link loadRustDisplayListQueryEngine} has loaded it, else null. */
+export function loadedRustDisplayListQueryEngine(): RustDisplayListQueryEngine | null {
+  return loadedEngine;
 }
 
 /**
@@ -508,7 +546,8 @@ export async function buildRustDisplayList(
  * Build one display frame. An engine that retains pagination returns a binary
  * FrameDelta, decoded and applied on top of `previous` so unchanged pages keep
  * object identity; `previous` also supplies the frame epoch the engine checks
- * before sending a delta rather than a full frame. An engine without
+ * before sending a delta rather than a full frame, unless `expectedFrameEpoch`
+ * overrides it (the engine numbers its frame after that epoch). An engine without
  * `buildDisplayListFrame` takes the full-JSON path, and its result carries
  * `frame: null` and `transport: 'json'`.
  *
@@ -518,7 +557,8 @@ export async function buildRustDisplayList(
 export async function buildRustDisplayFrame(
   inputs: DisplayListBuildInputs,
   engine?: RustDisplayListEngine,
-  previous: RetainedFrame | null = null
+  previous: RetainedFrame | null = null,
+  expectedFrameEpoch = previous?.frameEpoch ?? 0
 ): Promise<RustDisplayFrameResult> {
   let eng: RustDisplayListEngine;
   try {
@@ -537,7 +577,7 @@ export async function buildRustDisplayFrame(
   const inputJson = encodeDisplayListFrameExtras(inputs);
   let encoded: Uint8Array;
   try {
-    encoded = eng.buildDisplayListFrame(inputJson, previous?.frameEpoch ?? 0);
+    encoded = eng.buildDisplayListFrame(inputJson, expectedFrameEpoch);
   } catch (error) {
     throw new RustDisplayListSourceError('build', error);
   }

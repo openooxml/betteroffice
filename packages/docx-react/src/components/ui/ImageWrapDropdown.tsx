@@ -27,6 +27,8 @@ export interface ImageWrapDropdownProps {
   };
   onChange: (wrapType: string) => void;
   disabled?: boolean;
+  /** Why the dropdown is disabled. */
+  description?: string;
 }
 
 function getActiveWrapValue(ctx: ImageWrapDropdownProps['imageContext']): string {
@@ -39,6 +41,7 @@ export function ImageWrapDropdown({
   imageContext,
   onChange,
   disabled = false,
+  description,
 }: ImageWrapDropdownProps) {
   const { t } = useTranslation();
   const translatedOptions: IconGridOption[] = WRAP_OPTIONS.map((opt) => ({
@@ -55,9 +58,10 @@ export function ImageWrapDropdown({
       options={translatedOptions}
       activeValue={activeValue}
       triggerIcon={currentOption.iconName}
-      tooltipContent={`Wrap: ${currentOption.label}`}
+      tooltipContent={t('imageWrap.tooltipPrefix', { label: currentOption.label })}
       onSelect={onChange}
       disabled={disabled}
+      description={description}
       testId="toolbar-image-wrap"
       showLabels
     />

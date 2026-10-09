@@ -6,6 +6,10 @@ Compare DOCX, PPTX, and XLSX renders against Microsoft Office. Inputs and genera
 
 SSIM is the mean page-penalized grayscale score at 150 DPI, without resampling or alignment correction. DOCX uses recorded page bounds with at most a one-pixel edge adjustment. Missing or extra pages are penalized. Exact page counts are the documents whose rendered page count equals the reference; absolute page error sums the per-document difference. BetterOffice browser renders use pinned CDN fonts; native DOCX and LibreOffice share bundled fonts in CI. XLSX uses recorded print ranges and scale; its score measures range rendering, not automatic print pagination. Means cover successful comparisons only; failed or missing comparisons have no score. Compare coverage alongside SSIM because the channels may score different subsets.
 
+## Private DOCX layout gate
+
+`node scripts/office-quality/private-ssim.mjs --source <docx> --reference-pdf <word.pdf> --reference-dir <dir> --package-root packages/docx --react-root packages/docx-react --fonts-dist packages/fonts/dist --out <dir> [--baseline <score.json>]` scores a local document against its Word PDF without leaving the machine: page-penalized and text-aligned SSIM at 150 DPI, page and break agreement, and the first diverging page; it exits 1 when a baseline comparison regresses.
+
 ## Local benchmark
 
 Run from the repository root with Bun, Node.js, Python 3.13, and the project's Rust/Wasm toolchain installed:
@@ -41,7 +45,7 @@ chart typography can still differ from Excel.
 
 ## Manual CI and generated README
 
-After the [workflow](../../.github/workflows/visual-fidelity.yml) lands on `main`, use **Actions → Benchmarks → Run workflow**, or:
+Run the [workflow](../../.github/workflows/visual-fidelity.yml) from **Actions → Benchmarks → Run workflow**, or:
 
 ```sh
 gh workflow run visual-fidelity.yml --ref main -f branch=main
@@ -103,8 +107,9 @@ written last, so it never points at an incomplete upload. Every published SHA is
 
 Missing format reports or incomplete render artifacts prevent publication. An R2 upload failure
 also stops the final job before the README update. [`apps/fidelity`](../../apps/fidelity)
-serves those renders next to the public Office references, so a page can be compared by swiping or
-by a difference blend. It reads scores only from `report.json` and never derives its own.
+serves the benchmarks site: an overview that charts
+`report.json` with the README's aggregation rules, and a viewer that shows those renders next to
+the public Office references, so a page can be compared by swiping or by a difference blend.
 
 ## Office references
 
@@ -216,7 +221,7 @@ LibreOffice uses the bundled Python/UNO runtime from the same pinned Linux insta
 
 The README shows only parse success from these probes. Preservation counts, exact edit footprints, source/output hashes and diagnostics stay in `roundtrip_benchmark` and per-sample `roundtrip`/`roundtrip_probe` report fields. SSIM, recalculation accuracy and timing comparisons continue separately.
 
-Two native builds per selected format feed batches of at most 16 files, with four files processed concurrently per worker. Each file runs all three channels sequentially in fresh processes with independent 180-second limits. Probe selection and each preservation check run in separate processes with 30-second limits. Even if every engine and helper reaches its limit, one batch spends at most 44 minutes on those subprocesses, leaving room for installation, downloads and artifacts within the 90-minute job. Timeout cleanup kills the process group, including LibreOffice children; already recorded parse successes survive a later timeout. These probes do not contribute to timing metrics. The reconciler requires every planned shard and file, all three channels, matching source/build/checker/LibreOffice identities and explicit preservation evidence before publication. `roundtrip-diagnostics-*` retains saved documents, probe definitions and process logs for seven days. Runs remain manual; adding this harness does not refresh the current README numbers.
+Two native builds per selected format feed batches of at most 16 files, with four files processed concurrently per worker. Each file runs all three channels sequentially in fresh processes with independent 180-second limits. Probe selection and each preservation check run in separate processes with 30-second limits. Even if every engine and helper reaches its limit, one batch spends at most 44 minutes on those subprocesses, leaving room for installation, downloads and artifacts within the 90-minute job. Timeout cleanup kills the process group, including LibreOffice children; already recorded parse successes survive a later timeout. These probes do not contribute to timing metrics. The reconciler requires every planned shard and file, all three channels, matching source/build/checker/LibreOffice identities and explicit preservation evidence before publication. `roundtrip-diagnostics-*` retains saved documents, probe definitions and process logs for seven days. Runs remain manual.
 
 Compile-check a host without executing measurements:
 

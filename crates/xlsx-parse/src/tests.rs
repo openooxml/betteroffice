@@ -3,8 +3,8 @@
 
 use xlsx_model::styles::{BorderStyle, Color, Fill, FormatCode, HAlign, VAlign};
 use xlsx_model::{
-    Cell, CellRef, CellValue, ColStyle, DateSystem, DefinedName, ErrorValue, FreezePane, Hyperlink,
-    SheetId, Workbook,
+    Cell, CellRange, CellRef, CellValue, ColStyle, DateSystem, DefinedName, ErrorValue, FreezePane,
+    Hyperlink, SheetId, Workbook,
 };
 
 use crate::write::{
@@ -26,7 +26,7 @@ fn owned_parts<S: AsRef<[u8]>>(parts: &[(String, S)]) -> Vec<(String, Vec<u8>)> 
         .collect()
 }
 
-fn parse_workbook_with_package(
+pub(super) fn parse_workbook_with_package(
     parts: &[(String, impl AsRef<[u8]>)],
 ) -> Result<crate::ParsedWorkbook, ParseError> {
     crate::parse_workbook_with_owned_package(owned_parts(parts))
@@ -38,7 +38,11 @@ fn parse_workbook(parts: &[(String, impl AsRef<[u8]>)]) -> Result<Workbook, Pars
 
 /// assemble a one-sheet package around a worksheet body and optional shared
 /// strings, so each test only spells out the part under exercise.
-fn package(worksheet_body: &str, shared: &[&str], date1904: bool) -> Vec<(String, Vec<u8>)> {
+pub(super) fn package(
+    worksheet_body: &str,
+    shared: &[&str],
+    date1904: bool,
+) -> Vec<(String, Vec<u8>)> {
     let pr = if date1904 {
         r#"<workbookPr date1904="1"/>"#
     } else {
@@ -521,6 +525,329 @@ fn flattens_rich_run_shared_string() {
         CellValue::Text {
             value: "Hello World".into()
         }
+    );
+}
+
+#[test]
+fn records_which_shared_strings_carry_runs() {
+    let sst = "<sst>\n  <si><t>plain</t></si>\n  <si>\n    <r><rPr><b/></rPr><t>Bold</t></r>\n    <r><t> tail &amp; more</t></r>\n  </si>\n  <si><t xml:space=\"preserve\"> spaced </t><rPh><t>ph</t></rPh></si>\n</sst>";
+    let mut parts = package(
+        r#"<sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c><c r="C1" t="s"><v>2</v></c></row></sheetData>"#,
+        &[],
+        false,
+    );
+    parts.push(("xl/sharedStrings.xml".to_string(), sst.as_bytes().to_vec()));
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    assert_eq!(
+        parsed.workbook.shared_strings,
+        ["plain", "\n    Bold\n     tail & more\n  ", " spaced ph"]
+    );
+    assert!(!parsed.package.shared_string_is_rich(0));
+    assert!(parsed.package.shared_string_is_rich(1));
+    assert!(!parsed.package.shared_string_is_rich(2));
+    let mut truncated = package("<sheetData/>", &[], false);
+    truncated.push((
+        "xl/sharedStrings.xml".to_string(),
+        b"<sst><si><t>open".to_vec(),
+    ));
+    assert!(parse_workbook(&truncated).is_err());
+}
+
+fn sources_package() -> Vec<(String, Vec<u8>)> {
+    let workbook = r#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Shown" sheetId="1" r:id="rId1"/><sheet name="Hidden" sheetId="2" state="hidden" r:id="rId2"/><sheet name="Deep" sheetId="3" state="veryHidden" r:id="rId3"/><sheet name="Odd" sheetId="4" state="folded" r:id="rId4"/><sheet name="Chart" sheetId="5" r:id="rId5"/></sheets></workbook>"#;
+    let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet3.xml"/><Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet4.xml"/><Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chartsheet" Target="chartsheets/sheet1.xml"/></Relationships>"#;
+    let sheet_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="../comments1.xml"/><Relationship Id="rId3" Type="http://schemas.microsoft.com/office/2017/10/relationships/threadedComment" Target="../threadedComments/threadedComment1.xml"/><Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotTable" Target="../pivotTables/pivotTable1.xml"/><Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/broken.xml"/></Relationships>"#;
+    let anchor = |from: &str| {
+        format!(
+            "<xdr:twoCellAnchor><xdr:from><xdr:col>{from}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>4</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>3</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>"
+        )
+    };
+    let drawing = format!(
+        concat!(
+            r#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">"#,
+            r#"{a}<xdr:sp><xdr:nvSpPr><xdr:cNvPr id="2" name="Note box" descr="A note" title="Box" hidden="1"/></xdr:nvSpPr></xdr:sp><xdr:clientData/></xdr:twoCellAnchor>"#,
+            r#"{b}<mc:AlternateContent><mc:Choice Requires="a14"><xdr:grpSp><xdr:nvGrpSpPr><xdr:cNvPr id="3" name="Group"/></xdr:nvGrpSpPr></xdr:grpSp></mc:Choice><mc:Fallback/></mc:AlternateContent><xdr:clientData/></xdr:twoCellAnchor>"#,
+            r#"<mc:AlternateContent><mc:Choice Requires="x14">{c}<xdr:pic><xdr:nvPicPr><xdr:cNvPr id="4" name="Wrapped"/></xdr:nvPicPr><xdr:blipFill><a:blip r:embed="rIdImg"/></xdr:blipFill></xdr:pic><xdr:clientData/></xdr:twoCellAnchor></mc:Choice></mc:AlternateContent>"#,
+            r#"<xdr:absoluteAnchor><xdr:pos x="0" y="0"/><xdr:ext cx="1" cy="1"/><xdr:graphicFrame><xdr:nvGraphicFramePr><xdr:cNvPr id="5" name="Smart"/></xdr:nvGraphicFramePr><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/diagram"/></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:absoluteAnchor>"#,
+            r#"</xdr:wsDr>"#
+        ),
+        a = anchor("1"),
+        b = anchor("2"),
+        c = anchor("3"),
+    );
+    let worksheet = r#"<worksheet xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData/><conditionalFormatting sqref="A1"/><dataValidations count="0"/><drawing r:id="rId1"/></worksheet>"#;
+    let plain = "<worksheet><sheetData/></worksheet>";
+    [
+        ("xl/workbook.xml", workbook.to_owned()),
+        ("xl/_rels/workbook.xml.rels", rels.to_owned()),
+        ("xl/worksheets/sheet1.xml", worksheet.to_owned()),
+        ("xl/worksheets/_rels/sheet1.xml.rels", sheet_rels.to_owned()),
+        ("xl/worksheets/sheet2.xml", plain.to_owned()),
+        ("xl/worksheets/sheet3.xml", plain.to_owned()),
+        ("xl/worksheets/sheet4.xml", plain.to_owned()),
+        ("xl/chartsheets/sheet1.xml", "<chartsheet/>".to_owned()),
+        ("xl/drawings/drawing1.xml", drawing),
+        (
+            "xl/drawings/_rels/drawing1.xml.rels",
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImg" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.png"/></Relationships>"#.to_owned(),
+        ),
+        ("xl/drawings/broken.xml", "<xdr:wsDr".to_owned()),
+        (
+            "xl/comments1.xml",
+            "<comments><commentList><comment ref=\"A1\"/><comment ref=\"B1\"/></commentList></comments>".to_owned(),
+        ),
+        (
+            "xl/threadedComments/threadedComment1.xml",
+            "<ThreadedComments><threadedComment ref=\"A1\"/></ThreadedComments>".to_owned(),
+        ),
+    ]
+    .into_iter()
+    .map(|(name, xml)| (name.to_owned(), xml.into_bytes()))
+    .collect()
+}
+
+#[test]
+fn reports_source_sheet_visibility_kind_and_part() {
+    use crate::{SheetVisibility, SourceSheetKind};
+    let parsed = parse_workbook_with_package(&sources_package()).unwrap();
+    let package = &parsed.package;
+    let visibility = (0..5)
+        .map(|index| package.source_sheet_visibility(index).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        visibility,
+        [
+            SheetVisibility::Visible,
+            SheetVisibility::Hidden,
+            SheetVisibility::VeryHidden,
+            SheetVisibility::Unknown,
+            SheetVisibility::Visible,
+        ]
+    );
+    assert_eq!(
+        package.source_sheet_kind(0),
+        Some(SourceSheetKind::Worksheet)
+    );
+    assert_eq!(
+        package.source_sheet_kind(4),
+        Some(SourceSheetKind::Chartsheet)
+    );
+    assert_eq!(
+        package.source_sheet_part(4),
+        Some("xl/chartsheets/sheet1.xml")
+    );
+    assert_eq!(package.source_sheet_visibility(5), None);
+}
+
+#[test]
+fn inventories_drawing_objects_comments_and_dropped_features() {
+    use crate::DrawingObjectKind;
+    use xlsx_model::ChartAnchor;
+    let parsed = parse_workbook_with_package(&sources_package()).unwrap();
+    let mut budget = ample();
+    let inventory = parsed.package.source_sheet_inventory(0, &mut budget);
+    assert_eq!(inventory.limited, None);
+    assert_eq!(inventory.comments, 2);
+    assert_eq!(inventory.threaded_comments, 1);
+    assert_eq!(
+        inventory.features,
+        ["conditional formatting", "data validation", "pivot tables"]
+    );
+    assert!(inventory.unreadable_parts.is_empty());
+    let mut objects = Vec::new();
+    let mut unreadable = Vec::new();
+    let finished = parsed
+        .package
+        .visit_source_sheet_objects(0, &mut ample(), |item| {
+            match item {
+                crate::SourceObject::Object(object) => objects.push(object),
+                crate::SourceObject::Unreadable(part) => unreadable.push(part),
+                crate::SourceObject::Limited(part) => panic!("{part} hit a limit"),
+            }
+            std::ops::ControlFlow::Continue(())
+        });
+    assert!(finished.is_continue());
+    assert_eq!(unreadable, ["xl/drawings/broken.xml"]);
+    let mut seen = 0;
+    let stopped = parsed
+        .package
+        .visit_source_sheet_objects(0, &mut ample(), |_| {
+            seen += 1;
+            if seen == 2 {
+                std::ops::ControlFlow::Break(())
+            } else {
+                std::ops::ControlFlow::Continue(())
+            }
+        });
+    assert!(stopped.is_break() && seen == 2);
+    assert_eq!(
+        objects
+            .iter()
+            .map(|object| (object.kind, object.ordinal, object.anchor_index))
+            .collect::<Vec<_>>(),
+        [
+            (DrawingObjectKind::Shape, 0, Some(0)),
+            (DrawingObjectKind::Group, 1, Some(1)),
+            (DrawingObjectKind::Picture, 2, None),
+            (DrawingObjectKind::Diagram, 3, Some(2)),
+        ]
+    );
+    assert_eq!(objects[0].name.as_deref(), Some("Note box"));
+    assert_eq!(objects[0].description.as_deref(), Some("A note"));
+    assert_eq!(objects[0].title.as_deref(), Some("Box"));
+    assert!(objects[0].hidden);
+    assert!(matches!(
+        objects[0].anchor,
+        Some(ChartAnchor::TwoCell { from, .. }) if from.col == 1 && from.row == 1
+    ));
+    assert_eq!(objects[2].target.as_deref(), Some("xl/media/image1.png"));
+    assert!(matches!(
+        objects[3].anchor,
+        Some(ChartAnchor::Absolute { .. })
+    ));
+    assert_eq!(
+        parsed.package.source_sheet_inventory(1, &mut ample()),
+        crate::SheetInventory::default()
+    );
+}
+
+fn ample() -> crate::InspectionBudget {
+    crate::InspectionBudget {
+        nodes: u64::MAX,
+        bytes: u64::MAX,
+    }
+}
+
+#[test]
+fn inspection_stops_where_the_budget_runs_out() {
+    let parsed = parse_workbook_with_package(&sources_package()).unwrap();
+    let package = &parsed.package;
+    let mut full = ample();
+    package.source_sheet_inventory(0, &mut full);
+    let _ =
+        package.visit_source_sheet_objects(0, &mut full, |_| std::ops::ControlFlow::Continue(()));
+    let spent = u64::MAX - full.nodes;
+    assert!(spent > 40, "{spent}");
+
+    let mut small = crate::InspectionBudget {
+        nodes: 12,
+        bytes: u64::MAX,
+    };
+    let inventory = package.source_sheet_inventory(0, &mut small);
+    assert_eq!(
+        inventory.limited.as_deref(),
+        Some("xl/worksheets/_rels/sheet1.xml.rels")
+    );
+    assert_eq!(small.nodes, 0);
+    assert_eq!(inventory.comments, 0);
+
+    let mut visit_cost = ample();
+    let _ = package
+        .visit_source_sheet_objects(0, &mut visit_cost, |_| std::ops::ControlFlow::Continue(()));
+    let visit_cost = u64::MAX - visit_cost.nodes;
+    for nodes in [1, 20, visit_cost - 1] {
+        let mut budget = crate::InspectionBudget {
+            nodes,
+            bytes: u64::MAX,
+        };
+        let mut seen = Vec::new();
+        let stopped = package.visit_source_sheet_objects(0, &mut budget, |item| {
+            seen.push(item);
+            std::ops::ControlFlow::Continue(())
+        });
+        assert!(stopped.is_break(), "{nodes}");
+        assert!(
+            matches!(seen.as_slice(), [crate::SourceObject::Limited(_)]),
+            "{nodes}: {seen:?}"
+        );
+    }
+
+    let mut bytes = crate::InspectionBudget {
+        nodes: u64::MAX,
+        bytes: 10,
+    };
+    assert!(
+        package
+            .source_sheet_inventory(0, &mut bytes)
+            .limited
+            .is_some()
+    );
+}
+
+#[test]
+fn a_drawing_past_the_depth_cap_is_a_limit_and_malformed_xml_is_unreadable() {
+    let mut parts = sources_package();
+    let nested = format!(
+        r#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing">{}{}</xdr:wsDr>"#,
+        "<xdr:grpSp>".repeat(70),
+        "</xdr:grpSp>".repeat(70)
+    );
+    parts
+        .iter_mut()
+        .find(|(name, _)| name == "xl/drawings/drawing1.xml")
+        .unwrap()
+        .1 = nested.into_bytes();
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let mut seen = Vec::new();
+    let _ = parsed
+        .package
+        .visit_source_sheet_objects(0, &mut ample(), |item| {
+            seen.push(item);
+            std::ops::ControlFlow::Continue(())
+        });
+    assert!(matches!(
+        seen.as_slice(),
+        [crate::SourceObject::Limited(part)] if part == "xl/drawings/drawing1.xml"
+    ));
+}
+
+#[test]
+fn a_drawing_missing_from_the_package_is_unreadable() {
+    let mut parts = sources_package();
+    parts.retain(|(name, _)| name != "xl/drawings/drawing1.xml");
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let mut seen = Vec::new();
+    let finished = parsed
+        .package
+        .visit_source_sheet_objects(0, &mut ample(), |item| {
+            seen.push(item);
+            std::ops::ControlFlow::Continue(())
+        });
+    assert!(finished.is_continue());
+    assert_eq!(
+        seen,
+        [
+            crate::SourceObject::Unreadable("xl/drawings/drawing1.xml".to_owned()),
+            crate::SourceObject::Unreadable("xl/drawings/broken.xml".to_owned()),
+        ]
+    );
+}
+
+#[test]
+fn records_uncached_formulas_and_rich_inline_strings() {
+    let parts = package(
+        concat!(
+            r#"<sheetData><row r="1"><c r="A1" t="b"><f>TRUE()</f></c><c r="B1" t="str"><f>"x"</f></c>"#,
+            r#"<c r="C1"><f>1+1</f><v>2</v></c><c r="D1" t="str"><f>"y"</f><v></v></c>"#,
+            r#"<c r="E1" t="inlineStr"><is><r><rPr><b/></rPr><t>Bo</t></r><r><t>ld</t></r></is></c>"#,
+            r#"<c r="F1" t="inlineStr"><is><t>plain</t></is></c></row></sheetData>"#
+        ),
+        &[],
+        false,
+    );
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let facts = parsed.package.source_cell_facts(0).unwrap();
+    assert_eq!(
+        facts.uncached_formulas.iter().copied().collect::<Vec<_>>(),
+        [(0, 0), (0, 1)]
+    );
+    assert_eq!(
+        facts.rich_inline.iter().collect::<Vec<_>>(),
+        [(&(0, 4), &"Bold".to_owned())]
+    );
+    assert_eq!(
+        cell_at(&parsed.workbook, "A1").value,
+        CellValue::Bool { value: false }
     );
 }
 
@@ -1518,6 +1845,387 @@ fn two_sheet_package(first_body: &str, second_body: &str) -> Vec<(String, Vec<u8
     ]
 }
 
+fn check_source_sheet_after_unrelated_edit(body: &str, axes: SheetAxes, borrowed: bool) {
+    let parts = two_sheet_package(
+        r#"<sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>"#,
+        body,
+    );
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let mut workbook = parsed.workbook.clone();
+    workbook.sheets[0].set_cell(
+        CellRef::new(0, 0),
+        Cell {
+            value: CellValue::Number { value: 2.0 },
+            ..Cell::default()
+        },
+    );
+    assert_eq!(workbook.sheets[1], parsed.workbook.sheets[1]);
+    let provenance = [
+        parsed.package.source_shared_string_cells(0),
+        parsed.package.source_shared_string_cells(1),
+    ];
+    let axes = [Some(SheetAxes::default()), Some(axes)];
+    let save = || {
+        serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes(
+            &workbook,
+            &parsed.package,
+            &[Some(0), Some(1)],
+            &provenance,
+            &axes,
+            SaveEdits {
+                changed: true,
+                moved_references: false,
+            },
+            SheetId(0),
+        )
+        .unwrap()
+    };
+    let saved = save();
+    let (legacy, dispatches) = crate::with_legacy_save_path(save);
+    assert!(dispatches > 0);
+    assert_eq!(saved, legacy);
+    for saved in [&saved, &legacy] {
+        let (_, sheet) = saved
+            .iter()
+            .find(|(path, _)| path == "xl/worksheets/sheet2.xml")
+            .unwrap();
+        if borrowed {
+            assert!(matches!(sheet, std::borrow::Cow::Borrowed(_)));
+            assert_eq!(
+                sheet.as_ref(),
+                part_bytes(&parts, "xl/worksheets/sheet2.xml")
+            );
+        } else {
+            assert!(matches!(sheet, std::borrow::Cow::Owned(_)));
+            assert_ne!(
+                sheet.as_ref(),
+                part_bytes(&parts, "xl/worksheets/sheet2.xml")
+            );
+            assert!(
+                !String::from_utf8(sheet.to_vec())
+                    .unwrap()
+                    .contains("outlineLevel")
+            );
+        }
+        let reopened = parse_workbook(saved).unwrap();
+        assert_eq!(reopened.sheets[1], parsed.workbook.sheets[1]);
+        assert_eq!(reopened, workbook);
+    }
+}
+
+#[test]
+fn source_tab_color_survives_unrelated_edit_and_distant_row_insert() {
+    let body = r#"<sheetPr><tabColor rgb="FF112233"/></sheetPr><sheetData><row outlineLevel="1"><c><v>1</v></c></row></sheetData>"#;
+    let mut axes = SheetAxes::default();
+    axes.rows.insert(100, 1);
+    check_source_sheet_after_unrelated_edit(body, axes, true);
+}
+
+#[test]
+fn source_implicit_empty_rows_survive_unrelated_edit_and_row_insert() {
+    let body = r#"<sheetData><row/><row outlineLevel="1"/></sheetData>"#;
+    let mut axes = SheetAxes::default();
+    axes.rows.insert(1, 1);
+    check_source_sheet_after_unrelated_edit(body, axes, true);
+}
+
+#[test]
+fn source_implicit_row_after_explicit_row_is_dropped_when_deleted() {
+    let body = r#"<sheetData><row r="5"/><row outlineLevel="1"/></sheetData>"#;
+    let mut axes = SheetAxes::default();
+    axes.rows.delete(0, 1);
+    axes.rows.insert(0, 1);
+    check_source_sheet_after_unrelated_edit(body, axes, false);
+}
+
+fn check_extension_formula_after_unrelated_edit(
+    extension: &str,
+    axes: [Option<SheetAxes>; 2],
+    borrowed: bool,
+) {
+    let grid = r#"<sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>"#;
+    let parts = two_sheet_package(grid, &format!("{grid}{extension}"));
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let mut workbook = parsed.workbook.clone();
+    set_number(&mut workbook, 0, "A1", 2.0);
+    assert_eq!(workbook.sheets[1], parsed.workbook.sheets[1]);
+    let provenance = [
+        parsed.package.source_shared_string_cells(0),
+        parsed.package.source_shared_string_cells(1),
+    ];
+    let save = || {
+        serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes(
+            &workbook,
+            &parsed.package,
+            &[Some(0), Some(1)],
+            &provenance,
+            &axes,
+            SaveEdits {
+                changed: true,
+                moved_references: true,
+            },
+            SheetId(0),
+        )
+        .unwrap()
+    };
+    let saved = save();
+    let (legacy, dispatches) = crate::with_legacy_save_path(save);
+    assert!(dispatches > 0);
+    assert_eq!(saved, legacy);
+    for saved in [&saved, &legacy] {
+        let (_, sheet) = saved
+            .iter()
+            .find(|(path, _)| path == "xl/worksheets/sheet2.xml")
+            .unwrap();
+        if borrowed {
+            assert!(matches!(sheet, std::borrow::Cow::Borrowed(_)));
+            assert_eq!(
+                sheet.as_ref(),
+                part_bytes(&parts, "xl/worksheets/sheet2.xml")
+            );
+        } else {
+            assert!(matches!(sheet, std::borrow::Cow::Owned(_)));
+        }
+        let reopened = parse_workbook(saved).unwrap();
+        assert_eq!(reopened.sheets[1], parsed.workbook.sheets[1]);
+        assert_eq!(reopened, workbook);
+    }
+}
+
+#[test]
+fn source_extension_formula_sparkline_moved_range_refuses_borrowing() {
+    let extension = r#"<extLst><ext uri="{05C60535-1F16-4FD2-B633-F4F36F0B64E0}" xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main"><x14:sparklineGroups xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main"><x14:sparklineGroup><x14:sparklines><x14:sparkline><xm:f>Sheet2!E5:E6</xm:f><xm:sqref>A1</xm:sqref></x14:sparkline></x14:sparklines></x14:sparklineGroup></x14:sparklineGroups></ext></extLst>"#;
+    let mut axes = SheetAxes::default();
+    axes.rows.insert(3, 1);
+    assert_eq!(axes.rows.current(4), Some(5));
+    assert_eq!(axes.rows.current(5), Some(6));
+    check_extension_formula_after_unrelated_edit(
+        extension,
+        [Some(SheetAxes::default()), Some(axes)],
+        false,
+    );
+}
+
+#[test]
+fn source_extension_formula_unmoved_rows_borrow_byte_identically() {
+    let extension = r#"<extLst xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main" xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main"><ext><x14:dataValidations><x14:dataValidation><x14:formula1><xm:f>SUM('Sheet2'!$E$1:$E$2)</xm:f></x14:formula1><xm:sqref>A1</xm:sqref></x14:dataValidation></x14:dataValidations></ext></extLst>"#;
+    let mut axes = SheetAxes::default();
+    axes.rows.insert(3, 1);
+    check_extension_formula_after_unrelated_edit(
+        extension,
+        [Some(SheetAxes::default()), Some(axes)],
+        true,
+    );
+}
+
+#[test]
+fn source_extension_formula_other_sheet_moved_axes_refuse_borrowing() {
+    let extension = r#"<extLst xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main" xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main"><ext><x14:conditionalFormattings><x14:conditionalFormatting><x14:cfRule type="expression"><xm:f>'Sheet1'!$E$5&gt;1</xm:f></x14:cfRule><xm:sqref>A1</xm:sqref></x14:conditionalFormatting></x14:conditionalFormattings></ext></extLst>"#;
+    let mut axes = SheetAxes::default();
+    axes.rows.insert(3, 1);
+    check_extension_formula_after_unrelated_edit(
+        extension,
+        [Some(axes), Some(SheetAxes::default())],
+        false,
+    );
+}
+
+#[test]
+fn source_extension_formula_without_references_borrows() {
+    let extension = r#"<extLst xmlns:x="urn:generic"><ext><x:f>IF(TRUE,SQRT(100),&quot;Sheet2!E5:E6&quot;)</x:f></ext></extLst>"#;
+    let mut axes = SheetAxes::default();
+    axes.rows.insert(3, 1);
+    check_extension_formula_after_unrelated_edit(
+        extension,
+        [Some(SheetAxes::default()), Some(axes)],
+        true,
+    );
+}
+
+fn extension_formula_package(formula: &str, names: &str) -> Vec<(String, Vec<u8>)> {
+    let grid = r#"<sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>"#;
+    let mut parts = two_sheet_package(
+        grid,
+        &format!(
+            r#"{grid}<extLst xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main"><ext><xm:f>{formula}</xm:f></ext></extLst>"#
+        ),
+    );
+    let workbook = parts
+        .iter_mut()
+        .find(|(path, _)| path == "xl/workbook.xml")
+        .unwrap();
+    workbook.1 = String::from_utf8(workbook.1.clone())
+        .unwrap()
+        .replace("</workbook>", &format!("{names}</workbook>"))
+        .into_bytes();
+    parts
+}
+
+fn check_extension_formula_save(
+    parts: &[(String, Vec<u8>)],
+    parsed: &crate::ParsedWorkbook,
+    workbook: &Workbook,
+    axes: &[Option<SheetAxes>],
+    borrowed: bool,
+) {
+    let origins = (0..workbook.sheets.len()).map(Some).collect::<Vec<_>>();
+    let provenance = (0..workbook.sheets.len())
+        .map(|origin| parsed.package.source_shared_string_cells(origin))
+        .collect::<Vec<_>>();
+    let save = || {
+        serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes(
+            workbook,
+            &parsed.package,
+            &origins,
+            &provenance,
+            axes,
+            SaveEdits {
+                changed: true,
+                moved_references: true,
+            },
+            SheetId(0),
+        )
+        .unwrap()
+    };
+    let saved = save();
+    let (legacy, dispatches) = crate::with_legacy_save_path(save);
+    assert!(dispatches > 0);
+    assert_eq!(saved, legacy);
+    for saved in [&saved, &legacy] {
+        let (_, sheet) = saved
+            .iter()
+            .find(|(path, _)| path == "xl/worksheets/sheet2.xml")
+            .unwrap();
+        if borrowed {
+            assert!(matches!(sheet, std::borrow::Cow::Borrowed(_)));
+            assert_eq!(
+                sheet.as_ref(),
+                part_bytes(parts, "xl/worksheets/sheet2.xml")
+            );
+        } else {
+            assert!(matches!(sheet, std::borrow::Cow::Owned(_)));
+        }
+        let reopened = parse_workbook(saved).unwrap();
+        assert_eq!(reopened.sheets[1], parsed.workbook.sheets[1]);
+        assert_eq!(&reopened, workbook);
+    }
+}
+
+#[test]
+fn source_extension_formula_parenthesized_intersection_refuses_borrowing() {
+    let extension = r#"<extLst xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main"><ext><xm:f>SUM($E$5 (E:E))</xm:f></ext></extLst>"#;
+    let mut axes = SheetAxes::default();
+    axes.rows.insert(3, 1);
+    assert_eq!(axes.rows.current(4), Some(5));
+    check_extension_formula_after_unrelated_edit(
+        extension,
+        [Some(SheetAxes::default()), Some(axes)],
+        false,
+    );
+}
+
+#[test]
+fn source_extension_formula_renamed_sheet_names_refuse_borrowing() {
+    let mut parts = extension_formula_package("Data!E5", "");
+    for (path, bytes) in &mut parts {
+        let source = String::from_utf8(bytes.clone()).unwrap();
+        if path == "xl/workbook.xml" {
+            *bytes = source
+                .replace("Sheet1", "Data")
+                .replace("Sheet2", "View")
+                .replace(
+                    "</sheets>",
+                    r#"<sheet name="Other" sheetId="3" r:id="rId3"/></sheets>"#,
+                )
+                .into_bytes();
+        } else if path == "xl/_rels/workbook.xml.rels" {
+            *bytes = source
+                .replace(
+                    "</Relationships>",
+                    r#"<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet3.xml"/></Relationships>"#,
+                )
+                .into_bytes();
+        }
+    }
+    parts.push((
+        "xl/worksheets/sheet3.xml".to_owned(),
+        br#"<worksheet><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData></worksheet>"#
+            .to_vec(),
+    ));
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let mut axes = SheetAxes::default();
+    axes.rows.insert(3, 1);
+    assert_eq!(axes.rows.current(4), Some(5));
+    let axes = [
+        Some(SheetAxes::default()),
+        Some(SheetAxes::default()),
+        Some(axes),
+    ];
+    for reuse_name in [false, true] {
+        let mut workbook = parsed.workbook.clone();
+        workbook.sheets[0].name = "OldData".to_owned();
+        if reuse_name {
+            workbook.sheets[2].name = "Data".to_owned();
+        }
+        set_number(&mut workbook, 0, "A1", 2.0);
+        check_extension_formula_save(&parts, &parsed, &workbook, &axes, false);
+    }
+}
+
+#[test]
+fn source_extension_formula_cell_shaped_defined_name_refuses_borrowing() {
+    for scope in ["", r#" localSheetId="0""#, r#" localSheetId="1""#] {
+        let names = format!(
+            r#"<definedNames><definedName name="AB1"{scope}>Sheet1!$E$5</definedName></definedNames>"#
+        );
+        let parts = extension_formula_package("AB1", &names);
+        let parsed = parse_workbook_with_package(&parts).unwrap();
+        assert_eq!(parsed.workbook.defined_names[0].name, "AB1");
+        assert_eq!(parsed.workbook.defined_names[0].formula, "Sheet1!$E$5");
+        let mut workbook = parsed.workbook.clone();
+        workbook.defined_names[0].formula = "Sheet1!$E$6".to_owned();
+        set_number(&mut workbook, 0, "A1", 2.0);
+        let mut axes = SheetAxes::default();
+        axes.rows.insert(3, 1);
+        assert_eq!(axes.rows.current(4), Some(5));
+        check_extension_formula_save(
+            &parts,
+            &parsed,
+            &workbook,
+            &[Some(axes), Some(SheetAxes::default())],
+            false,
+        );
+    }
+}
+
+#[test]
+fn source_extension_formula_identity_intersection_and_name_borrow_byte_identically() {
+    let names = r#"<definedNames><definedName name="AB1">Sheet1!$E$5</definedName></definedNames>"#;
+    let parts = extension_formula_package("SUM($E$5 (E:E))+AB1", names);
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let mut workbook = parsed.workbook.clone();
+    set_number(&mut workbook, 0, "A1", 2.0);
+    check_extension_formula_save(
+        &parts,
+        &parsed,
+        &workbook,
+        &[Some(SheetAxes::default()), Some(SheetAxes::default())],
+        true,
+    );
+}
+
+#[test]
+fn source_extension_formula_unmoved_function_reference_borrows_byte_identically() {
+    let extension = r#"<extLst xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main"><ext><xm:f>SUM(E5)</xm:f></ext></extLst>"#;
+    let mut axes = SheetAxes::default();
+    axes.rows.insert(3, 1);
+    check_extension_formula_after_unrelated_edit(
+        extension,
+        [Some(axes), Some(SheetAxes::default())],
+        true,
+    );
+}
+
 fn part_bytes<S: AsRef<[u8]>>(parts: &[(String, S)], path: &str) -> Vec<u8> {
     parts
         .iter()
@@ -1703,6 +2411,15 @@ fn row_insert_shifts_preserved_row_and_cell_markup() {
     }
     for (at, cell) in cells {
         workbook.sheets[0].set_cell(CellRef::new(at.row + 1, at.col), cell);
+    }
+    let arrays: Vec<(CellRef, CellRange)> = workbook.sheets[0].array_formulas().collect();
+    for (at, _) in &arrays {
+        workbook.sheets[0].clear_array_formula(*at);
+    }
+    let down = |at: CellRef| CellRef::new(at.row + 1, at.col);
+    for (at, spill) in arrays {
+        workbook.sheets[0]
+            .set_array_formula(down(at), CellRange::new(down(spill.start), down(spill.end)));
     }
     let heights: Vec<(u32, f64)> = workbook.sheets[0]
         .row_heights

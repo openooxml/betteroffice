@@ -2,4 +2,4 @@
 "@betteroffice/xlsx-react": minor
 ---
 
-Expose host save interception, awaited input flushing, and pointer position queries.
+Adds opt-in `onSaveRequest` to intercept saving, plus `flushPendingInput` and `getPositionAtPoint` on the editor API to await input and query cells under a pointer.

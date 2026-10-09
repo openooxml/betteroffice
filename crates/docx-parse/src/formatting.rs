@@ -596,6 +596,12 @@ pub fn parse_paragraph_properties(
     if let Some(indent) = p_pr.child("w", "ind") {
         value.indent_left = indent.parse_numeric_attribute(Some("w"), "left", 1.0);
         value.indent_right = indent.parse_numeric_attribute(Some("w"), "right", 1.0);
+        if value.indent_left.is_none() {
+            value.indent_left = indent.parse_numeric_attribute(Some("w"), "start", 1.0);
+        }
+        if value.indent_right.is_none() {
+            value.indent_right = indent.parse_numeric_attribute(Some("w"), "end", 1.0);
+        }
         value.indent_first_line = indent.parse_numeric_attribute(Some("w"), "firstLine", 1.0);
         if let Some(hanging) = indent.parse_numeric_attribute(Some("w"), "hanging", 1.0) {
             value.indent_first_line = Some(-hanging);
@@ -1552,6 +1558,20 @@ mod tests {
         let hanging = parse_paragraph_properties(hanging.child("w", "pPr"), None).unwrap();
         assert_eq!(hanging.indent_first_line_chars, Some(-150.0));
         assert_eq!(hanging.hanging_indent, Some(true));
+    }
+
+    #[test]
+    fn a_style_indent_reads_start_and_end_when_left_and_right_are_absent() {
+        let style = root(r#"<w:style><w:pPr><w:ind w:start="720" w:end="360"/></w:pPr></w:style>"#);
+        let paragraph = parse_paragraph_properties(style.child("w", "pPr"), None).unwrap();
+        assert_eq!(paragraph.indent_left, Some(720.0));
+        assert_eq!(paragraph.indent_right, Some(360.0));
+        let style = root(
+            r#"<w:style><w:pPr><w:ind w:left="100" w:start="720" w:right="200" w:end="360"/></w:pPr></w:style>"#,
+        );
+        let paragraph = parse_paragraph_properties(style.child("w", "pPr"), None).unwrap();
+        assert_eq!(paragraph.indent_left, Some(100.0));
+        assert_eq!(paragraph.indent_right, Some(200.0));
     }
 
     #[test]

@@ -2,9 +2,9 @@
 
 use std::collections::HashSet;
 
-use yrs::{Any, Map, Out, ReadTxn, Transact};
+use yrs::{Any, Map, Out, ReadTxn, TextRef, Transact};
 
-use crate::op::{LocRange, OpError, OpResult, para_bounds};
+use crate::op::{OpError, OpResult, para_bounds};
 use crate::ops::{Chunk, ChunkKind, capture_pilcrow};
 use crate::queries::TextView;
 use crate::{
@@ -72,6 +72,8 @@ pub struct SelectionContextInfo {
     pub italic: TriState,
     pub underline: TriState,
     pub strike: TriState,
+    pub superscript: TriState,
+    pub subscript: TriState,
     // -- uniform-or-null value marks --
     /// The uniform `fontFamily.ascii`, or `None` when mixed/absent.
     pub font_family: Option<String>,
@@ -80,6 +82,8 @@ pub struct SelectionContextInfo {
     /// The uniform text color: the `rgb` hex when set, else the theme color
     /// name; `None` when mixed/absent.
     pub color: Option<String>,
+    /// The uniform highlight color name, or `None` when mixed/absent.
+    pub highlight: Option<String>,
     // Paragraph state at the range start.
     pub para_id: ParagraphId,
     /// The paragraph's `pStyle`, extracted from `paragraph_properties`.
@@ -132,35 +136,71 @@ pub(crate) fn table_cell_stories<T: ReadTxn>(doc: &EditingDoc, txn: &T) -> HashS
         let Out::YText(story) = value else {
             continue;
         };
-        for chunk in doc.chunk_snapshot(story_id, &story, txn).iter() {
-            let ChunkKind::Embed(Some(map)) = &chunk.kind else {
+        collect_table_cell_stories(doc, txn, story_id, &story, &mut cells);
+    }
+    cells
+}
+
+/// Whether `story` is a table cell story. Cell stories are named
+/// `{parent}:t{table}:r{row}c{cell}`, so that parent's tables are read first;
+/// only a story they do not list costs the whole-document scan.
+pub(crate) fn is_table_cell_story<T: ReadTxn>(doc: &EditingDoc, txn: &T, story: &str) -> bool {
+    if let Some(parent) = cell_story_parent(story)
+        && let Some(Out::YText(parent_story)) = txn
+            .get_map(crate::STORIES)
+            .and_then(|stories| stories.get(txn, parent))
+    {
+        let mut cells = HashSet::new();
+        collect_table_cell_stories(doc, txn, parent, &parent_story, &mut cells);
+        if cells.contains(story) {
+            return true;
+        }
+    }
+    table_cell_stories(doc, txn).contains(story)
+}
+
+fn cell_story_parent(story: &str) -> Option<&str> {
+    let (rest, cell) = story.rsplit_once(':')?;
+    let (parent, table) = rest.rsplit_once(':')?;
+    let digits = |value: &str| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit());
+    let (row, column) = cell.strip_prefix('r')?.split_once('c')?;
+    (digits(table.strip_prefix('t')?) && digits(row) && digits(column)).then_some(parent)
+}
+
+fn collect_table_cell_stories<T: ReadTxn>(
+    doc: &EditingDoc,
+    txn: &T,
+    story_id: &str,
+    story: &TextRef,
+    cells: &mut HashSet<String>,
+) {
+    for chunk in doc.chunk_snapshot(story_id, story, txn).iter() {
+        let ChunkKind::Embed(Some(map)) = &chunk.kind else {
+            continue;
+        };
+        if map_string(map, txn, KIND_KEY).as_deref() != Some("table") {
+            continue;
+        }
+        let Some(Out::Any(Any::Array(rows))) = map.get(txn, "rows") else {
+            continue;
+        };
+        for row in rows.iter() {
+            let Any::Map(row) = row else {
                 continue;
             };
-            if map_string(map, txn, KIND_KEY).as_deref() != Some("table") {
-                continue;
-            }
-            let Some(Out::Any(Any::Array(rows))) = map.get(txn, "rows") else {
+            let Some(Any::Array(row_cells)) = row.get("cells") else {
                 continue;
             };
-            for row in rows.iter() {
-                let Any::Map(row) = row else {
+            for cell in row_cells.iter() {
+                let Any::Map(cell) = cell else {
                     continue;
                 };
-                let Some(Any::Array(row_cells)) = row.get("cells") else {
-                    continue;
-                };
-                for cell in row_cells.iter() {
-                    let Any::Map(cell) = cell else {
-                        continue;
-                    };
-                    if let Some(Any::String(story_id)) = cell.get("story") {
-                        cells.insert(story_id.to_string());
-                    }
+                if let Some(Any::String(story_id)) = cell.get("story") {
+                    cells.insert(story_id.to_string());
                 }
             }
         }
     }
-    cells
 }
 
 impl EditingDoc {
@@ -208,8 +248,10 @@ impl EditingDoc {
                 story: range.story.clone(),
                 index: start_para.pilcrow,
             })?;
-        let paragraph_properties: std::collections::BTreeMap<String, Any> =
-            para_props.into_iter().collect();
+        let paragraph_properties: std::collections::BTreeMap<String, Any> = para_props
+            .into_iter()
+            .filter(|(key, _)| !crate::is_identity_key(key))
+            .collect();
         let prop_string = |key: &str| match paragraph_properties.get(key) {
             Some(Any::String(value)) => Some(value.to_string()),
             _ => None,
@@ -241,11 +283,14 @@ impl EditingDoc {
         let mut italic = None;
         let mut underline = None;
         let mut strike = None;
+        let mut superscript = None;
+        let mut subscript = None;
         let mut ins = None;
         let mut del = None;
         let mut font_family = ValueAgg::Empty;
         let mut font_size = ValueAgg::Empty;
         let mut color = ValueAgg::Empty;
+        let mut highlight = ValueAgg::Empty;
         for chunk in chunks.iter() {
             if chunk.start >= mark_to {
                 break;
@@ -257,11 +302,14 @@ impl EditingDoc {
             italic = TriState::fold(italic, chunk.attr_active("italic"));
             underline = TriState::fold(underline, chunk.attr_active("underline"));
             strike = TriState::fold(strike, chunk.attr_active("strike"));
+            superscript = TriState::fold(superscript, chunk.attr_active("superscript"));
+            subscript = TriState::fold(subscript, chunk.attr_active("subscript"));
             ins = TriState::fold(ins, chunk.attr_active(crate::INS));
             del = TriState::fold(del, chunk.attr_active(crate::DEL));
             font_family.fold(chunk.attrs.get("fontFamily"));
             font_size.fold(chunk.attrs.get("fontSize"));
             color.fold(chunk.attrs.get("textColor"));
+            highlight.fold(chunk.attrs.get("highlight"));
         }
 
         let map_field = |value: Option<&Any>, key: &str| match value {
@@ -293,6 +341,10 @@ impl EditingDoc {
             (_, Some(Any::String(theme))) => Some(theme.to_string()),
             _ => None,
         };
+        let highlight = match map_field(highlight.uniform(), "color") {
+            Some(Any::String(name)) => Some(name.to_string()),
+            _ => None,
+        };
 
         let embed_kind = if range.end == range.start + 1 {
             chunks
@@ -314,16 +366,19 @@ impl EditingDoc {
             italic: italic.unwrap_or(TriState::Off),
             underline: underline.unwrap_or(TriState::Off),
             strike: strike.unwrap_or(TriState::Off),
+            superscript: superscript.unwrap_or(TriState::Off),
+            subscript: subscript.unwrap_or(TriState::Off),
             font_family,
             font_size,
             color,
+            highlight,
             para_id,
             style_id: prop_string("pStyle"),
             alignment: prop_string("alignment"),
             paragraph_properties,
             has_selection: range.start != range.end,
             is_multi_paragraph,
-            in_table: table_cell_stories(self, &txn).contains(&range.story),
+            in_table: is_table_cell_story(self, &txn, &range.story),
             embed_kind,
             in_insertion: ins == Some(TriState::On),
             in_deletion: del == Some(TriState::On),
@@ -344,11 +399,29 @@ impl EditingDoc {
         };
         let mut result = Vec::new();
         for story_id in story_ids {
-            for change in self.list_changes(&story_id)? {
-                let range = LocRange {
-                    start: change.range.start.clone(),
-                    end: change.range.end.clone(),
-                };
+            let changes = self.story_changes(&story_id)?;
+            if changes.is_empty() {
+                continue;
+            }
+            let txn = self.yrs_doc().transact();
+            let story = crate::story_ref(&txn, &story_id)?;
+            let bounds = crate::op::para_bounds(&story, &txn);
+            let chunks = self.chunk_snapshot(&story_id, &story, &txn);
+            let views = crate::queries::para_views(&txn, TextView::Raw, &chunks);
+            let controls: Vec<_> = chunks
+                .iter()
+                .filter_map(|chunk| {
+                    if let ChunkKind::Embed(Some(map)) = &chunk.kind
+                        && map_string(map, &txn, KIND_KEY).as_deref() == Some("sdt")
+                        && let Some(Out::Any(content)) = map.get(&txn, "content")
+                    {
+                        Some((chunk, content))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            for (change, _) in changes {
                 let preview = if matches!(
                     change.kind,
                     crate::ChangeKind::ParagraphMarkInsertion
@@ -361,7 +434,49 @@ impl EditingDoc {
                 ) {
                     String::new()
                 } else {
-                    let full = self.text_between(&range, TextView::Raw)?;
+                    let from = crate::op::global_in_bounds(&bounds, &change.range.start)?;
+                    let to = crate::op::global_in_bounds(&bounds, &change.range.end)?;
+                    if to < from {
+                        return Err(OpError::InvalidRange {
+                            start: from,
+                            end: to,
+                        });
+                    }
+                    let mut full = String::new();
+                    let mut start = from;
+                    let first = controls.partition_point(|(chunk, _)| chunk.end() <= from);
+                    for (chunk, content) in &controls[first..] {
+                        if chunk.start >= to {
+                            break;
+                        }
+                        if start < chunk.start {
+                            for para in &views {
+                                para.view_slice_of_raw(start, chunk.start, &mut full);
+                            }
+                        }
+                        let key = if change.kind == crate::ChangeKind::Insertion {
+                            crate::INS
+                        } else {
+                            crate::DEL
+                        };
+                        let inherited = chunk
+                            .attrs
+                            .get(key)
+                            .and_then(crate::queries::revision_parts)
+                            .is_some_and(|(id, ..)| id == change.revision_id);
+                        full.push_str(&crate::inline_content::revision_text(
+                            content,
+                            &change.revision_id,
+                            key,
+                            inherited,
+                        ));
+                        start = to.min(chunk.end());
+                    }
+                    if start < to {
+                        for para in &views {
+                            para.view_slice_of_raw(start, to, &mut full);
+                        }
+                    }
                     full.chars().take(PREVIEW_MAX_CHARS).collect()
                 };
                 result.push(RevisionInfo {
@@ -377,7 +492,7 @@ impl EditingDoc {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
     use std::sync::Arc;
 
     use super::*;
@@ -462,6 +577,48 @@ mod tests {
         let plain = context(&doc, 6, 11);
         assert_eq!(plain.font_family, None);
         assert_eq!(plain.font_size, None);
+    }
+
+    #[test]
+    fn script_marks_are_tri_state_and_mutually_exclusive() {
+        let doc = seed("hello world");
+        doc.toggle_format(
+            &local(),
+            StoryRange::new("body", 0, 5),
+            SimpleFormat::Superscript,
+        )
+        .unwrap();
+
+        let raised = context(&doc, 0, 5);
+        assert_eq!(raised.superscript, TriState::On);
+        assert_eq!(raised.subscript, TriState::Off);
+        assert_eq!(context(&doc, 0, 11).superscript, TriState::Mixed);
+        assert_eq!(context(&doc, 3, 3).superscript, TriState::On);
+
+        doc.toggle_format(
+            &local(),
+            StoryRange::new("body", 0, 5),
+            SimpleFormat::Subscript,
+        )
+        .unwrap();
+        let lowered = context(&doc, 0, 5);
+        assert_eq!(lowered.superscript, TriState::Off);
+        assert_eq!(lowered.subscript, TriState::On);
+    }
+
+    #[test]
+    fn highlight_reports_the_uniform_palette_name() {
+        let doc = seed("hello world");
+        let delta = InlineFormatDelta {
+            highlight: Patch::Set("FFFF00".into()),
+            ..Default::default()
+        };
+        doc.format_range(&local(), StoryRange::new("body", 0, 5), &delta)
+            .unwrap();
+
+        assert_eq!(context(&doc, 0, 5).highlight.as_deref(), Some("yellow"));
+        assert_eq!(context(&doc, 0, 11).highlight, None);
+        assert_eq!(context(&doc, 6, 11).highlight, None);
     }
 
     #[test]
@@ -569,6 +726,53 @@ mod tests {
     }
 
     #[test]
+    fn in_table_reads_the_tables_that_list_the_cell() {
+        let doc = seed("body text");
+        let table = |doc: &EditingDoc, parent: &str, cell_story: &str| {
+            let cell = Any::Map(Arc::new(HashMap::from([(
+                "story".into(),
+                Any::from(cell_story),
+            )])));
+            let row = Any::Map(Arc::new(HashMap::from([(
+                "cells".into(),
+                Any::Array(Arc::from(vec![cell])),
+            )])));
+            doc.apply_raw_ops(
+                parent,
+                vec![RawOp::InsertEmbed {
+                    index: 0,
+                    kind: "table".into(),
+                    payload: vec![("rows".into(), Any::Array(Arc::from(vec![row])))],
+                    attrs: yrs::types::Attrs::new(),
+                }],
+                &local(),
+            )
+            .unwrap();
+        };
+        for story in [
+            "body:t0:r0c0",
+            "body:t0:r0c0:t0:r0c0",
+            "body:t1:r0c0",
+            "custom-cell",
+        ] {
+            doc.create_story(story, "cell", "Normal", "left").unwrap();
+        }
+        table(&doc, "body", "body:t0:r0c0");
+        table(&doc, "body:t0:r0c0", "body:t0:r0c0:t0:r0c0");
+        table(&doc, "body:t0:r0c0", "custom-cell");
+        let in_table = |story: &str| {
+            doc.selection_context(&StoryRange::new(story, 0, 1))
+                .unwrap()
+                .in_table
+        };
+        assert!(in_table("body:t0:r0c0"));
+        assert!(in_table("body:t0:r0c0:t0:r0c0"), "a nested table's cell");
+        assert!(in_table("custom-cell"), "a cell whose name names no parent");
+        assert!(!in_table("body:t1:r0c0"), "no table lists it");
+        assert!(!in_table("body"));
+    }
+
+    #[test]
     fn suggested_insert_and_delete_show_up_in_list_revisions() {
         let doc = seed("alpha beta");
         let insert = doc
@@ -606,6 +810,188 @@ mod tests {
             .insert_text(&local(), Position::new("body", 5), "!", FormatPolicy::Plain)
             .unwrap();
         assert!(plain.list_revisions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn revision_stamps_include_dates_from_adjacent_same_author_insertions() {
+        let doc = seed("alpha");
+        let first = doc
+            .insert_text(
+                &suggesting("Alice"),
+                Position::new("body", 5),
+                " first",
+                FormatPolicy::Plain,
+            )
+            .unwrap();
+        let later = "2026-07-14T12:01:00Z";
+        let second = doc
+            .insert_text(
+                &EditCtx::local("Alice", later).suggesting(),
+                Position::new("body", 11),
+                " second",
+                FormatPolicy::Plain,
+            )
+            .unwrap();
+        assert_eq!(second.revision_ids, first.revision_ids);
+        let listed = doc.list_revisions().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].change.date, DATE);
+        let id = first.revision_ids[0].clone();
+        assert_eq!(
+            doc.revision_stamps(&[id.clone(), "missing".into()])
+                .unwrap(),
+            BTreeMap::from([(
+                id,
+                BTreeSet::from([
+                    ("Alice".into(), DATE.into()),
+                    ("Alice".into(), later.into()),
+                ]),
+            )])
+        );
+    }
+
+    #[test]
+    fn revision_stamps_collect_text_and_paragraph_stamps_across_stories() {
+        let doc = seed("alpha");
+        doc.create_story("header", "x", "Normal", "left").unwrap();
+        let stamp = |author: &str| {
+            Any::Map(Arc::new(HashMap::from([
+                ("id".into(), Any::from("shared")),
+                ("author".into(), Any::from(author)),
+                ("date".into(), Any::from(DATE)),
+            ])))
+        };
+        doc.apply_raw_ops(
+            "body",
+            vec![RawOp::Format {
+                index: 0,
+                len: 5,
+                attrs: yrs::types::Attrs::from([
+                    (crate::INS.into(), stamp("Insert")),
+                    (crate::DEL.into(), stamp("Delete")),
+                ]),
+            }],
+            &local(),
+        )
+        .unwrap();
+        doc.apply_raw_ops(
+            "header",
+            vec![
+                RawOp::SetEmbedAttr {
+                    index: 1,
+                    key: crate::PPR_INS.into(),
+                    value: stamp("Mark insert"),
+                },
+                RawOp::SetEmbedAttr {
+                    index: 1,
+                    key: crate::PPR_DEL.into(),
+                    value: stamp("Mark delete"),
+                },
+                RawOp::SetEmbedAttr {
+                    index: 1,
+                    key: crate::PPR_CHANGE.into(),
+                    value: Any::Array(Arc::from(vec![
+                        stamp("Properties"),
+                        stamp("Properties again"),
+                    ])),
+                },
+            ],
+            &local(),
+        )
+        .unwrap();
+        let expected: BTreeSet<(String, String)> = [
+            "Insert",
+            "Delete",
+            "Mark insert",
+            "Mark delete",
+            "Properties",
+            "Properties again",
+        ]
+        .into_iter()
+        .map(|author| (author.to_owned(), DATE.to_owned()))
+        .collect();
+        assert_eq!(
+            doc.revision_stamps(&["shared".into()]).unwrap(),
+            BTreeMap::from([("shared".into(), expected)])
+        );
+    }
+
+    #[test]
+    fn listed_revisions_match_their_per_change_reads() {
+        let doc = seed("alpha beta gamma delta epsilon zeta eta theta iota kappa");
+        for at in [45, 36, 27, 18, 11, 5] {
+            doc.split_paragraph(&local(), Position::new("body", at), None)
+                .unwrap();
+        }
+        doc.insert_text(
+            &suggesting("Alice"),
+            Position::new("body", 2),
+            "one",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+        doc.delete_range(&suggesting("Bob"), StoryRange::new("body", 14, 18))
+            .unwrap();
+        doc.split_paragraph(&suggesting("Carol"), Position::new("body", 26), None)
+            .unwrap();
+        doc.insert_text(
+            &suggesting("Dan"),
+            Position::new("body", 40),
+            "two",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+        let last = doc
+            .locate(&doc.loc_at(&Position::new("body", u32::MAX)).unwrap())
+            .unwrap();
+        doc.delete_range(
+            &suggesting("Eve"),
+            StoryRange::new("body", last.index - 3, last.index),
+        )
+        .unwrap();
+
+        let revisions = doc.list_revisions().unwrap();
+        assert!(revisions.len() >= 5);
+        for revision in &revisions {
+            let range = &revision.change.range;
+            for loc in [&range.start, &range.end] {
+                let position = doc.locate(loc).unwrap();
+                assert_eq!(&doc.loc_at(&position).unwrap(), loc);
+            }
+            let preview: String = if matches!(
+                revision.change.kind,
+                ChangeKind::ParagraphMarkInsertion | ChangeKind::ParagraphMarkDeletion
+            ) {
+                String::new()
+            } else {
+                doc.text_between(range, TextView::Raw)
+                    .unwrap()
+                    .chars()
+                    .take(PREVIEW_MAX_CHARS)
+                    .collect()
+            };
+            assert_eq!(revision.preview, preview, "{revision:?}");
+        }
+
+        let txn = doc.yrs_doc().transact();
+        let story = crate::story_ref(&txn, "body").unwrap();
+        let bounds = para_bounds(&story, &txn);
+        let len = bounds.last().unwrap().pilcrow;
+        for index in 0..=len + 2 {
+            let naive = bounds
+                .iter()
+                .find(|bounds| index <= bounds.pilcrow)
+                .unwrap_or(bounds.last().unwrap());
+            let loc = crate::op::loc_in_bounds("body", &bounds, index).unwrap();
+            assert_eq!(loc.para, naive.para_id, "index {index}");
+            assert_eq!(
+                loc.offset,
+                index
+                    .min(naive.pilcrow)
+                    .saturating_sub(naive.start)
+                    .min(naive.len())
+            );
+        }
     }
 
     #[test]

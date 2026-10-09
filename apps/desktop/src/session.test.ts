@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { SessionRevision } from "./session";
+import { SessionRevision, savedBytes } from "./session";
 import { encodeBytes, formatOf } from "./bridge";
 
 describe("desktop document sessions", () => {
@@ -19,6 +19,15 @@ describe("desktop document sessions", () => {
     session.change();
     session.checkpoint();
     expect(session.dirty).toBe(true);
+  });
+
+  test("a failed save reports its failure, not that the file is opening", () => {
+    const failure = new Error("The document changed while saving");
+    expect(() => savedBytes(null, failure)).toThrow(failure);
+    expect(() => savedBytes(undefined, null)).toThrow("still opening");
+    expect(savedBytes(Uint8Array.of(7).buffer, null)).toEqual(
+      Uint8Array.of(7)
+    );
   });
 
   test("validates supported file types case insensitively", () => {

@@ -20,10 +20,11 @@
 //! delete, which models a user removing a paragraph mark rather than a
 //! revision being applied. A story's FINAL pilcrow is never removed, because a
 //! document always keeps its last paragraph mark; a join that would remove it
-//! clears the markers instead.
+//! clears the markers instead. A mark before a surviving block embed stays when
+//! paragraph content would otherwise interrupt the block, inheriting any pending
+//! revision that could remove that block.
 //!
-//! Resolving APPLIES a revision, it does not author one: no new revision is
-//! ever stamped and the context's suggesting mode is ignored.
+//! Resolving authors no new revision id; the context's suggesting mode is ignored.
 //!
 //! Structural table-row revisions (`trIns`/`trDel`) live in each row's `trPr`
 //! bag and resolve in the same transaction as story-unit revisions; removing a
@@ -38,11 +39,11 @@ use yrs::{Any, Map, MapRef, Out, ReadTxn, Text, TextRef, TransactionMut};
 
 use crate::op::{OpError, OpResult, Receipt, loc_range_in_txn};
 use crate::ops::table::resolve_table_row_revisions;
-use crate::ops::{ChunkKind, last_pilcrow, snapshot, snapshot_range};
+use crate::ops::{Chunk, ChunkKind, inherit_block_revisions, snapshot};
 use crate::queries::revision_parts;
 use crate::{
-    DEL, EditCtx, EditingDoc, INS, KIND_KEY, PARA_ID, PPR_CHANGE, PPR_DEL, PPR_INS, RevisionId,
-    StoryRange, check_range, story_ref,
+    DEL, EditCtx, EditingDoc, INS, PPR_CHANGE, PPR_DEL, PPR_INS, RevisionId, StoryRange,
+    check_range, story_ref,
 };
 
 /// What a resolve op targets.
@@ -100,6 +101,59 @@ fn clear_attr(txn: &mut TransactionMut<'_>, story: &TextRef, start: u32, len: u3
     story.format(txn, start, len, Attrs::from([(Arc::from(key), Any::Null)]));
 }
 
+fn resolve_inline_content(
+    content: &Any,
+    mode: ResolveMode,
+    filter: Option<&str>,
+    resolved: &mut Vec<String>,
+) -> Any {
+    let Any::Array(children) = content else {
+        return content.clone();
+    };
+    let mut remaining = Vec::new();
+    for child in children.iter() {
+        let Any::Map(child) = child else {
+            remaining.push(child.clone());
+            continue;
+        };
+        let mut child = child.as_ref().clone();
+        let attrs = match child.get("attrs") {
+            Some(Any::Map(attrs)) => attrs.as_ref().clone(),
+            _ => Default::default(),
+        };
+        let ins = active_stamp(attrs.get(INS).cloned(), filter);
+        let del = active_stamp(attrs.get(DEL).cloned(), filter);
+        let remove = match mode {
+            ResolveMode::Accept => del.as_ref(),
+            ResolveMode::Reject => ins.as_ref(),
+        };
+        if remove.is_some() {
+            record(resolved, remove);
+            continue;
+        }
+        let (key, keep) = match mode {
+            ResolveMode::Accept => (INS, ins.as_ref()),
+            ResolveMode::Reject => (DEL, del.as_ref()),
+        };
+        if keep.is_some() {
+            record(resolved, keep);
+            let mut attrs = attrs;
+            attrs.remove(key);
+            child.insert("attrs".to_owned(), Any::Map(Arc::new(attrs)));
+        }
+        if let Some(Any::Map(payload)) = child.get("payload")
+            && let Some(content) = payload.get("content")
+        {
+            let content = resolve_inline_content(content, mode, filter, resolved);
+            let mut payload = payload.as_ref().clone();
+            payload.insert("content".to_owned(), content);
+            child.insert("payload".to_owned(), Any::Map(Arc::new(payload)));
+        }
+        remaining.push(Any::Map(Arc::new(child)));
+    }
+    Any::Array(Arc::from(remaining))
+}
+
 fn property_map<'a>(
     change: &'a Any,
     key: &str,
@@ -123,10 +177,8 @@ fn restore_paragraph_properties(txn: &mut TransactionMut<'_>, map: &MapRef, chan
     if let Some(current) = current {
         for key in current.keys() {
             if previous.is_none_or(|prior| !prior.contains_key(key))
-                && !matches!(
-                    key.as_str(),
-                    KIND_KEY | PARA_ID | PPR_INS | PPR_DEL | PPR_CHANGE
-                )
+                && !crate::is_identity_key(key)
+                && !matches!(key.as_str(), PPR_INS | PPR_DEL | PPR_CHANGE)
             {
                 map.remove(txn, key);
             }
@@ -148,10 +200,9 @@ fn restore_paragraph_properties(txn: &mut TransactionMut<'_>, map: &MapRef, chan
     }
     if let Some(previous) = previous {
         for (key, value) in previous {
-            if !matches!(
-                key.as_str(),
-                KIND_KEY | PARA_ID | PPR_INS | PPR_DEL | PPR_CHANGE
-            ) {
+            if !crate::is_identity_key(key)
+                && !matches!(key.as_str(), PPR_INS | PPR_DEL | PPR_CHANGE)
+            {
                 map.insert(txn, key.clone(), value.clone());
             }
         }
@@ -172,6 +223,7 @@ fn resolve_paragraph_property_changes(
         Some(Out::Any(Any::Array(changes))) => changes.to_vec(),
         _ => return,
     };
+    let total = changes.len();
     let mut remaining = Vec::new();
     for change in changes {
         if active_stamp(Some(change.clone()), filter).is_some() {
@@ -185,9 +237,28 @@ fn resolve_paragraph_property_changes(
     }
     if remaining.is_empty() {
         map.remove(txn, PPR_CHANGE);
-    } else {
+    } else if remaining.len() < total {
         map.insert(txn, PPR_CHANGE, Any::Array(Arc::from(remaining)));
     }
+}
+
+fn removes_chunk<T: ReadTxn>(
+    chunk: &Chunk,
+    txn: &T,
+    mode: ResolveMode,
+    span: (u32, u32),
+    filter: Option<&str>,
+) -> bool {
+    if chunk.start < span.0 || chunk.end() > span.1 {
+        return false;
+    }
+    let (attr_key, ppr_key) = match mode {
+        ResolveMode::Accept => (DEL, PPR_DEL),
+        ResolveMode::Reject => (INS, PPR_INS),
+    };
+    active_stamp(chunk.attrs.get(attr_key).cloned(), filter).is_some()
+        || matches!(&chunk.kind, ChunkKind::Pilcrow(map)
+            if active_stamp(map_stamp(map, txn, ppr_key), filter).is_some())
 }
 
 /// Resolves one story's tracked changes in place. `span` limits the walk to a story range
@@ -202,25 +273,33 @@ fn resolve_story(
     resolved: &mut Vec<String>,
 ) -> u32 {
     let (span_start, span_end) = span.unwrap_or((0, u32::MAX));
-    let (chunks, final_pilcrow) = if span.is_some() {
-        (
-            snapshot_range(story, txn, span_start, span_end),
-            last_pilcrow(story, txn).map(|(index, _)| index),
-        )
-    } else {
-        let chunks = snapshot(story, txn);
-        let final_pilcrow = chunks.iter().rev().find_map(|chunk| match chunk.kind {
-            ChunkKind::Pilcrow(_) => Some(chunk.start),
-            _ => None,
-        });
-        (chunks, final_pilcrow)
-    };
+    let chunks = snapshot(story, txn);
+    let final_pilcrow = chunks.iter().rev().find_map(|chunk| match chunk.kind {
+        ChunkKind::Pilcrow(_) => Some(chunk.start),
+        _ => None,
+    });
+    let mut content = false;
+    let content_before: Vec<bool> = chunks
+        .iter()
+        .map(|chunk| {
+            let before = content;
+            if Some(chunk.start) == final_pilcrow
+                || !removes_chunk(chunk, txn, mode, (span_start, span_end), filter)
+            {
+                content =
+                    !matches!(chunk.kind, ChunkKind::Pilcrow(_)) && !chunk.is_block_embed(txn);
+            }
+            before
+        })
+        .collect();
     let mut removed = 0;
+    let mut next_block_revisions = None;
     // Reverse walk so physical removals never shift the indices still to be visited.
-    for chunk in chunks.iter().rev() {
+    for (slot, chunk) in chunks.iter().enumerate().rev() {
         let overlap_start = chunk.start.max(span_start);
         let overlap_end = chunk.end().min(span_end);
         if overlap_end <= overlap_start {
+            next_block_revisions = chunk.block_revisions(txn);
             continue;
         }
         match &chunk.kind {
@@ -238,7 +317,10 @@ fn resolve_story(
                     ResolveMode::Accept => del_hit,
                     ResolveMode::Reject => ins_hit,
                 };
-                if join {
+                let boundary_revisions = next_block_revisions
+                    .as_ref()
+                    .filter(|_| content_before[slot]);
+                if join && Some(chunk.start) != final_pilcrow && boundary_revisions.is_none() {
                     match mode {
                         ResolveMode::Accept => {
                             record(resolved, ppr_del.as_ref());
@@ -249,35 +331,30 @@ fn resolve_story(
                             record(resolved, attr_ins.as_ref());
                         }
                     }
-                    if Some(chunk.start) == final_pilcrow {
-                        // The final paragraph mark can never be removed — clear instead.
-                        let (ppr_key, attr_key) = match mode {
-                            ResolveMode::Accept => (PPR_DEL, DEL),
-                            ResolveMode::Reject => (PPR_INS, INS),
-                        };
+                    story.remove_range(txn, chunk.start, 1);
+                    removed += 1;
+                    continue;
+                }
+                for (ppr_key, attr_key, ppr_stamp, attr_stamp) in [
+                    (PPR_INS, INS, ppr_ins, attr_ins),
+                    (PPR_DEL, DEL, ppr_del, attr_del),
+                ] {
+                    record(resolved, ppr_stamp.as_ref());
+                    record(resolved, attr_stamp.as_ref());
+                    if ppr_stamp.is_some() {
                         map.remove(txn, ppr_key);
-                        clear_attr(txn, story, chunk.start, 1, attr_key);
-                    } else {
-                        story.remove_range(txn, chunk.start, 1);
-                        removed += 1;
                     }
-                } else {
-                    match mode {
-                        ResolveMode::Accept if ins_hit => {
-                            record(resolved, ppr_ins.as_ref());
-                            record(resolved, attr_ins.as_ref());
-                            map.remove(txn, PPR_INS);
-                            clear_attr(txn, story, chunk.start, 1, INS);
-                        }
-                        ResolveMode::Reject if del_hit => {
-                            record(resolved, ppr_del.as_ref());
-                            record(resolved, attr_del.as_ref());
-                            map.remove(txn, PPR_DEL);
-                            clear_attr(txn, story, chunk.start, 1, DEL);
-                        }
-                        _ => {}
+                    if attr_stamp.is_some() {
+                        clear_attr(txn, story, chunk.start, 1, attr_key);
                     }
                 }
+                if join
+                    && Some(chunk.start) != final_pilcrow
+                    && let Some(revisions) = boundary_revisions
+                {
+                    inherit_block_revisions(txn, story, chunk.start, map, revisions);
+                }
+                next_block_revisions = None;
             }
             ChunkKind::Text(_) | ChunkKind::Embed(_) => {
                 let ins = active_stamp(chunk.attrs.get(INS).cloned(), filter);
@@ -295,7 +372,27 @@ fn resolve_story(
                     }
                     story.remove_range(txn, overlap_start, overlap_end - overlap_start);
                     removed += overlap_end - overlap_start;
+                    if overlap_start > chunk.start || overlap_end < chunk.end() {
+                        next_block_revisions = None;
+                    }
                 } else {
+                    if let ChunkKind::Embed(Some(map)) = &chunk.kind
+                        && crate::map_string(map, txn, crate::KIND_KEY).as_deref() == Some("sdt")
+                        && let Some(Out::Any(content)) = map.get(txn, "content")
+                    {
+                        let mut tracked = false;
+                        crate::inline_content::visit(&content, &mut |child| {
+                            if let Some(Any::Map(attrs)) = child.get("attrs") {
+                                tracked |= attrs.contains_key(INS) || attrs.contains_key(DEL);
+                            }
+                        });
+                        if tracked {
+                            let updated = resolve_inline_content(&content, mode, filter, resolved);
+                            if updated != content {
+                                map.insert(txn, "content", updated);
+                            }
+                        }
+                    }
                     match mode {
                         ResolveMode::Accept if ins.is_some() => {
                             record(resolved, ins.as_ref());
@@ -307,6 +404,14 @@ fn resolve_story(
                         }
                         _ => {}
                     }
+                    next_block_revisions = chunk.block_revisions(txn).map(|mut revisions| {
+                        for stamp in &mut revisions {
+                            if active_stamp(stamp.clone(), filter).is_some() {
+                                *stamp = None;
+                            }
+                        }
+                        revisions
+                    });
                 }
             }
         }
@@ -350,7 +455,10 @@ impl EditingDoc {
                 }
                 let story = story_ref(&txn, &range.story)?;
                 check_range(&story, &txn, range.start, len)?;
-                resolve_table_row_revisions(
+                let (start, end) =
+                    crate::ops::code_point_range(&story, &txn, range.start, range.end);
+                let range = &StoryRange::new(range.story.clone(), start, end);
+                let removed_tables = resolve_table_row_revisions(
                     &mut txn,
                     &story,
                     &range.story,
@@ -363,12 +471,17 @@ impl EditingDoc {
                     &mut txn,
                     &story,
                     mode,
-                    Some((range.start, range.end)),
+                    Some((range.start, range.end - removed_tables)),
                     None,
                     &mut resolved,
                 );
-                let loc_range =
-                    loc_range_in_txn(&range.story, &story, &txn, range.start, range.end - removed)?;
+                let loc_range = loc_range_in_txn(
+                    &range.story,
+                    &story,
+                    &txn,
+                    range.start,
+                    range.end - removed_tables - removed,
+                )?;
                 Ok(Receipt {
                     new_para_ids: Vec::new(),
                     revision_ids: resolved,

@@ -129,8 +129,8 @@ describe('page break save projection', () => {
     const projected = await createYrsSession({ clientId: 68001 });
     const engine = await createYrsSession({ clientId: 68001 });
     try {
-      documentToYrs(projected, parsed);
-      engine.seedFromDocx(bytes);
+      documentToYrs(projected, parsed, { generation: 'parity' });
+      engine.seedFromDocx(bytes, { generation: 'parity' });
       expect(engine.storySegments('body')).toEqual(projected.storySegments('body'));
       expect(engine.encodeState()).toEqual(projected.encodeState());
       expect(engine.paragraphs('body')[0]?.properties._originalRunBoundaries).toEqual([

@@ -8,9 +8,14 @@
  * @public
  */
 
-import type { RenderedDomContext, PositionCoordinates } from './types';
+import type { RenderedDomContext, PositionCoordinates, PointPosition } from './types';
 import type { DisplayListQueries, DisplayListRect } from '../layout/render/displayListQueries';
-import { resolveDisplayPageClientRect } from '../layout/render/canvasPointer';
+import {
+  effectiveZoom,
+  materializeDisplayPages,
+  resolveCanvasPoint,
+  resolveDisplayPageClientRect,
+} from '../layout/render/canvasPointer';
 
 /** One data-doc-* bearing run span in the a11y mirror, with parsed positions. */
 interface MirrorSpanEntry {
@@ -61,11 +66,12 @@ export function createCanvasHostProjector(
     const containerRect = pagesContainer.getBoundingClientRect();
     const scaleX = canvasRect.width / pageSize.width;
     const scaleY = canvasRect.height / pageSize.height;
+    const scale = safeZoom * effectiveZoom(pagesContainer);
     return {
-      x: (canvasRect.left - containerRect.left + rect.x * scaleX) / safeZoom,
-      y: (canvasRect.top - containerRect.top + rect.y * scaleY) / safeZoom,
-      width: (rect.width * scaleX) / safeZoom,
-      height: (rect.height * scaleY) / safeZoom,
+      x: (canvasRect.left - containerRect.left + rect.x * scaleX) / scale,
+      y: (canvasRect.top - containerRect.top + rect.y * scaleY) / scale,
+      width: (rect.width * scaleX) / scale,
+      height: (rect.height * scaleY) / scale,
     };
   };
   return {
@@ -100,6 +106,11 @@ export class RenderedDomContextImpl implements RenderedDomContext {
     if ((this.queries === null) !== (this.projector === null)) {
       throw new Error('RenderedDomContext requires displayListQueries and projector together');
     }
+  }
+
+  /** Client pixels per unit of this context: its zoom times the container's ancestor CSS zoom. */
+  private clientScale(): number {
+    return this.zoom * effectiveZoom(this.pagesContainer);
   }
 
   /**
@@ -138,6 +149,7 @@ export class RenderedDomContextImpl implements RenderedDomContext {
       return projected ? { x: projected.x, y: projected.y, height: projected.height } : null;
     }
     const containerRect = this.pagesContainer.getBoundingClientRect();
+    const scale = this.clientScale();
 
     // Find spans with display-position data via the mirror's data-doc-* contract
     for (const { el: spanEl, start: spanStart, end: spanEnd } of this.spanEntries()) {
@@ -150,8 +162,8 @@ export class RenderedDomContextImpl implements RenderedDomContext {
           const lineHeight = lineEl ? (lineEl as HTMLElement).offsetHeight : 16;
 
           return {
-            x: (spanRect.left - containerRect.left) / this.zoom,
-            y: (spanRect.top - containerRect.top) / this.zoom,
+            x: (spanRect.left - containerRect.left) / scale,
+            y: (spanRect.top - containerRect.top) / scale,
             height: lineHeight / this.zoom,
           };
         }
@@ -180,8 +192,8 @@ export class RenderedDomContextImpl implements RenderedDomContext {
         const lineHeight = lineEl ? (lineEl as HTMLElement).offsetHeight : 16;
 
         return {
-          x: (rangeRect.left - containerRect.left) / this.zoom,
-          y: (rangeRect.top - containerRect.top) / this.zoom,
+          x: (rangeRect.left - containerRect.left) / scale,
+          y: (rangeRect.top - containerRect.top) / scale,
           height: lineHeight / this.zoom,
         };
       }
@@ -201,8 +213,8 @@ export class RenderedDomContextImpl implements RenderedDomContext {
         const lineHeight = lineEl ? (lineEl as HTMLElement).offsetHeight : 16;
 
         return {
-          x: (runRect.left - containerRect.left) / this.zoom,
-          y: (runRect.top - containerRect.top) / this.zoom,
+          x: (runRect.left - containerRect.left) / scale,
+          y: (runRect.top - containerRect.top) / scale,
           height: lineHeight / this.zoom,
         };
       }
@@ -211,10 +223,32 @@ export class RenderedDomContextImpl implements RenderedDomContext {
     return null;
   }
 
+  getPositionAtPoint(clientX: number, clientY: number): PointPosition | null {
+    if (!this.queries || !Number.isFinite(clientX) || !Number.isFinite(clientY)) return null;
+    const point = resolveCanvasPoint(this.pagesContainer, this.queries, clientX, clientY);
+    const hit = point?.hit;
+    if (!point || !hit || hit.pos === null || hit.target !== 'text') return null;
+    if ((hit.region === 'header' || hit.region === 'footer') && !hit.rId) return null;
+    if ((hit.region === 'footnote' || hit.region === 'endnote') && hit.noteId === undefined) {
+      return null;
+    }
+    return {
+      position: hit.pos,
+      pageIndex: point.pageIndex,
+      region: hit.region,
+      ...(hit.rId === undefined ? {} : { rId: hit.rId }),
+      ...(hit.noteId === undefined ? {} : { noteId: hit.noteId }),
+    };
+  }
+
   /**
    * Find DOM elements that overlap with a display-position range.
    */
   findElementsForRange(from: number, to: number): Element[] {
+    if (this.queries) {
+      const pages = new Set(this.queries.rangeRects(from, to).map((rect) => rect.pageIndex));
+      materializeDisplayPages(this.pagesContainer, [...pages]);
+    }
     const elements: Element[] = [];
     for (const { el, start, end } of this.spanEntries()) {
       // Check if this span overlaps with the range
@@ -240,6 +274,7 @@ export class RenderedDomContextImpl implements RenderedDomContext {
         .filter((rect): rect is ProjectedDisplayListRect => rect !== null);
     }
     const containerRect = this.pagesContainer.getBoundingClientRect();
+    const scale = this.clientScale();
     const rects: Array<{ x: number; y: number; width: number; height: number }> = [];
 
     for (const { el: spanEl, start: spanStart, end: spanEnd } of this.spanEntries()) {
@@ -250,10 +285,10 @@ export class RenderedDomContextImpl implements RenderedDomContext {
         if (spanEl.classList.contains('layout-run-tab')) {
           const spanRect = spanEl.getBoundingClientRect();
           rects.push({
-            x: (spanRect.left - containerRect.left) / this.zoom,
-            y: (spanRect.top - containerRect.top) / this.zoom,
-            width: spanRect.width / this.zoom,
-            height: spanRect.height / this.zoom,
+            x: (spanRect.left - containerRect.left) / scale,
+            y: (spanRect.top - containerRect.top) / scale,
+            width: spanRect.width / scale,
+            height: spanRect.height / scale,
           });
           continue;
         }
@@ -277,10 +312,10 @@ export class RenderedDomContextImpl implements RenderedDomContext {
           const clientRects = range.getClientRects();
           for (const rect of Array.from(clientRects)) {
             rects.push({
-              x: (rect.left - containerRect.left) / this.zoom,
-              y: (rect.top - containerRect.top) / this.zoom,
-              width: rect.width / this.zoom,
-              height: rect.height / this.zoom,
+              x: (rect.left - containerRect.left) / scale,
+              y: (rect.top - containerRect.top) / scale,
+              width: rect.width / scale,
+              height: rect.height / scale,
             });
           }
         }
@@ -328,11 +363,12 @@ export class RenderedDomContextImpl implements RenderedDomContext {
     if (!page) return null;
     const pageRect = page.getBoundingClientRect();
     const containerRect = this.pagesContainer.getBoundingClientRect();
+    const scale = this.clientScale();
     return {
-      x: (pageRect.left - containerRect.left) / this.zoom,
-      y: (pageRect.top - containerRect.top) / this.zoom,
-      width: pageRect.width / this.zoom,
-      height: pageRect.height / this.zoom,
+      x: (pageRect.left - containerRect.left) / scale,
+      y: (pageRect.top - containerRect.top) / scale,
+      width: pageRect.width / scale,
+      height: pageRect.height / scale,
     };
   }
 
@@ -347,10 +383,11 @@ export class RenderedDomContextImpl implements RenderedDomContext {
 
     const containerRect = this.pagesContainer.getBoundingClientRect();
     const parentRect = parent.getBoundingClientRect();
+    const scale = this.clientScale();
 
     return {
-      x: (containerRect.left - parentRect.left) / this.zoom,
-      y: (containerRect.top - parentRect.top) / this.zoom,
+      x: (containerRect.left - parentRect.left) / scale,
+      y: (containerRect.top - parentRect.top) / scale,
     };
   }
 }
@@ -367,6 +404,6 @@ export function createRenderedDomContext(
   pagesContainer: HTMLElement,
   zoom: number = 1,
   options?: RenderedDomContextOptions
-): RenderedDomContext {
+): RenderedDomContext & Required<Pick<RenderedDomContext, 'getPositionAtPoint'>> {
   return new RenderedDomContextImpl(pagesContainer, zoom, options);
 }

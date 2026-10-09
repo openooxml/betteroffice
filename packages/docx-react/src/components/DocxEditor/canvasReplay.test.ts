@@ -238,7 +238,7 @@ describe('presentCanvasReplay', () => {
     expect(presentations).toBe(0);
     expect(buffers.map(({ width }) => width)).toEqual([100, 100]);
     slow.resolve();
-    await replay;
+    expect(await replay).toBe(true);
     expect(presentations).toBe(2);
     expect(buffers.map(({ width, height }) => [width, height])).toEqual([
       [0, 0],
@@ -268,7 +268,7 @@ describe('presentCanvasReplay', () => {
     current = false;
     expect(buffer.width).toBe(100);
     slow.resolve();
-    await replay;
+    expect(await replay).toBe(false);
     expect(buffer.width).toBe(0);
     expect(state.prepare(surface, 1n, environment)).not.toBeNull();
   });
@@ -411,7 +411,7 @@ describe('presentCanvasReplay', () => {
     const attempts = [0, 0];
     let current = true;
     state.updateFrame(frame(1));
-    await presentCanvasReplay(
+    const presented = await presentCanvasReplay(
       buffers.map((buffer, index) => {
         const presentation = state.prepare(surfaces[index], ids[index], environment)!;
         return {
@@ -431,6 +431,7 @@ describe('presentCanvasReplay', () => {
       }),
       () => current
     );
+    expect(presented).toBe(false);
     expect(attempts).toEqual([1, 1]);
     expect(buffers.map(({ width, height }) => [width, height])).toEqual([
       [0, 0],

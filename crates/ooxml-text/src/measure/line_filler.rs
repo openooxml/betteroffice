@@ -25,7 +25,8 @@
 //!   overflowing the box. An image-grown line overrides both and the
 //!   identity still holds.
 //! - A tall inline image sits on the baseline with text descent below it;
-//!   alone on its line it takes the image's own height and nothing more.
+//!   alone on its line it takes the image's own height plus only the room a
+//!   multiple (`auto`) rule adds to the paragraph mark's line.
 //!   Block images retain a descent buffer above and below their footprint.
 //! - Float geometry is probed per line at the running Y with a fixed
 //!   default-font-size estimate, then re-tested against `fullWidthBlock` bands
@@ -40,7 +41,7 @@
 use crate::font_store::FontId;
 
 use super::floats;
-use super::input::{CompatIn, FloatSegmentIn, FloatZoneIn, SpacingIn, TabStopIn};
+use super::input::{CompatIn, FloatSegmentIn, FloatZoneIn, RunIn, SpacingIn, TabStopIn};
 use super::prepare::{
     CharAdv, PreparedField, PreparedImage, PreparedRun, PreparedTab, PreparedText,
 };
@@ -65,6 +66,8 @@ pub(super) struct FillParams<'a> {
     pub justify: bool,
     pub store: &'a crate::font_store::FontStore,
     pub prepared: &'a [PreparedRun],
+    /// The paragraph's runs, index-aligned with `prepared`.
+    pub runs: &'a [RunIn],
     pub spacing: Option<&'a SpacingIn>,
     /// Content width for every line after the first (indents applied).
     pub body_width: f32,
@@ -155,6 +158,9 @@ struct Filler<'a> {
     cumulative_height: f32,
     /// Float skip attached to the next finalized line.
     pending_float_skip: f32,
+    /// Per prepared run, the width of the text after it that continues the
+    /// word it ends in; see [`word_continuations`].
+    continuations: Vec<f32>,
 }
 
 /// Paragraph space-before in px, floored at zero.
@@ -269,6 +275,7 @@ pub(super) fn fill(p: FillParams) -> Result<ParagraphExtentOut, MeasureError> {
         lines: Vec::new(),
         cumulative_height,
         pending_float_skip,
+        continuations: word_continuations(p.prepared, p.runs),
     };
     filler.run()?;
 
@@ -356,6 +363,7 @@ pub(super) fn empty_paragraph_extent(
             right_offset: None,
             segments: None,
             float_skip_before,
+            marker_tab_offset: None,
             run_advances: None,
             cluster_advances: None,
             bidi_slices: None,
@@ -577,6 +585,16 @@ impl Filler<'_> {
             let word = &t.chars[char_idx..next_break];
             let word_width = span_width(word, t.letter_spacing);
             let fitting_width = visible_span_width(word, t.letter_spacing);
+            let joined_width = if next_break == t.chars.len() {
+                fitting_width + self.continuations.get(ri as usize).copied().unwrap_or(0.0)
+            } else {
+                fitting_width
+            };
+            let wrap_width = if joined_width <= self.p.body_width + WRAP_SLACK_PX {
+                joined_width
+            } else {
+                fitting_width
+            };
 
             if fitting_width > self.cur.available + WRAP_SLACK_PX {
                 // Overlong unbreakable word: fill the remaining space on the
@@ -615,7 +633,7 @@ impl Filler<'_> {
 
             if self.cur.width > 0.0
                 && fitting_width > 0.0
-                && self.cur.width + fitting_width
+                && self.cur.width + wrap_width
                     - if self.p.justify {
                         self.cur.space_width * 0.25
                     } else {
@@ -834,10 +852,16 @@ impl Filler<'_> {
                 line_height = image_h + buffer * 2.0;
                 ascent = image_h + buffer;
             } else if self.cur.max_font.is_none() {
-                // Word's box for an inline image alone on its line is exactly
-                // the image: the paragraph mark buys no descent under it.
+                // Word's box for an inline image alone on its line is the
+                // image: the paragraph mark buys no descent under it, only the
+                // room a multiple (`auto`) rule adds to the mark's line, below.
+                let added = if matches!(self.rule, wm::LineSpacingRule::Auto { .. }) {
+                    (text_line_height - content.height()).max(0.0)
+                } else {
+                    0.0
+                };
                 descent = 0.0;
-                line_height = image_h;
+                line_height = image_h + added;
                 ascent = image_h;
             } else {
                 line_height = image_h + buffer;
@@ -878,6 +902,7 @@ impl Filler<'_> {
             right_offset: (self.cur.right_offset > 0.0).then_some(self.cur.right_offset),
             segments,
             float_skip_before,
+            marker_tab_offset: None,
             run_advances,
             cluster_advances,
             bidi_slices,
@@ -1109,6 +1134,120 @@ fn advance_metadata(
 }
 
 /// UTF-16 offset of char index `i` (or the run's total length past the end).
+/// The widest span no line may break inside, and the paragraph's first span,
+/// which always opens the first line. Text splits into words at the same
+/// opportunities the filler wraps at, except that a word carries on into the
+/// next text run when the two runs meet with no opportunity between them.
+/// Fields and images are spans of their own; tabs and line breaks end a span.
+pub(super) fn unbreakable_spans(prepared: &[PreparedRun], runs: &[RunIn]) -> (f32, f32) {
+    let mut widest = 0.0_f32;
+    let mut first: Option<f32> = None;
+    let mut close = |width: f32| {
+        if width > 0.0 {
+            widest = widest.max(width);
+            first.get_or_insert(width);
+        }
+    };
+    let mut open: Option<(f32, usize)> = None;
+    for (index, run) in prepared.iter().enumerate() {
+        let atomic = match run {
+            PreparedRun::Text(t) if !t.chars.is_empty() => {
+                let carried = match open.take() {
+                    Some((width, from)) if runs_join(runs, from, index) => width,
+                    Some((width, _)) => {
+                        close(width);
+                        0.0
+                    }
+                    None => 0.0,
+                };
+                let mut start = 0usize;
+                for end in t
+                    .breaks
+                    .iter()
+                    .copied()
+                    .chain(std::iter::once(t.chars.len()))
+                {
+                    if end <= start {
+                        continue;
+                    }
+                    let word = &t.chars[start..end];
+                    let width = visible_span_width(word, t.letter_spacing)
+                        + if start == 0 { carried } else { 0.0 };
+                    if end == t.chars.len() && !word.last().is_some_and(|c| c.is_space) {
+                        open = Some((width, index));
+                    } else {
+                        close(width);
+                    }
+                    start = end;
+                }
+                continue;
+            }
+            PreparedRun::Text(_)
+            | PreparedRun::Hidden { .. }
+            | PreparedRun::SkippedImage { .. } => {
+                continue;
+            }
+            PreparedRun::Field(field) => field.width,
+            PreparedRun::InlineImage(image) | PreparedRun::OwnLineImage(image) => image.width,
+            PreparedRun::Tab(_) | PreparedRun::LineBreak => 0.0,
+        };
+        if let Some((width, _)) = open.take() {
+            close(width);
+        }
+        close(atomic);
+    }
+    if let Some((width, _)) = open {
+        close(width);
+    }
+    (widest, first.unwrap_or(0.0))
+}
+
+/// Per prepared run, the visible width of the text after it that continues
+/// the word it ends in, up to the next break opportunity, so a word split
+/// across runs wraps whole. Empty, hidden and floating-image runs pass
+/// through; any other run ends the word.
+fn word_continuations(prepared: &[PreparedRun], runs: &[RunIn]) -> Vec<f32> {
+    let mut continuations = vec![0.0; prepared.len()];
+    let mut next: Option<(usize, f32)> = None;
+    for (index, run) in prepared.iter().enumerate().rev() {
+        match run {
+            PreparedRun::Text(t) if !t.chars.is_empty() => {
+                if let Some((after, width)) = next
+                    && runs_join(runs, index, after)
+                {
+                    continuations[index] = width;
+                }
+                let end = t.breaks.first().copied().unwrap_or(t.chars.len());
+                let lead = visible_span_width(&t.chars[..end], t.letter_spacing);
+                let carried = if end == t.chars.len() {
+                    continuations[index]
+                } else {
+                    0.0
+                };
+                next = Some((index, lead + carried));
+            }
+            PreparedRun::Text(_)
+            | PreparedRun::Hidden { .. }
+            | PreparedRun::SkippedImage { .. } => {}
+            _ => next = None,
+        }
+    }
+    continuations
+}
+
+/// Whether text run `after` continues the word text run `before` ends in.
+fn runs_join(runs: &[RunIn], before: usize, after: usize) -> bool {
+    let last = runs
+        .get(before)
+        .and_then(|run| run.text.as_deref())
+        .and_then(|text| text.chars().next_back());
+    let next = runs
+        .get(after)
+        .and_then(|run| run.text.as_deref())
+        .and_then(|text| text.chars().next());
+    matches!((last, next), (Some(last), Some(next)) if !crate::line_break::break_allowed_between(last, next))
+}
+
 fn utf16_at(t: &PreparedText, i: usize) -> u32 {
     t.chars.get(i).map_or(t.utf16_len, |c| c.utf16_offset)
 }
@@ -1289,6 +1428,7 @@ mod tests {
                 s
             },
             prepared,
+            runs: &[],
             spacing: None,
             body_width: width,
             first_line_width: width,
