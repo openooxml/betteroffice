@@ -663,6 +663,7 @@ impl Stylesheet {
     /// borrows the resolved format for a cell style without cloning; unset
     /// facets resolve to defaults.
     pub fn resolved_format(&self, style_index: Option<u32>) -> ResolvedFormat<'_> {
+        let style_index = Some(style_index.unwrap_or(0));
         let xf = style_index.and_then(|index| self.xf(index));
         ResolvedFormat {
             font: xf
@@ -677,10 +678,8 @@ impl Stylesheet {
                 .and_then(|xf| xf.border)
                 .and_then(|index| self.borders.get(index as usize))
                 .unwrap_or(&DEFAULT_BORDER),
-            number_format: match style_index {
-                Some(index) => self.format_code_for(index),
-                None => FormatCode::Builtin(0),
-            },
+            number_format: style_index
+                .map_or(FormatCode::Builtin(0), |index| self.format_code_for(index)),
             alignment: xf
                 .and_then(|xf| xf.alignment.as_ref())
                 .unwrap_or(&DEFAULT_ALIGNMENT),
@@ -695,6 +694,27 @@ impl Stylesheet {
         if format == &CellFormat::default() {
             return Ok(None);
         }
+        if self.cell_xfs.is_empty() {
+            if self.fonts.is_empty() {
+                self.fonts.push(Font::default());
+            }
+            if self.fills.is_empty() {
+                self.fills.push(Fill::default());
+            }
+            if self.borders.is_empty() {
+                self.borders.push(Border::default());
+            }
+            self.cell_xfs.push(Xf::default());
+        }
+        if self.fonts.is_empty() && format.font != Font::default() {
+            self.fonts.push(Font::default());
+        }
+        if self.fills.is_empty() && format.fill != Fill::default() {
+            self.fills.push(Fill::default());
+        }
+        if self.borders.is_empty() && format.border != Border::default() {
+            self.borders.push(Border::default());
+        }
         match &format.number_format {
             NumberFormat::Builtin { id } => Ok(Some(self.intern_builtin_cell_format(format, *id))),
             NumberFormat::Custom { pattern } => self.intern_custom_cell_format(format, pattern),
@@ -704,15 +724,18 @@ impl Stylesheet {
     #[inline(never)]
     fn intern_builtin_cell_format(&mut self, format: &CellFormat, num_fmt_id: u16) -> u32 {
         if self.cell_xfs.len() < INTERN_CACHE_MIN_POOL {
-            let font = intern_linear(&mut self.fonts, &format.font);
-            let fill = intern_linear(&mut self.fills, &format.fill);
-            let border = intern_linear(&mut self.borders, &format.border);
+            let font = (format.font != Font::default())
+                .then(|| intern_linear(&mut self.fonts, &format.font));
+            let fill = (format.fill != Fill::default())
+                .then(|| intern_linear(&mut self.fills, &format.fill));
+            let border = (format.border != Border::default())
+                .then(|| intern_linear(&mut self.borders, &format.border));
             let num_fmt_id = Some(num_fmt_id).filter(|id| *id != 0);
             let alignment = (!format.alignment.is_empty()).then(|| format.alignment.clone());
             let xf = Xf {
-                font: (format.font != Font::default()).then_some(font),
-                fill: (format.fill != Fill::default()).then_some(fill),
-                border: (format.border != Border::default()).then_some(border),
+                font,
+                fill,
+                border,
                 num_fmt_id,
                 alignment,
             };
@@ -741,14 +764,17 @@ impl Stylesheet {
     ) -> Result<Option<u32>, NumFmtTableFull> {
         let num_fmt_id = Some(self.intern_number_format(pattern).ok_or(NumFmtTableFull)?);
         if self.cell_xfs.len() < INTERN_CACHE_MIN_POOL {
-            let font = intern_linear(&mut self.fonts, &format.font);
-            let fill = intern_linear(&mut self.fills, &format.fill);
-            let border = intern_linear(&mut self.borders, &format.border);
+            let font = (format.font != Font::default())
+                .then(|| intern_linear(&mut self.fonts, &format.font));
+            let fill = (format.fill != Fill::default())
+                .then(|| intern_linear(&mut self.fills, &format.fill));
+            let border = (format.border != Border::default())
+                .then(|| intern_linear(&mut self.borders, &format.border));
             let alignment = (!format.alignment.is_empty()).then(|| format.alignment.clone());
             let xf = Xf {
-                font: (format.font != Font::default()).then_some(font),
-                fill: (format.fill != Fill::default()).then_some(fill),
-                border: (format.border != Border::default()).then_some(border),
+                font,
+                fill,
+                border,
                 num_fmt_id,
                 alignment,
             };
@@ -763,17 +789,17 @@ impl Stylesheet {
             let font_len = self.fonts.len();
             let fill_len = self.fills.len();
             let border_len = self.borders.len();
-            let font = intern_linear(&mut self.fonts, &format.font);
-            let fill = intern_linear(&mut self.fills, &format.fill);
-            let border = intern_linear(&mut self.borders, &format.border);
             let has_font = format.font != Font::default();
             let has_fill = format.fill != Fill::default();
             let has_border = format.border != Border::default();
+            let font = has_font.then(|| intern_linear(&mut self.fonts, &format.font));
+            let fill = has_fill.then(|| intern_linear(&mut self.fills, &format.fill));
+            let border = has_border.then(|| intern_linear(&mut self.borders, &format.border));
             let alignment = (!format.alignment.is_empty()).then(|| format.alignment.clone());
             let xf = Xf {
-                font: has_font.then_some(font),
-                fill: has_fill.then_some(fill),
-                border: has_border.then_some(border),
+                font,
+                fill,
+                border,
                 num_fmt_id,
                 alignment,
             };
@@ -788,24 +814,30 @@ impl Stylesheet {
             if index == self.cell_xfs.len() {
                 self.cell_xfs.push(xf);
             } else {
-                seed_memo(
-                    &mut self.font_memo,
-                    self.fonts.len(),
-                    FontKey::new(&format.font).map(|key| fingerprint(&key)),
-                    font,
-                );
-                seed_memo(
-                    &mut self.fill_memo,
-                    self.fills.len(),
-                    FillKey::new(&format.fill).map(|key| fingerprint(&key)),
-                    fill,
-                );
-                seed_memo(
-                    &mut self.border_memo,
-                    self.borders.len(),
-                    BorderKey::new(&format.border).map(|key| fingerprint(&key)),
-                    border,
-                );
+                if let Some(font) = font {
+                    seed_memo(
+                        &mut self.font_memo,
+                        self.fonts.len(),
+                        FontKey::new(&format.font).map(|key| fingerprint(&key)),
+                        font,
+                    );
+                }
+                if let Some(fill) = fill {
+                    seed_memo(
+                        &mut self.fill_memo,
+                        self.fills.len(),
+                        FillKey::new(&format.fill).map(|key| fingerprint(&key)),
+                        fill,
+                    );
+                }
+                if let Some(border) = border {
+                    seed_memo(
+                        &mut self.border_memo,
+                        self.borders.len(),
+                        BorderKey::new(&format.border).map(|key| fingerprint(&key)),
+                        border,
+                    );
+                }
                 seed_memo(
                     &mut self.xf_memo,
                     self.cell_xfs.len(),
@@ -815,14 +847,15 @@ impl Stylesheet {
             }
             return index as u32;
         }
-        let font = self.intern_font(&format.font);
-        let fill = self.intern_fill(&format.fill);
-        let border = self.intern_border(&format.border);
+        let font = (format.font != Font::default()).then(|| self.intern_font(&format.font));
+        let fill = (format.fill != Fill::default()).then(|| self.intern_fill(&format.fill));
+        let border =
+            (format.border != Border::default()).then(|| self.intern_border(&format.border));
         let alignment = (!format.alignment.is_empty()).then(|| format.alignment.clone());
         let xf = Xf {
-            font: (format.font != Font::default()).then_some(font),
-            fill: (format.fill != Fill::default()).then_some(fill),
-            border: (format.border != Border::default()).then_some(border),
+            font,
+            fill,
+            border,
             num_fmt_id,
             alignment,
         };
@@ -1394,7 +1427,7 @@ mod tests {
             };
             assert_eq!(
                 unique.intern_cell_format(&format).unwrap(),
-                Some(index as u32)
+                Some(index as u32 + 1)
             );
             formats.push(format);
         }
@@ -1402,7 +1435,7 @@ mod tests {
         assert!(unique.xf_memo.map.is_empty());
 
         let repeated = formats.last().unwrap();
-        let repeated_index = (formats.len() - 1) as u32;
+        let repeated_index = formats.len() as u32;
         assert_eq!(
             unique.intern_cell_format(repeated).unwrap(),
             Some(repeated_index)
@@ -1729,6 +1762,36 @@ mod tests {
             FormatCode::Builtin(0)
         );
         assert_eq!(ss.cell_format(Some(index)), format);
+    }
+
+    #[test]
+    fn implicit_format_uses_xf_zero_and_interning_omits_unused_facets() {
+        let mut styles = Stylesheet::default();
+        styles.fonts.push(Font {
+            name: Some("DejaVu Sans".into()),
+            size_pt: Some(17.0),
+            ..Font::default()
+        });
+        styles.cell_xfs.push(Xf {
+            font: Some(0),
+            ..Xf::default()
+        });
+        assert_eq!(styles.cell_format(None), styles.cell_format(Some(0)));
+        for count in [1, INTERN_CACHE_MIN_POOL, INTERN_CACHE_MIN_POOL + 1] {
+            styles.cell_xfs.resize(count, Xf::default());
+            let format = CellFormat {
+                alignment: Alignment {
+                    h: Some(HAlign::Left),
+                    ..Alignment::default()
+                },
+                ..CellFormat::default()
+            };
+            let index = styles.intern_cell_format(&format).unwrap();
+            assert_eq!(styles.intern_cell_format(&format).unwrap(), index);
+            assert_eq!(styles.fonts.len(), 1);
+            assert!(styles.fills.is_empty());
+            assert!(styles.borders.is_empty());
+        }
     }
 
     #[test]

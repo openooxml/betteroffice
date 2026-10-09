@@ -150,6 +150,120 @@ fn text(parts: &BTreeMap<String, Vec<u8>>, path: &str) -> String {
     String::from_utf8(parts[path].clone()).unwrap()
 }
 
+#[test]
+fn formatting_an_implicit_header_does_not_add_an_empty_font() {
+    let source =
+        include_bytes!("../../../packages/agents/eval/formats/fixtures/xlsx-04-style-header.xlsx");
+    let mut workbook = Workbook::open(source).unwrap();
+    let empty_fonts = text(&parts(source), "xl/styles.xml")
+        .matches("<font></font>")
+        .count();
+    assert_eq!(
+        text(&parts(&workbook.save().unwrap()), "xl/styles.xml")
+            .matches("<font></font>")
+            .count(),
+        empty_fonts
+    );
+    workbook
+        .apply_ops(
+            vec![Op::PatchRangeStyle {
+                sheet: SheetId(0),
+                range: CellRange::parse_a1("A1:C1").unwrap(),
+                patch: xlsx_ops::StylePatch {
+                    bold: Some(true),
+                    fill_color: Some("#D9EAF7".into()),
+                    ..Default::default()
+                },
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        text(&parts(&workbook.save().unwrap()), "xl/styles.xml")
+            .matches("<font></font>")
+            .count(),
+        empty_fonts
+    );
+}
+
+#[test]
+fn formatting_keeps_each_cells_base_font_and_unmodeled_style_properties() {
+    let mut source = parts(&package(VARIANTS[0].1));
+    let xml = styles(VARIANTS[0].1).replace("Calibri", "DejaVu Sans")
+        .replace("<sz val=\"11\"/>", "<sz val=\"17\"/><family val=\"2\"/><charset val=\"1\"/>")
+        .replace("<diagonal/>", "<diagonal style=\"dotted\"><color rgb=\"FF123456\"/></diagonal>")
+        .replace("<protection locked=\"0\"/>", "<alignment horizontal=\"right\" textRotation=\"30\" indent=\"2\"/><protection locked=\"0\"/>");
+    let xml = xml.replace("<font><b/><sz val=\"17\"/><family val=\"2\"/><charset val=\"1\"/><name val=\"DejaVu Sans\"/>", "<font><b/><sz val=\"21\"/><family val=\"2\"/><charset val=\"1\"/><name val=\"Liberation Serif\"/>");
+    source.insert("xl/styles.xml".into(), xml.into_bytes());
+    source.insert(
+        "xl/worksheets/sheet1.xml".into(),
+        worksheet(SHEET1)
+            .replace("r=\"A1\" s=\"2\"", "r=\"A1\"")
+            .replace("r=\"C1\" s=\"2\"", "r=\"C1\" s=\"3\"")
+            .into_bytes(),
+    );
+    let source = ooxml_opc::rezip_parts(&source.into_iter().collect::<Vec<_>>()).unwrap();
+    let mut workbook = Workbook::open(&source).unwrap();
+    let before: Vec<_> = ["A1", "B1", "C1"]
+        .into_iter()
+        .map(|address| {
+            workbook.model().styles.cell_format(
+                workbook.model().sheets[0]
+                    .cell(cell(address))
+                    .unwrap()
+                    .style,
+            )
+        })
+        .collect();
+    let op = Op::PatchRangeStyle {
+        sheet: SheetId(0),
+        range: CellRange::parse_a1("A1:C1").unwrap(),
+        patch: xlsx_ops::StylePatch {
+            bold: Some(true),
+            fill_color: Some("#D9EAF7".into()),
+            ..Default::default()
+        },
+    };
+    workbook
+        .apply_ops(vec![op.clone()], CalculationOptions::default())
+        .unwrap();
+    let pools = workbook.model().styles.pool_marks();
+    workbook
+        .apply_ops(vec![op], CalculationOptions::default())
+        .unwrap();
+    assert_eq!(workbook.model().styles.pool_marks(), pools);
+    let summary = workbook
+        .selection_formatting(SheetId(0), CellRange::parse_a1("A1:C1").unwrap())
+        .unwrap();
+    assert_eq!(summary.font_family, None);
+    assert_eq!(summary.font_size, None);
+    let first = workbook
+        .selection_formatting(SheetId(0), CellRange::parse_a1("A1").unwrap())
+        .unwrap();
+    assert_eq!(first.font_family.as_deref(), Some("DejaVu Sans"));
+    assert_eq!(first.font_size, Some(17.0));
+    let saved = workbook.save().unwrap();
+    assert_eq!(workbook.save().unwrap(), saved);
+    let reopened = Workbook::open(&saved).unwrap();
+    for (address, mut expected) in ["A1", "B1", "C1"].into_iter().zip(before) {
+        expected.font.bold = true;
+        expected.fill = xlsx_model::Fill::Solid(xlsx_model::Color::Rgb("#d9eaf7".into()));
+        let actual = reopened.model().styles.cell_format(
+            reopened.model().sheets[0]
+                .cell(cell(address))
+                .unwrap()
+                .style,
+        );
+        assert_eq!(actual, expected, "{address}");
+    }
+    let xml = text(&parts(&saved), "xl/styles.xml");
+    assert!(!xml.contains("<font></font>"));
+    assert!(xml.matches("<family val=\"2\"/>").count() >= 3);
+    assert!(xml.matches("textRotation=\"30\"").count() >= 2);
+    assert!(xml.matches("<protection locked=\"0\"/>").count() >= 2);
+    assert!(xml.contains("<diagonal style=\"dotted\"><color rgb=\"FF123456\"/></diagonal>"));
+}
+
 /// Each `<c>` element's markup keyed by its `r` attribute.
 fn cells(xml: &str) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();

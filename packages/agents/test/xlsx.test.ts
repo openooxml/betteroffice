@@ -6,6 +6,30 @@ import { openWorkbook } from '@betteroffice/xlsx';
 import { attachXlsx, openXlsx } from '../src/xlsx';
 import { xlsxFixture } from './format-fixtures';
 
+test('XLSX header formatting preserves the implicit workbook font and reports it accurately', async () => {
+  const source = await readFile(resolve(import.meta.dir, '../eval/formats/fixtures/xlsx-04-style-header.xlsx'));
+  const book = await openXlsx(source);
+  try {
+    const result = book.formatRanges({ version: book.overview().version, edits: [{ sheet: 'sheet:0', range: 'A1:C1', bold: true, fill: '#D9EAF7' }] });
+    expect(result.items[0].formatting).toMatchObject({ fontFamily: 'DejaVu Sans', fontSize: 11, bold: true });
+    const zip = await JSZip.loadAsync(await book.export());
+    const styles = await zip.file('xl/styles.xml')!.async('string');
+    const original = await JSZip.loadAsync(source);
+    const originalStyles = await original.file('xl/styles.xml')!.async('string');
+    expect(styles.match(/<font><\/font>/g)?.length ?? 0).toBe(originalStyles.match(/<font><\/font>/g)?.length ?? 0);
+    const sheet = await zip.file('xl/worksheets/sheet1.xml')!.async('string');
+    const fonts = styles.match(/<font>.*?<\/font>/g)!;
+    const xfs = styles.match(/<cellXfs[^>]*>(.*?)<\/cellXfs>/)![1].match(/<xf\b[^>]*?(?:\/>|>.*?<\/xf>)/g)!;
+    for (const address of ['A1', 'B1', 'C1']) {
+      const xf = Number(sheet.match(new RegExp(`<c r="${address}"[^>]* s="(\\d+)"`))![1]);
+      const font = Number(xfs[xf].match(/fontId="(\d+)"/)![1]);
+      expect(fonts[font]).toContain('<name val="DejaVu Sans"/>');
+      expect(fonts[font]).toContain('<sz val="11"/>');
+      expect(fonts[font]).toContain('<b/>');
+    }
+  } finally { book.close(); }
+});
+
 async function tableFixture() {
   const zip = await JSZip.loadAsync(await xlsxFixture());
   const ns = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';

@@ -29,6 +29,7 @@ use crate::read::SharedStringCells;
 use crate::xml::{resolve_part_path, xml_err};
 
 mod source_coordinates;
+mod style_derivation;
 
 /// A saved workbook's parts: generated entries are owned, entries the source
 /// package already held are borrowed from it.
@@ -391,7 +392,9 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
     patch_chart_parts(wb, package, origins, &mut parts)?;
 
     let shared_strings_stable = wb.shared_strings == package.original_workbook.shared_strings;
-    let style_match = StyleMatch::new(&package.original_workbook.styles, &wb.styles);
+    let style_plan = style_derivation::StylePlan::new(wb, package, origins, sheet_axes)?;
+    let style_match = StyleMatch::new(&package.original_workbook.styles, &wb.styles)
+        .with_derived(style_plan.pairs.clone());
     let empty_provenance = SharedStringCells::new();
     let axes_changed = sheet_axes.iter().flatten().any(|axes| !axes.is_identity());
     let defined_names = package
@@ -543,14 +546,15 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
     let styles_retained = matches!(
         (package.styles.as_ref(), styles.as_ref()),
         (Some(source), Some(planned)) if source.path == planned.path
-    ) && wb.styles == package.original_workbook.styles;
+    ) && style_plan.styles == package.original_workbook.styles;
     if !styles_retained {
         replace_optional_part(&mut parts, package.styles.as_ref(), styles.as_ref(), || {
             match &package.stylesheet_template {
                 Some(template) => styles_xml_with_template(
-                    &wb.styles,
+                    &style_plan.styles,
                     &package.original_workbook.styles,
                     template,
+                    &style_plan.overrides,
                 ),
                 None => styles_xml_with_namespace(&wb.styles, main_namespace),
             }
@@ -3214,6 +3218,7 @@ fn patched_pool<T: PartialEq>(
     original: &[T],
     write_item: impl Fn(&mut Writer<Vec<u8>>, &T) -> io::Result<()>,
     write_pool: impl FnOnce() -> Result<Vec<u8>, ParseError>,
+    overrides: Option<&HashMap<usize, Vec<u8>>>,
 ) -> Result<Option<Vec<u8>>, ParseError> {
     if values.is_empty() {
         return Ok(None);
@@ -3225,6 +3230,10 @@ fn patched_pool<T: PartialEq>(
     let sources = pool.children_named(item_name).collect::<Vec<_>>();
     let mut items = Vec::with_capacity(values.len());
     for (index, value) in values.iter().enumerate() {
+        if let Some(bytes) = overrides.and_then(|values| values.get(&index)) {
+            items.push(pool.qualify_fragment(bytes)?);
+            continue;
+        }
         match sources
             .get(index)
             .filter(|_| original.get(index) == Some(value))
@@ -3244,6 +3253,7 @@ fn styles_xml_with_template(
     stylesheet: &Stylesheet,
     original: &Stylesheet,
     template: &XmlTemplate,
+    overrides: &style_derivation::StyleOverrides,
 ) -> Result<Vec<u8>, ParseError> {
     let num_fmts = patched_pool(
         template,
@@ -3260,6 +3270,7 @@ fn styles_xml_with_template(
             Ok(())
         },
         || fragment(|writer| write_num_fmts(writer, stylesheet)),
+        None,
     )?;
     let fonts = patched_pool(
         template,
@@ -3269,6 +3280,7 @@ fn styles_xml_with_template(
         &original.fonts,
         write_font,
         || fragment(|writer| write_fonts(writer, stylesheet)),
+        Some(&overrides.fonts),
     )?;
     let fills = patched_pool(
         template,
@@ -3278,6 +3290,7 @@ fn styles_xml_with_template(
         &original.fills,
         write_fill,
         || fragment(|writer| write_fills(writer, stylesheet)),
+        Some(&overrides.fills),
     )?;
     let borders = patched_pool(
         template,
@@ -3287,6 +3300,7 @@ fn styles_xml_with_template(
         &original.borders,
         write_border,
         || fragment(|writer| write_borders(writer, stylesheet)),
+        Some(&overrides.borders),
     )?;
     let cell_xfs = patched_pool(
         template,
@@ -3296,6 +3310,7 @@ fn styles_xml_with_template(
         &original.cell_xfs,
         write_xf,
         || fragment(|writer| write_cell_xfs(writer, stylesheet)),
+        Some(&overrides.xfs),
     )?;
     let mut replacements = vec![
         ("numFmts", num_fmts),

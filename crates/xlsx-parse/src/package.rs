@@ -488,6 +488,40 @@ pub(crate) struct XmlChild {
 }
 
 impl XmlTemplate {
+    pub(crate) fn render_with_attributes(
+        &self,
+        replacements: Vec<(&'static str, Option<Vec<u8>>)>,
+        rank: fn(&str) -> usize,
+        changes: &[(&str, Option<String>)],
+    ) -> Result<Vec<u8>, ParseError> {
+        let mut template = self.clone();
+        let mut reader = Reader::from_reader(self.prefix.as_slice());
+        let mut writer = Writer::new(Vec::new());
+        loop {
+            match reader.read_event().map_err(xml_err)? {
+                Event::Start(element) => {
+                    let mut values = attributes(&element)?;
+                    for (name, value) in changes {
+                        match value {
+                            Some(value) => set_attribute(&mut values, name, name, value.clone()),
+                            None => remove_attribute(&mut values, name),
+                        }
+                    }
+                    let mut root = BytesStart::new(self.root_name.as_str());
+                    for value in &values {
+                        root.push_attribute((value.name.as_str(), value.value.as_str()));
+                    }
+                    writer.write_event(Event::Start(root)).map_err(xml_err)?;
+                    break;
+                }
+                Event::Eof => return Err(ParseError::Malformed("missing template root".into())),
+                event => writer.write_event(event.into_owned()).map_err(xml_err)?,
+            }
+        }
+        template.prefix = writer.into_inner();
+        template.render(replacements, rank)
+    }
+
     pub(crate) fn capture(data: &[u8]) -> Result<Self, ParseError> {
         let mut reader = NsReader::from_reader(data);
         let config = reader.config_mut();

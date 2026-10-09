@@ -423,9 +423,14 @@ fn apply_range_formats(
                     None
                 };
                 let mut format = styles.cell_format(old_style);
+                let previous = format.clone();
                 if let Err(error) = update(&mut format, at.row, at.col) {
                     styles.restore_pools(marks);
                     return Err(error);
+                }
+                if format == previous {
+                    staged.push(old_style);
+                    continue;
                 }
                 match styles.intern_cell_format(&format) {
                     Ok(style) => staged.push(style),
