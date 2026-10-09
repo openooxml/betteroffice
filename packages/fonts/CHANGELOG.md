@@ -1,5 +1,11 @@
 # @betteroffice/fonts
 
+## 0.4.1
+
+### Patch Changes
+
+- a27d25a: Documents and presentations using CJK font families now get usable fallback fonts when the optional CJK add-on is unavailable.
+
 ## 0.4.0
 
 ### Minor Changes

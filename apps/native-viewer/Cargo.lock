@@ -161,7 +161,7 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "betteroffice-docx-edit"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "betteroffice-docx-layout",
  "betteroffice-docx-parse",
@@ -179,7 +179,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-docx-layout"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-ooxml-text",
@@ -193,7 +193,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-docx-parse"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "base64",
  "betteroffice-drawingml",
@@ -211,7 +211,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-docx-raster"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "base64",
  "betteroffice-docx-layout",
@@ -224,7 +224,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-drawingml"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "indexmap",
  "serde",
@@ -232,7 +232,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-metafile"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "betteroffice-drawingml",
 ]
@@ -276,11 +276,11 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-ooxml-diff"
-version = "0.4.3"
+version = "0.4.4"
 
 [[package]]
 name = "betteroffice-ooxml-text"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "rustybuzz",
  "serde",
@@ -292,7 +292,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-opc"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "quick-xml",
  "zip",
@@ -300,7 +300,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-pptx"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "betteroffice-pptx-edit",
  "betteroffice-pptx-parse",
@@ -310,7 +310,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-pptx-edit"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "base64",
  "betteroffice-drawingml",
@@ -325,7 +325,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-pptx-parse"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "base64",
  "betteroffice-drawingml",
@@ -337,7 +337,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-pptx-raster"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-ooxml-text",
@@ -352,7 +352,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-pptx-render"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-metafile",
@@ -366,7 +366,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-xlsx"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-opc",
@@ -383,21 +383,21 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-xlsx-calc"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "betteroffice-xlsx-model",
 ]
 
 [[package]]
 name = "betteroffice-xlsx-model"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "betteroffice-xlsx-ops"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "betteroffice-xlsx-calc",
  "betteroffice-xlsx-model",
@@ -406,7 +406,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-xlsx-parse"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-xlsx-model",
@@ -415,7 +415,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-xlsx-raster"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "betteroffice-xlsx-render",
  "png",
@@ -425,7 +425,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-xlsx-render"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-xlsx-model",

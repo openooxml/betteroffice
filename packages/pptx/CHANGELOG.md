@@ -1,5 +1,23 @@
 # @betteroffice/pptx
 
+## 0.3.0
+
+### Minor Changes
+
+- 90fc980: Adds opt-in `includeMedia: false` to `inspectPresentation` for smaller results that retain media paths, content types, and byte lengths. Media bytes remain included by default.
+- 90dc250: Editable `PptxEditor` sessions with `experimentalWorkerOpen` now use the worker-owned editor, with `saveAsync`, `handleAsync` and `recoverySave` on the editor API. The flag remains experimental and opt-in, the default editor is unchanged, and collaboration is not supported in this mode yet and throws `PptxWorkerEditorCollaborationError`.
+- 73959ca: `openPresentationSession` sessions add an experimental `call.frame(slideIndex)` that returns the slide's display list, the presentation version it was built from and the image media it references; a newer frame request replaces a queued older one.
+- 550b200: Adds experimental `openPresentationSession` for worker-owned presentation reads, version-checked edits, slide metadata, and async saving. Opt-in; caller buffers remain usable.
+
+### Patch Changes
+
+- 1ed2ad0: Built-in worker sessions for presentations and workbooks start compiling the engine as soon as the worker starts, and later built-in sessions in the same page reuse the compiled module, so opening another document is faster.
+- 396ebf9: Pictures use bounded decode sizes and image caching by default, reducing memory use in picture-heavy presentations. Adds optional `maxDimension` to `decodePresentationImage` and `acquire` and `release` to `CanvasImageResolver` for scoped painting.
+- 4a780fd: Presentation sessions open and serve their first slide faster on large decks.
+- 0be5495: Slides with many shadows now finish rendering and exporting by omitting shadows that exceed the rendering budget. Shapes and pictures remain visible.
+- 01c8ecb: Large presentations show their first slide sooner and edit faster: thumbnails are laid out after the first paint, and unchanged slides keep their cached layouts and thumbnails, so typing and remote edits lay out only the slides they change.
+- d402284: Scatter and bubble chart X axes now fit charts whose X values are all equal, and X values without a Y value no longer stretch the X axis.
+
 ## 0.2.0
 
 ### Minor Changes
