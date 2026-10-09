@@ -8,9 +8,9 @@ use docx_edit::{
     EditHistory, EditOperation, EditRefusal, EditRequest, EditSource, EditStep, EditSuggestion,
     EditTarget, EditTextView, EditingDoc, FindTextRequest, FormatPolicy, ParaAttrDelta,
     ParaSelector, ParagraphIdOrigin, ParagraphIdentity, ParagraphInput, ParagraphOrigin,
-    ParagraphRef, ParagraphTarget, Position, RawOp, ReadParagraphsRequest, SearchScope,
-    SegmentContent, StoryRange, TargetEdge, TextPosition, TextRange, TextTarget, UndoCaptureMode,
-    UndoSession, seed_from_docx,
+    ParagraphRef, ParagraphTarget, Position, RawOp, ReadParagraphsRequest, ReadStoriesRequest,
+    SearchScope, SegmentContent, StoryRange, StoryText, TargetEdge, TextPosition, TextRange,
+    TextTarget, UndoCaptureMode, UndoSession, seed_from_docx,
 };
 use yrs::{Any, Map, MapPrelim, ReadTxn, Text, TextRef, Transact};
 
@@ -1099,6 +1099,61 @@ impl InView for TextTarget {
             other => other,
         }
     }
+}
+
+#[test]
+fn read_stories_reports_each_story_and_refuses_a_stale_version() {
+    let doc = open(&format!(
+        r#"{}<w:p w14:paraId="00000002"><w:pPr><w:rPr><w:ins w:id="3" w:author="Ann" w:date="{DATE}"/></w:rPr></w:pPr>{}</w:p><w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc>{}</w:tc></w:tr></w:tbl>{}"#,
+        p("00000001", &r("before")),
+        r("split here"),
+        p("0000C001", &r("cell")),
+        p("00000003", &r("after")),
+    ));
+    let read = |stories: Option<Vec<&str>>, expect_version: Option<DocumentVersion>| {
+        doc.read_stories(&ReadStoriesRequest {
+            stories: stories.map(|ids| ids.into_iter().map(str::to_owned).collect()),
+            view: EditTextView::Accepted,
+            expect_version,
+        })
+    };
+    let summary = |stories: Vec<StoryText>| -> Vec<(String, Result<Vec<String>, EditFailureCode>)> {
+        stories
+            .into_iter()
+            .map(|story| match story {
+                StoryText::Read { story, paragraphs } => (
+                    story,
+                    Ok(paragraphs
+                        .into_iter()
+                        .map(|paragraph| paragraph.text)
+                        .collect()),
+                ),
+                StoryText::Refused { story, failure } => (story, Err(failure.code)),
+            })
+            .collect()
+    };
+    let all = summary(read(None, None).unwrap().stories);
+    let ids: Vec<&String> = all.iter().map(|(story, _)| story).collect();
+    assert!(ids.is_sorted());
+    assert!(all.contains(&("body".to_owned(), Err(EditFailureCode::Unsupported))));
+    assert!(all.contains(&("body:t0:r0c0".to_owned(), Ok(vec!["cell".to_owned()]))));
+
+    let chosen = read(Some(vec!["body:t0:r0c0", "missing", "body:t0:r0c0"]), None).unwrap();
+    assert_eq!(
+        summary(chosen.stories),
+        [
+            ("body:t0:r0c0".to_owned(), Ok(vec!["cell".to_owned()])),
+            ("missing".to_owned(), Err(EditFailureCode::MissingTarget)),
+        ]
+    );
+    assert!(read(Some(vec!["body:t0:r0c0"]), Some(chosen.version.clone())).is_ok());
+    let stale = read(
+        Some(vec!["body:t0:r0c0"]),
+        Some(DocumentVersion::from("stale".to_owned())),
+    )
+    .unwrap_err();
+    assert_eq!(stale.failure.code, EditFailureCode::StaleVersion);
+    assert_eq!(stale.version, chosen.version);
 }
 
 #[test]

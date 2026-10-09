@@ -9,7 +9,8 @@ import { syntheticDocx } from './__fixtures__/previewChain';
 import { isLayoutMetaV1, type LayoutMetaV1 } from './layoutMeta';
 import type { Layout } from '../layout/pagination';
 import { proposalRevisionPreview } from './proposals';
-import { createYrsSession } from './index';
+import { createYrsSession, readStorySelection, storyParts } from './index';
+import { storiesDocx } from './__fixtures__/storiesDocx';
 import { readSidebar, readOutlineHeadings } from './sidebarReads';
 import { sidebarDocx } from './__fixtures__/sidebarDocx';
 import { readResidentSearch } from './residentSearch';
@@ -562,6 +563,46 @@ test('document reads skip stale versions and read the current version', async ()
   });
   expect(current).not.toHaveProperty('superseded');
   expect(reads).toBe(1);
+});
+
+test('story reads answer from the worker as the session would', async () => {
+  const main = await createYrsSession();
+  const engine = await createResidentEngineSession();
+  const w = worker();
+  try {
+    const parts = storyParts(main.openDocx(storiesDocx(), true).document);
+    engine.openDocx(storiesDocx());
+    await w.bootstrap();
+    Object.assign(w.harness.session, {
+      proposalEngine: engine.proposalEngine,
+      geometryReader: engine.geometryReader,
+      readStories: engine.readStories,
+    });
+    const version = engine.proposalEngine.version();
+    expect(await w.send({ type: 'documentRead', read: { kind: 'storyIds' } })).toMatchObject({
+      ok: true,
+      read: { version, value: main.storyIds() },
+    });
+    for (const stories of ['all', ['header', 'table-cell'], ['footer', 'missing']] as const) {
+      const request = { stories, view: 'accepted' as const };
+      const reply = await w.send({ type: 'documentRead', read: { kind: 'readStories', request, parts } });
+      const local = readStorySelection(main, request, parts);
+      expect(reply).toMatchObject({ ok: true, read: { value: { ok: true, version } } });
+      const read = (reply as { read?: { value?: { stories?: unknown } } }).read;
+      expect(read?.value?.stories).toEqual(local.ok ? local.stories : undefined);
+    }
+    const stale = await w.send({
+      type: 'documentRead',
+      read: { kind: 'readStories', request: { stories: 'all', view: 'accepted', expectVersion: 'older' }, parts },
+    });
+    expect(stale).toMatchObject({
+      ok: true,
+      read: { value: { ok: false, version, failure: { code: 'stale-version' } } },
+    });
+  } finally {
+    main.destroy();
+    engine.destroy();
+  }
 });
 
 test.each([false, true])(
