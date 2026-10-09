@@ -462,15 +462,20 @@ const review = defineDocxPlugin<State>({
   `preferredSize` is clamped to 40% of the editor. In a narrow editor side docks
   show their tabs, and a tab opens its panel as a drawer over the document that
   Escape closes. Collapsing a panel keeps the plugin running.
-- **Story reads.** `read.listStories()` lists every story with its kind
-  (`body`, `table-cell`, `content-control`, `header`, `footer`, `footnote`,
-  `endnote` or `other`), the story a cell or block control sits in, and a
-  header's or footer's relationship id and the sections using it.
-  `read.readStories({ stories, view, expectVersion })` reads `'all'` stories,
-  those of the listed kinds, or listed story ids in one call. Worker viewers,
-  the default for read-only editors without `collaboration`, answer both with
-  one worker read. A story that cannot be read reports its failure, and
-  `expectVersion` refuses a changed document with `stale-version`.
+- **Story reads.** `read.listStories()` lists every story in id order with its
+  kind (`body`, `table-cell`, `content-control`, `header`, `footer`, `footnote`,
+  `endnote` or `other`; comment bodies are not session stories), its `root`, the
+  story a cell or block control sits in, and a header's or footer's `part` and
+  `uses`: the sections whose properties reference the part, inheritance applied,
+  whether or not a page shows it (anchor geometry tells where it is painted).
+  `read.readStories({ stories, byRoot, view, expectVersion })` reads `'all'`
+  stories, or listed kinds and story ids in their order without repeats, in one
+  call; kinds match each story's own kind unless `byRoot` matches its root's, so
+  `['header']` with `byRoot` includes header table cells. Worker viewers, the
+  default for read-only editors without `collaboration`, answer each with one
+  worker read. A story that cannot be read reports its own failure, the read
+  limits stop the read with `truncated`, and `expectVersion` refuses a changed
+  document with `stale-version`.
 - **Geometry.** `context.geometry` is null until a rendered layout shows the
   current version, and whenever it falls behind. `geometry.dom` answers in
   pages-container units divided by zoom; `geometry.toOverlayRect(rect)` converts

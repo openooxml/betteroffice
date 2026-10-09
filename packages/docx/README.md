@@ -191,12 +191,18 @@ U+FFFC listed in `atoms`, tabs stay `\t`, and paragraph marks are excluded. The
 `original` does the reverse. `findText` is exact, case-sensitive and
 paragraph-local, and a `search` target must match exactly once in its scope.
 
-`readStories({ stories, view, expectVersion })` reads the listed stories, or every
-story, in one read; a story that cannot be read reports its failure instead.
-`describeStories(session.storyIds(), storyParts(document))` gives each story's kind
-(`body`, `table-cell`, `content-control`, `header`, `footer`, `footnote`, `endnote`
-or `other`), the story a cell or block control sits in, and a header's or footer's
-relationship id and the sections using it; `readStorySelection` also takes kinds.
+`listStories()` lists every story in id order with its kind (`body`, `table-cell`,
+`content-control`, `header`, `footer`, `footnote`, `endnote` or `other`; comment bodies
+are not session stories), its `root` story, the story a cell or block control sits
+in, and a header's or footer's `part` and `uses`: the sections whose properties
+reference the part, inheritance applied, whether or not a page shows it.
+`readStories({ stories, byRoot, view, expectVersion })` reads `'all'` stories (the
+default), or listed kinds and story ids in their order without repeats, in one read.
+Kinds match each story's own kind, so `header` leaves out header table cells unless
+`byRoot` matches the root's kind instead. A story that cannot be read, such as one
+with a pending paragraph-mark revision, reports its own failure; the read limits stop
+the read with `truncated`, and `expectVersion` refuses a changed document with
+`stale-version`.
 
 | Step | Effect |
 | --- | --- |
