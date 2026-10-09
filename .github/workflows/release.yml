@@ -31,7 +31,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: "1.3.14"
+          bun-version: "1.4.2"
 
       # Node 24 ships npm >= 11.5.1, required for provenance and OIDC publishing.
       - uses: actions/setup-node@v7.0.0
@@ -81,7 +81,7 @@ jobs:
 
       - name: Detect crates.io bootstrap token
         id: crates-bootstrap
-        if: steps.pending.outputs.publishing == 'true'
+        if: steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_CRATES != 'true'
         env:
           TOKEN: ${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN }}
         run: |
@@ -95,14 +95,14 @@ jobs:
 
       - name: Authenticate to crates.io
         id: crates-auth
-        if: steps.pending.outputs.publishing == 'true'
+        if: steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_CRATES != 'true'
         uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1
         continue-on-error: ${{ steps.crates-bootstrap.outputs.enabled == 'true' }}
 
       # Both registries are checked before the first upload: a guard that fails
       # after the crates publish leaves the release half-published.
       - name: Check crates.io publish targets
-        if: steps.pending.outputs.publishing == 'true'
+        if: steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_CRATES != 'true'
         env:
           CRATES_IO_BOOTSTRAP_TOKEN: ${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN }}
         run: node scripts/check-publish-targets.mjs --crates
@@ -115,7 +115,7 @@ jobs:
         run: node scripts/check-publish-targets.mjs --npm
 
       - name: Publish Rust crates
-        if: steps.pending.outputs.publishing == 'true'
+        if: steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_CRATES != 'true'
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
           CRATES_IO_BOOTSTRAP_TOKEN: ${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN }}
@@ -152,7 +152,7 @@ jobs:
   python-bindings:
     name: Python release train
     needs: release
-    if: needs.release.result == 'success' && needs.release.outputs.publishing == 'true'
+    if: needs.release.result == 'success' && needs.release.outputs.publishing == 'true' && vars.RELEASE_SKIP_PYTHON != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:

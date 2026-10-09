@@ -1,4 +1,6 @@
 import type {
+  TablePayload,
+  TablePayloadRow,
   YrsCellBorders,
   YrsCellLoc,
   YrsContentControlValue,
@@ -10,6 +12,7 @@ import type {
   YrsTableLoc,
   YrsTableRange,
 } from '@betteroffice/docx/yrs';
+import { storyOffsetForLoc, storyPlainText, tableAnchors, tablePlainText } from '@betteroffice/docx/yrs';
 import { computeSplitDialogDefaults, pixelsToEmu } from '@betteroffice/docx/utils';
 import type { ImageLayoutTarget, SetImageWrapTypeOptions } from '@betteroffice/docx/docx';
 import type { TableContextInfo } from './types';
@@ -89,8 +92,7 @@ export interface YrsHyperlinkHit {
 }
 
 export function yrsStoryOffsetForLoc(session: YrsSession, loc: YrsLoc): number {
-  const span = session.locateParagraph(loc.story, loc.paraId);
-  return span.start + loc.offset;
+  return storyOffsetForLoc(session, loc);
 }
 
 export function yrsLocForStoryOffset(
@@ -227,87 +229,52 @@ export function yrsSelectedText(session: YrsSession): string {
     .join('');
 }
 
-interface TablePayloadCell {
-  story: string;
-  tcPr?: Record<string, unknown>;
-}
-
-interface TablePayloadRow {
-  cells: TablePayloadCell[];
-}
-
-interface TablePayload {
-  tblPr?: Record<string, unknown>;
-  grid?: unknown[];
-  rows: TablePayloadRow[];
-}
-
-interface TableCellAnchor {
-  row: number;
-  column: number;
-  rowspan: number;
-  colspan: number;
-  story: string;
-}
-
-function positiveSpan(value: unknown): number {
-  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : 1;
+/**
+ * The current selection as plain text for the clipboard: tabs and line breaks
+ * as characters, tables and a multi-cell selection as tab-separated rows.
+ */
+export function yrsSelectionPlainText(session: YrsSession): string {
+  const table = currentYrsTableTarget(session);
+  if (table && !sameCell(table.range.anchor, table.range.head)) {
+    const payload = tablePayload(session, table.range.anchor);
+    const { anchor, head } = table.range;
+    return payload
+      ? tablePlainText(session, payload, {
+          top: Math.min(anchor.row, head.row),
+          bottom: Math.max(anchor.row, head.row),
+          left: Math.min(anchor.column, head.column),
+          right: Math.max(anchor.column, head.column),
+        }).join('\n')
+      : '';
+  }
+  const range = currentYrsSelectionRange(session);
+  if (!range) return '';
+  const start = yrsStoryOffsetForLoc(session, { story: range.story, ...range.start });
+  const end = yrsStoryOffsetForLoc(session, { story: range.story, ...range.end });
+  return start === end ? '' : storyPlainText(session, range.story, start, end);
 }
 
 function tablePayload(session: YrsSession, table: YrsTableLoc): TablePayload | null {
-  let tableIndex = 0;
-  for (const segment of session.storySegments(table.story)) {
-    if (segment.kind !== 'embed' || segment.embedKind !== 'table') continue;
-    if (tableIndex === table.tableIndex) {
-      const rows = segment.payload.rows;
-      if (!Array.isArray(rows)) return null;
-      return {
-        tblPr:
-          segment.payload.tblPr && typeof segment.payload.tblPr === 'object'
-            ? (segment.payload.tblPr as Record<string, unknown>)
-            : undefined,
-        grid: Array.isArray(segment.payload.grid) ? segment.payload.grid : undefined,
-        rows: rows as TablePayloadRow[],
-      };
-    }
-    tableIndex += 1;
-  }
-  return null;
+  const payload = session.tablePayload(table.story, table.tableIndex);
+  if (!payload) return null;
+  const rows = payload.rows;
+  if (!Array.isArray(rows)) return null;
+  return {
+    tblPr:
+      payload.tblPr && typeof payload.tblPr === 'object'
+        ? (payload.tblPr as Record<string, unknown>)
+        : undefined,
+    grid: Array.isArray(payload.grid) ? payload.grid : undefined,
+    rows: rows as TablePayloadRow[],
+  };
 }
 
 /** Current table properties for the properties dialog. */
 export function currentYrsTableProperties(
   session: YrsSession
 ): Record<string, unknown> | undefined {
-  const target = currentYrsTableTarget(session);
-  return target ? tablePayload(session, target.focused)?.tblPr : undefined;
-}
-
-function tableAnchors(payload: TablePayload): { anchors: TableCellAnchor[]; columns: number } {
-  const occupied: boolean[][] = Array.from({ length: payload.rows.length }, () => []);
-  const anchors: TableCellAnchor[] = [];
-  let columns = payload.grid?.length ?? 0;
-
-  payload.rows.forEach((row, rowIndex) => {
-    let column = 0;
-    for (const cell of row.cells ?? []) {
-      while (occupied[rowIndex]?.[column]) column += 1;
-      const rowspan = positiveSpan(cell.tcPr?.rowspan);
-      const colspan = positiveSpan(cell.tcPr?.colspan);
-      anchors.push({ row: rowIndex, column, rowspan, colspan, story: cell.story });
-      for (let targetRow = rowIndex; targetRow < rowIndex + rowspan; targetRow += 1) {
-        const slots = occupied[targetRow] ?? [];
-        occupied[targetRow] = slots;
-        for (let targetColumn = column; targetColumn < column + colspan; targetColumn += 1) {
-          slots[targetColumn] = true;
-        }
-      }
-      column += colspan;
-      columns = Math.max(columns, column);
-    }
-  });
-
-  return { anchors, columns };
+  const resolved = resolveYrsTableTarget(session);
+  return resolved ? resolved.payload()?.tblPr : undefined;
 }
 
 function sameTable(a: YrsTableLoc, b: YrsTableLoc): boolean {
@@ -337,7 +304,10 @@ export function yrsCellLocFromStory(story: string): YrsCellLoc | null {
 /** Resolve a current grid cell back to its stable independent story id. */
 export function yrsCellStory(session: YrsSession, at: YrsCellLoc): string | null {
   const payload = tablePayload(session, at);
-  if (!payload) return null;
+  return payload ? cellStoryIn(payload, at) : null;
+}
+
+function cellStoryIn(payload: TablePayload, at: YrsCellLoc): string | null {
   const { anchors } = tableAnchors(payload);
   return (
     anchors.find(
@@ -356,6 +326,13 @@ export function yrsCellStory(session: YrsSession, at: YrsCellLoc): string | null
  * after preceding row/column edits even though authored story ids do not rename.
  */
 export function currentYrsTableTarget(session: YrsSession): YrsTableTarget | null {
+  return resolveYrsTableTarget(session)?.target ?? null;
+}
+
+/** The table target, with its table's payload read at most once. */
+function resolveYrsTableTarget(
+  session: YrsSession
+): { target: YrsTableTarget; payload: () => TablePayload | null } | null {
   const selection = session.selection();
   if (!selection || !yrsCellLocFromStory(selection.head.story)) return null;
 
@@ -368,8 +345,9 @@ export function currentYrsTableTarget(session: YrsSession): YrsTableTarget | nul
     return null;
   }
   if (selected && sameTable(selected.anchor, selected.head)) {
-    const anchorStory = yrsCellStory(session, selected.anchor);
-    const headStory = yrsCellStory(session, selected.head);
+    const payload = tablePayload(session, selected.anchor);
+    const anchorStory = payload ? cellStoryIn(payload, selected.anchor) : null;
+    const headStory = payload ? cellStoryIn(payload, selected.head) : null;
     const focused =
       anchorStory && storyContains(anchorStory, selection.head.story)
         ? selected.anchor
@@ -380,13 +358,28 @@ export function currentYrsTableTarget(session: YrsSession): YrsTableTarget | nul
       sameCell(focused, selected.anchor) || sameCell(focused, selected.head)
         ? selected
         : { anchor: focused, head: focused };
-    return { focused, range };
+    return { target: { focused, range }, payload: () => payload };
   }
 
   // Compatibility fallback for programmatic selections that predate the
   // pointer adapter's cell-selection publication.
   const focused = yrsCellLocFromStory(selection.head.story);
-  return focused ? { focused, range: { anchor: focused, head: focused } } : null;
+  if (!focused) return null;
+  let payload: TablePayload | null | undefined;
+  return {
+    target: { focused, range: { anchor: focused, head: focused } },
+    payload: () => (payload === undefined ? (payload = tablePayload(session, focused)) : payload),
+  };
+}
+
+/** Stable story ids of the anchor and head cells of the table selection. */
+export function yrsTableSelectionStories(session: YrsSession): [string, string] | null {
+  const resolved = resolveYrsTableTarget(session);
+  const payload = resolved?.payload();
+  if (!resolved || !payload) return null;
+  const anchor = cellStoryIn(payload, resolved.target.range.anchor);
+  const head = cellStoryIn(payload, resolved.target.range.head);
+  return anchor && head ? [anchor, head] : null;
 }
 
 function cellBorderColor(tcPr: Record<string, unknown> | undefined): TableContextInfo['cellBorderColor'] {
@@ -405,9 +398,10 @@ function cellBorderColor(tcPr: Record<string, unknown> | undefined): TableContex
 
 /** Build the toolbar/context-menu table state from the authoritative yrs payload. */
 export function currentYrsTableContext(session: YrsSession): TableContextInfo | null {
-  const target = currentYrsTableTarget(session);
-  if (!target) return null;
-  const payload = tablePayload(session, target.focused);
+  const resolved = resolveYrsTableTarget(session);
+  if (!resolved) return null;
+  const { target } = resolved;
+  const payload = resolved.payload();
   if (!payload) return null;
   const { anchors, columns } = tableAnchors(payload);
   const focusedAnchor = anchors.find(
@@ -451,9 +445,10 @@ export function currentYrsSplitCellConfig(session: YrsSession): {
   minRows: number;
   minCols: number;
 } | null {
-  const target = currentYrsTableTarget(session);
-  if (!target) return null;
-  const payload = tablePayload(session, target.focused);
+  const resolved = resolveYrsTableTarget(session);
+  if (!resolved) return null;
+  const { target } = resolved;
+  const payload = resolved.payload();
   if (!payload) return null;
   const anchor = tableAnchors(payload).anchors.find(
     (candidate) =>
@@ -574,7 +569,8 @@ export function yrsSelectionNearTable(session: YrsSession, table: YrsTableLoc) {
  */
 export interface YrsHistoryActionResult {
   changed: boolean;
-  story: string | null;
+  /** Every story the undo or redo changed, sorted; empty when nothing changed. */
+  stories: string[];
 }
 
 export function performYrsHistoryAction(
@@ -587,13 +583,13 @@ export function performYrsHistoryAction(
   if (nearby) session.setSelection(nearby);
 
   const changed = redo ? session.redo() : session.undo();
-  const story = changed ? (session.historyStories()[0] ?? null) : null;
-  if (!changed || !before || !nearby) return { changed, story };
+  const stories = changed ? session.historyStories() : [];
+  if (!changed || !before || !nearby) return { changed, stories };
 
   const restoredCell = yrsCellLocFromStory(before.head.story);
   const cellIsLive =
     !restoredCell || yrsCellStory(session, restoredCell) === before.head.story;
-  if (!cellIsLive) return { changed, story };
+  if (!cellIsLive) return { changed, stories };
   try {
     const paragraphs = session.paragraphs(before.head.story);
     const paraIds = new Set(paragraphs.map((paragraph) => paragraph.paraId));
@@ -603,7 +599,7 @@ export function performYrsHistoryAction(
   } catch {
     // The structural history operation removed the selected story.
   }
-  return { changed, story };
+  return { changed, stories };
 }
 
 function authoredId(value: unknown): string | null {

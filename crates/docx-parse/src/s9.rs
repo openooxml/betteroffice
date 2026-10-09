@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use indexmap::IndexMap;
+use ooxml_opc::PackageBytes;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -15,10 +16,11 @@ use crate::comments::remove_orphan_comment_ranges;
 use crate::document::{DocumentBody, extract_all_template_variables, parse_document_body_compact};
 use crate::fonts::{FontTable, parse_font_table};
 use crate::header_footer::{HeaderFooter, parse_related_header_footers};
-use crate::media::{MediaFile, build_media_map_with_warnings};
+use crate::media::{MediaFile, MediaScan, MediaTable, build_media_map_with_warnings};
 use crate::notes::Note;
 use crate::numbering::{NumberingDefinitions, parse_numbering};
 use crate::paragraph::{HexIdAllocator, Paragraph};
+use crate::paragraph_identity::parse_paragraph_id;
 use crate::relationships::{Relationship, RelationshipMap, parse_relationships};
 use crate::s8::{find_part, parse_comment_part, parse_note_part, partition_notes};
 use crate::settings::{DocumentSettings, is_valid_utf8_xml_text, parse_settings};
@@ -35,6 +37,8 @@ pub struct S9ParseOptions {
     pub detect_variables: bool,
     pub determinism_seed: Option<String>,
     pub include_canonical: bool,
+    /// Records each paragraph's `w:p` occurrence in its part as `sourceOrdinal`.
+    pub source_ordinals: bool,
 }
 
 impl Default for S9ParseOptions {
@@ -45,6 +49,7 @@ impl Default for S9ParseOptions {
             detect_variables: true,
             determinism_seed: None,
             include_canonical: false,
+            source_ordinals: false,
         }
     }
 }
@@ -197,17 +202,239 @@ pub fn parse_docx_s9_wire_parts_with_limits(
     limits: &ParseLimits,
 ) -> Result<(S9WireEnvelope, Vec<(String, Vec<u8>)>), ParseError> {
     let parts = ooxml_opc::unzip_parts(data).map_err(ParseError::Container)?;
-    let envelope = parse_s9_package(&parts, data, options, limits)?;
+    let envelope = parse_s9_package(&parts, data, options, limits, None, None)?
+        .expect("a whole body is never refused");
     Ok((envelope, parts))
 }
 
+/// [`parse_docx_s9_wire_parts_with_limits`] leaving the media in the package:
+/// an image names its part by a [`MediaTable`] token where it would carry a
+/// `data:` URL, and the envelope lists no media entries. Watermarks keep
+/// their `data:` URLs. Returns the parts the parse inflated and the media
+/// table.
+pub fn parse_docx_s9_wire_with_media_table(
+    data: Arc<[u8]>,
+    options: S9ParseOptions,
+    limits: &ParseLimits,
+) -> Result<(S9WireEnvelope, Vec<(String, Vec<u8>)>, MediaTable), ParseError> {
+    parse_docx_s9_wire_with_media_table_bytes(data.into(), options, limits)
+}
+
+/// [`parse_docx_s9_wire_with_media_table`] with shared or owned package bytes.
+pub fn parse_docx_s9_wire_with_media_table_bytes(
+    data: PackageBytes,
+    options: S9ParseOptions,
+    limits: &ParseLimits,
+) -> Result<(S9WireEnvelope, Vec<(String, Vec<u8>)>, MediaTable), ParseError> {
+    let (parts, table) = media_table_parts_bytes(&data)?;
+    let envelope = parse_s9_package(&parts, &data, options, limits, None, Some(&table))?
+        .expect("a whole body is never refused");
+    Ok((envelope, parts, table))
+}
+
+/// The package's parts other than its media, inflated, and its media table.
+pub fn media_table_parts(
+    data: &Arc<[u8]>,
+) -> Result<(Vec<(String, Vec<u8>)>, MediaTable), ParseError> {
+    media_table_parts_bytes(&Arc::clone(data).into())
+}
+
+/// [`media_table_parts`] with shared or owned package bytes.
+pub fn media_table_parts_bytes(
+    data: &PackageBytes,
+) -> Result<(Vec<(String, Vec<u8>)>, MediaTable), ParseError> {
+    media_table_parts_within_bytes(data, ooxml_opc::MAX_TOTAL_UNCOMPRESSED_BYTES)
+}
+
+/// Bounded extraction before transcoding, reserving compressed images' sizes.
+#[doc(hidden)]
+pub fn media_table_parts_within(
+    data: &Arc<[u8]>,
+    budget: u64,
+) -> Result<(Vec<(String, Vec<u8>)>, MediaTable), ParseError> {
+    media_table_parts_within_bytes(&Arc::clone(data).into(), budget)
+}
+
+/// [`media_table_parts_within`] with shared or owned package bytes.
+#[doc(hidden)]
+pub fn media_table_parts_within_bytes(
+    data: &PackageBytes,
+    budget: u64,
+) -> Result<(Vec<(String, Vec<u8>)>, MediaTable), ParseError> {
+    let package =
+        ooxml_opc::RetainedPackage::from_bytes(data.clone()).map_err(ParseError::Container)?;
+    let scan = MediaScan::new(package, budget).map_err(ParseError::Container)?;
+    let mut parts = ooxml_opc::unzip_parts_where(data, scan.remaining_budget(), |path| {
+        !scan.keeps_compressed(path)
+    })
+    .map_err(ParseError::Container)?;
+    let table = scan.finish(&mut parts).map_err(ParseError::Container)?;
+    Ok((parts, table))
+}
+
+/// Parses already inflated package parts with only the body's first
+/// `blocks` blocks, for a preview of its first pages: at least that many, and
+/// on until no field spans past the last one. `None` when the document holds
+/// a float placed from outside the text or a section with columns, which the
+/// layout may apply to the body's first pages, so no cut of the body lays out
+/// like the whole. The parts alone cannot be hashed into generated IDs, so
+/// `options.determinism_seed` is required.
+pub fn parse_docx_s9_preview_from_parts(
+    parts: &[(String, Vec<u8>)],
+    blocks: usize,
+    options: S9ParseOptions,
+    limits: &ParseLimits,
+) -> Result<Option<S9WireEnvelope>, ParseError> {
+    parse_docx_s9_preview_from_parts_with_budget(parts, blocks, options, limits, None)
+        .map(|preview| preview.map(|(envelope, _)| envelope))
+}
+
+/// Returns the preview and whether its paragraph budget stopped the cut.
+pub fn parse_docx_s9_preview_from_parts_with_budget(
+    parts: &[(String, Vec<u8>)],
+    blocks: usize,
+    options: S9ParseOptions,
+    limits: &ParseLimits,
+    paragraph_budget: Option<usize>,
+) -> Result<Option<(S9WireEnvelope, bool)>, ParseError> {
+    if options.determinism_seed.is_none() || options.include_canonical {
+        return Err(ParseError::Canonical(
+            "parsing parts needs a determinism seed and no canonical envelope".to_owned(),
+        ));
+    }
+    parse_s9_package_impl(
+        parts,
+        &[],
+        options,
+        limits,
+        Some(blocks),
+        None,
+        true,
+        paragraph_budget,
+    )
+}
+
+#[doc(hidden)]
+pub fn parse_docx_s9_preview_from_parts_full_dom(
+    parts: &[(String, Vec<u8>)],
+    blocks: usize,
+    options: S9ParseOptions,
+    limits: &ParseLimits,
+) -> Result<Option<S9WireEnvelope>, ParseError> {
+    parse_docx_s9_preview_from_parts_full_dom_with_budget(parts, blocks, options, limits, None)
+        .map(|preview| preview.map(|(envelope, _)| envelope))
+}
+
+#[doc(hidden)]
+pub fn parse_docx_s9_preview_from_parts_full_dom_with_budget(
+    parts: &[(String, Vec<u8>)],
+    blocks: usize,
+    options: S9ParseOptions,
+    limits: &ParseLimits,
+    paragraph_budget: Option<usize>,
+) -> Result<Option<(S9WireEnvelope, bool)>, ParseError> {
+    if options.determinism_seed.is_none() || options.include_canonical {
+        return Err(ParseError::Canonical(
+            "parsing parts needs a determinism seed and no canonical envelope".to_owned(),
+        ));
+    }
+    parse_s9_package_impl(
+        parts,
+        &[],
+        options,
+        limits,
+        Some(blocks),
+        None,
+        false,
+        paragraph_budget,
+    )
+}
+
+/// [`parse_docx_s9_preview_from_parts`] with images naming their parts by
+/// `table`'s tokens, as [`parse_docx_s9_wire_with_media_table`] does; `parts`
+/// need not hold the media.
+pub fn parse_docx_s9_preview_with_media_table(
+    parts: &[(String, Vec<u8>)],
+    table: &MediaTable,
+    blocks: usize,
+    options: S9ParseOptions,
+    limits: &ParseLimits,
+) -> Result<Option<S9WireEnvelope>, ParseError> {
+    parse_docx_s9_preview_with_media_table_with_budget(parts, table, blocks, options, limits, None)
+        .map(|preview| preview.map(|(envelope, _)| envelope))
+}
+
+/// Returns a media-token preview and whether its paragraph budget stopped the cut.
+pub fn parse_docx_s9_preview_with_media_table_with_budget(
+    parts: &[(String, Vec<u8>)],
+    table: &MediaTable,
+    blocks: usize,
+    options: S9ParseOptions,
+    limits: &ParseLimits,
+    paragraph_budget: Option<usize>,
+) -> Result<Option<(S9WireEnvelope, bool)>, ParseError> {
+    if options.determinism_seed.is_none() || options.include_canonical {
+        return Err(ParseError::Canonical(
+            "parsing parts needs a determinism seed and no canonical envelope".to_owned(),
+        ));
+    }
+    parse_s9_package_impl(
+        parts,
+        &[],
+        options,
+        limits,
+        Some(blocks),
+        Some(table),
+        true,
+        paragraph_budget,
+    )
+}
+
+/// `None` only when `body_blocks` would cut a body the preview refuses; see
+/// [`parse_docx_s9_preview_from_parts`].
 fn parse_s9_package(
     parts: &[(String, Vec<u8>)],
     data: &[u8],
     options: S9ParseOptions,
     limits: &ParseLimits,
-) -> Result<S9WireEnvelope, ParseError> {
+    body_blocks: Option<usize>,
+    media_table: Option<&MediaTable>,
+) -> Result<Option<S9WireEnvelope>, ParseError> {
+    parse_s9_package_impl(
+        parts,
+        data,
+        options,
+        limits,
+        body_blocks,
+        media_table,
+        true,
+        None,
+    )
+    .map(|preview| preview.map(|(envelope, _)| envelope))
+}
+
+fn parse_s9_package_impl(
+    parts: &[(String, Vec<u8>)],
+    data: &[u8],
+    options: S9ParseOptions,
+    limits: &ParseLimits,
+    body_blocks: Option<usize>,
+    media_table: Option<&MediaTable>,
+    prefix_preview: bool,
+    paragraph_budget: Option<usize>,
+) -> Result<Option<(S9WireEnvelope, bool)>, ParseError> {
+    if media_table.is_some() && options.include_canonical {
+        return Err(ParseError::Canonical(
+            "a canonical envelope needs the media inflated".to_owned(),
+        ));
+    }
     let mut budget = ParseBudget::new(limits);
+    if let Some(table) = media_table {
+        budget.read_media_from(table);
+    }
+    if options.source_ordinals {
+        budget.record_source_ordinals();
+    }
     let document_path = crate::relationships::office_document_path(parts, &mut budget)?;
     let document_relationships_path = crate::relationships::relationship_part_path(&document_path);
 
@@ -254,7 +481,10 @@ fn parse_s9_package(
         Some((path, xml)) => parse_relationships(xml, path, &mut budget)?,
         None => RelationshipMap::new(),
     };
-    let (media, media_warnings) = build_media_map_with_warnings(parts);
+    let (media, media_warnings) = match media_table {
+        Some(table) => (table.media_map(), table.warnings().to_vec()),
+        None => build_media_map_with_warnings(parts),
+    };
     let all_xml: IndexMap<_, _> = parts
         .iter()
         .filter(|(path, _)| {
@@ -273,11 +503,44 @@ fn parse_s9_package(
 
     let document_part = find_part(parts, &document_path);
     let mut warnings = Vec::new();
-    let mut body = match document_part.filter(|(_, xml)| !xml.is_empty()) {
+    let (mut body, budget_stopped) = match document_part.filter(|(_, xml)| !xml.is_empty()) {
         Some((path, xml)) => {
-            let parsed = parse_xml(xml, path, &mut budget)?;
+            let mut scanned_budget = body_blocks
+                .filter(|_| prefix_preview)
+                .map(|_| budget.clone());
+            let mut legacy_partial = None;
+            let prefix = if let Some(blocks) = body_blocks.filter(|_| prefix_preview) {
+                match crate::document::streaming_body_cut_with_limit(
+                    xml,
+                    scanned_budget.as_mut().unwrap(),
+                    body_blocks.filter(|_| paragraph_budget.is_some()),
+                ) {
+                    Ok((refused, partial)) => {
+                        if refused {
+                            return Ok(None);
+                        }
+                        legacy_partial = paragraph_budget.map(|_| partial);
+                        let keep = blocks.saturating_mul(2).max(blocks.saturating_add(64));
+                        crate::document::body_prefix(xml, keep).map(|xml| (xml, keep))
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            let parsed = parse_xml(
+                prefix.as_ref().map_or(xml, |(xml, _)| xml.as_slice()),
+                path,
+                &mut budget,
+            )?;
+            if prefix.is_some() {
+                budget = scanned_budget.unwrap();
+            }
             match parsed.root() {
                 Some(root) => {
+                    if body_blocks.is_some() && crate::document::refuses_a_body_cut(root) {
+                        return Ok(None);
+                    }
                     let mut parser = StoryParser {
                         relationships: Some(&relationships),
                         theme: Some(&theme),
@@ -291,14 +554,57 @@ fn parse_s9_package(
                         ids: &mut ids,
                         part: path,
                     };
-                    parse_document_body_compact(root, &mut parser)?
+                    if let Some((_, keep)) = &prefix {
+                        let kept_children = root.child("w", "body").map_or(0, |body| {
+                            body.child_elements()
+                                .take(*keep)
+                                .map(|child| {
+                                    if matches!(child.local_name(), "customXml" | "smartTag") {
+                                        crate::block::transparent_children(child, false).len()
+                                    } else {
+                                        1
+                                    }
+                                })
+                                .sum::<usize>()
+                        });
+                        let (body, read, budget_stopped) =
+                            crate::document::parse_document_body_compact_with_read(
+                                root,
+                                &mut parser,
+                                body_blocks,
+                                kept_children,
+                                paragraph_budget,
+                                legacy_partial,
+                            )?;
+                        if read >= kept_children {
+                            return parse_s9_package_impl(
+                                parts,
+                                data,
+                                options,
+                                limits,
+                                body_blocks,
+                                media_table,
+                                false,
+                                paragraph_budget,
+                            );
+                        }
+                        (body, budget_stopped)
+                    } else {
+                        parse_document_body_compact(
+                            root,
+                            &mut parser,
+                            body_blocks,
+                            paragraph_budget,
+                            legacy_partial,
+                        )?
+                    }
                 }
-                None => DocumentBody::default(),
+                None => (DocumentBody::default(), false),
             }
         }
         None => {
             warnings.push("No document.xml found in DOCX".to_owned());
-            DocumentBody::default()
+            (DocumentBody::default(), false)
         }
     };
 
@@ -421,7 +727,6 @@ fn parse_s9_package(
         endnotes.as_mut(),
         footnote_separators.as_mut(),
         endnote_separators.as_mut(),
-        &mut ids,
     );
 
     let template_variables = options
@@ -431,7 +736,7 @@ fn parse_s9_package(
     warnings.extend(smart_art.warnings);
     let warnings = (!warnings.is_empty()).then_some(warnings);
 
-    let document = S9DocumentWire {
+    let mut document = S9DocumentWire {
         package: S9PackageWire {
             document: body.into(),
             styles,
@@ -446,12 +751,21 @@ fn parse_s9_package(
             footnote_separators,
             endnote_separators,
             relationship_entries: relationships.into_iter().collect(),
-            media_entries: media.into_iter().collect(),
+            media_entries: match media_table {
+                Some(_) => Vec::new(),
+                None => media.into_iter().collect(),
+            },
             chart_entries: charts.into_iter().collect(),
         },
         template_variables,
         warnings,
     };
+    if let Some(error) = budget.media_read_error() {
+        return Err(ParseError::Container(error));
+    }
+    if let Some(table) = media_table {
+        resolve_host_media(&mut document.package, table)?;
+    }
 
     let (canonical_base64, canonical_sha256) = if options.include_canonical {
         let canonical = canonical_document(&document, data)?;
@@ -478,17 +792,21 @@ fn parse_s9_package(
         .filter(|(_, xml)| is_valid_utf8_xml_text(xml))
         .map(|(_, xml)| String::from_utf8_lossy(xml).into_owned());
 
-    Ok(S9WireEnvelope {
-        wire_version: 1,
-        document,
-        embedded_font_parts,
-        font_table_relationships_xml,
-        canonical_base64,
-        canonical_sha256,
-    })
+    Ok(Some((
+        S9WireEnvelope {
+            wire_version: 1,
+            document,
+            embedded_font_parts,
+            font_table_relationships_xml,
+            canonical_base64,
+            canonical_sha256,
+        },
+        budget_stopped,
+    )))
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Flags every paragraph whose ID repeats one earlier in the package,
+/// comparing values numerically; each keeps its authored ID.
 fn dedupe_package_paragraph_ids(
     body: &mut DocumentBody,
     headers: Option<&mut IndexMap<String, HeaderFooter>>,
@@ -497,15 +815,14 @@ fn dedupe_package_paragraph_ids(
     endnotes: Option<&mut Vec<Note>>,
     footnote_separators: Option<&mut Vec<Note>>,
     endnote_separators: Option<&mut Vec<Note>>,
-    ids: &mut HexIdAllocator,
 ) {
     let mut seen = HashSet::new();
-    dedupe_blocks(&mut body.content, &mut seen, ids);
+    dedupe_blocks(&mut body.content, &mut seen);
     for story in headers.into_iter().flat_map(IndexMap::values_mut) {
-        dedupe_blocks(&mut story.content, &mut seen, ids);
+        dedupe_blocks(&mut story.content, &mut seen);
     }
     for story in footers.into_iter().flat_map(IndexMap::values_mut) {
-        dedupe_blocks(&mut story.content, &mut seen, ids);
+        dedupe_blocks(&mut story.content, &mut seen);
     }
     for note in footnotes
         .into_iter()
@@ -522,52 +839,32 @@ fn dedupe_package_paragraph_ids(
                 .flat_map(|notes| notes.iter_mut()),
         )
     {
-        dedupe_blocks(&mut note.content, &mut seen, ids);
+        dedupe_blocks(&mut note.content, &mut seen);
     }
 }
 
-fn dedupe_blocks(
-    blocks: &mut [BlockContent],
-    seen: &mut HashSet<String>,
-    ids: &mut HexIdAllocator,
-) {
+fn dedupe_blocks(blocks: &mut [BlockContent], seen: &mut HashSet<u32>) {
     for block in blocks {
         match block {
-            BlockContent::Paragraph(paragraph) => {
-                dedupe_paragraph(Arc::make_mut(paragraph), seen, ids)
-            }
+            BlockContent::Paragraph(paragraph) => dedupe_paragraph(Arc::make_mut(paragraph), seen),
             BlockContent::Table(table) => {
                 for row in &mut Arc::make_mut(table).rows {
                     for cell in &mut row.cells {
-                        dedupe_blocks(&mut cell.content, seen, ids);
+                        dedupe_blocks(&mut cell.content, seen);
                     }
                 }
             }
-            BlockContent::BlockSdt(sdt) => {
-                dedupe_blocks(&mut Arc::make_mut(sdt).content, seen, ids)
-            }
+            BlockContent::BlockSdt(sdt) => dedupe_blocks(&mut Arc::make_mut(sdt).content, seen),
             BlockContent::RawXml(_) => {}
         }
     }
 }
 
-fn dedupe_paragraph(
-    paragraph: &mut Paragraph,
-    seen: &mut HashSet<String>,
-    ids: &mut HexIdAllocator,
-) {
-    let Some(current) = paragraph.para_id.as_ref() else {
-        return;
-    };
-    if seen.contains(current) {
-        let mut replacement = ids.allocate();
-        while seen.contains(&replacement) {
-            replacement = ids.allocate();
-        }
-        paragraph.para_id = Some(replacement);
-    }
-    if let Some(id) = &paragraph.para_id {
-        seen.insert(id.clone());
+fn dedupe_paragraph(paragraph: &mut Paragraph, seen: &mut HashSet<u32>) {
+    if let Some(id) = paragraph.para_id.as_deref().and_then(parse_paragraph_id)
+        && !seen.insert(id)
+    {
+        paragraph.repeated_para_id = Some(true);
     }
 }
 
@@ -694,6 +991,28 @@ fn ordered_map<T: Serialize>(entries: &[(String, T)]) -> Result<CanonicalValue, 
         .map(CanonicalValue::OrderedMap)
 }
 
+/// Gives the watermarks of a package parsed against `table` the `data:` URLs
+/// their tokens stand for, since they reach the host as parsed.
+fn resolve_host_media(package: &mut S9PackageWire, table: &MediaTable) -> Result<(), ParseError> {
+    for (_, story) in package
+        .header_entries
+        .iter_mut()
+        .chain(package.footer_entries.iter_mut())
+        .flatten()
+    {
+        if let Some(crate::vml::Watermark::Picture {
+            data_url: Some(data_url),
+            ..
+        }) = story.watermark.as_mut()
+            && let Some(index) =
+                crate::media::media_token_index(data_url).filter(|index| *index < table.len())
+        {
+            *data_url = table.data_url(index).map_err(ParseError::Container)?;
+        }
+    }
+    Ok(())
+}
+
 fn canonical_media(entries: &[(String, Arc<MediaFile>)]) -> Result<CanonicalValue, ParseError> {
     entries
         .iter()
@@ -734,7 +1053,7 @@ mod tests {
         let parts = vec![
             (
                 "word/document.xml".to_owned(),
-                br#"<w:document xmlns:w="w" xmlns:w14="w14"><w:body><w:p w14:paraId="00000001"><w:r><w:t>{name}</w:t></w:r></w:p><w:p w14:paraId="00000001"/></w:body></w:document>"#.to_vec(),
+                br#"<w:document xmlns:w="w" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="00000001"><w:r><w:t>{name}</w:t></w:r></w:p><w:p w14:paraId="00000001"/></w:body></w:document>"#.to_vec(),
             ),
             (
                 "word/header1.xml".to_owned(),
@@ -750,6 +1069,7 @@ mod tests {
                 detect_variables: true,
                 determinism_seed: None,
                 include_canonical: true,
+                source_ordinals: false,
             },
         )
         .unwrap();
@@ -766,7 +1086,11 @@ mod tests {
             panic!("paragraph")
         };
         assert_eq!(first.para_id.as_deref(), Some("00000001"));
-        assert_ne!(first.para_id, second.para_id);
+        assert_eq!(second.para_id.as_deref(), Some("00000001"));
+        assert_eq!(
+            (first.repeated_para_id, second.repeated_para_id),
+            (None, Some(true))
+        );
         assert_eq!(parsed.canonical_sha256.as_deref().unwrap().len(), 64);
     }
 }

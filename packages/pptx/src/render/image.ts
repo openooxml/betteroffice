@@ -1,7 +1,25 @@
 import { MAX_TIFF_BYTES, isTiff } from '../../../../shared/media';
 import { decodeTiffImage } from '../wasm/loader';
+import { rasterImageSize, type ImageSize } from './imageSize';
 
 const MAX_BITMAP_PIXELS = 33_554_432;
+const SVG_MEDIA_TYPE = 'image/svg+xml';
+/** Matches `MAX_SVG_BYTES` in pptx-raster: the largest SVG either backend decodes. */
+const MAX_SVG_BYTES = 4_194_304;
+const MAX_IMAGE_DIMENSION = 4096;
+const decodeScales = new WeakMap<CanvasImageSource, { x: number; y: number }>();
+
+export interface PresentationImageDecodeOptions {
+  maxDimension?: number;
+}
+
+export function imageDecodeScale(source: CanvasImageSource): { x: number; y: number } {
+  return decodeScales.get(source) ?? { x: 1, y: 1 };
+}
+
+export function setImageDecodeScale(source: CanvasImageSource, scale: { x: number; y: number }): void {
+  decodeScales.set(source, scale);
+}
 
 /** Convert presentation image formats that browsers cannot decode. */
 export function presentationImageBlob(bytes: Uint8Array): Blob {
@@ -12,9 +30,171 @@ export function presentationImageBlob(bytes: Uint8Array): Blob {
     return new Blob([decodeTiffImage(bytes).slice()], { type: 'image/png' });
   }
   const bitmap = wmfBitmap(bytes) ?? emfBitmap(bytes);
-  return bitmap
-    ? new Blob([bitmap], { type: 'image/bmp' })
-    : new Blob([bytes.slice()]);
+  if (bitmap) return new Blob([bitmap], { type: 'image/bmp' });
+  return svgBlob(bytes) ?? new Blob([bytes.slice()]);
+}
+
+/** Media the `<img>` element must decode, because `createImageBitmap` is not portable for it. */
+export function needsElementDecode(blob: Blob): boolean {
+  return blob.type === SVG_MEDIA_TYPE;
+}
+
+/**
+ * Decode presentation media for the canvas backend, rejecting with
+ * `errorMessage` when the browser will not decode it.
+ */
+export async function decodePresentationImage(
+  bytes: Uint8Array,
+  errorMessage: string,
+  options: PresentationImageDecodeOptions = {}
+): Promise<CanvasImageSource> {
+  const maximum = options.maxDimension ?? MAX_IMAGE_DIMENSION;
+  if (!Number.isSafeInteger(maximum) || maximum < 1) throw new Error('invalid image dimension limit');
+  const blob = presentationImageBlob(bytes);
+  if (typeof createImageBitmap === 'function' && !needsElementDecode(blob)) {
+    const original = rasterImageSize(new Uint8Array(await blob.arrayBuffer()));
+    if (original && Math.max(original.width, original.height) > maximum) {
+      const factor = maximum / Math.max(original.width, original.height);
+      const source = await createImageBitmap(blob, {
+        resizeWidth: Math.max(1, Math.floor(original.width * factor)),
+        resizeHeight: Math.max(1, Math.floor(original.height * factor)),
+      });
+      return boundImage(source, original, maximum);
+    }
+    const source = await createImageBitmap(blob);
+    return boundImage(source, { width: source.width, height: source.height }, maximum);
+  }
+  const url = URL.createObjectURL(blob);
+  try {
+    const source = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => resolve(image);
+      image.onerror = () => reject(new Error(errorMessage));
+      image.src = url;
+    });
+    return await boundImage(source, { width: source.naturalWidth, height: source.naturalHeight }, maximum);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+async function boundImage(
+  source: ImageBitmap | HTMLImageElement,
+  natural: ImageSize,
+  maximum: number
+): Promise<CanvasImageSource> {
+  const width = 'naturalWidth' in source ? source.naturalWidth : source.width;
+  const height = 'naturalHeight' in source ? source.naturalHeight : source.height;
+  let result: ImageBitmap | HTMLImageElement | HTMLCanvasElement | OffscreenCanvas = source;
+  if (Math.max(width, height) > maximum) {
+    const factor = maximum / Math.max(width, height);
+    const size = { width: Math.max(1, Math.floor(width * factor)), height: Math.max(1, Math.floor(height * factor)) };
+    let canvas: OffscreenCanvas | HTMLCanvasElement | undefined;
+    let ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null | undefined;
+    try {
+      if (typeof OffscreenCanvas === 'function') {
+        canvas = new OffscreenCanvas(size.width, size.height);
+        ctx = canvas.getContext('2d');
+      }
+    } catch {
+      canvas = undefined;
+    }
+    if (!ctx && typeof document !== 'undefined') {
+      try {
+        canvas = document.createElement('canvas');
+        canvas.width = size.width;
+        canvas.height = size.height;
+        ctx = canvas.getContext('2d');
+      } catch {
+        canvas = undefined;
+      }
+    }
+    if (canvas && ctx) {
+      ctx.drawImage(source, 0, 0, size.width, size.height);
+      if ('close' in source && typeof source.close === 'function') source.close();
+      try {
+        result = typeof createImageBitmap === 'function' ? await createImageBitmap(canvas) : canvas;
+      } catch {
+        result = canvas;
+      }
+    }
+  }
+  const actualWidth = 'naturalWidth' in result ? result.naturalWidth : result.width;
+  const actualHeight = 'naturalHeight' in result ? result.naturalHeight : result.height;
+  if (natural.width !== actualWidth || natural.height !== actualHeight)
+    setImageDecodeScale(result, { x: natural.width / actualWidth, y: natural.height / actualHeight });
+  return result;
+}
+
+/** An SVG a browser will decode: typed, and sized where only a `viewBox` says how big it is. */
+function svgBlob(bytes: Uint8Array): Blob | undefined {
+  if (bytes.byteLength > MAX_SVG_BYTES) return;
+  let text: string;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes).replace(/^\ufeff/, '');
+  } catch {
+    return;
+  }
+  if (!/^\s*</.test(text) || !text.slice(0, 1024).includes('<svg')) return;
+  return new Blob([withIntrinsicSize(text)], { type: SVG_MEDIA_TYPE });
+}
+
+function withIntrinsicSize(text: string): string {
+  const tag = rootTag(text);
+  if (!tag || /\s(?:width|height)\s*=/.test(text.slice(tag.start, tag.end))) return text;
+  const box = text
+    .slice(tag.start, tag.end)
+    .match(/\sviewBox\s*=\s*(["'])\s*[-+.\deE]+[\s,]+[-+.\deE]+[\s,]+([-+.\deE]+)[\s,]+([-+.\deE]+)\s*\1/);
+  const [width, height] = [Number(box?.[2]), Number(box?.[3])];
+  if (!(width > 0) || !(height > 0)) return text;
+  const at = tag.start + 4;
+  return `${text.slice(0, at)} width="${width}" height="${height}"${text.slice(at)}`;
+}
+
+/** The `<svg>` start tag's bounds, or nothing unless it is the first element. */
+function rootTag(text: string): { start: number; end: number } | undefined {
+  let start = 0;
+  while (start < text.length) {
+    if (/\s/.test(text[start])) start += 1;
+    else if (text.startsWith('<!--', start)) start = past(text.indexOf('-->', start + 4), 3);
+    else if (text.startsWith('<?', start)) start = past(text.indexOf('?>', start + 2), 2);
+    else if (text.startsWith('<!', start)) start = past(declarationEnd(text, start + 2), 1);
+    else break;
+    if (start < 0) return;
+  }
+  if (!/^<svg[\s/>]/.test(text.slice(start, start + 5))) return;
+  const end = declarationEnd(text, start + 4);
+  return end < 0 ? undefined : { start, end };
+}
+
+function past(at: number, length: number): number {
+  return at < 0 ? -1 : at + length;
+}
+
+/**
+ * The `>` closing a markup declaration or start tag, past `>` inside a quoted
+ * value or a DOCTYPE's internal subset, and past the comments and processing
+ * instructions that subset may hold.
+ */
+function declarationEnd(text: string, from: number): number {
+  let quote = '';
+  let subset = false;
+  for (let index = from; index < text.length; index += 1) {
+    const character = text[index];
+    if (quote) {
+      if (character === quote) quote = '';
+    } else if (subset && text.startsWith('<!--', index)) {
+      index = past(text.indexOf('-->', index + 4), 2);
+      if (index < 0) return -1;
+    } else if (subset && text.startsWith('<?', index)) {
+      index = past(text.indexOf('?>', index + 2), 1);
+      if (index < 0) return -1;
+    } else if (character === '"' || character === "'") quote = character;
+    else if (character === '[') subset = true;
+    else if (character === ']') subset = false;
+    else if (character === '>' && !subset) return index;
+  }
+  return -1;
 }
 
 /** An EMF whose only ink is one unscaled `EMR_STRETCHDIBITS` filling its bounds. */

@@ -3,7 +3,7 @@
 
 use xlsx_model::{CellValue, ErrorValue};
 
-use crate::eval::{Area, EvalContext, as_area, bound_area, err, evaluate, num, to_number, to_text};
+use crate::eval::{Area, EvalContext, as_area, err, evaluate, num, to_number, to_text};
 use crate::parser::Expr;
 
 use super::criteria::{self, Criterion};
@@ -32,18 +32,15 @@ pub(crate) fn sumif(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         return err(ErrorValue::Value);
     }
     let crit_area = match crate::eval::required_area(&args[0], ctx) {
-        Ok(a) => bound_area(a, ctx),
+        Ok(a) => a,
         Err(error) => return err(error),
     };
     let criterion = criteria::criterion_from_arg(&args[1], ctx);
     let values = if args.len() == 3 { &args[2] } else { &args[0] };
-    let sum_area = match criteria::aligned_area(values, ctx, crit_area.rows, crit_area.cols) {
-        Some(a) => a,
-        None => match as_area(values, ctx) {
-            Some(a) => a,
-            None => return err(ErrorValue::Value),
-        },
+    let Some(sum_area) = as_area(values, ctx) else {
+        return err(ErrorValue::Value);
     };
+    let (crit_area, sum_area) = criteria::single_pair(crit_area, sum_area, ctx);
     let pairs = [(crit_area, criterion)];
     sum_matching(&pairs, &sum_area, ctx)
 }
@@ -53,15 +50,13 @@ pub(crate) fn sumifs(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if args.len() < 3 {
         return err(ErrorValue::Value);
     }
-    match criteria::collect_pairs(&args[1..], ctx) {
-        Some(pairs) => {
-            let (rows, cols) = (pairs[0].0.rows, pairs[0].0.cols);
-            match criteria::aligned_area(&args[0], ctx, rows, cols) {
-                Some(sum_area) => sum_matching(&pairs, &sum_area, ctx),
-                None => err(ErrorValue::Value),
-            }
-        }
-        None => err(ErrorValue::Value),
+    match criteria::collect_pairs(&args[1..], Some(&args[0]), ctx) {
+        Some(criteria::Criteria {
+            pairs,
+            values: Some(sum_area),
+            ..
+        }) => sum_matching(&pairs, &sum_area, ctx),
+        _ => err(ErrorValue::Value),
     }
 }
 
@@ -96,11 +91,16 @@ pub(crate) fn sumproduct(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if args.is_empty() {
         return err(ErrorValue::Value);
     }
+    let areas: Vec<Option<Area>> = args.iter().map(|arg| as_area(arg, ctx)).collect();
+    // references on different sheets are cut to one extent, so their cells
+    // still pair up by position
+    let mut cut = areas.clone();
+    criteria::cut_references(&mut cut, ctx);
     let mut arrays: Vec<((usize, usize), Vec<f64>)> = Vec::with_capacity(args.len());
-    for arg in args {
-        match as_area(arg, ctx) {
-            Some(area) => {
-                let values = match area.values_ref(ctx) {
+    for ((arg, area), cut) in args.iter().zip(areas).zip(cut) {
+        match area.zip(cut) {
+            Some((area, cut)) => {
+                let values = match cut.cells_ref(ctx) {
                     Ok(values) => values,
                     Err(error) => return err(error),
                 };
@@ -143,8 +143,11 @@ pub(crate) fn sumproduct(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if arrays.iter().any(|(dims, _)| *dims != shape) {
         return err(ErrorValue::Value);
     }
+    // past the extent a reference was cut to its cells are blank, so their
+    // products are zero
+    let len = arrays.iter().map(|(_, a)| a.len()).min().unwrap_or(0);
     let mut total = 0.0;
-    for i in 0..arrays[0].1.len() {
+    for i in 0..len {
         let mut prod = 1.0;
         for (_, a) in &arrays {
             prod *= a[i];
@@ -201,6 +204,10 @@ fn matrix(arg: &Expr, ctx: &EvalContext<'_>) -> Result<Matrix, ErrorValue> {
         };
     };
     let cells = area.values_ref(ctx)?;
+    // the blanks past the used extent are not numbers
+    if area.unread(cells.len() as u64) > 0 {
+        return Err(ErrorValue::Value);
+    }
     let mut values = Vec::with_capacity(cells.len());
     for cell in cells {
         match *cell {

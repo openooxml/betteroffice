@@ -2,6 +2,7 @@ import {
   memo,
   useCallback,
   useEffect,
+  useInsertionEffect,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -11,10 +12,15 @@ import {
 } from 'react';
 import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVerticalScrollParent';
 import {
+  bindDisplayPageRegistry,
+  DisplayPageRegistry,
+  displayPageHoldsMirrorId,
+  displayPageRevision,
   presentDisplayPageBackBuffer,
   rasterizeDisplayPageToBackBuffer,
   GlyphCache,
   loadGlyphOutlineProvider,
+  displayPageNoteAnchorRevision,
   type DisplayList,
   type DisplayPage,
   type GlyphOutlineProvider,
@@ -24,13 +30,16 @@ import {
 import type { UseCanvasRendererResult } from './hooks/useDisplayList';
 import { CanvasPageMirror } from './CanvasPageMirror';
 import { CanvasInteractiveOverlay } from './CanvasInteractiveOverlay';
+import type { PageChromeHandle } from './usePageChrome';
 import { CanvasA11yLiveRegion, type CanvasA11yLiveRegionProps } from './CanvasA11yLiveRegion';
 import { CANVAS_PAGE_GAP_PX, CANVAS_PAGES_PADDING_PX } from '@betteroffice/docx/layout/render';
 import { SIDEBAR_DOCUMENT_SHIFT } from '../sidebar/constants';
-import { DefaultLoadingIndicator, ParseError } from '../DocxEditorHelpers';
+import { ParseError } from '../DocxEditorHelpers';
 import { displayListNeedsHostImages } from './canvasPresentation';
 import { CanvasReplayState, presentCanvasReplay, type CanvasReplayPreparation } from './canvasReplay';
 import { resolveCaretPaintColor } from './paintedCaret';
+import { clearPresented, markPresented, markReplayFailed } from './internals/layoutProvenance';
+import { viewportColumnBand } from './internals/viewportBand';
 import { DEFAULT_CARET_WIDTH } from './overlays/SelectionOverlay';
 
 // Canvas is the sole visible renderer. The editing/input subtree stays mounted
@@ -42,9 +51,12 @@ export function CanvasPagedArea({
   sidebarOpen = false,
   zoom = 1,
   interactive = false,
+  fontFamilies,
   children,
 }: {
   renderer: UseCanvasRendererResult;
+  /** The CSS family each document font family paints browser text with, where they differ. */
+  fontFamilies?: ReadonlyMap<string, string>;
   /** live-region wiring (host notify ref + Yrs session getter) — see CanvasA11yLiveRegion */
   a11y?: Omit<CanvasA11yLiveRegionProps, 'active'>;
   /** shifts the canvas pages left to make room for the comments sidebar, mirroring the DOM painter's viewport transform */
@@ -67,18 +79,17 @@ export function CanvasPagedArea({
           zoom={zoom}
           interactive={interactive}
           glyphOutlineProvider={renderer.glyphOutlineProvider}
+          fontFamilies={fontFamilies}
           offscreenReplay={renderer.offscreenReplay}
           onWorkerPresentationChange={renderer.setWorkerPresentationActive}
+          onPageWindowChange={renderer.setDisplayWindow}
+          onRetainBuiltPagesChange={renderer.setRetainBuiltPages}
         />
       ) : renderer.status === 'error' ? (
         <div data-testid="canvas-renderer-error" role="alert" style={{ minHeight: 240 }}>
           <ParseError message={renderer.error?.message ?? 'Canvas renderer failed.'} />
         </div>
-      ) : (
-        <div data-testid="canvas-renderer-loading" role="status" style={{ minHeight: 240 }}>
-          <DefaultLoadingIndicator />
-        </div>
-      )}
+      ) : null}
       {children}
       {a11y ? <CanvasA11yLiveRegion active={renderer.status === 'ready'} {...a11y} /> : null}
     </>
@@ -93,9 +104,13 @@ const PAGE_WINDOW_BUFFER = 2;
 // Documents at or below this page count never window — zero behavior change
 // for ordinary documents.
 const PAGE_WINDOW_MIN_PAGES = 12;
+/** Pages built on demand, most recent first, that keep their chrome past the task that built them. */
+const ON_DEMAND_CHROME_PAGES = 12;
 // A page already mounted stays mounted until it drifts one page beyond the
 // mount band, so slow scrolling at a boundary cannot thrash mount/unmount.
 const PAGE_WINDOW_HYSTERESIS = 1;
+type ChromeKind = 'mirror' | 'overlay';
+type ChromeHandles = Partial<Record<ChromeKind, PageChromeHandle>>;
 
 interface PageWindowRange {
   start: number;
@@ -123,25 +138,53 @@ function nextPageWindow(
  * One page's surface: canvas + a11y mirror + optional interactive overlay.
  * Memoized so a keystroke's snapshot commit re-renders only the pages whose
  * `DisplayPage` identity actually changed — the owned frame-delta path keeps
- * untouched pages' identity stable across keystrokes.
+ * untouched pages' identity stable across keystrokes. A page without
+ * `chrome` keeps its sized canvas and empty chrome hosts, which
+ * `registerChrome` can fill on demand.
  */
 const CanvasPageSurface = memo(function CanvasPageSurface({
   page,
+  noteAnchorRevision,
   pageKey,
   zoom,
   interactive,
+  chrome,
+  inWindow,
   deferChrome,
   registerCanvas,
+  registerChrome,
 }: {
   page: DisplayPage;
+  /**
+   * `displayPageRevision(page)`: re-renders the surface when an owned delta
+   * changes the page in place.
+   */
+  revision: number;
+  noteAnchorRevision: number;
   pageKey: string;
   zoom: number;
   interactive: boolean;
+  chrome: boolean;
+  inWindow: boolean;
   deferChrome: boolean;
   registerCanvas: (pageKey: string, el: HTMLCanvasElement | null) => void;
+  registerChrome: (pageKey: string, kind: ChromeKind, handle: PageChromeHandle | null) => void;
 }) {
+  const registerMirror = useCallback(
+    (handle: PageChromeHandle | null) => registerChrome(pageKey, 'mirror', handle),
+    [pageKey, registerChrome]
+  );
+  const registerOverlay = useCallback(
+    (handle: PageChromeHandle | null) => registerChrome(pageKey, 'overlay', handle),
+    [pageKey, registerChrome]
+  );
   return (
-    <div className="canvas-page" style={{ position: 'relative' }}>
+    <div
+      className="canvas-page"
+      data-page-index={page.pageIndex}
+      data-page-key={pageKey}
+      style={{ position: 'relative', width: page.width * zoom, height: page.height * zoom }}
+    >
       <canvas
         ref={(el) => registerCanvas(pageKey, el)}
         data-page-index={page.pageIndex}
@@ -153,9 +196,23 @@ const CanvasPageSurface = memo(function CanvasPageSurface({
           boxShadow: '0 1px 3px var(--doc-shadow)',
         }}
       />
-      <CanvasPageMirror page={page} zoom={zoom} defer={deferChrome} />
+      <CanvasPageMirror
+        page={page}
+        zoom={zoom}
+        active={chrome}
+        defer={deferChrome}
+        visible={inWindow}
+        register={registerMirror}
+        noteAnchorRevision={noteAnchorRevision}
+      />
       {interactive ? (
-        <CanvasInteractiveOverlay page={page} zoom={zoom} defer={deferChrome} />
+        <CanvasInteractiveOverlay
+          page={page}
+          zoom={zoom}
+          active={chrome}
+          defer={deferChrome}
+          register={registerOverlay}
+        />
       ) : null}
     </div>
   );
@@ -170,8 +227,11 @@ export function CanvasPagesView({
   zoom = 1,
   interactive = false,
   glyphOutlineProvider,
+  fontFamilies,
   offscreenReplay,
   onWorkerPresentationChange,
+  onPageWindowChange,
+  onRetainBuiltPagesChange,
 }: {
   displayList: DisplayList;
   /** Binary retained-frame metadata used to scope page replay. */
@@ -197,22 +257,44 @@ export function CanvasPagesView({
   interactive?: boolean;
   /** Outline source sharing the display engine's resident font store. */
   glyphOutlineProvider?: GlyphOutlineProvider | null;
+  /** The CSS family each document font family paints browser text with, where they differ. */
+  fontFamilies?: ReadonlyMap<string, string>;
   /** Dedicated worker replay surface; unsupported/media-heavy pages use DOM canvas. */
   offscreenReplay?: UseCanvasRendererResult['offscreenReplay'];
   onWorkerPresentationChange?: (active: boolean) => void;
+  /** The pages `[start, end)` that hold bitmaps, reported as the viewport moves. */
+  onPageWindowChange?: (start: number, end: number) => void;
+  onRetainBuiltPagesChange?: (retain: boolean) => void;
 }) {
   const canvasesRef = useRef(new Map<string, HTMLCanvasElement>());
-  const registerCanvas = useCallback((pageKey: string, el: HTMLCanvasElement | null) => {
-    if (el) canvasesRef.current.set(pageKey, el);
-    else canvasesRef.current.delete(pageKey);
-  }, []);
+  // Page lookups (pointer, overlays, caret) read this instead of searching
+  // the host, which also holds every page's accessibility mirror.
+  const [pageRegistry] = useState(() => new DisplayPageRegistry());
+  const registerCanvas = useCallback(
+    (pageKey: string, el: HTMLCanvasElement | null) => {
+      const previous = canvasesRef.current.get(pageKey);
+      if (previous && previous !== el) pageRegistry.delete(previous);
+      if (el) {
+        canvasesRef.current.set(pageKey, el);
+        pageRegistry.add(el);
+      } else {
+        canvasesRef.current.delete(pageKey);
+      }
+    },
+    [pageRegistry]
+  );
+  // Runs after this render's page DOM is in place and before any layout effect
+  // reads it: memoized pages can move or renumber without their refs rerunning.
+  useInsertionEffect(() => pageRegistry.invalidate());
   const transferredCanvasesRef = useRef(new WeakSet<HTMLCanvasElement>());
   const [replayState] = useState(() => new CanvasReplayState());
   const offscreenSignatureRef = useRef('');
+  const surfaceRef = useRef('');
   const replayGenerationRef = useRef(0);
   const [offscreenFailed, setOffscreenFailed] = useState(false);
   const offscreenFailedRef = useRef(false);
   const offscreenAttachedRef = useRef(false);
+  const pendingAttachRef = useRef<{ generation: number; displayList: DisplayList } | null>(null);
   const workerPresentationRef = useRef(false);
   const publishWorkerPresentation = useCallback(
     (active: boolean) => {
@@ -248,11 +330,15 @@ export function CanvasPagesView({
   const setHostRef = useMemo(
     () =>
       (element: HTMLDivElement | null): void => {
+        if (innerHostRef.current && innerHostRef.current !== element) {
+          bindDisplayPageRegistry(innerHostRef.current, null);
+        }
         innerHostRef.current = element;
+        if (element) bindDisplayPageRegistry(element, pageRegistry);
         if (typeof hostRef === 'function') hostRef(element);
         else if (hostRef) (hostRef as { current: HTMLDivElement | null }).current = element;
       },
-    [hostRef]
+    [hostRef, pageRegistry]
   );
   const pageWindowAllowed = useMemo(() => {
     if (typeof window === 'undefined') return false;
@@ -300,14 +386,9 @@ export function CanvasPagesView({
         );
         return;
       }
-      // client rects are viewport-relative: the visible band starts at the
-      // scroller's client top for an element scroller, at 0 for the root
-      const viewportTop = scrollTarget === window ? 0 : scrollParent.getBoundingClientRect().top;
-      const viewportHeight =
-        scrollTarget === window ? window.innerHeight : scrollParent.clientHeight;
-      const columnRect = column.getBoundingClientRect();
-      const viewTop = viewportTop - columnRect.top;
-      const viewBottom = viewTop + viewportHeight;
+      const band = viewportColumnBand(scrollTarget === window ? null : scrollParent, column);
+      const viewTop = band.top - band.columnTop;
+      const viewBottom = viewTop + band.height;
       const { tops, bottoms } = pageOffsets;
       let first = tops.length - 1;
       for (let index = 0; index < tops.length; index += 1) {
@@ -352,12 +433,163 @@ export function CanvasPagesView({
     effectiveWindow === null
       ? !windowingEnabled || index < PAGE_WINDOW_MIN_PAGES
       : pageInWindow(index);
+  // The page holding focus (an SDT widget, or assistive-technology focus in
+  // its mirror) keeps its chrome when it leaves the window. Pages are pinned
+  // by their surface key, which renumbering keeps.
+  const [focusedPageKey, setFocusedPageKey] = useState<string | null>(null);
+  useEffect(() => {
+    const host = innerHostRef.current;
+    if (!host) return;
+    const pageKeyOf = (target: EventTarget | null): string | null =>
+      (target instanceof Element
+        ? target.closest<HTMLElement>('.canvas-page')?.dataset.pageKey
+        : undefined) ?? null;
+    const onFocusIn = (event: FocusEvent) => setFocusedPageKey(pageKeyOf(event.target));
+    const onFocusOut = (event: FocusEvent) => {
+      if (!(event.relatedTarget instanceof Node) || !host.contains(event.relatedTarget)) {
+        setFocusedPageKey(null);
+      }
+    };
+    host.addEventListener('focusin', onFocusIn);
+    host.addEventListener('focusout', onFocusOut);
+    return () => {
+      host.removeEventListener('focusin', onFocusIn);
+      host.removeEventListener('focusout', onFocusOut);
+    };
+  }, []);
+  // Focus removed along with its element fires no focusout.
+  useEffect(() => {
+    const host = innerHostRef.current;
+    if (focusedPageKey !== null && !host?.contains(document.activeElement)) {
+      setFocusedPageKey(null);
+    }
+  });
+
+  // Chrome built on demand for pages outside the window: each page's mirror
+  // and overlay register a function that builds them at once.
+  const pageKeys = useMemo(
+    () =>
+      displayList.pages.map((page, index) => {
+        const retainedPage = frame?.pages[index];
+        return retainedPage ? retainedPage.pageId.toString() : `index:${page.pageIndex}`;
+      }),
+    [displayList, frame]
+  );
+  const pageKeysRef = useRef(pageKeys);
+  pageKeysRef.current = pageKeys;
+  const reportedRetainBuiltPagesRef = useRef<boolean | null>(null);
+  useEffect(() => {
+    if (!onRetainBuiltPagesChange) return;
+    const retain = focusedPageKey !== null;
+    if (reportedRetainBuiltPagesRef.current === retain) return;
+    reportedRetainBuiltPagesRef.current = retain;
+    onRetainBuiltPagesChange(retain);
+  }, [focusedPageKey, onRetainBuiltPagesChange]);
+  const displayListRef = useRef(displayList);
+  displayListRef.current = displayList;
+  const chromeHandlesRef = useRef(new Map<string, ChromeHandles>());
+  const registerChrome = useCallback(
+    (pageKey: string, kind: ChromeKind, handle: PageChromeHandle | null) => {
+      const registry = chromeHandlesRef.current;
+      const entry = registry.get(pageKey) ?? {};
+      if (handle) entry[kind] = handle;
+      else delete entry[kind];
+      if (entry.mirror || entry.overlay) registry.set(pageKey, entry);
+      else registry.delete(pageKey);
+    },
+    []
+  );
+  // Pages built on demand keep their chrome until the page window moves, so
+  // what a plugin query returned stays connected while the view stays put.
+  // Past the most recent ON_DEMAND_CHROME_PAGES, they keep it only until the
+  // task that built them ends: a scan of the document does not build it all.
+  const onDemandKeysRef = useRef(new Set<string>());
+  const [onDemandPageKeys, setOnDemandPageKeys] = useState<ReadonlySet<string>>(
+    () => new Set()
+  );
+  const releaseOnDemand = useCallback((keys: Iterable<string>) => {
+    const onDemand = onDemandKeysRef.current;
+    for (const key of [...keys]) {
+      const handles = chromeHandlesRef.current.get(key);
+      handles?.mirror?.release();
+      handles?.overlay?.release();
+      onDemand.delete(key);
+    }
+    setOnDemandPageKeys(new Set(onDemand));
+  }, []);
+  const trimTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (trimTimerRef.current !== null) clearTimeout(trimTimerRef.current);
+    },
+    []
+  );
+  const materializePages = useCallback(
+    (pageIndices: readonly number[]) => {
+      const onDemand = onDemandKeysRef.current;
+      let added = false;
+      for (const index of pageIndices) {
+        const key = pageKeysRef.current[index];
+        if (key === undefined) continue;
+        const handles = chromeHandlesRef.current.get(key);
+        handles?.mirror?.build();
+        handles?.overlay?.build();
+        added ||= !onDemand.has(key);
+        // Least recently built first.
+        onDemand.delete(key);
+        onDemand.add(key);
+      }
+      if (added) setOnDemandPageKeys(new Set(onDemand));
+      if (onDemand.size > ON_DEMAND_CHROME_PAGES && trimTimerRef.current === null) {
+        trimTimerRef.current = setTimeout(() => {
+          trimTimerRef.current = null;
+          const keys = [...onDemandKeysRef.current];
+          if (keys.length > ON_DEMAND_CHROME_PAGES) {
+            releaseOnDemand(keys.slice(0, keys.length - ON_DEMAND_CHROME_PAGES));
+          }
+        }, 0);
+      }
+    },
+    [releaseOnDemand]
+  );
+  useEffect(() => {
+    pageRegistry.setMaterializer(materializePages);
+    return () => pageRegistry.setMaterializer(null);
+  }, [materializePages, pageRegistry]);
+
+  // A fragment link to content on a page whose chrome is not built builds
+  // that page first, so the browser finds the target it follows.
+  useEffect(() => {
+    const host = innerHostRef.current;
+    if (!host) return;
+    const onClick = (event: MouseEvent): void => {
+      const link =
+        event.target instanceof Element
+          ? event.target.closest<HTMLAnchorElement>('a[href^="#"]')
+          : null;
+      if (!link || !host.contains(link)) return;
+      let id: string;
+      try {
+        id = decodeURIComponent(link.getAttribute('href')!.slice(1));
+      } catch {
+        return;
+      }
+      if (!id || host.ownerDocument.getElementById(id)) return;
+      const index = displayListRef.current.pages.findIndex((page) =>
+        displayPageHoldsMirrorId(page, id)
+      );
+      if (index >= 0) materializePages([index]);
+    };
+    host.addEventListener('click', onClick, true);
+    return () => host.removeEventListener('click', onClick, true);
+  }, [materializePages]);
 
   // One glyph-outline cache for the canvas lifetime (task contract: not
   // per-render). The wasm-backed outline provider loads lazily through the
   // SAME module the display-list builder already resolved — no extra fetch.
-  // `glyphCacheReady` re-runs the draw effect once the provider lands so the
-  // first shaped frame repaints as real glyph outlines (until then a glyphRun
+  // An engine's own provider is installed before the draw effect reads it, so
+  // its first replay already paints glyph outlines. `glyphCacheReady` re-runs
+  // the draw effect once a lazily loaded provider lands (until then a glyphRun
   // falls back to fillText inside the backend, so text is never blank).
   const glyphCacheRef = useRef<GlyphCache | null>(null);
   const [glyphCacheReady, setGlyphCacheReady] = useState(false);
@@ -369,12 +601,23 @@ export function CanvasPagesView({
   }, [offscreenReplay]);
   useEffect(() => {
     let cancelled = false;
+    // A replay still rasterizing once its engine is replaced or unmounted reads no outline from
+    // it (the engine may be freed) and falls back to text.
+    const outlines = glyphOutlineProvider;
+    if (outlines) {
+      glyphCacheRef.current = new GlyphCache({
+        provider: (fontId, glyphId) => {
+          if (cancelled) throw new Error('The glyph outlines belong to a released engine');
+          return outlines(fontId, glyphId);
+        },
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
     glyphCacheRef.current = null;
     setGlyphCacheReady(false);
-    const provider = glyphOutlineProvider
-      ? Promise.resolve(glyphOutlineProvider)
-      : loadGlyphOutlineProvider();
-    void provider
+    void loadGlyphOutlineProvider()
       .then((provider) => {
         if (cancelled) return;
         glyphCacheRef.current = new GlyphCache({ provider });
@@ -391,6 +634,15 @@ export function CanvasPagesView({
 
   const windowStart = effectiveWindow?.start ?? -1;
   const windowEnd = effectiveWindow?.end ?? -1;
+  const pageCount = displayList.pages.length;
+  useLayoutEffect(() => {
+    if (windowPending) return;
+    if (windowStart < 0) onPageWindowChange?.(0, pageCount);
+    else onPageWindowChange?.(windowStart, windowEnd + 1);
+  }, [onPageWindowChange, pageCount, windowEnd, windowPending, windowStart]);
+  useEffect(() => {
+    if (onDemandKeysRef.current.size > 0) releaseOnDemand(onDemandKeysRef.current);
+  }, [releaseOnDemand, windowStart, windowEnd]);
   useEffect(() => {
     // The window measurement lands pre-paint (layout effect) and re-runs this
     // effect; rastering before it exists would process every page.
@@ -421,11 +673,15 @@ export function CanvasPagesView({
           return;
         }
       }
-      const caretColor = resolveCaretPaintColor(innerHostRef.current);
+      const host = innerHostRef.current;
+      const caretColor = resolveCaretPaintColor(host);
       const caretStyle = { color: caretColor, width: DEFAULT_CARET_WIDTH };
       const signature = `${activePageIds.join(',')}|${dpr}|${zoom}|${caretColor}`;
       if (pages.length > 0 || signature !== offscreenSignatureRef.current) {
         offscreenSignatureRef.current = signature;
+        if (host) clearPresented(host);
+        const pendingAttach = { generation: replayGeneration, displayList };
+        pendingAttachRef.current = pendingAttach;
         void offscreenReplay.attach(pages, activePageIds, dpr, zoom, caretStyle).then((attached) => {
           // Publish on resolution regardless of replay generation: attach
           // resolutions are FIFO, so the last one reflects the worker's real
@@ -434,27 +690,54 @@ export function CanvasPagesView({
           // rastering — i.e. on every document load — leaving presentation
           // permanently unpublished while the worker was in fact presenting.
           offscreenAttachedRef.current = attached;
+          if (!attached && pages.length > 0) {
+            // No worker took these canvases, and a canvas transfers only
+            // once: they can never paint, so the pages remount on the DOM path.
+            offscreenFailedRef.current = true;
+            setOffscreenFailed(true);
+          }
           if (!offscreenFailedRef.current) publishWorkerPresentation(attached);
           if (!attached) {
             // transient (no worker client yet) — clear the signature so the
             // next pass retries instead of permanently flipping surfaces
             offscreenSignatureRef.current = '';
           }
+          if (pendingAttachRef.current !== pendingAttach) return;
+          pendingAttachRef.current = null;
+          const current = pendingAttach.generation === replayGenerationRef.current;
+          if (attached && current && innerHostRef.current) {
+            markPresented(innerHostRef.current, pendingAttach.displayList, { worker: true });
+          }
         }, () => {
+          if (pendingAttachRef.current === pendingAttach) pendingAttachRef.current = null;
           offscreenFailedRef.current = true;
           publishWorkerPresentation(false);
           setOffscreenFailed(true);
         });
-      } else if (offscreenAttachedRef.current) {
+      } else {
+        const pendingAttach = pendingAttachRef.current;
+        if (pendingAttach) {
+          // The worker replays its latest frame onto attached pages before the attach replies.
+          pendingAttach.generation = replayGeneration;
+          pendingAttach.displayList = displayList;
+        } else if (offscreenAttachedRef.current && host) {
+          // The worker presents a frame before it replies with it, so these pages show no other.
+          markPresented(host, displayList, { worker: true });
+        }
         // Heal any publish lost to ordering (StrictMode remount, late
         // resolution): the worker is attached and this pass kept it active.
-        publishWorkerPresentation(true);
+        if (offscreenAttachedRef.current) publishWorkerPresentation(true);
       }
       return;
     }
+    const surface = `${dpr}|${zoom}`;
+    if (surface !== surfaceRef.current) {
+      surfaceRef.current = surface;
+      if (innerHostRef.current) clearPresented(innerHostRef.current);
+    }
     const glyphCache = glyphCacheRef.current ?? undefined;
     replayState.updateFrame(frame);
-    const environment = { dpr, zoom, glyphCache, resolveImage };
+    const environment = { dpr, zoom, glyphCache, resolveImage, fontFamilies };
     const preparations: CanvasReplayPreparation[] = [];
     for (const [i, page] of displayList.pages.entries()) {
       const retainedPage = frame?.pages[i];
@@ -485,7 +768,7 @@ export function CanvasPagesView({
         ready: rasterizeDisplayPageToBackBuffer(
           buffer,
           page,
-          { resolveImage, glyphCache },
+          { resolveImage, glyphCache, fontFamilies },
           dpr,
           zoom
         ),
@@ -498,23 +781,32 @@ export function CanvasPagesView({
     void presentCanvasReplay(
       preparations,
       () => replayGeneration === replayGenerationRef.current
-    ).catch((error) => {
-      if (replayGeneration === replayGenerationRef.current) {
-        console.error('[CanvasRenderer] Canvas replay failed', error);
+    ).then(
+      (presented) => {
+        if (presented && innerHostRef.current) markPresented(innerHostRef.current, displayList);
+      },
+      (error) => {
+        if (replayGeneration === replayGenerationRef.current) {
+          console.error('[CanvasRenderer] Canvas replay failed', error);
+          markReplayFailed(displayList, error);
+        }
       }
-    });
+    );
     return () => {
       replayGenerationRef.current += 1;
     };
-    // glyphCacheReady is a redraw trigger (the cache itself is read via ref);
-    // zoom re-runs the raster so the enlarged canvas paints at full resolution;
-    // windowStart/windowEnd re-run it so pages entering the window paint and
-    // the offscreen active set prunes pages that left it
+    // glyphOutlineProvider and glyphCacheReady are redraw triggers (the cache
+    // itself is read via ref); zoom re-runs the raster so the enlarged canvas
+    // paints at full resolution; windowStart/windowEnd re-run it so pages
+    // entering the window paint and the offscreen active set prunes pages that
+    // left it
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     displayList,
     frame,
     resolveImage,
+    fontFamilies,
+    glyphOutlineProvider,
     glyphCacheReady,
     offscreenEligible,
     offscreenFailed,
@@ -548,22 +840,33 @@ export function CanvasPagesView({
         }}
       >
         {displayList.pages.map((page, i) => {
-          const retainedPage = frame?.pages[i];
-          const pageKey = retainedPage ? retainedPage.pageId.toString() : `index:${page.pageIndex}`;
+          const pageKey = pageKeys[i]!;
           const surfaceKey = `${pageKey}:${offscreenEligible && !offscreenFailed ? 'offscreen' : 'dom'}`;
           // per-page wrapper so the mirror positions 1:1 over its canvas.
-          // Every page keeps its full DOM (canvas element, a11y mirror, SDT
-          // overlay) — the page window releases only bitmap backing stores,
-          // so the accessible document and page geometry never shrink.
+          // Every page keeps its sized canvas, so page geometry never
+          // changes; the a11y mirror and SDT overlay hold content only for
+          // pages in the window, the page holding focus, and pages built on
+          // demand. A page in the measured window builds at once, others at
+          // idle time; after a content change a page in the window rebuilds
+          // at once.
           return (
             <CanvasPageSurface
               key={surfaceKey}
               page={page}
+              revision={displayPageRevision(page)}
+              noteAnchorRevision={displayPageNoteAnchorRevision(page)}
               pageKey={pageKey}
               zoom={zoom}
               interactive={interactive}
-              deferChrome={!chromeInWindow(i)}
+              chrome={
+                chromeInWindow(i) ||
+                pageKey === focusedPageKey ||
+                onDemandPageKeys.has(pageKey)
+              }
+              inWindow={chromeInWindow(i)}
+              deferChrome={windowPending || !chromeInWindow(i)}
               registerCanvas={registerCanvas}
+              registerChrome={registerChrome}
             />
           );
         })}

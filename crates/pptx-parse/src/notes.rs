@@ -18,20 +18,24 @@ pub(crate) fn slide_notes_part(relationships: &[Relationship]) -> Option<String>
 }
 
 /// Reads speaker notes as plain text.
+#[cfg(test)]
 pub(crate) fn parse_notes_text(
     bytes: &[u8],
     part: &str,
     budget: &mut ParseBudget<'_>,
 ) -> Result<String, PptxError> {
-    let root = parse_xml(bytes, part, budget)?;
+    Ok(notes_text(&parse_xml(bytes, part, budget)?))
+}
+
+/// A parsed notes page's speaker notes as plain text.
+pub(crate) fn notes_text(root: &XmlElement) -> String {
     let Some(tree) = root.child("cSld").and_then(|common| common.child("spTree")) else {
-        return Ok(String::new());
+        return String::new();
     };
     let Some(body) = notes_body_shape(tree).and_then(|shape| shape.child("txBody")) else {
-        return Ok(String::new());
+        return String::new();
     };
-    Ok(body
-        .children_named("p")
+    body.children_named("p")
         .map(|paragraph| {
             paragraph
                 .children
@@ -52,7 +56,7 @@ pub(crate) fn parse_notes_text(
                 .collect::<String>()
         })
         .collect::<Vec<_>>()
-        .join("\n"))
+        .join("\n")
 }
 
 fn notes_body_shape(tree: &XmlElement) -> Option<&XmlElement> {

@@ -1,8 +1,13 @@
 import { describe, expect, test } from 'bun:test';
 import {
   createDisplayListQueries,
+  endDisplayListQueriesLine,
   isDisplayListQuerySourceDead,
   onDisplayListQuerySourceFailure,
+  type DisplayListQueries,
+  type DisplayListRect,
+  type DisplayListRegionHit,
+  type ResidentDisplayListQueryEngine,
 } from './displayListQueries';
 import type { DisplayPage } from './displayList';
 import type { RustDisplayListQueryEngine } from './rustDisplayList';
@@ -52,6 +57,17 @@ function fakeEngine() {
   return { engine, calls };
 }
 
+function dropFacadeWithDonor(
+  engine: RustDisplayListQueryEngine,
+  hostState: WeakMap<object, { latest: DisplayListQueries }>
+): WeakRef<DisplayListQueries> {
+  const donor = createDisplayListQueries({ pages: [page(0)] }, engine);
+  donor.prime();
+  const facade = createDisplayListQueries({ pages: [page(0)] }, engine, donor);
+  hostState.set(donor, { latest: facade });
+  return new WeakRef(facade);
+}
+
 describe('createDisplayListQueries handle lifecycle', () => {
   test('opens the session handle lazily, on the first query', () => {
     const { engine, calls } = fakeEngine();
@@ -72,6 +88,27 @@ describe('createDisplayListQueries handle lifecycle', () => {
     expect(calls.open).toBe(1);
   });
 
+  test('a dropped facade whose donor leads back to it is collected', async () => {
+    const { engine } = fakeEngine();
+    // Host state keyed by the donor that reaches its successor, as a display window does.
+    const hostState = new WeakMap<object, { latest: DisplayListQueries }>();
+    const dropped = dropFacadeWithDonor(engine, hostState);
+    const alive = (): boolean => dropped.deref() !== undefined;
+    let collected = false;
+    for (let i = 0; i < 20 && !collected; i++) {
+      await new Promise<void>((resolve) =>
+        setTimeout(() => {
+          Bun.gc(true);
+          resolve();
+        }, 0)
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      collected = !alive();
+    }
+    expect(collected).toBe(true);
+    expect(hostState).toBeInstanceOf(WeakMap);
+  });
+
   test('adoption chains across unqueried generations as one page-delta', () => {
     const { engine, calls } = fakeEngine();
     const shared = page(0);
@@ -87,17 +124,326 @@ describe('createDisplayListQueries handle lifecycle', () => {
     expect(calls.update).toBe(1);
   });
 
-  test('superseded generations fall back to JSON-arg queries, never reopening', () => {
+  test('a superseded generation answers from the live one, never reopening or serialising', () => {
+    const { engine, calls } = fakeEngine();
+    const line = {};
+    // the store answers with the generation it holds, as the live layout would
+    engine.rangeRectsByHandle = () => {
+      calls.rangeByHandle += 1;
+      return `[{"pageIndex":0,"x":${calls.update},"y":0,"width":1,"height":1}]`;
+    };
+    const shared = page(0);
+    const first = createDisplayListQueries({ pages: [shared] }, engine, null, line);
+    first.rangeRects(0, 1);
+    const second = createDisplayListQueries({ pages: [shared] }, engine, first, line);
+    // still holding the handle, the old generation answers itself
+    expect(first.rangeRects(0, 1)[0]?.x).toBe(0);
+    second.rangeRects(0, 1);
+    const third = createDisplayListQueries({ pages: [shared, page(1)] }, engine, second, line);
+    expect(third.rangeRects(0, 1)[0]?.x).toBe(2);
+
+    expect(first.rangeRects(0, 1)[0]?.x).toBe(2);
+    expect(second.caretRect(0)?.x).toBe(2);
+    expect(calls.open).toBe(1);
+    expect(calls.rangeJson).toBe(0);
+  });
+
+  const rect = (x: number) => ({ pageIndex: 1, x, y: 0, width: 1, height: 1 });
+  const hit = (pos: number): DisplayListRegionHit => ({ region: 'body', pos, target: 'text' });
+
+  test('a superseded generation without a line queries its own list after handle adoption', () => {
+    const { engine, calls } = fakeEngine();
+    const queriedHandles: number[] = [];
+    const jsonQueries: string[] = [];
+    let hitJson = 0;
+    engine.rangeRectsByHandle = (handle) => {
+      calls.rangeByHandle += 1;
+      queriedHandles.push(handle);
+      return JSON.stringify([rect(300)]);
+    };
+    engine.hitTestRegionsByHandle = (handle) => {
+      queriedHandles.push(handle);
+      return JSON.stringify(hit(300));
+    };
+    engine.rangeRectsJson = (json) => {
+      calls.rangeJson += 1;
+      jsonQueries.push(json);
+      return JSON.stringify([rect(JSON.parse(json).pages[1].width)]);
+    };
+    engine.hitTestRegionsJson = (json) => {
+      hitJson += 1;
+      jsonQueries.push(json);
+      return JSON.stringify(hit(JSON.parse(json).pages[1].width));
+    };
+    const shared = page(0);
+    const firstList = { pages: [shared, { ...page(1), width: 200 }] };
+    const first = createDisplayListQueries(firstList, engine);
+    first.prime();
+    const second = createDisplayListQueries(
+      { pages: [shared, { ...page(1), width: 300 }] },
+      engine,
+      first
+    );
+    expect(second.rangeRects(0, 1)).toEqual([rect(300)]);
+    expect(calls.update).toBe(1);
+    expect(second.hitTestRegions(1, 1, 1)).toEqual(hit(300));
+
+    expect(first.rangeRects(0, 1)).toEqual([rect(200)]);
+    expect(first.hitTestRegions(1, 1, 1)).toEqual(hit(200));
+    expect(queriedHandles).toEqual([1, 1]);
+    expect(jsonQueries).toEqual([JSON.stringify(firstList), JSON.stringify(firstList)]);
+    expect(calls.rangeByHandle).toBe(1);
+    expect(calls.rangeJson).toBe(1);
+    expect(hitJson).toBe(1);
+    expect(calls.open).toBe(1);
+  });
+
+  test('a document line rejoins after a gap in the previous facade chain', () => {
+    const { engine, calls } = fakeEngine();
+    const queriedHandles: number[] = [];
+    const jsonQueries: string[] = [];
+    engine.rangeRectsByHandle = (handle) => {
+      queriedHandles.push(handle);
+      return JSON.stringify([rect(handle)]);
+    };
+    engine.hitTestRegionsByHandle = (handle) => {
+      queriedHandles.push(handle);
+      return JSON.stringify(hit(handle));
+    };
+    engine.rangeRectsJson = () => {
+      calls.rangeJson += 1;
+      jsonQueries.push('rangeRects');
+      return '[]';
+    };
+    engine.hitTestRegionsJson = () => {
+      jsonQueries.push('hitTestRegions');
+      return 'null';
+    };
+    const shared = page(0);
+    const line = {};
+    const first = createDisplayListQueries({ pages: [shared, page(1)] }, engine, null, line);
+    first.prime();
+    const second = createDisplayListQueries({ pages: [shared, page(1)] }, engine, first, line);
+    expect(second.rangeRects(0, 1)).toEqual([rect(1)]);
+    expect(calls.update).toBe(1);
+    expect(second.hitTestRegions(1, 1, 1)).toEqual(hit(1));
+    const third = createDisplayListQueries(
+      { pages: [shared, { ...page(1), width: 300 }] },
+      engine,
+      null,
+      line
+    );
+    third.prime();
+
+    expect(first.rangeRects(0, 1)).toEqual([rect(2)]);
+    expect(first.hitTestRegions(1, 1, 1)).toEqual(hit(2));
+    expect(second.rangeRects(0, 1)).toEqual([rect(1)]);
+    expect(queriedHandles).toEqual([1, 1, 2, 2, 1]);
+    expect(jsonQueries).toEqual([]);
+    expect(calls.rangeJson).toBe(0);
+    expect(calls.open).toBe(2);
+  });
+
+  test('ending a document line silences superseded facades until the line rejoins', () => {
+    const { engine, calls } = fakeEngine();
+    const queriedHandles: number[] = [];
+    const jsonQueries: string[] = [];
+    engine.rangeRectsByHandle = (handle) => {
+      queriedHandles.push(handle);
+      return JSON.stringify([rect(handle)]);
+    };
+    engine.hitTestRegionsByHandle = (handle) => {
+      queriedHandles.push(handle);
+      return JSON.stringify(hit(handle));
+    };
+    engine.rangeRectsJson = () => {
+      calls.rangeJson += 1;
+      jsonQueries.push('rangeRects');
+      return '[]';
+    };
+    engine.hitTestRegionsJson = () => {
+      jsonQueries.push('hitTestRegions');
+      return 'null';
+    };
+    const shared = page(0);
+    const line = {};
+    const first = createDisplayListQueries({ pages: [shared, page(1)] }, engine, null, line);
+    first.prime();
+    const second = createDisplayListQueries({ pages: [shared, page(1)] }, engine, first, line);
+    second.prime();
+    const third = createDisplayListQueries({ pages: [shared, page(1)] }, engine, second, line);
+    expect(third.rangeRects(0, 1)).toEqual([rect(1)]);
+    expect(calls.open).toBe(1);
+    expect(calls.update).toBe(2);
+
+    endDisplayListQueriesLine(line);
+    for (const queries of [first, second]) {
+      expect(queries.rangeRects(0, 1)).toEqual([]);
+      expect(queries.hitTestRegions(1, 1, 1)).toBeNull();
+    }
+    expect(queriedHandles).toEqual([1]);
+    expect(jsonQueries).toEqual([]);
+    expect(calls.open).toBe(1);
+
+    const rejoined = createDisplayListQueries({ pages: [shared, page(1)] }, engine, null, line);
+    rejoined.prime();
+    for (const queries of [first, second]) {
+      expect(queries.rangeRects(0, 1)).toEqual([rect(2)]);
+      expect(queries.hitTestRegions(1, 1, 1)).toEqual(hit(2));
+    }
+    expect(queriedHandles).toEqual([1, 2, 2, 2, 2]);
+    expect(jsonQueries).toEqual([]);
+    expect(calls.rangeJson).toBe(0);
+    expect(calls.open).toBe(2);
+  });
+
+  const lineQueries = [
+    {
+      name: 'rangeRects',
+      read: (queries: DisplayListQueries) => queries.rangeRects(0, 1),
+      a: [rect(200)],
+      b: [rect(300)],
+      empty: [],
+    },
+    {
+      name: 'anchorRect',
+      read: (queries: DisplayListQueries) => queries.anchorRect(0),
+      a: rect(200),
+      b: rect(300),
+      empty: null,
+    },
+    {
+      name: 'hitTestRegions',
+      read: (queries: DisplayListQueries) => queries.hitTestRegions(1, 1, 1),
+      a: hit(200),
+      b: hit(300),
+      empty: null,
+    },
+  ];
+
+  for (const query of lineQueries) {
+    test(`a document line split ends ${query.name} forwarding for every superseded generation`, () => {
+      const { engine, calls } = fakeEngine();
+      const queriedHandles: number[] = [];
+      const adoptedHandles: number[] = [];
+      const jsonQueries: string[] = [];
+      let storedWidth = 100;
+      engine.updateDisplayList = (handle, json) => {
+        calls.update += 1;
+        const update = JSON.parse(json) as {
+          reuse?: Array<[number, number]>;
+          replace: Array<[number, DisplayPage]>;
+        };
+        if (update.reuse) adoptedHandles.push(handle);
+        const changed = update.replace.find(([index]) => index === 1);
+        if (changed) storedWidth = changed[1].width;
+      };
+      engine.rangeRectsByHandle = (handle) => {
+        calls.rangeByHandle += 1;
+        queriedHandles.push(handle);
+        return JSON.stringify([rect(storedWidth)]);
+      };
+      engine.hitTestRegionsByHandle = (handle) => {
+        queriedHandles.push(handle);
+        return JSON.stringify(hit(storedWidth));
+      };
+      engine.rangeRectsJson = () => {
+        calls.rangeJson += 1;
+        jsonQueries.push('rangeRects');
+        return '[]';
+      };
+      engine.hitTestRegionsJson = () => {
+        jsonQueries.push('hitTestRegions');
+        return 'null';
+      };
+      const read = (queries: DisplayListQueries) => {
+        const handleStart = queriedHandles.length;
+        const jsonStart = jsonQueries.length;
+        const answer = query.read(queries);
+        return {
+          answer,
+          handles: queriedHandles.slice(handleStart),
+          json: jsonQueries.slice(jsonStart),
+        };
+      };
+      const shared = page(0);
+      const lineA = {};
+      const lineB = {};
+      const first = createDisplayListQueries({ pages: [shared, page(1)] }, engine, null, lineA);
+      first.prime();
+      const second = createDisplayListQueries(
+        { pages: [shared, { ...page(1), width: 200 }] },
+        engine,
+        first,
+        lineA
+      );
+      const currentA = read(second);
+      const forwardedA = read(first);
+      const replacement = createDisplayListQueries(
+        { pages: [shared, { ...page(1), width: 300 }] },
+        engine,
+        second,
+        lineB
+      );
+      const currentB = read(replacement);
+      const staleA1 = read(second);
+      const staleA0 = read(first);
+
+      expect({
+        currentA,
+        forwardedA,
+        currentB,
+        staleA1,
+        staleA0,
+        opens: calls.open,
+        adoptedHandles,
+      }).toEqual({
+        currentA: { answer: query.a, handles: [1], json: [] },
+        forwardedA: { answer: query.a, handles: [1], json: [] },
+        currentB: { answer: query.b, handles: [1], json: [] },
+        staleA1: { answer: query.empty, handles: [], json: [] },
+        staleA0: { answer: query.empty, handles: [], json: [] },
+        opens: 1,
+        adoptedHandles: [1, 1],
+      });
+    });
+  }
+
+  test('a superseded generation reads page metadata from the live layout too', () => {
     const { engine, calls } = fakeEngine();
     const shared = page(0);
-    const first = createDisplayListQueries({ pages: [shared] }, engine);
+    const line = {};
+    const first = createDisplayListQueries({ pages: [shared] }, engine, null, line);
     first.rangeRects(0, 1);
-    const second = createDisplayListQueries({ pages: [shared] }, engine, first);
+    const landscape = { ...page(1), width: 140 };
+    const second = createDisplayListQueries({ pages: [shared, landscape] }, engine, first, line);
+    expect(first.pageCount()).toBe(1);
     second.rangeRects(0, 1);
     expect(calls.update).toBe(1);
+    expect(first.pageCount()).toBe(2);
+    expect(first.pageSize(1)).toEqual({ width: 140, height: 100 });
+    expect(first.displayList).toBe(second.displayList);
+  });
+
+  test('a superseded generation whose successor is gone answers nothing', () => {
+    const { engine, calls } = fakeEngine();
+    const line = {};
+    engine.rangeRectsByHandle = () => {
+      calls.rangeByHandle += 1;
+      return '[{"pageIndex":0,"x":1,"y":0,"width":1,"height":1}]';
+    };
+    const shared = page(0);
+    const first = createDisplayListQueries({ pages: [shared] }, engine, null, line);
     first.rangeRects(0, 1);
-    expect(calls.open).toBe(1);
-    expect(calls.rangeJson).toBe(1);
+    const second = createDisplayListQueries({ pages: [shared] }, engine, first, line);
+    expect(second.rangeRects(0, 1)).toHaveLength(1);
+    expect(calls.update).toBe(1);
+    expect(first.rangeRects(0, 1)).toHaveLength(1);
+    second.dispose();
+    expect(first.rangeRects(0, 1)).toEqual([]);
+    expect(first.hitTestRegions(0, 1, 1)).toBeNull();
+    expect(first.anchorRect(0)).toBeNull();
+    expect(calls.rangeJson).toBe(0);
   });
 
   test('routes vertical movement through the retained handle', () => {
@@ -209,5 +555,651 @@ describe('createDisplayListQueries wasm trap containment', () => {
     expect(queries.rangeRects(0, 1)).toEqual([]);
     expect(residentCalls).toBe(1);
     expect(isDisplayListQuerySourceDead(resident)).toBe(true);
+  });
+});
+
+describe('createDisplayListQueries lazy store pages', () => {
+  function textPage(pageIndex: number, from: number, to: number): DisplayPage {
+    return {
+      pageIndex,
+      width: 100,
+      height: 100,
+      primitives: [
+        {
+          kind: 'text',
+          text: 'x',
+          x: 0,
+          baselineY: 10,
+          width: 10,
+          font: '10px serif',
+          color: '#000',
+          docStart: from,
+          docEnd: to,
+        } as DisplayPage['primitives'][number],
+      ],
+    };
+  }
+
+  function recordingEngine() {
+    const opened: string[] = [];
+    const updates: Array<{
+      total: number;
+      keep?: boolean;
+      reuse?: number[][];
+      replace: Array<[number, DisplayPage]>;
+    }> = [];
+    const { engine, calls } = fakeEngine();
+    engine.openDisplayList = (json: string) => {
+      calls.open += 1;
+      opened.push(json);
+      return 1;
+    };
+    engine.updateDisplayList = (_handle: number, json: string) => {
+      calls.update += 1;
+      updates.push(JSON.parse(json));
+    };
+    engine.hitTestRegionsByHandle = () => 'null';
+    engine.rangeRectsRegionByHandle = () => '[]';
+    engine.rangeRectsRegionJson = () => '[]';
+    engine.hasRangeRectsRegion = () => true;
+    return { engine, calls, opened, updates };
+  }
+
+  const list = () => ({ pages: [textPage(0, 1, 10), textPage(1, 11, 20), textPage(2, 21, 30)] });
+
+  test('opens the store with page sizes only and parses the pages a range touches', () => {
+    const { engine, opened, updates } = recordingEngine();
+    const queries = createDisplayListQueries(list(), engine);
+    queries.rangeRects(14, 15);
+    expect(JSON.parse(opened[0]).pages.map((p: DisplayPage) => p.primitives.length)).toEqual([
+      0, 0, 0,
+    ]);
+    expect(updates).toHaveLength(1);
+    expect(updates[0].replace.map(([index]) => index)).toEqual([1]);
+    expect(updates[0]).toMatchObject({ total: 3, keep: true });
+    expect(updates[0].reuse).toBeUndefined();
+    expect(updates[0].replace[0][1].primitives).toHaveLength(1);
+
+    queries.rangeRects(15, 16);
+    expect(updates).toHaveLength(1);
+  });
+
+  test('loads the hit page, a move’s neighbours, and every page for region queries', () => {
+    const { engine, updates } = recordingEngine();
+    const queries = createDisplayListQueries(list(), engine);
+    queries.hitTestRegions(2, 5, 5);
+    expect(updates.at(-1)!.replace.map(([index]) => index)).toEqual([2]);
+    queries.verticalMove(5, 'down');
+    expect(updates.at(-1)!.replace.map(([index]) => index)).toEqual([0, 1]);
+    queries.hfRangeRects('header', 'rId1', 0, 1);
+    expect(updates).toHaveLength(2);
+  });
+
+  test('a range spanning pages loads each of them', () => {
+    const { engine, updates } = recordingEngine();
+    const queries = createDisplayListQueries(list(), engine);
+    queries.rangeRects(5, 25);
+    expect(updates[0].replace.map(([index]) => index)).toEqual([0, 1, 2]);
+  });
+});
+
+describe('createDisplayListQueries page-restricted range rects', () => {
+  const list = () => ({
+    pages: Array.from({ length: 8 }, (_, pageIndex): DisplayPage => ({
+      ...page(pageIndex),
+      primitives: [0, 1].map((column) => ({
+        kind: 'text' as const,
+        text: 'head',
+        x: column * 20,
+        baselineY: 10,
+        width: 10,
+        font: '10px serif',
+        color: '#000',
+        docStart: pageIndex < 6 ? 1 : 100,
+        docEnd: pageIndex < 6 ? 5 : 104,
+      })),
+    })),
+  });
+  const rects = (pages: DisplayPage[], from: number, to: number): DisplayListRect[] =>
+    pages.flatMap((page) =>
+      page.primitives
+        .filter((primitive) =>
+          primitive.docStart! < Math.max(from, to) && primitive.docEnd! > Math.min(from, to)
+        )
+        .map((_, index) => ({ pageIndex: page.pageIndex, x: index * 20, y: 0, width: 10, height: 10 }))
+    );
+
+  test('direct wasm range exports normalize page bounds', async () => {
+    const wasm = await import('../../wasm/layout');
+    await wasm.preloadLayoutWasm();
+    const json = JSON.stringify(list());
+    const all = JSON.parse(wasm.rangeRectsJson(json, 2, 104)) as DisplayListRect[];
+    expect([...new Set(all.map((rect) => rect.pageIndex))]).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+    const bounds: Array<[number, number]> = [
+      [5.5, 5.5],
+      [4.2, 5.0],
+      [1.2, 4.8],
+      [NaN, 5],
+      [0, NaN],
+      [-3, 1],
+      [-3.2, 2.8],
+      [-5, -1],
+      [5, 2],
+      [2, Infinity],
+      [-Infinity, Infinity],
+      [Infinity, Infinity],
+      [0, -Infinity],
+      [0, 0x100000000],
+      [0x100000000, Infinity],
+    ];
+    const handle = wasm.openDisplayList(json);
+    try {
+      for (const [first, last] of bounds) {
+        const expected = all.filter(
+          (rect) => rect.pageIndex >= Math.ceil(first) && rect.pageIndex <= Math.floor(last)
+        );
+        expect(JSON.parse(wasm.rangeRectsOnPagesJson(json, 2, 104, first, last))).toEqual(expected);
+        expect(JSON.parse(wasm.rangeRectsOnPagesByHandle(handle, 2, 104, first, last))).toEqual(
+          expected
+        );
+        if (
+          Number.isNaN(first) ||
+          Number.isNaN(last) ||
+          Math.floor(last) < Math.max(0, Math.ceil(first))
+        ) {
+          expect(wasm.rangeRectsOnPagesJson('invalid', 2, 104, first, last)).toBe('[]');
+          expect(wasm.rangeRectsOnPagesByHandle(0xffffffff, 2, 104, first, last)).toBe('[]');
+        }
+      }
+    } finally {
+      wasm.closeDisplayList(handle);
+    }
+  });
+
+  function storeEngine() {
+    const { engine } = fakeEngine();
+    let stored: DisplayPage[] = [];
+    const loaded: number[] = [];
+    const visited: number[] = [];
+    const windows: Array<[number, number]> = [];
+    engine.openDisplayList = (json) => {
+      stored = JSON.parse(json).pages;
+      return 1;
+    };
+    engine.updateDisplayList = (_handle, json) => {
+      const update = JSON.parse(json) as { replace: Array<[number, DisplayPage]> };
+      for (const [index, page] of update.replace) {
+        stored[index] = page;
+        loaded.push(index);
+      }
+    };
+    engine.rangeRectsByHandle = (_handle, from, to) => JSON.stringify(rects(stored, from, to));
+    engine.rangeRectsJson = (json, from, to) => JSON.stringify(rects(JSON.parse(json).pages, from, to));
+    engine.rangeRectsOnPagesByHandle = (_handle, from, to, first, last) => {
+      windows.push([first, last]);
+      const pages = stored.slice(first >>> 0, (last >>> 0) + 1);
+      visited.push(...pages.map((page) => page.pageIndex));
+      return JSON.stringify(rects(pages, from, to));
+    };
+    engine.rangeRectsOnPagesJson = (json, from, to, first, last) => {
+      windows.push([first, last]);
+      return JSON.stringify(
+        rects(JSON.parse(json).pages.slice(first >>> 0, (last >>> 0) + 1), from, to)
+      );
+    };
+    return { engine, loaded, visited, windows };
+  }
+
+  function residentEngine(pages: () => DisplayPage[]) {
+    const windows: Array<[number, number]> = [];
+    const engine: ResidentDisplayListQueryEngine = {
+      displayHitTestRegionsJson: () => 'null',
+      displayVerticalMoveJson: () => 'null',
+      displayRangeRectsRegionJson: () => '[]',
+      displayRangeRectsJson: (from, to) => JSON.stringify(rects(pages(), from, to)),
+      displayRangeRectsOnPagesJson: (from, to, first, last) => {
+        windows.push([first, last]);
+        return JSON.stringify(rects(pages().slice(first >>> 0, (last >>> 0) + 1), from, to));
+      },
+    };
+    return { engine, windows };
+  }
+
+  test('loads and visits only zero-based page 5, including after other pages are loaded', () => {
+    const { engine, loaded, visited } = storeEngine();
+    const queries = createDisplayListQueries(list(), engine);
+    const restricted = queries.rangeRectsOnPages!(2, 4, 5, 5);
+    expect(restricted).toHaveLength(2);
+    expect(loaded).toEqual([5]);
+    expect(visited).toEqual([5]);
+    const all = queries.rangeRects(2, 4);
+    expect(all).toHaveLength(12);
+    expect(restricted).toEqual(all.filter((rect) => rect.pageIndex === 5));
+    visited.length = 0;
+    expect(queries.rangeRectsOnPages!(4, 2, 5, 5)).toEqual(restricted);
+    expect(visited).toEqual([5]);
+    expect(loaded).toEqual([5, 0, 1, 2, 3, 4]);
+    queries.dispose();
+  });
+
+  test('intersects the page window with pages touching the positions and preserves order', () => {
+    const { engine, loaded } = storeEngine();
+    const queries = createDisplayListQueries(list(), engine);
+    const restricted = queries.rangeRectsOnPages!(2, 4, 4, 7);
+    expect(loaded).toEqual([4, 5]);
+    expect(restricted.map((rect) => rect.pageIndex)).toEqual([4, 4, 5, 5]);
+    expect(restricted).toEqual(queries.rangeRects(2, 4).filter((rect) => rect.pageIndex >= 4));
+    queries.dispose();
+  });
+
+  test('the JSON path returns the same ordered rectangles', () => {
+    const { engine, loaded } = storeEngine();
+    engine.hasDisplayListSession = () => false;
+    const queries = createDisplayListQueries(list(), engine);
+    expect(queries.rangeRectsOnPages!(2, 4, 4, 5)).toEqual(
+      queries.rangeRects(2, 4).filter((rect) => rect.pageIndex >= 4 && rect.pageIndex <= 5)
+    );
+    expect(loaded).toEqual([]);
+    queries.dispose();
+  });
+
+  test('falls back to the page-restricted JSON query when a handle query fails', () => {
+    const { engine } = storeEngine();
+    engine.rangeRectsOnPagesByHandle = () => {
+      throw new Error('unknown handle');
+    };
+    const queries = createDisplayListQueries(list(), engine);
+    expect(queries.rangeRectsOnPages!(2, 4, 5, 5)).toEqual(rects([list().pages[5]], 2, 4));
+    queries.dispose();
+  });
+
+  test('falls back to unrestricted queries when an older engine lacks the export', () => {
+    for (const missing of ['method', 'export']) {
+      const { engine } = storeEngine();
+      if (missing === 'method') engine.rangeRectsOnPagesJson = undefined;
+      else engine.hasRangeRectsOnPages = () => false;
+      const queries = createDisplayListQueries(list(), engine);
+      expect(queries.rangeRectsOnPages!(2, 4, 5, 5)).toEqual(
+        queries.rangeRects(2, 4).filter((rect) => rect.pageIndex === 5)
+      );
+      queries.dispose();
+    }
+  });
+
+  test('empty and out-of-bounds windows load no pages', () => {
+    const { engine, loaded, visited } = storeEngine();
+    const queries = createDisplayListQueries(list(), engine);
+    expect(queries.rangeRectsOnPages!(2, 4, 6, 5)).toEqual([]);
+    expect(queries.rangeRectsOnPages!(2, 4, 8, 20)).toEqual([]);
+    expect(queries.rangeRectsOnPages!(2, 4, -5, -1)).toEqual([]);
+    expect(queries.rangeRectsOnPages!(2, 2, 0, 5)).toEqual([]);
+    expect(loaded).toEqual([]);
+    expect(visited).toEqual([]);
+    expect(queries.rangeRectsOnPages!(2, 4, -5, 20)).toEqual(queries.rangeRects(2, 4));
+    queries.dispose();
+  });
+
+  test('resident queries receive the page window and older residents fall back', () => {
+    const calls: number[][] = [];
+    const resident = {
+      displayHitTestRegionsJson: () => 'null',
+      displayVerticalMoveJson: () => 'null',
+      displayRangeRectsRegionJson: () => '[]',
+      displayRangeRectsJson: (from: number, to: number) => JSON.stringify(rects(list().pages, from, to)),
+      displayRangeRectsOnPagesJson: (from: number, to: number, first: number, last: number) => {
+        calls.push([from, to, first, last]);
+        return JSON.stringify(rects(list().pages.slice(first, last + 1), from, to));
+      },
+    };
+    const queries = createDisplayListQueries(list(), resident);
+    const expected = queries.rangeRects(2, 4).filter((rect) => rect.pageIndex === 5);
+    expect(queries.rangeRectsOnPages!(2, 4, 5, 5)).toEqual(expected);
+    expect(calls).toEqual([[2, 4, 5, 5]]);
+    const older = createDisplayListQueries(list(), {
+      ...resident,
+      displayRangeRectsOnPagesJson: undefined,
+    });
+    expect(older.rangeRectsOnPages!(2, 4, 5, 5)).toEqual(expected);
+    older.dispose();
+    queries.dispose();
+  });
+
+  test('retained resident facades query pages added by a rebuild with and without the export', () => {
+    for (const exported of [true, false]) {
+      let current = list().pages.slice(0, 1);
+      const { engine, windows } = residentEngine(() => current);
+      if (!exported) engine.displayRangeRectsOnPagesJson = undefined;
+      const queries = createDisplayListQueries({ pages: current }, engine);
+      expect(queries.rangeRectsOnPages!(2, 4, 5, 5)).toEqual([]);
+      current = list().pages;
+      const all = queries.rangeRects(2, 4);
+      const expected = all.filter((rect) => rect.pageIndex === 5);
+      expect(expected).toHaveLength(2);
+      expect(queries.rangeRectsOnPages!(2, 4, 5, 5)).toEqual(expected);
+      expect(queries.rangeRectsOnPages!(2, 4, 4, Infinity)).toEqual(
+        all.filter((rect) => rect.pageIndex >= 4)
+      );
+      expect(windows).toEqual(exported ? [[5, 5], [5, 5], [4, 0xffffffff]] : []);
+      queries.dispose();
+    }
+  });
+
+  test('normalizes page bounds identically for exports, fallbacks, residents and live queries', () => {
+    const bounds: Array<[number, number]> = [
+      [1.2, 4.8],
+      [5.5, 5.5],
+      [-3.2, 2.8],
+      [-5, -1],
+      [NaN, 5],
+      [0, NaN],
+      [NaN, NaN],
+      [5, 2],
+      [8, 20],
+      [-Infinity, Infinity],
+      [4.2, Infinity],
+      [Infinity, Infinity],
+      [0, -Infinity],
+      [0, 0x100000000],
+      [0x100000000, Infinity],
+    ];
+    const results: DisplayListRect[][][] = [];
+    for (const path of [
+      'handle',
+      'json',
+      'fallback-method',
+      'fallback-export',
+      'resident',
+      'resident-fallback',
+      'live',
+      'live-fallback',
+    ]) {
+      const displayList = list();
+      const store = storeEngine();
+      const resident = residentEngine(() => displayList.pages);
+      let queries: DisplayListQueries;
+      let successor: DisplayListQueries | undefined;
+      if (path.startsWith('resident')) {
+        if (path === 'resident-fallback') resident.engine.displayRangeRectsOnPagesJson = undefined;
+        queries = createDisplayListQueries({ pages: [displayList.pages[0]] }, resident.engine);
+      } else {
+        if (path === 'json') store.engine.hasDisplayListSession = () => false;
+        if (path === 'fallback-method') store.engine.rangeRectsOnPagesJson = undefined;
+        if (path === 'fallback-export') store.engine.hasRangeRectsOnPages = () => false;
+        if (path.startsWith('live')) {
+          const line = {};
+          queries = createDisplayListQueries(
+            { pages: [displayList.pages[0]] }, store.engine, null, line
+          );
+          queries.rangeRects(2, 104);
+          successor = createDisplayListQueries(displayList, store.engine, queries, line);
+          successor.rangeRects(2, 104);
+          if (path === 'live-fallback') successor.rangeRectsOnPages = undefined;
+        } else {
+          queries = createDisplayListQueries(displayList, store.engine);
+        }
+      }
+      const all = queries.rangeRects(2, 104);
+      expect(all).toHaveLength(16);
+      const actual = bounds.map(([first, last]) => {
+        const expected = all.filter((rect) => rect.pageIndex >= first && rect.pageIndex <= last);
+        const restricted = queries.rangeRectsOnPages!(2, 104, first, last);
+        expect(restricted).toEqual(expected);
+        return restricted;
+      });
+      results.push(actual);
+      for (const [first, last] of [...store.windows, ...resident.windows]) {
+        expect(Number.isInteger(first)).toBe(true);
+        expect(Number.isInteger(last)).toBe(true);
+        expect(first).toBeGreaterThanOrEqual(0);
+        expect(last).toBeLessThanOrEqual(path === 'resident' ? 0xffffffff : 7);
+        expect(first).toBeLessThanOrEqual(last);
+      }
+      successor?.dispose();
+      queries.dispose();
+    }
+    for (const actual of results) expect(actual).toEqual(results[0]);
+  });
+
+  test('a handed-off facade uses the live page count', () => {
+    const { engine } = storeEngine();
+    const displayList = list();
+    const line = {};
+    const first = createDisplayListQueries({ pages: [displayList.pages[0]] }, engine, null, line);
+    first.rangeRects(2, 4);
+    const live = createDisplayListQueries(displayList, engine, first, line);
+    const expected = live.rangeRectsOnPages!(2, 4, 5, 5);
+    expect(expected).toHaveLength(2);
+    expect(first.rangeRectsOnPages!(2, 4, 5, 5)).toEqual(expected);
+    live.dispose();
+    expect(first.rangeRectsOnPages!(2, 4, 5, 5)).toEqual([]);
+    first.dispose();
+  });
+});
+
+describe('createDisplayListQueries page load failures', () => {
+  test('a trap while loading pages stops querying the instance', () => {
+    const { engine, calls } = fakeEngine();
+    engine.updateDisplayList = () => {
+      throw wasmTrap();
+    };
+    const textPage: DisplayPage = {
+      ...page(0),
+      primitives: [
+        { kind: 'rect', x: 0, y: 0, w: 1, h: 1, docStart: 1, docEnd: 2 } as DisplayPage['primitives'][number],
+      ],
+    };
+    const queries = createDisplayListQueries({ pages: [textPage] }, engine);
+    expect(queries.rangeRects(1, 2)).toEqual([]);
+    expect(calls.rangeJson).toBe(0);
+    expect(calls.rangeByHandle).toBe(0);
+    expect(queries.sourceState().status).toBe('error');
+  });
+
+  test('an ordinary page load failure closes the handle and falls back to JSON', () => {
+    const { engine, calls } = fakeEngine();
+    engine.updateDisplayList = () => {
+      throw new Error('update rejected');
+    };
+    const textPage: DisplayPage = {
+      ...page(0),
+      primitives: [
+        { kind: 'rect', x: 0, y: 0, w: 1, h: 1, docStart: 1, docEnd: 2 } as DisplayPage['primitives'][number],
+      ],
+    };
+    const warn = console.warn;
+    console.warn = () => {};
+    try {
+      const queries = createDisplayListQueries({ pages: [textPage] }, engine);
+      queries.rangeRects(1, 2);
+      expect(calls.close).toBe(1);
+      expect(calls.rangeJson).toBe(1);
+      expect(calls.rangeByHandle).toBe(0);
+    } finally {
+      console.warn = warn;
+    }
+  });
+});
+
+describe('createDisplayListQueries unbuilt pages', () => {
+  test('a position on an unbuilt page anchors to its content box', () => {
+    const { engine } = fakeEngine();
+    const unbuilt: DisplayPage = {
+      pageIndex: 1,
+      width: 100,
+      height: 100,
+      primitives: [],
+      unbuilt: true,
+      positionSpan: [40, 80],
+      contentBounds: { x: 10, y: 12, width: 80, height: 70 },
+    };
+    const queries = createDisplayListQueries({ pages: [page(0), unbuilt] }, engine);
+    expect(queries.caretRect(50)).toEqual({ pageIndex: 1, x: 10, y: 12, width: 0, height: 0 });
+    expect(queries.anchorRect(50)).toEqual({ pageIndex: 1, x: 10, y: 12, width: 0, height: 0 });
+    expect(queries.caretRect(90)).toBeNull();
+  });
+
+  test('the first position of an unbuilt page anchors to it, not to the page painted before it', () => {
+    const { engine } = fakeEngine();
+    engine.rangeRectsByHandle = (_handle, from, to) =>
+      from === 39 && to === 40
+        ? JSON.stringify([{ pageIndex: 0, x: 20, y: 30, width: 5, height: 10 }])
+        : '[]';
+    const unbuilt = (pageIndex: number, positionSpan: [number, number]): DisplayPage => ({
+      pageIndex,
+      width: 100,
+      height: 100,
+      primitives: [],
+      unbuilt: true,
+      positionSpan,
+      contentBounds: { x: 10, y: 12 + pageIndex, width: 80, height: 70 },
+    });
+    const queries = createDisplayListQueries(
+      { pages: [page(0), unbuilt(1, [40, 80]), unbuilt(2, [80, 120])] },
+      engine
+    );
+    expect(queries.caretRect(40)).toEqual({ pageIndex: 1, x: 10, y: 13, width: 0, height: 0 });
+    expect(queries.caretRect(80)).toEqual({ pageIndex: 2, x: 10, y: 14, width: 0, height: 0 });
+  });
+
+  test('a position in a row split across unbuilt pages picks the page by its share of the row', () => {
+    const { engine } = fakeEngine();
+    const unbuilt = (pageIndex: number, positionSpan: [number, number]): DisplayPage => ({
+      pageIndex,
+      width: 100,
+      height: 100,
+      primitives: [],
+      unbuilt: true,
+      positionSpan,
+    });
+    const queries = createDisplayListQueries(
+      { pages: [page(0), unbuilt(1, [50, 400]), unbuilt(2, [100, 400]), unbuilt(3, [100, 450])] },
+      engine
+    );
+    expect(queries.caretRect(120)?.pageIndex).toBe(1);
+    expect(queries.caretRect(250)?.pageIndex).toBe(2);
+    expect(queries.caretRect(390)?.pageIndex).toBe(3);
+    expect(queries.caretRect(60)?.pageIndex).toBe(1);
+    expect(queries.caretRect(420)?.pageIndex).toBe(3);
+  });
+});
+
+describe('visual lines', () => {
+  const text = (
+    x: number,
+    baselineY: number,
+    docStart: number,
+    identity: { paraId?: string; blockKey?: string } = {}
+  ) => ({
+    kind: 'text' as const,
+    text: 'x',
+    x,
+    baselineY,
+    width: 10,
+    font: '400 10px Calibri',
+    color: '#000000',
+    docStart,
+    docEnd: docStart + 1,
+    ...identity,
+  });
+
+  test('group each page on its own, the way the whole list does', () => {
+    const lines: DisplayPage = {
+      pageIndex: 0,
+      width: 600,
+      height: 800,
+      primitives: [
+        text(0, 20, 1, { paraId: 'a' }),
+        text(300, 20, 50, { paraId: 'b' }),
+        text(20, 21, 2, { paraId: 'a' }),
+        text(0, 40, 3, { paraId: 'a' }),
+        text(310, 20.5, 51, { paraId: 'b' }),
+        text(0, 60, 70),
+        text(0, 60, 71),
+        text(0, 80, 80, { blockKey: 'k' }),
+      ],
+    };
+    const second: DisplayPage = {
+      ...lines,
+      pageIndex: 1,
+      primitives: [text(0, 20, 90, { paraId: 'c' })],
+    };
+    const queries = createDisplayListQueries({ pages: [lines, second] }, fakeEngine().engine);
+
+    const first = queries.visualLinesOnPage(0);
+    expect(
+      first.map(({ paraId, blockId, from, to, x, width }) => [paraId, blockId, from, to, x, width])
+    ).toEqual([
+      ['a', undefined, 1, 3, 0, 30],
+      ['b', undefined, 50, 52, 300, 20],
+      ['a', undefined, 3, 4, 0, 10],
+      [undefined, undefined, 70, 71, 0, 10],
+      [undefined, undefined, 71, 72, 0, 10],
+      [undefined, 'k', 80, 81, 0, 10],
+    ]);
+    expect(queries.visualLines()).toEqual([...first, ...queries.visualLinesOnPage(1)]);
+    expect(queries.visualLinesOnPage(2)).toEqual([]);
+    expect(queries.visualLineExtent(0)).toEqual({
+      top: Math.min(...first.map((line) => line.y)),
+      bottom: Math.max(...first.map((line) => line.y + line.height)),
+    });
+    const blank: DisplayPage = { ...lines, pageIndex: 2, primitives: [] };
+    expect(
+      createDisplayListQueries({ pages: [blank] }, fakeEngine().engine).visualLineExtent(0)
+    ).toBeNull();
+  });
+});
+
+describe('createDisplayListQueries page loads in the real store', () => {
+  test('pages loaded one query at a time answer as a store holding every page', async () => {
+    const { preloadLayoutWasm } = await import('../../wasm/layout');
+    const { loadRustDisplayListQueryEngine } = await import('./rustDisplayList');
+    await preloadLayoutWasm();
+    const engine = await loadRustDisplayListQueryEngine();
+    const textPage = (pageIndex: number): DisplayPage => ({
+      pageIndex,
+      width: 816,
+      height: 1056,
+      primitives: [0, 1, 2].map(
+        (line) =>
+          ({
+            kind: 'text',
+            text: `Page ${pageIndex} line ${line}`,
+            x: 100,
+            baselineY: 100 + line * 20,
+            width: 200,
+            font: '400 16px Arial',
+            color: '#000000',
+            docStart: pageIndex * 100 + line * 20 + 1,
+            docEnd: pageIndex * 100 + line * 20 + 15,
+          }) as DisplayPage['primitives'][number]
+      ),
+    });
+    const list = { pages: Array.from({ length: 12 }, (_, index) => textPage(index)) };
+    const calls = { byHandle: 0, json: 0, updates: 0 };
+    const counted = {
+      ...engine,
+      rangeRectsByHandle: (handle: number, from: number, to: number) => {
+        calls.byHandle += 1;
+        return engine.rangeRectsByHandle!(handle, from, to);
+      },
+      rangeRectsJson: (json: string, from: number, to: number) => {
+        calls.json += 1;
+        return engine.rangeRectsJson(json, from, to);
+      },
+      updateDisplayList: (handle: number, update: string) => {
+        calls.updates += 1;
+        engine.updateDisplayList!(handle, update);
+      },
+    };
+    const lazy = createDisplayListQueries(list, counted);
+    const order = [7, 2, 11, 2, 0, 5];
+    const answers = order.map((index) => lazy.rangeRects(index * 100 + 3, index * 100 + 50));
+    expect(calls).toEqual({ byHandle: 6, json: 0, updates: 5 });
+    const eager = createDisplayListQueries(list, engine);
+    eager.rangeRects(1, 1200);
+    expect(order.map((index) => eager.rangeRects(index * 100 + 3, index * 100 + 50))).toEqual(
+      answers
+    );
+    expect(answers.every((rects) => rects.length > 0)).toBe(true);
   });
 });

@@ -44,6 +44,33 @@ describe('YrsSession searchText', () => {
     }
   });
 
+  it('preserves Unicode simple-folding matches and UTF-16 offsets', async () => {
+    const text = readFileSync(resolve(import.meta.dir,
+      '../../../../crates/docx-edit/tests/fixtures/unicode-search.txt'), 'utf8').trimEnd();
+    const session = await createYrsSession({ clientId: 76004 });
+    try {
+      session.createStory('body', text);
+      const cases: Array<[string, string[]]> = [
+        ['i', ['I', 'i']], ['I', ['I', 'i']], ['ı', ['ı']], ['İ', ['İ']],
+        ['ΐ', ['ΐ', 'ΐ']], ['ΐ', ['ΐ', 'ΐ']],
+        ['ΰ', ['ΰ', 'ΰ']], ['ΰ', ['ΰ', 'ΰ']],
+        ['ﬅ', ['ﬅ', 'ﬆ']], ['ﬆ', ['ﬅ', 'ﬆ']],
+      ];
+      for (const [query, expected] of cases) {
+        const matches = session.searchText(query);
+        expect(matches.map((match) => match.text)).toEqual(expected);
+        for (const match of matches) {
+          expect(match.start).toBe(text.indexOf(match.text));
+          expect(match.end).toBe(match.start + match.text.length);
+        }
+        expect(session.searchText(query, { caseSensitive: true }).map((match) => match.text))
+          .toEqual([query]);
+      }
+    } finally {
+      session.destroy();
+    }
+  });
+
   it('does not match across inline embeds and preserves their offset unit', async () => {
     const session = await createYrsSession({ clientId: 76003 });
     try {

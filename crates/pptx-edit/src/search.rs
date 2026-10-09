@@ -23,14 +23,14 @@ pub struct TextSearchMatch {
     pub text: String,
 }
 
-/// Literal query; case-insensitive matching equates characters that share an uppercase form.
-struct Needle {
+/// Literal query with Unicode simple case-insensitive matching.
+pub(crate) struct Needle {
     folded: String,
     case_sensitive: bool,
 }
 
 impl Needle {
-    fn new(query: &str, case_sensitive: bool) -> Self {
+    pub(crate) fn new(query: &str, case_sensitive: bool) -> Self {
         let folded = if case_sensitive {
             query.to_owned()
         } else {
@@ -44,6 +44,15 @@ impl Needle {
 
     /// Lazily yields the non-overlapping byte ranges of `text` equal to the query, in order.
     fn find_all<'a>(&'a self, text: &'a str) -> Matches<'a> {
+        self.matches(text, false)
+    }
+
+    /// Like [`Needle::find_all`], but every occurrence counts, overlapping ones included.
+    pub(crate) fn find_overlapping<'a>(&'a self, text: &'a str) -> Matches<'a> {
+        self.matches(text, true)
+    }
+
+    fn matches<'a>(&'a self, text: &'a str, overlapping: bool) -> Matches<'a> {
         let (haystack, origins) = if self.case_sensitive {
             (Cow::Borrowed(text), Vec::new())
         } else {
@@ -61,11 +70,19 @@ impl Needle {
             haystack,
             origins,
             cursor: 0,
+            overlapping,
         }
     }
 }
 
 fn fold_char(ch: char) -> char {
+    match ch {
+        '\u{0131}' => return ch,
+        '\u{1FD3}' => return '\u{0390}',
+        '\u{1FE3}' => return '\u{03B0}',
+        '\u{FB05}' => return '\u{FB06}',
+        _ => {}
+    }
     let mut upper = ch.to_uppercase();
     if let (Some(single), None) = (upper.next(), upper.next()) {
         let mut lower = single.to_lowercase();
@@ -81,11 +98,13 @@ fn fold_char(ch: char) -> char {
 }
 
 /// Byte ranges in the original text; empty `origins` means the haystack is that text.
-struct Matches<'a> {
+pub(crate) struct Matches<'a> {
     needle: &'a str,
     haystack: Cow<'a, str>,
     origins: Vec<(usize, usize)>,
     cursor: usize,
+    /// Resume one character after a match's start rather than at its end.
+    overlapping: bool,
 }
 
 impl Iterator for Matches<'_> {
@@ -97,7 +116,15 @@ impl Iterator for Matches<'_> {
         }
         let start = self.cursor + self.haystack[self.cursor..].find(self.needle)?;
         let end = start + self.needle.len();
-        self.cursor = end;
+        self.cursor = if self.overlapping {
+            start
+                + self.haystack[start..]
+                    .chars()
+                    .next()
+                    .map_or(1, char::len_utf8)
+        } else {
+            end
+        };
         Some((self.original(start), self.original(end)))
     }
 }
@@ -285,5 +312,20 @@ mod tests {
         assert_eq!(ranges("ss", false), [(15, 17)]);
         assert_eq!(ranges("aa", false), [(26, 28)]);
         assert_eq!(Needle::new("", false).find_all(text).next(), None);
+    }
+
+    #[test]
+    fn overlapping_matches_count_every_occurrence() {
+        let needle = Needle::new("aa", true);
+        assert_eq!(needle.find_all("aaa").collect::<Vec<_>>(), [(0, 2)]);
+        assert_eq!(
+            needle.find_overlapping("aaa").collect::<Vec<_>>(),
+            [(0, 2), (1, 3)]
+        );
+        let emoji = Needle::new("😀😀", true);
+        assert_eq!(
+            emoji.find_overlapping("😀😀😀").collect::<Vec<_>>(),
+            [(0, 8), (4, 12)]
+        );
     }
 }

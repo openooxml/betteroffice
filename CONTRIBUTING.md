@@ -41,6 +41,15 @@ bun run test
 
 # Rust engines (fmt + clippy with -D warnings + tests)
 bun run rust:check
+
+# End-to-end scenarios on pinned corpus documents, every operation timed
+# Requires the pinned corpus and locally built Python bindings.
+bun e2e/python-env.ts
+bun run test:e2e
+
+# Headless Chromium: real DOCX, XLSX, and PPTX editor interactions.
+bunx playwright install chromium
+bun run test:e2e:browser
 ```
 
 ## Contributor License Agreement

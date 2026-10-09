@@ -11,7 +11,7 @@ use crate::image::{
     Image, ImagePadding, ImagePosition, ImageSize, ImageWrap, parse_anchor_position,
     parse_anchor_wrap, placeholder_image,
 };
-use crate::media::{MediaMap, resolve_image_data};
+use crate::media::{MediaMap, media_token_index, resolve_image_data};
 use crate::relationships::{RelationshipMap, TargetMode};
 use crate::scalars::ColorValue;
 use crate::xml::{XmlElement, parse_javascript_integer_prefix};
@@ -1161,11 +1161,11 @@ fn resolve_paint_picture(
         return;
     }
     let resolved = resolve_image_data(&image.relationship_id, Some(relationships), Some(media));
-    if resolved
-        .src
-        .as_deref()
-        .is_some_and(|value| value.starts_with("data:") || value.starts_with("blob:"))
-    {
+    if resolved.src.as_deref().is_some_and(|value| {
+        value.starts_with("data:")
+            || value.starts_with("blob:")
+            || media_token_index(value).is_some()
+    }) {
         image.src = resolved.src
     }
 }

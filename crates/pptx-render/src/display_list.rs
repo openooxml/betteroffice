@@ -61,6 +61,9 @@ pub enum ImageEffect {
         threshold: f32,
     },
     Grayscale,
+    Alpha {
+        amount: f32,
+    },
     Luminance {
         brightness: f32,
         contrast: f32,
@@ -190,6 +193,14 @@ impl ImageCrop {
     }
 }
 
+/// `a:blipFill/a:tile`, as the fractions the picture repeats at.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageTile {
+    pub scale_x: f32,
+    pub scale_y: f32,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
@@ -240,6 +251,10 @@ pub enum Primitive {
         effects: Vec<ImageEffect>,
         #[serde(default, skip_serializing_if = "ImageCrop::is_whole")]
         crop: ImageCrop,
+        /// `a:tile`: repeat the picture at its own size instead of stretching
+        /// it, scaled by these fractions.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tile: Option<ImageTile>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<Vec<GeometryPathCommand>>,
         #[serde(default, skip_serializing_if = "is_false")]
@@ -252,6 +267,9 @@ pub enum Primitive {
         transform: Transform,
     },
     TextBox {
+        /// `a:rPr/a:effectLst`: the shadow the box's glyphs are drawn with.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text_shadow: Option<Shadow>,
         object_id: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         shape_id: Option<String>,
@@ -495,6 +513,7 @@ mod tests {
     fn an_uncropped_rectangular_image_serializes_as_it_did_before_crops_existed() {
         let mut image = Primitive::Image {
             geometry_fallback: false,
+            tile: None,
             object_id: 90,
             shape_id: Some("slide:0:256:shape:9".into()),
             name: "Media fixture".into(),
