@@ -413,6 +413,7 @@ fn apply_range_formats(
         .map_or(0, |cols| u64::from(cols) + 1);
     let range_cells = rows.saturating_mul(cols);
     let mut staged = Vec::with_capacity(usize::try_from(range_cells).unwrap_or(0));
+    let mut resolved_formats = BTreeMap::new();
     {
         let sheet_ref = &wb.sheets[sheet.0 as usize];
         let styles = &mut wb.styles;
@@ -443,18 +444,59 @@ fn apply_range_formats(
                     styles.restore_pools(marks);
                     return Err(error);
                 }
-                let selected = captured.and_then(|captured| {
+                if let Some(captured) = captured {
                     let source_row = (row - range.start.row) % captured.rows;
                     let source_col = (col - range.start.col) % captured.columns;
-                    captured
-                        .source_styles
-                        .get((source_row * captured.columns + source_col) as usize)
-                        .copied()
-                        .filter(|style| styles.cell_format(*style) == format)
-                });
-                if let Some(style) = selected {
-                    staged.push(style);
-                    continue;
+                    let index = (source_row * captured.columns + source_col) as usize;
+                    if let Some(source) = captured.source_formats.get(index) {
+                        if source.format != format {
+                            styles.restore_pools(marks);
+                            return Err(OpError::InvalidStyle(
+                                "captured provenance does not match its format".into(),
+                            ));
+                        }
+                        if let Some(style) = resolved_formats.get(&index) {
+                            staged.push(*style);
+                            continue;
+                        }
+                        let matches = |style| {
+                            crate::formatting::PreservedCellFormat::from_style(styles, style)
+                                == *source
+                        };
+                        let selected = captured
+                            .source_styles
+                            .get(index)
+                            .copied()
+                            .filter(|style| {
+                                style.is_none_or(|index| styles.xf(index).is_some())
+                                    && matches(*style)
+                            })
+                            .or_else(|| {
+                                (0..styles.cell_xfs.len() as u32)
+                                    .find(|&index| matches(Some(index)))
+                                    .map(Some)
+                            });
+                        let selected = match selected {
+                            Some(style) => Ok(style),
+                            None => match source.derived_from {
+                                Some(base) if styles.xf(base).is_some() => {
+                                    styles.intern_derived_cell_format(base, &format).map(Some)
+                                }
+                                _ => styles.intern_cell_format(&format),
+                            },
+                        };
+                        match selected {
+                            Ok(style) => {
+                                resolved_formats.insert(index, style);
+                                staged.push(style);
+                            }
+                            Err(_) => {
+                                styles.restore_pools(marks);
+                                return Err(OpError::NumFmtTableFull);
+                            }
+                        }
+                        continue;
+                    }
                 }
                 if format == previous {
                     staged.push(old_style);
@@ -2323,6 +2365,7 @@ mod range_format_exhaustion_tests {
             ),
             format: CapturedFormat {
                 source_styles: Vec::new(),
+                source_formats: Vec::new(),
                 rows: 1,
                 columns: 2,
                 formats: vec![
@@ -2370,6 +2413,7 @@ mod range_format_exhaustion_tests {
             ),
             format: CapturedFormat {
                 source_styles: Vec::new(),
+                source_formats: Vec::new(),
                 rows: 1,
                 columns: 2,
                 formats: vec![

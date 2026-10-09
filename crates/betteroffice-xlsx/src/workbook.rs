@@ -1526,23 +1526,24 @@ impl Workbook {
 
     pub fn capture_format(&self, sheet: SheetId, range: CellRange) -> Result<CapturedFormat> {
         let (rows, columns) = self.validate_bounded_range(sheet, range)?;
+        let formats = self.range_formats(sheet, range)?;
+        let source_styles: Vec<_> = formats
+            .iter()
+            .map(|(at, _)| {
+                self.model.sheets[sheet.0 as usize]
+                    .cell(*at)
+                    .and_then(|cell| cell.style)
+            })
+            .collect();
         Ok(CapturedFormat {
             rows: rows as u32,
             columns: columns as u32,
-            source_styles: self
-                .range_formats(sheet, range)?
-                .into_iter()
-                .map(|(at, _)| {
-                    self.model.sheets[sheet.0 as usize]
-                        .cell(at)
-                        .and_then(|cell| cell.style)
-                })
+            source_formats: source_styles
+                .iter()
+                .map(|style| xlsx_ops::PreservedCellFormat::from_style(&self.model.styles, *style))
                 .collect(),
-            formats: self
-                .range_formats(sheet, range)?
-                .into_iter()
-                .map(|(_, format)| format)
-                .collect(),
+            source_styles,
+            formats: formats.into_iter().map(|(_, format)| format).collect(),
         })
     }
 

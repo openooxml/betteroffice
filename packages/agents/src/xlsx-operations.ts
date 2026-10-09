@@ -311,11 +311,16 @@ export function sortXlsx(book: XlsxAgentWorkbook, options: { version: string; sh
       ops.push({ type: 'setCell', sheet: sheet.index, at: { row: bounds.start.row + dest, col: bounds.start.col + col }, cell: { value: cell.value, formula: cell.formula } });
     }
   }
-  const formats = Array.from({ length: rows.length }, (_, dest) => {
+  const reorderFormats = <T>(formats: readonly T[]): T[] => Array.from({ length: rows.length }, (_, dest) => {
     const source = dest < start ? dest : order[dest - start];
-    return captured.formats.slice(source * bounds.columns, (source + 1) * bounds.columns);
+    return formats.slice(source * bounds.columns, (source + 1) * bounds.columns);
   }).flat();
-  if (ops.length) ops.push({ type: 'applyRangeFormat', sheet: sheet.index, range: { start: bounds.start, end: bounds.end }, format: { ...captured, formats } });
+  if (ops.length) ops.push({ type: 'applyRangeFormat', sheet: sheet.index, range: { start: bounds.start, end: bounds.end }, format: {
+    ...captured,
+    formats: reorderFormats(captured.formats),
+    ...(captured.sourceStyles && { sourceStyles: reorderFormats(captured.sourceStyles) }),
+    ...(captured.sourceFormats && { sourceFormats: reorderFormats(captured.sourceFormats) }),
+  } });
   let result;
   try { book.checkVersion(options.version); result = book.handle.applyOps(ops); } catch (error) { failure(error); }
   return { baseVersion: options.version, version: book.handle.version(), applied: result.applied, sheet: sheet.sheetId, range: options.range, rows: order.slice(0, 100).map((source, index) => ({ from: bounds.start.row + source + 1, to: bounds.start.row + start + index + 1 })), rowCount: order.length, truncated: order.length > 100, formulaPolicy: 'Formula source moves unchanged with its row; references keep their original A1 addresses.', results: book.readCells({ sheet: sheet.sheetId, range: options.range, limit: 20 }) };

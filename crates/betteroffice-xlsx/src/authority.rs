@@ -12,7 +12,7 @@ use xlsx_model::{
     MAX_COLS, MAX_ROWS, Sheet, SheetChart, SheetFormat, SheetId, Stylesheet, Table,
     Workbook as WorkbookModel,
 };
-use xlsx_ops::{CellState, Op};
+use xlsx_ops::{CellState, Op, PreservedCellFormat as StoredCellFormat};
 use yrs::block::{
     BLOCK_GC_REF_NUMBER, BLOCK_ITEM_ANY_REF_NUMBER, BLOCK_ITEM_DELETED_REF_NUMBER,
     BLOCK_ITEM_TYPE_REF_NUMBER, BLOCK_SKIP_REF_NUMBER, ClientID,
@@ -3231,16 +3231,6 @@ fn style_key(stylesheet: &Stylesheet, style: u32) -> Result<String, String> {
         return Err(format!("cell style index {style} is out of range"));
     }
     style_entry(stylesheet, style).map(|(key, _)| key)
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct StoredCellFormat {
-    #[serde(flatten)]
-    format: CellFormat,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    source_xf: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    derived_from: Option<u32>,
 }
 
 fn style_entry(stylesheet: &Stylesheet, index: u32) -> Result<(String, String), String> {

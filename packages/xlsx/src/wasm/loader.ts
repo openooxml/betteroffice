@@ -209,6 +209,8 @@ export interface CapturedFormat {
   rows: number;
   columns: number;
   formats: unknown[];
+  sourceStyles?: (number | null)[];
+  sourceFormats?: unknown[];
 }
 
 export interface CellPoint {

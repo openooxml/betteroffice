@@ -779,3 +779,81 @@ fn insert_above_authored_row_moves_its_unmodeled_attributes() {
     assert!(dispatches > 0);
     assert_eq!(parts(&oracle), after);
 }
+
+#[test]
+fn captured_format_preserves_protection_after_peer_style_reordering() {
+    let mut source = parts(&package(VARIANTS[0].1));
+    source.insert("xl/styles.xml".into(), format!(r#"<styleSheet xmlns="{MAIN}"><fonts count="1"><font/></fonts><cellXfs count="2"><xf fontId="0" applyProtection="1"><protection locked="0"/></xf><xf fontId="0" applyProtection="1"><protection locked="1"/></xf></cellXfs></styleSheet>"#).into_bytes());
+    source.insert("xl/worksheets/sheet1.xml".into(), worksheet(r#"<sheetData><row r="1"><c r="A1" s="0"><v>1</v></c><c r="B1" s="1"><v>2</v></c><c r="C1"><v>3</v></c></row></sheetData>"#).into_bytes());
+    source.insert(
+        "xl/worksheets/sheet2.xml".into(),
+        worksheet("<sheetData/>").into_bytes(),
+    );
+    let source = ooxml_opc::rezip_parts(&source.into_iter().collect::<Vec<_>>()).unwrap();
+    let mut a = Workbook::open_collaborative(&source, 11).unwrap();
+    let mut b = Workbook::open_collaborative(&source, 12).unwrap();
+    a.patch_range_style(
+        SheetId(0),
+        CellRange::parse_a1("A1").unwrap(),
+        xlsx_ops::StylePatch {
+            bold: Some(true),
+            ..Default::default()
+        },
+        CalculationOptions::default(),
+    )
+    .unwrap();
+    let captured = a
+        .capture_format(SheetId(0), CellRange::parse_a1("A1").unwrap())
+        .unwrap();
+    let original_index = captured.source_styles[0];
+    let captured = serde_json::from_str(&serde_json::to_string(&captured).unwrap()).unwrap();
+    b.apply_update_v1(
+        &a.encode_state_as_update_v1(),
+        CalculationOptions::default(),
+    )
+    .unwrap();
+    b.patch_range_style(
+        SheetId(0),
+        CellRange::parse_a1("B1").unwrap(),
+        xlsx_ops::StylePatch {
+            bold: Some(true),
+            ..Default::default()
+        },
+        CalculationOptions::default(),
+    )
+    .unwrap();
+    a.apply_update_v1(
+        &b.encode_state_as_update_v1(),
+        CalculationOptions::default(),
+    )
+    .unwrap();
+    assert_ne!(
+        a.capture_format(SheetId(0), CellRange::parse_a1("A1").unwrap())
+            .unwrap()
+            .source_styles[0],
+        original_index
+    );
+    a.apply_format(
+        SheetId(0),
+        CellRange::parse_a1("C1").unwrap(),
+        captured,
+        CalculationOptions::default(),
+    )
+    .unwrap();
+    b.apply_update_v1(
+        &a.encode_state_as_update_v1(),
+        CalculationOptions::default(),
+    )
+    .unwrap();
+    for workbook in [&a, &b] {
+        let saved = parts(&workbook.save().unwrap());
+        let sheet = cells(&text(&saved, "xl/worksheets/sheet1.xml"));
+        let styles = text(&saved, "xl/styles.xml");
+        let a_xf = cell_xf(&styles, style_index(&sheet["A1"]));
+        let b_xf = cell_xf(&styles, style_index(&sheet["B1"]));
+        let c_xf = cell_xf(&styles, style_index(&sheet["C1"]));
+        assert!(b_xf.contains("locked=\"1\""));
+        assert!(c_xf.contains("locked=\"0\""), "C1: {c_xf}");
+        assert_eq!(c_xf, a_xf);
+    }
+}
