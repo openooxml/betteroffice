@@ -135,18 +135,11 @@ export interface YrsHeaderFooterRegions {
 function rectForYrsPoint(
   point: YrsSidebarDisplayPoint,
   queries: DisplayListQueries,
-  hfRegions?: YrsHeaderFooterRegions,
-  session?: YrsSession
+  hfRegions?: YrsHeaderFooterRegions
 ): DisplayListRect | null {
   if (!point.hfRid) return queries.anchorRect(point.position);
-  const rIds = session ? headerFooterDisplayRIds(session, point.hfRid) : [point.hfRid];
-  for (const rId of rIds) {
-    const region = hfRegions?.get(rId);
-    if (!region) continue;
-    const rect = queries.hfAnchorRects(region, rId, point.position)[0];
-    if (rect) return rect;
-  }
-  return null;
+  const region = hfRegions?.get(point.hfRid);
+  return region ? (queries.hfAnchorRects(region, point.hfRid, point.position)[0] ?? null) : null;
 }
 
 /**
@@ -183,21 +176,31 @@ export function computeAnchorPositionsFromYrs(
       ];
     }
   }
-  return anchorPositionsFromPoints(points(), queries, hfRegions, projectY, session);
+  function* displayedPoints(): IterableIterator<readonly [string, YrsSidebarDisplayPoint | null]> {
+    for (const [key, point] of points()) {
+      if (!point?.hfRid) {
+        yield [key, point];
+        continue;
+      }
+      for (const rId of headerFooterDisplayRIds(session, point.hfRid)) {
+        yield [key, { ...point, hfRid: rId }];
+      }
+    }
+  }
+  return anchorPositionsFromPoints(displayedPoints(), queries, hfRegions, projectY);
 }
 
 export function anchorPositionsFromPoints(
   points: Iterable<readonly [key: string, point: YrsSidebarDisplayPoint | null]>,
   queries: DisplayListQueries,
   hfRegions?: YrsHeaderFooterRegions,
-  projectY?: (rect: DisplayListRect) => number | null,
-  session?: YrsSession
+  projectY?: (rect: DisplayListRect) => number | null
 ): Map<string, number> {
   const positions = new Map<string, number>();
   const pageTops = canvasPageTops(queries);
   for (const [key, point] of points) {
     if (!point || positions.has(key)) continue;
-    const rect = rectForYrsPoint(point, queries, hfRegions, session);
+    const rect = rectForYrsPoint(point, queries, hfRegions);
     if (!rect) continue;
     const y = projectY ? projectY(rect) : (pageTops[rect.pageIndex] ?? 0) + rect.y;
     if (y != null) positions.set(key, y);

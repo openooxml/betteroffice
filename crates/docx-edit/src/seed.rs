@@ -6317,7 +6317,7 @@ mod header_footer_alias_tests {
         let ctx = EditCtx::local("", "");
         doc.apply_raw_story_batches(deletes, &ctx).unwrap();
         doc.apply_raw_seed_batches(batches, &ctx).unwrap();
-        seed_opaque_sequences(doc, &lowered.context.opaque_sequences);
+        seed_opaque_sequences(doc, &lowered.context.opaque_sequences, None);
         doc.begin_opening(Some("singleton"));
         stories
     }

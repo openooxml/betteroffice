@@ -18,6 +18,8 @@ import {
   type YrsSession,
 } from '../yrs';
 import { headerFooterStory, sessionInternals } from '../yrs/sessionInternals';
+import { createResidentEngineSession } from '../yrs/residentEngineSession';
+import type { ResidentSaveRecord } from '../yrs/residentSave';
 import { parseDocx, repackDocx } from './index';
 import { collectParts, rezipPartsToArrayBuffer, toBytes } from './rezip/parts';
 import { unzipContainer } from './wasm';
@@ -65,6 +67,11 @@ function fixture(
 
 function aliasedRoom(session: YrsSession, bytes = fixture(), footer = false): Document {
   const { document } = session.openDocx(bytes, true);
+  declareAliases(session, footer);
+  return document;
+}
+
+function declareAliases(session: YrsSession, footer: boolean): void {
   const root = 'hf:rId9';
   for (const story of session.storyIds()) {
     if (story === root || story.startsWith(`${root}:`)) session.deleteStory(story);
@@ -74,7 +81,6 @@ function aliasedRoom(session: YrsSession, bytes = fixture(), footer = false): Do
     partPath: `word/${footer ? 'footer' : 'header'}1.xml`,
     relationshipIds: ['rId7', 'rId9'],
   }]));
-  return document;
 }
 
 function expectBandParts(actual: Uint8Array, source: Uint8Array): void {
@@ -384,6 +390,31 @@ describe('header/footer aliases', () => {
       expectSameParts(second.bytes, saved.bytes);
     });
   }
+
+  test.each([false, true])('resident saves preserve declared aliases with footer=%s', async (footer) => {
+    const bytes = fixture(`${footer ? 'footer' : 'header'}1.xml`, false, footer);
+    const resident = await createResidentEngineSession();
+    try {
+      const hostJson = resident.openDocx(bytes);
+      const peer = await replica();
+      peer.openDocx(bytes, false);
+      peer.loadState(resident.encodeState());
+      declareAliases(peer, footer);
+      const paragraph = peer.paragraphs('hf:rId7')[0]!;
+      peer.insertText({ story: 'hf:rId7', paraId: paragraph.paraId, offset: 6 }, ' edited');
+      resident.applyUpdate(peer.encodeStateAsUpdate(resident.encodeStateVector()));
+      const record: ResidentSaveRecord = { full: false };
+      const saved = new Uint8Array(await resident.save(bytes, hostJson, undefined, [], record));
+      const path = `word/${footer ? 'footer' : 'header'}1.xml`;
+      expect(xml(saved, path).match(/Shared edited/g)).toHaveLength(1);
+      expect(xml(saved, 'word/_rels/document.xml.rels'))
+        .toBe(xml(bytes, 'word/_rels/document.xml.rels'));
+      const again = new Uint8Array(await resident.save(bytes, hostJson, undefined, [], record));
+      expectSameParts(again, saved);
+    } finally {
+      resident.destroy();
+    }
+  });
 
   test('projects a section-two header hit to the canonical story and back', async () => {
     const session = await replica();
