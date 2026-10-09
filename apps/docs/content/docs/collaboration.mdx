@@ -126,3 +126,6 @@ Before deploying, add authentication and room authorization, set connection and
 storage quotas, and choose a retention policy for long-lived documents. The
 reference relay checkpoints automatically within its 16 MiB frame budget and
 keeps the existing 24-hour idle expiration.
+It caps total awareness payloads at 32 KiB per frame and allows a burst of 30
+awareness frames per connection, replenishing 30 frames per second. These limits
+apply by default, including to frames that also carry document updates.

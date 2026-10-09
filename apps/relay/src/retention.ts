@@ -1,4 +1,5 @@
 import { decodeStateVector, decodeUpdate, diffUpdate, encodeStateVectorFromUpdate, mergeUpdates } from "yjs";
+import { MAX_AWARENESS_PAYLOAD_BYTES } from "../../../shared/collaboration-limits";
 
 const TOP_LEVEL_SYNC = 0;
 const TOP_LEVEL_AWARENESS = 1;
@@ -12,7 +13,13 @@ const MAX_MESSAGES_PER_FRAME = 4096;
 const MAX_VAR_UINT = Number.MAX_SAFE_INTEGER;
 
 /** `document` frames carry state worth retaining, `transient` ones do not. */
-export type FrameKind = "document" | "transient" | "auth" | "invalid";
+export type FrameKind = "document" | "transient" | "auth" | "invalid" | "oversize-awareness";
+
+export interface ClassifiedFrame {
+  kind: FrameKind;
+  hasAwareness: boolean;
+  awarenessBytes: number;
+}
 
 interface DocumentMessage {
   subtype: number;
@@ -23,6 +30,8 @@ interface DecodedFrame {
   documents: DocumentMessage[];
   queries: Uint8Array[];
   hasAuth: boolean;
+  hasAwareness: boolean;
+  awarenessBytes: number;
 }
 
 class FrameDecoder {
@@ -98,6 +107,8 @@ function decodeFrame(frame: Uint8Array): DecodedFrame | null {
   const documents: DocumentMessage[] = [];
   const queries: Uint8Array[] = [];
   let hasAuth = false;
+  let hasAwareness = false;
+  let awarenessBytes = 0;
   let messageCount = 0;
 
   while (!decoder.done) {
@@ -119,7 +130,10 @@ function decodeFrame(frame: Uint8Array): DecodedFrame | null {
       if (subtype === SYNC_STEP_1) queries.push(payload);
       else documents.push({ subtype, payload });
     } else if (type === TOP_LEVEL_AWARENESS) {
-      if (decoder.readVarUint8Array() === null) return null;
+      const payload = decoder.readVarUint8Array();
+      if (payload === null) return null;
+      hasAwareness = true;
+      awarenessBytes += payload.byteLength;
     } else if (type === TOP_LEVEL_AUTH) {
       const subtype = decoder.readVarUint();
       const reason = decoder.readVarUint8Array();
@@ -136,14 +150,16 @@ function decodeFrame(frame: Uint8Array): DecodedFrame | null {
     }
   }
 
-  return { documents, queries, hasAuth };
+  return { documents, queries, hasAuth, hasAwareness, awarenessBytes };
 }
 
-export function classifyFrame(frame: Uint8Array): FrameKind {
+export function classifyFrame(frame: Uint8Array): ClassifiedFrame {
   const decoded = decodeFrame(frame);
-  if (!decoded) return "invalid";
-  if (decoded.hasAuth) return "auth";
-  return decoded.documents.length > 0 ? "document" : "transient";
+  if (!decoded) return { kind: "invalid", hasAwareness: false, awarenessBytes: 0 };
+  let kind: FrameKind = decoded.documents.length > 0 ? "document" : "transient";
+  if (decoded.hasAuth) kind = "auth";
+  if (decoded.awarenessBytes > MAX_AWARENESS_PAYLOAD_BYTES) kind = "oversize-awareness";
+  return { kind, hasAwareness: decoded.hasAwareness, awarenessBytes: decoded.awarenessBytes };
 }
 
 function isValidUtf8(bytes: Uint8Array): boolean {

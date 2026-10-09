@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { MAX_COLLABORATION_FRAME_BYTES } from "../../../shared/collaboration-limits";
+import { MAX_AWARENESS_PAYLOAD_BYTES, MAX_COLLABORATION_FRAME_BYTES } from "../../../shared/collaboration-limits";
 import {
   classifyFrame,
   RetainedUpdateLog,
@@ -12,10 +12,17 @@ interface Env {
 }
 
 const MAX_RETAINED_COUNT = 512;
+const AWARENESS_RATE_CAPACITY = 30;
+const AWARENESS_REFILL_PER_SECOND = 30;
 const ROOM_TTL_MS = 24 * 60 * 60 * 1000;
 const TTL_REFRESH_SLACK_MS = 60 * 60 * 1000;
 
 type PeerMessage = { type: "peers"; count: number };
+
+interface AwarenessBucket {
+  tokens: number;
+  updatedAt: number;
+}
 
 function sendIfOpen(socket: WebSocket, data: Uint8Array | string): void {
   if (socket.readyState !== WebSocket.OPEN) return;
@@ -47,6 +54,7 @@ export class CollaborationRoom extends DurableObject<Env> {
   private failed = false;
   private pendingBytes = 0;
   private pendingCount = 0;
+  private awarenessBuckets = new Map<WebSocket, AwarenessBucket>();
 
   constructor(state: DurableObjectState, env: Env) {
     super(state, env);
@@ -103,13 +111,21 @@ export class CollaborationRoom extends DurableObject<Env> {
       return;
     }
 
-    const kind = classifyFrame(bytes);
+    const { kind, hasAwareness } = classifyFrame(bytes);
     if (kind === "invalid") {
       socket.close(1002, "Malformed collaboration frame");
       return;
     }
+    if (kind === "oversize-awareness") {
+      socket.close(1009, `Awareness exceeds ${MAX_AWARENESS_PAYLOAD_BYTES} bytes`);
+      return;
+    }
     if (kind === "auth") {
       socket.close(1008, "Auth messages are server-only");
+      return;
+    }
+    if (hasAwareness && !this.consumeAwarenessToken(socket)) {
+      socket.close(1008, "Awareness frame rate exceeded");
       return;
     }
 
@@ -143,11 +159,13 @@ export class CollaborationRoom extends DurableObject<Env> {
     reason: string,
     _wasClean: boolean,
   ): void {
+    this.awarenessBuckets.delete(socket);
     closeSocket(socket);
     this.broadcastPeerCount();
   }
 
   webSocketError(socket: WebSocket, _error: unknown): void {
+    this.awarenessBuckets.delete(socket);
     socket.close(1011, "WebSocket error");
     this.broadcastPeerCount();
   }
@@ -180,6 +198,27 @@ export class CollaborationRoom extends DurableObject<Env> {
     if (this.expiresAt !== null && deadline - this.expiresAt < TTL_REFRESH_SLACK_MS) return;
     await this.ctx.storage.setAlarm(deadline);
     this.expiresAt = deadline;
+  }
+
+  private consumeAwarenessToken(socket: WebSocket): boolean {
+    const now = Date.now();
+    let bucket = this.awarenessBuckets.get(socket);
+    if (!bucket) {
+      bucket = { tokens: AWARENESS_RATE_CAPACITY, updatedAt: now };
+      this.awarenessBuckets.set(socket, bucket);
+    } else {
+      const elapsed = (now - bucket.updatedAt) / 1000;
+      if (elapsed > 0) {
+        bucket.tokens = Math.min(
+          AWARENESS_RATE_CAPACITY,
+          bucket.tokens + elapsed * AWARENESS_REFILL_PER_SECOND,
+        );
+        bucket.updatedAt = now;
+      }
+    }
+    if (bucket.tokens < 1) return false;
+    bucket.tokens -= 1;
+    return true;
   }
 
   private enqueue(action: () => Promise<void>): Promise<boolean> {

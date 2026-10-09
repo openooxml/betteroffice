@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, mock, setSystemTime, spyOn, test } from 'bun:test';
 import * as Y from 'yjs';
+import { MAX_AWARENESS_PAYLOAD_BYTES } from '../../../shared/collaboration-limits';
 import { decodeMessages, encodeSyncStep1, encodeSyncStep2, encodeUpdate } from '../../../packages/docx/src/collaboration/protocol';
 import { documentFrame, rehydrate } from './fixtures';
 import { updateKey } from '../src/persistence';
@@ -94,7 +95,121 @@ function frames(socket: Socket): Uint8Array[] {
   return socket.send.mock.calls.map(([bytes]) => bytes).filter((bytes): bytes is Uint8Array => bytes instanceof Uint8Array);
 }
 
+function awarenessFrame(size: number): Uint8Array {
+  const length: number[] = [];
+  let remaining = size;
+  while (remaining >= 128) {
+    length.push((remaining % 128) | 0x80);
+    remaining = Math.floor(remaining / 128);
+  }
+  length.push(remaining);
+  const frame = new Uint8Array(1 + length.length + size);
+  frame.set([1, ...length]);
+  return frame;
+}
+
 afterEach(() => { setSystemTime(); mock.restore(); });
+
+describe('CollaborationRoom awareness limits', () => {
+  test.each([false, true])('rejects oversize awareness before persistence or broadcast, mixed=%s', async mixed => {
+    const h = createRoom();
+    await h.initialization;
+    const awareness = awarenessFrame(MAX_AWARENESS_PAYLOAD_BYTES + 1);
+    send(h, mixed ? new Uint8Array([...documentFrame(), ...awareness]) : awareness);
+    await flush(h);
+    expect(h.sender.close).toHaveBeenCalledWith(1009, `Awareness exceeds ${MAX_AWARENESS_PAYLOAD_BYTES} bytes`);
+    expect(h.peer.send).not.toHaveBeenCalled();
+    expect(h.peer.close).not.toHaveBeenCalled();
+    expect(h.rows.size).toBe(0);
+    expect(h.alarms).toEqual([]);
+  });
+
+  test('broadcasts awareness at the cap without retaining it', async () => {
+    const h = createRoom();
+    await h.initialization;
+    const awareness = awarenessFrame(MAX_AWARENESS_PAYLOAD_BYTES);
+    send(h, awareness);
+    await flush(h);
+    expect(h.sender.close).not.toHaveBeenCalled();
+    expect(frames(h.peer)).toEqual([awareness]);
+    expect(h.rows.size).toBe(0);
+  });
+
+  test.each([
+    ['awareness', Uint8Array.of(1, 1, 12)],
+    ['mixed document and awareness', new Uint8Array([...documentFrame(), 1, 1, 12])],
+    ['empty awareness', Uint8Array.of(1, 0)],
+  ] as const)('rejects the 31st %s frame without persisting or broadcasting it', async (_, frame) => {
+    setSystemTime(Date.UTC(2026, 0, 1));
+    const h = createRoom();
+    await h.initialization;
+    for (let i = 0; i < 30; i++) send(h, frame);
+    await flush(h);
+    expect(h.sender.close).not.toHaveBeenCalled();
+    expect(frames(h.peer)).toHaveLength(30);
+    const before = structuredClone(h.rows);
+    send(h, frame);
+    await flush(h);
+    expect(h.sender.close).toHaveBeenCalledWith(1008, 'Awareness frame rate exceeded');
+    expect(frames(h.peer)).toHaveLength(30);
+    expect(h.rows).toEqual(before);
+    expect(h.peer.close).not.toHaveBeenCalled();
+  });
+
+  test('refills 30 tokens per second and isolates each connection', async () => {
+    const start = Date.UTC(2026, 0, 1);
+    setSystemTime(start);
+    const h = createRoom();
+    await h.initialization;
+    const awareness = Uint8Array.of(1, 1, 12);
+    for (let i = 0; i < 30; i++) send(h, awareness);
+    h.room.webSocketMessage(h.peer as never, awareness.buffer as ArrayBuffer);
+    setSystemTime(start + 100);
+    for (let i = 0; i < 3; i++) send(h, awareness);
+    await flush(h);
+    expect(h.sender.close).not.toHaveBeenCalled();
+    expect(h.peer.close).not.toHaveBeenCalled();
+    expect(frames(h.peer)).toHaveLength(33);
+    expect(frames(h.sender)).toEqual([awareness]);
+    send(h, awareness);
+    await flush(h);
+    expect(h.sender.close).toHaveBeenCalledWith(1008, 'Awareness frame rate exceeded');
+    expect(frames(h.peer)).toHaveLength(33);
+  });
+
+  test('caps refilled tokens at the burst capacity after a long idle', async () => {
+    const start = Date.UTC(2026, 0, 1);
+    setSystemTime(start);
+    const h = createRoom();
+    await h.initialization;
+    const awareness = Uint8Array.of(1, 1, 12);
+    send(h, awareness);
+    await flush(h);
+    setSystemTime(start + 60000);
+    for (let i = 0; i < 31; i++) send(h, awareness);
+    await flush(h);
+    expect(h.sender.close).toHaveBeenCalledWith(1008, 'Awareness frame rate exceeded');
+    expect(frames(h.peer)).toHaveLength(31);
+  });
+
+  test('persists document bursts after exhausting awareness tokens', async () => {
+    setSystemTime(Date.UTC(2026, 0, 1));
+    const h = createRoom();
+    await h.initialization;
+    for (let i = 0; i < 30; i++) send(h, Uint8Array.of(1, 1, 12));
+    const doc = new Y.Doc();
+    doc.on('update', update => send(h, encodeUpdate(update)));
+    for (let i = 0; i < 40; i++) doc.getText('body').insert(i, 'x');
+    await flush(h);
+    expect(h.sender.close).not.toHaveBeenCalled();
+    expect(frames(h.peer)).toHaveLength(70);
+    const restart = createRoom(h.rows);
+    await restart.initialization;
+    const restored = rehydrate(frames(await join(restart)));
+    expect(restored.getText('body').toString()).toBe('x'.repeat(40));
+    doc.destroy(); restored.destroy();
+  });
+});
 
 describe('CollaborationRoom', () => {
   test('persists document updates before broadcasting and skips awareness', async () => {
