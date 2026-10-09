@@ -1315,8 +1315,9 @@ fn a_keep_next_row_stays_on_the_page_when_later_pages_have_less_room() {
         keep_next_exact_row_page(
             2,
             &aligned,
-            json!({"section": {"kind": "sectionBreak", "id": 2, "type": "continuous",
-                "margins": {"top": 110, "right": 10, "bottom": 10, "left": 10}}}),
+            json!({"section": {"kind": "sectionBreak", "id": 2, "type": "continuous"},
+                "bodyBreakType": "continuous",
+                "finalMargins": {"top": 110, "right": 10, "bottom": 10, "left": 10}}),
         ),
         keep_next_exact_row_page(
             1,
