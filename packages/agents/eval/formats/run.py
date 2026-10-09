@@ -40,7 +40,7 @@ def command_line(cli, workspace, model, prompt):
             '-c', 'approval_policy="never"',
             '-c', 'mcp_servers.betteroffice.command=' + json.dumps(cli[0]),
             '-c', 'mcp_servers.betteroffice.args=' + json.dumps(cli[1:] + ['--root', str(workspace)]),
-            prompt + ' The documents live in the current directory.']
+            prompt + ' The documents live in the current directory. The shell is read-only; read and edit them with the betteroffice MCP tools.']
 
 
 def tool_calls(log):
