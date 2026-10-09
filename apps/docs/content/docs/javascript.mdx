@@ -203,12 +203,14 @@ anchor's `pageRect`. It refuses with a typed failure rather than answer from a
 stale or unpainted layout, and `layout-change` repeats once the pages have painted
 a layout that arrived before its pixels; `layout.previewVersion` is the proposal
 preview the pixels show.
-`geometry.readAnchorGeometry(target)` answers the same targets asynchronously
-and also works in viewers opened with `experimentalWorkerOpen`, where the
-document lives in the worker and answers wait for the painted layout. In those
-viewers, fragments on pages not built yet are left out of `rects` and their
-zero-based indexes listed in `unbuiltPages`; elsewhere it answers like
-`getAnchorGeometry`.
+`geometry.readAnchorGeometry(target)` answers the same targets asynchronously.
+Worker viewers, the default for read-only editors without `collaboration`, keep
+the document in the worker, where `getAnchorGeometry` refuses all but proposals;
+use `readAnchorGeometry` there. It leaves fragments on pages not built yet out
+of `rects` and lists their zero-based indexes in `unbuiltPages`; elsewhere it
+answers like `getAnchorGeometry`. It does not wait for paint: until the pages
+show the layout it refuses with `layout-unavailable`, so retry on the next
+`layout-change`.
 `geometry.dom` is experimental
 and may be replaced by a data-only facade. Overlays
 ignore the pointer unless an element sets `pointer-events: auto`. Sidebar cards

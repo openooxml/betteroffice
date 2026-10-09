@@ -209,14 +209,15 @@ export interface DocxPluginGeometry {
   /**
    * Every visible fragment in overlay-layer pixels. The anchor is the collapsed end of the
    * last fragment, a wholly hidden target's boundary, or its paragraph; pageRect is its page.
-   * Refuses stale or unrendered layouts. Non-proposal targets prefer {@link readAnchorGeometry}.
+   * Refuses stale or unrendered layouts, and all but proposals in worker viewers, which use
+   * {@link readAnchorGeometry}.
    */
   getAnchorGeometry(target: DocxGeometryTarget): DocxAnchorGeometryResult;
   /**
-   * Resolves a target asynchronously, reading worker viewers from the worker once the pages show
-   * the layout. In those viewers, fragments on pages not built yet are left out of `rects` and
-   * their pages listed in `unbuiltPages`, provisional until built; elsewhere it answers like
-   * `getAnchorGeometry`.
+   * Resolves a target asynchronously, from the worker in worker viewers, where fragments on pages
+   * not built yet are left out of `rects` and their pages listed in `unbuiltPages`, provisional
+   * until built; elsewhere it answers like `getAnchorGeometry`. Does not wait for paint: refuses
+   * with `layout-unavailable` until the pages show the layout.
    */
   readAnchorGeometry(target: DocxGeometryTarget): Promise<DocxAnchorGeometryResult>;
 }
