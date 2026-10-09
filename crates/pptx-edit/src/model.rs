@@ -79,6 +79,8 @@ pub struct TextRunSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct ParagraphSnapshot {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preserved_xml: Option<String>,
     pub alignment: Option<String>,
     pub level: u32,
     pub bullet_json: Option<String>,

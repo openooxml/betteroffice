@@ -35,6 +35,6 @@ pub use relationships::{Relationship, TargetMode, relationship_types};
 pub use write::{
     DeckWrite, InheritedTransform, NotesWrite, ParagraphWrite, PictureAdd, RunWrite, ShapeAdd,
     ShapePatch, ShapeWrite, SlideWrite, TextTarget, TextWrite, is_supported_image_content_type,
-    write_pptx_with_edits,
+    text_paragraph_xml, write_pptx_with_edits,
 };
 pub use xml::ParseLimits;

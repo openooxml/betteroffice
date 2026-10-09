@@ -2418,3 +2418,92 @@ fn picture_insertion_preserves_prefixed_metadata_and_exhausted_numeric_names() {
         b"existing"
     );
 }
+
+#[test]
+fn concurrent_replacements_keep_terminal_marker() {
+    let properties = r#"<a:pPr algn="r" lvl="2" marL="3000" indent="-1000"><a:spcBef><a:spcPts val="500"/></a:spcBef><a:buNone/></a:pPr>"#;
+    let end = r#"<a:endParaRPr lang="de-DE" sz="1700"/>"#;
+    let mut source = fixture_parts(256);
+    let slide = source
+        .iter_mut()
+        .find(|(path, _)| path == "ppt/slides/slide2.xml")
+        .unwrap();
+    let paragraph = format!(
+        "<a:p>{properties}<a:r><a:rPr b=\"1\" lang=\"en-US\" strike=\"sngStrike\"/><a:t>Source</a:t></a:r>{end}</a:p>"
+    );
+    slide.1 = slide.1.replace(
+        "<a:p><a:r><a:t>Second</a:t></a:r></a:p>",
+        &paragraph.repeat(2),
+    );
+    let source = zip(source);
+    for (a_id, b_id) in [(11, 12), (12, 11)] {
+        for (a_count, b_count) in [(1, 2), (2, 1), (1, 3), (3, 2), (3, 3)] {
+            let a = DeckSession::open(&source, a_id).unwrap();
+            let b = DeckSession::open(&source, b_id).unwrap();
+            let story = a.snapshot().unwrap().slides[1].shapes[0].text_stories[0].clone();
+            for (deck, count, prefix) in [(&a, a_count, "A"), (&b, b_count, "B")] {
+                let paragraphs = (0..count)
+                    .map(|index| pptx_edit::TextParagraphDraft {
+                        bullet: None,
+                        alignment: None,
+                        runs: vec![pptx_edit::TextRunDraft {
+                            text: format!("{prefix} replacement {index}"),
+                            style: story.paragraphs[0].runs[0].style.clone(),
+                        }],
+                    })
+                    .collect::<Vec<_>>();
+                deck.set_story_paragraphs(&context(), &story.id, &paragraphs)
+                    .unwrap();
+            }
+            let a_update = a.encode_state_as_update_v1();
+            let b_update = b.encode_state_as_update_v1();
+            let a_result = a.apply_update_v1(&b_update);
+            let b_result = b.apply_update_v1(&a_update);
+            assert!(a_result.is_ok(), "A: {a_result:?}");
+            assert!(b_result.is_ok(), "B: {b_result:?}");
+            assert_eq!(a.story(&story.id).unwrap(), b.story(&story.id).unwrap());
+            let merged_text = a.story(&story.id).unwrap().plain_text();
+            for (count, prefix) in [(a_count, "A"), (b_count, "B")] {
+                for index in 0..count {
+                    assert!(merged_text.contains(&format!("{prefix} replacement {index}")));
+                }
+            }
+            let check = |deck: &DeckSession| {
+                let current = deck.story(&story.id).unwrap();
+                let ids = current
+                    .paragraphs
+                    .iter()
+                    .map(|p| &p.id)
+                    .collect::<std::collections::HashSet<_>>();
+                assert_eq!(ids.len(), current.paragraphs.len());
+                assert_eq!(
+                    current.paragraphs.last().unwrap().id,
+                    story.paragraphs.last().unwrap().id
+                );
+                let xml = part_text(&parts(&deck.save().unwrap()), "ppt/slides/slide2.xml");
+                for markup in ["algn=\"r\"", "marL=\"3000\"", "indent=\"-1000\"", end] {
+                    assert_eq!(
+                        xml.matches(markup).count(),
+                        current.paragraphs.len(),
+                        "{markup}, counts {a_count}/{b_count}"
+                    );
+                }
+                for markup in ["lang=\"en-US\"", "strike=\"sngStrike\""] {
+                    assert!(
+                        xml.matches(markup).count() >= current.paragraphs.len(),
+                        "{markup}"
+                    );
+                }
+            };
+            check(&a);
+            check(&b);
+            assert!(a.undo());
+            check(&a);
+            assert!(a.redo());
+            check(&a);
+            b.apply_update_v1(&a.encode_state_as_update_v1()).unwrap();
+            check(&b);
+            assert_eq!(a.story(&story.id).unwrap(), b.story(&story.id).unwrap());
+        }
+    }
+}

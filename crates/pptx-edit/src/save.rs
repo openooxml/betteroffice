@@ -504,7 +504,7 @@ fn shape_patch(
     Ok(patch)
 }
 
-fn text_target(story_id: &str, shape_id: &str) -> EditResult<TextTarget> {
+pub(crate) fn text_target(story_id: &str, shape_id: &str) -> EditResult<TextTarget> {
     let suffix = story_id
         .strip_prefix("story:")
         .and_then(|rest| rest.strip_prefix(shape_id))
@@ -535,11 +535,13 @@ fn paragraph_writes(
         let source_index = paragraph
             .id
             .strip_prefix(&prefix)
-            .and_then(|index| index.parse::<usize>().ok());
+            .and_then(|index| index.parse::<usize>().ok())
+            .filter(|_| paragraph.preserved_xml.is_none());
         let base = baseline_paragraphs.get(paragraph.id.as_str()).copied();
         if base == Some(paragraph) && source_index.is_some() {
             writes.push(ParagraphWrite {
                 source_index,
+                preserved_xml: None,
                 rebuild: false,
                 properties_changed: false,
                 alignment: None,
@@ -565,6 +567,7 @@ fn paragraph_writes(
             .map_err(|error| EditError::Json(error.to_string()))?;
         writes.push(ParagraphWrite {
             source_index,
+            preserved_xml: paragraph.preserved_xml.clone(),
             rebuild: true,
             properties_changed,
             alignment: paragraph.alignment.clone(),

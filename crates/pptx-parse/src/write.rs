@@ -15,7 +15,7 @@ use crate::drawing::parse_run_properties;
 use crate::model::{Bullet, PptxPackage, RunProperties, ShapeElements, SlideReference};
 use crate::xml::{
     DRAWINGML_NS, PRESENTATIONML_NS, ParseBudget, ParseLimits, XmlElement, XmlNode,
-    alternate_content_branch_index, parse_xml, serialize_xml,
+    alternate_content_branch_index, parse_xml, serialize_xml, serialize_xml_fragment,
 };
 
 const OFFICE_RELATIONSHIPS_NS: &str =
@@ -124,6 +124,7 @@ pub enum TextTarget {
 pub struct ParagraphWrite {
     /// Index of the paragraph in the source text body, when it survives.
     pub source_index: Option<usize>,
+    pub preserved_xml: Option<String>,
     /// `false` keeps the source paragraph verbatim.
     pub rebuild: bool,
     pub properties_changed: bool,
@@ -2119,6 +2120,51 @@ fn set_adjust_values(
 
 // --- text -------------------------------------------------------------------
 
+/// Copies paragraph markup for a source text body.
+pub fn text_paragraph_xml(
+    package: &PptxPackage,
+    part: &str,
+    shape_path: &[usize],
+    target: &TextTarget,
+) -> Result<Vec<String>, PptxError> {
+    let Some(bytes) = package.part_bytes(part) else {
+        return Ok(Vec::new());
+    };
+    let limits = ParseLimits::default();
+    let mut budget = ParseBudget::new(&limits);
+    let mut root = parse_xml(bytes, part, &mut budget)?;
+    let mut element = root
+        .child_mut("cSld")
+        .and_then(|data| data.child_mut("spTree"))
+        .ok_or_else(|| write_error(part, "missing shape tree"))?
+        .clone();
+    for &index in shape_path {
+        let mut slots: Vec<_> = element.children.into_iter().map(Some).collect();
+        let paths = shape_slots(&slots, package.shape_elements);
+        let slot = paths
+            .get(index)
+            .ok_or_else(|| write_error(part, "missing source shape"))?;
+        element = element_at_path(slots[slot.position].as_mut().unwrap(), &slot.path)
+            .ok_or_else(|| write_error(part, "missing source shape"))?
+            .clone();
+    }
+    let body = match target {
+        TextTarget::Body => element.child_mut("txBody"),
+        TextTarget::TableCell { row, cell } => element
+            .child_mut("graphic")
+            .and_then(|graphic| graphic.child_mut("graphicData"))
+            .and_then(|data| data.child_mut("tbl"))
+            .and_then(|table| nth_child_mut(table, "tr", *row))
+            .and_then(|row| nth_child_mut(row, "tc", *cell))
+            .and_then(|cell| cell.child_mut("txBody")),
+    };
+    Ok(body
+        .into_iter()
+        .flat_map(|body| body.children_named("p"))
+        .map(|paragraph| String::from_utf8(serialize_xml_fragment(paragraph)).unwrap())
+        .collect())
+}
+
 fn patch_text(
     element: &mut XmlElement,
     text: &TextWrite,
@@ -2137,7 +2183,7 @@ fn patch_text(
             .and_then(|table_cell| table_cell.child_mut("txBody")),
     };
     let body = body.ok_or_else(|| write_error(part, "text target has no body"))?;
-    rebuild_paragraphs(body, &text.paragraphs, theme, prefixes);
+    rebuild_paragraphs(body, &text.paragraphs, theme, prefixes)?;
     Ok(())
 }
 
@@ -2161,7 +2207,7 @@ fn rebuild_paragraphs(
     paragraphs: &[ParagraphWrite],
     theme: Option<&Theme>,
     prefixes: &Prefixes,
-) {
+) -> Result<(), PptxError> {
     let mut preamble = Vec::new();
     let mut originals: Vec<XmlElement> = Vec::new();
     for child in std::mem::take(&mut body.children) {
@@ -2174,10 +2220,16 @@ fn rebuild_paragraphs(
         }
     }
     let mut children = preamble;
+    let limits = ParseLimits::default();
+    let mut budget = ParseBudget::new(&limits);
     for paragraph in paragraphs {
-        let source = paragraph
-            .source_index
-            .and_then(|index| originals.get(index).cloned());
+        let source = if let Some(xml) = &paragraph.preserved_xml {
+            Some(parse_xml(xml.as_bytes(), "paragraph", &mut budget)?)
+        } else {
+            paragraph
+                .source_index
+                .and_then(|index| originals.get(index).cloned())
+        };
         let element = match source {
             Some(element) if !paragraph.rebuild => element,
             source => build_paragraph(paragraph, source, theme, prefixes),
@@ -2191,6 +2243,7 @@ fn rebuild_paragraphs(
         children.push(XmlNode::Element(XmlElement::new(prefixes.drawing("p"))));
     }
     body.children = children;
+    Ok(())
 }
 
 fn is_run_element(local: &str) -> bool {
@@ -3613,6 +3666,7 @@ mod tests {
         let prefixes = Prefixes::from_root(&mut root);
         let write = ParagraphWrite {
             source_index: Some(0),
+            preserved_xml: None,
             rebuild: true,
             properties_changed: false,
             alignment: None,

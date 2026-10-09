@@ -356,61 +356,130 @@ impl DeckSession {
         }
         let previous = self.story(story_id)?;
         let story = story_ref(&self.doc.transact(), story_id)?;
-        let new_ids: Vec<_> = (previous.paragraphs.len()..paragraphs.len())
+        let source_xml = self.source_paragraph_xml(story_id)?;
+        let prefix = format!("para:{story_id}:");
+        let preserved: Vec<_> = paragraphs
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                let source = previous
+                    .paragraphs
+                    .get(index)
+                    .or_else(|| previous.paragraphs.last());
+                let xml = source.and_then(|source| {
+                    source.preserved_xml.clone().or_else(|| {
+                        source
+                            .id
+                            .strip_prefix(&prefix)
+                            .and_then(|index| index.parse::<usize>().ok())
+                            .and_then(|index| source_xml.get(index).cloned())
+                    })
+                });
+                (source.cloned(), xml)
+            })
+            .collect();
+        let new_ids: Vec<_> = (0..paragraphs.len() - 1)
             .map(|_| self.next_id("para"))
             .collect();
         self.automatic_undo_barrier();
         let mut txn = self.transact_for(context);
-        let mut existing = Vec::new();
-        let mut start = 0;
+        let terminal = selected_pilcrows(&story, &txn, previous.length - 1, previous.length - 1)
+            .pop()
+            .ok_or_else(|| EditError::InvalidState("missing terminal paragraph".into()))?;
+        story.remove_range(&mut txn, 0, previous.length - 1);
         let mut offset = 0;
-        for diff in story.diff(&txn, YChange::identity) {
-            if let Out::YMap(pilcrow) = &diff.insert {
-                existing.push((start, offset, pilcrow.clone()));
-                start = offset + 1;
-            }
-            offset += out_len(&diff.insert);
-        }
-        for (index, (start, end, pilcrow)) in existing.into_iter().enumerate().rev() {
-            let Some(paragraph) = paragraphs.get(index) else {
-                story.remove_range(&mut txn, start, end - start + 1);
-                continue;
-            };
-            story.remove_range(&mut txn, start, end - start);
-            let mut offset = start;
+        for (index, (paragraph, (source, xml))) in paragraphs.iter().zip(preserved).enumerate() {
             for run in &paragraph.runs {
                 insert_styled_text(&story, &mut txn, offset, &run.text, &run.style);
                 offset += run.text.encode_utf16().count() as u32;
             }
-            if let Some(alignment) = &paragraph.alignment {
-                pilcrow.insert(&mut txn, "alignment", alignment.as_str());
+            let pilcrow = if index + 1 == paragraphs.len() {
+                terminal.clone()
+            } else {
+                let map = story.insert_embed_with_attributes(
+                    &mut txn,
+                    offset,
+                    MapPrelim::default(),
+                    Attrs::default(),
+                );
+                map.insert(&mut txn, KIND, PILCROW_KIND);
+                map.insert(&mut txn, PARA_ID, new_ids[index].as_str());
+                map
+            };
+            if let Some(xml) = xml {
+                if map_string(&pilcrow, &txn, "preservedXml").as_ref() != Some(&xml) {
+                    pilcrow.insert(&mut txn, "preservedXml", xml);
+                }
+            } else {
+                pilcrow.remove(&mut txn, "preservedXml");
             }
-            if let Some(bullet) = paragraph.bullet {
-                pilcrow.insert(&mut txn, "bulletJson", replacement_bullet(bullet)?);
+            let alignment = paragraph
+                .alignment
+                .as_deref()
+                .or_else(|| source.as_ref().and_then(|p| p.alignment.as_deref()));
+            if let Some(alignment) = alignment {
+                if map_string(&pilcrow, &txn, "alignment").as_deref() != Some(alignment) {
+                    pilcrow.insert(&mut txn, "alignment", alignment);
+                }
+            } else {
+                pilcrow.remove(&mut txn, "alignment");
             }
-        }
-        for (paragraph, id) in paragraphs
-            .iter()
-            .skip(previous.paragraphs.len())
-            .zip(new_ids)
-        {
-            for run in &paragraph.runs {
-                let offset = story.len(&txn);
-                insert_styled_text(&story, &mut txn, offset, &run.text, &run.style);
+            let level = source.as_ref().map_or(0, |p| p.level) as f64;
+            if map_number(&pilcrow, &txn, "level") != Some(level) {
+                pilcrow.insert(&mut txn, "level", level);
             }
-            let bullet = paragraph.bullet.map(replacement_bullet).transpose()?;
-            append_pilcrow(
-                &story,
-                &mut txn,
-                &id,
-                paragraph.alignment.as_deref(),
-                0,
-                bullet.as_deref(),
-            );
+            let bullet = paragraph
+                .bullet
+                .map(replacement_bullet)
+                .transpose()?
+                .or_else(|| source.as_ref().and_then(|p| p.bullet_json.clone()));
+            if let Some(bullet) = bullet {
+                if map_string(&pilcrow, &txn, "bulletJson").as_ref() != Some(&bullet) {
+                    pilcrow.insert(&mut txn, "bulletJson", bullet);
+                }
+            } else {
+                pilcrow.remove(&mut txn, "bulletJson");
+            }
+            offset += 1;
         }
         drop(txn);
         self.automatic_undo_barrier();
         self.story(story_id)
+    }
+
+    fn source_paragraph_xml(&self, story_id: &str) -> EditResult<Vec<String>> {
+        fn find_shape<'a>(
+            shapes: &'a [crate::ShapeSnapshot],
+            story_id: &str,
+        ) -> Option<&'a crate::ShapeSnapshot> {
+            shapes.iter().find_map(|shape| {
+                if shape.text_stories.iter().any(|story| story.id == story_id) {
+                    Some(shape)
+                } else {
+                    find_shape(&shape.children, story_id)
+                }
+            })
+        }
+        for slide in self.snapshot()?.slides {
+            let Some(shape) = find_shape(&slide.shapes, story_id) else {
+                continue;
+            };
+            let Some(part) = slide.source_part_path else {
+                return Ok(Vec::new());
+            };
+            let Some((_, path)) = shape.id.rsplit_once(":shape:") else {
+                return Ok(Vec::new());
+            };
+            let path = path
+                .split('.')
+                .map(str::parse)
+                .collect::<Result<Vec<usize>, _>>()
+                .map_err(|error| EditError::Write(error.to_string()))?;
+            let target = crate::save::text_target(story_id, &shape.id)?;
+            return pptx_parse::text_paragraph_xml(&self.package, &part, &path, &target)
+                .map_err(|error| EditError::Write(error.to_string()));
+        }
+        Ok(Vec::new())
     }
 
     pub fn insert_text(
@@ -685,6 +754,7 @@ pub(crate) fn baseline_story(
     if body.paragraphs.is_empty() {
         paragraphs.push(ParagraphSnapshot {
             id: format!("para:{story_id}:0"),
+            preserved_xml: None,
             alignment: None,
             level: 0,
             bullet_json: None,
@@ -726,6 +796,7 @@ pub(crate) fn baseline_story(
                 .map_err(|error| EditError::Json(error.to_string()))?;
             paragraphs.push(ParagraphSnapshot {
                 id: format!("para:{story_id}:{paragraph_index}"),
+                preserved_xml: None,
                 alignment: paragraph.properties.alignment.clone(),
                 level: paragraph.properties.level,
                 bullet_json,
@@ -769,6 +840,7 @@ pub(crate) fn snapshot_story<T: ReadTxn>(
             Out::YMap(map) => {
                 paragraphs.push(ParagraphSnapshot {
                     id: map_string(&map, txn, PARA_ID).unwrap_or_default(),
+                    preserved_xml: map_string(&map, txn, "preservedXml"),
                     alignment: map_string(&map, txn, "alignment"),
                     level: map_number(&map, txn, "level").unwrap_or_default() as u32,
                     bullet_json: map_string(&map, txn, "bulletJson"),
