@@ -4,8 +4,13 @@ import { resolve } from 'node:path';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
 import { preloadEditWasm } from '../wasm/edit';
 import { createYrsSession, type YrsSession } from './index';
-import type { DocxProposalInput, DocxProposalResult } from './proposals';
 import {
+  proposalRevisionPreview,
+  type DocxProposalInput,
+  type DocxProposalResult,
+} from './proposals';
+import {
+  computeAnchorDisplayTarget,
   computeProposalGeometryMirror,
   proposalSetIdentity,
   resolveNavigationTarget,
@@ -448,6 +453,108 @@ describe('proposal geometry readers', () => {
         failure: { code: 'unsupported', message: 'The target has no body display position' },
       });
       expect(mirror.hidden).toHaveLength(1);
+    } finally {
+      main.destroy();
+    }
+  });
+});
+
+describe('anchor display targets', () => {
+  test('resident and main readers resolve paragraph, search and range targets alike', async () => {
+    const main = await proposedDocument();
+    const resident = await createResidentEngineSession();
+    try {
+      resident.loadState(main.encodeState());
+      const snapshot = main.getProposals();
+      const paragraph = {
+        kind: 'session',
+        sessionId: main.paragraphIdentities().sessionId,
+        story: 'body',
+        paraId: '00000006',
+      } as const;
+      const targets = (version: string) => [
+        { kind: 'paragraph', paragraph },
+        { kind: 'search', paragraph, text: 'End' },
+        { kind: 'revision', revisionId: main.listRevisions()[0]!.revisionId },
+        {
+          kind: 'range',
+          version,
+          range: {
+            story: 'body',
+            start: { paraId: '00000007', offset: 0 },
+            end: { paraId: '00000007', offset: 4 },
+            view: 'accepted',
+          },
+        },
+      ] as const;
+      const residentTargets = targets(resident.geometryReader.version());
+      targets(main.version()).forEach((target, index) => {
+        const expected = computeAnchorDisplayTarget(main, target, proposalRevisionPreview(snapshot));
+        const actual = computeAnchorDisplayTarget(
+          resident.geometryReader,
+          residentTargets[index]!,
+          proposalRevisionPreview(snapshot)
+        );
+        expect(expected).toMatchObject({ ok: true, ranges: expect.any(Array) });
+        expect(actual).toEqual(expected);
+      });
+    } finally {
+      resident.destroy();
+      main.destroy();
+    }
+  });
+
+  test('hidden ranges follow the proposal preview', async () => {
+    const main = await proposedDocument();
+    try {
+      const target = {
+        kind: 'paragraph',
+        paragraph: { kind: 'persisted', story: BODY, paraId: '00000001' },
+      } as const;
+      const previewed = computeAnchorDisplayTarget(
+        main,
+        target,
+        proposalRevisionPreview(main.getProposals())
+      );
+      const plain = computeAnchorDisplayTarget(main, target, undefined);
+      expect(previewed).toMatchObject({ ok: true });
+      expect(plain).toMatchObject({ ok: true, hidden: [] });
+      if (!previewed.ok) throw new Error('unreachable');
+      expect(previewed.hidden.length).toBeGreaterThan(0);
+      expect(previewed.hidden).toEqual(
+        computeProposalGeometryMirror(main, main.getProposals()).hidden
+      );
+    } finally {
+      main.destroy();
+    }
+  });
+
+  test('refuses a range from another version and a missing paragraph', async () => {
+    const main = await proposedDocument();
+    try {
+      expect(
+        computeAnchorDisplayTarget(
+          main,
+          {
+            kind: 'range',
+            version: 'stale',
+            range: {
+              story: 'body',
+              start: { paraId: '00000007', offset: 0 },
+              end: { paraId: '00000007', offset: 1 },
+              view: 'accepted',
+            },
+          },
+          undefined
+        )
+      ).toMatchObject({ ok: false, failure: { code: 'stale-version' } });
+      expect(
+        computeAnchorDisplayTarget(
+          main,
+          { kind: 'paragraph', paragraph: { kind: 'persisted', story: BODY, paraId: '0000FFFF' } },
+          undefined
+        )
+      ).toMatchObject({ ok: false, failure: { code: 'missing-target' } });
     } finally {
       main.destroy();
     }

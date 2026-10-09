@@ -2,8 +2,33 @@ import { beforeAll, describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import JSZip from 'jszip';
-import { createYrsSession, type DocxTextRange, type YrsStorySegment } from '@betteroffice/docx/yrs';
-import { resolveAnchorTarget, textRangeToRaw } from './anchorGeometry';
+import {
+  computeAnchorDisplayTarget,
+  createYrsSession,
+  proposalSetIdentity,
+  type DocxProposalRecord,
+  type DocxTextRange,
+  type ResidentDocumentRead,
+  type ResidentEngineWorkerClient,
+  type ResidentProposalReply,
+  type YrsSession,
+  type YrsStorySegment,
+} from '@betteroffice/docx/yrs';
+import {
+  createResidentEngineSession,
+  type ResidentEngineSession,
+} from '@betteroffice/docx/yrs/residentEngineSession';
+import type { WorkerOpenedDocument } from '../components/DocxEditor/hooks/useDisplayList';
+import { revisionPreviewKey } from '../components/DocxEditor/internals/layoutProvenance';
+import { holdWorkerOpenDocument } from '../components/DocxEditor/internals/workerOpenReplica';
+import { registerWorkerProposalAuthority } from '../components/DocxEditor/internals/workerProposalAuthority';
+import {
+  hiddenRanges,
+  readWorkerAnchorTarget,
+  resolveAnchorTarget,
+  textRangeToRaw,
+} from './anchorGeometry';
+import { currentPreviewKey, proposalSnapshot, revisionPreviewOf } from './proposalPreview';
 
 function range(
   start: number,
@@ -242,5 +267,218 @@ describe('view-to-raw boundaries in a real session', () => {
     } finally {
       session.destroy();
     }
+  });
+});
+
+function residentRead(engine: ResidentEngineSession) {
+  const requests: ResidentDocumentRead[] = [];
+  const read = (async (request: ResidentDocumentRead) => {
+    requests.push(request);
+    const version = engine.proposalEngine.version();
+    if (request.kind === 'resolveParagraphAnchors') {
+      return {
+        version,
+        value: { results: request.anchors.map((anchor) => engine.geometryReader.resolveParagraphAnchor(anchor)) },
+      };
+    }
+    if (request.kind !== 'anchorTarget') throw new Error(`unexpected ${request.kind} read`);
+    return {
+      version,
+      value:
+        version === request.expectVersion
+          ? computeAnchorDisplayTarget(engine.geometryReader, request.target, request.revisionPreview)
+          : null,
+    };
+  }) as ResidentEngineWorkerClient['documentRead'];
+  return { read, requests };
+}
+
+describe('anchor reads through the document worker', () => {
+  beforeAll(async () => {
+    const { preloadEditWasm } = await import('@betteroffice/docx/wasm/edit');
+    await preloadEditWasm(
+      new Uint8Array(
+        readFileSync(
+          resolve(import.meta.dir, '../../../docx/src/wasm/generated/edit/docx_edit_bg.wasm')
+        )
+      )
+    );
+  });
+
+  const persisted = {
+    kind: 'persisted' as const,
+    story: { partUri: '/word/document.xml', kind: 'body' as const },
+    paraId: '00000003',
+  };
+
+  test('a worker bootstrapped from main state at another version answers every target kind like the main thread, persisted anchors resolved on main', async () => {
+    const main = await createYrsSession({ clientId: 815 });
+    const engine = await createResidentEngineSession(undefined, 816);
+    try {
+      main.openDocx(await trackedDocument(), true);
+      engine.loadState(main.encodeState());
+      expect(engine.geometryReader.resolveParagraphAnchor(persisted)).toMatchObject({
+        status: 'unsupported',
+      });
+      const { read, requests } = residentRead(engine);
+      const found = main.findText({
+        text: 'xy',
+        within: { kind: 'paragraph', story: 'body', paraId: '00000003' },
+        view: 'accepted',
+      });
+      if (!found.ok) throw new Error(found.failure.message);
+      const resolved = main.resolveParagraphAnchor({ ...persisted, paraId: '00000001' });
+      if (resolved.status !== 'found' || resolved.anchor.kind !== 'session') throw new Error('expected a session anchor');
+      const session = resolved.anchor;
+      const range = { kind: 'range' as const, version: main.version(), range: found.matches[0]!.range };
+      const key = currentPreviewKey(main);
+      const targets = [
+        { kind: 'paragraph' as const, paragraph: persisted },
+        { kind: 'paragraph' as const, paragraph: session },
+        { kind: 'search' as const, paragraph: persisted, text: 'xy' },
+        { kind: 'revision' as const, revisionId: main.listRevisions()[0]!.revisionId },
+        range,
+      ];
+      for (const target of targets) {
+        const sent = target.kind === 'range' ? { ...target, version: engine.proposalEngine.version() } : target;
+        const expected = computeAnchorDisplayTarget(main, target, undefined);
+        expect(expected).toMatchObject({ ok: true, ranges: expect.arrayContaining([expect.any(Object)]) });
+        expect(await readWorkerAnchorTarget(read, main, sent, engine.proposalEngine.version(), 0, key)).toEqual(expected);
+      }
+      expect(engine.proposalEngine.version()).not.toBe(main.version());
+      expect(requests.map((request) => request.kind)).toEqual(targets.map(() => 'anchorTarget'));
+      expect(await readWorkerAnchorTarget(read, main, range, engine.proposalEngine.version(), 0, key)).toMatchObject({
+        ok: false,
+        failure: { code: 'stale-version' },
+      });
+      expect(requests).toContainEqual(
+        expect.objectContaining({ target: expect.objectContaining({ paragraph: expect.objectContaining({ kind: 'session', paraId: '00000003' }) }) })
+      );
+      expect(await readWorkerAnchorTarget(read, main, targets[3]!, 'superseded', 0, key)).toBeNull();
+      expect(await readWorkerAnchorTarget(read, main, targets[3]!, engine.proposalEngine.version(), 1, key)).toMatchObject({
+        ok: false,
+        failure: { code: 'layout-unavailable' },
+      });
+    } finally {
+      main.destroy();
+      engine.destroy();
+    }
+  });
+
+  test('a viewer whose document stays in the worker resolves persisted anchors there', async () => {
+    const main = await createYrsSession({ clientId: 817 });
+    const engine = await createResidentEngineSession(undefined, 818);
+    const reference = await createYrsSession({ clientId: 819 });
+    try {
+      const bytes = await trackedDocument();
+      engine.openDocx(bytes);
+      reference.openDocx(bytes, true);
+      holdWorkerOpenDocument(main, () => {
+        throw new Error('released');
+      });
+      const { read, requests } = residentRead(engine);
+      const target = { kind: 'search' as const, paragraph: persisted, text: 'xy' };
+      const expected = computeAnchorDisplayTarget(reference, target, undefined);
+      expect(expected).toMatchObject({ ok: true });
+      expect(await readWorkerAnchorTarget(read, main, target, engine.proposalEngine.version(), 0, currentPreviewKey(main))).toEqual(expected);
+      expect(requests.map((request) => request.kind)).toEqual(['resolveParagraphAnchors', 'anchorTarget']);
+      expect(await readWorkerAnchorTarget(read, main, target, 'superseded', 0, currentPreviewKey(main))).toBeNull();
+      expect(requests.at(-1)?.kind).toBe('resolveParagraphAnchors');
+      expect(
+        await readWorkerAnchorTarget(read, main, { ...target, paragraph: { ...persisted, paraId: '0000FFFF' } }, engine.proposalEngine.version(), 0, currentPreviewKey(main))
+      ).toMatchObject({ ok: false, failure: { code: 'missing-target' } });
+    } finally {
+      main.destroy();
+      engine.destroy();
+      reference.destroy();
+    }
+  });
+});
+
+describe('revision preview of an editor peer', () => {
+  const record = (id: string, state: DocxProposalRecord['state'], revisionId: string): DocxProposalRecord => ({
+    id,
+    state,
+    paragraph: { kind: 'session', sessionId: 's', story: 'body', paraId: 'p' },
+    revisionIds: [revisionId],
+    changed: true,
+  });
+
+  test('hidden ranges, the preview key and worker anchor reads share the merged preview', async () => {
+    let local = { version: 'worker-1', previewVersion: 1, proposals: [record('local', 'rejected', 'r2')] };
+    const revision = (revisionId: string, kind: 'insertion' | 'deletion', offset: number) => ({
+      revisionId,
+      kind,
+      story: 'body',
+      range: { start: { paraId: 'p', offset }, end: { paraId: 'p', offset: offset + 1 } },
+    });
+    const session = {
+      version: () => 'worker-1',
+      encodeStateVector: () => new Uint8Array(),
+      getProposals: () => local,
+      listRevisions: () => [revision('r1', 'deletion', 0), revision('r2', 'insertion', 2), revision('r3', 'deletion', 4)],
+      storiesChangedSince: () => ({ revision: 0, stories: [] }),
+    } as unknown as YrsSession;
+    const worker = record('worker', 'accepted', 'r1');
+    const snapshot = { version: 'worker-1', previewVersion: 1, proposals: [worker] };
+    const reply: ResidentProposalReply = {
+      mirror: {
+        version: 'worker-1',
+        proposals: { previewVersion: 1, entries: [{ record: worker, key: 'k', suggest: { author: 'a', date: 'd' } }] },
+      },
+      result: { ok: true, snapshot },
+      changedStories: [],
+      geometry: { version: 'worker-1', previewVersion: 1, proposals: proposalSetIdentity(snapshot), targets: {}, hidden: [] },
+      updates: [],
+      stateVector: new Uint8Array(),
+    };
+    const requests: ResidentDocumentRead[] = [];
+    const authority = registerWorkerProposalAuthority(
+      session,
+      {
+        proposal: async () => reply,
+        documentRead: async () => {
+          throw new Error('unexpected authority read');
+        },
+        handOver: async () => {
+          throw new Error('unexpected handover');
+        },
+      } as unknown as WorkerOpenedDocument,
+      {
+        editorPeer: true,
+        current: () => true,
+        laidOut: async () => {},
+        relayout: () => {},
+        adopted: () => {},
+        contentChanged: () => {},
+      }
+    );
+    await authority.initialize();
+    const merged = { r1: 'accepted', r2: 'rejected' } as const;
+    expect(revisionPreviewOf(session)).toEqual(merged);
+    expect(currentPreviewKey(session)).toBe(revisionPreviewKey(merged));
+    expect(hiddenRanges(session, 'worker-1')).toEqual([
+      { start: { story: 'body', paraId: 'p', offset: 0 }, end: { story: 'body', paraId: 'p', offset: 1 } },
+      { start: { story: 'body', paraId: 'p', offset: 2 }, end: { story: 'body', paraId: 'p', offset: 3 } },
+    ]);
+    const read = (async (request: ResidentDocumentRead) => {
+      requests.push(request);
+      return { version: 'worker-1', value: { ok: true, ranges: [], paragraph: 0, hidden: [] } };
+    }) as ResidentEngineWorkerClient['documentRead'];
+    const previewVersion = proposalSnapshot(session)!.previewVersion;
+    const key = currentPreviewKey(session);
+    expect(
+      await readWorkerAnchorTarget(read, session, { kind: 'revision', revisionId: 'r3' }, 'worker-1', previewVersion, key)
+    ).toMatchObject({ ok: true });
+    expect(requests).toEqual([
+      { kind: 'anchorTarget', target: { kind: 'revision', revisionId: 'r3' }, revisionPreview: merged, expectVersion: 'worker-1' },
+    ]);
+    local = { ...local, proposals: [record('local', 'accepted', 'r2')] };
+    expect(proposalSnapshot(session)!.previewVersion).toBe(previewVersion);
+    expect(currentPreviewKey(session)).not.toBe(key);
+    expect(
+      await readWorkerAnchorTarget(read, session, { kind: 'revision', revisionId: 'r3' }, 'worker-1', previewVersion, key)
+    ).toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
+    expect(requests).toHaveLength(1);
   });
 });
