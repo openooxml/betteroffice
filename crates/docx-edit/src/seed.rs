@@ -758,6 +758,37 @@ fn utf16_len(value: &str) -> u32 {
     value.encode_utf16().count() as u32
 }
 
+/// Aggregate xml-byte cap for opaque drawing payloads seeded into yrs state.
+pub const OPAQUE_SEED_BUDGET_BYTES: u64 = 8 * 1024 * 1024;
+
+pub fn opaque_seed_budget_exceeded(total: u64) -> String {
+    format!(
+        "opaque drawing seed budget exceeded ({} bytes of opaque xml, budget {} bytes)",
+        total, OPAQUE_SEED_BUDGET_BYTES
+    )
+}
+
+pub fn is_opaque_seed_budget_error(message: &str) -> bool {
+    message.starts_with("opaque drawing seed budget exceeded")
+}
+
+fn opaque_xml_bytes(value: &Value) -> u64 {
+    match value {
+        Value::Array(items) => items.iter().map(opaque_xml_bytes).sum(),
+        Value::Object(map) => {
+            let own = match map.get("type").and_then(Value::as_str) {
+                Some("opaqueDrawing") => map
+                    .get("xml")
+                    .and_then(Value::as_str)
+                    .map_or(0, |xml| xml.len() as u64),
+                _ => 0,
+            };
+            own + map.values().map(opaque_xml_bytes).sum::<u64>()
+        }
+        _ => 0,
+    }
+}
+
 fn ordered_object(
     entries: impl IntoIterator<Item = (impl Into<String>, Value)>,
 ) -> Vec<(String, Value)> {
@@ -2075,7 +2106,12 @@ fn note_ref_unit(id: &Value, note_type: &str, marks: &[Mark]) -> InlineUnit {
 fn drawing_marks(marks: &[Mark]) -> Vec<Mark> {
     marks
         .iter()
-        .filter(|mark| matches!(mark.name.as_str(), "hidden" | "insertion" | "deletion"))
+        .filter(|mark| {
+            matches!(
+                mark.name.as_str(),
+                "hidden" | "insertion" | "deletion" | "hyperlink"
+            )
+        })
         .cloned()
         .collect()
 }
@@ -2105,7 +2141,7 @@ fn run_content_unit_count(content: &Value) -> usize {
         "symbol" => usize::from(run_content_symbol_char(content).is_some()),
         "footnoteRef" | "endnoteRef" => usize::from(field(Some(content), "id").is_some()),
         "tab" | "softHyphen" | "noBreakHyphen" | "commentReference" | "drawing"
-        | "horizontalRule" | "shape" | "chart" => 1,
+        | "horizontalRule" | "shape" | "chart" | "opaqueDrawing" => 1,
         _ => 0,
     }
 }
@@ -2209,6 +2245,15 @@ fn run_content_to_units(
                 field(Some(content), "chart").unwrap_or(&Value::Null),
                 source,
             ),
+            &drawing_marks(marks),
+            1,
+        )],
+        "opaqueDrawing" => vec![embed_unit(
+            "opaqueDrawing",
+            map_from_value(json!({
+                "kind": field(Some(content), "kind").cloned().unwrap_or(Value::Null),
+                "xml": field(Some(content), "xml").cloned().unwrap_or(Value::Null),
+            })),
             &drawing_marks(marks),
             1,
         )],
@@ -3426,23 +3471,11 @@ fn content_breaks(
     }
 }
 
-fn drawing_element(kind: &str) -> String {
-    match kind {
-        "alternateContent" => "mc:AlternateContent".to_owned(),
-        kind => format!("w:{kind}"),
-    }
-}
-
 /// The unmodelled source nodes inside one paragraph content node, in source order.
 fn unmodelled_nodes(content: &Value, output: &mut Vec<String>) {
     let children = |key: &str| array(field(Some(content), key));
     match string(field(Some(content), "type")).unwrap_or_default() {
-        "run" => output.extend(
-            children("content")
-                .iter()
-                .filter(|item| string(field(Some(item), "type")) == Some("opaqueDrawing"))
-                .map(|item| drawing_element(string(field(Some(item), "kind")).unwrap_or_default())),
-        ),
+        "run" => {}
         "hyperlink" => {
             let nodes = field(Some(content), "structuredChildren")
                 .or_else(|| field(Some(content), "children"));
@@ -3626,7 +3659,6 @@ fn paragraph_units(
 fn run_prefix_units(run: &Value) -> usize {
     array(field(Some(run), "content"))
         .iter()
-        .take_while(|item| string(field(Some(item), "type")) != Some("opaqueDrawing"))
         .map(run_content_unit_count)
         .sum()
 }
@@ -5526,6 +5558,10 @@ fn lower_docx_with(
     let mut script_fonts = ScriptFontUse::default();
     script_fonts.font_table(&envelope.document.package.font_table.fonts);
     let parsed = serde_json::to_value(&envelope.document).map_err(|error| error.to_string())?;
+    let opaque_total = opaque_xml_bytes(&parsed);
+    if opaque_total > OPAQUE_SEED_BUDGET_BYTES {
+        return Err(opaque_seed_budget_exceeded(opaque_total));
+    }
     collect_fonts_from_value(&parsed, &mut referenced_fonts);
     let source_json = if payloads && needs_source_json(&parsed) {
         let serialized =
@@ -6325,7 +6361,7 @@ mod tests {
                     original = original.replace(" xml:space=\"preserve\"", "");
                 }
                 let content = format!(
-                    r#"{}<m:oMath><m:r><m:t>x=1</m:t></m:r></m:oMath><w:r><w:br w:type="page"/><w:br w:type="column"/></w:r>{}"#,
+                    r#"{}<x:mark xmlns:x="urn:example:unmodeled"/><m:oMath><m:r><m:t>x=1</m:t></m:r></m:oMath><w:r><w:br w:type="page"/><w:br w:type="column"/></w:r>{}"#,
                     fixture::run("a😀b"),
                     fixture::run(text)
                 );
@@ -6980,6 +7016,104 @@ mod tests {
                 .unwrap()
                 .contains("structuredResult")
         );
+    }
+
+    #[test]
+    fn tracked_embeds_keep_revision_marks_and_comment_ids() {
+        let info = json!({"id": 11, "author": "Ada", "date": "2024-01-01T00:00:00Z"});
+        let run = |content: Value| json!({"type": "run", "content": [content]});
+        let tracked = |node_type: &str, child: Value| json!({"type": node_type, "info": info, "content": [child]});
+        let opaque = || json!({"type": "opaqueDrawing", "kind": "object", "xml": "<w:object/>"});
+        let paragraph = json!({"content": [
+            tracked("insertion", run(json!({"type": "drawing", "image": {"wrap": {"type": "inline"}}}))),
+            tracked("insertion", run(json!({"type": "shape", "shape": {"shapeType": "rect"}}))),
+            tracked("insertion", run(json!({"type": "chart", "chart": {"chartType": "bar"}}))),
+            tracked("insertion", run(opaque())),
+            tracked("deletion", run(opaque())),
+            {"type": "commentRangeStart", "id": 3},
+            run(opaque()),
+            {"type": "commentRangeEnd", "id": 3},
+        ]});
+        let styles = StyleResolver::new(None);
+        let ParagraphUnits {
+            units,
+            comment_marks,
+            ..
+        } = paragraph_units(&paragraph, &styles, None, &BTreeMap::new());
+        assert_eq!(units.len(), 6);
+        for (unit, kind) in
+            units[..5]
+                .iter()
+                .zip(["image", "shape", "chart", "opaqueDrawing", "opaqueDrawing"])
+        {
+            let UnitContent::Embed { kind: actual, .. } = &unit.content else {
+                panic!("expected embed unit");
+            };
+            assert_eq!(actual, kind);
+        }
+        for unit in &units[..4] {
+            assert_eq!(unit.attrs["ins"]["author"], json!("Ada"));
+        }
+        assert_eq!(units[4].attrs["del"]["author"], json!("Ada"));
+        assert_eq!(
+            comment_marks,
+            [
+                CommentMark {
+                    unit: 5,
+                    start: true,
+                    id: "3".to_owned()
+                },
+                CommentMark {
+                    unit: 6,
+                    start: false,
+                    id: "3".to_owned()
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn hyperlinks_keep_embeds_and_comment_ids() {
+        let run = |content: Value| json!({"type": "run", "content": [content]});
+        let link = |child: Value| json!({"type": "hyperlink", "href": "https://example.com", "children": [child]});
+        let paragraph = json!({"content": [
+            {"type": "commentRangeStart", "id": 5},
+            link(run(json!({"type": "drawing", "image": {"wrap": {"type": "inline"}}}))),
+            link(run(json!({"type": "opaqueDrawing", "kind": "object", "xml": "<w:object/>"}))),
+            {"type": "commentRangeEnd", "id": 5},
+        ]});
+        let styles = StyleResolver::new(None);
+        let ParagraphUnits {
+            units,
+            comment_marks,
+            ..
+        } = paragraph_units(&paragraph, &styles, None, &BTreeMap::new());
+        assert_eq!(units.len(), 2);
+        assert_eq!(
+            comment_marks,
+            [
+                CommentMark {
+                    unit: 0,
+                    start: true,
+                    id: "5".to_owned()
+                },
+                CommentMark {
+                    unit: 2,
+                    start: false,
+                    id: "5".to_owned()
+                }
+            ]
+        );
+        for unit in &units {
+            let UnitContent::Embed { kind, .. } = &unit.content else {
+                panic!("expected embed unit");
+            };
+            assert!(kind == "image" || kind == "opaqueDrawing");
+            assert_eq!(
+                unit.attrs["hyperlink"]["href"],
+                json!("https://example.com")
+            );
+        }
     }
 
     #[test]
@@ -8667,6 +8801,32 @@ mod tests {
         assert_eq!(boundaries[0]["text"], "A\t\u{00ad}");
         assert_eq!(boundaries[0]["marksKey"], "bold:{}");
         assert_eq!(boundaries[1]["text"], "12");
+    }
+
+    #[test]
+    fn opaque_drawings_seed_one_opaque_unit_and_lower_without_a_run() {
+        let paragraph = json!({"type":"paragraph","paraId":"opaque","content": [{
+            "type": "run",
+            "content": [{"type": "opaqueDrawing", "kind": "object", "xml": "<w:object><o:OLEObject/></w:object>"}],
+        }]});
+        let ParagraphUnits { units, .. } = paragraph_units(
+            &paragraph,
+            &StyleResolver::new(None),
+            None,
+            &BTreeMap::new(),
+        );
+        assert_eq!(units.len(), 1);
+        let UnitContent::Embed { kind, payload } = &units[0].content else {
+            panic!("opaque drawing must seed an embed unit");
+        };
+        assert_eq!(kind, "opaqueDrawing");
+        assert_eq!(payload["kind"], json!("object"));
+        assert_eq!(payload["xml"], paragraph["content"][0]["content"][0]["xml"]);
+        assert_eq!(units[0].pm_size, 1);
+        let document = seed_body(&[paragraph]);
+        let (count, blocks) = rendered(&document);
+        assert_eq!(count, 1);
+        assert!(!blocks.contains("OLEObject"));
     }
 
     #[test]

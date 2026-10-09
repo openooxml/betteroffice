@@ -2,7 +2,7 @@
 
 import type { BlockContent, Document, Hyperlink, Image, Run } from '../types/document';
 import { visitTrackedControlContent } from '../utils/trackedControlContent';
-import { preloadParseWasm, writeDocxS13Wire } from './parseWasm';
+import { preloadParseWasm, writeDocxS13WithWarningsWire } from './parseWasm';
 import { collectParts, headerFooterFilename, partText } from './rezip/parts';
 import { preloadOpcWasm, unzipContainer } from './wasm';
 
@@ -31,6 +31,7 @@ export interface RustSelectiveSave {
 export interface RustSaveResult {
   buffer: ArrayBuffer;
   determinism: RustSaveDeterminism;
+  warnings: string[];
 }
 
 /**
@@ -105,10 +106,13 @@ export async function writeDocumentWithRust(
     ...(paragraphIds === undefined ? {} : { paragraphIds }),
   };
   assertSafeSaveTree(request, 'save');
-  const bytes = writeDocxS13Wire(JSON.stringify(request), new Uint8Array(originalBuffer));
+  const { bytes, warnings } = writeDocxS13WithWarningsWire(
+    JSON.stringify(request),
+    new Uint8Array(originalBuffer)
+  );
   const buffer = exactArrayBuffer(bytes);
   if (!selective && !skipMutations) applyRustSaveMutations(document, originalBuffer, buffer);
-  return { buffer, determinism: fixed };
+  return { buffer, determinism: fixed, warnings: [...(document.warnings ?? []), ...warnings] };
 }
 
 /** Applies saved relationship IDs to bound model nodes. */

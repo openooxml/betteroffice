@@ -55,6 +55,8 @@
 | [`@betteroffice/docx-react`](https://www.npmjs.com/package/@betteroffice/docx-react) | npm | drop-in React .docx editor |
 | [`betteroffice-docx`](https://pypi.org/project/betteroffice-docx/) | PyPI | Python API for reading, editing, laying out, and rasterizing DOCX documents |
 
+Unrecognized drawing markup inside DOCX runs survives editor saves.
+
 ### Spreadsheets — `.xlsx`
 
 | package | registry | what it does |

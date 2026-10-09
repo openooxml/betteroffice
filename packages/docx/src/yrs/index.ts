@@ -125,6 +125,12 @@ export {
   type WasmModuleMemory,
 } from '../wasm/loadWasmAsset';
 export { documentToYrs } from './documentToYrs';
+export {
+  OPAQUE_SEED_BUDGET_BYTES,
+  OpaqueSeedBudgetError,
+  assertOpaqueSeedBudget,
+  normalizeSeedError,
+} from './documentToYrs';
 export { ownProjectedParagraphs, yrsToDocument } from './yrsToDocument';
 export * from './paragraphIdentity';
 export {

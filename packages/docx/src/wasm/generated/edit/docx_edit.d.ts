@@ -1548,6 +1548,12 @@ export function wasm_peak_bytes(): number;
  */
 export function write_docx_s13_wasm(request_json: string, original_docx: Uint8Array): Uint8Array;
 
+/**
+ * [`write_docx_s13_wasm`], framing save diagnostics ahead of the package
+ * bytes: `u64 LE warnings_len || warnings_json || docx_bytes`.
+ */
+export function write_docx_s13_wasm_with_warnings(request_json: string, original_docx: Uint8Array): Uint8Array;
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
@@ -1802,6 +1808,7 @@ export interface InitOutput {
     readonly wasm_live_bytes: () => number;
     readonly wasm_peak_bytes: () => number;
     readonly write_docx_s13_wasm: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly write_docx_s13_wasm_with_warnings: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 }
 
 export type SyncInitInput = BufferSource | WebAssembly.Module;

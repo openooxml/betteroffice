@@ -82,7 +82,7 @@ export const PACKAGES_SECTION = {
 export const PACKAGES = [
   {
     name: "@betteroffice/docx",
-    desc: "Framework-free .docx core — parsing, CRDT editing and page layout on the Rust engine, with version-checked atomic text, paragraph and content-control batches, content-control discovery, structured JSON and Markdown export with page references, document comparison into tracked changes, host proposals with reversible accept and reject previews, undoable reanchoring of existing comments, and font loading kept apart between editors on one page.",
+    desc: "Framework-free .docx core — parsing, CRDT editing and page layout on the Rust engine, with unrecognized drawing markup preserved through editor saves, version-checked atomic text, paragraph and content-control batches, content-control discovery, structured JSON and Markdown export with page references, document comparison into tracked changes, host proposals with reversible accept and reject previews, undoable reanchoring of existing comments, and font loading kept apart between editors on one page.",
   },
   {
     name: "@betteroffice/docx-react",
