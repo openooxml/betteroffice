@@ -41,6 +41,25 @@ describe('wasm loader', () => {
     expect(wasmVersion().length).toBeGreaterThan(0);
   });
 
+  it('saves the source container verbatim after opening and painting formulas', () => {
+    const source = new Uint8Array(readFileSync(resolve(
+      import.meta.dir,
+      '../../test-fixtures/no-edit-save.xlsx'
+    )));
+    for (const options of [{}, { collaborative: true, clientId: 707 }]) {
+      const handle = openWorkbook(source, options);
+      try {
+        const frame = handle.displayList({ x: 0, y: 0, width: 600, height: 200 });
+        for (const text of ['3', '5']) {
+          expect(frame.commands.some((c) => c.op === 'text' && c.text === text)).toBe(true);
+        }
+        expect(handle.save()).toEqual(source);
+      } finally {
+        handle.dispose();
+      }
+    }
+  });
+
   it('restores persisted state from the published 0.2.1 package', () => {
     const update = new Uint8Array(readFileSync(resolve(
       import.meta.dir,

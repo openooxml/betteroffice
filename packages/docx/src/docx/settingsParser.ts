@@ -6,6 +6,9 @@ export interface CompatibilityFlags {
   doNotExpandShiftReturn: boolean;
   useWord97LineBreakRules: boolean;
   balanceSingleByteDoubleByteWidth: boolean;
+  doNotUseHTMLParagraphAutoSpacing?: boolean;
+  suppressSpBfAfterPgBrk?: boolean;
+  allowSpaceOfSameStyleInTable?: boolean;
 }
 
 export const DEFAULT_COMPATIBILITY_FLAGS: CompatibilityFlags = {
@@ -14,6 +17,9 @@ export const DEFAULT_COMPATIBILITY_FLAGS: CompatibilityFlags = {
   doNotExpandShiftReturn: false,
   useWord97LineBreakRules: false,
   balanceSingleByteDoubleByteWidth: false,
+  doNotUseHTMLParagraphAutoSpacing: false,
+  suppressSpBfAfterPgBrk: false,
+  allowSpaceOfSameStyleInTable: false,
 };
 
 /** Public model contract rehydrated by the Rust parser. */

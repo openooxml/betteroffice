@@ -140,6 +140,24 @@ pub(crate) struct ProposalStore {
     pub(crate) previews: HashMap<String, (u64, ProposalPreview)>,
 }
 
+impl ProposalStore {
+    pub(crate) fn counters(&self) -> (u64, usize) {
+        (self.next_id, self.pending.len())
+    }
+
+    pub(crate) fn adopt_counter(&mut self, counter: u64) {
+        self.next_id = counter;
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CompactProposalAcceptance {
+    pub proposal_id: String,
+    pub applied: bool,
+    pub changed_targets: Vec<String>,
+}
+
 impl DeckSession {
     pub fn propose(&self, request: ProposalRequest) -> ProposalResult<Proposal> {
         if request.agent_id.trim().is_empty()
@@ -226,6 +244,28 @@ impl DeckSession {
     }
 
     pub fn accept_proposal(&self, id: &str, force: bool) -> ProposalResult<ProposalAcceptance> {
+        let (outcome, snapshot) = self.accept_proposal_inner(id, force)?;
+        Ok(ProposalAcceptance {
+            proposal_id: outcome.proposal_id,
+            applied: outcome.applied,
+            snapshot,
+        })
+    }
+
+    pub(crate) fn accept_proposal_compact(
+        &self,
+        id: &str,
+        force: bool,
+    ) -> ProposalResult<CompactProposalAcceptance> {
+        self.accept_proposal_inner(id, force)
+            .map(|(outcome, _)| outcome)
+    }
+
+    fn accept_proposal_inner(
+        &self,
+        id: &str,
+        force: bool,
+    ) -> ProposalResult<(CompactProposalAcceptance, DeckSnapshot)> {
         let proposal = self.pending_proposal(id)?;
         let before = self.snapshot()?;
         let stale = stale_targets(&before, &proposal);
@@ -239,11 +279,29 @@ impl DeckSession {
             self.adopt(&preview, update, Adoption::Proposal)?;
         }
         self.reject_proposal(id);
-        Ok(ProposalAcceptance {
-            proposal_id: id.to_owned(),
-            applied,
+        let changed_targets = proposal
+            .changes
+            .iter()
+            .filter(|change| {
+                capture(&snapshot, &change.slide_id, change.shape_id.as_deref()).is_ok_and(
+                    |after| {
+                        capture(&before, &change.slide_id, change.shape_id.as_deref())
+                            .is_ok_and(|before| after != before)
+                    },
+                )
+            })
+            .map(ProposalChange::key)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        Ok((
+            CompactProposalAcceptance {
+                proposal_id: id.to_owned(),
+                applied,
+                changed_targets,
+            },
             snapshot,
-        })
+        ))
     }
 
     pub fn reject_proposal(&self, id: &str) -> bool {

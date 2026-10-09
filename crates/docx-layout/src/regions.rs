@@ -70,6 +70,8 @@ pub struct RegionSection {
 #[serde(rename_all = "camelCase")]
 pub struct AuthoredRegionSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compatibility_flags: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub footnote_pr: Option<NoteProperties>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endnote_pr: Option<NoteProperties>,
@@ -428,6 +430,8 @@ fn deserialize_page_start<'de, D: serde::Deserializer<'de>>(
 #[serde(rename_all = "camelCase")]
 pub struct RegionLayoutInput {
     #[serde(default)]
+    pub cached_page_totals: bool,
+    #[serde(default)]
     pub measured: Vec<crate::types::MeasuredBlock>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_story: Option<String>,
@@ -455,6 +459,16 @@ impl RegionLayoutInput {
         Option<String>,
     ) {
         self.regions.normalize_authored();
+        if let Some(compatibility) = self
+            .regions
+            .settings
+            .as_ref()
+            .and_then(|settings| settings.compatibility_flags.as_ref())
+            && let Some(env) = self.render_env.as_object_mut()
+        {
+            env.entry("compatibilityFlags")
+                .or_insert_with(|| compatibility.clone());
+        }
         (
             Input {
                 measured: self.measured,
@@ -561,9 +575,32 @@ impl RegionBlock for LayoutBlock {
 /// its `w:pgNumType w:start` and otherwise continue from the previous page, whatever the format;
 /// a page whose number is not its physical one always carries a label.
 pub fn apply_document_regions(layout: &mut Layout, regions: &DocumentRegions) {
+    apply_document_regions_with(layout, regions, |_| {});
+}
+
+/// Stamps page regions and appends indices whose section or numbering changed.
+pub fn apply_document_regions_tracked(
+    layout: &mut Layout,
+    regions: &DocumentRegions,
+    changed: &mut Vec<usize>,
+) {
+    apply_document_regions_with(layout, regions, |index| changed.push(index));
+}
+
+/// Stamps page regions and reports changed section and numbering stamps.
+fn apply_document_regions_with(
+    layout: &mut Layout,
+    regions: &DocumentRegions,
+    mut changed: impl FnMut(usize),
+) {
     let mut page_counts = BTreeMap::<usize, u64>::new();
     let mut previous_number = 0_u64;
     for (page_index, page) in layout.pages.iter_mut().enumerate() {
+        let section_id = std::mem::take(&mut page.section_id);
+        let section_index_before = page.section_index;
+        let section_page_index_before = page.section_page_index;
+        let section_page_number = page.section_page_number;
+        let page_label = std::mem::take(&mut page.page_label);
         let section_index = page.region_section_index;
         page.section_index = Some(section_index as u64);
         let section = regions
@@ -572,6 +609,9 @@ pub fn apply_document_regions(layout: &mut Layout, regions: &DocumentRegions) {
             .or_else(|| regions.sections.last());
         let section_page_index = page_counts.entry(section_index).or_default();
         page.section_page_index = Some(*section_page_index);
+        page.section_page_number = None;
+        page.page_label = None;
+        page.page_numbering = None;
         *section_page_index += 1;
 
         if let Some(section) = section {
@@ -621,6 +661,14 @@ pub fn apply_document_regions(layout: &mut Layout, regions: &DocumentRegions) {
             if !selected.is_empty() {
                 page.note_areas = Some(selected);
             }
+        }
+        if section_id.as_deref() != page.section_id.as_deref()
+            || section_index_before != page.section_index
+            || section_page_index_before != page.section_page_index
+            || section_page_number != page.section_page_number
+            || page_label.as_deref() != page.page_label.as_deref()
+        {
+            changed(page_index);
         }
     }
 }
@@ -806,6 +854,8 @@ mod tests {
         Page {
             number,
             fragments: Vec::new(),
+            body_margins: None,
+            body_anchor_margins: None,
             margins: PageMargins {
                 top: 96.0,
                 right: 96.0,
@@ -824,6 +874,8 @@ mod tests {
             header_footer_refs: None,
             footnote_ids: None,
             footnote_reserved_height: None,
+            float_bands: Vec::new(),
+            opening_fragment_geometry: None,
             footnote_columns: None,
             columns: None,
             section_id: None,
@@ -854,6 +906,7 @@ mod tests {
             footers: None,
             page_gap: Some(20.0),
             partial: false,
+            cached_page_totals: false,
         };
         let regions = DocumentRegions {
             sections: vec![
@@ -917,6 +970,7 @@ mod tests {
             footers: None,
             page_gap: None,
             partial: false,
+            cached_page_totals: false,
         };
         let regions = DocumentRegions {
             sections: vec![RegionSection::default(), RegionSection::default()],
@@ -927,6 +981,89 @@ mod tests {
             assert_eq!(page.section_page_number, None);
             assert_eq!(page.page_label, None);
         }
+    }
+
+    #[test]
+    fn restamping_a_page_back_on_its_physical_number_drops_its_label() {
+        let mut layout = Layout {
+            page_size: Size {
+                w: 816.0,
+                h: 1056.0,
+            },
+            pages: vec![page(1, 0), page(2, 1)],
+            columns: None,
+            headers: None,
+            footers: None,
+            page_gap: None,
+            partial: false,
+            cached_page_totals: false,
+        };
+        let restarted = DocumentRegions {
+            sections: vec![
+                RegionSection::default(),
+                RegionSection {
+                    page_numbering: Some(PageNumbering {
+                        start: Some(5),
+                        format: None,
+                    }),
+                    ..RegionSection::default()
+                },
+            ],
+            ..DocumentRegions::default()
+        };
+        apply_document_regions(&mut layout, &restarted);
+        assert_eq!(layout.pages[1].page_label.as_deref(), Some("5"));
+        let plain = DocumentRegions {
+            sections: vec![RegionSection::default(), RegionSection::default()],
+            ..DocumentRegions::default()
+        };
+        apply_document_regions(&mut layout, &plain);
+        let mut fresh = layout.clone();
+        fresh.pages = vec![page(1, 0), page(2, 1)];
+        apply_document_regions(&mut fresh, &plain);
+        assert_eq!(
+            serde_json::to_value(&layout).unwrap(),
+            serde_json::to_value(&fresh).unwrap()
+        );
+    }
+
+    /// Tracking appends only pages whose five display stamps changed.
+    #[test]
+    fn tracked_regions_report_only_changed_stamps() {
+        let mut layout = Layout {
+            page_size: Size {
+                w: 816.0,
+                h: 1056.0,
+            },
+            pages: (1..=6).map(|number| page(number, 0)).collect(),
+            columns: None,
+            headers: None,
+            footers: None,
+            page_gap: None,
+            partial: false,
+            cached_page_totals: false,
+        };
+        let regions = DocumentRegions {
+            sections: vec![RegionSection::default()],
+            ..DocumentRegions::default()
+        };
+        apply_document_regions(&mut layout, &regions);
+        let expected = layout.clone();
+        layout.pages[0].section_id = Some("other".to_owned());
+        layout.pages[1].section_index = None;
+        layout.pages[2].section_page_index = None;
+        layout.pages[3].section_page_number = Some(50);
+        layout.pages[4].page_label = Some("i".to_owned());
+        layout.pages[5].header_distance = Some(18.0);
+        let mut changed = vec![usize::MAX];
+        apply_document_regions_tracked(&mut layout, &regions, &mut changed);
+        assert_eq!(changed, [usize::MAX, 0, 1, 2, 3, 4]);
+        assert_eq!(
+            serde_json::to_value(&layout).unwrap(),
+            serde_json::to_value(&expected).unwrap(),
+        );
+        apply_document_regions_tracked(&mut layout, &regions, &mut changed);
+        assert_eq!(changed, [usize::MAX, 0, 1, 2, 3, 4]);
     }
 
     #[test]
@@ -942,6 +1079,7 @@ mod tests {
             footers: None,
             page_gap: Some(20.0),
             partial: false,
+            cached_page_totals: false,
         };
         let regions = DocumentRegions {
             sections: vec![

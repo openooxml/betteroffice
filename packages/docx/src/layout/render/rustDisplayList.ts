@@ -221,12 +221,23 @@ export interface RustDisplayListEngine {
     goalX: number
   ): string;
   displayRangeRectsJson?(from: number, to: number): string;
+  /** @internal */
+  displayRangeRectsOnPagesJson?(
+    from: number,
+    to: number,
+    firstPage: number,
+    lastPage: number
+  ): string;
   displayRangeRectsRegionJson?(
     region: string,
     partId: string,
     from: number,
     to: number
   ): string;
+  /** The bytes and media type of the part a `media:{n}` image source names. */
+  mediaSource?(token: string): { bytes: Uint8Array; mimeType: string } | null;
+  /** Changes whenever the package `mediaSource` reads changes. */
+  mediaScope?(): number;
 }
 
 export type RustDisplayListSourceErrorStage = 'load' | 'build' | 'parse' | 'decode' | 'apply';
@@ -285,6 +296,16 @@ export interface RustDisplayListQueryEngine {
   ): string;
   /** body document range → JSON array of `{pageIndex,x,y,width,height}` rects */
   rangeRectsJson(displayList: string, from: number, to: number): string;
+  /** @internal */
+  rangeRectsOnPagesJson?(
+    displayList: string,
+    from: number,
+    to: number,
+    firstPage: number,
+    lastPage: number
+  ): string;
+  /** @internal */
+  hasRangeRectsOnPages?(): boolean;
   /**
    * Region-aware document range → JSON array of rects. `region` is a
    * `DisplayListHitRegion` discriminant; `partId` names the instance — a
@@ -321,6 +342,14 @@ export interface RustDisplayListQueryEngine {
   ): string;
   /** body document range against a stored display list (by handle) */
   rangeRectsByHandle?(handle: number, from: number, to: number): string;
+  /** @internal */
+  rangeRectsOnPagesByHandle?(
+    handle: number,
+    from: number,
+    to: number,
+    firstPage: number,
+    lastPage: number
+  ): string;
   /** region-aware document range against a stored display list (by handle) */
   rangeRectsRegionByHandle?(
     handle: number,
@@ -332,15 +361,18 @@ export interface RustDisplayListQueryEngine {
 }
 
 let enginePromise: Promise<RustDisplayListEngine & RustDisplayListQueryEngine> | null = null;
+let loadedEngine: (RustDisplayListEngine & RustDisplayListQueryEngine) | null = null;
 
 function loadEngine(): Promise<RustDisplayListEngine & RustDisplayListQueryEngine> {
   enginePromise ??= import('../wasm/index').then(async (m) => {
     await m.preloadLayoutWasm();
-    return {
+    return (loadedEngine = {
     buildDisplayListJson: m.buildDisplayListJson,
     hitTestRegionsJson: m.hitTestRegionsJson,
     verticalMoveJson: m.verticalMoveJson,
     rangeRectsJson: m.rangeRectsJson,
+    rangeRectsOnPagesJson: m.rangeRectsOnPagesJson,
+    hasRangeRectsOnPages: m.hasRangeRectsOnPages,
     rangeRectsRegionJson: m.rangeRectsRegionJson,
     hasRangeRectsRegion: m.hasRangeRectsRegion,
     hasDisplayListSession: m.hasDisplayListSession,
@@ -351,10 +383,16 @@ function loadEngine(): Promise<RustDisplayListEngine & RustDisplayListQueryEngin
     hitTestRegionsByHandle: m.hitTestRegionsByHandle,
     verticalMoveByHandle: m.verticalMoveByHandle,
     rangeRectsByHandle: m.rangeRectsByHandle,
+    rangeRectsOnPagesByHandle: m.rangeRectsOnPagesByHandle,
     rangeRectsRegionByHandle: m.rangeRectsRegionByHandle,
-  };
+  });
   });
   return enginePromise;
+}
+
+/** The wasm query surface once {@link loadRustDisplayListQueryEngine} has loaded it, else null. */
+export function loadedRustDisplayListQueryEngine(): RustDisplayListQueryEngine | null {
+  return loadedEngine;
 }
 
 /**

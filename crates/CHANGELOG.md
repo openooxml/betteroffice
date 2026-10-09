@@ -1,5 +1,102 @@
 # @betteroffice/rust-crates
 
+## 0.4.3
+
+### Patch Changes
+
+- d8fe3c0: Documents open faster, especially ones with many comments.
+
+## 0.4.2
+
+### Patch Changes
+
+- 08c4763: Paragraphs lay out closer to Word: words across formatting runs, list numbers wider than their indent, `w:start`/`w:end` indents and bordered hanging indents. Picture outlines now paint.
+- 9c21cb8: Accepting, rejecting or undoing a proposal no longer stalls for up to 1.5 s on large documents, and tracked replacements apply faster.
+- 4e6a9e4: The first page shows sooner on long documents.
+- dcbc90b: Documents open faster.
+- ac0a55f: Tables lay out closer to Word: autofit column widths, floating tables across pages, partial cell margins, bordered table height and vertical text in merged cells.
+- 1037096: Long documents finish layout sooner.
+- ed29b59: Typing responds faster in long documents.
+
+## 0.4.1
+
+### Patch Changes
+
+- 66d0d66: A comment with ID 0 can now be re-anchored with `setCommentRanges` and keeps its range when saved after an edit elsewhere. Comment ranges, bookmarks and notes without a `w:id` are now ignored instead of being read as ID 0.
+- ff24d4d: Overlapping comments and comment ranges that span several paragraphs now keep their full extent when the document is saved after an edit elsewhere.
+- 37a8ff8: A header or footer field whose code runs over paragraph marks now shows its paragraphs as one line, as Word does, so it no longer makes the header taller and shortens every page.
+- 36ab3fe: Text now wraps beside a floating table wider than half the column that is anchored to the margin or names no horizontal anchor, as in Word, instead of running full width under it.
+- 55d0103: Body text now keeps clear of floating images, shapes, text boxes and tables in headers and footers that wrap top and bottom or span the text column, as in Word.
+- 4f2fcca: An inline picture alone on its line now gets the extra room of 1.5 or double line spacing below it, as in Word, so pages with such pictures break where Word breaks them.
+- d83c2fd: A paragraph set to keep with the next one inside a table cell now stays with it when the row breaks across pages, as in Word.
+- 81f0e0a: A table row set to keep with the next row now stays on its page when the first lines of the next row fit below it, as in Word, instead of moving with the whole next row.
+- 74322c9: A keep-with-next heading above a table now stays on its page when the first lines of the table's first row fit below it, as in Word, instead of moving to the next page with the whole row.
+- dd21fb2: A table row whose minimum height is taller than its content now moves whole to the next page when it does not fit, as in Word, instead of splitting across the page break.
+- ece75fd: Jumping to a proposal or paragraph no longer freezes long documents while the target is resolved. New `YrsSession.paragraphIdCount` counts the paragraphs of a story that carry an id.
+- c3ebdd0: Comments anchored inside a table cell or a block content control now keep their ranges when the document is saved after an edit elsewhere, and can be re-anchored with `setCommentRanges`.
+- fd3f7d4: A keep-with-next paragraph followed by a paragraph that starts a new page now stays on its page, as in Word, instead of moving to a page of its own.
+- 90033fe: Saving no longer adds zero wrap distances or a zero effect extent to a picture that had none, so inline pictures keep their position in LibreOffice after a save.
+- e8fb199: Internal groundwork for applying host proposals in the background worker; nothing changes for editors yet.
+- 7ab1ed4: Opening a large document spends less time committing its initial content, so it loads sooner.
+- 28eaa43: Opening a large document spends less time preparing its source positions, so it finishes loading sooner.
+- 2988780: Opening a document no longer waits for the East Asian or complex-script fonts its text names but never uses, so the first page no longer waits on a large CJK font for Latin-only text.
+- c407a61: A paragraph under widow control whose last line would carry over alone now takes one more line to the next page, as Word does, so page breaks match Word.
+
+## 0.4.0
+
+### Minor Changes
+
+- 5f5d4f0: Honors Word compatibility settings for fixed paragraph auto spacing, leading spacing after hard page breaks, and contextual spacing in table cells. Documents without these settings keep their existing spacing behavior.
+- 3d64f98: `proposeChanges` no longer rebuilds the document's text projection for every proposal in a batch.
+- e49077d: The DOCX editor now draws EMF, EMF+ and WMF pictures; one it cannot draw shows a placeholder and a `document.warnings` entry. The new `betteroffice-metafile` crate does the replay, enabled in `betteroffice-docx-parse` and `betteroffice-docx-edit` by an opt-in `metafile` feature.
+- add4cdb: Adds opt-in `set_windowed_incremental_builds` to limit incremental rebuilds to the display window and caret pages. The editor enables this for edits and proposal decisions, rebuilds other affected pages in the background, and waits for exact visible proposal geometry.
+- 2763a8e: Headers and footers now paint beneath the body, with watermarks beneath both, as in Word. Overlapping body content and controls receive clicks above header and footer content, while empty header and footer areas remain available for editing.
+- 81a2b31: **BREAKING (Rust consumers):** public `DocAttrs` fields in `betteroffice-docx-layout` are now `Option<Box<T>>`; construct them with `Some(Box::new(value))`. The JS API and the wire format are unchanged.
+- 8a481c6: Embedded images stay compressed in the opened file until a page shows them. `createCanvasImageResolver` accepts a `media` source, and the new `mediaTokens` option (`DocxEditor`, `YrsOpeningOptions`), off by default, keeps images out of the shared document state.
+- 00f5a64: With opt-in windowed builds, full rebuilds build only visible pages and the caret's page. `set_display_retain_built_pages` keeps every built page, and the editor sets it while a page widget has focus.
+- 76026a5: Adds `withdrawProposals`, which settles finished host proposals as their decisions show, and `search: ''` proposals that fill an empty paragraph. Typing into an empty paragraph in the editor now takes the paragraph mark's formatting, as Word does.
+- 92cd82c: Fix a crash when an edit relays out a document whose later sections have multiple columns, and balance those columns as a full layout does.
+- 0e8ca7e: Add `YrsRenderEnv.revisionPreview`, an opt-in map that lays out accepted or rejected tracked changes without changing the document. Plugin geometry follows a previewed decision once it is painted, and a paged export of a previewed layout is refused.
+- 4ad3ade: Number SEQ fields, such as figure and table captions, in document order as Word does; chapter-numbered sequences and number formats BetterOffice doesn't compute keep their saved result. Hidden text in text boxes and shapes stays hidden unless hidden text is shown.
+- 751515b: **BREAKING:** `update_resident_display_list_incremental_observed` and `update_resident_display_list_incremental_with_fonts_observed` take an `extra_pages` argument.
+
+### Patch Changes
+
+- f88ca8b: Accepting or rejecting a tracked change next to a table no longer breaks the document.
+- c64ae45: A page whose positions all shift by one delta now ships as a single run instead of one per primitive, cutting sync payloads from megabytes to kilobytes.
+- d53fb2e: The first keystroke after opening now paginates incrementally like later edits, instead of repaginating multi-section documents with tall headers.
+- 384a90c: Show the full page number when a header or footer puts its PAGE or NUMPAGES field in a table, where every digit past the first used to be clipped. Superscript and subscript page numbers in headers and footers now stay aligned too.
+- a6ac04e: Resolving paragraph anchors and reading paragraph identities reuse one read of the document until it changes, so proposing many edits to a long document no longer rereads it for every anchor.
+- ab5b7a8: Documents with footnotes or floating tables now relayout incrementally: an edit rebuilds only the affected pages and the float segments touching a changed block.
+- 86fcf80: An edit or proposal round early in a long document no longer builds the display of every later page at once; pages away from the viewport stay unbuilt until they are needed.
+- 0aa1c45: A heading kept with the next paragraph no longer moves to the next page when it fits there in Word: its spacing counts once and adjacent spacing collapses.
+- 42ce38a: Fix inflated table row heights and excess pages when cells have overlapping vertical merge ranges, including repeated table headers.
+- adb33ac: Selection and story queries on large documents no longer trigger whole-document rework; the first read of every story after an edit was quadratic in story count.
+- 0cc54bc: Footnote layout's fixpoint passes now run in place instead of on copies of the measured body, speeding up the first edit after opening.
+- 6ac2d8c: Edits and accepted or rejected suggestions repaint sooner, since each changed page is prepared for display in a single pass.
+- 7ca1b0f: Changes far apart in one layout pass, such as a round of host proposals, now lay out again only the pages around each change. `layout_document_incremental_ranges` reports the page ranges placed afresh.
+- 7f9ab99: Adds `parse_docx_s9_wire_with_media_table`, `parse_docx_s9_preview_with_media_table` and `media_table_parts`, which parse without inflating image parts, plus `RetainedPackage` and `MediaTable`. Existing entry points are unchanged.
+- 7205060: Each page now reserves room only for the header and footer it shows. Even pages follow the displayed page number, and a missing even band stays blank.
+- c4dbef0: Speeds up proposal preview changes on long documents by reusing the font requirements computed for the unchanged document.
+- 89c5d8e: Rebuild the editor's position projection incrementally: an edit now re-reads only changed paragraphs, via new `storiesChangedSince`, `storySegmentUnitDigests` and `storySegmentUnits` session queries.
+- 7852788: Loading display-list query pages one at a time no longer rewrites every page, so querying each page of a long document stays fast as the page count grows.
+- 77c07ec: Body range and caret queries now read only the pages they touch, via cached per-page position spans, instead of walking every primitive.
+- 6795634: Typing and deleting in table cells now goes through the resident engine worker in one request, like body paragraphs, instead of laying out the document first.
+- f41899b: The resident worker now finishes a document's first layout in short steps, so requests that arrive meanwhile run between them, with identical results. `YrsSession.beginRegionLayout` and `resumeRegionLayout` expose the stepped region layout.
+- c15d0ec: Reads a document's revisions and sidebar projection once per document version, so scrolling or building pages of a document with tracked changes no longer relists them.
+- 6a71241: Opening a second document with embedded fonts no longer changes the glyphs shown in another editor on the same page.
+- d9472e7: Show fields in text boxes and shapes, such as a page number in a footer text box, which used to be left out of the text.
+- cd2a6d7: The editor no longer loads, or reports errors for, East Asian or complex-script fonts a document names without having text in that script. `YrsDocxHost` gains `unusedScriptFonts`, which lists them.
+- 9b6cab0: Page and column breaks are now numbered among a story's breaks instead of by position, so early edits no longer repaginate the whole document.
+- bfb8e44: Reduces per-keystroke overhead when typing in large documents.
+- 4b39070: Suggested replacements now show the struck-out text before the new text, as Word does. `replaceRange` receipts carry the new text's `range`.
+- dd9f00d: A new `tablePayload` session query reads just the current table's structure instead of the whole story, cutting per-keystroke cost in the toolbar and dialogs.
+- dfa6b47: A row of an inline table now splits across pages only where Word allows it: widow and orphan control and `w:keepLines` keep a cell paragraph's lines together, as in body text, unless the row cannot fit on a whole page.
+- 5c6e00c: Add `getMemoryStats()` and opt-in `onMemoryPressure` and `memoryBudget` for the editor's wasm memory. A worker that runs out of memory, or past the opt-in `memoryBudget.workerLimitBytes`, is replaced once, then reported as `ResidentWorkerOutOfMemoryError` without a main-thread fallback; other failures fall back as before.
+- 2311375: Text now wraps beside floating tables that are wider than half the column instead of running under them.
+- 92900b6: Long documents respond faster to edits and suggestion decisions, since the layout worker no longer serializes or parses a layout it does not send.
+- 6809b31: Keep editing on the resident engine worker when a large document takes over five seconds to reply, instead of falling back to the main thread; only a worker silent for a minute is replaced. Queued keystrokes and worker-failure recovery now apply in order.
+
 ## 0.3.0
 
 ### Minor Changes

@@ -168,6 +168,29 @@ afterAll(async () => {
 const canvasOf = () => host.firstElementChild as HTMLCanvasElement;
 const note: PartEdit = { kind: 'footnote', noteId: NOTE_ID };
 
+test('a double-click on an empty header band opens the header', () => {
+  const opened: Array<['header' | 'footer', number | undefined]> = [];
+  const options = stableOptions();
+  renderHook(() =>
+    usePagesPointer(options({
+      displayListQueries: fakeQueries({
+        region: 'header',
+        rId: 'rIdHeader',
+        pos: null,
+        target: 'none',
+      }),
+      onHeaderFooterDoubleClick: (region, pageNumber) => opened.push([region, pageNumber]),
+    }))
+  );
+
+  mouse('mousedown', 400, 35, canvasOf());
+  mouse('click', 400, 35, canvasOf());
+  expect(selections).toEqual([]);
+  expect(opened).toEqual([]);
+  act(() => dispatchMouse('click', 400, 35, canvasOf(), { detail: 2 }));
+  expect(opened).toEqual([['header', 1]]);
+});
+
 describe('clicking a note', () => {
   test('a click in the note area opens that note instead of moving the body caret', () => {
     const opened: PartEdit[] = [];

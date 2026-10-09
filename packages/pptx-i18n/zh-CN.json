@@ -1,5 +1,13 @@
 {
   "_lang": "zh-CN",
+  "worker": {
+    "previousRecovery": null,
+    "preparing": "正在准备编辑器。稍后即可编辑。",
+    "failed": "无法编辑。请下载恢复的演示文稿。",
+    "disabled": "此编辑模式下无法使用此功能。",
+    "recovery": null,
+    "image": null
+  },
   "toolbar": {
     "label": null,
     "save": "保存",

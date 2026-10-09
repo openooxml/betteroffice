@@ -578,9 +578,11 @@ describe('release workflow crates auth', () => {
     );
   });
 
-  test('the OIDC exchange always runs on the publish path', () => {
+  test('the OIDC exchange runs on the publish path unless crates are skipped', () => {
     const auth = named.get('Authenticate to crates.io');
-    expect(auth.if).toBe("steps.pending.outputs.publishing == 'true'");
+    expect(auth.if).toBe(
+      "steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_CRATES != 'true'"
+    );
     expect(auth.if).not.toContain('crates-bootstrap');
   });
 
@@ -595,6 +597,8 @@ describe('release workflow crates auth', () => {
     const publish = named.get('Publish Rust crates');
     expect(publish.env.CARGO_REGISTRY_TOKEN).toBe('${{ steps.crates-auth.outputs.token }}');
     expect(publish.env.CRATES_IO_BOOTSTRAP_TOKEN).toBe('${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN }}');
-    expect(publish.if).toBe("steps.pending.outputs.publishing == 'true'");
+    expect(publish.if).toBe(
+      "steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_CRATES != 'true'"
+    );
   });
 });

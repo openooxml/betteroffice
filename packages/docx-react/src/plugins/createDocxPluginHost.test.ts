@@ -3,7 +3,7 @@ import type { YrsSession } from '@betteroffice/docx/yrs';
 import { createDocxPluginHost } from './createDocxPluginHost';
 import { defineDocxPlugin } from './defineDocxPlugin';
 import type { DocxProposalSnapshot } from './proposalPreview';
-import type { DocxPluginEvent, DocxPluginLayout } from './types';
+import type { DocxPluginEvent, DocxPluginGeometry, DocxPluginLayout } from './types';
 
 function stubSession(previewVersion = 0) {
   const updates = new Set<() => void>();
@@ -36,14 +36,15 @@ function stubSession(previewVersion = 0) {
   };
 }
 
-function setup() {
+function setup(geometry: () => DocxPluginGeometry | null = () => null) {
   const events: DocxPluginEvent[] = [];
   const host = createDocxPluginHost({
     pagedEditorRef: { current: null },
     writeMode: () => 'viewing',
     commands: () => null,
-    settledLayout: async () => true,
-    geometry: () => null,
+    layout: () => ({ queries: null, complete: false, failed: false }),
+    subscribeLayout: () => () => {},
+    geometry,
     translate: (key) => key,
   });
   const plugin = defineDocxPlugin({
@@ -101,17 +102,51 @@ describe('plugin host proposal previews', () => {
     host.layoutChanged(layout(3));
     await settle();
     events.length = 0;
-    registry.change({ version: 'snapshot-version' });
+    registry.change({
+      proposals: [
+        {
+          id: 'proposal',
+          state: 'accepted',
+          paragraph: { kind: 'session', sessionId: 'session', story: 'body', paraId: 'paragraph' },
+          revisionIds: [],
+          changed: false,
+        },
+      ],
+    });
     expect(host.layoutId()).toBe('layout');
     await settle();
     expect(events).toEqual([
       {
         type: 'proposal-change',
         generation: host.generation()!,
-        version: 'snapshot-version',
+        version: 'v1',
         previewVersion: 3,
       },
     ]);
+    host.close('unmounted');
+  });
+
+  test('a worker proposal version change publishes document-change before proposal-change without an update', async () => {
+    const { host, plugin, events } = setup();
+    const registry = stubSession();
+    host.setPlugins([plugin]);
+    host.open(registry.session);
+    host.layoutChanged(layout(0));
+    await settle();
+    events.length = 0;
+    registry.change({ version: 'v2', previewVersion: 1 });
+    expect(host.version()).toBe('v2');
+    expect(host.previewVersion()).toBe(1);
+    expect(host.layoutId()).toBeNull();
+    await settle();
+    expect(events).toEqual([
+      { type: 'document-change', generation: host.generation()!, version: 'v2' },
+      { type: 'layout-change', generation: host.generation()!, layout: null },
+      { type: 'proposal-change', generation: host.generation()!, version: 'v2', previewVersion: 1 },
+    ]);
+    for (const listener of registry.updates) listener();
+    await settle();
+    expect(events.filter((event) => event.type === 'document-change')).toHaveLength(1);
     host.close('unmounted');
   });
 
@@ -129,6 +164,52 @@ describe('plugin host proposal previews', () => {
     await settle();
     expect(events).toEqual([
       { type: 'layout-change', generation: host.generation()!, layout: layout(0) },
+    ]);
+    host.close('unmounted');
+  });
+
+  test('repeats the current layout once its geometry exists, unless a layout change carried it', async () => {
+    let geometry: DocxPluginGeometry | null = null;
+    const { host, plugin, events } = setup(() => geometry);
+    const registry = stubSession();
+    host.setPlugins([plugin]);
+    host.open(registry.session);
+    await settle();
+    host.layoutChanged(layout(0));
+    await settle();
+    events.length = 0;
+    host.geometryPresented(layout(0));
+    geometry = { layout: layout(0) } as DocxPluginGeometry;
+    host.geometryPresented({ ...layout(0), id: 'older' });
+    await settle();
+    expect(events).toEqual([]);
+    host.geometryPresented(layout(0));
+    await settle();
+    host.geometryPresented(layout(0));
+    await settle();
+    expect(events).toEqual([
+      { type: 'layout-change', generation: host.generation()!, layout: layout(0) },
+    ]);
+    const next = { ...layout(0), id: 'next' };
+    geometry = { layout: next } as DocxPluginGeometry;
+    events.length = 0;
+    host.layoutChanged(next);
+    await settle();
+    host.geometryPresented(next);
+    await settle();
+    expect(events).toEqual([
+      { type: 'layout-change', generation: host.generation()!, layout: next },
+    ]);
+    geometry = null;
+    host.layoutChanged(null);
+    host.layoutChanged(next);
+    await settle();
+    events.length = 0;
+    geometry = { layout: next } as DocxPluginGeometry;
+    host.geometryPresented(next);
+    await settle();
+    expect(events).toEqual([
+      { type: 'layout-change', generation: host.generation()!, layout: next },
     ]);
     host.close('unmounted');
   });

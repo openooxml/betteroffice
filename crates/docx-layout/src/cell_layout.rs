@@ -4,6 +4,13 @@ use serde::Serialize;
 
 use crate::types::{BlockExtent, FloatingTablePosition, LayoutBlock};
 
+pub(crate) fn is_floating_image(wrap_type: Option<&str>, display_mode: Option<&str>) -> bool {
+    matches!(
+        wrap_type,
+        Some("square" | "tight" | "through" | "behind" | "inFront")
+    ) || display_mode == Some("float")
+}
+
 pub(crate) fn nested_table_float_offset(position: Option<&FloatingTablePosition>) -> Option<f64> {
     let position = position?;
     (position.vert_anchor.as_deref() == Some("text")

@@ -1,9 +1,10 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { useEffect } from 'react';
 import { rezipPartsToArrayBuffer, toBytes } from '@betteroffice/docx/docx/rezip/parts';
-import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
+import { createEditSession, preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import type { YrsDocxHost, YrsSession } from '@betteroffice/docx/yrs';
 import { useCompatibilityWarm, useYrsCoreSession } from './useYrsCoreSession';
 
@@ -65,6 +66,75 @@ async function openedSession() {
 }
 
 const idle = () => new Promise((resolve) => setTimeout(resolve, 300));
+
+test('a session whose document fails to open is freed at once', async () => {
+  const probe = createEditSession(1);
+  const free = spyOn(Object.getPrototypeOf(probe) as { free(): void }, 'free');
+  const errors: Error[] = [];
+  const logged = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    renderHook(() =>
+      useYrsCoreSession(true, null, null, Uint8Array.of(1, 2, 3), 1, undefined, {
+        onError: (error) => errors.push(error),
+      })
+    );
+    await waitFor(() => expect(errors).toHaveLength(1));
+    expect(free).toHaveBeenCalledTimes(1);
+  } finally {
+    logged.mockRestore();
+    free.mockRestore();
+    probe.free();
+  }
+});
+
+test('a replaced session stays usable until the editor renders without it', async () => {
+  const errors: unknown[] = [];
+  const hook = renderHook(
+    ({ bytes, generation }: { bytes: Uint8Array; generation: number }) => {
+      const { session } = useYrsCoreSession(true, null, null, bytes, generation);
+      // A consumer that reads its session whenever the document changes, as the sidebar does.
+      useEffect(() => {
+        try {
+          session?.version();
+        } catch (error) {
+          errors.push(error);
+        }
+      }, [session, bytes]);
+      return session;
+    },
+    { initialProps: { bytes: fixture(), generation: 1 } }
+  );
+  await waitFor(() => expect(hook.result.current).not.toBeNull());
+  const replaced = hook.result.current!;
+  hook.rerender({ bytes: fixture(), generation: 2 });
+  expect(errors).toEqual([]);
+  expect(() => replaced.version()).toThrow();
+  await waitFor(() => expect(hook.result.current).not.toBeNull());
+  expect(hook.result.current).not.toBe(replaced);
+});
+
+test('a replaced session lives while the renderer still builds with it', async () => {
+  const first = fixture();
+  const hook = renderHook(
+    ({ bytes, generation, held }: { bytes: Uint8Array; generation: number; held: unknown }) =>
+      useYrsCoreSession(true, null, null, bytes, generation, undefined, undefined, {
+        heldEngine: held,
+      }).session,
+    { initialProps: { bytes: first, generation: 1, held: null as unknown } }
+  );
+  await waitFor(() => expect(hook.result.current).not.toBeNull());
+  const replaced = hook.result.current!;
+  hook.rerender({ bytes: first, generation: 1, held: replaced });
+  const next = fixture();
+  hook.rerender({ bytes: next, generation: 2, held: replaced });
+  await waitFor(() => expect(hook.result.current).not.toBeNull());
+  expect(hook.result.current).not.toBe(replaced);
+  expect(() => replaced.version()).not.toThrow();
+  // The next document's layout reaches the renderer.
+  hook.rerender({ bytes: next, generation: 2, held: hook.result.current });
+  expect(() => replaced.version()).toThrow();
+  hook.unmount();
+});
 
 test('opening never materializes the compatibility document by itself', async () => {
   const { project, materializations } = await openedSession();
@@ -145,4 +215,23 @@ describe('useCompatibilityWarm', () => {
     rerender({ session: sessions[0]!, frame: frames[0]!, projects: true });
     expect(calls.filter((call) => call === 'schedule')).toHaveLength(1);
   });
+});
+
+test('a new session is reported before it is seeded', async () => {
+  const bytes = fixture();
+  const events: string[] = [];
+  const reported: YrsSession[] = [];
+  const hook = renderHook(() =>
+    useYrsCoreSession(true, null, null, bytes, 1, undefined, {
+      onSession: (session) => {
+        reported.push(session);
+        events.push('session');
+      },
+      onHostDocument: () => events.push('host'),
+    })
+  );
+  await waitFor(() => expect(hook.result.current.session).not.toBeNull());
+  expect(events).toEqual(['session', 'host']);
+  expect(reported).toEqual([hook.result.current.session!]);
+  hook.unmount();
 });

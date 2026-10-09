@@ -13,6 +13,7 @@ import type {
   TableCellRef,
 } from './displayList';
 import { textRunRect, glyphRunRect, lineRect, type GeoRect } from './displayListGeometry';
+import { collectInteractiveOverlayLayers, hideOccludedControl } from './interactiveOverlay';
 
 export const MIRROR_CLASS_NAMES = {
   page: 'layout-page layout-page-mirror',
@@ -75,6 +76,7 @@ export interface MirrorLabels {
 /** per-page build state threaded through the mirror walk */
 interface MirrorBuildCtx {
   labels?: MirrorLabels;
+  occludedWidgets: ReadonlySet<DisplayPrimitive>;
   /**
    * note-ref anchor ids already assigned on this page: a reference mark split
    * into several primitives (bidi/font subranges) must yield exactly one
@@ -88,6 +90,249 @@ export interface BuildMirrorPageOptions {
   document?: Document;
   /** localized aria-labels for page/header/footer wrappers */
   labels?: MirrorLabels;
+}
+
+function pageRegionPrimitives(page: DisplayPage): DisplayPrimitive[] {
+  return [
+    ...page.primitives,
+    ...(page.header?.primitives ?? []),
+    ...(page.footer?.primitives ?? []),
+    ...(page.noteAreas ?? []).flatMap((area) => [
+      ...(area.separatorPrimitives ?? []),
+      ...(area.primitives ?? []),
+    ]),
+  ];
+}
+
+/** Whether the mirror renders `p` as a link: a hyperlink, or a note reference. */
+function mirrorLinks(p: DisplayPrimitive): boolean {
+  if (p.kind === 'image') return Boolean(p.href);
+  return (
+    (p.kind === 'text' || p.kind === 'glyphRun') &&
+    (Boolean(p.href) || p.noteRef?.id !== undefined)
+  );
+}
+
+/** Whether a note of `area` gets a backlink: it has primitives and metadata. */
+function noteHasBacklink(area: NoteRegion, noteId: number): boolean {
+  const groupId = `${area.kind ?? 'footnote'}-${noteId}`;
+  return (
+    (area.notes ?? []).some((meta) => meta.id === noteId) &&
+    (area.primitives ?? []).some((p) => p.groupId === groupId)
+  );
+}
+
+/** Whether `buildMirrorPage(page)` holds a table header cell, which cells on other pages may name. */
+export function mirrorPageHasHeaderCells(page: DisplayPage): boolean {
+  return pageRegionPrimitives(page).some((p) => p.cell?.isHeader === true);
+}
+
+/** Whether `buildMirrorPage(page)` holds a link Tab stops at. */
+export function mirrorPageHasTabStops(page: DisplayPage): boolean {
+  return (
+    pageRegionPrimitives(page).some(mirrorLinks) ||
+    (page.noteAreas ?? []).some((area) =>
+      (area.noteIds ?? []).some((noteId) => noteHasBacklink(area, noteId))
+    )
+  );
+}
+
+/** Attributes through which a mirror element names the elements that label it. */
+const MIRROR_LABEL_REFERENCES = ['aria-labelledby', 'aria-describedby'] as const;
+const MIRROR_LABELLED = MIRROR_LABEL_REFERENCES.map((name) => `[${name}]`).join(', ');
+
+const MIRROR_CELL = `.${MIRROR_CLASS_NAMES.tableCell}`;
+const MIRROR_HEADER_CELL = `${MIRROR_CELL}[role="columnheader"]`;
+
+function mirrorKeptElements(mirror: HTMLElement): { kept: Set<Element>; onPath: Set<Element> } {
+  const byId = new Map<string, Element>();
+  for (const element of mirror.querySelectorAll('[id]')) byId.set(element.id, element);
+  const outermostCell = (element: Element): Element => {
+    let outer = element;
+    for (
+      let cell = element.closest(MIRROR_CELL);
+      cell && mirror.contains(cell);
+      cell = cell.parentElement?.closest(MIRROR_CELL) ?? null
+    ) {
+      outer = cell;
+    }
+    return outer;
+  };
+  const kept = new Set<Element>();
+  const onPath = new Set<Element>([mirror]);
+  const pending = Array.from(
+    mirror.querySelectorAll(`a[href], .${MIRROR_CLASS_NAMES.note}, ${MIRROR_HEADER_CELL}`)
+  );
+  while (pending.length > 0) {
+    const element = outermostCell(pending.pop()!);
+    if (kept.has(element)) continue;
+    kept.add(element);
+    const labelled = [element, ...element.querySelectorAll(MIRROR_LABELLED)];
+    for (let node = element.parentElement; node && !onPath.has(node); node = node.parentElement) {
+      onPath.add(node);
+      labelled.push(node);
+    }
+    for (const node of labelled) {
+      for (const name of MIRROR_LABEL_REFERENCES) {
+        for (const id of node.getAttribute(name)?.split(/\s+/) ?? []) {
+          const label = byId.get(id);
+          if (label && !kept.has(label)) pending.push(label);
+        }
+      }
+    }
+  }
+  return { kept, onPath };
+}
+
+/**
+ * Reduces a `buildMirrorPage` tree, in place, to its links, its notes (the
+ * targets of note references), its header cells (which cells on any page may
+ * name) and the elements that label what stays. What stays inside a table
+ * cell keeps the whole outermost cell, so the cell keeps its accessible name.
+ * Every other element and text goes; the ancestors of what stays keep their
+ * attributes, so the ids, order, positions and table semantics that remain
+ * are the full mirror's.
+ */
+export function reduceMirrorToLinks(mirror: HTMLElement): HTMLElement {
+  const { kept, onPath } = mirrorKeptElements(mirror);
+  const prune = (element: Element): void => {
+    for (const child of Array.from(element.childNodes)) {
+      if (kept.has(child as Element)) continue;
+      if (onPath.has(child as Element)) prune(child as Element);
+      else child.remove();
+    }
+  };
+  prune(mirror);
+  return mirror;
+}
+
+/** `buildMirrorPage(page)` reduced to its links: see `reduceMirrorToLinks`. */
+export function buildMirrorPageLinks(
+  page: DisplayPage,
+  options: BuildMirrorPageOptions = {}
+): HTMLElement {
+  return reduceMirrorToLinks(buildMirrorPage(page, options));
+}
+
+const MIRROR_STRUCTURE = [
+  'layout-page-mirror',
+  MIRROR_CLASS_NAMES.content,
+  MIRROR_CLASS_NAMES.header,
+  MIRROR_CLASS_NAMES.footer,
+  MIRROR_CLASS_NAMES.block,
+  MIRROR_CLASS_NAMES.table,
+  MIRROR_CLASS_NAMES.tableRow,
+  MIRROR_CLASS_NAMES.tableCell,
+  MIRROR_CLASS_NAMES.notes,
+  MIRROR_CLASS_NAMES.blockSdt,
+];
+
+/** A run's text, in a bare span only where its language or direction differs from its context. */
+function plainRun(run: Element, text: string): Node {
+  const doc = run.ownerDocument;
+  const lang = run.getAttribute('lang');
+  const dir = run.getAttribute('dir');
+  const context = run.parentElement;
+  const differs = (name: string, value: string | null): boolean =>
+    value !== null && context?.closest(`[${name}]`)?.getAttribute(name) !== value;
+  if (!differs('lang', lang) && !differs('dir', dir)) return doc.createTextNode(text);
+  const span = doc.createElement('span');
+  if (lang) span.setAttribute('lang', lang);
+  if (dir) span.setAttribute('dir', dir);
+  span.textContent = text;
+  return span;
+}
+
+/**
+ * Reduces a `buildMirrorPage` tree, in place, to what a screen reader reads:
+ * everything `reduceMirrorToLinks` keeps, unchanged, plus the text of every
+ * other run as plain text inside its paragraph, table and region wrappers,
+ * and images with an accessible name. Wrappers that hold no kept element lose
+ * their ids and data attributes, so painter-contract queries never match them.
+ */
+export function reduceMirrorToText(mirror: HTMLElement): HTMLElement {
+  const { kept, onPath } = mirrorKeptElements(mirror);
+  const reduce = (element: Element): void => {
+    if (kept.has(element)) return;
+    if (!onPath.has(element) || (element === mirror && kept.size === 0)) {
+      for (const attribute of Array.from(element.attributes)) {
+        if (attribute.name === 'id' || attribute.name.startsWith('data-')) {
+          element.removeAttribute(attribute.name);
+        }
+      }
+    }
+    const structural =
+      element === mirror ||
+      (!element.classList.contains('layout-run') &&
+        MIRROR_STRUCTURE.some((name) => element.classList.contains(name)));
+    if (!structural && !onPath.has(element)) {
+      if (
+        element.classList.contains(MIRROR_CLASS_NAMES.revisionPmarkGlyph) ||
+        element.getAttribute('aria-hidden') === 'true' ||
+        element.hasAttribute('inert') ||
+        (element as HTMLElement).style?.visibility === 'hidden'
+      ) {
+        element.remove();
+        return;
+      }
+      const object = element.getAttribute('role') === 'img' || Boolean(element.getAttribute('alt'));
+      const accessible = object || Boolean(element.getAttribute('aria-label'));
+      if (element.children.length === 0) {
+        if (element.textContent && !object) {
+          element.replaceWith(plainRun(element, element.textContent));
+        } else if (!accessible) {
+          element.remove();
+        }
+        return;
+      }
+    }
+    for (const child of Array.from(element.children)) reduce(child);
+    for (const child of Array.from(element.childNodes)) {
+      if (child.nodeType !== 3) continue;
+      while (child.nextSibling?.nodeType === 3) {
+        const next = child.nextSibling;
+        child.textContent = (child.textContent ?? '') + (next.textContent ?? '');
+        next.remove();
+      }
+      if (!child.textContent) child.remove();
+    }
+  };
+  reduce(mirror);
+  mirror.style.contentVisibility = 'auto';
+  return mirror;
+}
+
+/** `buildMirrorPage(page)` reduced to readable text: see `reduceMirrorToText`. */
+export function buildMirrorPageText(
+  page: DisplayPage,
+  options: BuildMirrorPageOptions = {}
+): HTMLElement {
+  return reduceMirrorToText(buildMirrorPage(page, options));
+}
+
+/** Whether `page`'s mirror holds the note or note reference with element id `id`. */
+export function displayPageHoldsMirrorId(page: DisplayPage, id: string): boolean {
+  const note = /^oox-(footnote|endnote)-(.+)$/.exec(id);
+  if (note) {
+    const [, kind, noteId] = note;
+    return (page.noteAreas ?? []).some(
+      (area) =>
+        (area.kind ?? 'footnote') === kind &&
+        (area.noteIds ?? []).some((candidate) => String(candidate) === noteId) &&
+        (area.primitives ?? []).some((p) => p.groupId === `${kind}-${noteId}`)
+    );
+  }
+  const reference = /^oox-noteref-(footnote|endnote)-(.+)$/.exec(id);
+  if (!reference) return false;
+  const [, kind, noteId] = reference;
+  return pageRegionPrimitives(page).some(
+    (p) =>
+      (p.kind === 'text' || p.kind === 'glyphRun') &&
+      !p.href &&
+      p.noteRef?.id !== undefined &&
+      String(p.noteRef.id) === noteId &&
+      (p.noteRef.kind ?? 'footnote') === kind
+  );
 }
 
 /**
@@ -119,7 +364,12 @@ export function buildMirrorPage(
 ): HTMLElement {
   const doc = options.document ?? document;
   const labels = options.labels;
-  const ctx: MirrorBuildCtx = { labels, noteRefIds: new Set() };
+  const occludedWidgets = new Set(
+    collectInteractiveOverlayLayers(page).flatMap((layer) =>
+      layer.widgets.filter((widget) => widget.occluded).flatMap((widget) => widget.primitives)
+    )
+  );
+  const ctx: MirrorBuildCtx = { labels, noteRefIds: new Set(), occludedWidgets };
 
   const pageEl = doc.createElement('div');
   pageEl.className = MIRROR_CLASS_NAMES.page;
@@ -654,6 +904,17 @@ function findStructuralRevision(
 }
 
 function renderMirrorPrimitive(
+  p: DisplayPrimitive,
+  doc: Document,
+  offsetY: number,
+  ctx: MirrorBuildCtx
+): HTMLElement {
+  const el = createMirrorPrimitive(p, doc, offsetY, ctx);
+  if (ctx.occludedWidgets.has(p)) hideOccludedControl(el);
+  return el;
+}
+
+function createMirrorPrimitive(
   p: DisplayPrimitive,
   doc: Document,
   offsetY: number,
@@ -1219,7 +1480,7 @@ function buildMirrorNoteArea(
     // MirrorLabels.noteBacklink, falling back to the note's own label/number
     // (data, not hardcoded English). Pointer-inert like the rest of the
     // mirror; navigation UX belongs to the interactive overlay.
-    if (meta) {
+    if (meta && noteHasBacklink(area, noteId)) {
       const backlink = doc.createElement('a');
       backlink.className = MIRROR_CLASS_NAMES.noteBacklink;
       backlink.setAttribute('role', 'doc-backlink');

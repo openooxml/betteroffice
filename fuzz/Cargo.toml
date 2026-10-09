@@ -10,6 +10,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+ooxml-metafile = { package = "betteroffice-metafile", path = "../crates/ooxml-metafile", features = ["svg"] }
 ooxml-opc = { package = "betteroffice-opc", path = "../crates/ooxml-opc" }
 pptx-parse = { package = "betteroffice-pptx-parse", path = "../crates/pptx-parse" }
 pptx-raster = { package = "betteroffice-pptx-raster", path = "../crates/pptx-raster", features = ["fuzzing"] }
@@ -18,6 +19,13 @@ pptx-render = { package = "betteroffice-pptx-render", path = "../crates/pptx-ren
 [[bin]]
 name = "metafile-decode"
 path = "fuzz_targets/metafile-decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "metafile-svg"
+path = "fuzz_targets/metafile-svg.rs"
 test = false
 doc = false
 bench = false

@@ -402,6 +402,9 @@ describe('YrsSession edit batches', () => {
       expect(document).toContain('Filled control');
       expect(document).toMatch(/<w:ins [^>]*w:author="Reviewer"/);
       expect(document).toMatch(/<w:del [^>]*w:author="Reviewer"/);
+      const struck = document.search(/<w:delText[^>]*>Last</);
+      expect(struck).toBeGreaterThan(-1);
+      expect(struck).toBeLessThan(document.search(/<w:t[^>]*>Final</));
       expect(text(part(saved, 'word/footer1.xml'))).toContain(RAW);
       expect(text(part(saved, 'word/header1.xml'))).toContain('Edited header');
       expect(text(part(saved, 'word/_rels/document.xml.rels'))).toContain('Target="../customXml/item1.xml"');

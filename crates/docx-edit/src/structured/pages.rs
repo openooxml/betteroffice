@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use docx_layout::display_list::DisplayList;
 use docx_layout::footnotes::{NoteContent, NoteKind as LayoutNoteKind};
@@ -17,7 +18,7 @@ use docx_layout::placement::{
     PlacedItem, PlacedParagraph, PlacedRegion, PlacedTable, PlacementInput, PlacementIssueKind,
     line_window_slices, place_layout,
 };
-use docx_layout::types::{Layout, LayoutBlock, MeasuredBlock, Page};
+use docx_layout::types::{Layout, LayoutBlock, MeasuredBlock, Page, ParagraphBlock};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use yrs::{Any, Map, Out, ReadTxn, Transact};
@@ -404,6 +405,7 @@ pub enum PageDiagnosticCode {
     ClippedContent,
     GeometryUnavailable,
     Truncated,
+    NoteLayoutFallback,
 }
 
 /// Page options with their defaults applied and validated.
@@ -579,27 +581,46 @@ pub(crate) fn metadata_mismatch(
             )
         });
     }
-    let settings = |value: Option<&serde_json::Value>| {
-        serde_json::to_value(
-            value
-                .cloned()
-                .and_then(|value| {
-                    serde_json::from_value::<docx_layout::regions::AuthoredRegionSettings>(value)
-                        .ok()
-                })
-                .unwrap_or_default(),
-        )
-        .ok()
-    };
+    let requested = request.pointer("/regions/settings");
+    let compare_flags = requested
+        .and_then(|settings| settings.get("compatibilityFlags"))
+        .is_some_and(|flags| !flags.is_null());
     if !editor_owned
-        && settings(request.pointer("/regions/settings"))
-            != settings(read.and_then(|read| read.settings.as_ref()))
+        && normalized_region_settings(requested, compare_flags)
+            != normalized_region_settings(
+                read.and_then(|read| read.settings.as_ref()),
+                compare_flags,
+            )
     {
         return Some(
             "The layout's note and header settings differ from the document's; lay it out with its current settings.".to_owned(),
         );
     }
     None
+}
+
+fn normalized_region_settings(
+    value: Option<&serde_json::Value>,
+    compare_flags: bool,
+) -> Option<serde_json::Value> {
+    let mut settings = value
+        .cloned()
+        .and_then(|value| {
+            serde_json::from_value::<docx_layout::regions::AuthoredRegionSettings>(value).ok()
+        })
+        .unwrap_or_default();
+    if !compare_flags {
+        settings.compatibility_flags = None;
+    } else if let Some(flags) = settings.compatibility_flags.as_ref().and_then(|value| {
+        serde_json::from_value::<docx_parse::CompatibilityFlags>(value.clone()).ok()
+    }) {
+        settings.compatibility_flags = if flags == docx_parse::CompatibilityFlags::default() {
+            None
+        } else {
+            serde_json::to_value(flags).ok()
+        };
+    }
+    serde_json::to_value(settings).ok()
 }
 
 /// Whether any story that contributes to layout carries a pending revision, which would make
@@ -722,6 +743,9 @@ pub(crate) struct CapturedLayout<'a> {
     pub headers_footers: Option<&'a HeaderFooterPayload>,
     pub bands_composed: bool,
     pub notes: &'a [NoteContent],
+    /// The page indexes whose note area is kept larger than their notes because note placement
+    /// alternated between layouts.
+    pub note_fallback_pages: &'a [usize],
     /// Lowering maps by root story.
     pub maps: &'a HashMap<String, Rc<LoweringMap>>,
     pub display: Option<&'a DisplayList>,
@@ -779,6 +803,7 @@ pub(crate) fn build_layout_map(
         views: Views::new(doc, &txn),
         paragraph_indexes: HashMap::new(),
         atom_units: HashMap::new(),
+        paragraph_bounds: HashMap::new(),
         aliases: HashMap::new(),
         export_views: match content.revision_view {
             RevisionView::Accepted => &[EditTextView::Accepted],
@@ -808,6 +833,14 @@ pub(crate) fn build_layout_map(
                 message: format!(
                     "The page number format {format:?} is not supported; the page is numbered in decimal."
                 ),
+            });
+        }
+        if mapping && captured.note_fallback_pages.contains(&placed.page_index) {
+            mapper.diagnostics.push(PageDiagnostic {
+                code: PageDiagnosticCode::NoteLayoutFallback,
+                node_id: None,
+                page_index: Some(page_index),
+                message: "Note placement alternated between layouts, so this page keeps a larger note area than its notes take and its body may end earlier than in Word.".to_owned(),
             });
         }
         pages.push(record);
@@ -1325,10 +1358,19 @@ impl NodeIndex {
 }
 
 /// A laid-out paragraph's source: its story and paragraph id, in the exported story's names.
+#[derive(Clone)]
 struct Source {
     story: String,
     para_id: String,
 }
+
+#[derive(Default)]
+struct ParagraphIntervals {
+    texts: Vec<(u32, u32, u64)>,
+    atoms: Vec<(u32, u64, Vec<(i64, i64)>)>,
+}
+
+type SourceBounds = BTreeMap<u32, (u64, u64)>;
 
 /// The stories, paragraphs and tables of a header or footer the export merged into another with
 /// the same content, in that exported story's names, cell and control stories included.
@@ -1388,9 +1430,10 @@ struct Mapper<'a, 't, T: ReadTxn> {
     maps: &'a HashMap<String, Rc<LoweringMap>>,
     views: Views<'t, T>,
     /// Paragraph positions by id, per story and view.
-    paragraph_indexes: HashMap<(String, u8), Option<(Rc<StoryView>, Rc<HashMap<String, usize>>)>>,
+    paragraph_indexes: HashMap<(String, u8), Option<(Arc<StoryView>, Rc<HashMap<String, usize>>)>>,
     /// Display units of every atom, per root, source paragraph and story unit.
     atom_units: HashMap<String, Rc<HashMap<(u32, u32), u64>>>,
+    paragraph_bounds: HashMap<(String, u64), Rc<SourceBounds>>,
     /// The names of alias headers and footers in the exported stories'.
     aliases: HashMap<(String, String), Rc<AliasNames>>,
     export_views: &'static [EditTextView],
@@ -1514,13 +1557,6 @@ impl<'a, 't, T: ReadTxn> Mapper<'a, 't, T> {
         }
     }
 
-    /// The source of the paragraph block starting at `pm`, translated into the exported
-    /// story's names when the region shows an alias of it.
-    fn source(&mut self, occurrence: &Occurrence, map: &LoweringMap, pm: u64) -> Option<Source> {
-        let paragraph = map.paragraph_at(pm)?;
-        self.source_of(occurrence, map, paragraph)
-    }
-
     fn source_of(
         &mut self,
         occurrence: &Occurrence,
@@ -1565,7 +1601,7 @@ impl<'a, 't, T: ReadTxn> Mapper<'a, 't, T> {
         &mut self,
         story: &str,
         view: EditTextView,
-    ) -> Option<(Rc<StoryView>, Rc<HashMap<String, usize>>)> {
+    ) -> Option<(Arc<StoryView>, Rc<HashMap<String, usize>>)> {
         let key = (story.to_owned(), view_slot(view));
         if let Some(found) = self.paragraph_indexes.get(&key) {
             return found.clone();
@@ -1601,6 +1637,46 @@ impl<'a, 't, T: ReadTxn> Mapper<'a, 't, T> {
         units
     }
 
+    fn paragraph_bounds(
+        &mut self,
+        root: &str,
+        map: &LoweringMap,
+        block: &ParagraphBlock,
+        start: u64,
+    ) -> Rc<SourceBounds> {
+        let key = (root.to_owned(), start);
+        if let Some(found) = self.paragraph_bounds.get(&key) {
+            return Rc::clone(found);
+        }
+        let mut bounds = SourceBounds::new();
+        for run in &block.runs {
+            let (Some(from), Some(to)) = (run.pm_start(), run.pm_end()) else {
+                continue;
+            };
+            let (from, to) = (from as u64, to as u64);
+            let first = map.spans.partition_point(|span| span.pm_end <= from);
+            for span in map.spans[first..]
+                .iter()
+                .take_while(|span| span.pm_start < to)
+            {
+                let (lo, hi) = (from.max(span.pm_start), to.min(span.pm_end));
+                if hi <= lo {
+                    continue;
+                }
+                bounds
+                    .entry(span.paragraph)
+                    .and_modify(|range| {
+                        range.0 = range.0.min(lo);
+                        range.1 = range.1.max(hi);
+                    })
+                    .or_insert((lo, hi));
+            }
+        }
+        let bounds = Rc::new(bounds);
+        self.paragraph_bounds.insert(key, Rc::clone(&bounds));
+        bounds
+    }
+
     fn paragraph(
         &mut self,
         occurrence: &Occurrence,
@@ -1610,7 +1686,10 @@ impl<'a, 't, T: ReadTxn> Mapper<'a, 't, T> {
         let Some(start) = placed.block.pm_start.map(|value| value as u64) else {
             return self.unmapped(occurrence, "A laid-out paragraph has no document position.");
         };
-        let Some(source) = self.source(occurrence, map, start) else {
+        let Some(block_paragraph) = map.paragraph_at(start) else {
+            return self.unmapped(occurrence, "A laid-out paragraph has no recorded source.");
+        };
+        let Some(source) = self.source_of(occurrence, map, block_paragraph) else {
             return self.unmapped(occurrence, "A laid-out paragraph has no recorded source.");
         };
         let index: &'a NodeIndex = self.index;
@@ -1626,39 +1705,11 @@ impl<'a, 't, T: ReadTxn> Mapper<'a, 't, T> {
             }
             return;
         };
-        self.wrap(occurrence, &node.controls, placed.repeated_header);
-        self.placed_nodes.insert(node.id.clone());
         let region = Self::region_key(occurrence);
         let slices = line_window_slices(placed.block, placed.measure, placed.lines.clone());
-        let geometry = match placed.frame {
-            Some(frame) => Geometry::Frame(frame),
-            None => Geometry::Ranges(
-                region.clone(),
-                vec![(
-                    slices
-                        .first()
-                        .map_or(start as i64, |slice| slice.pm_start as i64),
-                    slices
-                        .last()
-                        .map_or(start as i64 + 1, |slice| slice.pm_end as i64),
-                )],
-            ),
-        };
-        self.fragment(
-            occurrence,
-            node.id.clone(),
-            node.id.clone(),
-            node.anchor.clone(),
-            FragmentSlice::Block,
-            Some((placed.continued_from_previous, placed.continued_on_next)),
-            placed.repeated_header,
-            geometry,
-        );
+        let bounds = self.paragraph_bounds(&occurrence.root, map, placed.block, start);
         let units = self.atom_units(&occurrence.root, map);
-        // Text runs as contiguous story intervals with their display start, atoms with the
-        // display units shown here.
-        let mut texts: Vec<(u32, u32, u64)> = Vec::new();
-        let mut atoms: Vec<(u32, u32, u64, Vec<(i64, i64)>)> = Vec::new();
+        let mut paragraphs: BTreeMap<u32, ParagraphIntervals> = BTreeMap::new();
         for slice in &slices {
             let (from, to) = (slice.pm_start as u64, slice.pm_end as u64);
             let first = map.spans.partition_point(|span| span.pm_end <= from);
@@ -1671,14 +1722,14 @@ impl<'a, 't, T: ReadTxn> Mapper<'a, 't, T> {
                 if hi <= lo {
                     continue;
                 }
+                let intervals = paragraphs.entry(span.paragraph).or_default();
                 if span.atom {
-                    match atoms.last_mut() {
-                        Some(last) if last.0 == span.paragraph && last.1 == span.raw_start => {
-                            last.2 += hi - lo;
-                            last.3.push((lo as i64, hi as i64));
+                    match intervals.atoms.last_mut() {
+                        Some(last) if last.0 == span.raw_start => {
+                            last.1 += hi - lo;
+                            last.2.push((lo as i64, hi as i64));
                         }
-                        _ => atoms.push((
-                            span.paragraph,
+                        _ => intervals.atoms.push((
                             span.raw_start,
                             hi - lo,
                             vec![(lo as i64, hi as i64)],
@@ -1688,16 +1739,129 @@ impl<'a, 't, T: ReadTxn> Mapper<'a, 't, T> {
                 }
                 let raw_lo = span.raw_start + (lo - span.pm_start) as u32;
                 let raw_hi = span.raw_start + (hi - span.pm_start) as u32;
-                match texts.last_mut() {
+                match intervals.texts.last_mut() {
                     Some(last) if last.1 == raw_lo && last.2 + u64::from(last.1 - last.0) == lo => {
                         last.1 = raw_hi;
                     }
-                    _ => texts.push((raw_lo, raw_hi, lo)),
+                    _ => intervals.texts.push((raw_lo, raw_hi, lo)),
                 }
             }
         }
+        let empty_fragment = paragraphs.is_empty();
+        if empty_fragment || (!bounds.contains_key(&block_paragraph) && !placed.continued_on_next) {
+            paragraphs.entry(block_paragraph).or_default();
+        }
+        let joined = bounds.keys().any(|paragraph| *paragraph != block_paragraph);
+        for (paragraph_index, intervals) in paragraphs {
+            let (source, node) = if paragraph_index == block_paragraph {
+                (source.clone(), node)
+            } else {
+                let Some(source) = self.source_of(occurrence, map, paragraph_index) else {
+                    continue;
+                };
+                let Some(node) = index
+                    .paragraphs
+                    .get(&(source.story.clone(), source.para_id.clone()))
+                else {
+                    continue;
+                };
+                (source, node)
+            };
+            let mut ranges: Vec<(i64, i64)> = intervals
+                .texts
+                .iter()
+                .map(|text| (text.2 as i64, (text.2 + u64::from(text.1 - text.0)) as i64))
+                .chain(
+                    intervals
+                        .atoms
+                        .iter()
+                        .flat_map(|atom| atom.2.iter().copied()),
+                )
+                .collect();
+            let flags = match bounds.get(&paragraph_index) {
+                _ if !joined || empty_fragment => {
+                    (placed.continued_from_previous, placed.continued_on_next)
+                }
+                Some(&(first, last)) => (
+                    placed.continued_from_previous
+                        && ranges
+                            .iter()
+                            .map(|range| range.0)
+                            .min()
+                            .is_some_and(|lo| first < lo as u64),
+                    placed.continued_on_next
+                        && ranges
+                            .iter()
+                            .map(|range| range.1)
+                            .max()
+                            .is_some_and(|hi| last > hi as u64),
+                ),
+                None => (false, false),
+            };
+            if ranges.is_empty() {
+                let mark = if joined {
+                    placed
+                        .block
+                        .pm_end
+                        .map_or(start as i64, |end| end as i64 - 1)
+                } else {
+                    start as i64
+                };
+                ranges.push((mark, mark + 1));
+            }
+            let geometry = match placed.frame.filter(|_| !joined) {
+                Some(frame) => Geometry::Frame(frame),
+                None => Geometry::Ranges(region.clone(), ranges),
+            };
+            self.wrap(occurrence, &node.controls, placed.repeated_header);
+            self.placed_nodes.insert(node.id.clone());
+            self.fragment(
+                occurrence,
+                node.id.clone(),
+                node.id.clone(),
+                node.anchor.clone(),
+                FragmentSlice::Block,
+                Some(flags),
+                placed.repeated_header,
+                geometry,
+            );
+            self.paragraph_inlines(
+                occurrence,
+                placed,
+                &region,
+                &units,
+                (&source, node),
+                intervals.texts.into_iter(),
+                intervals
+                    .atoms
+                    .into_iter()
+                    .map(|atom| (paragraph_index, atom.0, atom.1, atom.2)),
+            );
+            if placed.clipped {
+                self.diagnostics.push(PageDiagnostic {
+                    code: PageDiagnosticCode::ClippedContent,
+                    node_id: Some(node.id.clone()),
+                    page_index: Some(occurrence.record.page_index),
+                    message: "Its table cell cuts through a line of this paragraph on this page; the line's text is listed, though only part of it shows.".to_owned(),
+                });
+            }
+        }
+    }
+
+    /// Emits the text and atom fragments one source paragraph shows in a placed paragraph.
+    #[allow(clippy::too_many_arguments)]
+    fn paragraph_inlines(
+        &mut self,
+        occurrence: &Occurrence,
+        placed: &PlacedParagraph<'_>,
+        region: &RegionKey,
+        units: &HashMap<(u32, u32), u64>,
+        (source, node): (&Source, &'a ParagraphNode),
+        texts: impl Iterator<Item = (u32, u32, u64)>,
+        atoms: impl Iterator<Item = (u32, u32, u64, Vec<(i64, i64)>)>,
+    ) {
         let mut inlines: Vec<(i64, String, Anchor, FragmentSlice, Geometry)> = Vec::new();
-        for &(raw_start, raw_end, pm_start) in &texts {
+        for (raw_start, raw_end, pm_start) in texts {
             for &view in self.export_views {
                 let Some((projection, by_id)) = self.projection(&source.story, view) else {
                     continue;
@@ -1806,14 +1970,6 @@ impl<'a, 't, T: ReadTxn> Mapper<'a, 't, T> {
                 placed.repeated_header,
                 geometry,
             );
-        }
-        if placed.clipped {
-            self.diagnostics.push(PageDiagnostic {
-                code: PageDiagnosticCode::ClippedContent,
-                node_id: Some(node.id.clone()),
-                page_index: Some(occurrence.record.page_index),
-                message: "Its table cell cuts through a line of this paragraph on this page; the line's text is listed, though only part of it shows.".to_owned(),
-            });
         }
     }
 
@@ -2168,4 +2324,63 @@ fn assemble(
         map.diagnostics.push(stop(page_index));
     }
     map
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn region_settings_compare_compatibility_flags_with_defaults() {
+        let defaults = normalized_region_settings(None, true);
+        for settings in [
+            json!({}),
+            json!({"compatibilityFlags": null}),
+            json!({"compatibilityFlags": {}}),
+            json!({"compatibilityFlags": {
+                "compatibilityMode": 12,
+                "suppressSpBfAfterPgBrk": false
+            }}),
+            json!({"compatibilityFlags": docx_parse::CompatibilityFlags::default()}),
+        ] {
+            assert_eq!(normalized_region_settings(Some(&settings), true), defaults);
+        }
+        for (flag, value) in [
+            ("compatibilityMode", json!(15)),
+            ("noLeading", json!(true)),
+            ("doNotExpandShiftReturn", json!(true)),
+            ("useWord97LineBreakRules", json!(true)),
+            ("balanceSingleByteDoubleByteWidth", json!(true)),
+            ("doNotUseHTMLParagraphAutoSpacing", json!(true)),
+            ("suppressSpBfAfterPgBrk", json!(true)),
+            ("allowSpaceOfSameStyleInTable", json!(true)),
+        ] {
+            let mut full = json!({"compatibilityFlags": docx_parse::CompatibilityFlags::default()});
+            full["compatibilityFlags"][flag] = value.clone();
+            let mut partial = json!({"compatibilityFlags": {}});
+            partial["compatibilityFlags"][flag] = value;
+            assert_eq!(
+                normalized_region_settings(Some(&partial), true),
+                normalized_region_settings(Some(&full), true),
+                "{flag}"
+            );
+            assert_ne!(
+                normalized_region_settings(Some(&partial), true),
+                defaults,
+                "{flag}"
+            );
+        }
+        for settings in [
+            json!({"compatibilityFlags": {"suppressSpBfAfterPgBrk": "true"}}),
+            json!({"evenAndOddHeaders": true}),
+        ] {
+            assert_ne!(normalized_region_settings(Some(&settings), true), defaults);
+        }
+        let authored = json!({"compatibilityFlags": {"compatibilityMode": 15}});
+        assert_eq!(
+            normalized_region_settings(Some(&authored), false),
+            normalized_region_settings(None, false)
+        );
+    }
 }

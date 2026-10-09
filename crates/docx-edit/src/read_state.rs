@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use yrs::{Any, Map, Out, ReadTxn, TextRef, Transact};
 
-use crate::op::{LocRange, OpError, OpResult, para_bounds};
+use crate::op::{OpError, OpResult, para_bounds};
 use crate::ops::{Chunk, ChunkKind, capture_pilcrow};
 use crate::queries::TextView;
 use crate::{
@@ -399,11 +399,29 @@ impl EditingDoc {
         };
         let mut result = Vec::new();
         for story_id in story_ids {
-            for change in self.list_changes(&story_id)? {
-                let range = LocRange {
-                    start: change.range.start.clone(),
-                    end: change.range.end.clone(),
-                };
+            let changes = self.story_changes(&story_id)?;
+            if changes.is_empty() {
+                continue;
+            }
+            let txn = self.yrs_doc().transact();
+            let story = crate::story_ref(&txn, &story_id)?;
+            let bounds = crate::op::para_bounds(&story, &txn);
+            let chunks = self.chunk_snapshot(&story_id, &story, &txn);
+            let views = crate::queries::para_views(&txn, TextView::Raw, &chunks);
+            let controls: Vec<_> = chunks
+                .iter()
+                .filter_map(|chunk| {
+                    if let ChunkKind::Embed(Some(map)) = &chunk.kind
+                        && map_string(map, &txn, KIND_KEY).as_deref() == Some("sdt")
+                        && let Some(Out::Any(content)) = map.get(&txn, "content")
+                    {
+                        Some((chunk, content))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            for (change, _) in changes {
                 let preview = if matches!(
                     change.kind,
                     crate::ChangeKind::ParagraphMarkInsertion
@@ -416,7 +434,49 @@ impl EditingDoc {
                 ) {
                     String::new()
                 } else {
-                    let full = self.text_between(&range, TextView::Raw)?;
+                    let from = crate::op::global_in_bounds(&bounds, &change.range.start)?;
+                    let to = crate::op::global_in_bounds(&bounds, &change.range.end)?;
+                    if to < from {
+                        return Err(OpError::InvalidRange {
+                            start: from,
+                            end: to,
+                        });
+                    }
+                    let mut full = String::new();
+                    let mut start = from;
+                    let first = controls.partition_point(|(chunk, _)| chunk.end() <= from);
+                    for (chunk, content) in &controls[first..] {
+                        if chunk.start >= to {
+                            break;
+                        }
+                        if start < chunk.start {
+                            for para in &views {
+                                para.view_slice_of_raw(start, chunk.start, &mut full);
+                            }
+                        }
+                        let key = if change.kind == crate::ChangeKind::Insertion {
+                            crate::INS
+                        } else {
+                            crate::DEL
+                        };
+                        let inherited = chunk
+                            .attrs
+                            .get(key)
+                            .and_then(crate::queries::revision_parts)
+                            .is_some_and(|(id, ..)| id == change.revision_id);
+                        full.push_str(&crate::inline_content::revision_text(
+                            content,
+                            &change.revision_id,
+                            key,
+                            inherited,
+                        ));
+                        start = to.min(chunk.end());
+                    }
+                    if start < to {
+                        for para in &views {
+                            para.view_slice_of_raw(start, to, &mut full);
+                        }
+                    }
                     full.chars().take(PREVIEW_MAX_CHARS).collect()
                 };
                 result.push(RevisionInfo {
@@ -432,7 +492,7 @@ impl EditingDoc {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
     use std::sync::Arc;
 
     use super::*;
@@ -750,6 +810,188 @@ mod tests {
             .insert_text(&local(), Position::new("body", 5), "!", FormatPolicy::Plain)
             .unwrap();
         assert!(plain.list_revisions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn revision_stamps_include_dates_from_adjacent_same_author_insertions() {
+        let doc = seed("alpha");
+        let first = doc
+            .insert_text(
+                &suggesting("Alice"),
+                Position::new("body", 5),
+                " first",
+                FormatPolicy::Plain,
+            )
+            .unwrap();
+        let later = "2026-07-14T12:01:00Z";
+        let second = doc
+            .insert_text(
+                &EditCtx::local("Alice", later).suggesting(),
+                Position::new("body", 11),
+                " second",
+                FormatPolicy::Plain,
+            )
+            .unwrap();
+        assert_eq!(second.revision_ids, first.revision_ids);
+        let listed = doc.list_revisions().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].change.date, DATE);
+        let id = first.revision_ids[0].clone();
+        assert_eq!(
+            doc.revision_stamps(&[id.clone(), "missing".into()])
+                .unwrap(),
+            BTreeMap::from([(
+                id,
+                BTreeSet::from([
+                    ("Alice".into(), DATE.into()),
+                    ("Alice".into(), later.into()),
+                ]),
+            )])
+        );
+    }
+
+    #[test]
+    fn revision_stamps_collect_text_and_paragraph_stamps_across_stories() {
+        let doc = seed("alpha");
+        doc.create_story("header", "x", "Normal", "left").unwrap();
+        let stamp = |author: &str| {
+            Any::Map(Arc::new(HashMap::from([
+                ("id".into(), Any::from("shared")),
+                ("author".into(), Any::from(author)),
+                ("date".into(), Any::from(DATE)),
+            ])))
+        };
+        doc.apply_raw_ops(
+            "body",
+            vec![RawOp::Format {
+                index: 0,
+                len: 5,
+                attrs: yrs::types::Attrs::from([
+                    (crate::INS.into(), stamp("Insert")),
+                    (crate::DEL.into(), stamp("Delete")),
+                ]),
+            }],
+            &local(),
+        )
+        .unwrap();
+        doc.apply_raw_ops(
+            "header",
+            vec![
+                RawOp::SetEmbedAttr {
+                    index: 1,
+                    key: crate::PPR_INS.into(),
+                    value: stamp("Mark insert"),
+                },
+                RawOp::SetEmbedAttr {
+                    index: 1,
+                    key: crate::PPR_DEL.into(),
+                    value: stamp("Mark delete"),
+                },
+                RawOp::SetEmbedAttr {
+                    index: 1,
+                    key: crate::PPR_CHANGE.into(),
+                    value: Any::Array(Arc::from(vec![
+                        stamp("Properties"),
+                        stamp("Properties again"),
+                    ])),
+                },
+            ],
+            &local(),
+        )
+        .unwrap();
+        let expected: BTreeSet<(String, String)> = [
+            "Insert",
+            "Delete",
+            "Mark insert",
+            "Mark delete",
+            "Properties",
+            "Properties again",
+        ]
+        .into_iter()
+        .map(|author| (author.to_owned(), DATE.to_owned()))
+        .collect();
+        assert_eq!(
+            doc.revision_stamps(&["shared".into()]).unwrap(),
+            BTreeMap::from([("shared".into(), expected)])
+        );
+    }
+
+    #[test]
+    fn listed_revisions_match_their_per_change_reads() {
+        let doc = seed("alpha beta gamma delta epsilon zeta eta theta iota kappa");
+        for at in [45, 36, 27, 18, 11, 5] {
+            doc.split_paragraph(&local(), Position::new("body", at), None)
+                .unwrap();
+        }
+        doc.insert_text(
+            &suggesting("Alice"),
+            Position::new("body", 2),
+            "one",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+        doc.delete_range(&suggesting("Bob"), StoryRange::new("body", 14, 18))
+            .unwrap();
+        doc.split_paragraph(&suggesting("Carol"), Position::new("body", 26), None)
+            .unwrap();
+        doc.insert_text(
+            &suggesting("Dan"),
+            Position::new("body", 40),
+            "two",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+        let last = doc
+            .locate(&doc.loc_at(&Position::new("body", u32::MAX)).unwrap())
+            .unwrap();
+        doc.delete_range(
+            &suggesting("Eve"),
+            StoryRange::new("body", last.index - 3, last.index),
+        )
+        .unwrap();
+
+        let revisions = doc.list_revisions().unwrap();
+        assert!(revisions.len() >= 5);
+        for revision in &revisions {
+            let range = &revision.change.range;
+            for loc in [&range.start, &range.end] {
+                let position = doc.locate(loc).unwrap();
+                assert_eq!(&doc.loc_at(&position).unwrap(), loc);
+            }
+            let preview: String = if matches!(
+                revision.change.kind,
+                ChangeKind::ParagraphMarkInsertion | ChangeKind::ParagraphMarkDeletion
+            ) {
+                String::new()
+            } else {
+                doc.text_between(range, TextView::Raw)
+                    .unwrap()
+                    .chars()
+                    .take(PREVIEW_MAX_CHARS)
+                    .collect()
+            };
+            assert_eq!(revision.preview, preview, "{revision:?}");
+        }
+
+        let txn = doc.yrs_doc().transact();
+        let story = crate::story_ref(&txn, "body").unwrap();
+        let bounds = para_bounds(&story, &txn);
+        let len = bounds.last().unwrap().pilcrow;
+        for index in 0..=len + 2 {
+            let naive = bounds
+                .iter()
+                .find(|bounds| index <= bounds.pilcrow)
+                .unwrap_or(bounds.last().unwrap());
+            let loc = crate::op::loc_in_bounds("body", &bounds, index).unwrap();
+            assert_eq!(loc.para, naive.para_id, "index {index}");
+            assert_eq!(
+                loc.offset,
+                index
+                    .min(naive.pilcrow)
+                    .saturating_sub(naive.start)
+                    .min(naive.len())
+            );
+        }
     }
 
     #[test]

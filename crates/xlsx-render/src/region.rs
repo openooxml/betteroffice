@@ -14,6 +14,11 @@ use crate::geometry::GridGeometry;
 /// origin at the range's top-left.
 pub fn viewport_for_range(sheet: &Sheet, styles: &Stylesheet, range: CellRange) -> Viewport {
     let geom = GridGeometry::new(sheet, styles);
+    viewport_for_range_with_geometry(&geom, range)
+}
+
+#[doc(hidden)]
+pub fn viewport_for_range_with_geometry(geom: &GridGeometry, range: CellRange) -> Viewport {
     let x = geom.col_x(range.start.col);
     let y = geom.row_y(range.start.row);
     let right = geom.col_x(range.end.col + 1);
@@ -43,18 +48,27 @@ pub fn viewport_for_used_range(sheet: &Sheet, styles: &Stylesheet) -> Viewport {
 pub fn viewport_for_used_range_within(
     sheet: &Sheet,
     styles: &Stylesheet,
+    fits: impl FnMut(&Viewport) -> bool,
+) -> Viewport {
+    let geometry = GridGeometry::new(sheet, styles);
+    viewport_for_used_range_with_geometry(sheet, &geometry, fits)
+}
+
+#[doc(hidden)]
+pub fn viewport_for_used_range_with_geometry(
+    sheet: &Sheet,
+    geometry: &GridGeometry,
     mut fits: impl FnMut(&Viewport) -> bool,
 ) -> Viewport {
     let range = sheet
         .used_range()
         .unwrap_or_else(|| CellRange::new(CellRef::new(0, 0), CellRef::new(49, 25)));
-    let mut viewport = viewport_for_range(sheet, styles, range);
-    let geometry = GridGeometry::new(sheet, styles);
+    let mut viewport = viewport_for_range_with_geometry(geometry, range);
     let (frozen_rows, frozen_cols) = sheet
         .freeze_pane
         .map_or((0, 0), |pane| (pane.rows, pane.cols));
     for chart in &sheet.charts {
-        let Ok(anchor) = resolve_chart_anchor(chart.anchor, &geometry, frozen_rows, frozen_cols)
+        let Ok(anchor) = resolve_chart_anchor(chart.anchor, geometry, frozen_rows, frozen_cols)
         else {
             continue;
         };
