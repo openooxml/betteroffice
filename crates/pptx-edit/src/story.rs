@@ -293,6 +293,81 @@ impl DeckSession {
         Some(offset.index.min(length))
     }
 
+    pub fn set_story_paragraphs(
+        &self,
+        context: &crate::EditCtx,
+        story_id: &str,
+        paragraphs: &[crate::TextParagraphDraft],
+    ) -> EditResult<StorySnapshot> {
+        if paragraphs.is_empty() || paragraphs.len() > 100 {
+            return Err(EditError::InvalidText("supply 1 to 100 paragraphs".into()));
+        }
+        let mut length = 0;
+        for paragraph in paragraphs {
+            if paragraph.runs.is_empty() || paragraph.runs.len() > 64 {
+                return Err(EditError::InvalidText(
+                    "supply 1 to 64 runs per paragraph".into(),
+                ));
+            }
+            if paragraph
+                .alignment
+                .as_deref()
+                .is_some_and(|alignment| !ALIGNMENTS.contains(&alignment))
+            {
+                return Err(EditError::InvalidText(
+                    "unrecognized paragraph alignment".into(),
+                ));
+            }
+            for run in &paragraph.runs {
+                validate_xml_text(&run.text)?;
+                if run.text.contains(['\r', '\n']) {
+                    return Err(EditError::InvalidText(
+                        "each run must stay in one paragraph".into(),
+                    ));
+                }
+                let style = &run.style;
+                validate_style_values(
+                    style.font_family.as_deref(),
+                    style.underline.as_deref(),
+                    style.color.as_deref(),
+                    style.font_size_pt,
+                    style.spacing_pt,
+                    style.baseline_pct,
+                    style.kern_pt,
+                )?;
+                length += run.text.encode_utf16().count();
+            }
+        }
+        if length > 16_000 {
+            return Err(EditError::InvalidText(
+                "text exceeds the 16000-character limit".into(),
+            ));
+        }
+        let story = story_ref(&self.doc.transact(), story_id)?;
+        let paragraph_ids: Vec<_> = paragraphs.iter().map(|_| self.next_id("para")).collect();
+        self.automatic_undo_barrier();
+        let mut txn = self.transact_for(context);
+        let length = story.len(&txn);
+        story.remove_range(&mut txn, 0, length);
+        for (paragraph, id) in paragraphs.iter().zip(paragraph_ids) {
+            for run in &paragraph.runs {
+                let index = story.len(&txn);
+                insert_styled_text(&story, &mut txn, index, &run.text, &run.style);
+            }
+            append_pilcrow(
+                &story,
+                &mut txn,
+                &id,
+                paragraph.alignment.as_deref(),
+                0,
+                None,
+            );
+        }
+        drop(txn);
+        self.automatic_undo_barrier();
+        self.story(story_id)
+    }
+
     pub fn insert_text(
         &self,
         context: &crate::EditCtx,

@@ -12,6 +12,7 @@ use pptx_parse::{
 #[cfg(any(feature = "wasm", test))]
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use yrs::types::AsPrelim;
 use yrs::updates::decoder::Decode;
 use yrs::{
     Any, Array, ArrayPrelim, ArrayRef, ClientID, Doc, Map, MapPrelim, MapRef, Out, ReadTxn,
@@ -371,6 +372,101 @@ impl DeckSession {
         order.insert(&mut txn, index, slide_id.as_str());
         Ok(SlideReceipt {
             slide_id,
+            from_index: None,
+            to_index: Some(index),
+        })
+    }
+
+    pub fn duplicate_slide(
+        &self,
+        context: &EditCtx,
+        slide_id: &str,
+        index: u32,
+    ) -> EditResult<SlideReceipt> {
+        let (new_id, order, slides, shapes, stories, mut slide, copies) = {
+            let txn = self.doc.transact();
+            let order = required_order(&txn)?;
+            if index > order.len(&txn) {
+                return Err(EditError::OutOfBounds {
+                    index,
+                    length: order.len(&txn),
+                });
+            }
+            let source = slide_ref(&txn, slide_id)?;
+            let shapes = required_map(&txn, SHAPES)?;
+            let stories = required_map(&txn, STORIES)?;
+            let mut slide = source.as_prelim(&txn);
+            slide.insert(
+                "notes".into(),
+                slide_notes(&source, &txn, &self.package).into(),
+            );
+            let roots = live_shape_order(&slide_shape_order(&source, &txn)?, &txn)?;
+            let mut entries = ShapeEntries::default();
+            for id in &roots {
+                collect_shape_entries(&shapes, &txn, id, &mut HashSet::new(), &mut entries)?;
+            }
+            let new_id = self.next_id("slide");
+            let rename = |id: &str| -> String {
+                if let Some(tail) = id.strip_prefix(slide_id) {
+                    format!("{new_id}{tail}")
+                } else {
+                    format!("{new_id}:copy:{id}")
+                }
+            };
+            let mut copies = Vec::new();
+            for id in entries.shape_ids {
+                let source_shape = shape_ref(&txn, &id)?;
+                let mut shape = source_shape.as_prelim(&txn);
+                let new_shape_id = rename(&id);
+                shape.insert("id".into(), new_shape_id.clone().into());
+                let children = map_string_array(&source_shape, &txn, "children")?;
+                shape.insert(
+                    "children".into(),
+                    string_array(&children.iter().map(|id| rename(id)).collect::<Vec<_>>()).into(),
+                );
+                let texts = map_string_array(&source_shape, &txn, "textStories")?;
+                let mut new_texts = Vec::new();
+                for text_id in texts {
+                    let new_text_id = text_id.replacen(&id, &new_shape_id, 1);
+                    let text = stories
+                        .get(&txn, &text_id)
+                        .ok_or_else(|| EditError::StoryNotFound(text_id.clone()))?;
+                    copies.push((true, new_text_id.clone(), text.as_prelim(&txn)));
+                    new_texts.push(new_text_id);
+                }
+                shape.insert("textStories".into(), string_array(&new_texts).into());
+                copies.push((false, new_shape_id, shape.into()));
+            }
+            slide.insert(
+                "shapes".into(),
+                ArrayPrelim::from(roots.iter().map(|id| rename(id)).collect::<Vec<_>>()).into(),
+            );
+            (
+                new_id,
+                order,
+                required_map(&txn, SLIDES)?,
+                shapes,
+                stories,
+                slide,
+                copies,
+            )
+        };
+        slide.insert("id".into(), new_id.clone().into());
+        self.automatic_undo_barrier();
+        let mut txn = self.transact_for(context);
+        for (story, id, value) in copies {
+            if story {
+                stories.insert(&mut txn, id, value);
+            } else {
+                shapes.insert(&mut txn, id, value);
+            }
+        }
+        slides.insert(&mut txn, new_id.as_str(), slide);
+        order.insert(&mut txn, index, new_id.as_str());
+        drop(txn);
+        self.automatic_undo_barrier();
+        Ok(SlideReceipt {
+            slide_id: new_id,
             from_index: None,
             to_index: Some(index),
         })

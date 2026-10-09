@@ -63,7 +63,9 @@ enum Op {
     FormatText(String, u32, u32, TextStylePatch),
     InsertParagraphBreak(String, u32),
     SetParagraphAlignment(String, u32, u32, Option<String>),
+    SetStoryParagraphs(String, Vec<crate::TextParagraphDraft>),
     InsertSlide(u32, Option<String>),
+    DuplicateSlide(String, u32),
     DeleteSlide(String),
     MoveSlide(String, u32),
     SetSlideNotes(String, String),
@@ -333,9 +335,17 @@ impl WireOp {
                 let (id, start, end, align) = tuple(a, 4, 4)?;
                 Op::SetParagraphAlignment(id, start, end, align)
             }
+            "setStoryParagraphs" => {
+                let (id, paragraphs) = tuple(a, 2, 2)?;
+                Op::SetStoryParagraphs(id, paragraphs)
+            }
             "insertSlide" => {
                 let (index, layout) = tuple(a, 1, 2)?;
                 Op::InsertSlide(index, layout)
+            }
+            "duplicateSlide" => {
+                let (id, index) = tuple(a, 2, 2)?;
+                Op::DuplicateSlide(id, index)
             }
             "deleteSlide" => {
                 let (id,) = tuple(a, 1, 1)?;
@@ -500,9 +510,13 @@ impl Op {
             Self::SetParagraphAlignment(id, start, end, align) => {
                 value(session.set_paragraph_alignment(&ctx, id, *start, *end, align.as_deref())?)
             }
+            Self::SetStoryParagraphs(id, paragraphs) => {
+                value(session.set_story_paragraphs(&ctx, id, paragraphs)?)
+            }
             Self::InsertSlide(at, layout) => {
                 value(session.insert_slide(&ctx, *at, layout.as_deref())?)
             }
+            Self::DuplicateSlide(id, at) => value(session.duplicate_slide(&ctx, id, *at)?),
             Self::DeleteSlide(id) => value(session.delete_slide(&ctx, id)?),
             Self::MoveSlide(id, at) => value(session.move_slide(&ctx, id, *at)?),
             Self::SetSlideNotes(id, text) => {
