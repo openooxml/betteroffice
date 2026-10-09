@@ -16,6 +16,8 @@
       "@betteroffice/docx/editor": ["../docx/src/editor/index.ts"],
       "@betteroffice/docx/layout": ["../docx/src/layout/index.ts"],
       "@betteroffice/docx/layout/render": ["../docx/src/layout/render/index.ts"],
+      "@betteroffice/xlsx": ["../xlsx/src/index.ts"],
+      "@betteroffice/pptx": ["../pptx/src/index.ts"],
       "@betteroffice/fonts": ["../fonts/src/index.ts"]
     }
   },

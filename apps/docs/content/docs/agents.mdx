@@ -1,12 +1,13 @@
 ---
 title: Agents
-description: Search, inspect, propose, and preview DOCX edits through the agents SDK and MCP server.
+description: Search, inspect, and propose Office edits through the agents SDK and MCP server.
 ---
 
 `@betteroffice/agents` gives agents a bounded document workflow:
 discover → grep → read → propose → render → verify → export.
-The first release supports DOCX, including body text, headers, footers, and table
-cell stories exposed by the editing engine.
+DOCX supports body text, headers, footers, and table cell stories. Initial XLSX
+and PPTX prototypes add cell input/formula and slide-text proposals; rendering
+and tracked changes remain DOCX-only.
 
 ## MCP
 
@@ -63,3 +64,20 @@ the rendered pages and their warnings before delivery.
 
 The [package guide](https://github.com/openooxml/betteroffice/tree/main/packages/agents)
 contains the complete tool catalog, limits, host integration, and testing setup.
+
+## Spreadsheet and presentation prototypes
+
+`openXlsx(bytes)` and `openPptx(bytes)` expose the same review, accept/reject,
+proposed export, and save/reopen workflow. Both own their sessions.
+
+For XLSX, use `office_outline` to find sheet IDs, `office_cells` to read an A1
+range, and `office_propose_cells` with `{cell, input}`. Inputs replace entire
+cells; prefix formulas with `=`. Search is case-sensitive over displayed values.
+For PPTX, use `office_grep` and `office_propose` with `{match, newText}` to replace
+one occurrence inside a slide paragraph.
+
+Follow pagination, and narrow searches that report the 10,000-match cap.
+Any committed change invalidates outstanding XLSX/PPTX proposals. PNG rendering,
+tracked changes, and live-session attachment remain DOCX-only. Slide layout,
+notes, and media editing are outside the PPTX prototype. See the package guide
+for complete examples and formula calculation limits.
