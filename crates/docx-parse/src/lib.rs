@@ -32,6 +32,7 @@ pub mod borders;
 pub mod canonical;
 pub mod chart;
 pub mod comments;
+pub mod content_control;
 pub mod document;
 pub mod drawingml;
 pub mod fonts;
@@ -43,6 +44,7 @@ pub mod media;
 pub mod notes;
 pub mod numbering;
 pub mod paragraph;
+pub mod paragraph_identity;
 pub mod relationships;
 pub mod s2;
 pub mod s3;
@@ -70,11 +72,12 @@ pub mod xml;
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
-pub use block::{BlockContent, BlockSdt, StoryParser};
+pub use block::{BlockContent, BlockSdt, StoryParser, story_block_elements, table_part_elements};
 pub use borders::{
     BorderSpec, Borders, parse_border_spec, parse_paragraph_borders, parse_table_borders,
 };
 pub use comments::{Comment, parse_comments, remove_orphan_comment_ranges};
+pub use content_control::{clear_showing_placeholder_xml, parse_sdt_properties_xml};
 pub use document::{
     DocumentBody, Section, extract_all_template_variables, extract_template_variables,
     get_paragraph_text, is_empty_paragraph, parse_document_body,
@@ -149,8 +152,11 @@ pub use s8::{
 };
 pub use s9::{
     BinaryPartWire, S9DocumentBodyWire, S9DocumentWire, S9PackageWire, S9ParseOptions,
-    S9SectionWire, S9WireEnvelope, parse_docx_s9_wire, parse_docx_s9_wire_parts_with_limits,
-    parse_docx_s9_wire_with_limits,
+    S9SectionWire, S9WireEnvelope, media_table_parts, media_table_parts_bytes,
+    parse_docx_s9_preview_from_parts, parse_docx_s9_preview_from_parts_with_budget,
+    parse_docx_s9_preview_with_media_table, parse_docx_s9_preview_with_media_table_with_budget,
+    parse_docx_s9_wire, parse_docx_s9_wire_parts_with_limits, parse_docx_s9_wire_with_limits,
+    parse_docx_s9_wire_with_media_table, parse_docx_s9_wire_with_media_table_bytes,
 };
 pub use scalars::{
     ColorValue, RunScalarProperties, ShadingProperties, UnderlineValue, parse_color_value,
@@ -164,9 +170,9 @@ pub use section::{
 pub use serializer::{
     CanonicalXmlAttribute, CanonicalXmlEvent, S10SerializeRequest, S10SerializeResponse,
     S11SerializeRequest, S11SerializeResponse, S12SerializeRequest, S12SerializeResponse,
-    S13SaveOptions, S13SaveRequest, S13SelectiveSave, SerializerDeterminism, canonical_xml_events,
-    serialize_s10_wire, serialize_s11_wire, serialize_s12_wire, write_docx_s13,
-    write_docx_s13_parts,
+    S13SaveOptions, S13SaveRequest, S13SelectiveSave, S13SourceParagraph, S13SourceParagraphs,
+    SerializerDeterminism, canonical_xml_events, element_span, serialize_s10_wire,
+    serialize_s11_wire, serialize_s12_wire, write_docx_s13, write_docx_s13_parts,
 };
 pub use settings::{
     CompatibilityFlags, DocumentSettings, RevisionView, ThemeFontLanguage, parse_settings,

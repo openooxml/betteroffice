@@ -158,7 +158,8 @@ pub fn parse_relationships(
     Ok(relationships)
 }
 
-pub(crate) fn office_document_path(
+/// The main document part `_rels/.rels` names, `word/document.xml` when it names none.
+pub fn office_document_path(
     parts: &[(String, Vec<u8>)],
     budget: &mut ParseBudget<'_>,
 ) -> Result<String, ParseError> {

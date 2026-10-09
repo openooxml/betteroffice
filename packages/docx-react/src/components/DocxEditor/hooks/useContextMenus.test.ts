@@ -19,7 +19,7 @@ function options(
       } as PagedEditorRef,
     },
     focusActiveEditor: () => {},
-    openSplitCellDialog: () => {},
+    runTableAction: () => {},
     editorContentRef: { current: null },
     displayListQueries: null,
     interactionPageHostRef: { current: null },
@@ -71,5 +71,26 @@ describe('selection context menu', () => {
     });
 
     expect(added).toBe(0);
+  });
+});
+
+describe('read-only context menu', () => {
+  test('offers only Copy and Select all, and no image menu', () => {
+    const { result } = renderHook(() => useContextMenus({ ...options(false), readOnly: true }));
+    act(() =>
+      result.current.handleContextMenu({
+        x: 10,
+        y: 20,
+        hasSelection: true,
+        image: { pos: 4, wrapType: 'inline' },
+      })
+    );
+
+    expect(result.current.imageContextMenu.isOpen).toBe(false);
+    expect(result.current.contextMenu.isOpen).toBe(true);
+    expect(result.current.contextMenuItems.map((item) => item.action)).toEqual([
+      'copy',
+      'selectAll',
+    ]);
   });
 });

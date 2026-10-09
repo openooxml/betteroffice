@@ -29,7 +29,7 @@ export interface ResidentFontRequirement {
 
 export interface ResidentMeasurementConfig {
   fontChains: Record<string, number[]>;
-  defaults: { fontSize: 11; fontFamily: 'Calibri' };
+  defaults: { fontSize: number; fontFamily: string };
   compat: { noLeading: boolean; doNotExpandShiftReturn: boolean };
   authoritativeShaping: true;
 }

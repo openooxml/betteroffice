@@ -1,6 +1,6 @@
 use std::collections::{BTreeSet, HashSet};
-use std::sync::atomic::Ordering;
 
+use ooxml_diff::{DiffKind, DiffLimits, LimitFallback};
 use pptx_parse::PptxPackage;
 use serde::{Deserialize, Serialize};
 use yrs::{ArrayRef, Map, MapRef, ReadTxn, Transact};
@@ -10,11 +10,12 @@ use crate::deck::{
     live_shape_order, map_string, map_string_array, required_map, required_order, slide_notes,
     slide_ref, slide_shape_order, snapshot_shape, string_array_ref,
 };
+use crate::inherit::{SlideContext, record_inherited};
 use crate::proposals::{apply_edit, shape_text};
 use crate::{
-    DeckSession, DeckSnapshot, DeckUndoManager, EditError, EditResult, Proposal, ProposalChange,
-    ProposalEdit, ProposalResult, SHAPES, SLIDES, ShapeSnapshot, SlideScope, StorySnapshot,
-    TextRunSnapshot, TextStyle, doc_with_client_id, hydrate_doc,
+    DeckSession, DeckSnapshot, EditError, EditResult, Proposal, ProposalChange, ProposalEdit,
+    ProposalResult, SHAPES, SLIDES, ShapeSnapshot, SlideScope, StorySnapshot, TextRunSnapshot,
+    TextStyle,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,26 +145,11 @@ impl DeckSession {
     /// Hydrates a scratch doc from the live state and applies `edits` — the
     /// `preview_edits` tail, with target validation left to the caller.
     fn preview_doc_with_edits(&self, edits: &[ProposalEdit]) -> ProposalResult<DeckSession> {
-        let doc = doc_with_client_id(self.client_id);
-        let update = self.state_update_v1();
-        hydrate_doc(&doc, &update)?;
-        let undo = DeckUndoManager::new(&doc, self.client_id)?;
-        let (epoch, _epoch_observer) = crate::watch_epoch(&doc)?;
-        let preview = DeckSession {
-            doc,
-            client_id: self.client_id,
-            id_counter: self.id_counter.load(Ordering::Relaxed).into(),
-            package: self.package.clone(),
-            undo: std::cell::RefCell::new(undo),
-            proposals: Default::default(),
-            epoch,
-            _epoch_observer,
-            state_update: std::cell::RefCell::new(None),
-        };
+        let preview = self.stage()?;
         for edit in edits {
             apply_edit(&preview, edit)?;
         }
-        crate::deck::validated_snapshot(&preview.doc, &self.package)?;
+        preview.validated_snapshot()?;
         Ok(preview)
     }
 
@@ -251,12 +237,14 @@ fn scoped_capture<T: ReadTxn>(
             if !shape_in_tree(txn, &slide_shape_order(&slide, txn)?, shape_id)? {
                 return Err(EditError::ShapeNotFound(shape_id.to_owned()));
             }
+            let source_part_path = map_string(&slide, txn, "sourcePartPath");
+            let layout_part_path = map_string(&slide, txn, "layoutPartPath");
             let theme = pptx_parse::slide_theme(
                 package,
-                map_string(&slide, txn, "sourcePartPath").as_deref(),
-                map_string(&slide, txn, "layoutPartPath").as_deref(),
+                source_part_path.as_deref(),
+                layout_part_path.as_deref(),
             );
-            let shape = snapshot_shape(
+            let mut shape = snapshot_shape(
                 &required_map(txn, SHAPES)?,
                 &required_map(txn, crate::STORIES)?,
                 txn,
@@ -264,6 +252,14 @@ fn scoped_capture<T: ReadTxn>(
                 &mut HashSet::new(),
                 Some(&theme),
             )?;
+            record_inherited(
+                std::slice::from_mut(&mut shape),
+                &SlideContext::new(
+                    package,
+                    source_part_path.as_deref(),
+                    layout_part_path.as_deref(),
+                ),
+            );
             let text = shape_text(&shape);
             Ok((Some(shape), text))
         }
@@ -434,57 +430,150 @@ fn diff_story(
     after.length = offset;
 }
 
+/// Proposal previews coarsen a middle whose LCS table would exceed this many cells.
+const PREVIEW_LCS_CELLS: usize = 250_000;
+
 fn diff_tokens<'a>(
     old: &'a [Token],
     new: &'a [Token],
 ) -> Vec<(&'a Token, Option<ProposalTextChangeKind>)> {
     use ProposalTextChangeKind::{Deletion, Insertion};
-    let prefix = old.iter().zip(new).take_while(|(a, b)| a == b).count();
-    let suffix = old[prefix..]
-        .iter()
-        .rev()
-        .zip(new[prefix..].iter().rev())
-        .take_while(|(a, b)| a == b)
-        .count();
-    let mut result: Vec<_> = new[..prefix].iter().map(|token| (token, None)).collect();
-    let a = &old[prefix..old.len() - suffix];
-    let b = &new[prefix..new.len() - suffix];
-    if a.len()
-        .saturating_add(1)
-        .saturating_mul(b.len().saturating_add(1))
-        > 250_000
-    {
-        result.extend(a.iter().map(|token| (token, Some(Deletion))));
-        result.extend(b.iter().map(|token| (token, Some(Insertion))));
-    } else {
-        let width = b.len() + 1;
-        let mut lengths = vec![0u32; (a.len() + 1) * width];
-        for i in (0..a.len()).rev() {
-            for j in (0..b.len()).rev() {
-                lengths[i * width + j] = if a[i] == b[j] {
-                    lengths[(i + 1) * width + j + 1] + 1
-                } else {
-                    lengths[(i + 1) * width + j].max(lengths[i * width + j + 1])
-                };
+    let limits = DiffLimits::new(usize::MAX, PREVIEW_LCS_CELLS, LimitFallback::ReplaceMiddle);
+    let diff = ooxml_diff::diff_tokens(old, new, limits)
+        .expect("the replace-middle fallback never refuses");
+    let mut result = Vec::with_capacity(old.len().max(new.len()));
+    for hunk in diff.hunks {
+        match hunk.kind {
+            DiffKind::Equal => result.extend(new[hunk.new].iter().map(|token| (token, None))),
+            DiffKind::Delete => {
+                result.extend(old[hunk.old].iter().map(|token| (token, Some(Deletion))))
             }
-        }
-        let (mut i, mut j) = (0, 0);
-        while i < a.len() || j < b.len() {
-            if i < a.len() && j < b.len() && a[i] == b[j] {
-                result.push((&b[j], None));
-                i += 1;
-                j += 1;
-            } else if i < a.len()
-                && (j == b.len() || lengths[(i + 1) * width + j] >= lengths[i * width + j + 1])
-            {
-                result.push((&a[i], Some(Deletion)));
-                i += 1;
-            } else {
-                result.push((&b[j], Some(Insertion)));
-                j += 1;
+            DiffKind::Insert => {
+                result.extend(new[hunk.new].iter().map(|token| (token, Some(Insertion))))
             }
         }
     }
-    result.extend(new[new.len() - suffix..].iter().map(|token| (token, None)));
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The proposal diff as it was before the LCS moved into `ooxml-diff`.
+    fn reference<'a>(
+        old: &'a [Token],
+        new: &'a [Token],
+    ) -> Vec<(&'a Token, Option<ProposalTextChangeKind>)> {
+        use ProposalTextChangeKind::{Deletion, Insertion};
+        let prefix = old.iter().zip(new).take_while(|(a, b)| a == b).count();
+        let suffix = old[prefix..]
+            .iter()
+            .rev()
+            .zip(new[prefix..].iter().rev())
+            .take_while(|(a, b)| a == b)
+            .count();
+        let mut result: Vec<_> = new[..prefix].iter().map(|token| (token, None)).collect();
+        let a = &old[prefix..old.len() - suffix];
+        let b = &new[prefix..new.len() - suffix];
+        if a.len()
+            .saturating_add(1)
+            .saturating_mul(b.len().saturating_add(1))
+            > 250_000
+        {
+            result.extend(a.iter().map(|token| (token, Some(Deletion))));
+            result.extend(b.iter().map(|token| (token, Some(Insertion))));
+        } else {
+            let width = b.len() + 1;
+            let mut lengths = vec![0u32; (a.len() + 1) * width];
+            for i in (0..a.len()).rev() {
+                for j in (0..b.len()).rev() {
+                    lengths[i * width + j] = if a[i] == b[j] {
+                        lengths[(i + 1) * width + j + 1] + 1
+                    } else {
+                        lengths[(i + 1) * width + j].max(lengths[i * width + j + 1])
+                    };
+                }
+            }
+            let (mut i, mut j) = (0, 0);
+            while i < a.len() || j < b.len() {
+                if i < a.len() && j < b.len() && a[i] == b[j] {
+                    result.push((&b[j], None));
+                    i += 1;
+                    j += 1;
+                } else if i < a.len()
+                    && (j == b.len() || lengths[(i + 1) * width + j] >= lengths[i * width + j + 1])
+                {
+                    result.push((&a[i], Some(Deletion)));
+                    i += 1;
+                } else {
+                    result.push((&b[j], Some(Insertion)));
+                    j += 1;
+                }
+            }
+        }
+        result.extend(new[new.len() - suffix..].iter().map(|token| (token, None)));
+        result
+    }
+
+    fn runs(text: &str, bold: bool) -> Vec<TextRunSnapshot> {
+        vec![TextRunSnapshot {
+            text: text.to_owned(),
+            style: TextStyle {
+                bold: Some(bold),
+                ..TextStyle::default()
+            },
+        }]
+    }
+
+    fn assert_parity(old: &[TextRunSnapshot], new: &[TextRunSnapshot]) {
+        let (old, new) = (tokens(old), tokens(new));
+        assert_eq!(diff_tokens(&old, &new), reference(&old, &new));
+    }
+
+    #[test]
+    fn preview_diff_matches_the_previous_lcs() {
+        let cases = [
+            ("", ""),
+            ("same text", "same text"),
+            ("the quick brown fox", "the slow brown fox jumps"),
+            ("ab", "ba"),
+            ("a b a b", "b a b a"),
+            ("x y z", ""),
+            ("", "x y z"),
+            ("one two three", "three two one"),
+            ("tied tied tied", "tied tied"),
+        ];
+        for (old, new) in cases {
+            assert_parity(&runs(old, false), &runs(new, false));
+        }
+        assert_parity(&runs("style only", false), &runs("style only", true));
+    }
+
+    #[test]
+    fn oversized_preview_diffs_still_replace_the_middle() {
+        let words = |prefix: &str| {
+            (0..600)
+                .map(|index| format!("{prefix}{index}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let (old, new) = (
+            format!("start {} end", words("a")),
+            format!("start {} end", words("b")),
+        );
+        assert_parity(&runs(&old, false), &runs(&new, false));
+        let (old_tokens, new_tokens) = (tokens(&runs(&old, false)), tokens(&runs(&new, false)));
+        let diff = diff_tokens(&old_tokens, &new_tokens);
+        let first_insertion = diff
+            .iter()
+            .position(|(_, kind)| *kind == Some(ProposalTextChangeKind::Insertion))
+            .unwrap();
+        assert!(
+            diff[..first_insertion]
+                .iter()
+                .skip(2)
+                .all(|(_, kind)| *kind == Some(ProposalTextChangeKind::Deletion))
+        );
+    }
 }

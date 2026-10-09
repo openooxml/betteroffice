@@ -1,6 +1,6 @@
 use betteroffice_xlsx::{
-    CalculationOptions, CellRef, ProposalEditInput, ProposalRequest, Sheet, SheetId, Workbook,
-    WorkbookModel,
+    CalculationOptions, CellRef, EditRequest, ProposalEditInput, ProposalRequest, Sheet, SheetId,
+    Workbook, WorkbookModel,
 };
 
 fn cell(value: &str) -> CellRef {
@@ -158,4 +158,66 @@ fn acceptance_undo_and_redo_preserve_a_peer_edit_and_converge() {
         .unwrap();
     assert_eq!(peer.cell(SheetId(0), cell("C1")).unwrap().input, "42");
     assert_eq!(peer.cell(SheetId(0), cell("Z99")).unwrap().input, "keep");
+}
+
+#[test]
+fn a_batch_that_moves_a_dependency_leaves_the_proposal_to_its_review() {
+    let mut workbook = Workbook::from_model(model()).unwrap();
+    workbook
+        .edit_cell(SheetId(0), cell("A1"), "10", CalculationOptions::default())
+        .unwrap();
+    let id = stage(&mut workbook, "=A1*2");
+    let request: EditRequest = serde_json::from_value(serde_json::json!({
+        "expectVersion": workbook.version(),
+        "steps": [{
+            "op": "setCellInputs",
+            "target": { "sheetId": "sheet:0", "range": { "kind": "a1", "a1": "A1" } },
+            "inputs": [["50"]],
+        }],
+    }))
+    .unwrap();
+    workbook.apply_edits(&request).unwrap().unwrap();
+    assert_eq!(workbook.proposals().len(), 1);
+    assert_eq!(workbook.proposals()[0].edits[0].new_text, "20");
+    assert!(matches!(
+        workbook.accept_proposal(&id, false, CalculationOptions::default()),
+        Err(betteroffice_xlsx::Error::StaleProposal(_))
+    ));
+    assert_eq!(workbook.proposals()[0].edits[0].new_text, "100");
+    let version = workbook.version();
+    workbook
+        .accept_proposal(&id, false, CalculationOptions::default())
+        .unwrap();
+    assert_ne!(workbook.version(), version);
+    assert_eq!(
+        workbook.cell(SheetId(0), cell("C1")).unwrap().input,
+        "=A1*2"
+    );
+}
+
+#[test]
+fn standalone_acceptance_commits_the_authority_with_the_model() {
+    let mut workbook = Workbook::from_model(model()).unwrap();
+    let id = stage(&mut workbook, "42");
+    workbook
+        .accept_proposal(&id, false, CalculationOptions::default())
+        .unwrap();
+    let mut replica = Workbook::from_model_collaborative(model(), 931).unwrap();
+    replica
+        .apply_update_v1(
+            &workbook.encode_state_as_update_v1(),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(replica.cell(SheetId(0), cell("C1")).unwrap().input, "42");
+    workbook.undo(CalculationOptions::default()).unwrap();
+    assert_eq!(workbook.cell(SheetId(0), cell("C1")).unwrap().input, "");
+    let mut undone = Workbook::from_model_collaborative(model(), 932).unwrap();
+    undone
+        .apply_update_v1(
+            &workbook.encode_state_as_update_v1(),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(undone.cell(SheetId(0), cell("C1")).unwrap().input, "");
 }

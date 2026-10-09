@@ -7,6 +7,7 @@ import { createYrsSession, type YrsRenderEnv, type YrsSession } from '../yrs';
 import { documentToYrs } from '../yrs/documentToYrs';
 import { yrsToDocument } from '../yrs/yrsToDocument';
 import type { Document, Paragraph } from '../types/document';
+import { DEFAULT_COMPATIBILITY_FLAGS } from '../docx/settingsParser';
 import {
   buildResidentRegionLayoutRequest,
   computeLayout,
@@ -114,9 +115,26 @@ describe('computeLayout retained kernel inputs', () => {
         'retained layout revision mismatch: expected 1, current 2'
       );
       expect(secondKernel!.measured).toHaveLength(1);
+      expect([firstKernel!.layoutRevision, secondKernel!.layoutRevision]).toEqual([1, 2]);
     } finally {
       session.destroy();
     }
+  });
+});
+
+describe('buildResidentRegionLayoutRequest compatibilityFlags', () => {
+  test('forwards document spacing compatibility settings to lowering', () => {
+    const document = stylesDoc([]);
+    const compatibilityFlags = {
+      ...DEFAULT_COMPATIBILITY_FLAGS,
+      doNotUseHTMLParagraphAutoSpacing: true,
+      suppressSpBfAfterPgBrk: true,
+      allowSpaceOfSameStyleInTable: true,
+    };
+    document.package.settings = { defaultTabStop: 720, compatibilityFlags };
+    const request = buildResidentRegionLayoutRequest(document, 24, {});
+    expect(request.renderEnv.compatibilityFlags).toEqual(compatibilityFlags);
+    expect(request.regions.settings?.compatibilityFlags).toEqual(compatibilityFlags);
   });
 });
 
@@ -241,6 +259,29 @@ describe('computeLayout default style forwarding', () => {
       measurement: { fontChains: {}, defaults: { fontSize: 11, fontFamily: 'Calibri' } } as never,
     });
     expect((seen[1] as YrsRenderEnv).defaultParagraphStyleId).toBe('Override');
+  });
+
+  test('requests cached page totals only when asked', () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const session = {
+      layoutDocumentWithRegionsRetainedJson: (input: string) => {
+        seen.push(JSON.parse(input));
+        return JSON.stringify({ layout: { pages: [] }, notesConverged: true });
+      },
+      residentWorkerProbe: () => ({ layoutRevision: 1 }),
+      retainedKernelInputsJson: () => JSON.stringify({ measured: [], options: {} }),
+    };
+    const inputs = {
+      document: null,
+      pageGap: 24,
+      session: session as never,
+      renderEnv: {},
+      measurement: { fontChains: {}, defaults: { fontSize: 11, fontFamily: 'Calibri' } } as never,
+    };
+    computeLayout(inputs);
+    computeLayout({ ...inputs, cachedPageTotals: true });
+    expect(seen[0]).not.toHaveProperty('cachedPageTotals');
+    expect(seen[1]!.cachedPageTotals).toBe(true);
   });
 
   test('legacy empty env without document still succeeds', () => {

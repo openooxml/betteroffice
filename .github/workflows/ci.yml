@@ -8,6 +8,12 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  # run_id, not ref: a shared group still drops a queued run between two
+  # quick main pushes even with cancel-in-progress false.
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   packages:
     name: Package gate
@@ -17,7 +23,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: "1.3.14"
+          bun-version: "1.4.2"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -52,6 +58,9 @@ jobs:
           bun install --lockfile-only
           git diff --exit-code -- bun.lock
 
+      - name: Check changeset length
+        run: bun scripts/check-changeset-length.ts
+
       - name: Type check
         run: bun run typecheck:packages
 
@@ -79,6 +88,13 @@ jobs:
       - name: Build
         run: bun run build:packages
 
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: "24"
+
+      - name: Import every package entry in plain Node
+        run: node scripts/check-node-import.mjs
+
   audit:
     name: Security audit
     runs-on: ubuntu-latest
@@ -87,7 +103,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: "1.3.14"
+          bun-version: "1.4.2"
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -98,9 +114,10 @@ jobs:
 
       # GHSA-5p4m-2wfm-xmqj reaches only read-yaml-file under @changesets/cli,
       # which parses our own changesets; every way to move it is worse than the
-      # advisory. See SECURITY.md.
+      # advisory. GHSA-vfj7-8cjw-p6xm reaches braces only through build and dev
+      # tooling, and no patched release exists. See SECURITY.md.
       - name: Fail on high or critical advisories
-        run: bun audit --audit-level=high --ignore=GHSA-5p4m-2wfm-xmqj
+        run: bun audit --audit-level=high --ignore=GHSA-5p4m-2wfm-xmqj --ignore=GHSA-vfj7-8cjw-p6xm
 
   rust:
     name: Rust gate
@@ -132,6 +149,8 @@ jobs:
         if: steps.ws.outputs.present == 'true'
         run: |
           cargo clippy -p betteroffice-drawingml --all-targets --all-features -- -D warnings
+          cargo clippy -p betteroffice-metafile --all-targets --all-features -- -D warnings
+          cargo clippy -p betteroffice-docx-parse --all-targets --features tiff,metafile -- -D warnings
           cargo clippy -p betteroffice-docx --all-targets --all-features -- -D warnings
           cargo clippy -p betteroffice-pptx --all-targets --all-features -- -D warnings
           cargo clippy -p betteroffice-vsdx-edit --all-targets --all-features -- -D warnings
@@ -159,6 +178,8 @@ jobs:
         if: steps.ws.outputs.present == 'true'
         run: |
           cargo test -p betteroffice-drawingml --all-features
+          cargo test -p betteroffice-metafile --all-features
+          cargo test -p betteroffice-docx-parse --features tiff,metafile
           cargo test -p betteroffice-docx --all-features
           cargo test -p betteroffice-pptx --all-features
           cargo test -p betteroffice-vsdx-edit --features wasm

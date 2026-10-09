@@ -1,24 +1,30 @@
 use pptx_edit::DeckSession;
-use pptx_render::{PositionedTextLine, Primitive, SlideRenderer, SurfaceDisplayList};
+use pptx_render::{
+    PositionedTextLine, Primitive, RenderedSlide, SlideRenderer, SurfaceDisplayList,
+};
 
 const DECK: &[u8] = include_bytes!("fixtures/theme-fonts.pptx");
 const SANS: &[u8] = include_bytes!("../../../packages/fonts/assets/LiberationSans-Regular.ttf");
 const SERIF: &[u8] = include_bytes!("../../../packages/fonts/assets/LiberationSerif-Regular.ttf");
+const REGISTERED: [(&str, &[u8]); 3] = [
+    ("Arial", SANS),
+    ("Liberation Sans", SANS),
+    ("Liberation Serif", SERIF),
+];
 
-fn render(slide: usize) -> SurfaceDisplayList {
+fn rendered(slide: usize, families: &[(&str, &[u8])]) -> RenderedSlide {
     let session = DeckSession::open(DECK, 291).unwrap();
     let mut renderer = SlideRenderer::new();
-    for (family, bytes) in [
-        ("Arial", SANS),
-        ("Liberation Sans", SANS),
-        ("Liberation Serif", SERIF),
-    ] {
+    for (family, bytes) in families {
         renderer.register_font(family, false, false, bytes).unwrap();
     }
     renderer
         .layout_slide(session.package(), &session.snapshot().unwrap(), slide)
         .unwrap()
-        .display_list
+}
+
+fn render(slide: usize) -> SurfaceDisplayList {
+    rendered(slide, &REGISTERED).display_list
 }
 
 fn lines(list: &SurfaceDisplayList, id: u32) -> &[PositionedTextLine] {
@@ -61,6 +67,74 @@ fn major_theme_runs_use_the_major_face_and_metrics() {
     assert_eq!(explicit.font_family, "Arial");
     assert_eq!(explicit.font_id, 0);
     assert_eq!(explicit.color, "#7F3F00");
+}
+
+fn shape_id(list: &SurfaceDisplayList, id: u32) -> &str {
+    list.primitives
+        .iter()
+        .find_map(|primitive| match primitive {
+            Primitive::TextBox {
+                object_id,
+                shape_id,
+                ..
+            } if *object_id == id => shape_id.as_deref(),
+            _ => None,
+        })
+        .unwrap()
+}
+
+fn run_texts(list: &SurfaceDisplayList) -> Vec<String> {
+    list.primitives
+        .iter()
+        .filter_map(|primitive| match primitive {
+            Primitive::TextBox { lines, .. } => Some(lines),
+            _ => None,
+        })
+        .flatten()
+        .flat_map(|line| &line.runs)
+        .map(|run| run.text.clone())
+        .filter(|text| !text.trim().is_empty())
+        .collect()
+}
+
+#[test]
+fn a_registered_family_reports_no_substitution() {
+    assert!(rendered(0, &REGISTERED).font_substitutions.is_empty());
+}
+
+#[test]
+fn a_missing_family_reports_the_family_it_drew_instead() {
+    let slide = rendered(0, &[("Arial", SANS), ("Liberation Sans", SANS)]);
+    assert_eq!(slide.font_substitutions.len(), 1);
+    let reported = &slide.font_substitutions[0];
+    assert_eq!(reported.requested_family, "Liberation Serif");
+    assert_eq!(reported.selected_family, "Arial");
+    assert_eq!(reported.shape_id, shape_id(&slide.display_list, 2));
+}
+
+#[test]
+fn two_shapes_missing_one_family_report_it_once() {
+    let slide = rendered(0, &[("Arial", SANS), ("Liberation Sans", SANS)]);
+    for id in [2, 3] {
+        assert_eq!(
+            lines(&slide.display_list, id)[0].runs[0].font_family,
+            "Arial"
+        );
+    }
+    assert_eq!(slide.font_substitutions.len(), 1);
+}
+
+#[test]
+fn a_substitution_carries_no_document_text() {
+    let slide = rendered(1, &[("Arial", SANS)]);
+    let reported = format!("{:?}", slide.font_substitutions);
+    assert!(reported.contains("Liberation Serif Light"));
+    assert!(reported.contains("Arial"));
+    let texts = run_texts(&slide.display_list);
+    assert!(texts.iter().any(|text| text.contains("keeps the")));
+    for text in texts {
+        assert!(!reported.contains(&text), "{reported} leaked {text:?}");
+    }
 }
 
 #[test]

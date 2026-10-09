@@ -216,8 +216,207 @@ fn replace_range_suggesting_shares_one_revision_id() {
     );
     assert_eq!(
         doc.para_text(&para, TextView::Raw).unwrap(),
-        "alpha BETAbeta gamma"
+        "alpha betaBETA gamma"
     );
+    let inserted = receipt.range.as_ref().unwrap();
+    assert_eq!(
+        doc.locate_range(inserted).unwrap(),
+        StoryRange::new("body", 10, 14)
+    );
+    assert_eq!(doc.text_between(inserted, TextView::Raw).unwrap(), "BETA");
+}
+
+#[test]
+fn replace_range_suggesting_follows_retained_text_and_retracts_own_insertions() {
+    for rich in [false, true] {
+        for accept in [false, true] {
+            let (doc, _) = doc_with("abcdef");
+            doc.insert_text(
+                &sug("Alice"),
+                Position::new("body", 2),
+                "ZZ",
+                FormatPolicy::Plain,
+            )
+            .unwrap();
+            doc.insert_text(
+                &sug("Bob"),
+                Position::new("body", 5),
+                "XY",
+                FormatPolicy::Plain,
+            )
+            .unwrap();
+            let range = StoryRange::new("body", 1, 9);
+            let receipt = if rich {
+                doc.replace_range_rich(
+                    &sug("Bob"),
+                    range,
+                    &[RichRun {
+                        text: "NEW".to_owned(),
+                        ..RichRun::default()
+                    }],
+                )
+            } else {
+                doc.replace_range(&sug("Bob"), range, "NEW")
+            }
+            .unwrap();
+            assert_eq!(raw_text(&doc), "abZZcdeNEWf");
+            let inserted = receipt.range.as_ref().unwrap();
+            assert_eq!(
+                doc.locate_range(inserted).unwrap(),
+                StoryRange::new("body", 7, 10)
+            );
+            assert_eq!(doc.text_between(inserted, TextView::Raw).unwrap(), "NEW");
+            let nested = seg_attrs(&doc, "ZZ");
+            assert_eq!(revision_author_of(&nested, "ins").as_deref(), Some("Alice"));
+            assert_eq!(revision_author_of(&nested, "del").as_deref(), Some("Bob"));
+            let target = ChangeTarget::Revision(receipt.revision_ids[0].clone());
+            if accept {
+                doc.accept_change(&ctx(), &target).unwrap();
+                assert_eq!(raw_text(&doc), "aNEWf");
+            } else {
+                doc.reject_change(&ctx(), &target).unwrap();
+                assert_eq!(raw_text(&doc), "abZZcdef");
+                assert!(!active(&seg_attrs(&doc, "ZZ"), "del"));
+            }
+        }
+    }
+}
+
+#[test]
+fn replace_range_suggesting_across_paragraphs_follows_the_struck_pilcrow() {
+    for rich in [false, true] {
+        for accept in [false, true] {
+            let (doc, first) = doc_with("onetwo");
+            let split = doc
+                .split_paragraph(&ctx(), Position::new("body", 3), None)
+                .unwrap();
+            let range = StoryRange::new("body", 2, 5);
+            let receipt = if rich {
+                doc.replace_range_rich(
+                    &sug("Bob"),
+                    range,
+                    &[RichRun {
+                        text: "X".to_owned(),
+                        ..RichRun::default()
+                    }],
+                )
+            } else {
+                doc.replace_range(&sug("Bob"), range, "X")
+            }
+            .unwrap();
+            let paragraphs = doc.paragraphs("body").unwrap();
+            assert_eq!(paragraphs[0].para_id, first);
+            assert_eq!(paragraphs[0].text, "one");
+            assert_eq!(paragraphs[1].text, "tXwo");
+            assert!(active(&paragraphs[0].properties, "pPrDel"));
+            assert_eq!(
+                receipt.range,
+                Some(LocRange::new(
+                    Loc::new("body", split.second_para_id.clone(), 1),
+                    Loc::new("body", split.second_para_id, 2),
+                ))
+            );
+            let target = ChangeTarget::Revision(receipt.revision_ids[0].clone());
+            if accept {
+                doc.accept_change(&ctx(), &target).unwrap();
+                let paragraphs = doc.paragraphs("body").unwrap();
+                assert_eq!(paragraphs.len(), 1);
+                assert_eq!(paragraphs[0].text, "onXwo");
+            } else {
+                doc.reject_change(&ctx(), &target).unwrap();
+                let paragraphs = doc.paragraphs("body").unwrap();
+                assert_eq!(paragraphs.len(), 2);
+                assert_eq!(paragraphs[0].text, "one");
+                assert_eq!(paragraphs[1].text, "two");
+                assert!(!active(&paragraphs[0].properties, "pPrDel"));
+            }
+        }
+    }
+}
+
+#[test]
+fn replace_range_suggesting_clamps_before_the_final_pilcrow() {
+    for rich in [false, true] {
+        for accept in [false, true] {
+            let (doc, para) = doc_with("abc");
+            doc.insert_text(
+                &sug("Bob"),
+                Position::new("body", 3),
+                "XY",
+                FormatPolicy::Plain,
+            )
+            .unwrap();
+            let range = StoryRange::new("body", 0, doc.story_len("body").unwrap());
+            let receipt = if rich {
+                doc.replace_range_rich(
+                    &sug("Bob"),
+                    range,
+                    &[RichRun {
+                        text: "Z".to_owned(),
+                        ..RichRun::default()
+                    }],
+                )
+            } else {
+                doc.replace_range(&sug("Bob"), range, "Z")
+            }
+            .unwrap();
+            assert_eq!(raw_text(&doc), "abcZ");
+            assert_eq!(doc.story_len("body").unwrap(), 5);
+            assert_eq!(
+                receipt.range,
+                Some(LocRange::new(
+                    Loc::new("body", para.clone(), 3),
+                    Loc::new("body", para.clone(), 4),
+                ))
+            );
+            let paragraphs = doc.paragraphs("body").unwrap();
+            assert_eq!(paragraphs.len(), 1);
+            assert_eq!(paragraphs[0].para_id, para);
+            assert!(!active(&paragraphs[0].properties, "pPrDel"));
+            let segments = doc.story_segments("body").unwrap();
+            assert!(!active(&segments.last().unwrap().attributes, "del"));
+            let target = ChangeTarget::Revision(receipt.revision_ids[0].clone());
+            if accept {
+                doc.accept_change(&ctx(), &target).unwrap();
+                assert_eq!(raw_text(&doc), "Z");
+            } else {
+                doc.reject_change(&ctx(), &target).unwrap();
+                assert_eq!(raw_text(&doc), "abc");
+            }
+        }
+    }
+}
+
+#[test]
+fn replace_range_suggesting_collapsed_inserts_at_the_caret() {
+    for rich in [false, true] {
+        let (doc, _) = doc_with("abc");
+        let range = StoryRange::new("body", 1, 1);
+        let receipt = if rich {
+            doc.replace_range_rich(
+                &sug("Bob"),
+                range,
+                &[RichRun {
+                    text: "X".to_owned(),
+                    ..RichRun::default()
+                }],
+            )
+        } else {
+            doc.replace_range(&sug("Bob"), range, "X")
+        }
+        .unwrap();
+        assert_eq!(raw_text(&doc), "aXbc");
+        assert_eq!(
+            doc.locate_range(receipt.range.as_ref().unwrap()).unwrap(),
+            StoryRange::new("body", 1, 2)
+        );
+        assert_eq!(
+            revision_author_of(&seg_attrs(&doc, "X"), "ins").as_deref(),
+            Some("Bob")
+        );
+        assert!(!active(&seg_attrs(&doc, "a"), "del"));
+        assert!(!active(&seg_attrs(&doc, "bc"), "del"));
+    }
 }
 
 #[test]
@@ -1022,48 +1221,80 @@ fn apply_paragraph_style_clears_a_widow_control_off_the_new_style_does_not_autho
     );
 }
 
+fn identities(doc: &EditingDoc) -> Vec<(ParagraphId, Option<String>)> {
+    doc.paragraph_identities()
+        .paragraphs
+        .into_iter()
+        .map(|paragraph| match paragraph.paragraph {
+            ParagraphRef::Session { para_id, .. } => (para_id, paragraph.ooxml_para_id),
+            ParagraphRef::Source(source) => panic!("unexpected source paragraph {source:?}"),
+        })
+        .collect()
+}
+
 #[test]
-fn dedupe_para_ids_first_occurrence_keeps_its_id() {
-    // Concurrent splits of the same paragraph give both new pilcrows the ORIGINAL paraId.
-    let base = EditingDoc::new(1);
-    let original = base
-        .create_story("body", "abcdef", "Normal", "left")
-        .unwrap();
-    let update = base.encode_state_as_update_v1();
-    let a = EditingDoc::new(2);
-    let b = EditingDoc::new(3);
-    a.apply_update_v1(&update).unwrap();
-    b.apply_update_v1(&update).unwrap();
-    a.split_paragraph(&ctx(), Position::new("body", 2), None)
-        .unwrap();
-    b.split_paragraph(&ctx(), Position::new("body", 4), None)
-        .unwrap();
-    let from_a = a.encode_state_as_update_v1();
-    let from_b = b.encode_state_as_update_v1();
-    a.apply_update_v1(&from_b).unwrap();
-    b.apply_update_v1(&from_a).unwrap();
-    let ids: Vec<ParagraphId> = a
-        .paragraphs("body")
-        .unwrap()
-        .into_iter()
-        .map(|p| p.para_id)
-        .collect();
-    assert_eq!(
-        ids.iter().filter(|id| **id == original).count(),
-        2,
-        "concurrent splits duplicate the original id"
-    );
-    let renames = a.dedupe_para_ids(DATE).unwrap();
-    assert_eq!(renames.len(), 1);
-    assert_eq!(renames[0].0, original);
-    let ids: Vec<ParagraphId> = a
-        .paragraphs("body")
-        .unwrap()
-        .into_iter()
-        .map(|p| p.para_id)
-        .collect();
-    assert_eq!(ids.iter().filter(|id| **id == original).count(), 1);
-    assert_eq!(ids[0], original, "FIRST occurrence keeps the id");
+fn concurrent_splits_converge_on_unique_identities() {
+    // Each split copies the paragraph's identity onto its new first-half mark.
+    for (a_at, b_at) in [(2, 4), (3, 3)] {
+        let base = EditingDoc::new(1);
+        let original = base
+            .create_story("body", "abcdef", "Normal", "left")
+            .unwrap();
+        base.persist_paragraph_ids().unwrap();
+        let update = base.encode_state_as_update_v1();
+        let a = EditingDoc::new(2);
+        let b = EditingDoc::new(3);
+        a.apply_update_v1(&update).unwrap();
+        b.apply_update_v1(&update).unwrap();
+        let original_id = identities(&a)[0].1.clone().unwrap();
+        a.split_paragraph(&ctx(), Position::new("body", a_at), None)
+            .unwrap();
+        b.split_paragraph(&ctx(), Position::new("body", b_at), None)
+            .unwrap();
+        let from_a = a.encode_state_as_update_v1();
+        let from_b = b.encode_state_as_update_v1();
+        let late = EditingDoc::new(4);
+        late.apply_update_v1(&update).unwrap();
+        late.apply_update_v1(&from_b).unwrap();
+        a.apply_update_v1(&from_b).unwrap();
+        b.apply_update_v1(&from_a).unwrap();
+        assert_eq!(
+            identities(&a),
+            identities(&b),
+            "repairs agree before exchange"
+        );
+        late.apply_update_v1(&from_a).unwrap();
+        assert_eq!(
+            identities(&late),
+            identities(&a),
+            "delivery order is irrelevant"
+        );
+        let from_a = a.encode_state_as_update_v1();
+        let from_b = b.encode_state_as_update_v1();
+        let from_late = late.encode_state_as_update_v1();
+        a.apply_update_v1(&from_b).unwrap();
+        b.apply_update_v1(&from_late).unwrap();
+        b.apply_update_v1(&from_a).unwrap();
+        late.apply_update_v1(&from_a).unwrap();
+        late.apply_update_v1(&from_b).unwrap();
+        a.apply_update_v1(&from_late).unwrap();
+
+        let converged = identities(&a);
+        assert_eq!(converged, identities(&b));
+        assert_eq!(converged, identities(&late));
+        assert_eq!(a.encode_state_vector_v1(), b.encode_state_vector_v1());
+        assert_eq!(a.encode_state_vector_v1(), late.encode_state_vector_v1());
+        assert_eq!(converged.len(), 3);
+        assert_eq!(converged[0], (original.clone(), Some(original_id)));
+        let keys: std::collections::HashSet<_> = converged.iter().map(|(key, _)| key).collect();
+        let ids: std::collections::HashSet<_> = converged
+            .iter()
+            .map(|(_, id)| id.clone().unwrap())
+            .collect();
+        assert_eq!((keys.len(), ids.len()), (3, 3));
+        assert!(a.dedupe_para_ids(DATE).unwrap().is_empty());
+        assert!(b.persist_paragraph_ids().unwrap().assignments.is_empty());
+    }
 }
 
 // ---------------------------------------------------------------------------

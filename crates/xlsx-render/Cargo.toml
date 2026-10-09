@@ -20,5 +20,8 @@ ooxml-drawingml = { workspace = true, features = ["chart"] }
 serde = { version = "1", features = ["derive", "rc"] }
 xlsx-model.workspace = true
 
+[features]
+test-counters = []
+
 [dev-dependencies]
 serde_json = "1"

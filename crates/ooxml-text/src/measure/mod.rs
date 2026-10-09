@@ -120,16 +120,18 @@
 //! changes how neutral characters segment, never the sums.
 
 mod floats;
+mod font_slots;
 mod input;
 mod line_filler;
 mod list_marker;
 mod prepare;
 mod tabs;
 
+pub use font_slots::{FontSlotUse, font_slot_use};
 pub use input::{
-    AttrsIn, BlockIn, CompatIn, DefaultsIn, FloatSegmentIn, FloatZoneIn, FontChains, IndentIn,
-    MeasureInput, MeasureRequest, RotationBoundsIn, RunFontSlotsIn, RunIn, RunLanguageSlotsIn,
-    SpacingIn, TabStopIn,
+    AttrsIn, BlockIn, CompatIn, DefaultsIn, FloatSegmentIn, FloatZoneIn, FontChainDependencies,
+    FontChains, IndentIn, MeasureInput, MeasureRequest, RotationBoundsIn, RunFontSlotsIn, RunIn,
+    RunLanguageSlotsIn, SpacingIn, TabStopIn,
 };
 
 use crate::font_store::{FontId, FontStore};
@@ -186,6 +188,9 @@ pub struct TypesetRowOut {
     /// floats; painters render it as top margin, `totalHeight` includes it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub float_skip_before: Option<f32>,
+    /// Extra first-line px after a marker overruns its hanging indent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub marker_tab_offset: Option<f32>,
     /// Exact advances for run slices, emitted in visual paint order.
     /// `Some` only under `authoritativeShaping`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -406,14 +411,7 @@ pub fn measure_paragraph_typed(
         );
     }
 
-    // Visible markers consume width only at zero hanging.
-    let marker_inline_width = match attrs {
-        Some(a) if a.indent.as_ref().and_then(|i| i.hanging).unwrap_or(0.0) == 0.0 => {
-            list_marker::list_marker_inline_width(store, request, a)?
-        }
-        _ => 0.0,
-    };
-
+    let insets = line_insets(store, request)?;
     let prepared = prepare::prepare_runs(store, request)?;
 
     // The paragraph mark sizes any line that ends up with no font-bearing
@@ -431,29 +429,15 @@ pub fn measure_paragraph_typed(
         })
         .map(|font| (font, mark_size_pt));
 
-    // Left and right indents shrink both edges; first-line offset affects only the first line.
-    let indent = attrs.and_then(|a| a.indent.as_ref());
-    let indent_left = indent.and_then(|i| i.left).unwrap_or(0.0);
-    let indent_right = indent.and_then(|i| i.right).unwrap_or(0.0);
-    let visible_marker = attrs.is_some_and(|a| {
-        !a.list_marker_hidden
-            && a.list_marker
-                .as_ref()
-                .is_some_and(|marker| !marker.is_empty())
-    });
-    let hanging = indent.and_then(|i| i.hanging).unwrap_or(0.0);
-    let first_line_offset = if visible_marker && hanging > 0.0 {
-        0.0
-    } else {
-        indent.and_then(|i| i.first_line).unwrap_or(0.0) - hanging
-    };
-    let body_width = (request.max_width - indent_left - indent_right).max(1.0);
-    let first_line_width = (body_width - first_line_offset - marker_inline_width).max(1.0);
+    let body_width = (request.max_width - insets.left - insets.right).max(1.0);
+    let first_line_width =
+        (body_width - insets.first_line_offset - insets.marker_inline_width).max(1.0);
 
-    line_filler::fill(line_filler::FillParams {
+    let mut extent = line_filler::fill(line_filler::FillParams {
         justify: attrs.and_then(|attrs| attrs.alignment.as_deref()) == Some("justify"),
         store,
         prepared: &prepared,
+        runs: &request.block.runs,
         spacing,
         body_width,
         first_line_width,
@@ -461,14 +445,105 @@ pub fn measure_paragraph_typed(
         mark_font,
         compat: &request.compat,
         tabs: attrs.and_then(|a| a.tabs.as_deref()).unwrap_or(&[]),
-        indent_left_px: indent_left,
-        first_line_offset_px: first_line_offset,
+        indent_left_px: insets.left,
+        first_line_offset_px: insets.first_line_offset,
         zones,
         paragraph_y_offset,
         authoritative_shaping: request.authoritative_shaping,
         snap_pitch_px,
         run_snaps: &run_snaps,
+    })?;
+    if insets.marker_tab_overrun > 0.0
+        && let Some(line) = extent.lines.first_mut()
+    {
+        line.marker_tab_offset = Some(insets.marker_tab_overrun);
+    }
+    Ok(extent)
+}
+
+/// Horizontal room a paragraph's indents and list marker take from its lines.
+struct LineInsets {
+    left: f32,
+    right: f32,
+    /// Offset of the first line's text from the left indent.
+    first_line_offset: f32,
+    /// Width an inline (zero-hanging) list marker takes from the first line.
+    marker_inline_width: f32,
+    marker_tab_overrun: f32,
+}
+
+fn line_insets(
+    store: &FontStore,
+    request: &MeasureRequest<'_>,
+) -> Result<LineInsets, MeasureError> {
+    let attrs = request.block.attrs.as_ref();
+    let indent = attrs.and_then(|a| a.indent.as_ref());
+    let hanging = indent.and_then(|i| i.hanging).unwrap_or(0.0);
+    // Visible markers consume width only at zero hanging.
+    let marker_inline_width = match attrs {
+        Some(a) if hanging == 0.0 => list_marker::list_marker_inline_width(store, request, a)?,
+        _ => 0.0,
+    };
+    let visible_marker = attrs.is_some_and(|a| {
+        !a.list_marker_hidden
+            && a.list_marker
+                .as_ref()
+                .is_some_and(|marker| !marker.is_empty())
+    });
+    let marker_tab_overrun = match attrs {
+        Some(a) if visible_marker && hanging > 0.0 => {
+            list_marker::list_marker_tab_overrun(store, request, a)?
+        }
+        _ => 0.0,
+    };
+    let first_line_offset = if visible_marker && hanging > 0.0 {
+        marker_tab_overrun
+    } else {
+        indent.and_then(|i| i.first_line).unwrap_or(0.0) - hanging
+    };
+    Ok(LineInsets {
+        left: indent.and_then(|i| i.left).unwrap_or(0.0),
+        right: indent.and_then(|i| i.right).unwrap_or(0.0),
+        first_line_offset,
+        marker_inline_width,
+        marker_tab_overrun,
     })
+}
+
+/// The narrowest `maxWidth` at which [`measure_paragraph_typed`] lays the
+/// paragraph out without breaking a line inside a word, a field or an inline
+/// image: its widest such span plus the indents beside it, and for the first
+/// span also the first-line indent and an inline list marker. Zero for a
+/// paragraph with no text.
+pub fn min_content_width_typed(
+    store: &FontStore,
+    request: &MeasureRequest<'_>,
+) -> Result<f32, MeasureError> {
+    if request.block.kind != "paragraph" {
+        return Err(MeasureError::Unsupported(format!(
+            "block kind {:?}",
+            request.block.kind
+        )));
+    }
+    let runs = &request.block.runs;
+    if runs.len() > MAX_RUNS {
+        return Err(MeasureError::Unsupported(format!(
+            "too many runs ({} > {MAX_RUNS})",
+            runs.len()
+        )));
+    }
+    if runs.is_empty()
+        || (runs.len() == 1 && runs[0].kind == "text" && is_whitespace_only(&runs[0]))
+    {
+        return Ok(0.0);
+    }
+    let insets = line_insets(store, request)?;
+    let prepared = prepare::prepare_runs(store, request)?;
+    let (widest, first) = line_filler::unbreakable_spans(&prepared, runs);
+    Ok((insets.left
+        + insets.right
+        + widest.max(first + insets.first_line_offset + insets.marker_inline_width))
+    .max(0.0))
 }
 
 /// JSON boundary: a [`MeasureInput`] envelope in, a serialized
@@ -496,6 +571,7 @@ fn zero_row() -> TypesetRowOut {
         right_offset: None,
         segments: None,
         float_skip_before: None,
+        marker_tab_offset: None,
         run_advances: None,
         cluster_advances: None,
         bidi_slices: None,
@@ -676,5 +752,116 @@ mod authoritative_tests {
         assert_eq!(over_wide.lines[0].line_height, fits.lines[0].line_height);
         assert_eq!(over_wide.total_height, fits.total_height);
         assert!(over_wide.lines[0].line_height >= 400.0);
+    }
+}
+
+#[cfg(test)]
+mod min_content_tests {
+    use super::*;
+
+    const FIXTURE: &[u8] = include_bytes!("../../tests/fonts/LiberationSans-Regular.ttf");
+    /// Advance of '0' at 12pt (16px): 1139/128.
+    const W0: f32 = 1139.0 / 128.0;
+
+    fn input(block: serde_json::Value, max_width: f32) -> MeasureInput {
+        serde_json::from_value(serde_json::json!({
+            "block": block,
+            "maxWidth": max_width,
+            "fontChains": { "liberation sans|0|0": [0] },
+            "defaults": { "fontSize": 12.0, "fontFamily": "Liberation Sans" }
+        }))
+        .unwrap()
+    }
+
+    fn store() -> FontStore {
+        let mut store = FontStore::new();
+        store.register(FIXTURE.to_vec()).unwrap();
+        store
+    }
+
+    fn min_content(block: serde_json::Value) -> f32 {
+        min_content_width_typed(&store(), &input(block, 1000.0).as_request()).unwrap()
+    }
+
+    fn line_starts(block: serde_json::Value, max_width: f32) -> Vec<u32> {
+        measure_paragraph(&store(), &input(block, max_width))
+            .unwrap()
+            .lines
+            .iter()
+            .map(|line| line.head_char)
+            .collect()
+    }
+
+    fn line_heads(block: serde_json::Value, max_width: f32) -> Vec<(u32, u32)> {
+        measure_paragraph(&store(), &input(block, max_width))
+            .unwrap()
+            .lines
+            .iter()
+            .map(|line| (line.head_run, line.head_char))
+            .collect()
+    }
+
+    #[test]
+    fn a_word_split_across_runs_wraps_whole() {
+        let block = serde_json::json!({ "kind": "paragraph", "runs": [
+            { "kind": "text", "text": "0000 00" },
+            { "kind": "text", "text": "00 0" }
+        ]});
+        assert_eq!(line_heads(block, 7.0 * W0), vec![(0, 0), (0, 5)]);
+    }
+
+    #[test]
+    fn the_narrowest_width_that_cuts_no_word_is_the_widest_word() {
+        let block = serde_json::json!({ "kind": "paragraph", "runs": [
+            { "kind": "text", "text": "00 0000 0" }
+        ]});
+        let width = min_content(block.clone());
+        assert_eq!(width, 4.0 * W0);
+        assert_eq!(line_starts(block.clone(), width), vec![0, 3, 8]);
+        assert_eq!(line_starts(block, width - 1.0)[1], 4);
+    }
+
+    #[test]
+    fn a_word_split_across_runs_counts_whole() {
+        let joined = serde_json::json!({ "kind": "paragraph", "runs": [
+            { "kind": "text", "text": "00 00" },
+            { "kind": "text", "text": "00 0" }
+        ]});
+        assert_eq!(min_content(joined), 4.0 * W0);
+        let apart = serde_json::json!({ "kind": "paragraph", "runs": [
+            { "kind": "text", "text": "00 00 " },
+            { "kind": "text", "text": "000" }
+        ]});
+        assert_eq!(min_content(apart), 3.0 * W0);
+    }
+
+    #[test]
+    fn indents_widen_every_word_and_the_first_line_indent_the_first() {
+        let block = serde_json::json!({
+            "kind": "paragraph",
+            "runs": [{ "kind": "text", "text": "0000 00000" }],
+            "attrs": { "indent": { "left": 10.0, "right": 5.0, "firstLine": 30.0 } }
+        });
+        assert_eq!(min_content(block), 15.0 + 4.0 * W0 + 30.0);
+        let hanging = serde_json::json!({
+            "kind": "paragraph",
+            "runs": [{ "kind": "text", "text": "0000 00000" }],
+            "attrs": { "indent": { "left": 10.0, "right": 5.0, "hanging": 30.0 } }
+        });
+        assert_eq!(min_content(hanging), 15.0 + 5.0 * W0);
+    }
+
+    #[test]
+    fn a_paragraph_without_text_needs_no_width() {
+        assert_eq!(
+            min_content(serde_json::json!({ "kind": "paragraph", "runs": [] })),
+            0.0
+        );
+        assert_eq!(
+            min_content(serde_json::json!({ "kind": "paragraph", "runs": [
+                { "kind": "text", "text": "   " }
+            ]})),
+            0.0
+        );
     }
 }

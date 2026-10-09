@@ -1,6 +1,7 @@
 /** Typed TypeScript boundary for the Rust package writer. */
 
 import type { BlockContent, Document, Hyperlink, Image, Run } from '../types/document';
+import { visitTrackedControlContent } from '../utils/trackedControlContent';
 import { preloadParseWasm, writeDocxS13Wire } from './parseWasm';
 import { collectParts, headerFooterFilename, partText } from './rezip/parts';
 import { preloadOpcWasm, unzipContainer } from './wasm';
@@ -15,13 +16,39 @@ export interface RustSaveDeterminism {
   now: string;
 }
 
+/** Main-document body paragraphs a save replaces by source location, guarded by the part digest. */
+export interface RustSourceParagraphs {
+  partSha256: string;
+  paragraphs: Array<{ path: number[]; block: number }>;
+}
+
 export interface RustSelectiveSave {
   changedParaIds: Iterable<string>;
+  /** Replace only these paragraphs and keep every other part's source bytes. */
+  sourceParagraphs?: RustSourceParagraphs;
 }
 
 export interface RustSaveResult {
   buffer: ArrayBuffer;
   determinism: RustSaveDeterminism;
+}
+
+/**
+ * Paragraph IDs a session save applies: IDs for source paragraphs outside
+ * the edited stories by part and `w:p` occurrence, and parts written as their
+ * source bytes with only these IDs patched in.
+ */
+export interface RustParagraphIds {
+  assignments: Array<{ part: string; ordinal: number; paraId: string }>;
+  patchedParts: Array<{ part: string; paraIds: Array<[number, string]> }>;
+  /**
+   * Story parts written as their source bytes with only some paragraphs
+   * re-serialized: those whose `sourceOrdinal` is in `changed`, or whose
+   * written comments, revisions, notes or relationships differ from their
+   * source. `paragraphs` lists every `sourceOrdinal` the model holds for the
+   * part, `sha256` the source part it addresses.
+   */
+  splicedParts?: Array<{ part: string; sha256: string; paragraphs: number[]; changed: number[] }>;
 }
 
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
@@ -35,7 +62,9 @@ export async function writeDocumentWithRust(
   originalBuffer: ArrayBuffer,
   options: RustSaveOptions = {},
   selective?: RustSelectiveSave,
-  determinism?: RustSaveDeterminism
+  determinism?: RustSaveDeterminism,
+  paragraphIds?: RustParagraphIds,
+  skipMutations = false
 ): Promise<RustSaveResult> {
   await preloadOpcWasm();
   await preloadParseWasm();
@@ -65,12 +94,20 @@ export async function writeDocumentWithRust(
     },
     ...(selective === undefined
       ? {}
-      : { selective: { changedParaIds: [...selective.changedParaIds] } }),
+      : {
+          selective: {
+            changedParaIds: [...selective.changedParaIds],
+            ...(selective.sourceParagraphs === undefined
+              ? {}
+              : { sourceParagraphs: selective.sourceParagraphs }),
+          },
+        }),
+    ...(paragraphIds === undefined ? {} : { paragraphIds }),
   };
   assertSafeSaveTree(request, 'save');
   const bytes = writeDocxS13Wire(JSON.stringify(request), new Uint8Array(originalBuffer));
   const buffer = exactArrayBuffer(bytes);
-  if (!selective) applyRustSaveMutations(document, originalBuffer, buffer);
+  if (!selective && !skipMutations) applyRustSaveMutations(document, originalBuffer, buffer);
   return { buffer, determinism: fixed };
 }
 
@@ -168,7 +205,16 @@ function collectNewImages(blocks: BlockContent[]): Image[] {
           content.type === 'moveFrom' ||
           content.type === 'moveTo'
         ) {
-          for (const inline of content.content) if (inline.type === 'run') visitRun(inline);
+          for (const inline of content.content) {
+            if (inline.type === 'run') visitRun(inline);
+            else visitTrackedControlContent(inline, (node) => {
+              if (node.type === 'run') visitRun(node);
+            }, false, true);
+          }
+        } else {
+          visitTrackedControlContent(content, (node) => {
+            if (node.type === 'run') visitRun(node);
+          });
         }
       }
     } else if (block.type === 'table') {
@@ -187,6 +233,13 @@ function collectExternalHyperlinks(blocks: BlockContent[]): Hyperlink[] {
       for (const content of block.content) {
         if (content.type === 'hyperlink' && (content.href || content.rId) && !content.anchor) {
           hyperlinks.push(content);
+        }
+        if (content.type !== 'run') {
+          visitTrackedControlContent(content, (node) => {
+            if (node.type === 'hyperlink' && (node.href || node.rId) && !node.anchor) {
+              hyperlinks.push(node);
+            }
+          });
         }
       }
     } else if (block.type === 'table') {

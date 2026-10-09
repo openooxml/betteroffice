@@ -14,6 +14,7 @@ use ooxml_text::{
     CompatFlags, FontId, FontStore, ShapeFeature, WORD_SMALL_CAPS_ADVANCE_SCALE,
     presentation_break_opportunities, shape, single_line_box, uppercase_for_language,
 };
+use pptx_edit::paragraph::{ListCounters, ParagraphCascade, SlideParents, find_placeholder};
 use pptx_edit::{
     DeckSnapshot, ShapeKind, ShapeSnapshot, SlideScope, SlideSnapshot, StorySnapshot, TextStyle,
 };
@@ -29,12 +30,12 @@ use thiserror::Error;
 
 use crate::chart::{ChartFrame, ChartText, chart_primitive};
 use crate::family_metrics::{FamilyMetrics, family_advance, family_metrics};
-use crate::metafile::{MetafileDrawing, decode as decode_metafile, is_metafile};
 use crate::{
     CONTRACT_VERSION, CaretStop, GradientStop, GradientType, ImageCrop, ImageEffect, ImageTile,
     Paint, PositionedGlyph, PositionedTextLine, PositionedTextRun, Primitive, Shadow, Stroke,
     StrokeEnd, SurfaceDisplayList, TextAlign, TextAnchor, TextParagraph, TextRun, Transform,
 };
+use ooxml_metafile::{MetafileDrawing, decode as decode_metafile, is_metafile};
 
 const EMU_PER_CSS_PIXEL: f32 = 9_525.0;
 const EMU_PER_POINT: f64 = 12_700.0;
@@ -57,7 +58,6 @@ pub(crate) const MAX_RENDER_SHAPES: usize = 20_000;
 const MAX_TEXT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_TEXT_LINES: usize = 100_000;
 const MAX_TEXT_PARAGRAPHS: usize = 20_000;
-const MAX_AUTONUM_VALUE: u32 = 32_767 + MAX_TEXT_PARAGRAPHS as u32;
 const MAX_TEXT_RUNS: usize = 100_000;
 /// Chart parts one slide may draw, shared across its charts.
 pub(crate) const MAX_CHART_PRIMITIVES: usize = 100_000;
@@ -89,6 +89,43 @@ struct FontFace {
     /// The face whose own metrics size the line when `line` names none: the
     /// face itself, or for a coverage fallback the face of the run it stands in.
     line_id: FontId,
+}
+
+/// A font family the deck asked for that is not registered, the family drawn
+/// instead, and the first shape that asked for it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FontSubstitution {
+    pub requested_family: String,
+    pub selected_family: String,
+    pub shape_id: String,
+}
+
+/// Collects one `FontSubstitution` per requested family over a slide.
+#[derive(Default)]
+struct SubstitutionLog {
+    shape_id: String,
+    seen: HashSet<String>,
+    entries: Vec<FontSubstitution>,
+}
+
+impl SubstitutionLog {
+    fn enter_shape(&mut self, shape_id: &str) {
+        self.shape_id.clear();
+        self.shape_id.push_str(shape_id);
+    }
+
+    fn record(&mut self, requested: &str, normalized: &str, selected: &str) {
+        if normalized.is_empty() || self.seen.contains(normalized) {
+            return;
+        }
+        self.seen.insert(normalized.to_owned());
+        self.entries.push(FontSubstitution {
+            requested_family: requested.trim().to_owned(),
+            selected_family: selected.to_owned(),
+            shape_id: self.shape_id.clone(),
+        });
+    }
 }
 
 pub struct SlideRenderer {
@@ -363,41 +400,15 @@ impl SlideRenderer {
         height_emu: i64,
         slide_index: usize,
     ) -> Result<RenderedSlide, RenderError> {
-        let parsed_slide = deck_slide
-            .source_part_path
-            .as_deref()
-            .and_then(|path| package.slides.iter().find(|slide| slide.part_path == path));
-        let layout_path = deck_slide
-            .layout_part_path
-            .as_deref()
-            .or_else(|| parsed_slide.and_then(|slide| slide.layout_part_path.as_deref()));
-        let layout = layout_path
-            .and_then(|path| {
-                package
-                    .layouts
-                    .iter()
-                    .find(|layout| layout.part_path == path)
-            })
-            .or_else(|| package.layouts.first());
-        let master = layout
-            .and_then(|layout| layout.master_part_path.as_deref())
-            .and_then(|path| {
-                package
-                    .masters
-                    .iter()
-                    .find(|master| master.part_path == path)
-            })
-            .or_else(|| {
-                layout.and_then(|layout| {
-                    package.masters.iter().find(|master| {
-                        master
-                            .layout_part_paths
-                            .iter()
-                            .any(|path| path == &layout.part_path)
-                    })
-                })
-            })
-            .or_else(|| package.masters.first());
+        let SlideParents {
+            slide: parsed_slide,
+            layout,
+            master,
+        } = SlideParents::resolve(
+            package,
+            deck_slide.source_part_path.as_deref(),
+            deck_slide.layout_part_path.as_deref(),
+        );
         let theme_part = master
             .and_then(|master| master.theme_part_path.as_deref())
             .and_then(|path| package.themes.iter().find(|theme| theme.part_path == path))
@@ -474,6 +485,7 @@ impl SlideRenderer {
             parsed_slide,
             primitives: Vec::new(),
             hit_regions: Vec::new(),
+            substitutions: SubstitutionLog::default(),
             shape_count: 0,
             line_count: 0,
             chart_budget: MAX_CHART_PRIMITIVES,
@@ -547,6 +559,7 @@ impl SlideRenderer {
                 background,
                 primitives: builder.primitives,
             },
+            font_substitutions: builder.substitutions.entries,
             hit_regions: builder.hit_regions,
         })
     }
@@ -563,6 +576,7 @@ impl SlideRenderer {
         family: &str,
         bold: bool,
         italic: bool,
+        substitutions: &mut SubstitutionLog,
     ) -> Result<FontFace, RenderError> {
         let requested = normalize_family(family);
         let styles = [
@@ -580,7 +594,8 @@ impl SlideRenderer {
                 });
             }
         }
-        self.faces
+        let face = self
+            .faces
             .iter()
             .filter(|((name, _, _), _)| Some(name) == self.fallback_family.as_ref())
             .min_by_key(|((_, face_bold, face_italic), _)| {
@@ -591,7 +606,11 @@ impl SlideRenderer {
                 )
             })
             .map(|(_, face)| self.with_requested_metrics(face, &requested, bold, italic))
-            .ok_or(RenderError::NoFont)
+            .ok_or(RenderError::NoFont)?;
+        if normalize_family(&face.family) != requested {
+            substitutions.record(family, &requested, &face.family);
+        }
+        Ok(face)
     }
 
     fn with_requested_metrics(
@@ -667,6 +686,8 @@ impl<'a> BackgroundSource<'a> {
 
 pub struct RenderedSlide {
     pub display_list: SurfaceDisplayList,
+    /// Families the slide asked for that no registered face matched.
+    pub font_substitutions: Vec<FontSubstitution>,
     hit_regions: Vec<HitRegion>,
 }
 
@@ -716,6 +737,7 @@ struct LayoutBuilder<'a> {
     parsed_slide: Option<&'a Slide>,
     primitives: Vec<Primitive>,
     hit_regions: Vec<HitRegion>,
+    substitutions: SubstitutionLog,
     shape_count: usize,
     line_count: usize,
     chart_budget: usize,
@@ -857,15 +879,15 @@ impl<'a> LayoutBuilder<'a> {
                     self.theme,
                     space,
                     rect,
-                    shape.rotation_deg as f32,
-                    shape.flip_h,
-                    shape.flip_v,
+                    resolved.rotation_deg as f32,
+                    resolved.flip_h,
+                    resolved.flip_v,
                 )
             });
         let transform = Transform {
-            rotation_deg: shape.rotation_deg as f32,
-            flip_h: shape.flip_h,
-            flip_v: shape.flip_v,
+            rotation_deg: resolved.rotation_deg as f32,
+            flip_h: resolved.flip_h,
+            flip_v: resolved.flip_v,
         };
         match shape.kind {
             ShapeKind::Shape => {
@@ -1413,12 +1435,14 @@ impl<'a> LayoutBuilder<'a> {
             };
             let (renderer, theme) = (self.renderer, self.theme);
             let default_font = resolve_theme_font_ref(Some(theme), "+mn-lt");
+            self.substitutions.enter_shape(shape_id);
+            let substitutions = &mut self.substitutions;
             let chart = chart_primitive(
                 frame,
                 space,
                 &default_font,
                 self.chart_budget,
-                &mut |text| chart_text_primitive(renderer, theme, shape_id, text),
+                &mut |text| chart_text_primitive(renderer, theme, shape_id, text, substitutions),
             )?;
             if let Primitive::Chart { primitives, .. } = &chart {
                 self.chart_budget -= primitives.len();
@@ -1709,7 +1733,13 @@ impl<'a> LayoutBuilder<'a> {
         if TextFlow::from_body_vert(cascade.vertical()) != TextFlow::Horizontal {
             return Ok(0.0);
         }
-        let resolved = resolve_content(self.renderer, self.theme, content, cascade)?;
+        let resolved = resolve_content(
+            self.renderer,
+            self.theme,
+            content,
+            cascade,
+            &mut SubstitutionLog::default(),
+        )?;
         let left = cascade.inset_left().unwrap_or(DEFAULT_INSET_HORIZONTAL_EMU);
         let right = cascade
             .inset_right()
@@ -1761,7 +1791,14 @@ impl<'a> LayoutBuilder<'a> {
         content: TextContent,
         cascade: BodyCascade<'_>,
     ) -> Result<TextHit, RenderError> {
-        let resolved = resolve_content(self.renderer, self.theme, &content, cascade)?;
+        self.substitutions.enter_shape(shape_id);
+        let resolved = resolve_content(
+            self.renderer,
+            self.theme,
+            &content,
+            cascade,
+            &mut self.substitutions,
+        )?;
         let flow = TextFlow::from_body_vert(cascade.vertical());
         let text_transform = text_transform(transform, flow);
         let text_rect = flow.layout_rect(rect);
@@ -2237,59 +2274,23 @@ impl BodyCascade<'_> {
             })
     }
 
-    fn paragraph_properties(&self, index: usize, level: u32) -> ParagraphProperties {
-        let mut properties = self
-            .master_slide
-            .and_then(|master| master_style(master, self.placeholder, level))
-            .cloned()
-            .unwrap_or_default();
-        if self.placeholder.is_none() {
-            let level_style = self
-                .default_style
-                .get(level as usize)
-                .or_else(|| self.default_style.first());
-            for source in self.default_paragraph.into_iter().chain(level_style) {
-                merge_paragraph_properties(&mut properties, source);
-            }
+    fn paragraph_properties(
+        &self,
+        index: usize,
+        level: u32,
+        authored: Option<&Bullet>,
+    ) -> ParagraphProperties {
+        ParagraphCascade {
+            primary: self.primary,
+            layout: self.layout,
+            master: self.master,
+            master_slide: self.master_slide,
+            default_style: self.default_style,
+            default_paragraph: self.default_paragraph,
+            placeholder: self.placeholder,
+            style_color: self.style_color,
         }
-        if let Some(color) = self.style_color {
-            properties
-                .default_run
-                .get_or_insert_with(RunProperties::default)
-                .color = Some(color.clone());
-        }
-        for body in [self.master, self.layout, self.primary]
-            .into_iter()
-            .flatten()
-        {
-            if let Some(source) = &body.default_list_style {
-                merge_paragraph_properties(&mut properties, source);
-            }
-            if let Some(source) = body.list_style.get(level as usize) {
-                merge_paragraph_properties(&mut properties, source);
-            }
-            if let Some(source) = body
-                .paragraphs
-                .get(index)
-                .or_else(|| body.paragraphs.get(level as usize))
-                .map(|paragraph| &paragraph.properties)
-            {
-                merge_paragraph_properties(&mut properties, source);
-            }
-        }
-        if let Some(Bullet::AutoNumber { restart, .. }) = &mut properties.bullet {
-            *restart = self
-                .primary
-                .and_then(|body| body.paragraphs.get(index))
-                .is_some_and(|paragraph| {
-                    matches!(
-                        paragraph.properties.bullet,
-                        Some(Bullet::AutoNumber { restart: true, .. })
-                            | Some(Bullet::AutoNumber { start_at: 2.., .. })
-                    )
-                });
-        }
-        properties
+        .properties(index, level, authored)
     }
 }
 
@@ -2444,6 +2445,7 @@ fn resolve_content(
     theme: &Theme,
     content: &TextContent,
     cascade: BodyCascade<'_>,
+    substitutions: &mut SubstitutionLog,
 ) -> Result<ResolvedContent, RenderError> {
     let total_bytes = content
         .paragraphs
@@ -2474,26 +2476,23 @@ fn resolve_content(
     let line_space_reduction = autofit_line_space_reduction(cascade.autofit());
     let mut story_offset = 0_u32;
     let mut paragraphs = Vec::with_capacity(content.paragraphs.len());
-    let mut numbering = AutoNumbering::default();
+    let mut numbering = ListCounters::default();
     for (index, paragraph) in content.paragraphs.iter().enumerate() {
-        let mut properties = cascade.paragraph_properties(index, paragraph.level);
-        if matches!(paragraph.bullet, Some(Bullet::AutoNumber { .. })) {
-            properties.bullet = paragraph.bullet.clone();
-            if let Some(Bullet::AutoNumber {
-                restart, start_at, ..
-            }) = &mut properties.bullet
-            {
-                *restart |= *start_at != 1;
-            }
-        }
+        let properties =
+            cascade.paragraph_properties(index, paragraph.level, paragraph.bullet.as_ref());
         let language = properties
             .default_run
             .as_ref()
             .and_then(|value| value.language.as_deref());
         let mut runs = Vec::with_capacity(paragraph.runs.len().max(1));
         for run in &paragraph.runs {
-            let style =
-                resolve_style(renderer, theme, &run.style, properties.default_run.as_ref())?;
+            let style = resolve_style(
+                renderer,
+                theme,
+                &run.style,
+                properties.default_run.as_ref(),
+                substitutions,
+            )?;
             let start = story_offset;
             story_offset = story_offset.saturating_add(utf16_len(&run.text));
             let mut cased = Vec::new();
@@ -2517,26 +2516,41 @@ fn resolve_content(
             runs.push(ResolvedRun {
                 text: String::new(),
                 start: story_offset,
-                style: resolve_style(renderer, theme, &end_style, properties.default_run.as_ref())?,
+                style: resolve_style(
+                    renderer,
+                    theme,
+                    &end_style,
+                    properties.default_run.as_ref(),
+                    substitutions,
+                )?,
             });
         }
         let alignment = paragraph
             .alignment
             .as_deref()
             .or(properties.alignment.as_deref());
-        // A blank paragraph between list items is spacing, not an item:
-        // PowerPoint neither marks it nor counts it towards the next number.
-        let marker = paragraph
-            .runs
-            .iter()
-            .any(|run| !run.text.is_empty())
-            .then(|| resolve_marker(properties.bullet.as_ref(), paragraph.level, &mut numbering))
-            .flatten()
-            .map(|marker| symbol_bullet(&marker, properties.bullet_font.as_ref(), theme));
-        let bullet_style = marker
+        let written_marker = numbering
+            .next(
+                properties.bullet.as_ref(),
+                paragraph.level,
+                paragraph.runs.iter().any(|run| !run.text.is_empty()),
+            )
+            .map(|marker| marker.text());
+        let marker = written_marker
             .as_deref()
-            .map(|marker| {
-                let mut style = resolve_bullet_style(renderer, theme, &properties, &runs[0].style)?;
+            .map(|marker| symbol_bullet(marker, properties.bullet_font.as_ref(), theme));
+        let bullet_style = written_marker
+            .as_deref()
+            .zip(marker.as_deref())
+            .map(|(written, marker)| {
+                let mut style = resolve_bullet_style(
+                    renderer,
+                    theme,
+                    &properties,
+                    &runs[0].style,
+                    written,
+                    substitutions,
+                )?;
                 let font = properties.bullet_font.as_ref();
                 if !bullet_font_draws(renderer, theme, font, style.face.id, marker) {
                     style.color = TRANSPARENT.to_owned();
@@ -2661,6 +2675,8 @@ fn resolve_bullet_style(
     theme: &Theme,
     properties: &ParagraphProperties,
     text: &ResolvedStyle,
+    written_marker: &str,
+    substitutions: &mut SubstitutionLog,
 ) -> Result<ResolvedStyle, RenderError> {
     let mut style = text.clone();
     if let Some(BulletFont::Typeface(family)) = &properties.bullet_font {
@@ -2669,7 +2685,18 @@ fn resolve_bullet_style(
         } else {
             family.clone()
         };
-        style.face = renderer.resolve_face(&family, style.bold, style.italic)?;
+        let emulated = ooxml_text::SymbolFont::named(&family).is_some_and(|font| {
+            written_marker
+                .chars()
+                .all(|character| font.substitute(character).is_some())
+        });
+        let mut ignored = SubstitutionLog::default();
+        let log = if emulated {
+            &mut ignored
+        } else {
+            substitutions
+        };
+        style.face = renderer.resolve_face(&family, style.bold, style.italic, log)?;
         style.family = style.face.family.clone();
     }
     if let Some(BulletColor::Color(color)) = &properties.bullet_color
@@ -2691,6 +2718,7 @@ fn resolve_style(
     theme: &Theme,
     direct: &TextStyle,
     fallback: Option<&RunProperties>,
+    substitutions: &mut SubstitutionLog,
 ) -> Result<ResolvedStyle, RenderError> {
     let bold = direct
         .bold
@@ -2717,7 +2745,7 @@ fn resolve_style(
             }
         })
         .unwrap_or_else(|| resolve_theme_font_ref(Some(theme), "+mn-lt"));
-    let face = renderer.resolve_face(&family, bold, italic)?;
+    let face = renderer.resolve_face(&family, bold, italic, substitutions)?;
     let color = direct
         .color
         .as_deref()
@@ -2842,8 +2870,10 @@ fn named_cluster_width(style: &ResolvedStyle, text: &str, size_px: f32) -> Optio
     Some(total * size_px)
 }
 
-/// Optional ligatures are off once glyphs are tracked apart.
-fn tracking_features(tracking: f32) -> &'static [ShapeFeature] {
+/// Optional ligatures are off once glyphs are tracked apart or advanced by the
+/// named family's widths: either way every character needs its own cluster, or
+/// the browser draws the substitute's narrower ligature into a wider slot.
+fn ligature_features(separate: bool) -> &'static [ShapeFeature] {
     const OFF: [ShapeFeature; 2] = [
         ShapeFeature {
             tag: *b"liga",
@@ -2854,7 +2884,7 @@ fn tracking_features(tracking: f32) -> &'static [ShapeFeature] {
             value: 0,
         },
     ];
-    if tracking == 0.0 { &[] } else { &OFF }
+    if separate { &OFF } else { &[] }
 }
 
 /// One shaped line of chart text, in the family, weight, slant and pixel size
@@ -2864,6 +2894,7 @@ fn chart_text_primitive(
     theme: &Theme,
     shape_id: &str,
     text: ChartText<'_>,
+    substitutions: &mut SubstitutionLog,
 ) -> Result<Primitive, RenderError> {
     let bold = text.font.weight >= 600;
     let italic = text.font.italic;
@@ -2872,7 +2903,7 @@ fn chart_text_primitive(
     } else {
         text.font.family.clone()
     };
-    let face = renderer.resolve_face(&family, bold, italic)?;
+    let face = renderer.resolve_face(&family, bold, italic, substitutions)?;
     let size_px = safe_geometry(text.font.size_px as f32).clamp(1.0, 4_096.0);
     let tracking = safe_geometry(text.font.letter_spacing_px as f32);
     let metrics = renderer
@@ -2895,7 +2926,7 @@ fn chart_text_primitive(
             piece_face.id,
             &text.text[*start..end],
             size_px,
-            tracking_features(tracking),
+            ligature_features(tracking != 0.0),
         )
         .map_err(|error| RenderError::Font(error.to_string()))?;
         let piece_x = cursor;
@@ -3875,7 +3906,7 @@ fn add_shaped_segment(
         run.style.face.id,
         text,
         size_px,
-        tracking_features(tracking),
+        ligature_features(tracking != 0.0 || run.style.face.widths.is_some()),
     )
     .map_err(|error| RenderError::Font(error.to_string()))?;
     let mut starts = shaped
@@ -4501,45 +4532,6 @@ fn find_node(nodes: &[ShapeNode], id: u32) -> Option<&ShapeNode> {
     None
 }
 
-fn find_placeholder<'a>(nodes: &'a [ShapeNode], target: &Placeholder) -> Option<&'a ShapeNode> {
-    for node in nodes {
-        if node_placeholder(node).is_some_and(|value| placeholders_match(value, target)) {
-            return Some(node);
-        }
-        if let ShapeNode::Group(group) = node
-            && let Some(found) = find_placeholder(&group.children, target)
-        {
-            return Some(found);
-        }
-    }
-    None
-}
-
-/// A slide holds one of each of these, so they inherit by type: PowerPoint
-/// writes a slide number as `idx="12"` over a master's `idx="4"` and still
-/// draws it where the master put it (#797).
-const SINGLETON_PLACEHOLDERS: [&str; 5] = ["title", "sldNum", "dt", "ftr", "hdr"];
-
-fn placeholders_match(left: &Placeholder, right: &Placeholder) -> bool {
-    let left_type = normalize_placeholder_type(left.placeholder_type.as_deref());
-    let right_type = normalize_placeholder_type(right.placeholder_type.as_deref());
-    if SINGLETON_PLACEHOLDERS.contains(&left_type) || SINGLETON_PLACEHOLDERS.contains(&right_type) {
-        return left_type == right_type;
-    }
-    match (left.index, right.index) {
-        (Some(left), Some(right)) => left == right,
-        _ => left_type == right_type,
-    }
-}
-
-fn normalize_placeholder_type(value: Option<&str>) -> &str {
-    match value.unwrap_or("body") {
-        "ctrTitle" => "title",
-        "obj" => "body",
-        value => value,
-    }
-}
-
 fn node_base(node: &ShapeNode) -> &pptx_parse::ShapeBase {
     match node {
         ShapeNode::Shape(shape) => &shape.base,
@@ -4760,108 +4752,6 @@ fn body_text_effects(body: &TextBody) -> Option<&ShapeEffects> {
         .filter(|effects| effects.outer_shadow.is_some())
 }
 
-fn master_style<'a>(
-    master: &'a SlideMaster,
-    placeholder: Option<&Placeholder>,
-    level: u32,
-) -> Option<&'a ParagraphProperties> {
-    let styles = match placeholder {
-        Some(placeholder) => {
-            match normalize_placeholder_type(placeholder.placeholder_type.as_deref()) {
-                "title" => &master.text_styles.title,
-                "body" | "subTitle" => &master.text_styles.body,
-                _ => &master.text_styles.other,
-            }
-        }
-        None => &master.text_styles.other,
-    };
-    styles.get(level as usize).or_else(|| styles.first())
-}
-
-fn merge_paragraph_properties(target: &mut ParagraphProperties, source: &ParagraphProperties) {
-    if source.alignment.is_some() {
-        target.alignment.clone_from(&source.alignment);
-    }
-    if source.margin_left.is_some() {
-        target.margin_left = source.margin_left;
-    }
-    if source.margin_right.is_some() {
-        target.margin_right = source.margin_right;
-    }
-    if source.indent.is_some() {
-        target.indent = source.indent;
-    }
-    if source.bullet.is_some() {
-        target.bullet.clone_from(&source.bullet);
-    }
-    if source.line_spacing.is_some() {
-        target.line_spacing = source.line_spacing;
-    }
-    if source.space_before.is_some() {
-        target.space_before = source.space_before;
-    }
-    if source.space_after.is_some() {
-        target.space_after = source.space_after;
-    }
-    if source.bullet_font.is_some() {
-        target.bullet_font.clone_from(&source.bullet_font);
-    }
-    if source.bullet_color.is_some() {
-        target.bullet_color.clone_from(&source.bullet_color);
-    }
-    if source.bullet_size.is_some() {
-        target.bullet_size.clone_from(&source.bullet_size);
-    }
-    if source.default_tab_size.is_some() {
-        target.default_tab_size = source.default_tab_size;
-    }
-    if source.tab_stops.is_some() {
-        target.tab_stops.clone_from(&source.tab_stops);
-    }
-    if source.rtl.is_some() {
-        target.rtl = source.rtl;
-    }
-    if let Some(source) = &source.default_run {
-        let target = target
-            .default_run
-            .get_or_insert_with(RunProperties::default);
-        merge_run_properties(target, source);
-    }
-}
-
-fn merge_run_properties(target: &mut RunProperties, source: &RunProperties) {
-    if source.font_size_pt.is_some() {
-        target.font_size_pt = source.font_size_pt;
-    }
-    if source.bold.is_some() {
-        target.bold = source.bold;
-    }
-    if source.italic.is_some() {
-        target.italic = source.italic;
-    }
-    if source.underline.is_some() {
-        target.underline.clone_from(&source.underline);
-    }
-    if source.font_family.is_some() {
-        target.font_family.clone_from(&source.font_family);
-    }
-    if source.color.is_some() {
-        target.color.clone_from(&source.color);
-    }
-    if source.language.is_some() {
-        target.language.clone_from(&source.language);
-    }
-    if source.spacing_pt.is_some() {
-        target.spacing_pt = source.spacing_pt;
-    }
-    if source.baseline_pct.is_some() {
-        target.baseline_pct = source.baseline_pct;
-    }
-    if source.caps.is_some() {
-        target.caps = source.caps;
-    }
-}
-
 /// A run that carries an `a:hlinkClick` is drawn in the theme's `hlink` colour
 /// and underlined, over whatever the placeholder would otherwise give it.
 fn style_from_properties(properties: &RunProperties, theme: &Theme) -> TextStyle {
@@ -4883,40 +4773,44 @@ fn style_from_properties(properties: &RunProperties, theme: &Theme) -> TextStyle
     }
 }
 
+/// The transform a shape draws at. Without an extent it takes the inherited
+/// one, keeping its own orientation when its node spells out a transform.
 fn resolved_transform_value(
     shape: &ShapeSnapshot,
     original: Option<&ShapeNode>,
     layout: Option<&ShapeNode>,
     master: Option<&ShapeNode>,
 ) -> ShapeTransform {
+    let own = ShapeTransform {
+        x: shape.x,
+        y: shape.y,
+        width: shape.width,
+        height: shape.height,
+        rotation_deg: shape.rotation_deg,
+        flip_h: shape.flip_h,
+        flip_v: shape.flip_v,
+        ..ShapeTransform::default()
+    };
     if shape.width > 0 && shape.height > 0 {
+        return own;
+    }
+    let Some(inherited) = [original, layout, master]
+        .into_iter()
+        .flatten()
+        .map(|node| &node_base(node).transform)
+        .find(|transform| transform.width > 0 && transform.height > 0)
+    else {
+        return own;
+    };
+    if original.is_some_and(|node| node_base(node).transform != ShapeTransform::default()) {
         ShapeTransform {
-            x: shape.x,
-            y: shape.y,
-            width: shape.width,
-            height: shape.height,
-            rotation_deg: shape.rotation_deg,
-            flip_h: shape.flip_h,
-            flip_v: shape.flip_v,
-            ..ShapeTransform::default()
+            rotation_deg: own.rotation_deg,
+            flip_h: own.flip_h,
+            flip_v: own.flip_v,
+            ..inherited.clone()
         }
     } else {
-        [original, layout, master]
-            .into_iter()
-            .flatten()
-            .map(|node| &node_base(node).transform)
-            .find(|transform| transform.width > 0 && transform.height > 0)
-            .cloned()
-            .unwrap_or_else(|| ShapeTransform {
-                x: shape.x,
-                y: shape.y,
-                width: shape.width,
-                height: shape.height,
-                rotation_deg: shape.rotation_deg,
-                flip_h: shape.flip_h,
-                flip_v: shape.flip_v,
-                ..ShapeTransform::default()
-            })
+        inherited.clone()
     }
 }
 
@@ -5505,119 +5399,6 @@ fn symbol_bullet(marker: &str, font: Option<&BulletFont>, theme: &Theme) -> Stri
         .collect()
 }
 
-/// Per-level `a:buAutoNum` state: the number last drawn and the `startAt`
-/// the run was seeded from.
-#[derive(Default)]
-struct AutoNumbering {
-    numbers: [u32; 9],
-    starts: [u32; 9],
-}
-
-/// Resolves a marker once per paragraph.
-fn resolve_marker(
-    bullet: Option<&Bullet>,
-    level: u32,
-    numbering: &mut AutoNumbering,
-) -> Option<String> {
-    let level = (level as usize).min(numbering.numbers.len() - 1);
-    numbering.numbers[level + 1..].fill(0);
-    numbering.starts[level + 1..].fill(0);
-    match bullet {
-        Some(Bullet::AutoNumber {
-            scheme,
-            start_at,
-            restart,
-        }) => {
-            let start = (*start_at).clamp(1, 32_767);
-            // PowerPoint writes the list's `startAt` on every one of its
-            // paragraphs, so repeating the seed continues the run; only a
-            // different declared start opens a new list.
-            numbering.numbers[level] = match numbering.numbers[level] {
-                0 => start,
-                _ if *restart && numbering.starts[level] != start => start,
-                current => current.saturating_add(1),
-            };
-            if numbering.numbers[level] == start {
-                numbering.starts[level] = start;
-            }
-            Some(format_autonum(numbering.numbers[level], scheme))
-        }
-        _ => {
-            numbering.numbers[level] = 0;
-            numbering.starts[level] = 0;
-            match bullet {
-                Some(Bullet::Character { value }) if !value.trim().is_empty() => {
-                    Some(value.clone())
-                }
-                _ => None,
-            }
-        }
-    }
-}
-
-/// Formats Latin, Roman and decimal markers.
-fn format_autonum(value: u32, scheme: &str) -> String {
-    let value = value.clamp(1, MAX_AUTONUM_VALUE);
-    let (numeral, suffix) = ["ParenBoth", "ParenR", "Period", "Plain"]
-        .into_iter()
-        .find_map(|suffix| Some((scheme.strip_suffix(suffix)?, suffix)))
-        .unwrap_or((scheme, "Period"));
-    let body = match numeral {
-        "alphaLc" => format_alpha(value, false),
-        "alphaUc" => format_alpha(value, true),
-        "romanLc" => format_roman(value, false),
-        "romanUc" => format_roman(value, true),
-        "arabic" => value.to_string(),
-        _ => return format!("{value}."),
-    };
-    match suffix {
-        "ParenBoth" => format!("({body})"),
-        "ParenR" => format!("{body})"),
-        "Plain" => body,
-        _ => format!("{body}."),
-    }
-}
-
-fn format_alpha(value: u32, upper: bool) -> String {
-    let base = if upper { b'A' } else { b'a' };
-    let mut value = value.max(1);
-    let mut out = Vec::new();
-    while value > 0 {
-        let index = (value - 1) % 26;
-        out.push(base + index as u8);
-        value = (value - 1) / 26;
-    }
-    out.reverse();
-    String::from_utf8(out).unwrap_or_default()
-}
-
-fn format_roman(value: u32, upper: bool) -> String {
-    const NUMERALS: [(u32, &str); 13] = [
-        (1000, "m"),
-        (900, "cm"),
-        (500, "d"),
-        (400, "cd"),
-        (100, "c"),
-        (90, "xc"),
-        (50, "l"),
-        (40, "xl"),
-        (10, "x"),
-        (9, "ix"),
-        (5, "v"),
-        (4, "iv"),
-        (1, "i"),
-    ];
-    let mut value = value.max(1);
-    let mut out = String::new();
-    for (amount, numeral) in NUMERALS {
-        while value >= amount {
-            out.push_str(numeral);
-            value -= amount;
-        }
-    }
-    if upper { out.to_uppercase() } else { out }
-}
-
 fn normalize_family(value: &str) -> String {
     value.trim().to_lowercase()
 }
@@ -5682,6 +5463,8 @@ mod tests {
     const NUMBERED_FIXTURE: &[u8] =
         include_bytes!("../../pptx-parse/tests/fixtures/slide-number-fields.pptx");
     const STYLE_FIXTURE: &[u8] = include_bytes!("../../pptx-parse/tests/fixtures/shape-style.pptx");
+    const STYLE_MATRIX_FIXTURE: &[u8] =
+        include_bytes!("../../pptx-parse/tests/fixtures/style-matrix-deck.pptx");
     const HIDDEN_FIXTURE: &[u8] =
         include_bytes!("../../pptx-edit/tests/fixtures/hidden-shapes.pptx");
     const V2_UPDATE: &[u8] =
@@ -5898,185 +5681,6 @@ mod tests {
     }
 
     #[test]
-    fn autonumbering_counts_per_level_and_resumes_across_other_levels() {
-        let mut counters = AutoNumbering::default();
-        let number = |level, counters: &mut AutoNumbering| {
-            resolve_marker(
-                Some(&Bullet::AutoNumber {
-                    scheme: "arabicPeriod".to_owned(),
-                    start_at: 1,
-                    restart: false,
-                }),
-                level,
-                counters,
-            )
-        };
-        let dash = |level, counters: &mut AutoNumbering| {
-            resolve_marker(
-                Some(&Bullet::Character {
-                    value: "-".to_owned(),
-                }),
-                level,
-                counters,
-            )
-        };
-        assert_eq!(number(0, &mut counters).as_deref(), Some("1."));
-        assert_eq!(dash(1, &mut counters).as_deref(), Some("-"));
-        assert_eq!(dash(1, &mut counters).as_deref(), Some("-"));
-        assert_eq!(number(0, &mut counters).as_deref(), Some("2."));
-        assert_eq!(number(0, &mut counters).as_deref(), Some("3."));
-        assert_eq!(number(1, &mut counters).as_deref(), Some("1."));
-        assert_eq!(number(1, &mut counters).as_deref(), Some("2."));
-        assert_eq!(number(0, &mut counters).as_deref(), Some("4."));
-        assert_eq!(number(1, &mut counters).as_deref(), Some("1."));
-        assert_eq!(resolve_marker(Some(&Bullet::None), 0, &mut counters), None);
-    }
-
-    #[test]
-    fn inherited_autonumber_start_at_applies_only_to_the_first_item() {
-        let mut counters = AutoNumbering::default();
-        let number = |counters: &mut AutoNumbering| {
-            resolve_marker(
-                Some(&Bullet::AutoNumber {
-                    scheme: "arabicPeriod".to_owned(),
-                    start_at: 7,
-                    restart: false,
-                }),
-                0,
-                counters,
-            )
-        };
-        assert_eq!(number(&mut counters).as_deref(), Some("7."));
-        assert_eq!(number(&mut counters).as_deref(), Some("8."));
-        let mut counters = AutoNumbering::default();
-        let last_start = Bullet::AutoNumber {
-            scheme: "arabicPeriod".to_owned(),
-            start_at: 32_767,
-            restart: false,
-        };
-        assert_eq!(
-            resolve_marker(Some(&last_start), 0, &mut counters).as_deref(),
-            Some("32767.")
-        );
-        assert_eq!(
-            resolve_marker(Some(&last_start), 0, &mut counters).as_deref(),
-            Some("32768.")
-        );
-    }
-
-    #[test]
-    fn autonumber_schemes_format_their_numeral_and_suffix() {
-        assert_eq!(format_autonum(4, "arabicPeriod"), "4.");
-        assert_eq!(format_autonum(4, "arabicParenR"), "4)");
-        assert_eq!(format_autonum(4, "arabicParenBoth"), "(4)");
-        assert_eq!(format_autonum(4, "arabicPlain"), "4");
-        assert_eq!(format_autonum(1, "alphaLcParenR"), "a)");
-        assert_eq!(format_autonum(27, "alphaUcPeriod"), "AA.");
-        assert_eq!(format_autonum(9, "romanLcPeriod"), "ix.");
-        assert_eq!(format_autonum(2024, "romanUcPeriod"), "MMXXIV.");
-        assert_eq!(format_autonum(3, "somethingElse"), "3.");
-        assert_eq!(format_autonum(3, "somethingElsePlain"), "3.");
-        assert_eq!(format_autonum(3, "somethingElseParenBoth"), "3.");
-    }
-
-    #[test]
-    fn autonumber_sequences_restart_after_plain_paragraphs_and_explicit_starts() {
-        let mut counters = AutoNumbering::default();
-        let number = Bullet::AutoNumber {
-            scheme: "arabicPeriod".to_owned(),
-            start_at: 1,
-            restart: false,
-        };
-        let restart = Bullet::AutoNumber {
-            scheme: "arabicPeriod".to_owned(),
-            start_at: 7,
-            restart: true,
-        };
-        assert_eq!(
-            resolve_marker(Some(&number), 0, &mut counters).as_deref(),
-            Some("1.")
-        );
-        assert_eq!(
-            resolve_marker(Some(&restart), 0, &mut counters).as_deref(),
-            Some("7.")
-        );
-        assert_eq!(
-            resolve_marker(Some(&number), 0, &mut counters).as_deref(),
-            Some("8.")
-        );
-        assert_eq!(resolve_marker(None, 0, &mut counters), None);
-        assert_eq!(
-            resolve_marker(Some(&number), 0, &mut counters).as_deref(),
-            Some("1.")
-        );
-        assert_eq!(
-            resolve_marker(Some(&number), 1, &mut counters).as_deref(),
-            Some("1.")
-        );
-        assert_eq!(
-            resolve_marker(
-                Some(&Bullet::Character {
-                    value: "•".to_owned()
-                }),
-                0,
-                &mut counters
-            )
-            .as_deref(),
-            Some("•")
-        );
-        assert_eq!(
-            resolve_marker(Some(&number), 1, &mut counters).as_deref(),
-            Some("1.")
-        );
-        assert_eq!(
-            resolve_marker(Some(&number), 0, &mut counters).as_deref(),
-            Some("1.")
-        );
-    }
-
-    /// `pptarena-018-original` slide 11 declares `startAt="4"` on all four of
-    /// its paragraphs and PowerPoint renders 4, 5, 6, 7;
-    /// `pptarena-034-original` slide 11 declares `startAt="1"` on all five and
-    /// PowerPoint renders a) through e).
-    #[test]
-    fn a_repeated_declared_start_continues_the_list() {
-        let mut counters = AutoNumbering::default();
-        let arabic = Bullet::AutoNumber {
-            scheme: "arabicPeriod".to_owned(),
-            start_at: 4,
-            restart: true,
-        };
-        let alpha = Bullet::AutoNumber {
-            scheme: "alphaLcParenR".to_owned(),
-            start_at: 1,
-            restart: true,
-        };
-        assert_eq!(
-            (0..4)
-                .filter_map(|_| resolve_marker(Some(&arabic), 0, &mut counters))
-                .collect::<Vec<_>>(),
-            ["4.", "5.", "6.", "7."]
-        );
-        let mut counters = AutoNumbering::default();
-        assert_eq!(
-            (0..5)
-                .filter_map(|_| resolve_marker(Some(&alpha), 0, &mut counters))
-                .collect::<Vec<_>>(),
-            ["a)", "b)", "c)", "d)", "e)"]
-        );
-    }
-
-    #[test]
-    fn autonumber_roman_markers_bound_untrusted_start_values() {
-        assert_eq!(format_autonum(0, "arabicPeriod"), "1.");
-        assert_eq!(format_autonum(u32::MAX, "romanUcPeriod").len(), 61);
-        assert_eq!(
-            format_autonum(u32::MAX, "romanUcPeriod"),
-            format!("{}DCCLXVII.", "M".repeat(52))
-        );
-    }
-
-    #[test]
     fn a_character_its_face_cannot_draw_moves_to_a_fallback_that_can() {
         let arabic: &[u8] =
             include_bytes!("../../../packages/fonts/assets/NotoSansArabic-Regular.ttf");
@@ -6167,6 +5771,7 @@ mod tests {
                 align: PlotTextAlign::Start,
                 rotation_deg: 0.0,
             },
+            &mut SubstitutionLog::default(),
         )
         .unwrap();
         let Primitive::TextBox { lines, .. } = primitive else {
@@ -6521,7 +6126,9 @@ mod tests {
     }
 
     fn paragraph(renderer: &SlideRenderer, alignment: &str, text: &str) -> ResolvedParagraph {
-        let face = renderer.resolve_face("Arial", false, false).unwrap();
+        let face = renderer
+            .resolve_face("Arial", false, false, &mut SubstitutionLog::default())
+            .unwrap();
         ResolvedParagraph {
             align: parse_align(Some(alignment)),
             justify: is_full_justification(Some(alignment)),
@@ -6778,7 +6385,9 @@ mod tests {
     fn adjacent_runs_keep_their_own_paint_attributes() {
         let renderer = renderer();
         let style = ResolvedStyle {
-            face: renderer.resolve_face("Arial", false, false).unwrap(),
+            face: renderer
+                .resolve_face("Arial", false, false, &mut SubstitutionLog::default())
+                .unwrap(),
             family: "Arial".to_owned(),
             font_size_pt: 14.0,
             line_font_size_pt: 14.0,
@@ -6797,7 +6406,9 @@ mod tests {
         variants[3].underline = true;
         variants[4].font_size_pt = 28.0;
         variants[5].family = "Fallback".to_owned();
-        variants[6].face = renderer.resolve_face("Arial", true, false).unwrap();
+        variants[6].face = renderer
+            .resolve_face("Arial", true, false, &mut SubstitutionLog::default())
+            .unwrap();
         for changed in variants {
             let paragraph = ResolvedParagraph {
                 align: TextAlign::Left,
@@ -6865,7 +6476,9 @@ mod tests {
     fn identical_adjacent_runs_keep_the_same_display_list() {
         let renderer = renderer();
         let style = ResolvedStyle {
-            face: renderer.resolve_face("Arial", false, false).unwrap(),
+            face: renderer
+                .resolve_face("Arial", false, false, &mut SubstitutionLog::default())
+                .unwrap(),
             family: "Arial".to_owned(),
             font_size_pt: 14.0,
             line_font_size_pt: 14.0,
@@ -6941,7 +6554,9 @@ mod tests {
             )
             .unwrap();
         let style = ResolvedStyle {
-            face: renderer.resolve_face("Arial", false, false).unwrap(),
+            face: renderer
+                .resolve_face("Arial", false, false, &mut SubstitutionLog::default())
+                .unwrap(),
             family: "Arial".to_owned(),
             font_size_pt: 24.0,
             line_font_size_pt: 24.0,
@@ -7087,7 +6702,9 @@ mod tests {
             .register_font("Arial", true, false, BOLD_FONT)
             .unwrap();
 
-        let resolved = renderer.resolve_face("Segoe UI", true, false).unwrap();
+        let resolved = renderer
+            .resolve_face("Segoe UI", true, false, &mut SubstitutionLog::default())
+            .unwrap();
         assert_eq!(resolved.id.to_u32(), bold);
         assert_eq!(renderer.fonts.font_bytes(resolved.id).unwrap(), BOLD_FONT);
     }
@@ -7100,7 +6717,9 @@ mod tests {
             .register_font("Arial", false, true, ITALIC_FONT)
             .unwrap();
 
-        let resolved = renderer.resolve_face("Segoe UI", false, true).unwrap();
+        let resolved = renderer
+            .resolve_face("Segoe UI", false, true, &mut SubstitutionLog::default())
+            .unwrap();
         assert_eq!(resolved.id.to_u32(), italic);
         assert_eq!(renderer.fonts.font_bytes(resolved.id).unwrap(), ITALIC_FONT);
     }
@@ -7122,9 +6741,13 @@ mod tests {
             .register_font("Georgia", false, false, FONT)
             .unwrap();
 
-        let resolved = renderer.resolve_face(" geORGia ", true, true).unwrap();
+        let resolved = renderer
+            .resolve_face(" geORGia ", true, true, &mut SubstitutionLog::default())
+            .unwrap();
         assert_eq!(resolved.id.to_u32(), georgia);
-        let resolved = renderer.resolve_face("Segoe UI", true, true).unwrap();
+        let resolved = renderer
+            .resolve_face("Segoe UI", true, true, &mut SubstitutionLog::default())
+            .unwrap();
         assert_eq!(resolved.id.to_u32(), bold_italic);
         assert_eq!(renderer.fallback_font().unwrap().to_u32(), regular);
     }
@@ -7161,7 +6784,12 @@ mod tests {
         }
 
         assert!(matches!(
-            SlideRenderer::new().resolve_face("Segoe UI", false, false),
+            SlideRenderer::new().resolve_face(
+                "Segoe UI",
+                false,
+                false,
+                &mut SubstitutionLog::default()
+            ),
             Err(RenderError::NoFont)
         ));
         let package = pptx_parse::parse_pptx(FIXTURE).unwrap();
@@ -7183,7 +6811,10 @@ mod tests {
                     .register_font("Arial", bold, italic, bytes)
                     .unwrap();
             }
-            let bold_id = renderer.resolve_face("Arial", true, false).unwrap().id;
+            let bold_id = renderer
+                .resolve_face("Arial", true, false, &mut SubstitutionLog::default())
+                .unwrap()
+                .id;
             let mut slides = Vec::new();
             for index in 0..snapshot.slides.len() {
                 let mut rendered = renderer.layout_slide(&package, &snapshot, index).unwrap();
@@ -7201,7 +6832,9 @@ mod tests {
                 (false, true, ITALIC_FONT),
                 (true, true, BOLD_FONT),
             ] {
-                let resolved = renderer.resolve_face("Segoe UI", bold, italic).unwrap();
+                let resolved = renderer
+                    .resolve_face("Segoe UI", bold, italic, &mut SubstitutionLog::default())
+                    .unwrap();
                 assert!(
                     renderer.fonts.font_bytes(resolved.id).unwrap() == expected,
                     "wrong fallback for bold={bold}, italic={italic}"
@@ -7606,6 +7239,50 @@ mod tests {
     }
 
     #[test]
+    fn a_placeholder_without_a_transform_draws_with_the_orientation_it_inherits() {
+        let mut package = pptx_parse::parse_pptx(STYLE_MATRIX_FIXTURE).unwrap();
+        let session = DeckSession::open(STYLE_MATRIX_FIXTURE, 8_320).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let title = snapshot.slides[1].shapes[0].id.clone();
+        let layout = package
+            .layouts
+            .iter_mut()
+            .find(|layout| layout.part_path == "ppt/slideLayouts/slideLayout2.xml")
+            .unwrap();
+        let ShapeNode::Shape(placeholder) = &mut layout.shapes[0] else {
+            panic!("the layout title is a shape")
+        };
+        placeholder.base.transform.rotation_deg = 30.0;
+        placeholder.base.transform.flip_v = true;
+
+        let rendered = renderer().layout_slide(&package, &snapshot, 1).unwrap();
+        assert_eq!(
+            drawn_transform(&rendered, &title),
+            Transform {
+                rotation_deg: 30.0,
+                flip_h: false,
+                flip_v: true,
+            }
+        );
+    }
+
+    fn drawn_transform(rendered: &RenderedSlide, shape_id: &str) -> Transform {
+        rendered
+            .display_list
+            .primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                Primitive::Shape {
+                    shape_id: Some(id),
+                    transform,
+                    ..
+                } if id == shape_id => Some(*transform),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{shape_id} was not drawn"))
+    }
+
+    #[test]
     fn hiding_master_shapes_drops_the_layout_decoration_too() {
         let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
         let session = DeckSession::open(FIXTURE, 8_301).unwrap();
@@ -7935,6 +7612,7 @@ mod tests {
                 background: None,
                 primitives: Vec::new(),
             },
+            font_substitutions: Vec::new(),
             hit_regions: vec![HitRegion {
                 shape_id: "rotated".to_owned(),
                 rect: PxRect {
@@ -7985,6 +7663,7 @@ mod tests {
                 background: None,
                 primitives: Vec::new(),
             },
+            font_substitutions: Vec::new(),
             hit_regions: vec![HitRegion {
                 shape_id: "mirrored".to_owned(),
                 rect: PxRect {
@@ -8074,6 +7753,7 @@ mod tests {
                 background: None,
                 primitives: Vec::new(),
             },
+            font_substitutions: Vec::new(),
             hit_regions: vec![HitRegion {
                 shape_id: "sideways".to_owned(),
                 hit_rect: rect,
@@ -9754,16 +9434,16 @@ mod tests {
             orientation: None,
             size: None,
         };
-        assert!(!placeholders_match(&indexed, &same_index));
-        assert!(placeholders_match(&centered_title, &title));
+        assert!(!indexed.matches(&same_index));
+        assert!(centered_title.matches(&title));
         let slide_number = |index| Placeholder {
             placeholder_type: Some("sldNum".to_owned()),
             index: Some(index),
             orientation: None,
             size: None,
         };
-        assert!(placeholders_match(&slide_number(12), &slide_number(4)));
-        assert!(!placeholders_match(&slide_number(12), &indexed));
+        assert!(slide_number(12).matches(&slide_number(4)));
+        assert!(!slide_number(12).matches(&indexed));
 
         let snapshot = ShapeSnapshot {
             id: "placeholder".to_owned(),
@@ -9777,6 +9457,7 @@ mod tests {
             rotation_deg: 0.0,
             flip_h: false,
             flip_v: false,
+            inherited: None,
             hidden: false,
             geometry: "rect".to_owned(),
             adjust_values: BTreeMap::new(),
@@ -10066,8 +9747,17 @@ mod tests {
             .register_font("Trebuchet MS", false, false, FONT)
             .unwrap();
         renderer.register_font("Arial", false, false, FONT).unwrap();
-        let substituted = renderer.resolve_face("Trebuchet MS", false, false).unwrap();
-        let plain = renderer.resolve_face("Arial", false, false).unwrap();
+        let substituted = renderer
+            .resolve_face(
+                "Trebuchet MS",
+                false,
+                false,
+                &mut SubstitutionLog::default(),
+            )
+            .unwrap();
+        let plain = renderer
+            .resolve_face("Arial", false, false, &mut SubstitutionLog::default())
+            .unwrap();
         assert!(plain.widths.is_none() && plain.line.is_none());
 
         let metrics = substituted.widths.expect("trebuchet ms widths");
@@ -10091,7 +9781,10 @@ mod tests {
             .register_font("Georgia", false, false, FONT)
             .unwrap();
         let theme = Theme::default();
-        let face = renderer.resolve_face("Georgia", false, false).unwrap().id;
+        let face = renderer
+            .resolve_face("Georgia", false, false, &mut SubstitutionLog::default())
+            .unwrap()
+            .id;
         let draws = |family: Option<&str>, marker: &str| {
             let font = family.map(|family| BulletFont::Typeface(family.to_owned()));
             bullet_font_draws(&renderer, &theme, font.as_ref(), face, marker)
@@ -10105,6 +9798,51 @@ mod tests {
     }
 
     #[test]
+    fn a_run_on_the_named_family_widths_keeps_one_cluster_per_character() {
+        const CARLITO: &[u8] = include_bytes!("../../../packages/fonts/assets/Carlito-Regular.ttf");
+        let mut renderer = SlideRenderer::new();
+        renderer
+            .register_font("Arial", false, false, CARLITO)
+            .unwrap();
+        renderer
+            .register_font("Trebuchet MS", false, false, CARLITO)
+            .unwrap();
+        let text = "Transmigration";
+        let lay = |family: &str| {
+            let mut paragraph = paragraph(&renderer, "l", text);
+            paragraph.runs[0].style.face = renderer
+                .resolve_face(family, false, false, &mut SubstitutionLog::default())
+                .unwrap();
+            paragraph.runs[0].style.family = family.to_owned();
+            layout_paragraph(
+                &renderer.fonts,
+                &paragraph,
+                0.0,
+                0.0,
+                1_000.0,
+                1.0,
+                false,
+                true,
+            )
+            .unwrap()
+        };
+        assert!(
+            glyph_positions(&lay("Arial")).len() < text.len(),
+            "Carlito ligates ti on its own widths"
+        );
+        let named = lay("Trebuchet MS");
+        let positions = glyph_positions(&named);
+        assert_eq!(positions.len(), text.len());
+        let metrics = family_metrics("trebuchet ms", false, false).unwrap();
+        let size = points_to_px(18.0);
+        let mut pen = positions[0];
+        for (character, x) in text.chars().zip(&positions) {
+            assert!((x - pen).abs() < 0.01, "{character} at {x}, expected {pen}");
+            pen += family_advance(metrics, character).unwrap() * size;
+        }
+    }
+
+    #[test]
     fn missing_faces_keep_the_requested_family_and_style_metrics() {
         for registered in ["Arial", "Trebuchet MS"] {
             let mut renderer = SlideRenderer::new();
@@ -10112,17 +9850,85 @@ mod tests {
                 .register_font(registered, false, false, FONT)
                 .unwrap();
             for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
-                let face = renderer.resolve_face("Trebuchet MS", bold, italic).unwrap();
+                let face = renderer
+                    .resolve_face(
+                        "Trebuchet MS",
+                        bold,
+                        italic,
+                        &mut SubstitutionLog::default(),
+                    )
+                    .unwrap();
                 let expected = family_metrics("trebuchet ms", bold, italic).unwrap();
                 assert_eq!(renderer.fonts.font_bytes(face.id).unwrap(), FONT);
                 assert!(std::ptr::eq(face.widths.unwrap(), expected));
                 assert!(std::ptr::eq(face.line.unwrap(), expected));
             }
             let unknown = renderer
-                .resolve_face("Unknown family", false, false)
+                .resolve_face(
+                    "Unknown family",
+                    false,
+                    false,
+                    &mut SubstitutionLog::default(),
+                )
                 .unwrap();
             assert!(unknown.widths.is_none() && unknown.line.is_none());
         }
+    }
+
+    #[test]
+    fn an_empty_family_draws_the_fallback_without_reporting_it() {
+        let mut renderer = SlideRenderer::new();
+        renderer.register_font("Arial", false, false, FONT).unwrap();
+        let mut log = SubstitutionLog::default();
+        renderer.resolve_face("", false, false, &mut log).unwrap();
+        renderer.resolve_face("  ", false, false, &mut log).unwrap();
+        assert!(log.entries.is_empty());
+        renderer
+            .resolve_face("Missing", false, false, &mut log)
+            .unwrap();
+        assert_eq!(log.entries.len(), 1);
+    }
+
+    #[test]
+    fn only_a_different_drawn_family_is_reported() {
+        let mut renderer = SlideRenderer::new();
+        renderer.register_font("Arial", true, false, FONT).unwrap();
+        let mut log = SubstitutionLog::default();
+        let face = renderer
+            .resolve_face("Arial", false, false, &mut log)
+            .unwrap();
+        assert_eq!(face.family, "Arial");
+        assert!(log.entries.is_empty());
+
+        let mut renderer = SlideRenderer::new();
+        renderer
+            .register_font("Liberation Sans", false, false, FONT)
+            .unwrap();
+        renderer.register_font("Arial", true, false, FONT).unwrap();
+        renderer
+            .resolve_face("Arial", false, false, &mut log)
+            .unwrap();
+        assert_eq!(log.entries.len(), 1);
+        assert_eq!(log.entries[0].requested_family, "Arial");
+        assert_eq!(log.entries[0].selected_family, "Liberation Sans");
+    }
+
+    #[test]
+    fn a_symbol_bullet_is_reported_unless_every_character_is_emulated() {
+        let mut renderer = SlideRenderer::new();
+        renderer.register_font("Arial", false, false, FONT).unwrap();
+        let text = paragraph(&renderer, "l", "Item").runs[0].style.clone();
+        let properties = ParagraphProperties {
+            bullet_font: Some(BulletFont::Typeface("Wingdings".to_owned())),
+            ..ParagraphProperties::default()
+        };
+        let theme = Theme::default();
+        let mut log = SubstitutionLog::default();
+        resolve_bullet_style(&renderer, &theme, &properties, &text, "\u{a7}", &mut log).unwrap();
+        assert!(log.entries.is_empty());
+        resolve_bullet_style(&renderer, &theme, &properties, &text, "\u{2192}", &mut log).unwrap();
+        assert_eq!(log.entries.len(), 1);
+        assert_eq!(log.entries[0].requested_family, "Wingdings");
     }
 
     #[test]

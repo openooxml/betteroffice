@@ -129,7 +129,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
-          bun-version: "1.3.14"
+          bun-version: "1.4.2"
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
@@ -262,7 +262,7 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         if: matrix.channel == 'commit'
         with:
-          bun-version: "1.3.14"
+          bun-version: "1.4.2"
 
       - name: Freeze the shared native font bundle
         if: matrix.channel == 'commit'
@@ -553,7 +553,7 @@ jobs:
           python-version: "3.13"
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
-          bun-version: "1.3.14"
+          bun-version: "1.4.2"
       - name: Install LibreOffice and comparison tools
         run: |
           bash scripts/office-quality/install-libreoffice.sh
@@ -619,7 +619,7 @@ jobs:
           python-version: "3.13"
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
-          bun-version: "1.3.14"
+          bun-version: "1.4.2"
       - name: Install LibreOffice and comparison tools
         run: |
           bash scripts/office-quality/install-libreoffice.sh
@@ -892,7 +892,7 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         if: inputs.publish_renders && github.repository == 'openooxml/betteroffice'
         with:
-          bun-version: "1.3.14"
+          bun-version: "1.4.2"
 
       - name: Publish the reconciled commit renders
         if: inputs.publish_renders && github.repository == 'openooxml/betteroffice'

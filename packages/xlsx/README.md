@@ -32,9 +32,9 @@ workbook.editCell(0, 9, 2, "=SUM(C1:C9)"); // recalcs dependents
 const bytes = workbook.save();
 ```
 
-`initWasm()` fetches the packaged wasm asset once in browsers. Pass wasm bytes
-or a precompiled `WebAssembly.Module` explicitly in runtimes that cannot fetch
-the asset URL.
+`initWasm()` fetches the packaged wasm asset once in browsers; other runtimes
+pass wasm bytes or a precompiled `WebAssembly.Module`.
+`openWorkbookSession` is an experimental, opt-in worker session for async reads, edits, sheet metadata, and saving.
 
 Around the handle, the package exports the helpers a custom grid needs:
 `cellAtPoint` / `cellRect` / `rangeRect` (hit-testing), the viewport math,
@@ -78,8 +78,108 @@ if (isProposalsAvailable()) {
 ```
 
 The React editor paints pending proposals as in-cell tracked-change ghosts with
-an accept/reject panel. Guard with `isProposalsAvailable()` against cores built
-without the feature.
+an accept/reject panel. `isProposalsAvailable()` reports proposal availability.
+`StaleProposalError.targets` names each drifted cell's sheet beside `cells`.
+
+## Version-checked edit batches
+
+Read cells with the version they were read at, then apply a batch against it.
+Every step commits as one recalculated change and one undo step, or the batch
+returns a typed refusal and nothing changes:
+
+```ts
+const read = workbook.readCells({
+  ranges: [{ sheetId: "sheet:0", range: { kind: "a1", a1: "B3" } }],
+});
+if (!read.ok) throw new Error(read.failure.message);
+
+const result = workbook.applyEdits({
+  expectVersion: read.version,
+  steps: [
+    {
+      op: "setCellInputs",
+      target: { sheetId: "sheet:0", range: { kind: "a1", a1: "B3" } },
+      inputs: [["120"]],
+      expect: { cells: [[{ value: read.ranges[0].cells[0][0].value }]] },
+    },
+    { op: "setNumberFormat", target: { sheetId: "sheet:0", range: { kind: "a1", a1: "B3" } }, format: "currency" },
+  ],
+});
+if (!result.ok) console.warn(result.failure.code); // e.g. "stale-version"
+```
+
+- Steps: `setCellInputs` (parsed like typing, against each cell's current
+  number format), `setFormulas` (source without `=`, stored as formulas whatever
+  the format), `setNumberFormat` and `patchStyle`. Content and formatting may
+  combine on the same cells; writing one property twice refuses with
+  `overlapping-steps`.
+- Targets name a sheet id from the current catalog (`sheet:{index}` standalone,
+  the replica's sheet keys in collaboration) and an A1 range or zero-based
+  corners. Matrices and guards match the target's shape exactly. Guards compare
+  a cell's value, formula (`null` for none) or display text before the batch.
+- `validateEdits` stages a batch without changing anything; `findText` searches
+  display text exactly and case-sensitively. Update listeners run once, before
+  `applyEdits` returns, and see the recalculated state and its new version.
+  `changedSheets` names every sheet the batch or its recalculation changed.
+- Requests over 16 MiB and results over 64 MiB refuse with `limit-exceeded`;
+  calculation diagnostics stop at 10,000 cells per list and set `truncated`.
+- `history: "none"` keeps a batch out of undo; standalone undo still replays
+  older steps over its cells. `source` records provenance only. Volatile
+  functions see only `calculation.nowSerial`.
+- Versions and sheet ids are session-scoped; standalone sheet ids are
+  positional, so each is valid only for the version it was read at.
+
+## Structured export
+
+XLSX exports bounded sparse worksheet content and Markdown with positional
+anchors, formulas, stored values, formatted text, explicit hidden-content
+options, and omission diagnostics. Export reads stored values:
+
+```ts
+import { exportXlsxStructured } from "@betteroffice/xlsx";
+
+const read = workbook.exportStructured({ scope: [{ sheet: 0, range: "A1:D20" }] });
+if (read.ok) console.log(read.content.sheets[0].cells);
+
+const markdown = workbook.exportMarkdown({}, { maxRows: 100 });
+const fromBytes = await exportXlsxStructured(bytes); // no session, no clock
+```
+
+- Each sheet lists its stored cells in row-major order (formula cells and
+  styled empty cells included, empty positions skipped) with value, formula,
+  display text, number format and merge membership, plus merges, tables,
+  hyperlinks, hidden row and column spans, and charts, pictures and shapes as
+  placeholders with alt text. Defined names are listed read-only.
+- Anchors are `{ sheet: { sheetId, index, name }, a1 }` positions in the
+  exported version (`anchorScope: "session"`) or bytes snapshot (`"snapshot"`);
+  neither follows later row, column or sheet edits. `sheetId` is the id edit
+  batches take in that session (`sheet:{index}` for bytes), so a cell or range
+  anchor's `{ sheetId: anchor.sheet.sheetId, range: { kind: "a1", a1: anchor.a1 } }`
+  is its batch target at the exported version. Retained drawings carry a `sourcePart`
+  provenance with the part's SHA-256.
+- Formula results are the stored values (`calculation.policy: "asStored"`,
+  `freshness: "unverified"`); cells mark results the file did not store as
+  `missing` (`uncertain` once anything has calculated, or where it cannot be
+  traced) and the last calculation's `cycle` and `limited` cells. Live exports
+  reflect whatever calculation already ran, and the same version and options
+  always export the same content; `exportXlsxStructured` reads bytes without
+  recalculating.
+- Hidden sheets, rows, columns and names are excluded unless requested
+  (`includeHiddenSheets`, `includeHiddenRows`, `includeHiddenColumns`,
+  `includeHiddenNames`), with a `hidden-content-excluded` diagnostic. A sheet
+  whose visibility is unknown, such as one from a model handed in without its
+  package, counts as hidden.
+- `maxCells` (default 100,000) and `maxBytes` (default 8 MiB) stop at a complete
+  record with `truncated: true` and a `truncated` diagnostic; an absent cell is
+  empty only before that point. Scope refusals (`invalid-scope`,
+  `invalid-options`, `limit-exceeded`) return `{ ok: false, version, failure }`.
+- Markdown renders one grid per sheet labelled with its A1 columns and row
+  numbers (200 rows, 50 columns and 10,000 positions by default), using an
+  escaped HTML table where merges need spans, and `<!-- xlsx-export:N -->`
+  markers whose anchors come back in `anchors`. Document text is escaped and
+  kept on one line, and hyperlinks become Markdown links only for `http`,
+  `https` and `mailto` destinations. `renderXlsxMarkdown` renders content you
+  already hold, refusing content that does not validate.
 
 ## Collaboration
 
@@ -106,17 +206,15 @@ function dispose() {
 }
 ```
 
-The provider speaks the Yjs sync-v1 protocol used by y-websocket. WebSocket room
-routing, authentication, WebRTC signaling, reconnection policy, and awareness
-remain transport concerns; document updates flow directly between the connection
-and the Rust/WASM Yrs replica without a second JavaScript `Y.Doc`.
+The provider handles Yjs sync-v1 and awareness. Room routing, authentication,
+WebRTC signaling, and reconnection remain transport concerns; document updates
+flow directly into the Rust/WASM Yrs replica.
 After a close, the transport may reopen itself or the caller may invoke
 `provider.connect()` for another connection attempt.
 Call `provider.destroy()` before discarding its transport or workbook.
 
-Collaborative sessions currently support cell content, formulas, styles, column
-widths, and row heights. Structural edits and inverse-op undo are rejected until
-they have stable axis identities and a Yrs-aware undo manager.
+Collaborative sessions synchronize cell content, formulas, styles, column widths,
+and row heights, with Yrs-backed undo and redo. Structural operations throw.
 
 ## Development
 

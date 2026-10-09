@@ -59,6 +59,12 @@ pub enum ChartFill {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         background: Option<String>,
     },
+    /// `a:gradFill`, kept as its stop colours.
+    Gradient {
+        colors: Vec<String>,
+    },
+    /// Another fill, such as `a:blipFill`, painted in the host's default.
+    Unsupported,
 }
 
 /// The `a:ln` of a `c:spPr`.
