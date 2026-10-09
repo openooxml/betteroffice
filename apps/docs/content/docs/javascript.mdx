@@ -211,10 +211,10 @@ of `rects` and lists their zero-based indexes in `unbuiltPages`; elsewhere it
 answers like `getAnchorGeometry`. It does not wait for paint: until the pages
 show the layout it refuses with `layout-unavailable`, so retry on the next
 `layout-change`.
-`geometry.readAnchorGeometries(targets)` answers many targets in order. In
-worker viewers it makes at most one worker read per call and reuses the
-worker's answers until the version or proposal preview changes; main-thread
-and proposal answers are not cached.
+`geometry.readAnchorGeometries(targets)` answers many targets in order by the
+same rules, proposals included. In worker viewers it makes at most one worker
+read per call and reuses the worker's answers until the version or proposal
+preview changes; main-thread and proposal answers are not cached.
 `geometry.dom` is experimental
 and may be replaced by a data-only facade. Overlays
 ignore the pointer unless an element sets `pointer-events: auto`. Sidebar cards

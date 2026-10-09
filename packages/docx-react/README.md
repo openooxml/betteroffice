@@ -486,10 +486,10 @@ const review = defineDocxPlugin<State>({
   answers like `getAnchorGeometry`. It does not wait for paint: until the pages
   show the layout it refuses with `layout-unavailable`, so retry on the next
   `layout-change`.
-  `geometry.readAnchorGeometries(targets)` answers many targets in order. In
-  worker viewers it makes at most one worker read per call and reuses the
-  worker's answers until the version or proposal preview changes; main-thread
-  and proposal answers are not cached.
+  `geometry.readAnchorGeometries(targets)` answers many targets in order by the
+  same rules, proposals included. In worker viewers it makes at most one worker
+  read per call and reuses the worker's answers until the version or proposal
+  preview changes; main-thread and proposal answers are not cached.
   The layer ignores the
   pointer; interactive overlay elements set `pointer-events: auto`.
   `snapshot.selection.displayRange` belongs to one layout and is never an edit
