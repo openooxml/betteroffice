@@ -79,6 +79,7 @@ import {
 import { inPluginChrome, pluginEventStore } from './commands/pluginEvents';
 import type { XlsxCommandStore } from './commands/types';
 import { useCommandShortcuts } from './commands/useCommandShortcuts';
+import { useSaveRequest } from './commands/useSaveRequest';
 import { useXlsxCommandBinding, type XlsxEditorBridge } from './commands/useXlsxCommands';
 import { XlsxCommandContext } from './commands/XlsxCommandProvider';
 import { EditorToolbar } from './components/EditorToolbar';
@@ -94,7 +95,7 @@ import {
   RemoteSelections,
 } from './presence/Presence';
 import { ProposalsPanel } from './proposals/ProposalsPanel';
-import { deriveLimits, scaledRect } from './viewer/sessionGeometry';
+import { deriveLimits, positionAtPoint, scaledRect } from './viewer/sessionGeometry';
 import { XlsxSessionViewer } from './viewer/XlsxSessionViewer';
 import { XlsxWorkerEditor } from './worker/XlsxWorkerEditor';
 import type { XlsxWorkerEditorApi } from './worker/createWorkerEditorApi';
@@ -109,6 +110,12 @@ import { PluginDock, useDockArea, type DockPlacement } from './plugins/PluginPan
 import type { XlsxEditorPluginProps, XlsxPluginSelection } from './plugins/types';
 import { useXlsxPluginHost } from './plugins/useXlsxPluginHost';
 
+export interface XlsxPointPosition {
+  sheet: number;
+  row: number;
+  col: number;
+}
+
 /**
  * The imperative surface handed to {@link XlsxEditorProps.onReady}: the open
  * workbook handle plus a `refreshProposals` to re-read the pending list after an
@@ -122,6 +129,9 @@ import { useXlsxPluginHost } from './plugins/useXlsxPluginHost';
  * drag, and `document-replaced` when the workbook is replaced meanwhile.
  */
 export interface XlsxEditorApi {
+  flushPendingInput: () => Promise<void>;
+  /** Client coordinates; sheet, row and column are zero-based. */
+  getPositionAtPoint: (clientX: number, clientY: number) => XlsxPointPosition | null;
   /**
    * Closes the open cell entry and clears the selection. The entry is written
    * at once, or queued behind input still waiting to be written. An entry the
@@ -226,6 +236,8 @@ export interface XlsxEditorProps extends XlsxEditorPluginProps {
   fileName?: string;
   /** Receive saved bytes instead of triggering a browser download. */
   onSave?: (bytes: Uint8Array) => void;
+  /** Return true for built-in saving; false or void handles/cancels the request. */
+  onSaveRequest?: () => boolean | void | Promise<boolean | void>;
   /** Called after a user edit changes the workbook. */
   onChange?: () => void;
   /** Open a network-ready Yrs replica and repaint when peer updates arrive. */
@@ -602,6 +614,7 @@ function XlsxEditorContent({
   file,
   fileName,
   onSave,
+  onSaveRequest,
   onChange,
   collaboration,
   onReady,
@@ -625,11 +638,12 @@ function XlsxEditorContent({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const handleRef = useRef<WorkbookHandle | null>(null);
   const frameRef = useRef<DisplayList | null>(null);
+  const hostPointRef = useRef<(x: number, y: number) => XlsxPointPosition | null>(() => null);
   // the exact frame on screen, stored with the zoom it was painted at. scroll
   // repaints are rAF-coalesced and a mutation republishes the frame, so hit
   // testing reads this snapshot rather than the live scroll offset or the
   // current model — either would answer for pixels that are not on screen.
-  const paintedRef = useRef<{ frame: DisplayList; zoom: number } | null>(null);
+  const paintedRef = useRef<{ frame: DisplayList; zoom: number; sheet: number; handle: WorkbookHandle | null } | null>(null);
   const rafRef = useRef<number | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const editorInputRef = useRef<HTMLInputElement>(null);
@@ -1036,6 +1050,7 @@ function XlsxEditorContent({
     setRenderError(null);
     paintSourceRef.current = null;
     pendingSheetViewRef.current = false;
+    paintedRef.current = null;
     if (!file) {
       handleRef.current = null;
       setSheetInfo(null);
@@ -1095,9 +1110,19 @@ function XlsxEditorContent({
             handle,
             refreshProposals,
             focus: () => scrollRef.current?.focus(),
+            flushPendingInput: async () => {
+              if (handleRef.current !== opened) throw new XlsxCommandAdmissionError('document-replaced');
+              if (draggingRef.current) throw new XlsxCommandAdmissionError('gesture-active');
+              await afterInput(opened, () => {});
+              if (handleRef.current !== opened) throw new XlsxCommandAdmissionError('document-replaced');
+            },
+            getPositionAtPoint: (x, y) => handleRef.current === opened ? hostPointRef.current(x, y) : null,
             save: () => {
+              if (handleRef.current !== opened) throw new XlsxCommandAdmissionError('document-replaced');
               if (hasRejectedRef.current()) throw new XlsxSaveRefusedError('input-failed');
-              if (coordinator.pending) throw new XlsxSaveRefusedError('input-pending');
+              if (coordinator.pending || compositionRef.current || chartDragRef.current || draggingRef.current) {
+                throw new XlsxSaveRefusedError('input-pending');
+              }
               if (!settlePendingEditsRef.current()) throw new XlsxSaveRefusedError('input-failed');
               return opened.save();
             },
@@ -1144,6 +1169,8 @@ function XlsxEditorContent({
     );
     return () => {
       disposed = true;
+      compositionRef.current?.settle(false);
+      compositionRef.current = null;
       runReadyCleanup();
       unsubscribeUpdates();
       handle?.dispose();
@@ -1263,7 +1290,7 @@ function XlsxEditorContent({
     }
     paintDisplayList(ctx, dl, dpr * zoom);
     frameRef.current = dl;
-    paintedRef.current = { frame: dl, zoom };
+    paintedRef.current = { frame: dl, zoom, sheet: activeSheet, handle };
     let version: string | null = null;
     try {
       version = handle ? handle.version() : null;
@@ -1845,6 +1872,11 @@ function XlsxEditorContent({
     },
     [onSave, fileName]
   );
+  hostPointRef.current = (clientX, clientY) => {
+    const painted = paintedRef.current;
+    if (!painted?.handle || painted.handle !== handleRef.current) return null;
+    return positionAtPoint(painted.frame, painted.sheet, canvasRef.current, clientX, clientY);
+  };
 
   // render the current scroll window to png via the raster backend and download
   // it — the same display list the canvas paints, rasterized in the core.
@@ -2252,7 +2284,13 @@ function XlsxEditorContent({
     },
   };
 
+  const requestSave = useSaveRequest({
+    document: () => handleRef.current,
+    onSaveRequest,
+    fail: (error) => setError(error instanceof Error ? error.message : String(error)),
+  });
   const bridge: XlsxEditorBridge = {
+    requestSave,
     handle: () => handleRef.current,
     status: () => (handleRef.current ? 'ready' : file && !error ? 'loading' : 'empty'),
     readOnly: () => readOnlyRef.current,

@@ -166,6 +166,29 @@ afterEach(() => {
 afterAll(async () => { if (ownsDom) await GlobalRegistrator.unregister(); });
 
 describe('workbook session viewer', () => {
+  it('intercepts viewer saving and exposes painted pointer queries with stale guards', async () => {
+    const { viewer } = session();
+    open(viewer);
+    let api!: XlsxWorkerViewerApi;
+    const onSaveRequest = mock(async () => { await api.flushPendingInput(); return false; });
+    const saved = mock((_bytes: Uint8Array) => {});
+    const props = { readOnly: true as const, experimentalWorkerOpen: true as const,
+      onReady: (ready: XlsxWorkerViewerApi) => { api = ready; }, onSaveRequest, onSave: saved };
+    const view = render(<XlsxEditor {...props} file={file} />);
+    await opened();
+    const stale = api;
+    const canvas = view.container.querySelector('canvas')!;
+    canvas.getBoundingClientRect = () => new DOMRect(40, 60, 800, 600);
+    expect(api.getPositionAtPoint(184, 96)).toEqual({ sheet: 0, row: 1, col: 1 });
+    await act(async () => { expect(await api.commands.execute('save', null)).toEqual({ ok: true, status: 'noop' }); });
+    expect(onSaveRequest).toHaveBeenCalledTimes(1);
+    expect(viewer.save).not.toHaveBeenCalled();
+    expect(saved).not.toHaveBeenCalled();
+    await act(async () => { view.rerender(<XlsxEditor {...props} file={file.slice()} />); });
+    expect(stale.getPositionAtPoint(184, 96)).toBeNull();
+    await expect(stale.flushPendingInput()).rejects.toThrow('replaced');
+  });
+
   it('opens and publishes onReady once after the first paint without local wasm', async () => {
     const { viewer, call } = session();
     const opener = open(viewer);

@@ -326,6 +326,57 @@ afterEach(async () => {
 afterAll(async () => { if (ownsDom) await GlobalRegistrator.unregister(); });
 
 describe('workbook worker editor', () => {
+  for (const decision of [true, false, undefined] as const) {
+    it(`coalesces host save requests returning ${String(decision)} after flushing worker input`, async () => {
+      const host = harness();
+      let api!: XlsxWorkerEditorApi;
+      const request = deferred<boolean | void>();
+      const onSaveRequest = mock(async () => {
+        await api.flushPendingInput();
+        return request.promise;
+      });
+      const saved = mock((_bytes: Uint8Array) => {});
+      const view = render(<XlsxEditor file={file} experimentalWorkerOpen
+        onReady={(ready) => { api = ready; }} onSaveRequest={onSaveRequest} onSave={saved} />);
+      await opened();
+      await advance();
+      fireEvent.change(view.getByTestId('xlsx-formula-input'), { target: { value: 'host draft' } });
+      let first!: ReturnType<XlsxWorkerEditorApi['commands']['execute']>;
+      let second!: typeof first;
+      act(() => {
+        first = api.commands.execute('save', null);
+        fireEvent.keyDown(view.getByTestId('xlsx-formula-input'), { key: 's', ctrlKey: true });
+        second = api.commands.execute('save', null);
+      });
+      await advance();
+      expect(onSaveRequest).toHaveBeenCalledTimes(1);
+      expect(host.cells.get('0:0:0')).toBe('host draft');
+      expect(saved).not.toHaveBeenCalled();
+      await act(async () => { request.resolve(decision); await Promise.all([first, second]); });
+      expect(host.editMethods.flush).toHaveBeenCalled();
+      expect(host.editMethods.save).toHaveBeenCalledTimes(decision === true ? 1 : 0);
+      expect(saved).toHaveBeenCalledTimes(decision === true ? 1 : 0);
+    });
+  }
+
+  it('queries painted worker cells and refuses stale APIs after replacement', async () => {
+    harness();
+    const apis: XlsxWorkerEditorApi[] = [];
+    const onReady = (api: XlsxWorkerEditorApi) => { apis.push(api); };
+    const view = render(<XlsxEditor file={file} experimentalWorkerOpen onReady={onReady} />);
+    await opened();
+    await advance();
+    const canvas = view.container.querySelector('canvas')!;
+    canvas.getBoundingClientRect = () => new DOMRect(40, 60, 1200, 900);
+    const focused = document.activeElement;
+    expect(apis[0].getPositionAtPoint(40 + 144 * 1.5, 60 + 36 * 1.5)).toEqual({ sheet: 0, row: 1, col: 1 });
+    expect(apis[0].getPositionAtPoint(39, 70)).toBeNull();
+    expect(document.activeElement).toBe(focused);
+    await act(async () => { view.rerender(<XlsxEditor file={file.slice()} experimentalWorkerOpen onReady={onReady} />); });
+    expect(apis[0].getPositionAtPoint(40 + 144 * 1.5, 60 + 36 * 1.5)).toBeNull();
+    await expect(apis[0].flushPendingInput()).rejects.toThrow('replaced');
+  });
+
   it('shows visible ready commit text while the replacement frame is held without blocking input', async () => {
     const host = harness(true);
     const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false} />);
