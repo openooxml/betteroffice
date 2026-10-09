@@ -289,6 +289,9 @@ fn merge_run_properties(target: &mut RunProperties, source: &RunProperties) {
     if source.baseline_pct.is_some() {
         target.baseline_pct = source.baseline_pct;
     }
+    if source.kern_pt.is_some() {
+        target.kern_pt = source.kern_pt;
+    }
     if source.caps.is_some() {
         target.caps = source.caps;
     }

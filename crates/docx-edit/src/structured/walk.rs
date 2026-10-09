@@ -1122,7 +1122,7 @@ impl<'a> Exporter<'a> {
     }
 
     /// The sections referencing each header and footer story, with inherited references.
-    fn story_uses(&self) -> HashMap<String, Vec<StoryUse>> {
+    fn story_uses(&self, doc: &EditingDoc) -> HashMap<String, Vec<StoryUse>> {
         let mut properties: Vec<docx_parse::SectionProperties> = self
             .sections
             .iter()
@@ -1143,7 +1143,7 @@ impl<'a> Exporter<'a> {
                     "even" => HeaderFooterVariant::Even,
                     _ => HeaderFooterVariant::Default,
                 };
-                let story = format!("hf:{}", reference.relationship_id);
+                let story = doc.header_footer_story(&reference.relationship_id);
                 if seen.insert((story.clone(), index as u32, variant as u8)) {
                     uses.entry(story).or_default().push(StoryUse {
                         section_index: index as u32,
@@ -1211,24 +1211,28 @@ impl<'a> Exporter<'a> {
                 });
             }
         }
-        let uses = self.story_uses();
+        let uses = self.story_uses(views.doc());
         let mut stories: Vec<(StorySelection, ExportStory)> = Vec::new();
-        let mut known: HashSet<&str> = HashSet::new();
+        let mut known: HashSet<String> = HashSet::new();
         let mut unclassified = 0usize;
         if let Some(read) = self.read() {
             let mut by_part: HashMap<String, usize> = HashMap::new();
             for source in &read.stories {
-                if !self.story_ids.contains(&source.story) {
+                let story = source.content_story(views.doc());
+                if !self.story_ids.contains(&story)
+                    || (matches!(source.kind, StoryKind::Header | StoryKind::Footer)
+                        && known.contains(&story))
+                {
                     continue;
                 }
-                known.insert(&source.story);
+                known.insert(story.clone());
                 let category = match source.kind {
                     StoryKind::Header => StorySelection::Headers,
                     StoryKind::Footer => StorySelection::Footers,
                     StoryKind::Footnote => StorySelection::Footnotes,
                     _ => StorySelection::Endnotes,
                 };
-                let story_uses = uses.get(&source.story).cloned().unwrap_or_default();
+                let story_uses = uses.get(&story).cloned().unwrap_or_default();
                 let shared = matches!(source.kind, StoryKind::Header | StoryKind::Footer)
                     .then(|| source.part.clone())
                     .flatten()
@@ -1236,12 +1240,12 @@ impl<'a> Exporter<'a> {
                 if let Some((part, index)) = shared {
                     let first = stories[index].1.story.clone();
                     let capacity = self.capacity();
-                    if same_content(views, &self.story_ids, capacity, &first, &source.story) {
+                    if same_content(views, &self.story_ids, capacity, &first, &story) {
                         self.note(
                             DiagnosticCode::AmbiguousIdentity,
                             Severity::Info,
                             None,
-                            format!("Story {} reads part {part} as story {first} does and holds the same content, so it is exported once as {first}.", source.story),
+                            format!("Story {story} reads part {part} as story {first} does and holds the same content, so it is exported once as {first}."),
                         );
                         let merged = &mut stories[index].1.uses;
                         merged.extend(story_uses);
@@ -1253,7 +1257,7 @@ impl<'a> Exporter<'a> {
                         DiagnosticCode::AmbiguousIdentity,
                         Severity::Warning,
                         None,
-                        format!("Stories {first} and {} both read part {part} but now hold different content, so both are exported.", source.story),
+                        format!("Stories {first} and {story} both read part {part} but now hold different content, so both are exported."),
                     );
                 }
                 if let Some(part) = source
@@ -1266,7 +1270,7 @@ impl<'a> Exporter<'a> {
                 stories.push((
                     category,
                     ExportStory {
-                        story: source.story.clone(),
+                        story,
                         kind: source.kind,
                         part: source.part.clone(),
                         note_id: source.note_id.clone(),

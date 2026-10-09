@@ -31,9 +31,9 @@ use crate::{
     TransformReceipt,
 };
 
-const SCHEMA_VERSION: f64 = 2.2;
+const SCHEMA_VERSION: f64 = 2.3;
 /// Versions [`migrate_doc`] can carry forward. Anything else is unreadable.
-const MIGRATABLE_SCHEMA_VERSIONS: [f64; 4] = [1.0, 2.0, 2.1, SCHEMA_VERSION];
+const MIGRATABLE_SCHEMA_VERSIONS: [f64; 5] = [1.0, 2.0, 2.1, 2.2, SCHEMA_VERSION];
 const MAX_GEOMETRY: i64 = 1_000_000_000_000_000;
 const MAX_SHAPE_DEPTH: usize = 128;
 const EMU_PER_POINT: f64 = 12_700.0;
@@ -463,6 +463,7 @@ impl DeckSession {
             draft.style.font_size_pt,
             draft.style.spacing_pt,
             draft.style.baseline_pct,
+            draft.style.kern_pt,
         )?;
         let fill_json = serde_json::to_string(&ShapeFill::named("none"))
             .map_err(|error| EditError::Json(error.to_string()))?;
@@ -1435,7 +1436,7 @@ pub(crate) fn fingerprint_from_doc(doc: &Doc) -> EditResult<String> {
         .ok_or_else(|| EditError::InvalidState("missing fingerprint".to_owned()))
 }
 
-/// Carries a released 1.0, 2.0 or 2.1 document forward to the current schema.
+/// Carries a released 1.0, 2.0, 2.1 or 2.2 document forward to the current schema.
 pub(crate) fn migrate_doc(doc: &Doc) -> EditResult<()> {
     let version = {
         let txn = doc.transact();
@@ -1444,12 +1445,23 @@ pub(crate) fn migrate_doc(doc: &Doc) -> EditResult<()> {
     };
     let package = if version < 2.1 {
         migrate_doc_to_v2_1(doc)?
-    } else if version < SCHEMA_VERSION {
+    } else if version < 2.2 {
         migrate_doc_to_v2_2(doc)?
+    } else if version < SCHEMA_VERSION {
+        return migrate_doc_to_v2_3(doc);
     } else {
         return Ok(());
     };
     restore_preset_defaults(doc, &package)
+}
+
+/// Defers the run kern thresholds a 2.2 story and package lack to the source.
+fn migrate_doc_to_v2_3(doc: &Doc) -> EditResult<()> {
+    let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
+    let meta = required_map(&txn, META)?;
+    meta.insert(&mut txn, "kernPendingSource", true);
+    meta.insert(&mut txn, "schemaVersion", SCHEMA_VERSION);
+    Ok(())
 }
 
 /// Rewrites the stored package so media bytes ride as base64 strings rather
@@ -1465,6 +1477,7 @@ fn migrate_doc_to_v2_2(doc: &Doc) -> EditResult<PptxPackage> {
         "packageJson",
         Any::Buffer(Arc::from(package_json)),
     );
+    meta.insert(&mut txn, "kernPendingSource", true);
     defer_legacy_runs(&mut txn, &meta);
     meta.insert(&mut txn, "schemaVersion", SCHEMA_VERSION);
     Ok(package)
@@ -1648,6 +1661,7 @@ fn migrate_doc_to_v2_1(doc: &Doc) -> EditResult<PptxPackage> {
     backfill_blip_effects(&mut txn, &package)?;
     backfill_tables(&mut txn, &package)?;
     meta.insert(&mut txn, "spacingPendingSource", true);
+    meta.insert(&mut txn, "kernPendingSource", true);
     if package_needs_ole_source(&package) {
         meta.insert(&mut txn, "olePicturesPendingSource", true);
     }

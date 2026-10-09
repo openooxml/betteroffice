@@ -1064,6 +1064,25 @@ fn xlookup_honours_match_and_search_modes() {
     );
 }
 
+#[test]
+fn wildcard_lookups_match_literal_tildes() {
+    let mut workbook = fixture();
+    for (index, text) in ["a", "~a", "~", "~~"].iter().enumerate() {
+        put(&mut workbook.sheets[0], &format!("A{}", index + 1), t(text));
+    }
+    for (formula, expected) in [
+        (r#"XMATCH("~a",A1:A4,2)"#, n(2.0)),
+        (r#"XMATCH("~",A1:A4,2)"#, n(3.0)),
+        (r#"XMATCH("~~",A1:A4,2)"#, n(3.0)),
+        (r#"XMATCH("*~",A1:A4,2,-1)"#, n(4.0)),
+        (r#"XLOOKUP("~a",A1:A4,B1:B4,,2)"#, n(1.0)),
+        (r#"XLOOKUP("~",A1:A4,B1:B4,,2)"#, n(4.0)),
+        (r#"XLOOKUP("~~",A1:A4,B1:B4,,2)"#, n(4.0)),
+    ] {
+        assert_eq!(values(formula, &workbook), vec![expected], "{formula}");
+    }
+}
+
 /// a text builtin with no array-aware form still answers once per element.
 #[test]
 fn text_builtins_lift_over_a_range() {

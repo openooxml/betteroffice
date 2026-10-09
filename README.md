@@ -51,6 +51,15 @@
 
 ## Packages
 
+### Agent tools
+
+[`@betteroffice/agents`](packages/agents) provides grep-style discovery, bounded reads,
+and reviewable edits for DOCX, with initial XLSX cell/formula and PPTX slide-text
+prototypes. DOCX also supports rendered previews and tracked changes.
+Use its TypeScript SDK with an existing document session or connect the local
+`betteroffice-mcp` server to an agent. All three formats support proposed export
+and save/reopen checks; live-session attachment and PNG previews are DOCX-only.
+
 ### Documents — `.docx`
 
 | package | registry | what it does |

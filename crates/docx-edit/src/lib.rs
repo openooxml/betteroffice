@@ -81,6 +81,7 @@ mod deterministic;
 mod fingerprint;
 mod format;
 mod geometry;
+mod header_footer;
 mod heading;
 mod identity;
 mod inline_content;

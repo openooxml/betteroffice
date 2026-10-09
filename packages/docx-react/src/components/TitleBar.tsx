@@ -8,7 +8,7 @@
  * - TitleBarRight: right-aligned actions slot
  */
 
-import React, { useCallback, Children, isValidElement } from 'react';
+import React, { useCallback, useState, Children, isValidElement } from 'react';
 import type { ReactNode } from 'react';
 import { MenuDropdown } from './ui/MenuDropdown';
 import type { MenuEntry, MenuItem } from './ui/MenuDropdown';
@@ -39,7 +39,9 @@ function BreakSubmenu({ items, closeMenu }: { items: BreakSubmenuItem[]; closeMe
           <button
             key={item.label}
             type="button"
-            disabled={disabled}
+            tabIndex={-1}
+            role="menuitem"
+            aria-disabled={disabled || undefined}
             title={disabled ? item.description : undefined}
             style={{
               display: 'flex',
@@ -226,6 +228,7 @@ export function MenuBar() {
     [insertTable]
   );
 
+  const [activeMenu, setActiveMenu] = useState('file');
   const fileItems = visible(open, save);
   const printItems = visible(print, pageSetup);
   const file: MenuEntry[] = [
@@ -237,6 +240,7 @@ export function MenuBar() {
     ? {
         icon: 'grid_on',
         label: insertTable.label,
+        submenuRole: 'dialog',
         submenuContent: (closeMenu: () => void) => (
           <TableGridInline
             onInsert={(rows: number, cols: number) => {
@@ -253,15 +257,33 @@ export function MenuBar() {
         description: insertTable.state.disabledReason.message,
       };
   const breaks = [pageBreak, nextPage, continuous];
+  const focusedMenu =
+    (activeMenu === 'file' && file.length === 0) || (activeMenu === 'help' && reportIssue.hidden)
+      ? 'format'
+      : activeMenu;
 
   return (
     <div className="flex items-center" role="menubar" aria-label={t('titleBar.menuBarAriaLabel')}>
-      {file.length > 0 && <MenuDropdown label={t('toolbar.file')} items={file} />}
+      {file.length > 0 && (
+        <MenuDropdown
+          label={t('toolbar.file')}
+          items={file}
+          tabIndex={focusedMenu === 'file' ? 0 : -1}
+          onFocus={() => setActiveMenu('file')}
+        />
+      )}
 
-      <MenuDropdown label={t('toolbar.format')} items={visible(ltr, rtl)} />
+      <MenuDropdown
+        label={t('toolbar.format')}
+        items={visible(ltr, rtl)}
+        tabIndex={focusedMenu === 'format' ? 0 : -1}
+        onFocus={() => setActiveMenu('format')}
+      />
 
       <MenuDropdown
         label={t('toolbar.insert')}
+        tabIndex={focusedMenu === 'insert' ? 0 : -1}
+        onFocus={() => setActiveMenu('insert')}
         items={[
           ...visible(image),
           tableEntry,
@@ -286,7 +308,12 @@ export function MenuBar() {
       />
 
       {!reportIssue.hidden && (
-        <MenuDropdown label={t('toolbar.help')} items={visible(reportIssue)} />
+        <MenuDropdown
+          label={t('toolbar.help')}
+          items={visible(reportIssue)}
+          tabIndex={focusedMenu === 'help' ? 0 : -1}
+          onFocus={() => setActiveMenu('help')}
+        />
       )}
     </div>
   );

@@ -4981,7 +4981,7 @@ impl EngineSession {
                     ]
                     .into_iter()
                     .flatten()
-                    .map(|r_id| format!("hf:{r_id}")),
+                    .map(|r_id| self.doc.header_footer_story(&r_id)),
                 );
             }
             for (kind, name) in [
@@ -6654,17 +6654,22 @@ impl EngineSession {
                     ]
                     .into_iter()
                     .flatten()
-                    .map(|r_id| format!("hf:{r_id}")),
+                    .map(|r_id| {
+                        (
+                            crate::header_footer::story_id(&r_id),
+                            self.doc.header_footer_story(&r_id),
+                        )
+                    }),
                 );
             }
         }
         let mut bytes = Vec::new();
-        for story in stories {
+        for (identity, story) in stories {
             let lowered = self
                 .with_resident_story(&story, env, |blocks| serde_json::to_vec(blocks).ok())
                 .ok()
                 .flatten();
-            bytes.extend_from_slice(story.as_bytes());
+            bytes.extend_from_slice(identity.as_bytes());
             bytes.push(0);
             bytes.extend_from_slice(
                 &hash_bytes(lowered.as_deref().unwrap_or_default()).to_le_bytes(),
@@ -6989,12 +6994,16 @@ impl EngineSession {
                     continue;
                 };
                 let mut blocks = self
-                    .with_resident_story(&format!("hf:{r_id}"), render_env, |blocks| {
-                        blocks
-                            .iter()
-                            .map(|block| block.as_ref().clone())
-                            .collect::<Vec<_>>()
-                    })
+                    .with_resident_story(
+                        &self.doc.header_footer_story(&r_id),
+                        render_env,
+                        |blocks| {
+                            blocks
+                                .iter()
+                                .map(|block| block.as_ref().clone())
+                                .collect::<Vec<_>>()
+                        },
+                    )
                     .map_err(|error| error.to_string())?;
                 for block in &mut blocks {
                     resolve_line_unit_spacing(
@@ -9784,7 +9793,7 @@ impl EngineSession {
                 payload
                     .variants
                     .iter()
-                    .map(|variant| format!("hf:{}", variant.r_id)),
+                    .map(|variant| crate::header_footer::story_id(&variant.r_id)),
             );
         }
         roots.extend(
@@ -9805,12 +9814,22 @@ impl EngineSession {
             if maps.contains_key(&root) {
                 continue;
             }
-            let map = self.lowering_map(&root, env).map_err(|error| {
-                refuse(
-                    ExportFailureCode::LayoutUnavailable,
-                    &format!("Story {root} can no longer be lowered: {error}"),
-                )
-            })?;
+            let story = root
+                .strip_prefix("hf:")
+                .map(|r_id| self.doc.header_footer_story(r_id))
+                .unwrap_or_else(|| root.clone());
+            let map = if let Some(map) = maps.get(&story) {
+                Rc::clone(map)
+            } else {
+                let map = self.lowering_map(&story, env).map_err(|error| {
+                    refuse(
+                        ExportFailureCode::LayoutUnavailable,
+                        &format!("Story {story} can no longer be lowered: {error}"),
+                    )
+                })?;
+                maps.insert(story, Rc::clone(&map));
+                map
+            };
             maps.insert(root, map);
         }
         if options.revision_view != RevisionView::Markup {

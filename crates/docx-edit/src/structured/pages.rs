@@ -882,13 +882,14 @@ pub(crate) fn build_layout_map(
                         HeaderFooterType::First => HeaderFooterVariant::First,
                         HeaderFooterType::Even => HeaderFooterVariant::Even,
                     };
-                    let root = format!("hf:{r_id}");
-                    let story = if index.stories.contains_key(&root) {
-                        root.clone()
+                    let root = crate::header_footer::story_id(r_id);
+                    let mapped = doc.header_footer_story(r_id);
+                    let story = if index.stories.contains_key(&mapped) {
+                        mapped.clone()
                     } else {
                         index
                             .band_story(*kind, *section_index as u32, variant)
-                            .unwrap_or_else(|| root.clone())
+                            .unwrap_or(mapped)
                     };
                     mapper.laid_out_roots.insert(story.clone());
                     let kind_name = match kind {

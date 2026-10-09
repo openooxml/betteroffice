@@ -273,6 +273,7 @@ fn text_style(
         underline,
         spacing_pt: None,
         baseline_pct: None,
+        kern_pt: None,
         caps: None,
     }
 }

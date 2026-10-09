@@ -30,6 +30,15 @@ pub(crate) struct SourceStory {
     pub note_id: Option<String>,
 }
 
+impl SourceStory {
+    pub(crate) fn content_story(&self, doc: &EditingDoc) -> String {
+        self.story
+            .strip_prefix("hf:")
+            .map(|id| doc.header_footer_story(id))
+            .unwrap_or_else(|| self.story.clone())
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SourceComment {
@@ -687,7 +696,7 @@ impl ReadSource {
                 let Some(id) = entry.get(0).and_then(Value::as_str) else {
                     continue;
                 };
-                let story = format!("hf:{id}");
+                let story = crate::header_footer::story_id(id);
                 if story_index.contains_key(&story) {
                     continue;
                 }
