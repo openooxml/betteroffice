@@ -11313,6 +11313,11 @@ struct ResidentPageMetadata<'a> {
     section_page_index: Option<u64>,
     section_page_number: Option<u64>,
     page_label: &'a Option<String>,
+    number: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    header_footer_refs: &'a Option<crate::types::HeaderFooterRefs>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parity_filler: Option<bool>,
 }
 
 fn convert_resident_page(
@@ -11337,6 +11342,9 @@ fn convert_resident_page(
         section_page_index: page.section_page_index,
         section_page_number: page.section_page_number,
         page_label: &page.page_label,
+        number: page.number,
+        header_footer_refs: &page.header_footer_refs,
+        parity_filler: page.parity_filler,
     })
 }
 
@@ -12281,6 +12289,54 @@ mod tests {
         );
     }
 
+    /// Every page's header and footer parts, built and as unbuilt placeholders of a partial
+    /// build of page 0 and of a full build releasing every other page.
+    fn placeholder_and_built_parts(
+        pagination: &crate::types::Input,
+        layout: &crate::types::Layout,
+        extras: &str,
+    ) -> (Vec<HfParts>, Vec<HfParts>, Vec<HfParts>) {
+        let fonts = ooxml_text::FontStore::default();
+        let painted = |page: &DisplayPage| HfParts {
+            header: page.header.as_ref().map(|region| region.r_id.clone()),
+            footer: page.footer.as_ref().map(|region| region.r_id.clone()),
+        };
+        let placeholder = |page: &DisplayPage| {
+            assert!(page.unbuilt);
+            page.hf_parts.clone().unwrap_or_default()
+        };
+        let full = build_display_list(
+            &resident_build_input(pagination, layout, extras).unwrap(),
+            &fonts,
+        );
+        let (_, partial) = build_resident_display_list_partial_with_fonts_observed(
+            pagination,
+            layout,
+            extras,
+            &fonts,
+            &|index| index == 0,
+            &mut || {},
+        )
+        .unwrap();
+        let (mut resident, mut released) = build_resident_display_list_partial_with_fonts_observed(
+            pagination,
+            layout,
+            extras,
+            &fonts,
+            &|_| true,
+            &mut || {},
+        )
+        .unwrap();
+        let rest: Vec<usize> = (1..layout.pages.len()).collect();
+        release_resident_display_pages(pagination, layout, &mut resident, &mut released, &rest)
+            .unwrap();
+        (
+            full.pages.iter().skip(1).map(painted).collect(),
+            partial.pages.iter().skip(1).map(placeholder).collect(),
+            released.pages.iter().skip(1).map(placeholder).collect(),
+        )
+    }
+
     #[test]
     fn unbuilt_placeholders_name_the_header_and_footer_parts_their_build_paints() {
         let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
@@ -12297,53 +12353,99 @@ mod tests {
             {"rId":"rIdH1","kind":"header","type":"default"},
             {"rId":"rIdH2","kind":"header","type":"even"},
             {"rId":"rIdF1","kind":"footer","type":"first"}]}}"#;
-        let fonts = ooxml_text::FontStore::default();
         let mut headers = std::collections::BTreeSet::new();
         for name in names {
             let text =
                 std::fs::read_to_string(fixtures.join(format!("{name}.input.json"))).unwrap();
-            let Ok(mut pagination) = serde_json::from_str::<crate::types::Input>(&text) else {
-                continue;
-            };
-            let Ok(layout) = crate::compute_layout_input(&mut pagination) else {
-                continue;
-            };
-            let full = build_display_list(
-                &resident_build_input(&pagination, &layout, extras).unwrap(),
-                &fonts,
-            );
-            let (_, partial) = build_resident_display_list_partial_with_fonts_observed(
-                &pagination,
-                &layout,
-                extras,
-                &fonts,
-                &|index| index == 0,
-                &mut || {},
-            )
-            .unwrap();
-            for (built, placeholder) in full.pages.iter().zip(&partial.pages).skip(1) {
-                let painted = HfParts {
-                    header: built.header.as_ref().map(|region| region.r_id.clone()),
-                    footer: built.footer.as_ref().map(|region| region.r_id.clone()),
-                };
-                assert!(placeholder.unbuilt, "{name}");
-                assert_eq!(
-                    placeholder.hf_parts.clone().unwrap_or_default(),
-                    painted,
-                    "{name}"
-                );
-                headers.extend(painted.header);
-            }
-            assert_eq!(
-                full.pages[0]
-                    .footer
-                    .as_ref()
-                    .map(|region| region.r_id.as_str()),
-                Some("rIdF1"),
-                "{name}"
-            );
+            let mut pagination = serde_json::from_str::<crate::types::Input>(&text)
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            let layout = crate::compute_layout_input(&mut pagination)
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            let (painted, partial, released) =
+                placeholder_and_built_parts(&pagination, &layout, extras);
+            assert_eq!(partial, painted, "{name}");
+            assert_eq!(released, painted, "{name}");
+            headers.extend(painted.into_iter().filter_map(|parts| parts.header));
         }
         assert_eq!(headers.into_iter().collect::<Vec<_>>(), ["rIdH1", "rIdH2"]);
+    }
+
+    #[test]
+    fn placeholders_follow_section_refs_page_numbers_and_parity_fillers() {
+        let paragraph = |id: u64, text: &str| {
+            serde_json::json!({
+                "block": {"kind": "paragraph", "id": id, "runs": [{"kind": "text", "text": text}], "attrs": {}},
+                "measure": {"kind": "paragraph", "totalHeight": 24, "lines": [{
+                    "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": text.len(),
+                    "width": 120, "ascent": 19.2, "descent": 4.8, "lineHeight": 24
+                }]}
+            })
+        };
+        let page_break = |id: u64| serde_json::json!({"block": {"kind": "pageBreak", "id": id}, "measure": {"kind": "pageBreak"}});
+        let geometry = serde_json::json!({"pageSize": {"w": 800, "h": 1000}, "margins": {"top": 80, "right": 80, "bottom": 80, "left": 80}});
+        let mut section_break =
+            serde_json::json!({"kind": "sectionBreak", "id": 5, "type": "oddPage"});
+        section_break["pageSize"] = geometry["pageSize"].clone();
+        section_break["margins"] = geometry["margins"].clone();
+        let mut pagination: crate::types::Input = serde_json::from_value(serde_json::json!({
+            "measured": [
+                paragraph(0, "One"), page_break(1), paragraph(2, "Two"), page_break(3),
+                paragraph(4, "Three"),
+                {"block": section_break, "measure": {"kind": "sectionBreak"}},
+                paragraph(6, "Four"), page_break(7), paragraph(8, "Five"), page_break(9),
+                paragraph(10, "Six"),
+            ],
+            "options": {"pageSize": geometry["pageSize"], "margins": geometry["margins"], "pageGap": 20},
+        }))
+        .unwrap();
+        let mut layout = crate::compute_layout_input(&mut pagination).unwrap();
+        let regions: crate::regions::DocumentRegions = serde_json::from_value(serde_json::json!({
+            "evenAndOddHeaders": true,
+            "sections": [
+                {"headerFooterRefs": {"headerDefault": "rIdA", "headerEven": "rIdE", "footerDefault": "rIdF"}},
+                {"titlePg": true, "headerFooterRefs": {"headerFirst": "rIdB", "headerEven": "rIdC"}}
+            ]
+        }))
+        .unwrap();
+        crate::regions::apply_document_regions(&mut layout, &regions);
+        assert!(
+            layout
+                .pages
+                .iter()
+                .any(|page| page.parity_filler == Some(true))
+        );
+        assert!(
+            layout
+                .pages
+                .iter()
+                .all(|page| page.header_footer_refs.is_some())
+        );
+        let extras = r#"{"contractVersion":2,"fontChains":{"arial|0|0":[]},"headersFooters":{
+            "evenAndOddHeaders":true,"titlePageSections":[1],"variants":[
+            {"rId":"rIdA","kind":"header","type":"default"},
+            {"rId":"rIdE","kind":"header","type":"even","sectionIndex":0},
+            {"rId":"rIdZ","kind":"header","type":"default","sectionIndex":1},
+            {"rId":"rIdB","kind":"header","type":"first","sectionIndex":1},
+            {"rId":"rIdC","kind":"header","type":"even","sectionIndex":1},
+            {"rId":"rIdF","kind":"footer","type":"default"}]}}"#;
+        let (painted, partial, released) =
+            placeholder_and_built_parts(&pagination, &layout, extras);
+        assert_eq!(partial, painted);
+        assert_eq!(released, painted);
+        let filler = layout
+            .pages
+            .iter()
+            .position(|page| page.parity_filler == Some(true))
+            .unwrap();
+        assert_eq!(painted[filler - 1], HfParts::default());
+        let headers: std::collections::BTreeSet<_> = painted
+            .iter()
+            .filter_map(|parts| parts.header.as_deref())
+            .collect();
+        assert_eq!(
+            headers.into_iter().collect::<Vec<_>>(),
+            ["rIdA", "rIdB", "rIdC", "rIdE"]
+        );
     }
 
     fn table_split_fixture() -> crate::types::Input {
