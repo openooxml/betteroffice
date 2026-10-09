@@ -9,8 +9,8 @@ use docx_edit::{
     EditTarget, EditTextView, EditingDoc, FindTextRequest, FormatPolicy, ParaAttrDelta,
     ParaSelector, ParagraphIdOrigin, ParagraphIdentity, ParagraphInput, ParagraphOrigin,
     ParagraphRef, ParagraphTarget, Position, RawOp, ReadParagraphsRequest, ReadStoriesRequest,
-    SearchScope, SegmentContent, StoryRange, StoryText, TargetEdge, TextPosition, TextRange,
-    TextTarget, UndoCaptureMode, UndoSession, seed_from_docx,
+    SearchScope, SegmentContent, StoryRange, StorySelection, StoryText, TargetEdge, TextPosition,
+    TextRange, TextTarget, UndoCaptureMode, UndoSession, seed_from_docx,
 };
 use yrs::{Any, Map, MapPrelim, ReadTxn, Text, TextRef, Transact};
 
@@ -1112,7 +1112,9 @@ fn read_stories_reports_each_story_and_refuses_a_stale_version() {
     ));
     let read = |stories: Option<Vec<&str>>, expect_version: Option<DocumentVersion>| {
         doc.read_stories(&ReadStoriesRequest {
-            stories: stories.map(|ids| ids.into_iter().map(str::to_owned).collect()),
+            stories: stories
+                .map(|ids| StorySelection::Listed(ids.into_iter().map(str::to_owned).collect())),
+            by_root: false,
             view: EditTextView::Accepted,
             expect_version,
         })
@@ -1138,12 +1140,17 @@ fn read_stories_reports_each_story_and_refuses_a_stale_version() {
     assert!(all.contains(&("body".to_owned(), Err(EditFailureCode::Unsupported))));
     assert!(all.contains(&("body:t0:r0c0".to_owned(), Ok(vec!["cell".to_owned()]))));
 
-    let chosen = read(Some(vec!["body:t0:r0c0", "missing", "body:t0:r0c0"]), None).unwrap();
+    let chosen = read(
+        Some(vec!["missing", "body:t0:r0c0", "table-cell", "missing"]),
+        None,
+    )
+    .unwrap();
+    assert!(!chosen.truncated);
     assert_eq!(
         summary(chosen.stories),
         [
-            ("body:t0:r0c0".to_owned(), Ok(vec!["cell".to_owned()])),
             ("missing".to_owned(), Err(EditFailureCode::MissingTarget)),
+            ("body:t0:r0c0".to_owned(), Ok(vec!["cell".to_owned()])),
         ]
     );
     assert!(read(Some(vec!["body:t0:r0c0"]), Some(chosen.version.clone())).is_ok());
