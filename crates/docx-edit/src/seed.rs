@@ -3937,6 +3937,23 @@ fn cell_borders(
     }
 }
 
+pub(crate) fn synthesized_cell_width(
+    widths: &[Option<f64>],
+    total_width: f64,
+    start_column: usize,
+    colspan: usize,
+) -> Option<f64> {
+    (!widths.is_empty() && total_width > 0.0).then(|| {
+        let cell_width: f64 = widths
+            .iter()
+            .skip(start_column)
+            .take(colspan)
+            .flatten()
+            .sum();
+        (cell_width / total_width * 100.0).round()
+    })
+}
+
 struct CellOptions<'a> {
     is_header: bool,
     rowspan: usize,
@@ -4213,8 +4230,11 @@ fn project_row<'a>(
             field(Some(row), "propertyChanges").unwrap().clone(),
         );
     }
-    let widths = array(field(Some(table), "columnWidths"));
-    let total_width: f64 = widths.iter().filter_map(Value::as_f64).sum();
+    let widths: Vec<Option<f64>> = array(field(Some(table), "columnWidths"))
+        .iter()
+        .map(Value::as_f64)
+        .collect();
+    let total_width: f64 = widths.iter().flatten().sum();
     let rows = array(field(Some(table), "rows"));
     let total_columns = if !widths.is_empty() {
         widths.len()
@@ -4240,15 +4260,7 @@ fn project_row<'a>(
             number(field(field(Some(cell), "formatting"), "gridSpan")).unwrap_or(1.0) as usize;
         let start_column = column;
         let span = row_spans.get(&(row_index, start_column));
-        let grid_width = (!widths.is_empty() && total_width > 0.0).then(|| {
-            let cell_width: f64 = widths
-                .iter()
-                .skip(start_column)
-                .take(colspan)
-                .filter_map(Value::as_f64)
-                .sum();
-            (cell_width / total_width * 100.0).round()
-        });
+        let grid_width = synthesized_cell_width(&widths, total_width, start_column, colspan);
         column += colspan;
         if span.is_some_and(|(_, skip)| *skip) {
             continue;
@@ -6808,6 +6820,176 @@ mod tests {
             .apply_raw_story_batches(batches, &EditCtx::local(String::new(), String::new()))
             .unwrap();
         document
+    }
+
+    fn measured_table_column_widths(table: &docx_layout::types::TableBlock) -> Vec<f64> {
+        let mut block = docx_layout::types::LayoutBlock::Table(table.clone());
+        let config = docx_layout::measure_blocks::MeasurementConfig {
+            defaults: json!({"fontFamily": "Arial", "fontSize": 12}),
+            ..Default::default()
+        };
+        let docx_layout::types::BlockExtent::Table(extent) =
+            docx_layout::measure_blocks::measure_block(&mut block, 600.0, &config).unwrap()
+        else {
+            panic!()
+        };
+        extent.column_widths
+    }
+
+    #[test]
+    fn seeded_grid_percentages_do_not_become_cell_width_preferences() {
+        for formatting in [Value::Null, json!({}), json!({"verticalAlign": "center"})] {
+            let table = json!({
+                "type": "table", "columnWidths": [1500, 4500],
+                "formatting": {"layout": "fixed", "width": {"value": 9000, "type": "dxa"}},
+                "rows": [{"type": "tableRow", "cells": [
+                    {"type": "tableCell", "formatting": formatting, "content": []},
+                    {"type": "tableCell", "formatting": formatting, "content": []}
+                ]}]
+            });
+            let projected = project_table(&table, &StyleResolver::new(None), None, 12);
+            for (cell, width) in projected.rows[0].cells.iter().zip([25.0, 75.0]) {
+                assert_eq!(cell.attrs.get("width").and_then(Value::as_f64), Some(width));
+                assert_eq!(
+                    cell.attrs.get("widthType").and_then(Value::as_str),
+                    Some("pct")
+                );
+            }
+            let document = seed_body(&[table]);
+            let env = crate::bridge::RenderEnv::default();
+            let blocks = crate::bridge::yrs_doc_to_layout_blocks(&document, "body", &env).unwrap();
+            let docx_layout::types::LayoutBlock::Table(table) = &blocks[0] else {
+                panic!()
+            };
+            for cell in &table.rows[0].cells {
+                assert_eq!(cell.width, None);
+                assert_eq!(cell.width_value, None);
+                assert_eq!(cell.preferred_width, None);
+            }
+            assert_eq!(measured_table_column_widths(table), vec![150.0, 450.0]);
+            document
+                .set_column_width(
+                    &EditCtx::local("", ""),
+                    &crate::CellLoc::new("body", 0, 0, 0),
+                    3000.0,
+                )
+                .unwrap();
+            let blocks = crate::bridge::yrs_doc_to_layout_blocks(&document, "body", &env).unwrap();
+            let docx_layout::types::LayoutBlock::Table(table) = &blocks[0] else {
+                panic!()
+            };
+            assert_eq!(measured_table_column_widths(table), vec![250.0, 350.0]);
+        }
+    }
+
+    #[test]
+    fn edited_cell_percentages_without_authored_widths_remain_preferences() {
+        for formatting in [Value::Null, json!({}), json!({"verticalAlign": "center"})] {
+            let document = seed_body(&[json!({
+                "type": "table", "columnWidths": [3000, 6000],
+                "formatting": {"layout": "fixed", "width": {"value": 9000, "type": "dxa"}},
+                "rows": [{"type": "tableRow", "cells": [
+                    {"type": "tableCell", "formatting": formatting, "content": []},
+                    {"type": "tableCell", "formatting": formatting, "content": []}
+                ]}]
+            })]);
+            for (column, width) in [(0, 1250.0), (1, 3750.0)] {
+                document
+                    .set_cell_text_format(
+                        &EditCtx::local("", ""),
+                        &crate::TableRange::cell(crate::CellLoc::new("body", 0, 0, column)),
+                        &HashMap::from([
+                            ("width".to_owned(), Any::Number(width)),
+                            ("widthType".to_owned(), Any::from("pct")),
+                        ]),
+                    )
+                    .unwrap();
+            }
+            let blocks = crate::bridge::yrs_doc_to_layout_blocks(
+                &document,
+                "body",
+                &crate::bridge::RenderEnv::default(),
+            )
+            .unwrap();
+            let docx_layout::types::LayoutBlock::Table(table) = &blocks[0] else {
+                panic!()
+            };
+            for (cell, width) in table.rows[0].cells.iter().zip([1250.0, 3750.0]) {
+                assert_eq!(cell.width_value, Some(width));
+                assert_eq!(cell.preferred_width.as_ref().unwrap().value, Some(width));
+            }
+            assert_eq!(measured_table_column_widths(table), vec![150.0, 450.0]);
+        }
+    }
+
+    #[test]
+    fn seeded_grid_percentages_follow_horizontal_and_vertical_spans() {
+        let document = seed_body(&[json!({
+            "type": "table", "columnWidths": [1500, 3000, 4500],
+            "formatting": {"layout": "fixed", "width": {"value": 9000, "type": "dxa"}},
+            "rows": [
+                {"type": "tableRow", "cells": [
+                    {"type": "tableCell", "formatting": {"vMerge": "restart"}, "content": []},
+                    {"type": "tableCell", "formatting": {"gridSpan": 2}, "content": []}
+                ]},
+                {"type": "tableRow", "cells": [
+                    {"type": "tableCell", "formatting": {"vMerge": "continue"}, "content": []},
+                    {"type": "tableCell", "formatting": {"gridSpan": 2}, "content": []}
+                ]}
+            ]
+        })]);
+        let blocks = crate::bridge::yrs_doc_to_layout_blocks(
+            &document,
+            "body",
+            &crate::bridge::RenderEnv::default(),
+        )
+        .unwrap();
+        let docx_layout::types::LayoutBlock::Table(table) = &blocks[0] else {
+            panic!()
+        };
+        assert_eq!(table.rows[0].cells[0].row_span, Some(2.0));
+        assert_eq!(table.rows[1].cells.len(), 1);
+        for cell in table.rows.iter().flat_map(|row| &row.cells) {
+            assert_eq!(cell.width_value, None);
+            assert_eq!(cell.preferred_width, None);
+        }
+        assert_eq!(
+            measured_table_column_widths(table),
+            vec![100.0, 200.0, 300.0]
+        );
+    }
+
+    #[test]
+    fn seeded_cell_percentages_preserve_authored_units() {
+        for (values, expected) in [
+            ([1250.0, 3750.0], vec![150.0, 450.0]),
+            ([25.0, 75.0], vec![297.0, 303.0]),
+        ] {
+            let document = seed_body(&[json!({
+                "type": "table", "columnWidths": [1500, 4500],
+                "formatting": {"layout": "fixed", "width": {"value": 9000, "type": "dxa"}},
+                "rows": [{"type": "tableRow", "cells": [
+                    {"type": "tableCell", "content": [],
+                     "formatting": {"width": {"value": values[0], "type": "pct"}}},
+                    {"type": "tableCell", "content": [],
+                     "formatting": {"width": {"value": values[1], "type": "pct"}}}
+                ]}]
+            })]);
+            let blocks = crate::bridge::yrs_doc_to_layout_blocks(
+                &document,
+                "body",
+                &crate::bridge::RenderEnv::default(),
+            )
+            .unwrap();
+            let docx_layout::types::LayoutBlock::Table(table) = &blocks[0] else {
+                panic!()
+            };
+            for (cell, value) in table.rows[0].cells.iter().zip(values) {
+                assert_eq!(cell.width_value, Some(value));
+                assert_eq!(cell.preferred_width.as_ref().unwrap().value, Some(value));
+            }
+            assert_eq!(measured_table_column_widths(table), expected);
+        }
     }
 
     fn rendered(document: &EditingDoc) -> (usize, String) {

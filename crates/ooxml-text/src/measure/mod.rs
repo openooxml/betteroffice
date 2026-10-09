@@ -122,6 +122,7 @@
 mod floats;
 mod font_slots;
 mod input;
+mod intrinsic;
 mod line_filler;
 mod list_marker;
 mod prepare;
@@ -133,6 +134,7 @@ pub use input::{
     FontChains, IndentIn, MeasureInput, MeasureRequest, RotationBoundsIn, RunFontSlotsIn, RunIn,
     RunLanguageSlotsIn, SpacingIn, TabStopIn,
 };
+pub use intrinsic::measure_intrinsic_widths;
 
 use crate::font_store::{FontId, FontStore};
 

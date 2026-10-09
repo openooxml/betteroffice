@@ -54,6 +54,7 @@ use yrs::{Any, Map, MapRef, OffsetKind, Out, ReadTxn, Text, Transact};
 
 use super::{COMMENTS, DEL, EditError, EditingDoc, INS, decode_anchor, is_pilcrow, story_ref};
 use crate::list_marker::{ListState, compute_list_marker};
+use crate::seed::synthesized_cell_width;
 
 pub(crate) mod local;
 pub(crate) mod preview;
@@ -1747,7 +1748,11 @@ fn lower_table<T: ReadTxn>(
     let table_identity = table_identity.unwrap_or_else(|| story_index.to_string());
     let table_id = format!("{parent_story}:table:{table_identity}");
 
+    let original = tbl_pr.get("_originalFormatting").and_then(any_map);
     let table_margins = tbl_pr.get("cellMargins").and_then(any_map);
+    let grid_widths: Vec<Option<f64>> = grid.iter().map(any_number).collect();
+    let total_grid_width: f64 = grid_widths.iter().flatten().sum();
+    let mut column_row_ends = vec![0usize; grid_widths.len()];
     let mut rows = Vec::with_capacity(row_values.len());
     let mut row_pm_start = pm_start + 1;
 
@@ -1779,6 +1784,7 @@ fn lower_table<T: ReadTxn>(
 
         let mut cells = Vec::with_capacity(cell_values.len());
         let mut cell_pm_start = row_pm_start + 1;
+        let mut column = 0usize;
         for (cell_index, cell_value) in cell_values.iter().enumerate() {
             let cell = any_map(cell_value).ok_or_else(|| {
                 malformed_table(
@@ -1827,12 +1833,33 @@ fn lower_table<T: ReadTxn>(
                     }
                 }
             }
-            let width_value = map_number(tc_pr, "width");
+            while column_row_ends
+                .get(column)
+                .is_some_and(|end| *end > row_index)
+            {
+                column += 1;
+            }
+            let col_span = map_number(tc_pr, "colspan");
+            let row_span = map_number(tc_pr, "rowspan");
+            let colspan = col_span.unwrap_or(1.0) as usize;
             let width_type = map_string(tc_pr, "widthType");
+            let width_value = map_number(tc_pr, "width");
+            let authored_width = tc_pr
+                .get("_originalFormatting")
+                .and_then(any_map)
+                .and_then(|value| value.get("width"));
+            let synthesized_width = original.is_some()
+                && authored_width.is_none()
+                && width_type.as_deref() == Some("pct")
+                && width_value.is_some()
+                && width_value
+                    == synthesized_cell_width(&grid_widths, total_grid_width, column, colspan);
+            let width_value =
+                width_value.filter(|_| width_type.as_deref() != Some("auto") && !synthesized_width);
             let width =
                 width_value.filter(|value| *value != 0.0).and_then(|value| {
                     match width_type.as_deref() {
-                        None | Some("dxa") | Some("auto") => Some(twips_to_pixels(value)),
+                        None | Some("dxa") => Some(twips_to_pixels(value)),
                         _ => None,
                     }
                 });
@@ -1856,12 +1883,15 @@ fn lower_table<T: ReadTxn>(
                 text_direction: map_string(tc_pr, "textDirection"),
                 id: BlockId::Str(cell_story),
                 blocks,
-                col_span: map_number(tc_pr, "colspan"),
-                row_span: map_number(tc_pr, "rowspan"),
+                col_span,
+                row_span,
                 width,
                 width_value,
+                preferred_width: width_value.map(|value| docx_layout::types::PreferredWidth {
+                    value: Some(value),
+                    r#type: width_type.clone(),
+                }),
                 width_type,
-                preferred_width: None,
                 grid_start: None,
                 min_content_width: None,
                 max_content_width: None,
@@ -1872,6 +1902,10 @@ fn lower_table<T: ReadTxn>(
                 no_wrap: (map_bool(tc_pr, "noWrap") == Some(true)).then_some(true),
                 tracked_marker: tc_pr.get("cellMarker").and_then(any_json),
             });
+            for end in column_row_ends.iter_mut().skip(column).take(colspan) {
+                *end = row_index.saturating_add(row_span.unwrap_or(1.0) as usize);
+            }
+            column = column.saturating_add(colspan);
             cell_pm_start += content_size + 2;
         }
 
@@ -1903,12 +1937,11 @@ fn lower_table<T: ReadTxn>(
     }
 
     let node_size = row_pm_start + 1 - pm_start;
-    let column_widths: Vec<f64> = grid
+    let column_widths: Vec<f64> = grid_widths
         .iter()
-        .filter_map(any_number)
-        .map(twips_to_pixels)
+        .flatten()
+        .map(|width| twips_to_pixels(*width))
         .collect();
-    let original = tbl_pr.get("_originalFormatting").and_then(any_map);
     let indent = original
         .and_then(|value| value.get("indent"))
         .and_then(any_map)
@@ -1942,8 +1975,9 @@ fn lower_table<T: ReadTxn>(
             width: map_number(tbl_pr, "width"),
             width_type: map_string(tbl_pr, "widthType"),
             preferred_width: None,
-            width_algorithm: layout_mode.is_some().then(|| "legacy".to_owned()),
-            layout_mode,
+            layout_mode: None,
+            table_layout: Some(layout_mode.unwrap_or_else(|| "autofit".to_owned())),
+            width_algorithm: None,
             style_cascade: None,
             background: None,
             justification: map_string(tbl_pr, "justification"),
@@ -5267,6 +5301,7 @@ mod tests {
         let mut expected = json!([{
             "kind": "table",
             "id": "placeholder",
+            "tableLayout": "autofit",
             "rows": [
                 {
                     "id": "placeholder", "isHeader": false,
@@ -5318,6 +5353,166 @@ mod tests {
             shifted.pointer("/1/rows/0/id"),
             Some(&Value::from(format!("{stable_table_id}:r0")))
         );
+    }
+
+    #[test]
+    fn native_table_widths_honor_fixed_percent_and_automatic_preferences() {
+        for (layout, table_width, width_type, cell_widths, expected) in [
+            ("fixed", Some(9000), "dxa", [1500, 7500], [100.0, 500.0]),
+            ("autofit", None, "pct", [2500, 2500], [36.0, 36.0]),
+            ("autofit", None, "auto", [4500, 4500], [36.0, 36.0]),
+        ] {
+            let doc = EditingDoc::new(41);
+            for (story, para) in [("body:t0:r0c0", "c00p"), ("body:t0:r0c1", "c01p")] {
+                replace_story_with_paragraph(&doc, story, para, "Hello");
+            }
+            doc.create_story("body", "", "Normal", "left").unwrap();
+            let tbl_pr = json!({
+                "tableLayout": layout,
+                "width": table_width,
+                "widthType": if table_width.is_some() { "dxa" } else { "auto" }
+            });
+            let rows = json!([{"trPr": {}, "cells": [
+                {"tcPr": {"width": cell_widths[0], "widthType": width_type},
+                 "story": "body:t0:r0c0"},
+                {"tcPr": {"width": cell_widths[1], "widthType": width_type},
+                 "story": "body:t0:r0c1"}
+            ]}]);
+            doc.apply_raw_ops(
+                "body",
+                vec![
+                    RawOp::Delete { index: 0, len: 1 },
+                    RawOp::InsertEmbed {
+                        index: 0,
+                        kind: "table".to_owned(),
+                        payload: vec![
+                            (
+                                "tblPr".to_owned(),
+                                Any::from_json(&tbl_pr.to_string()).unwrap(),
+                            ),
+                            ("grid".to_owned(), Any::from_json("[4500,4500]").unwrap()),
+                            (
+                                "rows".to_owned(),
+                                Any::from_json(&rows.to_string()).unwrap(),
+                            ),
+                        ],
+                        attrs: Attrs::new(),
+                    },
+                ],
+                &EditCtx::local("", DATE),
+            )
+            .unwrap();
+            let mut blocks = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+            let LayoutBlock::Table(table) = &mut blocks[0] else {
+                panic!()
+            };
+            assert_eq!(table.layout_mode, None);
+            assert_eq!(table.table_layout.as_deref(), Some(layout));
+            assert_eq!(table.column_widths, Some(vec![300.0, 300.0]));
+            for cell in &mut table.rows[0].cells {
+                if width_type == "auto" {
+                    assert_eq!(cell.width, None);
+                    assert_eq!(cell.width_value, None);
+                    assert_eq!(cell.preferred_width, None);
+                    assert_eq!(cell.width_type.as_deref(), Some("auto"));
+                } else if width_type == "pct" {
+                    assert_eq!(cell.width, None);
+                    assert_eq!(cell.width_value, Some(2500.0));
+                }
+                cell.min_content_width = Some(36.0);
+                cell.max_content_width = Some(36.0);
+            }
+            let widths = docx_layout::table_grid::resolve_table_column_widths(table, 601.333_333);
+            for (actual, expected) in widths.iter().zip(expected) {
+                assert!((actual - expected).abs() < 1e-6, "{width_type}: {widths:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn docx_table_with_unmeasured_image_keeps_main_grid_through_lowering_and_measurement() {
+        for layout in [None, Some("autofit"), Some("fixed")] {
+            let doc = EditingDoc::new(41);
+            let story = "body:t0:r0c0";
+            replace_story_with_paragraph(&doc, story, "cell-p", "x");
+            doc.apply_raw_ops(
+                story,
+                vec![RawOp::InsertEmbed {
+                    index: 0,
+                    kind: "image".to_owned(),
+                    payload: vec![
+                        ("src".to_owned(), Any::from("image")),
+                        ("width".to_owned(), Any::Number(200.0)),
+                        ("height".to_owned(), Any::Number(40.0)),
+                    ],
+                    attrs: Attrs::new(),
+                }],
+                &EditCtx::local("", DATE),
+            )
+            .unwrap();
+            doc.create_story("body", "", "Normal", "left").unwrap();
+            let tbl_pr = json!({"tableLayout": layout});
+            let rows = json!([{"trPr": {}, "cells": [
+                {"tcPr": {"width": 1500, "widthType": "dxa"}, "story": story}
+            ]}]);
+            doc.apply_raw_ops(
+                "body",
+                vec![
+                    RawOp::Delete { index: 0, len: 1 },
+                    RawOp::InsertEmbed {
+                        index: 0,
+                        kind: "table".to_owned(),
+                        payload: vec![
+                            (
+                                "tblPr".to_owned(),
+                                Any::from_json(&tbl_pr.to_string()).unwrap(),
+                            ),
+                            ("grid".to_owned(), Any::from_json("[4500]").unwrap()),
+                            (
+                                "rows".to_owned(),
+                                Any::from_json(&rows.to_string()).unwrap(),
+                            ),
+                        ],
+                        attrs: Attrs::new(),
+                    },
+                ],
+                &EditCtx::local("", DATE),
+            )
+            .unwrap();
+            let mut blocks = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+            let LayoutBlock::Table(table) = &blocks[0] else {
+                panic!()
+            };
+            assert_eq!(table.layout_mode, None);
+            assert_eq!(
+                table.table_layout.as_deref(),
+                Some(layout.unwrap_or("autofit"))
+            );
+            assert_eq!(table.rows[0].cells[0].width, Some(100.0));
+            assert_eq!(
+                docx_layout::table_grid::resolve_table_column_widths(table, 600.0),
+                vec![300.0]
+            );
+            let LayoutBlock::Paragraph(paragraph) = &table.rows[0].cells[0].blocks[0] else {
+                panic!()
+            };
+            let Run::Image(image) = &paragraph.runs[0] else {
+                panic!()
+            };
+            assert_eq!(image.width, 200.0);
+            let config = docx_layout::measure_blocks::MeasurementConfig {
+                defaults: json!({"fontFamily": "Arial", "fontSize": 12}),
+                ..Default::default()
+            };
+            let docx_layout::types::BlockExtent::Table(measured) =
+                docx_layout::measure_blocks::measure_block(&mut blocks[0], 600.0, &config).unwrap()
+            else {
+                panic!()
+            };
+            assert_eq!(measured.column_widths, vec![300.0]);
+            assert_eq!(measured.total_width, 300.0);
+            assert_eq!(measured.rows[0].cells[0].width, 300.0);
+        }
     }
 
     #[test]
