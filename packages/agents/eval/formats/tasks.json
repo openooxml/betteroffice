@@ -1,0 +1,632 @@
+[
+  {
+    "id": "xlsx-01-correct-value",
+    "format": "xlsx",
+    "title": "Correct a budget amount",
+    "difficulty": 1,
+    "fixture": "fixtures/xlsx-01-correct-value.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, change the planned Supplies amount in Budget!B3 to 180. Keep the totals as formulas and update their calculated results. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "cells": {
+        "Budget": {
+          "B3": {
+            "value": 180,
+            "formula": null
+          },
+          "B5": {
+            "value": 680,
+            "formula": "SUM(B2:B4)"
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "xlsx-02-fix-total",
+    "format": "xlsx",
+    "title": "Repair a total formula",
+    "difficulty": 2,
+    "fixture": "fixtures/xlsx-02-fix-total.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, the Actual total in Budget!C5 leaves out Travel. Replace it with =SUM(C2:C4) and update its calculated result. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "cells": {
+        "Budget": {
+          "C5": {
+            "value": 630,
+            "formula": "SUM(C2:C4)"
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "xlsx-03-replace-product",
+    "format": "xlsx",
+    "title": "Rename a product across sheets",
+    "difficulty": 3,
+    "fixture": "fixtures/xlsx-03-replace-product.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, replace every occurrence of the case-sensitive product name Trail Mix with Forest Mix on both Catalog and Orders. Keep the rest of each cell intact. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "cells": {
+        "Catalog": {
+          "A2": {
+            "value": "Forest Mix",
+            "formula": null
+          },
+          "A4": {
+            "value": "Forest Mix family pack",
+            "formula": null
+          }
+        },
+        "Orders": {
+          "B2": {
+            "value": "Forest Mix",
+            "formula": null
+          },
+          "B4": {
+            "value": "Forest Mix family pack",
+            "formula": null
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "xlsx-04-style-header",
+    "format": "xlsx",
+    "title": "Format a header",
+    "difficulty": 4,
+    "fixture": "fixtures/xlsx-04-style-header.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, make Sales!A1:C1 bold and give those three header cells a solid light blue fill, color #D9EAF7. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "cells": {
+        "Sales": {
+          "A1": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "B1": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "C1": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "xlsx-05-sort-inventory",
+    "format": "xlsx",
+    "title": "Sort an inventory table",
+    "difficulty": 5,
+    "fixture": "fixtures/xlsx-05-sort-inventory.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, sort Inventory!A2:C5 by Stock in column C, smallest to largest. Move each complete row together and leave the header in row 1. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "rows": {
+        "Inventory": {
+          "2": 3,
+          "3": 5,
+          "4": 2,
+          "5": 4
+        }
+      }
+    }
+  },
+  {
+    "id": "xlsx-06-add-totals",
+    "format": "xlsx",
+    "title": "Add a currency total row",
+    "difficulty": 6,
+    "fixture": "fixtures/xlsx-06-add-totals.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, add a total row on Sales at row 5: A5 should say Total, B5 should contain =SUM(B2:B4), and C5 should contain =SUM(C2:C4). Format B5:C5 as dollars with two decimal places and a thousands separator, using $#,##0.00, and save calculated results. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "cells": {
+        "Sales": {
+          "A5": {
+            "value": "Total",
+            "formula": null
+          },
+          "B5": {
+            "value": 450,
+            "formula": "SUM(B2:B4)",
+            "style": {
+              "number_format": "$#,##0.00"
+            }
+          },
+          "C5": {
+            "value": 180,
+            "formula": "SUM(C2:C4)",
+            "style": {
+              "number_format": "$#,##0.00"
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "xlsx-07-growth-column",
+    "format": "xlsx",
+    "title": "Insert a growth column",
+    "difficulty": 7,
+    "fixture": "fixtures/xlsx-07-growth-column.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, insert a column immediately after Revenue column C, moving the existing Status column to E. Name D1 Growth %. In D2:D4 use =(C2-B2)/B2, =(C3-B3)/B3, and =(C4-B4)/B4 respectively. Format D2:D4 as percentages with one decimal place, using 0.0%, and save calculated results. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "insert_columns": {
+        "Revenue": 4
+      },
+      "cells": {
+        "Revenue": {
+          "D1": {
+            "value": "Growth %",
+            "formula": null
+          },
+          "D2": {
+            "value": 0.25,
+            "formula": "(C2-B2)/B2",
+            "style": {
+              "number_format": "0.0%"
+            }
+          },
+          "D3": {
+            "value": 0.5,
+            "formula": "(C3-B3)/B3",
+            "style": {
+              "number_format": "0.0%"
+            }
+          },
+          "D4": {
+            "value": -0.2,
+            "formula": "(C4-B4)/B4",
+            "style": {
+              "number_format": "0.0%"
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "xlsx-08-organize-sheets",
+    "format": "xlsx",
+    "title": "Rename and reorder sheets",
+    "difficulty": 8,
+    "fixture": "fixtures/xlsx-08-organize-sheets.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, rename Forecast to Outlook. Arrange the tabs in this order: Actuals, Outlook, Assumptions. Keep the formulas on Assumptions working by changing its B2 reference to ='Outlook'!B2; keep all other formulas and values intact. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "rename": {
+        "Forecast": "Outlook"
+      },
+      "sheet_order": [
+        "Actuals",
+        "Outlook",
+        "Assumptions"
+      ],
+      "cells": {
+        "Assumptions": {
+          "B2": {
+            "value": 450,
+            "formula": "'Outlook'!B2"
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "xlsx-09-budget-summary",
+    "format": "xlsx",
+    "title": "Build a linked budget summary",
+    "difficulty": 9,
+    "fixture": "fixtures/xlsx-09-budget-summary.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, add an Expenses total row at row 5 with A5 Total, B5 =SUM(B2:B4), and C5 =SUM(C2:C4). On Summary, set B2 to ='Expenses'!B5, B3 to ='Expenses'!C5, and B4 to =B3-B2. Format Expenses!B5:C5 and Summary!B2:B4 as dollars using $#,##0.00 and save calculated results. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "cells": {
+        "Expenses": {
+          "A5": {
+            "value": "Total",
+            "formula": null
+          },
+          "B5": {
+            "value": 350,
+            "formula": "SUM(B2:B4)",
+            "style": {
+              "number_format": "$#,##0.00"
+            }
+          },
+          "C5": {
+            "value": 470,
+            "formula": "SUM(C2:C4)",
+            "style": {
+              "number_format": "$#,##0.00"
+            }
+          }
+        },
+        "Summary": {
+          "B2": {
+            "value": 350,
+            "formula": "'Expenses'!B5",
+            "style": {
+              "number_format": "$#,##0.00"
+            }
+          },
+          "B3": {
+            "value": 470,
+            "formula": "'Expenses'!C5",
+            "style": {
+              "number_format": "$#,##0.00"
+            }
+          },
+          "B4": {
+            "value": 120,
+            "formula": "B3-B2",
+            "style": {
+              "number_format": "$#,##0.00"
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "xlsx-10-quarter-report",
+    "format": "xlsx",
+    "title": "Prepare a quarterly report",
+    "difficulty": 10,
+    "fixture": "fixtures/xlsx-10-quarter-report.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx on Quarterly, insert Growth % in a new column D, moving Owner to E. Sort the three data rows by Q2 descending, keeping each owner with the product. Set D2:D4 to =(C2-B2)/B2, =(C3-B3)/B3, and =(C4-B4)/B4. Add row 5 with A5 Total, B5 =SUM(B2:B4), C5 =SUM(C2:C4), and D5 =(C5-B5)/B5. Use 0.0% in D2:D5 and $#,##0.00 in B5:C5. Make A1:E1 bold with solid #D9EAF7 fill. Save calculated results. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "insert_columns": {
+        "Quarterly": 4
+      },
+      "rows": {
+        "Quarterly": {
+          "2": 3,
+          "3": 2,
+          "4": 4
+        }
+      },
+      "cells": {
+        "Quarterly": {
+          "D1": {
+            "value": "Growth %",
+            "formula": null,
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "A5": {
+            "value": "Total",
+            "formula": null
+          },
+          "B5": {
+            "value": 400,
+            "formula": "SUM(B2:B4)",
+            "style": {
+              "number_format": "$#,##0.00"
+            }
+          },
+          "C5": {
+            "value": 505,
+            "formula": "SUM(C2:C4)",
+            "style": {
+              "number_format": "$#,##0.00"
+            }
+          },
+          "D5": {
+            "value": 0.2625,
+            "formula": "(C5-B5)/B5",
+            "style": {
+              "number_format": "0.0%"
+            }
+          },
+          "D2": {
+            "value": 0.5,
+            "formula": "(C2-B2)/B2",
+            "style": {
+              "number_format": "0.0%"
+            }
+          },
+          "D3": {
+            "value": 0.25,
+            "formula": "(C3-B3)/B3",
+            "style": {
+              "number_format": "0.0%"
+            }
+          },
+          "D4": {
+            "value": -0.2,
+            "formula": "(C4-B4)/B4",
+            "style": {
+              "number_format": "0.0%"
+            }
+          },
+          "A1": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "B1": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "C1": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "E1": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "pptx-01-change-title",
+    "format": "pptx",
+    "title": "Change a slide title",
+    "difficulty": 1,
+    "fixture": "fixtures/pptx-01-change-title.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, change the title on slide 1 from Quarterly update to Quarterly results. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "changes": {
+        "1": {
+          "Title": [
+            "Quarterly results"
+          ]
+        }
+      }
+    }
+  },
+  {
+    "id": "pptx-02-update-revenue",
+    "format": "pptx",
+    "title": "Update a reported figure",
+    "difficulty": 2,
+    "fixture": "fixtures/pptx-02-update-revenue.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, on slide 2 change Revenue: $1.2 million to Revenue: $1.5 million. Leave the margin and retention figures intact. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "changes": {
+        "2": {
+          "Bullets": [
+            "Revenue: $1.5 million",
+            "Margin: 18%",
+            "Retention: 91%"
+          ]
+        }
+      }
+    }
+  },
+  {
+    "id": "pptx-03-replace-bullets",
+    "format": "pptx",
+    "title": "Replace a bullet list",
+    "difficulty": 3,
+    "fixture": "fixtures/pptx-03-replace-bullets.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, replace the three bullets on slide 2, Next steps, with these three bullets in order: Finish the pilot; Collect feedback; Launch in October. Keep the existing bullet formatting. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "changes": {
+        "2": {
+          "Bullets": [
+            "Finish the pilot",
+            "Collect feedback",
+            "Launch in October"
+          ]
+        }
+      }
+    }
+  },
+  {
+    "id": "pptx-04-replace-term",
+    "format": "pptx",
+    "title": "Rename a project in slide text",
+    "difficulty": 4,
+    "fixture": "fixtures/pptx-04-replace-term.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, replace Atlas with Beacon everywhere in the visible slide titles and bullets. Leave speaker notes as they are. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "replace": {
+        "old": "Atlas",
+        "new": "Beacon"
+      }
+    }
+  },
+  {
+    "id": "pptx-05-finalize-titles",
+    "format": "pptx",
+    "title": "Finalize two slide titles",
+    "difficulty": 5,
+    "fixture": "fixtures/pptx-05-finalize-titles.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, change slide 2 title Draft results to Results and slide 3 title Draft next steps to Next steps. Leave mentions of those phrases in bullets and speaker notes unchanged, and keep both slides in their current positions. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "changes": {
+        "2": {
+          "Title": [
+            "Results"
+          ]
+        },
+        "3": {
+          "Title": [
+            "Next steps"
+          ]
+        }
+      }
+    }
+  },
+  {
+    "id": "pptx-06-delete-appendix",
+    "format": "pptx",
+    "title": "Remove an appendix slide",
+    "difficulty": 6,
+    "fixture": "fixtures/pptx-06-delete-appendix.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, delete slide 3, titled Appendix. Keep the other slides in their current order. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "slide_order": [
+        1,
+        2,
+        4
+      ]
+    }
+  },
+  {
+    "id": "pptx-07-reorder-slides",
+    "format": "pptx",
+    "title": "Reorder a presentation",
+    "difficulty": 7,
+    "fixture": "fixtures/pptx-07-reorder-slides.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, arrange the slides in this order by title: Overview, Agenda, Results, Next steps. Keep each slide's content and speaker notes attached to that slide. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "slide_order": [
+        1,
+        3,
+        4,
+        2
+      ]
+    }
+  },
+  {
+    "id": "pptx-08-speaker-notes",
+    "format": "pptx",
+    "title": "Write speaker notes",
+    "difficulty": 8,
+    "fixture": "fixtures/pptx-08-speaker-notes.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, replace the speaker notes on slide 2, Results, with exactly two paragraphs: Pause for questions after the chart. and Ask which metric needs a follow-up. Put each sentence in its own paragraph. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "notes": {
+        "2": "Pause for questions after the chart.\nAsk which metric needs a follow-up."
+      }
+    }
+  },
+  {
+    "id": "pptx-09-position-textbox",
+    "format": "pptx",
+    "title": "Add a positioned text box",
+    "difficulty": 9,
+    "fixture": "fixtures/pptx-09-position-textbox.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, add a text box on slide 1 containing Internal draft. Place its top-left corner 0.5 inches from the left edge and 5 inches from the top edge, with width 3 inches and height 0.5 inches. Use 18-point text in #666666. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "add_shapes": {
+        "1": [
+          {
+            "texts": [
+              "Internal draft"
+            ],
+            "rect": [
+              457200,
+              4572000,
+              2743200,
+              457200
+            ],
+            "font_size": 1800,
+            "color": "666666"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "pptx-10-insert-slide",
+    "format": "pptx",
+    "title": "Insert a slide with bullets and notes",
+    "difficulty": 10,
+    "fixture": "fixtures/pptx-10-insert-slide.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, insert a new slide immediately after slide 2, Agenda. Give it the title Pilot plan and three separate bullets in this order: Start with ten users; Collect feedback daily; Report results in two weeks. Add exactly this speaker note to the new slide: Keep the pilot to two weeks. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "slide_order": [
+        1,
+        2,
+        {
+          "shapes": [
+            {
+              "texts": [
+                "Pilot plan"
+              ],
+              "bullets": [
+                false
+              ]
+            },
+            {
+              "texts": [
+                "Start with ten users",
+                "Collect feedback daily",
+                "Report results in two weeks"
+              ],
+              "bullets": [
+                true,
+                true,
+                true
+              ]
+            }
+          ],
+          "notes": "Keep the pilot to two weeks."
+        },
+        3,
+        4
+      ]
+    }
+  }
+]
