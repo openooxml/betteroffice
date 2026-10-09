@@ -201,12 +201,15 @@ pub fn measure_keep_with_next_group_at(
     deferred: f64,
     capacity: f64,
 ) -> f64 {
-    measure_keep_with_next_group_witnessing(group, measured, leading, deferred, capacity, true)
+    measure_keep_with_next_group_witnessing(
+        group, measured, leading, deferred, capacity, true, true,
+    )
 }
 
 /// [`measure_keep_with_next_group_at`] with per-cell table witnesses only on
 /// pages without float bands (`split_first_row`). Otherwise a headerless table
 /// witnesses its whole first row unless taller than `capacity`.
+/// `every_cell_starts` is [`RowBreaks::set_every_cell_starts`].
 pub(crate) fn measure_keep_with_next_group_witnessing(
     group: &KeepWithNextGroup,
     measured: &[MeasuredBlock],
@@ -214,6 +217,7 @@ pub(crate) fn measure_keep_with_next_group_witnessing(
     deferred: f64,
     capacity: f64,
     split_first_row: bool,
+    every_cell_starts: bool,
 ) -> f64 {
     let mut budget = 0.0;
     let mut owed = deferred;
@@ -248,7 +252,7 @@ pub(crate) fn measure_keep_with_next_group_witnessing(
         }
         Some(BlockExtent::Table(table)) => match follower.map(|mb| &mb.block) {
             Some(LayoutBlock::Table(block)) => {
-                table_leading_slice(block, table, capacity, split_first_row)
+                table_leading_slice(block, table, capacity, split_first_row, every_cell_starts)
             }
             _ => 0.0,
         },
@@ -280,8 +284,10 @@ fn table_leading_slice(
     measure: &TableExtent,
     capacity: f64,
     split_first_row: bool,
+    every_cell_starts: bool,
 ) -> f64 {
     let breaks = RowBreaks::new(block, measure);
+    breaks.set_every_cell_starts(every_cell_starts);
     if block.floating.is_some() {
         return first_table_fragment_height(block, measure, breaks.lines());
     }
@@ -327,6 +333,12 @@ fn table_leading_slice(
             first = first.min(band + slice);
         }
     }
+    let band: f64 = measure
+        .rows
+        .iter()
+        .take(headers)
+        .map(|row| row.height)
+        .sum();
     let mut top = 0.0;
     let mut slice = first;
     for (row, keep) in measure
@@ -341,6 +353,12 @@ fn table_leading_slice(
             measure,
             &breaks,
             capacity,
+            headers,
+            if headers > 0 && band <= capacity {
+                capacity - band
+            } else {
+                capacity
+            },
             !split_first_row,
         );
         if keep > 0.0 && top + keep <= capacity {

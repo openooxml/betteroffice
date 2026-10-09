@@ -3354,7 +3354,7 @@ fn per_cell_split_cells(spec: &[(usize, f64)]) -> serde_json::Value {
 #[test]
 fn per_cell_slices_paint_only_their_lines_and_hit_the_continued_paragraph() {
     use std::collections::BTreeSet;
-    for right_lines in [2, 3, 6] {
+    for right_lines in [2, 4, 6] {
         let mut input = per_cell_split_input(right_lines);
         input["layout"] =
             serde_json::from_str(&docx_layout::layout_to_json(&input.to_string()).unwrap())
