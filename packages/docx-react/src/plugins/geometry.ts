@@ -5,8 +5,13 @@ import {
 } from '@betteroffice/docx/layout/render';
 import type { PointPosition, RenderedDomContext } from '@betteroffice/docx/plugin-api';
 import { createCanvasHostProjector } from '@betteroffice/docx/plugin-api/RenderedDomContext';
-import type { YrsSession } from '@betteroffice/docx/yrs';
+import {
+  proposalSetIdentity,
+  type ProposalGeometryMirror,
+  type YrsSession,
+} from '@betteroffice/docx/yrs';
 import { sourceVersionOf } from '../components/DocxEditor/internals/layoutProvenance';
+import { displayWindowOf } from '../components/DocxEditor/internals/displayWindow';
 import type { PagedEditorRef } from '../components/DocxEditor/PagedEditor';
 import type { DocxPointPosition } from '../components/DocxEditor/types';
 import {
@@ -18,10 +23,27 @@ import {
 import { currentPreviewKey, proposalSnapshot, renderedPreviewKey } from './proposalPreview';
 import type { DocxAnchorRect, DocxPluginGeometry, DocxPluginLayout, DocxPluginRect } from './types';
 
+import { flushEditorInput } from '../components/DocxEditor/editorBatches';
+import { isWorkerViewer } from '../components/DocxEditor/internals/workerViewer';
+import { hasEditorWorkerProposalRounds } from '../components/DocxEditor/internals/workerProposalAuthority';
+import { workerOpenReplicaReady } from '../components/DocxEditor/internals/workerOpenReplica';
+
+export async function readPluginPositionAtPoint(
+  editorRef: React.RefObject<PagedEditorRef | null>,
+  clientX: number,
+  clientY: number,
+  experimentalWorkerOpen = false
+): Promise<DocxPointPosition | null> {
+  if (isWorkerViewer(editorRef.current)) return editorRef.current?.readPositionAtPoint(clientX, clientY) ?? null;
+  const flushed = await flushEditorInput(editorRef, experimentalWorkerOpen);
+  if (!flushed.ok && flushed.code !== 'editor-unavailable') throw flushed.error;
+  return editorRef.current?.getPositionAtPoint(clientX, clientY) ?? null;
+}
+
 const layoutIds = new WeakMap<DisplayListQueries, string>();
 let nextLayoutId = 0;
 
-function layoutIdOf(queries: DisplayListQueries): string {
+export function layoutIdOf(queries: DisplayListQueries): string {
   let id = layoutIds.get(queries);
   if (!id) {
     nextLayoutId += 1;
@@ -82,6 +104,8 @@ export function toOverlayRect(
 
 export interface AnchorGeometryAccess {
   session: YrsSession;
+  /** @internal */
+  proposalGeometry?: ProposalGeometryMirror;
   editor: Pick<PagedEditorRef, 'yrsLocToDisplayPosition' | 'hasPendingInput'>;
   /** Whether the pages show this layout's pixels. */
   presented: boolean;
@@ -147,7 +171,11 @@ function lastInReadingOrder(rects: readonly DisplayListRect[]): DisplayListRect 
   return last && { ...last, x: last.x + last.width, width: 0 };
 }
 
-/** Geometry of the current frame, resolving targets against the live editor. */
+/**
+ * Geometry of the current frame; visible unbuilt pages wait for exact content. While `held`,
+ * overlays still draw this layout until geometry for the next one exists, so `toOverlayRect`
+ * answers; hit tests and anchors wait for the new layout.
+ */
 export function createPluginGeometry(
   layout: DocxPluginLayout,
   dom: RenderedDomContext,
@@ -155,7 +183,9 @@ export function createPluginGeometry(
   current: () => boolean,
   resolve: (hit: PointPosition | null) => DocxPointPosition | null,
   queries: DisplayListQueries,
-  access: () => AnchorGeometryAccess | null
+  access: () => AnchorGeometryAccess | null,
+  held: () => boolean = () => false,
+  readPoint?: (clientX: number, clientY: number) => Promise<DocxPointPosition | null>
 ): DocxPluginGeometry {
   const shown = () => dom.zoom === layout.zoom && current();
   const projector = createCanvasHostProjector(dom.pagesContainer, queries, dom.zoom);
@@ -221,11 +251,21 @@ export function createPluginGeometry(
     layout,
     dom,
     toOverlayRect: (rect) =>
-      shown() ? toOverlayRect(dom.pagesContainer, layer, dom.zoom, rect) : null,
+      shown() || (dom.zoom === layout.zoom && held())
+        ? toOverlayRect(dom.pagesContainer, layer, dom.zoom, rect)
+        : null,
     getPositionAtPoint(clientX, clientY) {
       if (!shown()) return null;
       const position = resolve(dom.getPositionAtPoint?.(clientX, clientY) ?? null);
       return position ? { ...position, layoutId: layout.id } : null;
+    },
+    async readPositionAtPoint(clientX, clientY) {
+      if (!shown()) return null;
+      const position = readPoint
+        ? await readPoint(clientX, clientY)
+        : resolve(dom.getPositionAtPoint?.(clientX, clientY) ?? null);
+      return shown() && position && position.version === layout.version
+        ? { ...position, layoutId: layout.id } : null;
     },
     getAnchorGeometry(target) {
       if (!shown()) return unavailable();
@@ -235,28 +275,66 @@ export function createPluginGeometry(
       if (session.version() !== layout.version) {
         return anchorFailure('stale-version', 'The document changed after that version');
       }
+      const snapshot = proposalSnapshot(session);
       if (
-        (proposalSnapshot(session)?.previewVersion ?? 0) !== layout.previewVersion ||
+        (snapshot?.previewVersion ?? 0) !== layout.previewVersion ||
         currentPreviewKey(session) !== renderedPreviewKey(queries)
       )
         return unavailable();
-      const resolved = resolveAnchorTarget(session, target, layout.version);
-      if (!resolved.ok) return resolved;
+      const mirror = live.proposalGeometry;
+      if (
+        mirror &&
+        (target.kind !== 'proposal' ||
+          mirror.version !== layout.version ||
+          mirror.previewVersion !== layout.previewVersion ||
+          !snapshot ||
+          mirror.proposals !== proposalSetIdentity(snapshot))
+      )
+        return unavailable();
+      const mirrored =
+        mirror && target.kind === 'proposal'
+          ? Object.hasOwn(mirror.targets, target.id)
+            ? mirror.targets[target.id]
+            : anchorFailure('unknown-proposal', 'The proposal is not registered in this document')
+          : null;
+      if (mirrored && !mirrored.ok) return mirrored;
+      const resolved = mirror ? null : resolveAnchorTarget(session, target, layout.version);
+      if (resolved && !resolved.ok) return resolved;
+      const window = displayWindowOf(queries)?.read();
+      const pendingPage = (pageIndex: number): boolean =>
+        !!window &&
+        pageIndex >= window[0] &&
+        pageIndex < window[1] &&
+        queries.displayList?.pages[pageIndex]?.unbuilt === true;
       const display = (range: RawAnchorRange): Interval | null => {
         const from = editor.yrsLocToDisplayPosition(range.start);
         const to = editor.yrsLocToDisplayPosition(range.end);
         return from === null || to === null ? null : { from, to };
       };
-      const ranges: Interval[] = [];
-      for (const range of resolved.ranges) {
+      const ranges: Interval[] = mirrored?.ok ? [...mirrored.ranges] : [];
+      for (const range of resolved?.ok ? resolved.ranges : []) {
         const mapped = display(range);
         if (!mapped) return anchorFailure('unsupported', 'The target has no body display position');
         ranges.push(mapped);
       }
       ranges.sort((a, b) => a.from - b.from || a.to - b.to);
-      const hidden = hiddenRanges(session, layout.version)
-        .map(display)
-        .filter((range): range is Interval => range !== null);
+      if (
+        window &&
+        queries.displayList?.pages.slice(window[0], window[1]).some(
+          ({ unbuilt, positionSpan }) =>
+            unbuilt &&
+            positionSpan &&
+            ranges.some(({ from, to }) => from <= positionSpan[1] && to >= positionSpan[0])
+        )
+      )
+        return unavailable();
+      const hidden =
+        (mirror && (!hasEditorWorkerProposalRounds(session) || !workerOpenReplicaReady(session))
+          ? mirror.hidden
+          : undefined) ??
+        hiddenRanges(session, layout.version)
+          .map(display)
+          .filter((range): range is Interval => range !== null);
       const union: Interval[] = [];
       for (const range of subtract(ranges, hidden)) {
         const previous = union.at(-1);
@@ -270,6 +348,7 @@ export function createPluginGeometry(
         if (from >= to) continue;
         const visible = queries.rangeRects(from, to).filter((rect) => rect.width > 0);
         for (const rect of visible) {
+          if (pendingPage(rect.pageIndex)) return unavailable();
           const projected = project(rect);
           if (!projected) return unavailable();
           rects.push(projected);
@@ -279,13 +358,20 @@ export function createPluginGeometry(
       }
       const last = ranges.at(-1);
       const gap = last && widen(last, hidden);
-      const paragraph = editor.yrsLocToDisplayPosition(resolved.paragraph);
+      const paragraph = mirrored?.ok
+        ? mirrored.paragraph
+        : resolved?.ok
+          ? editor.yrsLocToDisplayPosition(resolved.paragraph)
+          : null;
       const end =
         tail !== null
           ? (endOf(tail) ?? lastInReadingOrder(drawn))
           : ((gap && (caretAt(gap.from, true) ?? caretAt(gap.to))) ??
             (paragraph === null ? null : caretAt(paragraph)));
       const fallback = end || paragraph === null ? null : queries.anchorRect(paragraph);
+      if ((end && pendingPage(end.pageIndex)) || (fallback && pendingPage(fallback.pageIndex))) {
+        return unavailable();
+      }
       const anchor = end ? project(end) : fallback ? project({ ...fallback, width: 0 }) : null;
       if (!anchor) return unavailable();
       const page = projector.getPageBounds(anchor.pageIndex);

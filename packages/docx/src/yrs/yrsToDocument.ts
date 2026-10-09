@@ -2,6 +2,8 @@
 
 /* eslint-disable max-lines -- the inverse mapping stays co-located with its save orchestrator */
 
+import { createStyleResolver, type StyleResolver } from '../styles';
+import { hasTrackedControlContent } from '../utils/trackedControlContent';
 import { isRawXml } from '../types/content/rawXml';
 import { pixelsToEmu } from '../utils/units';
 import {
@@ -24,6 +26,7 @@ import type {
   BlockContent,
   Paragraph,
   ParagraphContent,
+  ParagraphFormatting,
   Run,
   RunContent,
   HorizontalRuleContent,
@@ -38,8 +41,10 @@ import type {
   SimpleField,
   ComplexField,
   FieldType,
+  FieldInlineContent,
   MathEquation,
   Image,
+  ColorValue,
   Shape,
   Chart,
   InlineSdt,
@@ -72,6 +77,7 @@ interface YrsImageAttrs {
   };
   borderWidth?: number;
   borderColor?: string;
+  borderColorValue?: ColorValue;
   borderStyle?: string;
   wrapText?: string;
   hlinkHref?: string;
@@ -553,6 +559,7 @@ function fieldFromPayload(payload: Attrs, attributes: Attrs): SimpleField | Comp
   if (fieldData && fieldData.length <= 2_000_000) {
     try {
       const stored = JSON.parse(fieldData) as SimpleField | ComplexField;
+      if (fieldData.includes('"media:')) resolveMediaSrcs(stored);
       const children = stored.type === 'simpleField' ? stored.content : stored.fieldResult;
       if (
         (stored.type === 'simpleField' || stored.type === 'complexField') &&
@@ -638,6 +645,26 @@ function horizontalRuleRun(payload: Attrs, attributes: Attrs): Run {
   };
 }
 
+/** Reads the `media:{n}` image sources of the projection under way as `data:` URLs. */
+let projectedMedia: ((token: string) => string | null) | null = null;
+
+function mediaSrc(src: string): string {
+  return projectedMedia && src.startsWith('media:') ? (projectedMedia(src) ?? src) : src;
+}
+
+function resolveMediaSrcs(value: unknown): void {
+  if (Array.isArray(value)) {
+    for (const item of value) resolveMediaSrcs(item);
+    return;
+  }
+  const object = asObject(value);
+  if (!object) return;
+  for (const [key, field] of Object.entries(object)) {
+    if (key === 'src' && typeof field === 'string') object[key] = mediaSrc(field);
+    else resolveMediaSrcs(field);
+  }
+}
+
 function imageRunFromPayload(payload: Attrs): Run {
   const attrs = payload as YrsImageAttrs & Attrs;
   const wrap: Image['wrap'] = {
@@ -652,7 +679,7 @@ function imageRunFromPayload(payload: Attrs): Run {
   const image: Image = {
     type: 'image',
     rId: asString(attrs.rId) || '',
-    src: asString(attrs.src) || '',
+    src: mediaSrc(asString(attrs.src) || ''),
     alt: asString(attrs.alt) || undefined,
     title: asString(attrs.title) || undefined,
     shapeType: asString(attrs.shapeType) || undefined,
@@ -726,10 +753,10 @@ function imageRunFromPayload(payload: Attrs): Run {
   if (attrs.allowOverlap != null) image.allowOverlap = attrs.allowOverlap;
 
   const padding: NonNullable<Image['padding']> = {};
-  if (attrs.effectExtentTop) padding.top = pixelsToEmu(attrs.effectExtentTop);
-  if (attrs.effectExtentBottom) padding.bottom = pixelsToEmu(attrs.effectExtentBottom);
-  if (attrs.effectExtentLeft) padding.left = pixelsToEmu(attrs.effectExtentLeft);
-  if (attrs.effectExtentRight) padding.right = pixelsToEmu(attrs.effectExtentRight);
+  if (attrs.effectExtentTop != null) padding.top = pixelsToEmu(attrs.effectExtentTop);
+  if (attrs.effectExtentBottom != null) padding.bottom = pixelsToEmu(attrs.effectExtentBottom);
+  if (attrs.effectExtentLeft != null) padding.left = pixelsToEmu(attrs.effectExtentLeft);
+  if (attrs.effectExtentRight != null) padding.right = pixelsToEmu(attrs.effectExtentRight);
   if (Object.keys(padding).length > 0) image.padding = padding;
 
   return { type: 'run', content: [{ type: 'drawing', image }] };
@@ -743,6 +770,7 @@ function storedShape(value: unknown): Shape | undefined {
     const parsed = JSON.parse(json) as Shape;
     if (parsed?.type !== 'shape' || typeof parsed.shapeType !== 'string') return undefined;
     if (!asObject(parsed.size)) parsed.size = { width: 0, height: 0 };
+    if (json.includes('"media:')) resolveMediaSrcs(parsed);
     return parsed;
   } catch {
     return undefined;
@@ -754,6 +782,7 @@ function chartRunFromPayload(payload: Attrs): Run | null {
   if (!json) return null;
   try {
     const chart = JSON.parse(json) as Chart;
+    if (json.includes('"media:')) resolveMediaSrcs(chart);
     if (chart?.type !== 'chart' || typeof chart.chartType !== 'string') return null;
     return { type: 'run', content: [{ type: 'chart', chart }] };
   } catch {
@@ -849,6 +878,7 @@ function inlineSdtFromPayload(payload: Attrs): InlineSdt {
   if (propertiesJson && propertiesJson.length <= 1_000_000) {
     try {
       const parsed = JSON.parse(propertiesJson) as SdtProperties;
+      if (propertiesJson.includes('"media:')) resolveMediaSrcs(parsed);
       if (parsed && typeof parsed === 'object' && typeof parsed.sdtType === 'string') {
         properties = parsed;
       }
@@ -874,7 +904,7 @@ function inlineSdtFromPayload(payload: Attrs): InlineSdt {
       attributes,
     });
   }
-  let content = inlineSdtContent(buildParagraphContent(items));
+  let content = inlineSdtContent(buildParagraphContent(items, undefined, true));
   const authoredValue = contentControlValue(payload.value);
   if (authoredValue) {
     try {
@@ -893,6 +923,22 @@ function inlineSdtFromPayload(payload: Attrs): InlineSdt {
 function inlineSdtContent(content: ParagraphContent[]): InlineSdt['content'] {
   return content.filter(
     (child): child is InlineSdt['content'][number] =>
+      child.type === 'run' ||
+      child.type === 'hyperlink' ||
+      child.type === 'simpleField' ||
+      child.type === 'complexField' ||
+      child.type === 'inlineSdt' ||
+      child.type === 'mathEquation' ||
+      child.type === 'insertion' ||
+      child.type === 'deletion' ||
+      child.type === 'moveFrom' ||
+      child.type === 'moveTo'
+  );
+}
+
+function fieldInlineContent(content: ParagraphContent[]): FieldInlineContent[] {
+  return content.filter(
+    (child): child is FieldInlineContent =>
       child.type === 'run' ||
       child.type === 'hyperlink' ||
       child.type === 'simpleField' ||
@@ -974,29 +1020,33 @@ function tabRun(attributes: Attrs): Run {
   };
 }
 
-function trackedContentForItem(item: InlineItem, info: TrackedChangeInfo): ParagraphContent {
-  let run: Run;
-  if (item.kind === 'embed' && item.embedKind === 'image') run = imageRunFromPayload(item.payload);
-  else if (item.kind === 'embed' && item.embedKind === 'tab') run = tabRun(item.attributes);
+function trackedContentForItem(item: InlineItem, info: TrackedChangeInfo, inControl: boolean): ParagraphContent {
+  let child: TrackedWrapper['content'][number];
+  if (inControl) {
+    const ordinary = ordinaryContentForItem(item);
+    child = inlineSdtContent(ordinary ? [ordinary] : [])[0] ?? { type: 'run', content: [] };
+  } else if (item.kind === 'embed' && item.embedKind === 'sdt') child = inlineSdtFromPayload(item.payload);
+  else if (item.kind === 'embed' && item.embedKind === 'image') child = imageRunFromPayload(item.payload);
+  else if (item.kind === 'embed' && item.embedKind === 'tab') child = tabRun(item.attributes);
   else if (item.kind === 'embed' && item.embedKind === 'horizontalRule')
-    run = horizontalRuleRun(item.payload, item.attributes);
+    child = horizontalRuleRun(item.payload, item.attributes);
   else if (item.kind === 'embed' && item.embedKind === 'shape')
-    run = shapeRunFromPayload(item.payload);
+    child = shapeRunFromPayload(item.payload);
   else if (item.kind === 'embed' && item.embedKind === 'chart')
-    run = chartRunFromPayload(item.payload) ?? { type: 'run', content: [] };
-  else if (item.kind === 'text') run = createTextRun(item.text, item.attributes);
-  else run = { type: 'run', content: [] };
+    child = chartRunFromPayload(item.payload) ?? { type: 'run', content: [] };
+  else if (item.kind === 'text') child = createTextRun(item.text, item.attributes);
+  else child = { type: 'run', content: [] };
 
   const raw = asObject(item.attributes.ins) ?? asObject(item.attributes.del);
   const isMovePair = raw?.isMovePair === true;
   if (item.attributes.ins) {
     return isMovePair
-      ? { type: 'moveTo', info, content: [run] }
-      : { type: 'insertion', info, content: [run] };
+      ? { type: 'moveTo', info, content: [child] }
+      : { type: 'insertion', info, content: [child] };
   }
   return isMovePair
-    ? { type: 'moveFrom', info, content: [run] }
-    : { type: 'deletion', info, content: [run] };
+    ? { type: 'moveFrom', info, content: [child] }
+    : { type: 'deletion', info, content: [child] };
 }
 
 /**
@@ -1015,6 +1065,10 @@ function addToHyperlink(hyperlink: Hyperlink, item: InlineItem): void {
     child =
       commentReferenceFromPayload(item.payload) ?? fieldFromPayload(item.payload, item.attributes);
   } else if (item.embedKind === 'math') child = mathFromPayload(item.payload);
+  else if (item.embedKind === 'sdt') {
+    const control = inlineSdtFromPayload(item.payload);
+    if (item.attributes.ins || item.attributes.del || hasTrackedControlContent(control)) child = control;
+  }
   if (!child) return;
   if (child.type === 'run') hyperlink.children.push(child);
   if (child.type !== 'run' || hyperlink.structuredChildren) {
@@ -1067,14 +1121,14 @@ function restoreProjectedFieldResults(items: InlineItem[]): InlineItem[] {
     if (stored.type !== 'complexField') continue;
     const projection = asObject(owner.payload.resultProjection);
     const originals = Array.isArray(projection?.children) ? projection.children : [];
-    const replacements = new Map<number, ReturnType<typeof inlineSdtContent>>();
+    const replacements = new Map<number, FieldInlineContent[]>();
     for (const raw of originals) {
       const child = asObject(raw);
       const index = asFiniteNumber(child?.index);
       if (index === undefined || !Array.isArray(child?.items)) continue;
       const current = groups.get(owner)?.get(index) ?? [];
       if (projectionSignature(current) === projectionSignature(child.items as InlineItem[])) continue;
-      const rebuilt = inlineSdtContent(buildParagraphContent(current));
+      const rebuilt = fieldInlineContent(buildParagraphContent(current));
       const original = index < 0 ? stored.structuredCode?.inline?.[-index - 1] : stored.structuredResult?.inline?.[index];
       if (original?.type === 'hyperlink' && rebuilt.length === 1 && rebuilt[0]?.type === 'hyperlink') {
         rebuilt[0] = { ...original, ...rebuilt[0], structuredChildren: rebuilt[0].structuredChildren };
@@ -1113,7 +1167,8 @@ function isTrackedWrapper(content: ParagraphContent | undefined): content is Tra
 
 function buildParagraphContent(
   items: InlineItem[],
-  revisionIds?: RevisionIds
+  revisionIds?: RevisionIds,
+  inControl = false
 ): ParagraphContent[] {
   items = restoreProjectedFieldResults(items);
   const content: ParagraphContent[] = [];
@@ -1150,7 +1205,7 @@ function buildParagraphContent(
     if (revision) {
       flushRun();
       flushHyperlink();
-      const tracked = trackedContentForItem(item, revision);
+      const tracked = trackedContentForItem(item, revision, inControl);
       const previous = content[content.length - 1];
       if (
         isTrackedWrapper(previous) &&
@@ -1361,6 +1416,7 @@ function linkChildLength(child: HyperlinkContent): number {
   if (child.type === 'run') return runTextLength(child);
   return child.type === 'simpleField' ||
     child.type === 'complexField' ||
+    child.type === 'inlineSdt' ||
     child.type === 'mathEquation'
     ? 1
     : 0;
@@ -1473,7 +1529,7 @@ function splitContent(content: ParagraphContent, at: number): Split<ParagraphCon
       content.content,
       at,
       paragraphContentLength,
-      (child, offset) => splitContent(child, offset) as Split<Run | Hyperlink> | null
+      (child, offset) => splitContent(child, offset) as Split<TrackedWrapper['content'][number]> | null
     );
     return parts && [
       parts[0].length > 0 ? { ...content, content: parts[0] } : null,
@@ -1634,7 +1690,8 @@ function paragraphFromStory(
   items: InlineItem[],
   commentBoundaries: CommentBoundary[],
   baseParagraph: Paragraph | undefined,
-  revisionIds?: RevisionIds
+  revisionIds?: RevisionIds,
+  inherited?: ParagraphFormatting
 ): Paragraph {
   const attrs = paragraphAttrs(properties);
   let content = buildParagraphContent(items, revisionIds);
@@ -1678,7 +1735,7 @@ function paragraphFromStory(
     textId: baseParagraph?.textId,
     ...(baseParagraph?.extraAttributes ? { extraAttributes: baseParagraph.extraAttributes } : {}),
     ...(baseParagraph?.paraIdAttribute ? { paraIdAttribute: baseParagraph.paraIdAttribute } : {}),
-    formatting: paragraphAttrsToFormatting(attrs),
+    formatting: paragraphAttrsToFormatting(attrs, inherited),
     content,
   };
   if (baseParagraph?.renderedPageBreakBefore) paragraph.renderedPageBreakBefore = true;
@@ -2136,6 +2193,30 @@ function carryParagraphIdentities(
     return carried;
   });
 }
+
+/**
+ * `blocks` with paragraphs of their own, in table cells too, each still the
+ * session paragraph it was projected from: a save edits these, not the
+ * projection the next one reuses. @internal
+ */
+export function ownProjectedParagraphs(blocks: readonly BlockContent[]): BlockContent[] {
+  return blocks.map((block) => {
+    if (block.type === 'paragraph') {
+      const own: Paragraph = { ...block };
+      const sessionKey = projectedBlocks.get(block)?.sessionKey;
+      if (sessionKey) projectedBlocks.set(own, { sessionKey });
+      return own;
+    }
+    if (block.type !== 'table') return block;
+    return {
+      ...block,
+      rows: block.rows.map((row) => ({
+        ...row,
+        cells: row.cells.map((cell) => ({ ...cell, content: ownProjectedParagraphs(cell.content) })),
+      })),
+    };
+  });
+}
 const sessionProjectionMemos = new WeakMap<YrsSession, SessionProjectionMemo>();
 
 function sessionProjectionMemo(session: YrsSession): SessionProjectionMemo {
@@ -2214,6 +2295,9 @@ class SaveContext {
   /** Per story, the comment ranges of it and of the stories nested in it, which key its blocks. */
   private readonly subtreeComments = new Map<string, Map<string, unknown>>();
   private readonly memo: SessionProjectionMemo;
+  private readonly styles: StyleResolver;
+  private readonly syntheticDefaults: boolean;
+  private readonly inherited = new Map<string, ParagraphFormatting | undefined>();
 
   constructor(
     private readonly session: YrsSession,
@@ -2226,6 +2310,10 @@ class SaveContext {
     this.baseParagraphs = collectBaseParagraphs(this.baseStories);
     this.comments = commentRanges(session, base.package.document.comments, commentIds);
     this.memo = sessionProjectionMemo(session);
+    this.styles = createStyleResolver(base.package.styles);
+    const defaultStyle = this.styles.getDefaultParagraphStyle();
+    this.syntheticDefaults =
+      defaultStyle !== undefined && !(base.package.styles?.styles ?? []).includes(defaultStyle);
     for (const [story, ranges] of this.comments) {
       const seen = new Set<string>();
       for (
@@ -2260,6 +2348,32 @@ class SaveContext {
       }
     }
     return contents;
+  }
+
+  /**
+   * What a paragraph of `storyId` with pilcrow `properties` inherits from
+   * docDefaults and its style. None where more can apply than the resolver
+   * sees: table cells and content controls (a table style), numbered
+   * paragraphs or styles (the numbering level), synthesized defaults, and
+   * left and right indents (the style parser ignores w:start and w:end).
+   */
+  private inheritedFormatting(storyId: string, properties: Attrs): ParagraphFormatting | undefined {
+    if (NESTED_STORY_ID.test(storyId) || this.syntheticDefaults || properties.numPr != null) {
+      return undefined;
+    }
+    const key = typeof properties.pStyle === 'string' ? properties.pStyle : '';
+    if (!this.inherited.has(key)) {
+      const resolved = this.styles.resolveParagraphStyle(key || null).paragraphFormatting;
+      if (resolved === undefined || resolved.numPr != null) {
+        this.inherited.set(key, undefined);
+      } else {
+        const formatting = { ...resolved };
+        delete formatting.indentLeft;
+        delete formatting.indentRight;
+        this.inherited.set(key, formatting);
+      }
+    }
+    return this.inherited.get(key);
   }
 
   storyToBlocks(storyId: string): BlockContent[] {
@@ -2386,7 +2500,8 @@ class SaveContext {
             items,
             boundaries,
             baseParagraph,
-            this.revisionIds
+            this.revisionIds,
+            this.inheritedFormatting(storyId, segment.properties)
           );
           projectedBlocks.set(paragraph, { inputs: snapshot, sessionKey: segment.paraId });
         }
@@ -2536,6 +2651,21 @@ export function yrsBodyToDocumentWithRevisionIds(
 }
 
 function projectDocument(
+  session: YrsSession,
+  base: Document,
+  options: YrsToDocumentOptions,
+  revisionIds?: RevisionIds
+): Document {
+  const previous = projectedMedia;
+  projectedMedia = (token) => session.mediaDataUrl?.(token) ?? null;
+  try {
+    return projectStories(session, base, options, revisionIds);
+  } finally {
+    projectedMedia = previous;
+  }
+}
+
+function projectStories(
   session: YrsSession,
   base: Document,
   options: YrsToDocumentOptions,

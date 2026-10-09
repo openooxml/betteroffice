@@ -29,12 +29,15 @@ heap-stats = ["wasm"]
 # The seeded yrs image src is what the renderer paints, so this crate needs the
 # same TIFF transcode the docx-parse wasm build enables.
 tiff = ["docx-parse/tiff"]
+# EMF and WMF pictures reach the renderer as SVG, for the same reason.
+metafile = ["docx-parse/metafile"]
 
 [dependencies]
 # 0.27.3 is the newest crates.io release. The repository's minimumReleaseAge is a Bun/npm
 # policy; there is no Cargo deny/release-age policy, and the existing lockfile already pins it.
 docx-layout.workspace = true
 docx-parse.workspace = true
+foldhash = { version = "0.2", default-features = false }
 ooxml-diff.workspace = true
 ooxml-opc.workspace = true
 ooxml-text.workspace = true
@@ -48,3 +51,6 @@ unicode-segmentation = "1.12"
 # builds too), so the `wasm` feature does not re-declare it as `dep:serde_json`.
 wasm-bindgen = { version = "0.2", optional = true }
 js-sys = { version = "0.3", optional = true }
+
+[dev-dependencies]
+docx-layout = { workspace = true, features = ["test-support"] }

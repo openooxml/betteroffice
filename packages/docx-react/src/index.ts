@@ -12,15 +12,26 @@ import { version as packageVersion } from '../package.json';
 export const VERSION: string = packageVersion;
 
 export { preloadDocxEngine } from '@betteroffice/docx/yrs';
+export type {
+  DocxParagraphAnchor,
+  DocxParagraphAnchorResult,
+  DocxParagraphIdentitySnapshot,
+} from '@betteroffice/docx/yrs';
 
 // Main editor contract
 export {
   DocxEditor,
   type DocxEditorProps,
   type DocxEditorRef,
+  type DocxParagraphMatch,
+  type DocxSelectionInfo,
+  type DocxCommentInsertion,
+  type DocxDocumentChange,
   type DocxEditorCollaborationOptions,
   type EditorMode,
 } from './components/DocxEditor';
+export { DocxAsyncOnlyError, DocxReplicaNotReadyError } from './components/DocxEditor/hooks/useDocxEditorRefApi';
+export { DocxWorkerError, type DocxWorkerErrorStage } from './components/DocxEditor/internals/docxWorkerError';
 
 // Commands: one authority for built-in and host chrome
 export { DocxCommandProvider, type DocxCommandProviderProps } from './commands/DocxCommandProvider';
@@ -128,6 +139,10 @@ export type {
 } from './commands/types';
 export type { DocxPointPosition, SelectionState } from './components/DocxEditor/types';
 export type {
+  DocxSearchOptions,
+  DocxSearchState,
+} from './components/DocxEditor/hooks/useHostSearch';
+export type {
   DocxMemoryBudget,
   DocxMemoryPressure,
   DocxMemoryPressureLevel,
@@ -152,7 +167,8 @@ export {
 export { LocaleProvider, useTranslation, type LocaleProviderProps } from './i18n';
 
 // Host-proposal types — re-exported so hosts don't need to import
-// `@betteroffice/docx/yrs` directly for `proposeChanges`/`setProposalStates`/`getProposals`.
+// `@betteroffice/docx/yrs` directly for `proposeChanges`/`setProposalStates`/`withdrawProposals`/
+// `getProposals`.
 export type {
   DocxOccurrence,
   DocxProposalFailure,
@@ -163,4 +179,5 @@ export type {
   DocxProposalSnapshot,
   DocxProposalState,
   DocxProposalStateRequest,
+  DocxProposalWithdrawRequest,
 } from '@betteroffice/docx/yrs';

@@ -2,6 +2,9 @@
 #[path = "support/page_fixture.rs"]
 mod fixture;
 
+#[path = "support/revision_boundary.rs"]
+mod boundary;
+
 use docx_edit::bridge::{RenderEnv, RevisionPreview};
 use docx_edit::structured::{ExportFailureCode, PageExportOptions, RevisionView};
 use docx_edit::{
@@ -10,6 +13,7 @@ use docx_edit::{
     SearchScope, StoryRange, TargetEdge, TextTarget, UndoSession, seed_from_docx,
 };
 use docx_layout::display_list::{Primitive, RevisionKind};
+use docx_layout::types::LayoutBlock;
 use serde_json::{Value, json};
 
 use RevisionPreview::{Accepted, Rejected};
@@ -19,13 +23,29 @@ const NS: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/
 const PROPOSALS: &str = r#"<w:p w14:paraId="00000001"><w:r><w:t xml:space="preserve">Alpha </w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>beta</w:t></w:r><w:r><w:t xml:space="preserve"> gamma</w:t></w:r></w:p><w:p w14:paraId="00000002"><w:r><w:t>Delta</w:t></w:r></w:p><w:p w14:paraId="00000003"><w:r><w:t>Title</w:t></w:r></w:p>"#;
 
 fn document(body: &str) -> Vec<u8> {
-    let parts = [
-        ("[Content_Types].xml", r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/></Types>"#.to_owned()),
+    headed_document(body, None)
+}
+
+/// [`document`], with `header` as the default header of its one section.
+fn headed_document(body: &str, header: Option<&str>) -> Vec<u8> {
+    let (header_type, header_rel, header_ref) = header.map_or(("", "", ""), |_| (
+        r#"<Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>"#,
+        r#"<Relationship Id="rIdHeader" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>"#,
+        r#"<w:sectPr><w:headerReference w:type="default" r:id="rIdHeader"/></w:sectPr>"#,
+    ));
+    let mut parts = vec![
+        ("[Content_Types].xml", format!(r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>{header_type}</Types>"#)),
         ("_rels/.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_owned()),
-        ("word/_rels/document.xml.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdNumbering" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/></Relationships>"#.to_owned()),
+        ("word/_rels/document.xml.rels", format!(r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdNumbering" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/>{header_rel}</Relationships>"#)),
         ("word/numbering.xml", format!(r#"<w:numbering {NS}><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#)),
-        ("word/document.xml", format!(r#"<w:document {NS}><w:body>{body}</w:body></w:document>"#)),
+        ("word/document.xml", format!(r#"<w:document {NS} xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body>{body}{header_ref}</w:body></w:document>"#)),
     ];
+    if let Some(header) = header {
+        parts.push((
+            "word/header1.xml",
+            format!(r#"<w:hdr {NS}>{header}</w:hdr>"#),
+        ));
+    }
     ooxml_opc::rezip_parts(
         &parts
             .into_iter()
@@ -144,6 +164,52 @@ fn paragraph_bounds(blocks: &Value) -> Vec<(Value, Value)> {
         .iter()
         .map(|block| (block["pmStart"].clone(), block["pmEnd"].clone()))
         .collect()
+}
+
+#[test]
+fn previews_of_changes_before_a_table_keep_valid_block_boundaries() {
+    for (inserted_mark, replacement) in [(false, ""), (false, "X"), (true, "")] {
+        let engine = EngineSession::new(75110);
+        let plain = EditCtx::local("", "");
+        let suggest = EditCtx::local("Ann", "2026-09-29T12:00:00Z").suggesting();
+        let split_ctx = if inserted_mark { &suggest } else { &plain };
+        let split = boundary::seed(engine.doc(), "table", split_ctx);
+        let id = if inserted_mark {
+            split.revision_ids[0].clone()
+        } else {
+            let receipt = if replacement.is_empty() {
+                engine
+                    .doc()
+                    .delete_range(&suggest, StoryRange::new("body", 0, 4))
+            } else {
+                engine
+                    .doc()
+                    .replace_range(&suggest, StoryRange::new("body", 0, 4), replacement)
+            }
+            .unwrap();
+            receipt.revision_ids[0].clone()
+        };
+        let native = lower(&engine, &RenderEnv::default());
+        for decision in [Accepted, Rejected] {
+            let blocks = lower(&engine, &preview(&[(&id, decision)]));
+            assert_eq!(
+                blocks
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|block| block["kind"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                ["paragraph", "table", "paragraph"]
+            );
+            assert_eq!(paragraph_bounds(&blocks), paragraph_bounds(&native));
+            let text: String = runs(&blocks, 0).into_iter().map(|run| run.0).collect();
+            let expected = match decision {
+                Accepted if !inserted_mark => replacement,
+                _ => "old",
+            };
+            assert_eq!(text, expected);
+        }
+    }
 }
 
 #[test]
@@ -466,7 +532,10 @@ fn the_preview_parses_leniently_and_keys_the_lowering_cache() {
     );
 
     let (engine, [replace, ..]) = proposals();
-    let misses = || engine.stats().lower_cache_misses;
+    let misses = || {
+        let stats = engine.stats();
+        stats.lower_cache_misses + stats.lower_preview_patches
+    };
     lower(&engine, &RenderEnv::default());
     let start = misses();
     let empty: RenderEnv = serde_json::from_value(json!({"revisionPreview": {}})).unwrap();
@@ -533,10 +602,39 @@ fn segment(text: &str, kind: Option<RevisionKind>) -> (String, Option<RevisionKi
     (text.to_owned(), kind)
 }
 
+fn assert_matches_fresh(
+    engine: &EngineSession,
+    output: &str,
+    setup: impl FnOnce() -> EngineSession,
+    env: &RenderEnv,
+    font: u32,
+) -> (EngineSession, String) {
+    let fresh = setup();
+    let expected = fresh
+        .layout_document_with_regions_json(&layout_request(env, font))
+        .unwrap();
+    assert_eq!(output, expected);
+    fresh.build_display_list_frame("{}", 0).unwrap();
+    assert_eq!(
+        engine
+            .with_display_list(|list| serde_json::to_vec(list).unwrap())
+            .unwrap(),
+        fresh
+            .with_display_list(|list| serde_json::to_vec(list).unwrap())
+            .unwrap()
+    );
+    assert_eq!(
+        engine.lower_story_json("body", env).unwrap(),
+        fresh.lower_story_json("body", env).unwrap()
+    );
+    (fresh, expected)
+}
+
 #[test]
 fn a_changed_preview_rebuilds_the_retained_frame() {
     let font = docx_layout::register_measure_font(FONT).unwrap();
-    let (engine, [replace, delete, insert]) = proposals();
+    let bytes = document(PROPOSALS);
+    let (engine, [replace, delete, insert]) = proposals_in(&bytes);
     let native = RenderEnv::default();
     engine
         .layout_document_with_regions_json(&layout_request(&native, font))
@@ -558,12 +656,13 @@ fn a_changed_preview_rebuilds_the_retained_frame() {
 
     let mut epoch = engine.stats().frame_epoch;
     let mut frame = |env: &RenderEnv| {
-        engine
+        let output = engine
             .layout_document_with_regions_json(&layout_request(env, font))
             .unwrap();
         engine.build_display_list_frame("{}", epoch).unwrap();
         assert!(engine.stats().frame_epoch > epoch);
         epoch = engine.stats().frame_epoch;
+        assert_matches_fresh(&engine, &output, || proposals_in(&bytes).0, env, font);
         painted(&engine)
     };
     assert_eq!(
@@ -580,6 +679,252 @@ fn a_changed_preview_rebuilds_the_retained_frame() {
     ]);
     assert_eq!(frame(&all), [segment("Alpha BETA gammaTitle!", None)]);
     assert_eq!(frame(&native), tracked);
+}
+
+/// Two pages: "red" suggested as "blue", then after a page break a suggested
+/// deletion of "x" and insertion of "x", so the second paragraph shows an "x"
+/// from another source position whichever way the revisions are decided.
+fn twin_x_engine() -> (EngineSession, RenderEnv, RenderEnv, usize, f64) {
+    let engine = EngineSession::new(75110);
+    let body = r#"<w:p w14:paraId="00000001"><w:r><w:t>red</w:t></w:r><w:r><w:br w:type="page"/></w:r></w:p><w:p w14:paraId="00000002"><w:r><w:t>x</w:t></w:r></w:p>"#;
+    seed_from_docx(engine.doc(), &document(body)).unwrap();
+    let suggest = EditCtx::local("Ann", "2026-09-29T12:00:00Z").suggesting();
+    let red = engine
+        .doc()
+        .locate_range(
+            &engine
+                .doc()
+                .resolve_search("body", None, "red", docx_edit::TextView::Vanilla)
+                .unwrap(),
+        )
+        .unwrap()
+        .start;
+    let replace = engine
+        .doc()
+        .replace_range(&suggest, StoryRange::new("body", red, red + 3), "blue")
+        .unwrap()
+        .revision_ids[0]
+        .clone();
+    let blocks = lower(&engine, &RenderEnv::default());
+    let last = blocks.as_array().unwrap().len() - 1;
+    let start = runs(&blocks, last)[0].1;
+    let x = engine
+        .doc()
+        .resolve_search("body", None, "x", docx_edit::TextView::Vanilla)
+        .unwrap();
+    let at = engine.doc().locate_range(&x).unwrap().start;
+    let delete = engine
+        .doc()
+        .delete_range(&suggest, StoryRange::new("body", at, at + 1))
+        .unwrap()
+        .revision_ids[0]
+        .clone();
+    let insert = engine
+        .doc()
+        .insert_text(
+            &suggest,
+            Position::new("body", at + 1),
+            "x",
+            FormatPolicy::Inherit,
+        )
+        .unwrap()
+        .revision_ids[0]
+        .clone();
+    let accepted = preview(&[
+        (&replace, Accepted),
+        (&delete, Accepted),
+        (&insert, Accepted),
+    ]);
+    let rejected = preview(&[
+        (&replace, Rejected),
+        (&delete, Rejected),
+        (&insert, Rejected),
+    ]);
+    (engine, accepted, rejected, last, start)
+}
+
+#[test]
+fn a_changed_preview_refreshes_positions_in_an_identical_later_block() {
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    let (engine, accepted, rejected, last, start) = twin_x_engine();
+    let before = lower(&engine, &accepted);
+    let after = lower(&engine, &rejected);
+    assert_eq!(
+        serde_json::from_value::<LayoutBlock>(before[last].clone()).unwrap(),
+        serde_json::from_value::<LayoutBlock>(after[last].clone()).unwrap()
+    );
+    assert_eq!(before[last]["pmStart"], after[last]["pmStart"]);
+    assert_eq!(before[last]["pmEnd"], after[last]["pmEnd"]);
+    assert_eq!(
+        runs(&before, last),
+        [run("x", start + 1.0, start + 2.0, "")]
+    );
+    assert_eq!(runs(&after, last), [run("x", start, start + 1.0, "")]);
+
+    engine
+        .layout_document_with_regions_json(&layout_request(&accepted, font))
+        .unwrap();
+    engine.build_display_list_frame("{}", 0).unwrap();
+    assert_eq!(engine.with_display_list(|list| list.pages.len()), Some(2));
+    let initial = engine.stats();
+    let request = layout_request(&rejected, font);
+    let output = engine.layout_document_with_regions_json(&request).unwrap();
+    engine
+        .build_display_list_frame("{}", initial.frame_epoch)
+        .unwrap();
+
+    let (fresh, _) = assert_matches_fresh(&engine, &output, || twin_x_engine().0, &rejected, font);
+    assert_eq!(
+        engine.with_display_list(Clone::clone).unwrap(),
+        fresh.with_display_list(Clone::clone).unwrap()
+    );
+}
+
+#[test]
+fn a_resident_edit_after_a_preview_only_preflight_lays_out_the_retained_request() {
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    let (engine, accepted, rejected, _, _) = twin_x_engine();
+    let request = layout_request(&accepted, font);
+    engine.layout_document_with_regions_json(&request).unwrap();
+    engine.build_display_list_frame("{}", 0).unwrap();
+    // The worker lays out the rejected preview; the host only reads its fonts.
+    engine
+        .layout_font_requirements_json(&layout_request(&rejected, font))
+        .unwrap();
+    engine
+        .doc()
+        .insert_text(
+            &EditCtx::local("Ann", "2026-09-29T12:00:00Z"),
+            Position::new("body", 0),
+            "A",
+            FormatPolicy::Inherit,
+        )
+        .unwrap();
+    let epoch = engine.stats().frame_epoch;
+    engine.apply_and_layout("body", epoch).unwrap();
+
+    let fresh = EngineSession::new(75113);
+    fresh
+        .doc()
+        .apply_update_v1(&engine.doc().encode_state_as_update_v1())
+        .unwrap();
+    fresh.layout_document_with_regions_json(&request).unwrap();
+    fresh.build_display_list_frame("{}", 0).unwrap();
+    assert_eq!(
+        engine.with_display_list(Clone::clone).unwrap(),
+        fresh.with_display_list(Clone::clone).unwrap()
+    );
+}
+
+#[test]
+fn a_preview_decision_matches_a_fresh_layout() {
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    let filler = |range: std::ops::Range<usize>| -> String {
+        range
+            .map(|index| {
+                format!(
+                    "<w:p><w:r><w:t>Filler paragraph {index} carries enough words to wrap onto a second line of the page.</w:t></w:r></w:p>"
+                )
+            })
+            .collect()
+    };
+    let bytes = document(&format!(
+        "{}{PROPOSALS}{}",
+        filler(0..240),
+        filler(240..300)
+    ));
+    let layout = |engine: &EngineSession, ids: &[String; 3], env: &RenderEnv| {
+        let output = engine
+            .layout_document_with_regions_json(&layout_request(env, font))
+            .unwrap();
+        let mut normalized = output.clone();
+        for (index, id) in ids.iter().enumerate() {
+            normalized = normalized.replace(id.as_str(), &format!("revision-{index}"));
+        }
+        let mut normalized: Value = serde_json::from_str(&normalized).unwrap();
+        (normalized["layout"].take(), output)
+    };
+    let (engine, ids) = proposals_in(&bytes);
+    let (native, _) = layout(&engine, &ids, &RenderEnv::default());
+    assert!(native["pages"].as_array().unwrap().len() > 3);
+    engine.build_display_list_frame("{}", 0).unwrap();
+    let [replace, delete, insert] = [0, 1, 2];
+    for decisions in [
+        vec![(insert, Accepted)],
+        vec![(replace, Accepted), (delete, Accepted), (insert, Accepted)],
+        vec![(delete, Rejected)],
+        vec![],
+    ] {
+        let env = |ids: &[String; 3]| {
+            preview(
+                &decisions
+                    .iter()
+                    .map(|&(index, decision)| (ids[index].as_str(), decision))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let (decided, output) = layout(&engine, &ids, &env(&ids));
+        engine
+            .build_display_list_frame("{}", engine.stats().frame_epoch)
+            .unwrap();
+        let (fresh, fresh_ids) = proposals_in(&bytes);
+        let (fresh, _) = assert_matches_fresh(&engine, &output, || fresh, &env(&ids), font);
+        assert_eq!(decided, layout(&fresh, &fresh_ids, &env(&fresh_ids)).0);
+    }
+}
+
+#[test]
+fn a_decision_that_only_moves_a_paragraphs_positions_lays_it_out_again() {
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    let insertion = |id: u32, text: &str| {
+        format!(
+            r#"<w:ins w:id="{id}" w:author="Bo" w:date="2026-09-29T12:00:00Z"><w:r><w:t>{text}</w:t></w:r></w:ins>"#
+        )
+    };
+    let filler: String = (0..240)
+        .map(|index| format!("<w:p><w:r><w:t>Filler paragraph {index}</w:t></w:r></w:p>"))
+        .collect();
+    let bytes = document(&format!(
+        "<w:p>{}{}</w:p>{filler}<w:p><w:r><w:t>End</w:t></w:r>{}</w:p>",
+        insertion(1, "X"),
+        insertion(2, "X"),
+        insertion(3, "!")
+    ));
+    let pass = |engine: &EngineSession, env: &RenderEnv| {
+        let output = engine
+            .layout_document_with_regions_json(&layout_request(env, font))
+            .unwrap();
+        let epoch = engine.stats().frame_epoch;
+        engine.build_display_list_frame("{}", epoch).unwrap();
+        let mut layout: Value = serde_json::from_str(&output).unwrap();
+        let primitives = engine
+            .with_display_list(|list| serde_json::to_value(&list.pages[0].primitives).unwrap())
+            .unwrap();
+        (layout["layout"].take(), primitives, output)
+    };
+    let engine = EngineSession::new(75110);
+    seed_from_docx(engine.doc(), &bytes).unwrap();
+    pass(&engine, &preview(&[("1", Accepted), ("2", Rejected)]));
+    let decided = preview(&[("1", Rejected), ("2", Accepted), ("3", Accepted)]);
+    let incremental = pass(&engine, &decided);
+    let (fresh, _) = assert_matches_fresh(
+        &engine,
+        &incremental.2,
+        || {
+            let fresh = EngineSession::new(75111);
+            seed_from_docx(fresh.doc(), &bytes).unwrap();
+            fresh
+        },
+        &decided,
+        font,
+    );
+    let expected = pass(&fresh, &decided);
+    assert_eq!(
+        incremental.0["pages"][0]["fragments"][0], expected.0["pages"][0]["fragments"][0],
+        "first fragment"
+    );
+    assert_eq!(incremental.1, expected.1, "first page primitives");
+    assert_eq!(incremental, expected);
 }
 
 #[test]
@@ -737,6 +1082,63 @@ fn hidden_ranges_collapse_to_the_neighbouring_edges() {
 }
 
 #[test]
+fn a_preview_change_reads_revisions_in_a_story_without_paragraphs() {
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    let header = r#"<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:trPr><w:ins w:id="9" w:author="Bo" w:date="2026-01-01T00:00:00Z"/></w:trPr><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#;
+    let body: String = (0..120)
+        .map(|index| format!("<w:p><w:r><w:t>Filler paragraph {index} carries enough words to wrap onto a second line of the page.</w:t></w:r></w:p>"))
+        .chain([r#"<w:p><w:r><w:t>Tail</w:t></w:r><w:ins w:id="1" w:author="Bo" w:date="2026-01-01T00:00:00Z"><w:r><w:t xml:space="preserve"> added</w:t></w:r></w:ins></w:p>"#.to_owned()])
+        .collect();
+    let bytes = headed_document(&body, Some(header));
+    let seeded = || {
+        let engine = EngineSession::new(75103);
+        seed_from_docx(engine.doc(), &bytes).unwrap();
+        engine
+    };
+    let engine = seeded();
+    engine
+        .layout_document_with_regions_json(&layout_request(&RenderEnv::default(), font))
+        .unwrap();
+    let env = preview(&[("1", Accepted)]);
+    let request = layout_request(&env, font);
+    let decided = engine.layout_document_with_regions_json(&request).unwrap();
+    engine.build_display_list_frame("{}", 0).unwrap();
+    let (_, expected) = assert_matches_fresh(&engine, &decided, seeded, &env, font);
+    assert_eq!(decided, expected);
+}
+
+#[test]
+fn a_global_render_environment_change_keeps_full_placement() {
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    let filler: String = (0..120)
+        .map(|index| format!("<w:p><w:r><w:t>Filler paragraph {index} carries enough words to wrap onto a second line of the page.</w:t></w:r></w:p>"))
+        .collect();
+    let bytes = document(&format!(
+        r#"{PROPOSALS}<w:p><w:r><w:rPr><w:vanish/></w:rPr><w:t>Hidden</w:t></w:r></w:p>{filler}"#
+    ));
+    let (engine, [replace, ..]) = proposals_in(&bytes);
+    let mut env = preview(&[(&replace, Accepted)]);
+    let before = engine
+        .layout_document_with_regions_json(&layout_request(&env, font))
+        .unwrap();
+    engine.build_display_list_frame("{}", 0).unwrap();
+    let initial = engine.stats();
+    env.show_hidden_text = true;
+    let after = engine
+        .layout_document_with_regions_json(&layout_request(&env, font))
+        .unwrap();
+    assert_eq!(
+        engine.stats().incremental_pagination_calls,
+        initial.incremental_pagination_calls
+    );
+    assert_ne!(after, before);
+    engine
+        .build_display_list_frame("{}", initial.frame_epoch)
+        .unwrap();
+    assert_matches_fresh(&engine, &after, || proposals_in(&bytes).0, &env, font);
+}
+
+#[test]
 fn a_paged_export_refuses_a_previewed_layout() {
     let font = docx_layout::register_measure_font(FONT).unwrap();
     let bytes = document(&format!(
@@ -760,6 +1162,34 @@ fn a_paged_export_refuses_a_previewed_layout() {
         Err(ExportFailureCode::UnsupportedRevisionLayout)
     );
     assert_eq!(export(RenderEnv::default()), Ok(()));
+}
+
+#[test]
+fn a_paged_export_refuses_a_preview_present_only_in_the_current_request() {
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    let bytes = document(&format!(
+        r#"{PROPOSALS}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr>"#
+    ));
+    let (engine, [replace, ..]) = proposals_in(&bytes);
+    let request = fixture::region_request(&engine, &bytes, font);
+    engine
+        .layout_document_with_regions_json(&request.to_string())
+        .unwrap();
+    let options = PageExportOptions::new(RevisionView::Markup);
+    let mut current = request.clone();
+    current["renderEnv"]["revisionPreview"] = json!({replace: "accepted"});
+    let refusal = engine
+        .export_structured_with_pages_for(&options, &current.to_string())
+        .unwrap_err();
+    assert_eq!(
+        refusal.failure.code,
+        ExportFailureCode::UnsupportedRevisionLayout
+    );
+    assert!(
+        engine
+            .export_structured_with_pages_for(&options, &request.to_string())
+            .is_ok()
+    );
 }
 
 #[test]

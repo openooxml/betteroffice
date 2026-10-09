@@ -11,8 +11,8 @@ use crate::image::{is_text_box_drawing, parse_drawing};
 use crate::inline::{
     ContentPosition, Hyperlink, InlineNode, InlineSdt, InlineSdtType, MathEquation, MathType,
     OpenComplexField, Run, RunContent, SimpleField, SimpleFieldType, StructuredFieldContent,
-    StructuredFieldTree, parse_bookmark_end, parse_bookmark_start, parse_field_type,
-    parse_hyperlink, parse_run, parse_sdt_properties,
+    StructuredFieldTree, has_bookmark_id, parse_bookmark_end, parse_bookmark_start,
+    parse_field_type, parse_hyperlink, parse_run, parse_sdt_properties,
 };
 use crate::media::MediaMap;
 use crate::numbering::{ListRendering, NumberingMap, compute_list_rendering};
@@ -317,6 +317,7 @@ pub fn parse_paragraph(
         drawing,
         depth,
         false,
+        false,
     )?;
     apply_list_rendering(&mut paragraph, properties, styles, numbering);
     Ok(paragraph)
@@ -423,7 +424,7 @@ fn parse_paragraph_mark_change(element: &XmlElement) -> Option<TrackedChangeInfo
     })
 }
 
-fn parse_tracked_change_info(element: &XmlElement) -> TrackedChangeInfo {
+pub(crate) fn parse_tracked_change_info(element: &XmlElement) -> TrackedChangeInfo {
     let parsed = element
         .attribute(Some("w"), "id")
         .and_then(parse_javascript_integer_prefix)
@@ -462,6 +463,7 @@ fn parse_paragraph_contents(
     mut drawing: Option<&mut DrawingContext<'_>>,
     depth: usize,
     deletion: bool,
+    in_control: bool,
 ) -> Result<Vec<ParagraphContent>, ParseError> {
     budget.check_nesting_depth(depth, part)?;
     let tracked_context = if deletion {
@@ -472,17 +474,19 @@ fn parse_paragraph_contents(
     let mut output = Vec::new();
     let mut fields: Vec<OpenComplexField> = Vec::new();
     for child in transparent_children(element, false) {
+        let normalized;
+        let child = if tracked_context == TrackedContext::Deletion
+            && (in_control || matches!(child.local_name(), "r" | "sdt"))
+        {
+            normalized = normalize_deletion_element(child);
+            &normalized
+        } else {
+            child
+        };
         match child.local_name() {
             "r" => {
-                let normalized;
-                let run_element = if tracked_context == TrackedContext::Deletion {
-                    normalized = normalize_deletion_element(child);
-                    &normalized
-                } else {
-                    child
-                };
                 let run = parse_run_composed(
-                    run_element,
+                    child,
                     relationships,
                     theme,
                     styles,
@@ -521,6 +525,9 @@ fn parse_paragraph_contents(
                 }
             }
             "bookmarkStart" => {
+                if !has_bookmark_id(child) {
+                    continue;
+                }
                 let node = InlineNode::BookmarkStart(parse_bookmark_start(child));
                 match fields.last_mut() {
                     Some(active) => active.absorb(node, Vec::new()),
@@ -528,6 +535,9 @@ fn parse_paragraph_contents(
                 }
             }
             "bookmarkEnd" => {
+                if !has_bookmark_id(child) {
+                    continue;
+                }
                 let node = InlineNode::BookmarkEnd(parse_bookmark_end(child));
                 match fields.last_mut() {
                     Some(active) => active.absorb(node, Vec::new()),
@@ -568,6 +578,7 @@ fn parse_paragraph_contents(
                         drawing.as_deref_mut(),
                         depth + 1,
                         tracked_context == TrackedContext::Deletion,
+                        true,
                     )?;
                     output.push(ParagraphContent::Inline(InlineNode::InlineSdt(Box::new(
                         InlineSdt {
@@ -577,7 +588,7 @@ fn parse_paragraph_contents(
                                 child.child("w", "sdtEndPr"),
                                 theme,
                             ),
-                            content: filter_field_inline(parsed),
+                            content: filter_field_inline(parsed, true),
                         },
                     ))));
                 }
@@ -595,16 +606,27 @@ fn parse_paragraph_contents(
                     drawing.as_deref_mut(),
                     depth + 1,
                     is_deletion,
+                    in_control,
                 )?;
-                let content = content
-                    .into_iter()
-                    .filter_map(|content| match content {
-                        ParagraphContent::Inline(
-                            node @ (InlineNode::Run(_) | InlineNode::Hyperlink(_)),
-                        ) => Some(node),
-                        _ => None,
-                    })
-                    .collect();
+                let content = if in_control {
+                    filter_field_inline(content, true)
+                } else {
+                    content
+                        .into_iter()
+                        .filter_map(|content| match content {
+                            ParagraphContent::Inline(
+                                node @ (InlineNode::Run(_)
+                                | InlineNode::Hyperlink(_)
+                                | InlineNode::InlineSdt(_)),
+                            ) => Some(node),
+                            ParagraphContent::Tracked(change) => {
+                                let node = InlineNode::Tracked(Box::new(change));
+                                node.has_tracked_control(false, true).then_some(node)
+                            }
+                            _ => None,
+                        })
+                        .collect()
+                };
                 let node_type = match child.local_name() {
                     "ins" => "insertion",
                     "del" => "deletion",
@@ -618,27 +640,33 @@ fn parse_paragraph_contents(
                 }));
             }
             "moveFromRangeStart" | "moveToRangeStart" => {
-                output.push(ParagraphContent::RangeStart(RangeStart {
-                    node_type: child.local_name().to_owned(),
-                    id: parse_range_id(child),
-                    name: child
-                        .attribute(Some("w"), "name")
-                        .unwrap_or_default()
-                        .to_owned(),
-                }));
+                if let Some(id) = range_id(child) {
+                    output.push(ParagraphContent::RangeStart(RangeStart {
+                        node_type: child.local_name().to_owned(),
+                        id,
+                        name: child
+                            .attribute(Some("w"), "name")
+                            .unwrap_or_default()
+                            .to_owned(),
+                    }));
+                }
             }
             "moveFromRangeEnd" | "moveToRangeEnd" => {
-                output.push(ParagraphContent::RangeEnd(RangeEnd {
-                    node_type: child.local_name().to_owned(),
-                    id: parse_range_id(child),
-                }));
+                if let Some(id) = range_id(child) {
+                    output.push(ParagraphContent::RangeEnd(RangeEnd {
+                        node_type: child.local_name().to_owned(),
+                        id,
+                    }));
+                }
             }
             "commentRangeStart" | "commentRangeEnd" => {
-                output.push(ParagraphContent::CommentRange(CommentRange {
-                    node_type: child.local_name().to_owned(),
-                    id: parse_range_id(child),
-                    offset: None,
-                }));
+                if let Some(id) = range_id(child) {
+                    output.push(ParagraphContent::CommentRange(CommentRange {
+                        node_type: child.local_name().to_owned(),
+                        id,
+                        offset: None,
+                    }));
+                }
             }
             "oMath" | "oMathPara" => output.push(ParagraphContent::Inline(InlineNode::Math(
                 parse_math(child),
@@ -737,18 +765,22 @@ fn parse_simple_field_composed(
         .attribute(Some("w"), "instr")
         .unwrap_or_default()
         .to_owned();
-    let result = filter_field_inline(parse_paragraph_contents(
-        element,
-        relationships,
-        theme,
-        styles,
-        doc_defaults,
-        part,
-        budget,
-        drawing,
-        depth,
+    let result = filter_field_inline(
+        parse_paragraph_contents(
+            element,
+            relationships,
+            theme,
+            styles,
+            doc_defaults,
+            part,
+            budget,
+            drawing,
+            depth,
+            false,
+            false,
+        )?,
         false,
-    )?);
+    );
     let content = result
         .iter()
         .filter_map(|node| match node {
@@ -815,8 +847,11 @@ fn parse_hyperlink_composed(
                 budget,
                 drawing.as_deref_mut(),
             )?)),
-            "bookmarkStart" => Some(InlineNode::BookmarkStart(parse_bookmark_start(child))),
-            "bookmarkEnd" => Some(InlineNode::BookmarkEnd(parse_bookmark_end(child))),
+            "bookmarkStart" => has_bookmark_id(child)
+                .then(|| InlineNode::BookmarkStart(parse_bookmark_start(child))),
+            "bookmarkEnd" => {
+                has_bookmark_id(child).then(|| InlineNode::BookmarkEnd(parse_bookmark_end(child)))
+            }
             "fldSimple" => Some(InlineNode::SimpleField(Box::new(
                 parse_simple_field_composed(
                     child,
@@ -880,18 +915,22 @@ fn parse_inline_sdt_composed(
     let Some(container) = element.child("w", "sdtContent") else {
         return Ok(None);
     };
-    let content = filter_field_inline(parse_paragraph_contents(
-        container,
-        relationships,
-        theme,
-        styles,
-        doc_defaults,
-        part,
-        budget,
-        drawing,
-        depth,
-        false,
-    )?);
+    let content = filter_field_inline(
+        parse_paragraph_contents(
+            container,
+            relationships,
+            theme,
+            styles,
+            doc_defaults,
+            part,
+            budget,
+            drawing,
+            depth,
+            false,
+            true,
+        )?,
+        true,
+    );
     Ok(Some(InlineSdt {
         node_type: InlineSdtType::InlineSdt,
         // Pinned hyperlink quirk: the SDT's own run properties omit theme.
@@ -904,7 +943,7 @@ fn parse_inline_sdt_composed(
     }))
 }
 
-fn filter_field_inline(content: Vec<ParagraphContent>) -> Vec<InlineNode> {
+fn filter_field_inline(content: Vec<ParagraphContent>, control: bool) -> Vec<InlineNode> {
     content
         .into_iter()
         .filter_map(|content| match content {
@@ -916,12 +955,16 @@ fn filter_field_inline(content: Vec<ParagraphContent>) -> Vec<InlineNode> {
                 | InlineNode::InlineSdt(_)
                 | InlineNode::Math(_)),
             ) => Some(node),
+            ParagraphContent::Tracked(change) => {
+                let node = InlineNode::Tracked(Box::new(change));
+                (control || node.has_tracked_control(false, false)).then_some(node)
+            }
             _ => None,
         })
         .collect()
 }
 
-fn normalize_deletion_element(element: &XmlElement) -> XmlElement {
+pub(crate) fn normalize_deletion_element(element: &XmlElement) -> XmlElement {
     let local = element.local_name();
     let mapped = match local {
         "delText" => Some("t"),
@@ -951,11 +994,10 @@ fn normalize_deletion_element(element: &XmlElement) -> XmlElement {
     }
 }
 
-fn parse_range_id(element: &XmlElement) -> f64 {
+fn range_id(element: &XmlElement) -> Option<f64> {
     element
         .attribute(Some("w"), "id")
         .and_then(parse_javascript_integer_prefix)
-        .unwrap_or(0.0)
 }
 
 fn parse_math(element: &XmlElement) -> MathEquation {
@@ -1271,6 +1313,7 @@ fn inline_node_length(node: &InlineNode) -> usize {
             .map(|node| inline_node_length(&node))
             .sum(),
         InlineNode::InlineSdt(sdt) => sdt.content.iter().map(inline_node_length).sum(),
+        InlineNode::Tracked(change) => change.content.iter().map(inline_node_length).sum(),
         InlineNode::Math(math) => math
             .plain_text
             .as_deref()
@@ -1684,6 +1727,100 @@ mod tests {
         );
         assert_eq!(run_texts(&paragraph), ["a", "b", "c", "d"]);
         assert_eq!(paragraph.content.len(), 4);
+    }
+
+    #[test]
+    fn keeps_comment_range_zero_and_drops_ranges_without_an_id() {
+        let paragraph = parse(
+            r#"<w:p xmlns:w="w">
+              <w:commentRangeStart/>
+              <w:commentRangeStart w:id="0"/>
+              <w:r><w:t>a</w:t></w:r>
+              <w:commentRangeEnd w:id="0"/>
+              <w:commentRangeEnd w:id="x"/>
+            </w:p>"#,
+        );
+        let ranges: Vec<_> = paragraph
+            .content
+            .iter()
+            .filter_map(|content| match content {
+                ParagraphContent::CommentRange(range) => Some((range.node_type.as_str(), range.id)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            ranges,
+            [("commentRangeStart", 0.0), ("commentRangeEnd", 0.0)]
+        );
+    }
+
+    #[test]
+    fn keeps_move_range_zero_and_drops_ranges_without_an_id() {
+        for name in [
+            "moveFromRangeStart",
+            "moveToRangeStart",
+            "moveFromRangeEnd",
+            "moveToRangeEnd",
+        ] {
+            let paragraph = parse(&format!(
+                r#"<w:p xmlns:w="w"><w:{name}/><w:{name} w:id="0"/><w:{name} w:id="x"/></w:p>"#,
+            ));
+            assert_eq!(paragraph.content.len(), 1, "{name}");
+            let (node_type, id) = match &paragraph.content[0] {
+                ParagraphContent::RangeStart(range) => (range.node_type.as_str(), range.id),
+                ParagraphContent::RangeEnd(range) => (range.node_type.as_str(), range.id),
+                _ => panic!("move range"),
+            };
+            assert_eq!(node_type, name);
+            assert_eq!(id, 0.0);
+        }
+    }
+
+    #[test]
+    fn keeps_bookmark_zero_and_drops_bookmarks_without_an_id() {
+        let content = r#"<w:bookmarkStart/><w:bookmarkStart w:id="x"/><w:bookmarkStart w:id="0" w:name="zero"/><w:r><w:t>A😀</w:t></w:r><w:bookmarkEnd w:id="0"/><w:bookmarkEnd/><w:bookmarkEnd w:id="x"/>"#;
+        for hyperlink in [false, true] {
+            let paragraph = parse(&if hyperlink {
+                format!(
+                    r#"<w:p xmlns:w="w"><w:hyperlink w:anchor="zero">{content}</w:hyperlink></w:p>"#
+                )
+            } else {
+                format!(r#"<w:p xmlns:w="w">{content}</w:p>"#)
+            });
+            let nodes: Vec<_> = if hyperlink {
+                assert_eq!(paragraph.content.len(), 1);
+                let ParagraphContent::Inline(InlineNode::Hyperlink(link)) = &paragraph.content[0]
+                else {
+                    panic!("hyperlink")
+                };
+                assert_eq!(link.children.len(), 3);
+                assert_eq!(link.structured_children.as_ref().unwrap(), &link.children);
+                link.children.iter().collect()
+            } else {
+                paragraph
+                    .content
+                    .iter()
+                    .map(|content| match content {
+                        ParagraphContent::Inline(node) => node,
+                        _ => panic!("inline"),
+                    })
+                    .collect()
+            };
+            assert_eq!(nodes.len(), 3);
+            let InlineNode::BookmarkStart(start) = nodes[0] else {
+                panic!("bookmark start")
+            };
+            assert_eq!(start.id, 0.0);
+            assert_eq!(start.name, "zero");
+            let InlineNode::BookmarkEnd(end) = nodes[2] else {
+                panic!("bookmark end")
+            };
+            assert_eq!(end.id, 0.0);
+            if !hyperlink {
+                assert_eq!(start.position.as_ref().unwrap().offset, Some(0.0));
+                assert_eq!(end.position.as_ref().unwrap().offset, Some(3.0));
+            }
+        }
     }
 
     #[test]

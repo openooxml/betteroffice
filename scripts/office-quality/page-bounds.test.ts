@@ -1,9 +1,18 @@
 import { expect, test } from 'bun:test';
 import { capturePageExtent, validatePageBounds } from './page-bounds';
+import { MAX_LOCAL_REFERENCE_PAGES } from './reference.mjs';
 
 const a4 = { width_pt: 595.25, height_pt: 842, width_px: 1241, height_px: 1755 };
 const letter = { width_pt: 612, height_pt: 792, width_px: 1275, height_px: 1650 };
 const profile = (pages = [a4]) => ({ kind: 'office-page-bounds', pages });
+
+test('raises the page limit only for explicit local profiles', () => {
+  const long = profile(Array.from({ length: MAX_LOCAL_REFERENCE_PAGES }, () => a4));
+  expect(() => validatePageBounds(long)).toThrow('Invalid Office page bounds profile');
+  expect(validatePageBounds(long, MAX_LOCAL_REFERENCE_PAGES)?.pages).toHaveLength(5000);
+  expect(() => validatePageBounds(profile([...long.pages, a4]), MAX_LOCAL_REFERENCE_PAGES))
+    .toThrow('Invalid Office page bounds profile');
+});
 
 test('uses the recorded PDF extent for one-pixel A4 canvas differences', () => {
   const bounds = validatePageBounds(profile());
@@ -115,4 +124,13 @@ test('rejects invalid page indices and native canvas dimensions', () => {
   ]) {
     expect(() => capturePageExtent(null, index, width, height)).toThrow('native canvas');
   }
+});
+
+test('keeps a mismatched page at its own size only when asked', () => {
+  const bounds = validatePageBounds(profile([a4]))!;
+  expect(() => capturePageExtent(bounds, 0, 1755, 1241)).toThrow('more than 1 pixel');
+  expect(capturePageExtent(bounds, 0, 1755, 1241, true)).toMatchObject({
+    output: { width_px: 1755, height_px: 1241 },
+    adjustment: 'none',
+  });
 });

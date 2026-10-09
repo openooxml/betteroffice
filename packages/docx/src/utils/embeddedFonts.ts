@@ -204,6 +204,8 @@ export async function loadEmbeddedFonts(
   return new Set((await loadEmbeddedFontFamilies(fontTable, rawFonts, fontTableRelsXml)).keys());
 }
 
+const MISSING_FAMILY_WARNINGS = 8;
+
 /**
  * {@link loadEmbeddedFonts}, resolving to the CSS family each embedded family
  * was registered under: its own name, or an alias when another live document
@@ -224,15 +226,23 @@ export async function loadEmbeddedFontFamilies(
   const faces = embeddedFaces(fontTable, rawFonts, fontTableRelsXml);
   const registered = await register(faces);
   if (!registered) return new Map();
+  let missing = 0;
   for (const family of new Set((await faces).map((face) => face.family.trim()))) {
-    // A missing family genuinely failed (corrupt bytes, timeout); the picker
-    // may still list it (see getEmbeddedFontFamilies), and its text falls
-    // back to the CSS stack.
-    if (!registered.has(family)) {
+    // A missing family failed (corrupt bytes, timeout) or was past the
+    // document's face budget; the picker may still list it (see
+    // getEmbeddedFontFamilies), and its text falls back to the CSS stack.
+    if (registered.has(family)) continue;
+    missing += 1;
+    if (missing <= MISSING_FAMILY_WARNINGS) {
       console.warn(
         `[embeddedFonts] embedded font "${family}" failed to load; text using it falls back to the CSS stack`
       );
     }
+  }
+  if (missing > MISSING_FAMILY_WARNINGS) {
+    console.warn(
+      `[embeddedFonts] ${missing - MISSING_FAMILY_WARNINGS} more embedded fonts did not load; text using them falls back to the CSS stack`
+    );
   }
   return registered;
 }

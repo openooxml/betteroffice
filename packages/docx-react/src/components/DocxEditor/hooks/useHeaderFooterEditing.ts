@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from 'react';
+import { useCallback, useEffect, useMemo } from 'react';
 import type { Document, HeaderFooter } from '@betteroffice/docx/types/document';
 import {
   resolvedFinalSectionProperties,
@@ -29,6 +29,7 @@ export function useHeaderFooterEditing({
   pushDocument,
   partEditTarget,
   setPartEditTarget,
+  readOnly = false,
 }: {
   document: Document | null;
   pushDocument: (doc: Document) => void;
@@ -36,7 +37,12 @@ export function useHeaderFooterEditing({
   // route to the open part's story.
   partEditTarget: PartEditTarget | null;
   setPartEditTarget: React.Dispatch<React.SetStateAction<PartEditTarget | null>>;
+  readOnly?: boolean;
 }) {
+  useEffect(() => {
+    if (readOnly) setPartEditTarget(null);
+  }, [readOnly, setPartEditTarget]);
+
   const finalSectionProperties = useMemo(
     () => resolvedFinalSectionProperties(document?.package.document),
     [document]

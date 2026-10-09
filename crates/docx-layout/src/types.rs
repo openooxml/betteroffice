@@ -407,14 +407,25 @@ pub struct FieldRun {
     pub fmt: RunFormatting,
     pub field_type: String,
     /// Raw Word field type token, kept when `field_type` collapsed it to a
-    /// coarse category. Inert identity for announcement; never evaluated.
+    /// coarse category. Carried for announcement, and read to number SEQ
+    /// fields (see [`crate::sequence_fields`]); never evaluated otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_type: Option<String>,
-    /// raw field instruction text carried INERT for a11y announcement only
+    /// Raw field instruction text, carried for a11y announcement. Only a SEQ
+    /// field's is read, to number it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instruction: Option<String>,
+    /// The result the field shows: Word's cached result, or a SEQ field's
+    /// recomputed number.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fallback: Option<String>,
+    /// `w:fldLock`: Word keeps the cached result when it updates fields.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub locked: bool,
+    /// Sequences (lower-case names) of SEQ fields nested in this field's code
+    /// or result, which the field's single run doesn't show.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nested_sequences: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pm_start: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -904,6 +915,8 @@ pub struct TableBlock {
     pub compatibility_mode: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cell_margin_left: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cell_margin_right: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pm_start: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1005,6 +1018,8 @@ pub struct ShapeBlock {
     pub y: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inner_text: Option<Vec<ParagraphBlock>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nested_sequences: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inner_measures: Option<Vec<ParagraphExtent>>,
     pub children: Vec<ShapeBlock>,
@@ -1416,6 +1431,8 @@ impl PartialEq for FieldRun {
             raw_type: _,
             instruction: _,
             fallback: _,
+            locked: _,
+            nested_sequences: _,
             pm_start: _,
             pm_end: _,
         } = other;
@@ -1424,6 +1441,8 @@ impl PartialEq for FieldRun {
             && self.raw_type == other.raw_type
             && self.instruction == other.instruction
             && self.fallback == other.fallback
+            && self.locked == other.locked
+            && self.nested_sequences == other.nested_sequences
     }
 }
 
@@ -1468,6 +1487,7 @@ impl PartialEq for TableBlock {
             floating: _,
             compatibility_mode: _,
             cell_margin_left: _,
+            cell_margin_right: _,
             pm_start: _,
             pm_end: _,
         } = other;
@@ -1490,6 +1510,7 @@ impl PartialEq for TableBlock {
             && self.floating == other.floating
             && self.compatibility_mode == other.compatibility_mode
             && self.cell_margin_left == other.cell_margin_left
+            && self.cell_margin_right == other.cell_margin_right
     }
 }
 
@@ -1557,6 +1578,7 @@ impl PartialEq for ShapeBlock {
             x: _,
             y: _,
             inner_text: _,
+            nested_sequences: _,
             inner_measures: _,
             children: _,
             scene: _,
@@ -1588,6 +1610,7 @@ impl PartialEq for ShapeBlock {
             && self.x == other.x
             && self.y == other.y
             && self.inner_text == other.inner_text
+            && self.nested_sequences == other.nested_sequences
             && self.inner_measures == other.inner_measures
             && self.children == other.children
             && self.scene == other.scene
@@ -1803,6 +1826,9 @@ pub struct TypesetRow {
     pub segments: Option<Vec<TypesetRowSegment>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub float_skip_before: Option<f64>,
+    /// Extra first-line px after a marker overruns its hanging indent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub marker_tab_offset: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_advances: Option<Vec<TypesetRunAdvance>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1933,6 +1959,8 @@ pub struct LayoutOptions {
     pub title_page: Option<bool>,
     pub even_and_odd_headers: Option<bool>,
     pub footnote_reserved_heights: Option<BTreeMap<String, f64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note_separator_heights: Option<crate::footnotes::NoteSeparatorHeights>,
     pub body_break_type: Option<SectionBreakType>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub section_page_restarts: Option<Vec<Option<SectionPageRestart>>>,
@@ -1940,6 +1968,8 @@ pub struct LayoutOptions {
     /// footer other than the default one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub section_page_margins: Option<Vec<SectionPageMargins>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub section_page_float_bands: Option<Vec<SectionPageFloatBands>>,
     #[serde(default)]
     pub sections: Option<Vec<SectionLayoutContract>>,
 }
@@ -1958,6 +1988,28 @@ pub struct SectionPageMargins {
     pub even: Option<PageMargins>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restart: Option<u64>,
+}
+
+/// A full-width float exclusion in page coordinates.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageFloatBand {
+    pub top: f64,
+    pub bottom: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub odd_page: Option<bool>,
+}
+
+/// Float bands for each header/footer variant a section shows.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SectionPageFloatBands {
+    pub default: Vec<PageFloatBand>,
+    pub first: Option<Vec<PageFloatBand>>,
+    pub even: Option<Vec<PageFloatBand>>,
+    /// Authored margins for float anchors.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_margins: Option<PageMargins>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -2029,6 +2081,15 @@ pub struct ParagraphFragment {
     pub resolved_lines: Option<Vec<ResolvedLine>>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CellClip {
+    pub row: usize,
+    pub cell: usize,
+    pub top: f64,
+    pub bottom: f64,
+}
+
 /// One page's slice of a table: rows `[row_start, row_end)`, plus
 /// `clip_top` / `clip_bottom` when the boundary cuts through a row that broke
 /// mid-content, and `header_row_count` when this fragment repeats the header
@@ -2059,6 +2120,8 @@ pub struct TableFragment {
     pub clip_top: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub clip_bottom: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cell_clips: Option<Vec<CellClip>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2257,7 +2320,17 @@ pub struct HeaderFooterRefs {
 pub struct Page {
     pub number: u32,
     pub fragments: Vec<Fragment>,
+    #[serde(skip)]
+    pub(crate) float_bands: Vec<PageFloatBand>,
+    #[serde(skip)]
+    pub(crate) opening_fragment_geometry: Option<Box<crate::page_flow::OpeningFragmentGeometry>>,
     pub margins: PageMargins,
+    /// Body flow margins when they differ from the anchor frame.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_margins: Option<PageMargins>,
+    /// Effective body anchor margins before float exclusions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_anchor_margins: Option<PageMargins>,
     pub size: Size,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub orientation: Option<String>,
@@ -2302,6 +2375,12 @@ pub struct Page {
     pub parity_filler: Option<bool>,
 }
 
+impl Page {
+    pub fn has_float_bands(&self) -> bool {
+        !self.float_bands.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct HeaderFooterLayout {
     pub height: f64,
@@ -2322,10 +2401,12 @@ pub struct Layout {
     pub footers: Option<BTreeMap<String, HeaderFooterLayout>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub page_gap: Option<f64>,
-    /// Lays out only part of the document, so its page count is not the
-    /// document's and NUMPAGES fields render empty.
+    /// Covers only part of the document.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub partial: bool,
+    /// While `partial`, NUMPAGES renders the field's cached result.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cached_page_totals: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -2547,6 +2628,8 @@ pub struct DisplayListContractMetadata {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DisplayPageContractMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watermark_primitive_count: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -406,11 +406,21 @@ impl EditingDoc {
             let txn = self.yrs_doc().transact();
             let story = crate::story_ref(&txn, &story_id)?;
             let bounds = crate::op::para_bounds(&story, &txn);
-            let views = crate::queries::para_views(
-                &txn,
-                TextView::Raw,
-                &self.chunk_snapshot(&story_id, &story, &txn),
-            );
+            let chunks = self.chunk_snapshot(&story_id, &story, &txn);
+            let views = crate::queries::para_views(&txn, TextView::Raw, &chunks);
+            let controls: Vec<_> = chunks
+                .iter()
+                .filter_map(|chunk| {
+                    if let ChunkKind::Embed(Some(map)) = &chunk.kind
+                        && map_string(map, &txn, KIND_KEY).as_deref() == Some("sdt")
+                        && let Some(Out::Any(content)) = map.get(&txn, "content")
+                    {
+                        Some((chunk, content))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
             for (change, _) in changes {
                 let preview = if matches!(
                     change.kind,
@@ -433,8 +443,39 @@ impl EditingDoc {
                         });
                     }
                     let mut full = String::new();
-                    for para in &views {
-                        para.view_slice_of_raw(from, to, &mut full);
+                    let mut start = from;
+                    let first = controls.partition_point(|(chunk, _)| chunk.end() <= from);
+                    for (chunk, content) in &controls[first..] {
+                        if chunk.start >= to {
+                            break;
+                        }
+                        if start < chunk.start {
+                            for para in &views {
+                                para.view_slice_of_raw(start, chunk.start, &mut full);
+                            }
+                        }
+                        let key = if change.kind == crate::ChangeKind::Insertion {
+                            crate::INS
+                        } else {
+                            crate::DEL
+                        };
+                        let inherited = chunk
+                            .attrs
+                            .get(key)
+                            .and_then(crate::queries::revision_parts)
+                            .is_some_and(|(id, ..)| id == change.revision_id);
+                        full.push_str(&crate::inline_content::revision_text(
+                            content,
+                            &change.revision_id,
+                            key,
+                            inherited,
+                        ));
+                        start = to.min(chunk.end());
+                    }
+                    if start < to {
+                        for para in &views {
+                            para.view_slice_of_raw(start, to, &mut full);
+                        }
                     }
                     full.chars().take(PREVIEW_MAX_CHARS).collect()
                 };
@@ -451,7 +492,7 @@ impl EditingDoc {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
     use std::sync::Arc;
 
     use super::*;
@@ -769,6 +810,110 @@ mod tests {
             .insert_text(&local(), Position::new("body", 5), "!", FormatPolicy::Plain)
             .unwrap();
         assert!(plain.list_revisions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn revision_stamps_include_dates_from_adjacent_same_author_insertions() {
+        let doc = seed("alpha");
+        let first = doc
+            .insert_text(
+                &suggesting("Alice"),
+                Position::new("body", 5),
+                " first",
+                FormatPolicy::Plain,
+            )
+            .unwrap();
+        let later = "2026-07-14T12:01:00Z";
+        let second = doc
+            .insert_text(
+                &EditCtx::local("Alice", later).suggesting(),
+                Position::new("body", 11),
+                " second",
+                FormatPolicy::Plain,
+            )
+            .unwrap();
+        assert_eq!(second.revision_ids, first.revision_ids);
+        let listed = doc.list_revisions().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].change.date, DATE);
+        let id = first.revision_ids[0].clone();
+        assert_eq!(
+            doc.revision_stamps(&[id.clone(), "missing".into()])
+                .unwrap(),
+            BTreeMap::from([(
+                id,
+                BTreeSet::from([
+                    ("Alice".into(), DATE.into()),
+                    ("Alice".into(), later.into()),
+                ]),
+            )])
+        );
+    }
+
+    #[test]
+    fn revision_stamps_collect_text_and_paragraph_stamps_across_stories() {
+        let doc = seed("alpha");
+        doc.create_story("header", "x", "Normal", "left").unwrap();
+        let stamp = |author: &str| {
+            Any::Map(Arc::new(HashMap::from([
+                ("id".into(), Any::from("shared")),
+                ("author".into(), Any::from(author)),
+                ("date".into(), Any::from(DATE)),
+            ])))
+        };
+        doc.apply_raw_ops(
+            "body",
+            vec![RawOp::Format {
+                index: 0,
+                len: 5,
+                attrs: yrs::types::Attrs::from([
+                    (crate::INS.into(), stamp("Insert")),
+                    (crate::DEL.into(), stamp("Delete")),
+                ]),
+            }],
+            &local(),
+        )
+        .unwrap();
+        doc.apply_raw_ops(
+            "header",
+            vec![
+                RawOp::SetEmbedAttr {
+                    index: 1,
+                    key: crate::PPR_INS.into(),
+                    value: stamp("Mark insert"),
+                },
+                RawOp::SetEmbedAttr {
+                    index: 1,
+                    key: crate::PPR_DEL.into(),
+                    value: stamp("Mark delete"),
+                },
+                RawOp::SetEmbedAttr {
+                    index: 1,
+                    key: crate::PPR_CHANGE.into(),
+                    value: Any::Array(Arc::from(vec![
+                        stamp("Properties"),
+                        stamp("Properties again"),
+                    ])),
+                },
+            ],
+            &local(),
+        )
+        .unwrap();
+        let expected: BTreeSet<(String, String)> = [
+            "Insert",
+            "Delete",
+            "Mark insert",
+            "Mark delete",
+            "Properties",
+            "Properties again",
+        ]
+        .into_iter()
+        .map(|author| (author.to_owned(), DATE.to_owned()))
+        .collect();
+        assert_eq!(
+            doc.revision_stamps(&["shared".into()]).unwrap(),
+            BTreeMap::from([("shared".into(), expected)])
+        );
     }
 
     #[test]

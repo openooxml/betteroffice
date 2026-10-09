@@ -97,7 +97,16 @@ test('a session handed over keeps its worker and shows the old pages until the n
   const full = hostWithPage(9511, 'Full page');
   const handoffFrom = { current: null as YrsSession | null };
   const shown: Array<DisplayList | null> = [];
+  const warnings = spyOn(console, 'warn').mockImplementation(() => {});
   try {
+    const { preloadLayoutWasm } = await import('@betteroffice/docx/wasm/layout');
+    await preloadLayoutWasm(
+      new Uint8Array(
+        readFileSync(
+          resolve(import.meta.dir, '../../../../../docx/src/wasm/generated/layout/docx_layout_bg.wasm')
+        )
+      )
+    );
     const { result, rerender, unmount } = renderHook(
       ({ layout, source }) => {
         const hook = useRustDisplayList(
@@ -136,10 +145,40 @@ test('a session handed over keeps its worker and shows the old pages until the n
     await layOut(preview, 0);
     await waitFor(() => expect(text(result.current.displayList)).toContain('Preview'));
     const firstShown = shown.findIndex((list) => list !== null);
+    const stale = result.current.queries!;
+    await stale.whenReady();
+    stale.prime();
+    const previewRects = stale.rangeRects(1, 2);
+    const previewHits = stale.hitTestRegions(0, 100, 100);
+    expect(previewRects.length).toBeGreaterThan(0);
 
     handoffFrom.current = preview.engine;
     await layOut(full, 1);
     await waitFor(() => expect(text(result.current.displayList)).toContain('Full'));
+    const live = result.current.queries!;
+    await live.whenReady();
+    live.prime();
+    expect(live).not.toBe(stale);
+    expect(text(stale.displayList)).toContain('Preview');
+    expect(text(live.displayList)).toContain('Full');
+    expect(live.rangeRects(1, 2).length).toBeGreaterThan(0);
+
+    // A line is one session's: the preview's facade keeps its handle and answers from its own pages.
+    warnings.mockClear();
+    expect(stale.rangeRects(1, 2)).toEqual(previewRects);
+    expect(stale.hitTestRegions(0, 100, 100)).toEqual(previewHits);
+    expect(warnings).not.toHaveBeenCalled();
+
+    // What hosts read from here on (search, geometry, plugin queries, hit tests) is the full layout's.
+    await act(async () => {
+      await new Promise((done) => setTimeout(done, 50));
+    });
+    const current = result.current.queries!;
+    expect(current).toBe(live);
+    expect(text(current.displayList)).toContain('Full');
+    expect(text(current.displayList)).not.toContain('Preview');
+    expect(text(result.current.displayList)).not.toContain('Preview');
+    expect(text(shown.at(-1)!)).toContain('Full');
 
     expect(FakeWorker.created).toHaveLength(1);
     const worker = FakeWorker.created[0]!;
@@ -148,8 +187,11 @@ test('a session handed over keeps its worker and shows the old pages until the n
     expect(worker.posted[0]).not.toHaveProperty('keepSurfaces');
     // No render between the two documents shows an empty page list.
     expect(shown.slice(firstShown).every((list) => list !== null)).toBe(true);
+    stale.dispose();
+    live.dispose();
     unmount();
   } finally {
+    warnings.mockRestore();
     preview.native.free();
     full.native.free();
   }
@@ -629,6 +671,93 @@ test("a worker handed to another session builds no pages of the old session's fr
     full.native.free();
   }
 });
+
+test.each([false, true])(
+  'a provisional preview handoff builds every full-document page with worker-open=%s',
+  async (experimentalWorkerOpen) => {
+    FakeWorker.created = [];
+    globalThis.Worker = FakeWorker as unknown as typeof Worker;
+    const preview = hostWithLazyPages(9532, 'Preview');
+    const full = hostWithLazyPages(9533, 'Full document');
+    const handoffFrom = { current: null as YrsSession | null };
+    try {
+      const { result, rerender, unmount } = renderHook(
+        ({ layout, source }) =>
+          useRustDisplayList(
+            layout,
+            undefined,
+            undefined,
+            undefined,
+            source,
+            undefined,
+            undefined,
+            handoffFrom,
+            experimentalWorkerOpen
+          ),
+        { initialProps: { layout: null as Layout | null, source: null as YrsSession | null } }
+      );
+      const first = result.current.layoutInWorker(preview.engine, preview.request)!;
+      const worker = FakeWorker.created[0]!;
+      let host = preview;
+      const reply = (request: ResidentEngineWorkerRequest, frame: Uint8Array) =>
+        worker.reply({
+          id: request.id,
+          ok: true,
+          frame: frame.slice().buffer,
+          caret: JSON.parse(host.native.resident_caret_snapshot_json()),
+          selection: null,
+          layoutRevision: 1,
+          layoutJson: host.layoutJson,
+          ...(host === preview ? { layoutProvisional: true } : {}),
+        });
+      worker.postMessage = (request) => {
+        worker.posted.push(request);
+        if (request.type === 'buildPages') {
+          const pages = host === preview ? request.pages.filter((index) => index < 1) : request.pages;
+          const frame = host.native.build_display_pages_frame(
+            Uint32Array.from(pages),
+            request.expectedFrameEpoch
+          );
+          queueMicrotask(() => reply(request, frame));
+        }
+      };
+      reply(worker.posted[0]!, preview.frame);
+      const previewLayout = await first;
+      await act(async () => {
+        rerender({ layout: previewLayout!.layout, source: preview.engine });
+        result.current.setRetainBuiltPages!(true);
+      });
+      const previewFrame = result.current.frame!;
+      await act(async () => {
+        result.current.setDisplayWindow(1, previewFrame.displayList.pages.length);
+      });
+      await waitFor(() => expect(result.current.frame).not.toBe(previewFrame));
+
+      handoffFrom.current = preview.engine;
+      host = full;
+      const second = result.current.layoutInWorker(full.engine, full.request)!;
+      full.native.reset_frame_base();
+      reply(
+        worker.posted.at(-1)!,
+        full.native.build_display_pages_frame(new Uint32Array(), result.current.frame!.frameEpoch)
+      );
+      const fullLayout = await second;
+      await act(async () => {
+        rerender({ layout: fullLayout!.layout, source: full.engine });
+      });
+      await waitFor(() => expect(result.current.presentedEngine).toBe(full.engine));
+      await act(async () => {
+        const settled = result.current.settledDisplayList(null, 1_000);
+        await expect(settled).resolves.toBeDefined();
+        expect((await settled).pages.every((page) => !page.unbuilt)).toBe(true);
+      });
+      unmount();
+    } finally {
+      preview.native.free();
+      full.native.free();
+    }
+  }
+);
 
 test("a display-only preview's failed build fails no wait for the document", async () => {
   const failure = new Error('preview build failed');

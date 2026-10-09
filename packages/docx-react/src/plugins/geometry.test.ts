@@ -22,7 +22,10 @@ import {
   stampSourceVersion,
   UNKNOWN_REVISION_PREVIEW_KEY,
 } from '../components/DocxEditor/internals/layoutProvenance';
-import { createPluginGeometry, pluginLayout, toOverlayRect } from './geometry';
+import { bindDisplayWindow } from '../components/DocxEditor/internals/displayWindow';
+import { createPluginGeometry, pluginLayout, readPluginPositionAtPoint, toOverlayRect } from './geometry';
+import type { PagedEditorRef } from '../components/DocxEditor/PagedEditor';
+import type { DocxPointPosition } from '../components/DocxEditor/types';
 import * as proposalPreview from './proposalPreview';
 import type { DocxProposalSnapshot } from './proposalPreview';
 import type { DocxAnchorGeometryResult, DocxGeometryTarget } from './types';
@@ -409,6 +412,70 @@ function textLine(source: DisplayListQueries, hidden: number[] = [], rtl = false
 }
 
 describe('semantic anchor geometry', () => {
+  test('a proposal keeps its offscreen placeholder anchor and refuses it when the window moves', () => {
+    const { geometry, source } = semanticGeometry();
+    Object.assign(source, {
+      displayList: {
+        pages: [
+          { pageIndex: 0, ...PAGE, primitives: [] },
+          { pageIndex: 1, ...PAGE, primitives: [], unbuilt: true },
+        ],
+      },
+    });
+    source.rangeRects = () => [];
+    source.anchorRect = () => ({ ...RANGE, pageIndex: 1, width: 0, height: 0 });
+    let window: [number, number] = [0, 1];
+    bindDisplayWindow(source, { read: () => window, subscribe: () => () => {} });
+    const target: DocxGeometryTarget = { kind: 'proposal', id: 'proposal' };
+    expect(anchored(geometry.getAnchorGeometry(target))).toMatchObject({
+      rects: [],
+      anchor: { pageIndex: 1, width: 0, height: 0 },
+    });
+    window = [1, 2];
+    refused(geometry.getAnchorGeometry(target), 'layout-unavailable');
+    source.rangeRects = () => [{ ...RANGE, pageIndex: 1 }];
+    refused(geometry.getAnchorGeometry(target), 'layout-unavailable');
+  });
+
+  test('a proposal spanning a visible placeholder waits even when another page has rectangles', () => {
+    const { geometry, source } = semanticGeometry();
+    Object.assign(source, {
+      displayList: {
+        pages: [
+          { pageIndex: 0, ...PAGE, primitives: [] },
+          { pageIndex: 1, ...PAGE, primitives: [], unbuilt: true, positionSpan: [2, 4] },
+        ],
+      },
+    });
+    bindDisplayWindow(source, { read: () => [1, 2], subscribe: () => () => {} });
+    refused(geometry.getAnchorGeometry({ kind: 'proposal', id: 'proposal' }), 'layout-unavailable');
+  });
+
+  test('a hidden proposal on a visible placeholder does not use a neighbouring caret', () => {
+    const { geometry, source, setSnapshot } = semanticGeometry();
+    setSnapshot({
+      proposals: [
+        {
+          id: 'proposal',
+          state: 'rejected',
+          paragraph: PARAGRAPH,
+          revisionIds: ['r2'],
+          changed: true,
+        },
+      ],
+    });
+    Object.assign(source, {
+      displayList: {
+        pages: [
+          { pageIndex: 0, ...PAGE, primitives: [] },
+          { pageIndex: 1, ...PAGE, primitives: [], unbuilt: true, positionSpan: [2, 4] },
+        ],
+      },
+    });
+    bindDisplayWindow(source, { read: () => [1, 2], subscribe: () => () => {} });
+    refused(geometry.getAnchorGeometry({ kind: 'proposal', id: 'proposal' }), 'layout-unavailable');
+  });
+
   test('resolves every target kind and returns versioned, page-aware fragments', () => {
     const { geometry } = semanticGeometry();
     const targets: DocxGeometryTarget[] = [
@@ -1053,3 +1120,55 @@ describe('semantic anchor geometry', () => {
     }
   });
 });
+
+for (const viewer of [false, true]) {
+  test(`async point geometry ${viewer ? 'reads the worker' : 'flushes editor input'} and preserves the hit mapping`, async () => {
+    const events: string[] = [];
+    const hit = { version: 'v', position: 3, region: 'body', pageIndex: 0, target: { kind: 'range', story: 'body', start: { paraId: 'p', offset: 2 }, end: { paraId: 'p', offset: 2 }, view: 'accepted' } } as DocxPointPosition;
+    const session = {} as YrsSession;
+    const editor = {
+      isWorkerViewer: () => viewer,
+      getYrsSession: () => session,
+      flushPendingInput: async () => { events.push('flush'); },
+      getPositionAtPoint: () => { events.push('sync'); return hit; },
+      readPositionAtPoint: async () => { events.push('worker'); return hit; },
+    } as unknown as PagedEditorRef;
+    const pages = document.createElement('div');
+    const source = queries();
+    const dom = createRenderedDomContext(pages, 1, {
+      displayListQueries: source,
+      projector: createCanvasHostProjector(pages, source, 1),
+    });
+    const layout = { id: 'layout', version: 'v', previewVersion: 0, zoom: 1, pageCount: 1 };
+    const geometry = createPluginGeometry(layout, dom, document.createElement('div'), () => true,
+      () => hit, source, () => null, () => false,
+      (x, y) => readPluginPositionAtPoint({ current: editor }, x, y));
+    expect(await geometry.readPositionAtPoint(10, 20)).toEqual({ ...hit, layoutId: 'layout' });
+    expect(events).toEqual(viewer ? ['worker'] : ['flush', 'sync']);
+    expect(geometry.getPositionAtPoint(10, 20)).toEqual({ ...hit, layoutId: 'layout' });
+  });
+}
+
+for (const change of ['id', 'version', 'zoom'] as const) {
+  test(`async point geometry discards a worker hit when layout ${change} changes during the await`, async () => {
+    const pages = document.createElement('div');
+    const source = queries();
+    const dom = createRenderedDomContext(pages, 1, {
+      displayListQueries: source,
+      projector: createCanvasHostProjector(pages, source, 1),
+    });
+    const layout = { id: 'layout', version: 'v', previewVersion: 0, zoom: 1, pageCount: 1 };
+    let current = { ...layout };
+    let resolve!: (hit: DocxPointPosition | null) => void;
+    const pending = new Promise<DocxPointPosition | null>((done) => { resolve = done; });
+    const editor = { isWorkerViewer: () => true, readPositionAtPoint: () => pending } as unknown as PagedEditorRef;
+    const geometry = createPluginGeometry(layout, dom, document.createElement('div'),
+      () => current.id === layout.id && current.version === layout.version && current.zoom === layout.zoom,
+      () => null, source, () => null, () => false,
+      (x, y) => readPluginPositionAtPoint({ current: editor }, x, y));
+    const result = geometry.readPositionAtPoint(10, 20);
+    current = { ...current, [change]: change === 'zoom' ? 2 : 'new' };
+    resolve({ version: 'v', position: 3, pageIndex: 0, region: 'body', target: { kind: 'range', story: 'body', start: { paraId: 'p', offset: 2 }, end: { paraId: 'p', offset: 2 }, view: 'accepted' } });
+    expect(await result).toBeNull();
+  });
+}

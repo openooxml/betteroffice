@@ -65,6 +65,11 @@ export function useRustMeasurement(
   const sourceEngineRef = useRef<RustTextEngine | null>(null);
   const releaseSourceRef = useRef<(() => void) | null>(null);
   const latestFontChainsRef = useRef<Record<string, number[]>>({});
+  // The latest font requirement for each key a layout of this document asked
+  // for. A revision preview can show or hide the only runs in a font; keeping
+  // the ready fonts no run uses now in the configuration keeps it, and with it
+  // the retained measurements, unchanged across such toggles.
+  const requiredRef = useRef(new Map<string, ResidentFontRequirement>());
   const requirementWarmupsRef = useRef(new Map<string, Promise<void>>());
   const fedFontSourceRef = useRef<{
     buffer: ArrayBuffer | null;
@@ -86,6 +91,7 @@ export function useRustMeasurement(
           sourceEngineRef.current = engine;
           fedFontSourceRef.current = null;
           latestFontChainsRef.current = {};
+          requiredRef.current = new Map();
           requirementWarmupsRef.current.clear();
         }
         const firstLoad = !source;
@@ -109,6 +115,7 @@ export function useRustMeasurement(
           source.setEmbeddedFaces(faces);
           fedFontSourceRef.current = { buffer, fontTable };
           latestFontChainsRef.current = {};
+          requiredRef.current = new Map();
         }
         if (firstLoad) runLayoutPipelineRef.current?.();
       } catch (error) {
@@ -142,8 +149,20 @@ export function useRustMeasurement(
     (requirements: ResidentFontRequirement[]): ResidentMeasurementConfig | null => {
       const source = sourceRef.current;
       if (!source) return null;
-      const ready = source.measurementConfigForRequirements(requirements);
-      if (ready) {
+      const required = requiredRef.current;
+      for (const requirement of requirements) required.set(requirement.key, requirement);
+      const current = source.measurementConfigForRequirements(requirements);
+      if (current) {
+        const wanted = new Set(requirements.map((requirement) => requirement.key));
+        const kept = [...required.values()].filter(
+          (requirement) =>
+            !wanted.has(requirement.key) &&
+            source.measurementConfigForRequirements([requirement]) !== undefined
+        );
+        const ready =
+          source.measurementConfigForRequirements(
+            [...requirements, ...kept].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
+          ) ?? current;
         latestFontChainsRef.current = ready.fontChains;
         return ready;
       }

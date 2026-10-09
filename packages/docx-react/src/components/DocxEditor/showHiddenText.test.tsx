@@ -51,6 +51,9 @@ function yrsCore(): YrsCoreSession {
   return {
     session,
     sessionGeneration: 0,
+    replicaReady: true,
+    requestReplica: () => {},
+    workerProposalsReady: false,
     storyBlocks: () => null,
     bodyBlocks: () => null,
     inputPositionMap: () => null,

@@ -35,10 +35,12 @@ export { loadGlyphOutlineProvider } from './glyphOutlineWasm';
 export {
   buildMirrorPage,
   buildMirrorPageLinks,
+  buildMirrorPageText,
   displayPageHoldsMirrorId,
   mirrorPageHasHeaderCells,
   mirrorPageHasTabStops,
   reduceMirrorToLinks,
+  reduceMirrorToText,
   MIRROR_CLASS_NAMES,
   type BuildMirrorPageOptions,
   type MirrorLabels,
@@ -78,6 +80,7 @@ export {
   buildRustDisplayList,
   buildRustDisplayFrame,
   loadRustDisplayListQueryEngine,
+  loadedRustDisplayListQueryEngine,
   type DisplayListBuildInputs,
   type DisplayListHeadersFooters,
   type DisplayListHfVariant,
@@ -96,6 +99,7 @@ export {
   applyFrameDelta,
   applyFrameDeltaOwned,
   decodeFrameDelta,
+  decodeFrameDeltaSteps,
   displayPageNoteAnchorRevision,
   displayPageRevision,
   FRAME_DELTA_HEADER_BYTES,
@@ -111,6 +115,7 @@ export {
 
 export {
   createDisplayListQueries,
+  endDisplayListQueriesLine,
   isDisplayListQuerySourceDead,
   onDisplayListQuerySourceFailure,
   type DisplayListHitRegion,
@@ -143,7 +148,10 @@ export {
   type DisplayPageHostOptions,
 } from './canvasPointer';
 
-export { createCanvasImageResolver } from './canvasImageResolver';
+export {
+  createCanvasImageResolver,
+  type CanvasImageResolverOptions,
+} from './canvasImageResolver';
 
 export {
   computeA11yAnnouncements,
@@ -156,6 +164,7 @@ export {
 export {
   computeAnchorPositionsFromDisplayList,
   computeAnchorPositionsFromYrs,
+  anchorPositionsFromPoints,
   mergeHfAnchorPositionsFromDisplayList,
   visitAnchorKeys,
   type AnchorEditorView,
@@ -168,6 +177,7 @@ export {
   yrsIdToNumericId,
   type YrsSidebarDisplayPoint,
   type YrsSidebarProjection,
+  type YrsStorySegmentSource,
 } from './yrsSidebarProjection';
 
 export { extractTrackedChangesFromYrs, type TrackedChangesResult } from './yrsTrackedChanges';

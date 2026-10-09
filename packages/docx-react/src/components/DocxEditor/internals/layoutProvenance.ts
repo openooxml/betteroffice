@@ -12,6 +12,71 @@ export function sourceVersionOf(target: object | null | undefined): string | nul
   return target ? (sourceVersions.get(target) ?? null) : null;
 }
 
+export interface WorkerFrameProvenance {
+  version: string;
+  preview: boolean;
+  asOpened: boolean;
+}
+
+const workerFrames = new WeakMap<object, WorkerFrameProvenance>();
+
+/** Records the worker document version a worker frame's display list and queries show. */
+export function stampWorkerFrameVersion(
+  target: object,
+  version: string | null | undefined,
+  preview = false,
+  asOpened = false
+): void {
+  if (version != null) workerFrames.set(target, { version, preview, asOpened });
+}
+
+/** The worker document version `target` shows, or null for a frame the worker did not lay out. */
+export function workerFrameVersionOf(target: object | null | undefined): string | null {
+  return target ? (workerFrames.get(target)?.version ?? null) : null;
+}
+
+/** The provenance of the presented worker frame. */
+export function presentedWorkerFrame(
+  queries: { readonly displayList: object } | null | undefined
+): WorkerFrameProvenance | null {
+  return queries
+    ? (workerFrames.get(queries) ?? workerFrames.get(queries.displayList) ?? null)
+    : null;
+}
+
+/** The worker document version the frame `queries` query lays out, or null. */
+export function presentedWorkerVersion(
+  queries: { readonly displayList: object } | null | undefined
+): string | null {
+  return presentedWorkerFrame(queries)?.version ?? null;
+}
+
+const supersededLayouts = new WeakSet<object>();
+
+/** Records that the document changed past `layout` before it was shown. */
+export function markSupersededLayout(layout: object, superseded = true): void {
+  if (superseded) supersededLayouts.add(layout);
+  else supersededLayouts.delete(layout);
+}
+
+/** Whether the document changed past `layout` before it was shown; such a layout never settles. */
+export function isSupersededLayout(layout: object | null | undefined): boolean {
+  return layout ? supersededLayouts.has(layout) : false;
+}
+
+const queuedLayoutSessions = new WeakSet<object>();
+
+/** Records whether a pass for `session` that waited behind a worker pass has yet to start. */
+export function markLayoutQueued(session: object, queued: boolean): void {
+  if (queued) queuedLayoutSessions.add(session);
+  else queuedLayoutSessions.delete(session);
+}
+
+/** Whether a layout pass for `session` is queued; nothing shown meanwhile settles. */
+export function isLayoutQueued(session: object | null | undefined): boolean {
+  return session ? queuedLayoutSessions.has(session) : false;
+}
+
 const revisionPreviewKeys = new WeakMap<object, string>();
 
 /** A canonical key for a revision preview; '' when nothing is previewed. */
@@ -46,17 +111,27 @@ export function readSessionVersion(
   }
 }
 
+interface PresentationOptions {
+  worker?: boolean;
+}
+
 const presentedLists = new WeakMap<object, object>();
-const presentListeners = new Set<(displayList: object) => void>();
+const presentListeners = new Set<(displayList: object, options?: PresentationOptions) => void>();
 
 /** Records that the canvas pages under `host` finished painting `displayList`. */
-export function markPresented(host: object, displayList: object): void {
+export function markPresented(
+  host: object,
+  displayList: object,
+  options?: PresentationOptions
+): void {
   presentedLists.set(host, displayList);
-  for (const listener of [...presentListeners]) listener(displayList);
+  for (const listener of [...presentListeners]) listener(displayList, options);
 }
 
 /** Calls `listener` with each display list whose pages finish painting. */
-export function onPresented(listener: (displayList: object) => void): () => void {
+export function onPresented(
+  listener: (displayList: object, options?: PresentationOptions) => void
+): () => void {
   presentListeners.add(listener);
   return () => presentListeners.delete(listener);
 }

@@ -6,6 +6,7 @@
 //! counts and byte lengths; the browser decoder rejects any mismatch before a
 //! page reaches canvas replay.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -14,7 +15,9 @@ use docx_layout::display_list::{DisplayList, DisplayPage, DocAttrs, Primitive};
 use serde_json::Value;
 
 mod typed_page;
-use typed_page::{encode_page, hash_page};
+use typed_page::encode_page;
+#[cfg(test)]
+use typed_page::hash_page;
 
 pub const FRAME_DELTA_VERSION: u16 = 1;
 pub const FRAME_HEADER_LEN: usize = 80;
@@ -25,6 +28,9 @@ pub const PAGE_OP_REMOVE: u8 = 2;
 pub const PAGE_OP_MOVE: u8 = 3;
 pub const PAGE_OP_PATCH_POSITIONS: u8 = 4;
 pub const PAGE_OP_SHIFT_POSITIONS: u8 = 5;
+/// Shifts body positions and spans on a contiguous range of pages.
+pub const PAGE_OP_SHIFT_RANGE: u8 = 6;
+const SHIFT_SPAN_PRESENT: u32 = 1;
 
 const POSITION_DOC_START: u8 = 1 << 0;
 const POSITION_DOC_END: u8 = 1 << 1;
@@ -44,10 +50,11 @@ const POSITION_FIELDS: [u8; 5] = [
 
 const MAGIC: [u8; 4] = *b"FDV1";
 const MAX_U32: usize = u32::MAX as usize;
+const MAX_SAFE_INTEGER: i64 = (1 << 53) - 1;
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FramePageSnapshot {
     pub page_id: u64,
     pub anchor: String,
@@ -60,6 +67,39 @@ pub struct FramePageSnapshot {
     pub positions: Vec<PrimitivePositionSnapshot>,
     /// Every note region note's anchor, in area then note order.
     pub note_anchors: Vec<NoteAnchorSnapshot>,
+    placeholder: Option<Rc<DisplayPage>>,
+    placeholder_hash: u64,
+    position_span: Option<[i64; 2]>,
+    position_base: i64,
+    body_primitives: u32,
+}
+
+impl FramePageSnapshot {
+    /// Folds deferred body position shifts into the stored positions.
+    pub fn materialize_positions(&mut self) {
+        let delta = std::mem::take(&mut self.position_base);
+        if delta == 0 {
+            return;
+        }
+        for position in self
+            .positions
+            .iter_mut()
+            .take(self.body_primitives as usize)
+        {
+            for value in [
+                &mut position.doc_start,
+                &mut position.doc_end,
+                &mut position.fragment_doc_start,
+                &mut position.fragment_doc_end,
+                &mut position.inline_widget_pos,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                *value += delta;
+            }
+        }
+    }
 }
 
 /// One note region note's backlink anchor, addressed by area and note index.
@@ -88,12 +128,89 @@ pub struct FrameEpochs {
     pub base_frame_epoch: u64,
 }
 
+/// A contiguous range of pages whose body positions move by one delta.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PageShiftRun {
+    pub start: usize,
+    pub end: usize,
+    pub delta: i64,
+}
+
+/// Pages changed against an existing frame with stable page indices.
+pub struct DisplayChanges<'a> {
+    /// Pages whose display page was rebuilt, built, released or replaced: prepared afresh.
+    pub rebuilt: &'a [usize],
+    /// Clean pages whose positions moved non-uniformly: compared position by position.
+    pub repositioned: &'a [usize],
+    /// Clean pages whose positions all moved by one delta.
+    pub shifts: &'a [PageShiftRun],
+}
+
+/// A page or range to process in ascending index order.
+enum PageUpdate<'a> {
+    Rebuilt(usize),
+    Repositioned(usize),
+    Shift(&'a PageShiftRun),
+}
+
+impl PageUpdate<'_> {
+    /// Returns the page indices covered by this update.
+    fn range(&self) -> std::ops::Range<usize> {
+        match self {
+            Self::Rebuilt(index) | Self::Repositioned(index) => *index..*index + 1,
+            Self::Shift(run) => run.start..run.end,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct PreparedPage<'a> {
     snapshot: FramePageSnapshot,
     page: &'a DisplayPage,
-    is_new: bool,
-    moved: bool,
+    change: PageChange,
+    /// Where the page's primitive ids and payload went in the data section
+    /// when it was emitted while it was fingerprinted and then upserts.
+    emitted: Option<EmittedPage>,
+}
+
+impl<'a> PreparedPage<'a> {
+    /// Returns the operation for a page whose snapshot changed.
+    fn op(&self) -> Option<PageOp<'_, 'a>> {
+        match &self.change {
+            PageChange::Upsert => Some(PageOp::Upsert(self)),
+            PageChange::Move => Some(PageOp::Move(self)),
+            PageChange::PatchPositions(patches) => Some(PageOp::PatchPositions(self, patches)),
+            PageChange::ShiftPositions(runs, anchors, delta) => {
+                Some(PageOp::ShiftPositions(self, runs, anchors, *delta))
+            }
+            PageChange::Retain => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct EmittedPage {
+    primitive_ids_offset: usize,
+    payload_offset: usize,
+    payload_len: usize,
+}
+
+/// What a frame sends for a page, against the page's previous snapshot.
+#[derive(Debug)]
+enum PageChange {
+    Upsert,
+    Move,
+    PatchPositions(Vec<PositionPatch>),
+    ShiftPositions(Vec<PositionShiftRun>, Vec<NoteAnchorSnapshot>, Option<i64>),
+    Retain,
+}
+
+/// A frame's string table and data section, which pages emit into while
+/// they are prepared.
+#[derive(Default)]
+struct FrameData {
+    strings: StringTable,
+    out: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -101,12 +218,14 @@ enum PageOp<'a, 'b> {
     Upsert(&'a PreparedPage<'b>),
     Remove(&'a FramePageSnapshot),
     Move(&'a PreparedPage<'b>),
-    PatchPositions(&'a PreparedPage<'b>, Vec<PositionPatch>),
+    PatchPositions(&'a PreparedPage<'b>, &'a [PositionPatch]),
     ShiftPositions(
         &'a PreparedPage<'b>,
-        Vec<PositionShiftRun>,
-        Vec<NoteAnchorSnapshot>,
+        &'a [PositionShiftRun],
+        &'a [NoteAnchorSnapshot],
+        Option<i64>,
     ),
+    ShiftRange(&'a PageShiftRun, u64),
 }
 
 #[derive(Debug)]
@@ -172,8 +291,145 @@ pub fn encode_frame_delta_pages(
     next_page_id: &mut u64,
     rebuilt: &dyn Fn(usize) -> bool,
 ) -> Result<(Vec<u8>, Vec<FramePageSnapshot>), String> {
-    let prepared = prepare_pages(list, previous, next_page_id, Some(rebuilt), false)?;
-    encode_prepared(list, previous, epochs, false, prepared)
+    let mut data = FrameData::default();
+    let prepared = prepare_pages(
+        list,
+        previous,
+        next_page_id,
+        Some(rebuilt),
+        PrepareOptions {
+            match_anchors: false,
+            full: false,
+        },
+        &mut data,
+    )?;
+    encode_prepared(list, previous, epochs, false, prepared, data)
+}
+
+/// Encodes only changed pages and applies uniform range shifts to snapshots in place.
+pub fn encode_frame_delta_changes(
+    list: &DisplayList,
+    snapshots: &mut [FramePageSnapshot],
+    epochs: FrameEpochs,
+    changes: DisplayChanges<'_>,
+) -> Result<Vec<u8>, String> {
+    if snapshots.len() != list.pages.len() {
+        return Err("FrameDelta snapshot count does not match the display list".to_owned());
+    }
+    checked_u32(list.pages.len(), "page count")?;
+    let mut rebuilt = changes.rebuilt.to_vec();
+    rebuilt.sort_unstable();
+    rebuilt.dedup();
+    let mut repositioned = changes.repositioned.to_vec();
+    repositioned.sort_unstable();
+    repositioned.dedup();
+    if rebuilt
+        .iter()
+        .chain(&repositioned)
+        .any(|&index| index >= list.pages.len())
+    {
+        return Err("FrameDelta changed page index is out of range".to_owned());
+    }
+    for run in changes.shifts {
+        if run.start >= run.end || run.end > list.pages.len() {
+            return Err("FrameDelta page shift range is invalid".to_owned());
+        }
+        if run.delta == 0 || !(-MAX_SAFE_INTEGER..=MAX_SAFE_INTEGER).contains(&run.delta) {
+            return Err("FrameDelta page shift delta is invalid".to_owned());
+        }
+    }
+    let mut updates: Vec<_> = rebuilt
+        .into_iter()
+        .map(PageUpdate::Rebuilt)
+        .chain(repositioned.into_iter().map(PageUpdate::Repositioned))
+        .chain(changes.shifts.iter().map(PageUpdate::Shift))
+        .collect();
+    updates.sort_unstable_by_key(|update| update.range().start);
+    let mut end = 0;
+    for update in &updates {
+        let range = update.range();
+        if range.start < end {
+            return Err("FrameDelta changed pages and shift ranges overlap".to_owned());
+        }
+        end = range.end;
+    }
+
+    let mut data = FrameData::default();
+    let mut placeholder_data = FrameData::default();
+    let mut prepared = Vec::new();
+    for update in &updates {
+        match update {
+            PageUpdate::Rebuilt(index) | PageUpdate::Repositioned(index) => {
+                let old = &mut snapshots[*index];
+                old.materialize_positions();
+                let options = PagePreparation {
+                    page_id: old.page_id,
+                    page_index: checked_u32(*index, "page index")?,
+                    anchor: old.anchor.clone(),
+                    is_new: false,
+                    moved: false,
+                    full: false,
+                    rebuild: matches!(update, PageUpdate::Rebuilt(_)),
+                };
+                prepared.push(prepare_page(
+                    &list.pages[*index],
+                    Some(old),
+                    options,
+                    &mut data,
+                    &mut placeholder_data,
+                )?);
+            }
+            PageUpdate::Shift(run) => {
+                if snapshots[run.start].page_id == 0 {
+                    return Err("FrameDelta shifted page id is zero".to_owned());
+                }
+                for old in &snapshots[run.start..run.end] {
+                    old.position_base
+                        .checked_add(run.delta)
+                        .ok_or_else(|| "FrameDelta position base overflow".to_owned())?;
+                    if let Some(span) = old.position_span {
+                        for value in span {
+                            value
+                                .checked_add(run.delta)
+                                .ok_or_else(|| "FrameDelta position span overflow".to_owned())?;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut ops = Vec::new();
+    let mut pages = prepared.iter();
+    for update in &updates {
+        match update {
+            PageUpdate::Shift(run) => {
+                ops.push(PageOp::ShiftRange(run, snapshots[run.start].page_id));
+            }
+            _ => {
+                if let Some(op) = pages.next().expect("prepared changed page").op() {
+                    ops.push(op);
+                }
+            }
+        }
+    }
+    let bytes = encode_ops(list, epochs, false, &ops, data)?;
+    drop(ops);
+    for page in prepared {
+        let index = page.snapshot.page_index as usize;
+        snapshots[index] = page.snapshot;
+    }
+    for run in changes.shifts {
+        let salt = shift_range_salt(run.delta, epochs.frame_epoch);
+        for old in &mut snapshots[run.start..run.end] {
+            old.position_base += run.delta;
+            if let Some(span) = &mut old.position_span {
+                span[0] += run.delta;
+                span[1] += run.delta;
+            }
+            old.fingerprint ^= salt;
+        }
+    }
+    Ok(bytes)
 }
 
 fn encode_frame_delta_inner(
@@ -184,8 +440,19 @@ fn encode_frame_delta_inner(
     next_page_id: &mut u64,
     rebuilt_pages: Option<&dyn Fn(usize) -> bool>,
 ) -> Result<(Vec<u8>, Vec<FramePageSnapshot>), String> {
-    let prepared = prepare_pages(list, previous, next_page_id, rebuilt_pages, true)?;
-    encode_prepared(list, previous, epochs, full, prepared)
+    let mut data = FrameData::default();
+    let prepared = prepare_pages(
+        list,
+        previous,
+        next_page_id,
+        rebuilt_pages,
+        PrepareOptions {
+            match_anchors: true,
+            full,
+        },
+        &mut data,
+    )?;
+    encode_prepared(list, previous, epochs, full, prepared, data)
 }
 
 fn encode_prepared(
@@ -194,56 +461,32 @@ fn encode_prepared(
     epochs: FrameEpochs,
     full: bool,
     prepared: Vec<PreparedPage<'_>>,
+    data: FrameData,
 ) -> Result<(Vec<u8>, Vec<FramePageSnapshot>), String> {
-    let next_ids: HashSet<u64> = prepared.iter().map(|page| page.snapshot.page_id).collect();
-    let previous_by_id: HashMap<u64, &FramePageSnapshot> =
-        previous.iter().map(|old| (old.page_id, old)).collect();
-
     let mut ops = Vec::new();
-    if full {
-        ops.extend(prepared.iter().map(PageOp::Upsert));
-    } else {
+    if !full {
+        let next_ids: HashSet<u64> = prepared.iter().map(|page| page.snapshot.page_id).collect();
         for old in previous {
             if !next_ids.contains(&old.page_id) {
                 ops.push(PageOp::Remove(old));
             }
         }
-        for page in &prepared {
-            let old = previous_by_id.get(&page.snapshot.page_id).copied();
-            if page.is_new || old.is_none() {
-                ops.push(PageOp::Upsert(page));
-            } else if let Some(old) = old
-                && old.fingerprint != page.snapshot.fingerprint
-            {
-                if old.visual_fingerprint == page.snapshot.visual_fingerprint
-                    && old.primitive_ids == page.snapshot.primitive_ids
-                {
-                    let patches = position_patches(old, &page.snapshot);
-                    let anchors =
-                        changed_note_anchors(&old.note_anchors, &page.snapshot.note_anchors);
-                    let runs = if patches.is_empty() {
-                        Some(Vec::new())
-                    } else {
-                        position_shift_runs(&old.positions, &page.snapshot.positions)
-                    };
-                    match (anchors, runs) {
-                        (Some(anchors), Some(runs)) if !anchors.is_empty() || !runs.is_empty() => {
-                            ops.push(PageOp::ShiftPositions(page, runs, anchors));
-                        }
-                        (Some(anchors), None) if anchors.is_empty() => {
-                            ops.push(PageOp::PatchPositions(page, patches));
-                        }
-                        _ => ops.push(PageOp::Upsert(page)),
-                    }
-                } else {
-                    ops.push(PageOp::Upsert(page));
-                }
-            } else if page.moved {
-                ops.push(PageOp::Move(page));
-            }
-        }
     }
+    ops.extend(prepared.iter().filter_map(PreparedPage::op));
+    let bytes = encode_ops(list, epochs, full, &ops, data)?;
+    drop(ops);
+    let next_snapshots = prepared.into_iter().map(|page| page.snapshot).collect();
+    Ok((bytes, next_snapshots))
+}
 
+/// Writes operation records and assembles the frame's data and header.
+fn encode_ops(
+    list: &DisplayList,
+    epochs: FrameEpochs,
+    full: bool,
+    ops: &[PageOp<'_, '_>],
+    data: FrameData,
+) -> Result<Vec<u8>, String> {
     let op_count = checked_u32(ops.len(), "page operation count")?;
     let page_count = checked_u32(list.pages.len(), "page count")?;
     let ops_bytes = ops
@@ -260,8 +503,10 @@ fn encode_prepared(
     // 8-byte aligned, so relative alignment is absolute alignment.
     let mut records = vec![0_u8; ops_bytes];
     let mut data_offsets = Vec::new();
-    let mut strings = StringTable::default();
-    let mut out = Vec::new();
+    let FrameData {
+        mut strings,
+        mut out,
+    } = data;
     for (op_index, op) in ops.iter().enumerate() {
         let record = op_index * PAGE_OP_LEN;
         match op {
@@ -276,17 +521,25 @@ fn encode_prepared(
                     checked_u32(page.snapshot.primitive_ids.len(), "primitive id count")?,
                 );
 
-                align(&mut out, 8);
-                let primitive_id_offset = checked_u32(out.len(), "primitive id offset")?;
+                let emitted = match &page.emitted {
+                    Some(emitted) => emitted,
+                    None => {
+                        &emit_page(
+                            page.page,
+                            &page.snapshot.primitive_ids,
+                            &mut strings,
+                            &mut out,
+                        )?
+                        .0
+                    }
+                };
                 data_offsets.push(record + 28);
-                patch_u32(&mut records, record + 28, primitive_id_offset);
-                for id in page.snapshot.primitive_ids.iter() {
-                    write_u64(&mut out, *id);
-                }
-
-                let payload_offset = out.len();
-                encode_page(page.page, &mut strings, &mut out)?;
-                let payload_len = out.len() - payload_offset;
+                patch_u32(
+                    &mut records,
+                    record + 28,
+                    checked_u32(emitted.primitive_ids_offset, "primitive id offset")?,
+                );
+                let (payload_offset, payload_len) = (emitted.payload_offset, emitted.payload_len);
                 data_offsets.push(record + 32);
                 patch_u32(
                     &mut records,
@@ -327,7 +580,7 @@ fn encode_prepared(
                     checked_u32(patches.len(), "position patch count")?,
                 );
                 write_u32(&mut out, 0);
-                for patch in patches {
+                for patch in patches.iter() {
                     write_u64(&mut out, patch.primitive_id);
                     out.push(patch.changed_mask);
                     out.push(patch.present_mask);
@@ -355,7 +608,7 @@ fn encode_prepared(
                     checked_u32(payload_length, "position patch payload length")?,
                 );
             }
-            PageOp::ShiftPositions(page, runs, anchors) => {
+            PageOp::ShiftPositions(page, runs, anchors, span_delta) => {
                 records[record] = PAGE_OP_SHIFT_POSITIONS;
                 patch_u32(&mut records, record + 4, page.snapshot.page_index);
                 patch_u64(&mut records, record + 8, page.snapshot.page_id);
@@ -376,8 +629,18 @@ fn encode_prepared(
                     &mut out,
                     checked_u32(runs.len(), "position shift run count")?,
                 );
-                write_u32(&mut out, 0);
-                for run in runs {
+                write_u32(
+                    &mut out,
+                    if span_delta.is_some() {
+                        SHIFT_SPAN_PRESENT
+                    } else {
+                        0
+                    },
+                );
+                if let Some(delta) = span_delta {
+                    write_i64(&mut out, *delta);
+                }
+                for run in runs.iter() {
                     write_u32(&mut out, run.start);
                     write_u32(&mut out, run.count);
                     out.push(run.changed_mask);
@@ -387,7 +650,7 @@ fn encode_prepared(
                 if !anchors.is_empty() {
                     write_u32(&mut out, checked_u32(anchors.len(), "note anchor count")?);
                     write_u32(&mut out, 0);
-                    for anchor in anchors {
+                    for anchor in anchors.iter() {
                         write_u32(&mut out, anchor.area);
                         write_u32(&mut out, anchor.note);
                         write_i64(&mut out, anchor.start.unwrap_or(i64::MIN));
@@ -406,6 +669,26 @@ fn encode_prepared(
                     record + 36,
                     checked_u32(payload_length, "position shift payload length")?,
                 );
+            }
+            PageOp::ShiftRange(run, page_id) => {
+                records[record] = PAGE_OP_SHIFT_RANGE;
+                patch_u32(
+                    &mut records,
+                    record + 4,
+                    checked_u32(run.start, "page index")?,
+                );
+                patch_u64(&mut records, record + 8, *page_id);
+                patch_u64(
+                    &mut records,
+                    record + 16,
+                    shift_range_salt(run.delta, epochs.frame_epoch),
+                );
+                patch_u32(
+                    &mut records,
+                    record + 24,
+                    checked_u32(run.end - run.start, "page shift count")?,
+                );
+                records[record + 32..record + 40].copy_from_slice(&run.delta.to_le_bytes());
             }
         }
     }
@@ -466,9 +749,30 @@ fn encode_prepared(
     );
     patch_u32(&mut out, 72, list.contract_version.unwrap_or_default());
 
-    drop(ops);
-    let next_snapshots = prepared.into_iter().map(|page| page.snapshot).collect();
-    Ok((out, next_snapshots))
+    Ok(out)
+}
+
+struct PrepareOptions {
+    match_anchors: bool,
+    full: bool,
+}
+
+/// `snapshots` with every deferred position shift folded in, borrowed when
+/// none is deferred.
+fn materialized_snapshots(snapshots: &[FramePageSnapshot]) -> Cow<'_, [FramePageSnapshot]> {
+    if snapshots.iter().all(|snapshot| snapshot.position_base == 0) {
+        return Cow::Borrowed(snapshots);
+    }
+    Cow::Owned(
+        snapshots
+            .iter()
+            .cloned()
+            .map(|mut snapshot| {
+                snapshot.materialize_positions();
+                snapshot
+            })
+            .collect(),
+    )
 }
 
 fn prepare_pages<'a>(
@@ -476,8 +780,15 @@ fn prepare_pages<'a>(
     previous: &[FramePageSnapshot],
     next_page_id: &mut u64,
     rebuilt_pages: Option<&dyn Fn(usize) -> bool>,
-    match_anchors: bool,
+    options: PrepareOptions,
+    data: &mut FrameData,
 ) -> Result<Vec<PreparedPage<'a>>, String> {
+    let PrepareOptions {
+        match_anchors,
+        full,
+    } = options;
+    let materialized = materialized_snapshots(previous);
+    let previous: &[FramePageSnapshot] = &materialized;
     let anchors = page_anchors(list);
     // Anchors are unique within one snapshot list (page_anchors suffixes an
     // occurrence counter), so keyed lookups replace the old per-page scans.
@@ -531,6 +842,7 @@ fn prepare_pages<'a>(
         }
     };
     let mut prepared = Vec::with_capacity(list.pages.len());
+    let mut placeholder_data = FrameData::default();
     for ((index, page), anchor) in list.pages.iter().enumerate().zip(anchors) {
         let page_index = checked_u32(index, "page index")?;
         let matched = matched_previous[index].map(|previous_index| &previous[previous_index]);
@@ -542,48 +854,240 @@ fn prepare_pages<'a>(
                 .ok_or_else(|| "FrameDelta page id space exhausted".to_owned())?;
             (*next_page_id, true, false)
         };
-        let positions = primitive_positions(page);
-        let note_anchors = note_anchors(page)?;
-        // An unbuilt page has no primitive positions to shift, so its
-        // position span only reaches the host through a fresh fingerprint.
-        let full_prepare = is_new
-            || page.unbuilt
-            || rebuilt_pages.is_none_or(|rebuilt_pages| rebuilt_pages(index))
-            || matched.is_none_or(|old| i64::from(old.page_index) != retained_index(index));
-        let (fingerprint, visual_fingerprint, primitive_ids) = if full_prepare {
-            let hashes = hash_page(page)?;
-            let primitive_ids: Rc<[u64]> = primitive_ids(page, page_id).into();
-            (hashes.fingerprint, hashes.visual_fingerprint, primitive_ids)
-        } else {
-            let old = matched.expect("clean incremental pages retain a previous snapshot");
-            let fingerprint = if positions == old.positions && note_anchors == old.note_anchors {
-                old.fingerprint
-            } else {
-                hash_positions(old.visual_fingerprint, &positions, &note_anchors)
-            };
-            (
-                fingerprint,
-                old.visual_fingerprint,
-                Rc::clone(&old.primitive_ids),
-            )
-        };
-        prepared.push(PreparedPage {
-            snapshot: FramePageSnapshot {
-                page_id,
-                anchor,
-                fingerprint,
-                visual_fingerprint,
-                page_index,
-                primitive_ids,
-                positions,
-                note_anchors,
-            },
+        prepared.push(prepare_page(
             page,
-            is_new,
-            moved,
-        });
+            matched,
+            PagePreparation {
+                page_id,
+                page_index,
+                anchor,
+                is_new,
+                moved,
+                full,
+                rebuild: rebuilt_pages.is_none_or(|rebuilt| rebuilt(index))
+                    || matched.is_none_or(|old| i64::from(old.page_index) != retained_index(index)),
+            },
+            data,
+            &mut placeholder_data,
+        )?);
     }
     Ok(prepared)
+}
+
+/// Identity and preparation mode for one display page.
+struct PagePreparation {
+    page_id: u64,
+    page_index: u32,
+    anchor: String,
+    is_new: bool,
+    moved: bool,
+    full: bool,
+    rebuild: bool,
+}
+
+/// Prepares one page and keeps emitted bytes only when it upserts.
+fn prepare_page<'a>(
+    page: &'a DisplayPage,
+    old: Option<&FramePageSnapshot>,
+    options: PagePreparation,
+    data: &mut FrameData,
+    placeholder_data: &mut FrameData,
+) -> Result<PreparedPage<'a>, String> {
+    let PagePreparation {
+        page_id,
+        page_index,
+        anchor,
+        is_new,
+        moved,
+        full,
+        rebuild,
+    } = options;
+    let positions = primitive_positions(page);
+    let note_anchors = note_anchors(page)?;
+    let placeholder = page.unbuilt.then(|| {
+        let mut normalized = page.clone();
+        normalized.page_index = 0;
+        normalized.position_span = None;
+        Rc::new(normalized)
+    });
+    let same_placeholder = placeholder
+        .as_ref()
+        .is_some_and(|next| old.and_then(|old| old.placeholder.as_ref()) == Some(next));
+    let placeholder_hash = if same_placeholder {
+        old.expect("matched placeholder").placeholder_hash
+    } else if let Some(normalized) = &placeholder {
+        placeholder_data.strings.rollback(0);
+        placeholder_data.out.clear();
+        encode_page(
+            normalized,
+            &mut placeholder_data.strings,
+            &mut placeholder_data.out,
+        )?
+        .fingerprint
+    } else {
+        0
+    };
+    let full_prepare = !same_placeholder && (is_new || page.unbuilt || rebuild);
+    let mut emitted = None;
+    let (fingerprint, visual_fingerprint, primitive_ids) = if full_prepare {
+        let primitive_ids: Rc<[u64]> = primitive_ids(page, page_id).into();
+        let mark = (data.out.len(), data.strings.mark());
+        let (page_emitted, hashes) =
+            emit_page(page, &primitive_ids, &mut data.strings, &mut data.out)?;
+        emitted = Some((page_emitted, mark));
+        (hashes.fingerprint, hashes.visual_fingerprint, primitive_ids)
+    } else {
+        let old = old.expect("clean incremental pages retain a previous snapshot");
+        let fingerprint = if positions == old.positions && note_anchors == old.note_anchors {
+            old.fingerprint
+        } else {
+            hash_positions(old.visual_fingerprint, &positions, &note_anchors)
+        };
+        (
+            fingerprint,
+            old.visual_fingerprint,
+            Rc::clone(&old.primitive_ids),
+        )
+    };
+    let (fingerprint, visual_fingerprint) = if placeholder.is_some() {
+        let mut fingerprint = mix(placeholder_hash, u64::from(page.position_span.is_some()));
+        if let Some([start, end]) = page.position_span {
+            fingerprint = mix(mix(fingerprint, start as u64), end as u64);
+        }
+        (fingerprint, placeholder_hash)
+    } else {
+        (fingerprint, visual_fingerprint)
+    };
+    let mut snapshot = FramePageSnapshot {
+        page_id,
+        anchor,
+        fingerprint,
+        visual_fingerprint,
+        page_index,
+        primitive_ids,
+        positions,
+        note_anchors,
+        placeholder: if same_placeholder {
+            old.and_then(|old| old.placeholder.clone())
+        } else {
+            placeholder
+        },
+        placeholder_hash,
+        position_span: page.position_span,
+        position_base: 0,
+        body_primitives: checked_u32(page.primitives.len(), "body primitive count")?,
+    };
+    let mut change = page_change(full, is_new, moved, old, &snapshot);
+    if matches!(change, PageChange::Upsert)
+        && !full
+        && !is_new
+        && !moved
+        && let Some(old) = old
+        && old.visual_fingerprint == snapshot.visual_fingerprint
+        && old.primitive_ids == snapshot.primitive_ids
+        && old.positions == snapshot.positions
+        && old.note_anchors == snapshot.note_anchors
+        && old.placeholder == snapshot.placeholder
+        && old.position_span == snapshot.position_span
+    {
+        change = PageChange::Retain;
+        snapshot.fingerprint = old.fingerprint;
+    }
+    let emitted = match emitted {
+        Some((emitted, _)) if matches!(change, PageChange::Upsert) => Some(emitted),
+        Some((_, (end, mark))) => {
+            data.out.truncate(end);
+            data.strings.rollback(mark);
+            None
+        }
+        None => None,
+    };
+    Ok(PreparedPage {
+        snapshot,
+        page,
+        change,
+        emitted,
+    })
+}
+
+/// Emits `page`'s aligned primitive ids and then its payload.
+fn emit_page(
+    page: &DisplayPage,
+    primitive_ids: &[u64],
+    strings: &mut StringTable,
+    out: &mut Vec<u8>,
+) -> Result<(EmittedPage, typed_page::PageHashes), String> {
+    align(out, 8);
+    let primitive_ids_offset = out.len();
+    for id in primitive_ids {
+        write_u64(out, *id);
+    }
+    let payload_offset = out.len();
+    let hashes = encode_page(page, strings, out)?;
+    Ok((
+        EmittedPage {
+            primitive_ids_offset,
+            payload_offset,
+            payload_len: out.len() - payload_offset,
+        },
+        hashes,
+    ))
+}
+
+fn page_change(
+    full: bool,
+    is_new: bool,
+    moved: bool,
+    old: Option<&FramePageSnapshot>,
+    next: &FramePageSnapshot,
+) -> PageChange {
+    let Some(old) = old.filter(|_| !full && !is_new) else {
+        return PageChange::Upsert;
+    };
+    if old.placeholder.is_some() || next.placeholder.is_some() {
+        if old.placeholder != next.placeholder {
+            return PageChange::Upsert;
+        }
+        if old.position_span != next.position_span {
+            if let (Some([start, end]), Some([next_start, next_end])) =
+                (old.position_span, next.position_span)
+                && let Some(delta) = next_start.checked_sub(start)
+                && next_end.checked_sub(end) == Some(delta)
+                && delta != 0
+                && [start, end, next_start, next_end, delta]
+                    .into_iter()
+                    .all(|value| (-MAX_SAFE_INTEGER..=MAX_SAFE_INTEGER).contains(&value))
+            {
+                return PageChange::ShiftPositions(Vec::new(), Vec::new(), Some(delta));
+            }
+            return PageChange::Upsert;
+        }
+    }
+    if old.fingerprint == next.fingerprint {
+        return if moved {
+            PageChange::Move
+        } else {
+            PageChange::Retain
+        };
+    }
+    if old.visual_fingerprint != next.visual_fingerprint || old.primitive_ids != next.primitive_ids
+    {
+        return PageChange::Upsert;
+    }
+    let patches = position_patches(old, next);
+    let anchors = changed_note_anchors(&old.note_anchors, &next.note_anchors);
+    let runs = if patches.is_empty() {
+        Some(Vec::new())
+    } else {
+        position_shift_runs(&old.positions, &next.positions)
+    };
+    match (anchors, runs) {
+        (Some(anchors), Some(runs)) if !anchors.is_empty() || !runs.is_empty() => {
+            PageChange::ShiftPositions(runs, anchors, None)
+        }
+        (Some(anchors), None) if anchors.is_empty() => PageChange::PatchPositions(patches),
+        _ => PageChange::Upsert,
+    }
 }
 
 fn hash_positions(
@@ -1120,27 +1624,38 @@ fn encode_glyph_array(glyphs: &[Value], out: &mut Vec<u8>) -> Result<(), String>
 /// hashing.
 #[derive(Default)]
 pub(crate) struct StringTable {
-    ids: HashMap<String, u32>,
+    ids: HashMap<String, (u32, u64)>,
+    strings: Vec<String>,
 }
 
 impl StringTable {
-    pub(crate) fn id(&mut self, value: &str) -> Result<u32, String> {
-        if let Some(id) = self.ids.get(value) {
-            return Ok(*id);
+    /// `value`'s id and content hash.
+    pub(crate) fn intern(&mut self, value: &str) -> Result<(u32, u64), String> {
+        if let Some(entry) = self.ids.get(value) {
+            return Ok(*entry);
         }
         let id = u32::try_from(self.ids.len())
             .map_err(|_| "FrameDelta string table exceeds u32".to_owned())?;
-        self.ids.insert(value.to_owned(), id);
-        Ok(id)
+        let entry = (id, string_hash(value));
+        self.ids.insert(value.to_owned(), entry);
+        self.strings.push(value.to_owned());
+        Ok(entry)
+    }
+
+    fn mark(&self) -> usize {
+        self.strings.len()
+    }
+
+    /// Forgets the strings interned since `mark`.
+    fn rollback(&mut self, mark: usize) {
+        for value in self.strings.drain(mark..) {
+            self.ids.remove(&value);
+        }
     }
 
     /// The strings indexed by their ids.
     pub(crate) fn into_strings(self) -> Vec<String> {
-        let mut strings = vec![String::new(); self.ids.len()];
-        for (value, id) in self.ids {
-            strings[id as usize] = value;
-        }
-        strings
+        self.strings
     }
 }
 
@@ -1252,6 +1767,39 @@ fn hash_visual_page_value(value: &Value) -> u64 {
     hash
 }
 
+/// One step of the page fingerprints: the SplitMix64 finalizer over
+/// `state ^ word`. For a fixed `word` it is a bijection of `state`, so changing
+/// any single word changes the result, and its avalanche keeps a change in one
+/// word from being cancelled by a change in the next.
+fn mix(state: u64, word: u64) -> u64 {
+    let mut state = state ^ word;
+    state = (state ^ (state >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    state = (state ^ (state >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    state ^ (state >> 31)
+}
+
+/// The nonzero fingerprint salt of a shift range, distinct per frame so that
+/// shifts which cancel out in position never cancel out in fingerprint.
+fn shift_range_salt(delta: i64, frame_epoch: u64) -> u64 {
+    let salt = mix(
+        mix(mix(FNV_OFFSET, 0x5348_4946_545f_5247), delta as u64),
+        frame_epoch,
+    );
+    if salt == 0 { 1 } else { salt }
+}
+
+fn string_hash(value: &str) -> u64 {
+    let bytes = value.as_bytes();
+    let (chunks, remainder) = bytes.as_chunks::<8>();
+    let mut hash = mix(FNV_OFFSET, bytes.len() as u64);
+    for chunk in chunks {
+        hash = mix(hash, u64::from_le_bytes(*chunk));
+    }
+    let mut tail = [0; 8];
+    tail[..remainder.len()].copy_from_slice(remainder);
+    mix(hash, u64::from_le_bytes(tail))
+}
+
 fn hash_bytes(bytes: &[u8]) -> u64 {
     let mut hash = FNV_OFFSET;
     hash_write(&mut hash, bytes);
@@ -1304,6 +1852,284 @@ fn patch_u32(out: &mut [u8], offset: usize, value: u32) {
 
 fn patch_u64(out: &mut [u8], offset: usize, value: u64) {
     out[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+}
+
+/// A decoded page and the identity tokens retained by the test host.
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TestFramePage {
+    pub(crate) page: DisplayPage,
+    pub(crate) fingerprint: u64,
+    pub(crate) primitive_ids: Vec<u64>,
+}
+
+/// Visits mutable primitives in their encoded identity order.
+#[cfg(test)]
+fn test_page_primitives_mut(page: &mut DisplayPage) -> impl Iterator<Item = &mut Primitive> {
+    let body = page.primitives.iter_mut();
+    let notes = page.note_areas.iter_mut().flat_map(|area| {
+        area.separator_primitives
+            .iter_mut()
+            .chain(&mut area.primitives)
+    });
+    let header = page
+        .header
+        .iter_mut()
+        .flat_map(|region| &mut region.primitives);
+    let footer = page
+        .footer
+        .iter_mut()
+        .flat_map(|region| &mut region.primitives);
+    body.chain(notes).chain(header).chain(footer)
+}
+
+/// Returns the mutable position attributes of a test primitive.
+#[cfg(test)]
+fn test_primitive_attrs_mut(primitive: &mut Primitive) -> &mut DocAttrs {
+    match primitive {
+        Primitive::Text(value) => &mut value.attrs,
+        Primitive::GlyphRun(value) => &mut value.attrs,
+        Primitive::Rect(value) => &mut value.attrs,
+        Primitive::Line(value) => &mut value.attrs,
+        Primitive::Image(value) => &mut value.attrs,
+        Primitive::Shape(value) => &mut value.attrs,
+        Primitive::Decoration(value) => &mut value.attrs,
+    }
+}
+
+/// Applies a masked position delta as the test host would.
+#[cfg(test)]
+fn shift_test_primitive(primitive: &mut Primitive, mask: u8, delta: i64) {
+    let attrs = test_primitive_attrs_mut(primitive);
+    for (index, value) in [
+        &mut attrs.doc_start,
+        &mut attrs.doc_end,
+        &mut attrs.fragment_doc_start,
+        &mut attrs.fragment_doc_end,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if mask & POSITION_FIELDS[index] != 0 {
+            if let Some(value) = value {
+                *value = value.checked_add(delta).unwrap();
+            } else {
+                assert_ne!(mask & POSITION_PRESENT_ONLY, 0);
+            }
+        }
+    }
+    if mask & POSITION_INLINE_WIDGET != 0 {
+        if let Some(widget) = &mut attrs.inline_sdt_widget {
+            widget.pos = widget.pos.checked_add(delta).unwrap();
+        } else {
+            assert_ne!(mask & POSITION_PRESENT_ONLY, 0);
+        }
+    }
+}
+
+/// Applies a frame to the test host's retained pages and fingerprints.
+#[cfg(test)]
+pub(crate) fn apply_placeholder_test_frame(
+    bytes: &[u8],
+    retained: &mut HashMap<u64, TestFramePage>,
+) -> DisplayList {
+    let u32_at = |offset| u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+    let u64_at = |offset| u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
+    let i64_at = |offset| i64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
+    if u32_at(12) & FRAME_FLAG_FULL != 0 {
+        retained.clear();
+    }
+    let mut at = u32_at(60) as usize;
+    let string_count = u32_at(at);
+    at += 4;
+    let mut strings = Vec::new();
+    for _ in 0..string_count {
+        let length = u32_at(at) as usize;
+        at += 4;
+        strings.push(String::from_utf8(bytes[at..at + length].to_vec()).unwrap());
+        at += length;
+    }
+    for index in 0..u32_at(52) as usize {
+        let record = FRAME_HEADER_LEN + index * PAGE_OP_LEN;
+        let page_id = u64_at(record + 8);
+        let page_index = u32_at(record + 4);
+        match bytes[record] {
+            PAGE_OP_UPSERT => {
+                let mut cursor = u32_at(record + 32) as usize;
+                let value = tests::decode_typed(bytes, &mut cursor, &strings);
+                assert_eq!(
+                    cursor,
+                    u32_at(record + 32) as usize + u32_at(record + 36) as usize
+                );
+                let ids = u32_at(record + 28) as usize;
+                let primitive_ids = (0..u32_at(record + 24) as usize)
+                    .map(|index| u64_at(ids + index * 8))
+                    .collect();
+                retained.insert(
+                    page_id,
+                    TestFramePage {
+                        page: serde_json::from_value(value).unwrap(),
+                        fingerprint: u64_at(record + 16),
+                        primitive_ids,
+                    },
+                );
+            }
+            PAGE_OP_REMOVE => {
+                retained.remove(&page_id).unwrap();
+            }
+            PAGE_OP_MOVE => {
+                let retained = retained.get_mut(&page_id).unwrap();
+                retained.page.page_index = u64::from(page_index);
+                retained.fingerprint = u64_at(record + 16);
+            }
+            PAGE_OP_PATCH_POSITIONS => {
+                let retained = retained.get_mut(&page_id).unwrap();
+                let mut cursor = u32_at(record + 32) as usize;
+                let count = u32_at(cursor);
+                assert_eq!(count, u32_at(record + 24));
+                cursor += 8;
+                for _ in 0..count {
+                    let primitive_id = u64_at(cursor);
+                    let changed = bytes[cursor + 8];
+                    let present = bytes[cursor + 9];
+                    cursor += 12;
+                    let mut values = [None; 5];
+                    for (index, field) in POSITION_FIELDS.iter().enumerate() {
+                        if present & field != 0 {
+                            values[index] = Some(i64_at(cursor));
+                            cursor += 8;
+                        }
+                    }
+                    let index = retained
+                        .primitive_ids
+                        .iter()
+                        .position(|&id| id == primitive_id)
+                        .unwrap();
+                    let primitive = test_page_primitives_mut(&mut retained.page)
+                        .nth(index)
+                        .unwrap();
+                    let attrs = test_primitive_attrs_mut(primitive);
+                    for (index, value) in [
+                        &mut attrs.doc_start,
+                        &mut attrs.doc_end,
+                        &mut attrs.fragment_doc_start,
+                        &mut attrs.fragment_doc_end,
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        if changed & POSITION_FIELDS[index] != 0 {
+                            *value = values[index];
+                        }
+                    }
+                    if changed & POSITION_INLINE_WIDGET != 0 {
+                        if let Some(pos) = values[4] {
+                            attrs.inline_sdt_widget.as_mut().unwrap().pos = pos;
+                        } else {
+                            attrs.inline_sdt_widget = None;
+                        }
+                    }
+                }
+                assert_eq!(
+                    cursor,
+                    u32_at(record + 32) as usize + u32_at(record + 36) as usize
+                );
+                retained.page.page_index = u64::from(page_index);
+                retained.fingerprint = u64_at(record + 16);
+            }
+            PAGE_OP_SHIFT_POSITIONS => {
+                let retained = retained.get_mut(&page_id).unwrap();
+                let mut cursor = u32_at(record + 32) as usize;
+                let count = u32_at(cursor);
+                let flags = u32_at(cursor + 4);
+                assert_eq!(count, u32_at(record + 24));
+                cursor += 8;
+                if flags & SHIFT_SPAN_PRESENT != 0 {
+                    let delta = i64_at(cursor);
+                    cursor += 8;
+                    let span = retained.page.position_span.as_mut().unwrap();
+                    for value in span {
+                        *value = value.checked_add(delta).unwrap();
+                    }
+                }
+                for _ in 0..count {
+                    let start = u32_at(cursor) as usize;
+                    let count = u32_at(cursor + 4) as usize;
+                    let mask = bytes[cursor + 8];
+                    let delta = i64_at(cursor + 16);
+                    cursor += 24;
+                    for primitive in test_page_primitives_mut(&mut retained.page)
+                        .skip(start)
+                        .take(count)
+                    {
+                        shift_test_primitive(primitive, mask, delta);
+                    }
+                }
+                let anchors = u32_at(record + 40);
+                if anchors != 0 {
+                    assert_eq!(u32_at(cursor), anchors);
+                    cursor += 8;
+                    for _ in 0..anchors {
+                        let area = u32_at(cursor) as usize;
+                        let note = u32_at(cursor + 4) as usize;
+                        let start = i64_at(cursor + 8);
+                        let end = i64_at(cursor + 16);
+                        cursor += 24;
+                        let note = &mut retained.page.note_areas[area].notes[note];
+                        note.anchor_doc_start = (start != i64::MIN).then_some(start);
+                        note.anchor_doc_end = (end != i64::MIN).then_some(end);
+                    }
+                }
+                assert_eq!(
+                    cursor,
+                    u32_at(record + 32) as usize + u32_at(record + 36) as usize
+                );
+                retained.page.page_index = u64::from(page_index);
+                retained.fingerprint = u64_at(record + 16);
+            }
+            PAGE_OP_SHIFT_RANGE => {
+                let count = u32_at(record + 24);
+                let salt = u64_at(record + 16);
+                let delta = i64_at(record + 32);
+                assert!(count >= 1 && page_index + count <= u32_at(48));
+                assert_ne!(page_id, 0);
+                assert_ne!(salt, 0);
+                assert!(delta != 0 && (-MAX_SAFE_INTEGER..=MAX_SAFE_INTEGER).contains(&delta));
+                assert_eq!(bytes[record + 1..record + 4], [0; 3]);
+                assert_eq!(u32_at(record + 28), 0);
+                assert_eq!(u64_at(record + 40), 0);
+                assert_eq!(retained[&page_id].page.page_index, u64::from(page_index));
+                let mut shifted = 0;
+                for retained in retained.values_mut().filter(|retained| {
+                    (u64::from(page_index)..u64::from(page_index + count))
+                        .contains(&retained.page.page_index)
+                }) {
+                    retained.fingerprint ^= salt;
+                    if let Some(span) = &mut retained.page.position_span {
+                        for value in span {
+                            *value = value.checked_add(delta).unwrap();
+                        }
+                    }
+                    for primitive in &mut retained.page.primitives {
+                        shift_test_primitive(primitive, POSITION_PRESENT_ONLY | 0x1f, delta);
+                    }
+                    shifted += 1;
+                }
+                assert_eq!(shifted, count);
+            }
+            opcode => panic!("unexpected test frame opcode {opcode}"),
+        }
+    }
+    let mut pages: Vec<_> = retained
+        .values()
+        .map(|retained| retained.page.clone())
+        .collect();
+    pages.sort_by_key(|page| page.page_index);
+    assert_eq!(pages.len(), u32_at(48) as usize);
+    DisplayList {
+        contract_version: (u32_at(72) != 0).then(|| u32_at(72)),
+        pages,
+    }
 }
 
 #[cfg(test)]
@@ -1369,7 +2195,7 @@ mod tests {
     /// Test-only decoder over the typed value stream, mirroring the browser
     /// decoder's structure so typed emission can be checked against the
     /// `Value` reference implementation.
-    fn decode_typed(bytes: &[u8], cursor: &mut usize, strings: &[String]) -> Value {
+    pub(super) fn decode_typed(bytes: &[u8], cursor: &mut usize, strings: &[String]) -> Value {
         let tag = bytes[*cursor];
         *cursor += 1;
         match tag {
@@ -1546,9 +2372,576 @@ mod tests {
         .unwrap()
     }
 
+    /// Shifts only the serialized body position fields and page spans.
+    fn shifted_body_list(
+        list: &DisplayList,
+        range: std::ops::Range<usize>,
+        delta: i64,
+    ) -> DisplayList {
+        let mut next = serde_json::to_value(list).unwrap();
+        for page in &mut next["pages"].as_array_mut().unwrap()[range] {
+            if let Some(span) = page.get_mut("positionSpan") {
+                for value in span.as_array_mut().unwrap() {
+                    *value = Value::from(value.as_i64().unwrap() + delta);
+                }
+            }
+            for primitive in page["primitives"].as_array_mut().unwrap() {
+                for field in ["docStart", "docEnd", "fragmentDocStart", "fragmentDocEnd"] {
+                    if let Some(value) = primitive.get_mut(field) {
+                        *value = Value::from(value.as_i64().unwrap() + delta);
+                    }
+                }
+                if let Some(widget) = primitive.get_mut("inlineSdtWidget") {
+                    widget["pos"] = Value::from(widget["pos"].as_i64().unwrap() + delta);
+                }
+            }
+        }
+        serde_json::from_value(next).unwrap()
+    }
+
+    /// Includes positioned body, note, header and footer primitives.
+    fn range_shift_built_list() -> DisplayList {
+        let mut value = serde_json::to_value(list_pages(&[
+            ("P1", "first"),
+            ("P2", "second"),
+            ("P3", "third"),
+        ]))
+        .unwrap();
+        let primitive = value["pages"][0]["primitives"][0].clone();
+        let page = &mut value["pages"][0];
+        page["header"] = serde_json::json!({
+            "rId": "header", "kind": "header", "y": 0, "height": 20,
+            "primitives": [primitive.clone()]
+        });
+        page["footer"] = serde_json::json!({
+            "rId": "footer", "kind": "footer", "y": 1000, "height": 20,
+            "primitives": [primitive.clone()]
+        });
+        page["noteAreas"] = serde_json::json!([{
+            "separatorPrimitives": [primitive.clone()], "primitives": [primitive],
+            "notes": [{"id": 1, "anchorDocStart": 2, "anchorDocEnd": 3}]
+        }]);
+        page["primitives"][0]["fragmentDocStart"] = serde_json::json!(0);
+        page["primitives"][0]["fragmentDocEnd"] = serde_json::json!(6);
+        page["primitives"][0]["inlineSdtWidget"] = serde_json::json!({
+            "kind": "checkbox", "groupId": "widget", "pos": 3
+        });
+        page["primitives"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "kind": "rect", "x": 0, "y": 0, "w": 1, "h": 1,
+                "fill": "#000", "fragmentDocEnd": 6
+            }));
+        serde_json::from_value(value).unwrap()
+    }
+
+    /// The general encoders compare against range-shifted snapshots as the host holds them.
+    #[test]
+    fn general_encoders_fold_deferred_shifts_before_comparing() {
+        let before = range_shift_built_list();
+        let count = before.pages.len();
+        let mut next_id = 0;
+        let (full, mut snapshots) =
+            encode_frame_delta(&before, &[], placeholder_epochs(1), true, &mut next_id).unwrap();
+        let mut retained = HashMap::new();
+        apply_placeholder_test_frame(&full, &mut retained);
+        let shifted = shifted_body_list(&before, 0..count, 1);
+        let bytes = encode_frame_delta_changes(
+            &shifted,
+            &mut snapshots,
+            placeholder_epochs(2),
+            DisplayChanges {
+                rebuilt: &[],
+                repositioned: &[],
+                shifts: &[PageShiftRun {
+                    start: 0,
+                    end: count,
+                    delta: 1,
+                }],
+            },
+        )
+        .unwrap();
+        assert_eq!(apply_placeholder_test_frame(&bytes, &mut retained), shifted);
+        let rebuilt: HashSet<usize> = (0..count).collect();
+        let (bytes, _) = encode_frame_delta_incremental(
+            &before,
+            &snapshots,
+            placeholder_epochs(3),
+            &mut next_id,
+            &rebuilt,
+        )
+        .unwrap();
+        assert_eq!(apply_placeholder_test_frame(&bytes, &mut retained), before);
+    }
+
+    /// Built pages, placeholders and inert extensions decode identically through both encoders.
+    #[test]
+    fn uniform_page_ranges_encode_as_one_operation() {
+        let built = range_shift_built_list();
+        let mut placeholders = built.clone();
+        for (index, page) in placeholders.pages.iter_mut().enumerate() {
+            *page = placeholder_list(Some([10 + index as i64 * 20, 20 + index as i64 * 20]))
+                .pages
+                .remove(0);
+            page.page_index = index as u64;
+        }
+        let mut inert = built.clone();
+        let last = inert.pages.last_mut().unwrap();
+        last.primitives.clear();
+        for before in [built, placeholders, inert] {
+            let count = before.pages.len();
+            let mut next_id = 0;
+            let (full, mut snapshots) =
+                encode_frame_delta(&before, &[], placeholder_epochs(1), true, &mut next_id)
+                    .unwrap();
+            let mut retained = HashMap::new();
+            assert_eq!(apply_placeholder_test_frame(&full, &mut retained), before);
+            let mut current = before;
+            for (epoch, delta) in [(2, 6), (3, -4), (4, 6)] {
+                let previous = snapshots.clone();
+                let mut legacy_snapshots = previous.clone();
+                for page in &mut legacy_snapshots {
+                    page.materialize_positions();
+                }
+                let mut legacy_retained = retained.clone();
+                let after = shifted_body_list(&current, 0..count, delta);
+                let bytes = encode_frame_delta_changes(
+                    &after,
+                    &mut snapshots,
+                    placeholder_epochs(epoch),
+                    DisplayChanges {
+                        rebuilt: &[],
+                        repositioned: &[],
+                        shifts: &[PageShiftRun {
+                            start: 0,
+                            end: count,
+                            delta,
+                        }],
+                    },
+                )
+                .unwrap();
+                let record = FRAME_HEADER_LEN;
+                assert_eq!(u32_at(&bytes, 12), 0);
+                assert_eq!(u64_at(&bytes, 40), epoch - 1);
+                assert_eq!(u32_at(&bytes, 48) as usize, count);
+                assert_eq!(u32_at(&bytes, 52), 1);
+                assert_eq!(bytes[record], PAGE_OP_SHIFT_RANGE);
+                assert_eq!(u32_at(&bytes, record + 4), 0);
+                assert_eq!(u64_at(&bytes, record + 8), previous[0].page_id);
+                assert_eq!(u64_at(&bytes, record + 16), shift_range_salt(delta, epoch));
+                assert_eq!(u32_at(&bytes, record + 24) as usize, count);
+                assert_eq!(
+                    i64::from_le_bytes(bytes[record + 32..record + 40].try_into().unwrap()),
+                    delta
+                );
+                assert_eq!(u32_at(&bytes, 68) as usize, bytes.len());
+                assert_eq!(apply_placeholder_test_frame(&bytes, &mut retained), after);
+                let (legacy, _) = encode_frame_delta_incremental(
+                    &after,
+                    &legacy_snapshots,
+                    placeholder_epochs(epoch),
+                    &mut next_id,
+                    &HashSet::new(),
+                )
+                .unwrap();
+                assert_eq!(
+                    apply_placeholder_test_frame(&legacy, &mut legacy_retained),
+                    after
+                );
+                for (index, snapshot) in snapshots.iter().enumerate() {
+                    assert_eq!(
+                        snapshot.fingerprint,
+                        previous[index].fingerprint ^ shift_range_salt(delta, epoch)
+                    );
+                    assert_eq!(
+                        snapshot.fingerprint,
+                        retained[&snapshot.page_id].fingerprint
+                    );
+                    assert_eq!(
+                        snapshot.position_base,
+                        previous[index].position_base + delta
+                    );
+                    assert_eq!(snapshot.positions, previous[index].positions);
+                    assert_eq!(snapshot.note_anchors, previous[index].note_anchors);
+                    assert_eq!(snapshot.position_span, after.pages[index].position_span);
+                    assert!(Rc::ptr_eq(
+                        &snapshot.primitive_ids,
+                        &previous[index].primitive_ids
+                    ));
+                    let mut materialized = snapshot.clone();
+                    materialized.materialize_positions();
+                    assert_eq!(
+                        materialized.positions,
+                        primitive_positions(&after.pages[index])
+                    );
+                }
+                current = after;
+            }
+        }
+    }
+
+    /// Rebuilding identical shifted content retains the shared fingerprint token.
+    #[test]
+    fn identical_rebuilt_pages_after_a_range_shift_emit_nothing() {
+        for before in [range_shift_built_list(), placeholder_list(Some([10, 20]))] {
+            let count = before.pages.len();
+            let mut next_id = 0;
+            let (_, mut snapshots) =
+                encode_frame_delta(&before, &[], placeholder_epochs(1), true, &mut next_id)
+                    .unwrap();
+            let after = shifted_body_list(&before, 0..count, 6);
+            encode_frame_delta_changes(
+                &after,
+                &mut snapshots,
+                placeholder_epochs(2),
+                DisplayChanges {
+                    rebuilt: &[],
+                    repositioned: &[],
+                    shifts: &[PageShiftRun {
+                        start: 0,
+                        end: count,
+                        delta: 6,
+                    }],
+                },
+            )
+            .unwrap();
+            let mut shifted = snapshots.clone();
+            let bytes = encode_frame_delta_changes(
+                &after,
+                &mut snapshots,
+                placeholder_epochs(3),
+                DisplayChanges {
+                    rebuilt: &[0, 0],
+                    repositioned: &[],
+                    shifts: &[],
+                },
+            )
+            .unwrap();
+            assert_eq!(u32_at(&bytes, 52), 0);
+            assert_eq!(snapshots[0].fingerprint, shifted[0].fingerprint);
+            assert_eq!(snapshots[0].position_base, 0);
+            for (snapshot, old) in snapshots[1..].iter().zip(&shifted[1..]) {
+                assert_eq!(snapshot.position_base, old.position_base);
+                assert_eq!(snapshot.positions, old.positions);
+            }
+            let rebuilt: HashSet<_> = (0..count).collect();
+            for snapshot in &mut snapshots {
+                snapshot.materialize_positions();
+            }
+            for snapshot in &mut shifted {
+                snapshot.materialize_positions();
+            }
+            assert_eq!(snapshots, shifted);
+            for (bytes, next) in [
+                encode_frame_delta(
+                    &after,
+                    &snapshots,
+                    placeholder_epochs(4),
+                    false,
+                    &mut next_id,
+                )
+                .unwrap(),
+                encode_frame_delta_incremental(
+                    &after,
+                    &snapshots,
+                    placeholder_epochs(4),
+                    &mut next_id,
+                    &rebuilt,
+                )
+                .unwrap(),
+                encode_frame_delta_pages(
+                    &after,
+                    &snapshots,
+                    placeholder_epochs(4),
+                    &mut next_id,
+                    &|_| true,
+                )
+                .unwrap(),
+            ] {
+                assert_eq!(u32_at(&bytes, 52), 0);
+                assert_eq!(next, snapshots);
+            }
+        }
+    }
+
+    /// Deferred shifts round trip without changing positions outside the body.
+    #[test]
+    fn materialize_positions_folds_only_present_body_positions() {
+        let before = range_shift_built_list();
+        let (_, mut snapshots) =
+            encode_frame_delta(&before, &[], placeholder_epochs(1), true, &mut 0).unwrap();
+        let original = snapshots.remove(0);
+        let mut snapshot = original.clone();
+        let after = shifted_body_list(&before, 0..1, 6);
+        snapshot.position_base = 6;
+        snapshot.materialize_positions();
+        assert_eq!(snapshot.positions, primitive_positions(&after.pages[0]));
+        assert_eq!(snapshot.position_base, 0);
+        assert_eq!(snapshot.fingerprint, original.fingerprint);
+        assert_eq!(snapshot.note_anchors, original.note_anchors);
+        let materialized = snapshot.clone();
+        snapshot.materialize_positions();
+        assert_eq!(snapshot, materialized);
+        snapshot.position_base = -6;
+        snapshot.materialize_positions();
+        assert_eq!(snapshot, original);
+    }
+
+    /// Change sets reject invalid indices, overlapping pages and invalid ranges.
+    #[test]
+    fn display_changes_validate_indices_ranges_and_snapshot_length() {
+        let list = range_shift_built_list();
+        let (_, snapshots) =
+            encode_frame_delta(&list, &[], placeholder_epochs(1), true, &mut 0).unwrap();
+        let attempt = |rebuilt: &[usize], repositioned: &[usize], shifts: &[PageShiftRun]| {
+            encode_frame_delta_changes(
+                &list,
+                &mut snapshots.clone(),
+                placeholder_epochs(2),
+                DisplayChanges {
+                    rebuilt,
+                    repositioned,
+                    shifts,
+                },
+            )
+        };
+        assert!(attempt(&[0], &[0], &[]).is_err());
+        assert!(attempt(&[3], &[], &[]).is_err());
+        assert!(attempt(&[], &[usize::MAX], &[]).is_err());
+        let range = PageShiftRun {
+            start: 0,
+            end: 2,
+            delta: 1,
+        };
+        assert!(attempt(&[1], &[], &[range]).is_err());
+        assert!(attempt(&[], &[0], &[range]).is_err());
+        assert!(
+            attempt(
+                &[],
+                &[],
+                &[
+                    range,
+                    PageShiftRun {
+                        start: 1,
+                        end: 3,
+                        delta: 1
+                    }
+                ]
+            )
+            .is_err()
+        );
+        for run in [
+            PageShiftRun {
+                start: 0,
+                end: 4,
+                delta: 1,
+            },
+            PageShiftRun {
+                start: 2,
+                end: 1,
+                delta: 1,
+            },
+            PageShiftRun {
+                start: 1,
+                end: 1,
+                delta: 1,
+            },
+            PageShiftRun {
+                start: 0,
+                end: 1,
+                delta: 0,
+            },
+            PageShiftRun {
+                start: 0,
+                end: 1,
+                delta: MAX_SAFE_INTEGER + 1,
+            },
+            PageShiftRun {
+                start: 0,
+                end: 1,
+                delta: -MAX_SAFE_INTEGER - 1,
+            },
+        ] {
+            assert!(attempt(&[], &[], &[run]).is_err());
+        }
+        assert!(
+            encode_frame_delta_changes(
+                &list,
+                &mut snapshots[..2].to_vec(),
+                placeholder_epochs(2),
+                DisplayChanges {
+                    rebuilt: &[],
+                    repositioned: &[],
+                    shifts: &[]
+                },
+            )
+            .is_err()
+        );
+    }
+
+    /// Sorting and deduplication preserve existing upsert and patch bytes.
+    #[test]
+    fn display_changes_reuse_per_page_encoding_and_leave_unreported_snapshots_untouched() {
+        let before = list_pages(&[
+            ("P1", "one"),
+            ("P2", "two"),
+            ("P3", "three"),
+            ("P4", "four"),
+        ]);
+        let mut after = before.clone();
+        let Primitive::Text(first) = &mut after.pages[0].primitives[0] else {
+            unreachable!()
+        };
+        first.text.push('!');
+        let Primitive::Text(second) = &mut after.pages[1].primitives[0] else {
+            unreachable!()
+        };
+        second.attrs.doc_start = Some(2);
+        second.attrs.doc_end = Some(7);
+        let Primitive::Text(last) = &mut after.pages[3].primitives[0] else {
+            unreachable!()
+        };
+        last.text.push('!');
+        let mut next_id = 0;
+        let (full, previous) =
+            encode_frame_delta(&before, &[], placeholder_epochs(1), true, &mut next_id).unwrap();
+        let mut snapshots = previous.clone();
+        let bytes = encode_frame_delta_changes(
+            &after,
+            &mut snapshots,
+            placeholder_epochs(2),
+            DisplayChanges {
+                rebuilt: &[3, 0, 3],
+                repositioned: &[1, 1],
+                shifts: &[],
+            },
+        )
+        .unwrap();
+        let (legacy, legacy_snapshots) = encode_frame_delta_pages(
+            &after,
+            &previous,
+            placeholder_epochs(2),
+            &mut next_id,
+            &|index| index == 0 || index == 3,
+        )
+        .unwrap();
+        assert_eq!(bytes, legacy);
+        assert_eq!(snapshots, legacy_snapshots);
+        assert_eq!(snapshots[2], previous[2]);
+        assert_eq!(u32_at(&bytes, 52), 3);
+        assert_eq!(
+            bytes[FRAME_HEADER_LEN + PAGE_OP_LEN],
+            PAGE_OP_PATCH_POSITIONS
+        );
+        for (op, index) in [0, 1, 3].into_iter().enumerate() {
+            assert_eq!(
+                u32_at(&bytes, FRAME_HEADER_LEN + op * PAGE_OP_LEN + 4),
+                index
+            );
+        }
+        let mut retained = HashMap::new();
+        apply_placeholder_test_frame(&full, &mut retained);
+        assert_eq!(apply_placeholder_test_frame(&bytes, &mut retained), after);
+        let before_empty = snapshots.clone();
+        let bytes = encode_frame_delta_changes(
+            &after,
+            &mut snapshots,
+            placeholder_epochs(3),
+            DisplayChanges {
+                rebuilt: &[],
+                repositioned: &[],
+                shifts: &[],
+            },
+        )
+        .unwrap();
+        assert_eq!(u32_at(&bytes, 52), 0);
+        assert_eq!(snapshots, before_empty);
+    }
+
+    /// Mixed changes and unsorted shift ranges emit operations in page order.
+    #[test]
+    fn display_changes_order_rebuilds_repositions_and_shift_ranges() {
+        let before = list_pages(&[
+            ("P1", "one"),
+            ("P2", "two"),
+            ("P3", "three"),
+            ("P4", "four"),
+            ("P5", "five"),
+            ("P6", "six"),
+        ]);
+        let mut after = shifted_body_list(&before, 1..3, 4);
+        after = shifted_body_list(&after, 5..6, -1);
+        for index in [0, 4] {
+            let Primitive::Text(value) = &mut after.pages[index].primitives[0] else {
+                unreachable!()
+            };
+            value.text.push('!');
+        }
+        let Primitive::Text(value) = &mut after.pages[3].primitives[0] else {
+            unreachable!()
+        };
+        value.attrs.doc_start = Some(2);
+        value.attrs.doc_end = Some(7);
+        let (full, mut snapshots) =
+            encode_frame_delta(&before, &[], placeholder_epochs(1), true, &mut 0).unwrap();
+        let previous = snapshots.clone();
+        let bytes = encode_frame_delta_changes(
+            &after,
+            &mut snapshots,
+            placeholder_epochs(2),
+            DisplayChanges {
+                rebuilt: &[4, 0, 4],
+                repositioned: &[3, 3],
+                shifts: &[
+                    PageShiftRun {
+                        start: 5,
+                        end: 6,
+                        delta: -1,
+                    },
+                    PageShiftRun {
+                        start: 1,
+                        end: 3,
+                        delta: 4,
+                    },
+                ],
+            },
+        )
+        .unwrap();
+        assert_eq!(u32_at(&bytes, 52), 5);
+        for (op, (index, opcode)) in [
+            (0, PAGE_OP_UPSERT),
+            (1, PAGE_OP_SHIFT_RANGE),
+            (3, PAGE_OP_PATCH_POSITIONS),
+            (4, PAGE_OP_UPSERT),
+            (5, PAGE_OP_SHIFT_RANGE),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let record = FRAME_HEADER_LEN + op * PAGE_OP_LEN;
+            assert_eq!(u32_at(&bytes, record + 4), index);
+            assert_eq!(bytes[record], opcode);
+            assert_eq!(u64_at(&bytes, record + 8), previous[index as usize].page_id);
+        }
+        let mut retained = HashMap::new();
+        apply_placeholder_test_frame(&full, &mut retained);
+        assert_eq!(apply_placeholder_test_frame(&bytes, &mut retained), after);
+        for (index, snapshot) in snapshots.iter_mut().enumerate() {
+            assert_eq!(
+                snapshot.fingerprint,
+                retained[&snapshot.page_id].fingerprint
+            );
+            snapshot.materialize_positions();
+            assert_eq!(snapshot.positions, primitive_positions(&after.pages[index]));
+        }
+    }
+
     #[test]
     fn typed_emission_matches_the_value_reference() {
-        for list in [list("hello"), list_at_position(2), rich_list()] {
+        let mut watermark = list("watermark");
+        watermark.pages[0].watermark_primitive_count = Some(1);
+        for list in [list("hello"), list_at_position(2), rich_list(), watermark] {
             for page in &list.pages {
                 let value = serde_json::to_value(page).unwrap();
 
@@ -1571,6 +2964,34 @@ mod tests {
                 assert_eq!(decoded, expected, "typed stream decodes differently");
             }
         }
+    }
+
+    #[test]
+    fn changing_the_watermark_prefix_requires_a_page_upsert() {
+        let before = list("watermark");
+        let mut after = before.clone();
+        after.pages[0].watermark_primitive_count = Some(1);
+        let epochs = FrameEpochs {
+            doc_epoch: 1,
+            layout_epoch: 1,
+            frame_epoch: 1,
+            base_frame_epoch: 0,
+        };
+        let mut next_id = 0;
+        let (_, snapshot) = encode_frame_delta(&before, &[], epochs, true, &mut next_id).unwrap();
+        let (bytes, _) = encode_frame_delta(
+            &after,
+            &snapshot,
+            FrameEpochs {
+                frame_epoch: 2,
+                base_frame_epoch: 1,
+                ..epochs
+            },
+            false,
+            &mut next_id,
+        )
+        .unwrap();
+        assert_eq!(bytes[FRAME_HEADER_LEN], PAGE_OP_UPSERT);
     }
 
     #[test]
@@ -1659,6 +3080,94 @@ mod tests {
 
         let content = hash_page(&list("other").pages[0]).unwrap();
         assert_ne!(before.visual_fingerprint, content.visual_fingerprint);
+    }
+
+    #[test]
+    fn a_page_fingerprints_the_same_whatever_was_emitted_before_it() {
+        let list = list_pages(&[("P1", "alpha"), ("P2", "beta")]);
+        let alone = hash_page(&list.pages[1]).unwrap();
+        let mut table = StringTable::default();
+        let mut out = Vec::new();
+        encode_page(&list.pages[0], &mut table, &mut out).unwrap();
+        let after = encode_page(&list.pages[1], &mut table, &mut out).unwrap();
+        assert_eq!(alone.fingerprint, after.fingerprint);
+        assert_eq!(alone.visual_fingerprint, after.visual_fingerprint);
+    }
+
+    #[test]
+    fn a_moved_glyph_changes_both_fingerprints() {
+        let list = rich_list();
+        let mut value = serde_json::to_value(&list).unwrap();
+        value["pages"][0]["primitives"][0]["glyphs"][1]["x"] = serde_json::json!(9.5);
+        let moved: DisplayList = serde_json::from_value(value).unwrap();
+        let before = hash_page(&list.pages[0]).unwrap();
+        let after = hash_page(&moved.pages[0]).unwrap();
+        assert_ne!(before.fingerprint, after.fingerprint);
+        assert_ne!(before.visual_fingerprint, after.visual_fingerprint);
+    }
+
+    #[test]
+    fn a_glyph_change_spread_over_two_coordinates_changes_both_fingerprints() {
+        let glyph_at = |x: f64, y: f64| {
+            let mut value = serde_json::to_value(rich_list()).unwrap();
+            let glyph = &mut value["pages"][0]["primitives"][0]["glyphs"][1];
+            glyph["x"] = serde_json::json!(x);
+            glyph["y"] = serde_json::json!(y);
+            let list: DisplayList = serde_json::from_value(value).unwrap();
+            hash_page(&list.pages[0]).unwrap()
+        };
+        let before = glyph_at(1.0, 1.0);
+        let after = glyph_at(-1.0, f64::from_bits(0xbff0_0000_8000_0000));
+        assert_ne!(before.fingerprint, after.fingerprint);
+        assert_ne!(before.visual_fingerprint, after.visual_fingerprint);
+    }
+
+    /// The upsert bounds the browser decoder checks: aligned primitive ids,
+    /// then a non-empty payload, all inside the frame.
+    fn assert_upserts_in_bounds(bytes: &[u8]) {
+        let data_offset = u32_at(bytes, 68) as usize;
+        for op in 0..u32_at(bytes, 52) as usize {
+            let record = FRAME_HEADER_LEN + op * PAGE_OP_LEN;
+            if bytes[record] != PAGE_OP_UPSERT {
+                continue;
+            }
+            let ids = u32_at(bytes, record + 28) as usize;
+            let ids_end = ids + 8 * u32_at(bytes, record + 24) as usize;
+            let payload = u32_at(bytes, record + 32) as usize;
+            let payload_end = payload + u32_at(bytes, record + 36) as usize;
+            assert!(ids >= data_offset && ids % 8 == 0);
+            assert!(ids_end <= payload && payload < payload_end && payload_end <= bytes.len());
+        }
+    }
+
+    #[test]
+    fn a_rebuilt_page_that_did_not_change_adds_nothing_to_the_frame() {
+        let before = list_pages(&[("P1", "first"), ("P2", "second"), ("P3", "third")]);
+        let after = list_pages(&[("P1", "first!"), ("P2", "second"), ("P3", "third!")]);
+        let epochs = |frame_epoch| FrameEpochs {
+            doc_epoch: frame_epoch,
+            layout_epoch: frame_epoch,
+            frame_epoch,
+            base_frame_epoch: frame_epoch - 1,
+        };
+        let mut next_id = 0;
+        let (_, snapshot) =
+            encode_frame_delta(&before, &[], epochs(1), true, &mut next_id).unwrap();
+        let delta = |rebuilt: &[usize]| {
+            let mut next_id = next_id;
+            encode_frame_delta_incremental(
+                &after,
+                &snapshot,
+                epochs(2),
+                &mut next_id,
+                &rebuilt.iter().copied().collect(),
+            )
+            .unwrap()
+        };
+        let changed_only = delta(&[0, 2]);
+        assert_eq!(u32_at(&changed_only.0, 52), 2);
+        assert_upserts_in_bounds(&changed_only.0);
+        assert_eq!(delta(&[0, 1, 2]), changed_only);
     }
 
     #[test]
@@ -1807,6 +3316,90 @@ mod tests {
     }
 
     #[test]
+    fn releasing_a_repeated_header_page_preserves_identity_through_rebuilds_and_edits() {
+        let list = |released: bool, suffix: &str| -> DisplayList {
+            let pages: Vec<_> = (0..4).map(|index| {
+                if released && index == 0 {
+                    serde_json::json!({
+                        "pageIndex": index, "width": 816, "height": 1056,
+                        "primitives": [], "unbuilt": true, "positionSpan": [1, 9]
+                    })
+                } else {
+                    serde_json::json!({
+                        "pageIndex": index, "width": 816, "height": 1056,
+                        "primitives": [{
+                            "kind": "text", "text": format!("page {index}{}", if index == 3 { suffix } else { "" }),
+                            "x": 96, "baselineY": 120, "width": 40, "font": "16px serif",
+                            "color": "#000000", "blockId": 7, "paraId": "HEADER"
+                        }]
+                    })
+                }
+            }).collect();
+            serde_json::from_value(serde_json::json!({ "contractVersion": 1, "pages": pages }))
+                .unwrap()
+        };
+        let epochs = |frame_epoch| FrameEpochs {
+            doc_epoch: frame_epoch,
+            layout_epoch: frame_epoch,
+            frame_epoch,
+            base_frame_epoch: frame_epoch - 1,
+        };
+        let mut next_id = 0;
+        let (_, before) =
+            encode_frame_delta(&list(false, ""), &[], epochs(1), true, &mut next_id).unwrap();
+        let (release, mut snapshots) = encode_frame_delta_pages(
+            &list(true, ""),
+            &before,
+            epochs(2),
+            &mut next_id,
+            &|index| index == 0,
+        )
+        .unwrap();
+        assert_eq!(u32_at(&release, 52), 1);
+        assert_eq!(release[FRAME_HEADER_LEN], PAGE_OP_UPSERT);
+        assert_eq!(u64_at(&release, FRAME_HEADER_LEN + 8), before[0].page_id);
+        assert!(snapshots[0].primitive_ids.is_empty());
+        assert!(snapshots[0].positions.is_empty());
+        for (actual, old) in snapshots.iter().zip(&before) {
+            assert_eq!(actual.page_id, old.page_id);
+        }
+        for (epoch, released, suffix, rebuilt) in [
+            (3, true, " edited", 3),
+            (4, false, " edited", 0),
+            (5, false, " edited again", 3),
+        ] {
+            let current = list(released, suffix);
+            let (_, next) = if rebuilt == 0 {
+                encode_frame_delta_pages(
+                    &current,
+                    &snapshots,
+                    epochs(epoch),
+                    &mut next_id,
+                    &|index| index == 0,
+                )
+                .unwrap()
+            } else {
+                encode_frame_delta_incremental(
+                    &current,
+                    &snapshots,
+                    epochs(epoch),
+                    &mut next_id,
+                    &HashSet::from([rebuilt]),
+                )
+                .unwrap()
+            };
+            let (_, fresh) =
+                encode_frame_delta(&current, &[], epochs(epoch), true, &mut 0).unwrap();
+            for (actual, expected) in next.iter().zip(&fresh) {
+                assert_eq!(actual.page_id, expected.page_id);
+                assert_eq!(actual.fingerprint, expected.fingerprint);
+                assert_eq!(actual.primitive_ids, expected.primitive_ids);
+            }
+            snapshots = next;
+        }
+    }
+
+    #[test]
     fn an_unbuilt_page_whose_position_span_moves_is_sent_again() {
         let list = |span: [i64; 2]| -> DisplayList {
             serde_json::from_value(serde_json::json!({ "contractVersion": 1, "pages": [
@@ -1854,7 +3447,177 @@ mod tests {
         )
         .unwrap();
         assert_eq!(u32_at(&moved, 52), 1);
-        assert_eq!(moved[FRAME_HEADER_LEN], PAGE_OP_UPSERT);
+        assert_eq!(moved[FRAME_HEADER_LEN], PAGE_OP_SHIFT_POSITIONS);
+    }
+
+    fn placeholder_list(span: Option<[i64; 2]>) -> DisplayList {
+        let mut list: DisplayList = serde_json::from_value(serde_json::json!({ "pages": [{
+            "pageIndex": 0, "width": 816, "height": 1056,
+            "primitives": [], "unbuilt": true
+        }]}))
+        .unwrap();
+        list.pages[0].position_span = span;
+        list
+    }
+
+    /// Range shifts that cancel out in position never restore an earlier fingerprint.
+    #[test]
+    fn cancelling_range_shifts_never_restore_an_earlier_fingerprint() {
+        let mut fingerprint = 0x1234_u64;
+        let mut seen = HashSet::from([fingerprint]);
+        for (epoch, delta) in [(2, 1), (3, 1), (4, -1), (5, -1), (6, 1), (7, -1)] {
+            fingerprint ^= shift_range_salt(delta, epoch);
+            assert!(seen.insert(fingerprint), "frame {epoch}");
+        }
+    }
+
+    fn placeholder_epochs(frame_epoch: u64) -> FrameEpochs {
+        FrameEpochs {
+            doc_epoch: frame_epoch,
+            layout_epoch: frame_epoch,
+            frame_epoch,
+            base_frame_epoch: frame_epoch - 1,
+        }
+    }
+
+    #[test]
+    fn an_unbuilt_page_whose_position_span_moves_uses_a_compact_shift() {
+        let before = placeholder_list(Some([8, 30]));
+        let mut next_id = 0;
+        let (full, mut snapshots) =
+            encode_frame_delta(&before, &[], placeholder_epochs(1), true, &mut next_id).unwrap();
+        let mut retained = HashMap::new();
+        assert_eq!(apply_placeholder_test_frame(&full, &mut retained), before);
+        for (epoch, span) in [(2, [14, 36]), (3, [10, 32]), (4, [10, 32])] {
+            let next = placeholder_list(Some(span));
+            let (bytes, next_snapshots) = encode_frame_delta_incremental(
+                &next,
+                &snapshots,
+                placeholder_epochs(epoch),
+                &mut next_id,
+                &HashSet::new(),
+            )
+            .unwrap();
+            if epoch == 4 {
+                assert_eq!(u32_at(&bytes, 52), 0);
+            } else {
+                assert_eq!(u32_at(&bytes, 52), 1);
+                assert_eq!(bytes[FRAME_HEADER_LEN], PAGE_OP_SHIFT_POSITIONS);
+                assert_eq!(u32_at(&bytes, FRAME_HEADER_LEN + 24), 0);
+                assert_eq!(u32_at(&bytes, FRAME_HEADER_LEN + 40), 0);
+                let payload = u32_at(&bytes, FRAME_HEADER_LEN + 32) as usize;
+                assert_eq!(u32_at(&bytes, payload + 4), SHIFT_SPAN_PRESENT);
+                assert_eq!(u32_at(&bytes, FRAME_HEADER_LEN + 36), 16);
+            }
+            assert_eq!(apply_placeholder_test_frame(&bytes, &mut retained), next);
+            snapshots = next_snapshots;
+        }
+    }
+
+    #[test]
+    fn compact_placeholders_upsert_unsafe_position_span_shifts() {
+        let max = MAX_SAFE_INTEGER;
+        for (before_span, after_span) in [
+            ([-max, -max + 1], [1, 2]),
+            ([1, 2], [-max, -max + 1]),
+            ([-max, -max + 1], [-max - 1, -max]),
+            ([-max - 1, -max], [-max, -max + 1]),
+            ([max - 1, max], [max, max + 1]),
+            ([max, max + 1], [max - 1, max]),
+        ] {
+            let before = placeholder_list(Some(before_span));
+            let after = placeholder_list(Some(after_span));
+            let mut next_id = 0;
+            let (full, snapshots) =
+                encode_frame_delta(&before, &[], placeholder_epochs(1), true, &mut next_id)
+                    .unwrap();
+            let mut retained = HashMap::new();
+            assert_eq!(apply_placeholder_test_frame(&full, &mut retained), before);
+            let (bytes, _) = encode_frame_delta_incremental(
+                &after,
+                &snapshots,
+                placeholder_epochs(2),
+                &mut next_id,
+                &HashSet::new(),
+            )
+            .unwrap();
+            assert_eq!(u32_at(&bytes, 52), 1);
+            assert_eq!(bytes[FRAME_HEADER_LEN], PAGE_OP_UPSERT);
+            assert_eq!(apply_placeholder_test_frame(&bytes, &mut retained), after);
+        }
+    }
+
+    #[test]
+    fn compact_placeholders_upsert_nonuniform_or_missing_spans_and_metadata_changes() {
+        let before = placeholder_list(Some([8, 30]));
+        let moved = placeholder_list(Some([14, 36]));
+        let mut changed = moved.clone();
+        changed.pages[0].page_label = Some("ii".to_owned());
+        let mut geometry = moved.clone();
+        geometry.pages[0].width = 800.into();
+        let mut built = moved.clone();
+        built.pages[0].unbuilt = false;
+        built.pages[0].primitives = list_at_position(14).pages[0].primitives.clone();
+        let cases = [
+            (placeholder_list(None), moved.clone()),
+            (before.clone(), placeholder_list(None)),
+            (before.clone(), placeholder_list(Some([14, 37]))),
+            (before.clone(), changed),
+            (before.clone(), geometry),
+            (before.clone(), built.clone()),
+            (built, moved.clone()),
+            (
+                placeholder_list(Some([i64::MIN, 0])),
+                placeholder_list(Some([0, i64::MAX])),
+            ),
+        ];
+        for (before, after) in cases {
+            let mut next_id = 0;
+            let (full, snapshots) =
+                encode_frame_delta(&before, &[], placeholder_epochs(1), true, &mut next_id)
+                    .unwrap();
+            let mut retained = HashMap::new();
+            assert_eq!(apply_placeholder_test_frame(&full, &mut retained), before);
+            let rebuilt = if before.pages[0].unbuilt && !after.pages[0].unbuilt {
+                HashSet::from([0])
+            } else {
+                HashSet::new()
+            };
+            let (bytes, next_snapshots) = encode_frame_delta_incremental(
+                &after,
+                &snapshots,
+                placeholder_epochs(2),
+                &mut next_id,
+                &rebuilt,
+            )
+            .unwrap();
+            assert_eq!(u32_at(&bytes, 52), 1);
+            assert_eq!(bytes[FRAME_HEADER_LEN], PAGE_OP_UPSERT);
+            let applied = apply_placeholder_test_frame(&bytes, &mut retained);
+            assert_eq!(applied, after);
+            if !rebuilt.is_empty() {
+                assert!(!applied.pages[0].unbuilt);
+                assert_eq!(applied.pages[0].position_span, Some([14, 36]));
+                assert_eq!(applied.pages[0].primitives, after.pages[0].primitives);
+                assert_ne!(next_snapshots[0].fingerprint, snapshots[0].fingerprint);
+                assert_eq!(next_snapshots[0].primitive_ids.len(), 1);
+            }
+        }
+        let mut next_id = 0;
+        let (_, snapshots) =
+            encode_frame_delta(&before, &[], placeholder_epochs(1), true, &mut next_id).unwrap();
+        let (full, _) = encode_frame_delta(
+            &moved,
+            &snapshots,
+            placeholder_epochs(2),
+            true,
+            &mut next_id,
+        )
+        .unwrap();
+        assert_eq!(full[FRAME_HEADER_LEN], PAGE_OP_UPSERT);
+        let (new_page, _) =
+            encode_frame_delta(&moved, &[], placeholder_epochs(2), false, &mut next_id).unwrap();
+        assert_eq!(new_page[FRAME_HEADER_LEN], PAGE_OP_UPSERT);
     }
 
     #[test]
@@ -1882,6 +3645,7 @@ mod tests {
         let payload_offset = u32_at(&bytes, FRAME_HEADER_LEN + 32) as usize;
         let payload_len = u32_at(&bytes, FRAME_HEADER_LEN + 36) as usize;
         assert_eq!(payload_offset + payload_len, bytes.len());
+        assert_upserts_in_bounds(&bytes);
         assert_eq!(bytes[payload_offset], VALUE_OBJECT);
         assert_eq!(snapshot[0].page_id, 1);
 

@@ -87,7 +87,7 @@ export function testBinding(initial: Partial<XlsxCommandEnvironment> = {}) {
   const binding: XlsxCommandBinding = {
     environment: (executing) => (executing ? { ...state.env, pendingInput: false } : state.env),
     ordered: (id) => !immediate.has(id),
-    admit: (operation) => state.admission().then(operation),
+    admit: (operation) => state.admission().then(() => operation()),
     perform<K extends XlsxCommandId>(id: K, args: XlsxCommandArgs[K]) {
       calls.push({ id, args, ordered: !immediate.has(id) });
       return state.result();

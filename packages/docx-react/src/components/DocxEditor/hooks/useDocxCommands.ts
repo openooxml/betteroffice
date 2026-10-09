@@ -39,6 +39,7 @@ import { getPrimaryFontFamily } from '../../ui/fontPickerValue';
 import { normalizeFontFamilies } from '../../ui/normalizeFontFamilies';
 import { DEFAULT_STYLES } from '../../ui/StylePicker';
 import type { EditorMode } from '../internals/editing-modes';
+import { readSessionVersion } from '../internals/layoutProvenance';
 import type { PagedEditorRef } from '../PagedEditor';
 import {
   yrsHyperlinkAtSelection,
@@ -51,6 +52,7 @@ import type {
   PagedEditorCommandBridge,
   PagedEditorSelectedImage,
 } from './usePagedEditorRefApi';
+import { workerOpenReplicaPending } from '../internals/workerOpenReplica';
 
 /** Outcome of the built-in save workflow. */
 export type DocxSaveOutcome = 'saved' | 'requested' | 'failed';
@@ -62,6 +64,7 @@ type StyleResolver = ReturnType<typeof createStyleResolver>;
 
 /** Everything the command binding reads from the editor, refreshed every render. */
 export interface DocxCommandInputs {
+  experimentalWorkerOpen?: boolean;
   pagedEditorRef: React.RefObject<PagedEditorRef | null>;
   bridgeRef: React.RefObject<PagedEditorCommandBridge | null>;
   isLoading: boolean;
@@ -69,6 +72,7 @@ export interface DocxCommandInputs {
   document: Document | null;
   session: YrsSession | null;
   readOnly: boolean;
+  viewerSession?: boolean;
   mode: EditorMode;
   modeControlled: boolean;
   onModeChange: ((mode: EditorMode) => void) | undefined;
@@ -242,13 +246,13 @@ function fontOptions(
 
 interface RevisionIndex {
   session: YrsSession;
-  version: number;
+  version: string;
   ids: ReadonlySet<string>;
   navigation: DocxRevisionEnvironment[];
   spans: { revisionId: string; story: string; start: number; end: number }[];
 }
 
-function revisionIndex(session: YrsSession, version: number): RevisionIndex {
+function revisionIndex(session: YrsSession, version: string): RevisionIndex {
   const revisions = session.listRevisions();
   const projection = createYrsSidebarProjection(session);
   const ids = new Set(revisions.map((revision) => revision.revisionId));
@@ -356,21 +360,24 @@ export function useDocxCommandBinding(inputs: DocxCommandInputs): DocxCommandsHa
 
   const binding = useMemo<DocxCommandBinding>(() => {
     const bridge = () => latest.current.bridgeRef.current;
+    const viewer = () => latest.current.viewerSession || latest.current.pagedEditorRef.current?.isWorkerViewer?.() === true;
 
     const environment = (executing: boolean): DocxCommandEnvironment => {
       const current = latest.current;
       const editor = bridge();
-      const session = current.session;
+      const authoritySession = current.session;
+      const session = viewer() ? null : authoritySession;
       const t = translationRef.current;
       const status: DocxCommandEnvironment['status'] = current.isLoading
         ? 'loading'
         : current.parseError || !current.document
           ? 'empty'
-          : !session || !editor || editor.session() !== session
+          : !authoritySession || !editor || editor.session() !== authoritySession
             ? 'loading'
             : 'ready';
       let toolbar: YrsToolbarSelection | null | undefined;
       const readToolbar = () => {
+        if (viewer()) return null;
         if (toolbar === undefined) toolbar = editor?.toolbarSelection(executing) ?? null;
         return toolbar;
       };
@@ -380,10 +387,13 @@ export function useDocxCommandBinding(inputs: DocxCommandInputs): DocxCommandsHa
       const index = () => {
         if (!session) return null;
         const cached = revisions.current;
-        if (cached && cached.session === session && cached.version === documentVersion.current) {
+        // The session's own version has moved by the time any update listener
+        // runs, including one that refreshes before ours counts the update.
+        const version = `${documentVersion.current}:${readSessionVersion(session) ?? ''}`;
+        if (cached && cached.session === session && cached.version === version) {
           return cached;
         }
-        revisions.current = revisionIndex(session, documentVersion.current);
+        revisions.current = revisionIndex(session, version);
         return revisions.current;
       };
       return {
@@ -405,7 +415,7 @@ export function useDocxCommandBinding(inputs: DocxCommandInputs): DocxCommandsHa
           const read = status === 'ready' ? readToolbar() : null;
           selectionMemo = read
             ? selectionEnvironment(read, current)
-            : status === 'ready' && editor?.hasSelection()
+            : !viewer() && status === 'ready' && editor?.hasSelection()
               ? 'unsupported'
               : null;
           return selectionMemo;
@@ -420,7 +430,7 @@ export function useDocxCommandBinding(inputs: DocxCommandInputs): DocxCommandsHa
         },
         get image() {
           if (imageMemo !== undefined) return imageMemo;
-          const selected = status === 'ready' ? (editor?.selectedImage() ?? null) : null;
+          const selected = !viewer() && status === 'ready' ? (editor?.selectedImage() ?? null) : null;
           imageMemo = selected ? { wrap: imageWrapTarget(selected.attrs) } : null;
           return imageMemo;
         },
@@ -704,7 +714,7 @@ export function useDocxCommandBinding(inputs: DocxCommandInputs): DocxCommandsHa
           return (async (): Promise<DocxCommandResult> => {
             try {
               if (!editor || !session) throw new DocxCommandAdmissionError('editor-unavailable');
-              await editor.runAfterPendingInput(() => undefined);
+              if (!viewer()) await editor.runAfterPendingInput(() => undefined);
               const displayList = await latest.current.renderedDisplayList();
               assertCurrent();
               await job.prepare(displayList);
@@ -718,6 +728,25 @@ export function useDocxCommandBinding(inputs: DocxCommandInputs): DocxCommandsHa
         }
         case 'find':
         case 'replace': {
+          const pagedEditor = current.pagedEditorRef.current;
+          if (pagedEditor?.isWorkerViewer?.() === true) {
+            return (async () => {
+              let timer: ReturnType<typeof setTimeout> | undefined;
+              let selectedText = '';
+              try {
+                selectedText = (await Promise.race([
+                  Promise.resolve(pagedEditor.readSelectedText()),
+                  new Promise<string>((resolve) => { timer = setTimeout(() => resolve(''), 500); }),
+                ])) ?? '';
+              } catch {} finally {
+                clearTimeout(timer);
+              }
+              openDialog('replace');
+              if (id === 'find') current.findReplace.openFind(selectedText);
+              else current.findReplace.openReplace(selectedText);
+              return OPENED;
+            })();
+          }
           const session = editor?.session();
           const selectedText = session ? yrsSelectedText(session) : '';
           openDialog('replace');
@@ -746,16 +775,31 @@ export function useDocxCommandBinding(inputs: DocxCommandInputs): DocxCommandsHa
     };
 
     return {
+      isViewer: viewer,
       environment,
-      ordered: (id, args) =>
-        !IMMEDIATE_COMMANDS.has(id) &&
-        !(
-          id === 'tableAction' &&
-          (args === 'splitCell' ||
-            (typeof args === 'object' &&
-              args !== null &&
-              (args as { type?: string }).type === 'openTableProperties'))
-        ),
+      ordered: (id, args) => {
+        if (
+          (id === 'reviewAccept' || id === 'reviewReject' || id === 'reviewNext' || id === 'reviewPrevious') &&
+          viewer()
+        ) return false;
+        const session = latest.current.session;
+        if (
+          latest.current.experimentalWorkerOpen && session && workerOpenReplicaPending(session) &&
+          (((id === 'find' || id === 'replace') &&
+            latest.current.pagedEditorRef.current?.isWorkerViewer?.() !== true) || id === 'insertImage' ||
+            id === 'imageProperties' || id === 'pageSetup' || id === 'watermark')
+        ) return true;
+        return (
+          !IMMEDIATE_COMMANDS.has(id) &&
+          !(
+            id === 'tableAction' &&
+            (args === 'splitCell' ||
+              (typeof args === 'object' &&
+                args !== null &&
+                (args as { type?: string }).type === 'openTableProperties'))
+          )
+        );
+      },
       admit(operation) {
         const editor = bridge();
         if (!editor) return Promise.reject(new DocxCommandAdmissionError('editor-unavailable'));

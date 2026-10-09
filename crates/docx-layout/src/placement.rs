@@ -230,7 +230,10 @@ pub fn place_layout<'a>(input: &PlacementInput<'a>) -> Placements<'a> {
                 Fragment::Table(fragment) => Some(fragment.y + fragment.height),
                 _ => None,
             })
-            .fold(page.margins.top, f64::max);
+            .fold(
+                page.body_margins.as_ref().unwrap_or(&page.margins).top,
+                f64::max,
+            );
         let mut regions: Vec<PlacedRegionContent<'a>> = if body.is_empty() {
             vec![PlacedRegionContent {
                 region: PlacedRegion::Body {
@@ -494,6 +497,7 @@ fn whole_items<'a>(
                     header_row_count: None,
                     clip_top: None,
                     clip_bottom: None,
+                    cell_clips: None,
                 };
                 let at = items.len();
                 readable &= place_table_fragment(&TableGeometry::new(table, extent), &whole, items);
@@ -945,6 +949,7 @@ mod tests {
             header_row_count: None,
             clip_top,
             clip_bottom,
+            cell_clips: None,
         }
     }
 

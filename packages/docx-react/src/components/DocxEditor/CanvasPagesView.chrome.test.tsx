@@ -1,5 +1,5 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeEach, expect, spyOn, test } from 'bun:test';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -19,12 +19,24 @@ import {
 import { CanvasInteractiveOverlay } from './CanvasInteractiveOverlay';
 import { CanvasPageMirror } from './CanvasPageMirror';
 import { CanvasPagesView } from './CanvasPagesView';
+import { checkIdleContinuation, fakeIdleScheduler } from './__fixtures__/fakeIdleScheduler';
 import type { PageChromeHandle } from './usePageChrome';
 
 const { act, cleanup, render } = await import('@testing-library/react');
 
-/** Lets chrome that waits for idle time build. */
-const idle = () => act(() => new Promise<void>((resolve) => setTimeout(resolve, 200)));
+let scheduler: ReturnType<typeof fakeIdleScheduler>;
+let idleWork: typeof scheduler.idleWork;
+let flushIdle: typeof scheduler.flushIdle;
+
+/** Lets chrome and queued fallbacks finish their idle work. */
+const idle = () =>
+  act(async () => {
+    await new Promise<void>((resolve) => setTimeout(resolve, 200));
+    while (idleWork.size > 0) {
+      flushIdle({ didTimeout: false, timeRemaining: () => 50 });
+      await Promise.resolve();
+    }
+  });
 
 const blankPages = (
   count: number,
@@ -37,14 +49,30 @@ const blankPages = (
     primitives: primitives(pageIndex),
   }));
 
-/** The pages under `host` whose mirror holds content. */
+const renderInactiveMirrors = (pages: DisplayPage[]) => render(
+  <>{pages.map((page) => (
+    <CanvasPageMirror key={page.pageIndex} page={page} active={false} />
+  ))}</>
+);
+
+const hasFullMirror = (page: Element): boolean => {
+  const mirror = page.querySelector<HTMLElement>('.canvas-page-mirror > .layout-page-mirror');
+  return Boolean(mirror && mirror.style.contentVisibility !== 'auto');
+};
+
+/** The pages under `host` whose full mirror is built. */
 const mirroredPages = (host: HTMLElement) =>
   Array.from(host.querySelectorAll<HTMLElement>('.canvas-page'))
-    .filter((page) => page.querySelector('.canvas-page-mirror')?.firstElementChild)
+    .filter(hasFullMirror)
     .map((page) => Number(page.dataset.pageIndex));
 
+beforeEach(() => {
+  scheduler = fakeIdleScheduler();
+  ({ idleWork, flushIdle } = scheduler);
+});
 afterEach(() => {
   cleanup();
+  scheduler.restore();
 });
 afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
@@ -115,7 +143,7 @@ test('the focus pin follows its page when pages before it are inserted', async (
   const host = hostRef.current!;
   const mirroredKeys = () =>
     Array.from(host.querySelectorAll<HTMLElement>('.canvas-page'))
-      .filter((page) => page.querySelector('.canvas-page-mirror')?.firstElementChild)
+      .filter(hasFullMirror)
       .map((page) => page.dataset.pageKey);
   const pinned = host.querySelector<HTMLElement>('.canvas-page[data-page-key="36"] canvas')!;
   pinned.tabIndex = 0;
@@ -200,7 +228,7 @@ test('controls on every page and links on pages outside the window stay built', 
   expect(page.querySelector('button[data-sdt-group-id="far"]')).not.toBeNull();
   const mirror = page.querySelector('.canvas-page-mirror')!;
   expect(mirror.querySelector('a[href="#somewhere"]')?.textContent).toBe('far link');
-  expect(mirror.textContent).not.toContain('plain words');
+  expect(mirror.textContent).toContain('plain words');
 });
 
 test('a far page keeps the header cells that cells on other pages name', async () => {
@@ -269,7 +297,9 @@ test('a page leaving the window keeps the links it built', async () => {
   rerender(<CanvasPageMirror page={page} active={false} />);
   await act(async () => {});
   expect(container.querySelector('a[href="#kept"]')).toBe(built);
-  expect(container.textContent).not.toContain('plain words');
+  expect(container.textContent).toContain('plain words');
+  const root = container.firstElementChild!.firstElementChild as HTMLElement;
+  expect(root.style.contentVisibility).toBe('auto');
 });
 
 test('a rebuild keeps focus on the same link when links before it change', async () => {
@@ -345,7 +375,7 @@ test('a rebuild keeps focus on a control that changed, moved or lost a neighbour
   expect(focusedControl()).toBe('102');
 });
 
-test('a link to a note on a page whose chrome is not built builds that page first', async () => {
+test('a link to a note outside the window finds its target in the text fallback', async () => {
   const hostRef = createRef<HTMLDivElement>();
   const reference = {
     kind: 'text',
@@ -374,12 +404,53 @@ test('a link to a note on a page whose chrome is not built builds that page firs
   );
   await idle();
   const host = hostRef.current!;
-  expect(document.getElementById('oox-endnote-7')).toBeNull();
+  expect(document.getElementById('oox-endnote-7')).not.toBeNull();
+  expect(mirroredPages(host)).not.toContain(30);
   const link = host.querySelector<HTMLAnchorElement>('a[href="#oox-endnote-7"]')!;
   await act(async () => {
     link.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
   });
   expect(document.getElementById('oox-endnote-7')).not.toBeNull();
+  expect(mirroredPages(host)).not.toContain(30);
+});
+
+test('every page exposes text outside the window and range queries build full chrome on demand', async () => {
+  const hostRef = createRef<HTMLDivElement>();
+  const pages = blankPages(40, (index) => [{
+    kind: 'text',
+    x: 10,
+    baselineY: 20,
+    width: 30,
+    font: '11px sans-serif',
+    color: '#000',
+    text: `Page ${index}`,
+    blockKey: `p${index}`,
+    docStart: index * 10,
+    docEnd: index * 10 + 7,
+  }]);
+  render(<CanvasPagesView displayList={{ pages }} hostRef={hostRef} glyphOutlineProvider={() => ''} />);
+  await idle();
+  const host = hostRef.current!;
+  const far = host.querySelector<HTMLElement>('.canvas-page[data-page-index="30"]')!;
+  expect(far.querySelector('.canvas-page-mirror')?.textContent).toBe('Page 30');
+  expect(mirroredPages(host)).not.toContain(30);
+  expect(far.querySelector('.layout-run-text, [data-doc-start], [data-para-id]')).toBeNull();
+  const queries = {
+    rangeRects: () => [{ pageIndex: 30, x: 0, y: 0, width: 1, height: 1 }],
+  } as unknown as DisplayListQueries;
+  const context = createRenderedDomContext(host, 1, {
+    displayListQueries: queries,
+    projector: { projectRect: () => null, getPageBounds: () => null },
+  });
+  let elements: Element[] = [];
+  await act(async () => {
+    elements = context.findElementsForRange(300, 307);
+  });
+  expect(elements).toHaveLength(1);
+  expect(elements[0]).toBe(far.querySelector('span.layout-run-text[data-doc-start="300"]')!);
+  expect(elements[0]!.textContent).toBe('Page 30');
+  expect(elements[0]!.isConnected).toBe(true);
+  expect(mirroredPages(host)).toContain(30);
 });
 
 test('a plugin DOM query for a range on a page whose chrome is not built finds its elements', async () => {
@@ -585,16 +656,166 @@ test('chrome built on demand for an inactive page is cleared on release', async 
   const { container, rerender } = render(
     <CanvasPageMirror page={page} active={false} register={register} />
   );
-  await act(async () => {});
-  const content = () => container.firstElementChild!.firstElementChild;
-  expect(content()).toBeNull();
+  await idle();
+  const content = () => container.firstElementChild!.firstElementChild as HTMLElement;
+  expect(content().style.contentVisibility).toBe('auto');
   act(() => handle!.build());
-  expect(content()).not.toBeNull();
+  expect(content().style.contentVisibility).not.toBe('auto');
   act(() => handle!.release());
-  expect(content()).toBeNull();
+  expect(content().style.contentVisibility).toBe('auto');
 
   rerender(<CanvasPageMirror page={page} active register={register} />);
   await act(async () => {});
   act(() => handle!.release());
-  expect(content()).not.toBeNull();
+  expect(content().style.contentVisibility).not.toBe('auto');
+});
+
+test('first fallbacks share a FIFO and honor idle deadlines and timeouts', async () => {
+  const pages = blankPages(4, (index) => [{
+    kind: 'text',
+    x: 10,
+    baselineY: 20,
+    width: 30,
+    font: '11px sans-serif',
+    color: '#000',
+    text: `Page ${index}`,
+  }]);
+  const { container } = renderInactiveMirrors(pages);
+  expect(idleWork.size).toBe(1);
+  const timeout = Array.from(idleWork.values())[0]!.timeout!;
+  expect(timeout).toBeGreaterThan(0);
+  expect(timeout).toBeLessThanOrEqual(5000);
+  const text = () =>
+    Array.from(container.querySelectorAll('.canvas-page-mirror'), (host) => host.textContent);
+  await act(async () => flushIdle({ didTimeout: false, timeRemaining: () => 1 }));
+  expect(text()).toEqual(['Page 0', '', '', '']);
+  expect(idleWork.size).toBe(1);
+  await act(async () => flushIdle({ didTimeout: true, timeRemaining: () => 50 }));
+  expect(text()).toEqual(['Page 0', 'Page 1', '', '']);
+  expect(idleWork.size).toBe(1);
+  await idle();
+  expect(text()).toEqual(['Page 0', 'Page 1', 'Page 2', 'Page 3']);
+  expect(idleWork.size).toBe(0);
+});
+
+test('first fallbacks cap each idle slice at eight milliseconds and keep FIFO order', () => {
+  const pages = blankPages(8);
+  const { container } = renderInactiveMirrors(pages);
+  const hosts = Array.from(container.querySelectorAll('.canvas-page-mirror'));
+  const clock = spyOn(performance, 'now').mockImplementation(
+    () => hosts.filter((host) => host.firstChild !== null).length * 3
+  );
+  const observer = new MutationObserver(() => {});
+  observer.observe(container, { childList: true, subtree: true });
+  const completed: number[] = [];
+  try {
+    for (const count of [3, 6, 8]) {
+      expect(idleWork.size).toBe(1);
+      act(() => {
+        flushIdle({ didTimeout: false, timeRemaining: () => 40 });
+        completed.push(
+          ...observer.takeRecords().map(({ target }) => hosts.indexOf(target as Element))
+        );
+      });
+      expect(completed).toEqual(pages.slice(0, count).map((page) => page.pageIndex));
+    }
+    expect(idleWork.size).toBe(0);
+  } finally {
+    observer.disconnect();
+    clock.mockRestore();
+  }
+});
+
+for (const scenario of ['busy', 'no idle', 'dispose', 'dispose no idle', 'expiry during page']) {
+  test(`fallback continuation: ${scenario}`, () => {
+    const noIdle = scenario.includes('no idle');
+    let now = 0;
+    let hosts: Element[] = [];
+    scheduler.restore();
+    scheduler = fakeIdleScheduler({
+      timers: true, noIdle, now: () => now + (hosts[0]?.firstChild ? 8 : 0),
+    });
+    const built = () => hosts.map((host) => host.textContent);
+    const pages = blankPages(3, (index) => [{
+      kind: 'text', x: 10, y: 10, font: '11px sans-serif', color: '#000', text: `Page ${index}`,
+    } as unknown as DisplayPrimitive]);
+    const rendered = renderInactiveMirrors(pages);
+    const { unmount } = rendered;
+    hosts = Array.from(rendered.container.querySelectorAll('.canvas-page-mirror'));
+    checkIdleContinuation(scheduler, scenario, {
+      setNow: (value) => { now = value; }, dispose: unmount,
+      run: act, noIdleStart: 50, offset: () => hosts[0]?.firstChild ? 8 : 0,
+      checkFirst: () => expect(built()).toEqual(['Page 0', '', '']),
+      timerSlices: 2, replayIdle: true,
+      checkTimer: (index) => {
+        expect(built()).toEqual(index === 0 ? ['Page 0', 'Page 1', ''] : ['Page 0', 'Page 1', 'Page 2']);
+        if (index === 1) {
+          expect(performance.now()).toBe(noIdle ? 58 : scenario === 'expiry during page' ? 5007 : 5000);
+        }
+      },
+    });
+  });
+}
+
+test('unmounting an inactive page cancels its queued first fallback', async () => {
+  const pages = blankPages(2);
+  const view = (showFirst: boolean) => (
+    <>
+      {showFirst && <CanvasPageMirror key="first" page={pages[0]!} active={false} />}
+      <CanvasPageMirror key="second" page={pages[1]!} active={false} />
+    </>
+  );
+  const { container, rerender, unmount } = render(view(true));
+  expect(idleWork.size).toBe(1);
+  rerender(view(false));
+  await act(async () => flushIdle({ didTimeout: true, timeRemaining: () => 0 }));
+  expect(container.querySelectorAll('.layout-page-mirror')).toHaveLength(1);
+  expect(idleWork.size).toBe(0);
+  unmount();
+  render(<CanvasPageMirror page={pages[0]!} active={false} />).unmount();
+  expect(idleWork.size).toBe(0);
+});
+
+test('deferred full chrome keeps its own idle schedule alongside queued fallbacks', async () => {
+  const pages = blankPages(2);
+  const { container } = render(
+    <>
+      <CanvasPageMirror page={pages[0]!} active={false} />
+      <CanvasPageMirror page={pages[1]!} defer />
+    </>
+  );
+  const [fallback, chrome] = Array.from(idleWork.values());
+  expect(fallback!.timeout).toBeGreaterThan(0);
+  expect(fallback!.timeout).toBeLessThanOrEqual(5000);
+  expect(chrome!.timeout).toBe(1500);
+  await idle();
+  const mirrors = container.querySelectorAll<HTMLElement>('.layout-page-mirror');
+  expect(mirrors).toHaveLength(2);
+  expect(mirrors[0]!.style.contentVisibility).toBe('auto');
+  expect(mirrors[1]!.style.contentVisibility).not.toBe('auto');
+});
+
+test('deferred chrome keeps independent 150 ms timers without requestIdleCallback', () => {
+  scheduler.restore();
+  scheduler = fakeIdleScheduler({ timers: true, noIdle: true });
+  const { timers } = scheduler;
+  const pages = blankPages(3);
+  const rendered = render(
+    <>
+      <CanvasPageMirror page={pages[0]!} active={false} />
+      <CanvasPageMirror page={pages[1]!} defer />
+      <CanvasPageMirror page={pages[2]!} defer />
+    </>
+  );
+  const mirrors = () => rendered.container.querySelectorAll<HTMLElement>('.layout-page-mirror');
+  expect([...timers.values()].map(({ at }) => at)).toEqual([50, 150, 150]);
+  for (const at of [50, 150]) {
+    scheduler.now = at;
+    act(() => scheduler.flushDueTimers());
+    expect(mirrors()).toHaveLength(at === 50 ? 1 : 3);
+  }
+  expect(mirrors()[0]!.style.contentVisibility).toBe('auto');
+  expect(mirrors()[1]!.style.contentVisibility).not.toBe('auto');
+  expect(mirrors()[2]!.style.contentVisibility).not.toBe('auto');
+  expect(timers.size).toBe(0);
 });

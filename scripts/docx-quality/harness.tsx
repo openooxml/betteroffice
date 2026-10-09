@@ -4,13 +4,29 @@ import { DocxEditor } from '@betteroffice/docx-react';
 import { setGoogleFontsEnabled } from '@betteroffice/docx/utils';
 import '@betteroffice/docx-react/styles.css';
 import { createFontProvider } from '../../packages/fonts/src/cdn';
+import { MAX_LOCAL_REFERENCE_PAGES } from '../office-quality/reference.mjs';
 import {
   capturePageExtent,
   validatePageBounds,
   type OfficePageBounds,
 } from '../office-quality/page-bounds';
 
-const provider = createFontProvider();
+declare const __QUALITY_FONT_BASE__: string | null;
+declare const __QUALITY_FONT_BASE_CJK__: string | null;
+
+const search = new URLSearchParams(window.location.search);
+// Local-only captures load this checkout's fonts from the viewer's own origin.
+const localFonts = search.get('local') === '1' && typeof __QUALITY_FONT_BASE__ === 'string';
+const provider = createFontProvider(
+  localFonts
+    ? {
+        baseUrl: __QUALITY_FONT_BASE__,
+        ...(typeof __QUALITY_FONT_BASE_CJK__ === 'string'
+          ? { cjkBaseUrl: __QUALITY_FONT_BASE_CJK__ }
+          : {}),
+      }
+    : undefined
+);
 setGoogleFontsEnabled(false);
 const fontLoads: {
   kind: string;
@@ -50,8 +66,15 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const api = window as any;
 let captureProfile: OfficePageBounds | null = null;
 const pageExtents: ReturnType<typeof capturePageExtent>[] = [];
+const requestedMaxPages = search.get('maxPages');
+const maxPages = requestedMaxPages === null ? undefined : Number(requestedMaxPages);
+if (maxPages !== undefined && (!Number.isInteger(maxPages) || maxPages < 1))
+  throw new Error('maxPages must be a positive integer');
 api.oracleInit = async (input: number[], fonts: boolean, profile?: unknown) => {
-  captureProfile = validatePageBounds(profile);
+  captureProfile = validatePageBounds(
+    profile,
+    maxPages === undefined ? undefined : Math.min(maxPages, MAX_LOCAL_REFERENCE_PAGES)
+  );
   pageExtents.length = 0;
   fontLoads.length = 0;
   const bytes = new Uint8Array(input).buffer;
@@ -115,7 +138,14 @@ api.oraclePage = async (index: number) => {
       `canvas[data-page-index="${index}"]`
     );
     if (canvas?.width && canvas?.height) {
-      const extent = capturePageExtent(captureProfile, index, canvas.width, canvas.height);
+      // local captures keep a page whose size differs from Word's page at that index
+      const extent = capturePageExtent(
+        captureProfile,
+        index,
+        canvas.width,
+        canvas.height,
+        maxPages !== undefined
+      );
       const output = document.createElement('canvas');
       output.width = extent.output.width_px;
       output.height = extent.output.height_px;

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, type RefObject } from 'react';
 import { displayPageRevision, type DisplayPage } from '@betteroffice/docx/layout/render';
 import type { TFunction } from '@betteroffice/docx-i18n';
+import { scheduleIdleWork } from './hooks/pageBuildScheduler';
 
 type MakeChrome = (page: DisplayPage, t: TFunction) => HTMLElement;
 /** `chrome` is the page's current chrome, if built for this page, which it may take over. */
@@ -42,6 +43,53 @@ interface BuiltFor {
   revision: number;
   urgentRevision: number;
   t: TFunction;
+}
+
+const IDLE_SLICE_MS = 8;
+const fallbackQueue: { work: () => void; expiresAt: number }[] = [];
+let cancelFallbackDrain: (() => void) | null = null;
+let drainingFallbacks = false;
+
+function scheduleFallbackDrain(): void {
+  if (cancelFallbackDrain || drainingFallbacks || fallbackQueue.length === 0) return;
+  const drain = (deadline?: IdleDeadline): void => {
+    const start = performance.now();
+    cancelFallbackDrain = null;
+    drainingFallbacks = true;
+    try {
+      fallbackQueue.shift()?.work();
+      while (
+        deadline &&
+        !deadline.didTimeout &&
+        deadline.timeRemaining() > 1 &&
+        performance.now() - start < IDLE_SLICE_MS &&
+        fallbackQueue.length > 0
+      ) {
+        fallbackQueue.shift()!.work();
+      }
+    } finally {
+      drainingFallbacks = false;
+      scheduleFallbackDrain();
+    }
+  };
+  cancelFallbackDrain = scheduleIdleWork(drain, fallbackQueue[0]!.expiresAt, 50).cancel;
+}
+
+function enqueueFallback(work: () => void): () => void {
+  const queued = {
+    work,
+    expiresAt: performance.now() + (typeof requestIdleCallback === 'function' ? 5000 : 50),
+  };
+  fallbackQueue.push(queued);
+  scheduleFallbackDrain();
+  return () => {
+    const index = fallbackQueue.indexOf(queued);
+    if (index >= 0) fallbackQueue.splice(index, 1);
+    if (fallbackQueue.length === 0) {
+      cancelFallbackDrain?.();
+      cancelFallbackDrain = null;
+    }
+  };
 }
 
 const TAB_STOPS = 'a[href], button, input, select, textarea, [tabindex]';
@@ -190,7 +238,7 @@ export function usePageChrome(
         showFallback();
         return;
       }
-      return idle(showFallback);
+      return enqueueFallback(showFallback);
     }
     if (shows('chrome')) return;
     const built = builtForRef.current?.kind === 'chrome' ? builtForRef.current : null;

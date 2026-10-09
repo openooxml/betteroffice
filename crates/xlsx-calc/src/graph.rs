@@ -1,6 +1,15 @@
 //! dependency graph: which formula cells read which cells, answering "when this
 //! cell changes, which formulas must re-evaluate?".
 
+mod builder;
+mod snapshot;
+mod snapshot_growth;
+
+#[doc(hidden)]
+pub use builder::DepGraphBuilder;
+#[doc(hidden)]
+pub use snapshot::SnapshotGraphBuilder;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -133,15 +142,33 @@ impl DepGraph {
         for (index, sheet) in wb.sheets.iter().enumerate() {
             let sid = SheetId(index as u32);
             for (anchor, range) in sheet.array_formulas() {
-                let key = NodeKey::new(sid, anchor);
-                if range.start != range.end && self.deps.contains_key(&key) {
-                    self.spills.insert(key, range);
-                    self.spills_by_sheet
-                        .entry(sid)
-                        .or_default()
-                        .push((key, range));
-                }
+                self.install_spill(NodeKey::new(sid, anchor), range);
             }
+        }
+    }
+
+    fn empty() -> Self {
+        Self {
+            names: HashMap::new(),
+            defined_names: Vec::new(),
+            defined_name_indices: HashMap::new(),
+            tables: HashMap::new(),
+            deps: HashMap::new(),
+            by_sheet: HashMap::new(),
+            volatile: HashSet::new(),
+            spills: HashMap::new(),
+            spills_by_sheet: HashMap::new(),
+            asts: ParseCache::default(),
+        }
+    }
+
+    fn install_spill(&mut self, key: NodeKey, range: CellRange) {
+        if range.start != range.end && self.deps.contains_key(&key) {
+            self.spills.insert(key, range);
+            self.spills_by_sheet
+                .entry(key.sheet)
+                .or_default()
+                .push((key, range));
         }
     }
 
@@ -415,6 +442,151 @@ impl DepGraph {
             }
         }
         false
+    }
+}
+
+#[cfg(test)]
+impl DepGraph {
+    fn assert_matches(&self, other: &Self) {
+        let Self {
+            names,
+            defined_names,
+            defined_name_indices,
+            tables,
+            deps,
+            by_sheet,
+            volatile,
+            spills,
+            spills_by_sheet,
+            asts,
+        } = self;
+        let Self {
+            names: other_names,
+            defined_names: other_defined_names,
+            defined_name_indices: other_defined_name_indices,
+            tables: other_tables,
+            deps: other_deps,
+            by_sheet: other_by_sheet,
+            volatile: other_volatile,
+            spills: other_spills,
+            spills_by_sheet: other_spills_by_sheet,
+            asts: other_asts,
+        } = other;
+        assert_eq!(names, other_names);
+        assert_eq!(defined_names, other_defined_names);
+        assert_eq!(defined_name_indices, other_defined_name_indices);
+        assert_eq!(tables, other_tables);
+        assert_eq!(by_sheet, other_by_sheet);
+        assert_eq!(volatile, other_volatile);
+        assert_eq!(spills, other_spills);
+        assert_eq!(spills_by_sheet, other_spills_by_sheet);
+        assert_eq!(deps.len(), other_deps.len());
+        for (key, NodeEntry { ast, edges }) in deps {
+            let NodeEntry {
+                ast: other_ast,
+                edges: other_edges,
+            } = &other_deps[key];
+            assert_eq!(edges, other_edges);
+            assert_expr_matches(ast, other_ast);
+        }
+        let asts = asts.lock().expect("parse cache poisoned");
+        let other_asts = other_asts.lock().expect("parse cache poisoned");
+        assert_eq!(asts.len(), other_asts.len());
+        for (source, ast) in asts.iter() {
+            assert_expr_matches(ast, &other_asts[source]);
+        }
+    }
+}
+
+#[cfg(test)]
+fn assert_expr_matches(actual: &Expr, expected: &Expr) {
+    let mut pending = vec![(actual, expected)];
+    while let Some((actual, expected)) = pending.pop() {
+        match (actual, expected) {
+            (Expr::Number(actual), Expr::Number(expected)) => {
+                assert_eq!(actual.to_bits(), expected.to_bits());
+            }
+            (Expr::Literal(actual), Expr::Literal(expected)) => {
+                if let (
+                    xlsx_model::CellValue::Number { value: actual },
+                    xlsx_model::CellValue::Number { value: expected },
+                ) = (actual, expected)
+                {
+                    assert_eq!(actual.to_bits(), expected.to_bits());
+                } else {
+                    assert_eq!(actual, expected);
+                }
+            }
+            (
+                Expr::ArrayLiteral { cols, values },
+                Expr::ArrayLiteral {
+                    cols: other_cols,
+                    values: other_values,
+                },
+            ) => {
+                assert_eq!(cols, other_cols);
+                assert_eq!(values.len(), other_values.len());
+                pending.extend(values.iter().zip(other_values));
+            }
+            (
+                Expr::Unary { op, expr },
+                Expr::Unary {
+                    op: other_op,
+                    expr: other_expr,
+                },
+            ) => {
+                assert_eq!(op, other_op);
+                pending.push((expr, other_expr));
+            }
+            (
+                Expr::Binary { op, lhs, rhs },
+                Expr::Binary {
+                    op: other_op,
+                    lhs: other_lhs,
+                    rhs: other_rhs,
+                },
+            ) => {
+                assert_eq!(op, other_op);
+                pending.push((rhs, other_rhs));
+                pending.push((lhs, other_lhs));
+            }
+            (Expr::Percent(expr), Expr::Percent(other_expr)) => {
+                pending.push((expr, other_expr));
+            }
+            (
+                Expr::RangeJoin { start, end },
+                Expr::RangeJoin {
+                    start: other_start,
+                    end: other_end,
+                },
+            ) => {
+                pending.push((end, other_end));
+                pending.push((start, other_start));
+            }
+            (
+                Expr::FuncCall { name, func, args },
+                Expr::FuncCall {
+                    name: other_name,
+                    func: other_func,
+                    args: other_args,
+                },
+            ) => {
+                assert_eq!(name, other_name);
+                assert_eq!(func, other_func);
+                assert_eq!(args.len(), other_args.len());
+                pending.extend(args.iter().zip(other_args));
+            }
+            (Expr::Text(_), Expr::Text(_))
+            | (Expr::Bool(_), Expr::Bool(_))
+            | (Expr::Error(_), Expr::Error(_))
+            | (Expr::Ref { .. }, Expr::Ref { .. })
+            | (Expr::Range { .. }, Expr::Range { .. })
+            | (Expr::ColumnRange { .. }, Expr::ColumnRange { .. })
+            | (Expr::RowRange { .. }, Expr::RowRange { .. })
+            | (Expr::TableRef { .. }, Expr::TableRef { .. })
+            | (Expr::Name { .. }, Expr::Name { .. }) => assert_eq!(actual, expected),
+            _ => panic!("different expressions: {actual:?} and {expected:?}"),
+        }
     }
 }
 

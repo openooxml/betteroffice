@@ -24,7 +24,8 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { parseDocx, repackDocx } from '@betteroffice/docx/docx';
 
 const document = await parseDocx(await readFile('contract.docx'));
-// document.package: body, styles, numbering, theme, media, headers/footers
+// document.package.document.content: the body's paragraphs and tables
+// document.package also holds styles, numbering, theme, media, headers and footers
 
 const bytes = await repackDocx(document);
 await writeFile('contract-out.docx', Buffer.from(bytes));
@@ -240,7 +241,12 @@ const result = session.proposeChanges({
 ```
 
 `occurrence` is `'first'` (the default), `'all'` or a one-based number, counting
-non-overlapping matches of the accepted text. The round applies as one batch
+non-overlapping matches of the accepted text. `search: ''` fills an empty
+paragraph: it matches once, at the start of a paragraph whose accepted text is
+empty (hyperlinks, fields, content controls and pending insertions count as
+text), and refuses with `missing-target` anywhere else. Text typed into a
+paragraph without runs takes the paragraph mark's run formatting, as in Word.
+The round applies as one batch
 outside undo history, or nothing changes and a typed refusal names the
 `proposalId`: an ambiguous paragraph ID refuses with `ambiguous-target`, and
 adjoining or overlapping proposals with `overlapping-steps`. Retrying an id with
@@ -255,6 +261,12 @@ leave the document, its version and undo history untouched, and each change
 increments `previewVersion`, which `expectPreviewVersion` checks
 (`stale-preview`). `getProposals()` and `onProposalChange()` read and observe
 the registry; opening another document forgets it.
+
+`session.withdrawProposals({ expectVersion, ids })` ends proposals the host is
+done with, settling each as its decision previews it: accepted ones apply as
+plain text and rejected or undecided ones are removed, in one change outside
+undo history. The document then reads as the preview did, so the next round's
+searches match the text the reader saw. Ids that name no proposal are ignored.
 
 ### Structured export
 
@@ -395,7 +407,9 @@ paged export reads the `markup` view, and `accepted` or `original` return
 `unsupported-revision-layout`. The other refusal codes are `stale-document`,
 `stale-layout` (stale section, settings or note metadata, fonts, options or
 `expectLayoutVersion`), `layout-unavailable`, `layout-not-converged` and
-`unsupported`.
+`unsupported`. When note placement alternates between layouts, pages keep the larger
+note area, and each page reserving more than its notes take has a
+`note-layout-fallback` diagnostic.
 Geometry is off by default; rectangles are unzoomed CSS pixels (96 per inch) from
 the physical page's top-left corner. `maxFragments` (100,000 by default) and
 `maxLayoutBytes` bound the map separately and mark it `truncated`; mapping stops a
