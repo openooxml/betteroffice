@@ -436,6 +436,8 @@ fn legal_xml_character(character: char) -> bool {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TextParagraphDraft {
     pub alignment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bullet: Option<bool>,
     pub runs: Vec<TextRunDraft>,
 }
 

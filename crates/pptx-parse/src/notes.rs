@@ -107,11 +107,16 @@ pub(crate) fn patch_notes_xml(
                     shape.child_mut("txBody").expect("just inserted")
                 }
             };
+            let paragraphs: Vec<_> = body.children_named("p").cloned().collect();
             body.children.retain(
                 |child| !matches!(child, XmlNode::Element(element) if element.local_name() == "p"),
             );
-            for line in text.split('\n') {
-                body.children.push(XmlNode::Element(notes_paragraph(line)));
+            for (index, line) in text.split('\n').enumerate() {
+                let paragraph = paragraphs.get(index).or_else(|| paragraphs.last());
+                body.children.push(XmlNode::Element(match paragraph {
+                    Some(paragraph) => replace_notes_paragraph(paragraph.clone(), line),
+                    None => notes_paragraph(line),
+                }));
             }
         }
         None => tree
@@ -227,6 +232,43 @@ fn notes_paragraph(text: &str) -> XmlElement {
         )
 }
 
+fn replace_notes_paragraph(mut paragraph: XmlElement, text: &str) -> XmlElement {
+    let mut runs: Vec<_> = paragraph.children_named("r").cloned().collect();
+    if runs.is_empty() {
+        runs.push(XmlElement::new("a:r").with_attribute("xmlns:a", NS_A));
+    }
+    paragraph.children.retain(|child| {
+        !matches!(child, XmlNode::Element(element) if matches!(element.local_name(), "r" | "fld" | "br"))
+    });
+    let run_count = runs.len();
+    let mut remaining = text.chars().peekable();
+    let mut replacements = Vec::with_capacity(run_count);
+    for (index, mut run) in runs.into_iter().enumerate() {
+        let count = if index + 1 == run_count {
+            usize::MAX
+        } else {
+            run.children_named("t")
+                .map(|text| text.text_content().chars().count())
+                .sum()
+        };
+        let text: String = remaining.by_ref().take(count).collect();
+        run.children.retain(
+            |child| !matches!(child, XmlNode::Element(element) if element.local_name() == "t"),
+        );
+        run.children.push(XmlNode::Element(
+            XmlElement::new("a:t")
+                .with_attribute("xmlns:a", NS_A)
+                .with_text(text),
+        ));
+        replacements.push(XmlNode::Element(run));
+    }
+    let position = paragraph.children.iter().position(|child| {
+        matches!(child, XmlNode::Element(element) if element.local_name() == "endParaRPr")
+    }).unwrap_or(paragraph.children.len());
+    paragraph.children.splice(position..position, replacements);
+    paragraph
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,6 +328,41 @@ mod tests {
         let patched_str = String::from_utf8(patched).expect("utf8");
         assert!(patched_str.contains("Slide Image Placeholder"));
         assert!(!patched_str.contains("Old line"));
+    }
+
+    #[test]
+    fn patch_preserves_paragraph_and_run_properties_for_each_line() {
+        let properties = r#"<a:pPr algn="r" lvl="2" marL="3000" indent="-1000"><a:spcBef><a:spcPts val="500"/></a:spcBef><a:buNone/></a:pPr>"#;
+        let end = r#"<a:endParaRPr lang="de-DE" sz="1700"/>"#;
+        let source = String::from_utf8(EXISTING.to_vec()).unwrap().replace(
+            "<a:p><a:r><a:t>Old line</a:t></a:r></a:p>",
+            &format!("<a:p>{properties}<a:r><a:rPr b=\"1\"/><a:t>Old </a:t></a:r><a:r><a:rPr i=\"1\"/><a:t>line</a:t></a:r>{end}</a:p>"),
+        );
+        let limits = ParseLimits::default();
+        let patched = patch_notes_xml(
+            source.as_bytes(),
+            "notes.xml",
+            "New 😀 text\nExtra line",
+            &mut budget(&limits),
+        )
+        .unwrap();
+        assert_eq!(
+            parse_notes_text(&patched, "notes.xml", &mut budget(&limits)).unwrap(),
+            "New 😀 text\nExtra line"
+        );
+        let xml = String::from_utf8(patched).unwrap();
+        for markup in [
+            "algn=\"r\"",
+            "lvl=\"2\"",
+            "marL=\"3000\"",
+            "indent=\"-1000\"",
+            "<a:buNone/>",
+            end,
+            "<a:rPr b=\"1\"/>",
+            "<a:rPr i=\"1\"/>",
+        ] {
+            assert_eq!(xml.matches(markup).count(), 2, "{markup}");
+        }
     }
 
     #[test]

@@ -248,18 +248,19 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
       if (!story) throw new DocumentToolError('UNKNOWN_STORY', 'Shape must have one text story, or supply a story ID from pptx_read_slide.', { validStories: shape.textStories.map(story => story.id).slice(0, 20) });
       const content = unwrap(handle.readContent({ slideIds: [slide.id] })).stories.find(item => item.storyId === story.id)!;
       if (content.paragraphs.some(p => p.fields.length || !p.editable)) throw new DocumentToolError('UNSUPPORTED_TARGET', 'Shape contains text fields. Use find_replace for plain text outside the fields.');
-      const paragraphs = edit.op === 'replace_text' ? edit.text.replace(/\r\n?/g, '\n').split('\n').map(text => ({ runs: [{ text }], alignment: undefined })) : edit.paragraphs;
+      const paragraphs = edit.op === 'replace_text' ? edit.text.replace(/\r\n?/g, '\n').split('\n').map(text => ({ runs: [{ text }], alignment: undefined, bullet: undefined })) : edit.paragraphs;
       const text = paragraphs.map(p => p.runs.map(r => r.text).join('')).join('\n');
       plainText(text);
       if (text.length > 16000) throw new DocumentToolError('EDIT_LIMIT', 'Shape text must fit in 16000 characters.');
       if (edit.op === 'replace_text' && text === content.text) return { changed: false, slideId: slide.id, shapeId: shape.id, storyId: story.id };
-      const formatted = paragraphs.map(paragraph => ({
+      const formatted = paragraphs.map((paragraph, index) => ({
+        bullet: paragraph.bullet,
         alignment: paragraph.alignment ?? null,
-        runs: paragraph.runs.map(run => {
+        runs: paragraph.runs.flatMap(run => {
           const { text, ...style } = run;
           if ('fontFamily' in style && style.fontFamily) plainText(style.fontFamily);
           if (/[\r\n]/u.test(text)) throw new DocumentToolError('INVALID_ARGUMENT', 'Each run must stay in one paragraph. Add another paragraphs item for a line break.');
-          return { text, style: edit.op === 'replace_text' ? this.inheritedStyle(story) : style };
+          return edit.op === 'replace_text' ? this.replacementRuns(story, index, text) : [{ text, style }];
         }),
       }));
       handle.setStoryParagraphs(story.id, formatted);
@@ -304,10 +305,18 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
     return { changed: true, slideId: slide.id, shapeId: receipt.shapeId, index: receipt.index + 1, rect: this.rect(rect) };
   }
 
-  private inheritedStyle(story: StorySnapshot): TextStyle {
-    const style = story.paragraphs.flatMap(p => p.runs)[0]?.style;
-    if (!style) return {};
-    return Object.fromEntries(Object.entries(style).filter(([key, value]) => value !== null && ['bold', 'italic', 'underline', 'fontSizePt', 'fontFamily', 'color', 'spacingPt', 'baselinePct'].includes(key))) as TextStyle;
+  private replacementRuns(story: StorySnapshot, index: number, text: string) {
+    const runs = (story.paragraphs[index] ?? story.paragraphs.at(-1))?.runs ?? [];
+    if (!runs.length) return [{ text, style: {} }];
+    const characters = Array.from(text);
+    let offset = 0;
+    return runs.map((run, index) => {
+      const end = index + 1 === runs.length ? characters.length : Math.min(characters.length, offset + Array.from(run.text).length);
+      const text = characters.slice(offset, end).join('');
+      offset = end;
+      const style = Object.fromEntries(Object.entries(run.style).filter(([, value]) => value !== null)) as TextStyle;
+      return { text, style };
+    });
   }
   private imageBytes(base64: string, contentType: string) {
     if (base64.length % 4 !== 0 || /[^A-Za-z0-9+/=]/u.test(base64)) throw new DocumentToolError('INVALID_IMAGE', 'Supply canonical base64 image bytes, without a data URL prefix.');

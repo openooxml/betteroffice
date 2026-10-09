@@ -576,6 +576,7 @@ export interface UpdateEvent {
 }
 
 export interface TextParagraphDraft {
+  bullet?: boolean;
   alignment?: ParagraphAlignment | null;
   runs: Array<{ text: string; style?: TextStyle }>;
 }

@@ -343,13 +343,37 @@ impl DeckSession {
                 "text exceeds the 16000-character limit".into(),
             ));
         }
+        let previous = self.story(story_id)?;
         let story = story_ref(&self.doc.transact(), story_id)?;
-        let paragraph_ids: Vec<_> = paragraphs.iter().map(|_| self.next_id("para")).collect();
+        let paragraph_ids: Vec<_> = paragraphs
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                previous
+                    .paragraphs
+                    .get(index)
+                    .map_or_else(|| self.next_id("para"), |paragraph| paragraph.id.clone())
+            })
+            .collect();
         self.automatic_undo_barrier();
         let mut txn = self.transact_for(context);
         let length = story.len(&txn);
         story.remove_range(&mut txn, 0, length);
-        for (paragraph, id) in paragraphs.iter().zip(paragraph_ids) {
+        for (index, (paragraph, id)) in paragraphs.iter().zip(paragraph_ids).enumerate() {
+            let bullet = paragraph
+                .bullet
+                .map(|enabled| {
+                    if enabled {
+                        pptx_parse::Bullet::Character {
+                            value: "•".into()
+                        }
+                    } else {
+                        pptx_parse::Bullet::None
+                    }
+                })
+                .map(|bullet| serde_json::to_string(&bullet))
+                .transpose()
+                .map_err(|error| EditError::Json(error.to_string()))?;
             for run in &paragraph.runs {
                 let index = story.len(&txn);
                 insert_styled_text(&story, &mut txn, index, &run.text, &run.style);
@@ -358,9 +382,22 @@ impl DeckSession {
                 &story,
                 &mut txn,
                 &id,
-                paragraph.alignment.as_deref(),
-                0,
-                None,
+                paragraph.alignment.as_deref().or_else(|| {
+                    previous
+                        .paragraphs
+                        .get(index)
+                        .and_then(|paragraph| paragraph.alignment.as_deref())
+                }),
+                previous
+                    .paragraphs
+                    .get(index)
+                    .map_or(0, |paragraph| paragraph.level),
+                bullet.as_deref().or_else(|| {
+                    previous
+                        .paragraphs
+                        .get(index)
+                        .and_then(|paragraph| paragraph.bullet_json.as_deref())
+                }),
             );
         }
         drop(txn);

@@ -10,6 +10,7 @@ export const pptxRunStyleSchema = z.object({
   fontSizePt: z.number().min(1).max(400).optional(), fontFamily: z.string().min(1).max(200).optional(), color: color.optional(),
 }).strict();
 const paragraph = z.object({
+  bullet: z.boolean().optional().describe('true adds a bullet, false removes it; omitted preserves the existing bullet.'),
   alignment: z.enum(['l', 'ctr', 'r', 'just']).optional(),
   runs: z.array(pptxRunStyleSchema.extend({ text })).min(1).max(64),
 }).strict();

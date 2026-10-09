@@ -59,6 +59,7 @@ fn set_story_paragraphs_replaces_multiple_paragraphs_and_preserves_story_identit
         .unwrap();
     let paragraphs = vec![
         TextParagraphDraft {
+            bullet: None,
             alignment: Some("ctr".into()),
             runs: vec![TextRunDraft {
                 text: "New title 😀".into(),
@@ -70,6 +71,7 @@ fn set_story_paragraphs_replaces_multiple_paragraphs_and_preserves_story_identit
             }],
         },
         TextParagraphDraft {
+            bullet: None,
             alignment: None,
             runs: vec![TextRunDraft {
                 text: "Second paragraph".into(),
@@ -96,6 +98,7 @@ fn set_story_paragraphs_replaces_multiple_paragraphs_and_preserves_story_identit
     assert_eq!(text.paragraphs[0].runs[0].style.bold, Some(true));
     let version = deck.version();
     let invalid = vec![TextParagraphDraft {
+        bullet: None,
         alignment: None,
         runs: vec![TextRunDraft {
             text: "invalid\nrun".into(),

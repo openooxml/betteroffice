@@ -36,6 +36,54 @@ test('PPTX outline and slide read expose layouts, tree, points, runs, placeholde
   } finally { deck.close(); }
 });
 
+test('PPTX text, paragraph, bullet and notes edits preserve paragraph and run markup', async () => {
+  const zip = await JSZip.loadAsync(await presentationFixture());
+  const props = '<a:pPr algn="r" lvl="2" marL="3000" indent="-1000"><a:spcBef><a:spcPts val="500"/></a:spcBef><a:buNone/></a:pPr>';
+  const end = '<a:endParaRPr lang="de-DE" sz="1700"/>';
+  for (const path of ['ppt/slides/slide1.xml', 'ppt/notesSlides/notesSlide1.xml']) {
+    let xml = await zip.file(path)!.async('string');
+    xml = xml.replaceAll('<a:p>', `<a:p>${props}`).replaceAll('</a:p>', `${end}</a:p>`);
+    zip.file(path, xml);
+  }
+  const deck = await openPptx(await zip.generateAsync({ type: 'uint8array' }));
+  try {
+    const target = first(deck);
+    apply(deck, [{ op: 'replace_text', ...target, text: 'First replacement\nSecond replacement' }, { op: 'find_replace', query: 'replacement', replacement: 'result' }, { op: 'set_notes', slide: target.slide, text: 'New notes' }]);
+    expect(deck.readSlide({ slide: target.slide }).shapes[0].stories[0].paragraphs[0].runs[0].formatting).toMatchObject({ bold: true, fontSizePt: 24 });
+    expect(deck.readSlide({ slide: target.slide }).shapes[0].stories[0].paragraphs[1].runs[0].formatting.bold).toBeNull();
+    let saved = await JSZip.loadAsync(await deck.export());
+    for (const path of ['ppt/slides/slide1.xml', 'ppt/notesSlides/notesSlide1.xml']) {
+      const xml = await saved.file(path)!.async('string');
+      for (const markup of ['algn="r"', 'lvl="2"', 'marL="3000"', 'indent="-1000"', '<a:spcBef><a:spcPts val="500"/></a:spcBef>', '<a:buNone/>', end]) expect(xml).toContain(markup);
+    }
+    apply(deck, [{ op: 'set_paragraphs', ...target, paragraphs: [{ bullet: true, runs: [{ text: 'Bullet one', bold: true }] }, { bullet: false, runs: [{ text: 'Plain two' }] }] }]);
+    saved = await JSZip.loadAsync(await deck.export());
+    const xml = await saved.file('ppt/slides/slide1.xml')!.async('string');
+    expect(xml).toContain('<a:buChar char="•"/>');
+    expect(xml).toContain('<a:buNone/>');
+    expect(xml.match(/<a:endParaRPr/g)).toHaveLength(2);
+    expect(xml.match(/indent="-1000"/g)).toHaveLength(2);
+  } finally { deck.close(); }
+});
+
+test('PPTX inserts a title and one body shape with three real bullet paragraphs', async () => {
+  const deck = await openPptx(await presentationFixture());
+  try {
+    const slide = apply(deck, [{ op: 'add_slide', index: 1, layout: deck.outline().layouts[0].id }]).results[0].slideId as string;
+    expect(deck.readSlide({ slide }).shapeCount).toBe(0);
+    const added = apply(deck, [
+      { op: 'add_text_box', slide, name: 'Title', rect: { x: 36, y: 36, width: 648, height: 54 }, text: 'Pilot plan' },
+      { op: 'add_text_box', slide, name: 'Body', rect: { x: 36, y: 126, width: 648, height: 270 }, text: '' },
+    ]);
+    apply(deck, [{ op: 'set_paragraphs', slide, shape: added.results[1].shapeId as string, paragraphs: ['Start with ten users', 'Collect feedback daily', 'Report results in two weeks'].map(text => ({ bullet: true, runs: [{ text }] })) }, { op: 'set_notes', slide, text: 'Keep the pilot to two weeks.' }]);
+    const read = deck.readSlide({ slide });
+    expect(read.shapeCount).toBe(2);
+    expect(read.shapes[1].stories[0].paragraphs.map(p => JSON.parse(p.bullet!))).toEqual(Array(3).fill({ type: 'character', value: '•' }));
+    const zip = await JSZip.loadAsync(await deck.export());
+    expect((await zip.file('ppt/slides/slide2.xml')!.async('string')).match(/<a:buChar/g)).toHaveLength(3);
+  } finally { deck.close(); }
+});
+
 test('PPTX replaces full text and sets formatted paragraphs with stable shape IDs', async () => {
   const deck = await openPptx(await pptxFixture());
   try {

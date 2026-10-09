@@ -311,6 +311,55 @@ fn part_text(parts: &BTreeMap<String, Vec<u8>>, path: &str) -> String {
     .unwrap()
 }
 
+#[test]
+fn replacing_paragraphs_preserves_properties_and_end_run_markup() {
+    let properties = r#"<a:pPr algn="r" lvl="2" marL="3000" indent="-1000"><a:lnSpc><a:spcPct val="120000"/></a:lnSpc><a:spcBef><a:spcPts val="500"/></a:spcBef><a:buNone/></a:pPr>"#;
+    let end = r#"<a:endParaRPr lang="de-DE" sz="1700"/>"#;
+    let mut source = fixture_parts(256);
+    let slide = source
+        .iter_mut()
+        .find(|(path, _)| path == "ppt/slides/slide2.xml")
+        .unwrap();
+    slide.1 = slide.1.replace("<a:p><a:r><a:t>Second</a:t></a:r></a:p>", &format!("<a:p>{properties}<a:r><a:rPr b=\"1\" lang=\"en-US\" strike=\"sngStrike\"/><a:t>Second</a:t></a:r>{end}</a:p>"));
+    let deck = DeckSession::open(&zip(source), 11).unwrap();
+    let story = deck.snapshot().unwrap().slides[1].shapes[0].text_stories[0].clone();
+    deck.set_story_paragraphs(
+        &context(),
+        &story.id,
+        &[pptx_edit::TextParagraphDraft {
+            bullet: None,
+            alignment: None,
+            runs: vec![pptx_edit::TextRunDraft {
+                text: "Replacement".into(),
+                style: story.paragraphs[0].runs[0].style.clone(),
+            }],
+        }],
+    )
+    .unwrap();
+    assert_eq!(
+        deck.story(&story.id).unwrap().paragraphs[0].id,
+        story.paragraphs[0].id
+    );
+    let xml = part_text(&parts(&deck.save().unwrap()), "ppt/slides/slide2.xml");
+    for markup in [
+        "algn=\"r\"",
+        "lvl=\"2\"",
+        "marL=\"3000\"",
+        "indent=\"-1000\"",
+        "<a:lnSpc><a:spcPct val=\"120000\"/></a:lnSpc>",
+        "<a:spcBef><a:spcPts val=\"500\"/></a:spcBef>",
+        "<a:buNone/>",
+    ] {
+        assert!(xml.contains(markup), "{markup}");
+    }
+    assert!(xml.contains("<a:endParaRPr lang=\"de-DE\" sz=\"1700\"/>"));
+    assert!(xml.contains("lang=\"en-US\""));
+    assert!(xml.contains("strike=\"sngStrike\""));
+    assert!(xml.contains("Replacement"));
+    assert!(deck.undo());
+    assert_eq!(deck.story(&story.id).unwrap(), story);
+}
+
 /// Every internal relationship in every .rels part must resolve to a part.
 fn assert_relationships_resolve(parts: &BTreeMap<String, Vec<u8>>) {
     for (path, bytes) in parts {
