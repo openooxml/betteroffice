@@ -307,17 +307,28 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
 
   private replacementRuns(story: StorySnapshot, index: number, text: string) {
     const runs = (story.paragraphs[index] ?? story.paragraphs.at(-1))?.runs ?? [];
+    if (!text) return [];
     if (!runs.length) return [{ text, style: {} }];
     const characters = Array.from(text);
     let offset = 0;
-    return runs.map((run, index) => {
+    const result: Array<{ text: string; style: TextStyle }> = [];
+    for (const [index, run] of runs.entries()) {
       const end = index + 1 === runs.length ? characters.length : Math.min(characters.length, offset + Array.from(run.text).length);
-      const text = characters.slice(offset, end).join('');
+      const part = characters.slice(offset, end).join('');
       offset = end;
+      if (!part) continue;
       const style = Object.fromEntries(Object.entries(run.style).filter(([, value]) => value !== null)) as TextStyle;
-      return { text, style };
-    });
+      const previous = result.at(-1);
+      if (previous && JSON.stringify(previous.style) === JSON.stringify(style)) previous.text += part;
+      else result.push({ text: part, style });
+    }
+    if (!result.length || result.length > 64) {
+      const style = Object.fromEntries(Object.entries(runs[0].style).filter(([, value]) => value !== null)) as TextStyle;
+      return [{ text, style }];
+    }
+    return result;
   }
+
   private imageBytes(base64: string, contentType: string) {
     if (base64.length % 4 !== 0 || /[^A-Za-z0-9+/=]/u.test(base64)) throw new DocumentToolError('INVALID_IMAGE', 'Supply canonical base64 image bytes, without a data URL prefix.');
     const bytes = Buffer.from(base64, 'base64');

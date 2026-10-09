@@ -9,6 +9,33 @@ import { pptxFixture } from './format-fixtures';
 import { presentationFixture } from './pptx-fixture';
 
 const apply = (deck: PptxAgentPresentation, edits: PptxAgentEdit[]) => deck.edit({ version: deck.overview().version, edits });
+
+test('PPTX replacements compact 65 source runs and fall back within the run limit', async () => {
+  const zip = await JSZip.loadAsync(await presentationFixture());
+  const path = 'ppt/slides/slide1.xml';
+  const xml = await zip.file(path)!.async('string');
+  const runs = Array.from({ length: 65 }, (_, i) => `<a:r><a:rPr b="${i % 2}" sz="2400"/><a:t>x</a:t></a:r>`).join('');
+  zip.file(path, xml.replace(/<a:p>[\s\S]*?<\/a:p>/u, `<a:p>${runs}</a:p>`));
+  const bytes = await zip.generateAsync({ type: 'uint8array' });
+  for (const text of ['New text', 'x'.repeat(65), '']) {
+    const deck = await openPptx(bytes);
+    try {
+      const target = first(deck);
+      apply(deck, [{ op: 'replace_text', ...target, text: text === 'x'.repeat(65) ? 'y'.repeat(65) : text }]);
+      const paragraph = deck.readSlide({ slide: target.slide }).shapes[0].stories[0].paragraphs[0];
+      expect(paragraph.runs.length).toBeLessThanOrEqual(64);
+      expect(paragraph.runs.every(run => run.text.length > 0)).toBe(true);
+      if (text.length === 65) {
+        expect(paragraph.runs).toHaveLength(1);
+        expect(paragraph.runs[0].formatting).toMatchObject({ bold: false, fontSizePt: 24 });
+      }
+      const saved = await JSZip.loadAsync(await deck.export());
+      const paragraphXml = (await saved.file(path)!.async('string')).match(/<a:p(?:\s[^>]*)?(?:\/>|>[\s\S]*?<\/a:p>)/u)![0];
+      const savedText = [...paragraphXml.matchAll(/<a:t>([^<]*)<\/a:t>/gu)].map(match => match[1]).join('');
+      expect(savedText).toBe(text.length === 65 ? 'y'.repeat(65) : text);
+    } finally { deck.close(); }
+  }
+});
 function first(deck: PptxAgentPresentation) {
   const slide = deck.outline().slides[0];
   return { slide: slide.id, shape: slide.shapes.find(shape => shape.text.length > 0)!.id };
