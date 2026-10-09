@@ -194,6 +194,17 @@ export interface ChartContent {
 }
 
 /**
+ * A drawing the parser does not model, replayed verbatim on save.
+ */
+export interface OpaqueDrawingContent {
+  type: 'opaqueDrawing';
+  /** Authored element kind (`drawing`, `pict`, `object`, `alternateContent`). */
+  kind: string;
+  /** Original markup, written back verbatim at the run position. */
+  xml: string;
+}
+
+/**
  * All possible run content types
  */
 export type RunContent =
@@ -212,7 +223,8 @@ export type RunContent =
   | NoBreakHyphenContent
   | DrawingContent
   | ShapeContent
-  | ChartContent;
+  | ChartContent
+  | OpaqueDrawingContent;
 
 /**
  * A run (`w:r`) — a contiguous span of inline content sharing one set of

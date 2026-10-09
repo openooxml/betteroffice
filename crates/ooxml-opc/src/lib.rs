@@ -25,8 +25,8 @@ pub use source_bytes::SourceContainerBuilder;
 pub use source_bytes::SourceContainerInitializer;
 
 pub use sanitize::{
-    DocumentKind, DocumentKindError, detect_package_kind, sanitize_package,
-    sanitize_package_for_format,
+    ContentTypes, DocumentKind, DocumentKindError, detect_package_kind, parse_content_types,
+    sanitize_package, sanitize_package_for_format,
 };
 
 /// A well-formed document stays far under this; a decompression bomb blows past it.

@@ -16,7 +16,11 @@ import {
   type DocxProposalRequest,
   type DocxProposalResult,
 } from './proposals';
-import { computeProposalGeometryMirror, resolveNavigationTarget } from './proposalGeometry';
+import {
+  computeAnchorTargetGeometry,
+  computeProposalGeometryMirror,
+  resolveNavigationTarget,
+} from './proposalGeometry';
 import { findBodyMatches } from './findMatches';
 import { readResidentSearch, residentBodyPositions } from './residentSearch';
 import type { ResidentSaveRecord } from './residentSave';
@@ -719,6 +723,9 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
           request.read.story,
           request.read.paraId
         );
+        break;
+      case 'anchorTargets':
+        value = computeAnchorTargetGeometry(session.geometryReader, request.read.targets);
         break;
       case 'searchText':
         value = readResidentSearch(

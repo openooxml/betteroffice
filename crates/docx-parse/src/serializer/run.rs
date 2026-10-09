@@ -345,11 +345,27 @@ fn serialize_run_content(
             writer.end_element();
         }
         RunContent::Chart { chart } => {
-            let xml = chart.drawing_xml.as_deref().ok_or_else(|| {
-                ParseError::Canonical("chart run carries no drawing to replay".to_owned())
-            })?;
-            validate_raw_subtree(xml, "w", "drawing")?;
-            return Ok(xml.to_owned());
+            if let Some(xml) = chart.drawing_xml.as_deref() {
+                validate_raw_subtree(xml, "w", "drawing")?;
+                return Ok(xml.to_owned());
+            }
+            if let Some(xml) = chart
+                .relationship_id
+                .as_deref()
+                .and_then(|id| context.chart_drawing(id))
+            {
+                validate_raw_subtree(xml, "w", "drawing")?;
+                return Ok(xml.to_owned());
+            }
+            context.warn(format!(
+                "chart run carries no drawing to replay{}; keeping the run out of the output",
+                chart
+                    .relationship_id
+                    .as_deref()
+                    .map(|id| format!(" (rId {id})"))
+                    .unwrap_or_default()
+            ));
+            return Ok(String::new());
         }
         RunContent::OpaqueDrawing { xml, .. } => {
             validate_replayed_fragment(xml)?;
@@ -555,8 +571,9 @@ pub fn serialize_shape_content(
                 .start_element("wps:txbx")
                 .start_element("w:txbxContent");
             for value in &text_body.content {
-                let block: BlockContent =
-                    serde_json::from_value(value.clone()).map_err(|error| {
+                let block: BlockContent = serde_json::to_string(&(value.clone()))
+                    .and_then(|s| serde_json::from_str(&s))
+                    .map_err(|error| {
                         ParseError::Canonical(format!(
                             "shape text body contains an invalid block: {error}"
                         ))

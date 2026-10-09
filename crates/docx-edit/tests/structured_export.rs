@@ -986,13 +986,13 @@ fn live_edits_appear_and_removed_content_does_not_return() {
         .collect();
     assert_eq!(
         shifted.last(),
-        Some(&("end".to_owned(), Some(41))),
+        Some(&("end".to_owned(), Some(42))),
         "{shifted:?}"
     );
     assert_eq!(
         shifted[shifted.len() - 2],
-        ("w:drawing".to_owned(), None),
-        "the pinned omission moves with the text around it"
+        ("w:drawing".to_owned(), Some(41)),
+        "the drawing atom moves with the text around it"
     );
     let delete = EditRequest {
         expect_version: doc.version(),

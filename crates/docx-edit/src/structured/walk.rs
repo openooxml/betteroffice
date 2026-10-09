@@ -3429,6 +3429,22 @@ impl<'a> Exporter<'a> {
             }
             "field" => self.field(ctx, payload, &base, depth),
             "image" => self.image(ctx, payload, &anchor),
+            "opaqueDrawing" => {
+                let element =
+                    super::source::element_name(any_str(payload.get("xml")).unwrap_or_default());
+                self.note(
+                    DiagnosticCode::UnsupportedContent,
+                    Severity::Warning,
+                    Some(anchor.clone()),
+                    format!(
+                        "An inline {element} is not represented in the export; it stays in the package."
+                    ),
+                );
+                InlineKind::Unsupported {
+                    element,
+                    alt_text: None,
+                }
+            }
             "sdt" => {
                 let control_id = control_id.unwrap_or_default();
                 return self.inline_control(ctx, payload, base, control_id, records, depth);

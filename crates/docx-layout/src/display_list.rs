@@ -1263,12 +1263,12 @@ impl<'de> Deserialize<'de> for BuildInput {
         let headers_footers = wire
             .headers_footers
             .clone()
-            .map(serde_json::from_value)
+            .map(|v| serde_json::to_string(&v).and_then(|s| serde_json::from_str(&s)))
             .transpose()
             .map_err(serde::de::Error::custom)?;
         let headers_footers_content = wire
             .headers_footers
-            .map(serde_json::from_value)
+            .map(|v| serde_json::to_string(&v).and_then(|s| serde_json::from_str(&s)))
             .transpose()
             .map_err(serde::de::Error::custom)?;
         Ok(Self {
@@ -5008,8 +5008,10 @@ fn build_display_list_selected(
 ) -> DisplayList {
     // Without font chains every text run stays a TextRunPrimitive.
     let shape_fonts = ShapeFonts::build(input, fonts);
-    let render_options =
-        serde_json::from_value::<RenderOptionsIn>(input.options.clone()).unwrap_or_default();
+    let render_options = serde_json::to_string(&input.options)
+        .ok()
+        .and_then(|s| serde_json::from_str::<RenderOptionsIn>(&s).ok())
+        .unwrap_or_default();
 
     // Index measured blocks by canonical block key.
     let mut by_id: HashMap<Cow<'_, str>, &MeasuredBlockIn> = HashMap::new();
@@ -6512,8 +6514,9 @@ fn emit_line(
                     baseline - layout_height
                 };
                 if let Some(inline_value) = imr.inline_shape.as_ref()
-                    && let Ok(shape_block) =
-                        serde_json::from_value::<ShapeBlockIn>(inline_value.clone())
+                    && let Some(shape_block) = serde_json::to_string(&inline_value)
+                        .ok()
+                        .and_then(|s| serde_json::from_str::<ShapeBlockIn>(&s).ok())
                 {
                     let stamp_from = prims.len();
                     let fragment = ShapeFragmentIn {
@@ -10875,7 +10878,9 @@ pub fn build_display_list_value_with_fonts(
 ) -> Result<DisplayList, String> {
     let mut wire: Value = serde_json::from_str(input).map_err(|e| format!("parse: {e}"))?;
     normalize_integral_json_numbers(&mut wire);
-    let parsed: BuildInput = serde_json::from_value(wire).map_err(|e| format!("parse: {e}"))?;
+    let parsed: BuildInput = serde_json::to_string(&wire)
+        .map_err(|e| format!("parse: {e}"))
+        .and_then(|s| serde_json::from_str(&s).map_err(|e| format!("parse: {e}")))?;
     Ok(build_display_list(&parsed, fonts))
 }
 
@@ -11224,8 +11229,9 @@ fn resident_build_input_for(
     }
     let mut wire = Value::Object(fields);
     normalize_integral_json_numbers(&mut wire);
-    let extras: ResidentExtrasWire =
-        serde_json::from_value(wire).map_err(|e| format!("parse resident display input: {e}"))?;
+    let extras: ResidentExtrasWire = serde_json::to_string(&wire)
+        .and_then(|s| serde_json::from_str(&s))
+        .map_err(|e| format!("parse resident display input: {e}"))?;
     let mut transcoder = crate::transcode::Transcoder::default();
     let layout = convert_resident_layout(&mut transcoder, layout, pages)
         .map_err(|e| format!("parse resident display input: {e}"))?;
@@ -11254,12 +11260,12 @@ fn resident_build_input_for(
     let headers_footers = extras
         .headers_footers
         .clone()
-        .map(serde_json::from_value)
+        .map(|v| serde_json::to_string(&v).and_then(|s| serde_json::from_str(&s)))
         .transpose()
         .map_err(|e| format!("parse resident display input: {e}"))?;
     let headers_footers_content = extras
         .headers_footers
-        .map(serde_json::from_value)
+        .map(|v| serde_json::to_string(&v).and_then(|s| serde_json::from_str(&s)))
         .transpose()
         .map_err(|e| format!("parse resident display input: {e}"))?;
     Ok(BuildInput {

@@ -12,11 +12,12 @@ import {
 import type { PagedEditorRef } from '../components/DocxEditor/PagedEditor';
 import type { SelectionState } from '../components/DocxEditor/types';
 import { defineDocxPlugin } from './defineDocxPlugin';
+import { PluginOverlays } from './PluginOverlays';
 import { useDocxPluginHost, type UseDocxPluginHostOptions } from './useDocxPluginHost';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
-const { act, cleanup, renderHook, waitFor } = await import('@testing-library/react');
+const { act, cleanup, render, renderHook, waitFor } = await import('@testing-library/react');
 const restores: Array<() => void> = [];
 
 afterEach(() => {
@@ -78,6 +79,10 @@ function setup() {
     onEvent(context, event) {
       if (event.type === 'layout-change' && event.layout) events.push(context.geometry !== null);
     },
+    overlay: ({ geometry }) =>
+      geometry.toOverlayRect({ x: 0, y: 0, width: 100, height: 200 }) ? (
+        <div data-testid="page-overlay" data-layout={geometry.layout.id} />
+      ) : null,
   });
   const options: UseDocxPluginHostOptions = {
     plugins: [plugin],
@@ -97,10 +102,18 @@ function setup() {
     i18n: undefined,
     onRenderedDomContextReady: undefined,
   };
-  const { result } = renderHook(() => useDocxPluginHost(options));
+  const { result, rerender } = renderHook(
+    (props: UseDocxPluginHostOptions) => useDocxPluginHost(props),
+    { initialProps: options }
+  );
   return {
     events,
     result,
+    options,
+    rerender,
+    queries,
+    pages,
+    layer,
     present: () => markPresented(pages, displayList),
     attachLayer: () => result.current.overlayLayerRef(layer),
     emitDom: () =>
@@ -154,4 +167,54 @@ test('geometry that exists before its layout is presented adds no layout change'
 
   await rebuild();
   expect(view.events).toEqual([false, true]);
+});
+
+test('overlays keep their node when a new frame retires geometry before activations publish', async () => {
+  const view = setup();
+  await act(async () => {
+    view.attachLayer();
+    view.emitDom();
+    view.present();
+  });
+  await waitFor(() => expect(view.result.current.activations[0]?.context.geometry).toBeTruthy());
+  const activations = view.result.current.activations;
+  const previous = activations[0]!.context.geometry!;
+  const overlays = (entries = activations) => (
+    <PluginOverlays
+      host={view.result.current.host}
+      activations={entries}
+      target={view.layer}
+      layerRef={() => {}}
+      heldGeometry={view.result.current.heldGeometry}
+    />
+  );
+  const rendered = render(overlays());
+  const marker = () => view.layer.querySelector('[data-testid="page-overlay"]');
+  const before = marker();
+  expect(before).not.toBeNull();
+
+  const next = { ...view.queries, displayList: { ...view.queries.displayList } };
+  stampSourceVersion(next, 'v1');
+  stampRevisionPreviewKey(next, '');
+  await act(async () => {
+    view.rerender({ ...view.options, queries: next });
+    view.result.current.onRenderedDomContext(createRenderedDomContext(view.pages, 1), next);
+    markPresented(view.pages, next.displayList);
+  });
+  await waitFor(() => {
+    expect(view.result.current.heldGeometry).toBeTruthy();
+    expect(view.result.current.heldGeometry?.layout.id).not.toBe(previous.layout.id);
+    expect(view.result.current.activations[0]?.context.geometry?.layout.id).toBe(
+      view.result.current.heldGeometry?.layout.id
+    );
+  });
+  const current = view.result.current.heldGeometry!;
+  expect(previous.toOverlayRect({ x: 0, y: 0, width: 100, height: 200 })).toBeNull();
+  expect(current.toOverlayRect({ x: 0, y: 0, width: 100, height: 200 })).not.toBeNull();
+
+  rendered.rerender(overlays());
+  expect(marker() === before).toBe(true);
+  expect(marker()?.getAttribute('data-layout')).toBe(current.layout.id);
+  rendered.rerender(overlays(view.result.current.activations));
+  expect(marker() === before).toBe(true);
 });

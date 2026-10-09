@@ -26,6 +26,8 @@ mod cache_patch_tests;
 mod oracle;
 #[cfg(test)]
 mod oracle_tests;
+#[cfg(test)]
+mod regeneration_tests;
 mod style_match;
 #[cfg(test)]
 mod style_match_tests;
@@ -1082,6 +1084,188 @@ fn expanded_empty(
         suffix,
         content: span.end..span.end,
     })
+}
+
+/// First markup a model-only `<sheetData>` write would lose.
+pub(crate) fn sheet_data_regeneration_loss(data: &[u8]) -> Result<Option<String>, ParseError> {
+    let mut reader = Reader::from_reader(data);
+    reader.config_mut().expand_empty_elements = false;
+    reader.config_mut().check_end_names = true;
+    let mut path: Vec<Vec<u8>> = Vec::new();
+    let mut row_ordinal = 0;
+    let mut cell_ordinal = 0;
+    let mut row_location = "sheetData".to_owned();
+    let mut cell_location = None;
+    let mut cell_children = 0_u8;
+    let mut inline_text = false;
+    let loss = |markup: String, location: &str| {
+        Ok(Some(format!(
+            "regenerating sheetData would drop {markup} at {location}"
+        )))
+    };
+    loop {
+        let event = reader.read_event().map_err(xml_err)?;
+        let empty = matches!(&event, Event::Empty(_));
+        match event {
+            Event::Start(element) | Event::Empty(element) => {
+                let name = element.local_name().as_ref().to_vec();
+                let parent = path.last().map(Vec::as_slice);
+                if parent == Some(b"sheetData") && name == b"row" {
+                    row_ordinal += 1;
+                    cell_ordinal = 0;
+                    row_location = format!(
+                        "row {}",
+                        attr(&element, b"r")?.unwrap_or_else(|| row_ordinal.to_string())
+                    );
+                } else if parent == Some(b"row") && name == b"c" {
+                    cell_ordinal += 1;
+                    cell_location = Some(attr(&element, b"r")?.map_or_else(
+                        || format!("{row_location}, cell {cell_ordinal}"),
+                        |address| format!("cell {address}"),
+                    ));
+                    cell_children = 0;
+                }
+                let location = cell_location.as_deref().unwrap_or(&row_location);
+                let allowed = match parent {
+                    None => name == b"sheetData",
+                    Some(b"sheetData") => name == b"row",
+                    Some(b"row") => name == b"c",
+                    Some(b"c") => {
+                        let bit = match name.as_slice() {
+                            b"f" => 1,
+                            b"v" => 2,
+                            b"is" => 4,
+                            _ => 0,
+                        };
+                        let allowed = bit != 0
+                            && cell_children & bit == 0
+                            && (bit & 6 == 0 || cell_children & 6 == 0);
+                        cell_children |= bit;
+                        if name == b"is" {
+                            inline_text = false;
+                        }
+                        allowed
+                    }
+                    Some(b"is") => {
+                        let allowed = name == b"t" && !inline_text;
+                        inline_text = true;
+                        allowed
+                    }
+                    _ => false,
+                };
+                if !allowed {
+                    return loss(format!("<{}>", String::from_utf8_lossy(&name)), location);
+                }
+                for attribute in element.attributes() {
+                    let attribute = attribute.map_err(xml_err)?;
+                    let key = attribute.key.as_ref();
+                    if key == b"xmlns" || key.starts_with(b"xmlns:") {
+                        continue;
+                    }
+                    let value = if matches!(
+                        (name.as_slice(), key),
+                        (b"c" | b"f", b"t") | (b"t", b"xml:space")
+                    ) {
+                        attribute
+                            .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                            .map_err(xml_err)?
+                    } else {
+                        String::from_utf8_lossy(attribute.value.as_ref())
+                    };
+                    let allowed = match name.as_slice() {
+                        b"row" => {
+                            matches!(
+                                key,
+                                b"r" | b"ht"
+                                    | b"customHeight"
+                                    | b"hidden"
+                                    | b"spans"
+                                    | b"thickTop"
+                                    | b"thickBot"
+                            ) || attribute.key.local_name().as_ref() == b"dyDescent"
+                        }
+                        b"c" => match key {
+                            b"r" | b"s" => true,
+                            b"t" => matches!(
+                                value.as_ref(),
+                                "n" | "s" | "str" | "inlineStr" | "b" | "e"
+                            ),
+                            _ => false,
+                        },
+                        b"f" => match key {
+                            b"t" => matches!(value.as_ref(), "shared" | "array" | "normal"),
+                            b"ref" | b"si" => true,
+                            _ => false,
+                        },
+                        b"t" => {
+                            key == b"xml:space" && matches!(value.as_ref(), "preserve" | "default")
+                        }
+                        _ => false,
+                    };
+                    if !allowed {
+                        return loss(
+                            format!(
+                                "<{}> attribute {}=\"{value}\"",
+                                String::from_utf8_lossy(&name),
+                                String::from_utf8_lossy(key),
+                            ),
+                            location,
+                        );
+                    }
+                }
+                if empty && name == b"is" {
+                    return loss("<is> without a plain <t>".to_owned(), location);
+                }
+                if !empty {
+                    path.push(name);
+                } else if name == b"c" {
+                    cell_location = None;
+                } else if name == b"row" {
+                    row_location = "sheetData".to_owned();
+                }
+            }
+            Event::End(_) => {
+                if path.last().is_some_and(|name| name == b"is") && !inline_text {
+                    return loss(
+                        "<is> without a plain <t>".to_owned(),
+                        cell_location.as_deref().unwrap_or(&row_location),
+                    );
+                }
+                match path.pop().as_deref() {
+                    Some(b"c") => cell_location = None,
+                    Some(b"row") => row_location = "sheetData".to_owned(),
+                    _ => {}
+                }
+            }
+            Event::Text(text)
+                if !matches!(path.last().map(Vec::as_slice), Some(b"f" | b"v" | b"t")) =>
+            {
+                if !text.decode().map_err(xml_err)?.trim().is_empty() {
+                    return loss(
+                        "text".to_owned(),
+                        cell_location.as_deref().unwrap_or(&row_location),
+                    );
+                }
+            }
+            Event::CData(_) | Event::GeneralRef(_)
+                if matches!(path.last().map(Vec::as_slice), Some(b"f" | b"v" | b"t")) => {}
+            Event::Text(_) => {}
+            Event::Eof => return Ok(None),
+            event => {
+                let markup = match event {
+                    Event::Comment(_) => "XML comment",
+                    Event::PI(_) => "processing instruction",
+                    Event::CData(_) => "CDATA outside cell text",
+                    Event::GeneralRef(_) => "entity outside cell text",
+                    _ => "XML markup",
+                };
+                return loss(
+                    markup.to_owned(),
+                    cell_location.as_deref().unwrap_or(&row_location),
+                );
+            }
+        }
+    }
 }
 
 /// Rows and cells of a `<sheetData>`; `None` when unpatchable cell by cell.

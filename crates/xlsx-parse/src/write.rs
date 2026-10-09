@@ -24,7 +24,7 @@ use crate::package::{
     XmlTemplate, attributes_from_fragment, effective_content_type, normalized_part_name,
     parse_relationships, relationship_part_path, remove_attribute, set_attribute,
 };
-use crate::patch::{SheetPatch, SourceStyles, StyleMatch};
+use crate::patch::{SheetPatch, SourceStyles, StyleMatch, sheet_data_regeneration_loss};
 use crate::read::SharedStringCells;
 use crate::xml::{resolve_part_path, xml_err};
 
@@ -742,6 +742,10 @@ fn unwritable_chart(part: &str, sheet: &str) -> ParseError {
     ParseError::UnsupportedEdit(format!(
         "chart {part} was not read from sheet {sheet}, and this crate cannot create one"
     ))
+}
+
+fn unwritable_grid(sheet: &str, reason: impl std::fmt::Display) -> ParseError {
+    ParseError::UnsupportedEdit(format!("sheet {sheet}: {reason}"))
 }
 
 /// Everything a save over a preserved package must satisfy before a byte is
@@ -2550,8 +2554,7 @@ struct WorksheetOutput {
 }
 
 /// The `<cols>` and `<sheetData>` elements with only the changed columns, rows
-/// and cells rewritten and every other byte kept verbatim. `None` when the
-/// source cannot be patched cell by cell, which reserializes from the model.
+/// and cells rewritten and every other byte kept verbatim.
 #[allow(clippy::too_many_arguments)]
 fn patched_grid(
     sheet: &Sheet,
@@ -2562,7 +2565,7 @@ fn patched_grid(
     shared_string_cells: &SharedStringCells,
     shared_string_plan: Option<&SharedStringPlan>,
     styles: &StyleMatch<'_>,
-) -> Option<(Option<Vec<u8>>, Vec<u8>)> {
+) -> Result<(Option<Vec<u8>>, Vec<u8>), ParseError> {
     let mut sst_index: HashMap<&str, usize> = HashMap::with_capacity(wb.shared_strings.len());
     if shared_string_plan.is_none() {
         for (index, value) in wb.shared_strings.iter().enumerate() {
@@ -2586,32 +2589,52 @@ fn patched_grid(
                 .child("cols")
                 .map(|child| child.bytes.as_slice()),
         )
-        .ok()?;
+        .map_err(|error| unwritable_grid(&sheet.name, error))?;
     let sheet_data = match source.template.child("sheetData") {
-        Some(child) => patch.sheet_data(&child.bytes).ok()?.or_else(|| {
-            let explicit = source_coordinates::explicit_rows(&child.bytes, axes).ok()??;
-            patch.sheet_data(&explicit).ok()?
-        }),
+        Some(child) => {
+            let patched = patch
+                .sheet_data(&child.bytes)
+                .map_err(|error| unwritable_grid(&sheet.name, error))?;
+            match patched {
+                Some(patched) => Some(patched),
+                None => match source_coordinates::explicit_rows(&child.bytes, axes)
+                    .map_err(|error| unwritable_grid(&sheet.name, error))?
+                {
+                    Some(explicit) => patch
+                        .sheet_data(&explicit)
+                        .map_err(|error| unwritable_grid(&sheet.name, error))?,
+                    None => None,
+                },
+            }
+        }
         None => None,
-    }
-    .or_else(|| {
-        fragment(|writer| {
-            write_sheet_data(
-                writer,
-                sheet,
-                wb,
-                shared_string_cells,
-                shared_string_plan,
-                Some(SourceStyles {
-                    original,
-                    axes,
-                    styles,
-                }),
-            )
-        })
-        .ok()
-    })?;
-    Some((columns, sheet_data))
+    };
+    let sheet_data = match sheet_data {
+        Some(sheet_data) => sheet_data,
+        None => {
+            if let Some(child) = source.template.child("sheetData")
+                && let Some(loss) = sheet_data_regeneration_loss(&child.bytes)
+                    .map_err(|error| unwritable_grid(&sheet.name, error))?
+            {
+                return Err(unwritable_grid(&sheet.name, loss));
+            }
+            fragment(|writer| {
+                write_sheet_data(
+                    writer,
+                    sheet,
+                    wb,
+                    shared_string_cells,
+                    shared_string_plan,
+                    Some(SourceStyles {
+                        original,
+                        axes,
+                        styles,
+                    }),
+                )
+            })?
+        }
+    };
+    Ok((columns, sheet_data))
 }
 
 /// Preserved fragments (filters, validations, anchors) keep their source
@@ -2630,7 +2653,7 @@ fn worksheet_xml_with_template(
 ) -> Result<WorksheetOutput, ParseError> {
     let template = &source.template;
     let patched = match (original, sheet_axes) {
-        (Some(original), Some(axes)) => patched_grid(
+        (Some(original), Some(axes)) => Some(patched_grid(
             sheet,
             wb,
             original,
@@ -2639,7 +2662,7 @@ fn worksheet_xml_with_template(
             shared_string_cells,
             shared_string_plan,
             styles,
-        ),
+        )?),
         _ => None,
     };
     let (columns, sheet_data) = match patched {

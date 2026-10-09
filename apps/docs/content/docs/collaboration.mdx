@@ -84,8 +84,48 @@ shared starting state for that document. The demo generates these states with
 Call `provider.destroy()` and disconnect the transport when the editor unmounts
 or changes rooms.
 
+## Relay checkpoints and rehydration
+
+The reference relay checkpoints its retained updates automatically after 512
+frames, when the retained byte budget would be exceeded, or when a frame is
+larger than 64 KiB. A checkpoint merges the binary Yjs v1 updates without
+changing their CRDT identities. New updates form a short tail after it.
+
+The checkpoint and deletion of covered updates commit in one storage
+transaction. Checkpoint bytes are split into 64 KiB storage chunks. When a room
+restarts, it loads the checkpoint and newer tail before accepting clients.
+Joining clients receive both, then exchange state vectors with the relay to
+supply a missing initial seed or offline changes. No online peer is required to
+recover state already persisted in the room. Hosts with a Durable Object binding
+can also call `await room.checkpoint()` to compact immediately.
+
+Checkpoints preserve updates with missing dependencies, so updates arriving out
+of order are still mergeable when their dependencies arrive. They deduplicate
+and compact the update log; they do not garbage-collect deleted CRDT content,
+reset client clocks, or provide a version-history archive. State already evicted
+by an older relay cannot be recovered from its remaining log alone: a client
+with the complete state must reconnect.
+
+The checkpoint must fit in the 16 MiB collaboration frame budget. If merging
+cannot fit a new update, the relay refuses it and preserves the previously
+committed state. Storage failures close connections instead of broadcasting
+uncommitted updates. The next request reloads committed state, so clients can
+reconnect once storage recovers. The relay accepts one state-vector query per
+frame to bound diff computation and caches merged state between updates.
+Malformed legacy update entries are removed during repair; a peer with complete
+state can supply missing history on reconnect. Malformed checkpoint storage
+prevents the room from serving partial state.
+
+The reference room still expires after 24 hours without connected clients.
+Persist your source document and long-term backups separately; a checkpoint is
+not a permanent saved Office file.
+
 ## Production setup
 
 Before deploying, add authentication and room authorization, set connection and
-storage quotas, and plan how to snapshot or compact long-lived documents. The
-reference relay retains at most 512 frames or 16 MiB per room.
+storage quotas, and choose a retention policy for long-lived documents. The
+reference relay checkpoints automatically within its 16 MiB frame budget and
+keeps the existing 24-hour idle expiration.
+It caps total awareness payloads at 32 KiB per frame and allows a burst of 30
+awareness frames per connection, replenishing 30 frames per second. These limits
+apply by default, including to frames that also carry document updates.

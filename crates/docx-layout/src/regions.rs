@@ -640,7 +640,9 @@ fn apply_document_regions_with(
                     number as i64,
                     numbering.format.as_deref().unwrap_or("decimal"),
                 ));
-                page.page_numbering = serde_json::to_value(numbering).ok();
+                page.page_numbering = serde_json::to_string(&numbering)
+                    .ok()
+                    .and_then(|s| serde_json::from_str(&s).ok());
             } else if number != u64::from(page.number) {
                 page.section_page_number = Some(number);
                 page.page_label = Some(number.to_string());

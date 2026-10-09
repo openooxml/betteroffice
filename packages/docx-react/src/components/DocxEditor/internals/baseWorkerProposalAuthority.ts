@@ -1,4 +1,5 @@
 import type {
+  AnchorGeometryTarget,
   DocxContentControlQuery,
   DocxContentControlsOptions,
   DocxContentControlsResult,
@@ -21,6 +22,7 @@ import type {
   DocxReadParagraphsRequest,
   DocxReadParagraphsResult,
   ProposalGeometryMirror,
+  ProposalGeometryTarget,
   ResidentProposalReply,
   ResidentEngineWorkerClient,
   YrsLoc,
@@ -37,6 +39,7 @@ import {
   workerOpenRequest,
 } from './workerOpenReplica';
 
+type NonProposalTarget = Exclude<AnchorGeometryTarget, { kind: 'proposal' }>;
 type SearchRead = Awaited<ReturnType<typeof ResidentEngineWorkerClient.prototype.documentRead<'searchText'>>>;
 type StickyAnchorsRead = Awaited<ReturnType<typeof ResidentEngineWorkerClient.prototype.documentRead<'stickyAnchors'>>>;
 
@@ -50,6 +53,8 @@ export interface WorkerProposalAuthority {
   initialize(): Promise<void>;
   /** Mirrored geometry until hand-over. */
   geometry(): ProposalGeometryMirror | null;
+  /** Cached worker geometry; listeners hear when a target resolves. */
+  anchorTarget(target: NonProposalTarget): ProposalGeometryTarget | undefined;
   /** Reseeding would lose worker changes, including those of a state change still in flight. */
   holdsWorkerState(): boolean;
   /** Reseeding would lose worker changes the main thread has already observed. */
@@ -176,6 +181,12 @@ export function registerWorkerProposalAuthority(
   let initialized = false;
   let mirror: ResidentProposalReply['mirror'] | null = null;
   let geometry: ProposalGeometryMirror | null = null;
+  let anchorTargets: {
+    geometry: ProposalGeometryMirror;
+    resolved: Map<string, ProposalGeometryTarget>;
+    requested: Set<string>;
+    batch: Map<string, NonProposalTarget> | null;
+  } | null = null;
   let holdsState = false;
   let mutating = 0;
   let handingOver = false;
@@ -211,6 +222,21 @@ export function registerWorkerProposalAuthority(
     mirror = reply.mirror;
     session.mirrorWorkerDocument(mirror);
     notify();
+  };
+  const resolveAnchorTargets = (entry: NonNullable<typeof anchorTargets>): void => {
+    const batch = entry.batch!;
+    entry.batch = null;
+    const keys = [...batch.keys()];
+    const forget = () => { for (const key of keys) entry.requested.delete(key); };
+    const current = () => anchorTargets === entry && geometry === entry.geometry &&
+      initialized && !handingOver && !failure && hooks.current();
+    if (!current()) return forget();
+    void interruptible(worker.documentRead({ kind: 'anchorTargets', targets: [...batch.values()] }))
+      .then((read) => {
+        if (!current() || read.version !== entry.geometry.version) return forget();
+        keys.forEach((key, index) => entry.resolved.set(key, read.value[index]!));
+        notify();
+      }, forget);
   };
   // Calls answer in order. One made before the hand-over began runs in the worker, ahead of the
   // hand-over; one made after waits in turn for the replica.
@@ -322,6 +348,24 @@ export function registerWorkerProposalAuthority(
       return initializing;
     },
     geometry: () => geometry,
+    anchorTarget(target) {
+      const current = geometry;
+      if (!current || !initialized || handingOver || failure || !hooks.current()) return undefined;
+      if (anchorTargets?.geometry !== current) {
+        anchorTargets = { geometry: current, resolved: new Map(), requested: new Set(), batch: null };
+      }
+      const entry = anchorTargets;
+      const key = JSON.stringify(target);
+      const resolved = entry.resolved.get(key);
+      if (resolved || entry.requested.has(key)) return resolved;
+      entry.requested.add(key);
+      if (!entry.batch) {
+        entry.batch = new Map();
+        queueMicrotask(() => resolveAnchorTargets(entry));
+      }
+      entry.batch.set(key, JSON.parse(key) as NonProposalTarget);
+      return undefined;
+    },
     holdsWorkerState: () => holdsState || mutating > 0,
     holdsCommittedWorkerState: () => holdsState,
     failure: () => failure?.error,

@@ -1,7 +1,23 @@
 import type { CellRange, DisplayList, MergedRange, SelectionLimits, SheetInfo } from '@betteroffice/xlsx';
+import { cellAtPoint, chartRegionAtPoint } from '@betteroffice/xlsx';
+import type { XlsxPointPosition } from '../XlsxEditor';
 
 const COL_W = 96;
 const ROW_H = 24;
+
+export function positionAtPoint(
+  frame: DisplayList, sheet: number, canvas: HTMLCanvasElement | null, clientX: number, clientY: number
+): XlsxPointPosition | null {
+  if (!canvas || !frame.grid || !Number.isFinite(clientX) || !Number.isFinite(clientY)) return null;
+  const rect = canvas.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0 || clientX < rect.left || clientY < rect.top ||
+      clientX >= rect.right || clientY >= rect.bottom) return null;
+  const x = (clientX - rect.left) * frame.width / rect.width;
+  const y = (clientY - rect.top) * frame.height / rect.height;
+  if (chartRegionAtPoint(frame.charts, x, y)) return null;
+  const cell = cellAtPoint(frame.grid, x, y);
+  return cell ? { ...cell, sheet } : null;
+}
 
 function medianTrack(offsets: number[] | undefined, fallback: number): number {
   if (!offsets || offsets.length < 2) return fallback;

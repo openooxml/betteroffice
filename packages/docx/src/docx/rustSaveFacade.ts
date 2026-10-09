@@ -2,8 +2,8 @@
 
 import type { BlockContent, Document, HeaderFooter, Hyperlink, Image, Run } from '../types/document';
 import { visitTrackedControlContent } from '../utils/trackedControlContent';
-import { preloadParseWasm, writeDocxS13Wire } from './parseWasm';
 import { isWrittenByCanonical } from './headerFooterAliasProjection';
+import { preloadParseWasm, writeDocxS13WithWarningsWire } from './parseWasm';
 import { collectParts, headerFooterFilename, partText } from './rezip/parts';
 import { preloadOpcWasm, unzipContainer } from './wasm';
 
@@ -32,6 +32,7 @@ export interface RustSelectiveSave {
 export interface RustSaveResult {
   buffer: ArrayBuffer;
   determinism: RustSaveDeterminism;
+  warnings: string[];
 }
 
 /**
@@ -47,9 +48,18 @@ export interface RustParagraphIds {
    * re-serialized: those whose `sourceOrdinal` is in `changed`, or whose
    * written comments, revisions, notes or relationships differ from their
    * source. `paragraphs` lists every `sourceOrdinal` the model holds for the
-   * part, `sha256` the source part it addresses.
+   * part, `sha256` the source part it addresses, `removed` the source
+   * paragraphs it no longer holds, and `inserted`, in writing order, where
+   * each paragraph written without a `sourceOrdinal` goes.
    */
-  splicedParts?: Array<{ part: string; sha256: string; paragraphs: number[]; changed: number[] }>;
+  splicedParts?: Array<{
+    part: string;
+    sha256: string;
+    paragraphs: number[];
+    changed: number[];
+    inserted?: Array<{ before: number } | { after: number }>;
+    removed?: number[];
+  }>;
 }
 
 function headerFooterSaveEntries(
@@ -75,8 +85,7 @@ export async function writeDocumentWithRust(
   paragraphIds?: RustParagraphIds,
   skipMutations = false
 ): Promise<RustSaveResult> {
-  await preloadOpcWasm();
-  await preloadParseWasm();
+  await Promise.all([preloadOpcWasm(), preloadParseWasm()]);
   const fixed =
     determinism ??
     ({
@@ -114,10 +123,13 @@ export async function writeDocumentWithRust(
     ...(paragraphIds === undefined ? {} : { paragraphIds }),
   };
   assertSafeSaveTree(request, 'save');
-  const bytes = writeDocxS13Wire(JSON.stringify(request), new Uint8Array(originalBuffer));
+  const { bytes, warnings } = writeDocxS13WithWarningsWire(
+    JSON.stringify(request),
+    new Uint8Array(originalBuffer)
+  );
   const buffer = exactArrayBuffer(bytes);
   if (!selective && !skipMutations) applyRustSaveMutations(document, originalBuffer, buffer);
-  return { buffer, determinism: fixed };
+  return { buffer, determinism: fixed, warnings: [...(document.warnings ?? []), ...warnings] };
 }
 
 /** Applies saved relationship IDs to bound model nodes. */

@@ -41,6 +41,7 @@ export interface WorkerEditorSessionAccess {
 }
 
 export interface WorkerEditorApiBridge {
+  getPositionAtPoint?: XlsxWorkerViewerApi['getPositionAtPoint'];
   coordinator(): WorkerInputCoordinator | null;
   readOnly(): boolean;
   clearSelection(): void;
@@ -188,17 +189,22 @@ export function createWorkerEditorApi(
   const save = () => ordered('save', async () => new Uint8Array(await requirePeer().edits.save()));
   const readable = () => session.current && !session.retiring && session.ready && !session.failure &&
     !bridge().coordinator()?.unapplied.length && !bridge().coordinator()?.draft;
+  const flushPendingInput = async () => {
+    assertCurrent();
+    if (session.retiring) throw new XlsxCommandAdmissionError('document-replaced');
+    await coordinator().flush();
+    requirePeer();
+  };
 
   return {
     handle: null, commands,
     get hydrated() { return session.ready && !session.retiring && !session.failure; },
     get failure() { return session.failure; },
     whenHydrated: () => session.whenHydrated(),
-    async flush() {
-      assertCurrent();
-      await coordinator().flush();
-      requirePeer();
-    },
+    flush: flushPendingInput,
+    flushPendingInput,
+    getPositionAtPoint: (x, y) => session.current && !session.retiring && !session.failure
+      ? bridge().getPositionAtPoint?.(x, y) ?? null : null,
     save, saveAsync: save,
     async recoverySave() {
       assertCurrent();

@@ -2441,25 +2441,12 @@ fn assign_marker_offsets(content: &mut [InlineNode]) {
 
 fn inline_content_length(node: &InlineNode) -> usize {
     match node {
-        InlineNode::Run(run) => run
-            .content
-            .iter()
-            .map(|content| match content {
-                RunContent::Text { text, .. } | RunContent::InstrText { text } => {
-                    // Text offsets count UTF-16 code units.
-                    text.encode_utf16().count()
-                }
-                RunContent::Tab
-                | RunContent::SoftHyphen
-                | RunContent::NoBreakHyphen
-                | RunContent::Symbol { .. } => 1,
-                _ => 0,
-            })
-            .sum(),
+        InlineNode::Run(run) => run.content.iter().map(run_content_length).sum(),
         InlineNode::Hyperlink(hyperlink) => hyperlink
-            .children
+            .structured_children
+            .as_deref()
+            .unwrap_or(&hyperlink.children)
             .iter()
-            .filter(|child| matches!(child, InlineNode::Run(_)))
             .map(inline_content_length)
             .sum(),
         InlineNode::SimpleField(field) => field
@@ -2478,12 +2465,40 @@ fn inline_content_length(node: &InlineNode) -> usize {
             .sum(),
         InlineNode::InlineSdt(sdt) => sdt.content.iter().map(inline_content_length).sum(),
         InlineNode::Tracked(change) => change.content.iter().map(inline_content_length).sum(),
-        InlineNode::Math(math) => math
-            .plain_text
-            .as_deref()
-            .map(|text| text.encode_utf16().count())
-            .unwrap_or(0),
+        InlineNode::Math(_) => 1,
         InlineNode::BookmarkStart(_) | InlineNode::BookmarkEnd(_) | InlineNode::RawXml(_) => 0,
+    }
+}
+
+/// Story width of one run atom: text in UTF-16 units, every live embed one.
+pub(crate) fn run_content_length(content: &RunContent) -> usize {
+    match content {
+        RunContent::Text { text, .. } | RunContent::InstrText { text } => {
+            text.encode_utf16().count()
+        }
+        RunContent::Tab
+        | RunContent::SoftHyphen
+        | RunContent::NoBreakHyphen
+        | RunContent::Symbol { .. }
+        | RunContent::FootnoteRef { .. }
+        | RunContent::EndnoteRef { .. }
+        | RunContent::CommentReference { .. }
+        | RunContent::Drawing { .. }
+        | RunContent::Shape { .. }
+        | RunContent::HorizontalRule { .. }
+        | RunContent::Chart { .. }
+        | RunContent::OpaqueDrawing { .. } => 1,
+        RunContent::Break { break_type, .. } => {
+            if break_type
+                .as_deref()
+                .is_none_or(|kind| kind == "textWrapping")
+            {
+                1
+            } else {
+                0
+            }
+        }
+        _ => 0,
     }
 }
 
@@ -2803,6 +2818,29 @@ mod tests {
         assert_eq!(nested[0].display_mode.as_deref(), Some("result"));
         // Parsing records INCLUDETEXT; it never resolves or fetches it.
         assert!(field.instruction.starts_with("IF"));
+    }
+
+    #[test]
+    fn a_bookmark_after_hyperlink_math_counts_the_math_unit() {
+        let paragraph = root(
+            r#"<w:p><w:hyperlink w:anchor="a"><m:oMath><m:r><m:t>x</m:t></m:r></m:oMath><w:r><w:t>ab</w:t></w:r></w:hyperlink><w:bookmarkStart w:id="1" w:name="b"/></w:p>"#,
+        );
+        let limits = ParseLimits::default();
+        let content = parse_inline_container(
+            &paragraph,
+            None,
+            None,
+            None,
+            None,
+            "word/document.xml",
+            &ParseBudget::new(&limits),
+            0,
+        )
+        .unwrap();
+        let InlineNode::BookmarkStart(bookmark) = &content[1] else {
+            panic!("expected bookmark")
+        };
+        assert_eq!(bookmark.position.as_ref().unwrap().offset, Some(3.0));
     }
 
     #[test]

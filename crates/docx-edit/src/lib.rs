@@ -130,7 +130,7 @@ pub use identity::{
     AnchorResolution, AnchorUnsupported, ParagraphAnchor, ParagraphIdAssignment,
     ParagraphIdDiagnostic, ParagraphIdOrigin, ParagraphIdRefusal, ParagraphIdentities,
     ParagraphIdentity, ParagraphOrigin, ParagraphRef, ParagraphSavePlan, PersistedParagraphIds,
-    SourceParagraphRef, SourceStory, SourceStoryKind, SplicedPart,
+    SourceParagraphRef, SourceStory, SourceStoryKind, SpliceAnchor, SplicedPart,
 };
 pub use op::{Loc, LocRange, OpError, OpResult, Receipt, SplitReceipt};
 pub use ops::paragraph::{
@@ -148,7 +148,10 @@ pub use queries::{
 pub use raw::RawOp;
 pub use read_state::{RevisionInfo, SelectionContextInfo, TriState};
 pub use search::{TextSearchError, TextSearchMatch};
-pub use seed::{seed_docx_preview, seed_from_docx, seed_from_docx_with_generation};
+pub use seed::{
+    OPAQUE_SEED_BUDGET_BYTES, is_opaque_seed_budget_error, opaque_seed_budget_exceeded,
+    seed_docx_preview, seed_from_docx, seed_from_docx_with_generation,
+};
 use segments::{ParagraphIndex, SegmentIndex, build_indexes};
 pub use target::{
     AtomKind, EditTextView, FindTextRequest, FindTextResponse, ParagraphTarget, ParagraphText,

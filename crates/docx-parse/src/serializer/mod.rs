@@ -30,7 +30,9 @@ pub use paragraph::{
     serialize_inline_sdt, serialize_paragraph, serialize_paragraph_content,
     serialize_paragraph_formatting, synthesize_sdt_properties,
 };
-pub use paragraph_ids::{S13ParagraphId, S13ParagraphIds, S13PatchedPart, S13SplicedPart};
+pub use paragraph_ids::{
+    S13ParagraphId, S13ParagraphIds, S13PatchedPart, S13SpliceAnchor, S13SplicedPart,
+};
 pub use parts::{
     CommentParaInfo, serialize_comments_extended_part, serialize_comments_extensible_part,
     serialize_comments_ids_part, serialize_comments_part, serialize_comments_with_info,
@@ -49,7 +51,7 @@ pub use s12::{S12SerializeRequest, S12SerializeResponse, serialize_s12_wire};
 pub use s13::{
     S13SaveOptions, S13SaveRequest, S13SelectiveSave, S13SourceParagraph, S13SourceParagraphs,
     build_patched_document_xml, element_span, update_core_properties, write_docx_s13,
-    write_docx_s13_parts,
+    write_docx_s13_parts, write_docx_s13_with_warnings,
 };
 pub use sdt::{serialize_block_content, serialize_block_sdt};
 pub use section::serialize_section_properties;

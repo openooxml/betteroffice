@@ -461,26 +461,7 @@ export function proposalSetIdentity(snapshot: DocxProposalSnapshot): string {
   return identity;
 }
 
-/** @internal */
-export function computeProposalGeometryMirror(
-  reader: ProposalGeometryReader,
-  snapshot: DocxProposalSnapshot,
-  includeNavigationTargets = true
-): ProposalGeometryMirror {
-  const version = reader.version();
-  let revisions: readonly ProposalGeometryRevision[] | undefined;
-  if (reader.proposalRevisions) {
-    const ids = [...new Set(snapshot.proposals.flatMap(({ revisionIds }) => revisionIds))].sort();
-    const key = JSON.stringify(ids);
-    const reads = readsAt(reader, version);
-    if (reads.proposalRevisions?.ids !== key) {
-      reads.proposalRevisions = {
-        ids: key,
-        revisions: ids.length > 0 ? reader.proposalRevisions(ids) : [],
-      };
-    }
-    revisions = reads.proposalRevisions.revisions;
-  }
+function displayMapping(reader: ProposalGeometryReader, version: string) {
   const projections = new Map<string, YrsLocProjection | null>();
   const inputMaps = new Map<string, YrsInputPositionMap | null>();
   const projectionFor = (rootStory: string): YrsLocProjection | null =>
@@ -508,21 +489,46 @@ export function computeProposalGeometryMirror(
     const to = positionFor(range.end);
     return from === null || to === null ? null : { from, to };
   };
+  const displayTarget = (resolved: AnchorResolution): ProposalGeometryTarget => {
+    if (!resolved.ok) return resolved;
+    const ranges: { from: number; to: number }[] = [];
+    for (const range of resolved.ranges) {
+      const mapped = display(range);
+      if (!mapped) return anchorFailure('unsupported', 'The target has no body display position');
+      ranges.push(mapped);
+    }
+    ranges.sort((a, b) => a.from - b.from || a.to - b.to);
+    return { ok: true, ranges, paragraph: positionFor(resolved.paragraph) };
+  };
+  return { positionFor, display, displayTarget };
+}
+
+/** @internal */
+export function computeProposalGeometryMirror(
+  reader: ProposalGeometryReader,
+  snapshot: DocxProposalSnapshot,
+  includeNavigationTargets = true
+): ProposalGeometryMirror {
+  const version = reader.version();
+  let revisions: readonly ProposalGeometryRevision[] | undefined;
+  if (reader.proposalRevisions) {
+    const ids = [...new Set(snapshot.proposals.flatMap(({ revisionIds }) => revisionIds))].sort();
+    const key = JSON.stringify(ids);
+    const reads = readsAt(reader, version);
+    if (reads.proposalRevisions?.ids !== key) {
+      reads.proposalRevisions = {
+        ids: key,
+        revisions: ids.length > 0 ? reader.proposalRevisions(ids) : [],
+      };
+    }
+    revisions = reads.proposalRevisions.revisions;
+  }
+  const { display, displayTarget } = displayMapping(reader, version);
   const targets = Object.fromEntries(
-    snapshot.proposals.map(({ id }): [string, ProposalGeometryTarget] => {
-      const resolved = resolveAnchorTarget(reader, { kind: 'proposal', id }, version, snapshot, revisions);
-      if (!resolved.ok) return [id, resolved];
-      const ranges: { from: number; to: number }[] = [];
-      for (const range of resolved.ranges) {
-        const mapped = display(range);
-        if (!mapped) {
-          return [id, anchorFailure('unsupported', 'The target has no body display position')];
-        }
-        ranges.push(mapped);
-      }
-      ranges.sort((a, b) => a.from - b.from || a.to - b.to);
-      return [id, { ok: true, ranges, paragraph: positionFor(resolved.paragraph) }];
-    })
+    snapshot.proposals.map(({ id }): [string, ProposalGeometryTarget] => [
+      id,
+      displayTarget(resolveAnchorTarget(reader, { kind: 'proposal', id }, version, snapshot, revisions)),
+    ])
   );
   return {
     version,
@@ -536,6 +542,23 @@ export function computeProposalGeometryMirror(
       .map(display)
       .filter((range): range is { from: number; to: number } => range !== null),
   };
+}
+
+/** @internal Display geometry of non-proposal targets. */
+export function computeAnchorTargetGeometry(
+  reader: ProposalGeometryReader,
+  targets: readonly Exclude<AnchorGeometryTarget, { kind: 'proposal' }>[]
+): ProposalGeometryTarget[] {
+  const version = reader.version();
+  const { displayTarget } = displayMapping(reader, version);
+  return targets.map((target) => {
+    try {
+      return displayTarget(resolveAnchorTarget(reader, target, version));
+    } catch (error) {
+      if (error instanceof WebAssembly.RuntimeError) throw error;
+      return anchorFailure('unsupported', error instanceof Error ? error.message : String(error));
+    }
+  });
 }
 
 /** @internal */
