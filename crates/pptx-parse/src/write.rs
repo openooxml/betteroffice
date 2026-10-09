@@ -2163,11 +2163,11 @@ fn rebuild_paragraphs(
     prefixes: &Prefixes,
 ) {
     let mut preamble = Vec::new();
-    let mut originals: Vec<Option<XmlElement>> = Vec::new();
+    let mut originals: Vec<XmlElement> = Vec::new();
     for child in std::mem::take(&mut body.children) {
         match child {
             XmlNode::Element(element) if element.local_name() == "p" => {
-                originals.push(Some(element));
+                originals.push(element);
             }
             XmlNode::Text(text) if text.trim().is_empty() => {}
             other => preamble.push(other),
@@ -2177,7 +2177,7 @@ fn rebuild_paragraphs(
     for paragraph in paragraphs {
         let source = paragraph
             .source_index
-            .and_then(|index| originals.get_mut(index).and_then(Option::take));
+            .and_then(|index| originals.get(index).cloned());
         let element = match source {
             Some(element) if !paragraph.rebuild => element,
             source => build_paragraph(paragraph, source, theme, prefixes),

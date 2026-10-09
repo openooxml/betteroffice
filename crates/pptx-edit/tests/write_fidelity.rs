@@ -360,6 +360,87 @@ fn replacing_paragraphs_preserves_properties_and_end_run_markup() {
     assert_eq!(deck.story(&story.id).unwrap(), story);
 }
 
+#[test]
+fn concurrent_paragraph_replacements_keep_unique_ids_and_formatting_through_history() {
+    let properties = r#"<a:pPr algn="r" lvl="2" marL="3000" indent="-1000"><a:spcBef><a:spcPts val="500"/></a:spcBef><a:buNone/></a:pPr>"#;
+    let end = r#"<a:endParaRPr lang="de-DE" sz="1700"/>"#;
+    let mut source = fixture_parts(256);
+    let slide = source
+        .iter_mut()
+        .find(|(path, _)| path == "ppt/slides/slide2.xml")
+        .unwrap();
+    slide.1 = slide.1.replace("<a:p><a:r><a:t>Second</a:t></a:r></a:p>", &format!("<a:p>{properties}<a:r><a:rPr b=\"1\" lang=\"en-US\" strike=\"sngStrike\"/><a:t>Second</a:t></a:r>{end}</a:p>"));
+    let source = zip(source);
+    let first = DeckSession::open(&source, 11).unwrap();
+    let second = DeckSession::open(&source, 12).unwrap();
+    let story = first.snapshot().unwrap().slides[1].shapes[0].text_stories[0].clone();
+    for (deck, text) in [
+        (&first, "First replacement"),
+        (&second, "Second replacement"),
+    ] {
+        deck.set_story_paragraphs(
+            &context(),
+            &story.id,
+            &[pptx_edit::TextParagraphDraft {
+                bullet: None,
+                alignment: None,
+                runs: vec![pptx_edit::TextRunDraft {
+                    text: text.into(),
+                    style: story.paragraphs[0].runs[0].style.clone(),
+                }],
+            }],
+        )
+        .unwrap();
+    }
+    first
+        .apply_update_v1(&second.encode_state_as_update_v1())
+        .unwrap();
+    second
+        .apply_update_v1(&first.encode_state_as_update_v1())
+        .unwrap();
+    assert_eq!(
+        first.story(&story.id).unwrap(),
+        second.story(&story.id).unwrap()
+    );
+    let check = |deck: &DeckSession| {
+        let current = deck.story(&story.id).unwrap();
+        let ids: std::collections::HashSet<_> = current.paragraphs.iter().map(|p| &p.id).collect();
+        assert_eq!(ids.len(), current.paragraphs.len());
+        let xml = part_text(&parts(&deck.save().unwrap()), "ppt/slides/slide2.xml");
+        for markup in [
+            "algn=\"r\"",
+            "marL=\"3000\"",
+            "indent=\"-1000\"",
+            end,
+            "lang=\"en-US\"",
+            "strike=\"sngStrike\"",
+        ] {
+            if markup == "lang=\"en-US\"" || markup == "strike=\"sngStrike\"" {
+                assert!(
+                    xml.matches(markup).count() >= current.paragraphs.len(),
+                    "{markup}"
+                );
+            } else {
+                assert_eq!(
+                    xml.matches(markup).count(),
+                    current.paragraphs.len(),
+                    "{markup}"
+                );
+            }
+        }
+    };
+    check(&first);
+    check(&second);
+    assert!(first.undo());
+    check(&first);
+    assert!(first.redo());
+    check(&first);
+    second
+        .apply_update_v1(&first.encode_state_as_update_v1())
+        .unwrap();
+    check(&second);
+}
+
 /// Every internal relationship in every .rels part must resolve to a part.
 fn assert_relationships_resolve(parts: &BTreeMap<String, Vec<u8>>) {
     for (path, bytes) in parts {

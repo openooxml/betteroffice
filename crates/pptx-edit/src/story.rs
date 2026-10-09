@@ -254,6 +254,17 @@ fn append_pilcrow(
     }
 }
 
+fn replacement_bullet(enabled: bool) -> EditResult<String> {
+    let bullet = if enabled {
+        pptx_parse::Bullet::Character {
+            value: "•".into()
+        }
+    } else {
+        pptx_parse::Bullet::None
+    };
+    serde_json::to_string(&bullet).map_err(|error| EditError::Json(error.to_string()))
+}
+
 impl DeckSession {
     pub fn story(&self, story_id: &str) -> EditResult<StorySnapshot> {
         let txn = self.doc.transact();
@@ -304,9 +315,9 @@ impl DeckSession {
         }
         let mut length = 0;
         for paragraph in paragraphs {
-            if paragraph.runs.is_empty() || paragraph.runs.len() > 64 {
+            if paragraph.runs.len() > 64 {
                 return Err(EditError::InvalidText(
-                    "supply 1 to 64 runs per paragraph".into(),
+                    "supply up to 64 runs per paragraph".into(),
                 ));
             }
             if paragraph
@@ -345,59 +356,56 @@ impl DeckSession {
         }
         let previous = self.story(story_id)?;
         let story = story_ref(&self.doc.transact(), story_id)?;
-        let paragraph_ids: Vec<_> = paragraphs
-            .iter()
-            .enumerate()
-            .map(|(index, _)| {
-                previous
-                    .paragraphs
-                    .get(index)
-                    .map_or_else(|| self.next_id("para"), |paragraph| paragraph.id.clone())
-            })
+        let new_ids: Vec<_> = (previous.paragraphs.len()..paragraphs.len())
+            .map(|_| self.next_id("para"))
             .collect();
         self.automatic_undo_barrier();
         let mut txn = self.transact_for(context);
-        let length = story.len(&txn);
-        story.remove_range(&mut txn, 0, length);
-        for (index, (paragraph, id)) in paragraphs.iter().zip(paragraph_ids).enumerate() {
-            let bullet = paragraph
-                .bullet
-                .map(|enabled| {
-                    if enabled {
-                        pptx_parse::Bullet::Character {
-                            value: "•".into()
-                        }
-                    } else {
-                        pptx_parse::Bullet::None
-                    }
-                })
-                .map(|bullet| serde_json::to_string(&bullet))
-                .transpose()
-                .map_err(|error| EditError::Json(error.to_string()))?;
-            for run in &paragraph.runs {
-                let index = story.len(&txn);
-                insert_styled_text(&story, &mut txn, index, &run.text, &run.style);
+        let mut existing = Vec::new();
+        let mut start = 0;
+        let mut offset = 0;
+        for diff in story.diff(&txn, YChange::identity) {
+            if let Out::YMap(pilcrow) = &diff.insert {
+                existing.push((start, offset, pilcrow.clone()));
+                start = offset + 1;
             }
+            offset += out_len(&diff.insert);
+        }
+        for (index, (start, end, pilcrow)) in existing.into_iter().enumerate().rev() {
+            let Some(paragraph) = paragraphs.get(index) else {
+                story.remove_range(&mut txn, start, end - start + 1);
+                continue;
+            };
+            story.remove_range(&mut txn, start, end - start);
+            let mut offset = start;
+            for run in &paragraph.runs {
+                insert_styled_text(&story, &mut txn, offset, &run.text, &run.style);
+                offset += run.text.encode_utf16().count() as u32;
+            }
+            if let Some(alignment) = &paragraph.alignment {
+                pilcrow.insert(&mut txn, "alignment", alignment.as_str());
+            }
+            if let Some(bullet) = paragraph.bullet {
+                pilcrow.insert(&mut txn, "bulletJson", replacement_bullet(bullet)?);
+            }
+        }
+        for (paragraph, id) in paragraphs
+            .iter()
+            .skip(previous.paragraphs.len())
+            .zip(new_ids)
+        {
+            for run in &paragraph.runs {
+                let offset = story.len(&txn);
+                insert_styled_text(&story, &mut txn, offset, &run.text, &run.style);
+            }
+            let bullet = paragraph.bullet.map(replacement_bullet).transpose()?;
             append_pilcrow(
                 &story,
                 &mut txn,
                 &id,
-                paragraph.alignment.as_deref().or_else(|| {
-                    previous
-                        .paragraphs
-                        .get(index)
-                        .and_then(|paragraph| paragraph.alignment.as_deref())
-                }),
-                previous
-                    .paragraphs
-                    .get(index)
-                    .map_or(0, |paragraph| paragraph.level),
-                bullet.as_deref().or_else(|| {
-                    previous
-                        .paragraphs
-                        .get(index)
-                        .and_then(|paragraph| paragraph.bullet_json.as_deref())
-                }),
+                paragraph.alignment.as_deref(),
+                0,
+                bullet.as_deref(),
             );
         }
         drop(txn);
