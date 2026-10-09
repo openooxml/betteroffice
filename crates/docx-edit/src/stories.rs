@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use yrs::{Map, ReadTxn, Transact};
@@ -26,7 +26,17 @@ pub enum StoryInfoKind {
 
 impl StoryInfoKind {
     fn parse(name: &str) -> Option<Self> {
-        serde_json::from_value(serde_json::Value::String(name.to_owned())).ok()
+        Some(match name {
+            "body" => Self::Body,
+            "table-cell" => Self::TableCell,
+            "content-control" => Self::ContentControl,
+            "header" => Self::Header,
+            "footer" => Self::Footer,
+            "footnote" => Self::Footnote,
+            "endnote" => Self::Endnote,
+            "other" => Self::Other,
+            _ => return None,
+        })
     }
 }
 
@@ -44,7 +54,7 @@ pub struct StoryInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub part: Option<String>,
     /// A header's or footer's sections whose properties reference the part, inheritance
-    /// applied, whether or not a page shows it.
+    /// applied, whether or not a page shows it; a preview's may be incomplete.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uses: Option<Vec<StoryUse>>,
 }
@@ -154,7 +164,7 @@ pub(crate) fn select_stories<T: ReadTxn>(
         .any(|entry| StoryInfoKind::parse(entry).is_some())
         .then(|| {
             let infos = story_infos(views);
-            let kinds: std::collections::HashMap<String, StoryInfoKind> = infos
+            let kinds: HashMap<String, StoryInfoKind> = infos
                 .iter()
                 .map(|info| (info.story.clone(), info.kind))
                 .collect();
@@ -202,5 +212,58 @@ impl EditingDoc {
             version,
             stories: story_infos(&mut views),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use yrs::Any;
+
+    use super::*;
+    use crate::{EditCtx, RawOp};
+
+    #[test]
+    fn without_a_source_section_references_name_headers_and_footers() {
+        let doc = EditingDoc::new(100);
+        doc.create_story("body", "x", "Normal", "left").unwrap();
+        for story in ["hf:rIdH", "hf:rIdF", "hf:rIdX"] {
+            doc.create_story(story, "y", "Normal", "left").unwrap();
+        }
+        let section = Any::from_json(
+            r#"{"headerReferences":[{"type":"default","rId":"rIdH"}],"footerReferences":[{"type":"first","rId":"rIdF"}]}"#,
+        )
+        .unwrap();
+        doc.apply_raw_ops(
+            "body",
+            vec![RawOp::SetEmbedAttr {
+                index: 1,
+                key: "sectPr".to_owned(),
+                value: section,
+            }],
+            &EditCtx::local("", ""),
+        )
+        .unwrap();
+        let listed = serde_json::to_value(doc.list_stories().stories).unwrap();
+        assert_eq!(
+            listed,
+            serde_json::json!([
+                { "story": "body", "kind": "body", "root": "body" },
+                {
+                    "story": "hf:rIdF", "kind": "footer", "root": "hf:rIdF",
+                    "uses": [
+                        { "sectionIndex": 0, "variant": "first" },
+                        { "sectionIndex": 1, "variant": "first" },
+                    ],
+                },
+                {
+                    "story": "hf:rIdH", "kind": "header", "root": "hf:rIdH",
+                    "uses": [
+                        { "sectionIndex": 0, "variant": "default" },
+                        { "sectionIndex": 1, "variant": "default" },
+                    ],
+                },
+                { "story": "hf:rIdX", "kind": "other", "root": "hf:rIdX" },
+            ])
+        );
     }
 }

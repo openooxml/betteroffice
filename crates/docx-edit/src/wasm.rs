@@ -4214,8 +4214,9 @@ impl EditSession {
     /// Every story: `{"ok":true,"version","stories":[{"story","kind","parent"?,"root","part"?,
     /// "uses"?}]}`, sorted by id.
     pub fn list_stories_json(&self) -> Result<String, JsValue> {
-        let listed: Result<_, EditRefusal> = Ok(self.engine.doc().list_stories());
-        outcome_json(&listed).map_err(js_err)
+        let mut listed = serde_json::to_value(self.engine.doc().list_stories()).map_err(js_err)?;
+        listed["ok"] = Value::Bool(true);
+        Ok(listed.to_string())
     }
 
     /// Until the matching `end_shared_reads`, committed reads share story projections of each document state.

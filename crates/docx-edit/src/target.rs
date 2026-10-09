@@ -210,7 +210,8 @@ pub struct ReadStoriesResponse {
     pub version: DocumentVersion,
     pub view: EditTextView,
     pub stories: Vec<StoryText>,
-    /// The read limits stopped the read before the next selected story.
+    /// The read limits stopped the read before the next selected story; a story larger than the
+    /// limits on its own is refused with `limit-exceeded` instead.
     pub truncated: bool,
 }
 
@@ -1337,7 +1338,17 @@ impl EditingDoc {
             let before = budget;
             match read_story(&mut views, &story, None, request.view, &mut budget) {
                 Ok(paragraphs) => stories.push(StoryText::Read { story, paragraphs }),
-                Err(failure) if failure.code == EditFailureCode::LimitExceeded => {
+                Err(failure)
+                    if failure.code == EditFailureCode::LimitExceeded
+                        && read_story(
+                            &mut views,
+                            &story,
+                            None,
+                            request.view,
+                            &mut ReadBudget::limited(before.max_paragraphs, before.max_text_units),
+                        )
+                        .is_ok() =>
+                {
                     truncated = true;
                     break;
                 }
@@ -1623,8 +1634,14 @@ mod tests {
     #[test]
     fn read_stories_stop_at_limits_across_stories_and_refund_refused_stories() {
         let doc = EditingDoc::new(100);
-        for story in ["a", "b", "c"] {
-            doc.create_story(story, story, "Normal", "left").unwrap();
+        for (story, text) in [
+            ("a", "a"),
+            ("b", "b"),
+            ("c", "c"),
+            ("d", "dddd"),
+            ("e", "e"),
+        ] {
+            doc.create_story(story, text, "Normal", "left").unwrap();
         }
         doc.apply_raw_ops(
             "a",
@@ -1646,22 +1663,25 @@ mod tests {
             let read = doc
                 .read_stories_within(&request, ReadBudget::limited(paragraphs, text_units))
                 .unwrap();
-            let stories: Vec<(String, bool)> = read
+            let stories: Vec<(String, Option<EditFailureCode>)> = read
                 .stories
                 .into_iter()
                 .map(|story| match story {
-                    StoryText::Read { story, .. } => (story, true),
-                    StoryText::Refused { story, .. } => (story, false),
+                    StoryText::Read { story, .. } => (story, None),
+                    StoryText::Refused { story, failure } => (story, Some(failure.code)),
                 })
                 .collect();
             (stories, read.truncated)
         };
         let all = vec![
-            ("a".to_owned(), false),
-            ("b".to_owned(), true),
-            ("c".to_owned(), true),
+            ("a".to_owned(), Some(EditFailureCode::Unsupported)),
+            ("b".to_owned(), None),
+            ("c".to_owned(), None),
+            ("d".to_owned(), Some(EditFailureCode::LimitExceeded)),
+            ("e".to_owned(), None),
         ];
-        assert_eq!(read(2, 2), (all.clone(), false));
+        assert_eq!(read(10, 3), (all.clone(), false));
+        assert_eq!(read(2, 2), (all[..4].to_vec(), true));
         assert_eq!(read(1, 2), (all[..2].to_vec(), true));
         assert_eq!(read(2, 1), (all[..2].to_vec(), true));
     }
