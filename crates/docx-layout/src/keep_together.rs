@@ -204,9 +204,9 @@ pub fn measure_keep_with_next_group_at(
     measure_keep_with_next_group_witnessing(group, measured, leading, deferred, capacity, true)
 }
 
-/// [`measure_keep_with_next_group_at`], where a headerless table follower
-/// witnesses its whole first row unless `split_first_row` (and the row is not
-/// taller than `capacity`).
+/// [`measure_keep_with_next_group_at`] with per-cell table witnesses only on
+/// pages without float bands (`split_first_row`). Otherwise a headerless table
+/// witnesses its whole first row unless taller than `capacity`.
 pub(crate) fn measure_keep_with_next_group_witnessing(
     group: &KeepWithNextGroup,
     measured: &[MeasuredBlock],
@@ -270,10 +270,11 @@ pub(crate) fn measure_keep_with_next_group_witnessing(
 /// header band and first body slice (its first line when the paragraph rules
 /// leave that row no break in the room under the band), or the smallest slice
 /// of a headerless table's first row (the whole row when it cannot split, or
-/// unless `split_first_row` and the row fits `capacity`), extended to the end
+/// when `!split_first_row` and the row fits `capacity`), extended to the end
 /// of any keep-with-next row chain starting in them that fits `capacity` along
 /// with the rows above it. A floating table keeps its line slice, as it is not
 /// placed in the flow.
+/// Per-cell witnesses are used only when `split_first_row` (no float bands).
 fn table_leading_slice(
     block: &TableBlock,
     measure: &TableExtent,
@@ -300,6 +301,9 @@ fn table_leading_slice(
             .is_some_and(|row| row.cant_split.unwrap_or(false) || row.is_exact_height());
     if headers == 0 && !measure.rows.is_empty() && (split_first_row || oversized_first_row) {
         first = breaks.fresh_slice(0, 0.0, capacity);
+        if split_first_row {
+            first = first.min(breaks.first_cell_slice(0, 0.0, capacity).unwrap_or(first));
+        }
     } else if headers > 0
         && headers < measure.rows.len()
         && !block
@@ -316,6 +320,12 @@ fn table_leading_slice(
         if breaks.kept_oversized(headers, 0.0, body) {
             first = band + breaks.fresh_slice(headers, 0.0, body);
         }
+        if split_first_row
+            && band <= capacity
+            && let Some(slice) = breaks.first_cell_slice(headers, 0.0, body)
+        {
+            first = first.min(band + slice);
+        }
     }
     let mut top = 0.0;
     let mut slice = first;
@@ -325,7 +335,14 @@ fn table_leading_slice(
         .zip(crate::hooks::row_keep_chains(block, measure))
         .take(headers + 1)
     {
-        let keep = crate::hooks::row_keep_height(keep, block, measure, &breaks, capacity);
+        let keep = crate::hooks::row_keep_height(
+            keep,
+            block,
+            measure,
+            &breaks,
+            capacity,
+            !split_first_row,
+        );
         if keep > 0.0 && top + keep <= capacity {
             slice = slice.max(top + keep);
         }

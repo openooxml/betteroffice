@@ -25,7 +25,10 @@
     "rust"
   ],
   "type": "module",
-  "sideEffects": false,
+  "sideEffects": [
+    "**/xlsxSessionWorker.*",
+    "**/session/worker.*"
+  ],
   "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",

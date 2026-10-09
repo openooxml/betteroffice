@@ -1,5 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { HeadingInfo } from '@betteroffice/docx/utils';
+import type { ResidentEngineWorkerClient } from '@betteroffice/docx/yrs';
+import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
+import { presentedWorkerVersion } from '../internals/layoutProvenance';
+import { ViewerOutlineReads } from '../internals/viewerOutlineReads';
 import type { PagedEditorRef } from '../PagedEditor';
 
 /** The body's headings as the engine classifies them, with their display positions. */
@@ -35,19 +39,49 @@ export function useOutlineSidebar({
   pagedEditorRef,
   scrollContainerRef,
   isLoading,
+  viewerRef,
+  viewerRead,
+  queries,
 }: {
   showOutlineProp: boolean;
   pagedEditorRef: React.RefObject<PagedEditorRef | null>;
   scrollContainerRef: React.RefObject<HTMLDivElement | null>;
   isLoading: boolean;
+  viewerRef?: React.RefObject<boolean>;
+  viewerRead?: ResidentEngineWorkerClient['documentRead'];
+  queries?: DisplayListQueries | null;
 }) {
   const [showOutline, setShowOutline] = useState(showOutlineProp);
   const showOutlineRef = useRef(false);
   showOutlineRef.current = showOutline;
   const [outlineHeadings, setHeadingInfos] = useState<HeadingInfo[]>([]);
+  const queriesRef = useRef(queries);
+  queriesRef.current = queries;
+  const viewerReads = useMemo(() => viewerRead ? new ViewerOutlineReads(viewerRead) : null, [viewerRead]);
+  const activeReads = useRef(viewerReads);
+  activeReads.current = viewerReads;
   const refreshHeadings = useCallback(() => {
-    setHeadingInfos(collectYrsHeadings(pagedEditorRef.current));
-  }, [pagedEditorRef]);
+    if (!viewerRef?.current) {
+      setHeadingInfos(collectYrsHeadings(pagedEditorRef.current));
+      return;
+    }
+    const version = presentedWorkerVersion(queriesRef.current);
+    if (!viewerReads || version === null) return;
+    void viewerReads.collect(version, () => presentedWorkerVersion(queriesRef.current)).then((headings) => {
+      if (headings && viewerRef?.current && activeReads.current === viewerReads) setHeadingInfos(headings);
+    });
+  }, [pagedEditorRef, viewerRef, viewerReads]);
+  const navigateViewerHeading = useCallback((pmPos: number) => {
+    void viewerReads?.navigate(pmPos, () => presentedWorkerVersion(queriesRef.current), (position) => {
+      if (viewerRef?.current && activeReads.current === viewerReads) {
+        pagedEditorRef.current?.scrollToPosition(position);
+      }
+    });
+  }, [viewerReads, viewerRef, pagedEditorRef]);
+  const version = presentedWorkerVersion(queries);
+  useEffect(() => {
+    if (viewerRef?.current && showOutline) refreshHeadings();
+  }, [version, showOutline, isLoading, viewerRef, refreshHeadings]);
 
   // Sync outline visibility when prop changes
   useEffect(() => {
@@ -88,6 +122,7 @@ export function useOutlineSidebar({
     outlineHeadings,
     setHeadingInfos,
     refreshHeadings,
+    navigateViewerHeading,
     editorScrollLeft,
   };
 }

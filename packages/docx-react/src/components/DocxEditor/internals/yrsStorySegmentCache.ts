@@ -1,5 +1,9 @@
 import type { YrsStorySegmentSource } from '@betteroffice/docx/layout/render';
 import type { YrsSession, YrsStorySegment } from '@betteroffice/docx/yrs';
+import { scheduleIdleWork } from '../hooks/pageBuildScheduler';
+
+const IDLE_SLICE_MS = 8;
+const DIGEST_FALLBACK_MS = 5000;
 
 interface CachedStory {
   /** Per-paragraph digests; null until known. */
@@ -21,7 +25,9 @@ export class YrsStorySegmentCache {
   private readonly stale = new Map<string, CachedStory>();
   private readonly units = new Map<string, { segments: YrsStorySegment[]; stories: number }>();
   private readonly undigested = new Set<string>();
+  private readonly warming = new Map<string, CachedStory | null>();
   private cancelIdle: (() => void) | null = null;
+  private digestExpiresAt: number | null = null;
   private released = false;
 
   constructor(readonly session: YrsSession) {}
@@ -55,7 +61,10 @@ export class YrsStorySegmentCache {
     if (!this.stale.get(story)?.digests) {
       const segments = this.session.storySegments(story);
       this.store(story, null, [segments]);
-      if (splitUnits(segments).length > 1) this.undigested.add(story);
+      if (splitUnits(segments).length > 1) {
+        this.undigested.add(story);
+        if (this.warming.has(story)) this.warming.set(story, this.stories.get(story)!);
+      }
       return segments;
     }
     const digests = this.session.storySegmentUnitDigests(story);
@@ -70,22 +79,23 @@ export class YrsStorySegmentCache {
 
   /** Fetches the digests of stories read whole once the main thread is idle. */
   scheduleDigests(): void {
-    if (this.cancelIdle || this.undigested.size === 0) return;
-    const run = () => {
+    if (this.released || this.cancelIdle || this.undigested.size === 0) return;
+    this.digestExpiresAt ??=
+      performance.now() + (typeof requestIdleCallback === 'function' ? DIGEST_FALLBACK_MS : 0);
+    const run = (deadline?: IdleDeadline) => {
       this.cancelIdle = null;
       try {
-        this.completeDigests();
+        this.completeDigests(deadline ?? {
+          didTimeout: true,
+          timeRemaining: () => 0,
+        });
+        if (this.undigested.size > 0) this.scheduleDigests();
+        else this.digestExpiresAt = null;
       } catch {
         // A session destroyed meanwhile has nothing left to digest.
       }
     };
-    if (typeof requestIdleCallback === 'function') {
-      const id = requestIdleCallback(run);
-      this.cancelIdle = () => cancelIdleCallback(id);
-    } else {
-      const id = setTimeout(run, 0);
-      this.cancelIdle = () => clearTimeout(id);
-    }
+    this.cancelIdle = scheduleIdleWork(run, this.digestExpiresAt, 0).cancel;
   }
 
   /** Whether {@link YrsStorySegmentCache.dispose} ran; a disposed cache holds nothing. */
@@ -96,27 +106,61 @@ export class YrsStorySegmentCache {
   dispose(): void {
     this.cancelIdle?.();
     this.cancelIdle = null;
+    this.digestExpiresAt = null;
     this.released = true;
     this.stories.clear();
     this.stale.clear();
     this.units.clear();
     this.undigested.clear();
+    this.warming.clear();
   }
 
-  /** Reads the digests of stories read whole that have not changed since. */
-  completeDigests(): void {
+  /** Warms pending stories, re-reading those edited after a yield. */
+  completeDigests(deadline?: IdleDeadline): void {
+    if (this.released) return;
+    const start = performance.now();
     const { stories: changed } = this.session.storiesChangedSince(this.revision);
     const changedSince = new Set(changed);
-    for (const story of this.undigested) {
-      const cached = this.stories.get(story);
-      if (!cached || cached.digests || changedSince.has(story)) continue;
-      const digests = this.session.storySegmentUnitDigests(story);
-      const units = splitUnits(cached.segments);
-      if (digests.length !== units.length) continue;
-      this.stories.delete(story);
-      this.store(story, digests, units);
+    if (this.warming.size === 0) {
+      for (const story of this.undigested) {
+        const cached = this.stories.get(story);
+        this.warming.set(story, cached && !changedSince.has(story) ? cached : null);
+      }
     }
-    this.undigested.clear();
+    for (const story of this.undigested) {
+      if (!this.session.hasStory(story)) {
+        this.release(this.stories.get(story)?.digests ?? []);
+        this.stories.delete(story);
+      } else {
+        let cached = this.stories.get(story);
+        if (!this.warming.has(story)) {
+          this.warming.set(story, cached && !changedSince.has(story) ? cached : null);
+        }
+        const warming = this.warming.get(story);
+        if (warming && !cached?.digests && (cached !== warming || changedSince.has(story))) {
+          this.refresh();
+          this.store(story, null, [this.session.storySegments(story)]);
+          cached = this.stories.get(story);
+        }
+        if (warming && cached && !cached.digests) {
+          const digests = this.session.storySegmentUnitDigests(story);
+          const units = splitUnits(cached.segments);
+          if (digests.length === units.length) {
+            this.stories.delete(story);
+            this.store(story, digests, units);
+          }
+        }
+      }
+      this.undigested.delete(story);
+      this.warming.delete(story);
+      if (
+        deadline &&
+        (performance.now() - start >= IDLE_SLICE_MS ||
+          (deadline.timeRemaining() <= 1 && !deadline.didTimeout))
+      ) {
+        break;
+      }
+    }
   }
 
   private store(

@@ -59,6 +59,79 @@ function frameText(frame: RetainedFrame): string {
     .join('');
 }
 
+test('font snapshots append suffixes, preserve worker ids and recover from a mismatched base', async () => {
+  const main = await createYrsSession({ clientId: 5190 });
+  sessions.push(main);
+  main.createStory('body', 'Fonts');
+  const bytes = new Uint8Array(readFileSync(FONT));
+  expect(main.registerFont(bytes)).toBe(0);
+  main.layoutDocumentWithRegionsJson(LAYOUT);
+  const worker = startWorker();
+  const client = new ResidentEngineWorkerClient(worker);
+  clients.push(client);
+  const initial = main.residentWorkerSnapshot()!;
+  expect(initial.fonts).toHaveLength(1);
+  expect(initial.fontsBaseRevision).toBeUndefined();
+  const booted = await client.bootstrap(initial, '{}');
+  const current = main.residentWorkerSnapshot({ knownFontsRevision: client.syncedFontsRevision() })!;
+  expect(current.fonts).toEqual([]);
+  expect(current.fontsBaseRevision).toBe(client.syncedFontsRevision()!);
+  const appendedId = main.registerFont(bytes);
+  expect(appendedId).toBe(1);
+  const suffix = main.residentWorkerSnapshot({ knownFontsRevision: client.syncedFontsRevision() })!;
+  expect(suffix.fonts).toEqual([bytes]);
+  expect(suffix.fontsBaseRevision).toBe(initial.fontsRevision);
+  await client.sync(suffix, '{}', booted.caret.frameEpoch);
+  for (const id of [0, appendedId]) {
+    expect(worker.sessions[0]!.outlineGlyphJson(id, 36)).toBe(main.outlineGlyphJson(id, 36));
+  }
+  const substitute = main.registerSubstituteFont(appendedId, 'Calibri');
+  const substituteSuffix = main.residentWorkerSnapshot({ knownFontsRevision: client.syncedFontsRevision() })!;
+  expect(substituteSuffix.fonts).toEqual([{ substituteOf: appendedId, family: 'Calibri' }]);
+  const beforeMismatch = client.syncedFontsRevision();
+  worker.hold();
+  const failed = client.sync({ ...substituteSuffix, fontsBaseRevision: 999 }, '{}', 0);
+  const queuedOmission = main.residentWorkerSnapshot({
+    knownFontsRevision: client.syncedFontsRevision(),
+  })!;
+  expect(queuedOmission.fonts).toEqual([]);
+  expect(queuedOmission.fontsBaseRevision).toBe(substituteSuffix.fontsRevision);
+  const queued = client.sync(queuedOmission, '{}', 0);
+  const failures = [failed, queued].map((reply) =>
+    reply.then(
+      () => null,
+      (error: unknown) => String(error)
+    )
+  );
+  worker.release();
+  for (const failure of failures) expect(await failure).toContain('font base revision mismatch');
+  expect(client.syncedFontsRevision()).toBeNull();
+  for (const id of [0, appendedId]) {
+    expect(worker.sessions[0]!.outlineGlyphJson(id, 36)).toBe(main.outlineGlyphJson(id, 36));
+  }
+  const recovery = main.residentWorkerSnapshot({ knownFontsRevision: client.syncedFontsRevision() })!;
+  expect(recovery.fontsBaseRevision).toBeUndefined();
+  expect(recovery.fonts).toHaveLength(3);
+  await client.sync(recovery, '{}', 0);
+  for (const id of [0, appendedId, substitute]) {
+    expect(worker.sessions[0]!.outlineGlyphJson(id, 36)).toBe(main.outlineGlyphJson(id, 36));
+  }
+  const revision = client.syncedFontsRevision()!;
+  for (const knownFontsRevision of [-1, revision + 1, revision + 0.5]) {
+    const full = main.residentWorkerSnapshot({ knownFontsRevision })!;
+    expect(full.fontsBaseRevision).toBeUndefined();
+    expect(full.fonts).toHaveLength(3);
+  }
+  main.clearFonts();
+  expect(main.registerFont(bytes)).toBe(0);
+  const cleared = main.residentWorkerSnapshot({ knownFontsRevision: revision })!;
+  expect(cleared.fontsBaseRevision).toBeUndefined();
+  expect(cleared.fonts).toEqual([bytes]);
+  await client.sync(cleared, '{}', 0);
+  expect(worker.sessions[0]!.outlineGlyphJson(0, 36)).toBe(main.outlineGlyphJson(0, 36));
+  expect(beforeMismatch).toBe(initial.fontsRevision + 1);
+});
+
 test('host batches drain worker input, invalidate the worker once and never adopt stale frames', async () => {
   const main = await createYrsSession({ clientId: 5101 });
   sessions.push(main);

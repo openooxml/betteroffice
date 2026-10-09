@@ -405,6 +405,7 @@ pub enum PageDiagnosticCode {
     ClippedContent,
     GeometryUnavailable,
     Truncated,
+    NoteLayoutFallback,
 }
 
 /// Page options with their defaults applied and validated.
@@ -742,6 +743,9 @@ pub(crate) struct CapturedLayout<'a> {
     pub headers_footers: Option<&'a HeaderFooterPayload>,
     pub bands_composed: bool,
     pub notes: &'a [NoteContent],
+    /// The page indexes whose note area is kept larger than their notes because note placement
+    /// alternated between layouts.
+    pub note_fallback_pages: &'a [usize],
     /// Lowering maps by root story.
     pub maps: &'a HashMap<String, Rc<LoweringMap>>,
     pub display: Option<&'a DisplayList>,
@@ -829,6 +833,14 @@ pub(crate) fn build_layout_map(
                 message: format!(
                     "The page number format {format:?} is not supported; the page is numbered in decimal."
                 ),
+            });
+        }
+        if mapping && captured.note_fallback_pages.contains(&placed.page_index) {
+            mapper.diagnostics.push(PageDiagnostic {
+                code: PageDiagnosticCode::NoteLayoutFallback,
+                node_id: None,
+                page_index: Some(page_index),
+                message: "Note placement alternated between layouts, so this page keeps a larger note area than its notes take and its body may end earlier than in Word.".to_owned(),
             });
         }
         pages.push(record);

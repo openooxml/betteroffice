@@ -1776,6 +1776,27 @@ impl<'a> SeriesView<'a> {
         Some((self.x_value(index)?, self.data_value(index)?))
     }
 
+    fn xy_indices(&self) -> impl Iterator<Item = usize> + '_ {
+        let length = self.series.x_values.len().min(MAX_PLOT_DATA_SCAN);
+        let dense = if self.wildcard.is_some_and(|position| {
+            self.series.points[position]
+                .value
+                .is_some_and(f64::is_finite)
+        }) {
+            length
+        } else {
+            length.min(self.series.values.len())
+        };
+        (0..dense).chain(self.indexed.iter().filter_map(move |&(index, position)| {
+            (index >= dense
+                && index < length
+                && self.series.points[position]
+                    .value
+                    .is_some_and(f64::is_finite))
+            .then_some(index)
+        }))
+    }
+
     fn bubble_size(&self, index: usize) -> f64 {
         self.series
             .bubble_sizes
@@ -2379,6 +2400,9 @@ impl ValueScale {
                 let log = |value: f64| value.max(f64::MIN_POSITIVE).log(base);
                 (log(value.max(self.min)) - log(self.min)) / (log(self.max) - log(self.min))
             }
+            _ if !(self.max - self.min).is_finite() => {
+                (value * 0.5 - self.min * 0.5) / (self.max * 0.5 - self.min * 0.5)
+            }
             _ => (value - self.min) / (self.max - self.min),
         };
         if raw.is_finite() { raw } else { 0.0 }
@@ -2576,6 +2600,114 @@ fn value_range(family: PlotFamily<'_>) -> (f64, f64) {
     (scale.min, scale.max)
 }
 
+#[derive(Clone, Copy)]
+enum ValueRangeRule {
+    Scatter { intervals: f64 },
+    Value,
+}
+
+/// Ignores non-finite pins; reversed pins collapse to min, equal pins and exhausted edges stay equal.
+fn normalize_value_range(
+    data: Option<(f64, f64)>,
+    pins: PlotAxisRange,
+    rule: ValueRangeRule,
+    log_base: Option<f64>,
+    major_unit: Option<f64>,
+) -> (f64, f64, f64, Option<f64>) {
+    let (mut min, mut max) = data
+        .filter(|(min, max)| !min.is_nan() && !max.is_nan())
+        .map(|(min, max)| (min.clamp(f64::MIN, f64::MAX), max.clamp(f64::MIN, f64::MAX)))
+        .unwrap_or((0.0, 1.0));
+    let pinned_min = pins.min.filter(|value| value.is_finite());
+    let pinned_max = pins.max.filter(|value| value.is_finite());
+    if let Some(value) = pinned_min {
+        min = value;
+    }
+    if let Some(value) = pinned_max {
+        max = value;
+    }
+    if max <= min {
+        let expansion = |edge: f64, up: bool| match rule {
+            ValueRangeRule::Scatter { .. } => edge.abs().max(1.0) * 0.05,
+            ValueRangeRule::Value => {
+                let shifted = if up { edge + 1.0 } else { edge - 1.0 };
+                if shifted != edge {
+                    1.0
+                } else {
+                    edge.abs().max(1.0) * 0.05
+                }
+            }
+        };
+        match (pinned_min, pinned_max) {
+            (Some(_), None) => max = (min + expansion(min, true)).min(f64::MAX),
+            (None, Some(_)) => min = (max - expansion(max, false)).max(f64::MIN),
+            (Some(_), Some(_)) => max = min,
+            (None, None) => {
+                if matches!(rule, ValueRangeRule::Value)
+                    && (min + 1.0).is_finite()
+                    && min + 1.0 > min
+                {
+                    max = min + 1.0;
+                } else {
+                    let low = min.min(0.0);
+                    let high = max.max(0.0);
+                    (min, max) = if high > low {
+                        (low, high)
+                    } else {
+                        (low, low + 1.0)
+                    };
+                }
+            }
+        }
+    }
+    let log_base = log_base.filter(|base| *base > 1.0 && base.is_finite() && min > 0.0);
+    if matches!(rule, ValueRangeRule::Value) && log_base.is_none() {
+        let span = max - min;
+        let padding = if span.is_finite() {
+            span * 0.05
+        } else {
+            (max * 0.5 - min * 0.5) * 0.1
+        };
+        if pinned_max.is_none() && max > 0.0 {
+            max = (max + padding).min(f64::MAX);
+        }
+        if pinned_min.is_none() && min < 0.0 {
+            min = (min - padding).max(f64::MIN);
+        }
+    }
+    let unit = major_unit
+        .filter(|unit| unit.is_finite() && *unit > 0.0)
+        .unwrap_or_else(|| {
+            let span = max - min;
+            if span.is_finite() {
+                match rule {
+                    ValueRangeRule::Scatter { intervals } => nice_unit(span / intervals),
+                    ValueRangeRule::Value => excel_unit(span),
+                }
+            } else {
+                let span = max * 0.5 - min * 0.5;
+                let half_unit = match rule {
+                    ValueRangeRule::Scatter { intervals } => nice_unit(span / intervals),
+                    ValueRangeRule::Value => excel_unit(span),
+                };
+                (half_unit * 2.0).min(f64::MAX)
+            }
+        });
+    let unrounded = (min, max);
+    if log_base.is_none() {
+        if pinned_min.is_none() {
+            min = round_to_unit(min, unit, false);
+        }
+        if pinned_max.is_none() {
+            max = round_to_unit(max, unit, true);
+        }
+    }
+    if max <= min && unrounded.1 > unrounded.0 {
+        (min, max) = unrounded;
+    }
+    (min, max, unit, log_base)
+}
+
 fn value_scale(family: PlotFamily<'_>) -> ValueScale {
     let stacking = family.stacking();
     let (mut min, mut max) = match stacking {
@@ -2588,6 +2720,24 @@ fn value_scale(family: PlotFamily<'_>) -> ValueScale {
         .map(|axis| axis.range)
         .or(family.value_axis)
         .unwrap_or_default();
+    let data = (min, max);
+    let overflow_scale = || {
+        let (min, max, unit, log_base) = normalize_value_range(
+            Some(data),
+            bounds,
+            ValueRangeRule::Value,
+            family.axis.and_then(|axis| axis.log_base),
+            family.axis.and_then(|axis| axis.major_unit),
+        );
+        ValueScale {
+            min,
+            max,
+            unit,
+            log_base,
+            reversed: family.axis.is_some_and(|axis| axis.reversed),
+            percent: stacking == Stacking::Percent,
+        }
+    };
     let pinned_min = bounds.min.filter(|value| value.is_finite());
     let pinned_max = bounds.max.filter(|value| value.is_finite());
     if let Some(value) = pinned_min {
@@ -2595,6 +2745,9 @@ fn value_scale(family: PlotFamily<'_>) -> ValueScale {
     }
     if let Some(value) = pinned_max {
         max = value;
+    }
+    if !(max - min).is_finite() {
+        return overflow_scale();
     }
     if max <= min {
         max = min + 1.0;
@@ -2617,6 +2770,9 @@ fn value_scale(family: PlotFamily<'_>) -> ValueScale {
         if pinned_min.is_none() && min < 0.0 {
             min -= padding;
         }
+    }
+    if !(max - min).is_finite() {
+        return overflow_scale();
     }
     let unit = family
         .axis
@@ -2645,6 +2801,9 @@ fn value_scale(family: PlotFamily<'_>) -> ValueScale {
 /// Tick values: powers of the base on a log axis, else a walk in `unit` or the scale's own.
 fn axis_ticks(scale: ValueScale, unit: Option<f64>) -> Vec<f64> {
     let span = scale.max - scale.min;
+    if !span.is_finite() {
+        return overflow_axis_ticks(scale, unit);
+    }
     if let Some(base) = scale.log_base {
         let first = scale.min.log(base).ceil();
         let last = scale.max.log(base).floor();
@@ -2685,6 +2844,59 @@ fn axis_ticks(scale: ValueScale, unit: Option<f64>) -> Vec<f64> {
             step => scale.min + span * step as f64 / 4.0,
         })
         .collect()
+}
+
+fn overflow_axis_ticks(scale: ValueScale, unit: Option<f64>) -> Vec<f64> {
+    if let Some(base) = scale.log_base {
+        let first = scale.min.log(base).ceil();
+        let last = scale.max.log(base).floor();
+        if last >= first && (last - first) < MAX_PLOT_AXIS_TICKS as f64 {
+            let ticks: Vec<f64> = (0..=(last - first) as usize)
+                .map(|step| base.powf(first + step as f64))
+                .filter(|value| value.is_finite())
+                .collect();
+            if ticks.len() >= 2 {
+                return ticks;
+            }
+        }
+    }
+    let unit = unit
+        .filter(|unit| unit.is_finite() && *unit > 0.0)
+        .unwrap_or(scale.unit);
+    if unit.is_finite() && unit > 0.0 {
+        let steps = ((scale.max * 0.5 - scale.min * 0.5) / (unit * 0.5)).floor();
+        if steps >= 1.0 && steps < MAX_PLOT_AXIS_TICKS as f64 {
+            let mut ticks = Vec::new();
+            let mut index = 0;
+            while ticks.len() < MAX_PLOT_AXIS_TICKS {
+                let value = (scale.min * 0.5 + (unit * 0.5) * index as f64) * 2.0;
+                if !value.is_finite()
+                    || value > (scale.max + unit * 1e-9).min(f64::MAX)
+                    || ticks.last().is_some_and(|last| value <= *last)
+                {
+                    break;
+                }
+                ticks.push(value);
+                index += 1;
+            }
+            if ticks.len() >= 2 {
+                return ticks;
+            }
+        }
+    }
+    let mut ticks: Vec<f64> = (0..=4)
+        .map(|step| match step {
+            4 => scale.max,
+            step => {
+                let fraction = step as f64 / 4.0;
+                (scale.min * 0.5 + (scale.max * 0.5 - scale.min * 0.5) * fraction) * 2.0
+            }
+        })
+        .collect();
+    if scale.max > scale.min {
+        ticks.dedup();
+    }
+    ticks
 }
 
 /// A gridline whose `c:spPr` draws no line is declared only to be hidden.
@@ -3613,17 +3825,35 @@ fn scatter_x_scale(family: PlotFamily<'_>, plot: PlotArea) -> ValueScale {
     let (mut min, mut max) = (f64::INFINITY, f64::NEG_INFINITY);
     let mut seen = false;
     let mut remaining = MAX_PLOT_DATA_SCAN;
-    for series in family.series {
-        let samples = series.series.x_values.len().min(remaining);
-        remaining -= samples;
-        for index in 0..samples {
-            if let Some((value, _)) = series.xy_value(index) {
-                seen = true;
-                min = min.min(value);
-                max = max.max(value);
+    let automatic = family
+        .x_axis
+        .is_none_or(|axis| axis.range.min.is_none() || axis.range.max.is_none());
+    if automatic {
+        for series in family.series {
+            let samples = remaining;
+            for index in series.xy_indices().take(samples) {
+                remaining -= 1;
+                if let Some((value, _)) = series.xy_value(index) {
+                    seen = true;
+                    min = min.min(value);
+                    max = max.max(value);
+                }
+            }
+        }
+    } else {
+        for series in family.series {
+            let samples = series.series.x_values.len().min(remaining);
+            remaining -= samples;
+            for index in 0..samples {
+                if let Some((value, _)) = series.xy_value(index) {
+                    seen = true;
+                    min = min.min(value);
+                    max = max.max(value);
+                }
             }
         }
     }
+    let constant = seen && min == max;
     if !seen {
         min = 0.0;
         max = 1.0;
@@ -3640,6 +3870,27 @@ fn scatter_x_scale(family: PlotFamily<'_>, plot: PlotArea) -> ValueScale {
         .filter(|value| value.is_finite())
     {
         max = value;
+    }
+    if !(max - min).is_finite()
+        || constant && axis.is_none_or(|axis| axis.range.min.is_none() && axis.range.max.is_none())
+    {
+        let (min, max, unit, log_base) = normalize_value_range(
+            Some((min, max)),
+            axis.map(|axis| axis.range).unwrap_or_default(),
+            ValueRangeRule::Scatter {
+                intervals: target_intervals(plot.w),
+            },
+            axis.and_then(|axis| axis.log_base),
+            axis.and_then(|axis| axis.major_unit),
+        );
+        return ValueScale {
+            min,
+            max,
+            unit,
+            log_base,
+            reversed: axis.is_some_and(|axis| axis.reversed),
+            percent: false,
+        };
     }
     if !(max - min).is_finite() || max <= min {
         (min, max) = (min.min(0.0), min.min(0.0) + 1.0);
@@ -5163,6 +5414,77 @@ mod tests {
     }
 
     #[test]
+    fn inverted_value_axis_pins_match_main_bounds_and_ticks() {
+        let data = source(&[1.0]);
+        let chart = PlotChart {
+            chart_type: "column",
+            value_axis: Some(PlotAxisRange {
+                min: Some(10.0),
+                max: Some(-10.0),
+            }),
+            series: vec![series("Values", &data)],
+            ..PlotChart::default()
+        };
+        let views = series_views(&chart.series, &mut ScanBudget::new());
+        let label = PlotTextStyle::default().resolve(CHART_LABEL_SIZE_PX, 400);
+        let scale = value_scale(family(&chart, &views, &label));
+        assert_eq!(scale.min.to_bits(), 10.0_f64.to_bits());
+        assert_eq!(scale.max.to_bits(), 11.0_f64.to_bits());
+        assert_eq!(scale.unit.to_bits(), 0.2_f64.to_bits());
+        assert_eq!(
+            axis_ticks(scale, None)
+                .into_iter()
+                .map(f64::to_bits)
+                .collect::<Vec<_>>(),
+            [10.0_f64, 10.2, 10.4, 10.6, 10.8, 11.0].map(f64::to_bits)
+        );
+    }
+
+    #[test]
+    fn inverted_scatter_x_pins_match_main_bounds_and_ticks() {
+        let data = source(&[1.0, 2.0]);
+        let x = [1.0, 2.0];
+        let mut xy = series("XY", &data);
+        xy.x_values = &x;
+        let chart = PlotChart {
+            chart_type: "scatter",
+            series: vec![xy],
+            ..PlotChart::default()
+        };
+        let views = series_views(&chart.series, &mut ScanBudget::new());
+        let label = PlotTextStyle::default().resolve(CHART_LABEL_SIZE_PX, 400);
+        let axis = value_axis("x", 10.0, -10.0);
+        let family = PlotFamily {
+            x_axis: Some(&axis),
+            ..family(&chart, &views, &label)
+        };
+        let scale = scatter_x_scale(family, xy_plot());
+        assert_eq!(scale.min.to_bits(), 0.0_f64.to_bits());
+        assert_eq!(scale.max.to_bits(), 1.0_f64.to_bits());
+        assert_eq!(scale.unit.to_bits(), 0.1_f64.to_bits());
+        assert_eq!(
+            axis_ticks(scale, None)
+                .into_iter()
+                .map(f64::to_bits)
+                .collect::<Vec<_>>(),
+            [
+                0.0_f64,
+                0.1,
+                0.2,
+                0.30000000000000004,
+                0.4,
+                0.5,
+                0.6000000000000001,
+                0.7000000000000001,
+                0.8,
+                0.9,
+                1.0,
+            ]
+            .map(f64::to_bits)
+        );
+    }
+
+    #[test]
     fn axis_bounds_override_the_data_range() {
         let north = source(&[1.0]);
         let chart = PlotChart {
@@ -5729,6 +6051,52 @@ mod tests {
         }
     }
 
+    fn xy_plot() -> PlotArea {
+        PlotArea {
+            x: 30.0,
+            y: 20.0,
+            w: 240.0,
+            h: 160.0,
+            gutter: 0.0,
+        }
+    }
+
+    fn xy_layout() -> PlotRect {
+        PlotRect {
+            x: 0.1,
+            y: 0.1,
+            w: 0.8,
+            h: 0.8,
+        }
+    }
+
+    fn xy_scales(chart: &PlotChart<'_>) -> (ValueScale, ValueScale) {
+        let label = PlotTextStyle::default().resolve(CHART_LABEL_SIZE_PX, 400);
+        let views = vec![series_views(
+            &chart.plot_groups[0].series,
+            &mut ScanBudget::new(),
+        )];
+        let families = plot_families(chart, &views, &label);
+        (
+            scatter_x_scale(families[0], xy_plot()),
+            value_scale(families[0]),
+        )
+    }
+
+    fn xy_markers(ops: &[PlotOp]) -> Vec<(f64, f64)> {
+        ops.iter()
+            .filter_map(|op| match op {
+                PlotOp::Rect {
+                    x, y, w, h, fill, ..
+                }
+                | PlotOp::Path {
+                    x, y, w, h, fill, ..
+                } if fill == "#010203" && !is_swatch(*w, *h) => Some((x + w / 2.0, y + h / 2.0)),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn every_family_draws_with_its_own_renderer() {
         let data = source(&[3.0, 1.0]);
@@ -5853,6 +6221,1114 @@ mod tests {
             rect(),
         );
         assert_eq!(paths(&bubble), 1);
+    }
+
+    fn main_linear_ticks(scale: ValueScale, unit: Option<f64>) -> Vec<f64> {
+        let span = scale.max - scale.min;
+        let unit = unit
+            .filter(|unit| unit.is_finite() && *unit > 0.0)
+            .unwrap_or(scale.unit);
+        if unit.is_finite() && unit > 0.0 {
+            let steps = (span / unit).floor();
+            if steps >= 1.0 && steps < MAX_PLOT_AXIS_TICKS as f64 {
+                let mut ticks = Vec::new();
+                let mut index = 0;
+                while ticks.len() < MAX_PLOT_AXIS_TICKS {
+                    let value = scale.min + unit * index as f64;
+                    if !value.is_finite() || value > scale.max + unit * 1e-9 {
+                        break;
+                    }
+                    ticks.push(value);
+                    index += 1;
+                }
+                if ticks.len() >= 2 {
+                    return ticks;
+                }
+            }
+        }
+        (0..=4)
+            .map(|step| match step {
+                4 => scale.max,
+                step => scale.min + span * step as f64 / 4.0,
+            })
+            .collect()
+    }
+
+    fn assert_scale_bits(
+        scale: ValueScale,
+        bounds: (f64, f64),
+        unit: f64,
+        ticks: &[f64],
+        value: f64,
+        fraction: f64,
+    ) {
+        assert_eq!(scale.min.to_bits(), bounds.0.to_bits());
+        assert_eq!(scale.max.to_bits(), bounds.1.to_bits());
+        assert_eq!(scale.unit.to_bits(), unit.to_bits());
+        assert_eq!(
+            axis_ticks(scale, None)
+                .into_iter()
+                .map(f64::to_bits)
+                .collect::<Vec<_>>(),
+            ticks.iter().copied().map(f64::to_bits).collect::<Vec<_>>()
+        );
+        assert_eq!(scale.fraction(value).to_bits(), fraction.to_bits());
+    }
+
+    #[test]
+    fn scatter_auto_y_bounds_include_values_without_x_as_on_main() {
+        let data = source(&[5.0, 10.0, 100.0]);
+        let x = [1.0, 2.0];
+        let mut xy = series("XY", &data);
+        xy.x_values = &x;
+        xy.color = Some("#010203");
+        let mut chart = grouped("scatter", group("scatter", vec![xy]));
+        chart.plot_layout = Some(xy_layout());
+        let (_, scale) = xy_scales(&chart);
+        assert_scale_bits(
+            scale,
+            (0.0, 120.0),
+            20.0,
+            &[0.0, 20.0, 40.0, 60.0, 80.0, 100.0, 120.0],
+            5.0,
+            5.0 / 120.0,
+        );
+        assert_eq!(xy_markers(&plot_chart(&chart, rect())).len(), 2);
+    }
+
+    #[test]
+    fn scatter_inverted_rounded_y_maps_as_on_main() {
+        let data = source(&[0.0, 1e-12]);
+        let x = [1.0, 2.0];
+        let mut xy = series("XY", &data);
+        xy.x_values = &x;
+        let mut plot_group = group("scatter", vec![xy]);
+        plot_group.axis_ids = vec!["x", "y"];
+        let chart = PlotChart {
+            chart_type: "scatter",
+            plot_groups: vec![plot_group],
+            axes: vec![PlotAxis {
+                id: Some("y"),
+                kind: PlotAxisKind::Value,
+                range: PlotAxisRange {
+                    min: Some(1e-13),
+                    max: None,
+                },
+                major_unit: Some(1.0),
+                ..PlotAxis::default()
+            }],
+            ..PlotChart::default()
+        };
+        let (_, scale) = xy_scales(&chart);
+        assert_scale_bits(
+            scale,
+            (1e-13, 0.0),
+            1.0,
+            &[
+                1e-13,
+                1e-13 + -1e-13 / 4.0,
+                1e-13 + -1e-13 * 2.0 / 4.0,
+                1e-13 + -1e-13 * 3.0 / 4.0,
+                0.0,
+            ],
+            0.0,
+            1.0,
+        );
+    }
+
+    #[test]
+    fn finite_value_axes_keep_duplicate_tick_bits_as_on_main() {
+        let a = 9007199254740992.0;
+        let b = a + 2.0;
+        let data = source(&[a, b]);
+        let x = [a, b];
+        let mut xy = series("XY", &data);
+        xy.x_values = &x;
+        let mut plot_group = group("scatter", vec![xy]);
+        plot_group.axis_ids = vec!["x", "y"];
+        let axes = ["x", "y"]
+            .map(|id| PlotAxis {
+                major_unit: Some(4.0),
+                ..value_axis(id, a, b)
+            })
+            .to_vec();
+        let chart = PlotChart {
+            chart_type: "scatter",
+            plot_groups: vec![plot_group],
+            axes,
+            ..PlotChart::default()
+        };
+        let (x_scale, y_scale) = xy_scales(&chart);
+        for scale in [x_scale, y_scale] {
+            assert_scale_bits(scale, (a, b), 4.0, &[a, a, a, b, b], b, 1.0);
+        }
+    }
+
+    #[test]
+    fn bubble_auto_x_includes_nonpositive_sizes_as_on_main() {
+        let data = source(&[1.0, 2.0, 3.0]);
+        let x = [1.0, 2.0, 100.0];
+        for size in [0.0, -1.0] {
+            let sizes = [1.0, 1.0, size];
+            let mut xy = series("XY", &data);
+            xy.x_values = &x;
+            xy.bubble_sizes = &sizes;
+            let mut plot_group = group("bubble", vec![xy]);
+            plot_group.axis_ids = vec!["x", "y"];
+            let chart = PlotChart {
+                chart_type: "bubble",
+                plot_groups: vec![plot_group],
+                axes: vec![PlotAxis {
+                    id: Some("x"),
+                    kind: PlotAxisKind::Value,
+                    major_unit: Some(1.0),
+                    ..PlotAxis::default()
+                }],
+                ..PlotChart::default()
+            };
+            let (scale, _) = xy_scales(&chart);
+            assert_scale_bits(
+                scale,
+                (1.0, 100.0),
+                1.0,
+                &[1.0, 25.75, 50.5, 75.25, 100.0],
+                2.0,
+                1.0 / 99.0,
+            );
+        }
+    }
+
+    #[test]
+    fn scatter_auto_x_follows_plotted_points_and_y_includes_unpaired_values() {
+        let x = [40.0, 40.0];
+        for (values, max) in [(vec![5.0, 10.0], 12.0), (vec![5.0, 10.0, 1e9], 1.2e9)] {
+            let data = source(&values);
+            let mut xy = series("XY", &data);
+            xy.x_values = &x;
+            xy.color = Some("#010203");
+            let mut chart = grouped("scatter", group("scatter", vec![xy]));
+            chart.plot_layout = Some(xy_layout());
+            let (x_scale, y_scale) = xy_scales(&chart);
+            assert_eq!((x_scale.min, x_scale.max), (0.0, 40.0));
+            assert_eq!((y_scale.min, y_scale.max), (0.0, max));
+            let ops = plot_chart(&chart, rect());
+            let markers = xy_markers(&ops);
+            assert_eq!(markers.len(), 2);
+            for ((x, y), value) in markers.iter().zip([5.0, 10.0]) {
+                assert!((x - 270.0).abs() < 0.01, "{markers:?}");
+                assert!(
+                    (y - (180.0 - 160.0 * (value / max))).abs() < 0.01,
+                    "{markers:?}"
+                );
+            }
+            let labels = texts(&ops);
+            assert!(labels.contains(&"40".to_owned()), "{labels:?}");
+        }
+    }
+
+    #[test]
+    fn scatter_and_bubble_automatic_y_padding_stays_finite() {
+        let data = source(&[1e308, 1.75e308]);
+        let x = [1.0, 2.0];
+        let sizes = [2.0, 2.0];
+        for chart_type in ["scatter", "bubble"] {
+            for reversed in [false, true] {
+                for major_unit in [None, Some(1.0)] {
+                    let mut xy = series("XY", &data);
+                    xy.x_values = &x;
+                    xy.bubble_sizes = &sizes;
+                    xy.color = Some("#010203");
+                    let mut group = group(chart_type, vec![xy]);
+                    group.axis_ids = vec!["x", "y"];
+                    let chart = PlotChart {
+                        chart_type,
+                        plot_groups: vec![group],
+                        axes: vec![PlotAxis {
+                            id: Some("y"),
+                            kind: PlotAxisKind::Value,
+                            reversed,
+                            major_unit,
+                            ..PlotAxis::default()
+                        }],
+                        plot_layout: Some(xy_layout()),
+                        ..PlotChart::default()
+                    };
+                    let (_, scale) = xy_scales(&chart);
+                    assert!(scale.min.is_finite() && scale.max.is_finite());
+                    assert!(scale.max >= 1.75e308 && scale.max > scale.min);
+                    assert!((scale.max - scale.min).is_finite());
+                    let ticks = axis_ticks(scale, major_unit);
+                    assert!(ticks.len() >= 2, "{ticks:?}");
+                    assert_eq!(
+                        ticks.into_iter().map(f64::to_bits).collect::<Vec<_>>(),
+                        main_linear_ticks(scale, major_unit)
+                            .into_iter()
+                            .map(f64::to_bits)
+                            .collect::<Vec<_>>()
+                    );
+                    let ops = plot_chart(&chart, rect());
+                    assert!(ops.iter().all(op_is_finite));
+                    let markers = xy_markers(&ops);
+                    assert_eq!(markers.len(), 2, "{chart_type}");
+                    assert!(
+                        if reversed {
+                            markers[0].1 < markers[1].1
+                        } else {
+                            markers[0].1 > markers[1].1
+                        },
+                        "{markers:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scatter_and_bubble_constant_negative_y_matches_main_bounds() {
+        let data = source(&[-40.0]);
+        let x = [1.0];
+        let sizes = [2.0];
+        for chart_type in ["scatter", "bubble"] {
+            for reversed in [false, true] {
+                let mut xy = series("XY", &data);
+                xy.x_values = &x;
+                xy.bubble_sizes = &sizes;
+                xy.color = Some("#010203");
+                let mut group = group(chart_type, vec![xy]);
+                group.axis_ids = vec!["x", "y"];
+                let chart = PlotChart {
+                    chart_type,
+                    plot_groups: vec![group],
+                    axes: vec![PlotAxis {
+                        id: Some("y"),
+                        kind: PlotAxisKind::Value,
+                        range: PlotAxisRange {
+                            min: None,
+                            max: Some(-40.0),
+                        },
+                        reversed,
+                        major_unit: Some(1.0),
+                        ..PlotAxis::default()
+                    }],
+                    plot_layout: Some(xy_layout()),
+                    ..PlotChart::default()
+                };
+                let (_, scale) = xy_scales(&chart);
+                assert_eq!(scale.min, -41.0);
+                assert_eq!(scale.max, -39.0);
+                assert!(scale.min.is_finite() && scale.min < scale.max);
+                assert_eq!(scale.fraction(-40.0), 0.5);
+                let ticks = axis_ticks(scale, Some(1.0));
+                assert!(ticks.len() >= 2, "{ticks:?}");
+                assert!(ticks.iter().all(|value| value.is_finite()), "{ticks:?}");
+                assert!(ticks.windows(2).all(|pair| pair[0] < pair[1]), "{ticks:?}");
+                let ops = plot_chart(&chart, rect());
+                assert!(ops.iter().all(op_is_finite));
+                let markers = xy_markers(&ops);
+                assert_eq!(markers.len(), 1, "{chart_type}");
+                assert!((markers[0].1 - 100.0).abs() < 0.01);
+            }
+        }
+    }
+
+    #[test]
+    fn scatter_and_bubble_overflowing_y_spans_preserve_pinned_bounds() {
+        let data = source(&[-1e308, 0.0, 1e308]);
+        let x = [1.0, 2.0, 3.0];
+        let sizes = [2.0, 2.0, 2.0];
+        for chart_type in ["scatter", "bubble"] {
+            for reversed in [false, true] {
+                for major_unit in [None, Some(1.0)] {
+                    let mut xy = series("XY", &data);
+                    xy.x_values = &x;
+                    xy.bubble_sizes = &sizes;
+                    xy.color = Some("#010203");
+                    let mut group = group(chart_type, vec![xy]);
+                    group.axis_ids = vec!["x", "y"];
+                    let mut axis = value_axis("y", -1e308, 1e308);
+                    axis.reversed = reversed;
+                    axis.major_unit = major_unit;
+                    let chart = PlotChart {
+                        chart_type,
+                        plot_groups: vec![group],
+                        axes: vec![axis],
+                        plot_layout: Some(xy_layout()),
+                        ..PlotChart::default()
+                    };
+                    let (_, scale) = xy_scales(&chart);
+                    assert_eq!((scale.min, scale.max), (-1e308, 1e308));
+                    assert_eq!(scale.fraction(0.0), 0.5);
+                    let ticks = axis_ticks(scale, major_unit);
+                    assert!(ticks.len() >= 2, "{ticks:?}");
+                    assert!(ticks.iter().all(|value| value.is_finite()), "{ticks:?}");
+                    assert!(ticks.windows(2).all(|pair| pair[0] < pair[1]), "{ticks:?}");
+                    let ops = plot_chart(&chart, rect());
+                    assert!(ops.iter().all(op_is_finite));
+                    let markers = xy_markers(&ops);
+                    assert_eq!(markers.len(), 3, "{chart_type}");
+                    assert!((markers[1].1 - 100.0).abs() < 0.01, "{markers:?}");
+                    assert!(
+                        if reversed {
+                            markers[0].1 < markers[2].1
+                        } else {
+                            markers[0].1 > markers[2].1
+                        },
+                        "{markers:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn value_axes_extreme_range_sweep() {
+        let values = [
+            -f64::MAX,
+            -1e308,
+            -1.0,
+            -f64::MIN_POSITIVE,
+            -f64::from_bits(1),
+            0.0,
+            f64::from_bits(1),
+            f64::MIN_POSITIVE,
+            1.0,
+            1e308,
+            f64::MAX,
+        ];
+        let samples: Vec<Vec<f64>> = std::iter::once(Vec::new())
+            .chain(
+                values
+                    .iter()
+                    .flat_map(|&value| [vec![value], vec![value, value]]),
+            )
+            .chain(
+                values
+                    .iter()
+                    .flat_map(|&a| values.iter().map(move |&b| vec![a, b])),
+            )
+            .collect();
+        let pins: Vec<Option<f64>> = std::iter::once(None)
+            .chain(values.iter().copied().map(Some))
+            .collect();
+        let label = PlotTextStyle::default().resolve(CHART_LABEL_SIZE_PX, 400);
+        for sample in &samples {
+            let data = source(sample);
+            let sizes = vec![2.0; sample.len()];
+            for chart_type in ["bar", "line", "area", "scatter", "bubble"] {
+                let mut xy = series("XY", &data);
+                xy.x_values = sample;
+                xy.bubble_sizes = &sizes;
+                let chart = PlotChart {
+                    chart_type,
+                    series: vec![xy],
+                    ..PlotChart::default()
+                };
+                let views = series_views(&chart.series, &mut ScanBudget::new());
+                for &min in &pins {
+                    for &max in &pins {
+                        for reversed in [false, true] {
+                            for major_unit in [None, Some(1.0)] {
+                                let axis = PlotAxis {
+                                    kind: PlotAxisKind::Value,
+                                    range: PlotAxisRange { min, max },
+                                    reversed,
+                                    major_unit,
+                                    ..PlotAxis::default()
+                                };
+                                let family = PlotFamily {
+                                    axis: Some(&axis),
+                                    x_axis: Some(&axis),
+                                    ..family(&chart, &views, &label)
+                                };
+                                let scales = [
+                                    Some(value_scale(family)),
+                                    matches!(chart_type, "scatter" | "bubble")
+                                        .then(|| scatter_x_scale(family, xy_plot())),
+                                ];
+                                for (scale_index, scale) in scales.into_iter().enumerate() {
+                                    let Some(scale) = scale else {
+                                        continue;
+                                    };
+                                    let context = (chart_type, sample, min, max, major_unit, scale);
+                                    assert!(
+                                        scale.min.is_finite() && scale.max.is_finite(),
+                                        "{context:?}"
+                                    );
+                                    assert_eq!(scale.reversed, reversed, "{context:?}");
+                                    let is_x = scale_index == 1;
+                                    let data_bounds = if is_x && !sample.is_empty() {
+                                        sample.iter().copied().fold(
+                                            (f64::INFINITY, f64::NEG_INFINITY),
+                                            |(min, max), value| (min.min(value), max.max(value)),
+                                        )
+                                    } else if is_x {
+                                        (0.0, 1.0)
+                                    } else {
+                                        sample
+                                            .iter()
+                                            .copied()
+                                            .fold((0.0_f64, 0.0_f64), |(min, max), value| {
+                                                (min.min(value), max.max(value))
+                                            })
+                                    };
+                                    let mut expected_min = min.unwrap_or(data_bounds.0);
+                                    let mut expected_max = max.unwrap_or(data_bounds.1);
+                                    let constant_x = is_x
+                                        && !sample.is_empty()
+                                        && data_bounds.0 == data_bounds.1
+                                        && min.is_none()
+                                        && max.is_none();
+                                    let inverted_pins =
+                                        min.zip(max).is_some_and(|(min, max)| min > max);
+                                    let mut normalized = !(expected_max - expected_min).is_finite()
+                                        || constant_x
+                                            && expected_max <= expected_min
+                                            && !inverted_pins;
+                                    if !normalized {
+                                        if expected_max <= expected_min {
+                                            if is_x {
+                                                expected_min = expected_min.min(0.0);
+                                                expected_max = expected_min + 1.0;
+                                            } else {
+                                                expected_max = expected_min + 1.0;
+                                            }
+                                        }
+                                        if !is_x
+                                            && (!(expected_max - expected_min).is_finite()
+                                                || expected_max <= expected_min)
+                                        {
+                                            (expected_min, expected_max) = (0.0, 1.0);
+                                        }
+                                        if !is_x {
+                                            let padding = (expected_max - expected_min) * 0.05;
+                                            if max.is_none() && expected_max > 0.0 {
+                                                expected_max += padding;
+                                            }
+                                            if min.is_none() && expected_min < 0.0 {
+                                                expected_min -= padding;
+                                            }
+                                        }
+                                        normalized = !(expected_max - expected_min).is_finite();
+                                        let unit = major_unit.unwrap_or_else(|| {
+                                            if is_x {
+                                                nice_unit(
+                                                    (expected_max - expected_min)
+                                                        / target_intervals(xy_plot().w),
+                                                )
+                                            } else {
+                                                excel_unit(expected_max - expected_min)
+                                            }
+                                        });
+                                        if min.is_none() {
+                                            expected_min = round_to_unit(expected_min, unit, false);
+                                        } else {
+                                            assert_eq!(
+                                                scale.min.to_bits(),
+                                                expected_min.to_bits(),
+                                                "{context:?}"
+                                            );
+                                        }
+                                        if max.is_none() {
+                                            expected_max = round_to_unit(expected_max, unit, true);
+                                        } else {
+                                            assert_eq!(
+                                                scale.max.to_bits(),
+                                                expected_max.to_bits(),
+                                                "{context:?}"
+                                            );
+                                        }
+                                        if !normalized {
+                                            assert_eq!(
+                                                (scale.min.to_bits(), scale.max.to_bits()),
+                                                (expected_min.to_bits(), expected_max.to_bits()),
+                                                "{context:?}"
+                                            );
+                                            assert_eq!(
+                                                scale.unit.to_bits(),
+                                                unit.to_bits(),
+                                                "{context:?}"
+                                            );
+                                            assert_eq!(scale.log_base, None, "{context:?}");
+                                            assert!(!scale.percent, "{context:?}");
+                                        }
+                                    }
+                                    let degenerate = if normalized {
+                                        if constant_x && (expected_max - expected_min).is_finite() {
+                                            match (min, max) {
+                                                (Some(_), None) => {
+                                                    expected_max = (expected_min
+                                                        + expected_min.abs().max(1.0) * 0.05)
+                                                        .min(f64::MAX);
+                                                }
+                                                (None, Some(_)) => {
+                                                    expected_min = (expected_max
+                                                        - expected_max.abs().max(1.0) * 0.05)
+                                                        .max(f64::MIN);
+                                                }
+                                                (Some(_), Some(_)) => expected_max = expected_min,
+                                                (None, None) => {
+                                                    expected_min = expected_min.min(0.0);
+                                                    expected_max = expected_max.max(0.0);
+                                                    if expected_max <= expected_min {
+                                                        expected_max = expected_min + 1.0;
+                                                    }
+                                                }
+                                            }
+                                            let unrounded = (expected_min, expected_max);
+                                            let unit = major_unit.unwrap_or_else(|| {
+                                                nice_unit(
+                                                    (expected_max - expected_min)
+                                                        / target_intervals(xy_plot().w),
+                                                )
+                                            });
+                                            if min.is_none() {
+                                                expected_min =
+                                                    round_to_unit(expected_min, unit, false);
+                                            }
+                                            if max.is_none() {
+                                                expected_max =
+                                                    round_to_unit(expected_max, unit, true);
+                                            }
+                                            if expected_max <= expected_min
+                                                && unrounded.1 > unrounded.0
+                                            {
+                                                (expected_min, expected_max) = unrounded;
+                                            }
+                                            assert_eq!(
+                                                (scale.min.to_bits(), scale.max.to_bits()),
+                                                (expected_min.to_bits(), expected_max.to_bits()),
+                                                "{context:?}"
+                                            );
+                                        }
+                                        if min.zip(max).is_none_or(|(min, max)| min <= max) {
+                                            if let Some(min) = min {
+                                                assert_eq!(scale.min, min, "{context:?}");
+                                            }
+                                            if let Some(max) = max {
+                                                assert_eq!(scale.max, max, "{context:?}");
+                                            }
+                                        }
+                                        min.zip(max).is_some_and(|(min, max)| min >= max)
+                                            || min == Some(f64::MAX) && max.is_none()
+                                            || max == Some(f64::MIN) && min.is_none()
+                                    } else {
+                                        expected_max <= expected_min
+                                    };
+                                    let ticks = axis_ticks(scale, major_unit);
+                                    assert!(ticks.len() >= 2, "{context:?}: {ticks:?}");
+                                    if (scale.max - scale.min).is_finite() {
+                                        assert_eq!(
+                                            ticks
+                                                .iter()
+                                                .copied()
+                                                .map(f64::to_bits)
+                                                .collect::<Vec<_>>(),
+                                            main_linear_ticks(scale, major_unit)
+                                                .into_iter()
+                                                .map(f64::to_bits)
+                                                .collect::<Vec<_>>(),
+                                            "{context:?}"
+                                        );
+                                        for value in [scale.min, scale.max] {
+                                            let raw = (value - scale.min) / (scale.max - scale.min);
+                                            let expected = if raw.is_finite() { raw } else { 0.0 };
+                                            assert_eq!(
+                                                scale.fraction(value).to_bits(),
+                                                expected.to_bits(),
+                                                "{context:?}"
+                                            );
+                                        }
+                                    } else {
+                                        assert!(
+                                            ticks.iter().all(|tick| tick.is_finite()),
+                                            "{context:?}: {ticks:?}"
+                                        );
+                                    }
+                                    if !normalized && expected_max < expected_min {
+                                        assert!(scale.max < scale.min, "{context:?}");
+                                        assert_eq!(scale.fraction(scale.min), 0.0, "{context:?}");
+                                        let expected_span = expected_max - expected_min;
+                                        let expected_ticks: Vec<f64> = (0..=4)
+                                            .map(|step| match step {
+                                                4 => expected_max,
+                                                step => {
+                                                    expected_min + expected_span * step as f64 / 4.0
+                                                }
+                                            })
+                                            .collect();
+                                        assert_eq!(ticks, expected_ticks, "{context:?}");
+                                    } else if degenerate {
+                                        assert_eq!(scale.max, scale.min, "{context:?}");
+                                        assert_eq!(scale.fraction(scale.min), 0.0, "{context:?}");
+                                        assert_eq!(ticks, vec![scale.min; 5], "{context:?}");
+                                    } else {
+                                        assert!(scale.max > scale.min, "{context:?}");
+                                        let span = scale.max - scale.min;
+                                        let span = if span.is_finite() {
+                                            span
+                                        } else {
+                                            scale.max * 0.5 - scale.min * 0.5
+                                        };
+                                        assert!(span.is_finite() && span > 0.0, "{context:?}");
+                                        assert!(
+                                            scale.fraction(scale.min).is_finite(),
+                                            "{context:?}"
+                                        );
+                                        assert!(
+                                            scale.fraction(scale.max).is_finite(),
+                                            "{context:?}"
+                                        );
+                                        if !(scale.max - scale.min).is_finite() {
+                                            assert!(
+                                                ticks.windows(2).all(|pair| pair[0] < pair[1]),
+                                                "{context:?}: {ticks:?}"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn value_range_impossible_inputs_share_fallback() {
+        for rule in [
+            ValueRangeRule::Scatter { intervals: 12.0 },
+            ValueRangeRule::Value,
+        ] {
+            for (data, min, max, expected) in [
+                (
+                    None,
+                    Some(f64::NAN),
+                    Some(f64::INFINITY),
+                    if matches!(rule, ValueRangeRule::Value) {
+                        (0.0, 2.0)
+                    } else {
+                        (0.0, 1.0)
+                    },
+                ),
+                (Some((0.0, 1.0)), Some(2.0), Some(1.0), (2.0, 2.0)),
+                (Some((0.0, 1.0)), Some(40.0), Some(40.0), (40.0, 40.0)),
+                (
+                    Some((f64::MAX, f64::MAX)),
+                    Some(f64::MAX),
+                    None,
+                    (f64::MAX, f64::MAX),
+                ),
+                (
+                    Some((f64::MIN, f64::MIN)),
+                    None,
+                    Some(f64::MIN),
+                    (f64::MIN, f64::MIN),
+                ),
+            ] {
+                let (min, max, unit, log_base) =
+                    normalize_value_range(data, PlotAxisRange { min, max }, rule, None, Some(1.0));
+                assert_eq!((min, max), expected);
+                let scale = ValueScale {
+                    min,
+                    max,
+                    unit,
+                    log_base,
+                    reversed: false,
+                    percent: false,
+                };
+                assert!(scale.fraction(min).is_finite());
+                assert!(axis_ticks(scale, None).iter().all(|tick| tick.is_finite()));
+            }
+        }
+    }
+
+    #[test]
+    fn scatter_and_bubble_constant_x_pins_match_main_bounds() {
+        let data = source(&[10.0]);
+        let sizes = [2.0];
+        for chart_type in ["scatter", "bubble"] {
+            for (value, bounds, expected) in [
+                (40.0, (Some(40.0), None), (0.0, 1.0)),
+                (-40.0, (None, Some(-40.0)), (-40.0, -39.0)),
+                (40.0, (Some(40.0), Some(40.0)), (0.0, 1.0)),
+                (40.0, (Some(20.0), Some(60.0)), (20.0, 60.0)),
+                (40.0, (None, None), (0.0, 40.0)),
+                (-40.0, (None, None), (-40.0, 0.0)),
+            ] {
+                for reversed in [false, true] {
+                    let x = [value];
+                    let mut xy = series("XY", &data);
+                    xy.x_values = &x;
+                    xy.bubble_sizes = &sizes;
+                    xy.color = Some("#010203");
+                    let mut group = group(chart_type, vec![xy]);
+                    group.axis_ids = vec!["x", "y"];
+                    let mut x_axis = value_axis("x", 0.0, 1.0);
+                    x_axis.range = PlotAxisRange {
+                        min: bounds.0,
+                        max: bounds.1,
+                    };
+                    x_axis.reversed = reversed;
+                    let chart = PlotChart {
+                        chart_type,
+                        plot_groups: vec![group],
+                        axes: vec![x_axis, value_axis("y", 0.0, 20.0)],
+                        plot_layout: Some(xy_layout()),
+                        ..PlotChart::default()
+                    };
+                    let (scale, _) = xy_scales(&chart);
+                    assert_eq!((scale.min, scale.max), expected, "{chart_type}");
+                    assert_eq!(scale.reversed, reversed);
+                    let markers = xy_markers(&plot_chart(&chart, rect()));
+                    assert_eq!(markers.len(), 1, "{chart_type}");
+                    let fraction = if expected.0 == expected.1 {
+                        0.0
+                    } else {
+                        ((value - expected.0) / (expected.1 - expected.0)).clamp(0.0, 1.0)
+                    };
+                    let ratio = if reversed { 1.0 - fraction } else { fraction };
+                    assert!((markers[0].0 - (30.0 + 240.0 * ratio)).abs() < 0.01);
+                    assert!((markers[0].1 - 100.0).abs() < 0.01);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scatter_and_bubble_constant_x_large_pins_match_main() {
+        let data = source(&[10.0]);
+        let sizes = [2.0];
+        for chart_type in ["scatter", "bubble"] {
+            for (value, bounds, expected, fraction) in [
+                (
+                    -1.75e308,
+                    (None, Some(-1.75e308)),
+                    (-1.75e308, -1.75e308),
+                    0.0,
+                ),
+                (1.75e308, (Some(1.75e308), None), (0.0, 1.0), 1.75e308),
+            ] {
+                for reversed in [false, true] {
+                    for major_unit in [None, Some(1.0)] {
+                        let x = [value];
+                        let mut xy = series("XY", &data);
+                        xy.x_values = &x;
+                        xy.bubble_sizes = &sizes;
+                        let mut group = group(chart_type, vec![xy]);
+                        group.axis_ids = vec!["x", "y"];
+                        let x_axis = PlotAxis {
+                            id: Some("x"),
+                            kind: PlotAxisKind::Value,
+                            range: PlotAxisRange {
+                                min: bounds.0,
+                                max: bounds.1,
+                            },
+                            reversed,
+                            major_unit,
+                            ..PlotAxis::default()
+                        };
+                        let chart = PlotChart {
+                            chart_type,
+                            plot_groups: vec![group],
+                            axes: vec![x_axis, value_axis("y", 0.0, 20.0)],
+                            ..PlotChart::default()
+                        };
+                        let (scale, _) = xy_scales(&chart);
+                        assert_eq!((scale.min, scale.max), expected, "{chart_type}");
+                        assert!(scale.min.is_finite() && scale.max.is_finite());
+                        assert!(scale.max >= scale.min);
+                        assert!((scale.max - scale.min).is_finite());
+                        assert!(scale.unit.is_finite() && scale.unit > 0.0);
+                        assert_eq!(scale.fraction(value), fraction);
+                        assert_eq!(
+                            scale.ratio(value),
+                            if reversed {
+                                1.0 - fraction.clamp(0.0, 1.0)
+                            } else {
+                                fraction.clamp(0.0, 1.0)
+                            }
+                        );
+                        let ticks = axis_ticks(scale, major_unit);
+                        assert!(ticks.len() >= 2, "{ticks:?}");
+                        assert!(ticks.iter().all(|value| value.is_finite()), "{ticks:?}");
+                        assert_eq!(ticks, main_linear_ticks(scale, major_unit));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scatter_and_bubble_constant_x_inward_pins_match_main() {
+        let data = source(&[10.0]);
+        let sizes = [2.0];
+        for chart_type in ["scatter", "bubble"] {
+            for (value, bounds, expected, fraction) in [
+                (f64::MIN, (Some(f64::MIN), None), (f64::MIN, f64::MIN), 0.0),
+                (f64::MAX, (None, Some(f64::MAX)), (0.0, 1.0), f64::MAX),
+            ] {
+                for reversed in [false, true] {
+                    let x = [value];
+                    let mut xy = series("XY", &data);
+                    xy.x_values = &x;
+                    xy.bubble_sizes = &sizes;
+                    let mut group = group(chart_type, vec![xy]);
+                    group.axis_ids = vec!["x", "y"];
+                    let x_axis = PlotAxis {
+                        id: Some("x"),
+                        kind: PlotAxisKind::Value,
+                        range: PlotAxisRange {
+                            min: bounds.0,
+                            max: bounds.1,
+                        },
+                        reversed,
+                        ..PlotAxis::default()
+                    };
+                    let chart = PlotChart {
+                        chart_type,
+                        plot_groups: vec![group],
+                        axes: vec![x_axis, value_axis("y", 0.0, 20.0)],
+                        ..PlotChart::default()
+                    };
+                    let (scale, _) = xy_scales(&chart);
+                    assert_eq!((scale.min, scale.max), expected);
+                    assert!(scale.min.is_finite() && scale.max.is_finite());
+                    assert!(scale.max >= scale.min);
+                    assert!((scale.max - scale.min).is_finite());
+                    assert!(scale.unit.is_finite() && scale.unit > 0.0);
+                    assert_eq!(scale.fraction(value), fraction);
+                    assert_eq!(
+                        scale.ratio(value),
+                        if reversed {
+                            1.0 - fraction.clamp(0.0, 1.0)
+                        } else {
+                            fraction.clamp(0.0, 1.0)
+                        }
+                    );
+                    let ticks = axis_ticks(scale, None);
+                    assert!(ticks.len() >= 2, "{ticks:?}");
+                    assert!(ticks.iter().all(|value| value.is_finite()), "{ticks:?}");
+                    assert_eq!(ticks, main_linear_ticks(scale, None));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scatter_and_bubble_constant_x_outward_pins_match_main() {
+        let data = source(&[10.0]);
+        let sizes = [2.0];
+        for chart_type in ["scatter", "bubble"] {
+            for (value, bounds, expected, fraction) in [
+                (f64::MIN, (None, Some(f64::MIN)), (f64::MIN, f64::MIN), 0.0),
+                (f64::MAX, (Some(f64::MAX), None), (0.0, 1.0), f64::MAX),
+            ] {
+                for reversed in [false, true] {
+                    let x = [value];
+                    let mut xy = series("XY", &data);
+                    xy.x_values = &x;
+                    xy.bubble_sizes = &sizes;
+                    let mut group = group(chart_type, vec![xy]);
+                    group.axis_ids = vec!["x", "y"];
+                    let x_axis = PlotAxis {
+                        id: Some("x"),
+                        kind: PlotAxisKind::Value,
+                        range: PlotAxisRange {
+                            min: bounds.0,
+                            max: bounds.1,
+                        },
+                        reversed,
+                        ..PlotAxis::default()
+                    };
+                    let chart = PlotChart {
+                        chart_type,
+                        plot_groups: vec![group],
+                        axes: vec![x_axis, value_axis("y", 0.0, 20.0)],
+                        ..PlotChart::default()
+                    };
+                    let (scale, _) = xy_scales(&chart);
+                    assert_eq!((scale.min, scale.max), expected, "{chart_type}");
+                    assert!(scale.min.is_finite() && scale.max.is_finite());
+                    assert_eq!(scale.max - scale.min, expected.1 - expected.0);
+                    assert!(scale.unit.is_finite() && scale.unit > 0.0);
+                    assert_eq!(scale.fraction(value), fraction);
+                    assert_eq!(
+                        scale.ratio(value),
+                        if reversed {
+                            1.0 - fraction.clamp(0.0, 1.0)
+                        } else {
+                            fraction.clamp(0.0, 1.0)
+                        }
+                    );
+                    let ticks = axis_ticks(scale, None);
+                    assert_eq!(ticks, main_linear_ticks(scale, None));
+                    assert!(ticks.iter().all(|value| value.is_finite()), "{ticks:?}");
+                    assert!(ticks.windows(2).all(|pair| pair[0] <= pair[1]), "{ticks:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scatter_and_bubble_unpaired_x_tails_do_not_spend_scale_budget() {
+        let a = source(&[10.0]);
+        let b = source(&[100.0, 200.0]);
+        let a_x = vec![1.0; MAX_PLOT_DATA_SCAN];
+        let b_x = [1.0, 1.0];
+        let a_sizes = vec![2.0; MAX_PLOT_DATA_SCAN];
+        let b_sizes = [2.0, 2.0];
+        for chart_type in ["scatter", "bubble"] {
+            let mut a_series = series("A", &a);
+            a_series.x_values = &a_x;
+            a_series.bubble_sizes = &a_sizes;
+            a_series.color = Some("#010203");
+            let mut b_series = series("B", &b);
+            b_series.x_values = &b_x;
+            b_series.bubble_sizes = &b_sizes;
+            b_series.color = Some("#010203");
+            b_series.marker = Some(PlotMarker {
+                symbol: Some(PlotMarkerSymbol::Circle),
+                ..PlotMarker::default()
+            });
+            let mut chart = grouped(chart_type, group(chart_type, vec![a_series, b_series]));
+            chart.plot_layout = Some(xy_layout());
+            let (_, scale) = xy_scales(&chart);
+            assert!(scale.min <= 100.0 && scale.max >= 200.0, "{scale:?}");
+            let markers = xy_markers(&plot_chart(&chart, rect()));
+            assert_eq!(markers.len(), 3, "{chart_type}");
+            assert!(markers[1].1 > markers[2].1, "{markers:?}");
+            for (_, y) in &markers[1..] {
+                assert!(*y > 20.0 && *y < 180.0, "{markers:?}");
+            }
+            for ((_, y), expected_y) in markers[1..].iter().zip([116.0, 52.0]) {
+                assert!((y - expected_y).abs() < 0.01, "{markers:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn scatter_and_bubble_overflowing_x_spans_stay_usable() {
+        let data = source(&[5.0, 10.0]);
+        let x = [-1e308, 1e308];
+        let sizes = [2.0, 2.0];
+        for chart_type in ["scatter", "bubble"] {
+            for major_unit in [None, Some(1.0)] {
+                let mut xy = series("XY", &data);
+                xy.x_values = &x;
+                xy.bubble_sizes = &sizes;
+                xy.color = Some("#010203");
+                let mut group = group(chart_type, vec![xy]);
+                group.axis_ids = vec!["x", "y"];
+                let x_axis = PlotAxis {
+                    id: Some("x"),
+                    kind: PlotAxisKind::Value,
+                    major_unit,
+                    ..PlotAxis::default()
+                };
+                let chart = PlotChart {
+                    chart_type,
+                    plot_groups: vec![group],
+                    axes: vec![x_axis, value_axis("y", 0.0, 20.0)],
+                    plot_layout: Some(xy_layout()),
+                    ..PlotChart::default()
+                };
+                let (scale, _) = xy_scales(&chart);
+                assert!(scale.min.is_finite() && scale.max.is_finite());
+                assert!(scale.unit.is_finite() && scale.unit > 0.0);
+                let ticks = axis_ticks(scale, major_unit);
+                assert!(ticks.len() >= 2, "{ticks:?}");
+                assert!(ticks.iter().all(|value| value.is_finite()), "{ticks:?}");
+                assert!(ticks.windows(2).all(|pair| pair[0] < pair[1]), "{ticks:?}");
+                let ops = plot_chart(&chart, rect());
+                assert!(ops.iter().all(op_is_finite));
+                let labels = texts(&ops);
+                assert!(
+                    labels.iter().all(|text| {
+                        !text.contains("NaN") && !text.to_ascii_lowercase().contains("inf")
+                    }),
+                    "{labels:?}"
+                );
+                let markers = xy_markers(&ops);
+                assert_eq!(markers.len(), 2, "{chart_type}");
+                assert!(markers.iter().all(|(x, y)| x.is_finite() && y.is_finite()));
+                assert!(markers[0].0 < markers[1].0, "{markers:?}");
+                assert!((markers[0].0 - 30.0).abs() < 0.01, "{markers:?}");
+                assert!((markers[1].0 - 270.0).abs() < 0.01, "{markers:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn bubble_unpaired_size_tails_spend_main_y_scan_budget() {
+        let a = Source {
+            categories: Vec::new(),
+            values: vec![10.0; MAX_PLOT_DATA_SCAN],
+        };
+        let b = source(&[100.0, 200.0]);
+        let a_x = vec![1.0; MAX_PLOT_DATA_SCAN];
+        let b_x = [1.0, 1.0];
+        let a_sizes = [2.0];
+        let b_sizes = [2.0, 2.0];
+        let mut a_series = series("A", &a);
+        a_series.x_values = &a_x;
+        a_series.bubble_sizes = &a_sizes;
+        a_series.color = Some("#010203");
+        let mut b_series = series("B", &b);
+        b_series.x_values = &b_x;
+        b_series.bubble_sizes = &b_sizes;
+        b_series.color = Some("#010203");
+        let mut chart = grouped("bubble", group("bubble", vec![a_series, b_series]));
+        chart.plot_layout = Some(xy_layout());
+        let (_, scale) = xy_scales(&chart);
+        assert_eq!((scale.min, scale.max), (0.0, 12.0));
+        let markers = xy_markers(&plot_chart(&chart, rect()));
+        assert_eq!(markers.len(), 3);
+        assert!((markers[1].1 - 20.0).abs() < 0.01, "{markers:?}");
+        assert!((markers[2].1 - 20.0).abs() < 0.01, "{markers:?}");
+    }
+
+    #[test]
+    fn scatter_and_bubble_y_scan_keeps_main_cap_and_point_overrides() {
+        let dense = Source {
+            categories: Vec::new(),
+            values: vec![10.0; MAX_PLOT_DATA_SCAN],
+        };
+        let sparse = source(&[10.0]);
+        let b = source(&[100.0, 200.0]);
+        let a_x = vec![1.0; MAX_PLOT_DATA_SCAN];
+        let b_x = [1.0, 1.0];
+        let a_sizes = vec![2.0; MAX_PLOT_DATA_SCAN];
+        let b_sizes = [2.0, 2.0];
+        for chart_type in ["scatter", "bubble"] {
+            let mut a_series = series("A", &dense);
+            a_series.x_values = &a_x;
+            a_series.bubble_sizes = &a_sizes;
+            let mut b_series = series("B", &b);
+            b_series.x_values = &b_x;
+            b_series.bubble_sizes = &b_sizes;
+            let mut chart = grouped(chart_type, group(chart_type, vec![a_series, b_series]));
+            let (_, scale) = xy_scales(&chart);
+            assert_eq!((scale.min, scale.max), (0.0, 12.0));
+
+            chart.plot_groups[0].series[0].values = &sparse.values;
+            chart.plot_groups[0].series[0].points = vec![PlotPoint {
+                index: Some(MAX_PLOT_DATA_SCAN - 1),
+                value: Some(500.0),
+                ..PlotPoint::default()
+            }];
+            let (_, scale) = xy_scales(&chart);
+            assert_eq!((scale.min, scale.max), (0.0, 250.0));
+
+            chart.plot_groups[0].series[0].points[0].value = Some(50.0);
+            let (_, scale) = xy_scales(&chart);
+            assert!(scale.max >= 200.0, "{scale:?}");
+
+            chart.plot_groups[0].series[0].points[0].index = None;
+            chart.plot_groups[0].series[0].points[0].value = Some(10.0);
+            let (_, scale) = xy_scales(&chart);
+            assert_eq!((scale.min, scale.max), (0.0, 250.0));
+        }
     }
 
     #[test]

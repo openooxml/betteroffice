@@ -6,8 +6,8 @@ use std::sync::Arc;
 use yrs::types::text::YChange;
 use yrs::types::{Attrs, Delta};
 use yrs::{
-    Any, Assoc, ClientID, In, IndexedSequence, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextRef,
-    TransactionMut,
+    Any, Assoc, ClientID, ID, In, IndexScope, IndexedSequence, Map, MapPrelim, MapRef, Out,
+    ReadTxn, StickyIndex, Text, TextRef, TransactionMut,
 };
 
 use docx_parse::paragraph_identity::parse_paragraph_id;
@@ -530,7 +530,15 @@ fn apply_raw_ops_to_story(
                     }
                     _ => run.seed_range = None,
                 }
-                apply_raw_op_absolute(txn, &story, story_id, op, deterministic, rekeyed)?;
+                apply_raw_op_absolute(
+                    txn,
+                    &story,
+                    story_id,
+                    op,
+                    deterministic,
+                    run.seed_range.as_ref(),
+                    rekeyed,
+                )?;
             }
         }
     }
@@ -570,6 +578,7 @@ fn apply_raw_op_absolute(
     story_id: &str,
     op: RawOp,
     seeding: bool,
+    seed_range: Option<&SeedRange>,
     rekeyed: &mut Vec<MapRef>,
 ) -> OpResult<()> {
     match op {
@@ -637,15 +646,40 @@ fn apply_raw_op_absolute(
                     .filter(|len| *len > 0)
                     .ok_or(OpError::InvalidRange { start, end })?;
                 guard_range(story, txn, start, len)?;
-                let start_anchor =
-                    story
-                        .sticky_index(txn, start, Assoc::After)
-                        .ok_or_else(|| {
-                            OpError::InvalidComment("start anchor could not be made".into())
+                let (start_anchor, end_anchor) = if let Some(range) = seed_range
+                    && end <= range.len
+                {
+                    let anchors = (
+                        StickyIndex::new(
+                            IndexScope::Relative(ID::new(range.client, range.clock + start)),
+                            Assoc::After,
+                        ),
+                        StickyIndex::new(
+                            IndexScope::Relative(ID::new(range.client, range.clock + end - 1)),
+                            Assoc::Before,
+                        ),
+                    );
+                    debug_assert_eq!(
+                        (Some(&anchors.0), Some(&anchors.1)),
+                        (
+                            story.sticky_index(txn, start, Assoc::After).as_ref(),
+                            story.sticky_index(txn, end, Assoc::Before).as_ref()
+                        )
+                    );
+                    anchors
+                } else {
+                    let start_anchor =
+                        story
+                            .sticky_index(txn, start, Assoc::After)
+                            .ok_or_else(|| {
+                                OpError::InvalidComment("start anchor could not be made".into())
+                            })?;
+                    let end_anchor =
+                        story.sticky_index(txn, end, Assoc::Before).ok_or_else(|| {
+                            OpError::InvalidComment("end anchor could not be made".into())
                         })?;
-                let end_anchor = story.sticky_index(txn, end, Assoc::Before).ok_or_else(|| {
-                    OpError::InvalidComment("end anchor could not be made".into())
-                })?;
+                    (start_anchor, end_anchor)
+                };
                 anchors.push(anchor_value(story_id, &start_anchor, &end_anchor));
             }
             let comments = txn
@@ -708,6 +742,9 @@ fn guard_range<T: ReadTxn>(story: &yrs::TextRef, txn: &T, index: u32, len: u32) 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+
+    use yrs::Transact;
+    use yrs::updates::encoder::Encode;
 
     use super::*;
     use crate::canonical::project_story;
@@ -976,6 +1013,191 @@ mod tests {
             body: Any::Null,
         });
         ops
+    }
+
+    fn comment_seed_batches() -> Vec<(String, Vec<RawOp>)> {
+        let mut body = seed_shaped_ops();
+        body.push(RawOp::SetComment {
+            id: "whole".into(),
+            ranges: vec![(0, 96)],
+            author: "Ada".into(),
+            date: String::new(),
+            body: Any::from("whole story"),
+        });
+        body.push(RawOp::SetComment {
+            id: "edges".into(),
+            ranges: vec![(0, 22), (22, 59), (59, 64), (64, 96)],
+            author: "Ada".into(),
+            date: String::new(),
+            body: Any::from("adjacent ranges"),
+        });
+        let header = vec![
+            RawOp::Delete { index: 0, len: 1 },
+            RawOp::Insert {
+                index: 0,
+                text: "😀".into(),
+                attrs: Attrs::new(),
+            },
+            RawOp::Insert {
+                index: 2,
+                text: "AB".into(),
+                attrs: attrs(&[("italic", Any::Bool(true))]),
+            },
+            RawOp::InsertEmbed {
+                index: 4,
+                kind: PILCROW_KIND.into(),
+                payload: pilcrow_payload("7:h0"),
+                attrs: Attrs::new(),
+            },
+            RawOp::SetComment {
+                id: "9".into(),
+                ranges: vec![(0, 2), (2, 5)],
+                author: "Ada".into(),
+                date: String::new(),
+                body: Any::from("shared across stories"),
+            },
+        ];
+        vec![("body".into(), body), ("header:1".into(), header)]
+    }
+
+    #[test]
+    fn seeded_comment_anchors_match_sticky_indices_and_resolve() {
+        let doc = EditingDoc::new(7);
+        doc.create_empty_stories(&["body".into(), "header:1".into()])
+            .unwrap();
+        let batches = comment_seed_batches();
+        let mut expected = BTreeMap::<String, Vec<(String, u32, u32)>>::new();
+        for (story, ops) in &batches {
+            for op in ops {
+                if let RawOp::SetComment { id, ranges, .. } = op {
+                    expected.entry(id.clone()).or_default().extend(
+                        ranges
+                            .iter()
+                            .map(|&(start, end)| (story.clone(), start, end)),
+                    );
+                }
+            }
+        }
+        doc.apply_raw_seed_batches(batches, &EditCtx::local("", ""))
+            .unwrap();
+        assert_eq!(doc.story_len("body").unwrap(), 96);
+        assert_eq!(doc.story_len("header:1").unwrap(), 5);
+        let txn = doc.yrs_doc().transact();
+        let comments = txn.get_map(COMMENTS).unwrap();
+        assert_eq!(comments.len(&txn) as usize, expected.len());
+        for (id, ranges) in expected {
+            let comment = comments.get(&txn, &id).unwrap().cast::<MapRef>().unwrap();
+            let Some(Out::Any(Any::Array(anchors))) = comment.get(&txn, "anchors") else {
+                panic!("comment {id} has no anchors");
+            };
+            assert_eq!(anchors.len(), ranges.len(), "comment {id}");
+            for (anchor, (story_id, start, end)) in anchors.iter().zip(&ranges) {
+                let Any::Map(anchor) = anchor else {
+                    panic!("comment {id} has an invalid anchor");
+                };
+                let story = story_ref(&txn, story_id).unwrap();
+                assert_eq!(anchor.get("story"), Some(&Any::from(story_id.as_str())));
+                assert_eq!(
+                    anchor.get("start"),
+                    Some(&Any::from(
+                        story
+                            .sticky_index(&txn, *start, Assoc::After)
+                            .unwrap()
+                            .encode_v1()
+                    )),
+                    "comment {id}, {story_id}:{start}..{end}"
+                );
+                assert_eq!(
+                    anchor.get("end"),
+                    Some(&Any::from(
+                        story
+                            .sticky_index(&txn, *end, Assoc::Before)
+                            .unwrap()
+                            .encode_v1()
+                    )),
+                    "comment {id}, {story_id}:{start}..{end}"
+                );
+            }
+            assert_eq!(
+                doc.resolve_comment(&id)
+                    .unwrap()
+                    .into_iter()
+                    .map(|anchor| (anchor.story, anchor.start, anchor.end))
+                    .collect::<Vec<_>>(),
+                ranges,
+                "comment {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn seeded_comment_anchors_preserve_update_and_state_vector_bytes() {
+        let ctx = EditCtx::local("", "");
+        let seeded = EditingDoc::new(7);
+        seeded
+            .create_empty_stories(&["body".into(), "header:1".into()])
+            .unwrap();
+        seeded
+            .apply_raw_seed_batches(comment_seed_batches(), &ctx)
+            .unwrap();
+
+        let reference = EditingDoc::new(7);
+        reference
+            .create_empty_stories(&["body".into(), "header:1".into()])
+            .unwrap();
+        for (story, mut ops) in comment_seed_batches() {
+            let first_comment = ops
+                .iter()
+                .position(|op| matches!(op, RawOp::SetComment { .. }))
+                .unwrap();
+            let comments = ops.split_off(first_comment);
+            reference
+                .apply_raw_seed_batches(vec![(story.clone(), ops)], &ctx)
+                .unwrap();
+            reference
+                .apply_raw_seed_batches(vec![(story, comments)], &ctx)
+                .unwrap();
+        }
+
+        assert_eq!(
+            seeded.encode_state_as_update_v1(),
+            reference.encode_state_as_update_v1()
+        );
+        assert_eq!(
+            seeded.encode_state_vector_v1(),
+            reference.encode_state_vector_v1()
+        );
+    }
+
+    #[test]
+    fn seeded_comments_preserve_range_errors() {
+        let cases = [
+            (
+                Vec::new(),
+                OpError::InvalidComment("at least one anchored range is required".into()),
+            ),
+            (vec![(96, 96)], OpError::InvalidRange { start: 96, end: 96 }),
+            (vec![(98, 97)], OpError::InvalidRange { start: 98, end: 97 }),
+            (vec![(0, 97)], OpError::OutOfBounds { index: 97, len: 96 }),
+        ];
+        for (ranges, expected) in cases {
+            let doc = EditingDoc::new(7);
+            doc.create_empty_stories(&["body".into()]).unwrap();
+            let mut ops = seed_shaped_ops();
+            ops.retain(|op| !matches!(op, RawOp::SetComment { .. }));
+            ops.push(RawOp::SetComment {
+                id: "invalid".into(),
+                ranges,
+                author: String::new(),
+                date: String::new(),
+                body: Any::Null,
+            });
+            let result =
+                doc.apply_raw_seed_batches(vec![("body".into(), ops)], &EditCtx::local("", ""));
+            assert_eq!(result.err(), Some(expected));
+            assert_eq!(doc.story_len("body").unwrap(), 96);
+            assert!(doc.resolve_comment("invalid").is_err());
+        }
     }
 
     #[test]

@@ -190,7 +190,14 @@ export function CanvasFindHighlightOverlay({
       }
       for (const index of visible) {
         const m = matches[index];
-        for (const r of displayListQueries.rangeRects(m.displayFrom, m.displayTo)) {
+        const source =
+          displayListQueries.rangeRectsOnPages?.(
+            m.displayFrom,
+            m.displayTo,
+            pageWindow.start,
+            pageWindow.end
+          ) ?? displayListQueries.rangeRects(m.displayFrom, m.displayTo);
+        for (const r of source) {
           const p = project(r, index === currentIndex);
           if (p) next.push(p);
         }

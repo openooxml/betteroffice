@@ -34,6 +34,7 @@ await paintSlide(canvas.getContext('2d')!, frame, devicePixelRatio);
 ```
 
 Browsers can call `initWasm()`; Node and SSR pass wasm bytes to `initWasm(bytes)`.
+`openPresentationSession` is an experimental, opt-in worker session for async reads, edits, slide metadata, and saving.
 
 All parsing, edits, collaboration state, text shaping, layout, hit-testing, and
 display-list emission stay in Rust. The package decodes the typed boundary and
