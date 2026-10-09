@@ -10,10 +10,11 @@ use pyo3::types::{PyBool, PyBytes, PyDict, PyInt};
 use python_common::map_io_error;
 
 use betteroffice_docx::{
-    BlockContent, DisplayList, Document as CoreDocument, DocxStructuredContent, EditCtx,
-    EditOrigin, Error as CoreError, ExportOptions, HeaderFooter, ImageScope, InlineNode,
-    LayoutInput, MarkdownOptions, NoteKind, Paragraph, ParagraphContent, ParseLimits, Receipt,
-    RevisionView, Run, RunContent, SaveOptions, Section, StorySelection, Table, get_paragraph_text,
+    BlockContent, ContentControlQuery, ContentControlsOptions, DisplayList,
+    Document as CoreDocument, DocxStructuredContent, EditCtx, EditOrigin, Error as CoreError,
+    ExportOptions, HeaderFooter, ImageScope, InlineNode, LayoutInput, MarkdownOptions, NoteKind,
+    Paragraph, ParagraphContent, ParseLimits, Receipt, RevisionView, Run, RunContent, SaveOptions,
+    Section, StorySelection, Table, get_paragraph_text,
 };
 
 /// The engine builds and discards an editing document per call, so one client
@@ -60,7 +61,7 @@ create_exception!(
     _betteroffice_docx,
     ExportError,
     DocxError,
-    "The engine refused a structured export's options."
+    "The engine refused a structured export's or a content-control listing's options."
 );
 
 fn map_error(error: CoreError) -> PyErr {
@@ -68,7 +69,9 @@ fn map_error(error: CoreError) -> PyErr {
     match error {
         CoreError::Parse(_) => ParseError::new_err(message),
         CoreError::Edit(_) | CoreError::Operation(_) => EditError::new_err(message),
-        CoreError::ParagraphNotFound(_) => PyKeyError::new_err(message),
+        CoreError::ParagraphNotFound(_) | CoreError::AmbiguousParagraph(_) => {
+            PyKeyError::new_err(message)
+        }
         CoreError::UnsupportedParagraphEdit(_) => UnsupportedEditError::new_err(message),
         CoreError::Layout(_) | CoreError::DisplayList(_) => LayoutError::new_err(message),
         CoreError::Font(_) | CoreError::Image(_) => PyValueError::new_err(message),
@@ -181,6 +184,20 @@ fn export_options(
             .transpose()?,
         include_formatting: Some(include_formatting),
         max_blocks: Some(max_blocks),
+        max_bytes: Some(max_bytes),
+    })
+}
+
+fn controls_options(
+    stories: Option<Vec<String>>,
+    max_controls: u32,
+    max_bytes: u32,
+) -> PyResult<ContentControlsOptions> {
+    Ok(ContentControlsOptions {
+        stories: stories
+            .map(|stories| stories.iter().map(|story| parse_story(story)).collect())
+            .transpose()?,
+        max_controls: Some(max_controls),
         max_bytes: Some(max_bytes),
     })
 }
@@ -947,14 +964,14 @@ impl PyDocument {
                 "paragraph must be an ID (str) or an index (int), not bool",
             ));
         }
-        let paragraphs = self.inner.paragraphs();
         if let Ok(id) = key.extract::<String>() {
-            return paragraphs
-                .into_iter()
-                .find(|paragraph| paragraph.para_id.as_deref() == Some(id.as_str()))
+            return self
+                .inner
+                .paragraph(&id)
                 .map(PyParagraph::from_core)
                 .ok_or_else(|| PyKeyError::new_err(format!("no paragraph with ID {id:?}")));
         }
+        let paragraphs = self.inner.paragraphs();
         if key.is_instance_of::<PyInt>() {
             return key
                 .extract::<usize>()
@@ -1049,8 +1066,10 @@ impl PyDocument {
         self.timestamp = timestamp;
     }
 
-    /// Body paragraph IDs in document order. A paragraph Word never stamped
-    /// with a `w14:paraId` reads as `None` and cannot be edited by ID.
+    /// Body paragraph IDs in document order, each addressing one paragraph. A
+    /// paragraph that repeats an earlier paragraph's ID reads as a fresh one,
+    /// which a save writes once the paragraph is edited. A paragraph Word never
+    /// stamped with a `w14:paraId` reads as `None` and cannot be edited by ID.
     #[getter]
     fn paragraph_ids(&self) -> Vec<Option<String>> {
         self.inner
@@ -1220,6 +1239,47 @@ impl PyDocument {
             .detach(|| self.inner.export_markdown(&options))
             .map_err(|error| map_export_error(py, error))?;
         to_dict(py, serde_json::to_string(&content))
+    }
+
+    /// The content controls of the current model in document order, as the
+    /// camelCase snapshot dict. Ids and anchors address this snapshot.
+    #[pyo3(signature = (*, stories = None, max_controls = 10_000, max_bytes = 8_388_608))]
+    fn list_content_controls<'py>(
+        &self,
+        py: Python<'py>,
+        stories: Option<Vec<String>>,
+        max_controls: u32,
+        max_bytes: u32,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let options = controls_options(stories, max_controls, max_bytes)?;
+        let snapshot = py
+            .detach(|| self.inner.list_content_controls(&options))
+            .map_err(|error| map_export_error(py, error))?;
+        to_dict(py, serde_json::to_string(&snapshot))
+    }
+
+    /// The content controls matching `query` exactly: `{"kind": "id", "controlId"}`,
+    /// `{"kind": "tag", "tag"}` or `{"kind": "alias", "alias"}`.
+    #[pyo3(signature = (query, *, stories = None, max_controls = 10_000, max_bytes = 8_388_608))]
+    fn find_content_controls<'py>(
+        &self,
+        py: Python<'py>,
+        query: &Bound<'py, PyAny>,
+        stories: Option<Vec<String>>,
+        max_controls: u32,
+        max_bytes: u32,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let text = py
+            .import("json")?
+            .call_method1("dumps", (query,))?
+            .extract::<String>()?;
+        let query: ContentControlQuery = serde_json::from_str(&text)
+            .map_err(|error| PyValueError::new_err(format!("invalid query: {error}")))?;
+        let options = controls_options(stories, max_controls, max_bytes)?;
+        let snapshot = py
+            .detach(|| self.inner.find_content_controls(&query, &options))
+            .map_err(|error| map_export_error(py, error))?;
+        to_dict(py, serde_json::to_string(&snapshot))
     }
 
     /// Paginate a `{"measured": [...], "options": {...}}` envelope.

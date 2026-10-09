@@ -6,10 +6,17 @@
  * precompiled module. Callers never see the JSON-string boundary.
  */
 
-import initWasmModule, { XlsxDocument } from './generated/xlsx_wasm.js';
+import initWasmModule, {
+  XlsxDocument,
+  exportXlsxMarkdownJson,
+  exportXlsxStructuredJson,
+  renderXlsxMarkdownJson,
+} from './generated/xlsx_wasm.js';
 import type { InitInput } from './generated/xlsx_wasm.js';
+import * as xlsxWasm from './generated/xlsx_wasm.js';
+import { wasmAssetUrl } from './asset';
 import type { CollaborationReplica, CollaborationUpdateOrigin } from '../collaboration/types';
-import type { ChartRegion, DisplayList } from '../display-list/types';
+import type { ChartRegion, DisplayList, Rect } from '../display-list/types';
 import type {
   XlsxCellAddress,
   XlsxEditRequest,
@@ -20,6 +27,13 @@ import type {
   XlsxReadResult,
   XlsxValidationResult,
 } from '../edits';
+import type {
+  XlsxExportOptions,
+  XlsxExportResult,
+  XlsxMarkdownContent,
+  XlsxMarkdownOptions,
+  XlsxStructuredContent,
+} from '../exports';
 
 /**
  * A scrolled window into a sheet. `x`/`y` are content-pixel offsets into the
@@ -217,11 +231,17 @@ export interface HistoryState {
 export type WorkbookUpdateOrigin = CollaborationUpdateOrigin;
 export type WorkbookUpdateListener = (update: Uint8Array, origin: WorkbookUpdateOrigin) => void;
 
+export interface WorkbookCalculationContext {
+  nowSerial: number;
+  randSeed: number;
+}
+
 export interface OpenWorkbookOptions {
   /** Open a Yrs-backed replica that can accept peer updates. */
   collaborative?: boolean;
   /** Peer-unique positive safe integer. Generated securely when omitted. */
   clientId?: number;
+  calculation?: WorkbookCalculationContext;
 }
 
 /**
@@ -320,6 +340,35 @@ export class StaleProposalError extends Error {
   }
 }
 
+/** A display-list viewport exceeds the counted cell limit. */
+export class DisplayTooLargeError extends Error {
+  readonly code = 'displayTooLarge';
+  constructor(readonly cells: number, readonly maxCells: number) {
+    super(`requested viewport spans ${cells} cells, exceeds the ${maxCells}-cell display-list cap`);
+    this.name = 'DisplayTooLargeError';
+  }
+}
+
+function displayErrorFrom(message: string): DisplayTooLargeError | null {
+  if (!message.startsWith('{')) return null;
+  try {
+    const parsed = JSON.parse(message) as {
+      code?: unknown;
+      cells?: unknown;
+      maxCells?: unknown;
+    };
+    if (
+      parsed.code !== 'displayTooLarge' ||
+      typeof parsed.cells !== 'number' || !Number.isSafeInteger(parsed.cells) ||
+      typeof parsed.maxCells !== 'number' || !Number.isSafeInteger(parsed.maxCells) ||
+      parsed.maxCells <= 0 || parsed.cells <= parsed.maxCells
+    ) return null;
+    return new DisplayTooLargeError(parsed.cells, parsed.maxCells);
+  } catch {
+    return null;
+  }
+}
+
 // the wasm reports a stale accept as a JSON error naming each drifted cell.
 function staleErrorFrom(message: string): StaleProposalError | null {
   if (!message.startsWith('{')) return null;
@@ -345,6 +394,7 @@ function staleErrorFrom(message: string): StaleProposalError | null {
  */
 export interface WorkbookHandle extends CollaborationReplica {
   readonly clientId: number;
+  setCalculationContext(context: WorkbookCalculationContext | null): void;
   /** Available in both modes; encodes this handle's current Yrs state vector. */
   encodeStateVector(): Uint8Array;
   /** Available in both modes; pass a peer vector to encode only the missing state. */
@@ -354,7 +404,11 @@ export interface WorkbookHandle extends CollaborationReplica {
   /** Observe owned update bytes from local commits and accepted remote updates. */
   onUpdate(listener: WorkbookUpdateListener): () => void;
   sheetInfo(): SheetInfo;
+  sheetCount(): number;
+  /** Metadata for `sheet`, with that index in `activeSheet`; leaves the workbook unchanged. */
+  sheetInfoFor(sheet: number): SheetInfo;
   calculationStatus(): CalculationStatus;
+  /** Clamps tracks to the grid; throws {@link DisplayTooLargeError} above {@link getDisplayListCellLimit}. */
   displayList(viewport: Viewport): DisplayList;
   /** `displayList` with build and encode time measured inside the core. */
   displayListProfiled(viewport: Viewport): ProfiledDisplayList;
@@ -401,6 +455,8 @@ export interface WorkbookHandle extends CollaborationReplica {
   /** Searches formatted text in sheet and row order. */
   searchText(query: string, options?: XlsxTextSearchOptions): XlsxTextMatch[];
   cellPosition(sheet: number, row: number, col: number): CellPosition;
+  /** Absolute sheet rectangle in unzoomed pixels. */
+  cellRect(sheet: number, row: number, col: number): Rect;
   /** row-major editable views for a range, e.g. "A1:C3" (clipboard copy). */
   rangeCells(sheet: number, range: string): CellEdit[][];
   patchRangeStyle(sheet: number, range: string, patch: RangeStylePatch): EditResult;
@@ -409,6 +465,7 @@ export interface WorkbookHandle extends CollaborationReplica {
   captureFormat(sheet: number, range: string): CapturedFormat;
   applyFormat(sheet: number, range: string, format: CapturedFormat): EditResult;
   mergedRanges(sheet: number, range: string): MergedRange[];
+  visibleMergedRanges(sheet: number, viewport: Viewport): MergedRange[];
   historyState(): HistoryState;
   /**
    * render the current sheet viewport to png bytes via the native raster
@@ -445,8 +502,8 @@ export interface WorkbookHandle extends CollaborationReplica {
   isProposalsAvailable(): boolean;
   /**
    * The session-scoped version of the committed workbook. Committed edits, peer updates, undo,
-   * redo and value-changing recalculation move it; selection, the active sheet and proposals
-   * do not.
+   * redo and a recalculation that changes values or what an export reports about results move
+   * it; selection, the active sheet and proposals do not.
    */
   version(): string;
   /** Cells with the version they were read at; empty `ranges` reads the sheet catalog. */
@@ -460,17 +517,40 @@ export interface WorkbookHandle extends CollaborationReplica {
    * Update listeners run once, after the call returns. Malformed requests throw.
    */
   applyEdits(request: XlsxEditRequest): XlsxEditResult;
+  /**
+   * Exports the committed workbook with the version it was read at: sparse cells with values,
+   * formulas and display text, plus sheet metadata and diagnostics. Nothing is recalculated,
+   * flushed or published. Options it cannot honor refuse; malformed ones throw.
+   */
+  exportStructured(options?: XlsxExportOptions): XlsxExportResult<XlsxStructuredContent>;
+  /** {@link WorkbookHandle.exportStructured} rendered as Markdown from the same read. */
+  exportMarkdown(
+    options?: XlsxExportOptions,
+    markdownOptions?: XlsxMarkdownOptions
+  ): XlsxExportResult<XlsxMarkdownContent>;
   dispose(): void;
 }
 
 let initialized = false;
 let initialization: Promise<void> | undefined;
+const displayListJsonReaders = new WeakMap<
+  WorkbookHandle, (viewport: Viewport, sheet?: number) => string
+>();
+
+/** @experimental */
+export function workbookDisplayListJson(
+  handle: WorkbookHandle, viewport: Viewport, sheet?: number
+): string {
+  const read = displayListJsonReaders.get(handle);
+  if (!read) throw new Error('Workbook display list is unavailable');
+  return read(viewport, sheet);
+}
 
 export type WasmInitInput = InitInput | Promise<InitInput>;
 
 /** Initialize the workbook engine. Concurrent calls share the same attempt. */
 export function initWasm(
-  input: WasmInitInput = new URL('./generated/xlsx_wasm_bg.wasm', import.meta.url)
+  input: WasmInitInput = wasmAssetUrl()
 ): Promise<void> {
   if (initialized) return Promise.resolve();
   if (initialization) return initialization;
@@ -493,7 +573,14 @@ function requireInitialized(): void {
 // wasm rejects throw strings; normalize them (and anything else) to Error.
 function toError(e: unknown): Error {
   if (e instanceof Error) return e;
-  return new Error(typeof e === 'string' ? e : String(e));
+  const message = typeof e === 'string' ? e : String(e);
+  return displayErrorFrom(message) ?? new Error(message);
+}
+
+/** Maximum counted cells per frame, including boundary and frozen tracks; call after `initWasm`. */
+export function getDisplayListCellLimit(): number {
+  requireInitialized();
+  return xlsxWasm.displayListCellLimit();
 }
 
 /**
@@ -529,22 +616,121 @@ export function openWorkbook(
   bytes: Uint8Array,
   options: OpenWorkbookOptions = {}
 ): WorkbookHandle {
+  return openWorkbookInternal(bytes, options);
+}
+
+const peerHydrationReaders = new WeakMap<WorkbookHandle, () => string>();
+const peerVersionAdopters = new WeakMap<WorkbookHandle, (version: string) => void>();
+const peerSnapshotAccess = new WeakMap<WorkbookHandle, {
+  begin(records: number, bytes: number): void;
+  next(): Uint8Array | undefined;
+  end(): void;
+}>();
+
+export function workbookPeerSnapshot(handle: WorkbookHandle) {
+  const snapshot = peerSnapshotAccess.get(handle);
+  if (!snapshot) throw new TypeError('Workbook does not support peer snapshots');
+  return snapshot;
+}
+
+type SnapshotBuilder = {
+  push(chunk: Uint8Array): void;
+  advance(records: number, bytes: number): boolean;
+  finish(): XlsxDocument;
+  free(): void;
+};
+
+export function createWorkbookSnapshotBuilder(options: OpenWorkbookOptions) {
+  requireInitialized();
+  const Constructor = (xlsxWasm as unknown as {
+    XlsxSnapshotBuilder?: new () => SnapshotBuilder;
+  }).XlsxSnapshotBuilder;
+  if (!Constructor) throw new Error('Workbook wasm does not support peer snapshots');
+  let builder: SnapshotBuilder | undefined = new Constructor();
+  function active(): SnapshotBuilder {
+    if (!builder) throw new Error('Workbook snapshot builder is disposed');
+    return builder;
+  }
+  return {
+    push(chunk: Uint8Array): void {
+      try { active().push(chunk); } catch (error) { throw toError(error); }
+    },
+    advance(records: number, bytes: number): boolean {
+      try { return active().advance(records, bytes); } catch (error) { throw toError(error); }
+    },
+    finish(): WorkbookHandle {
+      const finishing = active();
+      builder = undefined;
+      try { return wrapWorkbookDocument(finishing.finish(), options, true); }
+      catch (error) { throw toError(error); }
+    },
+    dispose(): void {
+      const disposing = builder;
+      builder = undefined;
+      disposing?.free();
+    },
+  };
+}
+
+export function workbookPeerHydration(handle: WorkbookHandle): string {
+  const read = peerHydrationReaders.get(handle);
+  if (!read) throw new TypeError('Workbook does not support peer hydration');
+  return read();
+}
+
+export function adoptWorkbookPeerVersion(handle: WorkbookHandle, version: string): void {
+  const adopt = peerVersionAdopters.get(handle);
+  if (!adopt) throw new TypeError('Workbook does not support peer version adoption');
+  adopt(version);
+}
+
+export function openWorkbookPeer(
+  bytes: Uint8Array, options: OpenWorkbookOptions, hydration: string
+): WorkbookHandle {
+  return openWorkbookInternal(bytes, options, hydration);
+}
+
+function openWorkbookInternal(
+  bytes: Uint8Array, options: OpenWorkbookOptions, hydration?: string
+): WorkbookHandle {
+  if (options.calculation !== undefined) {
+    validateCalculationContext(options.calculation);
+    if (options.collaborative === true) {
+      throw new TypeError('calculation context is unavailable for collaborative workbooks');
+    }
+  }
   requireInitialized();
   const collaborativeClientId = resolveCollaborativeClientId(options);
   let doc: XlsxDocument;
   try {
-    doc =
-      collaborativeClientId === undefined
+    if (hydration !== undefined) {
+      doc = (XlsxDocument as PeerDocumentConstructor).openWithPeerHydrationJson(bytes, hydration);
+    } else if (options.calculation !== undefined) {
+      doc = (XlsxDocument as CalculationDocumentConstructor).openWithCalculationJson(
+        bytes, JSON.stringify(options.calculation)
+      );
+    } else {
+      doc = collaborativeClientId === undefined
         ? XlsxDocument.open(bytes)
         : XlsxDocument.openCollaborative(bytes, collaborativeClientId);
+    }
   } catch (e) {
     throw toError(e);
   }
 
+  return wrapWorkbookDocument(doc, options, hydration !== undefined);
+}
+
+function wrapWorkbookDocument(
+  doc: XlsxDocument, options: OpenWorkbookOptions, hydrated: boolean
+): WorkbookHandle {
+  const collaborativeClientId = resolveCollaborativeClientId(options);
   const listeners = new Map<number, WorkbookUpdateListener>();
   const pendingUpdates: Array<{ update: Uint8Array; origin: WorkbookUpdateOrigin }> = [];
   let nextListenerId = 0;
   let disposed = false;
+  let hasCalculationContext = options.calculation !== undefined ||
+    (hydrated && collaborativeClientId === undefined);
   let observerInstalled = false;
   let wasmCallDepth = 0;
   let flushingUpdates = false;
@@ -629,6 +815,11 @@ export function openWorkbook(
     return wasmCall(() => JSON.parse(operation()) as T, drainUpdates);
   }
 
+  function displayListJson(viewport: Viewport, sheet?: number): string {
+    const json = JSON.stringify(viewport);
+    return sheet === undefined ? doc.displayListJson(json) : doc.displayListForJson(sheet, json);
+  }
+
   function ensureUpdateObserver(): void {
     if (observerInstalled) return;
     wasmCall(() => doc.startUpdateObservation());
@@ -645,6 +836,17 @@ export function openWorkbook(
   const handle: WorkbookHandle = {
     get clientId(): number {
       return wasmCall(() => doc.clientId);
+    },
+    setCalculationContext(context: WorkbookCalculationContext | null): void {
+      assertAlive();
+      if (context !== null) {
+        validateCalculationContext(context);
+        if (collaborativeClientId !== undefined) {
+          throw new TypeError('calculation context is unavailable for collaborative workbooks');
+        }
+      }
+      wasmCall(() => (doc as CalculationDocument).setCalculationContextJson(JSON.stringify(context)));
+      hasCalculationContext = context !== null;
     },
     encodeStateVector(): Uint8Array {
       return wasmCall(() => doc.encodeStateVector());
@@ -681,6 +883,15 @@ export function openWorkbook(
     sheetInfo(): SheetInfo {
       return parseJson(() => doc.sheetInfoJson());
     },
+    sheetCount(): number {
+      return wasmCall(() => doc.sheetCount());
+    },
+    sheetInfoFor(sheet: number): SheetInfo {
+      if (!Number.isInteger(sheet) || sheet < 0 || sheet >= handle.sheetCount()) {
+        throw new RangeError('Sheet index is out of range');
+      }
+      return parseJson(() => doc.sheetInfoForJson(sheet));
+    },
     calculationStatus(): CalculationStatus {
       return wasmCall(() => {
         const fn = (doc as { calculationStatusJson?: () => string }).calculationStatusJson;
@@ -689,7 +900,7 @@ export function openWorkbook(
       });
     },
     displayList(viewport: Viewport): DisplayList {
-      return parseJson(() => doc.displayListJson(JSON.stringify(viewport)));
+      return parseJson(() => displayListJson(viewport));
     },
     displayListProfiled(viewport: Viewport): ProfiledDisplayList {
       return parseJson(() => doc.displayListProfiledJson(JSON.stringify(viewport)));
@@ -757,6 +968,9 @@ export function openWorkbook(
     cellPosition(sheet: number, row: number, col: number): CellPosition {
       return parseJson(() => doc.cellPositionJson(JSON.stringify({ sheet, row, col })));
     },
+    cellRect(sheet: number, row: number, col: number): Rect {
+      return parseJson(() => doc.cellRectJson(JSON.stringify({ sheet, row, col })));
+    },
     rangeCells(sheet: number, range: string): CellEdit[][] {
       const parsed = parseJson<{ cells: CellEdit[][] }>(() =>
         doc.rangeCellsJson(JSON.stringify({ sheet, range }))
@@ -795,6 +1009,15 @@ export function openWorkbook(
     mergedRanges(sheet: number, range: string): MergedRange[] {
       const parsed = parseJson<{ ranges: MergedRange[] }>(() =>
         doc.mergedRangesJson(JSON.stringify({ sheet, range }))
+      );
+      return parsed.ranges;
+    },
+    visibleMergedRanges(sheet: number, viewport: Viewport): MergedRange[] {
+      if (!Number.isInteger(sheet) || sheet < 0 || sheet >= handle.sheetCount()) {
+        throw new RangeError('Sheet index is out of range');
+      }
+      const parsed = parseJson<{ ranges: MergedRange[] }>(() =>
+        doc.visibleMergedRangesJson(sheet, JSON.stringify(viewport))
       );
       return parsed.ranges;
     },
@@ -874,10 +1097,27 @@ export function openWorkbook(
       return parseJson(() => doc.findTextJson(JSON.stringify(request)));
     },
     validateEdits(request: XlsxEditRequest): XlsxValidationResult {
+      if (hasCalculationContext && request.calculation !== undefined) {
+        validateCalculationOverride(request.calculation);
+      }
       return parseJson(() => doc.validateEditsJson(JSON.stringify(request)));
     },
     applyEdits(request: XlsxEditRequest): XlsxEditResult {
+      if (hasCalculationContext && request.calculation !== undefined) {
+        validateCalculationOverride(request.calculation);
+      }
       return parseJson(() => doc.applyEditsJson(JSON.stringify(request)), true);
+    },
+    exportStructured(options: XlsxExportOptions = {}): XlsxExportResult<XlsxStructuredContent> {
+      return parseJson(() => doc.exportStructuredJson(JSON.stringify(options)));
+    },
+    exportMarkdown(
+      options: XlsxExportOptions = {},
+      markdownOptions: XlsxMarkdownOptions = {}
+    ): XlsxExportResult<XlsxMarkdownContent> {
+      return parseJson(() =>
+        doc.exportMarkdownJson(JSON.stringify(options), JSON.stringify(markdownOptions))
+      );
     },
     dispose(): void {
       if (disposed) return;
@@ -901,7 +1141,69 @@ export function openWorkbook(
       if (disposalError !== undefined) throw toError(disposalError);
     },
   };
+  displayListJsonReaders.set(handle, (viewport, sheet) => wasmCall(() => displayListJson(viewport, sheet)));
+  peerHydrationReaders.set(handle, () => wasmCall(() => (doc as PeerDocument).peerHydrationJson()));
+  peerVersionAdopters.set(handle, (version) => wasmCall(() => (doc as PeerDocument).adoptPeerVersion(version)));
+  peerSnapshotAccess.set(handle, {
+    begin: (records, bytes) => wasmCall(() => (doc as SnapshotDocument).beginPeerSnapshot(records, bytes)),
+    next: () => wasmCall(() => (doc as SnapshotDocument).nextPeerSnapshotChunk()),
+    end: () => wasmCall(() => (doc as SnapshotDocument).endPeerSnapshot()),
+  });
   return handle;
+}
+
+type SnapshotDocument = XlsxDocument & {
+  beginPeerSnapshot(records: number, bytes: number): void;
+  nextPeerSnapshotChunk(): Uint8Array | undefined;
+  endPeerSnapshot(): void;
+};
+
+type PeerDocument = XlsxDocument & {
+  peerHydrationJson(): string;
+  adoptPeerVersion(version: string): void;
+};
+
+type PeerDocumentConstructor = typeof XlsxDocument & {
+  openWithPeerHydrationJson(bytes: Uint8Array, hydration: string): PeerDocument;
+};
+
+type CalculationDocument = XlsxDocument & {
+  setCalculationContextJson(context: string): void;
+};
+
+type CalculationDocumentConstructor = typeof XlsxDocument & {
+  openWithCalculationJson(bytes: Uint8Array, context: string): CalculationDocument;
+};
+
+function validateCalculationContext(context: unknown): void {
+  if (
+    typeof context !== 'object' || context === null || Array.isArray(context) ||
+    Object.keys(context).some((key) => key !== 'nowSerial' && key !== 'randSeed')
+  ) {
+    throw new TypeError('calculation must be an object with nowSerial and randSeed');
+  }
+  const { nowSerial, randSeed } = context as Partial<WorkbookCalculationContext>;
+  if (typeof nowSerial !== 'number' || !Number.isFinite(nowSerial)) {
+    throw new TypeError('nowSerial must be a finite number');
+  }
+  if (
+    typeof randSeed !== 'number' || !Number.isInteger(randSeed) || randSeed < 0 || randSeed > 0xffff_ffff
+  ) {
+    throw new TypeError('randSeed must be an integer from 0 to 4294967295');
+  }
+}
+
+function validateCalculationOverride(calculation: unknown): void {
+  if (
+    typeof calculation !== 'object' || calculation === null || Array.isArray(calculation) ||
+    Object.keys(calculation).some((key) => key !== 'nowSerial')
+  ) {
+    throw new TypeError('calculation must be an object with an optional nowSerial');
+  }
+  const { nowSerial } = calculation as { nowSerial?: number };
+  if (nowSerial !== undefined && (typeof nowSerial !== 'number' || !Number.isFinite(nowSerial))) {
+    throw new TypeError('nowSerial must be a finite number');
+  }
 }
 
 function resolveCollaborativeClientId(options: OpenWorkbookOptions): number | undefined {
@@ -933,6 +1235,48 @@ function resolveCollaborativeClientId(options: OpenWorkbookOptions): number | un
     value = (words[0] & 0x1fffff) * 0x1_0000_0000 + words[1];
   } while (value === 0);
   return value;
+}
+
+function exported<T>(operation: () => string): T {
+  try {
+    return JSON.parse(operation()) as T;
+  } catch (error) {
+    throw toError(error);
+  }
+}
+
+/**
+ * Exports `.xlsx` bytes as read, initializing the core if needed. Formula results are the
+ * stored ones: nothing is recalculated and no clock is read, so the same bytes and options
+ * always give the same content. Unreadable bytes and unusable options reject.
+ */
+export async function exportXlsxStructured(
+  bytes: Uint8Array,
+  options: XlsxExportOptions = {}
+): Promise<XlsxStructuredContent> {
+  await initWasm();
+  return exported(() => exportXlsxStructuredJson(bytes, JSON.stringify(options)));
+}
+
+/** {@link exportXlsxStructured} rendered as Markdown. */
+export async function exportXlsxMarkdown(
+  bytes: Uint8Array,
+  options: XlsxExportOptions = {},
+  markdownOptions: XlsxMarkdownOptions = {}
+): Promise<XlsxMarkdownContent> {
+  await initWasm();
+  return exported(() =>
+    exportXlsxMarkdownJson(bytes, JSON.stringify(options), JSON.stringify(markdownOptions))
+  );
+}
+
+/** Renders structured content as Markdown; content that does not validate rejects. */
+export async function renderXlsxMarkdown(
+  content: XlsxStructuredContent,
+  options: XlsxMarkdownOptions = {}
+): Promise<XlsxMarkdownContent> {
+  await initWasm();
+  return exported(() => renderXlsxMarkdownJson(JSON.stringify(content), JSON.stringify(options)));
 }
 
 /**

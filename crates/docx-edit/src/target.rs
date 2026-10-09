@@ -8,7 +8,10 @@
 //! insertions and hides pending deletions; the original view does the reverse.
 
 use std::collections::{BTreeMap, HashMap};
+use std::ops::Range;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use serde::{Deserialize, Serialize};
 use yrs::{Any, Map, MapRef, Out, ReadTxn, Transact};
@@ -16,6 +19,7 @@ use yrs::{Any, Map, MapRef, Out, ReadTxn, Transact};
 use crate::batch::{
     DocumentVersion, EditFailure, EditFailureCode, EditRefusal, EditTarget, failure, refusal,
 };
+use crate::content_controls::Inventory;
 use crate::format::InlineFormatDelta;
 use crate::ops::{ChunkKind, capture_pilcrow, utf16_len};
 use crate::policy::Ownership;
@@ -88,7 +92,7 @@ pub enum SearchScope {
 pub enum TextTarget {
     /// The paragraph's whole accepted-view text.
     Paragraph(ParagraphTarget),
-    /// An explicit range; v1 requires both ends in one paragraph.
+    /// An explicit range within one paragraph.
     Range(TextRange),
     /// The one exact, case-sensitive, paragraph-local match of `text` in `within`.
     Search {
@@ -279,11 +283,28 @@ impl ParagraphView {
         self.spans.last().map_or(0, |span| span.view + span.len)
     }
 
+    /// Raw intervals of the visible units in `range`, in order.
+    pub(crate) fn raw_ranges(&self, range: Range<u32>) -> impl Iterator<Item = Range<u32>> + '_ {
+        let first = self
+            .spans
+            .partition_point(|span| span.view + span.len <= range.start);
+        self.spans[first..]
+            .iter()
+            .take_while(move |span| span.view < range.end)
+            .map(move |span| {
+                let start = range.start.max(span.view) - span.view;
+                let end = range.end.min(span.view + span.len) - span.view;
+                span.raw + start..span.raw + end
+            })
+    }
+
     /// Raw index of the visible unit at `offset`, or the paragraph mark at the end.
     pub fn raw_at(&self, offset: u32) -> u32 {
         self.spans
-            .iter()
-            .find(|span| offset < span.view + span.len)
+            .get(
+                self.spans
+                    .partition_point(|span| span.view + span.len <= offset),
+            )
             .map_or(self.pilcrow, |span| span.raw + (offset - span.view))
     }
 
@@ -293,8 +314,10 @@ impl ParagraphView {
             return self.node_start;
         }
         self.spans
-            .iter()
-            .find(|span| offset - 1 < span.view + span.len)
+            .get(
+                self.spans
+                    .partition_point(|span| span.view + span.len < offset),
+            )
             .map_or(self.pilcrow, |span| span.raw + (offset - span.view))
     }
 
@@ -513,6 +536,17 @@ impl StoryView {
     ) -> Option<(Self, bool)> {
         let story = story_ref(txn, story_id).ok()?;
         let chunks = doc.chunk_snapshot(story_id, &story, txn);
+        Self::from_chunks(doc, txn, story_id, view, limit, &chunks)
+    }
+
+    fn from_chunks<T: ReadTxn>(
+        doc: &EditingDoc,
+        txn: &T,
+        story_id: &str,
+        view: EditTextView,
+        limit: u32,
+        chunks: &[crate::ops::Chunk],
+    ) -> Option<(Self, bool)> {
         let source = doc.source_metadata();
         let mut paragraphs = Vec::new();
         let mut current = ParagraphBuilder::new(0);
@@ -657,14 +691,17 @@ impl StoryView {
 pub(crate) struct Views<'a, T: ReadTxn> {
     doc: &'a EditingDoc,
     txn: &'a T,
-    cache: HashMap<(String, EditTextView), Option<Rc<StoryView>>>,
+    epoch: Option<u64>,
+    fresh: bool,
+    cache: HashMap<(String, EditTextView), Option<Arc<StoryView>>>,
     ownership: Option<Rc<Ownership>>,
+    controls: Option<Rc<Inventory>>,
 }
 
 /// A resolved text selection in one paragraph of one view.
 #[derive(Clone)]
 pub(crate) struct Selection {
-    pub view: Rc<StoryView>,
+    pub view: Arc<StoryView>,
     pub paragraph: usize,
     pub start: u32,
     pub end: u32,
@@ -700,13 +737,44 @@ fn paragraph_target(target: &ParagraphTarget) -> EditTarget {
     EditTarget::Paragraph(target.clone())
 }
 
+fn story_view_key(story: &str, view: EditTextView) -> String {
+    let view = match view {
+        EditTextView::Accepted => 'a',
+        EditTextView::Original => 'o',
+    };
+    format!("{view}\0{story}")
+}
+
+impl<'a, 'doc> Views<'a, yrs::Transaction<'doc>> {
+    /// Shares projections of this committed transaction's epoch inside a shared-read scope.
+    pub fn committed(doc: &'a EditingDoc, txn: &'a yrs::Transaction<'doc>) -> Self {
+        let mut views = Self::new(doc, txn);
+        // The read transaction is already open, so no commit can land while it is held.
+        if doc.shared_read_depth.load(Ordering::Relaxed) > 0 {
+            views.epoch = Some(doc.epoch.load(Ordering::Relaxed));
+        }
+        views
+    }
+}
+
+impl<'a, 'doc> Views<'a, yrs::TransactionMut<'doc>> {
+    pub fn uncommitted(doc: &'a EditingDoc, txn: &'a yrs::TransactionMut<'doc>) -> Self {
+        let mut views = Self::new(doc, txn);
+        views.fresh = true;
+        views
+    }
+}
+
 impl<'a, T: ReadTxn> Views<'a, T> {
     pub fn new(doc: &'a EditingDoc, txn: &'a T) -> Self {
         Self {
             doc,
             txn,
+            epoch: None,
+            fresh: false,
             cache: HashMap::new(),
             ownership: None,
+            controls: None,
         }
     }
 
@@ -718,11 +786,31 @@ impl<'a, T: ReadTxn> Views<'a, T> {
         self.txn
     }
 
-    pub fn story(&mut self, story: &str, view: EditTextView) -> Option<Rc<StoryView>> {
-        let (doc, txn) = (self.doc, self.txn);
+    pub fn story(&mut self, story: &str, view: EditTextView) -> Option<Arc<StoryView>> {
+        let (doc, txn, epoch, fresh) = (self.doc, self.txn, self.epoch, self.fresh);
         self.cache
             .entry((story.to_owned(), view))
-            .or_insert_with(|| StoryView::build(doc, txn, story, view).map(Rc::new))
+            .or_insert_with(|| {
+                if fresh {
+                    let text = story_ref(txn, story).ok()?;
+                    let chunks = crate::ops::snapshot(&text, txn);
+                    StoryView::from_chunks(doc, txn, story, view, u32::MAX, &chunks)
+                        .map(|(view, _)| Arc::new(view))
+                } else if let Some(epoch) = epoch {
+                    let key = story_view_key(story, view);
+                    let mut cache = doc.story_views.lock().unwrap();
+                    if let Some(built) = cache.get(&key, epoch) {
+                        return Some(built);
+                    }
+                    let built = Arc::new(StoryView::build(doc, txn, story, view)?);
+                    if doc.shared_read_depth.load(Ordering::Relaxed) > 0 {
+                        cache.insert(&key, epoch, Arc::clone(&built));
+                    }
+                    Some(built)
+                } else {
+                    StoryView::build(doc, txn, story, view).map(Arc::new)
+                }
+            })
             .clone()
     }
 
@@ -738,14 +826,28 @@ impl<'a, T: ReadTxn> Views<'a, T> {
         story: &str,
         view: EditTextView,
         limit: u32,
-    ) -> Option<(Rc<StoryView>, bool)> {
-        let cached = self.cache.contains_key(&(story.to_owned(), view));
+    ) -> Option<(Arc<StoryView>, bool)> {
+        let cached = self.cache.contains_key(&(story.to_owned(), view))
+            || self.epoch.is_some_and(|epoch| {
+                self.doc
+                    .story_views
+                    .lock()
+                    .unwrap()
+                    .get(&story_view_key(story, view), epoch)
+                    .is_some()
+            });
         let units = yrs::Text::len(&story_ref(self.txn, story).ok()?, self.txn);
+        if self.fresh {
+            let text = story_ref(self.txn, story).ok()?;
+            let chunks = crate::ops::snapshot(&text, self.txn);
+            return StoryView::from_chunks(self.doc, self.txn, story, view, limit, &chunks)
+                .map(|(view, complete)| (Arc::new(view), complete));
+        }
         if cached || units <= limit {
             return self.story(story, view).map(|built| (built, true));
         }
         StoryView::build_within(self.doc, self.txn, story, view, limit)
-            .map(|(built, complete)| (Rc::new(built), complete))
+            .map(|(built, complete)| (Arc::new(built), complete))
     }
 
     pub fn ownership(&mut self) -> Rc<Ownership> {
@@ -756,11 +858,24 @@ impl<'a, T: ReadTxn> Views<'a, T> {
         )
     }
 
+    /// Every content control of this state, read once.
+    pub fn controls(&mut self) -> Result<Rc<Inventory>, EditFailure> {
+        if let Some(controls) = &self.controls {
+            return Ok(Rc::clone(controls));
+        }
+        let inventory = Rc::new(
+            Inventory::build(self.doc, self.txn)
+                .map_err(|export| failure(EditFailureCode::LimitExceeded, export.message, None))?,
+        );
+        self.controls = Some(Rc::clone(&inventory));
+        Ok(inventory)
+    }
+
     pub fn paragraph(
         &mut self,
         target: &ParagraphTarget,
         view: EditTextView,
-    ) -> Result<(Rc<StoryView>, usize), EditFailure> {
+    ) -> Result<(Arc<StoryView>, usize), EditFailure> {
         let Some(story) = self.story(&target.story, view) else {
             return Err(failure(
                 EditFailureCode::MissingTarget,
@@ -921,7 +1036,7 @@ impl<'a, T: ReadTxn> Views<'a, T> {
         &mut self,
         within: &SearchScope,
         view: EditTextView,
-    ) -> Result<(Rc<StoryView>, Vec<usize>), EditFailure> {
+    ) -> Result<(Arc<StoryView>, Vec<usize>), EditFailure> {
         match within {
             SearchScope::Story { story } => {
                 let Some(projection) = self.story(story, view) else {
@@ -1006,7 +1121,7 @@ impl EditingDoc {
     ) -> Result<(DocumentVersion, R), EditRefusal> {
         let version = self.version();
         let txn = self.yrs_doc().transact();
-        let mut views = Views::new(self, &txn);
+        let mut views = Views::committed(self, &txn);
         match read(&mut views) {
             Ok(result) => Ok((version, result)),
             Err(failure) => Err(refusal(version, failure)),
@@ -1107,7 +1222,7 @@ impl EditingDoc {
                     matches.push(TextMatch {
                         text: request.text.clone(),
                         range: Selection {
-                            view: Rc::clone(&story),
+                            view: Arc::clone(&story),
                             paragraph: index,
                             start,
                             end,
@@ -1332,5 +1447,197 @@ impl From<TextTarget> for EditTarget {
             TextTarget::Range(range) => EditTarget::Range(range),
             TextTarget::Search { text, within, view } => EditTarget::Search { text, within, view },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        EditHistory, EditOperation, EditRequest, EditSource, EditStep, FormatPolicy, Position,
+        UndoSession,
+    };
+
+    fn texts(story: &StoryView) -> Vec<&str> {
+        story.paragraphs.iter().map(|p| p.text.as_str()).collect()
+    }
+
+    fn committed_body(doc: &EditingDoc) -> Arc<StoryView> {
+        let txn = doc.yrs_doc().transact();
+        let story = Views::committed(doc, &txn)
+            .story("body", EditTextView::Accepted)
+            .unwrap();
+        let fresh = StoryView::build(doc, &txn, "body", EditTextView::Accepted).unwrap();
+        assert_eq!(texts(&story), texts(&fresh));
+        story
+    }
+
+    #[test]
+    fn committed_story_views_follow_edits_undo_and_remote_updates() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<ParagraphView>();
+        assert_send_sync::<StoryView>();
+
+        let doc = EditingDoc::new(100);
+        let para_id = doc.create_story("body", "Alpha", "Normal", "left").unwrap();
+        doc.begin_shared_reads();
+        let read = || {
+            doc.read_scope(|views| Ok(views.story("body", EditTextView::Accepted).unwrap()))
+                .unwrap()
+                .1
+        };
+        let initial = read();
+        assert!(Arc::ptr_eq(&initial, &read()));
+        assert!(Arc::ptr_eq(&initial, &committed_body(&doc)));
+
+        let history = UndoSession::new();
+        let request = EditRequest {
+            expect_version: doc.version(),
+            source: EditSource::Host,
+            history: EditHistory::Separate,
+            steps: vec![EditStep::new(EditOperation::ReplaceText {
+                target: TextTarget::Paragraph(ParagraphTarget {
+                    story: "body".to_owned(),
+                    para_id,
+                }),
+                text: "Beta".to_owned(),
+            })],
+        };
+        assert!(
+            doc.apply_edits(&request, &history)
+                .unwrap()
+                .unwrap()
+                .applied
+        );
+        let edited = committed_body(&doc);
+        assert!(!Arc::ptr_eq(&initial, &edited));
+        assert_eq!(texts(&edited), ["Beta"]);
+
+        assert!(history.undo());
+        let undone = committed_body(&doc);
+        assert!(!Arc::ptr_eq(&edited, &undone));
+        assert!(!Arc::ptr_eq(&initial, &undone));
+        assert_eq!(texts(&undone), ["Alpha"]);
+
+        let peer = EditingDoc::new(200);
+        peer.apply_update_v1(&doc.encode_state_as_update_v1())
+            .unwrap();
+        peer.insert_text(
+            &EditCtx::local("", ""),
+            Position::new("body", 0),
+            "Remote ",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+        doc.apply_update_v1(&peer.encode_state_as_update_v1())
+            .unwrap();
+        let merged = committed_body(&doc);
+        assert!(!Arc::ptr_eq(&undone, &merged));
+        assert_eq!(texts(&merged), ["Remote Alpha"]);
+        doc.end_shared_reads();
+    }
+
+    #[test]
+    fn committed_story_views_separate_views_and_reuse_complete_projections() {
+        let doc = EditingDoc::new(100);
+        doc.create_story("body", "Alpha", "Normal", "left").unwrap();
+        doc.begin_shared_reads();
+        let accepted = committed_body(&doc);
+        let txn = doc.yrs_doc().transact();
+        let mut views = Views::committed(&doc, &txn);
+        let original = views.story("body", EditTextView::Original).unwrap();
+        assert!(!Arc::ptr_eq(&accepted, &original));
+        assert!(Arc::ptr_eq(
+            &original,
+            &Views::committed(&doc, &txn)
+                .story("body", EditTextView::Original)
+                .unwrap()
+        ));
+        let (within, complete) = views
+            .story_within("body", EditTextView::Accepted, 0)
+            .unwrap();
+        assert!(complete);
+        assert!(Arc::ptr_eq(&accepted, &within));
+        assert!(views.story("missing", EditTextView::Accepted).is_none());
+        assert_eq!(doc.story_views.lock().unwrap().entries.len(), 2);
+        doc.end_shared_reads();
+    }
+
+    #[test]
+    fn committed_story_views_share_only_inside_nested_scopes() {
+        let doc = EditingDoc::new(100);
+        doc.create_story("body", "Alpha", "Normal", "left").unwrap();
+        doc.end_shared_reads();
+        let first = committed_body(&doc);
+        let second = committed_body(&doc);
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert!(doc.story_views.lock().unwrap().entries.is_empty());
+
+        doc.begin_shared_reads();
+        let shared = committed_body(&doc);
+        assert!(Arc::ptr_eq(&shared, &committed_body(&doc)));
+        assert_eq!(doc.story_views.lock().unwrap().entries.len(), 1);
+        doc.end_shared_reads();
+        assert!(doc.story_views.lock().unwrap().entries.is_empty());
+        assert!(!Arc::ptr_eq(&shared, &committed_body(&doc)));
+        assert!(doc.story_views.lock().unwrap().entries.is_empty());
+
+        doc.begin_shared_reads();
+        doc.begin_shared_reads();
+        let nested = committed_body(&doc);
+        assert!(!Arc::ptr_eq(&shared, &nested));
+        assert!(Arc::ptr_eq(&nested, &committed_body(&doc)));
+        doc.end_shared_reads();
+        assert_eq!(doc.story_views.lock().unwrap().entries.len(), 1);
+        assert!(Arc::ptr_eq(&nested, &committed_body(&doc)));
+        doc.end_shared_reads();
+        assert!(doc.story_views.lock().unwrap().entries.is_empty());
+        assert!(!Arc::ptr_eq(&nested, &committed_body(&doc)));
+        assert!(doc.story_views.lock().unwrap().entries.is_empty());
+    }
+
+    #[test]
+    fn transaction_local_story_views_leave_the_shared_cache_untouched() {
+        let doc = EditingDoc::new(100);
+        doc.create_story("body", "Alpha", "Normal", "left").unwrap();
+        doc.begin_shared_reads();
+        let local = {
+            let txn = doc.yrs_doc().transact_mut();
+            let mut views = Views::new(&doc, &txn);
+            let story = views.story("body", EditTextView::Accepted).unwrap();
+            assert!(Arc::ptr_eq(
+                &story,
+                &views.story("body", EditTextView::Accepted).unwrap()
+            ));
+            assert!(doc.story_views.lock().unwrap().entries.is_empty());
+            story
+        };
+        let shared = committed_body(&doc);
+        assert!(!Arc::ptr_eq(&local, &shared));
+        let txn = doc.yrs_doc().transact();
+        let local = Views::new(&doc, &txn)
+            .story("body", EditTextView::Accepted)
+            .unwrap();
+        assert!(!Arc::ptr_eq(&local, &shared));
+        assert!(Arc::ptr_eq(&shared, &committed_body(&doc)));
+        assert_eq!(doc.story_views.lock().unwrap().entries.len(), 1);
+        doc.end_shared_reads();
+    }
+
+    #[test]
+    fn installing_source_metadata_retires_committed_story_views() {
+        let doc = EditingDoc::new(100);
+        crate::seed::seed_from_docx(
+            &doc,
+            include_bytes!("../tests/fixtures/footnote-anchor.docx"),
+        )
+        .unwrap();
+        doc.begin_shared_reads();
+        let before = committed_body(&doc);
+        assert!(Arc::ptr_eq(&before, &committed_body(&doc)));
+        let metadata = doc.metadata.lock().unwrap().take().unwrap();
+        doc.install_source(Arc::into_inner(metadata).unwrap(), 1);
+        assert!(!Arc::ptr_eq(&before, &committed_body(&doc)));
+        doc.end_shared_reads();
     }
 }

@@ -3,16 +3,17 @@
 use yrs::types::text::YChange;
 use yrs::{Any, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextRef, Transact};
 
+use crate::control_values::{guard_embed_insert, guard_embed_write};
 use crate::op::{OpError, OpResult, Receipt, loc_range_in_txn};
-use crate::ops::{adjacent_paragraph_change_revision_id, adjacent_revision_id, snapshot_range};
+use crate::ops::{adjacent_paragraph_change_revision_id, adjacent_revision_id, position_chunks};
 use crate::{
-    EditCtx, EditingDoc, INS, KIND_KEY, PARA_ID, PILCROW_KIND, Position, check_position,
-    insertion_attrs, is_pilcrow, out_len, revision_value, story_ref,
+    EditCtx, EditingDoc, INS, KIND_KEY, PILCROW_KIND, Position, check_position, insertion_attrs,
+    is_pilcrow, out_len, revision_value, story_ref,
 };
 
 /// Finds the map-backed embed sitting exactly at story `index` (any kind,
 /// pilcrows included).
-fn embed_map_at<T: ReadTxn>(story: &TextRef, txn: &T, index: u32) -> OpResult<MapRef> {
+pub(crate) fn embed_map_at<T: ReadTxn>(story: &TextRef, txn: &T, index: u32) -> OpResult<MapRef> {
     let mut offset = 0u32;
     for diff in story.diff(txn, YChange::identity) {
         if offset == index {
@@ -77,7 +78,30 @@ fn embed_by_id<T: ReadTxn>(txn: &T, embed_id: &str) -> OpResult<(String, MapRef)
     Err(OpError::UnknownEmbed(embed_id.to_owned()))
 }
 
+/// [`embed_by_id`] with the embed's story index.
+#[cfg(feature = "wasm")]
+fn embed_position_by_id<T: ReadTxn>(txn: &T, embed_id: &str) -> OpResult<(String, u32)> {
+    let (story_id, target) = embed_by_id(txn, embed_id)?;
+    let story = story_ref(txn, &story_id)?;
+    let mut offset = 0u32;
+    for diff in story.diff(txn, YChange::identity) {
+        if let Out::YMap(map) = &diff.insert
+            && *map == target
+        {
+            return Ok((story_id, offset));
+        }
+        offset += out_len(&diff.insert);
+    }
+    Err(OpError::UnknownEmbed(embed_id.to_owned()))
+}
+
 impl EditingDoc {
+    /// The story and story index of the embed carrying `embed_id`.
+    #[cfg(feature = "wasm")]
+    pub(crate) fn embed_position(&self, embed_id: &str) -> OpResult<(String, u32)> {
+        embed_position_by_id(&self.yrs_doc().transact(), embed_id)
+    }
+
     /// The story holding the embed carrying `embed_id`.
     pub fn embed_story(&self, embed_id: &str) -> OpResult<String> {
         embed_by_id(&self.yrs_doc().transact(), embed_id).map(|(story, _)| story)
@@ -110,16 +134,24 @@ impl EditingDoc {
         let map = embed_map_at(&story, &txn, at.index)?;
         let pilcrow = is_pilcrow(&map, &txn);
         for (key, _) in &entries {
-            if key == KIND_KEY || (pilcrow && key == PARA_ID) {
+            if key == KIND_KEY || (pilcrow && crate::is_identity_key(key)) {
                 return Err(OpError::ReservedKey(key.clone()));
             }
         }
+        let retyped = guard_embed_write(
+            &map,
+            &txn,
+            entries.iter().map(|(key, value)| (key.as_str(), value)),
+        )?;
         for (key, value) in entries {
             if value == Any::Null {
                 map.remove(&mut txn, &key);
             } else {
                 map.insert(&mut txn, key, value);
             }
+        }
+        if retyped {
+            map.remove(&mut txn, "value");
         }
         Ok(Receipt::default())
     }
@@ -134,18 +166,26 @@ impl EditingDoc {
         entries: Vec<(String, Any)>,
     ) -> OpResult<Receipt> {
         for (key, _) in &entries {
-            if key == KIND_KEY || key == PARA_ID {
+            if crate::is_identity_key(key) {
                 return Err(OpError::ReservedKey(key.clone()));
             }
         }
         let mut txn = self.transact_for(ctx);
         let (_, map) = embed_by_id(&txn, embed_id)?;
+        let retyped = guard_embed_write(
+            &map,
+            &txn,
+            entries.iter().map(|(key, value)| (key.as_str(), value)),
+        )?;
         for (key, value) in entries {
             if value == Any::Null {
                 map.remove(&mut txn, &key);
             } else {
                 map.insert(&mut txn, key, value);
             }
+        }
+        if retyped {
+            map.remove(&mut txn, "value");
         }
         Ok(Receipt::default())
     }
@@ -156,7 +196,7 @@ impl EditingDoc {
     pub fn insert_embed(
         &self,
         ctx: &EditCtx,
-        at: Position,
+        mut at: Position,
         kind: &str,
         payload: Vec<(String, Any)>,
     ) -> OpResult<Receipt> {
@@ -164,19 +204,19 @@ impl EditingDoc {
             return Err(OpError::ReservedKey(kind.to_owned()));
         }
         for (key, _) in &payload {
-            if key == KIND_KEY || key == PARA_ID {
+            if crate::is_identity_key(key) {
                 return Err(OpError::ReservedKey(key.clone()));
             }
         }
+        guard_embed_insert(
+            kind,
+            payload.iter().map(|(key, value)| (key.as_str(), value)),
+        )?;
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &at.story)?;
         check_position(&story, &txn, at.index)?;
-        let chunks = snapshot_range(
-            &story,
-            &txn,
-            at.index.saturating_sub(1),
-            at.index.saturating_add(1),
-        );
+        crate::identity::promote_at(self, &mut txn, &at.story, &story, at.index);
+        let chunks = position_chunks(&story, &txn, &mut at.index);
         let revision_id = ctx.is_suggesting().then(|| {
             adjacent_revision_id(&chunks, at.index, INS, &ctx.author)
                 .or_else(|| {

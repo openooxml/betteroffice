@@ -7,6 +7,7 @@ export type {
   PanelConfig,
   RenderedDomContext,
   PositionCoordinates,
+  PointPosition,
   SidebarItem,
 } from '@betteroffice/docx/plugin-api';
 

@@ -3,7 +3,7 @@ import { InputOperationQueue } from './inputOperationQueue';
 import { VerticalCaretGoal } from './verticalCaretGoal';
 
 describe('InputOperationQueue', () => {
-  test('flush waits for accepted operations and reports earlier failures', async () => {
+  test('flush waits for accepted operations and rejects only for their failures', async () => {
     const errors: unknown[] = [];
     const queue = new InputOperationQueue((error) => errors.push(error));
     let release!: () => void;
@@ -27,7 +27,26 @@ describe('InputOperationQueue', () => {
     await expect(queue.flush()).rejects.toBe(failure);
     expect(errors).toEqual([failure]);
     queue.enqueue(() => {});
-    await expect(queue.flush()).rejects.toBe(failure);
+    await queue.flush();
+  });
+
+  test('a flush reports the first input failure since its checkpoint', async () => {
+    const queue = new InputOperationQueue(() => {});
+    const since = queue.failureCheckpoint();
+    const first = new Error('first');
+    const second = new Error('second');
+    queue.enqueue(() => {
+      throw first;
+    });
+    queue.enqueue(() => {
+      throw second;
+    });
+    await expect(queue.flush(since)).rejects.toBe(first);
+    const later = queue.failureCheckpoint();
+    queue.enqueue(() => {
+      throw second;
+    });
+    await expect(queue.flush(later)).rejects.toBe(second);
   });
 
   test('orders a horizontal goal reset after an in-flight vertical move', async () => {
@@ -109,7 +128,7 @@ describe('InputOperationQueue', () => {
     expect(order).toEqual(['input', 'command', 'later input']);
   });
 
-  test('a failed command rejects alone; failed input marks the queue failed', async () => {
+  test('a failed command rejects alone; failed input fails only what was behind it', async () => {
     const errors: unknown[] = [];
     const queue = new InputOperationQueue((error) => errors.push(error));
     const refusal = new Error('command refused');
@@ -118,16 +137,16 @@ describe('InputOperationQueue', () => {
         throw refusal;
       })
     ).rejects.toBe(refusal);
-    expect(queue.failed).toBe(false);
     await queue.flush();
     const lost = new Error('input lost');
     queue.enqueue(() => {
       throw lost;
     });
+    const behind = queue.run((inputLost) => inputLost);
     await queue.idle();
-    expect(queue.failed).toBe(true);
     expect(errors).toEqual([lost]);
-    expect(await queue.run(() => 'still ordered')).toBe('still ordered');
+    expect(await behind).toBe(true);
+    expect(await queue.run((inputLost) => inputLost)).toBe(false);
   });
 
   test('reports when accepted work starts and stops waiting', async () => {

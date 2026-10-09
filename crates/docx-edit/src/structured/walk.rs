@@ -6,7 +6,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use serde::Serialize;
 use serde_json::Value;
 use yrs::{Any, Map, MapRef, Out, ReadTxn, Transact};
 
@@ -53,26 +52,6 @@ const PROJECTION_SLACK: usize = 1 << 20;
 const SUMMARY_MESSAGE: &str = "Further diagnostics with this code were omitted.";
 
 type Payload = HashMap<String, Any>;
-
-/// Counts written bytes without keeping them.
-struct Counter(usize);
-
-impl std::io::Write for Counter {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0 += bytes.len();
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-/// The compact JSON size of `value`, measured without building the JSON.
-fn json_len<T: Serialize + ?Sized>(value: &T) -> usize {
-    let mut counter = Counter(0);
-    serde_json::to_writer(&mut counter, value).map_or(0, |_| counter.0)
-}
 
 fn diagnostic(
     code: DiagnosticCode,
@@ -463,9 +442,9 @@ struct StoryCtx {
     /// The package part the story belongs to.
     part: Option<String>,
     prov: Prov,
-    accepted: Rc<StoryView>,
+    accepted: Arc<StoryView>,
     /// The original-view projection; the accepted view, which never reads it, reuses `accepted`.
-    original: Rc<StoryView>,
+    original: Arc<StoryView>,
     chunks: Arc<Vec<Chunk>>,
     /// The anchor every node uses instead of its own, for content without a session location.
     owner: Option<Anchor>,
@@ -1585,7 +1564,7 @@ impl<'a> Exporter<'a> {
     ) -> Option<StoryCtx> {
         let (accepted, complete) = views.story_within(story, EditTextView::Accepted, limit)?;
         let original = match self.view() {
-            RevisionView::Accepted => Rc::clone(&accepted),
+            RevisionView::Accepted => Arc::clone(&accepted),
             _ => {
                 let limit = if complete { u32::MAX } else { limit };
                 views.story_within(story, EditTextView::Original, limit)?.0
@@ -1898,7 +1877,7 @@ impl<'a> Exporter<'a> {
             return output;
         };
         let chunks = Arc::clone(&ctx.chunks);
-        let accepted = Rc::clone(&ctx.accepted);
+        let accepted = Arc::clone(&ctx.accepted);
         let mut output: Vec<Built> = Vec::new();
         let mut held: Option<Held> = None;
         let mut cursor = 0usize;
@@ -2839,7 +2818,7 @@ impl<'a> Exporter<'a> {
         depth: usize,
         list: &mut ListState,
     ) -> Block {
-        let accepted = Rc::clone(&ctx.accepted);
+        let accepted = Arc::clone(&ctx.accepted);
         let paragraph = &accepted.paragraphs[index];
         if !self.grow(1, 0) {
             return Block {
@@ -3141,8 +3120,8 @@ impl<'a> Exporter<'a> {
         chunks: &[Chunk],
         depth: usize,
     ) -> Vec<Inline> {
-        let accepted = Rc::clone(&ctx.accepted);
-        let original = Rc::clone(&ctx.original);
+        let accepted = Arc::clone(&ctx.accepted);
+        let original = Arc::clone(&ctx.original);
         let paragraph = &accepted.paragraphs[index];
         let paragraph_anchor = ctx.paragraph_anchor(&paragraph.para_id);
         let mut records = ctx
@@ -4400,14 +4379,19 @@ fn content_fingerprint<T: ReadTxn>(
     Some(Value::Array(stories))
 }
 
-/// Blanks the identity fields of an embed payload: paragraph ids, the block ids a field hides,
-/// and the child story and block ids under `prefix`, which name the story they belong to.
+/// Blanks the identity fields of an embed payload: paragraph ids, the block ids a field hides or
+/// joins, and the child story and block ids under `prefix`, which name the story they belong to.
 fn set_identities_aside(value: &mut Value, prefix: &str) {
     match value {
         Value::Object(object) => {
             object.remove(crate::PARA_ID);
-            if let Some(Value::Array(ids)) = object.get_mut("fieldResultBlocks") {
-                ids.iter_mut().for_each(|id| *id = Value::Null);
+            for key in ["fieldResultBlocks", "fieldCodeMarks"] {
+                if let Some(Value::Array(ids)) = object.get_mut(key) {
+                    ids.iter_mut().for_each(|id| *id = Value::Null);
+                }
+            }
+            if let Some(target) = object.get_mut("fieldCodeTarget") {
+                *target = Value::Null;
             }
             for (key, value) in object.iter_mut() {
                 match value {

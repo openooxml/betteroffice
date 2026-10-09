@@ -269,7 +269,7 @@ class Comment:
     def y(self) -> int: ...
     @property
     def parent_id(self) -> str | None:
-        """Set on a reply; names the thread root. Modern decks only."""
+        """The root comment ID for a modern reply."""
     @property
     def resolved(self) -> bool: ...
 
@@ -458,7 +458,7 @@ class Presentation:
         initials: str = ...,
         created: str,
     ) -> CommentEdit:
-        """Modern comments only; legacy comments carry no replies."""
+        """Reply to a modern comment thread."""
     def set_comment_status(self, comment_id: str, resolved: bool = ...) -> CommentEdit:
         """Resolve or reopen a modern comment."""
     def remove_comment(self, comment_id: str) -> CommentEdit: ...

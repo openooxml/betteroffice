@@ -21,21 +21,24 @@
 //! Spacing, indent and tab values are authored OOXML units — twips and
 //! line-spacing units — never pixels.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use yrs::types::Attrs;
 use yrs::{Any, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextRef, TransactionMut};
 
 use crate::format::{PROTECTED_ATTRS, Patch};
+use crate::identity::{self, IdAllocator, PARA_ORIGIN, SOURCE_PARA_ID};
 use crate::op::{OpError, OpResult, ParaBounds, Receipt, SplitReceipt, para_bounds};
 use crate::ops::{
-    adjacent_paragraph_change_revision_id, adjacent_revision_id, adopt_pilcrow, capture_pilcrow,
-    revision_id_in_range, snapshot_range,
+    adjacent_paragraph_change_revision_id, adjacent_revision_id, adopt_pilcrow, block_embed_at,
+    capture_pilcrow, paragraph_content_before, position_chunks, revision_id_in_range,
+    snapshot_range,
 };
 use crate::{
     DEL, EditCtx, EditingDoc, KIND_KEY, PARA_ID, PPR_CHANGE, PPR_DEL, PPR_INS, ParagraphId,
-    Position, StoryRange, check_position, insertion_attrs, next_pilcrow, revision_value, story_ref,
+    ParagraphIdOrigin, Position, StoryRange, check_position, insertion_attrs, next_pilcrow,
+    revision_value, story_ref,
 };
 
 /// The paragraph attributes a style definition owns. Applying a style resets
@@ -294,7 +297,7 @@ fn apply_paragraph_attr_projection(
         if STYLE_CONTROLLED_PARA_ATTRS.contains(&key.as_str()) {
             continue;
         }
-        if matches!(key.as_str(), PARA_ID | KIND_KEY) {
+        if crate::is_identity_key(key) {
             return Err(OpError::ReservedKey(key.clone()));
         }
         set_or_remove(txn, map, key, Some(value.clone()));
@@ -344,8 +347,9 @@ impl EditingDoc {
     /// Splits a paragraph by inserting exactly ONE pilcrow at `at`.
     ///
     /// The new pilcrow terminates the FIRST half, carrying the source
-    /// paragraph's full properties and its ORIGINAL paraId; the original
-    /// pilcrow is re-minted with a fresh paraId and becomes the second half's
+    /// paragraph's full properties, its ORIGINAL paraId and its Word
+    /// paragraph ID; the original pilcrow is re-minted with a fresh paraId and
+    /// a freshly allocated Word paragraph ID and becomes the second half's
     /// mark. What the second half then keeps depends on where the split fell:
     ///
     /// - mid-paragraph: it keeps its own properties;
@@ -365,7 +369,7 @@ impl EditingDoc {
     pub fn split_paragraph(
         &self,
         ctx: &EditCtx,
-        at: Position,
+        mut at: Position,
         next_style: Option<&ResolvedStyleProjection>,
     ) -> OpResult<SplitReceipt> {
         if let Some(projection) = next_style
@@ -373,16 +377,13 @@ impl EditingDoc {
         {
             return Err(OpError::UnknownStyle(projection.style_id.clone()));
         }
-        let second_para_id = self.next_id();
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &at.story)?;
         check_position(&story, &txn, at.index)?;
-        let chunks = snapshot_range(
-            &story,
-            &txn,
-            at.index.saturating_sub(1),
-            at.index.saturating_add(1),
-        );
+        identity::promote_at(self, &mut txn, &at.story, &story, at.index);
+        let mut ids = IdAllocator::new(self, &txn);
+        let second_para_id = ids.session_key(self);
+        let chunks = position_chunks(&story, &txn, &mut at.index);
         let revision_id = ctx.is_suggesting().then(|| {
             adjacent_revision_id(&chunks, at.index, crate::INS, &ctx.author)
                 .or_else(|| {
@@ -395,7 +396,17 @@ impl EditingDoc {
                 story: at.story.clone(),
                 index: at.index,
             })?;
-        let (first_para_id, props) = capture_pilcrow(&orig_map, &txn);
+        let (first_para_id, mut props) = capture_pilcrow(&orig_map, &txn);
+        // A mark kept before a pending block carries that block's revision; the new mark does not.
+        let block_revisions = snapshot_range(&story, &txn, orig_index + 1, orig_index + 2)
+            .first()
+            .and_then(|chunk| chunk.block_revisions(&txn))
+            .unwrap_or_default();
+        props.retain(|(key, value)| match key.as_str() {
+            PPR_INS => block_revisions[0].as_ref() != Some(value),
+            PPR_DEL => block_revisions[1].as_ref() != Some(value),
+            _ => true,
+        });
         let second_half_empty = orig_index == at.index;
 
         let ins = revision_id
@@ -453,6 +464,14 @@ impl EditingDoc {
             // Mid-paragraph split keeps the second half's pPr; Word never propagates w:pBdr.
             orig_map.remove(&mut txn, BORDERS);
         }
+        orig_map.remove(&mut txn, SOURCE_PARA_ID);
+        orig_map.remove(&mut txn, PARA_ORIGIN);
+        ids.bind(
+            &mut txn,
+            &orig_map,
+            &second_para_id,
+            ParagraphIdOrigin::Authored,
+        );
         Ok(SplitReceipt {
             first_para_id,
             second_para_id,
@@ -507,6 +526,12 @@ impl EditingDoc {
         let survivor = &targets[boundary_index + 1];
         let story = boundary.story.clone();
         let pilcrow_index = boundary.bounds.pilcrow;
+        let needs_boundary = block_embed_at(&story, &txn, pilcrow_index + 1)
+            && paragraph_content_before(&story, &txn, pilcrow_index)
+            && snapshot_range(&story, &txn, pilcrow_index + 1, pilcrow_index + 2)
+                .first()
+                .and_then(|chunk| chunk.block_revisions(&txn))
+                .is_none_or(|revisions| revisions.iter().all(Option::is_none));
         let own_insert = ctx
             .is_suggesting()
             .then(|| paragraph_revision_id(&boundary.map, &txn, PPR_INS, &ctx.author))
@@ -525,10 +550,37 @@ impl EditingDoc {
         if own_insert.is_some() {
             // Backspacing over this author's still-pending split retracts the
             // suggestion itself; it must not author a second pPrDel revision.
-            let (donor_id, mut donor_props) = capture_pilcrow(&boundary.map, &txn);
-            donor_props.retain(|(key, _)| !matches!(key.as_str(), PPR_INS | PPR_DEL));
-            story.remove_range(&mut txn, pilcrow_index, 1);
-            adopt_pilcrow(&mut txn, &survivor.map, &donor_id, &donor_props);
+            if needs_boundary {
+                // The mark stays; every stamp of the retracted revision goes with it.
+                for key in [PPR_INS, PPR_DEL] {
+                    if paragraph_revision_id(&boundary.map, &txn, key, &ctx.author) == own_insert {
+                        boundary.map.remove(&mut txn, key);
+                    }
+                }
+                let stamps = snapshot_range(&story, &txn, pilcrow_index, pilcrow_index + 1)
+                    .first()
+                    .map(|chunk| chunk.attrs.clone())
+                    .unwrap_or_default();
+                for key in [crate::INS, DEL] {
+                    if stamps
+                        .get(key)
+                        .and_then(|stamp| super::revision_id_for_author(stamp, &ctx.author))
+                        == own_insert
+                    {
+                        story.format(
+                            &mut txn,
+                            pilcrow_index,
+                            1,
+                            Attrs::from([(Arc::from(key), Any::Null)]),
+                        );
+                    }
+                }
+            } else {
+                let (donor_id, mut donor_props) = capture_pilcrow(&boundary.map, &txn);
+                donor_props.retain(|(key, _)| !matches!(key.as_str(), PPR_INS | PPR_DEL));
+                story.remove_range(&mut txn, pilcrow_index, 1);
+                adopt_pilcrow(&mut txn, &survivor.map, &donor_id, &donor_props);
+            }
         } else if let Some(id) = revision_id.as_ref() {
             let revision = revision_value(id, &ctx.revision_author());
             story.format(
@@ -538,7 +590,7 @@ impl EditingDoc {
                 Attrs::from([(Arc::from(DEL), revision.clone())]),
             );
             boundary.map.insert(&mut txn, PPR_DEL, revision);
-        } else {
+        } else if !needs_boundary {
             let (donor_id, donor_props) = capture_pilcrow(&boundary.map, &txn);
             story.remove_range(&mut txn, pilcrow_index, 1);
             adopt_pilcrow(&mut txn, &survivor.map, &donor_id, &donor_props);
@@ -570,7 +622,7 @@ impl EditingDoc {
         delta: &ParaAttrDelta,
     ) -> OpResult<Receipt> {
         for key in delta.other.keys() {
-            if matches!(key.as_str(), PARA_ID | KIND_KEY) {
+            if crate::is_identity_key(key) {
                 return Err(OpError::ReservedKey(key.clone()));
             }
         }
@@ -600,6 +652,9 @@ impl EditingDoc {
             let previous = paragraph_formatting(&target.map, &txn);
             apply_para_delta(&mut txn, &target.map, delta);
             let current = paragraph_formatting(&target.map, &txn);
+            if previous != current {
+                identity::promote(self, &mut txn, &target.map);
+            }
             if let Some(id) = revision_id.as_ref()
                 && previous != current
             {
@@ -788,26 +843,15 @@ impl EditingDoc {
         Ok(Receipt::default())
     }
 
-    /// Restores paraId uniqueness after a merge of divergent replicas: every
-    /// duplicate is re-minted, with the first occurrence in document order
-    /// keeping its id. Runs under a system origin so the pass never enters
-    /// undo history. Returns the `(old, new)` pairs.
-    pub fn dedupe_para_ids(&self, now_iso: &str) -> OpResult<Vec<(ParagraphId, ParagraphId)>> {
-        let ctx = EditCtx::system(now_iso);
-        let mut renames = Vec::new();
-        let mut txn = self.transact_for(&ctx);
-        let targets = all_targets(&txn);
-        let mut seen: HashSet<String> = HashSet::new();
-        for target in targets {
-            let id = target.bounds.para_id.clone();
-            if seen.insert(id.clone()) {
-                continue;
-            }
-            let minted = self.next_id();
-            target.map.insert(&mut txn, PARA_ID, minted.as_str());
-            renames.push((id, minted));
-        }
-        Ok(renames)
+    /// Restores unique paraIds and Word paragraph IDs after divergent replicas
+    /// merged or a paragraph was copied: the first occurrence in document
+    /// order keeps a duplicated paraId and a later one takes a key derived
+    /// from its mark, and a duplicated Word paragraph ID stays with its owner
+    /// while the others take fresh ones, identically on every replica.
+    /// Applying an update or raw ops already runs this. Returns the
+    /// `(old, new)` key pairs.
+    pub fn dedupe_para_ids(&self, _now_iso: &str) -> OpResult<Vec<(ParagraphId, ParagraphId)>> {
+        Ok(self.repair_paragraph_identities())
     }
 }
 
@@ -948,7 +992,9 @@ pub(crate) fn plan_paragraph_style(
 
 impl EditingDoc {
     /// Inserts complete paragraph records at story index `at` in one transaction and returns
-    /// their fresh ids. Existing paragraphs keep their identity and properties.
+    /// their session keys. Each is authored: allocated a key and a claimed Word paragraph ID. An
+    /// insertion at or after the final paragraph mark authors into an editor-only final
+    /// paragraph, as a split there does. Existing paragraphs keep their identity and properties.
     pub(crate) fn insert_paragraph_records(
         &self,
         story_id: &str,
@@ -958,6 +1004,10 @@ impl EditingDoc {
         let mut txn = self.transact_for(&EditCtx::local(String::new(), String::new()));
         let story = story_ref(&txn, story_id)?;
         check_position(&story, &txn, at)?;
+        if at + 1 >= story.len(&txn) {
+            identity::promote_story(self, &mut txn, story_id);
+        }
+        let mut allocator = IdAllocator::new(self, &txn);
         let mut index = at;
         let mut ids = Vec::with_capacity(records.len());
         for record in records {
@@ -972,7 +1022,7 @@ impl EditingDoc {
                 story.insert_with_attributes(&mut txn, index, &record.text, attrs);
                 index += crate::ops::utf16_len(&record.text);
             }
-            let para_id = self.next_id();
+            let para_id = allocator.session_key(self);
             let pilcrow = story.insert_embed_with_attributes(
                 &mut txn,
                 index,
@@ -982,10 +1032,11 @@ impl EditingDoc {
             pilcrow.insert(&mut txn, KIND_KEY, crate::PILCROW_KIND);
             pilcrow.insert(&mut txn, PARA_ID, para_id.as_str());
             for (key, value) in &record.properties {
-                if !matches!(key.as_str(), KIND_KEY | PARA_ID) {
+                if !crate::is_identity_key(key) {
                     pilcrow.insert(&mut txn, key.clone(), value.clone());
                 }
             }
+            allocator.bind(&mut txn, &pilcrow, &para_id, ParagraphIdOrigin::Authored);
             index += 1;
             ids.push(para_id);
         }
@@ -1168,10 +1219,8 @@ fn apply_para_delta(txn: &mut TransactionMut<'_>, map: &MapRef, delta: &ParaAttr
 fn paragraph_formatting<T: ReadTxn>(map: &MapRef, txn: &T) -> HashMap<String, Any> {
     map.iter(txn)
         .filter_map(|(key, value)| {
-            if matches!(
-                key.as_ref(),
-                KIND_KEY | PARA_ID | PPR_INS | PPR_DEL | PPR_CHANGE
-            ) {
+            if crate::is_identity_key(key) || matches!(key.as_ref(), PPR_INS | PPR_DEL | PPR_CHANGE)
+            {
                 return None;
             }
             match value {

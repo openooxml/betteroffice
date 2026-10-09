@@ -50,9 +50,7 @@ without it, saving downloads the file), `readOnly`, `toolbar`, and `showToolbar`
 ## Compose the toolbar
 
 Every built-in control runs through one command store per editor,
-`api.commands`. This command and toolbar composition API is experimental and
-may change in minor releases. Hosts arrange the same controls with their own
-actions:
+`api.commands`. Hosts arrange the same controls with their own actions:
 
 ```tsx
 import {
@@ -102,8 +100,8 @@ import {
   `usePptxCommand` and `usePptxCommandState` bind custom controls.
 - **Ordering.** `execute(id, args)` waits for input accepted before it, such as
   a picture still decoding, keeps later typing behind it, checks availability
-  again and resolves to `executed`, `noop`, `opened`, `requested` or a coded
-  failure (`input-failed`, `document-replaced`, `target-changed`,
+  again and resolves to `{ ok: true, status }` or `{ ok: false, failure }`
+  (`input-failed`, `document-replaced`, `target-changed`,
   `gesture-active`, `command-failed`). Keystrokes typed meanwhile land in the
   text they were typed into, and a picture on the slide the picker opened on;
   input queued for a replaced document is dropped. Save runs the host's `onSaveRequest` outside that queue, so the request
@@ -172,6 +170,128 @@ batch refuses with `stale-version`. Read-only editors refuse `validateEdits` and
 `applyEdits` with `read-only`, and the promises reject when the presentation is
 replaced while input flushes.
 
+## Host plugins
+
+Host-owned tools (review aids, checks, templates) install through the `plugins`
+prop. A plugin contributes a docked panel, an overlay and commands, and works
+through restricted clients rather than the editor API or the presentation
+handle:
+
+```tsx
+import { PptxEditor, definePptxPlugin } from '@betteroffice/pptx-react';
+
+type State = { version: string | null; slides: number };
+
+const review = definePptxPlugin<State>({
+  id: 'acme.review',
+  createState: () => ({ version: null, slides: 0 }),
+  async onEvent(context, event) {
+    if (event.type !== 'load' && event.type !== 'document-change') return;
+    const read = await context.read.readContent();
+    if (read.ok) context.setState({ version: read.version, slides: read.slides.length }, read.version);
+  },
+  panel: {
+    title: 'Review',
+    placement: 'right',
+    render: ({ context }) => <p>{context.state.slides} slides</p>,
+  },
+  overlay: ({ context, geometry }) => {
+    const target = context.snapshot.selection?.target;
+    const box = target && target.kind !== 'slide' ? geometry.getShapeRect(target.shapeId) : null;
+    return box ? (
+      <div style={{ position: 'absolute', left: box.x, top: box.y, width: box.width, height: box.height, outline: '2px dashed #2563eb' }} />
+    ) : null;
+  },
+});
+
+<PptxEditor
+  file={bytes}
+  fonts={fonts}
+  plugins={[review]}
+  pluginGrants={{ 'acme.review': { document: 'write', editBatches: true } }}
+  onPluginError={(error) => report(error)}
+/>;
+```
+
+- **Lifecycle.** Once a presentation is open, each plugin gets fresh state,
+  `initialize`, then one `load` event (`loaded`, `replaced`, or `attached` for a
+  plugin added to an open presentation), and its contributions appear. A
+  presentation change the hook did not make itself aborts it and delivers
+  `load` again; after ten such runs the plugin is stopped and reported. It then
+  receives `document-change` (the committed version only, for typing, commands,
+  batches, its own included, undo, redo and remote updates, never for refusals
+  or no-ops), `selection-change`, `mode-change` (with `readOnly`),
+  `layout-change` and `grants-change`. Events describe current state: several
+  changes may arrive as one, and a newer one aborts the hook still handling the
+  previous (`context.signal`), except a change that hook's own edit batch made.
+  Replacing the presentation, removing the plugin, changing its `revision`,
+  unmounting, or a failure ends the activation: its signals abort, its clients
+  refuse, and every `onCleanup` disposer runs once with the reason. Plugins are
+  matched by `id` and `revision`, so new array or callback identities and
+  reordering keep their state. `definePptxPlugin` copies the panel, commands
+  and toolbar, so changing them takes a new definition. `context.run(action)`
+  gives event handlers a fresh context and isolates their failures. `onReady` is
+  unaffected by plugins.
+- **Stale results.** `setState` returns false once the context is superseded or
+  ended, or when the presentation is no longer at `atVersion` (by default the
+  version the context was created at).
+- **Reads and edits.** `context.read` offers `version`, `readContent`,
+  `findText` and `validateEdits`, and `context.edits.applyEdits` the editor's
+  version-checked batches. Each call waits for pending input in order with it,
+  but plugin handlers run outside that queue, so a command can await its own
+  batch.
+- **Grants.** Without a grant a plugin reads, validates and navigates only, and
+  `context.edits` is null. Built-in commands need their id in `commands`, and
+  mutating ones also `document: 'write'`; edit batches need `document: 'write'`
+  and `editBatches`, and `history: 'none'` also `untrackedHistory`. The grant
+  and `readOnly` are checked again right before each change, so a revoked grant,
+  `readOnly` or a replaced presentation refuses even through a client obtained
+  earlier. Mutating built-in commands refuse plugins with `unsupported-policy`;
+  plugins change presentations through edit batches.
+- **Contributed commands** register as `plugin:<pluginId>/<id>` on
+  `api.commands`. They always run with their own plugin's clients, even when the
+  toolbar, a shortcut or the host invokes them. `execute` returns
+  `{ ok: true, status }` or a failure with the plugin's own code, or a refused
+  edit batch as-is; callers receive it unchanged. `mutatesDocument` disables a
+  command while read-only but grants nothing. Plugin shortcuts must use Mod or
+  Alt, or a function key; built-in and clipboard shortcuts win, and a clashing
+  plugin shortcut is not bound and is reported. `toolbar` lists local ids in
+  order: the default toolbar shows them, and replacement chrome places
+  `<PptxPluginToolbar />` where it wants them. `ToolbarCommandButton`,
+  `ToolbarCommand`, `usePptxCommand` and `usePptxCommandState` also take a
+  contributed id.
+- **Selection and navigation.** `snapshot.selection` names the current slide
+  (`slideId` and the one-based `slide`) and a slide, shape or text target; text
+  keeps its `anchor` and `focus` direction in UTF-16 story offsets.
+  `navigation.goToSlide`, `selectShape` and `selectText` resolve session ids
+  after pending input against `expectVersion`, keep keyboard focus unless
+  `focus: true`, and refuse with `stale-version`, `missing-target`,
+  `layout-unavailable` or `unsupported` (during proposal review) rather than
+  retarget. Ids are session-scoped.
+- **Geometry.** `context.geometry` describes the painted current version, and is
+  `null` during proposal review.
+  `layout.width` and `height` are the unzoomed slide in display-list pixels and
+  `layout.zoom` the resolved scale, fit included. `geometry.toOverlayRect` takes
+  a `slide-emu` (9,525 EMU per pixel) or `slide-px` rectangle and returns pixels
+  of the unscaled overlay layer, which sits on the slide canvas below selection
+  handles and proposal controls and ignores the pointer unless an element sets
+  `pointer-events: auto`. `getShapeRect(shapeId)` returns the rendered bounds of
+  a shape and its group descendants, and `getPositionAtPoint` adds `version` and
+  `layoutId` to a hit. Every method returns null once its layout is gone.
+- **Panels** dock left, right or bottom of the slide, beside the thumbnail rail
+  and outside the slide's keyboard handling, with tabs when several share a
+  side. `preferredSize` is clamped to 40% of the workspace. In a narrow editor
+  side docks show their tabs, and a tab opens its panel as a drawer that Escape
+  closes. Collapsing a panel keeps the plugin running.
+- **Failures.** Every contribution renders behind its own error boundary with a
+  command context restricted to its plugin. Keys pressed in plugin chrome are
+  the user's: built-in shortcuts act on the editor there, and a plugin's text
+  fields keep their own editing keys. A throwing hook, renderer,
+  command-state function, command or `context.run` action stops only that
+  plugin, runs its cleanups and reports `{ pluginId, generation, phase, error }`
+  to `onPluginError`. Plugins run in the page's realm: grants govern the
+  supported API, not a sandbox.
+
 ## What works today
 
 - Slide rendering with Rust layout and text shaping, painted onto canvas
@@ -181,6 +301,8 @@ replaced while input flushes.
 - Saving the deck back to `.pptx` — toolbar button, Ctrl/Cmd+S, or `api.save()`
 - A command store behind every control, with composable toolbar parts and an
   accessible overflow menu
+- Host-owned plugins with panels, overlays, lifecycle events, and explicitly
+  granted commands and edit batches
 - Localized UI via the `i18n` prop
   ([`@betteroffice/pptx-i18n`](https://www.npmjs.com/package/@betteroffice/pptx-i18n))
 - Real-time collaboration with people or agents; the deck is a CRDT
@@ -226,9 +348,8 @@ step. Rejecting it leaves the deck untouched. If a target changed, preview its
 current state before choosing **Apply updated proposal**. A further target
 change detected at that click refreshes the preview for another review.
 
-Pending proposals are session-local and disappear when the deck closes. Only
-accepted edits are saved and synchronized. Existing host-driven edits may keep
-using `api.refresh()`, which also refreshes the proposal list.
+Accepted proposals are saved and synchronized. `api.refresh()` also refreshes the
+proposal list.
 
 ## Collaboration
 
@@ -258,8 +379,7 @@ import { CollaborationProvider } from '@betteroffice/pptx';
 
 ## Framework notes
 
-The editor is browser-only (canvas, wasm); under Next.js load it with
-`next/dynamic` and `ssr: false`.
+Under Next.js, load the editor with `next/dynamic` and `ssr: false`.
 
 [JavaScript guide](https://docs.betteroffice.dev/docs/javascript) ·
 [Changelog](https://github.com/openooxml/betteroffice/blob/main/packages/pptx-react/CHANGELOG.md) · Apache-2.0.

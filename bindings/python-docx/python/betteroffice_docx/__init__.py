@@ -132,16 +132,12 @@ class Document:
 
     @property
     def paragraph_ids(self) -> "list[str | None]":
-        """Body paragraph IDs in document order.
-
-        A paragraph Word never stamped with a ``w14:paraId`` reads as ``None``
-        and cannot be addressed by ID.
-        """
+        """Body paragraph IDs in document order; missing IDs are ``None``."""
         return self._inner.paragraph_ids
 
     @property
     def warnings(self) -> "list[str]":
-        """What the parser could not represent. Parsing still succeeded."""
+        """Parser diagnostics."""
         return self._inner.warnings
 
     @property
@@ -221,8 +217,7 @@ class Document:
     ) -> "dict[str, Any]":
         """``export_structured`` rendered as Markdown with source anchors.
 
-        Returns ``{"markdown", "anchors", "diagnostics", "truncated"}``. Markdown
-        does not preserve Word layout.
+        Returns ``{"markdown", "anchors", "diagnostics", "truncated"}``.
         """
         return self._inner.export_markdown(
             revision_view=revision_view,
@@ -232,11 +227,52 @@ class Document:
             max_bytes=max_bytes,
         )
 
+    def list_content_controls(
+        self,
+        *,
+        stories: "Sequence[str] | None" = None,
+        max_controls: int = 10_000,
+        max_bytes: int = 8_388_608,
+    ) -> "dict[str, Any]":
+        """List the document's content controls in document order as a camelCase dict.
+
+        Each control carries its tag, alias, type, lock, placement, anchor and
+        current ``value``. ``stories`` defaults to every category. Ids and
+        anchors address this snapshot. Raises ``ExportError`` for unusable
+        limits or more controls than ``max_controls``.
+        """
+        return self._inner.list_content_controls(
+            stories=None if stories is None else list(stories),
+            max_controls=max_controls,
+            max_bytes=max_bytes,
+        )
+
+    def find_content_controls(
+        self,
+        query: "Mapping[str, Any]",
+        *,
+        stories: "Sequence[str] | None" = None,
+        max_controls: int = 10_000,
+        max_bytes: int = 8_388_608,
+    ) -> "dict[str, Any]":
+        """The content controls matching ``query`` exactly, case-sensitively.
+
+        ``query`` is ``{"kind": "tag", "tag": ...}``, ``{"kind": "alias",
+        "alias": ...}``, ``{"kind": "ooxmlId", "ooxmlId": ...}`` (the authored
+        ``w:id``) or ``{"kind": "id", "controlId": ...}``. Every match is
+        returned; none and several are both results.
+        """
+        return self._inner.find_content_controls(
+            dict(query),
+            stories=None if stories is None else list(stories),
+            max_controls=max_controls,
+            max_bytes=max_bytes,
+        )
+
     def layout(self, input: "str | Mapping[str, Any]") -> Layout:
         """Paginate a ``{"measured": [...], "options": {...}}`` envelope.
 
-        The engine paginates blocks that were measured already; it does not
-        measure them, so the envelope carries the metrics.
+        The envelope supplies measured blocks and their metrics.
         """
         return self._inner.layout(input if isinstance(input, str) else dict(input))
 
@@ -248,7 +284,7 @@ class Document:
         bold: bool = False,
         italic: bool = False,
     ) -> int:
-        """Register a face for rasterization. No face is embedded in the wheel."""
+        """Register a face for rasterization."""
         return self._inner.register_font(family, _as_bytes(data), bold=bold, italic=italic)
 
     def register_image(

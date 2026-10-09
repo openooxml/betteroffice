@@ -42,10 +42,36 @@ export {
   DocxExportError,
   exportDocxMarkdown,
   exportDocxStructured,
+  exportDocxStructuredWithPages,
   renderDocxMarkdown,
+  renderDocxMarkdownWithPages,
 } from './docx/structuredExport';
 export type * from './yrs/structuredExport';
+export type * from './yrs/pagedExport';
 export type * from './yrs/readTypes';
+
+export { compareDocx } from './docx/compare';
+export type {
+  DocxCompareDiagnostic,
+  DocxCompareDiagnosticCode,
+  DocxCompareLimits,
+  DocxCompareLocation,
+  DocxCompareOptions,
+  DocxCompareResult,
+  DocxComparedChange,
+  DocxCompareTextSpan,
+} from './docx/compare';
+
+// ============================================================================
+// CONTENT CONTROLS
+// ============================================================================
+
+export {
+  DocxContentControlsError,
+  findDocxContentControls,
+  listDocxContentControls,
+} from './docx/contentControls';
+export type * from './yrs/contentControls';
 
 // ============================================================================
 // UTILITIES
@@ -176,6 +202,7 @@ export type {
   PanelConfig,
   RenderedDomContext,
   PositionCoordinates,
+  PointPosition,
 } from './plugin-api/types';
 
 // ============================================================================

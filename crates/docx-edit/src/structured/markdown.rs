@@ -5,14 +5,16 @@
 //! inert: no line break survives, so none can open a block, and only http, https, mailto and
 //! internal-anchor links are linked, judged after the decoding a consumer applies.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
 
 use super::{
-    Block, BlockKind, BreakType, CachedResult, Diagnostic, DiagnosticCode, DocxStructuredContent,
-    ExportFailure, FormattingMark, HeadingInfo, Inline, InlineKind, Link, ListInfo, MarkdownAnchor,
-    MarkdownContent, MarkdownOptions, NoteKind, Revision, RevisionKind, Severity, StoryKind,
-    TableData, VerticalMerge, byte_limit,
+    Block, BlockKind, BreakType, CachedResult, Diagnostic, DiagnosticCode, DocxLayoutMap,
+    DocxSnapshotLayoutMap, DocxStructuredContent, ExportFailure, ExportPage, FormattingMark,
+    FragmentSlice, HeadingInfo, Inline, InlineKind, Link, ListInfo, MarkdownAnchor,
+    MarkdownContent, MarkdownOptions, NoteKind, PageFragment, PageMarkdownOptions, Revision,
+    RevisionKind, Severity, StoryKind, TableData, VerticalMerge, byte_limit, export_fingerprint,
+    invalid_options,
 };
 
 /// Renders `content` as Markdown within `options.max_bytes`, stopping at a block boundary.
@@ -20,7 +22,105 @@ pub fn render_docx_markdown(
     content: &DocxStructuredContent,
     options: &MarkdownOptions,
 ) -> Result<MarkdownContent, ExportFailure> {
-    let max_bytes = byte_limit(options.max_bytes)?;
+    render(content, options.max_bytes, HashMap::new())
+}
+
+/// The page map of a paged export, as Markdown page markers read it.
+#[derive(Clone, Copy, Debug)]
+pub struct PageAnnotations<'a> {
+    pub export_fingerprint: &'a str,
+    pub pages: &'a [ExportPage],
+    pub fragments: &'a [PageFragment],
+}
+
+impl<'a> From<&'a DocxLayoutMap> for PageAnnotations<'a> {
+    fn from(map: &'a DocxLayoutMap) -> Self {
+        Self {
+            export_fingerprint: &map.export_fingerprint,
+            pages: &map.pages,
+            fragments: &map.fragments,
+        }
+    }
+}
+
+impl<'a> From<&'a DocxSnapshotLayoutMap> for PageAnnotations<'a> {
+    fn from(map: &'a DocxSnapshotLayoutMap) -> Self {
+        Self {
+            export_fingerprint: &map.export_fingerprint,
+            pages: &map.pages,
+            fragments: &map.fragments,
+        }
+    }
+}
+
+/// Renders the content of a paged export as Markdown. With `page_markers`, each block marker is
+/// followed by `<!-- docx-pages: N=label ... -->`, the physical page indexes and displayed
+/// labels of every page showing the block, labels percent-encoded; no page break is inserted
+/// into the text. The map must belong to `content`.
+pub fn render_docx_markdown_with_pages(
+    content: &DocxStructuredContent,
+    pages: PageAnnotations<'_>,
+    options: &PageMarkdownOptions,
+) -> Result<MarkdownContent, ExportFailure> {
+    if export_fingerprint(content) != pages.export_fingerprint {
+        return Err(invalid_options(
+            "The page map was not captured with this structured content.",
+        ));
+    }
+    let mut annotations = HashMap::new();
+    if options.page_markers == Some(true) {
+        let labels: HashMap<u32, &str> = pages
+            .pages
+            .iter()
+            .map(|page| (page.page_index, page.displayed_label.as_str()))
+            .collect();
+        let mut shown: HashMap<&str, BTreeSet<u32>> = HashMap::new();
+        for fragment in pages.fragments {
+            if matches!(
+                fragment.slice,
+                FragmentSlice::Block | FragmentSlice::Table { .. }
+            ) {
+                shown
+                    .entry(fragment.node_id.as_str())
+                    .or_default()
+                    .insert(fragment.page_index);
+            }
+        }
+        for (node, indexes) in shown {
+            let mut marker = String::from("<!-- docx-pages:");
+            for index in indexes {
+                let _ = write!(
+                    marker,
+                    " {index}={}",
+                    page_label(labels.get(&index).copied().unwrap_or_default())
+                );
+            }
+            marker.push_str(" -->");
+            annotations.insert(node.to_owned(), marker);
+        }
+    }
+    render(content, options.max_bytes, annotations)
+}
+
+/// A displayed page label with everything but ASCII letters and digits percent-encoded.
+fn page_label(label: &str) -> String {
+    let mut output = String::with_capacity(label.len());
+    for byte in label.bytes() {
+        if byte.is_ascii_alphanumeric() {
+            output.push(byte as char);
+        } else {
+            let _ = write!(output, "%{byte:02X}");
+        }
+    }
+    output
+}
+
+fn render(
+    content: &DocxStructuredContent,
+    max_bytes: Option<u32>,
+    pages: HashMap<String, String>,
+) -> Result<MarkdownContent, ExportFailure> {
+    let max_bytes = byte_limit(max_bytes)?;
     let mut renderer = Renderer {
         output: String::new(),
         anchors: Vec::new(),
@@ -31,6 +131,7 @@ pub fn render_docx_markdown(
         max_bytes,
         truncated: false,
         in_list: false,
+        pages,
     };
     'stories: for story in &content.stories {
         let kind = match story.kind {
@@ -110,6 +211,8 @@ struct Renderer {
     max_bytes: usize,
     truncated: bool,
     in_list: bool,
+    /// Page markers by block id.
+    pages: HashMap<String, String>,
 }
 
 /// Whether a consumer can read `ch` as ending a line.
@@ -545,7 +648,10 @@ impl Renderer {
             marker: marker.clone(),
             anchor: block.anchor.clone(),
         });
-        format!("<!-- {marker} -->")
+        match self.pages.get(&block.id) {
+            Some(pages) => format!("<!-- {marker} -->{pages}"),
+            None => format!("<!-- {marker} -->"),
+        }
     }
 
     /// Renders one root block with its marker, all or nothing, and stops rendering it as soon as
@@ -1358,5 +1464,13 @@ mod tests {
             text("Docs", link("https://example.test/pixel", None)),
         ]);
         assert_eq!(markdown, r"see\![Docs](https://example.test/pixel)");
+    }
+
+    #[test]
+    fn page_labels_cannot_close_or_extend_their_comment() {
+        assert_eq!(page_label("-3-"), "%2D3%2D");
+        assert_eq!(page_label("iv"), "iv");
+        assert_eq!(page_label("--> <b>"), "%2D%2D%3E%20%3Cb%3E");
+        assert_eq!(page_label("\u{4E00}"), "%E4%B8%80");
     }
 }

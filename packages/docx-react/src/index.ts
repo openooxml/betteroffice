@@ -11,14 +11,27 @@ import { version as packageVersion } from '../package.json';
 
 export const VERSION: string = packageVersion;
 
+export { preloadDocxEngine } from '@betteroffice/docx/yrs';
+export type {
+  DocxParagraphAnchor,
+  DocxParagraphAnchorResult,
+  DocxParagraphIdentitySnapshot,
+} from '@betteroffice/docx/yrs';
+
 // Main editor contract
 export {
   DocxEditor,
   type DocxEditorProps,
   type DocxEditorRef,
+  type DocxParagraphMatch,
+  type DocxSelectionInfo,
+  type DocxCommentInsertion,
+  type DocxDocumentChange,
   type DocxEditorCollaborationOptions,
   type EditorMode,
 } from './components/DocxEditor';
+export { DocxAsyncOnlyError, DocxReplicaNotReadyError } from './components/DocxEditor/hooks/useDocxEditorRefApi';
+export { DocxWorkerError, type DocxWorkerErrorStage } from './components/DocxEditor/internals/docxWorkerError';
 
 // Commands: one authority for built-in and host chrome
 export { DocxCommandProvider, type DocxCommandProviderProps } from './commands/DocxCommandProvider';
@@ -87,6 +100,9 @@ export { defineDocxPlugin } from './plugins/defineDocxPlugin';
 export { DocxPluginToolbar } from './plugins/DocxPluginToolbar';
 export type {
   DocxEditorPluginProps,
+  DocxAnchorGeometryResult,
+  DocxAnchorRect,
+  DocxGeometryTarget,
   DocxPlugin,
   DocxPluginCommand,
   DocxPluginCommandClient,
@@ -103,6 +119,7 @@ export type {
   DocxPluginNavigation,
   DocxPluginNavigationFailureCode,
   DocxPluginPanel,
+  DocxPluginPointPosition,
   DocxPluginReadClient,
   DocxPluginRect,
   DocxPluginRefusal,
@@ -120,8 +137,22 @@ export type {
   DocxPluginCommandResult,
   DocxPluginCommandState,
 } from './commands/types';
-export type { SelectionState } from './components/DocxEditor/types';
-export type { RenderedDomContext, PositionCoordinates } from '@betteroffice/docx/plugin-api';
+export type { DocxPointPosition, SelectionState } from './components/DocxEditor/types';
+export type {
+  DocxSearchOptions,
+  DocxSearchState,
+} from './components/DocxEditor/hooks/useHostSearch';
+export type {
+  DocxMemoryBudget,
+  DocxMemoryPressure,
+  DocxMemoryPressureLevel,
+  DocxMemoryStats,
+} from './components/DocxEditor/memoryStats';
+export type {
+  RenderedDomContext,
+  PositionCoordinates,
+  PointPosition,
+} from '@betteroffice/docx/plugin-api';
 
 export type { BundledFontProvider } from '@betteroffice/docx/layout';
 export {
@@ -134,3 +165,19 @@ export {
 // Translations, PartialLocaleStrings, TranslationKey) live in
 // `@betteroffice/docx-i18n`; import them from there.
 export { LocaleProvider, useTranslation, type LocaleProviderProps } from './i18n';
+
+// Host-proposal types — re-exported so hosts don't need to import
+// `@betteroffice/docx/yrs` directly for `proposeChanges`/`setProposalStates`/`withdrawProposals`/
+// `getProposals`.
+export type {
+  DocxOccurrence,
+  DocxProposalFailure,
+  DocxProposalInput,
+  DocxProposalRecord,
+  DocxProposalRequest,
+  DocxProposalResult,
+  DocxProposalSnapshot,
+  DocxProposalState,
+  DocxProposalStateRequest,
+  DocxProposalWithdrawRequest,
+} from '@betteroffice/docx/yrs';

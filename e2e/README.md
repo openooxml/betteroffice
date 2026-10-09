@@ -117,3 +117,10 @@ A strict performance gate needs repeated base/PR runs on a controlled runner.
 Both jobs fail on test failures, have a 40-minute deadline, and cancel superseded
 runs. Repository branch protection must require their check names if they are to
 block merges; workflow code does not change that repository setting.
+
+On pushes to `main`, a green run also publishes the three corpus result files to
+the `betteroffice-fidelity` R2 bucket as `e2e/<sha>/<format>.json`, then points
+`e2e/latest.json` at them unless it already names a newer run. The benchmarks site in
+[`apps/fidelity`](../apps/fidelity) charts the latest one.
+`publish.ts` refuses partial, failed, skipped or dirty runs, and a failed upload does
+not fail the workflow.

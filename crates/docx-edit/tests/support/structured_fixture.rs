@@ -510,3 +510,33 @@ pub fn image(id: &str, description: &str) -> String {
 pub fn namespaces() -> &'static str {
     NS
 }
+
+/// Gives the paragraph keyed `from` in `story` the key `to` by writing the shared state directly,
+/// as a replica outside the engine could: every editing path repairs a key two paragraphs share.
+pub fn share_key(doc: &docx_edit::EditingDoc, story: &str, from: &str, to: &str) {
+    use yrs::types::text::YChange;
+    use yrs::{Any, Map, MapRef, Out, ReadTxn, Text, TextRef, Transact};
+    let mut txn = doc.yrs_doc().transact_mut();
+    let text: TextRef = txn
+        .get_map("stories")
+        .and_then(|stories| stories.get(&txn, story))
+        .unwrap()
+        .cast()
+        .unwrap();
+    let pilcrow: MapRef = text
+        .diff(&txn, YChange::identity)
+        .into_iter()
+        .find_map(|chunk| match chunk.insert {
+            Out::YMap(map)
+                if matches!(
+                    map.get(&txn, "paraId"),
+                    Some(Out::Any(Any::String(key))) if &*key == from
+                ) =>
+            {
+                Some(map)
+            }
+            _ => None,
+        })
+        .unwrap();
+    pilcrow.insert(&mut txn, "paraId", to);
+}

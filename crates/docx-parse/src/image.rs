@@ -381,7 +381,10 @@ fn apply_common_image_fields(
     }
     image.outline = parse_picture_outline(container);
     image.rotation_bounds = rotation_bounds(&image.size, image.transform.as_ref());
-    if padding.is_some() {
+    if padding
+        .as_ref()
+        .is_some_and(|padding| !is_zero_padding(padding))
+    {
         image.effect_extent = padding;
     }
     if let (Some(relationship_id), Some(relationships)) = (properties.hyperlink_id, relationships) {
@@ -461,17 +464,19 @@ fn parse_extent(element: Option<&XmlElement>) -> ImageSize {
 
 fn parse_effect_extent(element: Option<&XmlElement>) -> Option<ImagePadding> {
     let element = element?;
-    let padding = ImagePadding {
+    Some(ImagePadding {
         left: Some(numeric_attr(Some(element), "l").unwrap_or(0.0)),
         top: Some(numeric_attr(Some(element), "t").unwrap_or(0.0)),
         right: Some(numeric_attr(Some(element), "r").unwrap_or(0.0)),
         bottom: Some(numeric_attr(Some(element), "b").unwrap_or(0.0)),
-    };
-    let all_zero = [padding.left, padding.top, padding.right, padding.bottom]
+    })
+}
+
+fn is_zero_padding(padding: &ImagePadding) -> bool {
+    [padding.left, padding.top, padding.right, padding.bottom]
         .into_iter()
         .flatten()
-        .all(|value| value == 0.0);
-    (!all_zero).then_some(padding)
+        .all(|value| value == 0.0)
 }
 
 fn find_blip_chain(container: &XmlElement) -> (Option<&XmlElement>, Option<&XmlElement>) {

@@ -26,8 +26,8 @@ pub struct CellPosition {
     pub col: u32,
 }
 
-/// An inclusive rectangle: an A1 cell or `A1:B2` range (optionally with `$`), or zero-based
-/// corners. Sheet-qualified, union, whole-row/column and defined-name references are refused.
+/// An inclusive rectangle of explicit cells on the target's sheet: an A1 cell or `A1:B2` range
+/// (optionally with `$`), or zero-based corners.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(
     tag = "kind",
@@ -220,7 +220,7 @@ fn parse_cell(text: &str) -> Option<CellRef> {
         .map(|cell| CellRef::new(cell.row, cell.col))
 }
 
-fn parse_range(address: &RangeAddress) -> std::result::Result<CellRange, String> {
+pub(crate) fn parse_range(address: &RangeAddress) -> std::result::Result<CellRange, String> {
     let (start, end) = match address {
         RangeAddress::A1 { a1 } => {
             let (start, end) = a1.split_once(':').unwrap_or((a1, a1));
@@ -300,7 +300,7 @@ impl Workbook {
             .get(sheet.0 as usize)
             .copied()
             .flatten()?;
-        let package = self.source_package.as_ref()?;
+        let package = self.source_package.as_ref()?.facts();
         let name = self
             .model
             .sheet(sheet)

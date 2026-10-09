@@ -229,6 +229,21 @@ class Document:
         max_blocks: int = ...,
         max_bytes: int = ...,
     ) -> dict[str, Any]: ...
+    def list_content_controls(
+        self,
+        *,
+        stories: list[str] | None = ...,
+        max_controls: int = ...,
+        max_bytes: int = ...,
+    ) -> dict[str, Any]: ...
+    def find_content_controls(
+        self,
+        query: Mapping[str, Any],
+        *,
+        stories: list[str] | None = ...,
+        max_controls: int = ...,
+        max_bytes: int = ...,
+    ) -> dict[str, Any]: ...
     def layout(self, input: str | Mapping[str, Any]) -> Layout: ...
     def register_font(
         self, family: str, data: bytes, *, bold: bool = ..., italic: bool = ...

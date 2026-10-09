@@ -1,5 +1,13 @@
 {
   "_lang": "fr",
+  "worker": {
+    "previousRecovery": null,
+    "preparing": "Préparation de l’éditeur. La modification sera bientôt disponible.",
+    "failed": "La modification est indisponible. Téléchargez la présentation récupérée.",
+    "disabled": "Cette fonctionnalité est indisponible dans ce mode de modification.",
+    "recovery": null,
+    "image": null
+  },
   "toolbar": {
     "label": null,
     "save": "Enregistrer",
@@ -188,7 +196,17 @@
       "documentReplaced": "La présentation a été remplacée.",
       "targetChanged": "La sélection a changé avant l'exécution de la commande.",
       "gestureActive": "Terminez d'abord le geste du pointeur.",
-      "commandFailed": "La commande a échoué."
+      "commandFailed": "La commande a échoué.",
+      "permissionDenied": "L'application hôte n'a pas autorisé ce plugin à utiliser cette commande.",
+      "unsupportedPolicy": "Les plugins ne peuvent pas encore exécuter cette commande. Utilisez plutôt un lot de modifications.",
+      "pluginUnavailable": "Le plugin n'est plus actif.",
+      "aborted": "L'action du plugin a été annulée avant l'exécution de la commande."
     }
+  },
+  "plugins": {
+    "toolbarGroup": "Plugins",
+    "panelTabs": "Panneaux des plugins",
+    "collapsePanel": "Réduire {title}",
+    "expandPanel": "Développer {title}"
   }
 }

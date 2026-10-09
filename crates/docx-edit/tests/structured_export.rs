@@ -919,6 +919,13 @@ fn exporting_is_read_only() {
     assert_eq!(doc.encode_state_vector_v1(), vector);
     assert_eq!(updates.get(), 0);
     assert!(history.can_undo() && history.can_redo());
+    assert!(history.redo() && control_history.redo());
+    assert!(history.undo() && control_history.undo());
+    assert_eq!(
+        doc.story_segments("body").unwrap(),
+        control.story_segments("body").unwrap(),
+        "the history replays exactly as a replica's that never exported"
+    );
     let range = |doc: &EditingDoc| {
         let start = doc.paragraph_mark_position("00000017").unwrap().index - 3;
         docx_edit::StoryRange::new("body", start, start + 2)
@@ -929,13 +936,6 @@ fn exporting_is_read_only() {
             .add_comment(&[range(&control)], "A", "", Any::Null)
             .unwrap(),
         "exporting allocates no ids"
-    );
-    assert!(history.redo() && control_history.redo());
-    assert!(history.undo() && control_history.undo());
-    assert_eq!(
-        doc.story_segments("body").unwrap(),
-        control.story_segments("body").unwrap(),
-        "the history replays exactly as a replica's that never exported"
     );
 }
 
@@ -1094,6 +1094,9 @@ fn duplicate_paragraph_ids_are_reported_as_ambiguous() {
         &docx_edit::EditCtx::local("", ""),
     )
     .unwrap();
+    let copy = doc.paragraphs("body").unwrap()[0].para_id.clone();
+    assert_ne!(copy, para, "editing repairs a key two paragraphs share");
+    fixture::share_key(&doc, "body", &copy, &para);
     let content = doc
         .export_structured(&options(RevisionView::Accepted))
         .unwrap()

@@ -5,6 +5,7 @@ import {
   defineDocxPlugin,
   type DocxEditorRef,
   type DocxPluginContext,
+  type DocxPluginGeometry,
   type DocxPluginSidebarItem,
 } from '@betteroffice/docx-react';
 import documentUrl from '../../../apps/demo/public/betteroffice-demo.docx?url';
@@ -19,6 +20,7 @@ type ProbeContext = DocxPluginContext<ProbeState>;
 
 interface ProbeWindow {
   editor: DocxEditorRef | null;
+  geometry: DocxPluginGeometry | null;
   navigation: unknown;
   marks: number;
   reload(): Promise<void>;
@@ -26,6 +28,7 @@ interface ProbeWindow {
 
 const probe: ProbeWindow = {
   editor: null,
+  geometry: null,
   navigation: null,
   marks: 0,
   async reload() {
@@ -92,6 +95,13 @@ function ProbePanel({ context }: { context: ProbeContext }) {
   );
 }
 
+function GeometryProbe({ geometry }: { geometry: DocxPluginGeometry }) {
+  useEffect(() => {
+    probe.geometry = geometry;
+  }, [geometry]);
+  return null;
+}
+
 function ProbeCard({
   item,
   isExpanded,
@@ -133,6 +143,7 @@ const alignment = defineDocxPlugin<ProbeState>({
   panel: { title: 'Probe', placement: 'right', render: ProbePanel },
   overlay: ({ geometry }) => (
     <>
+      <GeometryProbe geometry={geometry} />
       {Array.from({ length: Math.min(geometry.layout.pageCount, 2) }, (_, index) => {
         const bounds = geometry.dom.getPageBounds(index);
         const box = bounds && geometry.toOverlayRect(bounds);

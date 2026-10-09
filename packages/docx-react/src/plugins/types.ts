@@ -5,8 +5,10 @@ import type {
   DocxEditResult,
   DocxFindTextRequest,
   DocxFindTextResult,
+  DocxParagraphAnchor,
   DocxReadParagraphsRequest,
   DocxReadParagraphsResult,
+  DocxTextRange,
   DocxValidationResult,
 } from '@betteroffice/docx/yrs';
 import type { CommandState } from '../../../../shared/host-contracts/commands';
@@ -32,7 +34,8 @@ import type {
   DocxPluginCommandState,
 } from '../commands/types';
 import type { EditorMode } from '../components/DocxEditor/internals/editing-modes';
-import type { SelectionState } from '../components/DocxEditor/types';
+import type { DocxPointPosition, SelectionState } from '../components/DocxEditor/types';
+import type { DocxOccurrence } from './proposalPreview';
 
 export type {
   MaybePromise,
@@ -122,6 +125,8 @@ export interface DocxPluginLayout {
   /** Changes with every rendered frame; unrelated to document versions. */
   id: string;
   version: string;
+  /** The proposal preview its pixels show. */
+  previewVersion: number;
   zoom: number;
   pageCount: number;
 }
@@ -146,16 +151,65 @@ export interface DocxPluginSnapshot {
   layout: DocxPluginLayout | null;
 }
 
+/** A text position under the pointer, with the layout it was resolved against. */
+export type DocxPluginPointPosition = DocxPointPosition & { layoutId: string };
+
+export interface DocxAnchorRect extends DocxPluginRect {
+  /** Zero-based display-list page. */
+  pageIndex: number;
+}
+
+export type DocxGeometryTarget =
+  | { kind: 'proposal'; id: string }
+  | { kind: 'revision'; revisionId: string }
+  | { kind: 'paragraph'; paragraph: DocxParagraphAnchor }
+  | {
+      kind: 'search';
+      paragraph: DocxParagraphAnchor;
+      text: string;
+      occurrence?: DocxOccurrence;
+    }
+  | { kind: 'range'; version: string; range: DocxTextRange };
+
+export type DocxAnchorGeometryResult =
+  | {
+      ok: true;
+      version: string;
+      previewVersion: number;
+      layoutId: string;
+      rects: readonly DocxAnchorRect[];
+      anchor: DocxAnchorRect;
+      pageRect: DocxPluginRect;
+    }
+  | {
+      ok: false;
+      failure: {
+        code: DocxPluginNavigationFailureCode | 'unknown-proposal';
+        message: string;
+      };
+    };
+
 /**
  * Local geometry of the rendered layout. `dom` answers in pages-container units divided by zoom;
- * `toOverlayRect` converts one of those rectangles into overlay-layer pixels, and returns null
- * once its layout is no longer rendered.
+ * `toOverlayRect` converts one of those rectangles into overlay-layer pixels. `toOverlayRect` and
+ * `getPositionAtPoint` return null once the layout is no longer rendered.
  */
 export interface DocxPluginGeometry {
   layout: DocxPluginLayout;
   /** @experimental DOM access that a data-only geometry facade may replace in a minor release. */
   dom: RenderedDomContext;
   toOverlayRect(rect: DocxPluginRect): DocxPluginRect | null;
+  /** Returns the text under client coordinates without moving selection or focus.
+   * @deprecated Use {@link readPositionAtPoint}. Worker viewers return a cached answer or null. */
+  getPositionAtPoint(clientX: number, clientY: number): DocxPluginPointPosition | null;
+  /** Reads the point after pending input commits; returns null if this layout changes while waiting. */
+  readPositionAtPoint(clientX: number, clientY: number): Promise<DocxPluginPointPosition | null>;
+  /**
+   * Every visible fragment in overlay-layer pixels. The anchor is the collapsed end of the
+   * last fragment, a wholly hidden target's boundary, or its paragraph; pageRect is its page.
+   * Refuses stale or unrendered layouts.
+   */
+  getAnchorGeometry(target: DocxGeometryTarget): DocxAnchorGeometryResult;
 }
 
 export type DocxPluginNavigationFailureCode =
@@ -181,10 +235,14 @@ export interface DocxPluginNavigation {
   >;
 }
 
-/** Lifecycle notifications describe current state; several changes may arrive as one. */
+/**
+ * Lifecycle notifications describe current state; several changes may arrive as one.
+ * `layout-change` repeats once the pages have painted a layout that arrived before its pixels.
+ */
 export type DocxPluginEvent =
   | { type: 'load'; generation: string; version: string; reason: PluginLoadReason }
   | { type: 'document-change'; generation: string; version: string }
+  | { type: 'proposal-change'; generation: string; version: string; previewVersion: number }
   | {
       type: 'selection-change';
       generation: string;
@@ -282,6 +340,10 @@ export interface DocxPluginDefinition<S> {
   initialize?(context: DocxPluginContext<S>): MaybePromise<void>;
   onEvent?(context: DocxPluginContext<S>, event: DocxPluginEvent): MaybePromise<void>;
   panel?: DocxPluginPanel<S>;
+  /**
+   * May render during a pending layout with `context.geometry` and `context.snapshot.layout` null;
+   * `geometry` is then the previous layout's.
+   */
   overlay?: ComponentType<{ context: DocxPluginContext<S>; geometry: DocxPluginGeometry }>;
   getSidebarItems?(context: DocxPluginContext<S>): readonly DocxPluginSidebarItem<S>[];
   commands?: readonly DocxPluginCommand<S>[];

@@ -8,7 +8,15 @@ export type {
   XlsxEditorProps,
   XlsxEditorApi,
   XlsxEditorCollaborationOptions,
+  XlsxWorkerViewerApi,
+  XlsxWorkerViewerProps,
 } from './XlsxEditor';
+/** @experimental */
+export type { XlsxWorkerEditorProps } from './XlsxEditor';
+/** @experimental */
+export type { XlsxWorkerEditorApi } from './worker/createWorkerEditorApi';
+/** @experimental */
+export { XlsxPeerNotReadyError, XlsxWorkerEditorCollaborationError } from './worker/createWorkerEditorApi';
 export { EditorToolbar } from './components/EditorToolbar';
 export {
   Toolbar,
@@ -57,6 +65,7 @@ export {
   useXlsxCommandState,
   useXlsxCommand,
   type XlsxBoundCommand,
+  type XlsxBoundPluginCommand,
 } from './commands/hooks';
 export type {
   CommandReason,
@@ -75,6 +84,10 @@ export type {
   XlsxCommandStore,
   XlsxCommandValues,
   XlsxNumberFormatValue,
+  XlsxPluginCommandDescriptor,
+  XlsxPluginCommandId,
+  XlsxPluginCommandResult,
+  XlsxPluginCommandState,
   XlsxSelectCommandId,
 } from './commands/types';
 export {
@@ -88,3 +101,37 @@ export {
 } from './components/toolbar/ToolbarCommand';
 export { ToolbarOverflow, type ToolbarOverflowProps } from './components/toolbar/ToolbarOverflow';
 export type { FormulaBarProps } from './components/toolbar/FormulaBar';
+
+export { defineXlsxPlugin } from './plugins/defineXlsxPlugin';
+export { XlsxPluginToolbar } from './plugins/XlsxPluginToolbar';
+export type {
+  MaybePromise,
+  PluginCleanupReason,
+  PluginGrant,
+  PluginLoadReason,
+  XlsxEditorPluginProps,
+  XlsxPlugin,
+  XlsxPluginCellPosition,
+  XlsxPluginCommand,
+  XlsxPluginCommandClient,
+  XlsxPluginContext,
+  XlsxPluginDefinition,
+  XlsxPluginEditClient,
+  XlsxPluginError,
+  XlsxPluginErrorPhase,
+  XlsxPluginEvent,
+  XlsxPluginFailureCode,
+  XlsxPluginGeometry,
+  XlsxPluginGrant,
+  XlsxPluginLayout,
+  XlsxPluginNavigation,
+  XlsxPluginNavigationFailureCode,
+  XlsxPluginNavigationOptions,
+  XlsxPluginNavigationResult,
+  XlsxPluginPanel,
+  XlsxPluginReadClient,
+  XlsxPluginRect,
+  XlsxPluginRefusal,
+  XlsxPluginSelection,
+  XlsxPluginSnapshot,
+} from './plugins/types';

@@ -1093,18 +1093,30 @@ fn reading_a_bound_block_charges_the_budget() {
         &format!("_xlfn.LET(_xlpm.x,_xlfn.SEQUENCE(60000),{body})"),
         &workbook,
     );
-    assert_eq!(large.len(), 400);
-    assert!(large.iter().any(|value| matches!(
-        value,
-        CellValue::Error {
+    assert_eq!(
+        large,
+        vec![CellValue::Error {
             value: ErrorValue::Num
-        }
-    )));
+        }]
+    );
     let small = values(
         &format!("_xlfn.LET(_xlpm.x,_xlfn.SEQUENCE(4),{body})"),
         &workbook,
     );
     assert!(small.iter().all(|value| *value == n(4.0)));
+}
+
+/// `MAKEARRAY` pays for its cells once, so a block the budget covers is built.
+#[test]
+fn makearray_charges_its_cells_once() {
+    let workbook = fixture();
+    assert_eq!(
+        values(
+            "SUM(_xlfn.MAKEARRAY(600000,1,_xlfn.LAMBDA(_xlpm.r,_xlpm.c,_xlpm.r)))",
+            &workbook
+        ),
+        vec![n(180_000_300_000.0)]
+    );
 }
 
 /// `LINEST` lays its coefficients out right to left with the intercept last,

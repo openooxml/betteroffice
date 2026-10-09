@@ -70,6 +70,8 @@ pub struct RegionSection {
 #[serde(rename_all = "camelCase")]
 pub struct AuthoredRegionSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compatibility_flags: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub footnote_pr: Option<NoteProperties>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endnote_pr: Option<NoteProperties>,
@@ -428,6 +430,8 @@ fn deserialize_page_start<'de, D: serde::Deserializer<'de>>(
 #[serde(rename_all = "camelCase")]
 pub struct RegionLayoutInput {
     #[serde(default)]
+    pub cached_page_totals: bool,
+    #[serde(default)]
     pub measured: Vec<crate::types::MeasuredBlock>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_story: Option<String>,
@@ -455,6 +459,16 @@ impl RegionLayoutInput {
         Option<String>,
     ) {
         self.regions.normalize_authored();
+        if let Some(compatibility) = self
+            .regions
+            .settings
+            .as_ref()
+            .and_then(|settings| settings.compatibility_flags.as_ref())
+            && let Some(env) = self.render_env.as_object_mut()
+        {
+            env.entry("compatibilityFlags")
+                .or_insert_with(|| compatibility.clone());
+        }
         (
             Input {
                 measured: self.measured,
@@ -557,9 +571,36 @@ impl RegionBlock for LayoutBlock {
     }
 }
 
+/// Stamps each page with its section's regions and numbering. A section's page numbers restart at
+/// its `w:pgNumType w:start` and otherwise continue from the previous page, whatever the format;
+/// a page whose number is not its physical one always carries a label.
 pub fn apply_document_regions(layout: &mut Layout, regions: &DocumentRegions) {
+    apply_document_regions_with(layout, regions, |_| {});
+}
+
+/// Stamps page regions and appends indices whose section or numbering changed.
+pub fn apply_document_regions_tracked(
+    layout: &mut Layout,
+    regions: &DocumentRegions,
+    changed: &mut Vec<usize>,
+) {
+    apply_document_regions_with(layout, regions, |index| changed.push(index));
+}
+
+/// Stamps page regions and reports changed section and numbering stamps.
+fn apply_document_regions_with(
+    layout: &mut Layout,
+    regions: &DocumentRegions,
+    mut changed: impl FnMut(usize),
+) {
     let mut page_counts = BTreeMap::<usize, u64>::new();
+    let mut previous_number = 0_u64;
     for (page_index, page) in layout.pages.iter_mut().enumerate() {
+        let section_id = std::mem::take(&mut page.section_id);
+        let section_index_before = page.section_index;
+        let section_page_index_before = page.section_page_index;
+        let section_page_number = page.section_page_number;
+        let page_label = std::mem::take(&mut page.page_label);
         let section_index = page.region_section_index;
         page.section_index = Some(section_index as u64);
         let section = regions
@@ -568,6 +609,9 @@ pub fn apply_document_regions(layout: &mut Layout, regions: &DocumentRegions) {
             .or_else(|| regions.sections.last());
         let section_page_index = page_counts.entry(section_index).or_default();
         page.section_page_index = Some(*section_page_index);
+        page.section_page_number = None;
+        page.page_label = None;
+        page.page_numbering = None;
         *section_page_index += 1;
 
         if let Some(section) = section {
@@ -584,18 +628,28 @@ pub fn apply_document_regions(layout: &mut Layout, regions: &DocumentRegions) {
                 .clone()
                 .or_else(|| regions.watermark.clone());
             page.vertical_align = section.vertical_align.clone();
+            let restart = section
+                .page_numbering
+                .as_ref()
+                .and_then(|numbering| numbering.start)
+                .filter(|_| page.section_page_index == Some(0));
+            let number = restart.unwrap_or(previous_number + 1);
             if let Some(numbering) = &section.page_numbering {
-                let number = numbering.start.unwrap_or(1) + page.section_page_index.unwrap_or(0);
                 page.section_page_number = Some(number);
                 page.page_label = Some(format_number(
                     number as i64,
                     numbering.format.as_deref().unwrap_or("decimal"),
                 ));
                 page.page_numbering = serde_json::to_value(numbering).ok();
+            } else if number != u64::from(page.number) {
+                page.section_page_number = Some(number);
+                page.page_label = Some(number.to_string());
             }
+            previous_number = number;
         } else {
             page.section_id = Some(section_index.to_string());
             page.watermark = regions.watermark.clone();
+            previous_number += 1;
         }
 
         if let Some(areas) = &regions.note_areas {
@@ -607,6 +661,14 @@ pub fn apply_document_regions(layout: &mut Layout, regions: &DocumentRegions) {
             if !selected.is_empty() {
                 page.note_areas = Some(selected);
             }
+        }
+        if section_id.as_deref() != page.section_id.as_deref()
+            || section_index_before != page.section_index
+            || section_page_index_before != page.section_page_index
+            || section_page_number != page.section_page_number
+            || page_label.as_deref() != page.page_label.as_deref()
+        {
+            changed(page_index);
         }
     }
 }
@@ -664,6 +726,25 @@ pub(crate) fn page_field_text(page_label: Option<&str>, page_number: u64) -> Cow
     match page_label {
         Some(label) => Cow::Borrowed(label),
         None => Cow::Owned(page_number.to_string()),
+    }
+}
+
+/// Whether [`format_number`] writes `number` in `format` rather than falling back to decimal.
+pub fn number_format_resolves(number: i64, format: &str) -> bool {
+    match format {
+        "upperRoman" | "lowerRoman" => (1..=3999).contains(&number),
+        "upperLetter" | "lowerLetter" => number > 0,
+        "decimal"
+        | "decimalZero"
+        | "decimalZero3"
+        | "decimalZero4"
+        | "decimalZero5"
+        | "ordinal"
+        | "bullet"
+        | "none"
+        | "decimalEnclosedParen"
+        | "numberInDash" => true,
+        _ => false,
     }
 }
 
@@ -773,6 +854,8 @@ mod tests {
         Page {
             number,
             fragments: Vec::new(),
+            body_margins: None,
+            body_anchor_margins: None,
             margins: PageMargins {
                 top: 96.0,
                 right: 96.0,
@@ -791,6 +874,8 @@ mod tests {
             header_footer_refs: None,
             footnote_ids: None,
             footnote_reserved_height: None,
+            float_bands: Vec::new(),
+            opening_fragment_geometry: None,
             footnote_columns: None,
             columns: None,
             section_id: None,
@@ -820,6 +905,8 @@ mod tests {
             headers: None,
             footers: None,
             page_gap: Some(20.0),
+            partial: false,
+            cached_page_totals: false,
         };
         let regions = DocumentRegions {
             sections: vec![
@@ -859,20 +946,128 @@ mod tests {
         assert_eq!(layout.pages[2].page_label.as_deref(), Some("a"));
         assert_eq!(layout.pages[2].footer_distance, Some(18.0));
         assert_eq!(layout.pages[3].section_page_index, Some(0));
-        assert_eq!(layout.pages[3].section_page_number, None);
-        assert_eq!(layout.pages[3].page_label, None);
+        assert_eq!(layout.pages[3].section_page_number, Some(2));
         assert_eq!(
             page_field_text(
                 layout.pages[3].page_label.as_deref(),
                 layout.pages[3].number as u64
             )
             .as_ref(),
-            "4"
+            "2"
         );
     }
 
     #[test]
-    fn restart_and_roman_labels_match_pg_num_type() {
+    fn pages_without_a_restart_continue_the_previous_number() {
+        let mut layout = Layout {
+            page_size: Size {
+                w: 816.0,
+                h: 1056.0,
+            },
+            pages: vec![page(1, 0), page(2, 1), page(3, 1)],
+            columns: None,
+            headers: None,
+            footers: None,
+            page_gap: None,
+            partial: false,
+            cached_page_totals: false,
+        };
+        let regions = DocumentRegions {
+            sections: vec![RegionSection::default(), RegionSection::default()],
+            ..DocumentRegions::default()
+        };
+        apply_document_regions(&mut layout, &regions);
+        for page in &layout.pages {
+            assert_eq!(page.section_page_number, None);
+            assert_eq!(page.page_label, None);
+        }
+    }
+
+    #[test]
+    fn restamping_a_page_back_on_its_physical_number_drops_its_label() {
+        let mut layout = Layout {
+            page_size: Size {
+                w: 816.0,
+                h: 1056.0,
+            },
+            pages: vec![page(1, 0), page(2, 1)],
+            columns: None,
+            headers: None,
+            footers: None,
+            page_gap: None,
+            partial: false,
+            cached_page_totals: false,
+        };
+        let restarted = DocumentRegions {
+            sections: vec![
+                RegionSection::default(),
+                RegionSection {
+                    page_numbering: Some(PageNumbering {
+                        start: Some(5),
+                        format: None,
+                    }),
+                    ..RegionSection::default()
+                },
+            ],
+            ..DocumentRegions::default()
+        };
+        apply_document_regions(&mut layout, &restarted);
+        assert_eq!(layout.pages[1].page_label.as_deref(), Some("5"));
+        let plain = DocumentRegions {
+            sections: vec![RegionSection::default(), RegionSection::default()],
+            ..DocumentRegions::default()
+        };
+        apply_document_regions(&mut layout, &plain);
+        let mut fresh = layout.clone();
+        fresh.pages = vec![page(1, 0), page(2, 1)];
+        apply_document_regions(&mut fresh, &plain);
+        assert_eq!(
+            serde_json::to_value(&layout).unwrap(),
+            serde_json::to_value(&fresh).unwrap()
+        );
+    }
+
+    /// Tracking appends only pages whose five display stamps changed.
+    #[test]
+    fn tracked_regions_report_only_changed_stamps() {
+        let mut layout = Layout {
+            page_size: Size {
+                w: 816.0,
+                h: 1056.0,
+            },
+            pages: (1..=6).map(|number| page(number, 0)).collect(),
+            columns: None,
+            headers: None,
+            footers: None,
+            page_gap: None,
+            partial: false,
+            cached_page_totals: false,
+        };
+        let regions = DocumentRegions {
+            sections: vec![RegionSection::default()],
+            ..DocumentRegions::default()
+        };
+        apply_document_regions(&mut layout, &regions);
+        let expected = layout.clone();
+        layout.pages[0].section_id = Some("other".to_owned());
+        layout.pages[1].section_index = None;
+        layout.pages[2].section_page_index = None;
+        layout.pages[3].section_page_number = Some(50);
+        layout.pages[4].page_label = Some("i".to_owned());
+        layout.pages[5].header_distance = Some(18.0);
+        let mut changed = vec![usize::MAX];
+        apply_document_regions_tracked(&mut layout, &regions, &mut changed);
+        assert_eq!(changed, [usize::MAX, 0, 1, 2, 3, 4]);
+        assert_eq!(
+            serde_json::to_value(&layout).unwrap(),
+            serde_json::to_value(&expected).unwrap(),
+        );
+        apply_document_regions_tracked(&mut layout, &regions, &mut changed);
+        assert_eq!(changed, [usize::MAX, 0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn restart_and_continued_roman_labels_match_pg_num_type() {
         let mut layout = Layout {
             page_size: Size {
                 w: 816.0,
@@ -883,6 +1078,8 @@ mod tests {
             headers: None,
             footers: None,
             page_gap: Some(20.0),
+            partial: false,
+            cached_page_totals: false,
         };
         let regions = DocumentRegions {
             sections: vec![
@@ -911,9 +1108,9 @@ mod tests {
         assert_eq!(layout.pages[0].section_page_number, Some(5));
         assert_eq!(layout.pages[0].page_label.as_deref(), Some("5"));
         assert_eq!(layout.pages[1].page_label.as_deref(), Some("6"));
-        assert_eq!(layout.pages[2].section_page_number, Some(1));
-        assert_eq!(layout.pages[2].page_label.as_deref(), Some("i"));
-        assert_eq!(layout.pages[3].page_label.as_deref(), Some("ii"));
+        assert_eq!(layout.pages[2].section_page_number, Some(7));
+        assert_eq!(layout.pages[2].page_label.as_deref(), Some("vii"));
+        assert_eq!(layout.pages[3].page_label.as_deref(), Some("viii"));
     }
 
     #[test]
@@ -1173,7 +1370,8 @@ mod tests {
         )
         .unwrap();
         let full = crate::place::layout_document_checkpointed(&mut input).unwrap();
-        assert_eq!(incremental.rebuilt_page_start, 1);
+        // the changed paragraph opens page 1, so placement resumes a page earlier
+        assert_eq!(incremental.rebuilt_page_start, 0);
         assert_eq!(
             serde_json::to_value(&incremental.layout).unwrap(),
             serde_json::to_value(&full.layout).unwrap()

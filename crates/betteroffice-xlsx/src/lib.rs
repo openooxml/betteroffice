@@ -3,16 +3,40 @@
 mod authority;
 mod error;
 mod sheet_json;
+#[cfg_attr(not(test), allow(dead_code))]
+mod snapshot;
+mod structured;
 mod types;
 mod workbook;
 
 pub use error::Error;
+pub use snapshot::{
+    HydratedWorkbook, SnapshotBudget, SnapshotError, SnapshotProgress, SnapshotResult,
+    WorkbookSnapshotBuilder, WorkbookSnapshotEncoder,
+};
+pub use structured::{
+    DEFAULT_EXPORT_MAX_BYTES, DEFAULT_EXPORT_MAX_CELLS, DEFAULT_MARKDOWN_MAX_CELLS,
+    DEFAULT_MARKDOWN_MAX_COLUMNS, DEFAULT_MARKDOWN_MAX_ROWS, MAX_EXPORT_BYTES, MAX_EXPORT_CELLS,
+    MAX_MARKDOWN_CELLS, MAX_MARKDOWN_ROWS, MIN_MARKDOWN_BYTES, XlsxAnchor, XlsxAnchorScope,
+    XlsxCalculationFreshness, XlsxCalculationPolicy, XlsxCalculationState, XlsxCellMerge,
+    XlsxDateSystem, XlsxExport, XlsxExportCell, XlsxExportDefinedName, XlsxExportDiagnostic,
+    XlsxExportDiagnosticCode, XlsxExportFailure, XlsxExportFailureCode, XlsxExportHyperlink,
+    XlsxExportIncluded, XlsxExportMerge, XlsxExportObject, XlsxExportOptions, XlsxExportRefusal,
+    XlsxExportResult, XlsxExportScope, XlsxExportSeverity, XlsxExportSheet, XlsxExportTable,
+    XlsxExportValue, XlsxFormulaResult, XlsxMarkdownAnchor, XlsxMarkdownContent,
+    XlsxMarkdownOptions, XlsxObjectKind, XlsxSchemaVersion, XlsxSheetIdentity, XlsxSheetKind,
+    XlsxSheetVisibility, XlsxSourcePart, XlsxStructuredContent, export_result_json,
+    export_xlsx_markdown, export_xlsx_markdown_json, export_xlsx_structured,
+    export_xlsx_structured_json, render_xlsx_markdown, render_xlsx_markdown_json,
+};
 pub use types::{
     CalculationOptions, CalculationResult, CellAddress, CellEdit, CellInput, EditProfile,
     EditStage, HistoryState, MutationResult, NumberFormatKind, ProposalAcceptance,
     ProposalEditInput, ProposalRequest, RenderOptions, RenderedPng, SelectionFormatting, SheetInfo,
     TextSearchMatch, UpdateEvent, UpdateOrigin,
 };
+#[doc(hidden)]
+pub use workbook::PeerHydration;
 pub use workbook::batch::{
     CalculationRequest, CellGuard, DocumentVersion, EditApplication, EditCalculation, EditFailure,
     EditFailureCode, EditHistory, EditOperation, EditOutcome, EditPreview, EditReceipt,

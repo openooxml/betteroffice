@@ -3,6 +3,7 @@ import type { CSSProperties, ReactNode } from 'react';
 import { useXlsxCommand } from '../commands/hooks';
 import { XlsxCommandContext } from '../commands/XlsxCommandProvider';
 import { useTranslation } from '../i18n';
+import { XlsxPluginToolbar } from '../plugins/XlsxPluginToolbar';
 import { EditorToolbarContext, ToolbarModeContext } from './EditorToolbarContext';
 import { createLegacyToolbarStore } from './toolbar/legacyToolbarStore';
 import { ToolbarCommand } from './toolbar/ToolbarCommand';
@@ -230,6 +231,7 @@ function DefaultToolbarItems() {
         <ToolbarCommand id="verticalAlignment" />
         <ToolbarCommand id="textWrapping" />
       </ToolbarGroup>
+      <XlsxPluginToolbar />
     </>
   );
 }

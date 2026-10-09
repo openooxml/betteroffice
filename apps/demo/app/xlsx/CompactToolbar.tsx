@@ -6,6 +6,7 @@ import {
   ToolbarCommandButton,
   ToolbarCommandSelect,
   ToolbarGroup,
+  XlsxPluginToolbar,
 } from "@betteroffice/xlsx-react";
 
 export function CompactToolbar({ onShare }: { onShare(): void }) {
@@ -17,6 +18,7 @@ export function CompactToolbar({ onShare }: { onShare(): void }) {
           <ToolbarCommandButton id="bold" />
         </ToolbarGroup>
         <ToolbarCommandButton id="undo" />
+        <XlsxPluginToolbar />
         <ToolbarButton title="Copy link" onClick={onShare}>
           Copy link
         </ToolbarButton>

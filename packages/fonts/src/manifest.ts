@@ -417,6 +417,39 @@ export function resolveMetricCompatFace(
   );
 }
 
+const bundledFamilyByName = new Map(
+  BUNDLED_FONTS.map((face) => [face.family.toLowerCase(), face.family]),
+);
+
+/** Serif Noto families this package does not vendor; the same region's sans face covers them. */
+const UNVENDORED_NOTO_SERIF: Record<string, string> = {
+  'noto serif tc': 'Noto Sans TC',
+  'noto serif jp': 'Noto Sans JP',
+  'noto serif kr': 'Noto Sans KR',
+};
+
+/**
+ * Resolve a family by its bundled name (`"Gelasio"`, `"Noto Sans SC"`) or as a
+ * Word family, returning only a face whose weight and style match, so a
+ * browser can synthesize the styles a family does not ship.
+ */
+export function resolveBundledFamilyFace(
+  family: string,
+  bold: boolean,
+  italic: boolean,
+): BundledFontFace | undefined {
+  const key = family.trim().toLowerCase();
+  const bundled =
+    bundledFamilyByName.get(key) ??
+    UNVENDORED_NOTO_SERIF[key] ??
+    resolveMetricCompatFamily(family);
+  const weight = bold ? 700 : 400;
+  const style = italic ? 'italic' : 'normal';
+  return BUNDLED_FONTS.find(
+    (f) => f.family === bundled && f.weight === weight && f.style === style,
+  );
+}
+
 /**
  * Pick the bundled face that provides glyph coverage for a script bucket.
  * Preference order: exact (weight, style) -> same weight upright -> the
@@ -558,20 +591,26 @@ function heavyVariantOf(family: string, italic: boolean): BundledFontFace | unde
   return resolveMetricCompatFace(words.slice(0, -1).join(' '), true, italic);
 }
 
+/** The Office application whose font substitution a last-resort pick follows. */
+export type LastResortOffice = 'powerpoint' | 'word';
+
 /**
  * Choose a related family, then a serif or sans fallback.
  *
- * The sans fallback is Calibri because that is what Office substitutes for a
- * family it cannot find: a deck asking for Google Sans, Inter or Questrial is
- * drawn in Calibri, which is ~7% narrower than Arial, so falling back to Arial
- * rewraps every line the document wrote against those metrics. A heavy weight
- * in the name is read only for a family we bundle: Office substitutes
- * `Archivo Black` with a regular face, and matching that keeps the line breaks.
+ * The sans fallback follows the application that drew the file. PowerPoint
+ * substitutes Calibri for a family it cannot find: a deck asking for Google
+ * Sans, Inter or Questrial is drawn in Calibri, which is ~7% narrower than
+ * Arial, so falling back to Arial rewraps every line the deck wrote against
+ * those metrics. Word substitutes Arial, and a document paginated against
+ * Arial loses pages when drawn in Calibri. A heavy weight in the name is read
+ * only for a family we bundle: Office substitutes `Archivo Black` with a
+ * regular face, and matching that keeps the line breaks.
  */
 export function resolveLastResortFace(
   family: string,
   bold: boolean,
   italic: boolean,
+  office: LastResortOffice = 'powerpoint',
 ): BundledFontFace {
   const light = lightVariantOf(family, italic);
   if (light) return light;
@@ -585,6 +624,7 @@ export function resolveLastResortFace(
     const face = resolveMetricCompatFace(matched, bold, italic);
     if (face) return face;
   }
-  const base = looksSerif(family) ? 'Times New Roman' : 'Calibri';
+  const sans = office === 'word' ? 'Arial' : 'Calibri';
+  const base = looksSerif(family) ? 'Times New Roman' : sans;
   return resolveMetricCompatFace(base, bold, italic)!;
 }
