@@ -146,6 +146,10 @@ pub enum EditOperation {
         target: RangeTarget,
         inputs: Vec<Vec<String>>,
     },
+    SetCellValues {
+        target: RangeTarget,
+        values: Vec<Vec<CellValue>>,
+    },
     /// Formula source without the leading `=`, stored as a formula whatever the cell's format.
     SetFormulas {
         target: RangeTarget,
@@ -167,6 +171,7 @@ impl EditOperation {
     pub fn target(&self) -> &RangeTarget {
         match self {
             Self::SetCellInputs { target, .. }
+            | Self::SetCellValues { target, .. }
             | Self::SetFormulas { target, .. }
             | Self::SetNumberFormat { target, .. }
             | Self::PatchStyle { target, .. } => target,
@@ -420,7 +425,9 @@ struct Claims {
 impl Claims {
     fn of(operation: &EditOperation) -> Self {
         match operation {
-            EditOperation::SetCellInputs { .. } | EditOperation::SetFormulas { .. } => Self {
+            EditOperation::SetCellInputs { .. }
+            | EditOperation::SetCellValues { .. }
+            | EditOperation::SetFormulas { .. } => Self {
                 content: true,
                 number_format: false,
                 style: Vec::new(),
@@ -642,6 +649,26 @@ impl Workbook {
                     .map(|value| utf16_units(value))
                     .sum::<u64>();
             }
+            EditOperation::SetCellValues { values, .. } => {
+                if !matrix_fits(values, resolved) {
+                    return Err(at(
+                        EditFailureCode::InvalidStep,
+                        format!(
+                            "the values must be {} rows of {} cells",
+                            resolved.rows(),
+                            resolved.cols()
+                        ),
+                    ));
+                }
+                text += values
+                    .iter()
+                    .flatten()
+                    .map(|value| match value {
+                        CellValue::Text { value } => utf16_units(value),
+                        _ => 0,
+                    })
+                    .sum::<u64>();
+            }
             EditOperation::SetNumberFormat {
                 format: NumberFormatMutation::Custom { pattern },
                 ..
@@ -730,6 +757,27 @@ impl Workbook {
                         &current_cell_state(&self.model, resolved.sheet, cell),
                         &state,
                     ) {
+                        states.push((cell, state));
+                    }
+                }
+                Effect::Content(states)
+            }
+            EditOperation::SetCellValues { values, .. } => {
+                let mut states = Vec::new();
+                for (cell, value) in resolved.iter().zip(values.iter().flatten()) {
+                    let current = current_cell_state(&self.model, resolved.sheet, cell);
+                    let state = CellState {
+                        value: value.clone(),
+                        formula: None,
+                        style: current.style,
+                    };
+                    validate_cell_state(&state).map_err(|error| {
+                        at(
+                            EditFailureCode::InvalidStep,
+                            format!("the value for {}: {error}", cell.to_a1()),
+                        )
+                    })?;
+                    if !cell_states_semantically_equal(&current, &state) {
                         states.push((cell, state));
                     }
                 }

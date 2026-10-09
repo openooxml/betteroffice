@@ -182,6 +182,9 @@ function editRequest(value: unknown): boolean {
     })) return false;
     switch (step.op) {
       case 'setCellInputs': return matrix(step.inputs);
+      case 'setCellValues': return Array.isArray(step.values) && Array.from(step.values).every(
+        row => Array.isArray(row) && Array.from(row).every(cell => record(cell) && guard({ value: cell }))
+      );
       case 'setFormulas': return matrix(step.formulas);
       case 'setNumberFormat': return numberFormat(step.format);
       case 'patchStyle': return style(step.patch);

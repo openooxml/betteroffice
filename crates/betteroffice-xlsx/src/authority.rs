@@ -1872,6 +1872,10 @@ impl WorkbookAuthority {
                     let key = self.allocate_sheet_key();
                     keys.insert(*index, key);
                 }
+                Op::MoveSheet { from, to } => {
+                    let key = keys.remove(*from);
+                    keys.insert(*to, key);
+                }
                 Op::RemoveSheet { index } => {
                     if *index >= keys.len() {
                         return Err(format!("sheet removal index {index} is out of range"));
@@ -1946,6 +1950,7 @@ pub(crate) fn is_structural_op(op: &Op) -> bool {
             | Op::UnmergeCells { .. }
             | Op::AddSheet { .. }
             | Op::RemoveSheet { .. }
+            | Op::MoveSheet { .. }
             | Op::RenameSheet { .. }
             | Op::RestoreSheet { .. }
             | Op::SetCharts { .. }
@@ -2748,6 +2753,7 @@ fn requires_full_semantic_sync(op: &Op) -> bool {
             | Op::SetCharts { .. }
             | Op::SetChartAnchor { .. }
             | Op::RemoveSheet { .. }
+            | Op::MoveSheet { .. }
             | Op::RenameSheet { .. }
             | Op::RestoreSheet { .. }
     )
@@ -2786,6 +2792,11 @@ fn targeted_sheet_keys(
                     return Err(format!("sheet removal index {index} is out of range"));
                 }
                 tokens.remove(*index);
+                targets.push(None);
+            }
+            Op::MoveSheet { from, to } => {
+                let token = tokens.remove(*from);
+                tokens.insert(*to, token);
                 targets.push(None);
             }
             Op::SetDefinedNames { .. } => targets.push(None),
@@ -2848,7 +2859,10 @@ fn op_sheet(op: &Op) -> Option<SheetId> {
         | Op::ApplyRangeFormat { sheet, .. }
         | Op::RenameSheet { sheet, .. }
         | Op::RestoreSheet { sheet, .. } => Some(*sheet),
-        Op::AddSheet { .. } | Op::RemoveSheet { .. } | Op::SetDefinedNames { .. } => None,
+        Op::AddSheet { .. }
+        | Op::RemoveSheet { .. }
+        | Op::MoveSheet { .. }
+        | Op::SetDefinedNames { .. } => None,
     }
 }
 

@@ -98,6 +98,11 @@ export type XlsxEditOperation =
       inputs: string[][];
     }
   | {
+      op: 'setCellValues';
+      target: XlsxRangeTarget;
+      values: XlsxCellValue[][];
+    }
+  | {
       /** Formula source without the leading `=`, stored as a formula whatever the format. */
       op: 'setFormulas';
       target: XlsxRangeTarget;

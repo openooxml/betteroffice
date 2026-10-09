@@ -463,6 +463,8 @@ fn edit_cell_lockstep_matches_full_materialization() {
             name: "Added".into(),
         },
         Op::RemoveSheet { index: 1 },
+        Op::MoveSheet { from: 0, to: 2 },
+        Op::MoveSheet { from: 2, to: 0 },
     ] {
         pair.step(true, |workbook| {
             workbook.apply_ops(vec![op.clone()], options())
@@ -653,4 +655,50 @@ fn preserved_state_snapshots_copy_on_write() {
     original.forget_shared_strings();
     assert!(original.shared_string_cells.iter().all(BTreeMap::is_empty));
     assert_eq!(*snapshot.shared_string_cells, expected);
+}
+
+#[test]
+fn move_sheet_preserves_package_identity_and_undo() {
+    let mut workbook = Workbook::open(&workbook_bytes()).unwrap();
+    let names = workbook.sheet_names();
+    let model = workbook.model.clone();
+    let origins = workbook.preserved.origins.clone();
+    let version = workbook.version();
+    assert!(
+        workbook
+            .apply_ops(vec![Op::MoveSheet { from: 0, to: 2 }], options())
+            .unwrap()
+            .applied
+    );
+    assert_eq!(
+        workbook.sheet_names(),
+        vec![names[1].clone(), names[2].clone(), names[0].clone()]
+    );
+    assert_eq!(
+        workbook.preserved.origins,
+        vec![origins[1], origins[2], origins[0]]
+    );
+    assert_eq!(workbook.model.sheets[2], model.sheets[0]);
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    assert_eq!(reopened.sheet_names(), workbook.sheet_names());
+    assert_eq!(reopened.model.sheets[2], model.sheets[0]);
+    assert_ne!(workbook.version(), version);
+    workbook.undo(options()).unwrap();
+    assert_eq!(workbook.model.sheets, model.sheets);
+    assert_eq!(workbook.preserved.origins, origins);
+    workbook.redo(options()).unwrap();
+    assert_eq!(workbook.model.sheets[2], model.sheets[0]);
+    let before = workbook.model.clone();
+    assert!(
+        workbook
+            .apply_ops(
+                vec![
+                    Op::MoveSheet { from: 2, to: 0 },
+                    Op::MoveSheet { from: 7, to: 0 }
+                ],
+                options()
+            )
+            .is_err()
+    );
+    assert_eq!(workbook.model, before);
 }
