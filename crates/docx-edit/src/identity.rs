@@ -25,12 +25,13 @@ use std::sync::{Arc, Mutex, OnceLock};
 use docx_parse::paragraph_identity::{
     ParagraphOccurrence, allocate_paragraph_id_where, format_paragraph_id, parse_paragraph_id,
 };
+use ooxml_opc::PackageBytes;
 use yrs::branch::Branch;
 use yrs::types::text::YChange;
 use yrs::types::{Delta, EntryChange, Event};
 use yrs::{
     Any, BranchID, DeepObservable, Doc, Map, MapRef, Observable, Out, ReadTxn, Subscription, Text,
-    TextRef, Transact, TransactionMut,
+    TextRef, Transact, Transaction, TransactionMut,
 };
 
 use crate::{
@@ -60,13 +61,13 @@ fn fresh_generation() -> String {
 }
 
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
-fn entropy() -> [u64; 2] {
+pub(crate) fn entropy() -> [u64; 2] {
     let draw = || (js_sys::Math::random() * 9_007_199_254_740_992.0) as u64;
     [draw() ^ ((js_sys::Date::now() as u64) << 11), draw()]
 }
 
 #[cfg(not(all(feature = "wasm", target_arch = "wasm32")))]
-fn entropy() -> [u64; 2] {
+pub(crate) fn entropy() -> [u64; 2] {
     use std::hash::{BuildHasher, Hasher};
     static OPENINGS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let opening = OPENINGS.fetch_add(1, Ordering::Relaxed);
@@ -83,7 +84,8 @@ fn entropy() -> [u64; 2] {
 }
 
 /// Kind of Word story a source part holds.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum SourceStoryKind {
     Body,
     Header,
@@ -94,12 +96,14 @@ pub enum SourceStoryKind {
 }
 
 /// A Word story qualified by the package part it is read from.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SourceStory {
     /// The OPC part name, such as `/word/document.xml`.
     pub part_uri: String,
     pub kind: SourceStoryKind,
     /// The note or comment ID, for the stories that share a part.
+    #[serde(deserialize_with = "crate::peer_bootstrap::required_option")]
     pub item_id: Option<String>,
 }
 
@@ -271,12 +275,28 @@ pub enum ParagraphIdRefusal {
 /// Paragraph IDs a save applies: IDs for source paragraphs outside the
 /// stories, by part and occurrence, and the story parts unchanged since
 /// seeding, which it writes as their source bytes with IDs patched in.
+/// Story parts that still hold the paragraphs they were seeded with, in
+/// order, are spliced: written as their source bytes with only the
+/// paragraphs that changed re-serialized.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ParagraphSavePlan {
     /// `(part path, ordinal, ID)`.
     pub assignments: Vec<(String, u32, String)>,
     /// `(part path, [(ordinal, ID)])`.
     pub patched_parts: Vec<(String, Vec<(u32, String)>)>,
+    pub spliced_parts: Vec<SplicedPart>,
+}
+
+/// A story part whose stories hold the paragraphs seeded from it, in order.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SplicedPart {
+    pub part: String,
+    /// Lowercase hex SHA-256 of the source part.
+    pub sha256: String,
+    /// `(ordinal, session key)` of every paragraph seeded from the part.
+    pub paragraphs: Vec<(u32, String)>,
+    /// The ordinals of those whose segments changed since seeding.
+    pub changed: Vec<u32>,
 }
 
 /// One paragraph as the seeder lowers it, in document order.
@@ -299,12 +319,20 @@ pub(crate) struct SourcePartInput {
     pub(crate) roots: Vec<(String, Option<String>)>,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SourcePart {
     uri: String,
+    /// Lowercase hex SHA-256 of the part's XML.
+    sha256: String,
+    /// Whether the parser reads the part's XML exactly as written, so its bytes can be kept.
+    as_written: bool,
     kind: SourceStoryKind,
+    #[serde(with = "crate::peer_bootstrap::occurrences")]
     occurrences: Vec<ParagraphOccurrence>,
     /// Occurrence ordinal to the session keys seeded from it: one per root
     /// story sharing the part, each a view of the same paragraph, first seeded first.
+    #[serde(with = "crate::peer_bootstrap::sorted_map")]
     backed: HashMap<u32, Vec<String>>,
     roots: Vec<String>,
 }
@@ -331,31 +359,115 @@ impl SourcePart {
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Seeded {
     root: String,
+    #[serde(deserialize_with = "crate::peer_bootstrap::required_option")]
     part: Option<usize>,
+    #[serde(deserialize_with = "crate::peer_bootstrap::required_option")]
     ordinal: Option<u32>,
+    #[serde(deserialize_with = "crate::peer_bootstrap::required_option")]
     source_para_id: Option<String>,
 }
 
 /// Identity index of the retained source package, reconstructible from its bytes.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SourceIndex {
     package_sha256: String,
-    bytes: Arc<[u8]>,
+    #[serde(skip, default = "empty_package_bytes")]
+    bytes: PackageBytes,
     occupied: BTreeSet<u32>,
     /// Story parts in package order.
     parts: Vec<SourcePart>,
+    #[serde(with = "crate::peer_bootstrap::sorted_map")]
     roots: HashMap<String, SourceStory>,
+    #[serde(with = "crate::peer_bootstrap::sorted_map")]
     seeded: HashMap<String, Seeded>,
     /// IDs the comment companion parts reference.
     comment_references: BTreeSet<u32>,
+    #[serde(skip)]
     seed_states: OnceLock<HashMap<String, StoryState>>,
 }
 
+fn empty_package_bytes() -> PackageBytes {
+    Vec::new().into()
+}
+
 impl SourceIndex {
+    pub(crate) fn attach_peer_source(&mut self, bytes: PackageBytes) -> Result<(), String> {
+        for (part_index, part) in self.parts.iter().enumerate() {
+            if !part.uri.starts_with('/') || part.uri.len() == 1 {
+                return Err("invalid source part URI".to_owned());
+            }
+            for (ordinal, occurrence) in part.occurrences.iter().enumerate() {
+                if occurrence.ordinal as usize != ordinal
+                    || occurrence.tag.start >= occurrence.tag.end
+                {
+                    return Err("invalid source paragraph occurrence".to_owned());
+                }
+            }
+            for (ordinal, views) in &part.backed {
+                if *ordinal as usize >= part.occurrences.len() || views.is_empty() {
+                    return Err("invalid source paragraph views".to_owned());
+                }
+                let mut roots = HashSet::new();
+                for key in views {
+                    let seed = self
+                        .seeded
+                        .get(key)
+                        .ok_or("invalid source paragraph view")?;
+                    if seed.part != Some(part_index)
+                        || seed.ordinal != Some(*ordinal)
+                        || !roots.insert(&seed.root)
+                    {
+                        return Err("inconsistent source paragraph view".to_owned());
+                    }
+                }
+            }
+        }
+        for (key, seed) in &self.seeded {
+            if let Some(part) = seed.part {
+                let part = self.parts.get(part).ok_or("invalid seeded part")?;
+                if seed
+                    .ordinal
+                    .is_some_and(|ordinal| ordinal as usize >= part.occurrences.len())
+                {
+                    return Err("invalid seeded paragraph ordinal".to_owned());
+                }
+                if let Some(ordinal) = seed.ordinal
+                    && !part
+                        .backed
+                        .get(&ordinal)
+                        .is_some_and(|views| views.contains(key))
+                {
+                    return Err("seeded paragraph missing its source view".to_owned());
+                }
+            } else if seed.ordinal.is_some() {
+                return Err("seeded paragraph ordinal without a part".to_owned());
+            }
+        }
+        self.bytes = bytes;
+        Ok(())
+    }
+
+    pub(crate) fn package_digest(&self) -> &str {
+        &self.package_sha256
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_states_initialized(&self) -> bool {
+        self.seed_states.get().is_some()
+    }
+
+    pub(crate) fn bytes(&self) -> PackageBytes {
+        self.bytes.clone()
+    }
+
     pub(crate) fn new(
         package_sha256: String,
-        bytes: Arc<[u8]>,
+        bytes: PackageBytes,
         occupied: BTreeSet<u32>,
         inputs: Vec<SourcePartInput>,
         comment_references: BTreeSet<u32>,
@@ -367,6 +479,11 @@ impl SourceIndex {
         for input in inputs {
             let part = SourcePart {
                 uri: format!("/{}", input.path),
+                sha256: {
+                    use sha2::{Digest, Sha256};
+                    format!("{:x}", Sha256::digest(input.xml.as_bytes()))
+                },
+                as_written: docx_parse::xml::reads_as_written(input.xml.as_bytes()),
                 kind: input.kind,
                 occurrences: docx_parse::paragraph_identity::paragraph_occurrences(&input.xml)
                     .unwrap_or_default(),
@@ -498,9 +615,10 @@ impl SourceIndex {
     }
 }
 
-/// The retained source package: its bytes until an identity read needs the index.
+/// The retained source package: its bytes, and their digest when known,
+/// until an identity read needs the index.
 pub(crate) enum SourcePackage {
-    Pending(Arc<[u8]>),
+    Pending(PackageBytes, Option<String>),
     Ready(Arc<SourceIndex>),
 }
 
@@ -510,15 +628,30 @@ struct StoryState {
     root: String,
     /// Digest of every segment the projection reads: see [`story_fingerprint`].
     fingerprint: [u8; 32],
+    /// The story's paragraphs, each with the segments up to and including its pilcrow.
+    units: Vec<UnitState>,
     /// Where each comment anchored in the story starts and ends, carets and
     /// ranges over embeds included: the projection's comment markers.
     comments: BTreeMap<String, Vec<(u32, u32)>>,
 }
 
+/// One paragraph's segments in a story, or the segments after its last pilcrow.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct UnitState {
+    /// The session key of the pilcrow closing the unit.
+    key: Option<String>,
+    /// Digest of all the unit's segments.
+    digest: [u8; 32],
+    /// Digest of its table and block content control embeds, which open their own blocks.
+    blocks: [u8; 32],
+    /// Whether the unit holds anything besides those embeds and its pilcrow.
+    inline: bool,
+}
+
 fn story_states(doc: &EditingDoc) -> HashMap<String, StoryState> {
     let (scan, mut comments) = {
         let txn = doc.yrs_doc().transact();
-        let scan = Scan::new(&txn);
+        let scan = doc.committed_scan(&txn);
         let comments: HashMap<String, BTreeMap<String, Vec<(u32, u32)>>> = scan
             .stories
             .iter()
@@ -532,26 +665,30 @@ fn story_states(doc: &EditingDoc) -> HashMap<String, StoryState> {
     scan.stories
         .iter()
         .filter_map(|story| {
+            let comments = comments.remove(story).unwrap_or_default();
+            let (fingerprint, units) = story_fingerprint(doc, story, &comments)?;
             Some((
                 story.clone(),
                 StoryState {
                     root: scan.root(story).to_owned(),
-                    fingerprint: story_fingerprint(doc, story)?,
-                    comments: comments.remove(story).unwrap_or_default(),
+                    fingerprint,
+                    units,
+                    comments,
                 },
             ))
         })
         .collect()
 }
 
-/// SHA-256 over every segment of a story exactly as
-/// [`EditingDoc::story_segments`] hands it to the save projection: each
-/// text, paragraph mark and embed with its full payload and its full
-/// attribute map (tracked insertions and deletions, formatting), map keys
-/// sorted and nulls kept. The one exclusion is the paragraph identity the
-/// save plan patches in place: the segments already leave out the session
-/// key, Word paragraph ID, source ID and editor-only marker.
-fn story_fingerprint(doc: &EditingDoc, story: &str) -> Option<[u8; 32]> {
+/// Each paragraph's [`UnitState`], hashing its save segments with media tokens expanded, map
+/// keys sorted and nulls kept, and the starts and ends of the `comments` anchored in it relative
+/// to its first segment; and the SHA-256 of those digests in order.
+/// [`EditingDoc::story_segments`] already excludes paragraph identities.
+fn story_fingerprint(
+    doc: &EditingDoc,
+    story: &str,
+    comments: &BTreeMap<String, Vec<(u32, u32)>>,
+) -> Option<([u8; 32], Vec<UnitState>)> {
     use sha2::{Digest, Sha256};
     fn ordered(value: &Any) -> serde_json::Value {
         match value {
@@ -570,8 +707,27 @@ fn story_fingerprint(doc: &EditingDoc, story: &str) -> Option<[u8; 32]> {
                 .collect(),
         )
     }
-    let mut hasher = Sha256::new();
-    for segment in doc.story_segments(story).ok()? {
+    let mut segments = doc.story_segments(story).ok()?;
+    if let Some(media) = doc.media_table() {
+        crate::media::write_segment_data_urls(&mut segments, &media).ok()?;
+    }
+    let mut boundaries: Vec<(u32, &str, bool)> = comments
+        .iter()
+        .flat_map(|(key, anchors)| {
+            anchors.iter().flat_map(move |(start, end)| {
+                [(*start, key.as_str(), false), (*end, key.as_str(), true)]
+            })
+        })
+        .collect();
+    boundaries.sort_unstable();
+    let mut boundaries = boundaries.into_iter().peekable();
+    let mut units = Vec::new();
+    let mut unit = Sha256::new();
+    let mut blocks = Sha256::new();
+    let mut inline = false;
+    let mut start = 0u32;
+    let mut position = 0u32;
+    for segment in segments {
         let content = match &segment.content {
             crate::SegmentContent::Text(text) => serde_json::json!({ "text": text }),
             crate::SegmentContent::Pilcrow(properties) => {
@@ -582,10 +738,53 @@ fn story_fingerprint(doc: &EditingDoc, story: &str) -> Option<[u8; 32]> {
             }
         };
         let entry = serde_json::json!([content, ordered_map(segment.attributes.iter())]);
-        hasher.update(serde_json::to_vec(&entry).ok()?);
-        hasher.update(b"\n");
+        let bytes = serde_json::to_vec(&entry).ok()?;
+        unit.update(&bytes);
+        unit.update(b"\n");
+        position += match &segment.content {
+            crate::SegmentContent::Text(text) => u32::try_from(text.encode_utf16().count()).ok()?,
+            _ => 1,
+        };
+        match &segment.content {
+            crate::SegmentContent::Pilcrow(properties) => {
+                while let Some((at, key, end)) = boundaries.next_if(|(at, ..)| *at < position) {
+                    unit.update(serde_json::to_vec(&(at - start, key, end)).ok()?);
+                }
+                start = position;
+                units.push(UnitState {
+                    key: Some(properties.para_id.clone()),
+                    digest: std::mem::take(&mut unit).finalize().into(),
+                    blocks: std::mem::take(&mut blocks).finalize().into(),
+                    inline: std::mem::take(&mut inline),
+                });
+            }
+            crate::SegmentContent::OtherEmbed { kind, .. }
+                if matches!(kind.as_str(), "table" | "blockSdt") =>
+            {
+                blocks.update(&bytes);
+                blocks.update(b"\n");
+            }
+            _ => inline = true,
+        }
     }
-    Some(hasher.finalize().into())
+    for (at, key, end) in boundaries {
+        unit.update(serde_json::to_vec(&(at.saturating_sub(start), key, end)).ok()?);
+    }
+    let trailing = unit.finalize().into();
+    let empty: [u8; 32] = Sha256::new().finalize().into();
+    if trailing != empty {
+        units.push(UnitState {
+            key: None,
+            digest: trailing,
+            blocks: blocks.finalize().into(),
+            inline,
+        });
+    }
+    let mut hasher = Sha256::new();
+    for unit in &units {
+        hasher.update(unit.digest);
+    }
+    Some((hasher.finalize().into(), units))
 }
 
 fn valid(value: Option<String>) -> Option<String> {
@@ -649,7 +848,7 @@ impl Pilcrow {
 }
 
 /// Every story and pilcrow, stories in sorted order, plus each nested story's parent.
-struct Scan {
+pub(crate) struct Scan {
     stories: Vec<String>,
     pilcrows: Vec<Pilcrow>,
     parents: HashMap<String, String>,
@@ -728,6 +927,10 @@ impl Scan {
         story
     }
 }
+
+/// The [`Scan`] of the last committed state read, with the epoch it was read at.
+#[derive(Default)]
+pub(crate) struct ScanCache(Mutex<Option<(u64, Arc<Scan>)>>);
 
 struct Claim {
     owner: String,
@@ -1030,6 +1233,22 @@ pub(crate) fn promote_at(
     if index + 1 == story.len(txn) {
         promote_story(doc, txn, story_id);
     }
+}
+
+pub(crate) fn would_promote_at<T: ReadTxn>(
+    doc: &EditingDoc,
+    txn: &T,
+    story_id: &str,
+    story: &TextRef,
+    index: u32,
+) -> bool {
+    index.checked_add(1) == Some(story.len(txn))
+        && doc.with_seen(txn, |seen| {
+            seen.synthetic.iter().any(|(id, pilcrow)| {
+                id == story_id
+                    && map_string(pilcrow, txn, PARA_ORIGIN).as_deref() == Some(SYNTHETIC)
+            })
+        })
 }
 
 /// [`promote`] for an edit that authored into the paragraph ending `story_id`.
@@ -1364,6 +1583,22 @@ impl Repairs {
 }
 
 impl EditingDoc {
+    /// [`Scan::new`] over the committed state `txn` reads, shared by every
+    /// read-only query until the next committed change.
+    fn committed_scan(&self, txn: &Transaction<'_>) -> Arc<Scan> {
+        // No commit lands while `txn` is open, so this is the epoch of what it reads.
+        let epoch = self.epoch.load(Ordering::Relaxed);
+        let mut cache = self.scan_cache.0.lock().unwrap();
+        if let Some((cached, scan)) = cache.as_ref()
+            && *cached == epoch
+        {
+            return Arc::clone(scan);
+        }
+        let scan = Arc::new(Scan::new(txn));
+        *cache = Some((epoch, Arc::clone(&scan)));
+        scan
+    }
+
     /// Starts a new opening of this document: writes its generation into
     /// replicated state, identical on every replica that syncs it, so session
     /// anchors from any other opening never resolve here, even one seeded
@@ -1899,12 +2134,12 @@ impl EditingDoc {
             let claims = claims(&txn);
             let assignments = source_assignments(&txn);
             let mut current: HashMap<String, u32> = HashMap::new();
-            for pilcrow in Scan::new(&txn).pilcrows {
+            for pilcrow in &self.committed_scan(&txn).pilcrows {
                 if let Some(id) = pilcrow
                     .saved_id(source.as_deref())
                     .and_then(|(id, _)| parse_paragraph_id(&id))
                 {
-                    current.insert(pilcrow.key, id);
+                    current.insert(pilcrow.key.clone(), id);
                 }
             }
             if let Some(source) = source.as_deref() {
@@ -1983,7 +2218,7 @@ impl EditingDoc {
         let txn = self.yrs_doc().transact();
         let claims = claims(&txn);
         let assignments = source_assignments(&txn);
-        let scan = Scan::new(&txn);
+        let scan = self.committed_scan(&txn);
         let id_origin = |id: &str, owner: &str| {
             claim(&claims, id, owner).map_or(ParagraphIdOrigin::Source, |claim| claim.origin)
         };
@@ -2067,7 +2302,7 @@ impl EditingDoc {
         }
         let source = self.source_index();
         let txn = self.yrs_doc().transact();
-        let scan = Scan::new(&txn);
+        let scan = self.committed_scan(&txn);
         let by_key = |key: &str, story: Option<&str>| -> Vec<ParagraphRef> {
             scan.pilcrows
                 .iter()
@@ -2156,7 +2391,7 @@ impl EditingDoc {
         };
         let txn = self.yrs_doc().transact();
         let assignments = source_assignments(&txn);
-        let scan = Scan::new(&txn);
+        let scan = self.committed_scan(&txn);
         drop(txn);
         let mut plan = ParagraphSavePlan {
             assignments: source
@@ -2168,21 +2403,13 @@ impl EditingDoc {
                 })
                 .collect(),
             patched_parts: Vec::new(),
+            spliced_parts: Vec::new(),
         };
         let seeded = source.seed_states();
         let live = story_states(self);
         let stories_of = |states: &HashMap<String, StoryState>, part: &SourcePart| {
-            let prefix = match part.kind {
-                SourceStoryKind::Footnote => Some("fn:"),
-                SourceStoryKind::Endnote => Some("en:"),
-                _ => None,
-            };
-            states
-                .iter()
-                .filter(|(_, state)| {
-                    part.roots.contains(&state.root)
-                        || prefix.is_some_and(|prefix| state.root.starts_with(prefix))
-                })
+            part_stories(states, part)
+                .into_iter()
                 .map(|(story, state)| (story.clone(), (state.fingerprint, state.comments.clone())))
                 .collect::<BTreeMap<_, _>>()
         };
@@ -2191,8 +2418,14 @@ impl EditingDoc {
             .iter()
             .map(|pilcrow| (pilcrow.key.as_str(), pilcrow))
             .collect();
-        'parts: for part in &source.parts {
-            if seeded.is_empty() || stories_of(seeded, part) != stories_of(&live, part) {
+        'parts: for (index, part) in source.parts.iter().enumerate() {
+            if seeded.is_empty() {
+                continue;
+            }
+            if let Some(spliced) = spliced_part(&source, index, seeded, &live, &by_key) {
+                plan.spliced_parts.push(spliced);
+            }
+            if stories_of(seeded, part) != stories_of(&live, part) {
                 continue;
             }
             let mut patches = Vec::new();
@@ -2218,6 +2451,89 @@ impl EditingDoc {
     }
 }
 
+/// The stories seeded from `part`, cells and content controls nested in them included.
+fn part_stories<'a>(
+    states: &'a HashMap<String, StoryState>,
+    part: &SourcePart,
+) -> BTreeMap<&'a String, &'a StoryState> {
+    let prefix = match part.kind {
+        SourceStoryKind::Footnote => Some("fn:"),
+        SourceStoryKind::Endnote => Some("en:"),
+        _ => None,
+    };
+    states
+        .iter()
+        .filter(|(_, state)| {
+            part.roots.contains(&state.root)
+                || prefix.is_some_and(|prefix| state.root.starts_with(prefix))
+        })
+        .collect()
+}
+
+/// `source.parts[index]` as a part a save can splice: one whose stories still hold, in order
+/// and each with the block embeds it was seeded with, every paragraph seeded from it and no
+/// other but empty editor-only ones, each the only view of its source paragraph.
+fn spliced_part(
+    source: &SourceIndex,
+    index: usize,
+    seeded: &HashMap<String, StoryState>,
+    live: &HashMap<String, StoryState>,
+    by_key: &HashMap<&str, &Pilcrow>,
+) -> Option<SplicedPart> {
+    let part = &source.parts[index];
+    if !part.as_written
+        || part.kind == SourceStoryKind::Comment
+        || part.backed.values().any(|views| views.len() != 1)
+    {
+        return None;
+    }
+    let before = part_stories(seeded, part);
+    let after = part_stories(live, part);
+    if !before.keys().eq(after.keys()) {
+        return None;
+    }
+    let mut paragraphs = Vec::new();
+    let mut changed = Vec::new();
+    for (seed, now) in before.values().zip(after.values()) {
+        if seed.units.len() != now.units.len() {
+            return None;
+        }
+        for (was, is) in seed.units.iter().zip(&now.units) {
+            if was.key != is.key || was.blocks != is.blocks {
+                return None;
+            }
+            let same = was.digest == is.digest;
+            let Some(key) = is.key.as_deref() else {
+                if same && !is.inline {
+                    continue;
+                }
+                return None;
+            };
+            match source.view_of(key) {
+                Some(((part_index, ordinal), 0)) if part_index == index => {
+                    paragraphs.push((ordinal, key.to_owned()));
+                    if !same {
+                        changed.push(ordinal);
+                    }
+                }
+                None if same && by_key.get(key).is_some_and(|pilcrow| pilcrow.synthetic) => {}
+                _ => return None,
+            }
+        }
+    }
+    if paragraphs.len() != part.backed.len() {
+        return None;
+    }
+    paragraphs.sort_unstable();
+    changed.sort_unstable();
+    Some(SplicedPart {
+        part: part.path().to_owned(),
+        sha256: part.sha256.clone(),
+        paragraphs,
+        changed,
+    })
+}
+
 fn holder_ref(scan: &Scan, source: Option<&SourceIndex>, holder: Holder) -> Option<ParagraphRef> {
     match holder {
         Holder::Pilcrow(index) => Some(scan.pilcrows[index].session_ref()),
@@ -2240,6 +2556,73 @@ mod tests {
 
     fn ctx() -> EditCtx {
         EditCtx::local("", DATE)
+    }
+
+    #[test]
+    fn media_sources_have_the_same_fingerprint_in_both_seed_modes() {
+        let bytes =
+            ooxml_opc::rezip_parts(&[("word/media/picture.png".to_owned(), vec![1, 2, 3, 4])])
+                .unwrap();
+        let table = docx_parse::media::MediaTable::new(
+            ooxml_opc::RetainedPackage::new(Arc::from(bytes)).unwrap(),
+        )
+        .unwrap();
+        let url = table.data_url(0).unwrap();
+        for key in [
+            "src",
+            "shapeJson",
+            "chartJson",
+            "fieldData",
+            "propertiesJson",
+        ] {
+            let document = |src: &str| {
+                let doc = EditingDoc::new(7);
+                doc.create_story("body", "", "Normal", "left").unwrap();
+                let value = if key == "src" {
+                    src.to_owned()
+                } else {
+                    serde_json::json!({"nested": [{"src": src, "label": "media:0"}]}).to_string()
+                };
+                doc.apply_raw_ops(
+                    "body",
+                    vec![crate::RawOp::InsertEmbed {
+                        index: 0,
+                        kind: "image".into(),
+                        payload: vec![(key.into(), Any::String(value.into()))],
+                        attrs: Default::default(),
+                    }],
+                    &ctx(),
+                )
+                .unwrap();
+                doc
+            };
+            let default = document(&url);
+            let expected = story_fingerprint(&default, "body", &BTreeMap::new()).unwrap();
+            let segments = default.story_segments("body").unwrap();
+            default.install_media(table.clone());
+            assert_eq!(
+                story_fingerprint(&default, "body", &BTreeMap::new()),
+                Some(expected.clone()),
+                "{key}"
+            );
+            let mut normalized = segments.clone();
+            crate::media::write_segment_data_urls(&mut normalized, &table).unwrap();
+            assert_eq!(normalized, segments, "{key}");
+            let tokens = document("media:0");
+            tokens.install_media(table.clone());
+            assert_eq!(
+                story_fingerprint(&tokens, "body", &BTreeMap::new()),
+                Some(expected.clone()),
+                "{key}"
+            );
+            let changed = document("data:image/png;base64,AQIDBQ==");
+            changed.install_media(table.clone());
+            assert_ne!(
+                story_fingerprint(&changed, "body", &BTreeMap::new()),
+                Some(expected),
+                "{key}"
+            );
+        }
     }
 
     fn session(story: &str, key: &str) -> ParagraphRef {
@@ -2325,6 +2708,129 @@ mod tests {
         let restored = &doc.paragraph_identities().paragraphs[1];
         assert_eq!(restored.paragraph, session("body", &split.second_para_id));
         assert_eq!(restored.ooxml_para_id.as_deref(), Some(second.as_str()));
+    }
+
+    fn scan_view(scan: &Scan) -> (Vec<String>, Vec<String>, BTreeMap<String, String>) {
+        let pilcrows = scan.pilcrows.iter().map(|pilcrow| {
+            format!(
+                "{} {} {:?} {:?} {} {} {:?}",
+                pilcrow.story,
+                pilcrow.key,
+                pilcrow.allocated,
+                pilcrow.source,
+                pilcrow.synthetic,
+                pilcrow.content,
+                AsRef::<Branch>::as_ref(&pilcrow.map).id(),
+            )
+        });
+        (
+            scan.stories.clone(),
+            pilcrows.collect(),
+            scan.parents.clone().into_iter().collect(),
+        )
+    }
+
+    /// The cached scan, checked against a fresh one of the same state.
+    fn checked_scan(doc: &EditingDoc) -> Arc<Scan> {
+        let txn = doc.yrs_doc().transact();
+        let cached = doc.committed_scan(&txn);
+        assert_eq!(scan_view(&cached), scan_view(&Scan::new(&txn)));
+        cached
+    }
+
+    /// Every read-only identity query, answered from the cache and cold.
+    fn queries_agree(doc: &EditingDoc) {
+        let answers = |cold: bool| {
+            let forget = || {
+                if cold {
+                    *doc.scan_cache.0.lock().unwrap() = None;
+                }
+            };
+            forget();
+            let identities = doc.paragraph_identities();
+            let anchors: Vec<_> = identities
+                .paragraphs
+                .iter()
+                .map(|identity| {
+                    let ParagraphRef::Session { story, para_id } = &identity.paragraph else {
+                        unreachable!("no source package is retained");
+                    };
+                    forget();
+                    doc.resolve_paragraph_anchor(&ParagraphAnchor::Session {
+                        session_id: identities.session_id.clone(),
+                        story: story.clone(),
+                        para_id: para_id.clone(),
+                    })
+                })
+                .collect();
+            (format!("{identities:?}"), format!("{anchors:?}"))
+        };
+        checked_scan(doc);
+        assert_eq!(answers(false), answers(true));
+    }
+
+    #[test]
+    fn the_cached_scan_matches_a_fresh_one_across_edits_undo_and_remote_updates() {
+        let doc = EditingDoc::new(7);
+        doc.create_story("body", "abcd", "Normal", "left").unwrap();
+        doc.create_story("hf:rIdHeader", "head", "Normal", "left")
+            .unwrap();
+        let mut undo = doc.undo_manager();
+        let opened = checked_scan(&doc);
+        assert!(Arc::ptr_eq(&opened, &checked_scan(&doc)));
+        queries_agree(&doc);
+
+        doc.split_paragraph(&ctx(), Position::new("body", 2), None)
+            .unwrap();
+        let split = checked_scan(&doc);
+        assert!(!Arc::ptr_eq(&opened, &split));
+        assert_eq!(split.pilcrows.len(), 3);
+        queries_agree(&doc);
+
+        doc.persist_paragraph_ids().unwrap();
+        let persisted = checked_scan(&doc);
+        assert!(!Arc::ptr_eq(&split, &persisted));
+        assert!(persisted.pilcrows[0].allocated.is_some());
+        queries_agree(&doc);
+
+        assert!(undo.undo());
+        assert_eq!(checked_scan(&doc).pilcrows.len(), 2);
+        queries_agree(&doc);
+        assert!(undo.redo());
+        assert_eq!(checked_scan(&doc).pilcrows.len(), 3);
+        queries_agree(&doc);
+
+        let remote = EditingDoc::new(9);
+        remote
+            .apply_update_v1(&doc.encode_state_as_update_v1())
+            .unwrap();
+        remote
+            .split_paragraph(&ctx(), Position::new("body", 1), None)
+            .unwrap();
+        remote
+            .insert_text(
+                &ctx(),
+                Position::new("hf:rIdHeader", 0),
+                "x",
+                FormatPolicy::Plain,
+            )
+            .unwrap();
+        let before = checked_scan(&doc);
+        doc.apply_update_v1(
+            &remote
+                .encode_diff_v1(&doc.encode_state_vector_v1())
+                .unwrap(),
+        )
+        .unwrap();
+        let merged = checked_scan(&doc);
+        assert!(!Arc::ptr_eq(&before, &merged));
+        assert_eq!(merged.pilcrows.len(), 4);
+        queries_agree(&doc);
+
+        doc.delete_range(&ctx(), StoryRange::new("body", 0, 2))
+            .unwrap();
+        assert!(!Arc::ptr_eq(&merged, &checked_scan(&doc)));
+        queries_agree(&doc);
     }
 
     #[test]

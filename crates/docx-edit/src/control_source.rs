@@ -10,7 +10,8 @@ use crate::read_types::Anchor;
 const MAX_UNSUPPORTED: usize = 8;
 
 /// What a control's source content holds beyond text a fill may replace.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ControlSafety {
     /// Qualified names of source elements a text fill would destroy.
     pub unsupported: Vec<String>,
@@ -285,13 +286,17 @@ fn classify_run(run: &XmlElement, safety: &mut ControlSafety) {
 }
 
 /// A content control only the source package holds.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SourceControl {
     /// The story it belongs to: the story of its raw block, or `comment:{id}`.
     pub story: String,
     /// The raw block of `story` holding it, if any.
+    #[serde(deserialize_with = "crate::peer_bootstrap::required_option")]
     pub raw_block: Option<usize>,
     pub anchor: Anchor,
     /// The nearest source control containing it, as an index into the same list.
+    #[serde(deserialize_with = "crate::peer_bootstrap::required_option")]
     pub parent: Option<usize>,
     pub block: bool,
     pub properties: docx_parse::SdtProperties,

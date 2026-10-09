@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Worker viewer parity</title>
+    <link rel="icon" href="data:," />
+    <style>
+      html, body, #worker-viewer-root { margin: 0; height: 100%; }
+      #worker-viewer-root { display: flex; }
+      [data-arm] { flex: 1; min-width: 0; height: 100%; }
+    </style>
+  </head>
+  <body>
+    <div id="worker-viewer-root"></div>
+    <script type="module" src="./pptx-worker-viewer-harness.tsx"></script>
+  </body>
+</html>

@@ -27,7 +27,7 @@ let saved = workbook.save()?;
 
 Saving preserves the source package: parts and sheets an edit did not touch are
 copied through byte for byte, and only what changed is reserialized.
-`0.2.x`: the API may change before `1.0`.
+Pre-1.0: the API may change between minor versions.
 
 ## Edit batches
 
@@ -37,12 +37,10 @@ read at. `apply_edits` resolves every step of an `EditRequest` against its
 publishing the update only after recalculation, or returns an `EditRefusal`
 with the workbook, history and proposals untouched. `validate_edits` stages and
 rehearses the same batch without adopting it. Steps set cell inputs, formulas,
-number formats and style patches; they do not insert or delete rows, columns or
-sheets, and refuse writes to merged-cell followers, array-formula cells and
-protected sheets. The request and outcome types serialize to the JSON the
-JavaScript and Python bindings share; `read_cells_json`, `find_text_json`,
-`validate_edits_json` and `apply_edits_json` are those bindings' entry points,
-refusing requests over `MAX_REQUEST_BYTES` and results over
+number formats and style patches. The request and outcome types serialize to
+the JSON the JavaScript and Python bindings share; `read_cells_json`,
+`find_text_json`, `validate_edits_json` and `apply_edits_json` are those
+bindings' entry points, refusing requests over `MAX_REQUEST_BYTES` and results over
 `MAX_RESPONSE_BYTES` with `limit-exceeded`. A `recalculate_all` that changes
 values, or what a structured export reports about results, moves `version()` and
 notifies observers with an empty `UpdateOrigin::Recalculation` event, which
@@ -96,8 +94,7 @@ they do not make hostile Yrs `Any` payloads safe.
 
 Cell formats live in a content-addressed `xlsx:cell-formats` map that per-sheet
 style maps reference by key, so concurrent style creation does not depend on
-local style-table indices. Undo and redo track local user-origin transactions
-only; remote updates and accepted agent proposals stay out of local history.
+local style-table indices. Undo and redo track local user-origin transactions.
 
 ## Charts
 
@@ -131,26 +128,17 @@ hold, when a string cache covers cells that are not text, when a cache would
 hold more points than a chart can carry, or when the cache carries content this
 crate does not model, such as an `extLst` or a per-point `formatCode`.
 
-Charts are preserved, never created. A model carrying charts with no source
+Charts retain their source package. A model carrying charts with no source
 package is refused, as is a chart that appeared on or vanished from a sheet
 between open and save, and an anchor change beyond the row and column a save
 writes back.
 
-## Support matrix
+## Capabilities
 
-| Capability | Standalone | Collaborative |
-| --- | --- | --- |
-| Cell content and formatting | Yes | Yes |
-| Column widths and row heights | Yes | Yes |
-| Formula recalculation and cached save values | Yes | Local projection only |
-| Row/column insert and delete | Yes | No |
-| Merge and unmerge | Yes | No |
-| Add, remove, rename, and restore sheets | Yes | No |
-| Chart references and anchors follow structural edits | Yes | Yes |
-| Undo/redo | Yes | Local user origin only |
-| Agent proposals | Yes | Yes; acceptance is not locally undoable |
-| Version-checked edit batches | Yes | Yes |
-| Structured JSON and Markdown export | Yes | Yes |
-| Yrs v1 vectors, diffs, updates, and observers | Encode/observe only | Yes |
+Standalone and collaborative workbooks support cell content, formatting, row
+heights, column widths, edit batches, structured export and proposals.
+Collaborative replicas exchange Yrs updates and track local user edits for undo.
+Standalone workbooks additionally support structural edits and remap chart
+references and anchors.
 
 Part of [BetterOffice](https://betteroffice.dev). Apache-2.0.

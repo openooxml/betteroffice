@@ -1,6 +1,7 @@
 /** Typed TypeScript boundary for the Rust package writer. */
 
 import type { BlockContent, Document, Hyperlink, Image, Run } from '../types/document';
+import { visitTrackedControlContent } from '../utils/trackedControlContent';
 import { preloadParseWasm, writeDocxS13Wire } from './parseWasm';
 import { collectParts, headerFooterFilename, partText } from './rezip/parts';
 import { preloadOpcWasm, unzipContainer } from './wasm';
@@ -40,6 +41,14 @@ export interface RustSaveResult {
 export interface RustParagraphIds {
   assignments: Array<{ part: string; ordinal: number; paraId: string }>;
   patchedParts: Array<{ part: string; paraIds: Array<[number, string]> }>;
+  /**
+   * Story parts written as their source bytes with only some paragraphs
+   * re-serialized: those whose `sourceOrdinal` is in `changed`, or whose
+   * written comments, revisions, notes or relationships differ from their
+   * source. `paragraphs` lists every `sourceOrdinal` the model holds for the
+   * part, `sha256` the source part it addresses.
+   */
+  splicedParts?: Array<{ part: string; sha256: string; paragraphs: number[]; changed: number[] }>;
 }
 
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
@@ -54,7 +63,8 @@ export async function writeDocumentWithRust(
   options: RustSaveOptions = {},
   selective?: RustSelectiveSave,
   determinism?: RustSaveDeterminism,
-  paragraphIds?: RustParagraphIds
+  paragraphIds?: RustParagraphIds,
+  skipMutations = false
 ): Promise<RustSaveResult> {
   await preloadOpcWasm();
   await preloadParseWasm();
@@ -97,7 +107,7 @@ export async function writeDocumentWithRust(
   assertSafeSaveTree(request, 'save');
   const bytes = writeDocxS13Wire(JSON.stringify(request), new Uint8Array(originalBuffer));
   const buffer = exactArrayBuffer(bytes);
-  if (!selective) applyRustSaveMutations(document, originalBuffer, buffer);
+  if (!selective && !skipMutations) applyRustSaveMutations(document, originalBuffer, buffer);
   return { buffer, determinism: fixed };
 }
 
@@ -195,7 +205,16 @@ function collectNewImages(blocks: BlockContent[]): Image[] {
           content.type === 'moveFrom' ||
           content.type === 'moveTo'
         ) {
-          for (const inline of content.content) if (inline.type === 'run') visitRun(inline);
+          for (const inline of content.content) {
+            if (inline.type === 'run') visitRun(inline);
+            else visitTrackedControlContent(inline, (node) => {
+              if (node.type === 'run') visitRun(node);
+            }, false, true);
+          }
+        } else {
+          visitTrackedControlContent(content, (node) => {
+            if (node.type === 'run') visitRun(node);
+          });
         }
       }
     } else if (block.type === 'table') {
@@ -214,6 +233,13 @@ function collectExternalHyperlinks(blocks: BlockContent[]): Hyperlink[] {
       for (const content of block.content) {
         if (content.type === 'hyperlink' && (content.href || content.rId) && !content.anchor) {
           hyperlinks.push(content);
+        }
+        if (content.type !== 'run') {
+          visitTrackedControlContent(content, (node) => {
+            if (node.type === 'hyperlink' && (node.href || node.rId) && !node.anchor) {
+              hyperlinks.push(node);
+            }
+          });
         }
       }
     } else if (block.type === 'table') {

@@ -33,12 +33,12 @@ function frame(epoch: number): RetainedFrame {
 }
 
 function workerReplay() {
-  const attaches: Array<{ zoom: number; resolve: (attached: boolean) => void }> = [];
+  const attaches: Array<{ zoom: number; pages: number; resolve: (attached: boolean) => void }> = [];
   return {
     attaches,
     offscreenReplay: {
-      attach: (_pages: unknown, _ids: string[], _dpr: number, zoom: number) =>
-        new Promise<boolean>((resolve) => attaches.push({ zoom, resolve })),
+      attach: (pages: unknown[], _ids: string[], _dpr: number, zoom: number) =>
+        new Promise<boolean>((resolve) => attaches.push({ zoom, pages: pages.length, resolve })),
     },
   };
 }
@@ -93,4 +93,49 @@ test('worker pages count as presented only once their attach has painted them', 
   await act(async () => {});
   expect(attaches).toHaveLength(4);
   expect(shows(third.displayList)).toBe(true);
+});
+
+test('main-thread pages stop counting as presented at a new zoom until they repaint', async () => {
+  const hostRef = createRef<HTMLDivElement>();
+  const shown = frame(1);
+  const view = (zoom: number) => (
+    <CanvasPagesView
+      displayList={shown.displayList}
+      frame={shown}
+      hostRef={hostRef}
+      zoom={zoom}
+      glyphOutlineProvider={() => ''}
+    />
+  );
+  const shows = () => isPresented(hostRef.current, shown.displayList);
+  const { rerender } = render(view(1));
+  await act(async () => {});
+  expect(shows()).toBe(true);
+  rerender(view(2));
+  expect(shows()).toBe(false);
+  await act(async () => {});
+  expect(shows()).toBe(true);
+});
+
+test('canvases no worker took remount on the main-thread path', async () => {
+  const { attaches, offscreenReplay } = workerReplay();
+  const hostRef = createRef<HTMLDivElement>();
+  const current = frame(1);
+  render(
+    <CanvasPagesView
+      displayList={current.displayList}
+      frame={current}
+      hostRef={hostRef}
+      glyphOutlineProvider={() => ''}
+      offscreenReplay={offscreenReplay}
+    />
+  );
+  await act(async () => {});
+  const transferred = hostRef.current!.querySelector('canvas');
+  expect(attaches.map(({ pages }) => pages)).toEqual([1]);
+  await act(async () => attaches[0].resolve(false));
+  const remounted = hostRef.current!.querySelector('canvas');
+  expect(remounted).not.toBeNull();
+  expect(remounted).not.toBe(transferred);
+  expect(attaches).toHaveLength(1);
 });

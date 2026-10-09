@@ -35,11 +35,8 @@ Value and formula are separate accessors on purpose: `sheet["B3"]` is the value,
 dependents, so the value above is computed here rather than read back from the
 file.
 
-`Workbook.open` starts from the values the authoring application cached, and a
-cell you have not touched keeps that cached value — including if it was stale
-when the file was written. Use `open_recalculated`, or call `recalculate()`,
-when you need every formula evaluated by this engine rather than trusted from
-the file.
+`Workbook.open` starts from cached values. Edits recalculate dependent formulas;
+`open_recalculated` and `recalculate()` request a full recalculation.
 
 ## Render a sheet to PNG
 
@@ -62,9 +59,9 @@ exposes the byte-level primitives rather than a transport, so it drops into a
 WebSocket server, a queue, or a test harness without committing you to asyncio:
 
 ```python
+data = wb.save()
 left = Workbook.open_collaborative(data)
 right = Workbook.open_collaborative(data)
-print(left.client_id, right.client_id)
 
 left["Sheet1"]["B3"] = 1000
 right.apply_update(left.diff(right.state_vector()))   # right now agrees
@@ -106,8 +103,8 @@ for edit in proposal.edits:
 wb.accept_proposal(proposal.id)     # or wb.reject_proposal(proposal.id)
 ```
 
-Nothing is written until the proposal is accepted, and accepting applies it as
-a single undo step. `proposals()` lists the ones still awaiting a decision.
+In standalone workbooks, accepting a proposal records one undo step.
+`proposals()` lists pending proposals.
 
 A proposal goes stale when one of its target cells changes after it was staged.
 `accept_proposal` then raises `StaleProposalError`, whose `cells` names the
@@ -117,6 +114,8 @@ apply it anyway with `force=True`:
 ```python
 from betteroffice_xlsx import StaleProposalError
 
+proposal = wb.propose("copilot", [("Sheet1", "H1", "=B3*3")])
+sheet["H1"] = 0
 try:
     wb.accept_proposal(proposal.id)
 except StaleProposalError as stale:
@@ -159,11 +158,7 @@ if not result["ok"]:
 Steps set inputs (parsed like `set`), formulas (source without `=`), number
 formats and styles. `validate_edits` stages a batch without changing anything,
 `find_text` searches display text exactly, and `history: "none"` keeps a batch
-out of undo. `"none"` is experimental: standalone undo still replays older
-steps over its cells, and that interaction may change in a minor release. A
-malformed request raises `ValueError`. Batches do not insert or delete rows,
-columns or sheets, and refuse writes to merged-cell followers, array-formula
-cells and protected sheets.
+out of undo. A malformed request raises `ValueError`.
 
 ## Structured export
 
@@ -224,8 +219,8 @@ print(summary.changed, summary.cycles)
 | Render to an image | no | yes, PNG |
 | Engine | pure Python | Rust, compiled |
 
-`openpyxl` is a far broader library and covers plenty this does not. If you need
-formulas evaluated or a sheet rasterized, that is the gap this fills.
+Use `betteroffice-xlsx` for formula evaluation, PNG rendering and collaborative
+editing.
 
 ## API
 
@@ -260,10 +255,10 @@ formulas evaluated or a sheet rasterized, that is the gap this fills.
 | `wb.render_png(sheet, ...)` | render to PNG |
 | `wb.save()` / `wb.save_path(path)` | serialize to XLSX |
 
-Every call that can trigger a calculation — `open_recalculated`,
+The following calculation calls — `open_recalculated`,
 `open_collaborative`, `recalculate`, `set`, `set_many`, `undo`, `redo`,
 `apply_update`, `propose`, `accept_proposal`, `set_number_format`, and
-`set_style` — takes a keyword-only `now_serial`. It is the clock `TODAY()` and
+`set_style` — take a keyword-only `now_serial`. It is the clock `TODAY()` and
 `NOW()` read, as an Excel serial number. The engine has none of its own, so
 both return `#VALUE!` unless you pass one:
 
@@ -283,10 +278,8 @@ if sheet["D3"] == "#DIV/0!":
 ```
 
 Writing accepts `None` (clears the cell), `bool`, `int`, `float`, `Decimal`, and
-`str`. `date`, `datetime`, `time`, and `timedelta` raise `TypeError` for now:
-converting them needs the workbook's date system, which is not exposed yet, and
-stringifying them would write text that only looks like a date. Pass the Excel
-serial number as a float if you need a date today.
+`str`. `date`, `datetime`, `time` and `timedelta` raise `TypeError`; pass Excel
+serials as floats.
 
 General cells interpret strings like Excel: a leading `=` is a formula,
 `TRUE`/`FALSE` become booleans, and numeric text becomes a number. Text (`@`)
@@ -297,12 +290,9 @@ sheet["A1"] = "'=1+1"   # the text "=1+1"
 sheet["A2"] = "=1+1"    # the formula, evaluating to 2.0
 ```
 
-Mutating calls return a `Mutation` — truthy when something changed, with
-`changed` listing the cells the engine *recalculated* as a result, and `cycles`
-and `limited` the ones it gave up on. A cell you wrote directly is not itself a
-recalculation, so it will not always appear there. Addresses are bare A1 on the
-active sheet and `Sheet!A1` anywhere else, so match on the suffix rather than
-the whole string.
+Mutating calls return a truthy-on-change `Mutation`. `changed` lists
+recalculated cells; `cycles` and `limited` identify calculation diagnostics.
+Addresses are A1 on the active sheet and `Sheet!A1` elsewhere.
 
 Errors raise `XlsxError` or a more specific subclass: `ParseError`,
 `RangeError`, `RenderError`, `InvalidUpdateError`, `CollaborativeStateError`,
@@ -314,7 +304,7 @@ raises `KeyError`.
 
 ## Status
 
-`0.0.x`, and the API may change before `0.1.0`.
+Pre-1.0: the API may change between minor versions.
 
 `save` keeps the parts the model does not represent — charts, drawings, pivot
 tables, comments, macros, custom XML, and their relationships — rather than
@@ -322,19 +312,8 @@ regenerating the package from the modeled features, and sheets you did not
 touch are copied through byte for byte. The stylesheet is left alone unless
 styles actually change.
 
-A sheet you *do* edit keeps its unmodeled row, column, and cell markup: only the
-cells, rows, and columns the edit actually changed are rewritten; a sheet whose rows
-or cells lack `r` attributes or arrive out of order, or that was replayed from
-collaboration updates, is reserialized from the model instead. Its autofilter,
-data-validation, conditional-formatting, table, and sparkline ranges stay at
-their source coordinates. Collaborative sessions compare only the modeled workbook, so two
-peers holding the same cells but different macros or custom XML still accept
-each other as the same base.
-
-This binding exposes no structural edits: no sheet rename or removal, no row or
-column insert or delete. The engine refuses those anyway while a pivot table or
-an unmodeled chart part is preserved, because it cannot rewrite the references
-they hold.
+Saving serializes edited worksheet state and retains source range coordinates.
+Collaboration fingerprints the modeled workbook.
 
 Wheels are built for Linux (x86_64, aarch64), macOS (arm64, x86_64), and Windows
 (x86_64) against the stable ABI for CPython 3.9 and up.

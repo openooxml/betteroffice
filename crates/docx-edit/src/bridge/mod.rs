@@ -46,6 +46,7 @@ use docx_layout::types::{
     ShapeBlock, Size, SpacingExplicit, TabRun, TabStop, TableBlock, TableCell, TableRow, TextRun,
     UnderlineSpec,
 };
+use docx_parse::{drawingml::resolve_color_value_to_hex, scalars::ColorValue};
 use serde_json::{Map as JsonMap, Value};
 use yrs::types::Attrs;
 use yrs::types::text::YChange;
@@ -54,6 +55,8 @@ use yrs::{Any, Map, MapRef, OffsetKind, Out, ReadTxn, Text, Transact};
 use super::{COMMENTS, DEL, EditError, EditingDoc, INS, decode_anchor, is_pilcrow, story_ref};
 use crate::list_marker::{ListState, compute_list_marker};
 
+pub(crate) mod local;
+pub(crate) mod preview;
 mod shapes;
 
 const AUTO_PARAGRAPH_SPACING_PX: f64 = 14.0;
@@ -63,6 +66,7 @@ const AUTO_PARAGRAPH_SPACING_PX: f64 = 14.0;
 #[derive(Clone, Debug, Default, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct RenderEnv {
+    pub compatibility_flags: docx_parse::CompatibilityFlags,
     #[serde(skip_serializing_if = "BTreeSet::is_empty")]
     pub toc_style_ids: BTreeSet<String>,
     /// Six-digit RGB values keyed by OOXML theme slot. A missing slot falls
@@ -81,6 +85,16 @@ pub struct RenderEnv {
     pub numeric_ids: BTreeMap<String, f64>,
     /// Include hidden text in visible layout without changing the document.
     pub show_hidden_text: bool,
+    /// Revision id, as [`crate::ChangeInfo`] reports it, to the decision
+    /// shown in place of its markup. A decided insertion or deletion renders
+    /// as plain text or not at all, at its original positions; any other
+    /// revision renders as a tracked change. Entries with other values are
+    /// ignored.
+    #[serde(
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "deserialize_revision_preview"
+    )]
+    pub revision_preview: BTreeMap<String, RevisionPreview>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub paragraph_spacing_line_px: Option<f64>,
     /// Section document-grid snap pitch in px (`w:docGrid w:linePitch`),
@@ -91,6 +105,14 @@ pub struct RenderEnv {
     pub doc_grid_pitch_px: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_paragraph_style_id: Option<String>,
+    /// Lower the `data:` image sources seeding wrote as the `media:{n}`
+    /// tokens of their parts, which the host then resolves.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub media_tokens: bool,
+    /// The seeded media [`Self::media_tokens`] reads; lowering takes the
+    /// document's when empty.
+    #[serde(skip)]
+    pub media: crate::media::MediaSources,
 }
 
 impl RenderEnv {
@@ -98,6 +120,70 @@ impl RenderEnv {
         self.numeric_ids.insert(yrs_id.into(), layout_id);
         self
     }
+
+    pub fn with_revision_preview(
+        mut self,
+        revision_id: impl Into<String>,
+        preview: RevisionPreview,
+    ) -> Self {
+        self.revision_preview.insert(revision_id.into(), preview);
+        self
+    }
+
+    /// Reads `revisionPreview` entries from JSON, skipping any that are not
+    /// an `"accepted"` or `"rejected"` string.
+    pub fn parse_revision_preview(value: &Value) -> BTreeMap<String, RevisionPreview> {
+        let Value::Object(entries) = value else {
+            return BTreeMap::new();
+        };
+        entries
+            .iter()
+            .filter_map(|(id, state)| {
+                let preview = match state.as_str()? {
+                    "accepted" => RevisionPreview::Accepted,
+                    "rejected" => RevisionPreview::Rejected,
+                    _ => return None,
+                };
+                Some((id.clone(), preview))
+            })
+            .collect()
+    }
+
+    fn revision_decision(&self, value: &Any) -> Option<RevisionPreview> {
+        preview::record_decision(value);
+        if self.revision_preview.is_empty() {
+            return None;
+        }
+        let (id, ..) = crate::queries::revision_parts(value)?;
+        self.revision_preview.get(&id).copied()
+    }
+
+    /// Whether the decisions previewed hide a run with these attributes: an
+    /// insertion rejected, or a deletion accepted.
+    fn revision_hidden(&self, attributes: Option<&Attrs>) -> bool {
+        attribute(attributes, INS).and_then(|value| self.revision_decision(value))
+            == Some(RevisionPreview::Rejected)
+            || attribute(attributes, DEL).and_then(|value| self.revision_decision(value))
+                == Some(RevisionPreview::Accepted)
+    }
+}
+
+/// A decision [`RenderEnv::revision_preview`] shows for one revision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RevisionPreview {
+    Accepted,
+    Rejected,
+}
+
+fn deserialize_revision_preview<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, RevisionPreview>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = <Value as serde::Deserialize>::deserialize(deserializer)?;
+    Ok(RenderEnv::parse_revision_preview(&value))
 }
 
 /// Why a story could not be lowered. Every variant means the input is wrong,
@@ -247,15 +333,94 @@ pub fn yrs_doc_to_mapped_layout_blocks(
     story_id: &str,
     env: &RenderEnv,
 ) -> Result<(Vec<LayoutBlock>, LoweringMap), BridgeError> {
+    let mut local = local::LocalLowering::new(false);
+    yrs_doc_to_mapped_layout_blocks_inner(doc, story_id, env, &mut None, &mut local, &mut None)
+}
+
+/// [`yrs_doc_to_mapped_layout_blocks`] plus the blocks it leaves out that a revision
+/// preview can reveal: suppressed field results and drawing-only paragraphs.
+#[cfg(test)]
+pub(crate) fn yrs_doc_to_mapped_layout_blocks_with_revealable(
+    doc: &EditingDoc,
+    story_id: &str,
+    env: &RenderEnv,
+    local: &mut local::LocalLowering,
+) -> Result<(Vec<LayoutBlock>, LoweringMap, Vec<LayoutBlock>), BridgeError> {
+    let mut revealable = Some(Vec::new());
+    let (blocks, map) = yrs_doc_to_mapped_layout_blocks_inner(
+        doc,
+        story_id,
+        env,
+        &mut revealable,
+        local,
+        &mut None,
+    )?;
+    local.finish(&blocks, &map);
+    Ok((blocks, map, revealable.unwrap_or_default()))
+}
+
+fn yrs_doc_to_mapped_layout_blocks_inner(
+    doc: &EditingDoc,
+    story_id: &str,
+    env: &RenderEnv,
+    revealable: &mut Option<Vec<LayoutBlock>>,
+    local: &mut local::LocalLowering,
+    preview_units: &mut Option<preview::PreviewUnits>,
+) -> Result<(Vec<LayoutBlock>, LoweringMap), BridgeError> {
     if doc.yrs_doc().offset_kind() != OffsetKind::Utf16 {
         return Err(BridgeError::WrongOffsetKind);
     }
 
-    let mut list_state = ListState::new(doc.source_metadata().map(|source| source.numbering()));
+    let with_media;
+    let env = match doc.media_sources() {
+        media if env.media_tokens && env.media.is_empty() && !media.is_empty() => {
+            with_media = RenderEnv {
+                media,
+                ..env.clone()
+            };
+            &with_media
+        }
+        _ => env,
+    };
+    let source = doc.source_metadata();
+    local.source = source.as_ref().map(Arc::downgrade).unwrap_or_default();
+    local.block(source.as_ref().is_some_and(|source| {
+        source
+            .run_revision_stories()
+            .any(|story| story == "body" || story.starts_with("body:"))
+    }));
+    let mut list_state = ListState::new(source.map(|source| source.numbering()));
     let txn = doc.yrs_doc().transact();
+    local.block(
+        txn.get_map(COMMENTS)
+            .is_some_and(|comments| comments.len(&txn) != 0),
+    );
     let mut active_stories = BTreeSet::new();
-    let mut map = LoweringMap::default();
-    let (blocks, _) = lower_story(
+    let mut map = preview::LoweringOutput::default();
+    let session = txn.get_map(crate::identity::SESSION);
+    let has_sequence_metadata = session
+        .as_ref()
+        .is_some_and(|session| session.contains_key(&txn, crate::seed::OPAQUE_SEQUENCES));
+    let mut opaque_sequences: BTreeSet<String> = session
+        .map(|session| {
+            any_strings(shared_any(&session, &txn, crate::seed::OPAQUE_SEQUENCES).as_ref())
+                .into_iter()
+                .collect()
+        })
+        .unwrap_or_default();
+    local.preview_blocked |= has_sequence_metadata;
+    if local.legacy {
+        local.block(has_sequence_metadata);
+    }
+    let mut recording = if story_id == "body" {
+        preview_units
+            .take()
+            .map(|units| preview::UnitRecorder::new(units, local.enabled && !local.legacy))
+    } else {
+        None
+    };
+    let _reads = recording.as_ref().map(preview::UnitRecorder::read_guard);
+    let (mut blocks, _) = lower_story_with_preview(
         &txn,
         story_id,
         env,
@@ -264,9 +429,21 @@ pub fn yrs_doc_to_mapped_layout_blocks(
         &mut list_state,
         CellEdges::default(),
         &mut map,
+        &mut opaque_sequences,
+        revealable,
+        local,
+        recording.as_mut(),
     )?;
+    *preview_units = recording.map(|recording| recording.finish(has_sequence_metadata));
+    // Word numbers SEQ fields in the main text only.
+    if story_id == "body" && has_sequence_metadata {
+        docx_layout::sequence_fields::number_sequence_fields_with_opaque(
+            &mut blocks,
+            opaque_sequences,
+        );
+    }
     map.finish();
-    Ok((blocks, map))
+    Ok((blocks, map.map))
 }
 
 #[derive(Clone, Copy, Default)]
@@ -284,362 +461,766 @@ fn lower_story<T: ReadTxn>(
     active_stories: &mut BTreeSet<String>,
     list_state: &mut ListState,
     cell_edges: CellEdges,
-    map: &mut LoweringMap,
+    map: &mut preview::LoweringOutput,
+    opaque_sequences: &mut BTreeSet<String>,
+    revealable: &mut Option<Vec<LayoutBlock>>,
+    local: &mut local::LocalLowering,
+) -> Result<(Vec<LayoutBlock>, u64), BridgeError> {
+    lower_story_with_preview(
+        txn,
+        story_id,
+        env,
+        pm_base,
+        active_stories,
+        list_state,
+        cell_edges,
+        map,
+        opaque_sequences,
+        revealable,
+        local,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_story_with_preview<T: ReadTxn>(
+    txn: &T,
+    story_id: &str,
+    env: &RenderEnv,
+    pm_base: u64,
+    active_stories: &mut BTreeSet<String>,
+    list_state: &mut ListState,
+    cell_edges: CellEdges,
+    map: &mut preview::LoweringOutput,
+    opaque_sequences: &mut BTreeSet<String>,
+    revealable: &mut Option<Vec<LayoutBlock>>,
+    local: &mut local::LocalLowering,
+    mut recording: Option<&mut preview::UnitRecorder>,
 ) -> Result<(Vec<LayoutBlock>, u64), BridgeError> {
     if !active_stories.insert(story_id.to_owned()) {
         return Err(BridgeError::RecursiveStory(story_id.to_owned()));
     }
-    let story_slot = map.stories.len() as u32;
+    let story_slot = map.story_count();
     map.stories.push(story_id.to_owned());
-    let mut table_ordinal = 0_u32;
-
     let result = (|| {
         let story = story_ref(txn, story_id)?;
-        let comments = resolve_comment_intervals(txn, story_id, env)?;
-        let mut blocks = Vec::new();
-        let mut paragraph_runs = Vec::new();
-        let mut paragraph_drawings = Vec::new();
-        let mut story_index = 0_u32;
-        let mut paragraph_start = 0_u32;
-        let mut paragraph_pm_start = pm_base;
-        let mut paragraph_pm_units = 0_u32;
-        let mut pm_cursor = pm_base;
-        let mut at_block_boundary = true;
-        let mut hidden_field_blocks = BTreeSet::new();
-        let mut pending_hidden_field_blocks = BTreeSet::new();
-        // Sections are body-level, so the cascade is per story; cell and
-        // header/footer stories simply never carry section properties.
-        let mut section_margins = SectionMarginsTwips::default();
+        let comments = std::rc::Rc::new(resolve_comment_intervals(txn, story_id, env)?);
+        let chunks = story.diff(txn, YChange::identity);
+        let share_chunks = !local.blocked && !local.legacy;
+        let (owned_chunks, shared_chunks) = if story_id == "body" && share_chunks {
+            (
+                Vec::new(),
+                Some(std::rc::Rc::new(local::SeedChunks::new(chunks))),
+            )
+        } else {
+            (chunks, None)
+        };
+        if story_id == "body" {
+            local.chunks.clone_from(&shared_chunks);
+        }
+        let chunks = shared_chunks
+            .as_ref()
+            .map_or(owned_chunks.as_slice(), |chunks| chunks.diffs.as_slice());
+        let initial = preview::WalkPosition::new(story_slot, pm_base, map);
+        let (blocks, after, _) = walk_story_chunks(
+            txn,
+            story_id,
+            env,
+            active_stories,
+            list_state,
+            cell_edges,
+            map,
+            opaque_sequences,
+            revealable,
+            local,
+            &story,
+            &comments,
+            chunks,
+            initial,
+            BTreeSet::new(),
+            recording.as_deref_mut(),
+        )?;
+        if let Some(recording) = recording {
+            recording.save_chunks(chunks, comments);
+        }
+        Ok((blocks, after.pm_cursor - pm_base))
+    })();
+    if story_id == "body" {
+        local.chunks = None;
+    }
+    active_stories.remove(story_id);
+    result
+}
 
-        for diff in story.diff(txn, YChange::identity) {
-            let attributes = diff.attributes.as_deref();
-            match diff.insert {
-                Out::Any(Any::String(text)) => {
-                    let text = text.as_ref();
-                    push_text_chunks(
-                        &mut paragraph_runs,
-                        text,
-                        story_index,
-                        attributes,
-                        &comments,
-                        env,
-                        paragraph_pm_units,
-                    );
-                    let width = utf16_len(text);
-                    story_index += width;
-                    paragraph_pm_units += width;
-                    at_block_boundary = false;
-                }
-                Out::YMap(pilcrow) if is_pilcrow(&pilcrow, txn) => {
-                    let mut paragraph_blocks = flush_paragraph_parts(
-                        paragraph_runs,
-                        paragraph_drawings,
-                        &pilcrow,
-                        attributes,
-                        txn,
-                        story_id,
-                        env,
+#[allow(clippy::too_many_arguments)]
+fn walk_story_chunks<T: ReadTxn>(
+    txn: &T,
+    story_id: &str,
+    env: &RenderEnv,
+    active_stories: &mut BTreeSet<String>,
+    list_state: &mut ListState,
+    cell_edges: CellEdges,
+    map: &mut preview::LoweringOutput,
+    opaque_sequences: &mut BTreeSet<String>,
+    revealable: &mut Option<Vec<LayoutBlock>>,
+    local: &mut local::LocalLowering,
+    story: &yrs::TextRef,
+    comments: &[CommentInterval],
+    chunks: &[yrs::types::text::Diff<YChange>],
+    initial: preview::WalkPosition,
+    mut hidden_field_blocks: BTreeSet<String>,
+    mut recording: Option<&mut preview::UnitRecorder>,
+) -> Result<(Vec<LayoutBlock>, preview::WalkPosition, BTreeSet<String>), BridgeError> {
+    let preview::WalkPosition {
+        story_slot,
+        mut table_ordinal,
+        mut break_ordinal,
+        mut story_index,
+        mut paragraph_start,
+        mut paragraph_pm_start,
+        mut paragraph_pm_units,
+        mut pm_cursor,
+        mut at_block_boundary,
+        mut section_margins,
+        ..
+    } = initial;
+    let mut blocks = Vec::new();
+    let mut paragraph_runs = Vec::new();
+    let mut paragraph_drawings: Vec<DrawingMarker> = Vec::new();
+    let mut pending_hidden_field_blocks = BTreeSet::new();
+    let mut pending_code_join: Option<(Vec<FieldCodeParagraph>, String)> = None;
+    let mut field_join: Option<FieldJoin> = None;
+    macro_rules! position {
+        () => {
+            preview::WalkPosition {
+                story_slot,
+                table_ordinal,
+                break_ordinal,
+                story_index,
+                paragraph_start,
+                paragraph_pm_start,
+                paragraph_pm_units,
+                pm_cursor,
+                at_block_boundary,
+                section_margins,
+                stories: map.story_count(),
+                paragraphs: map.paragraph_count(),
+                safe: at_block_boundary
+                    && paragraph_start == story_index
+                    && paragraph_runs.is_empty()
+                    && paragraph_drawings.is_empty()
+                    && pending_hidden_field_blocks.is_empty()
+                    && pending_code_join.is_none()
+                    && field_join.is_none()
+                    && active_stories.len() == 1
+                    && active_stories.contains(story_id),
+            }
+        };
+    }
+    let mut plain = local::ParagraphSeed::default();
+    for (chunk_index, diff) in chunks.iter().enumerate() {
+        let local_safe = !local.legacy
+            && !local.blocked
+            && pending_hidden_field_blocks.is_empty()
+            && pending_code_join.is_none()
+            && field_join.is_none()
+            && story_id == "body"
+            && active_stories.len() == 1
+            && active_stories.contains("body");
+        if !local.legacy && !local.blocked && at_block_boundary && paragraph_start == story_index {
+            plain.start(local_safe && paragraph_runs.is_empty() && paragraph_drawings.is_empty());
+        }
+        if let Some(recording) = recording.as_deref_mut()
+            && recording.wants_chunk(story_index)
+        {
+            recording.before_chunk(
+                chunk_index,
+                diff,
+                txn,
+                position!(),
+                list_state,
+                opaque_sequences,
+                &hidden_field_blocks,
+                blocks.len(),
+                revealable.as_ref().map_or(0, Vec::len),
+                map,
+            );
+        }
+        let attributes = diff.attributes.as_deref();
+        let width = match &diff.insert {
+            Out::Any(Any::String(text)) => utf16_len(text),
+            _ => 0,
+        };
+        local.observe(&mut plain, diff, txn, story_id, chunk_index, width);
+        match &diff.insert {
+            Out::Any(Any::String(text)) => {
+                let text = text.as_ref();
+                push_text_chunks(
+                    &mut paragraph_runs,
+                    text,
+                    story_index,
+                    attributes,
+                    comments,
+                    env,
+                    paragraph_pm_units,
+                );
+                story_index += width;
+                paragraph_pm_units += width;
+                at_block_boundary = false;
+            }
+            Out::YMap(pilcrow) if is_pilcrow(pilcrow, txn) => {
+                let values = pilcrow_values(pilcrow, txn);
+                local.observe_pilcrow(
+                    &mut plain,
+                    pilcrow,
+                    &values,
+                    attributes,
+                    story_id,
+                    (
+                        paragraph_start,
                         paragraph_pm_start,
-                        paragraph_pm_units,
-                        list_state,
-                        (map, story_slot),
-                    );
-                    let values = pilcrow_values(&pilcrow, txn);
-                    suppress_cell_edge_spacing(
-                        &mut paragraph_blocks,
-                        &values,
-                        CellEdges {
-                            before: cell_edges.before && paragraph_start == 0,
-                            after: cell_edges.after && story_index + 1 == story.len(txn),
-                        },
-                    );
-                    pm_cursor = paragraph_pm_start + u64::from(paragraph_pm_units) + 2;
-                    if !shared_map_string(&pilcrow, txn, "paraId")
-                        .is_some_and(|id| hidden_field_blocks.contains(&id))
-                    {
-                        blocks.extend(paragraph_blocks);
+                        blocks.len(),
+                        map.paragraph_count(),
+                    ),
+                    story_index + 1 == story.len(txn),
+                    local_safe
+                        && !value_string(values.get("paraId"))
+                            .is_some_and(|id| hidden_field_blocks.contains(&id)),
+                );
+                let para_id = value_string(values.get("paraId")).unwrap_or_default();
+                let code_join = pending_code_join.take();
+                let sectioned =
+                    values.contains_key("sectPr") || values.contains_key("sectionBreakType");
+                let suppressed = hidden_field_blocks.contains(&para_id);
+                retain_visible_drawings(&mut paragraph_drawings, env, opaque_sequences);
+                if !sectioned
+                    && field_join
+                        .as_ref()
+                        .and_then(|join| join.hidden.get(join.next_hidden))
+                        .is_some_and(|paragraph| {
+                            paragraph.id == para_id && paragraph.allows(&paragraph_runs, env)
+                        })
+                    && paragraph_drawings.iter().all(|drawing| drawing.anchored)
+                {
+                    paragraph_runs.retain(|run| {
+                        let kept = run.visible(env) && run.anchored();
+                        if !kept && !run.revision_hidden {
+                            collect_run_sequences(run, opaque_sequences);
+                        }
+                        kept
+                    });
+                    if !paragraph_runs.is_empty() || !paragraph_drawings.is_empty() {
+                        let source = map.paragraph_count();
+                        map.paragraphs.push((story_slot, para_id));
+                        blocks.extend(lift_drawings(
+                            std::mem::take(&mut paragraph_drawings),
+                            source,
+                            paragraph_pm_start,
+                            map,
+                        ));
+                        if !paragraph_runs.is_empty() {
+                            let join = field_join.as_mut().unwrap();
+                            let offset = (paragraph_pm_start - join.pm_start) as u32;
+                            let defaults = paragraph_run_defaults(&values);
+                            for run in &mut paragraph_runs {
+                                run.pm_start += offset;
+                                run.pm_end += offset;
+                                apply_run_defaults(&mut run.formatting, &defaults);
+                            }
+                            join.pm_units = offset + paragraph_pm_units;
+                            join.segments
+                                .push((source, std::mem::take(&mut paragraph_runs)));
+                        }
                     }
-                    // The field's own paragraph is the one just closed, so the
-                    // range it suppresses opens with the next block.
+                    field_join.as_mut().unwrap().next_hidden += 1;
                     hidden_field_blocks.append(&mut pending_hidden_field_blocks);
-                    // A pilcrow carrying section properties ENDS its section,
-                    // so the break block follows its paragraph.
-                    if let Some(section_break) = section_break_block(&values, &mut section_margins)
-                    {
-                        blocks.push(LayoutBlock::SectionBreak(section_break));
-                    }
                     paragraph_runs = Vec::new();
                     paragraph_drawings = Vec::new();
+                    pm_cursor = paragraph_pm_start + u64::from(paragraph_pm_units) + 2;
                     story_index += 1;
                     paragraph_start = story_index;
                     paragraph_pm_start = pm_cursor;
                     paragraph_pm_units = 0;
                     at_block_boundary = true;
+                    continue;
                 }
-                Out::YMap(table)
-                    if shared_map_string(&table, txn, "_kind").as_deref() == Some("table") =>
-                {
-                    if !paragraph_runs.is_empty()
-                        || !paragraph_drawings.is_empty()
-                        || paragraph_start != story_index
-                    {
-                        return Err(BridgeError::MalformedTable {
-                            story: story_id.to_owned(),
-                            index: story_index,
-                            detail: "table embed interrupts paragraph content".to_owned(),
-                        });
+                let joinable = !sectioned
+                    && !suppressed
+                    && paragraph_drawings.iter().all(|drawing| drawing.anchored);
+                let carried = field_join.take().and_then(|join| {
+                    if joinable && join.next_hidden == join.hidden.len() && join.target == para_id {
+                        return Some(join);
                     }
-                    let hidden = shared_map_string(&table, txn, "blockId")
-                        .is_some_and(|id| hidden_field_blocks.contains(&id));
-                    map.tables.push((pm_cursor, story_slot, table_ordinal));
-                    table_ordinal += 1;
-                    let (lowered, node_size) = lower_table(
-                        &table,
+                    blocks.extend(join.flush(
                         txn,
                         story_id,
-                        story_index,
-                        pm_cursor,
                         env,
-                        active_stories,
                         list_state,
                         map,
-                    )?;
-                    if !hidden {
-                        blocks.push(LayoutBlock::Table(lowered));
-                    }
-                    story_index += 1;
-                    paragraph_start = story_index;
-                    pm_cursor += node_size;
-                    paragraph_pm_start = pm_cursor;
-                    paragraph_pm_units = 0;
-                    at_block_boundary = true;
-                }
-                Out::YMap(page_break)
-                    if matches!(
-                        shared_map_string(&page_break, txn, "_kind").as_deref(),
-                        Some("pageBreak" | "columnBreak")
-                    ) =>
-                {
-                    if !at_block_boundary
-                        || !paragraph_runs.is_empty()
-                        || !paragraph_drawings.is_empty()
-                    {
-                        return Err(BridgeError::UnsupportedEmbed {
-                            story: story_id.to_owned(),
-                            index: story_index,
-                        });
-                    }
-                    let kind = shared_map_string(&page_break, txn, "_kind").unwrap_or_default();
-                    if kind == "pageBreak"
-                        && let Some(LayoutBlock::Paragraph(paragraph)) = blocks.last_mut()
-                        && paragraph.runs.is_empty()
-                        && paragraph.pm_end == Some(pm_cursor as f64)
-                        && paragraph.pm_end == paragraph.pm_start.map(|start| start + 2.0)
-                        && let Some(attrs) = paragraph.attrs.as_mut()
-                        && attrs.list_marker.is_some()
-                    {
-                        attrs.list_marker_hidden = Some(true);
-                    }
-                    let id = BlockId::Str(format!("{story_id}:{kind}:{story_index}"));
-                    if kind == "columnBreak" {
-                        blocks.push(LayoutBlock::ColumnBreak(ColumnBreakBlock {
-                            sdt_groups: None,
-                            id,
-                            pm_start: Some(pm_cursor as f64),
-                            pm_end: Some((pm_cursor + 1) as f64),
-                        }));
-                    } else {
-                        blocks.push(LayoutBlock::PageBreak(PageBreakBlock {
-                            sdt_groups: None,
-                            id,
-                            pm_start: Some(pm_cursor as f64),
-                            pm_end: Some((pm_cursor + 1) as f64),
-                        }));
-                    }
-                    story_index += 1;
-                    paragraph_start = story_index;
-                    pm_cursor += 1;
-                    paragraph_pm_start = pm_cursor;
-                    paragraph_pm_units = 0;
-                    at_block_boundary = true;
-                }
-                Out::YMap(block_sdt)
-                    if shared_map_string(&block_sdt, txn, "_kind").as_deref()
-                        == Some("blockSdt") =>
-                {
-                    if !at_block_boundary
-                        || !paragraph_runs.is_empty()
-                        || !paragraph_drawings.is_empty()
-                    {
-                        return Err(BridgeError::UnsupportedEmbed {
-                            story: story_id.to_owned(),
-                            index: story_index,
-                        });
-                    }
-                    let Some(child_story) = shared_map_string(&block_sdt, txn, "story") else {
-                        return Err(BridgeError::UnsupportedEmbed {
-                            story: story_id.to_owned(),
-                            index: story_index,
-                        });
-                    };
-                    let group = lower_sdt_group(&block_sdt, txn, pm_cursor as i64);
-                    let (mut child_blocks, content_size) = lower_story(
-                        txn,
-                        &child_story,
-                        env,
-                        pm_cursor + 1,
-                        active_stories,
-                        list_state,
+                        story_slot,
                         CellEdges {
-                            before: cell_edges.before && story_index == 0,
-                            after: cell_edges.after && story_index + 1 == story.len(txn),
+                            before: cell_edges.before,
+                            after: false,
                         },
-                        map,
-                    )?;
-                    stamp_sdt_group(&mut child_blocks, group);
-                    if !hidden_field_blocks.contains(&child_story) {
-                        blocks.extend(child_blocks);
+                        opaque_sequences,
+                        revealable,
+                    ));
+                    None
+                });
+                let (block_pm_start, block_start, mut segments) = match carried {
+                    Some(join) => (join.pm_start, join.story_start, join.segments),
+                    None => (paragraph_pm_start, paragraph_start, Vec::new()),
+                };
+                let offset = (paragraph_pm_start - block_pm_start) as u32;
+                for run in &mut paragraph_runs {
+                    run.pm_start += offset;
+                    run.pm_end += offset;
+                }
+                for drawing in &mut paragraph_drawings {
+                    drawing.pm_offset += offset;
+                }
+                let block_pm_units = offset + paragraph_pm_units;
+                pm_cursor = paragraph_pm_start + u64::from(paragraph_pm_units) + 2;
+                if let Some((hidden, target)) = code_join
+                    && joinable
+                {
+                    let defaults = paragraph_run_defaults(&values);
+                    for run in &mut paragraph_runs {
+                        apply_run_defaults(&mut run.formatting, &defaults);
                     }
+                    let source = map.paragraph_count();
+                    map.paragraphs.push((story_slot, para_id));
+                    blocks.extend(lift_drawings(
+                        std::mem::take(&mut paragraph_drawings),
+                        source,
+                        block_pm_start,
+                        map,
+                    ));
+                    segments.push((source, std::mem::take(&mut paragraph_runs)));
+                    field_join = Some(FieldJoin {
+                        pilcrow: pilcrow.clone(),
+                        attributes: attributes.cloned(),
+                        segments,
+                        pm_start: block_pm_start,
+                        pm_units: block_pm_units,
+                        story_start: block_start,
+                        hidden,
+                        next_hidden: 0,
+                        target,
+                    });
+                    hidden_field_blocks.append(&mut pending_hidden_field_blocks);
                     story_index += 1;
                     paragraph_start = story_index;
-                    pm_cursor += content_size + 2;
                     paragraph_pm_start = pm_cursor;
                     paragraph_pm_units = 0;
                     at_block_boundary = true;
+                    continue;
                 }
-                Out::YMap(note_ref)
-                    if shared_map_string(&note_ref, txn, "_kind").as_deref() == Some("noteRef") =>
+                let mut paragraph_blocks = flush_paragraph_parts(
+                    paragraph_runs,
+                    paragraph_drawings,
+                    pilcrow,
+                    attributes,
+                    txn,
+                    story_id,
+                    env,
+                    block_pm_start,
+                    block_pm_units,
+                    list_state,
+                    (map, story_slot),
+                    opaque_sequences,
+                    revealable,
+                    segments,
+                );
+                suppress_cell_edge_spacing(
+                    &mut paragraph_blocks,
+                    &values,
+                    CellEdges {
+                        before: cell_edges.before && block_start == 0,
+                        after: cell_edges.after && story_index + 1 == story.len(txn),
+                    },
+                );
+                if !shared_map_string(pilcrow, txn, "paraId")
+                    .is_some_and(|id| hidden_field_blocks.contains(&id))
                 {
-                    let footnote_id = shared_any(&note_ref, txn, "footnoteRefId")
-                        .as_ref()
-                        .and_then(|value| note_ref_id(value, env));
-                    let endnote_id = shared_any(&note_ref, txn, "endnoteRefId")
-                        .as_ref()
-                        .and_then(|value| note_ref_id(value, env));
-                    let Some(id) = footnote_id.or(endnote_id) else {
-                        return Err(BridgeError::UnsupportedEmbed {
-                            story: story_id.to_owned(),
-                            index: story_index,
-                        });
-                    };
-                    let mut formatting = lower_run_formatting(attributes, env);
-                    formatting.superscript = Some(true);
-                    if footnote_id.is_some() {
-                        formatting.footnote_ref_id = Some(id);
-                    } else {
-                        formatting.endnote_ref_id = Some(id);
-                    }
-                    let mut comment_ids: Vec<f64> = comments
-                        .iter()
-                        .filter(|interval| {
-                            interval.start <= story_index && story_index + 1 <= interval.end
-                        })
-                        .map(|interval| interval.id)
-                        .collect();
-                    comment_ids.sort_by(f64::total_cmp);
-                    comment_ids.dedup_by(|a, b| a.total_cmp(b).is_eq());
-                    if !comment_ids.is_empty() {
-                        formatting.comment_ids = Some(comment_ids);
-                    }
-                    paragraph_runs.push(RawRun {
-                        kind: RawRunKind::Text(note_ref_label(id)),
-                        formatting,
-                        story_start: story_index,
-                        story_end: story_index + 1,
-                        pm_start: paragraph_pm_units,
-                        pm_end: paragraph_pm_units + 1,
-                        inherited_hyperlink: inherited_hyperlink_style(attributes),
-                        inline_sdt_widget: None,
-                        atom: true,
-                    });
-                    story_index += 1;
-                    paragraph_pm_units += 1;
-                    at_block_boundary = false;
+                    blocks.extend(paragraph_blocks);
+                } else if let Some(revealed) = revealable {
+                    revealed.extend(paragraph_blocks);
                 }
-                Out::YMap(field)
-                    if shared_map_string(&field, txn, "_kind").as_deref() == Some("field") =>
-                {
-                    let instruction = shared_map_string(&field, txn, "instruction")
-                        .filter(|value| !value.is_empty());
-                    let hidden = instruction
-                        .as_deref()
-                        .is_some_and(super::seed::numeric_field_instruction);
-                    if hidden {
-                        pending_hidden_field_blocks
-                            .append(&mut hidden_field_result_blocks(&field, txn));
-                    }
-                    let field_type = shared_map_string(&field, txn, "fieldType")
-                        .unwrap_or_else(|| "OTHER".to_owned());
-                    let mapped_type = match field_type.as_str() {
-                        "PAGE" | "NUMPAGES" | "DATE" | "TIME" => field_type.clone(),
-                        _ => "OTHER".to_owned(),
-                    };
-                    paragraph_runs.push(RawRun {
-                        kind: RawRunKind::Field {
-                            field_type: mapped_type.clone(),
-                            raw_type: (field_type != mapped_type).then_some(field_type),
-                            instruction,
-                            fallback: Some(if hidden {
-                                String::new()
-                            } else {
-                                shared_map_string(&field, txn, "displayText").unwrap_or_default()
-                            }),
+                // The field's own paragraph is the one just closed, so the
+                // range it suppresses opens with the next block.
+                hidden_field_blocks.append(&mut pending_hidden_field_blocks);
+                // A pilcrow carrying section properties ENDS its section,
+                // so the break block follows its paragraph.
+                if let Some(section_break) = section_break_block(&values, &mut section_margins) {
+                    blocks.push(LayoutBlock::SectionBreak(section_break));
+                }
+                paragraph_runs = Vec::new();
+                paragraph_drawings = Vec::new();
+                story_index += 1;
+                paragraph_start = story_index;
+                paragraph_pm_start = pm_cursor;
+                paragraph_pm_units = 0;
+                at_block_boundary = true;
+            }
+            Out::YMap(table)
+                if shared_map_string(table, txn, "_kind").as_deref() == Some("table") =>
+            {
+                if let Some(join) = field_join.take() {
+                    blocks.extend(join.flush(
+                        txn,
+                        story_id,
+                        env,
+                        list_state,
+                        map,
+                        story_slot,
+                        CellEdges {
+                            before: cell_edges.before,
+                            after: false,
                         },
-                        formatting: lower_run_formatting(attributes, env),
-                        story_start: story_index,
-                        story_end: story_index + 1,
-                        pm_start: paragraph_pm_units,
-                        pm_end: paragraph_pm_units + 1,
-                        inherited_hyperlink: inherited_hyperlink_style(attributes),
-                        inline_sdt_widget: None,
-                        atom: true,
-                    });
-                    story_index += 1;
-                    paragraph_pm_units += 1;
-                    at_block_boundary = false;
+                        opaque_sequences,
+                        revealable,
+                    ));
                 }
-                Out::YMap(line_break)
-                    if shared_map_string(&line_break, txn, "_kind").as_deref() == Some("break") =>
+                if !paragraph_runs.is_empty()
+                    || !paragraph_drawings.is_empty()
+                    || paragraph_start != story_index
                 {
-                    paragraph_runs.push(RawRun {
-                        kind: RawRunKind::LineBreak,
-                        formatting: lower_run_formatting(attributes, env),
-                        story_start: story_index,
-                        story_end: story_index + 1,
-                        pm_start: paragraph_pm_units,
-                        pm_end: paragraph_pm_units + 1,
-                        inherited_hyperlink: inherited_hyperlink_style(attributes),
-                        inline_sdt_widget: None,
-                        atom: true,
+                    return Err(BridgeError::MalformedTable {
+                        story: story_id.to_owned(),
+                        index: story_index,
+                        detail: "table embed interrupts paragraph content".to_owned(),
                     });
-                    story_index += 1;
-                    paragraph_pm_units += 1;
-                    at_block_boundary = false;
                 }
-                Out::YMap(image)
-                    if shared_map_string(&image, txn, "_kind").as_deref() == Some("image") =>
+                let previewed_out = env.revision_hidden(attributes);
+                let hidden = previewed_out
+                    || shared_map_string(table, txn, "blockId")
+                        .is_some_and(|id| hidden_field_blocks.contains(&id));
+                map.tables.push((pm_cursor, story_slot, table_ordinal));
+                table_ordinal += 1;
+                let mut unnumbered = previewed_out.then(|| list_state.clone());
+                let (lowered, node_size) = lower_table(
+                    table,
+                    txn,
+                    story_id,
+                    story_index,
+                    pm_cursor,
+                    env,
+                    active_stories,
+                    unnumbered.as_mut().unwrap_or(&mut *list_state),
+                    map,
+                    opaque_sequences,
+                    revealable,
+                    local,
+                )?;
+                if !hidden {
+                    blocks.push(LayoutBlock::Table(lowered));
+                } else if !previewed_out && let Some(revealed) = revealable {
+                    revealed.push(LayoutBlock::Table(lowered));
+                }
+                story_index += 1;
+                paragraph_start = story_index;
+                pm_cursor += node_size;
+                paragraph_pm_start = pm_cursor;
+                paragraph_pm_units = 0;
+                at_block_boundary = true;
+            }
+            Out::YMap(page_break)
+                if matches!(
+                    shared_map_string(page_break, txn, "_kind").as_deref(),
+                    Some("pageBreak" | "columnBreak")
+                ) =>
+            {
+                if let Some(join) = field_join.take() {
+                    blocks.extend(join.flush(
+                        txn,
+                        story_id,
+                        env,
+                        list_state,
+                        map,
+                        story_slot,
+                        CellEdges {
+                            before: cell_edges.before,
+                            after: false,
+                        },
+                        opaque_sequences,
+                        revealable,
+                    ));
+                }
+                if !at_block_boundary
+                    || !paragraph_runs.is_empty()
+                    || !paragraph_drawings.is_empty()
                 {
-                    let formatting = lower_run_formatting(attributes, env);
-                    paragraph_runs.push(RawRun {
-                        kind: RawRunKind::Image(lower_image_run(&image, txn, &formatting, env)),
-                        formatting,
-                        story_start: story_index,
-                        story_end: story_index + 1,
-                        pm_start: paragraph_pm_units,
-                        pm_end: paragraph_pm_units + 1,
-                        inherited_hyperlink: inherited_hyperlink_style(attributes),
-                        inline_sdt_widget: None,
-                        atom: true,
+                    return Err(BridgeError::UnsupportedEmbed {
+                        story: story_id.to_owned(),
+                        index: story_index,
                     });
-                    story_index += 1;
-                    paragraph_pm_units += 1;
-                    at_block_boundary = false;
                 }
-                Out::YMap(rule)
-                    if shared_map_string(&rule, txn, "_kind").as_deref()
-                        == Some("horizontalRule") =>
+                let kind = shared_map_string(page_break, txn, "_kind").unwrap_or_default();
+                let hidden = env.revision_hidden(attributes);
+                if kind == "pageBreak"
+                    && !hidden
+                    && let Some(LayoutBlock::Paragraph(paragraph)) = blocks.last_mut()
+                    && paragraph.runs.is_empty()
+                    && paragraph.pm_end == Some(pm_cursor as f64)
+                    && paragraph.pm_end == paragraph.pm_start.map(|start| start + 2.0)
+                    && let Some(attrs) = paragraph.attrs.as_mut()
+                    && attrs.list_marker.is_some()
                 {
-                    let Some(rule) = shared_any(&rule, txn, "rule")
+                    attrs.list_marker_hidden = Some(true);
+                }
+                // Numbered among the story's breaks rather than by position,
+                // so an edit before a break leaves its block unchanged.
+                let id = BlockId::Str(format!("{story_id}:{kind}:{break_ordinal}"));
+                break_ordinal += 1;
+                if !hidden {
+                    let (pm_start, pm_end) = (Some(pm_cursor as f64), Some((pm_cursor + 1) as f64));
+                    blocks.push(if kind == "columnBreak" {
+                        LayoutBlock::ColumnBreak(ColumnBreakBlock {
+                            sdt_groups: None,
+                            id,
+                            pm_start,
+                            pm_end,
+                        })
+                    } else {
+                        LayoutBlock::PageBreak(PageBreakBlock {
+                            sdt_groups: None,
+                            id,
+                            pm_start,
+                            pm_end,
+                        })
+                    });
+                }
+                story_index += 1;
+                paragraph_start = story_index;
+                pm_cursor += 1;
+                paragraph_pm_start = pm_cursor;
+                paragraph_pm_units = 0;
+                at_block_boundary = true;
+            }
+            Out::YMap(block_sdt)
+                if shared_map_string(block_sdt, txn, "_kind").as_deref() == Some("blockSdt") =>
+            {
+                if let Some(join) = field_join.take() {
+                    blocks.extend(join.flush(
+                        txn,
+                        story_id,
+                        env,
+                        list_state,
+                        map,
+                        story_slot,
+                        CellEdges {
+                            before: cell_edges.before,
+                            after: false,
+                        },
+                        opaque_sequences,
+                        revealable,
+                    ));
+                }
+                if !at_block_boundary
+                    || !paragraph_runs.is_empty()
+                    || !paragraph_drawings.is_empty()
+                {
+                    return Err(BridgeError::UnsupportedEmbed {
+                        story: story_id.to_owned(),
+                        index: story_index,
+                    });
+                }
+                let Some(child_story) = shared_map_string(block_sdt, txn, "story") else {
+                    return Err(BridgeError::UnsupportedEmbed {
+                        story: story_id.to_owned(),
+                        index: story_index,
+                    });
+                };
+                let group = lower_sdt_group(block_sdt, txn, pm_cursor as i64);
+                let previewed_out = env.revision_hidden(attributes);
+                let mut unnumbered = previewed_out.then(|| list_state.clone());
+                let (mut child_blocks, content_size) = lower_story(
+                    txn,
+                    &child_story,
+                    env,
+                    pm_cursor + 1,
+                    active_stories,
+                    unnumbered.as_mut().unwrap_or(&mut *list_state),
+                    CellEdges {
+                        before: cell_edges.before && story_index == 0,
+                        after: cell_edges.after && story_index + 1 == story.len(txn),
+                    },
+                    map,
+                    opaque_sequences,
+                    revealable,
+                    local,
+                )?;
+                stamp_sdt_group(&mut child_blocks, group);
+                if !previewed_out && !hidden_field_blocks.contains(&child_story) {
+                    blocks.extend(child_blocks);
+                } else if !previewed_out && let Some(revealed) = revealable {
+                    revealed.extend(child_blocks);
+                }
+                story_index += 1;
+                paragraph_start = story_index;
+                pm_cursor += content_size + 2;
+                paragraph_pm_start = pm_cursor;
+                paragraph_pm_units = 0;
+                at_block_boundary = true;
+            }
+            Out::YMap(note_ref)
+                if shared_map_string(note_ref, txn, "_kind").as_deref() == Some("noteRef") =>
+            {
+                let footnote_id = shared_any(note_ref, txn, "footnoteRefId")
+                    .as_ref()
+                    .and_then(|value| note_ref_id(value, env));
+                let endnote_id = shared_any(note_ref, txn, "endnoteRefId")
+                    .as_ref()
+                    .and_then(|value| note_ref_id(value, env));
+                let Some(id) = footnote_id.or(endnote_id) else {
+                    return Err(BridgeError::UnsupportedEmbed {
+                        story: story_id.to_owned(),
+                        index: story_index,
+                    });
+                };
+                let mut formatting = lower_run_formatting(attributes, env);
+                formatting.superscript = Some(true);
+                if footnote_id.is_some() {
+                    formatting.footnote_ref_id = Some(id);
+                } else {
+                    formatting.endnote_ref_id = Some(id);
+                }
+                let mut comment_ids: Vec<f64> = comments
+                    .iter()
+                    .filter(|interval| {
+                        interval.start <= story_index && story_index + 1 <= interval.end
+                    })
+                    .map(|interval| interval.id)
+                    .collect();
+                comment_ids.sort_by(f64::total_cmp);
+                comment_ids.dedup_by(|a, b| a.total_cmp(b).is_eq());
+                if !comment_ids.is_empty() {
+                    formatting.comment_ids = Some(comment_ids);
+                }
+                paragraph_runs.push(RawRun {
+                    kind: RawRunKind::Text(note_ref_label(id)),
+                    formatting,
+                    story_start: story_index,
+                    story_end: story_index + 1,
+                    pm_start: paragraph_pm_units,
+                    pm_end: paragraph_pm_units + 1,
+                    inherited_hyperlink: inherited_hyperlink_style(attributes),
+                    inline_sdt_widget: None,
+                    atom: true,
+                    revision_hidden: env.revision_hidden(attributes),
+                });
+                story_index += 1;
+                paragraph_pm_units += 1;
+                at_block_boundary = false;
+            }
+            Out::YMap(field)
+                if shared_map_string(field, txn, "_kind").as_deref() == Some("field") =>
+            {
+                let instruction =
+                    shared_map_string(field, txn, "instruction").filter(|value| !value.is_empty());
+                let hidden = instruction
+                    .as_deref()
+                    .is_some_and(super::seed::numeric_field_instruction);
+                if hidden && !env.revision_hidden(attributes) {
+                    preview::touch_hidden_fields();
+                    pending_hidden_field_blocks.append(&mut hidden_field_result_blocks(field, txn));
+                }
+                if joins_field_code_paragraphs(story_id)
+                    && let Some(join) = field_code_join(field, txn)
+                    && !env.revision_hidden(attributes)
+                    && pending_code_join
+                        .as_ref()
+                        .is_none_or(|(hidden, _)| join.0.len() > hidden.len())
+                {
+                    pending_code_join = Some(join);
+                }
+                let field_type = shared_map_string(field, txn, "fieldType")
+                    .unwrap_or_else(|| "OTHER".to_owned());
+                let mapped_type = match field_type.as_str() {
+                    "PAGE" | "NUMPAGES" | "DATE" | "TIME" => field_type.clone(),
+                    _ => "OTHER".to_owned(),
+                };
+                let nested_sequences = lower_nested_sequences(
+                    instruction.as_deref(),
+                    shared_any(field, txn, "resultProjection").as_ref(),
+                );
+                paragraph_runs.push(RawRun {
+                    kind: RawRunKind::Field {
+                        field_type: mapped_type.clone(),
+                        raw_type: (field_type != mapped_type).then_some(field_type),
+                        instruction,
+                        fallback: Some(if hidden {
+                            String::new()
+                        } else {
+                            shared_map_string(field, txn, "displayText").unwrap_or_default()
+                        }),
+                        source: field_join
+                            .as_ref()
+                            .and_then(|_| shared_map_string(field, txn, "fieldData")),
+                        locked: shared_any(field, txn, "fldLock")
+                            .as_ref()
+                            .and_then(any_bool)
+                            .unwrap_or(false),
+                        nested_sequences,
+                    },
+                    formatting: lower_run_formatting(attributes, env),
+                    story_start: story_index,
+                    story_end: story_index + 1,
+                    pm_start: paragraph_pm_units,
+                    pm_end: paragraph_pm_units + 1,
+                    inherited_hyperlink: inherited_hyperlink_style(attributes),
+                    inline_sdt_widget: None,
+                    atom: true,
+                    revision_hidden: env.revision_hidden(attributes),
+                });
+                story_index += 1;
+                paragraph_pm_units += 1;
+                at_block_boundary = false;
+            }
+            Out::YMap(line_break)
+                if shared_map_string(line_break, txn, "_kind").as_deref() == Some("break") =>
+            {
+                paragraph_runs.push(RawRun {
+                    kind: RawRunKind::LineBreak,
+                    formatting: lower_run_formatting(attributes, env),
+                    story_start: story_index,
+                    story_end: story_index + 1,
+                    pm_start: paragraph_pm_units,
+                    pm_end: paragraph_pm_units + 1,
+                    inherited_hyperlink: inherited_hyperlink_style(attributes),
+                    inline_sdt_widget: None,
+                    atom: true,
+                    revision_hidden: env.revision_hidden(attributes),
+                });
+                story_index += 1;
+                paragraph_pm_units += 1;
+                at_block_boundary = false;
+            }
+            Out::YMap(image)
+                if shared_map_string(image, txn, "_kind").as_deref() == Some("image") =>
+            {
+                let formatting = lower_run_formatting(attributes, env);
+                paragraph_runs.push(RawRun {
+                    kind: RawRunKind::Image(lower_image_run(image, txn, &formatting, env)),
+                    formatting,
+                    story_start: story_index,
+                    story_end: story_index + 1,
+                    pm_start: paragraph_pm_units,
+                    pm_end: paragraph_pm_units + 1,
+                    inherited_hyperlink: inherited_hyperlink_style(attributes),
+                    inline_sdt_widget: None,
+                    atom: true,
+                    revision_hidden: env.revision_hidden(attributes),
+                });
+                story_index += 1;
+                paragraph_pm_units += 1;
+                at_block_boundary = false;
+            }
+            Out::YMap(rule)
+                if shared_map_string(rule, txn, "_kind").as_deref() == Some("horizontalRule") =>
+            {
+                let Some(rule) = shared_any(rule, txn, "rule")
                         .filter(|value| {
                             any_map(value).is_some_and(|map| {
                                 ["width", "widthPercent", "height"].iter().all(|key| {
@@ -657,206 +1238,235 @@ fn lower_story<T: ReadTxn>(
                             index: story_index,
                         });
                     };
-                    paragraph_runs.push(RawRun {
-                        kind: RawRunKind::HorizontalRule(HorizontalRule {
-                            width: rule.width.map(|width| width / 9_525.0),
-                            width_percent: rule.width_percent,
-                            height: rule.height / 9_525.0,
-                            alignment: rule.alignment,
-                            no_shade: rule.no_shade,
-                            color: rule.color,
-                            pm_start: 0.0,
-                            pm_end: 0.0,
-                        }),
-                        formatting: lower_run_formatting(attributes, env),
-                        story_start: story_index,
-                        story_end: story_index + 1,
-                        pm_start: paragraph_pm_units,
-                        pm_end: paragraph_pm_units + 1,
-                        inherited_hyperlink: inherited_hyperlink_style(attributes),
-                        inline_sdt_widget: None,
-                        atom: true,
-                    });
-                    story_index += 1;
-                    paragraph_pm_units += 1;
-                    at_block_boundary = false;
+                paragraph_runs.push(RawRun {
+                    kind: RawRunKind::HorizontalRule(HorizontalRule {
+                        width: rule.width.map(|width| width / 9_525.0),
+                        width_percent: rule.width_percent,
+                        height: rule.height / 9_525.0,
+                        alignment: rule.alignment,
+                        no_shade: rule.no_shade,
+                        color: rule.color,
+                        pm_start: 0.0,
+                        pm_end: 0.0,
+                    }),
+                    formatting: lower_run_formatting(attributes, env),
+                    story_start: story_index,
+                    story_end: story_index + 1,
+                    pm_start: paragraph_pm_units,
+                    pm_end: paragraph_pm_units + 1,
+                    inherited_hyperlink: inherited_hyperlink_style(attributes),
+                    inline_sdt_widget: None,
+                    atom: true,
+                    revision_hidden: env.revision_hidden(attributes),
+                });
+                story_index += 1;
+                paragraph_pm_units += 1;
+                at_block_boundary = false;
+            }
+            Out::YMap(math) if shared_map_string(math, txn, "_kind").as_deref() == Some("math") => {
+                let text = shared_map_string(math, txn, "plainText")
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or_else(|| "[equation]".to_owned());
+                paragraph_runs.push(RawRun {
+                    kind: RawRunKind::Text(text),
+                    formatting: RunFormatting {
+                        italic: Some(true),
+                        font_family: Some("Cambria Math".to_owned()),
+                        hidden: mark_bool(attributes, "hidden"),
+                        // Sentinel consumed by `stamp_logical_order`: a
+                        // math fallback run gets no logical order.
+                        logical_order: Some(u64::MAX),
+                        ..RunFormatting::default()
+                    },
+                    story_start: story_index,
+                    story_end: story_index + 1,
+                    pm_start: paragraph_pm_units,
+                    pm_end: paragraph_pm_units + 1,
+                    inherited_hyperlink: inherited_hyperlink_style(attributes),
+                    inline_sdt_widget: None,
+                    atom: true,
+                    revision_hidden: env.revision_hidden(attributes),
+                });
+                story_index += 1;
+                paragraph_pm_units += 1;
+                at_block_boundary = false;
+            }
+            Out::YMap(sdt) if shared_map_string(sdt, txn, "_kind").as_deref() == Some("sdt") => {
+                let first = paragraph_runs.len();
+                let node_size = lower_inline_sdt(
+                    sdt,
+                    txn,
+                    env,
+                    story_index,
+                    paragraph_pm_start,
+                    paragraph_pm_units,
+                    None,
+                    &mut paragraph_runs,
+                );
+                inherit_inline_revision(&mut paragraph_runs[first..], attributes, env);
+                if env.revision_hidden(attributes) {
+                    hide_runs(&mut paragraph_runs[first..]);
                 }
-                Out::YMap(math)
-                    if shared_map_string(&math, txn, "_kind").as_deref() == Some("math") =>
-                {
-                    let text = shared_map_string(&math, txn, "plainText")
-                        .filter(|value| !value.is_empty())
-                        .unwrap_or_else(|| "[equation]".to_owned());
-                    paragraph_runs.push(RawRun {
-                        kind: RawRunKind::Text(text),
-                        formatting: RunFormatting {
-                            italic: Some(true),
-                            font_family: Some("Cambria Math".to_owned()),
-                            hidden: mark_bool(attributes, "hidden"),
-                            // Sentinel consumed by `stamp_logical_order`: a
-                            // math fallback run gets no logical order.
-                            logical_order: Some(u64::MAX),
-                            ..RunFormatting::default()
-                        },
-                        story_start: story_index,
-                        story_end: story_index + 1,
-                        pm_start: paragraph_pm_units,
-                        pm_end: paragraph_pm_units + 1,
-                        inherited_hyperlink: inherited_hyperlink_style(attributes),
-                        inline_sdt_widget: None,
-                        atom: true,
-                    });
-                    story_index += 1;
-                    paragraph_pm_units += 1;
-                    at_block_boundary = false;
-                }
-                Out::YMap(sdt)
-                    if shared_map_string(&sdt, txn, "_kind").as_deref() == Some("sdt") =>
-                {
-                    let node_size = lower_inline_sdt(
-                        &sdt,
-                        txn,
-                        env,
-                        story_index,
-                        paragraph_pm_start,
-                        paragraph_pm_units,
-                        None,
-                        &mut paragraph_runs,
-                    );
-                    story_index += 1;
-                    paragraph_pm_units += node_size;
-                    at_block_boundary = false;
-                }
-                Out::YMap(shape)
-                    if shared_map_string(&shape, txn, "_kind").as_deref() == Some("shape") =>
-                {
-                    let pm_offset = paragraph_pm_units;
-                    let Some(block) = lower_shape_block(
-                        &shape,
-                        txn,
-                        paragraph_pm_start + 1 + u64::from(pm_offset),
-                        env,
-                    ) else {
-                        return Err(BridgeError::UnsupportedEmbed {
-                            story: story_id.to_owned(),
-                            index: story_index,
-                        });
-                    };
-                    let formatting = lower_run_formatting(attributes, env);
-                    if shapes::inline_native_shape(&block) {
-                        let image = ImageRun {
-                            src: String::new(),
-                            width: block.width,
-                            height: block.height,
-                            alt: block.description.clone().or_else(|| block.title.clone()),
-                            shape_type: Some(block.shape_type.clone()),
-                            transform: None,
-                            position: None,
-                            wrap_type: Some("inline".to_owned()),
-                            display_mode: Some("inline".to_owned()),
-                            css_float: Some("none".to_owned()),
-                            dist_top: None,
-                            dist_bottom: None,
-                            dist_left: None,
-                            dist_right: None,
-                            crop_top: None,
-                            crop_right: None,
-                            crop_bottom: None,
-                            crop_left: None,
-                            opacity: None,
-                            rotation_deg: None,
-                            flip_h: None,
-                            flip_v: None,
-                            rotation_bounds: None,
-                            wrap_text: None,
-                            wrap_polygon: None,
-                            allow_overlap: None,
-                            layout_in_cell: None,
-                            effect_extent: None,
-                            effects: None,
-                            outline: None,
-                            decorative: block.decorative,
-                            hyperlink: formatting.hyperlink.clone(),
-                            inline_shape: Some(Box::new(block)),
-                            is_insertion: formatting.is_insertion,
-                            is_deletion: formatting.is_deletion,
-                            change_author: formatting.change_author.clone(),
-                            change_date: formatting.change_date.clone(),
-                            change_revision_id: formatting.change_revision_id,
-                            pm_start: None,
-                            pm_end: None,
-                        };
-                        paragraph_runs.push(RawRun {
-                            kind: RawRunKind::Image(image),
-                            formatting,
-                            story_start: story_index,
-                            story_end: story_index + 1,
-                            pm_start: pm_offset,
-                            pm_end: pm_offset + 1,
-                            inherited_hyperlink: inherited_hyperlink_style(attributes),
-                            inline_sdt_widget: None,
-                            atom: true,
-                        });
-                    } else {
-                        paragraph_drawings.push(DrawingMarker {
-                            pm_offset,
-                            story_index,
-                            anchored: shapes::anchored_shape(&block),
-                            block: LayoutBlock::Shape(block),
-                            hidden: mark_bool(attributes, "hidden") == Some(true),
-                        });
-                    }
-                    story_index += 1;
-                    paragraph_pm_units += 1;
-                    at_block_boundary = false;
-                }
-                Out::YMap(chart)
-                    if shared_map_string(&chart, txn, "_kind").as_deref() == Some("chart") =>
-                {
-                    let pm_offset = paragraph_pm_units;
-                    let Some(block) = lower_chart_block(
-                        &chart,
-                        txn,
-                        paragraph_pm_start + 1 + u64::from(pm_offset),
-                        env,
-                    ) else {
-                        return Err(BridgeError::UnsupportedEmbed {
-                            story: story_id.to_owned(),
-                            index: story_index,
-                        });
-                    };
-                    paragraph_drawings.push(DrawingMarker {
-                        pm_offset,
-                        story_index,
-                        block: LayoutBlock::Chart(block),
-                        hidden: mark_bool(attributes, "hidden") == Some(true),
-                        anchored: false,
-                    });
-                    story_index += 1;
-                    paragraph_pm_units += 1;
-                    at_block_boundary = false;
-                }
-                _ => {
+                story_index += 1;
+                paragraph_pm_units += node_size;
+                at_block_boundary = false;
+            }
+            Out::YMap(shape)
+                if shared_map_string(shape, txn, "_kind").as_deref() == Some("shape") =>
+            {
+                let pm_offset = paragraph_pm_units;
+                let Some(block) = lower_shape_block(
+                    shape,
+                    txn,
+                    paragraph_pm_start + 1 + u64::from(pm_offset),
+                    env,
+                ) else {
                     return Err(BridgeError::UnsupportedEmbed {
                         story: story_id.to_owned(),
                         index: story_index,
                     });
+                };
+                let formatting = lower_run_formatting(attributes, env);
+                if shapes::inline_native_shape(&block) {
+                    let image = ImageRun {
+                        src: String::new(),
+                        width: block.width,
+                        height: block.height,
+                        alt: block.description.clone().or_else(|| block.title.clone()),
+                        shape_type: Some(block.shape_type.clone()),
+                        transform: None,
+                        position: None,
+                        wrap_type: Some("inline".to_owned()),
+                        display_mode: Some("inline".to_owned()),
+                        css_float: Some("none".to_owned()),
+                        dist_top: None,
+                        dist_bottom: None,
+                        dist_left: None,
+                        dist_right: None,
+                        crop_top: None,
+                        crop_right: None,
+                        crop_bottom: None,
+                        crop_left: None,
+                        opacity: None,
+                        rotation_deg: None,
+                        flip_h: None,
+                        flip_v: None,
+                        rotation_bounds: None,
+                        wrap_text: None,
+                        wrap_polygon: None,
+                        allow_overlap: None,
+                        layout_in_cell: None,
+                        effect_extent: None,
+                        effects: None,
+                        outline: None,
+                        decorative: block.decorative,
+                        hyperlink: formatting.hyperlink.clone(),
+                        inline_shape: Some(Box::new(block)),
+                        is_insertion: formatting.is_insertion,
+                        is_deletion: formatting.is_deletion,
+                        change_author: formatting.change_author.clone(),
+                        change_date: formatting.change_date.clone(),
+                        change_revision_id: formatting.change_revision_id,
+                        pm_start: None,
+                        pm_end: None,
+                    };
+                    paragraph_runs.push(RawRun {
+                        kind: RawRunKind::Image(image),
+                        formatting,
+                        story_start: story_index,
+                        story_end: story_index + 1,
+                        pm_start: pm_offset,
+                        pm_end: pm_offset + 1,
+                        inherited_hyperlink: inherited_hyperlink_style(attributes),
+                        inline_sdt_widget: None,
+                        atom: true,
+                        revision_hidden: env.revision_hidden(attributes),
+                    });
+                } else {
+                    paragraph_drawings.push(DrawingMarker {
+                        pm_offset,
+                        story_index,
+                        anchored: shapes::anchored_shape(&block),
+                        block: LayoutBlock::Shape(block),
+                        hidden: mark_bool(attributes, "hidden") == Some(true),
+                        revision_hidden: env.revision_hidden(attributes),
+                    });
                 }
+                story_index += 1;
+                paragraph_pm_units += 1;
+                at_block_boundary = false;
+            }
+            Out::YMap(chart)
+                if shared_map_string(chart, txn, "_kind").as_deref() == Some("chart") =>
+            {
+                let pm_offset = paragraph_pm_units;
+                let Some(block) = lower_chart_block(
+                    chart,
+                    txn,
+                    paragraph_pm_start + 1 + u64::from(pm_offset),
+                    env,
+                ) else {
+                    return Err(BridgeError::UnsupportedEmbed {
+                        story: story_id.to_owned(),
+                        index: story_index,
+                    });
+                };
+                paragraph_drawings.push(DrawingMarker {
+                    pm_offset,
+                    story_index,
+                    block: LayoutBlock::Chart(block),
+                    hidden: mark_bool(attributes, "hidden") == Some(true),
+                    revision_hidden: env.revision_hidden(attributes),
+                    anchored: false,
+                });
+                story_index += 1;
+                paragraph_pm_units += 1;
+                at_block_boundary = false;
+            }
+            _ => {
+                return Err(BridgeError::UnsupportedEmbed {
+                    story: story_id.to_owned(),
+                    index: story_index,
+                });
             }
         }
+    }
 
-        if !at_block_boundary
-            || !paragraph_runs.is_empty()
-            || !paragraph_drawings.is_empty()
-            || paragraph_start != story_index
-        {
-            return Err(BridgeError::UnterminatedStory(story_id.to_owned()));
-        }
+    if let Some(join) = field_join.take() {
+        blocks.extend(join.flush(
+            txn,
+            story_id,
+            env,
+            list_state,
+            map,
+            story_slot,
+            cell_edges,
+            opaque_sequences,
+            revealable,
+        ));
+    }
+    if !at_block_boundary
+        || !paragraph_runs.is_empty()
+        || !paragraph_drawings.is_empty()
+        || paragraph_start != story_index
+    {
+        return Err(BridgeError::UnterminatedStory(story_id.to_owned()));
+    }
 
-        Ok((blocks, pm_cursor - pm_base))
-    })();
-    active_stories.remove(story_id);
-    result
+    let after = position!();
+    if let Some(recording) = recording {
+        recording.end_window(
+            chunks.len(),
+            after,
+            list_state,
+            opaque_sequences,
+            &hidden_field_blocks,
+            blocks.len(),
+            revealable.as_ref().map_or(0, Vec::len),
+            map,
+        );
+    }
+    Ok((blocks, after, hidden_field_blocks))
 }
 
 /// CamelCase alias of [`yrs_doc_to_layout_blocks`] for callers spelling the
@@ -868,6 +1478,160 @@ pub fn yrsDocToLayoutBlocks(
     env: &RenderEnv,
 ) -> Result<Vec<LayoutBlock>, BridgeError> {
     yrs_doc_to_layout_blocks(doc, story_id, env)
+}
+
+/// The paragraph a field's paragraph joins because the field's code hides its mark, and the
+/// paragraphs in between, which the code hides whole; bound at seed time.
+fn field_code_join<T: ReadTxn>(
+    field: &MapRef,
+    txn: &T,
+) -> Option<(Vec<FieldCodeParagraph>, String)> {
+    let target = shared_map_string(field, txn, "fieldCodeTarget")?;
+    let data = shared_map_string(field, txn, "fieldData")
+        .and_then(|data| serde_json::from_str::<Value>(&data).ok());
+    let code = data
+        .as_ref()
+        .and_then(|data| data.get("structuredCode"))
+        .and_then(|code| code.get("blocks"))
+        .and_then(Value::as_array);
+    let hidden = match shared_any(field, txn, "fieldCodeMarks") {
+        Some(Any::Array(ids)) => ids
+            .iter()
+            .filter_map(any_str)
+            .enumerate()
+            .map(|(index, id)| {
+                let mut fields = Vec::new();
+                if let Some(content) = code
+                    .and_then(|blocks| blocks.get(index))
+                    .and_then(|block| block.get("content"))
+                {
+                    nested_code_fields(content, &mut fields);
+                }
+                FieldCodeParagraph {
+                    id: id.to_owned(),
+                    fields,
+                }
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    Some((hidden, target))
+}
+
+fn nested_code_fields(value: &Value, fields: &mut Vec<Value>) {
+    match value {
+        Value::Object(object)
+            if matches!(
+                object.get("type").and_then(Value::as_str),
+                Some("simpleField" | "complexField")
+            ) =>
+        {
+            fields.push(value.clone());
+        }
+        Value::Object(object) => {
+            if let Some(content) = object
+                .get("structuredChildren")
+                .or_else(|| object.get("children"))
+                .or_else(|| object.get("content"))
+            {
+                nested_code_fields(content, fields);
+            }
+        }
+        Value::Array(values) => {
+            for child in values {
+                nested_code_fields(child, fields);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Headers and footers show a field whose code spans paragraph marks on one line, as Word
+/// does; other stories keep each paragraph, whose carets and edits address it alone.
+fn joins_field_code_paragraphs(story_id: &str) -> bool {
+    story_id.starts_with("hf:")
+}
+
+struct FieldCodeParagraph {
+    id: String,
+    fields: Vec<Value>,
+}
+
+impl FieldCodeParagraph {
+    fn allows(&self, runs: &[RawRun], env: &RenderEnv) -> bool {
+        let mut fields = self.fields.iter();
+        runs.iter()
+            .filter(|run| run.visible(env) && !run.anchored())
+            .all(|run| match &run.kind {
+                RawRunKind::Field {
+                    source: Some(source),
+                    ..
+                } => serde_json::from_str::<Value>(source)
+                    .ok()
+                    .is_some_and(|source| fields.any(|field| *field == source)),
+                _ => false,
+            })
+    }
+}
+
+/// Paragraphs whose marks a field's code hides, held until the paragraph they join.
+struct FieldJoin {
+    /// The last held paragraph, whose properties apply if the join is cut short.
+    pilcrow: MapRef,
+    attributes: Option<Attrs>,
+    /// Each held paragraph's source and runs, relative to `pm_start`, with its run defaults
+    /// applied.
+    segments: Vec<(u32, Vec<RawRun>)>,
+    pm_start: u64,
+    pm_units: u32,
+    story_start: u32,
+    /// The paragraphs between the last held one and `target`.
+    hidden: Vec<FieldCodeParagraph>,
+    next_hidden: usize,
+    target: String,
+}
+
+impl FieldJoin {
+    /// Lowers the held paragraphs as one paragraph, when what follows cannot take them.
+    #[allow(clippy::too_many_arguments)]
+    fn flush<T: ReadTxn>(
+        self,
+        txn: &T,
+        story_id: &str,
+        env: &RenderEnv,
+        list_state: &mut ListState,
+        map: &mut preview::LoweringOutput,
+        story_slot: u32,
+        cell_edges: CellEdges,
+        opaque_sequences: &mut BTreeSet<String>,
+        revealable: &mut Option<Vec<LayoutBlock>>,
+    ) -> Vec<LayoutBlock> {
+        let mut blocks = flush_paragraph_parts(
+            Vec::new(),
+            Vec::new(),
+            &self.pilcrow,
+            self.attributes.as_ref(),
+            txn,
+            story_id,
+            env,
+            self.pm_start,
+            self.pm_units,
+            list_state,
+            (map, story_slot),
+            opaque_sequences,
+            revealable,
+            self.segments,
+        );
+        suppress_cell_edge_spacing(
+            &mut blocks,
+            &pilcrow_values(&self.pilcrow, txn),
+            CellEdges {
+                before: cell_edges.before && self.story_start == 0,
+                after: cell_edges.after,
+            },
+        );
+        blocks
+    }
 }
 
 /// Story blocks a hidden field's cached result duplicates, bound at seed time.
@@ -925,7 +1689,10 @@ fn lower_table<T: ReadTxn>(
     env: &RenderEnv,
     active_stories: &mut BTreeSet<String>,
     list_state: &mut ListState,
-    map: &mut LoweringMap,
+    map: &mut preview::LoweringOutput,
+    opaque_sequences: &mut BTreeSet<String>,
+    revealable: &mut Option<Vec<LayoutBlock>>,
+    local: &mut local::LocalLowering,
 ) -> Result<(TableBlock, u64), BridgeError> {
     let tbl_pr_value = shared_any(table, txn, "tblPr")
         .ok_or_else(|| malformed_table(parent_story, story_index, "missing tblPr"))?;
@@ -968,8 +1735,9 @@ fn lower_table<T: ReadTxn>(
             _ => None,
         })
         .filter_map(any_map)
-        .find_map(|cell| map_string(cell, "story"))
-        .unwrap_or_else(|| story_index.to_string());
+        .find_map(|cell| map_string(cell, "story"));
+    local.block(table_identity.is_none());
+    let table_identity = table_identity.unwrap_or_else(|| story_index.to_string());
     let table_id = format!("{parent_story}:table:{table_identity}");
 
     let table_margins = tbl_pr.get("cellMargins").and_then(any_map);
@@ -1038,8 +1806,20 @@ fn lower_table<T: ReadTxn>(
                     after: true,
                 },
                 map,
+                opaque_sequences,
+                revealable,
+                local,
             )?;
 
+            if env.compatibility_flags.allow_space_of_same_style_in_table {
+                for block in &mut blocks {
+                    if let LayoutBlock::Paragraph(paragraph) = block
+                        && let Some(attrs) = &mut paragraph.attrs
+                    {
+                        attrs.contextual_spacing = Some(false);
+                    }
+                }
+            }
             let width_value = map_number(tc_pr, "width");
             let width_type = map_string(tc_pr, "widthType");
             let width =
@@ -1136,10 +1916,14 @@ fn lower_table<T: ReadTxn>(
     let compatibility_mode = map_number(tbl_pr, "compatibilityMode").and_then(|value| {
         (value.is_finite() && (0.0..=255.0).contains(&value)).then_some(value as u8)
     });
-    let cell_margin_left = table_margins
-        .and_then(|margins| map_number(margins, "left"))
-        .map(twips_to_pixels)
-        .filter(|value| value.is_finite() && *value > 0.0);
+    let layout_mode = map_string(tbl_pr, "tableLayout")
+        .filter(|value| matches!(value.as_str(), "fixed" | "autofit"));
+    let table_margin = |side: &str| {
+        table_margins
+            .and_then(|margins| map_number(margins, side))
+            .map(twips_to_pixels)
+            .filter(|value| value.is_finite() && *value > 0.0)
+    };
 
     Ok((
         TableBlock {
@@ -1151,8 +1935,8 @@ fn lower_table<T: ReadTxn>(
             width: map_number(tbl_pr, "width"),
             width_type: map_string(tbl_pr, "widthType"),
             preferred_width: None,
-            layout_mode: None,
-            width_algorithm: None,
+            width_algorithm: layout_mode.is_some().then(|| "legacy".to_owned()),
+            layout_mode,
             style_cascade: None,
             background: None,
             justification: map_string(tbl_pr, "justification"),
@@ -1160,7 +1944,8 @@ fn lower_table<T: ReadTxn>(
             indent,
             floating,
             compatibility_mode,
-            cell_margin_left,
+            cell_margin_left: table_margin("left"),
+            cell_margin_right: table_margin("right"),
             pm_start: Some(pm_start as f64),
             pm_end: Some((pm_start + node_size) as f64),
         },
@@ -1250,6 +2035,44 @@ fn image_transform_metrics(
     )
 }
 
+fn image_outline(
+    values: &std::collections::HashMap<String, Any>,
+    env: &RenderEnv,
+) -> Option<CellBorderSpec> {
+    let color = values
+        .get("borderColorValue")
+        .and_then(any_json)
+        .and_then(|value| serde_json::from_value::<ColorValue>(value).ok())
+        .and_then(|mut color| {
+            color.rgb = color.rgb.take().or_else(|| {
+                color
+                    .theme_color
+                    .as_deref()
+                    .and_then(|slot| theme_color(slot, env))
+            });
+            color.theme_color = None;
+            resolve_color_value_to_hex(Some(&color))
+        })
+        .or_else(|| {
+            map_string(values, "borderColor")
+                .map(|color| css_hex(&color))
+                .filter(|hex| {
+                    hex.len() == 7 && hex[1..].bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+        })?;
+    Some(CellBorderSpec {
+        width: Some(map_number(values, "borderWidth").unwrap_or(1.0)),
+        color: Some(color),
+        style: Some(
+            match map_string(values, "borderStyle").as_deref() {
+                Some(style @ ("dotted" | "dashed")) => style,
+                _ => "solid",
+            }
+            .to_owned(),
+        ),
+    })
+}
+
 fn lower_image_values(
     values: &std::collections::HashMap<String, Any>,
     formatting: &RunFormatting,
@@ -1289,7 +2112,10 @@ fn lower_image_values(
         });
 
     ImageRun {
-        src: map_string(values, "src").unwrap_or_default(),
+        src: match values.get("src") {
+            Some(Any::String(src)) => env.media.token(src).unwrap_or_else(|| src.to_string()),
+            value => value_string(value).unwrap_or_default(),
+        },
         width,
         height,
         alt: map_string(values, "alt"),
@@ -1318,7 +2144,7 @@ fn lower_image_values(
         layout_in_cell: None,
         effect_extent: None,
         effects: None,
-        outline: None,
+        outline: image_outline(values, env),
         decorative: None,
         hyperlink: None,
         inline_shape: None,
@@ -1505,6 +2331,7 @@ fn lower_shape_block<T: ReadTxn>(
         x: None,
         y: None,
         inner_text: None,
+        nested_sequences: Vec::new(),
         inner_measures: None,
         children: Vec::new(),
         scene: None,
@@ -1652,6 +2479,33 @@ fn authored_checkbox_value(values: &std::collections::HashMap<String, Any>) -> O
         .flatten()
 }
 
+fn inherit_inline_revision(runs: &mut [RawRun], attrs: Option<&Attrs>, env: &RenderEnv) {
+    if !attrs.is_some_and(|attrs| attrs.contains_key(crate::INS) || attrs.contains_key(crate::DEL))
+    {
+        return;
+    }
+    let inherited = lower_run_formatting(attrs, env);
+    if inherited.change_revision_id.is_none() {
+        return;
+    }
+    for run in runs {
+        if run.formatting.change_revision_id.is_none() {
+            run.formatting.is_insertion = inherited.is_insertion;
+            run.formatting.is_deletion = inherited.is_deletion;
+            run.formatting.change_revision_id = inherited.change_revision_id;
+            run.formatting.change_author = inherited.change_author.clone();
+            run.formatting.change_date = inherited.change_date.clone();
+            if let RawRunKind::Image(image) = &mut run.kind {
+                image.is_insertion = inherited.is_insertion;
+                image.is_deletion = inherited.is_deletion;
+                image.change_revision_id = inherited.change_revision_id;
+                image.change_author = inherited.change_author.clone();
+                image.change_date = inherited.change_date.clone();
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn lower_inline_sdt<T: ReadTxn>(
     sdt: &MapRef,
@@ -1716,6 +2570,7 @@ fn lower_inline_sdt_values(
                         inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
                         inline_sdt_widget: widget.clone(),
                         atom: true,
+                        revision_hidden: env.revision_hidden(Some(&attrs)),
                     });
                 }
                 width
@@ -1731,6 +2586,7 @@ fn lower_inline_sdt_values(
                     inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
                     inline_sdt_widget: None,
                     atom: true,
+                    revision_hidden: env.revision_hidden(Some(&attrs)),
                 });
                 1
             }
@@ -1745,6 +2601,7 @@ fn lower_inline_sdt_values(
                     inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
                     inline_sdt_widget: None,
                     atom: true,
+                    revision_hidden: env.revision_hidden(Some(&attrs)),
                 });
                 1
             }
@@ -1760,6 +2617,7 @@ fn lower_inline_sdt_values(
                         inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
                         inline_sdt_widget: None,
                         atom: true,
+                        revision_hidden: env.revision_hidden(Some(&attrs)),
                     });
                 }
                 1
@@ -1772,18 +2630,28 @@ fn lower_inline_sdt_values(
                     "PAGE" | "NUMPAGES" | "DATE" | "TIME" => field_type.clone(),
                     _ => "OTHER".to_owned(),
                 };
+                let instruction = payload
+                    .and_then(|payload| map_string(payload, "instruction"))
+                    .filter(|value| !value.is_empty());
+                let nested_sequences = lower_nested_sequences(
+                    instruction.as_deref(),
+                    payload.and_then(|payload| payload.get("resultProjection")),
+                );
                 runs.push(RawRun {
                     kind: RawRunKind::Field {
                         field_type: mapped_type.clone(),
                         raw_type: (field_type != mapped_type).then_some(field_type),
-                        instruction: payload
-                            .and_then(|payload| map_string(payload, "instruction"))
-                            .filter(|value| !value.is_empty()),
+                        instruction,
                         fallback: Some(
                             payload
                                 .and_then(|payload| map_string(payload, "displayText"))
                                 .unwrap_or_default(),
                         ),
+                        source: payload.and_then(|payload| map_string(payload, "fieldData")),
+                        locked: payload
+                            .and_then(|payload| map_bool(payload, "fldLock"))
+                            .unwrap_or(false),
+                        nested_sequences,
                     },
                     formatting,
                     story_start: story_index,
@@ -1793,6 +2661,7 @@ fn lower_inline_sdt_values(
                     inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
                     inline_sdt_widget: None,
                     atom: true,
+                    revision_hidden: env.revision_hidden(Some(&attrs)),
                 });
                 1
             }
@@ -1807,6 +2676,11 @@ fn lower_inline_sdt_values(
                         italic: Some(true),
                         font_family: Some("Cambria Math".to_owned()),
                         logical_order: Some(u64::MAX),
+                        is_insertion: formatting.is_insertion,
+                        is_deletion: formatting.is_deletion,
+                        change_revision_id: formatting.change_revision_id,
+                        change_author: formatting.change_author,
+                        change_date: formatting.change_date,
                         ..RunFormatting::default()
                     },
                     story_start: story_index,
@@ -1816,6 +2690,7 @@ fn lower_inline_sdt_values(
                     inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
                     inline_sdt_widget: None,
                     atom: true,
+                    revision_hidden: env.revision_hidden(Some(&attrs)),
                 });
                 1
             }
@@ -1844,12 +2719,14 @@ fn lower_inline_sdt_values(
                         inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
                         inline_sdt_widget: widget.clone(),
                         atom: true,
+                        revision_hidden: env.revision_hidden(Some(&attrs)),
                     });
                 }
                 1
             }
             "sdt" => payload.map_or(2, |payload| {
-                lower_inline_sdt_values(
+                let first = runs.len();
+                let size = lower_inline_sdt_values(
                     payload,
                     env,
                     story_index,
@@ -1857,7 +2734,12 @@ fn lower_inline_sdt_values(
                     child_pm_start,
                     widget.clone(),
                     runs,
-                )
+                );
+                inherit_inline_revision(&mut runs[first..], Some(&attrs), env);
+                if env.revision_hidden(Some(&attrs)) {
+                    hide_runs(&mut runs[first..]);
+                }
+                size
             }),
             // A shape or chart nested in an inline SDT produces no run; every
             // other leaf still occupies one position even without one.
@@ -1998,6 +2880,9 @@ enum RawRunKind {
         raw_type: Option<String>,
         instruction: Option<String>,
         fallback: Option<String>,
+        source: Option<String>,
+        locked: bool,
+        nested_sequences: Vec<String>,
     },
 }
 
@@ -2018,6 +2903,32 @@ struct RawRun {
     inline_sdt_widget: Option<Value>,
     /// Content of an embed rather than story text.
     atom: bool,
+    /// Content the previewed revision decisions leave out of layout.
+    revision_hidden: bool,
+}
+
+impl RawRun {
+    fn visible(&self, env: &RenderEnv) -> bool {
+        !self.revision_hidden && (env.show_hidden_text || self.formatting.hidden != Some(true))
+    }
+
+    fn anchored(&self) -> bool {
+        let RawRunKind::Image(image) = &self.kind else {
+            return false;
+        };
+        image.display_mode.as_deref() == Some("float")
+            || matches!(
+                image.wrap_type.as_deref(),
+                Some("square" | "tight" | "through" | "topAndBottom" | "behind" | "inFront")
+            )
+    }
+}
+
+/// Leaves out the content of a control whose own revision the preview hides.
+fn hide_runs(runs: &mut [RawRun]) {
+    for run in runs {
+        run.revision_hidden = true;
+    }
 }
 
 /// A paragraph's shape or chart child, at the offset it occupied.
@@ -2027,7 +2938,37 @@ struct DrawingMarker {
     story_index: u32,
     block: LayoutBlock,
     hidden: bool,
+    revision_hidden: bool,
     anchored: bool,
+}
+
+impl DrawingMarker {
+    fn visible(&self, env: &RenderEnv) -> bool {
+        !self.revision_hidden && (env.show_hidden_text || !self.hidden)
+    }
+}
+
+fn lift_drawings(
+    drawings: Vec<DrawingMarker>,
+    source: u32,
+    paragraph_pm_start: u64,
+    map: &mut preview::LoweringOutput,
+) -> Vec<LayoutBlock> {
+    drawings
+        .into_iter()
+        .map(|drawing| {
+            let pm_start = paragraph_pm_start + 1 + u64::from(drawing.pm_offset);
+            map.spans.push(SourceSpan {
+                pm_start,
+                pm_end: pm_start + 1,
+                paragraph: source,
+                raw_start: drawing.story_index,
+                raw_end: drawing.story_index + 1,
+                atom: true,
+            });
+            drawing.block
+        })
+        .collect()
 }
 
 /// Resolves every comment anchored in `story_id` to sorted, story-global
@@ -2149,8 +3090,79 @@ fn push_text_chunks(
             inherited_hyperlink: inherited_hyperlink_style(attributes),
             inline_sdt_widget: None,
             atom: false,
+            revision_hidden: env.revision_hidden(attributes),
         });
     }
+}
+
+/// Drops the drawings the view hides, keeping the sequences a hidden shape holds opaque.
+fn retain_visible_drawings(
+    drawings: &mut Vec<DrawingMarker>,
+    env: &RenderEnv,
+    opaque_sequences: &mut BTreeSet<String>,
+) {
+    drawings.retain(|drawing| {
+        if drawing.visible(env) {
+            return true;
+        }
+        if !drawing.revision_hidden
+            && let LayoutBlock::Shape(shape) = &drawing.block
+        {
+            collect_shape_sequences(shape, opaque_sequences);
+        }
+        false
+    });
+}
+
+/// Keeps the sequences a field run holds opaque when the view leaves it out.
+fn collect_run_sequences(run: &RawRun, opaque_sequences: &mut BTreeSet<String>) {
+    if let RawRunKind::Field {
+        instruction,
+        nested_sequences,
+        ..
+    } = &run.kind
+    {
+        opaque_sequences.extend(
+            instruction
+                .as_deref()
+                .and_then(docx_layout::sequence_fields::sequence_name),
+        );
+        opaque_sequences.extend(nested_sequences.iter().cloned());
+    }
+}
+
+fn collect_shape_sequences(shape: &ShapeBlock, opaque_sequences: &mut BTreeSet<String>) {
+    opaque_sequences.extend(shape.nested_sequences.iter().cloned());
+    for run in shape
+        .inner_text
+        .iter()
+        .flatten()
+        .flat_map(|paragraph| &paragraph.runs)
+    {
+        if let Run::Field(field) = run {
+            opaque_sequences.extend(
+                field
+                    .instruction
+                    .as_deref()
+                    .and_then(docx_layout::sequence_fields::sequence_name),
+            );
+            opaque_sequences.extend(field.nested_sequences.iter().cloned());
+        }
+    }
+    for child in &shape.children {
+        collect_shape_sequences(child, opaque_sequences);
+    }
+}
+
+fn lower_nested_sequences(
+    instruction: Option<&str>,
+    result_projection: Option<&Any>,
+) -> Vec<String> {
+    result_projection
+        .and(instruction)
+        .and_then(docx_layout::sequence_fields::sequence_name)
+        .into_iter()
+        .collect()
 }
 
 /// Emits the blocks one paragraph contributes. Anchored children are lifted
@@ -2168,22 +3180,34 @@ fn flush_paragraph_parts<T: ReadTxn>(
     paragraph_pm_start: u64,
     paragraph_pm_units: u32,
     list_state: &mut ListState,
-    (map, story_slot): (&mut LoweringMap, u32),
+    (map, story_slot): (&mut preview::LoweringOutput, u32),
+    opaque_sequences: &mut BTreeSet<String>,
+    revealable: &mut Option<Vec<LayoutBlock>>,
+    mut carried: Vec<(u32, Vec<RawRun>)>,
 ) -> Vec<LayoutBlock> {
-    let source = map.paragraphs.len() as u32;
+    let source = map.paragraph_count();
     map.paragraphs.push((
         story_slot,
         shared_map_string(pilcrow, txn, "paraId").unwrap_or_default(),
     ));
-    if env.show_hidden_text {
-        for run in &mut raw_runs {
-            if run.formatting.hidden == Some(true) {
-                run.formatting.hidden = None;
+    retain_visible_drawings(&mut drawings, env, opaque_sequences);
+    for runs in std::iter::once(&mut raw_runs).chain(carried.iter_mut().map(|(_, runs)| runs)) {
+        runs.retain(|run| {
+            if run.visible(env) {
+                return true;
+            }
+            if !run.revision_hidden {
+                collect_run_sequences(run, opaque_sequences);
+            }
+            false
+        });
+        if env.show_hidden_text {
+            for run in runs.iter_mut() {
+                if run.formatting.hidden == Some(true) {
+                    run.formatting.hidden = None;
+                }
             }
         }
-    } else {
-        raw_runs.retain(|run| run.formatting.hidden != Some(true));
-        drawings.retain(|drawing| !drawing.hidden);
     }
     for drawing in &drawings {
         let pm_start = paragraph_pm_start + 1 + u64::from(drawing.pm_offset);
@@ -2212,6 +3236,7 @@ fn flush_paragraph_parts<T: ReadTxn>(
             paragraph_pm_units,
             list_state,
             (map, source),
+            carried,
         );
         if !env.show_hidden_text
             && paragraph.runs.is_empty()
@@ -2249,6 +3274,7 @@ fn flush_paragraph_parts<T: ReadTxn>(
                 drawing.pm_offset - segment_start,
                 list_state,
                 (map, source),
+                Vec::new(),
             )));
         }
         blocks.push(drawing.block);
@@ -2271,6 +3297,27 @@ fn flush_paragraph_parts<T: ReadTxn>(
             paragraph_pm_units - segment_start,
             list_state,
             (map, source),
+            Vec::new(),
+        )));
+    }
+    if let Some(revealed) = revealable
+        && !blocks
+            .iter()
+            .any(|block| matches!(block, LayoutBlock::Paragraph(_)))
+    {
+        // A preview that hides every drawing leaves the paragraph itself.
+        revealed.push(LayoutBlock::Paragraph(flush_paragraph(
+            Vec::new(),
+            pilcrow,
+            pilcrow_attributes,
+            txn,
+            story_id,
+            env,
+            paragraph_pm_start,
+            0,
+            &mut list_state.clone(),
+            (&mut preview::LoweringOutput::default(), 0),
+            Vec::new(),
         )));
     }
     blocks
@@ -2287,7 +3334,8 @@ fn flush_paragraph<T: ReadTxn>(
     paragraph_pm_start: u64,
     paragraph_pm_units: u32,
     list_state: &mut ListState,
-    (map, source): (&mut LoweringMap, u32),
+    (map, source): (&mut preview::LoweringOutput, u32),
+    carried: Vec<(u32, Vec<RawRun>)>,
 ) -> ParagraphBlock {
     let values = pilcrow_values(pilcrow, txn);
     let para_id = value_string(values.get("paraId")).unwrap_or_default();
@@ -2309,7 +3357,15 @@ fn flush_paragraph<T: ReadTxn>(
     }
     let raw_runs = coalesce_runs(raw_runs);
     map.paragraph_blocks.push((paragraph_pm_start, source));
-    for raw in &raw_runs {
+    let carried: Vec<_> = carried
+        .into_iter()
+        .map(|(source, runs)| (source, coalesce_runs(runs)))
+        .collect();
+    for (raw, source) in carried
+        .iter()
+        .flat_map(|(source, runs)| runs.iter().map(|raw| (raw, *source)))
+        .chain(raw_runs.iter().map(|raw| (raw, source)))
+    {
         map.spans.push(SourceSpan {
             pm_start: paragraph_pm_start + 1 + u64::from(raw.pm_start),
             pm_end: paragraph_pm_start + 1 + u64::from(raw.pm_end),
@@ -2319,6 +3375,11 @@ fn flush_paragraph<T: ReadTxn>(
             atom: raw.atom,
         });
     }
+    let raw_runs: Vec<RawRun> = carried
+        .into_iter()
+        .flat_map(|(_, runs)| runs)
+        .chain(raw_runs)
+        .collect();
     let mut attrs = lower_paragraph_attrs(&values, pilcrow_attributes, env, list_state);
     for raw in &raw_runs {
         if let RawRunKind::HorizontalRule(rule) = &raw.kind {
@@ -2367,7 +3428,7 @@ const DEFAULT_COLUMN_GAP_TWIPS: f64 = 720.0;
 /// section that overrides ANY margin emits a full margins record; its unset
 /// sides inherit from the prior section rather than resetting to the OOXML
 /// default.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct SectionMarginsTwips {
     top: f64,
     bottom: f64,
@@ -2590,12 +3651,17 @@ fn raw_run_to_layout(raw: RawRun, paragraph_pm_start: u64) -> Run {
             raw_type,
             instruction,
             fallback,
+            locked,
+            nested_sequences,
+            ..
         } => Run::Field(FieldRun {
             fmt: raw.formatting,
             field_type,
             raw_type,
             instruction,
             fallback,
+            locked,
+            nested_sequences,
             pm_start,
             pm_end,
         }),
@@ -2768,6 +3834,11 @@ fn lower_font_family(attributes: Option<&Attrs>, result: &mut RunFormatting) {
     }
 }
 
+/// A `w:sz` half-point size in points, clamped to Word's 1–1638 pt range.
+pub(crate) fn font_size_pt(half_points: f64) -> f64 {
+    (half_points / 2.0).clamp(1.0, 1638.0)
+}
+
 fn lower_font_size(attributes: Option<&Attrs>, result: &mut RunFormatting) {
     let Some(value) = attribute(attributes, "fontSize").or_else(|| attribute(attributes, "sz"))
     else {
@@ -2777,14 +3848,14 @@ fn lower_font_size(attributes: Option<&Attrs>, result: &mut RunFormatting) {
         // A scalar mark is the authored `w:sz`; the object form additionally
         // preserves an independent `w:szCs`. Both stay in half-points until
         // this conversion.
-        Any::Number(half_points) => result.font_size = Some(*half_points / 2.0),
-        Any::BigInt(half_points) => result.font_size = Some(*half_points as f64 / 2.0),
+        Any::Number(half_points) => result.font_size = Some(font_size_pt(*half_points)),
+        Any::BigInt(half_points) => result.font_size = Some(font_size_pt(*half_points as f64)),
         Any::Map(map) => {
             let size = map_number(map, "size").or_else(|| map_number(map, "sz"));
             let size_cs = map_number(map, "sizeCs").or_else(|| map_number(map, "szCs"));
             let rtl = mark_bool(attributes, "rtl") == Some(true);
-            result.font_size = if rtl { size_cs.or(size) } else { size }.map(|value| value / 2.0);
-            result.font_size_cs = size_cs.map(|value| value / 2.0);
+            result.font_size = if rtl { size_cs.or(size) } else { size }.map(font_size_pt);
+            result.font_size_cs = size_cs.map(font_size_pt);
         }
         _ => {}
     }
@@ -2868,8 +3939,13 @@ fn revision_meta(value: &Any, env: &RenderEnv) -> Option<RevisionMeta> {
 }
 
 fn lower_revisions(attributes: Option<&Attrs>, env: &RenderEnv, result: &mut RunFormatting) {
-    let insertion = attribute(attributes, INS).and_then(|value| revision_meta(value, env));
-    let deletion = attribute(attributes, DEL).and_then(|value| revision_meta(value, env));
+    let pending = |key| {
+        attribute(attributes, key)
+            .filter(|value| env.revision_decision(value).is_none())
+            .and_then(|value| revision_meta(value, env))
+    };
+    let insertion = pending(INS);
+    let deletion = pending(DEL);
     if insertion.is_some() {
         result.is_insertion = Some(true);
     }
@@ -2912,7 +3988,7 @@ fn lower_paragraph_attrs(
             .clone()
             .filter(|style| !style.is_empty());
     }
-    lower_paragraph_spacing(values, &mut result, env.paragraph_spacing_line_px);
+    lower_paragraph_spacing(values, &mut result, env);
     // Section document-grid pitch for line-height snapping, stamped at
     // lowering so incremental reuse compares resolved blocks. The engine
     // overwrites this per section after lowering.
@@ -3137,15 +4213,26 @@ fn suppress_cell_edge_spacing(
 fn lower_paragraph_spacing(
     values: &BTreeMap<String, Any>,
     result: &mut ParagraphAttrs,
-    line_px: Option<f64>,
+    env: &RenderEnv,
 ) {
-    let line_px = line_px
+    let line_px = env
+        .paragraph_spacing_line_px
         .filter(|line| line.is_finite() && *line > 0.0)
         .unwrap_or(16.0);
+    let suppress_before = env.compatibility_flags.suppress_sp_bf_after_pg_brk
+        && true_property(values, "pageBreakBeforeRun") == Some(true);
     let spacing_map = values.get("spacing").and_then(any_map);
     let auto_before = paragraph_auto_spacing(values, "beforeAutospacing");
     let auto_after = paragraph_auto_spacing(values, "afterAutospacing");
-    let before_lines = (!auto_before)
+    let (auto_before_px, auto_after_px) = if env
+        .compatibility_flags
+        .do_not_use_html_paragraph_auto_spacing
+    {
+        (twips_to_pixels(100.0), twips_to_pixels(200.0))
+    } else {
+        (AUTO_PARAGRAPH_SPACING_PX, AUTO_PARAGRAPH_SPACING_PX)
+    };
+    let before_lines = (!auto_before && !suppress_before)
         .then(|| value_number(values.get("spaceBeforeLines")))
         .flatten()
         .filter(|value| value.is_finite() && *value > 0.0);
@@ -3173,15 +4260,17 @@ fn lower_paragraph_spacing(
         let mut spacing = ParagraphSpacing {
             before_lines,
             after_lines,
-            before: if auto_before {
-                Some(AUTO_PARAGRAPH_SPACING_PX)
+            before: if suppress_before {
+                Some(0.0)
+            } else if auto_before {
+                Some(auto_before_px)
             } else {
                 before_lines
                     .map(|lines| lines * line_px / 100.0)
                     .or_else(|| before.map(twips_to_pixels))
             },
             after: if auto_after {
-                Some(AUTO_PARAGRAPH_SPACING_PX)
+                Some(auto_after_px)
             } else {
                 after_lines
                     .map(|lines| lines * line_px / 100.0)
@@ -3292,7 +4381,7 @@ fn paragraph_default_font_size(values: &BTreeMap<String, Any>) -> f64 {
         .get("defaultTextFormatting")
         .and_then(any_map)
         .and_then(|defaults| map_number(defaults, "fontSize"))
-        .map_or(10.0, |value| value / 2.0)
+        .map_or(10.0, font_size_pt)
 }
 
 fn lower_paragraph_defaults(values: &BTreeMap<String, Any>, result: &mut ParagraphAttrs) {
@@ -3334,7 +4423,7 @@ fn paragraph_run_defaults(values: &BTreeMap<String, Any>) -> RunFormatting {
             .or_else(|| slots.cs.clone());
         result.font_slots = Some(slots);
     }
-    result.font_size_cs = map_number(defaults, "fontSizeCs").map(|value| value / 2.0);
+    result.font_size_cs = map_number(defaults, "fontSizeCs").map(font_size_pt);
     result.bold_cs = map_bool(defaults, "boldCs");
     result.italic_cs = map_bool(defaults, "italicCs");
     result.complex_script = map_bool(defaults, "cs");
@@ -3694,6 +4783,17 @@ fn map_bool(map: &std::collections::HashMap<String, Any>, key: &str) -> Option<b
     map.get(key).and_then(any_bool)
 }
 
+fn any_strings(value: Option<&Any>) -> Vec<String> {
+    match value {
+        Some(Any::Array(values)) => values
+            .iter()
+            .filter_map(any_str)
+            .map(str::to_owned)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 pub(crate) fn map_number(map: &std::collections::HashMap<String, Any>, key: &str) -> Option<f64> {
     map.get(key).and_then(any_number)
 }
@@ -3751,6 +4851,30 @@ mod tests {
     use crate::{EditCtx, FormatPolicy, Position, RawOp, SimpleFormat, StoryRange};
 
     const DATE: &str = "2026-07-13T12:00:00Z";
+
+    #[test]
+    fn hard_break_spacing_suppression_clears_line_units_without_changing_authored_values() {
+        let values = BTreeMap::from([
+            ("spaceBeforeLines".to_owned(), Any::Number(200.0)),
+            ("spaceAfterLines".to_owned(), Any::Number(100.0)),
+            ("pageBreakBeforeRun".to_owned(), Any::Bool(true)),
+        ]);
+        let mut env = RenderEnv {
+            paragraph_spacing_line_px: Some(32.0),
+            ..RenderEnv::default()
+        };
+        let mut attrs = ParagraphAttrs::default();
+        lower_paragraph_spacing(&values, &mut attrs, &env);
+        assert_eq!(attrs.spacing.as_ref().unwrap().before, Some(64.0));
+        env.compatibility_flags.suppress_sp_bf_after_pg_brk = true;
+        lower_paragraph_spacing(&values, &mut attrs, &env);
+        let spacing = attrs.spacing.unwrap();
+        assert_eq!(spacing.before, Some(0.0));
+        assert_eq!(spacing.before_lines, None);
+        assert_eq!(spacing.after, Some(32.0));
+        assert_eq!(spacing.after_lines, Some(100.0));
+        assert_eq!(values["spaceBeforeLines"], Any::Number(200.0));
+    }
 
     fn any_map(entries: impl IntoIterator<Item = (&'static str, Any)>) -> Any {
         Any::Map(Arc::new(
@@ -5335,5 +6459,29 @@ mod tests {
         assert!(!formatting_equal(&finite, &pos_inf));
         assert!(formatting_equal(&nan_comments, &nan_comments2));
         assert!(!formatting_equal(&nan_comments, &nan_in_field));
+    }
+
+    #[test]
+    fn edited_image_borders_paint_the_edited_values() {
+        let values = HashMap::from([
+            ("borderWidth".to_owned(), Any::Number(2.0)),
+            ("borderColor".to_owned(), Any::String("#0000FF".into())),
+            ("borderColorValue".to_owned(), Any::Null),
+            ("borderStyle".to_owned(), Any::String("double".into())),
+        ]);
+        let outline = image_outline(&values, &RenderEnv::default()).unwrap();
+        assert_eq!(outline.width, Some(2.0));
+        assert_eq!(outline.color.as_deref(), Some("#0000FF"));
+        assert_eq!(outline.style.as_deref(), Some("solid"));
+        let values = HashMap::from([("borderColorValue".to_owned(), Any::Null)]);
+        assert!(image_outline(&values, &RenderEnv::default()).is_none());
+        let values = HashMap::from([
+            ("borderWidth".to_owned(), Any::Number(2.0)),
+            (
+                "borderColor".to_owned(),
+                Any::String("rgb(0, 0, 255)".into()),
+            ),
+        ]);
+        assert!(image_outline(&values, &RenderEnv::default()).is_none());
     }
 }

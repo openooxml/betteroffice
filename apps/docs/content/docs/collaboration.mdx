@@ -71,10 +71,10 @@ Pass the collaboration options to your editor:
 ```tsx
 const collaboration = { clientId, initialUpdate, onReplica };
 
-<DocxEditor documentBuffer={docxBytes} collaboration={collaboration} />
-<XlsxEditor file={xlsxBytes} collaboration={collaboration} />
-<PptxEditor file={pptxBytes} fonts={fonts} collaboration={collaboration} />
-<VsdxEditor file={vsdxBytes} fonts={fonts} collaboration={collaboration} />
+<DocxEditor documentBuffer={docxBytes} collaboration={collaboration} />;
+<XlsxEditor file={xlsxBytes} collaboration={collaboration} />;
+<PptxEditor file={pptxBytes} fonts={fonts} collaboration={collaboration} />;
+<VsdxEditor file={vsdxBytes} fonts={fonts} collaboration={collaboration} />;
 ```
 
 `clientId` must be unique per open peer. `initialUpdate` must represent the

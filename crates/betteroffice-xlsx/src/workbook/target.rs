@@ -26,8 +26,8 @@ pub struct CellPosition {
     pub col: u32,
 }
 
-/// An inclusive rectangle: an A1 cell or `A1:B2` range (optionally with `$`), or zero-based
-/// corners. Sheet-qualified, union, whole-row/column and defined-name references are refused.
+/// An inclusive rectangle of explicit cells on the target's sheet: an A1 cell or `A1:B2` range
+/// (optionally with `$`), or zero-based corners.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(
     tag = "kind",
@@ -300,7 +300,7 @@ impl Workbook {
             .get(sheet.0 as usize)
             .copied()
             .flatten()?;
-        let package = self.source_package.as_ref()?;
+        let package = self.source_package.as_ref()?.facts();
         let name = self
             .model
             .sheet(sheet)

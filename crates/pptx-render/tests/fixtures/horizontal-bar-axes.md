@@ -27,15 +27,11 @@ plot at x=172. The first purple bar starts at `(172, 338.26666)` with width
 115.8 and height 34.133335. North remains `#6254E7`, South `#1FA97A`, text
 `#222222`, axes `#666666`, and gridlines `#D9D9D9`.
 
-The contributor's original geometry placed the category title at baseline 119,
-overlapping the chart title at baseline 114. Reserving an 18px axis header puts
-it at baseline 137. On slide 4, secondary ticks move from baseline 118 to 136,
-and the obsolete 38px right margin is removed: the plot's right edge moves
-from x=520 to x=558. Its minor gridlines remain vertical, at width 0.25.
+Reserving an 18px axis header puts the category title at baseline 137, clear of
+the chart title at baseline 114. On slide 4, secondary ticks sit at baseline 136
+and the plot's right edge is at x=558. Its minor gridlines remain vertical, at
+width 0.25.
 
 Slide 2 reverses category order; slide 5 reverses value positions and bars.
-Slide 3 is byte-identical to main. No model, snapshot format, or writer changes
-are needed. External ZIP-part comparison of the no-edit save preserves all
-parts, including the chart XML.
 
 Review: [PR #310](https://github.com/openooxml/betteroffice/pull/310).

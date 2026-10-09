@@ -8,8 +8,11 @@ import { rezipPartsToArrayBuffer, type PartsMap } from '../docx/rezip/parts';
 import { unzipContainer } from '../docx/wasm';
 import { preloadEditWasm } from '../wasm/edit';
 import {
+  captureSessionSave,
   createYrsSession,
   saveYrsDocx,
+  writeSessionSave,
+  yrsToDocument,
   type DocxExportBlock,
   type DocxParagraphAnchor,
   type DocxParagraphRef,
@@ -439,6 +442,35 @@ describe('paragraph identities across saves', () => {
     const id = expectAllocated(idOf(savedParagraphs(saved.bytes, DOCUMENT)[DOCUMENT]!, 'Typed'));
     expect(promoted.ooxmlParaId).toBe(id);
     expect(resolvedText(await open(saved.bytes, 8), promoted.persisted!)).toBe('Typed');
+  });
+
+  it('saves no editor-only tail after a closing table or content control until it is authored into', async () => {
+    for (const closing of [
+      '<w:tbl><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:p w14:paraId="0A0B0C0D"><w:r><w:t>Last cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>',
+      '<w:sdt><w:sdtPr><w:tag w:val="last"/></w:sdtPr><w:sdtContent><w:p w14:paraId="0A0B0C0D"><w:r><w:t>Last control</w:t></w:r></w:p></w:sdtContent></w:sdt>',
+    ]) {
+      const bytes = fixture([DOCUMENT, TAIL, closing]);
+      const source = savedParagraphs(bytes, DOCUMENT)[DOCUMENT]!.map(([, text]) => text);
+      const opened = await open(bytes, 7);
+      opened.insertText({ story: 'body', paraId: '1A2B3C4D', offset: 0 }, 'Edited ');
+      const expected = ['Edited Valid', ...source.slice(1)];
+      const base = opened.materializeDocx()!;
+      const editor = await writeSessionSave(
+        opened,
+        yrsToDocument(opened, base),
+        captureSessionSave(opened),
+        base.originalBuffer!,
+        {},
+        () => false
+      );
+      for (const saved of [(await saveYrsDocx(opened)).bytes, editor.bytes]) {
+        expect(savedParagraphs(saved, DOCUMENT)[DOCUMENT]!.map(([, text]) => text)).toEqual(expected);
+      }
+      const tail = opened.paragraphs('body').at(-1)!.paraId;
+      opened.insertText({ story: 'body', paraId: tail, offset: 0 }, 'Typed');
+      const typed = (await saveYrsDocx(opened)).bytes;
+      expect(savedParagraphs(typed, DOCUMENT)[DOCUMENT]!.map(([, text]) => text)).toEqual([...expected, 'Typed']);
+    }
   });
 
   it('resolves a nested anchor after a table inserted before it shifts story positions', async () => {

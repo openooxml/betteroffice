@@ -19,6 +19,7 @@ import {
 import { createRoomTransport } from "../../demo/app/collab/createRoomTransport";
 import type { CollaborationReplica } from "../../demo/app/collab/types";
 import type { Format } from "./bridge";
+import { savedBytes } from "./session";
 import "@betteroffice/docx-react/styles.css";
 
 configureDefaultFonts({ load: () => import("@betteroffice/fonts") });
@@ -97,7 +98,8 @@ export default function Editor({
   onOpen(file: File): Promise<void>;
   onStatus(status: string): void;
 }) {
-  const serializing = useRef(false);
+  const serialization = useRef<{ failure: Error | null } | null>(null);
+  const serializations = useRef<Promise<unknown>>(Promise.resolve());
   const docx = useRef<DocxEditorRef>(null);
   const xlsx = useRef<XlsxEditorApi | null>(null);
   const pptx = useRef<PptxEditorApi | null>(null);
@@ -145,10 +147,10 @@ export default function Editor({
     (bytes: Uint8Array) => callbacks.current.onSave(bytes),
     []
   );
-  const error = useCallback(
-    (error: Error) => callbacks.current.onError(error),
-    []
-  );
+  const error = useCallback((error: Error) => {
+    if (serialization.current) serialization.current.failure = error;
+    callbacks.current.onError(error);
+  }, []);
   const workbookReady = useCallback(
     (api: XlsxEditorApi) => {
       xlsx.current = api;
@@ -175,26 +177,28 @@ export default function Editor({
         else if (file.format === "xlsx") xlsx.current?.focus();
         else pptx.current?.focus();
       },
-      async serialize() {
-        if (document.activeElement instanceof HTMLElement)
-          document.activeElement.blur();
-        await new Promise<void>((resolve) => setTimeout(resolve, 0));
-        serializing.current = true;
-        try {
-          const bytes =
-            file.format === "docx"
-              ? await docx.current?.save()
-              : file.format === "xlsx"
-              ? xlsx.current?.handle.save()
-              : pptx.current?.save();
-          if (!bytes)
-            throw new Error(
-              "The editor is still opening the file. Try again in a moment."
-            );
-          return new Uint8Array(bytes);
-        } finally {
-          serializing.current = false;
-        }
+      serialize() {
+        const attempt = async () => {
+          if (document.activeElement instanceof HTMLElement)
+            document.activeElement.blur();
+          await new Promise<void>((resolve) => setTimeout(resolve, 0));
+          const current: { failure: Error | null } = { failure: null };
+          serialization.current = current;
+          try {
+            const bytes =
+              file.format === "docx"
+                ? await docx.current?.save()
+                : file.format === "xlsx"
+                ? xlsx.current?.handle.save()
+                : pptx.current?.save();
+            return savedBytes(bytes, current.failure);
+          } finally {
+            serialization.current = null;
+          }
+        };
+        const next = serializations.current.then(attempt, attempt);
+        serializations.current = next.catch(() => undefined);
+        return next;
       },
     });
     return () => onReady(null);
@@ -207,7 +211,7 @@ export default function Editor({
         document={file.document}
         downloadOnSave={false}
         onSave={(buffer) => {
-          if (!serializing.current) saveBytes(new Uint8Array(buffer));
+          if (!serialization.current) saveBytes(new Uint8Array(buffer));
         }}
         documentName={name}
         onChange={changed}

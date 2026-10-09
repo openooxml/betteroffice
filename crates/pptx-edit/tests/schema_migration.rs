@@ -2,8 +2,11 @@
 //! `betteroffice-demo.pptx`, adds a text box and edits its story, then persists
 //! `encode_state_as_update_v1()`.
 
+use std::collections::BTreeMap;
+
 use pptx_edit::{
-    CommentFlavor, DeckSession, DeckSnapshot, EditCtx, EditError, ShapeSnapshot, TextStyle,
+    CommentFlavor, DeckSession, DeckSnapshot, EditCtx, EditError, ShapeSnapshot, TextCaps,
+    TextStyle,
 };
 use yrs::updates::decoder::Decode;
 use yrs::{Any, Doc, Map, MapRef, Out, ReadTxn, StateVector, Transact, Update};
@@ -18,6 +21,10 @@ const FIXTURE: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-de
 const NUMBERED_FIXTURE: &[u8] =
     include_bytes!("../../pptx-parse/tests/fixtures/slide-number-fields.pptx");
 const V2_HIDDEN_UPDATE: &[u8] = include_bytes!("fixtures/deck-schema-v2-hidden.update.bin");
+const V2_1_DEFAULTS_SOURCE: &[u8] = include_bytes!("fixtures/deck-schema-v2.1-defaults.pptx");
+const V2_1_DEFAULTS_UPDATE: &[u8] = include_bytes!("fixtures/deck-schema-v2.1-defaults.update.bin");
+const V2_1_EDITS_SOURCE: &[u8] = include_bytes!("fixtures/deck-schema-v2.1-edits.pptx");
+const V2_1_EDITS_UPDATE: &[u8] = include_bytes!("fixtures/deck-schema-v2.1-edits.update.bin");
 const SHAPES: &str = "pptx:shapes";
 const V2_STORY_ID: &str = "story:shape:4343:0:0";
 const V2_HIDDEN_SHAPE_IDS: [&str; 4] = [
@@ -899,4 +906,936 @@ fn a_2_1_deck_with_integer_media_arrays_migrates_to_base64() {
     assert!(migrated_json.contains("\"bytes\":\"BwYF\""));
     assert!(!migrated_json.contains("[7,6,5]"));
     assert!(migrated_json.contains("betteroffice-mark.png"));
+}
+
+#[test]
+fn a_released_update_reopened_with_its_source_saves_an_unedited_deck_byte_identically() {
+    assert_eq!(stamped_version(V2_1_DEFAULTS_UPDATE), Some(2.1));
+    let fresh = DeckSession::open(V2_1_DEFAULTS_SOURCE, 42200).unwrap();
+    for (client_id, update) in [
+        (42210, V2_1_DEFAULTS_UPDATE.to_vec()),
+        (42220, restamped(V2_1_DEFAULTS_UPDATE, Some(2.0))),
+    ] {
+        let migrated = DeckSession::open_from_update(&update, client_id).unwrap();
+        assert_eq!(
+            adjust_values(&migrated.snapshot().unwrap()),
+            adjust_values(&fresh.snapshot().unwrap())
+        );
+        let attached = DeckSession::open_from_update_with_source(
+            &migrated.encode_state_as_update_v1(),
+            V2_1_DEFAULTS_SOURCE,
+            client_id + 1,
+        )
+        .unwrap();
+        assert_eq!(attached.snapshot().unwrap(), fresh.snapshot().unwrap());
+        assert_eq!(attached.save().unwrap(), V2_1_DEFAULTS_SOURCE);
+        let carried = attached.encode_state_as_update_v1();
+        let sourceless = DeckSession::open_from_update(&carried, client_id + 2).unwrap();
+        assert_eq!(sourceless.snapshot().unwrap(), fresh.snapshot().unwrap());
+        assert_eq!(
+            sourceless.package().masters[0].color_map,
+            fresh.package().masters[0].color_map
+        );
+        let reattached = DeckSession::open_from_update_with_source(
+            &carried,
+            V2_1_DEFAULTS_SOURCE,
+            client_id + 3,
+        )
+        .unwrap();
+        assert_eq!(reattached.save().unwrap(), V2_1_DEFAULTS_SOURCE);
+    }
+}
+
+#[test]
+fn edits_made_after_migrating_a_released_update_survive_the_source_import() {
+    let migrated = DeckSession::open_from_update(V2_1_DEFAULTS_UPDATE, 42230).unwrap();
+    let context = EditCtx::local("fixture");
+    let snapshot = migrated.snapshot().unwrap();
+    let slide = &snapshot.slides[0];
+    let shape = |name: &str| {
+        slide
+            .shapes
+            .iter()
+            .find(|shape| shape.name == name)
+            .unwrap()
+    };
+    migrated
+        .set_shape_adjust(
+            &context,
+            &slide.id,
+            &shape("Default star").id,
+            &BTreeMap::from([("adj".to_owned(), 0.45)]),
+        )
+        .unwrap();
+    migrated
+        .insert_text(
+            &context,
+            &shape("Direct all caps").text_stories[0].id,
+            0,
+            "QZ",
+            &TextStyle {
+                font_size_pt: Some(32.0),
+                color: Some("#101828".to_owned()),
+                caps: Some(TextCaps::Small),
+                ..TextStyle::default()
+            },
+        )
+        .unwrap();
+    let attached = DeckSession::open_from_update_with_source(
+        &migrated.encode_state_as_update_v1(),
+        V2_1_DEFAULTS_SOURCE,
+        42231,
+    )
+    .unwrap();
+    let saved = attached.save().unwrap();
+    let parts: BTreeMap<_, _> = ooxml_opc::unzip_parts(&saved)
+        .unwrap()
+        .into_iter()
+        .collect();
+    let slide = String::from_utf8(parts["ppt/slides/slide1.xml"].clone()).unwrap();
+    let shape_xml = |name: &str| {
+        let start = slide.find(&format!("name=\"{name}\"")).unwrap();
+        &slide[start..start + slide[start..].find("</p:sp>").unwrap()]
+    };
+    assert!(shape_xml("Default star").contains(r#"<a:gd fmla="val 45000" name="adj"/>"#));
+    let caps = shape_xml("Direct all caps");
+    assert!(caps.contains(concat!(
+        r#"<a:rPr cap="small" lang="en-US" sz="3200"><a:solidFill><a:srgbClr val="101828"/>"#,
+        r#"</a:solidFill></a:rPr><a:t>QZ</a:t>"#
+    )));
+    assert!(caps.contains(concat!(
+        r#"<a:rPr cap="all" lang="en-US" sz="3200"><a:solidFill><a:schemeClr val="tx1"/>"#,
+        r#"</a:solidFill><a:latin typeface="Arial"/></a:rPr><a:t>Mixed Case Title</a:t>"#
+    )));
+    assert!(!shape_xml("Default trapezoid").contains("<a:gd "));
+}
+
+fn adjust_values(snapshot: &DeckSnapshot) -> Vec<BTreeMap<String, f64>> {
+    fn collect(shapes: &[ShapeSnapshot], values: &mut Vec<BTreeMap<String, f64>>) {
+        for shape in shapes {
+            values.push(shape.adjust_values.clone());
+            collect(&shape.children, values);
+        }
+    }
+    let mut values = Vec::new();
+    for slide in &snapshot.slides {
+        collect(&slide.shapes, &mut values);
+    }
+    values
+}
+
+const DEFAULTS_SLIDE: &str = "ppt/slides/slide1.xml";
+const STORY_COUNTS: [usize; 3] = [40, 160, 640];
+const DELETIONS_PER_STORY: u32 = 6;
+const FRAGMENTED_PARAGRAPHS: usize = 40;
+const FRAGMENTED_RUNS: usize = 4;
+const FRAGMENTED_REPEATS: usize = 12;
+const DEFAULTS_LAYOUT: &str = "ppt/slideLayouts/slideLayout1.xml";
+const DEFAULTS_MASTER: &str = "ppt/slideMasters/slideMaster1.xml";
+const INVERTED_MAP: &str = r#"bg1="dk1" tx1="lt1" bg2="dk2" tx2="lt2""#;
+const IDENTITY_MAP: &str = r#"bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2""#;
+
+type RunLook = (String, Option<TextCaps>, Option<String>);
+
+#[test]
+fn a_repeated_character_inserted_before_recovery_stays_the_inserted_text() {
+    let migrated = DeckSession::open_from_update(V2_1_DEFAULTS_UPDATE, 42500).unwrap();
+    let story = defaults_story(&migrated, "Direct all caps");
+    migrated
+        .insert_text(&EditCtx::local("fixture"), &story, 1, "i", &small_caps())
+        .unwrap();
+    let attached = DeckSession::open_from_update_with_source(
+        &migrated.encode_state_as_update_v1(),
+        V2_1_DEFAULTS_SOURCE,
+        42501,
+    )
+    .unwrap();
+    assert_eq!(
+        pending_flag(&attached.encode_state_as_update_v1(), "capsPendingSource"),
+        None
+    );
+    let expected = [
+        look("M", Some(TextCaps::All), "#FFFFFF"),
+        look("i", Some(TextCaps::Small), "#101828"),
+        look("ixed Case Title", Some(TextCaps::All), "#FFFFFF"),
+    ];
+    assert_eq!(run_looks(&attached, &story), expected);
+    let saved = DeckSession::open(&attached.save().unwrap(), 42502).unwrap();
+    assert_eq!(run_looks(&saved, &story), expected);
+}
+
+#[test]
+fn a_long_story_with_separated_edits_recovers_its_source_runs() {
+    let text = "Mixed Case Title ".repeat(180);
+    let text = text.trim_end();
+    let source = defaults_variant(&[(
+        DEFAULTS_SLIDE,
+        "<a:t>Mixed Case Title</a:t>",
+        &format!("<a:t>{text}</a:t>"),
+    )]);
+    let migrated = DeckSession::open_from_update(&legacy_seed(&source, 42600), 42601).unwrap();
+    let story = defaults_story(&migrated, "Direct all caps");
+    let context = EditCtx::local("fixture");
+    let length = text.len() as u32;
+    migrated.delete_text(&context, &story, 0, 1).unwrap();
+    migrated
+        .insert_text(&context, &story, 0, "X", &TextStyle::default())
+        .unwrap();
+    migrated
+        .delete_text(&context, &story, length - 1, length)
+        .unwrap();
+    migrated
+        .insert_text(&context, &story, length - 1, "Y", &TextStyle::default())
+        .unwrap();
+    let attached = DeckSession::open_from_update_with_source(
+        &migrated.encode_state_as_update_v1(),
+        &source,
+        42602,
+    )
+    .unwrap();
+    assert_eq!(
+        run_looks(&attached, &story),
+        [
+            ("X".to_owned(), None, None),
+            look(&text[1..text.len() - 1], Some(TextCaps::All), "#FFFFFF"),
+            ("Y".to_owned(), None, None),
+        ]
+    );
+    attached.save().unwrap();
+}
+
+#[test]
+fn a_released_update_recovers_run_colours_through_every_colour_map() {
+    let mapping = format!(
+        "<a:overrideClrMapping {INVERTED_MAP} accent1=\"accent1\" accent2=\"accent2\" \
+         accent3=\"accent3\" accent4=\"accent4\" accent5=\"accent5\" accent6=\"accent6\" \
+         hlink=\"hlink\" folHlink=\"folHlink\"/>"
+    );
+    let slide_override = format!("</p:cSld><p:clrMapOvr>{mapping}</p:clrMapOvr>");
+    for (client_id, source) in [
+        (
+            42700,
+            defaults_variant(&[(
+                DEFAULTS_SLIDE,
+                r#"<a:schemeClr val="tx1"/>"#,
+                r#"<a:schemeClr val="bg1"/>"#,
+            )]),
+        ),
+        (
+            42710,
+            defaults_variant(&[
+                (DEFAULTS_MASTER, INVERTED_MAP, IDENTITY_MAP),
+                (DEFAULTS_SLIDE, "</p:cSld>", &slide_override),
+            ]),
+        ),
+        (
+            42720,
+            defaults_variant(&[
+                (DEFAULTS_MASTER, INVERTED_MAP, IDENTITY_MAP),
+                (DEFAULTS_LAYOUT, "<a:masterClrMapping/>", &mapping),
+            ]),
+        ),
+    ] {
+        let fresh = DeckSession::open(&source, client_id).unwrap();
+        let migrated =
+            DeckSession::open_from_update(&legacy_seed(&source, client_id + 1), client_id + 2)
+                .unwrap();
+        assert_ne!(migrated.snapshot().unwrap(), fresh.snapshot().unwrap());
+        let attached = DeckSession::open_from_update_with_source(
+            &migrated.encode_state_as_update_v1(),
+            &source,
+            client_id + 3,
+        )
+        .unwrap();
+        assert_eq!(attached.snapshot().unwrap(), fresh.snapshot().unwrap());
+        assert_eq!(attached.save().unwrap(), source);
+        let sourceless =
+            DeckSession::open_from_update(&attached.encode_state_as_update_v1(), client_id + 4)
+                .unwrap();
+        assert_eq!(sourceless.snapshot().unwrap(), fresh.snapshot().unwrap());
+        let (package, expected) = (sourceless.package(), fresh.package());
+        assert_eq!(package.masters[0].color_map, expected.masters[0].color_map);
+        assert_eq!(
+            package.layouts[0].color_map_override,
+            expected.layouts[0].color_map_override
+        );
+        assert_eq!(
+            package.slides[0].color_map_override,
+            expected.slides[0].color_map_override
+        );
+    }
+}
+
+#[test]
+fn peers_recovering_the_same_released_update_converge() {
+    let fresh = DeckSession::open(V2_1_DEFAULTS_SOURCE, 42800).unwrap();
+    let left = DeckSession::open_from_update_with_source(
+        V2_1_DEFAULTS_UPDATE,
+        V2_1_DEFAULTS_SOURCE,
+        42801,
+    )
+    .unwrap();
+    let right = DeckSession::open_from_update_with_source(
+        V2_1_DEFAULTS_UPDATE,
+        V2_1_DEFAULTS_SOURCE,
+        42802,
+    )
+    .unwrap();
+    left.apply_update_v1(&right.encode_state_as_update_v1())
+        .unwrap();
+    right
+        .apply_update_v1(&left.encode_state_as_update_v1())
+        .unwrap();
+    for session in [&left, &right] {
+        assert_eq!(session.snapshot().unwrap(), fresh.snapshot().unwrap());
+        assert_eq!(session.save().unwrap(), V2_1_DEFAULTS_SOURCE);
+    }
+}
+
+#[test]
+fn recovery_concurrent_with_a_peer_edit_converges_and_keeps_the_inserted_text() {
+    let editor = DeckSession::open_from_update(V2_1_DEFAULTS_UPDATE, 42900).unwrap();
+    let story = defaults_story(&editor, "Direct all caps");
+    editor
+        .insert_text(&EditCtx::local("fixture"), &story, 1, "i", &small_caps())
+        .unwrap();
+    let recovering = DeckSession::open_from_update_with_source(
+        V2_1_DEFAULTS_UPDATE,
+        V2_1_DEFAULTS_SOURCE,
+        42901,
+    )
+    .unwrap();
+    editor
+        .apply_update_v1(&recovering.encode_state_as_update_v1())
+        .unwrap();
+    recovering
+        .apply_update_v1(&editor.encode_state_as_update_v1())
+        .unwrap();
+    assert_eq!(editor.snapshot().unwrap(), recovering.snapshot().unwrap());
+    let looks = run_looks(&recovering, &story);
+    assert_eq!(
+        looks.iter().map(|look| look.0.as_str()).collect::<String>(),
+        "Miixed Case Title"
+    );
+    assert_eq!(looks[0], look("M", Some(TextCaps::All), "#FFFFFF"));
+    assert_eq!(
+        (looks[1].0.as_str(), looks[1].1),
+        ("i", Some(TextCaps::Small))
+    );
+    let saved = DeckSession::open(&recovering.save().unwrap(), 42902).unwrap();
+    assert_eq!(run_looks(&saved, &story), looks);
+}
+
+#[test]
+fn a_surviving_character_between_identical_source_characters_keeps_its_own_run() {
+    let source = defaults_variant(&[(
+        DEFAULTS_SLIDE,
+        "<a:t>Mixed Case Title</a:t></a:r>",
+        concat!(
+            r#"<a:t>a</a:t></a:r><a:r><a:rPr lang="en-US" sz="3200" cap="small">"#,
+            r#"<a:solidFill><a:schemeClr val="tx1"/></a:solidFill>"#,
+            r#"<a:latin typeface="Arial"/></a:rPr><a:t>a</a:t></a:r>"#
+        ),
+    )]);
+    let migrated = DeckSession::open_from_update(&legacy_seed(&source, 43100), 43101).unwrap();
+    let story = defaults_story(&migrated, "Direct all caps");
+    migrated
+        .delete_text(&EditCtx::local("fixture"), &story, 0, 1)
+        .unwrap();
+    let attached = DeckSession::open_from_update_with_source(
+        &migrated.encode_state_as_update_v1(),
+        &source,
+        43102,
+    )
+    .unwrap();
+    let expected = [look("a", Some(TextCaps::Small), "#FFFFFF")];
+    assert_eq!(run_looks(&attached, &story), expected);
+    let carried = attached.encode_state_as_update_v1();
+    assert!(!meta_has(&carried, "capsPendingSource"));
+    let saved = DeckSession::open(&attached.save().unwrap(), 43103).unwrap();
+    assert_eq!(run_looks(&saved, &story), expected);
+}
+
+#[test]
+fn an_ambiguous_character_keeps_only_its_story_pending() {
+    let source = defaults_variant(&[(
+        DEFAULTS_SLIDE,
+        "<a:t>Mixed Case Title</a:t></a:r>",
+        concat!(
+            r#"<a:t>a</a:t></a:r><a:r><a:rPr lang="en-US" sz="3200" cap="small">"#,
+            r#"<a:solidFill><a:schemeClr val="tx1"/></a:solidFill>"#,
+            r#"<a:latin typeface="Arial"/></a:rPr><a:t>a</a:t></a:r>"#
+        ),
+    )]);
+    let seeded = legacy_seed(&source, 43600);
+    let doc = hydrated(&seeded);
+    let mut package: serde_json::Value = serde_json::from_str(&package_json(&seeded)).unwrap();
+    without_keys(&mut package, &["fontSizePt"]);
+    let stored_meta = meta(&doc);
+    stored_meta.insert(
+        &mut doc.transact_mut(),
+        "packageJson",
+        Any::Buffer(serde_json::to_vec(&package).unwrap().into()),
+    );
+    let stored = doc
+        .transact()
+        .encode_state_as_update_v1(&StateVector::default());
+    let migrated = DeckSession::open_from_update(&stored, 43601).unwrap();
+    let story = defaults_story(&migrated, "Direct all caps");
+    migrated
+        .delete_text(&EditCtx::local("fixture"), &story, 0, 1)
+        .unwrap();
+    let mut update = migrated.encode_state_as_update_v1();
+    for client_id in [43602, 43603] {
+        let attached =
+            DeckSession::open_from_update_with_source(&update, &source, client_id).unwrap();
+        update = attached.encode_state_as_update_v1();
+        let pending: BTreeMap<String, Vec<(u64, u32)>> =
+            serde_json::from_str(&meta_string(&update, "capsPendingSource")).unwrap();
+        assert_eq!(pending.keys().collect::<Vec<_>>(), [&story]);
+        assert_eq!(pending[&story].len(), 1);
+        assert_eq!(run_looks(&attached, &story)[0].1, None);
+        assert_eq!(
+            run_looks(&attached, &defaults_story(&attached, "Direct small caps"))[0].1,
+            Some(TextCaps::Small)
+        );
+    }
+}
+
+#[test]
+fn retyped_source_text_keeps_the_style_it_was_typed_with() {
+    let migrated = DeckSession::open_from_update(V2_1_DEFAULTS_UPDATE, 43200).unwrap();
+    let story = defaults_story(&migrated, "Direct all caps");
+    let context = EditCtx::local("fixture");
+    migrated.delete_text(&context, &story, 0, 1).unwrap();
+    let typed = TextStyle {
+        font_size_pt: Some(32.0),
+        color: Some("#101828".to_owned()),
+        ..TextStyle::default()
+    };
+    migrated
+        .insert_text(&context, &story, 0, "M", &typed)
+        .unwrap();
+    let attached = DeckSession::open_from_update_with_source(
+        &migrated.encode_state_as_update_v1(),
+        V2_1_DEFAULTS_SOURCE,
+        43201,
+    )
+    .unwrap();
+    let expected = [
+        look("M", None, "#101828"),
+        look("ixed Case Title", Some(TextCaps::All), "#FFFFFF"),
+    ];
+    assert_eq!(run_looks(&attached, &story), expected);
+    let saved = DeckSession::open(&attached.save().unwrap(), 43202).unwrap();
+    assert_eq!(run_looks(&saved, &story), expected);
+}
+
+#[test]
+fn undo_restored_source_text_is_left_as_restored() {
+    let migrated = DeckSession::open_from_update(V2_1_DEFAULTS_UPDATE, 43300).unwrap();
+    let story = defaults_story(&migrated, "Direct all caps");
+    migrated
+        .delete_text(&EditCtx::local("fixture"), &story, 1, 2)
+        .unwrap();
+    assert!(migrated.undo());
+    let attached = DeckSession::open_from_update_with_source(
+        &migrated.encode_state_as_update_v1(),
+        V2_1_DEFAULTS_SOURCE,
+        43301,
+    )
+    .unwrap();
+    assert_eq!(
+        run_looks(&attached, &story),
+        [
+            look("M", Some(TextCaps::All), "#FFFFFF"),
+            look("i", None, "#101828"),
+            look("xed Case Title", Some(TextCaps::All), "#FFFFFF"),
+        ]
+    );
+}
+
+#[test]
+fn a_preset_value_a_collaborator_set_before_migration_stays() {
+    let fresh = DeckSession::open(V2_1_DEFAULTS_SOURCE, 43400).unwrap();
+    let shape = |name: &str| {
+        fresh.snapshot().unwrap().slides[0]
+            .shapes
+            .iter()
+            .find(|shape| shape.name == name)
+            .unwrap()
+            .id
+            .clone()
+    };
+    let (trapezoid, star) = (shape("Default trapezoid"), shape("Default star"));
+    let doc = hydrated(V2_1_DEFAULTS_UPDATE);
+    {
+        let mut txn = doc.transact_mut();
+        let shapes = txn.get_map(SHAPES).unwrap();
+        let shape = shapes
+            .get(&txn, &trapezoid)
+            .unwrap()
+            .cast::<MapRef>()
+            .unwrap();
+        shape.insert(&mut txn, "adjustValuesJson", r#"{"adj":0.2}"#);
+    }
+    let edited = doc
+        .transact()
+        .encode_state_as_update_v1(&StateVector::default());
+    let migrated = DeckSession::open_from_update(&edited, 43401).unwrap();
+    let adjust = |session: &DeckSession, id: &str| {
+        session.snapshot().unwrap().slides[0]
+            .shapes
+            .iter()
+            .find(|shape| shape.id == id)
+            .unwrap()
+            .adjust_values
+            .clone()
+    };
+    assert_eq!(
+        adjust(&migrated, &trapezoid),
+        BTreeMap::from([("adj".to_owned(), 0.2)])
+    );
+    assert_eq!(adjust(&migrated, &star), adjust(&fresh, &star));
+    let attached = DeckSession::open_from_update_with_source(
+        &migrated.encode_state_as_update_v1(),
+        V2_1_DEFAULTS_SOURCE,
+        43402,
+    )
+    .unwrap();
+    let parts: BTreeMap<_, _> = ooxml_opc::unzip_parts(&attached.save().unwrap())
+        .unwrap()
+        .into_iter()
+        .collect();
+    let slide = String::from_utf8(parts[DEFAULTS_SLIDE].clone()).unwrap();
+    let start = slide.find(r#"name="Default trapezoid""#).unwrap();
+    let trapezoid_xml = &slide[start..start + slide[start..].find("</p:sp>").unwrap()];
+    assert!(trapezoid_xml.contains(r#"<a:gd fmla="val 20000" name="adj"/>"#));
+}
+
+#[test]
+fn a_fragmented_story_recovers_in_about_the_time_a_fresh_open_takes() {
+    let mut paragraphs = String::new();
+    for paragraph in 0..FRAGMENTED_PARAGRAPHS {
+        paragraphs.push_str("<a:p><a:pPr/>");
+        for run in 0..FRAGMENTED_RUNS {
+            let (caps, size) = if (paragraph + run) % 2 == 0 {
+                ("all", 3200)
+            } else {
+                ("small", 3300)
+            };
+            paragraphs.push_str(&format!(
+                "<a:r><a:rPr lang=\"en-US\" sz=\"{size}\" cap=\"{caps}\"><a:solidFill>\
+                 <a:schemeClr val=\"tx1\"/></a:solidFill><a:latin typeface=\"Arial\"/></a:rPr>\
+                 <a:t>{}</a:t></a:r>",
+                format!("run {run} of {paragraph} ").repeat(FRAGMENTED_REPEATS)
+            ));
+        }
+        paragraphs.push_str("</a:p>");
+    }
+    let slide = defaults_part(DEFAULTS_SLIDE);
+    let start = slide.find("<a:p><a:pPr/><a:r>").unwrap();
+    let end = start + slide[start..].find("</a:p>").unwrap() + "</a:p>".len();
+    let source = defaults_variant(&[(DEFAULTS_SLIDE, &slide[start..end], &paragraphs)]);
+    let stored = legacy_seed(&source, 43500);
+    let started = std::time::Instant::now();
+    let fresh = DeckSession::open(&source, 43501).unwrap();
+    let open_time = started.elapsed();
+    let migrated = DeckSession::open_from_update(&stored, 43502).unwrap();
+    let story = defaults_story(&migrated, "Direct all caps");
+    let context = EditCtx::local("fixture");
+    let mut starts = Vec::new();
+    let mut offset = 0;
+    for paragraph in fresh.story(&story).unwrap().paragraphs {
+        starts.push(offset);
+        offset += paragraph
+            .runs
+            .iter()
+            .map(|run| run.text.len() as u32)
+            .sum::<u32>()
+            + 1;
+    }
+    let typed = TextStyle {
+        font_size_pt: Some(32.0),
+        ..TextStyle::default()
+    };
+    for session in [&migrated, &fresh] {
+        for index in starts
+            .iter()
+            .rev()
+            .flat_map(|start| [start + 60, start + 30, start + 3])
+        {
+            session
+                .delete_text(&context, &story, index, index + 2)
+                .unwrap();
+            session
+                .insert_text(&context, &story, index, "X", &typed)
+                .unwrap();
+        }
+    }
+    let update = migrated.encode_state_as_update_v1();
+    let started = std::time::Instant::now();
+    let attached = DeckSession::open_from_update_with_source(&update, &source, 43503).unwrap();
+    let attach_time = started.elapsed();
+    eprintln!("TIMING attach {attach_time:?} open {open_time:?}");
+    assert_eq!(
+        attached.story(&story).unwrap(),
+        fresh.story(&story).unwrap()
+    );
+    assert!(
+        attach_time < open_time * 8,
+        "attaching took {attach_time:?}, a fresh open {open_time:?}"
+    );
+}
+fn small_caps() -> TextStyle {
+    TextStyle {
+        font_size_pt: Some(32.0),
+        color: Some("#101828".to_owned()),
+        caps: Some(TextCaps::Small),
+        ..TextStyle::default()
+    }
+}
+
+fn look(text: &str, caps: Option<TextCaps>, color: &str) -> RunLook {
+    (text.to_owned(), caps, Some(color.to_owned()))
+}
+
+fn defaults_story(session: &DeckSession, shape: &str) -> String {
+    session.snapshot().unwrap().slides[0]
+        .shapes
+        .iter()
+        .find(|candidate| candidate.name == shape)
+        .unwrap()
+        .text_stories[0]
+        .id
+        .clone()
+}
+
+fn run_looks(session: &DeckSession, story: &str) -> Vec<RunLook> {
+    session.story(story).unwrap().paragraphs[0]
+        .runs
+        .iter()
+        .map(|run| (run.text.clone(), run.style.caps, run.style.color.clone()))
+        .collect()
+}
+
+fn defaults_part(part: &str) -> String {
+    let parts = ooxml_opc::unzip_parts(V2_1_DEFAULTS_SOURCE).unwrap();
+    let (_, bytes) = parts.into_iter().find(|(name, _)| name == part).unwrap();
+    String::from_utf8(bytes).unwrap()
+}
+
+/// The defaults deck with each `(part, from, to)` replacement applied once.
+fn defaults_variant(edits: &[(&str, &str, &str)]) -> Vec<u8> {
+    let mut parts = ooxml_opc::unzip_parts(V2_1_DEFAULTS_SOURCE).unwrap();
+    for (part, from, to) in edits {
+        let (_, bytes) = parts.iter_mut().find(|(name, _)| name == part).unwrap();
+        let xml = String::from_utf8(bytes.clone()).unwrap();
+        assert!(xml.contains(from), "{part} lacks {from}");
+        *bytes = xml.replacen(from, to, 1).into_bytes();
+    }
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+/// Seeds `source` the way a release before schema 2.2 stored it: no caps, and
+/// run colours resolved without the slide colour map.
+fn legacy_seed(source: &[u8], client_id: u64) -> Vec<u8> {
+    let stored = stored_2_0(source, client_id, |value| {
+        without_keys(value, &["caps", "colorMap", "colorMapOverride"])
+    });
+    restamped(&stored, Some(2.1))
+}
+
+fn meta_has(update: &[u8], key: &str) -> bool {
+    let doc = hydrated(update);
+    meta(&doc).contains_key(&doc.transact(), key)
+}
+
+fn meta_string(update: &[u8], key: &str) -> String {
+    let doc = hydrated(update);
+    match meta(&doc).get(&doc.transact(), key) {
+        Some(Out::Any(Any::String(value))) => value.to_string(),
+        other => panic!("{key} is {other:?}"),
+    }
+}
+
+#[test]
+fn migrating_and_attaching_grows_linearly_with_the_number_of_stories() {
+    let slide = defaults_part(DEFAULTS_SLIDE);
+    let start = slide
+        .find(r#"<p:sp><p:nvSpPr><p:cNvPr id="10" name="Direct all caps"/>"#)
+        .unwrap();
+    let end = start + slide[start..].find("</p:sp>").unwrap() + "</p:sp>".len();
+    let template = &slide[start..end];
+    let mut timings = Vec::new();
+    for count in STORY_COUNTS {
+        let copies: String = (0..count)
+            .map(|index| {
+                template.replace(
+                    r#"id="10" name="Direct all caps""#,
+                    &format!(r#"id="{}" name="Copy {index}""#, 1000 + index),
+                )
+            })
+            .collect();
+        let source = defaults_variant(&[(
+            DEFAULTS_SLIDE,
+            "</p:spTree>",
+            &format!("{copies}</p:spTree>"),
+        )]);
+        let doc = hydrated(&legacy_seed(&source, 44500));
+        let fresh = DeckSession::open(&source, 44501).unwrap();
+        let stories: Vec<_> = fresh.snapshot().unwrap().slides[0]
+            .shapes
+            .iter()
+            .flat_map(|shape| shape.text_stories.iter().map(|story| story.id.clone()))
+            .collect();
+        {
+            let mut txn = doc.transact_mut();
+            let map = txn.get_map("pptx:stories").unwrap();
+            for story in &stories {
+                let text = map
+                    .get(&txn, story)
+                    .unwrap()
+                    .cast::<yrs::TextRef>()
+                    .unwrap();
+                for index in (0..DELETIONS_PER_STORY).rev() {
+                    yrs::Text::remove_range(&text, &mut txn, index * 2, 1);
+                }
+            }
+        }
+        for story in &stories {
+            for index in (0..DELETIONS_PER_STORY).rev() {
+                let context = EditCtx::local("fixture");
+                fresh
+                    .delete_text(&context, story, index * 2, index * 2 + 1)
+                    .unwrap();
+            }
+        }
+        let update = doc
+            .transact()
+            .encode_state_as_update_v1(&StateVector::default());
+        let started = std::time::Instant::now();
+        let attached = DeckSession::open_from_update_with_source(&update, &source, 44502).unwrap();
+        timings.push(started.elapsed());
+        for story in &stories {
+            assert_eq!(attached.story(story).unwrap(), fresh.story(story).unwrap());
+        }
+    }
+    for step in timings.windows(2) {
+        assert!(
+            step[1] < step[0] * 8,
+            "{STORY_COUNTS:?} stories took {timings:?}"
+        );
+    }
+}
+
+#[test]
+fn baseline_and_spacing_recover_text_restored_by_undo() {
+    let baselines: &[u8] =
+        include_bytes!("../../pptx-render/tests/fixtures/text-baseline-script.pptx");
+    let spacing: &[u8] = include_bytes!("fixtures/run-spacing-shadow.pptx");
+    for (client_id, source, key) in [
+        (44700, baselines, "baselinePct"),
+        (44800, spacing, "spacingPt"),
+    ] {
+        let fresh = DeckSession::open(source, client_id).unwrap();
+        let (story, offset) = first_offset(&fresh.snapshot().unwrap(), |style| {
+            style.baseline_pct.is_some() || style.spacing_pt.is_some()
+        });
+        let stored = stored_2_0(source, client_id + 1, |value| without_keys(value, &[key]));
+        let migrated = DeckSession::open_from_update(&stored, client_id + 2).unwrap();
+        migrated
+            .delete_text(&EditCtx::local("fixture"), &story, offset, offset + 1)
+            .unwrap();
+        assert!(migrated.undo());
+        let attached = DeckSession::open_from_update_with_source(
+            &migrated.encode_state_as_update_v1(),
+            source,
+            client_id + 3,
+        )
+        .unwrap();
+        assert_eq!(
+            attached.story(&story).unwrap(),
+            fresh.story(&story).unwrap(),
+            "{key}"
+        );
+        assert_eq!(attached.save().unwrap(), fresh.save().unwrap(), "{key}");
+    }
+}
+
+/// The first story offset whose run style matches.
+fn first_offset(snapshot: &DeckSnapshot, matches: impl Fn(&TextStyle) -> bool) -> (String, u32) {
+    fn find(
+        shapes: &[ShapeSnapshot],
+        matches: &impl Fn(&TextStyle) -> bool,
+    ) -> Option<(String, u32)> {
+        for shape in shapes {
+            for story in &shape.text_stories {
+                let mut offset = 0;
+                for paragraph in &story.paragraphs {
+                    for run in &paragraph.runs {
+                        if matches(&run.style) {
+                            return Some((story.id.clone(), offset));
+                        }
+                        offset += run.text.encode_utf16().count() as u32;
+                    }
+                    offset += 1;
+                }
+            }
+            if let Some(found) = find(&shape.children, matches) {
+                return Some(found);
+            }
+        }
+        None
+    }
+    snapshot
+        .slides
+        .iter()
+        .find_map(|slide| find(&slide.shapes, &matches))
+        .unwrap()
+}
+
+#[test]
+fn a_released_update_edited_across_runs_and_surrogates_recovers_by_its_clocks() {
+    let fresh = DeckSession::open(V2_1_EDITS_SOURCE, 44900).unwrap();
+    let story = defaults_story(&fresh, "Direct all caps");
+    let context = EditCtx::local("fixture");
+    let typed = TextStyle {
+        font_size_pt: Some(32.0),
+        color: Some("#123456".to_owned()),
+        ..TextStyle::default()
+    };
+    fresh.delete_text(&context, &story, 1, 3).unwrap();
+    fresh.delete_text(&context, &story, 9, 11).unwrap();
+    fresh
+        .insert_text(&context, &story, 0, "NEW", &typed)
+        .unwrap();
+    fresh.delete_text(&context, &story, 27, 29).unwrap();
+    fresh
+        .insert_text(&context, &story, 19, "\u{1D402}", &typed)
+        .unwrap();
+    let attached =
+        DeckSession::open_from_update_with_source(V2_1_EDITS_UPDATE, V2_1_EDITS_SOURCE, 44901)
+            .unwrap();
+    assert_eq!(
+        attached.story(&story).unwrap(),
+        fresh.story(&story).unwrap()
+    );
+    assert_eq!(attached.save().unwrap(), fresh.save().unwrap());
+    let carried = attached.encode_state_as_update_v1();
+    for key in ["capsPendingSource", "colorsPendingSource"] {
+        assert!(!meta_has(&carried, key), "{key}");
+    }
+}
+
+#[test]
+fn baseline_and_spacing_recover_a_long_paragraph_restored_by_undo() {
+    let (source, story) = long_formatted_paragraph();
+    for (client_id, replayable) in [(45000, true), (45100, false)] {
+        let migrated = DeckSession::open_from_update(
+            &long_paragraph_seed(&source, client_id, replayable),
+            client_id + 1,
+        )
+        .unwrap();
+        migrated
+            .delete_text(&EditCtx::local("fixture"), &story, 0, LONG_PARAGRAPH)
+            .unwrap();
+        assert!(migrated.undo());
+        let attached = DeckSession::open_from_update_with_source(
+            &migrated.encode_state_as_update_v1(),
+            &source,
+            client_id + 2,
+        )
+        .unwrap();
+        let fresh = DeckSession::open(&source, client_id + 3).unwrap();
+        assert_eq!(
+            attached.story(&story).unwrap(),
+            fresh.story(&story).unwrap()
+        );
+        assert_eq!(attached.save().unwrap(), source);
+    }
+}
+
+#[test]
+fn a_save_refuses_to_drop_baseline_or_spacing_it_could_not_recover() {
+    let (source, story) = long_formatted_paragraph();
+    let migrated =
+        DeckSession::open_from_update(&long_paragraph_seed(&source, 45200, true), 45201).unwrap();
+    let context = EditCtx::local("fixture");
+    migrated
+        .delete_text(&context, &story, 0, LONG_PARAGRAPH)
+        .unwrap();
+    migrated
+        .insert_text(
+            &context,
+            &story,
+            0,
+            &"Z".repeat(2100),
+            &TextStyle::default(),
+        )
+        .unwrap();
+    let attached = DeckSession::open_from_update_with_source(
+        &migrated.encode_state_as_update_v1(),
+        &source,
+        45202,
+    )
+    .unwrap();
+    let carried = attached.encode_state_as_update_v1();
+    meta_string(&carried, "baselinesPendingSource");
+    match attached.save() {
+        Err(EditError::Write(message)) => assert!(message.contains("could not be recovered")),
+        other => panic!("{other:?}"),
+    }
+    attached.delete_text(&context, &story, 0, 2100).unwrap();
+    attached.save().unwrap();
+}
+
+const LONG_PARAGRAPH: u32 = 2000;
+
+/// The defaults deck with a 2,000-character raised, tracked run, and its story.
+fn long_formatted_paragraph() -> (Vec<u8>, String) {
+    let text: String = "Mixed Case Title "
+        .repeat(120)
+        .chars()
+        .take(LONG_PARAGRAPH as usize)
+        .collect();
+    let source = defaults_variant(&[
+        (
+            DEFAULTS_SLIDE,
+            r#"<a:rPr lang="en-US" sz="3200" cap="all">"#,
+            r#"<a:rPr lang="en-US" sz="3200" cap="all" spc="300" baseline="30000">"#,
+        ),
+        (
+            DEFAULTS_SLIDE,
+            "<a:t>Mixed Case Title</a:t>",
+            &format!("<a:t>{text}</a:t>"),
+        ),
+    ]);
+    let story = defaults_story(
+        &DeckSession::open(&source, 44999).unwrap(),
+        "Direct all caps",
+    );
+    (source, story)
+}
+
+/// A 2.0 seed of `source` without baselines or spacing; unless `replayable`,
+/// its stored package no longer reproduces the seed.
+fn long_paragraph_seed(source: &[u8], client_id: u64, replayable: bool) -> Vec<u8> {
+    let seeded = stored_2_0(source, client_id, |value| {
+        without_keys(value, &["baselinePct", "spacingPt"])
+    });
+    if replayable {
+        return seeded;
+    }
+    let doc = hydrated(&seeded);
+    let mut package: serde_json::Value = serde_json::from_str(&package_json(&seeded)).unwrap();
+    without_keys(&mut package, &["fontSizePt"]);
+    let stored_meta = meta(&doc);
+    stored_meta.insert(
+        &mut doc.transact_mut(),
+        "packageJson",
+        Any::Buffer(serde_json::to_vec(&package).unwrap().into()),
+    );
+    doc.transact()
+        .encode_state_as_update_v1(&StateVector::default())
 }

@@ -7,12 +7,8 @@ unlisted files except Word owner files beginning with `~$`.
 Each fixture is opened and saved, then compared with the
 [package oracles](../../../ooxml-fidelity/README.md). Every finding must match
 `expected/<fixture>.findings.txt` exactly. Reopening and saving the result must
-produce identical package bytes; unstable parts are findings. These checks
-compare package contents and do not establish rendering agreement with Word.
-
-A source root that binds a standard WML prefix such as `w16` to another namespace
-is saved with the serializer's fixed Word binding, which can change
-`mc:Choice/@Requires` meaning; the oracles report this loss.
+produce identical package bytes; unstable parts are findings. The oracles
+compare package contents and report namespace changes.
 
 Run `cargo test -p betteroffice-docx --test corpus`. To regenerate findings,
 run `GOLDEN_UPDATE=1 cargo test -p betteroffice-docx --test corpus`, then review

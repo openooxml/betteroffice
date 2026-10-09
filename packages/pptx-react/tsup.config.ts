@@ -1,4 +1,6 @@
 import { defineConfig } from 'tsup';
+import { fileURLToPath } from 'node:url';
+import { packageBoundary } from '../../scripts/package-boundary';
 
 export default defineConfig({
   entry: { index: 'src/index.ts' },
@@ -10,4 +12,5 @@ export default defineConfig({
   treeshake: true,
   minify: true,
   external: ['react', 'react-dom', '@betteroffice/pptx'],
+  esbuildPlugins: [packageBoundary(fileURLToPath(new URL('.', import.meta.url)))],
 });

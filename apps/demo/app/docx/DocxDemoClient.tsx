@@ -26,7 +26,7 @@ setGoogleFontsEnabled(false);
 // The editor is browser-only (canvas + wasm + worker); keep it out of SSR.
 const DocxEditor = dynamic(
   () => import("@betteroffice/docx-react").then((m) => m.DocxEditor),
-  { ssr: false }
+  { ssr: false, loading: () => <DocumentLoading /> }
 );
 const CompactToolbar = dynamic(
   () => import("./CompactToolbar").then((m) => m.CompactToolbar),
@@ -34,6 +34,18 @@ const CompactToolbar = dynamic(
 );
 
 const SHOWCASE = { url: "/betteroffice-demo.docx", name: "betteroffice-demo.docx" };
+
+function DocumentLoading() {
+  return (
+    <div
+      className="oox-root flex flex-col items-center justify-center gap-5 bg-[var(--doc-bg)] text-[var(--doc-text-muted)]"
+      role="status"
+    >
+      <div className="size-9 animate-[spin_0.8s_linear_infinite] rounded-full border-3 border-[var(--doc-border)] border-t-[var(--doc-primary)]" />
+      <div className="text-[14px]">Loading document...</div>
+    </div>
+  );
+}
 
 /** `id` keys the editor, so each loaded document gets its own session. */
 interface DemoSource {
@@ -282,7 +294,7 @@ export function DocxDemoClient() {
             showZoomControl
           />
         ) : (
-          <p className="m-auto text-mute">Loading document…</p>
+          <DocumentLoading />
         )}
       </main>
     </div>

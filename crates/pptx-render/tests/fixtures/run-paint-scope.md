@@ -16,9 +16,10 @@ must remain one positioned run. This exercises inherited source runs before
 the editor can coalesce identical text attributes.
 
 On main, slide 1 paints `gold black gold` entirely gold and `black gold black`
-entirely black. Its last row drops the bold and italic flags, underline, and the 48 px size.
-[PR #304](https://github.com/openooxml/betteroffice/pull/304) compares this slide
-before and after the fix with the same registered font.
+entirely black. Its last row drops the bold and italic flags, underline, and
+the 48 px size.
+
+Review: [PR #304](https://github.com/openooxml/betteroffice/pull/304).
 
 The tracked demo deck also reproduces the bug on slide 3: the three numbered
 step labels should retain their accent colours and 16 px size, while the

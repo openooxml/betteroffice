@@ -34,26 +34,10 @@ untouched comment parts byte for byte. Deleting a thread removes its known
 replies; a reply added concurrently becomes a root when its parent is absent,
 so both clients and saved files retain it.
 
-The current schema is v20. Older v1–v19 updates can be opened, and attaching the
-original package with `open_from_update_with_source` imports source comments,
-list styles, explicit numbering restarts, paragraph line spacing, picture
-fills, unedited gradient outlines, chart-space fills and axis lines, explicit
-text overflow settings, bitmap effects, and shape shadows with their scale and
-alignment missing from older snapshots. Schema 20 recovers OLE preview pictures
-after schema 19 restores character tracking.
-Source attachment also restores run baseline and character spacing formatting
-on surviving text while retaining edits and explicit zero overrides. Imported properties persist in
-subsequent updates, and reattaching the source is idempotent.
-Source-free loads defer the import until the package is attached. Older clients
-reject new-schema updates; collaborators must upgrade together or exchange
-saved PPTX files. The existing connector, slide-number, theme-formatting,
-hidden-shape, custom-geometry, comment and list-style migrations run first,
-followed by the schema-10 baseline migration, schema-11 numbering migration,
-schema-12 line-spacing migration, schema-13 picture-fill migration, and
-schema-14 gradient-outline migration, followed by the chart migration in
-schema 15, the text-overflow migration in schema 16, and the bitmap-effect
-migration in schema 17, then the outer-shadow migration in schema 18, and
-character spacing in schema 19.
+The current deck schema is 2.2. Opening migrates released 1.0, 2.0 and 2.1
+snapshots; attaching the original package with `open_from_update_with_source`
+restores source properties. Older clients reject new-schema updates;
+collaborators upgrade together or exchange saved PPTX files.
 Default text overflow settings and starting slide numbers remain omitted from
 package JSON.
 

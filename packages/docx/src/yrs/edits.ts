@@ -101,8 +101,8 @@ export type DocxEditOperation =
 
 /**
  * Replaces a plain- or rich-text content control's content with plain text and clears its
- * placeholder state. CRLF becomes LF; LF breaks lines in an inline control and paragraphs in a
- * block control, and a plain-text control accepts it only with `w:multiLine`. The text takes the
+ * placeholder state. CRLF becomes LF; LF is a line break (a paragraph break in a rich-text block
+ * control), and a plain-text control accepts it only with `w:multiLine`. The text takes the
  * formatting of the control's first text run (a control showing its placeholder takes its own run
  * properties). `expect` compares against the control's `value`; `suggest` is refused.
  */

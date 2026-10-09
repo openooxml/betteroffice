@@ -114,3 +114,39 @@ fn refusals_are_export_errors() {
         .unwrap_err();
     assert!(matches!(error, Error::Export(_)), "{error}");
 }
+
+#[test]
+fn block_controls_in_table_cells_survive_save() {
+    let w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    let document = format!(
+        r#"<w:document xmlns:w="{w}"><w:body><w:tbl><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:sdt><w:sdtPr><w:alias w:val="Cell"/><w:tag w:val="cell"/><w:id w:val="101"/><w:text/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>cell text</w:t></w:r></w:p></w:sdtContent></w:sdt></w:tc></w:tr></w:tbl><w:sectPr/></w:body></w:document>"#
+    );
+    let bytes = ooxml_opc::rezip_parts(&[
+        (
+            "[Content_Types].xml".to_owned(),
+            br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec(),
+        ),
+        (
+            "_rels/.rels".to_owned(),
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec(),
+        ),
+        ("word/document.xml".to_owned(), document.into_bytes()),
+    ])
+    .unwrap();
+    let saved = Document::open(&bytes).unwrap().save().unwrap();
+    let controls = list_docx_content_controls(&saved, &ContentControlsOptions::default())
+        .unwrap()
+        .controls;
+    let [control] = controls.as_slice() else {
+        panic!("one control: {controls:?}");
+    };
+    assert_eq!(control.metadata.tag.as_deref(), Some("cell"));
+    assert_eq!(control.metadata.alias.as_deref(), Some("Cell"));
+    assert_eq!(control.metadata.ooxml_id.as_deref(), Some("101"));
+    assert_eq!(
+        control.value,
+        ControlValue::Text {
+            text: "cell text".to_owned()
+        }
+    );
+}
