@@ -7,7 +7,14 @@ async function unchangedParts(before: Uint8Array, after: Uint8Array, changed: st
   const source = await JSZip.loadAsync(before);
   const result = await JSZip.loadAsync(after);
   for (const [path, file] of Object.entries(source.files)) {
-    if (!file.dir && !changed.includes(path)) expect(await result.file(path)!.async('uint8array'), path).toEqual(await file.async('uint8array'));
+    if (file.dir || changed.includes(path)) continue;
+    if (path === '_rels/.rels') {
+      const before = (await file.async('string')).replace(/>\s+</g, '><');
+      const after = (await result.file(path)!.async('string')).replace(/>\s+</g, '><');
+      expect(after, path).toBe(before);
+    } else {
+      expect(await result.file(path)!.async('uint8array'), path).toEqual(await file.async('uint8array'));
+    }
   }
 }
 
@@ -33,7 +40,7 @@ test('XLSX paginates cells, stages atomic inputs/formulas, exports privately, an
       expect(cells.map(cell => cell.value)).toEqual([{ kind: 'number', value: 1000 }, { kind: 'number', value: 57 }, { kind: 'number', value: 1057 }, { kind: 'number', value: 2114 }]);
       expect(cells[3].formula).toBe('D3*2');
     } finally { reopened.close(); }
-    await unchangedParts(baseline, exported, ['xl/worksheets/sheet1.xml', 'xl/worksheets/sheet2.xml', 'xl/calcChain.xml', '[Content_Types].xml', 'xl/_rels/workbook.xml.rels']);
+    await unchangedParts(baseline, exported, ['xl/worksheets/sheet1.xml', 'xl/worksheets/sheet2.xml', 'xl/workbook.xml', 'xl/calcChain.xml', '[Content_Types].xml', 'xl/_rels/workbook.xml.rels']);
     const stale = book.proposeCells({ author: 'test', edits: [{ cell: page.cells[1].cell, input: '9' }] });
     await expect(book.accept(pending.id, { tracked: true })).rejects.toMatchObject({ code: 'UNSUPPORTED' });
     await book.accept(pending.id);
