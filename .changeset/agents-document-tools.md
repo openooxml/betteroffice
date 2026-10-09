@@ -1,6 +1,5 @@
 ---
 "@betteroffice/agents": minor
-"@betteroffice/docx": patch
 ---
 
-Add the agents package with bounded DOCX discovery, literal search, precise reads, reviewable text proposals, page previews, save/reopen checks, and a local stdio MCP server. Release the DOCX session APIs used by the adapter alongside the new package.
+Adds `@betteroffice/agents` with opt-in DOCX search, text proposals, raster previews and save/reopen checks. `createOfficeMcpServer` provides a local stdio MCP server with bounded file reads, tool inputs and image decoding.

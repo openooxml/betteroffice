@@ -1,10 +1,29 @@
 import { expect, test } from 'bun:test';
-import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { fixture } from './fixture';
+
+test('stdio closes when unterminated input exceeds 1 MiB', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'betteroffice-mcp-limit-'));
+  const child = spawn(process.execPath, [resolve(import.meta.dir, '../src/cli.ts'), '--root', root], { stdio: ['pipe', 'pipe', 'pipe'] });
+  child.stdin.on('error', () => {});
+  try {
+    const exited = new Promise<number | null>((resolveExit, reject) => {
+      child.once('exit', resolveExit);
+      child.once('error', reject);
+    });
+    child.stdin.write('x'.repeat(1024 * 1024 + 1));
+    expect(await exited).toBe(0);
+    expect(await readdir(root)).toEqual([]);
+  } finally {
+    child.kill();
+    await rm(root, { recursive: true, force: true });
+  }
+}, 10000);
 
 test('stdio MCP supports discovery through verified export and confines file access', async () => {
   const root = await mkdtemp(join(tmpdir(), 'betteroffice-mcp-'));
@@ -47,6 +66,15 @@ test('stdio MCP supports discovery through verified export and confines file acc
     expect((await client.callTool({ name: 'office_open', arguments: { path: 'escape/secret.docx' } })).isError).toBe(true);
     expect((await client.callTool({ name: 'office_export', arguments: { document, path: 'escape/leak.docx' } })).isError).toBe(true);
     expect((await client.callTool({ name: 'office_grep', arguments: { document, query: 'risk', limit: 100000 } })).isError).toBe(true);
+    for (const [name, args] of [
+      ['office_open', { path: 'x'.repeat(4097) }],
+      ['office_read', { document: 'x'.repeat(129), ref: hit.ref }],
+      ['office_propose', { document, author: 'test', edits: [{ match: hit.match, newText: 'x'.repeat(16001) }] }],
+    ] as const) {
+      const invalid = await client.callTool({ name, arguments: args });
+      expect(invalid.isError).toBe(true);
+      expect(invalid.structuredContent).toMatchObject({ code: 'INVALID_ARGUMENT' });
+    }
     await call('office_accept', { document, proposal });
     expect((await call('office_read', { document, ref: hit.ref })).text).toContain('€5.1 million');
     await call('office_close', { document });
@@ -55,5 +83,26 @@ test('stdio MCP supports discovery through verified export and confines file acc
     await client.close();
     await rm(root, { recursive: true, force: true });
     await rm(outside, { recursive: true, force: true });
+  }
+}, 30000);
+
+test('read-only stdio exposes inspection tools and refuses writes', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'betteroffice-mcp-readonly-'));
+  const client = new Client({ name: 'test', version: '1' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve(import.meta.dir, '../src/cli.ts'), '--root', root, '--read-only'], stderr: 'pipe' });
+  try {
+    await writeFile(join(root, 'report.docx'), await fixture());
+    await client.connect(transport);
+    const names = (await client.listTools()).tools.map(tool => tool.name);
+    expect(names).toContain('office_open');
+    for (const name of ['office_propose', 'office_accept', 'office_reject', 'office_export']) {
+      expect(names).not.toContain(name);
+      expect((await client.callTool({ name, arguments: {} })).isError).toBe(true);
+    }
+    expect((await client.callTool({ name: 'office_open', arguments: { path: 'report.docx' } })).isError).not.toBe(true);
+    expect(await readdir(root)).toEqual(['report.docx']);
+  } finally {
+    await client.close();
+    await rm(root, { recursive: true, force: true });
   }
 }, 30000);

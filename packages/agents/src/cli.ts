@@ -11,7 +11,7 @@ try {
   } else {
     if (!values.root) throw new Error('--root <directory> is required.');
     const server = await createOfficeMcpServer({ root: values.root, readOnly: values['read-only'], renderer: renderDocxPage });
-    await server.connect(new StdioServerTransport());
+    await server.connect(new StdioServerTransport(process.stdin, process.stdout, { maxBufferSize: 1024 * 1024 }));
   }
 } catch (error) {
   process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
