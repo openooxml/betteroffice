@@ -88,6 +88,7 @@ mod list_marker;
 pub mod media;
 mod op;
 mod ops;
+mod peer_bootstrap;
 mod policy;
 mod presence;
 mod queries;
@@ -97,6 +98,7 @@ pub mod read_types;
 mod script_fonts;
 mod search;
 mod seed;
+mod segment_json;
 mod segments;
 pub mod structured;
 mod target;
@@ -137,6 +139,7 @@ pub use ops::paragraph::{
 pub use ops::resolve::ChangeTarget;
 pub use ops::table::{CellLoc, TableLocator, TableRange, TableReceipt};
 pub use ops::text::RichRun;
+pub use peer_bootstrap::{PeerBootstrap, PeerBootstrapSource, PeerMetadataError};
 pub use queries::{
     ChangeInfo, ChangeKind, CommentInfo, FindMatch, FindOptions, LayoutBridge, NavDirection,
     NavUnit, PageContent, PageParagraph, SelectionInfo, TextView,
@@ -547,6 +550,7 @@ pub struct EditingDoc {
     id_counter: AtomicU64,
     direct_batches: AtomicBool,
     direct_batches_applied: AtomicU64,
+    host_edit_depth: Arc<AtomicU32>,
     /// Bumped once per committed update (local ops, remote merges, undo/redo); segment
     /// indexes and chunk snapshots older than the current value are rebuilt on next lookup.
     epoch: Arc<AtomicU64>,
@@ -610,6 +614,7 @@ impl EditingDoc {
             id_counter: AtomicU64::new(0),
             direct_batches: AtomicBool::new(false),
             direct_batches_applied: AtomicU64::new(0),
+            host_edit_depth: Arc::new(AtomicU32::new(0)),
             epoch,
             instance: DOC_INSTANCES.fetch_add(1, Ordering::Relaxed),
             version_nonce: AtomicU64::new(batch::mint_nonce(client_id, 0)),
@@ -980,10 +985,10 @@ impl EditingDoc {
         let mut media = self.media.lock().unwrap();
         if media.is_none() {
             let bytes = match self.source.lock().unwrap().as_ref()? {
-                identity::SourcePackage::Pending(bytes, _) => Arc::clone(bytes),
+                identity::SourcePackage::Pending(bytes, _) => bytes.clone(),
                 identity::SourcePackage::Ready(index) => index.bytes(),
             };
-            let package = ooxml_opc::RetainedPackage::new(bytes).ok()?;
+            let package = ooxml_opc::RetainedPackage::from_bytes(bytes).ok()?;
             *media = Some(Arc::new(docx_parse::media::MediaTable::new(package).ok()?));
         }
         media.clone()
@@ -993,6 +998,7 @@ impl EditingDoc {
     /// a replica hydrated from state resolves source and persisted anchors and
     /// reserves the package's paragraph IDs. Indexed on first identity use.
     pub fn retain_source_docx(&self, bytes: impl Into<Arc<[u8]>>) {
+        let bytes: Arc<[u8]> = bytes.into();
         self.retain_source(identity::SourcePackage::Pending(bytes.into(), None));
     }
 
@@ -1023,7 +1029,7 @@ impl EditingDoc {
         let index = match source.as_ref()? {
             identity::SourcePackage::Ready(index) => return Some(Arc::clone(index)),
             identity::SourcePackage::Pending(bytes, digest) => {
-                seed::source_index(Arc::clone(bytes), digest.clone())
+                seed::source_index(bytes.clone(), digest.clone())
                     .ok()
                     .map(Arc::new)
             }
@@ -1438,6 +1444,8 @@ impl EditingDoc {
 
     /// Applies an update, then repairs any paragraph identities it duplicated.
     pub(crate) fn integrate_update(&self, update: Update, origin: UpdateOrigin) -> EditResult<()> {
+        let _host_edit = matches!(origin, UpdateOrigin::Host)
+            .then(|| batch::HostEditGuard::new(&self.host_edit_depth));
         let watch = identity::IdentityWatch::new(self);
         let reanchored = comment_references::CommentWatch::new(self);
         let result = match origin {

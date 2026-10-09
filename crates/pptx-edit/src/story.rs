@@ -198,7 +198,7 @@ pub(crate) fn import_source_numbering_restarts(
     let mut txn = doc.transact_mut_with(crate::MIGRATE_ORIGIN);
     let stories = crate::deck::required_map(&txn, STORIES)?;
     let mut updates = Vec::new();
-    for (_, value) in stories.iter(&txn) {
+    for (story_id, value) in stories.iter(&txn) {
         let Out::YText(story) = value else { continue };
         for diff in story.diff(&txn, YChange::identity) {
             let Out::YMap(map) = diff.insert else {
@@ -213,11 +213,12 @@ pub(crate) fn import_source_numbering_restarts(
             let current = map_string(&map, &txn, "bulletJson")
                 .and_then(|json| serde_json::from_str::<pptx_parse::Bullet>(&json).ok());
             if current.as_ref() == Some(legacy) {
-                updates.push((map, source.clone()));
+                updates.push(((story_id.to_owned(), id), map, source.clone()));
             }
         }
     }
-    for (map, json) in updates {
+    updates.sort_by(|left, right| left.0.cmp(&right.0));
+    for (_, map, json) in updates {
         map.insert(&mut txn, "bulletJson", json);
     }
     Ok(())
@@ -365,12 +366,16 @@ impl DeckSession {
         check_text_bounds(&story, &txn, start, end)?;
         let text = text_in_range(&story, &txn, start, end);
         for (segment_start, segment_end) in paragraph_text_segments(&story, &txn, start, end) {
-            story.format(
-                &mut txn,
-                segment_start,
-                segment_end - segment_start,
-                attrs_from_patch(patch),
-            );
+            for (key, value) in patch_values(patch) {
+                if let Some(value) = value {
+                    story.format(
+                        &mut txn,
+                        segment_start,
+                        segment_end - segment_start,
+                        Attrs::from([(Arc::from(key), value)]),
+                    );
+                }
+            }
         }
         Ok(TextReceipt {
             story_id: story_id.to_owned(),
@@ -420,16 +425,20 @@ impl DeckSession {
         story_id: &str,
         index: u32,
     ) -> EditResult<TextReceipt> {
-        let mut txn = self.transact_for(context);
-        let story = story_ref(&txn, story_id)?;
-        let final_pilcrow = final_pilcrow_index(&story, &txn)?;
-        if index > final_pilcrow {
-            return Err(EditError::OutOfBounds {
-                index,
-                length: final_pilcrow,
-            });
-        }
+        let story = {
+            let txn = self.doc.transact();
+            let story = story_ref(&txn, story_id)?;
+            let final_pilcrow = final_pilcrow_index(&story, &txn)?;
+            if index > final_pilcrow {
+                return Err(EditError::OutOfBounds {
+                    index,
+                    length: final_pilcrow,
+                });
+            }
+            story
+        };
         let paragraph_id = self.next_id("para");
+        let mut txn = self.transact_for(context);
         let pilcrow = story.insert_embed_with_attributes(
             &mut txn,
             index,
@@ -797,31 +806,17 @@ fn style_values(style: &TextStyle) -> [(&'static str, Any); 9] {
     ]
 }
 
-fn attrs_from_patch(patch: &TextStylePatch) -> Attrs {
-    let mut attrs = Attrs::default();
-    insert_option(&mut attrs, "bold", patch.bold.map(Any::Bool));
-    insert_option(&mut attrs, "italic", patch.italic.map(Any::Bool));
-    insert_option(&mut attrs, "fontSize", patch.font_size_pt.map(Any::Number));
-    insert_option(&mut attrs, "color", patch.color.as_deref().map(Any::from));
-    insert_option(
-        &mut attrs,
-        "fontFamily",
-        patch.font_family.as_deref().map(Any::from),
-    );
-    insert_option(
-        &mut attrs,
-        "underline",
-        patch.underline.as_deref().map(Any::from),
-    );
-    insert_option(&mut attrs, "spacing", patch.spacing_pt.map(Any::Number));
-    insert_option(&mut attrs, "baseline", patch.baseline_pct.map(Any::Number));
-    attrs
-}
-
-fn insert_option(attrs: &mut Attrs, key: &str, value: Option<Any>) {
-    if let Some(value) = value {
-        attrs.insert(Arc::from(key), value);
-    }
+fn patch_values(patch: &TextStylePatch) -> [(&'static str, Option<Any>); 8] {
+    [
+        ("bold", patch.bold.map(Any::Bool)),
+        ("italic", patch.italic.map(Any::Bool)),
+        ("fontSize", patch.font_size_pt.map(Any::Number)),
+        ("color", patch.color.as_deref().map(Any::from)),
+        ("fontFamily", patch.font_family.as_deref().map(Any::from)),
+        ("underline", patch.underline.as_deref().map(Any::from)),
+        ("spacing", patch.spacing_pt.map(Any::Number)),
+        ("baseline", patch.baseline_pct.map(Any::Number)),
+    ]
 }
 
 fn style_from_run_properties(properties: &RunProperties, theme: Option<&Theme>) -> TextStyle {

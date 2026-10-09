@@ -43,6 +43,7 @@ import type { DocxEditorCollaborationOptions } from './types';
 import type { YrsCoreSession } from './hooks/useYrsCoreSession';
 import { partEditStory, type NoteEdit, type PartEdit, type PartEditTarget } from './partEdit';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
+import type { ViewerSelectionChange } from './internals/viewerSelectionController';
 
 /**
  * Body of the editor: the paged editor host, its sidebar overlay
@@ -63,6 +64,7 @@ export function DocxEditorPagedArea({
   // Document + section
   document,
   yrsCore,
+  pluginHostOpen,
   collaboration,
   theme,
   initialSectionProperties,
@@ -81,12 +83,16 @@ export function DocxEditorPagedArea({
   // Editor
   zoom,
   readOnly,
+  holdInput,
+  inputScope,
+  inputQueries,
   viewerDocumentRead,
   showHiddenText = false,
   onYrsContentChange,
   onYrsHistoryChange,
   onPagedSelectionChange,
   onYrsSelectionChange,
+  onViewerSelectionChange,
   onRenderedDomContextReady,
   pluginOverlays,
   onHyperlinkClick,
@@ -103,6 +109,8 @@ export function DocxEditorPagedArea({
   anchorPositions,
   onAnchorPositionsChange,
   onYrsTrackedChangesChange,
+  onViewerCommentRangesChange,
+  viewerSidebarActive,
   pluginRenderedDomContext,
   pageWidthPx,
   expandedSidebarItem,
@@ -149,6 +157,7 @@ export function DocxEditorPagedArea({
   editorContentRef: React.RefObject<HTMLDivElement | null>;
   document: Document | null;
   yrsCore: YrsCoreSession;
+  pluginHostOpen?: boolean;
   collaboration?: DocxEditorCollaborationOptions;
   theme: Theme | null | undefined;
   initialSectionProperties: SectionProperties | undefined;
@@ -165,13 +174,17 @@ export function DocxEditorPagedArea({
   onBodyClick: () => void;
   zoom: number;
   readOnly: boolean;
+  holdInput?: boolean;
+  inputScope?: number;
+  inputQueries?: DisplayListQueries | null;
   /** A viewer session's document reads; see {@link PagedEditorProps.viewerDocumentRead}. */
   viewerDocumentRead?: PagedEditorProps['viewerDocumentRead'];
   showHiddenText?: boolean;
   onYrsContentChange: () => void;
   onYrsHistoryChange?: (canUndo: boolean, canRedo: boolean) => void;
-  onPagedSelectionChange: () => void;
+  onPagedSelectionChange: NonNullable<PagedEditorProps['onSelectionChange']>;
   onYrsSelectionChange: (selection: YrsToolbarSelection) => void;
+  onViewerSelectionChange?: (selection: ViewerSelectionChange) => void;
   onRenderedDomContextReady:
     | ((ctx: RenderedDomContext, queries: DisplayListQueries) => void)
     | undefined;
@@ -199,6 +212,8 @@ export function DocxEditorPagedArea({
   anchorPositions: Map<string, number>;
   onAnchorPositionsChange: (positions: Map<string, number>) => void;
   onYrsTrackedChangesChange: (result: TrackedChangesResult) => void;
+  onViewerCommentRangesChange?: PagedEditorProps['onViewerCommentRangesChange'];
+  viewerSidebarActive?: boolean;
   pluginRenderedDomContext: RenderedDomContext | null | undefined;
   pageWidthPx: number;
   expandedSidebarItem: string | null;
@@ -440,6 +455,7 @@ export function DocxEditorPagedArea({
         commandBridgeRef={commandBridgeRef}
         document={document}
         yrsCore={yrsCore}
+        pluginHostOpen={pluginHostOpen}
         collaboration={collaboration}
         styles={document?.package.styles}
         theme={document?.package.theme || theme}
@@ -459,12 +475,16 @@ export function DocxEditorPagedArea({
         rustFontChainsProviderRef={rustFontChainsProviderRef}
         zoom={zoom}
         readOnly={readOnly}
+        holdInput={holdInput}
+        inputScope={inputScope}
+        inputQueries={inputQueries}
         viewerDocumentRead={viewerDocumentRead}
         showHiddenText={showHiddenText}
         onYrsContentChange={onYrsContentChange}
         onYrsHistoryChange={onYrsHistoryChange}
         onSelectionChange={onPagedSelectionChange}
         onYrsSelectionChange={onYrsSelectionChange}
+        onViewerSelectionChange={onViewerSelectionChange}
         onYrsPartSelectionChange={(part, selection) => {
           if (partEditStory(part) === partStory) setPartSelection(selection);
         }}
@@ -482,6 +502,8 @@ export function DocxEditorPagedArea({
         onAnchorPositionsChange={onAnchorPositionsChange}
         sidebarCommentIds={sidebarCommentIds}
         onYrsTrackedChangesChange={onYrsTrackedChangesChange}
+        onViewerCommentRangesChange={onViewerCommentRangesChange}
+        viewerSidebarActive={viewerSidebarActive}
         onTotalPagesChange={onTotalPagesChange}
         onLayoutComputed={onLayoutComputed}
         layoutInWorker={layoutInWorker}

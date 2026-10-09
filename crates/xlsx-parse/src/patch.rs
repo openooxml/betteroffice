@@ -4,7 +4,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::iter::Peekable;
 use std::ops::Range;
 
-use quick_xml::events::{BytesEnd, BytesStart, Event};
+use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::{Reader, Writer};
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
 use xlsx_model::{Cell, CellRange, CellRef, Sheet, Workbook};
@@ -13,11 +13,30 @@ use crate::axis::SheetAxes;
 use crate::package::{XmlAttribute, attributes, remove_attribute, set_attribute};
 use crate::read::SharedStringCells;
 use crate::write::{
-    SharedStringPlan, fmt_num, fragment, shared_string_index, write_cell, write_col, write_cols,
-    write_row,
+    SharedStringPlan, cell_value_markup, fmt_num, fragment, shared_string_index, write_cell,
+    write_col, write_cols, write_row,
 };
 use crate::xml::{attr, xml_err};
 use crate::{MAX_DEPTH, ParseError};
+
+#[cfg(test)]
+mod cache_patch_tests;
+#[cfg(any(test, feature = "test-oracle"))]
+#[cfg_attr(not(test), allow(dead_code))]
+mod oracle;
+#[cfg(test)]
+mod oracle_tests;
+mod style_match;
+#[cfg(test)]
+mod style_match_tests;
+
+pub(crate) use style_match::{SourceStyles, StyleMatch};
+
+#[cfg(any(test, feature = "test-oracle"))]
+thread_local! {
+    static EMISSION_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static DETECTOR_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// One edited sheet against the source it was read from.
 pub(crate) struct SheetPatch<'a> {
@@ -28,6 +47,7 @@ pub(crate) struct SheetPatch<'a> {
     pub(crate) sst_index: &'a HashMap<&'a str, usize>,
     pub(crate) retained: &'a SharedStringCells,
     pub(crate) plan: Option<&'a SharedStringPlan>,
+    pub(crate) styles: &'a StyleMatch<'a>,
 }
 
 struct SourceElement {
@@ -90,13 +110,67 @@ struct WidthPiece {
     changed: Option<Option<f64>>,
 }
 
+struct SourceCellCursor<'a, I: Iterator> {
+    sheet: &'a Sheet,
+    cells: Peekable<I>,
+    source: Option<(u32, u32)>,
+    current: Option<(u32, u32)>,
+}
+
+impl<'a, I> SourceCellCursor<'a, I>
+where
+    I: Iterator<Item = (CellRef, &'a Cell)>,
+{
+    fn new(sheet: &'a Sheet, cells: I) -> Self {
+        Self {
+            sheet,
+            cells: cells.peekable(),
+            source: None,
+            current: None,
+        }
+    }
+
+    fn at(&mut self, source: CellRef, current: CellRef) -> (Option<&'a Cell>, bool) {
+        let source_key = (source.row, source.col);
+        let current_key = (current.row, current.col);
+        let source_ordered = self.source.is_none_or(|previous| previous < source_key);
+        let current_ordered = self.current.is_none_or(|previous| previous < current_key);
+        self.source = Some(self.source.map_or(source_key, |last| last.max(source_key)));
+        self.current = Some(
+            self.current
+                .map_or(current_key, |last| last.max(current_key)),
+        );
+        let original = if source_ordered {
+            while self
+                .cells
+                .peek()
+                .is_some_and(|(at, _)| (at.row, at.col) < source_key)
+            {
+                self.cells.next();
+            }
+            self.cells
+                .next_if(|(at, _)| (at.row, at.col) == source_key)
+                .map(|(_, cell)| cell)
+        } else {
+            #[cfg(test)]
+            EMISSION_LOOKUPS.with(|count| count.set(count.get() + 1));
+            self.sheet.cell(source)
+        };
+        (original, source_ordered && current_ordered)
+    }
+}
+
 impl SheetPatch<'_> {
     /// Patched `<sheetData>`; `None` when the source resists cell-by-cell patching.
     pub(crate) fn sheet_data(&self, source: &[u8]) -> Result<Option<Vec<u8>>, ParseError> {
+        #[cfg(any(test, feature = "test-oracle"))]
+        if crate::save_oracle::use_legacy_save_path() {
+            return self.sheet_data_oracle(source);
+        }
         let Some((element, rows)) = scan_sheet_data(source)? else {
             return Ok(None);
         };
-        let dirty = self.dirty_formulas(&rows);
+        let dirty = self.dirty_formulas(source, &rows)?;
         let mut out = Vec::with_capacity(source.len());
         out.extend_from_slice(&element.prefix);
         let mut source_rows = rows
@@ -109,6 +183,7 @@ impl SheetPatch<'_> {
             })
             .peekable();
         let mut cells = self.sheet.iter_cells().peekable();
+        let mut originals = SourceCellCursor::new(self.original, self.original.iter_cells());
         let mut heights = self.sheet.row_heights.keys().copied().peekable();
         loop {
             let next_source = source_rows.peek().map(|(current, _)| *current);
@@ -126,10 +201,20 @@ impl SheetPatch<'_> {
             }
             if next_source == Some(row) {
                 let (_, source_row) = source_rows.next().expect("peeked");
-                self.emit_source_row(&mut out, source, source_row, row, &mut cells, &dirty)?;
+                self.emit_source_row(
+                    &mut out,
+                    source,
+                    source_row,
+                    row,
+                    &mut cells,
+                    &mut originals,
+                    &dirty,
+                )?;
             } else {
                 self.emit_generated_row(&mut out, row, &mut cells)?;
             }
+            let current = (row, u32::MAX);
+            originals.current = Some(originals.current.map_or(current, |last| last.max(current)));
         }
         let tail = rows
             .last()
@@ -262,23 +347,27 @@ impl SheetPatch<'_> {
             self.sst_index,
             self.retained,
             self.plan,
+            None,
         )
         .map_err(xml_err)?;
         *out = writer.into_inner();
         Ok(())
     }
 
-    fn emit_source_row<'c, I>(
+    #[allow(clippy::too_many_arguments)]
+    fn emit_source_row<'c, 'o, I, O>(
         &self,
         out: &mut Vec<u8>,
         data: &[u8],
         source: &SourceRow,
         row: u32,
         cells: &mut Peekable<I>,
+        originals: &mut SourceCellCursor<'o, O>,
         dirty: &DirtyFormulas,
     ) -> Result<(), ParseError>
     where
         I: Iterator<Item = (CellRef, &'c Cell)>,
+        O: Iterator<Item = (CellRef, &'o Cell)>,
     {
         let mut body = Vec::new();
         let mut columns: Option<(u32, u32)> = None;
@@ -305,8 +394,21 @@ impl SheetPatch<'_> {
                 (next_source == Some(col)).then(|| source_cells.next().expect("peeked").1);
             let model_cell = (next_model == Some(col)).then(|| cells.next().expect("peeked").1);
             let at = CellRef::new(row, col);
+            let mut original = None;
+            let verbatim = source_cell.is_some_and(|source_cell| {
+                let (found, ordered) = originals.at(source_cell.at, at);
+                original = found;
+                let model = if ordered {
+                    model_cell
+                } else {
+                    #[cfg(test)]
+                    EMISSION_LOOKUPS.with(|count| count.set(count.get() + 1));
+                    self.sheet.cell(at)
+                };
+                self.verbatim(source_cell, at, model, found, dirty)
+            });
             match source_cell {
-                Some(source_cell) if self.verbatim(source_cell, at, dirty) => {
+                Some(source_cell) if verbatim => {
                     body.extend_from_slice(&data[source_cell.before.clone()]);
                     self.emit_source_cell(&mut body, data, source_cell, at)?;
                 }
@@ -315,9 +417,24 @@ impl SheetPatch<'_> {
                         continue;
                     };
                     body.extend_from_slice(&data[source_cell.before.clone()]);
-                    self.emit_cell(&mut body, at, cell)?;
+                    if !self.emit_cached_cell(
+                        &mut body,
+                        data,
+                        source_cell,
+                        at,
+                        cell,
+                        original,
+                        dirty,
+                    )? {
+                        self.emit_cell(&mut body, at, cell, original)?;
+                    }
                 }
-                None => self.emit_cell(&mut body, at, model_cell.expect("one side is present"))?,
+                None => self.emit_cell(
+                    &mut body,
+                    at,
+                    model_cell.expect("one side is present"),
+                    None,
+                )?,
             }
             columns = Some(match columns {
                 Some((min, max)) => (min, max.max(col + 1)),
@@ -363,9 +480,15 @@ impl SheetPatch<'_> {
     }
 
     /// Whether a source cell can stand for the model cell now at `at`.
-    fn verbatim(&self, cell: &SourceCell, at: CellRef, dirty: &DirtyFormulas) -> bool {
-        let model = self.sheet.cell(at);
-        if model != self.original.cell(cell.at) {
+    fn verbatim(
+        &self,
+        cell: &SourceCell,
+        at: CellRef,
+        model: Option<&Cell>,
+        original: Option<&Cell>,
+        dirty: &DirtyFormulas,
+    ) -> bool {
+        if !self.styles.same(original, model) {
             return false;
         }
         if cell.shared_string
@@ -389,14 +512,22 @@ impl SheetPatch<'_> {
         let Some(formula) = &cell.formula else {
             return true;
         };
+        self.formula_clean(cell, at, formula, dirty)
+    }
+
+    fn formula_clean(
+        &self,
+        cell: &SourceCell,
+        at: CellRef,
+        formula: &FormulaMarkup,
+        dirty: &DirtyFormulas,
+    ) -> bool {
         if cell.at != at && formula.positional {
             return false;
         }
         match formula.group {
             Some(group) => !dirty.groups.contains(&group),
-            None => {
-                formula.reference.is_none() || !dirty.masters.contains(&(cell.at.row, cell.at.col))
-            }
+            None => !dirty.masters.contains(&(cell.at.row, cell.at.col)),
         }
     }
 
@@ -414,8 +545,20 @@ impl SheetPatch<'_> {
         let (name, mut attributes) = start_tag(&data[cell.tag.clone()])?;
         set_attribute(&mut attributes, "r", "r", at.to_a1());
         write_start_tag(out, &name, &attributes, cell.empty)?;
+        self.emit_source_cell_content(out, data, cell, at, cell.span.end)
+    }
+
+    fn emit_source_cell_content(
+        &self,
+        out: &mut Vec<u8>,
+        data: &[u8],
+        cell: &SourceCell,
+        at: CellRef,
+        end: usize,
+    ) -> Result<(), ParseError> {
         let mut cursor = cell.tag.end;
-        if let Some(formula) = &cell.formula
+        if cell.at != at
+            && let Some(formula) = &cell.formula
             && let Some(reference) = formula.reference
             && let Some(remapped) = self.remap_range(reference)
             && remapped != reference
@@ -426,11 +569,121 @@ impl SheetPatch<'_> {
             write_start_tag(out, &name, &attributes, formula.empty)?;
             cursor = formula.tag.end;
         }
-        out.extend_from_slice(&data[cursor..cell.span.end]);
+        out.extend_from_slice(&data[cursor..end]);
         Ok(())
     }
 
-    fn emit_cell(&self, out: &mut Vec<u8>, at: CellRef, cell: &Cell) -> Result<(), ParseError> {
+    #[allow(clippy::too_many_arguments)]
+    fn emit_cached_cell(
+        &self,
+        out: &mut Vec<u8>,
+        data: &[u8],
+        source: &SourceCell,
+        at: CellRef,
+        cell: &Cell,
+        original: Option<&Cell>,
+        dirty: &DirtyFormulas,
+    ) -> Result<bool, ParseError> {
+        let (Some(formula), Some(original)) = (&source.formula, original) else {
+            return Ok(false);
+        };
+        if cell.formula.is_none()
+            || cell.formula != original.formula
+            || !self.formula_clean(source, at, formula, dirty)
+        {
+            return Ok(false);
+        }
+        let Some(slot) = self.cache_patch_slot(data, source, at)? else {
+            return Ok(false);
+        };
+        let (name, mut attributes) = start_tag(&data[source.tag.clone()])?;
+        if source.at != at {
+            set_attribute(&mut attributes, "r", "r", at.to_a1());
+        }
+        let style = self.styles.written(original.style, cell.style);
+        if style != original.style {
+            attributes.retain(|attribute| attribute.name != "s");
+            if let Some(style) = style {
+                attributes.push(XmlAttribute {
+                    name: "s".to_owned(),
+                    value: style.to_string(),
+                });
+            }
+        }
+        let markup = cell_value_markup(cell, self.sst_index, None);
+        match markup.ty {
+            Some(ty) => {
+                if let Some(attribute) = attributes
+                    .iter_mut()
+                    .find(|attribute| attribute.name == "t")
+                {
+                    attribute.value = ty.to_owned();
+                } else {
+                    attributes.push(XmlAttribute {
+                        name: "t".to_owned(),
+                        value: ty.to_owned(),
+                    });
+                }
+            }
+            None => attributes.retain(|attribute| attribute.name != "t"),
+        }
+        write_start_tag(out, &name, &attributes, false)?;
+        self.emit_source_cell_content(out, data, source, at, slot.start)?;
+        if let Some(value) = markup.value {
+            let mut writer = Writer::new(std::mem::take(out));
+            writer
+                .create_element("v")
+                .write_text_content(BytesText::new(&value))
+                .map_err(xml_err)?;
+            *out = writer.into_inner();
+        }
+        out.extend_from_slice(&data[slot.end..source.span.end]);
+        Ok(true)
+    }
+
+    fn cache_patch_slot(
+        &self,
+        data: &[u8],
+        source: &SourceCell,
+        at: CellRef,
+    ) -> Result<Option<Range<usize>>, ParseError> {
+        let Some(formula) = &source.formula else {
+            return Ok(None);
+        };
+        let (name, attributes) = start_tag(&data[source.tag.clone()])?;
+        if name != "c"
+            || attributes
+                .iter()
+                .any(|attribute| attribute.name.contains(':') || attribute.name == "xmlns")
+        {
+            return Ok(None);
+        }
+        let (_, formula_attributes) = start_tag(&data[formula.tag.clone()])?;
+        let metadata = attributes
+            .iter()
+            .any(|attribute| matches!(attribute.local_name(), "cm" | "vm"));
+        let array = formula_attributes
+            .iter()
+            .any(|attribute| attribute.local_name() == "t" && attribute.value == "array");
+        if metadata || array {
+            let source_range = self.original.array_formula(source.at);
+            if source_range.is_none()
+                || source_range != formula.reference
+                || source_range != self.sheet.array_formula(at)
+            {
+                return Ok(None);
+            }
+        }
+        cached_value_slot(data, source)
+    }
+
+    fn emit_cell(
+        &self,
+        out: &mut Vec<u8>,
+        at: CellRef,
+        cell: &Cell,
+        original: Option<&Cell>,
+    ) -> Result<(), ParseError> {
         let retained = shared_string_index(
             cell,
             at,
@@ -440,10 +693,14 @@ impl SheetPatch<'_> {
             self.plan,
         );
         let mut writer = Writer::new(std::mem::take(out));
+        let style = original.map_or(cell.style, |original| {
+            self.styles.written(original.style, cell.style)
+        });
         write_cell(
             &mut writer,
             at,
             cell,
+            style,
             self.sst_index,
             retained,
             self.sheet.array_formula(at),
@@ -453,8 +710,9 @@ impl SheetPatch<'_> {
         Ok(())
     }
 
-    fn dirty_formulas(&self, rows: &[SourceRow]) -> DirtyFormulas {
-        let changed = self.changed_source_cells();
+    fn dirty_formulas(&self, data: &[u8], rows: &[SourceRow]) -> Result<DirtyFormulas, ParseError> {
+        let mut changed = self.changed_source_cells();
+        let mut arrays = BTreeSet::new();
         let mut groups: HashMap<u32, (bool, Option<CellRange>)> = HashMap::new();
         let mut masters = Vec::new();
         for cell in rows.iter().flat_map(|row| &row.cells) {
@@ -462,10 +720,33 @@ impl SheetPatch<'_> {
                 continue;
             };
             let key = (cell.at.row, cell.at.col);
+            if self
+                .original
+                .array_formula(cell.at)
+                .and_then(|range| self.remap_range(range))
+                != self
+                    .mapped(cell.at)
+                    .and_then(|mapped| self.sheet.array_formula(mapped))
+            {
+                changed.insert(key);
+                arrays.insert(key);
+            }
             match formula.group {
                 Some(group) => {
                     let entry = groups.entry(group).or_insert((false, None));
-                    entry.0 |= changed.contains(&key);
+                    entry.0 |= self
+                        .mapped(cell.at)
+                        .is_none_or(|at| self.inverse(at) != Some(cell.at))
+                        || (changed.contains(&key) && self.source_formula_changed(cell.at));
+                    entry.0 |= arrays.contains(&key);
+                    if !entry.0
+                        && formula.reference.is_some()
+                        && let Some(at) = self.mapped(cell.at)
+                    {
+                        entry.0 |= (cell.at != at && formula.positional)
+                            || (changed.contains(&key)
+                                && self.cache_patch_slot(data, cell, at)?.is_none());
+                    }
                     if let Some(reference) = formula.reference
                         && entry.1.replace(reference).is_some()
                     {
@@ -473,13 +754,11 @@ impl SheetPatch<'_> {
                     }
                 }
                 None => {
-                    if let Some(reference) = formula.reference {
-                        masters.push((key, reference));
-                    }
+                    masters.push((key, formula.reference));
                 }
             }
         }
-        DirtyFormulas {
+        Ok(DirtyFormulas {
             groups: groups
                 .into_iter()
                 .filter(|(_, (dirty, master))| {
@@ -490,28 +769,101 @@ impl SheetPatch<'_> {
             masters: masters
                 .into_iter()
                 .filter(|(key, reference)| {
-                    changed.contains(key)
-                        || !self.moves_uniformly(*reference)
-                        || range_changed(*reference, &changed)
+                    arrays.contains(key)
+                        || (reference.is_some() && changed.contains(key))
+                        || reference.is_some_and(|reference| {
+                            !self.moves_uniformly(reference) || range_changed(reference, &changed)
+                        })
                 })
                 .map(|(key, _)| key)
                 .collect(),
+        })
+    }
+
+    fn source_formula_changed(&self, source: CellRef) -> bool {
+        let Some(at) = self.mapped(source) else {
+            return true;
+        };
+        if self.inverse(at) != Some(source) {
+            return true;
+        }
+        match (self.original.cell(source), self.sheet.cell(at)) {
+            (Some(original), Some(cell)) => original.formula != cell.formula,
+            _ => true,
         }
     }
 
-    /// Source addresses whose cell changed, moved, or is gone.
+    /// Source addresses whose cell changed or is gone.
     fn changed_source_cells(&self) -> BTreeSet<(u32, u32)> {
+        #[cfg(any(test, feature = "test-oracle"))]
+        if crate::save_oracle::use_legacy_save_path() {
+            return self.changed_source_cells_oracle();
+        }
+        let mut changed = BTreeSet::new();
+        let mut cells = self.sheet.iter_cells().peekable();
+        let mut previous = None;
+        for (source, original) in self.original.iter_cells() {
+            let Some(mapped) = self.mapped(source) else {
+                changed.insert((source.row, source.col));
+                continue;
+            };
+            let key = (mapped.row, mapped.col);
+            if previous.is_some_and(|previous| previous >= key)
+                || self.inverse(mapped) != Some(source)
+            {
+                return self.changed_source_cells_by_lookup();
+            }
+            previous = Some(key);
+            while cells.peek().is_some_and(|(at, _)| (at.row, at.col) < key) {
+                let (at, _) = cells.next().expect("peeked");
+                if !self.record_unmatched_source(at, &mut changed) {
+                    return self.changed_source_cells_by_lookup();
+                }
+            }
+            let current = cells
+                .next_if(|(at, _)| (at.row, at.col) == key)
+                .map(|(_, cell)| cell);
+            if !self.styles.same(Some(original), current) {
+                changed.insert((source.row, source.col));
+            }
+        }
+        for (at, _) in cells {
+            if !self.record_unmatched_source(at, &mut changed) {
+                return self.changed_source_cells_by_lookup();
+            }
+        }
+        changed
+    }
+
+    fn record_unmatched_source(&self, at: CellRef, changed: &mut BTreeSet<(u32, u32)>) -> bool {
+        if let Some(source) = self.inverse(at) {
+            if self.mapped(source) != Some(at) {
+                return false;
+            }
+            changed.insert((source.row, source.col));
+        }
+        true
+    }
+
+    fn changed_source_cells_by_lookup(&self) -> BTreeSet<(u32, u32)> {
         let mut changed = BTreeSet::new();
         for (at, cell) in self.original.iter_cells() {
-            if self.mapped(at).and_then(|mapped| self.sheet.cell(mapped)) != Some(cell) {
+            let current = self.mapped(at).and_then(|mapped| {
+                #[cfg(test)]
+                DETECTOR_LOOKUPS.with(|count| count.set(count.get() + 1));
+                self.sheet.cell(mapped)
+            });
+            if !self.styles.same(Some(cell), current) {
                 changed.insert((at.row, at.col));
             }
         }
         for (at, cell) in self.sheet.iter_cells() {
-            if let Some(source) = self.inverse(at)
-                && self.original.cell(source) != Some(cell)
-            {
-                changed.insert((source.row, source.col));
+            if let Some(source) = self.inverse(at) {
+                #[cfg(test)]
+                DETECTOR_LOOKUPS.with(|count| count.set(count.get() + 1));
+                if !self.styles.same(self.original.cell(source), Some(cell)) {
+                    changed.insert((source.row, source.col));
+                }
             }
         }
         changed
@@ -550,6 +902,70 @@ fn range_changed(reference: CellRange, changed: &BTreeSet<(u32, u32)>) -> bool {
     changed
         .range((reference.start.row, 0)..=(reference.end.row, u32::MAX))
         .any(|&(_, col)| col >= reference.start.col && col <= reference.end.col)
+}
+
+fn cached_value_slot(data: &[u8], cell: &SourceCell) -> Result<Option<Range<usize>>, ParseError> {
+    let mut reader = Reader::from_reader(&data[cell.span.clone()]);
+    reader.config_mut().expand_empty_elements = false;
+    let mut depth = 0_usize;
+    let mut child_start = cell.tag.end;
+    let mut formula_end = None;
+    let mut value = None;
+    loop {
+        let before = cell.span.start + reader.buffer_position() as usize;
+        let event = reader.read_event().map_err(xml_err)?;
+        let after = cell.span.start + reader.buffer_position() as usize;
+        if let Event::Start(element) | Event::Empty(element) = &event {
+            if depth > 1 {
+                return Ok(None);
+            }
+            if depth == 1
+                && (!matches!(element.name().as_ref(), b"f" | b"v" | b"is")
+                    || attributes(element)?.iter().any(|attribute| {
+                        attribute.name == "xmlns" || attribute.name.starts_with("xmlns:")
+                    }))
+            {
+                return Ok(None);
+            }
+        }
+        match event {
+            Event::Start(element) => {
+                if depth == 1 {
+                    child_start = before;
+                    if element.name().as_ref() == b"is" {
+                        return Ok(None);
+                    }
+                }
+                depth += 1;
+            }
+            Event::Empty(element) if depth == 1 => match element.name().as_ref() {
+                b"f" if formula_end.replace(after).is_some() => return Ok(None),
+                b"v" if value.replace(before..after).is_some() => return Ok(None),
+                b"is" => return Ok(None),
+                _ => {}
+            },
+            Event::End(element) => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+                if depth == 1 {
+                    match element.name().as_ref() {
+                        b"f" if formula_end.replace(after).is_some() => return Ok(None),
+                        b"v" if value.replace(child_start..after).is_some() => return Ok(None),
+                        _ => {}
+                    }
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(formula_end.and_then(|end| match value {
+        Some(value) if value.start >= end => Some(value),
+        None => Some(end..end),
+        _ => None,
+    }))
 }
 
 fn set_row_height(attributes: &mut Vec<XmlAttribute>, height: Option<f64>) {

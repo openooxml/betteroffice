@@ -1,18 +1,28 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeAll, beforeEach, describe, expect, mock, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
 import { applyFrameDeltaOwned, decodeFrameDelta } from '../layout/render/frameDelta';
-import { createResidentEngineSession } from './residentEngineSession';
+import { createResidentEngineSession, type ResidentEngineSession } from './residentEngineSession';
+import type { ResidentSaveRecord } from './residentSave';
+import { syntheticDocx } from './__fixtures__/previewChain';
+import { isLayoutMetaV1, type LayoutMetaV1 } from './layoutMeta';
+import type { Layout } from '../layout/pagination';
 import { proposalRevisionPreview } from './proposals';
 import { createYrsSession } from './index';
+import { readSidebar, readOutlineHeadings } from './sidebarReads';
+import { sidebarDocx } from './__fixtures__/sidebarDocx';
 import { readResidentSearch } from './residentSearch';
+import { findBodyMatches } from './findMatches';
+import { createYrsInputPositionMap } from './inputPositionMap';
 import { createYrsPositionProjection, yrsLocToProjectedDisplayPosition } from './yrsPositionProjection';
 import { preloadEditWasm } from './wasm/index';
+import { PeerMetadataError } from './peerMetadata';
 import type { DecodedFrameDelta, FramePageOperation } from '../layout/render/frameDelta';
 import type { DisplayPage } from '../layout/render/displayList';
 import type {
   DocxEditRequest,
+  DocxContentControlsResult,
   DocxParagraphAnchor,
   DocxProposalInput,
   YrsResidentCaretRect,
@@ -45,7 +55,7 @@ beforeAll(async () => {
       export const preloadEditWasmFrom = (source) => testHarness.preloadFrom(source);
     `,
     '../layout/render/glyphCache':
-      'export class GlyphCache { constructor(options) { testHarness.glyphs = options.provider; } }',
+      'export class GlyphCache { constructor(options) { testHarness.glyphs = options.provider; testHarness.glyphCacheCreations += 1; } }',
     '../wasm/loadWasmAsset': 'export const wasmModuleMemories = () => testHarness.memories;',
     '../layout/render/frameDelta': `
       export { applyFrameDeltaOwned, retainedFramePageById } from ${JSON.stringify(frameDelta)};
@@ -99,11 +109,13 @@ function worker() {
   let frameEpoch = 0;
   const replies = new Map<number, (reply: ResidentEngineWorkerResponse) => void>();
   const answered: number[] = [];
+  const transfers = new Map<number, Transferable[]>();
   const surfaces = new Map<string, Surface>();
   const scope = {
     onmessage: (_event: { data: ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule }) => {},
     onmessageerror: null as (() => void) | null,
-    postMessage(reply: ResidentEngineWorkerResponse) {
+    postMessage(reply: ResidentEngineWorkerResponse, transfer: Transferable[] = []) {
+      transfers.set(reply.id, transfer);
       answered.push(reply.id);
       replies.get(reply.id)?.(reply);
       replies.delete(reply.id);
@@ -112,6 +124,12 @@ function worker() {
   const harness = {
     now: () => performance.now(),
     initializations: 0,
+    glyphCacheCreations: 0,
+    clearFontCalls: 0,
+    fontIds: [] as number[],
+    loadedStates: [] as Uint8Array[],
+    loadedMediaSources: [] as string[],
+    partialDocuments: [] as boolean[],
     sessionsCreated: 0,
     wasmReady: false,
     failWarm: null as Error | null,
@@ -149,10 +167,17 @@ function worker() {
     memories: [{ label: 'docx-edit', bufferBytes: 65536, liveBytes: 100, peakBytes: 100, failedAllocationBytes: 0 }],
     session: {
       proposalEngine: { version: () => 'v' },
-      loadState() {},
-      loadMediaSources(_json: string) {},
+      markProjectionStories(_stories: readonly string[]) {},
+      loadState(state: Uint8Array) {
+        harness.loadedStates.push(state);
+      },
+      loadMediaSources(json: string) {
+        harness.loadedMediaSources.push(json);
+      },
       loadNoteSeparators(_state: Uint8Array) {},
-      setPartialDocument() {},
+      setPartialDocument(partial: boolean) {
+        harness.partialDocuments.push(partial);
+      },
       setDisplayWindow(start: number, end: number) {
         harness.displayWindows.push([start, end]);
       },
@@ -168,7 +193,20 @@ function worker() {
       directBatchesApplied() {
         return 0;
       },
-      clearFonts() {},
+      clearFonts() {
+        harness.clearFontCalls += 1;
+        harness.fontIds = [];
+      },
+      registerFont(_bytes: Uint8Array) {
+        const id = harness.fontIds.length;
+        harness.fontIds.push(id);
+        return id;
+      },
+      registerSubstituteFont(_base: number, _family: string) {
+        const id = harness.fontIds.length;
+        harness.fontIds.push(id);
+        return id;
+      },
       layoutDocumentJson() {},
       layoutDocumentWithRegionsRetained() {},
       retainedHeadersFootersJson(): string | undefined {
@@ -314,7 +352,9 @@ function worker() {
     harness,
     surfaces,
     answered,
+    transfers,
     send,
+    delta,
     resetCalls() {
       harness.rasterized = [];
       harness.presented = [];
@@ -661,6 +701,132 @@ test('a visible page request supersedes the remaining background slices', async 
   expect((await visible).ok).toBe(true);
   expect(calls).toEqual([[0, 1, 2, 3], [8]]);
   expect(w.answered).toEqual([1, 2, 3]);
+});
+
+test('font suffixes preserve ids and glyph caches; mismatches require a full snapshot', async () => {
+  const w = worker();
+  expect(await w.bootstrap()).toMatchObject({ ok: true });
+  expect(await w.attach([1])).toMatchObject({ ok: true });
+  const font = new Uint8Array([1]);
+  const sync = (
+    fontsRevision: number,
+    fonts: YrsResidentWorkerSnapshot['fonts'],
+    fontsBaseRevision?: number
+  ) => {
+    return w.send({
+      type: 'sync',
+      extras: '',
+      expectedFrameEpoch: w.harness.delta!.baseFrameEpoch,
+      paintCaret: false,
+      snapshot: {
+        clientId: 1,
+        state: new Uint8Array(),
+        selection: null,
+        fonts,
+        fontsRevision,
+        ...(fontsBaseRevision === undefined ? {} : { fontsBaseRevision }),
+        renderInputs: [],
+        measureInputs: [],
+        layoutInput: '',
+        layoutWithRegions: false,
+        layoutRevision: 1,
+      },
+    });
+  };
+  w.delta([]);
+  expect(await sync(1, [font], 0)).toMatchObject({ ok: true });
+  w.delta([]);
+  expect(await sync(2, [{ substituteOf: 0, family: 'Calibri' }], 1)).toMatchObject({ ok: true });
+  w.delta([]);
+  expect(await sync(2, [], 2)).toMatchObject({ ok: true });
+  expect(w.harness.fontIds).toEqual([0, 1]);
+  expect(w.harness.clearFontCalls).toBe(1);
+  expect(w.harness.glyphCacheCreations).toBe(1);
+  const beforeMismatch = {
+    states: w.harness.loadedStates.length,
+    media: w.harness.loadedMediaSources.length,
+    partial: w.harness.partialDocuments.length,
+    windows: w.harness.displayWindows.length,
+  };
+  expect(await sync(3, [font], 0)).toMatchObject({
+    ok: false, error: 'Resident engine worker font base revision mismatch',
+  });
+  expect(await sync(2, [], 1)).toMatchObject({
+    ok: false, error: 'Resident engine worker font base revision mismatch',
+  });
+  expect(w.harness.fontIds).toEqual([0, 1]);
+  expect(w.harness.clearFontCalls).toBe(1);
+  expect(w.harness.glyphCacheCreations).toBe(1);
+  expect(w.harness.loadedStates).toHaveLength(beforeMismatch.states);
+  expect(w.harness.loadedMediaSources).toHaveLength(beforeMismatch.media);
+  expect(w.harness.partialDocuments).toHaveLength(beforeMismatch.partial);
+  expect(w.harness.displayWindows).toHaveLength(beforeMismatch.windows);
+  w.delta([]);
+  expect(await sync(3, [font])).toMatchObject({ ok: true });
+  expect(w.harness.fontIds).toEqual([0]);
+  expect(w.harness.clearFontCalls).toBe(2);
+  expect(w.harness.glyphCacheCreations).toBe(2);
+});
+
+test('full font sync repaints retained pages while suffix appends preserve their pixels', async () => {
+  for (const paintCaret of [false, true]) {
+    const w = worker();
+    expect(await w.bootstrap()).toMatchObject({ ok: true });
+    w.harness.caret = paintCaret ? caret(1) : null;
+    const sync = (
+      fontsRevision: number,
+      fonts: YrsResidentWorkerSnapshot['fonts'],
+      fontsBaseRevision?: number
+    ) => {
+      w.delta([]);
+      return w.send({
+        type: 'sync',
+        extras: '',
+        expectedFrameEpoch: w.harness.delta!.baseFrameEpoch,
+        paintCaret,
+        snapshot: {
+          clientId: 1,
+          state: new Uint8Array(),
+          selection: null,
+          fonts,
+          fontsRevision,
+          ...(fontsBaseRevision === undefined ? {} : { fontsBaseRevision }),
+          renderInputs: [],
+          measureInputs: [],
+          layoutInput: '',
+          layoutWithRegions: false,
+          layoutRevision: 1,
+        },
+      });
+    };
+    expect(await sync(1, [new Uint8Array([1])])).toMatchObject({ ok: true });
+    expect(await w.attach([1, 2])).toMatchObject({ ok: true });
+    expect(w.harness.rasterized).toEqual([1, 2]);
+    w.resetCalls();
+    expect(await sync(2, [new Uint8Array([2])])).toMatchObject({
+      ok: true,
+      replayedPages: 2,
+      caretPainted: paintCaret,
+    });
+    expect(w.harness.delta!.operations).toEqual([]);
+    expect(w.harness.rasterized).toEqual([1, 2]);
+    expect(w.harness.presented).toEqual([1, 2]);
+    expect(w.surfaces.get('1')!.pixels).toBe(paintCaret ? '1:100|caret:#000' : '1:100');
+    expect(w.surfaces.get('2')!.pixels).toBe('2:100');
+    w.resetCalls();
+    expect(await w.build([], 100, w.harness.caret)).toMatchObject({
+      ok: true,
+      replayedPages: 0,
+      caretPainted: paintCaret,
+    });
+    expect(await sync(3, [new Uint8Array([3])], 2)).toMatchObject({
+      ok: true,
+      replayedPages: 0,
+      caretPainted: paintCaret,
+    });
+    expect(w.harness.rasterized).toEqual([]);
+    expect(w.harness.presented).toEqual([]);
+  }
 });
 
 describe('resident display page release', () => {
@@ -2541,7 +2707,45 @@ describe('worker proposals during sliced completion', () => {
     import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm'
   )))));
 
-  async function proposalWorker(extraBody = '') {
+  test('content-control reads equal a main session opened from the same package', async () => {
+    const bytes = new Uint8Array(readFileSync(resolve(
+      import.meta.dir, '__fixtures__/content-controls/template.docx'
+    )));
+    const engine = await createResidentEngineSession(undefined, 97200);
+    const main = await createYrsSession({ clientId: 97200 });
+    const w = worker();
+    Object.assign(w.harness.session, engine);
+    const normalize = (result: DocxContentControlsResult) => ({ ...result, version: '<version>' });
+    try {
+      expect((await w.send({ type: 'open', bytes: bytes.buffer })).ok).toBe(true);
+      main.openDocx(bytes, true);
+      const listed = main.listContentControls();
+      if (!listed.ok) throw new Error(listed.failure.message);
+      expect(new Set(listed.content.controls.map(({ placement }) => placement))).toEqual(
+        new Set(['inline', 'block'])
+      );
+      const query = { kind: 'ooxmlId', ooxmlId: listed.content.controls[0]!.ooxmlId! } as const;
+      for (const options of [{}, { maxControls: 1 }, { stories: ['body'] as const }]) {
+        for (const read of [
+          { kind: 'listContentControls', options },
+          { kind: 'findContentControls', query, options },
+        ] satisfies ResidentDocumentRead[]) {
+          const reply = await w.send({ type: 'documentRead', read });
+          if (!reply.ok || !reply.read) throw new Error('expected a content-control read');
+          expect(normalize(reply.read.value as DocxContentControlsResult)).toEqual(normalize(
+            read.kind === 'listContentControls'
+              ? main.listContentControls(options)
+              : main.findContentControls(query, options)
+          ));
+        }
+      }
+    } finally {
+      main.destroy();
+      engine.destroy();
+    }
+  });
+
+  async function proposalWorker(extraBody = '', comments?: string, bytes?: Uint8Array, options: { clientId?: number; headersFooters?: boolean } = {}) {
     const parts: PartsMap = new Map();
     parts.set('[Content_Types].xml', toBytes(
       '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'
@@ -2555,8 +2759,29 @@ describe('worker proposals during sliced completion', () => {
     parts.set('word/document.xml', toBytes(
       `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body>${body}<w:sectPr/></w:body></w:document>`
     ));
-    const engine = await createResidentEngineSession();
-    engine.openDocx(new Uint8Array(rezipPartsToArrayBuffer(parts)));
+    if (comments !== undefined) {
+      const types = new TextDecoder().decode(parts.get('[Content_Types].xml')!);
+      parts.set('[Content_Types].xml', toBytes(types.replace('</Types>', '<Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/></Types>')));
+      parts.set('word/_rels/document.xml.rels', toBytes('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdComments" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/></Relationships>'));
+      parts.set('word/comments.xml', toBytes(`<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">${comments}</w:comments>`));
+    }
+    if (options.headersFooters) {
+      const document = new TextDecoder().decode(parts.get('word/document.xml')!);
+      parts.set('word/document.xml', toBytes(document.replace('<w:sectPr/>',
+        '<w:sectPr><w:headerReference w:type="default" r:id="rIdHeader"/><w:footerReference w:type="default" r:id="rIdFooter"/></w:sectPr>'
+      ).replace('<w:document ', '<w:document xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ')));
+      const types = new TextDecoder().decode(parts.get('[Content_Types].xml')!);
+      parts.set('[Content_Types].xml', toBytes(types.replace('</Types>',
+        '<Override PartName="/word/header.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/><Override PartName="/word/footer.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/></Types>'
+      )));
+      parts.set('word/_rels/document.xml.rels', toBytes(
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdHeader" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header.xml"/><Relationship Id="rIdFooter" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer.xml"/></Relationships>'
+      ));
+      parts.set('word/header.xml', toBytes('<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>Header</w:t></w:r></w:p></w:hdr>'));
+      parts.set('word/footer.xml', toBytes('<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>Footer</w:t></w:r></w:p></w:ftr>'));
+    }
+    const engine = await createResidentEngineSession(undefined, options.clientId);
+    engine.openDocx(bytes ?? new Uint8Array(rezipPartsToArrayBuffer(parts)));
     const w = worker();
     const calls: string[] = [];
     const onResume: Array<() => void> = [];
@@ -2609,7 +2834,8 @@ describe('worker proposals during sliced completion', () => {
       type: 'bootstrap', snapshot, extras: '', layoutExtras: '{}',
       provisionalPages: 1, displayWindow: [0, 1], expectedFrameEpoch: 0,
     });
-    expect(booted.ok && booted.layoutProvisional).toBe(true);
+    expect(booted.ok).toBe(true);
+    if (!bytes) expect(booted.ok && booted.layoutProvisional).toBe(true);
     const proposal = (index = 1): Extract<DocxProposalInput, { op: 'replaceText' }> => ({
       id: `p${index}`,
       paragraph: {
@@ -2637,6 +2863,63 @@ describe('worker proposals during sliced completion', () => {
     };
     return { w, engine, calls, onResume, snapshot, booted, proposal, complete, expectFullLayout };
   }
+
+  test('sidebar and headings reads match a main session and reject stale versions', async () => {
+    const bytes = sidebarDocx();
+    const { w, engine } = await proposalWorker('', undefined, bytes);
+    const main = await createYrsSession();
+    try {
+      main.openDocx(bytes, true);
+      const version = engine.geometryReader.version();
+      const expected = {
+        sidebar: readSidebar(main, ['7', 'missing'], main.version()),
+        headings: readOutlineHeadings(main, main.version()),
+      };
+      for (const expectVersion of [version, 'stale']) {
+        const reads: ResidentDocumentRead[] = [
+          { kind: 'sidebar', commentIds: ['7', 'missing'], expectVersion },
+          { kind: 'headings', expectVersion },
+        ];
+        for (const read of reads) {
+          const reply = await w.send({ type: 'documentRead', read });
+          expect(reply).toMatchObject({ ok: true, read: {
+            version,
+            value: expectVersion === version ? expected[read.kind as keyof typeof expected] : null,
+          } });
+        }
+      }
+    } finally {
+      main.destroy();
+      engine.destroy();
+    }
+  });
+
+  test('paged export replies with the resident session export of its retained layout', async () => {
+    const { w, engine, complete } = await proposalWorker();
+    try {
+      const completed = await complete();
+      expect(completed.ok && completed.layoutProvisional).not.toBe(true);
+      const options = { revisionView: 'markup' } as const;
+      for (const currentRequest of [
+        layoutInput,
+        JSON.stringify({ ...JSON.parse(layoutInput), renderEnv: { revisionPreview: { '1': 'accepted' } } }),
+      ]) {
+        const reply = await w.send({
+          type: 'documentRead',
+          read: { kind: 'exportStructuredWithPages', options, currentRequest },
+        });
+        if (!reply.ok || !reply.read) throw new Error('expected a paged export read');
+        expect(reply.read.value).toBe(engine.exportStructuredWithPagesJson(options, currentRequest));
+        expect(JSON.parse(reply.read.value as string).version).toBe(reply.read.version);
+      }
+      const preview = JSON.parse(engine.exportStructuredWithPagesJson(options, JSON.stringify({
+        ...JSON.parse(layoutInput), renderEnv: { revisionPreview: { '1': 'accepted' } },
+      })));
+      expect(preview).toMatchObject({ ok: false, failure: { code: 'unsupported-revision-layout' } });
+    } finally {
+      engine.destroy();
+    }
+  });
 
   test('proposal mirrors retain the same navigation target as repeated worker reads', async () => {
     const { w, engine, proposal } = await proposalWorker();
@@ -2724,6 +3007,103 @@ describe('worker proposals during sliced completion', () => {
       return { fontRequirements: reply.proposal.fontRequirements, preview: proposalRevisionPreview(result.snapshot) };
     };
   }
+
+  test('meta and JSON replies preserve decisions, frame bytes, sizes and header epochs', async () => {
+    const run = async (mode: 'json' | 'meta') => {
+      const { w, engine, proposal, snapshot, calls } = await proposalWorker('', undefined, undefined, {
+        clientId: 9501, headersFooters: true,
+      });
+      const frames: Uint8Array[] = [];
+      const layouts: string[] = [];
+      const metas: LayoutMetaV1[] = [];
+      let revision = snapshot.layoutRevision;
+      let epoch = w.harness.delta!.frameEpoch;
+      let input = layoutInput;
+      const sync = async () => {
+        const response = await w.send({
+          type: 'sync', expectedFrameEpoch: epoch, paintCaret: false, extras: '', layoutExtras: '{}',
+          ...(mode === 'meta' ? { layoutReply: 'meta' as const } : {}),
+          snapshot: { ...snapshot, fonts: [], layoutRevision: ++revision, layoutInput: input },
+        });
+        if (!response.ok || !response.frame) throw new Error('expected layout frame');
+        frames.push(new Uint8Array(response.frame));
+        epoch = response.caret!.frameEpoch;
+        const full = await w.send({ type: 'layoutJson', layoutRevision: revision });
+        if (!full.ok || full.layoutJsonStatus !== 'ok' || full.layoutJson === undefined) {
+          throw new Error('expected retained JSON');
+        }
+        layouts.push(full.layoutJson);
+        if (mode === 'json') {
+          expect(response.layoutJson).toBe(full.layoutJson);
+          expect(response.layoutMeta).toBeUndefined();
+        } else {
+          expect(response.layoutJson).toBeUndefined();
+          if (!isLayoutMetaV1(response.layoutMeta)) throw new Error('expected v1 meta');
+          const meta = response.layoutMeta;
+          metas.push(meta);
+          expect(w.transfers.get(response.id)).toContain(meta.pageSizes.buffer);
+          const output = JSON.parse(full.layoutJson) as { layout: Layout; notesConverged: boolean; provisional?: boolean };
+          expect(meta.pageCount).toBe(output.layout.pages.length);
+          expect(meta.pageCount).toBeGreaterThan(1);
+          expect(meta.partial).toBe(output.layout.partial === true);
+          expect(meta.provisional).toBe(output.provisional === true);
+          expect(meta.notesConverged).toBe(output.notesConverged);
+          const sizes = new Float64Array(output.layout.pages.flatMap((page) => [page.size.w, page.size.h]));
+          expect(new Uint8Array(meta.pageSizes.buffer)).toEqual(new Uint8Array(sizes.buffer));
+          expect(JSON.parse(meta.layoutShell)).toEqual({
+            ...output.layout,
+            pages: output.layout.pages.map((page) => ({ ...page, fragments: [] })),
+          });
+        }
+        expect(await w.send({ type: 'layoutJson', layoutRevision: revision - 1 })).toMatchObject({
+          ok: true, layoutJsonStatus: 'stale',
+        });
+      };
+      try {
+        const decide = await decided(w, engine, proposal);
+        for (const state of ['accepted', 'rejected', 'proposed', 'accepted'] as const) {
+          const decision = await decide(state);
+          input = JSON.stringify({ ...JSON.parse(layoutInput),
+            regions: { sections: [{ sectionId: 'main', headerFooterRefs: {
+              headerDefault: 'rIdHeader', footerDefault: 'rIdFooter',
+            } }] },
+            renderEnv: { revisionPreview: decision.preview },
+          });
+          await sync();
+        }
+        engine.applyRawOps('hf:rIdHeader', [{ op: 'insert', index: 0, text: 'Changed ' }]);
+        await sync();
+        await sync();
+        input = JSON.stringify({ ...JSON.parse(input), regions: { sections: [{ sectionId: 'main' }] } });
+        await sync();
+        await sync();
+        if (mode === 'meta') {
+          expect(calls).not.toContain('whole');
+          expect(metas[0]!.headersFooters).toContain('Header');
+          expect(metas[0]!.headersFooters).toContain('Footer');
+          for (const meta of metas.slice(1, 4)) {
+            expect(meta.headersFootersEpoch).toBe(metas[0]!.headersFootersEpoch);
+            expect(meta.headersFooters).toBeUndefined();
+          }
+          expect(metas[4]!.headersFootersEpoch).toBe(metas[0]!.headersFootersEpoch + 1);
+          expect(metas[4]!.headersFooters).toContain('Changed ');
+          expect(metas[5]!.headersFootersEpoch).toBe(metas[4]!.headersFootersEpoch);
+          expect(metas[5]!.headersFooters).toBeUndefined();
+          expect(metas[6]!.headersFootersEpoch).toBe(metas[4]!.headersFootersEpoch + 1);
+          expect(metas[6]!.headersFooters).toBe('null');
+          expect(metas[7]!.headersFootersEpoch).toBe(metas[6]!.headersFootersEpoch);
+          expect(metas[7]!.headersFooters).toBeUndefined();
+        }
+        return { frames, layouts };
+      } finally {
+        void w.send({ type: 'destroy' });
+      }
+    };
+    const full = await run('json');
+    const meta = await run('meta');
+    expect(meta.layouts).toEqual(full.layouts);
+    expect(meta.frames).toEqual(full.frames);
+  });
 
   test('a decision answers with the font requirements of the layout input the host builds next, and an undo reads cached ones', async () => {
     const { w, engine, proposal } = await proposalWorker();
@@ -2905,6 +3285,135 @@ describe('worker proposals during sliced completion', () => {
       expect(calls.filter((call) => call === 'begin')).toHaveLength(1);
       await expectFullLayout(completed);
     } finally {
+      engine.destroy();
+    }
+  });
+
+  test('find matches read equals the replica and rejects a different version', async () => {
+    const { w, engine } = await proposalWorker();
+    const replica = await createYrsSession();
+    try {
+      replica.loadState(engine.encodeState());
+      const expectVersion = engine.proposalEngine.version();
+      const options = { matchCase: false, matchWholeWord: true };
+      const matches = findBodyMatches(replica, (loc) => yrsLocToProjectedDisplayPosition(
+        replica,
+        (root) => createYrsPositionProjection(replica, root),
+        loc,
+        'body',
+        (story) => createYrsInputPositionMap(story, replica.paragraphSpans(story))
+      ), 'paragraph', options);
+      expect(matches).toHaveLength(40);
+      const read = { kind: 'findMatches', searchText: 'paragraph', options, expectVersion } as const;
+      const reply = await w.send({ type: 'documentRead', read });
+      expect(reply.ok && reply.read).toEqual({ version: expectVersion, value: matches });
+      const stale = await w.send({
+        type: 'documentRead', read: { ...read, expectVersion: `${expectVersion}-stale` },
+      });
+      expect(stale.ok && stale.read).toEqual({ version: expectVersion, value: null });
+    } finally {
+      replica.destroy();
+      engine.destroy();
+    }
+  });
+
+  test('comment deletion removes only its worker anchor and missing ids are harmless', async () => {
+    const extraBody = [1, 2].map((id) =>
+      `<w:p w14:paraId="0000010${id}"><w:commentRangeStart w:id="${id}"/><w:r><w:t>Marked ${id}</w:t></w:r><w:commentRangeEnd w:id="${id}"/><w:r><w:commentReference w:id="${id}"/></w:r></w:p>`
+    ).join('');
+    const comments = [1, 2].map((id) =>
+      `<w:comment w:id="${id}" w:author="Reviewer"><w:p><w:r><w:t>Comment ${id}</w:t></w:r></w:p></w:comment>`
+    ).join('');
+    const { w, engine } = await proposalWorker(extraBody, comments);
+    try {
+      expect(engine.resolveComment('1')).not.toHaveLength(0);
+      const untouched = engine.resolveComment('2');
+      const reply = await w.send({ type: 'proposal', operation: { kind: 'removeComment', id: '1' } });
+      if (!reply.ok || !reply.proposal) throw new Error('expected comment deletion reply');
+      expect(reply.proposal.result).toBeUndefined();
+      expect(reply.proposal.changedStories.length).toBeGreaterThan(0);
+      expect(reply.proposal.updates.length).toBeGreaterThan(0);
+      let anchors: ReturnType<typeof engine.resolveComment> = [];
+      try { anchors = engine.resolveComment('1'); } catch {}
+      expect(anchors).toEqual([]);
+      expect(engine.resolveComment('2')).toEqual(untouched);
+      expect(readSidebar(engine.geometryReader, ['1'], engine.proposalEngine.version())!.comments)
+        .toEqual([{ id: '1', anchors: [] }]);
+
+      const version = engine.proposalEngine.version();
+      const missing = await w.send({ type: 'proposal', operation: { kind: 'removeComment', id: 'missing' } });
+      expect(missing).toMatchObject({ ok: true, proposal: { changedStories: [], updates: [] } });
+      expect(engine.proposalEngine.version()).toBe(version);
+      expect(engine.resolveComment('2')).toEqual(untouched);
+    } finally {
+      engine.destroy();
+    }
+  });
+
+  test('viewer document reads reply with the current version and value', async () => {
+    const extraBody = '<w:p w14:paraId="00000100"><w:r><w:t xml:space="preserve">Before </w:t></w:r>' +
+      '<w:commentRangeStart w:id="1"/><w:r><w:t>the phrase</w:t></w:r><w:commentRangeEnd w:id="1"/>' +
+      '<w:r><w:commentReference w:id="1"/></w:r><w:r><w:t xml:space="preserve"> </w:t></w:r>' +
+      '<w:ins w:id="9" w:author="A" w:date="2026-10-01T00:00:00Z"><w:r><w:t>new</w:t></w:r></w:ins>' +
+      '<w:r><w:t xml:space="preserve"> after</w:t></w:r></w:p>';
+    const comments = '<w:comment w:id="1" w:author="Reviewer"><w:p><w:r><w:t>Check phrase</w:t></w:r></w:p></w:comment>';
+    const { w, engine } = await proposalWorker(extraBody, comments);
+    const main = await createYrsSession();
+    try {
+      main.loadState(engine.encodeState());
+      const version = engine.proposalEngine.version();
+      const projection = createYrsPositionProjection(main, 'body');
+      const position = (offset: number) => yrsLocToProjectedDisplayPosition(main, () => projection, {
+        story: 'body', paraId: '00000100', offset,
+      })!;
+      const revision = main.listRevisions().find((candidate) => candidate.kind === 'insertion')!;
+      const requests: Array<{ read: ResidentDocumentRead; value?: unknown; text?: string }> = [
+        {
+          read: { kind: 'findText', request: { text: 'phrase', within: { kind: 'story', story: 'body' }, view: 'accepted', limit: 1 } },
+          value: { ...main.findText({ text: 'phrase', within: { kind: 'story', story: 'body' }, view: 'accepted', limit: 1 }), version },
+        },
+        {
+          read: { kind: 'findParagraphs', query: 'phrase', caseSensitive: true, limit: 1 },
+          value: [{ paraId: '00000100', match: 'phrase', before: 'Before the ', after: ' new after' }],
+        },
+        {
+          read: { kind: 'selectionInfo', story: 'body', anchor: position(17), head: position(7), expectVersion: version },
+          value: main.selectionText({
+            story: 'body', start: { paraId: '00000100', offset: 7 }, end: { paraId: '00000100', offset: 17 },
+          }),
+        },
+        {
+          read: { kind: 'commentTarget', story: 'body', commentId: '1', expectVersion: version },
+          text: 'the phrase',
+        },
+        {
+          read: { kind: 'revisionTarget', story: 'body', revisionId: revision.revisionId, expectVersion: version },
+          text: 'new',
+        },
+      ];
+      for (const { read, value, text } of requests) {
+        const reply = await w.send({ type: 'documentRead', read });
+        expect(reply.ok).toBe(true);
+        if (text === undefined) {
+          expect(reply.ok && reply.read).toEqual({ version, value });
+        } else {
+          const range = reply.ok ? (reply.read!.value as { anchor: number; head: number } | null) : null;
+          expect(reply.ok && reply.read!.version).toBe(version);
+          expect(range).not.toBeNull();
+          const covered = await w.send({
+            type: 'documentRead',
+            read: { kind: 'selectionText', story: 'body', anchor: range!.anchor, head: range!.head, expectVersion: version },
+          });
+          expect(covered.ok && (covered.read!.value as { text: string } | null)?.text).toBe(text);
+        }
+        if ('expectVersion' in read) {
+          const stale = await w.send({ type: 'documentRead', read: { ...read, expectVersion: `${version}-stale` } });
+          expect(stale.ok).toBe(true);
+          expect(stale.ok && stale.read).toEqual({ version, value: null });
+        }
+      }
+    } finally {
+      main.destroy();
       engine.destroy();
     }
   });
@@ -3162,6 +3671,61 @@ describe('worker proposals during sliced completion', () => {
 });
 
 describe('resident worker opening', () => {
+  test.each([undefined, 256])('forwards the optional preview paragraph budget %s', async (paragraphBudget) => {
+    await preloadEditWasm(new Uint8Array(readFileSync(resolve(
+      import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm'
+    ))));
+    const bytes = syntheticDocx('plain', 44, 17, {
+      tableDense: true,
+      blocks: 40,
+      trailingShortParagraphs: 170,
+    });
+    const engine = await createResidentEngineSession();
+    const w = worker();
+    const forwarded: Array<number | undefined> = [];
+    Object.assign(w.harness.session, engine, {
+      openDocxPreview: (source: Uint8Array, blocks: number, budget?: number) => {
+        forwarded.push(budget);
+        return engine.openDocxPreview(source, blocks, budget);
+      },
+    });
+    try {
+      const reply = await w.send({
+        type: 'open',
+        bytes: bytes.buffer as ArrayBuffer,
+        previewBlocks: 200,
+        ...(paragraphBudget === undefined ? {} : { previewParagraphBudget: paragraphBudget }),
+      });
+      expect(reply.ok).toBe(true);
+      expect(reply.ok && reply.hostJson).toBeDefined();
+      expect(forwarded).toEqual([paragraphBudget]);
+      const expected = await createResidentEngineSession();
+      try {
+        const hostJson = expected.openDocxPreview(bytes, 200, paragraphBudget);
+        expect(reply.ok && reply.hostJson).toBe(hostJson ?? undefined);
+        expect(engine.paragraphIdentities().paragraphs.length).toBe(
+          expected.paragraphIdentities().paragraphs.length
+        );
+        const blockCount = await createResidentEngineSession();
+        try {
+          blockCount.openDocxPreview(bytes, 200);
+          const count = blockCount.paragraphIdentities().paragraphs.length;
+          if (paragraphBudget === undefined) {
+            expect(engine.paragraphIdentities().paragraphs.length).toBe(count);
+          } else {
+            expect(engine.paragraphIdentities().paragraphs.length).toBeLessThan(count);
+          }
+        } finally {
+          blockCount.destroy();
+        }
+      } finally {
+        expected.destroy();
+      }
+    } finally {
+      engine.destroy();
+    }
+  });
+
   const provisional = '{"layout":{"pages":[1]},"notesConverged":true,"provisional":true}';
   const full = '{"layout":{"pages":[1,2]},"notesConverged":true}';
   const snapshot = {
@@ -3186,6 +3750,7 @@ describe('resident worker opening', () => {
         calls.push(`open:${bytes.join(',')}:${digest}:${generation}`);
         return '{"host":1}';
       },
+      storiesChangedSince: () => ({ revision: 0, stories: [] }),
       layoutFontRequirementsJson: (input: string) => {
         calls.push(`requirements:${input}`);
         return '[{"key":"a"}]';
@@ -3236,6 +3801,228 @@ describe('resident worker opening', () => {
     });
     return { w, calls };
   }
+
+  async function peerReply(w: ReturnType<typeof worker>, request: ResidentEngineWorkerRequestWithoutId) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        w.send(request),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`No ${request.type} reply`)), 1000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  test('encodeState captures peer metadata, state, version and proposals in one synchronous handler', async () => {
+    const { w } = openingWorker();
+    await peerReply(w, { type: 'open', bytes: new Uint8Array([1]).buffer });
+    let revision = 7;
+    const captures: string[] = [];
+    Object.assign(w.harness.session, {
+      encodeState: () => {
+        captures.push(`state:${revision}`);
+        queueMicrotask(() => { revision += 1; });
+        return new Uint8Array([0, revision, 0]).subarray(1, 2);
+      },
+      encodePeerMetadata: () => {
+        captures.push(`metadata:${revision}`);
+        return new Uint8Array([0, revision, 0]).subarray(1, 2);
+      },
+      proposalEngine: { version: () => {
+        captures.push(`version:${revision}`);
+        return `v${revision}`;
+      } },
+    });
+    const reply = await peerReply(w, { type: 'encodeState', peerMetadata: true });
+    if (!reply.ok || !reply.state || !reply.peerMetadata) throw new Error('Expected peer snapshot');
+    expect(captures).toEqual(['state:7', 'metadata:7', 'version:7']);
+    expect(new Uint8Array(reply.state)).toEqual(new Uint8Array([7]));
+    expect(new Uint8Array(reply.peerMetadata)).toEqual(new Uint8Array([7]));
+    expect(reply.version).toBe('v7');
+    expect(reply.proposals).toEqual({ previewVersion: 0, entries: [] });
+    expect(w.transfers.get(reply.id)).toEqual([reply.state, reply.peerMetadata]);
+  });
+
+  test('state-only encodeState keeps its reply and transfer unchanged', async () => {
+    const { w } = openingWorker();
+    await peerReply(w, { type: 'open', bytes: new Uint8Array([1]).buffer });
+    const metadata = mock(() => new Uint8Array([9]));
+    Object.assign(w.harness.session, { encodePeerMetadata: metadata });
+    const reply = await peerReply(w, { type: 'encodeState' });
+    if (!reply.ok || !reply.state) throw new Error('Expected state');
+    expect(reply).toEqual({
+      id: reply.id, ok: true, state: new Uint8Array([7, 8]).buffer,
+      version: 'opened', proposals: { previewVersion: 0, entries: [] },
+      memory: w.harness.memories,
+    });
+    expect(metadata).not.toHaveBeenCalled();
+    expect(w.transfers.get(reply.id)).toEqual([reply.state]);
+  });
+
+  test.each(['missing', 'rejected'] as const)('encodeState preserves state when metadata is %s', async (kind) => {
+    const { w } = openingWorker();
+    await peerReply(w, { type: 'open', bytes: new Uint8Array([1]).buffer });
+    if (kind === 'rejected') Object.assign(w.harness.session, {
+      encodePeerMetadata: () => { throw new PeerMetadataError('unopened', 'No peer source'); },
+    });
+    const reply = await peerReply(w, { type: 'encodeState', peerMetadata: true });
+    if (!reply.ok || !reply.state) throw new Error('Expected valid state despite metadata absence');
+    expect(new Uint8Array(reply.state)).toEqual(new Uint8Array([7, 8]));
+    expect(reply.peerMetadata).toBeUndefined();
+    expect(reply.peerMetadataReason).toContain(kind === 'missing' ? 'missing-capability' : 'unopened');
+    expect(reply.version).toBe('opened');
+    expect(w.transfers.get(reply.id)).toEqual([reply.state]);
+  });
+
+  test('retains the opened source, keeps save history across an opened bootstrap and resets it on destroy/open', async () => {
+    const { w } = openingWorker();
+    const host = { package: { document: { content: [] } } };
+    let source = new Uint8Array([1, 2, 3]).buffer;
+    const records: ResidentSaveRecord[] = [];
+    const save: ResidentEngineSession['save'] = async (bytes, hostJson, metadata, comments, record) => {
+      expect(bytes.buffer).toBe(source);
+      expect(hostJson).toBe('{"host":1}');
+      expect(metadata).toBe(host);
+      expect(comments).toEqual([]);
+      if (records.at(-1) !== record) {
+        expect(record).toEqual({ full: false });
+        records.push(record);
+      } else {
+        expect(record.full).toBe(true);
+        expect(record.saved).toBeDefined();
+        expect(record.base).toBe(host);
+      }
+      const saved = new Uint8Array([4, 5, 6]).buffer;
+      record.full = true;
+      record.saved = saved;
+      record.base = host as unknown as NonNullable<ResidentSaveRecord['base']>;
+      return saved;
+    };
+    Object.assign(w.harness.session, { save });
+    expect((await w.send({ type: 'open', bytes: source })).ok).toBe(true);
+    const first = await w.send({ type: 'save', host, comments: [] });
+    expect(first.ok && first.saved).not.toBe(records[0]!.saved);
+    expect(first.ok && [...new Uint8Array(first.saved!)]).toEqual([4, 5, 6]);
+    expect((await w.send({ type: 'save', host, comments: [] })).ok).toBe(true);
+    expect((await w.send({
+      type: 'bootstrap', opened: true, snapshot, extras: '', layoutExtras: '{}', expectedFrameEpoch: 0,
+    })).ok).toBe(true);
+    expect((await w.send({ type: 'save', host, comments: [] })).ok).toBe(true);
+    expect(records).toHaveLength(1);
+    w.scope.onmessage({ data: { id: 999, type: 'destroy' } });
+    source = new Uint8Array([7, 8]).buffer;
+    expect((await w.send({ type: 'open', bytes: source })).ok).toBe(true);
+    expect((await w.send({ type: 'save', host, comments: [] })).ok).toBe(true);
+    expect(records).toHaveLength(2);
+    expect((await w.bootstrap()).ok).toBe(true);
+    expect(await w.send({ type: 'save', host, comments: [] })).toMatchObject({
+      ok: false, code: 'save-unavailable',
+    });
+  });
+
+  test('save returns exactly the peer diff only when given a state vector', async () => {
+    const { w } = openingWorker();
+    const diff = new Uint8Array([7, 8, 9]);
+    const encodeStateAsUpdate = mock((_stateVector: Uint8Array) => diff);
+    Object.assign(w.harness.session, {
+      save: async () => new ArrayBuffer(4),
+      encodeStateAsUpdate,
+    });
+    expect((await w.send({ type: 'open', bytes: new ArrayBuffer(1) })).ok).toBe(true);
+    const stateVector = new Uint8Array([1, 2, 3]);
+    const saved = await w.send({ type: 'save', comments: [], stateVector });
+    expect(saved.ok && saved.updates).toEqual([diff.buffer]);
+    expect(encodeStateAsUpdate).toHaveBeenCalledTimes(1);
+    expect(encodeStateAsUpdate).toHaveBeenCalledWith(stateVector);
+    encodeStateAsUpdate.mockClear();
+    expect(await w.send({ type: 'save', comments: [] })).toMatchObject({ ok: true, updates: [] });
+    expect(encodeStateAsUpdate).not.toHaveBeenCalled();
+  });
+
+  test('syncUpdate applies in mutation order and acknowledges its version, vector and repairs', async () => {
+    const { w } = openingWorker();
+    const calls: string[] = [];
+    let version = 'opened';
+    const vector = new Uint8Array([1, 2]);
+    const repair = new Uint8Array([3, 4]);
+    Object.assign(w.harness.session, {
+      applyUpdate: (update: Uint8Array) => { version = String(update[0]); calls.push(`apply:${version}`); },
+      encodeStateAsUpdate: (captured: Uint8Array) => {
+        expect(captured).toEqual(vector);
+        calls.push(`repair:${version}`);
+        return repair;
+      },
+      encodeStateVector: () => vector,
+      proposalEngine: { version: () => version },
+      save: async () => { calls.push(`save:${version}`); return new ArrayBuffer(0); },
+    });
+    expect((await w.send({ type: 'open', bytes: new ArrayBuffer(1) })).ok).toBe(true);
+    void w.send({ type: 'applyUpdate', update: new Uint8Array([1]), selection: null });
+    const acknowledged = w.send({ type: 'syncUpdate', update: new Uint8Array([2]), stateVector: vector });
+    void w.send({ type: 'applyUpdate', update: new Uint8Array([3]), selection: null });
+    const saved = w.send({ type: 'save', comments: [] });
+    expect(await acknowledged).toMatchObject({ ok: true, version: '2', stateVector: vector.buffer, repair: repair.buffer });
+    expect((await saved).ok).toBe(true);
+    expect(calls).toEqual(['apply:1', 'apply:2', 'repair:2', 'apply:3', 'save:3']);
+  });
+
+  test('syncUpdate acknowledges an empty diff and a deletion with an unchanged state vector', async () => {
+    const { w } = openingWorker();
+    const vector = new Uint8Array([1, 2]);
+    let version = 'opened';
+    const applyUpdate = mock((update: Uint8Array) => { if (update.length > 0) version = 'deleted'; });
+    const encodeStateAsUpdate = mock(() => new Uint8Array([0, 0]));
+    Object.assign(w.harness.session, {
+      applyUpdate, encodeStateAsUpdate,
+      encodeStateVector: () => vector,
+      proposalEngine: { version: () => version },
+    });
+    expect((await w.send({ type: 'open', bytes: new ArrayBuffer(1) })).ok).toBe(true);
+    expect(await w.send({ type: 'syncUpdate', update: new Uint8Array(), stateVector: vector })).toMatchObject({
+      ok: true, version: 'opened', stateVector: vector.buffer,
+    });
+    expect(await w.send({ type: 'syncUpdate', update: new Uint8Array([9]), stateVector: vector })).toMatchObject({
+      ok: true, version: 'deleted', stateVector: vector.buffer,
+    });
+    expect(applyUpdate).toHaveBeenCalledTimes(1);
+    expect(encodeStateAsUpdate).toHaveBeenCalledTimes(2);
+  });
+
+  test('syncUpdate reports a worker trap as a terminal failure', async () => {
+    const { w } = openingWorker();
+    Object.assign(w.harness.session, { applyUpdate: () => { throw new WebAssembly.RuntimeError('unreachable'); } });
+    expect((await w.send({ type: 'open', bytes: new ArrayBuffer(1) })).ok).toBe(true);
+    expect(await w.send({ type: 'syncUpdate', update: new Uint8Array([1]), stateVector: new Uint8Array([0]) })).toMatchObject({
+      ok: false, terminal: true,
+    });
+  });
+
+  test('save forwards the peer story set, including an empty set, without reading revisions', async () => {
+    const { w } = openingWorker();
+    const save = mock(async (..._args: Parameters<ResidentEngineSession['save']>) => new ArrayBuffer(4));
+    const storiesChangedSince = mock(() => { throw new Error('save must not read revisions'); });
+    Object.assign(w.harness.session, { save, storiesChangedSince });
+    expect((await w.send({ type: 'open', bytes: new ArrayBuffer(1) })).ok).toBe(true);
+    for (const stories of [['hf:rIdH1'], []]) {
+      expect((await w.send({ type: 'save', comments: [], stories })).ok).toBe(true);
+      expect(save.mock.calls.at(-1)![5]).toEqual(stories);
+    }
+    expect((await w.send({ type: 'save', comments: [] })).ok).toBe(true);
+    expect(save.mock.calls.at(-1)![5]).toBeUndefined();
+    expect(storiesChangedSince).not.toHaveBeenCalled();
+  });
+
+  test('a preview rejects save as still opening', async () => {
+    const { w } = openingWorker();
+    Object.assign(w.harness.session, { openDocxPreview: () => '{"host":"preview"}' });
+    expect((await w.send({ type: 'open', bytes: new ArrayBuffer(1), previewBlocks: 1 })).ok).toBe(true);
+    expect(await w.send({ type: 'save', comments: [] })).toMatchObject({
+      ok: false, code: 'save-unavailable', error: 'Resident engine worker is still opening',
+    });
+  });
 
   test('opens a package, lays it out without a state to load, and hands its state over', async () => {
     const { w, calls } = openingWorker();

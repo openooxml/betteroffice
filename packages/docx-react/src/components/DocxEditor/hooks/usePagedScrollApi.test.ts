@@ -7,6 +7,11 @@ import type {
   DisplayPage,
 } from '@betteroffice/docx/layout/render';
 import type { YrsSession } from '@betteroffice/docx/yrs';
+import {
+  captureDisplayListScrollAnchor,
+  restoreDisplayListScrollAnchor,
+  restoreScrollSnapshot,
+} from '../internals/scrollRestore';
 import type { DisplayPageNavigation } from './useDisplayList';
 import { usePagedScrollApi } from './usePagedScrollApi';
 
@@ -164,7 +169,7 @@ function revealApi(pageNavigation?: DisplayPageNavigation) {
       }),
     { initialProps: { displayListQueries: unbuiltQueries(false, placeholder) } }
   );
-  return { ...hook, scroller, scrolls, placeholder, match };
+  return { ...hook, scroller, host, scrolls, placeholder, match };
 }
 
 test('a position navigation requests its unbuilt page alongside the guess scroll', () => {
@@ -206,13 +211,228 @@ test('a user scroll withdraws the page request and ignores later frames', () => 
   scroller.remove();
 });
 
+test('layout scroll compensation keeps navigation refining', () => {
+  const clock = spyOn(performance, 'now').mockReturnValue(0);
+  const nav = fakePageNavigation();
+  const t = revealApi(nav.pageNavigation);
+  try {
+    Object.defineProperty(t.scroller, 'scrollHeight', { value: 10000 });
+    act(() => t.result.current.revealPositionImpl(500));
+    expect(t.scrolls).toHaveLength(1);
+    const compensatedTop = t.scroller.scrollTop + 100;
+    restoreScrollSnapshot({ scrollTopSnapshot: compensatedTop }, t.scroller);
+    expect(t.scroller.scrollTop).toBe(compensatedTop);
+    t.scroller.dispatchEvent(new Event('scroll'));
+    act(() => nav.publish(unbuiltQueries(true, t.match)));
+    expect(t.scrolls).toHaveLength(2);
+    expect(t.scroller.scrollTop).toBe(6000 + t.match.y + t.match.height / 2 - 200);
+  } finally {
+    t.unmount();
+    t.scroller.remove();
+    clock.mockRestore();
+  }
+});
+
+test('layout scroll compensation after an external move cancels navigation', () => {
+  const clock = spyOn(performance, 'now').mockReturnValue(0);
+  const nav = fakePageNavigation();
+  const t = revealApi(nav.pageNavigation);
+  try {
+    Object.defineProperty(t.scroller, 'scrollHeight', { value: 10000 });
+    act(() => t.result.current.revealPositionImpl(500));
+    t.scroller.scrollTop = 100;
+    restoreScrollSnapshot({ scrollTopSnapshot: 200 }, t.scroller);
+    t.scroller.dispatchEvent(new Event('scroll'));
+    act(() => nav.publish(unbuiltQueries(true, t.match)));
+    expect(t.scrolls).toHaveLength(1);
+    expect(t.scroller.scrollTop).toBe(200);
+    expect(nav.builds).toEqual([[6], []]);
+  } finally {
+    t.unmount();
+    t.scroller.remove();
+    clock.mockRestore();
+  }
+});
+
+test('scroll height clamping keeps navigation refining', () => {
+  const clock = spyOn(performance, 'now').mockReturnValue(0);
+  const nav = fakePageNavigation();
+  const t = revealApi(nav.pageNavigation);
+  try {
+    let scrollHeight = 10000;
+    Object.defineProperty(t.scroller, 'scrollHeight', { get: () => scrollHeight });
+    act(() => t.result.current.revealPositionImpl(500));
+    expect(t.scrolls).toHaveLength(1);
+    scrollHeight = 6000;
+    t.scroller.scrollTop = scrollHeight - t.scroller.clientHeight;
+    t.scroller.dispatchEvent(new Event('scroll'));
+    scrollHeight = 10000;
+    act(() => nav.publish(unbuiltQueries(true, t.match)));
+    expect(t.scrolls).toHaveLength(2);
+    expect(t.scroller.scrollTop).toBe(6000 + t.match.y + t.match.height / 2 - 200);
+  } finally {
+    t.unmount();
+    t.scroller.remove();
+    clock.mockRestore();
+  }
+});
+
+test('scroll height clamping followed by layout compensation keeps navigation refining', () => {
+  const clock = spyOn(performance, 'now').mockReturnValue(0);
+  const nav = fakePageNavigation();
+  const t = revealApi(nav.pageNavigation);
+  try {
+    let scrollHeight = 10000;
+    Object.defineProperty(t.scroller, 'scrollHeight', { get: () => scrollHeight });
+    t.rerender({ displayListQueries: unbuiltQueries(false, { ...t.placeholder, y: 1200 }) });
+    act(() => t.result.current.revealPositionImpl(500));
+    expect(t.scrolls).toEqual([7000]);
+    scrollHeight = 6900;
+    t.scroller.scrollTop = scrollHeight - t.scroller.clientHeight;
+    expect(t.scroller.scrollTop).toBe(6500);
+    restoreScrollSnapshot({ scrollTopSnapshot: 6200 }, t.scroller);
+    t.scroller.dispatchEvent(new Event('scroll'));
+    expect(t.scroller.scrollTop).toBe(6200);
+    expect(nav.builds).toEqual([[6]]);
+    scrollHeight = 10000;
+    act(() => nav.publish(unbuiltQueries(true, t.match)));
+    const target = 6000 + t.match.y + t.match.height / 2 - 200;
+    expect(t.scrolls).toEqual([7000, target]);
+    expect(t.scroller.scrollTop).toBe(target);
+    expect(nav.builds).toEqual([[6], []]);
+  } finally {
+    t.unmount();
+    t.scroller.remove();
+    clock.mockRestore();
+  }
+});
+
+test.each(['scroll', 'frame'])(
+  'height expansion after clamping and layout compensation keeps navigation refining on a %s',
+  (detection) => {
+    const clock = spyOn(performance, 'now').mockReturnValue(0);
+    const nav = fakePageNavigation();
+    const t = revealApi(nav.pageNavigation);
+    try {
+      let scrollHeight = 10000;
+      Object.defineProperty(t.scroller, 'scrollHeight', { get: () => scrollHeight });
+      const queries = unbuiltQueries(false, { ...t.placeholder, y: 1200 });
+      t.rerender({ displayListQueries: queries });
+      act(() => t.result.current.revealPositionImpl(500));
+      expect(t.scrolls).toEqual([7000]);
+      const anchor = captureDisplayListScrollAnchor(queries, t.host, t.scroller, 500);
+      expect(anchor.scrollTopSnapshot).toBe(7000);
+      scrollHeight = 6900;
+      t.scroller.scrollTop = scrollHeight - t.scroller.clientHeight;
+      expect(t.scroller.scrollTop).toBe(6500);
+      restoreDisplayListScrollAnchor(
+        anchor, unbuiltQueries(false, { ...t.placeholder, y: 400 }), t.host, t.scroller
+      );
+      expect(t.scroller.scrollTop).toBe(6200);
+      scrollHeight = 10000;
+      if (detection === 'scroll') t.scroller.dispatchEvent(new Event('scroll'));
+      act(() => nav.publish(unbuiltQueries(true, t.match)));
+      const target = 6000 + t.match.y + t.match.height / 2 - 200;
+      expect(t.scrolls).toEqual([7000, target]);
+      expect(t.scroller.scrollTop).toBe(target);
+      expect(nav.builds).toEqual([[6], []]);
+    } finally {
+      t.unmount();
+      t.scroller.remove();
+      clock.mockRestore();
+    }
+  }
+);
+
+test('stale layout scroll compensation does not excuse an external move after a reveal', () => {
+  const clock = spyOn(performance, 'now').mockReturnValue(0);
+  const nav = fakePageNavigation();
+  const t = revealApi(nav.pageNavigation);
+  try {
+    Object.defineProperty(t.scroller, 'scrollHeight', { value: 10000 });
+    t.rerender({ displayListQueries: unbuiltQueries(false, { ...t.placeholder, y: 60 }) });
+    t.scroller.scrollTop = 5860;
+    restoreScrollSnapshot({ scrollTopSnapshot: 5960 }, t.scroller);
+    expect(t.scroller.scrollTop).toBe(5960);
+    act(() => t.result.current.revealPositionImpl(500));
+    expect(t.scrolls).toEqual([5860]);
+    expect(t.scroller.scrollTop).toBe(5860);
+    t.scroller.scrollTop = 5960;
+    t.scroller.dispatchEvent(new Event('scroll'));
+    expect(nav.builds).toEqual([[6], []]);
+    act(() => nav.publish(unbuiltQueries(true, t.match)));
+    expect(t.scrolls).toEqual([5860]);
+    expect(t.scroller.scrollTop).toBe(5960);
+  } finally {
+    t.unmount();
+    t.scroller.remove();
+    clock.mockRestore();
+  }
+});
+
+test('plain scrolling cancels navigation across later frames', () => {
+  const clock = spyOn(performance, 'now').mockReturnValue(0);
+  const nav = fakePageNavigation();
+  const t = revealApi(nav.pageNavigation);
+  try {
+    act(() => t.result.current.revealPositionImpl(500));
+    for (const built of [false, true]) {
+      t.scroller.scrollTop = 100;
+      t.scroller.dispatchEvent(new Event('scroll'));
+      const rect = { ...t.match, pageIndex: 8 };
+      act(() => nav.publish(unbuiltQueries(built, rect)));
+      expect(t.scroller.scrollTop).toBe(100);
+      expect(t.scrolls).toHaveLength(1);
+    }
+  } finally {
+    t.unmount();
+    t.scroller.remove();
+    clock.mockRestore();
+  }
+});
+
+test('a programmatic scroll without an event cancels navigation before the next frame', () => {
+  const clock = spyOn(performance, 'now').mockReturnValue(0);
+  const nav = fakePageNavigation();
+  const t = revealApi(nav.pageNavigation);
+  try {
+    act(() => t.result.current.revealPositionImpl(500));
+    t.scroller.scrollTop = 100;
+    for (const built of [false, true]) {
+      const rect = { ...t.match, pageIndex: 8 };
+      act(() => nav.publish(unbuiltQueries(built, rect)));
+      expect(t.scroller.scrollTop).toBe(100);
+      expect(t.scrolls).toHaveLength(1);
+    }
+  } finally {
+    t.unmount();
+    t.scroller.remove();
+    clock.mockRestore();
+  }
+});
+
 test('a published frame requests the new unbuilt page holding the position', () => {
   const { pageNavigation, builds, publish } = fakePageNavigation();
   const { result, scroller, scrolls, placeholder, match } = revealApi(pageNavigation);
+  const scrollTo = scroller.scrollTo;
+  scroller.scrollTop = 5500;
+  scroller.scrollTo = ((options: ScrollToOptions) => {
+    if (options.behavior === 'smooth') {
+      scrolls.push(options.top ?? 0);
+    } else {
+      scrollTo(options);
+    }
+  }) as typeof scroller.scrollTo;
   act(() => result.current.scrollToPositionImpl(700));
+  expect(scrolls).toHaveLength(1);
+  expect(scroller.scrollTop).toBe(5500);
+  scroller.scrollTop = 5600;
+  scroller.dispatchEvent(new Event('scroll'));
+  scroller.scrollTop = 5750;
   act(() => publish(unbuiltQueries([0, 1, 2, 3, 4, 5, 6, 7], { ...placeholder, pageIndex: 8 })));
   expect(builds).toEqual([[6], [8]]);
   expect(scrolls).toHaveLength(2);
+  scroller.dispatchEvent(new Event('scroll'));
 
   act(() => publish(unbuiltQueries(true, { ...match, pageIndex: 8 })));
   expect(builds).toEqual([[6], [8], []]);

@@ -1,3 +1,4 @@
+import type { LayoutMetaV1 } from './layoutMeta';
 import type {
   YrsEngineApplyProfile,
   YrsResidentCaretSnapshot,
@@ -18,12 +19,15 @@ import type {
 } from './residentEngineWorkerProtocol';
 import type { DocxProposalRegistryState } from './proposals';
 import type { WasmModuleMemory } from '../wasm/loadWasmAsset';
+import type { Comment } from '../types/content';
+import type { Document } from '../types/document';
 import { editWasmModule } from './wasm/index';
 
 /** @internal */
 export interface ResidentProposalReply
-  extends Omit<ResidentProposalResponse, 'updates' | 'stateVector'> {
+  extends Omit<ResidentProposalResponse, 'updates' | 'stateVector' | 'peerDiff'> {
   updates: Uint8Array[];
+  peerDiff?: Uint8Array;
   stateVector: Uint8Array;
 }
 
@@ -51,6 +55,7 @@ export interface ResidentEngineWorkerFrame {
   deletedUnits: number;
   /** The region layout the worker ran, when the request handed it the layout. */
   layoutJson?: string;
+  layoutMeta?: LayoutMetaV1 | { v: number };
   /** `layoutJson` covers only the first pages; `completeLayout` finishes it. */
   layoutProvisional?: boolean;
 }
@@ -59,6 +64,8 @@ export interface ResidentEngineWorkerFrame {
 export interface ResidentEngineWorkerLayoutOptions {
   /** Display extras minus the header/footer payload the worker's layout supplies. */
   layoutExtras?: string;
+  layoutReply?: 'meta';
+  headersFootersEpoch?: number;
   /** The host state vector the snapshot brings the worker to. */
   stateVector?: Uint8Array;
   /** Lay out just the body's first pages before replying. */
@@ -97,10 +104,13 @@ export interface ResidentEngineWorkerApplyResult extends ResidentEngineWorkerFra
   applied: true;
 }
 
+const EMPTY_YRS_UPDATE_V1_BYTES = 2;
+
 // Not `completeLayout`: page builds run between the steps of a sliced completion.
 const FRAME_REQUESTS = new Set<AwaitedRequest['type']>([
   'bootstrap',
   'sync',
+  'layoutJson',
   'buildFrame',
   'releasePages',
   'applyInput',
@@ -153,6 +163,7 @@ export class ResidentEngineWorkerClient {
   private terminalError: Error | null = null;
   private ready = false;
   private revision = 0;
+  private documentSequence = 0;
   private remoteVector: Uint8Array | null = null;
   private appliedFontsRevision: number | null = null;
   private bootstrapped = false;
@@ -164,6 +175,7 @@ export class ResidentEngineWorkerClient {
   /** Id of the last snapshot request sent; replies to earlier requests must
    * not replace the state it recorded. */
   private lastSnapshotId = 0;
+  private lastFailedFontsSnapshotId = 0;
   private keepSurfaces = false;
   private bootstrapWaiters: Array<() => void> = [];
   private lastMemory: WasmModuleMemory[] | null = null;
@@ -196,7 +208,17 @@ export class ResidentEngineWorkerClient {
       this.pending.delete(response.id);
       if (this.pending.size === 0) this.disarmWatchdog();
       if (response.ok) pending.resolve(response);
-      else pending.reject(residentWorkerError(response.error, response.residentUnavailable));
+      else {
+        if (pending.type === 'bootstrap' || pending.type === 'sync') {
+          this.appliedFontsRevision = null;
+          this.lastFailedFontsSnapshotId = this.nextId - 1;
+        }
+        pending.reject(
+          response.code === 'save-unavailable'
+            ? new ResidentWorkerSaveUnavailableError(response.error)
+            : residentWorkerError(response.error, response.residentUnavailable)
+        );
+      }
     };
     this.worker.onerror = (event) => {
       this.fail(new ResidentWorkerFailureError(`Resident engine worker failed: ${event.message}`));
@@ -222,6 +244,11 @@ export class ResidentEngineWorkerClient {
 
   layoutRevision(): number {
     return this.revision;
+  }
+
+  /** @internal */
+  stateSequence(): number {
+    return this.documentSequence;
   }
 
   /** @internal The newest frame epoch a reply carried; 0 before any frame. */
@@ -274,10 +301,11 @@ export class ResidentEngineWorkerClient {
    * new document's pages paint where the old ones were.
    */
   rebootstrap(): void {
+    this.documentSequence += 1;
     this.bootstrapped = false;
     this.remoteVector = null;
     this.appliedFontsRevision = null;
-    this.lastSnapshotId = 0;
+    this.lastSnapshotId = this.nextId;
     this.revision = 0;
     this.keepSurfaces = true;
     // The bootstrap it asks for frees the worker's document, opened there or not.
@@ -331,7 +359,7 @@ export class ResidentEngineWorkerClient {
   async openPreview(
     bytes: Uint8Array,
     blocks: number,
-    options: { heapLimitBytes?: number } = {}
+    options: { heapLimitBytes?: number; paragraphBudget?: number } = {}
   ): Promise<ResidentEngineWorkerOpened | null> {
     if (this.openedHeapLimit || this.bootstrapped) {
       throw new ResidentWorkerFailureError('Resident engine worker already holds a document');
@@ -346,6 +374,9 @@ export class ResidentEngineWorkerClient {
           type: 'open',
           bytes: copy.buffer,
           previewBlocks: blocks,
+          ...(options.paragraphBudget !== undefined
+            ? { previewParagraphBudget: options.paragraphBudget }
+            : {}),
           ...(options.heapLimitBytes !== undefined ? { heapLimitBytes: options.heapLimitBytes } : {}),
         },
         [copy.buffer]
@@ -385,6 +416,15 @@ export class ResidentEngineWorkerClient {
     return reply;
   }
 
+  async layoutJson(layoutRevision: number): Promise<{ status: 'ok'; layoutJson: string } | { status: 'stale' }> {
+    const response = await this.request({ type: 'layoutJson', layoutRevision });
+    if (response.layoutJsonStatus === 'stale') return { status: 'stale' };
+    if (response.layoutJsonStatus !== 'ok' || response.layoutJson === undefined) {
+      throw new ResidentWorkerFailureError('Resident engine worker omitted its retained layout');
+    }
+    return { status: 'ok', layoutJson: response.layoutJson };
+  }
+
   /** @internal */
   async proposal(operation: ResidentProposalOperation): Promise<ResidentProposalReply> {
     if (!this.bootstrapped) {
@@ -394,9 +434,13 @@ export class ResidentEngineWorkerClient {
     if (!response.proposal) {
       throw new ResidentWorkerFailureError('Resident engine worker omitted the proposal result');
     }
+    const { peerDiff, ...proposal } = response.proposal;
     return {
-      ...response.proposal,
+      ...proposal,
       updates: response.proposal.updates.map((update) => new Uint8Array(update)),
+      ...(peerDiff === undefined
+        ? {}
+        : { peerDiff: new Uint8Array(peerDiff) }),
       stateVector: new Uint8Array(response.proposal.stateVector),
     };
   }
@@ -437,12 +481,14 @@ export class ResidentEngineWorkerClient {
   }
 
   /** @internal */
-  async handOver(): Promise<{
+  async handOver(peerMetadata?: true): Promise<{
     state: Uint8Array;
+    metadata?: Uint8Array;
+    metadataReason?: string;
     version: string;
     proposals: DocxProposalRegistryState;
   }> {
-    const response = await this.request({ type: 'encodeState' });
+    const response = await this.request({ type: 'encodeState', ...(peerMetadata ? { peerMetadata } : {}) });
     if (!response.state || response.version === undefined || !response.proposals) {
       throw new ResidentWorkerFailureError('Resident engine worker omitted its document handoff');
     }
@@ -450,6 +496,12 @@ export class ResidentEngineWorkerClient {
       state: new Uint8Array(response.state),
       version: response.version,
       proposals: response.proposals,
+      ...(peerMetadata ? {
+        metadata: response.peerMetadata === undefined ? undefined : new Uint8Array(response.peerMetadata),
+        metadataReason: response.peerMetadata === undefined
+          ? response.peerMetadataReason ?? 'missing-capability: Worker omitted peer metadata'
+          : undefined,
+      } : {}),
     };
   }
 
@@ -460,6 +512,63 @@ export class ResidentEngineWorkerClient {
       throw new ResidentWorkerFailureError('Resident engine worker omitted its state');
     }
     return new Uint8Array(response.state);
+  }
+
+  /** @internal */
+  async encodeVersionedState(peerMetadata?: true): Promise<{
+    state: Uint8Array;
+    version: string | undefined;
+    metadata?: Uint8Array;
+    metadataReason?: string;
+  }> {
+    const response = await this.request({ type: 'encodeState', ...(peerMetadata ? { peerMetadata } : {}) });
+    if (!response.state) {
+      throw new ResidentWorkerFailureError('Resident engine worker omitted its state');
+    }
+    return {
+      state: new Uint8Array(response.state),
+      version: response.version,
+      ...(peerMetadata ? {
+        metadata: response.peerMetadata === undefined ? undefined : new Uint8Array(response.peerMetadata),
+        metadataReason: response.peerMetadata === undefined
+          ? response.peerMetadataReason ?? 'missing-capability: Worker omitted peer metadata'
+          : undefined,
+      } : {}),
+    };
+  }
+
+  /**
+   * @internal Saves the opened document in the worker. With the editor copy's
+   * `stateVector`, `updates` carry what the worker holds beyond it (the
+   * paragraph IDs the save wrote among them) for that copy to integrate;
+   * `version` is the document version after the save.
+   */
+  async save(request: {
+    comments: Comment[];
+    host?: Document;
+    stateVector?: Uint8Array;
+    /** @internal */
+    stories?: readonly string[];
+  }): Promise<{ bytes: ArrayBuffer; updates: Uint8Array[]; version: string }> {
+    const response = await this.request({
+      type: 'save',
+      comments: request.comments,
+      ...(request.host === undefined ? {} : { host: request.host }),
+      ...(request.stateVector === undefined ? {} : { stateVector: request.stateVector.slice() }),
+      ...(request.stories === undefined ? {} : { stories: [...request.stories] }),
+    });
+    if (
+      !(response.saved instanceof ArrayBuffer) ||
+      !Array.isArray(response.updates) ||
+      typeof response.version !== 'string'
+    ) {
+      throw new ResidentWorkerFailureError('Resident engine worker omitted the saved document');
+    }
+    return {
+      bytes: response.saved,
+      updates: response.updates.map((update) => new Uint8Array(update)),
+      version: response.version,
+    };
   }
 
   async revisionCount(): Promise<number> {
@@ -520,6 +629,8 @@ export class ResidentEngineWorkerClient {
         extras,
         expectedFrameEpoch: options.frameEpoch ?? 0,
         ...(options.layoutExtras !== undefined ? { layoutExtras: options.layoutExtras } : {}),
+        ...(options.layoutReply ? { layoutReply: options.layoutReply } : {}),
+        ...(options.headersFootersEpoch !== undefined ? { headersFootersEpoch: options.headersFootersEpoch } : {}),
         ...(options.displayWindow
           ? {
               displayWindow: options.displayWindow,
@@ -571,6 +682,8 @@ export class ResidentEngineWorkerClient {
         expectedFrameEpoch,
         paintCaret,
         ...(options.layoutExtras !== undefined ? { layoutExtras: options.layoutExtras } : {}),
+        ...(options.layoutReply ? { layoutReply: options.layoutReply } : {}),
+        ...(options.headersFootersEpoch !== undefined ? { headersFootersEpoch: options.headersFootersEpoch } : {}),
         ...(options.provisionalPages !== undefined
           ? { provisionalPages: options.provisionalPages }
           : {}),
@@ -738,6 +851,7 @@ export class ResidentEngineWorkerClient {
 
   invalidate(update: Uint8Array, selection: YrsSelection | null): void {
     if (this.terminalError) return;
+    this.documentSequence += 1;
     this.ready = false;
     const owned = update.slice();
     const id = this.nextId++;
@@ -748,6 +862,31 @@ export class ResidentEngineWorkerClient {
       selection,
     };
     this.worker.postMessage(message, [owned.buffer]);
+  }
+
+  async syncUpdate(update: Uint8Array, stateVector: Uint8Array): Promise<{
+    version: string;
+    stateVector: Uint8Array;
+    repair: Uint8Array | null;
+  }> {
+    const owned = update.slice();
+    const vector = stateVector.slice();
+    const response = await this.request(
+      { type: 'syncUpdate', update: owned, stateVector: vector },
+      [owned.buffer, vector.buffer]
+    );
+    if (
+      typeof response.version !== 'string' ||
+      !(response.stateVector instanceof ArrayBuffer) ||
+      (response.repair !== null && !(response.repair instanceof ArrayBuffer))
+    ) {
+      throw new ResidentWorkerFailureError('Resident engine worker omitted the update acknowledgment');
+    }
+    return {
+      version: response.version,
+      stateVector: new Uint8Array(response.stateVector),
+      repair: response.repair === null ? null : new Uint8Array(response.repair),
+    };
   }
 
   async attachCanvases(
@@ -777,6 +916,15 @@ export class ResidentEngineWorkerClient {
     transfer: Transferable[] = []
   ): Promise<ResidentEngineWorkerResponse & { ok: true }> {
     if (this.terminalError) return Promise.reject(this.terminalError);
+    if (
+      request.type === 'open' ||
+      ((request.type === 'bootstrap' || request.type === 'sync') &&
+        !request.snapshot.workerAuthoritative &&
+        request.snapshot.state.byteLength > EMPTY_YRS_UPDATE_V1_BYTES &&
+        (request.type !== 'bootstrap' || !request.opened)) ||
+      request.type === 'applyInput' || request.type === 'applyDelete' ||
+      (request.type === 'proposal' && request.operation.kind !== 'snapshot')
+    ) this.documentSequence += 1;
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       if (this.pending.size === 0) this.armWatchdog();
@@ -823,7 +971,9 @@ export class ResidentEngineWorkerClient {
     response: ResidentEngineWorkerResponse & { ok: true },
     fontsRevision: number
   ): void {
-    if (response.id >= this.lastSnapshotId) this.appliedFontsRevision = fontsRevision;
+    if (response.id >= this.lastSnapshotId && response.id > this.lastFailedFontsSnapshotId) {
+      this.appliedFontsRevision = fontsRevision;
+    }
   }
 
   private fail(error: Error, notify = true): void {
@@ -843,6 +993,9 @@ class ResidentWorkerUnavailableError extends Error {}
 
 /** The worker itself failed (crash, timeout, torn-down, corrupt reply). */
 export class ResidentWorkerFailureError extends Error {}
+
+/** The worker has no whole opened package to save. @internal */
+export class ResidentWorkerSaveUnavailableError extends ResidentWorkerFailureError {}
 
 /** The worker trapped because its wasm memory could not grow any further. */
 export class ResidentWorkerOutOfMemoryError extends ResidentWorkerUnavailableError {
@@ -903,6 +1056,7 @@ function frameResult(
     ...(response.documentAsOpened === undefined ? {} : { documentAsOpened: response.documentAsOpened }),
     deletedUnits: response.deletedUnits ?? 0,
     ...(response.layoutJson !== undefined ? { layoutJson: response.layoutJson } : {}),
+    ...(response.layoutMeta !== undefined ? { layoutMeta: response.layoutMeta } : {}),
     ...(response.layoutProvisional ? { layoutProvisional: true } : {}),
   };
 }

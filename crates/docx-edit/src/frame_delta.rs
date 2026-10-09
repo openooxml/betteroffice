@@ -1860,7 +1860,7 @@ fn patch_u64(out: &mut [u8], offset: usize, value: u64) {
 pub(crate) struct TestFramePage {
     pub(crate) page: DisplayPage,
     pub(crate) fingerprint: u64,
-    primitive_ids: Vec<u64>,
+    pub(crate) primitive_ids: Vec<u64>,
 }
 
 /// Visits mutable primitives in their encoded identity order.

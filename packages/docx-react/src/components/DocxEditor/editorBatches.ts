@@ -6,9 +6,11 @@ import type {
   DocxProposalResult,
   YrsSession,
 } from '@betteroffice/docx/yrs';
+import { proposalProjectionStories } from '@betteroffice/docx/yrs';
 import type { PagedEditorRef } from './PagedEditor';
 import type { EditorMode } from './internals/editing-modes';
-import { awaitWorkerOpenReplica } from './internals/workerOpenReplica';
+import { awaitWorkerOpenReplica, workerOpenDocumentHeld } from './internals/workerOpenReplica';
+import { handedOverRequest, workerProposalAuthority } from './internals/workerProposalAuthority';
 
 export type EditorFlush =
   | { ok: true; editor: PagedEditorRef; session: YrsSession }
@@ -38,7 +40,9 @@ export async function flushEditorInput(
     if (pagedEditorRef.current?.getYrsSession() !== session) {
       throw new Error('The document changed while flushing input');
     }
-    const ready = experimentalWorkerOpen ? awaitWorkerOpenReplica(session) : undefined;
+    const ready = experimentalWorkerOpen && !workerOpenDocumentHeld(session) && editor.isWorkerViewer?.() !== true
+      ? awaitWorkerOpenReplica(session)
+      : undefined;
     if (ready) {
       await ready;
       if (pagedEditorRef.current?.getYrsSession() !== session) {
@@ -75,7 +79,7 @@ export async function flushedSession(
 }
 
 function refusal(session: YrsSession, failure: DocxEditFailure): DocxEditRefusal {
-  return { ok: false, version: session.version(), failure };
+  return { ok: false, version: workerProposalAuthority(session)?.geometry()?.version ?? session.version(), failure };
 }
 
 /** Refuses writes the editor's mode does not allow; suggesting mode needs `suggest` on every step. */
@@ -121,6 +125,8 @@ export async function applyEditBatch<Refusal = never>(
       },
     };
   }
+  const early = modeRefusal(session, mode(), request);
+  if (early) return { result: early };
   const ready = experimentalWorkerOpen ? awaitWorkerOpenReplica(session) : undefined;
   if (ready) {
     try {
@@ -144,8 +150,6 @@ export async function applyEditBatch<Refusal = never>(
       };
     }
   }
-  const early = modeRefusal(session, mode(), request);
-  if (early) return { result: early };
   const flushed = await flushEditorInput(pagedEditorRef, experimentalWorkerOpen);
   if (!flushed.ok) return { flush: flushed };
   if (flushed.session !== session || pagedEditorRef.current?.getYrsSession() !== session) {
@@ -161,7 +165,7 @@ export async function applyEditBatch<Refusal = never>(
   if (denied) return { result: denied };
   const refused = modeRefusal(session, mode(), request);
   if (refused) return { result: refused };
-  const result = commit(() => session.applyEdits(request));
+  const result = commit(() => session.applyEdits(handedOverRequest(session, request)));
   if (result.ok && result.applied) {
     try {
       flushed.editor.syncYrsInputState(true, result.changedStories, { inWorker: true });
@@ -190,6 +194,10 @@ export async function applyProposalCall(
   });
   const session = pagedEditorRef.current?.getYrsSession();
   if (!session) throw new Error('The editor input is unavailable');
+  if (workerOpenDocumentHeld(session)) {
+    if (!allowed()) return denied(session);
+    throw new Error('Viewer proposals must use the worker proposal authority');
+  }
   const ready = experimentalWorkerOpen ? awaitWorkerOpenReplica(session) : undefined;
   if (ready) {
     await ready;
@@ -208,12 +216,7 @@ export async function applyProposalCall(
   const since = session.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
   const result = call(session);
   if (!result.ok) return result;
-  const stories = new Set([
-    ...result.snapshot.proposals
-      .filter((proposal) => proposal.changed && !known.has(proposal.id))
-      .map((proposal) => proposal.paragraph.story),
-    ...session.storiesChangedSince(since).stories,
-  ]);
+  const stories = proposalProjectionStories(known, result, session.storiesChangedSince(since).stories);
   if (stories.size > 0) {
     try {
       flushed.editor.syncYrsInputState(true, [...stories], { inWorker: true });

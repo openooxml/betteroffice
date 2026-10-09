@@ -12,6 +12,7 @@ import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVer
 import type { YrsLoc, YrsSession } from '@betteroffice/docx/yrs';
 
 import type { YrsInputRef } from '../YrsInput';
+import { layoutScrollCompensation } from '../internals/scrollRestore';
 import { runAfterFrames } from '../internals/scrollUtils';
 import { scrollViewport } from '../internals/viewportBand';
 import type { DisplayPageNavigation } from './useDisplayList';
@@ -54,6 +55,7 @@ export interface UsePagedScrollApiReturn {
 
 const SMOOTH_SCROLL_VIEWPORTS = 2;
 const REFINE_WINDOW_MS = 3000;
+const SCROLL_EPSILON = 1;
 const USER_SCROLL_EVENTS = ['wheel', 'touchstart', 'pointerdown', 'keydown'] as const;
 
 interface PendingRefine {
@@ -61,6 +63,10 @@ interface PendingRefine {
   pageIndex: number;
   until: number;
   stop: AbortController;
+  scroller: HTMLElement;
+  scrollTop: number;
+  compensationSequence: number;
+  smoothTarget?: number;
   /** The document version `position` belongs to, when a reveal set it. */
   version?: string;
 }
@@ -96,6 +102,40 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
     pendingRefineRef.current = null;
     pageNavigation?.buildPages([]);
   }, [pageNavigation]);
+  const checkPendingScroll = useCallback(() => {
+    const pending = pendingRefineRef.current;
+    if (!pending) return;
+    const top = pending.scroller.scrollTop;
+    if (Math.abs(top - pending.scrollTop) <= SCROLL_EPSILON) return;
+    const compensation = layoutScrollCompensation(pending.scroller);
+    const target = pending.smoothTarget;
+    if (
+      target !== undefined &&
+      top >= Math.min(pending.scrollTop, target) - SCROLL_EPSILON &&
+      top <= Math.max(pending.scrollTop, target) + SCROLL_EPSILON
+    ) {
+      pending.scrollTop = top;
+      pending.compensationSequence = compensation?.sequence ?? pending.compensationSequence;
+      if (Math.abs(top - target) <= SCROLL_EPSILON) pending.smoothTarget = undefined;
+      return;
+    }
+    const maxScrollTop = Math.max(0, pending.scroller.scrollHeight - pending.scroller.clientHeight);
+    if (
+      (compensation &&
+        compensation.sequence > pending.compensationSequence &&
+        (Math.abs(compensation.from - pending.scrollTop) <= SCROLL_EPSILON ||
+          Math.abs(compensation.scrollTopSnapshot - pending.scrollTop) <= SCROLL_EPSILON ||
+          Math.abs(compensation.from - Math.min(pending.scrollTop, maxScrollTop)) <= SCROLL_EPSILON) &&
+        Math.abs(compensation.to - top) <= SCROLL_EPSILON) ||
+      (pending.scrollTop > maxScrollTop + SCROLL_EPSILON &&
+        Math.abs(top - maxScrollTop) <= SCROLL_EPSILON)
+    ) {
+      pending.scrollTop = top;
+      pending.compensationSequence = compensation?.sequence ?? pending.compensationSequence;
+      return;
+    }
+    clearPendingRefine();
+  }, [clearPendingRefine]);
 
   useEffect(
     () => () => {
@@ -124,7 +164,20 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
         viewport.height / 2;
       const near = Math.abs(top - scroller.scrollTop) <= viewport.height * SMOOTH_SCROLL_VIEWPORTS;
       // 'auto' would follow a CSS `scroll-behavior: smooth` and animate anyway
-      scroller.scrollTo({ top, behavior: smooth ? (near ? 'smooth' : 'instant') : 'auto' });
+      const behavior = smooth ? (near ? 'smooth' : 'instant') : 'auto';
+      const pending = pendingRefineRef.current;
+      if (pending) {
+        pending.smoothTarget =
+          behavior === 'smooth' ||
+          (behavior === 'auto' && getComputedStyle(scroller).scrollBehavior === 'smooth')
+            ? top
+            : undefined;
+      }
+      scroller.scrollTo({ top, behavior });
+      if (pending) {
+        pending.scrollTop = scroller.scrollTop;
+        pending.compensationSequence = layoutScrollCompensation(scroller)?.sequence ?? 0;
+      }
       return true;
     },
     [canvasHostRef, displayListQueries, getScrollContainer, pagesContainerRef]
@@ -141,12 +194,29 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
         for (const type of USER_SCROLL_EVENTS) {
           scroller.addEventListener(type, clearPendingRefine, listening);
         }
+        scroller.addEventListener('scroll', checkPendingScroll, listening);
+        scroller.addEventListener(
+          'scrollend',
+          () => {
+            const pending = pendingRefineRef.current;
+            if (pending) pending.smoothTarget = undefined;
+          },
+          listening
+        );
         scroller.ownerDocument.addEventListener('keydown', clearPendingRefine, {
           ...listening,
           capture: true,
         });
         const until = performance.now() + REFINE_WINDOW_MS;
-        pendingRefineRef.current = { position, pageIndex: rect.pageIndex, until, stop };
+        pendingRefineRef.current = {
+          position,
+          pageIndex: rect.pageIndex,
+          until,
+          stop,
+          scroller,
+          scrollTop: scroller.scrollTop,
+          compensationSequence: layoutScrollCompensation(scroller)?.sequence ?? 0,
+        };
       }
       const scrolled = scrollRectIntoView(rect, smooth);
       if (pendingRefineRef.current) pageNavigation?.buildPages([rect.pageIndex]);
@@ -154,6 +224,7 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
     },
     [
       canvasHostRef,
+      checkPendingScroll,
       clearPendingRefine,
       getScrollContainer,
       pageNavigation,
@@ -164,6 +235,7 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
 
   const refinePending = useCallback(
     (queries: DisplayListQueries) => {
+      checkPendingScroll();
       const pending = pendingRefineRef.current;
       if (!pending) return;
       // an edit moved the positions: the old one now names other text
@@ -185,7 +257,7 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
       }
       scrollRectIntoView(rect, false, queries);
     },
-    [clearPendingRefine, pageNavigation, scrollRectIntoView, yrsSession]
+    [checkPendingScroll, clearPendingRefine, pageNavigation, scrollRectIntoView, yrsSession]
   );
 
   useEffect(() => {

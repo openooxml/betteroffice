@@ -1,3 +1,5 @@
+import { readRetainedLayoutMeta } from './layoutMeta';
+import { PeerMetadataError } from './peerMetadata';
 import { decodeEncodedSelection } from './encodedSelection';
 import type {
   YrsEngineApplyProfile,
@@ -6,6 +8,7 @@ import type {
   YrsParagraphSpan,
   YrsRegionLayoutProgress,
   YrsResidentCaretSnapshot,
+  YrsResolvedCommentAnchor,
   YrsRevisionInfo,
   YrsSelection,
   YrsSelectionText,
@@ -23,9 +26,16 @@ import type {
   DocxParagraphAnchorResult,
   DocxParagraphIdentitySnapshot,
 } from './paragraphIdentity';
+import type { DocxSidebarReader } from './sidebarReads';
 import type { ProposalGeometryReader, ProposalGeometryRevision } from './proposalGeometry';
 import type { DocxProposalSession } from './proposals';
+import type { DocxPageExportOptions } from './pagedExport';
+import type { DocxContentControlsResult } from './contentControls';
 import type { YrsPositionOutline } from './yrsPositionProjection';
+import type { ResidentSaveRecord } from './residentSave';
+import type { Comment } from '../types/content';
+import type { Document } from '../types/document';
+import { DirtyProjectionStories } from './dirtyProjectionStories';
 import { resolveHostJsonCommentMedia } from './hostMedia';
 import { createEditSession, preloadEditWasm, setEditWasmHeapLimit } from './wasm/index';
 
@@ -35,6 +45,7 @@ export type ResidentEngineSession = Pick<
   | 'applyDeleteProfiled'
   | 'applyInput'
   | 'applyInputProfiled'
+  | 'applyRawOps'
   | 'applyUpdate'
   | 'beginRegionLayout'
   | 'buildDisplayListFrame'
@@ -43,10 +54,15 @@ export type ResidentEngineSession = Pick<
   | 'clearFonts'
   | 'destroy'
   | 'encodeSelection'
+  | 'encodeStateAsUpdate'
   | 'encodeStateVector'
+  | 'findContentControls'
+  | 'listContentControls'
   | 'layoutDocumentJson'
   | 'layoutFontRequirementsJson'
   | 'layoutDocumentWithRegionsRetainedJson'
+  | 'layoutDocumentWithRegionsRetainedMeta'
+  | 'retainedLayoutJson'
   | 'loadMediaSources'
   | 'loadNoteSeparators'
   | 'loadState'
@@ -61,6 +77,7 @@ export type ResidentEngineSession = Pick<
   | 'resumeRegionLayout'
   | 'selection'
   | 'selectionText'
+  | 'resolveComment'
   | 'searchText'
   | 'encodeStickyPosition'
   | 'resolveStickyPosition'
@@ -73,11 +90,13 @@ export type ResidentEngineSession = Pick<
   /** @internal */
   proposalEngine: DocxProposalSession;
   /** @internal */
-  geometryReader: ProposalGeometryReader;
+  geometryReader: ProposalGeometryReader & DocxSidebarReader;
   /** @internal The segments of the story's paragraphs at `indices`, each ending with its pilcrow. */
   paragraphSegments(story: string, indices: readonly number[]): YrsStorySegment[][];
   /** @internal */
   paragraphIdentities(): DocxParagraphIdentitySnapshot;
+  /** @internal */
+  exportStructuredWithPagesJson(options: DocxPageExportOptions, currentRequest: string): string;
   /** The region layout of only as much of the body as fills `pages` pages. */
   layoutDocumentWithRegionsPrefixRetainedJson(input: string, pages: number): string;
   /** Limit incremental rebuilds to the display window and caret pages. Off by default. */
@@ -86,18 +105,30 @@ export type ResidentEngineSession = Pick<
   setDirectBatches(enabled: boolean): void;
   /** @internal */
   directBatchesApplied(): number;
+  /** @internal */
+  markProjectionStories(stories: readonly string[]): void;
   /** Parses and seeds a DOCX; returns the host metadata JSON the main thread decodes. */
   openDocx(bytes: Uint8Array, digest?: string, generation?: string): string;
-  /** Opens a display-only preview of the first `blocks` body blocks; null when it refuses. */
-  openDocxPreview(bytes: Uint8Array, blocks: number): string | null;
+  /** Opens a display-only preview with a block limit and optional paragraph budget; null when refused. */
+  openDocxPreview(bytes: Uint8Array, blocks: number, paragraphBudget?: number): string | null;
   /** The whole document state as one yrs v1 update. */
   encodeState(): Uint8Array;
+  encodePeerMetadata?(): Uint8Array;
   /** Tracked changes in the document, leaving out the revisions in `excluding`. */
   revisionCount(excluding?: ReadonlySet<string>): number;
   /** The retained region layout pass without serializing its reply. */
   layoutDocumentWithRegionsRetained(input: string): void;
   /** The retained region layout's `headersFooters` JSON, when it has any. */
   retainedHeadersFootersJson(): string | undefined;
+  /** @internal */
+  save(
+    source: Uint8Array,
+    hostJson: string,
+    host: Document | undefined,
+    comments: Comment[],
+    record: ResidentSaveRecord,
+    stories?: readonly string[]
+  ): Promise<ArrayBuffer>;
 };
 
 export async function createResidentEngineSession(
@@ -121,23 +152,48 @@ export async function createResidentEngineSession(
 
   const geometrySpans = new Map<string, { revision: number; spans: YrsParagraphLength[] }>();
   const geometryOutlines = new Map<string, { version: string; outline: YrsPositionOutline | null }>();
+  const storyRevisions = new Map<string, number>();
+  const projectionStories = new DirtyProjectionStories();
+  let nativeStoryRevision = 0;
+  let storyRevision = 0;
 
-  const geometryStory = (story: string) => {
-    let cached = geometryStories.get(story);
-    const changes = JSON.parse(
-      session.stories_changed_since(cached?.revision ?? Number.MAX_SAFE_INTEGER)
-    ) as {
+  const syncStoryRevisions = (): number => {
+    const changes = JSON.parse(session.stories_changed_since(nativeStoryRevision)) as {
       revision: number;
       stories: string[];
     };
-    if (!cached || changes.stories.includes(story)) {
+    if (changes.revision !== nativeStoryRevision) {
+      nativeStoryRevision = changes.revision;
+      storyRevision += 1;
+      for (const story of changes.stories) storyRevisions.set(story, storyRevision);
+    }
+    return storyRevision;
+  };
+
+  const storiesChangedSince = (since: number) => {
+    const revision = syncStoryRevisions();
+    if (since >= revision) return { revision, stories: [] };
+    return {
+      revision,
+      stories: [...storyRevisions].filter(([, changed]) => changed > since)
+        .map(([story]) => story).sort(),
+    };
+  };
+
+  const storyChangedSince = (story: string, since: number): boolean =>
+    (storyRevisions.get(story) ?? 0) > since;
+
+  const geometryStory = (story: string) => {
+    const revision = syncStoryRevisions();
+    let cached = geometryStories.get(story);
+    if (!cached || storyChangedSince(story, cached.revision)) {
       cached = {
-        revision: changes.revision,
+        revision,
         segments: JSON.parse(session.story_segments(story)) as YrsStorySegment[],
       };
       geometryStories.set(story, cached);
     } else {
-      cached.revision = changes.revision;
+      cached.revision = revision;
     }
     return cached;
   };
@@ -159,6 +215,18 @@ export async function createResidentEngineSession(
     observing = true;
   };
 
+  const markProjectionStories = (stories: readonly string[]): void => {
+    for (const story of stories) projectionStories.add(story);
+  };
+
+  const applyResidentInput = <T>(apply: () => T): T => {
+    ensureUndo();
+    const result = apply();
+    const selection = JSON.parse(session.selection()) as YrsSelection | null;
+    projectionStories.add(selection?.head.story ?? 'body');
+    return result;
+  };
+
   const proposalEngine: DocxProposalSession = {
     version: () => session.version(),
     resolveParagraphAnchor: (anchor) =>
@@ -169,8 +237,11 @@ export async function createResidentEngineSession(
       JSON.parse(session.find_text_json(JSON.stringify(request))) as DocxFindTextResult,
     readParagraphs: (request) =>
       JSON.parse(session.read_paragraphs_json(JSON.stringify(request))) as DocxReadParagraphsResult,
-    applyEdits: (request) =>
-      JSON.parse(session.apply_edits_json(JSON.stringify(request))) as DocxEditResult,
+    applyEdits: (request) => {
+      const result = JSON.parse(session.apply_edits_json(JSON.stringify(request))) as DocxEditResult;
+      if (result.ok && result.applied) markProjectionStories(result.changedStories);
+      return result;
+    },
     listRevisions: () =>
       JSON.parse(session.list_revisions()) as ReturnType<DocxProposalSession['listRevisions']>,
     revisionStamps: (ids) =>
@@ -178,7 +249,9 @@ export async function createResidentEngineSession(
         NonNullable<DocxProposalSession['revisionStamps']>
       >,
     settleRevisions: (accept, reject) => {
+      const since = storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
       session.settle_revisions_json(JSON.stringify({ accept, reject }));
+      markProjectionStories(storiesChangedSince(since).stories);
     },
     ...(typeof session.begin_shared_reads === 'function' &&
     typeof session.end_shared_reads === 'function'
@@ -195,23 +268,23 @@ export async function createResidentEngineSession(
       : {}),
   };
 
-  const geometryReader: ProposalGeometryReader = {
+  const geometryReader: ProposalGeometryReader & DocxSidebarReader = {
+    resolveComment: (id) => JSON.parse(session.resolve_comment(id)),
+    headings: (story) => JSON.parse(session.headings_json(story)),
     version: () => session.version(),
     hasStory: (story) => !LONE_SURROGATE.test(story) && session.has_story(story),
     storyIds: () => session.story_ids(),
     paragraphs: (story) => JSON.parse(session.paragraphs(story)) as YrsParagraph[],
     paragraphIdCount: (story, paraId) => session.paragraph_id_count(story, paraId),
     paragraphSpans: (story) => {
+      const revision = syncStoryRevisions();
       const cached = geometrySpans.get(story);
-      const changes = JSON.parse(
-        session.stories_changed_since(cached?.revision ?? Number.MAX_SAFE_INTEGER)
-      ) as { revision: number; stories: string[] };
-      if (cached && !changes.stories.includes(story)) {
-        cached.revision = changes.revision;
+      if (cached && !storyChangedSince(story, cached.revision)) {
+        cached.revision = revision;
         return cached.spans;
       }
       const spans = JSON.parse(session.paragraph_spans(story)) as YrsParagraphLength[];
-      geometrySpans.set(story, { revision: changes.revision, spans });
+      geometrySpans.set(story, { revision, spans });
       return spans;
     },
     storySegments: (story) => geometryStory(story).segments,
@@ -246,6 +319,8 @@ export async function createResidentEngineSession(
   return {
     proposalEngine,
     geometryReader,
+    resolveComment: (commentId) =>
+      JSON.parse(session.resolve_comment(commentId)) as YrsResolvedCommentAnchor[],
     paragraphSegments: (story, indices) =>
       JSON.parse(session.story_segment_units(story, Uint32Array.from(indices))) as YrsStorySegment[][],
     searchText: (query, options = {}) => {
@@ -275,18 +350,32 @@ export async function createResidentEngineSession(
     },
     paragraphIdentities: () =>
       JSON.parse(session.paragraph_identities()) as DocxParagraphIdentitySnapshot,
-    storiesChangedSince: (since) =>
-      JSON.parse(session.stories_changed_since(since)) as { revision: number; stories: string[] },
+    exportStructuredWithPagesJson: (options, currentRequest) =>
+      session.export_structured_with_pages_json(JSON.stringify(options), currentRequest),
+    listContentControls: (options = {}) =>
+      JSON.parse(
+        session.list_content_controls_json(JSON.stringify(options))
+      ) as DocxContentControlsResult,
+    findContentControls: (query, options = {}) =>
+      JSON.parse(
+        session.find_content_controls_json(JSON.stringify(query), JSON.stringify(options))
+      ) as DocxContentControlsResult,
+    storiesChangedSince,
     openDocx: (bytes, digest, generation) => {
       geometryStories.clear();
+      projectionStories.clear();
       return resolveHostJsonCommentMedia(
         session.open_docx(bytes, true, generation, digest),
         (token) => (token.startsWith('media:') ? (session.media_data_url(token) ?? null) : null)
       );
     },
-    openDocxPreview: (bytes, blocks) => {
+    openDocxPreview: (bytes, blocks, paragraphBudget) => {
       geometryStories.clear();
-      const json = session.open_docx_preview(bytes, blocks);
+      projectionStories.clear();
+      const json =
+        paragraphBudget === undefined
+          ? session.open_docx_preview(bytes, blocks)
+          : session.open_docx_preview_with_budget(bytes, blocks, paragraphBudget);
       return json === undefined
         ? null
         : resolveHostJsonCommentMedia(
@@ -295,6 +384,24 @@ export async function createResidentEngineSession(
           );
     },
     encodeState: () => session.encode_state(),
+    encodePeerMetadata: () => {
+      const peerSession = session as typeof session & { encode_peer_metadata?: () => Uint8Array };
+      if (!peerSession.encode_peer_metadata) {
+        throw new PeerMetadataError('missing-capability', 'Editing wasm cannot encode peer metadata');
+      }
+      return peerSession.encode_peer_metadata();
+    },
+    encodeStateAsUpdate: (remoteStateVector) =>
+      remoteStateVector === undefined
+        ? session.encode_state()
+        : session.encode_diff(remoteStateVector.slice()),
+    save: async (source, hostJson, host, comments, record, stories) => {
+      const { saveResidentDocument } = await import('./residentSave');
+      return saveResidentDocument(
+        session, clientId, source, hostJson, host, comments, record, projectionStories, stories
+      );
+    },
+    markProjectionStories,
     revisionCount: (excluding) =>
       (JSON.parse(session.list_revisions()) as { revisionId: string }[]).filter(
         (revision) => !excluding?.has(revision.revisionId)
@@ -309,6 +416,9 @@ export async function createResidentEngineSession(
     layoutFontRequirementsJson: (input) => session.layout_font_requirements_json(input),
     layoutDocumentWithRegionsRetainedJson: (input) =>
       session.layout_document_with_regions_retained_json(input),
+    layoutDocumentWithRegionsRetainedMeta: (input) =>
+      readRetainedLayoutMeta(session.layout_document_with_regions_retained_meta(input)),
+    retainedLayoutJson: () => session.retained_layout_json(),
     beginRegionLayout: (input) =>
       JSON.parse(session.begin_region_layout(input)) as YrsRegionLayoutProgress,
     resumeRegionLayout: (blocks) =>
@@ -346,24 +456,33 @@ export async function createResidentEngineSession(
         )
       ) as YrsSelectionText,
     encodeSelection: () => decodeEncodedSelection(session.encoded_selection()),
-    applyInput: (text, expectedFrameEpoch) => {
-      ensureUndo();
-      return session.apply_input(text, expectedFrameEpoch);
-    },
-    applyDelete: (direction, expectedFrameEpoch, count = 1) => {
-      ensureUndo();
-      return session.apply_delete(direction, expectedFrameEpoch, count);
-    },
+    applyInput: (text, expectedFrameEpoch) =>
+      applyResidentInput(() => session.apply_input(text, expectedFrameEpoch)),
+    applyDelete: (direction, expectedFrameEpoch, count = 1) =>
+      applyResidentInput(() => session.apply_delete(direction, expectedFrameEpoch, count)),
     residentDeletedUnits: () => session.resident_deleted_units(),
+    applyRawOps: (story, ops) => {
+      geometryStories.clear();
+      const version = session.version();
+      try {
+        session.apply_raw_ops(story, JSON.stringify(ops));
+        projectionStories.add(story);
+      } finally {
+        if (session.version() !== version) {
+          projectionStories.add(story);
+          syncStoryRevisions();
+          storyRevision += 1;
+          storyRevisions.set(story, storyRevision);
+        }
+      }
+    },
     applyInputProfiled: (text, expectedFrameEpoch) => {
-      ensureUndo();
-      const frame = session.apply_input_profiled(text, expectedFrameEpoch);
+      const frame = applyResidentInput(() => session.apply_input_profiled(text, expectedFrameEpoch));
       const profile = JSON.parse(session.apply_input_profile_json()) as YrsEngineApplyProfile;
       return { frame, profile };
     },
     applyDeleteProfiled: (direction, expectedFrameEpoch, count = 1) => {
-      ensureUndo();
-      const frame = session.apply_delete_profiled(direction, expectedFrameEpoch, count);
+      const frame = applyResidentInput(() => session.apply_delete_profiled(direction, expectedFrameEpoch, count));
       const profile = JSON.parse(session.apply_input_profile_json()) as YrsEngineApplyProfile;
       return { frame, profile };
     },
@@ -394,6 +513,8 @@ export async function createResidentEngineSession(
       destroyed = true;
       listeners.clear();
       geometryStories.clear();
+      storyRevisions.clear();
+      projectionStories.clear();
       if (observing) session.clear_update_observer();
       session.free();
     },

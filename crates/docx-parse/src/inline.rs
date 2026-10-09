@@ -897,7 +897,11 @@ pub(crate) fn raw_foreign_node(
 
 /// Whether `element` is foreign markup the model keeps as raw XML, read from its name alone.
 pub(crate) fn is_foreign(element: &crate::xml::XmlElement) -> bool {
-    let prefix = match element.name.split_once(':') {
+    is_foreign_name(&element.name)
+}
+
+pub(crate) fn is_foreign_name(name: &str) -> bool {
+    let prefix = match name.split_once(':') {
         Some((prefix, _)) => prefix,
         None => "",
     };

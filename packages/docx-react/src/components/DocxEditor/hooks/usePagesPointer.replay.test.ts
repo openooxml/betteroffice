@@ -13,7 +13,6 @@ import {
   type PagedEditorCommandBridge,
 } from './usePagedEditorRefApi';
 import {
-  awaitWorkerOpenReplica,
   deferWorkerOpenReplica,
   requestWorkerOpenReplica,
 } from '../internals/workerOpenReplica';
@@ -73,7 +72,7 @@ function options(overrides: Partial<UsePagesPointerOptions> = {}) {
   const opts: UsePagesPointerOptions = {
     pagesContainerRef: { current: null },
     yrsInputRef: { current: input },
-    yrsSession: { cellSelection: () => null } as unknown as YrsSession,
+    yrsSession: { cellSelection: () => null, version: () => 'initial' } as unknown as YrsSession,
     yrsRootStory: 'body',
     getYrsPositionProjection: () => (opts.replicaReady ? projection : null),
     applyYrsCommand: () => false,
@@ -90,6 +89,28 @@ function options(overrides: Partial<UsePagesPointerOptions> = {}) {
     ...overrides,
   };
   return { opts, selections, words, paragraphs, kept, projection, focused: () => focused };
+}
+
+function queuedOptions(overrides: Partial<UsePagesPointerOptions> = {}) {
+  const queries = fakeQueries();
+  queries.isReady = () => true;
+  queries.whenReady = async () => {};
+  const result = options({ readOnly: false, queueInput: true, inputQueries: queries, ...overrides });
+  const entries: Array<{ prepare: () => Promise<() => void>; inTable?: () => boolean }> = [];
+  const input = result.opts.yrsInputRef.current!;
+  input.queueSelection = (prepare, _force, inTable) => {
+    entries.push({ prepare, inTable });
+    return true;
+  };
+  input.captureSelectionFromDisplay = (anchor, head, story) =>
+    () => input.setSelectionFromDisplay(anchor, head, story);
+  const replay = async () => {
+    result.opts.replicaReady = true;
+    await act(async () => {
+      for (const entry of entries.splice(0)) (await entry.prepare())();
+    });
+  };
+  return { ...result, queries, entries, replay };
 }
 
 function mouse(type: string, clientX: number, clientY = 400, detail = 1): void {
@@ -179,6 +200,82 @@ test('a single click during replica loading replays the caret', () => {
   expect(selections).toEqual([[20, 20, 'body']]);
 });
 
+test.each([{ inTable: false }, { inTable: true }])('a queued opening click exposes its table target without the replica: $inTable', async ({ inTable }) => {
+  const { opts, queries, entries, selections, replay } = queuedOptions();
+  queries.displayList.pages[0]!.primitives = [{
+    kind: 'text', text: 'text', x: 0, baselineY: 410, width: 800,
+    font: '400 16px Calibri', color: '#000000', docStart: 1, docEnd: 100,
+    cell: inTable ? { row: 0, col: 0, rowSpan: 1, colSpan: 1 } : undefined,
+  }];
+  const projection = mock(() => { throw new Error('Replica projection is unavailable'); });
+  const readyProjection = opts.getYrsPositionProjection;
+  opts.getYrsPositionProjection = projection;
+  const view = renderHook(() => usePagesPointer(opts));
+  click(1);
+  expect(entries).toHaveLength(1);
+  expect(entries[0].inTable!()).toBe(inTable);
+  expect(projection).not.toHaveBeenCalled();
+  expect(selections).toEqual([]);
+  opts.getYrsPositionProjection = readyProjection;
+  view.rerender();
+  await replay();
+  expect(selections).toEqual([[20, 20, 'body']]);
+});
+
+test('a queued opening external link activates during the click and still replays selection', async () => {
+  let clicking = false;
+  const onHyperlinkClick = mock(() => { expect(clicking).toBe(true); });
+  const { opts, queries, entries, selections, replay } = queuedOptions({
+    displayListQueries: undefined, canvasOverlayTarget: host, onHyperlinkClick,
+  });
+  queries.displayList.pages[0]!.primitives = [{
+    kind: 'text', text: 'link', x: 0, baselineY: 410, width: 800,
+    font: '400 16px Calibri', color: '#000000', docStart: 1, docEnd: 100,
+    href: 'https://example.com/',
+  }];
+  renderHook(() => usePagesPointer(opts));
+  clicking = true;
+  click(1, 200, 405);
+  clicking = false;
+  expect(onHyperlinkClick).toHaveBeenCalledTimes(1);
+  expect(onHyperlinkClick).toHaveBeenCalledWith(expect.objectContaining({
+    href: 'https://example.com/', displayText: 'link',
+  }));
+  expect(entries).toHaveLength(1);
+  expect(selections).toEqual([]);
+  await replay();
+  expect(selections).toEqual([[20, 20, 'body']]);
+  expect(onHyperlinkClick).toHaveBeenCalledTimes(1);
+});
+
+test.each(['bookmark', 'double-click', 'drag'])('a queued opening %s keeps link activation suppressed', async (kind) => {
+  const onHyperlinkClick = mock(() => {});
+  const scrollToPositionImpl = mock(() => {});
+  const { opts, queries, entries, selections, replay } = queuedOptions({
+    canvasOverlayTarget: host, onHyperlinkClick, scrollToPositionImpl,
+  });
+  queries.displayList.pages[0]!.primitives = [{
+    kind: 'text', text: 'link', x: 0, baselineY: 410, width: 800,
+    font: '400 16px Calibri', color: '#000000', docStart: 1, docEnd: 100,
+    href: kind === 'bookmark' ? '#bookmark' : 'https://example.com/',
+  }];
+  renderHook(() => usePagesPointer(opts));
+  if (kind === 'drag') {
+    mouse('mousedown', 200, 405);
+    mouse('mousemove', 350, 405);
+    mouse('mouseup', 350, 405);
+    mouse('click', 350, 405);
+  } else click(kind === 'double-click' ? 2 : 1, 200, 405);
+  expect(entries).toHaveLength(1);
+  expect(onHyperlinkClick).not.toHaveBeenCalled();
+  expect(scrollToPositionImpl).not.toHaveBeenCalled();
+  expect(selections).toEqual([]);
+  await replay();
+  expect(selections).toHaveLength(1);
+  expect(onHyperlinkClick).not.toHaveBeenCalled();
+  expect(scrollToPositionImpl).not.toHaveBeenCalled();
+});
+
 test.each(['click', 'double-click', 'drag'])('a replayed %s keeps its selection in place', (gesture) => {
   const { opts, selections, words, kept } = options();
   const view = renderHook(() => usePagesPointer(opts));
@@ -247,24 +344,36 @@ test.each([
   if (!loaded) expect(other).toEqual([]);
 });
 
-test('a recorded gesture asks for the replica', () => {
-  const requestReplica = mock(() => {});
-  const { opts } = options({ requestReplica });
-  renderHook(() => usePagesPointer(opts));
+test('a recorded gesture never starts loading the replica', () => {
+  const { opts, selections } = options();
+  const hydrate = mock(async () => () => {});
+  const fallback = mock(() => {});
+  deferWorkerOpenReplica(opts.yrsSession!, hydrate, fallback, () => {});
+  const view = renderHook(() => usePagesPointer(opts));
 
   click(1);
-  expect(requestReplica).toHaveBeenCalled();
+  expect(hydrate).not.toHaveBeenCalled();
+  expect(fallback).not.toHaveBeenCalled();
+  expect(selections).toEqual([]);
+  opts.replicaReady = true;
+  view.rerender();
+  expect(selections).toEqual([[20, 20, 'body']]);
+  expect(hydrate).not.toHaveBeenCalled();
+  expect(fallback).not.toHaveBeenCalled();
 });
 
 test('without a recorded gesture the pointer asks for nothing', () => {
-  const requestReplica = mock(() => {});
-  const { opts } = options({ requestReplica, replicaPending: () => false });
+  const { opts } = options({ replicaPending: () => false });
+  const hydrate = mock(async () => () => {});
+  const fallback = mock(() => {});
+  deferWorkerOpenReplica(opts.yrsSession!, hydrate, fallback, () => {});
   opts.getYrsPositionProjection = () => null;
   renderHook(() => usePagesPointer(opts));
 
   click(1);
   pointerDown(host.firstElementChild!, 'touch');
-  expect(requestReplica).not.toHaveBeenCalled();
+  expect(hydrate).not.toHaveBeenCalled();
+  expect(fallback).not.toHaveBeenCalled();
 });
 
 test('a pending drag replays the latest mousemove before an animation frame', () => {
@@ -745,7 +854,7 @@ function refApiOptions(
     yrsInputRef: opts.yrsInputRef,
     layout: null,
     runLayoutPipeline: () => {},
-    getLayoutRequest: () => null,
+    getLayoutRequest: () => null, readLayoutRequest: async () => null,
     scrollToPositionImpl: () => {},
     revealPositionImpl: () => 'layout-unavailable',
     scrollToParaIdImpl: () => false,
@@ -856,143 +965,3 @@ for (const [name, admit] of [
     expect(selections).toEqual([]);
   });
 }
-
-test('a highlight asked while the replica loads applies once it has loaded', async () => {
-  let loaded!: () => void;
-  const session = {
-    cellSelection: () => null,
-    version: () => 'v1',
-  } as unknown as YrsSession;
-  const { opts, selections } = options({ yrsSession: session });
-  const replica = deferWorkerOpenReplica(
-    session,
-    () => new Promise<() => void>((resolve) => { loaded = () => resolve(() => {}); }),
-    () => {},
-    () => { opts.replicaReady = true; },
-    { active: () => true, request: () => replica.start() }
-  );
-  const ref = createRef<PagedEditorRef>();
-  const view = renderHook(() => {
-    const pointer = usePagesPointer(opts);
-    usePagedEditorRefApi(refApiOptions(opts, ref, pointer));
-    return pointer;
-  });
-
-  act(() => ref.current!.highlightRange(20, 45));
-  expect(selections).toEqual([]);
-  await act(async () => {
-    loaded();
-    await awaitWorkerOpenReplica(session);
-  });
-  view.rerender();
-  expect(selections).toEqual([[20, 45, 'body']]);
-});
-
-test.each(['wheel', 'touchmove', 'keydown'])(
-  'reader %s drops a highlight asked while the replica loads',
-  async (type) => {
-    let loaded!: () => void;
-    const session = {
-      cellSelection: () => null,
-      version: () => 'v1',
-    } as unknown as YrsSession;
-    const { opts, selections } = options({ yrsSession: session });
-    const replica = deferWorkerOpenReplica(
-      session,
-      () => new Promise<() => void>((resolve) => { loaded = () => resolve(() => {}); }),
-      () => {},
-      () => { opts.replicaReady = true; },
-      { active: () => true, request: () => replica.start() }
-    );
-    const ref = createRef<PagedEditorRef>();
-    const view = renderHook(() => {
-      const pointer = usePagesPointer(opts);
-      usePagedEditorRefApi(refApiOptions(opts, ref, pointer));
-      return pointer;
-    });
-    const remove = spyOn(host, 'removeEventListener');
-    try {
-      act(() => ref.current!.highlightRange(20, 45));
-      act(() => host.firstElementChild!.dispatchEvent(new Event(type, { bubbles: true })));
-      await act(async () => {
-        loaded();
-        await awaitWorkerOpenReplica(session);
-      });
-      view.rerender();
-      expect(selections).toEqual([]);
-      expect(remove.mock.calls.filter(([name]) => name === type)).toHaveLength(1);
-    } finally {
-      remove.mockRestore();
-    }
-  }
-);
-
-test.each(['wheel', 'pointerdown', 'keydown'])(
-  "%s in the host's own UI keeps a highlight asked while the replica loads",
-  async (type) => {
-    let loaded!: () => void;
-    const session = {
-      cellSelection: () => null,
-      version: () => 'v1',
-    } as unknown as YrsSession;
-    const { opts, selections } = options({ yrsSession: session });
-    const replica = deferWorkerOpenReplica(
-      session,
-      () => new Promise<() => void>((resolve) => { loaded = () => resolve(() => {}); }),
-      () => {},
-      () => { opts.replicaReady = true; },
-      { active: () => true, request: () => replica.start() }
-    );
-    const ref = createRef<PagedEditorRef>();
-    const view = renderHook(() => {
-      const pointer = usePagesPointer(opts);
-      usePagedEditorRefApi(refApiOptions(opts, ref, pointer));
-      return pointer;
-    });
-    const hostUi = document.createElement('input');
-    document.body.append(hostUi);
-    try {
-      act(() => ref.current!.highlightRange(20, 45));
-      act(() => hostUi.dispatchEvent(new Event(type, { bubbles: true })));
-      await act(async () => {
-        loaded();
-        await awaitWorkerOpenReplica(session);
-      });
-      view.rerender();
-      expect(selections).toEqual([[20, 45, 'body']]);
-    } finally {
-      hostUi.remove();
-    }
-  }
-);
-
-test('newer input drops a highlight asked while the replica loads', async () => {
-  let loaded!: () => void;
-  const session = {
-    cellSelection: () => null,
-    version: () => 'v1',
-  } as unknown as YrsSession;
-  const { opts, selections } = options({ yrsSession: session });
-  const replica = deferWorkerOpenReplica(
-    session,
-    () => new Promise<() => void>((resolve) => { loaded = () => resolve(() => {}); }),
-    () => {},
-    () => { opts.replicaReady = true; },
-    { active: () => true, request: () => replica.start() }
-  );
-  const ref = createRef<PagedEditorRef>();
-  const view = renderHook(() => {
-    const pointer = usePagesPointer(opts);
-    usePagedEditorRefApi(refApiOptions(opts, ref, pointer));
-    return pointer;
-  });
-
-  act(() => ref.current!.highlightRange(20, 45));
-  click(1, 450);
-  await act(async () => {
-    loaded();
-    await awaitWorkerOpenReplica(session);
-  });
-  view.rerender();
-  expect(selections).toEqual([[45, 45, 'body']]);
-});
