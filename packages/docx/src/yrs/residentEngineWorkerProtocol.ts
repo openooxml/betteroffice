@@ -49,9 +49,9 @@ export interface ResidentEngineWorkerFontSync {
 
 /** @internal */
 export type ResidentProposalOperation =
-  | { kind: 'propose'; request: DocxProposalRequest }
-  | { kind: 'setStates'; request: DocxProposalStateRequest }
-  | { kind: 'withdraw'; request: DocxProposalWithdrawRequest }
+  | { kind: 'propose'; request: DocxProposalRequest; peerStateVector?: Uint8Array }
+  | { kind: 'setStates'; request: DocxProposalStateRequest; peerStateVector?: Uint8Array }
+  | { kind: 'withdraw'; request: DocxProposalWithdrawRequest; peerStateVector?: Uint8Array }
   | { kind: 'removeComment'; id: string }
   | { kind: 'snapshot' };
 
@@ -62,6 +62,7 @@ export interface ResidentProposalResponse {
   changedStories: string[];
   projectionStories?: string[];
   updates: ArrayBuffer[];
+  peerDiff?: ArrayBuffer;
   stateVector: ArrayBuffer;
   geometry: ProposalGeometryMirror;
   fontRequirements?: { layoutInput: string; requirementsJson: string };
@@ -182,7 +183,7 @@ export type ResidentEngineWorkerRequest =
     }
   | { id: number; type: 'fontRequirements'; layoutInput: string }
   | { id: number; type: 'layoutJson'; layoutRevision: number }
-  | { id: number; type: 'encodeState' }
+  | { id: number; type: 'encodeState'; peerMetadata?: true }
   | {
       id: number;
       type: 'save';
@@ -348,6 +349,8 @@ export type ResidentEngineWorkerResponse = (
       requirementsJson?: string;
       /** An `encodeState` reply: the document state as one yrs v1 update. */
       state?: ArrayBuffer;
+      peerMetadata?: ArrayBuffer;
+      peerMetadataReason?: string;
       /** @internal */
       saved?: ArrayBuffer;
       revisionCount?: number;

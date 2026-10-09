@@ -350,14 +350,17 @@ impl DeckSession {
                 "unknown slide layout {path:?}"
             )));
         }
+        let (order, slides, length) = {
+            let txn = self.doc.transact();
+            let order = required_order(&txn)?;
+            let length = order.len(&txn);
+            if index > length {
+                return Err(EditError::OutOfBounds { index, length });
+            }
+            (order, required_map(&txn, SLIDES)?, length)
+        };
         let slide_id = self.next_id("slide");
         let mut txn = self.transact_for(context);
-        let order = required_order(&txn)?;
-        let length = order.len(&txn);
-        if index > length {
-            return Err(EditError::OutOfBounds { index, length });
-        }
-        let slides = required_map(&txn, SLIDES)?;
         let slide = slides.insert(&mut txn, slide_id.as_str(), MapPrelim::default());
         slide.insert(&mut txn, "id", slide_id.as_str());
         slide.insert(&mut txn, "name", format!("Slide {}", length + 1));
@@ -375,9 +378,9 @@ impl DeckSession {
 
     pub fn set_slide_notes(&self, context: &EditCtx, slide_id: &str, text: &str) -> EditResult<()> {
         crate::model::validate_xml_text(text)?;
+        let slide = slide_ref(&self.doc.transact(), slide_id)?;
         self.automatic_undo_barrier();
         let mut txn = self.transact_for(context);
-        let slide = slide_ref(&txn, slide_id)?;
         slide.insert(&mut txn, "notes", text);
         drop(txn);
         self.automatic_undo_barrier();
@@ -395,7 +398,7 @@ impl DeckSession {
         let shape_ids = live_shape_order(&shape_order, &txn)?;
         remove_shape_entries(&mut txn, &shape_ids)?;
         let comments = required_map(&txn, crate::COMMENTS)?;
-        let comment_ids: Vec<String> = comments
+        let mut comment_ids: Vec<String> = comments
             .iter(&txn)
             .filter_map(|(id, value)| {
                 let entry = value.cast::<MapRef>().ok()?;
@@ -403,6 +406,7 @@ impl DeckSession {
                     .then(|| id.to_owned())
             })
             .collect();
+        comment_ids.sort();
         for id in comment_ids {
             comments.remove(&mut txn, &id);
         }
@@ -460,15 +464,24 @@ impl DeckSession {
             draft.style.spacing_pt,
             draft.style.baseline_pct,
         )?;
+        let fill_json = serde_json::to_string(&ShapeFill::named("none"))
+            .map_err(|error| EditError::Json(error.to_string()))?;
+        let (order, index, shapes, stories) = {
+            let txn = self.doc.transact();
+            let slide = slide_ref(&txn, slide_id)?;
+            let order = slide_shape_order(&slide, &txn)?;
+            let index = order.len(&txn);
+            (
+                order,
+                index,
+                required_map(&txn, SHAPES)?,
+                required_map(&txn, STORIES)?,
+            )
+        };
         let shape_id = self.next_id("shape");
         let story_id = format!("story:{shape_id}:0");
         let paragraph_id = self.next_id("para");
         let mut txn = self.transact_for(context);
-        let slide = slide_ref(&txn, slide_id)?;
-        let order = slide_shape_order(&slide, &txn)?;
-        let index = order.len(&txn);
-        let shapes = required_map(&txn, SHAPES)?;
-        let stories = required_map(&txn, STORIES)?;
         seed_plain_story(
             &stories,
             &mut txn,
@@ -490,12 +503,7 @@ impl DeckSession {
         shape.insert(&mut txn, "flipH", false);
         shape.insert(&mut txn, "flipV", false);
         shape.insert(&mut txn, "geometry", "rect");
-        insert_json(
-            &shape,
-            &mut txn,
-            "fillJson",
-            Some(&ShapeFill::named("none")),
-        )?;
+        shape.insert(&mut txn, "fillJson", fill_json);
         shape.insert(
             &mut txn,
             "textStories",
@@ -536,12 +544,19 @@ impl DeckSession {
         let adjust_values = preset_geometry_default_adjustments(&draft.geometry)
             .into_iter()
             .collect::<BTreeMap<_, _>>();
+        let adjust_values_json = serde_json::to_string(&adjust_values)
+            .map_err(|error| EditError::Json(error.to_string()))?;
+        let fill_json =
+            serde_json::to_string(&fill).map_err(|error| EditError::Json(error.to_string()))?;
+        let (order, index, shapes) = {
+            let txn = self.doc.transact();
+            let slide = slide_ref(&txn, slide_id)?;
+            let order = slide_shape_order(&slide, &txn)?;
+            let index = order.len(&txn);
+            (order, index, required_map(&txn, SHAPES)?)
+        };
         let shape_id = self.next_id("shape");
         let mut txn = self.transact_for(context);
-        let slide = slide_ref(&txn, slide_id)?;
-        let order = slide_shape_order(&slide, &txn)?;
-        let index = order.len(&txn);
-        let shapes = required_map(&txn, SHAPES)?;
         let shape = shapes.insert(&mut txn, shape_id.as_str(), MapPrelim::default());
         shape.insert(&mut txn, "id", shape_id.as_str());
         shape.insert(&mut txn, "sourceId", 0_f64);
@@ -555,8 +570,8 @@ impl DeckSession {
         shape.insert(&mut txn, "flipH", false);
         shape.insert(&mut txn, "flipV", false);
         shape.insert(&mut txn, "geometry", draft.geometry.as_str());
-        insert_json(&shape, &mut txn, "adjustValuesJson", Some(&adjust_values))?;
-        insert_json(&shape, &mut txn, "fillJson", Some(&fill))?;
+        shape.insert(&mut txn, "adjustValuesJson", adjust_values_json);
+        shape.insert(&mut txn, "fillJson", fill_json);
         shape.insert(&mut txn, "textStories", string_array(&[]));
         shape.insert(&mut txn, "children", string_array(&[]));
         order.push_back(&mut txn, shape_id.as_str());
@@ -614,12 +629,15 @@ impl DeckSession {
                 draft.content_type
             )));
         }
+        let (order, index, shapes) = {
+            let txn = self.doc.transact();
+            let slide = slide_ref(&txn, slide_id)?;
+            let order = slide_shape_order(&slide, &txn)?;
+            let index = order.len(&txn);
+            (order, index, required_map(&txn, SHAPES)?)
+        };
         let shape_id = self.next_id("shape");
         let mut txn = self.transact_for(context);
-        let slide = slide_ref(&txn, slide_id)?;
-        let order = slide_shape_order(&slide, &txn)?;
-        let index = order.len(&txn);
-        let shapes = required_map(&txn, SHAPES)?;
         let shape = shapes.insert(&mut txn, shape_id.as_str(), MapPrelim::default());
         shape.insert(&mut txn, "id", shape_id.as_str());
         shape.insert(&mut txn, "sourceId", 0_f64);
@@ -2720,7 +2738,735 @@ fn optional_json<T: DeserializeOwned, R: ReadTxn>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::TextStyle;
+    use crate::{
+        CaretAnchor, CommentFlavor, ProposalEdit, ProposalRequest, TextStyle, TextStylePatch,
+        UndoCaptureMode,
+    };
+    use std::sync::atomic::Ordering;
+    use yrs::Text;
+    use yrs::types::text::YChange;
+
+    fn deterministic_deck_bytes() -> Vec<u8> {
+        let shapes = (2..=3)
+            .map(|id| {
+                format!(
+                    r#"<p:sp><p:nvSpPr><p:cNvPr id="{id}" name="Text {id}"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1270000" cy="1270000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:pPr><a:buAutoNum type="arabicPeriod" startAt="1"/></a:pPr><a:r><a:rPr/><a:t>Alpha</a:t></a:r></a:p><a:p><a:pPr><a:buAutoNum type="arabicPeriod" startAt="7"/></a:pPr><a:r><a:rPr/><a:t>Beta</a:t></a:r></a:p></p:txBody></p:sp>"#
+                )
+            })
+            .collect::<String>();
+        let slide = format!(
+            r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>{shapes}</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>"#
+        );
+        let parts = [
+            (
+                "[Content_Types].xml",
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/></Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/></Relationships>"#,
+            ),
+            (
+                "ppt/presentation.xml",
+                r#"<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst><p:sldSz cx="9144000" cy="6858000"/><p:notesSz cx="6858000" cy="9144000"/></p:presentation>"#,
+            ),
+            (
+                "ppt/_rels/presentation.xml.rels",
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/></Relationships>"#,
+            ),
+            ("ppt/slides/slide1.xml", slide.as_str()),
+        ]
+        .into_iter()
+        .map(|(path, xml)| (path.to_owned(), xml.as_bytes().to_vec()))
+        .collect::<Vec<_>>();
+        ooxml_opc::rezip_parts(&parts).unwrap()
+    }
+
+    fn add_test_comment(
+        session: &DeckSession,
+        ctx: &EditCtx,
+        slide_id: &str,
+        text: &str,
+    ) -> EditResult<crate::CommentReceipt> {
+        session.add_comment(
+            ctx,
+            slide_id,
+            "Human",
+            "H",
+            text,
+            "2026-10-05T10:00:00Z",
+            0,
+            0,
+        )
+    }
+
+    fn add_test_reply(
+        session: &DeckSession,
+        ctx: &EditCtx,
+        parent: &str,
+        text: &str,
+    ) -> EditResult<crate::CommentReceipt> {
+        session.reply_to_comment(ctx, parent, "Human", "H", text, "2026-10-05T10:00:00Z")
+    }
+
+    fn assert_equal_peers(left: &DeckSession, right: &DeckSession, label: &str) {
+        let snapshot = left.snapshot().unwrap();
+        assert_eq!(snapshot, right.snapshot().unwrap(), "{label}: snapshot");
+        assert_eq!(left.save().unwrap(), right.save().unwrap(), "{label}: save");
+        assert_eq!(
+            left.proposals().unwrap(),
+            right.proposals().unwrap(),
+            "{label}: proposals"
+        );
+        assert_eq!(left.can_undo(), right.can_undo(), "{label}: can undo");
+        assert_eq!(left.can_redo(), right.can_redo(), "{label}: can redo");
+        assert_eq!(
+            left.undo.borrow().stack_clock_counts(),
+            right.undo.borrow().stack_clock_counts(),
+            "{label}: history entries"
+        );
+        assert_eq!(
+            left.id_counter.load(Ordering::Relaxed),
+            right.id_counter.load(Ordering::Relaxed),
+            "{label}: allocator"
+        );
+        for slide in &snapshot.slides {
+            for shape in &slide.shapes {
+                for story in &shape.text_stories {
+                    assert_eq!(
+                        left.story(&story.id).unwrap(),
+                        right.story(&story.id).unwrap(),
+                        "{label}: story"
+                    );
+                    for index in 0..story.length {
+                        let left_anchor = left.anchor_caret(&story.id, index).unwrap();
+                        let right_anchor = right.anchor_caret(&story.id, index).unwrap();
+                        assert_eq!(
+                            left.resolve_caret_anchor(&left_anchor),
+                            Some(index),
+                            "{label}: left anchor"
+                        );
+                        assert_eq!(
+                            right.resolve_caret_anchor(&right_anchor),
+                            Some(index),
+                            "{label}: right anchor"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn assert_refused_without_changes<T: std::fmt::Debug>(
+        session: &DeckSession,
+        label: &str,
+        reject: impl FnOnce() -> EditResult<T>,
+    ) {
+        let update = session.encode_state_as_update_v1();
+        let version = session.version();
+        let counter = session.id_counter.load(Ordering::Relaxed);
+        let proposals = session.proposals().map_err(|error| error.to_string());
+        let history = (session.can_undo(), session.can_redo());
+        let history_entries = session.undo.borrow().stack_diagnostics();
+        let outcome = reject();
+        assert!(outcome.is_err(), "{label}: {outcome:?}");
+        assert_eq!(
+            session.encode_state_as_update_v1(),
+            update,
+            "{label}: update"
+        );
+        assert_eq!(session.version(), version, "{label}: version");
+        assert_eq!(
+            session.id_counter.load(Ordering::Relaxed),
+            counter,
+            "{label}: allocator"
+        );
+        assert_eq!(
+            session.proposals().map_err(|error| error.to_string()),
+            proposals,
+            "{label}: proposals"
+        );
+        assert_eq!(
+            (session.can_undo(), session.can_redo()),
+            history,
+            "{label}: history"
+        );
+        assert_eq!(
+            session.undo.borrow().stack_diagnostics(),
+            history_entries,
+            "{label}: history entries"
+        );
+    }
+
+    fn assert_history_paths_match(
+        left: &DeckSession,
+        right: &DeckSession,
+        label: &str,
+        anchors: &[CaretAnchor],
+    ) -> usize {
+        assert_eq!(
+            left.undo.borrow().stack_diagnostics(),
+            right.undo.borrow().stack_diagnostics(),
+            "{label}: history ids before restoration"
+        );
+        let final_snapshot = left.snapshot().unwrap();
+        let final_save = left.save().unwrap();
+        let mut undos = 0;
+        loop {
+            let applied = left.undo();
+            assert_eq!(applied, right.undo(), "{label}: undo {undos}");
+            assert_equal_peers(left, right, &format!("{label}: undo {undos}"));
+            for anchor in anchors {
+                assert_eq!(
+                    left.resolve_caret_anchor(anchor),
+                    right.resolve_caret_anchor(anchor),
+                    "{label}: retained undo anchor"
+                );
+            }
+            if !applied {
+                break;
+            }
+            undos += 1;
+            assert!(undos < 64, "{label}: undo failed to terminate");
+        }
+        let mut redos = 0;
+        loop {
+            let applied = left.redo();
+            assert_eq!(applied, right.redo(), "{label}: redo {redos}");
+            assert_equal_peers(left, right, &format!("{label}: redo {redos}"));
+            for anchor in anchors {
+                assert_eq!(
+                    left.resolve_caret_anchor(anchor),
+                    right.resolve_caret_anchor(anchor),
+                    "{label}: retained redo anchor"
+                );
+            }
+            if !applied {
+                break;
+            }
+            redos += 1;
+            assert!(redos < 64, "{label}: redo failed to terminate");
+        }
+        assert_eq!(undos, redos, "{label}: history depth");
+        assert_eq!(
+            left.snapshot().unwrap(),
+            final_snapshot,
+            "{label}: redo snapshot"
+        );
+        assert_eq!(left.save().unwrap(), final_save, "{label}: redo save");
+        undos
+    }
+
+    #[test]
+    fn rejected_creators_preserve_allocator_and_history() {
+        let bytes = deterministic_deck_bytes();
+        let ctx = EditCtx::local("human");
+        let rect = ShapeRect {
+            x: 0,
+            y: 0,
+            width: 1270000,
+            height: 1270000,
+        };
+        let text_box = ShapeDraft {
+            name: "Text".into(),
+            rect,
+            text: "Created".into(),
+            style: TextStyle::default(),
+        };
+        let shape = PresetShapeDraft {
+            name: "Shape".into(),
+            geometry: "rect".into(),
+            rect,
+            fill: None,
+        };
+        let picture = PictureDraft {
+            name: "Picture".into(),
+            rect,
+            content_type: "image/png".into(),
+            media_bytes: base64::engine::general_purpose::STANDARD
+                .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=")
+                .unwrap(),
+        };
+        for case in [
+            "slide index",
+            "slide layout",
+            "text box target",
+            "text box style",
+            "shape target",
+            "shape geometry",
+            "picture target",
+            "picture data",
+            "picture type",
+            "comment target",
+            "comment text",
+            "reply target",
+            "reply nested",
+            "reply legacy",
+            "paragraph target",
+            "paragraph index",
+        ] {
+            let refused = DeckSession::open(&bytes, 710).unwrap();
+            let fresh = DeckSession::open(&bytes, 710).unwrap();
+            let slide_id = fresh.slide_ids().unwrap()[0].clone();
+            let story_id = fresh.snapshot().unwrap().slides[0].shapes[0].text_stories[0]
+                .id
+                .clone();
+            let mut root = String::new();
+            let mut reply = String::new();
+            for session in [&refused, &fresh] {
+                session.set_undo_capture_mode(UndoCaptureMode::Manual);
+                if case != "reply legacy" {
+                    session
+                        .set_comment_flavor(&ctx, CommentFlavor::Modern)
+                        .unwrap();
+                }
+                root = add_test_comment(session, &ctx, &slide_id, "Root")
+                    .unwrap()
+                    .comment_id;
+                if case != "reply legacy" {
+                    reply = add_test_reply(session, &ctx, &root, "Reply")
+                        .unwrap()
+                        .comment_id;
+                }
+                session
+                    .propose(ProposalRequest {
+                        agent_id: "agent".into(),
+                        note: None,
+                        edits: vec![ProposalEdit::SetSlideNotes {
+                            slide_id: slide_id.clone(),
+                            text: "Pending".into(),
+                        }],
+                    })
+                    .unwrap();
+                session.add_undo_barrier();
+                session
+                    .insert_text(&ctx, &story_id, 0, "redo", &TextStyle::default())
+                    .unwrap();
+                assert!(session.undo());
+                assert!(session.can_redo());
+            }
+            assert_equal_peers(&refused, &fresh, case);
+            assert_refused_without_changes(&refused, case, || match case {
+                "slide index" => refused.insert_slide(&ctx, 2, None).map(|_| ()),
+                "slide layout" => refused
+                    .insert_slide(&ctx, 1, Some("missing-layout"))
+                    .map(|_| ()),
+                "text box target" => refused
+                    .add_text_box(&ctx, "missing-slide", &text_box)
+                    .map(|_| ()),
+                "text box style" => refused
+                    .add_text_box(
+                        &ctx,
+                        &slide_id,
+                        &ShapeDraft {
+                            style: TextStyle {
+                                font_size_pt: Some(f64::NAN),
+                                ..Default::default()
+                            },
+                            ..text_box.clone()
+                        },
+                    )
+                    .map(|_| ()),
+                "shape target" => refused.add_shape(&ctx, "missing-slide", &shape).map(|_| ()),
+                "shape geometry" => refused
+                    .add_shape(
+                        &ctx,
+                        &slide_id,
+                        &PresetShapeDraft {
+                            geometry: "missing-geometry".into(),
+                            ..shape.clone()
+                        },
+                    )
+                    .map(|_| ()),
+                "picture target" => refused
+                    .add_picture(&ctx, "missing-slide", &picture)
+                    .map(|_| ()),
+                "picture data" => refused
+                    .add_picture(
+                        &ctx,
+                        &slide_id,
+                        &PictureDraft {
+                            media_bytes: vec![],
+                            ..picture.clone()
+                        },
+                    )
+                    .map(|_| ()),
+                "picture type" => refused
+                    .add_picture(
+                        &ctx,
+                        &slide_id,
+                        &PictureDraft {
+                            content_type: "image/unknown".into(),
+                            ..picture.clone()
+                        },
+                    )
+                    .map(|_| ()),
+                "comment target" => {
+                    add_test_comment(&refused, &ctx, "missing-slide", "Comment").map(|_| ())
+                }
+                "comment text" => add_test_comment(&refused, &ctx, &slide_id, "").map(|_| ()),
+                "reply target" => {
+                    add_test_reply(&refused, &ctx, "missing-comment", "Reply").map(|_| ())
+                }
+                "reply nested" => add_test_reply(&refused, &ctx, &reply, "Reply").map(|_| ()),
+                "reply legacy" => add_test_reply(&refused, &ctx, &root, "Reply").map(|_| ()),
+                "paragraph target" => refused
+                    .insert_paragraph_break(&ctx, "missing-story", 0)
+                    .map(|_| ()),
+                "paragraph index" => refused
+                    .insert_paragraph_break(&ctx, &story_id, u32::MAX)
+                    .map(|_| ()),
+                _ => unreachable!(),
+            });
+            assert_equal_peers(&refused, &fresh, case);
+            for session in [&refused, &fresh] {
+                match case {
+                    "slide index" | "slide layout" => {
+                        session.insert_slide(&ctx, 1, None).unwrap();
+                    }
+                    "text box target" | "text box style" => {
+                        session.add_text_box(&ctx, &slide_id, &text_box).unwrap();
+                    }
+                    "shape target" | "shape geometry" => {
+                        session.add_shape(&ctx, &slide_id, &shape).unwrap();
+                    }
+                    "picture target" | "picture data" | "picture type" => {
+                        session.add_picture(&ctx, &slide_id, &picture).unwrap();
+                    }
+                    "comment target" | "comment text" => {
+                        add_test_comment(session, &ctx, &slide_id, "Comment").unwrap();
+                    }
+                    "reply target" | "reply nested" => {
+                        add_test_reply(session, &ctx, &root, "Reply").unwrap();
+                    }
+                    "reply legacy" => {
+                        session.remove_comment(&ctx, &root).unwrap();
+                        session
+                            .set_comment_flavor(&ctx, CommentFlavor::Modern)
+                            .unwrap();
+                        let parent = add_test_comment(session, &ctx, &slide_id, "Root").unwrap();
+                        add_test_reply(session, &ctx, &parent.comment_id, "Reply").unwrap();
+                    }
+                    "paragraph target" | "paragraph index" => {
+                        session.insert_paragraph_break(&ctx, &story_id, 2).unwrap();
+                    }
+                    _ => unreachable!(),
+                }
+                session
+                    .propose(ProposalRequest {
+                        agent_id: "agent".into(),
+                        note: None,
+                        edits: vec![ProposalEdit::SetSlideNotes {
+                            slide_id: slide_id.clone(),
+                            text: "Next".into(),
+                        }],
+                    })
+                    .unwrap();
+            }
+            assert_equal_peers(&refused, &fresh, case);
+            assert!(assert_history_paths_match(&refused, &fresh, case, &[]) > 0);
+        }
+    }
+
+    #[test]
+    fn formatting_and_map_writes_preserve_history_and_anchors() {
+        let bytes = deterministic_deck_bytes();
+        let left = DeckSession::open(&bytes, 711).unwrap();
+        let right = DeckSession::open(&bytes, 711).unwrap();
+        let pristine = left.snapshot().unwrap();
+        let ctx = EditCtx::local("human");
+        let slide_id = pristine.slides[0].id.clone();
+        let story_ids = pristine.slides[0]
+            .shapes
+            .iter()
+            .map(|shape| shape.text_stories[0].id.clone())
+            .collect::<Vec<_>>();
+        let mut anchors: Vec<CaretAnchor> = Vec::new();
+        let mut root = String::new();
+        for session in [&left, &right] {
+            session.set_undo_capture_mode(UndoCaptureMode::Manual);
+            let mut txn = session.doc.transact_mut_with("pptx:system");
+            let mut migrated = 0;
+            for story_id in &story_ids {
+                let story = crate::story::story_ref(&txn, story_id).unwrap();
+                for diff in story.diff(&txn, YChange::identity) {
+                    let Out::YMap(map) = diff.insert else {
+                        continue;
+                    };
+                    let json = map_string(&map, &txn, "bulletJson").unwrap();
+                    let mut bullet: pptx_parse::Bullet = serde_json::from_str(&json).unwrap();
+                    let pptx_parse::Bullet::AutoNumber { restart, .. } = &mut bullet else {
+                        panic!("synthetic paragraphs must have automatic numbering");
+                    };
+                    assert!(*restart);
+                    *restart = false;
+                    map.insert(
+                        &mut txn,
+                        "bulletJson",
+                        serde_json::to_string(&bullet).unwrap(),
+                    );
+                    migrated += 1;
+                }
+            }
+            assert_eq!(migrated, 4);
+            drop(txn);
+            assert!(!session.can_undo());
+            let epoch = session.epoch();
+            crate::story::import_source_numbering_restarts(&session.doc, session.package())
+                .unwrap();
+            assert_eq!(session.epoch(), epoch + 1);
+            for story_id in &story_ids {
+                for paragraph in session.story(story_id).unwrap().paragraphs {
+                    let bullet: pptx_parse::Bullet =
+                        serde_json::from_str(&paragraph.bullet_json.unwrap()).unwrap();
+                    assert!(matches!(
+                        bullet,
+                        pptx_parse::Bullet::AutoNumber { restart: true, .. }
+                    ));
+                }
+            }
+            let epoch = session.epoch();
+            crate::story::import_source_numbering_restarts(&session.doc, session.package())
+                .unwrap();
+            assert_eq!(session.epoch(), epoch);
+            assert_eq!(session.snapshot().unwrap(), pristine);
+            session
+                .set_comment_flavor(&ctx, CommentFlavor::Modern)
+                .unwrap();
+            root = add_test_comment(session, &ctx, &slide_id, "Root")
+                .unwrap()
+                .comment_id;
+            for text in ["One", "Two", "Three"] {
+                add_test_reply(session, &ctx, &root, text).unwrap();
+            }
+            add_test_comment(session, &ctx, &slide_id, "Other").unwrap();
+            session.add_undo_barrier();
+        }
+        assert_equal_peers(&left, &right, "numbering migration and comment setup");
+        for story_id in &story_ids {
+            let anchor = left.anchor_caret(story_id, 3).unwrap();
+            assert_eq!(anchor, right.anchor_caret(story_id, 3).unwrap());
+            anchors.push(anchor);
+        }
+        let patch = TextStylePatch {
+            bold: Some(true),
+            italic: Some(true),
+            font_size_pt: Some(28.0),
+            color: Some("123ABC".into()),
+            font_family: Some("Arial".into()),
+            underline: Some("dbl".into()),
+            spacing_pt: Some(1.5),
+            baseline_pct: Some(12.0),
+        };
+        for story_id in &story_ids {
+            let end = left.story(story_id).unwrap().length - 1;
+            let epoch = left.epoch();
+            assert_eq!(
+                left.format_text(&ctx, story_id, 1, end, &patch).unwrap(),
+                right.format_text(&ctx, story_id, 1, end, &patch).unwrap()
+            );
+            assert_eq!(left.epoch(), epoch + 1);
+            let formatted = left.story(story_id).unwrap();
+            let style = &formatted.paragraphs[0].runs.last().unwrap().style;
+            assert_eq!(style.bold, patch.bold);
+            assert_eq!(style.italic, patch.italic);
+            assert_eq!(style.font_size_pt, patch.font_size_pt);
+            assert_eq!(style.color, patch.color);
+            assert_eq!(style.font_family, patch.font_family);
+            assert_eq!(style.underline, patch.underline);
+            assert_eq!(style.spacing_pt, patch.spacing_pt);
+            assert_eq!(style.baseline_pct, patch.baseline_pct);
+            assert_eq!(formatted.paragraphs[0].runs[0].text, "A");
+            assert_eq!(formatted.paragraphs[0].runs[0].style, TextStyle::default());
+            let original = &pristine.slides[0]
+                .shapes
+                .iter()
+                .find(|shape| shape.text_stories[0].id == *story_id)
+                .unwrap()
+                .text_stories[0];
+            for (before, after) in original.paragraphs.iter().zip(&formatted.paragraphs) {
+                assert_eq!(before.id, after.id);
+                assert_eq!(before.bullet_json, after.bullet_json);
+            }
+            assert_equal_peers(&left, &right, "multi-attribute formatting");
+        }
+        left.add_undo_barrier();
+        right.add_undo_barrier();
+        for story_id in &story_ids {
+            assert_eq!(
+                left.insert_paragraph_break(&ctx, story_id, 2).unwrap(),
+                right.insert_paragraph_break(&ctx, story_id, 2).unwrap()
+            );
+        }
+        assert_equal_peers(
+            &left,
+            &right,
+            "paragraph breaks after formatting and migration",
+        );
+        for anchor in &anchors {
+            assert_eq!(left.resolve_caret_anchor(anchor), Some(4));
+            assert_eq!(right.resolve_caret_anchor(anchor), Some(4));
+        }
+        left.add_undo_barrier();
+        right.add_undo_barrier();
+        assert_eq!(
+            left.remove_comment(&ctx, &root).unwrap(),
+            right.remove_comment(&ctx, &root).unwrap()
+        );
+        assert_eq!(left.comments().unwrap().len(), 1);
+        assert_equal_peers(&left, &right, "root and reply deletion");
+        left.add_undo_barrier();
+        right.add_undo_barrier();
+        assert_eq!(
+            left.delete_slide(&ctx, &slide_id).unwrap(),
+            right.delete_slide(&ctx, &slide_id).unwrap()
+        );
+        assert!(left.snapshot().unwrap().slides.is_empty());
+        assert!(left.comments().unwrap().is_empty());
+        assert_equal_peers(&left, &right, "slide comment deletion");
+        assert_eq!(
+            assert_history_paths_match(&left, &right, "formatting and map writes", &anchors),
+            5
+        );
+        for anchor in anchors {
+            assert_eq!(
+                left.resolve_caret_anchor(&anchor),
+                right.resolve_caret_anchor(&anchor)
+            );
+        }
+    }
+
+    #[test]
+    fn rejected_comment_mutations_preserve_allocator_and_history() {
+        let bytes = deterministic_deck_bytes();
+        let ctx = EditCtx::local("human");
+        for flavor in [CommentFlavor::Legacy, CommentFlavor::Modern] {
+            let refused = DeckSession::open(&bytes, 712).unwrap();
+            let fresh = DeckSession::open(&bytes, 712).unwrap();
+            let slide_id = fresh.slide_ids().unwrap()[0].clone();
+            let story_id = fresh.snapshot().unwrap().slides[0].shapes[0].text_stories[0]
+                .id
+                .clone();
+            let mut root = String::new();
+            let mut reply = String::new();
+            for session in [&refused, &fresh] {
+                session.set_undo_capture_mode(UndoCaptureMode::Manual);
+                session.set_comment_flavor(&ctx, flavor).unwrap();
+                root = add_test_comment(session, &ctx, &slide_id, "Root")
+                    .unwrap()
+                    .comment_id;
+                if flavor == CommentFlavor::Modern {
+                    reply = add_test_reply(session, &ctx, &root, "Reply")
+                        .unwrap()
+                        .comment_id;
+                }
+                session.add_undo_barrier();
+                session
+                    .insert_text(&ctx, &story_id, 0, "redo", &TextStyle::default())
+                    .unwrap();
+                assert!(session.undo());
+                assert!(session.can_redo());
+            }
+            assert_refused_without_changes(&refused, "missing status target", || {
+                refused.set_comment_status(&ctx, "missing-comment", true)
+            });
+            assert_refused_without_changes(&refused, "missing position target", || {
+                refused.set_comment_position(&ctx, "missing-comment", 0, 0)
+            });
+            assert_refused_without_changes(&refused, "unsafe position", || {
+                refused.set_comment_position(&ctx, &root, i64::MAX, 0)
+            });
+            assert_refused_without_changes(&refused, "missing removal target", || {
+                refused.remove_comment(&ctx, "missing-comment")
+            });
+            assert_refused_without_changes(&refused, "fixed flavor", || {
+                refused.set_comment_flavor(&ctx, CommentFlavor::Modern)
+            });
+            assert_refused_without_changes(&refused, "missing notes target", || {
+                refused.set_slide_notes(&ctx, "missing-slide", "Notes")
+            });
+            if flavor == CommentFlavor::Legacy {
+                assert_refused_without_changes(&refused, "legacy status", || {
+                    refused.set_comment_status(&ctx, &root, true)
+                });
+            } else {
+                assert_refused_without_changes(&refused, "reply position", || {
+                    refused.set_comment_position(&ctx, &reply, 0, 0)
+                });
+            }
+            assert_equal_peers(&refused, &fresh, "comment refusals");
+            for session in [&refused, &fresh] {
+                session
+                    .set_comment_position(&ctx, &root, 12700, 25400)
+                    .unwrap();
+                if flavor == CommentFlavor::Modern {
+                    session.set_comment_status(&ctx, &root, true).unwrap();
+                }
+                session.remove_comment(&ctx, &root).unwrap();
+                session
+                    .set_comment_flavor(&ctx, CommentFlavor::Modern)
+                    .unwrap();
+                session.set_slide_notes(&ctx, &slide_id, "Notes").unwrap();
+            }
+            assert_equal_peers(&refused, &fresh, "comment retries");
+            assert!(assert_history_paths_match(&refused, &fresh, "comment refusals", &[]) > 0);
+        }
+    }
+
+    #[test]
+    fn rejected_shape_creators_preflight_shape_order() {
+        let bytes = deterministic_deck_bytes();
+        let session = DeckSession::open(&bytes, 713).unwrap();
+        let ctx = EditCtx::local("human");
+        let slide_id = session.slide_ids().unwrap()[0].clone();
+        let rect = ShapeRect {
+            x: 0,
+            y: 0,
+            width: 1270000,
+            height: 1270000,
+        };
+        let mut txn = session.doc.transact_mut_with("pptx:system");
+        slide_ref(&txn, &slide_id)
+            .unwrap()
+            .insert(&mut txn, "shapes", "invalid");
+        drop(txn);
+        assert_refused_without_changes(&session, "text box shape order", || {
+            session.add_text_box(
+                &ctx,
+                &slide_id,
+                &ShapeDraft {
+                    name: "Text".into(),
+                    rect,
+                    text: "Text".into(),
+                    style: TextStyle::default(),
+                },
+            )
+        });
+        assert_refused_without_changes(&session, "preset shape order", || {
+            session.add_shape(
+                &ctx,
+                &slide_id,
+                &PresetShapeDraft {
+                    name: "Shape".into(),
+                    geometry: "rect".into(),
+                    rect,
+                    fill: None,
+                },
+            )
+        });
+        assert_refused_without_changes(&session, "picture shape order", || {
+            session.add_picture(
+                &ctx,
+                &slide_id,
+                &PictureDraft {
+                    name: "Picture".into(),
+                    rect,
+                    content_type: "image/png".into(),
+                    media_bytes: vec![1],
+                },
+            )
+        });
+    }
 
     const FIXTURE: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-demo.pptx");
     const HIDDEN_FIXTURE: &[u8] = include_bytes!("../tests/fixtures/hidden-shapes.pptx");

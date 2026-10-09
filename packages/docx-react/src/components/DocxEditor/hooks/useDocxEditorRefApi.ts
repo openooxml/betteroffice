@@ -40,20 +40,30 @@ import {
 import type { DocxHostSearch } from './useHostSearch';
 import {
   awaitWorkerOpenReplica,
+  requestWorkerOpenReplicaReadiness,
   ensureWorkerOpenReplica,
   requestWorkerOpenReplica,
   workerOpenDocumentHeld,
   workerOpenReplicaPending,
+  workerOpenReplicaReady,
 } from '../internals/workerOpenReplica';
 import {
   handedOverRequest,
   registeredWorkerProposalAuthority,
   workerProposalAuthority,
+  workerProposalRoundAuthority,
+  activateEditorWorkerProposalRounds,
+  editorWorkerProposalActivationAvailable,
+  hasEditorWorkerProposalRounds,
   type WorkerProposalAuthority,
 } from '../internals/workerProposalAuthority';
 
 import { isWorkerViewer } from '../internals/workerViewer';
 import { warnDeprecatedViewerMember } from '../internals/deprecatedViewerMembers';
+
+class ProposalAdmissionRefusal extends Error {
+  constructor(readonly result: DocxProposalResult) { super('The editor is read-only'); }
+}
 
 export const DOCX_REF_ASYNC_TWINS = {
   getDocument: ['readParagraphs', 'exportStructuredWithPages'],
@@ -143,17 +153,38 @@ export const DOCX_REF_REPLICA_ACCESS = {
   onDocumentChange: 'independent',
 } as const satisfies Record<keyof DocxEditorRef, 'await' | 'sync' | 'independent' | 'commands'>;
 
+/** What a synchronous member returns while the editor's document is still loading here. */
+export const DOCX_REF_REPLICA_LOADING_ANSWERS = {
+  getDocument: null,
+  getEditorRef: null,
+  getSelectionInfo: null,
+  getPageContent: null,
+  scrollToParaId: false,
+  scrollToCommentId: false,
+  scrollToChangeId: false,
+  findInDocument: [],
+} satisfies Partial<{
+  [Member in keyof DocxEditorRef]: DocxEditorRef[Member] extends (...args: never[]) => infer Result ? Result : never;
+}>;
+
+export const DOCX_REF_REPLICA_LOADING_MUTATIONS: ReadonlySet<keyof DocxEditorRef> = new Set([
+  'proposeChange', 'applyFormatting', 'setParagraphStyle', 'insertBreak', 'addComment',
+]);
+
 /**
- * Thrown by a synchronous editor ref member that needs the document on the main thread while a
- * read-only `experimentalWorkerOpen` editor still holds it, with host proposals, in its worker. The
- * document starts loading; await `flushPendingInput()` (or the member's async counterpart) and call
- * it again.
+ * Thrown by synchronous mutations proposeChange, applyFormatting, setParagraphStyle, insertBreak
+ * and addComment while the editor's main-thread copy is loading. Await flushPendingInput() and
+ * call it again, or use the member's async counterpart.
  */
 export class DocxReplicaNotReadyError extends Error {
   constructor(readonly member: string) {
+    const twin = member in DOCX_REF_ASYNC_TWINS
+      ? DOCX_REF_ASYNC_TWINS[member as keyof typeof DOCX_REF_ASYNC_TWINS]
+      : undefined;
     super(
       `${member} needs the document on the main thread, which is still loading; ` +
-        'await flushPendingInput() and call it again'
+        'await flushPendingInput() and call it again' +
+        (twin ? `, or use ${typeof twin === 'string' ? twin : twin.join(' or ')}` : '')
     );
     this.name = 'DocxReplicaNotReadyError';
   }
@@ -272,6 +303,7 @@ const WORKER_PROPOSAL_ACCESS: ReadonlySet<keyof DocxEditorRef> = new Set([
 function gateReplicaAccess(
   api: DocxEditorRef,
   pagedEditorRef: React.RefObject<PagedEditorRef | null>,
+  hostEditorRef: React.RefObject<PagedEditorRef | null>,
   enabled: boolean,
   viewer: () => boolean
 ): DocxEditorRef {
@@ -283,18 +315,35 @@ function gateReplicaAccess(
     if ((access !== 'await' && access !== 'sync') || typeof call !== 'function') continue;
     Object.defineProperty(gated, key, {
       value: (...args: unknown[]) => {
-        const session = pagedEditorRef.current?.getYrsSession();
+        const editor = DOCX_REF_REPLICA_LOADING_MUTATIONS.has(key) ? hostEditorRef.current : pagedEditorRef.current;
+        const session = editor?.getYrsSession();
         if (viewer() || (session && workerOpenDocumentHeld(session))) {
           return Reflect.apply(call, api, args);
         }
         if (session) {
+          if ((key === 'proposeChanges' || key === 'setProposalStates' || key === 'withdrawProposals') &&
+            editorWorkerProposalActivationAvailable(session)) return Reflect.apply(call, api, args);
           if (key === 'exportStructuredWithPages' && workerOpenExport(session)) {
             return Reflect.apply(call, api, args);
           }
-          if (WORKER_PROPOSAL_ACCESS.has(key) && workerProposalAuthority(session)) {
+          if (
+            (key === 'proposeChanges' || key === 'setProposalStates' || key === 'withdrawProposals' || key === 'getProposals')
+              ? workerProposalRoundAuthority(session)
+              : WORKER_PROPOSAL_ACCESS.has(key) && workerProposalAuthority(session)
+          ) {
             return Reflect.apply(call, api, args);
           }
           if (access === 'sync') {
+            if (!isWorkerViewer(editor) && workerOpenReplicaPending(session)) {
+              if (DOCX_REF_REPLICA_LOADING_MUTATIONS.has(key)) {
+                throw new DocxReplicaNotReadyError(key);
+              }
+              if (key in DOCX_REF_REPLICA_LOADING_ANSWERS) {
+                const answer = DOCX_REF_REPLICA_LOADING_ANSWERS[key as keyof typeof DOCX_REF_REPLICA_LOADING_ANSWERS];
+                return Array.isArray(answer) ? answer.slice() : answer;
+              }
+              return Reflect.apply(call, api, args);
+            }
             // Proposals only the worker holds cannot be rebuilt here: the replica takes them over.
             if (workerProposalAuthority(session)?.holdsWorkerState()) {
               void requestWorkerOpenReplica(session)?.catch(() => {});
@@ -302,6 +351,7 @@ function gateReplicaAccess(
             }
             ensureWorkerOpenReplica(session, key);
           } else {
+            if (key === 'flushPendingInput') requestWorkerOpenReplicaReadiness(session);
             const ready = awaitWorkerOpenReplica(session);
             if (ready) {
               const timeoutMs =
@@ -377,7 +427,7 @@ function storyOffset(session: YrsSession, loc: YrsLoc): number {
 async function exportWithPages(
   pagedEditorRef: React.RefObject<PagedEditorRef | null>,
   options: DocxPageExportOptions,
-  experimentalWorkerOpen = false
+  experimentalWorkerOpen: boolean
 ): Promise<DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>> {
   const { session } = await flushedSession(pagedEditorRef, experimentalWorkerOpen);
   const editor = (): PagedEditorRef => {
@@ -435,7 +485,7 @@ async function exportWithPagesInWorker(
   authority: Pick<WorkerProposalAuthority, 'exportStructuredWithPages'>,
   options: DocxPageExportOptions,
   settledDisplayList: ((relayout: null, timeoutMs: number | null, scope?: 'document' | 'window') => Promise<DisplayList>) | undefined,
-  experimentalWorkerOpen = false
+  experimentalWorkerOpen: boolean
 ): Promise<DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>> {
   const editor = (): PagedEditorRef => {
     const current = pagedEditorRef.current;
@@ -656,12 +706,40 @@ export function useDocxEditorRefApi({
         : workerProposalAuthority(session)
       : null;
   };
-  /** A proposal call on the worker's registry while it holds them, else on the main session. */
+  const roundAuthority = () => {
+    const session = pagedEditorRef.current?.getYrsSession();
+    return experimentalWorkerOpen && session ? workerProposalRoundAuthority(session) : null;
+  };
+  const roundAdmission = (mutation: boolean) => {
+    const session = pagedEditorRef.current?.getYrsSession();
+    const validate = () => {
+      if (!session || pagedEditorRef.current?.getYrsSession() !== session) {
+        throw new Error('The document changed while applying proposals');
+      }
+      if (mutation && !hostProposalsAllowed()) throw new ProposalAdmissionRefusal({
+        ok: false, version: session.version(),
+        failure: { code: 'read-only', message: 'The editor is read-only' },
+      });
+    };
+    return {
+      validate,
+      flush: async () => {
+        validate();
+        if (session && !workerOpenDocumentHeld(session) && workerOpenReplicaReady(session)) {
+          const flushed = await flushEditorInput(pagedEditorRef, experimentalWorkerOpen);
+          if (!flushed.ok) throw flushed.error;
+        }
+        validate();
+      },
+    };
+  };
+  /** Executes a proposal round on the session's authority. */
   const routedProposalCall = <R extends { expectVersion: string }>(
     request: R,
     onWorker: (
       authority: WorkerProposalAuthority,
-      main: (request: R) => Promise<DocxProposalResult>
+      main: (request: R) => Promise<DocxProposalResult>,
+      admission?: ReturnType<typeof roundAdmission>
     ) => Promise<DocxProposalResult>,
     call: (session: YrsSession, request: R) => DocxProposalResult
   ): Promise<DocxProposalResult> => {
@@ -675,16 +753,32 @@ export function useDocxEditorRefApi({
         experimentalWorkerOpen
       );
     };
-    const authority = proposalAuthority();
-    if (!authority) return main(request);
-    if (!hostProposalsAllowed()) {
-      return Promise.resolve({
-        ok: false,
-        version: pagedEditorRef.current!.getYrsSession()!.version(),
-        failure: { code: 'read-only', message: 'The editor is read-only' },
+    const session = pagedEditorRef.current?.getYrsSession();
+    const execute = (authority: WorkerProposalAuthority | null): Promise<DocxProposalResult> => {
+      if (!authority) return main(request);
+      if (!hostProposalsAllowed()) {
+        return Promise.resolve({
+          ok: false,
+          version: pagedEditorRef.current!.getYrsSession()!.version(),
+          failure: { code: 'read-only', message: 'The editor is read-only' },
+        });
+      }
+      if (!session || !hasEditorWorkerProposalRounds(session)) return onWorker(authority, main);
+      return onWorker(authority, main, roundAdmission(true)).catch((error: unknown) => {
+        if (error instanceof ProposalAdmissionRefusal) return error.result;
+        throw error;
+      });
+    };
+    const authority = roundAuthority();
+    if (authority) return execute(authority);
+    if (hostProposalsAllowed() && experimentalWorkerOpen && session && !workerOpenDocumentHeld(session) &&
+      editorWorkerProposalActivationAvailable(session)) {
+      return activateEditorWorkerProposalRounds(session, () => !workerOpenDocumentHeld(session) && hostProposalsAllowed()).then((activated) => {
+        if (pagedEditorRef.current?.getYrsSession() !== session) throw new Error('The document changed while applying proposals');
+        return execute(activated);
       });
     }
-    return onWorker(authority, main);
+    return main(request);
   };
   const createApi = (): DocxEditorRef => {
     const held = () => {
@@ -790,21 +884,23 @@ export function useDocxEditorRefApi({
       },
 
       proposeChanges: (request) =>
-        routedProposalCall(request, (authority, main) => authority.propose(request, main), (session, input) =>
+        routedProposalCall(request, (authority, main, admission) => authority.propose(request, main, admission), (session, input) =>
           session.proposeChanges(input)
         ),
       setProposalStates: (request) =>
-        routedProposalCall(request, (authority, main) => authority.setStates(request, main), (session, input) =>
+        routedProposalCall(request, (authority, main, admission) => authority.setStates(request, main, admission), (session, input) =>
           session.setProposalStates(input)
         ),
       withdrawProposals: (request) =>
-        routedProposalCall(request, (authority, main) => authority.withdraw(request, main), (session, input) =>
+        routedProposalCall(request, (authority, main, admission) => authority.withdraw(request, main, admission), (session, input) =>
           session.withdrawProposals(input)
         ),
       getProposals: () => {
         const main = async () =>
           (await mainSession()).session.getProposals();
-        return proposalAuthority()?.getProposals(main) ?? main();
+        const session = pagedEditorRef.current?.getYrsSession();
+        if (!session || !hasEditorWorkerProposalRounds(session)) return proposalAuthority()?.getProposals(main) ?? main();
+        return roundAuthority()?.getProposals(main, roundAdmission(false)) ?? main();
       },
 
       exportStructuredWithPages: (options) => {
@@ -1132,7 +1228,7 @@ export function useDocxEditorRefApi({
       },
       ...hostSearch,
     };
-    const api = gateReplicaAccess(direct, pagedEditorRef, experimentalWorkerOpen, refusing);
+    const api = gateReplicaAccess(direct, pagedEditorRef, hostEditorRef, experimentalWorkerOpen, refusing);
     const editRefusal = (request: Parameters<DocxEditorRef['applyEdits']>[0]) => {
       const session = pagedEditorRef.current?.getYrsSession();
       return session ? modeRefusal(session, modeRef.current, request) : null;

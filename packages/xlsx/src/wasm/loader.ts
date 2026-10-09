@@ -13,6 +13,7 @@ import initWasmModule, {
   renderXlsxMarkdownJson,
 } from './generated/xlsx_wasm.js';
 import type { InitInput } from './generated/xlsx_wasm.js';
+import * as xlsxWasm from './generated/xlsx_wasm.js';
 import { wasmAssetUrl } from './asset';
 import type { CollaborationReplica, CollaborationUpdateOrigin } from '../collaboration/types';
 import type { ChartRegion, DisplayList, Rect } from '../display-list/types';
@@ -339,6 +340,35 @@ export class StaleProposalError extends Error {
   }
 }
 
+/** A display-list viewport exceeds the counted cell limit. */
+export class DisplayTooLargeError extends Error {
+  readonly code = 'displayTooLarge';
+  constructor(readonly cells: number, readonly maxCells: number) {
+    super(`requested viewport spans ${cells} cells, exceeds the ${maxCells}-cell display-list cap`);
+    this.name = 'DisplayTooLargeError';
+  }
+}
+
+function displayErrorFrom(message: string): DisplayTooLargeError | null {
+  if (!message.startsWith('{')) return null;
+  try {
+    const parsed = JSON.parse(message) as {
+      code?: unknown;
+      cells?: unknown;
+      maxCells?: unknown;
+    };
+    if (
+      parsed.code !== 'displayTooLarge' ||
+      typeof parsed.cells !== 'number' || !Number.isSafeInteger(parsed.cells) ||
+      typeof parsed.maxCells !== 'number' || !Number.isSafeInteger(parsed.maxCells) ||
+      parsed.maxCells <= 0 || parsed.cells <= parsed.maxCells
+    ) return null;
+    return new DisplayTooLargeError(parsed.cells, parsed.maxCells);
+  } catch {
+    return null;
+  }
+}
+
 // the wasm reports a stale accept as a JSON error naming each drifted cell.
 function staleErrorFrom(message: string): StaleProposalError | null {
   if (!message.startsWith('{')) return null;
@@ -378,6 +408,7 @@ export interface WorkbookHandle extends CollaborationReplica {
   /** Metadata for `sheet`, with that index in `activeSheet`; leaves the workbook unchanged. */
   sheetInfoFor(sheet: number): SheetInfo;
   calculationStatus(): CalculationStatus;
+  /** Clamps tracks to the grid; throws {@link DisplayTooLargeError} above {@link getDisplayListCellLimit}. */
   displayList(viewport: Viewport): DisplayList;
   /** `displayList` with build and encode time measured inside the core. */
   displayListProfiled(viewport: Viewport): ProfiledDisplayList;
@@ -542,7 +573,14 @@ function requireInitialized(): void {
 // wasm rejects throw strings; normalize them (and anything else) to Error.
 function toError(e: unknown): Error {
   if (e instanceof Error) return e;
-  return new Error(typeof e === 'string' ? e : String(e));
+  const message = typeof e === 'string' ? e : String(e);
+  return displayErrorFrom(message) ?? new Error(message);
+}
+
+/** Maximum counted cells per frame, including boundary and frozen tracks; call after `initWasm`. */
+export function getDisplayListCellLimit(): number {
+  requireInitialized();
+  return xlsxWasm.displayListCellLimit();
 }
 
 /**
@@ -578,6 +616,83 @@ export function openWorkbook(
   bytes: Uint8Array,
   options: OpenWorkbookOptions = {}
 ): WorkbookHandle {
+  return openWorkbookInternal(bytes, options);
+}
+
+const peerHydrationReaders = new WeakMap<WorkbookHandle, () => string>();
+const peerVersionAdopters = new WeakMap<WorkbookHandle, (version: string) => void>();
+const peerSnapshotAccess = new WeakMap<WorkbookHandle, {
+  begin(records: number, bytes: number): void;
+  next(): Uint8Array | undefined;
+  end(): void;
+}>();
+
+export function workbookPeerSnapshot(handle: WorkbookHandle) {
+  const snapshot = peerSnapshotAccess.get(handle);
+  if (!snapshot) throw new TypeError('Workbook does not support peer snapshots');
+  return snapshot;
+}
+
+type SnapshotBuilder = {
+  push(chunk: Uint8Array): void;
+  advance(records: number, bytes: number): boolean;
+  finish(): XlsxDocument;
+  free(): void;
+};
+
+export function createWorkbookSnapshotBuilder(options: OpenWorkbookOptions) {
+  requireInitialized();
+  const Constructor = (xlsxWasm as unknown as {
+    XlsxSnapshotBuilder?: new () => SnapshotBuilder;
+  }).XlsxSnapshotBuilder;
+  if (!Constructor) throw new Error('Workbook wasm does not support peer snapshots');
+  let builder: SnapshotBuilder | undefined = new Constructor();
+  function active(): SnapshotBuilder {
+    if (!builder) throw new Error('Workbook snapshot builder is disposed');
+    return builder;
+  }
+  return {
+    push(chunk: Uint8Array): void {
+      try { active().push(chunk); } catch (error) { throw toError(error); }
+    },
+    advance(records: number, bytes: number): boolean {
+      try { return active().advance(records, bytes); } catch (error) { throw toError(error); }
+    },
+    finish(): WorkbookHandle {
+      const finishing = active();
+      builder = undefined;
+      try { return wrapWorkbookDocument(finishing.finish(), options, true); }
+      catch (error) { throw toError(error); }
+    },
+    dispose(): void {
+      const disposing = builder;
+      builder = undefined;
+      disposing?.free();
+    },
+  };
+}
+
+export function workbookPeerHydration(handle: WorkbookHandle): string {
+  const read = peerHydrationReaders.get(handle);
+  if (!read) throw new TypeError('Workbook does not support peer hydration');
+  return read();
+}
+
+export function adoptWorkbookPeerVersion(handle: WorkbookHandle, version: string): void {
+  const adopt = peerVersionAdopters.get(handle);
+  if (!adopt) throw new TypeError('Workbook does not support peer version adoption');
+  adopt(version);
+}
+
+export function openWorkbookPeer(
+  bytes: Uint8Array, options: OpenWorkbookOptions, hydration: string
+): WorkbookHandle {
+  return openWorkbookInternal(bytes, options, hydration);
+}
+
+function openWorkbookInternal(
+  bytes: Uint8Array, options: OpenWorkbookOptions, hydration?: string
+): WorkbookHandle {
   if (options.calculation !== undefined) {
     validateCalculationContext(options.calculation);
     if (options.collaborative === true) {
@@ -588,7 +703,9 @@ export function openWorkbook(
   const collaborativeClientId = resolveCollaborativeClientId(options);
   let doc: XlsxDocument;
   try {
-    if (options.calculation !== undefined) {
+    if (hydration !== undefined) {
+      doc = (XlsxDocument as PeerDocumentConstructor).openWithPeerHydrationJson(bytes, hydration);
+    } else if (options.calculation !== undefined) {
       doc = (XlsxDocument as CalculationDocumentConstructor).openWithCalculationJson(
         bytes, JSON.stringify(options.calculation)
       );
@@ -601,11 +718,19 @@ export function openWorkbook(
     throw toError(e);
   }
 
+  return wrapWorkbookDocument(doc, options, hydration !== undefined);
+}
+
+function wrapWorkbookDocument(
+  doc: XlsxDocument, options: OpenWorkbookOptions, hydrated: boolean
+): WorkbookHandle {
+  const collaborativeClientId = resolveCollaborativeClientId(options);
   const listeners = new Map<number, WorkbookUpdateListener>();
   const pendingUpdates: Array<{ update: Uint8Array; origin: WorkbookUpdateOrigin }> = [];
   let nextListenerId = 0;
   let disposed = false;
-  let hasCalculationContext = options.calculation !== undefined;
+  let hasCalculationContext = options.calculation !== undefined ||
+    (hydrated && collaborativeClientId === undefined);
   let observerInstalled = false;
   let wasmCallDepth = 0;
   let flushingUpdates = false;
@@ -1017,8 +1142,30 @@ export function openWorkbook(
     },
   };
   displayListJsonReaders.set(handle, (viewport, sheet) => wasmCall(() => displayListJson(viewport, sheet)));
+  peerHydrationReaders.set(handle, () => wasmCall(() => (doc as PeerDocument).peerHydrationJson()));
+  peerVersionAdopters.set(handle, (version) => wasmCall(() => (doc as PeerDocument).adoptPeerVersion(version)));
+  peerSnapshotAccess.set(handle, {
+    begin: (records, bytes) => wasmCall(() => (doc as SnapshotDocument).beginPeerSnapshot(records, bytes)),
+    next: () => wasmCall(() => (doc as SnapshotDocument).nextPeerSnapshotChunk()),
+    end: () => wasmCall(() => (doc as SnapshotDocument).endPeerSnapshot()),
+  });
   return handle;
 }
+
+type SnapshotDocument = XlsxDocument & {
+  beginPeerSnapshot(records: number, bytes: number): void;
+  nextPeerSnapshotChunk(): Uint8Array | undefined;
+  endPeerSnapshot(): void;
+};
+
+type PeerDocument = XlsxDocument & {
+  peerHydrationJson(): string;
+  adoptPeerVersion(version: string): void;
+};
+
+type PeerDocumentConstructor = typeof XlsxDocument & {
+  openWithPeerHydrationJson(bytes: Uint8Array, hydration: string): PeerDocument;
+};
 
 type CalculationDocument = XlsxDocument & {
   setCalculationContextJson(context: string): void;

@@ -10,7 +10,7 @@ import { proposalProjectionStories } from '@betteroffice/docx/yrs';
 import type { PagedEditorRef } from './PagedEditor';
 import type { EditorMode } from './internals/editing-modes';
 import { awaitWorkerOpenReplica, workerOpenDocumentHeld } from './internals/workerOpenReplica';
-import { workerProposalAuthority } from './internals/workerProposalAuthority';
+import { handedOverRequest, workerProposalAuthority } from './internals/workerProposalAuthority';
 
 export type EditorFlush =
   | { ok: true; editor: PagedEditorRef; session: YrsSession }
@@ -165,7 +165,7 @@ export async function applyEditBatch<Refusal = never>(
   if (denied) return { result: denied };
   const refused = modeRefusal(session, mode(), request);
   if (refused) return { result: refused };
-  const result = commit(() => session.applyEdits(request));
+  const result = commit(() => session.applyEdits(handedOverRequest(session, request)));
   if (result.ok && result.applied) {
     try {
       flushed.editor.syncYrsInputState(true, result.changedStories, { inWorker: true });

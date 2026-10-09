@@ -173,6 +173,7 @@ export class EditSession {
      * Until the matching `end_shared_reads`, committed reads share story projections of each document state.
      */
     begin_shared_reads(): void;
+    bootstrap_peer(state: Uint8Array, metadata: Uint8Array, source?: Uint8Array | null): void;
     /**
      * Display-only input JSON in, one binary `FrameDelta` v1 out (exposed as
      * a transferable `Uint8Array`). `expected_frame_epoch` is the epoch of the
@@ -316,6 +317,10 @@ export class EditSession {
      */
     display_range_rects_json(from: number, to: number): string;
     /**
+     * @internal
+     */
+    display_range_rects_on_pages_json(from: number, to: number, first_page: number, last_page: number): string;
+    /**
      * Same rectangles as [`EditSession::display_range_rects_json`], scoped to
      * a region. `region` is `"body"`, `"header"`, `"footer"`, `"footnote"` or
      * `"endnote"`; `part_id` names one header/footer part (an empty string
@@ -348,6 +353,7 @@ export class EditSession {
      * state vector.
      */
     encode_diff(remote_state_vector: Uint8Array): Uint8Array;
+    encode_peer_metadata(): Uint8Array;
     /**
      * The full document state as one yrs v1 update. Hand it to
      * [`EditSession::load`] on a fresh replica to reproduce this document.
@@ -1420,6 +1426,16 @@ export function range_rects_by_handle(handle: number, from: number, to: number):
 export function range_rects_json(display_list: string, from: number, to: number): string;
 
 /**
+ * @internal
+ */
+export function range_rects_on_pages_by_handle(handle: number, from: number, to: number, first_page: number, last_page: number): string;
+
+/**
+ * @internal
+ */
+export function range_rects_on_pages_json(display_list: string, from: number, to: number, first_page: number, last_page: number): string;
+
+/**
  * wasm wrapper over [`session::range_rects_region_by_handle`]: region-aware
  * range rects against a stored display list. `region` is
  * `"body" | "header" | "footer" | "footnote" | "endnote"`; `part_id` scopes
@@ -1569,6 +1585,7 @@ export interface InitOutput {
     readonly editsession_begin_opening: (a: number, b: number, c: number) => void;
     readonly editsession_begin_region_layout: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_begin_shared_reads: (a: number) => void;
+    readonly editsession_bootstrap_peer: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
     readonly editsession_build_display_list_frame: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_build_display_list_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_build_display_pages_frame: (a: number, b: number, c: number, d: number) => [number, number, number, number];
@@ -1592,10 +1609,12 @@ export interface InitOutput {
     readonly editsession_direct_batches_applied: (a: number) => number;
     readonly editsession_display_hit_test_regions_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_display_range_rects_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_display_range_rects_on_pages_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_display_range_rects_region_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly editsession_display_vertical_move_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_drain_update_event: (a: number) => [number, number];
     readonly editsession_encode_diff: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_encode_peer_metadata: (a: number) => [number, number, number, number];
     readonly editsession_encode_state: (a: number) => [number, number];
     readonly editsession_encode_state_vector: (a: number) => [number, number];
     readonly editsession_encode_sticky_position: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
@@ -1756,6 +1775,8 @@ export interface InitOutput {
     readonly parse_relationships_xml: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly range_rects_by_handle: (a: number, b: number, c: number) => [number, number, number, number];
     readonly range_rects_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly range_rects_on_pages_by_handle: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly range_rects_on_pages_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly range_rects_region_by_handle: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly range_rects_region_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly register_measure_font: (a: number, b: number) => [number, number, number];

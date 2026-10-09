@@ -50,6 +50,8 @@ interface WorkerPass {
 interface HookProps {
   session: YrsSession;
   renderEnv?: YrsRenderEnv;
+  zoom?: number;
+  viewport?: HTMLDivElement;
 }
 
 const MEASUREMENT: ResidentMeasurementConfig = {
@@ -114,18 +116,18 @@ async function opened({
   const worker: WorkerPass[] = [];
   const errors: Error[] = [];
   const syncCoordinator = new LayoutSelectionGate();
-  const hook = renderHook(({ session, renderEnv }: HookProps) =>
+  const hook = renderHook(({ session, renderEnv, zoom = 1, viewport }: HookProps) =>
     useLayoutPipeline({
       document: null,
       session,
       experimentalWorkerOpen,
       renderEnv: renderEnv ?? ({} as YrsRenderEnv),
       pageGap: 24,
-      zoom: 1,
+      zoom,
       residentMeasurementConfig: () => (doc.fontsReady ? doc.measurement : null),
       deferLayoutPass: () => false,
       pagesContainerRef: { current: null },
-      viewportLayoutRef: { current: null },
+      viewportLayoutRef: { current: viewport ?? null },
       syncCoordinator,
       getScrollContainer: () => null,
       onError: (error) => errors.push(error),
@@ -221,6 +223,129 @@ test.each([false, true])('cached page totals are requested only with worker-open
   }
 });
 
+test('an identical pass replaces provisional pages while the replica is hydrating', async () => {
+  const h = await opened({ experimentalWorkerOpen: true, pendingReplica: true, ownsDocument: true });
+  h.replica!.start();
+  expect(h.replica?.pending).toBe(true);
+  expect(h.replica?.started).toBe(true);
+  h.doc.version = 2;
+  act(() => h.hook.result.current.scheduleLayout('remote'));
+  await h.frame();
+  let finish!: (computation: LayoutComputation | null) => void;
+  const complete = new Promise<LayoutComputation | null>((resolve) => { finish = resolve; });
+  const firstPages = { pages: [] } as unknown as Layout;
+  await h.answer(1, { layout: firstPages, notesConverged: true, complete });
+  expect(h.hook.result.current.layout).toBe(firstPages);
+
+  act(() => h.hook.result.current.scheduleLayout('remote'));
+  await h.frame();
+  expect(h.worker.map((pass) => pass.at)).toEqual([1, 2, 2]);
+  let finishRetry!: (computation: LayoutComputation | null) => void;
+  const retryComplete = new Promise<LayoutComputation | null>((resolve) => { finishRetry = resolve; });
+  const retryPages = { pages: [] } as unknown as Layout;
+  await h.answer(2, { layout: retryPages, notesConverged: true, complete: retryComplete });
+  await act(async () => finish({ layout: { pages: [] } as unknown as Layout, notesConverged: true }));
+  expect(h.hook.result.current.layout).toBe(retryPages);
+  const full = { pages: [] } as unknown as Layout;
+  await act(async () => finishRetry({ layout: full, notesConverged: true }));
+  expect(h.hook.result.current.layout).toBe(full);
+  expect(isLayoutQueued(h.session)).toBe(false);
+  act(() => h.hook.result.current.runLayoutPipeline());
+  await h.frame();
+  expect(h.worker).toHaveLength(3);
+  expect(h.hook.result.current.layout).toBe(full);
+  expect(h.doc.laidOutHere).toEqual([]);
+  expect(h.ensureReplica).not.toHaveBeenCalled();
+  expect(h.errors).toEqual([]);
+});
+
+test('an identical pass retries a null worker reply while the replica is hydrating', async () => {
+  const h = await opened({ experimentalWorkerOpen: true, pendingReplica: true, ownsDocument: true });
+  act(() => h.hook.result.current.runLayoutPipeline());
+  expect(h.worker).toHaveLength(2);
+  h.replica!.start();
+  expect(h.replica?.pending).toBe(true);
+  expect(h.replica?.started).toBe(true);
+  act(() => h.hook.result.current.runLayoutPipeline());
+  expect(isLayoutQueued(h.session)).toBe(true);
+  await act(async () => h.worker[1]!.fail());
+  expect(h.doc.laidOutHere).toEqual([]);
+  await h.frame();
+  expect(h.worker.map((pass) => pass.at)).toEqual([1, 1, 1]);
+  await h.answer(2);
+  expect(isLayoutQueued(h.session)).toBe(false);
+  expect(h.doc.laidOutHere).toEqual([]);
+  expect(h.ensureReplica).not.toHaveBeenCalled();
+  expect(h.errors).toEqual([]);
+});
+
+test('worker ownership lost before preflight requires another layout after it recovers', async () => {
+  let recovering = false;
+  let recover = () => {};
+  const h = await opened({
+    experimentalWorkerOpen: true,
+    pendingReplica: true,
+    ownsDocument: true,
+    fontRequirementsInWorker: () => {
+      if (!recovering) return null;
+      recover();
+      return Promise.resolve('[]');
+    },
+  });
+  h.replica!.start();
+  h.doc.workerOwnsDocument = false;
+  recovering = true;
+  recover = () => { h.doc.workerOwnsDocument = true; };
+  act(() => h.hook.result.current.runLayoutPipeline());
+  await h.frame();
+  expect(h.doc.workerOwnsDocument).toBe(true);
+  expect(h.worker.map((pass) => pass.at)).toEqual([1, 1]);
+  await h.answer(1);
+  expect(isLayoutQueued(h.session)).toBe(false);
+  expect(h.doc.laidOutHere).toEqual([]);
+  expect(h.ensureReplica).not.toHaveBeenCalled();
+  expect(h.errors).toEqual([]);
+});
+
+test('a zoom change updates the viewport while the replica is hydrating', async () => {
+  const h = await opened({ experimentalWorkerOpen: true, pendingReplica: true, ownsDocument: true });
+  h.replica!.start();
+  const viewport = document.createElement('div');
+  h.hook.rerender({ session: h.session, zoom: 2, viewport });
+  act(() => h.hook.result.current.runLayoutPipeline());
+  await h.frame();
+  expect(h.worker).toHaveLength(2);
+  await h.answer(1);
+  expect(viewport.style.minHeight).not.toBe('');
+  expect(viewport.style.marginBottom).toBe(viewport.style.minHeight);
+  expect(isLayoutQueued(h.session)).toBe(false);
+  expect(h.doc.laidOutHere).toEqual([]);
+  expect(h.errors).toEqual([]);
+});
+
+test('a deferred host pass does not force a new session to hydrate its replica', async () => {
+  const h = await opened({ experimentalWorkerOpen: true, pendingReplica: true });
+  h.doc.fontsReady = false;
+  act(() => h.hook.result.current.runLayoutPipeline({ onHost: true }));
+  expect(h.ensureReplica).toHaveBeenCalledTimes(1);
+  const next = fakeDocument();
+  const replica = deferWorkerOpenReplica(next.session, () => new Promise(() => {}), () => {}, () => {});
+  const ensureReplica = spyOn(replica, 'ensure');
+  h.hook.rerender({ session: next.session });
+  h.doc.fontsReady = true;
+  act(() => h.hook.result.current.runLayoutPipeline());
+  await h.frame();
+  expect(ensureReplica).not.toHaveBeenCalled();
+  expect(replica.pending).toBe(true);
+  expect(replica.started).toBe(false);
+  expect(h.worker).toHaveLength(2);
+  await h.answer(1);
+  expect(h.hook.result.current.layout).not.toBeNull();
+  expect(isLayoutQueued(next.session)).toBe(false);
+  expect(next.doc.laidOutHere).toEqual([]);
+  expect(h.errors).toEqual([]);
+});
+
 test('a superseded null completion requests the worker while it holds proposals', async () => {
   const h = await opened({ experimentalWorkerOpen: true, pendingReplica: true });
   await holdProposals(h.session);
@@ -241,6 +366,31 @@ test('a superseded null completion requests the worker while it holds proposals'
   expect(isLayoutQueued(h.session)).toBe(false);
   expect(h.doc.laidOutHere).toEqual([]);
   expect(h.ensureReplica).not.toHaveBeenCalled();
+  expect(h.errors).toEqual([]);
+});
+
+test.each(['computation', 'completion'])('a viewer whose worker holds proposals queues a worker pass for every null %s', async (result) => {
+  const h = await opened({ experimentalWorkerOpen: true, ownsDocument: true });
+  await holdProposals(h.session);
+  act(() => h.hook.result.current.scheduleLayout('remote'));
+  await h.frame();
+  for (const index of [1, 2]) {
+    if (result === 'computation') {
+      await act(async () => h.worker[index]!.fail());
+    } else {
+      let finish!: (computation: LayoutComputation | null) => void;
+      const complete = new Promise<LayoutComputation | null>((resolve) => { finish = resolve; });
+      await h.answer(index, { layout: { pages: [] } as unknown as Layout, notesConverged: true, complete });
+      await act(async () => finish(null));
+    }
+    expect(isLayoutQueued(h.session)).toBe(true);
+    await h.frame();
+    expect(h.worker).toHaveLength(index + 2);
+  }
+  await h.answer(3);
+  expect(isLayoutQueued(h.session)).toBe(false);
+  expect(h.worker.map((pass) => pass.at)).toEqual([1, 1, 1, 1]);
+  expect(h.doc.laidOutHere).toEqual([]);
   expect(h.errors).toEqual([]);
 });
 
@@ -968,4 +1118,109 @@ test('a new session lays out while the replaced one still has a worker pass queu
   expect(worker).toHaveLength(3);
   expect(doc.laidOutHere).toEqual([]);
   expect(errors).toEqual([]);
+});
+
+test('ready editor layout settles with both registries even when proposal ids match', async () => {
+  const h = await opened({ experimentalWorkerOpen: true, ownsDocument: true });
+  const paragraph = { kind: 'session', sessionId: 'session', story: 'body', paraId: 'p1' } as const;
+  const local = {
+    version: '1', previewVersion: 1,
+    proposals: [{ id: 'same', paragraph, revisionIds: ['100:1'], state: 'rejected' as const, changed: true }],
+  };
+  const remote = {
+    version: 'worker-1', previewVersion: 1,
+    proposals: [{ id: 'same', paragraph, revisionIds: ['200:1'], state: 'accepted' as const, changed: true }],
+  };
+  Object.assign(h.session, {
+    getProposals: () => local, mirrorWorkerDocument: () => {},
+    encodeStateVector: () => new Uint8Array(), storyIds: () => ['body'],
+  });
+  const reply: ResidentProposalReply = {
+    mirror: {
+      version: remote.version,
+      proposals: { previewVersion: remote.previewVersion, entries: remote.proposals.map((record) => ({
+        record, key: record.id, suggest: { author: 'Host', date: '2026-10-05T00:00:00Z' },
+      })) },
+    },
+    result: { ok: true, snapshot: remote },
+    changedStories: [], updates: [], stateVector: new Uint8Array(),
+    geometry: { version: remote.version, previewVersion: 1, proposals: proposalSetIdentity(remote), targets: {}, hidden: [] },
+  };
+  const authority = registerWorkerProposalAuthority(h.session, {
+    proposal: async () => reply,
+    documentRead: async () => { throw new Error('unexpected document read'); },
+    handOver: async () => { throw new Error('unexpected snapshot'); },
+    syncUpdate: async () => ({ version: remote.version, stateVector: new Uint8Array(), repair: null }),
+    integrateProposalUpdate: () => {},
+  }, {
+    editorPeer: true, current: () => true, laidOut: async () => {}, relayout: () => {},
+    adopted: () => {}, contentChanged: () => {},
+  });
+  await authority.initialize();
+  expect(await authority.setStates({ expectVersion: h.session.version(), expectPreviewVersion: 1, changes: [] },
+    async () => { throw new Error('unexpected peer decision'); })).toMatchObject({ ok: true });
+  act(() => h.hook.result.current.runLayoutPipeline());
+  const preview = { '100:1': 'rejected', '200:1': 'accepted' };
+  expect(JSON.parse(h.worker[1]!.request).renderEnv.revisionPreview).toEqual(preview);
+  expect(Object.keys(authority.revisionPreview()!)).toHaveLength(2);
+  expect(h.session.getProposals().proposals).toEqual(local.proposals);
+  expect(authority.snapshot()!.proposals).toEqual(remote.proposals);
+  await h.answer(1);
+  expect(isLayoutQueued(h.session)).toBe(false);
+  expect(h.shown()).toBe(h.session.version());
+  expect(h.errors).toEqual([]);
+});
+
+test('replacement layout retains both registry decisions while initialization is pending', async () => {
+  const h = await opened({ experimentalWorkerOpen: true, ownsDocument: true });
+  const paragraph = { kind: 'session', sessionId: 'session', story: 'body', paraId: 'p1' } as const;
+  const local = {
+    version: '1', previewVersion: 1,
+    proposals: [{ id: 'same', paragraph, revisionIds: ['100:1'], state: 'rejected' as const, changed: true }],
+  };
+  const remote = {
+    version: 'worker-1', previewVersion: 1,
+    proposals: [{ id: 'same', paragraph, revisionIds: ['200:1'], state: 'accepted' as const, changed: true }],
+  };
+  Object.assign(h.session, {
+    getProposals: () => local, mirrorWorkerDocument: () => {},
+    encodeStateVector: () => new Uint8Array(), storyIds: () => ['body'],
+  });
+  const reply: ResidentProposalReply = {
+    mirror: {
+      version: remote.version,
+      proposals: { previewVersion: remote.previewVersion, entries: remote.proposals.map((record) => ({
+        record, key: record.id, suggest: { author: 'Host', date: '2026-10-05T00:00:00Z' },
+      })) },
+    },
+    result: { ok: true, snapshot: remote },
+    changedStories: [], updates: [], stateVector: new Uint8Array(),
+    geometry: { version: remote.version, previewVersion: 1, proposals: proposalSetIdentity(remote), targets: {}, hidden: [] },
+  };
+  const authority = registerWorkerProposalAuthority(h.session, {
+    proposal: async () => reply,
+    documentRead: async () => { throw new Error('unexpected document read'); },
+    handOver: async () => { throw new Error('unexpected snapshot'); },
+    syncUpdate: async () => ({ version: remote.version, stateVector: new Uint8Array(), repair: null }),
+    integrateProposalUpdate: () => {},
+  }, {
+    editorPeer: true, current: () => true, laidOut: async () => {}, relayout: () => {},
+    adopted: () => {}, contentChanged: () => {},
+  });
+  await authority.initialize();
+  expect(await authority.setStates({ expectVersion: h.session.version(), expectPreviewVersion: 1, changes: [] },
+    async () => { throw new Error('unexpected peer decision'); })).toMatchObject({ ok: true });
+  authority.restart();
+  expect(authority.initialized).toBe(false);
+  act(() => h.hook.result.current.runLayoutPipeline());
+  const preview = { '100:1': 'rejected', '200:1': 'accepted' };
+  expect(JSON.parse(h.worker[1]!.request).renderEnv.revisionPreview).toEqual(preview);
+  expect(Object.keys(authority.revisionPreview()!)).toHaveLength(2);
+  expect(h.session.getProposals().proposals).toEqual(local.proposals);
+  expect(authority.snapshot()!.proposals).toEqual(remote.proposals);
+  await h.answer(1);
+  expect(authority.initialized).toBe(false);
+  expect(isLayoutQueued(h.session)).toBe(false);
+  expect(h.shown()).toBe(h.session.version());
+  expect(h.errors).toEqual([]);
 });

@@ -13,8 +13,14 @@ import {
   type YrsSession,
 } from '@betteroffice/docx/yrs';
 import type { PluginInvocation } from '../../../../shared/plugin-host/runtime';
-import { UNAVAILABLE_DOCX_COMMANDS } from '../commands/createDocxCommandStore';
+import {
+  createDocxCommandController,
+  DocxCommandAdmissionError,
+  UNAVAILABLE_DOCX_COMMANDS,
+} from '../commands/createDocxCommandStore';
+import { testBinding } from '../commands/testing';
 import * as editorBatches from '../components/DocxEditor/editorBatches';
+import { DocxWorkerError } from '../components/DocxEditor/internals/docxWorkerError';
 import type { EditorMode } from '../components/DocxEditor/internals/editing-modes';
 import { stampRevisionPreviewKey, stampSourceVersion } from '../components/DocxEditor/internals/layoutProvenance';
 import * as workerOpenReplica from '../components/DocxEditor/internals/workerOpenReplica';
@@ -267,7 +273,9 @@ function routeWorker(env: Awaited<ReturnType<typeof setup>>) {
   const findText = spyOn(authority, 'findText');
   const flush = spyOn(editorBatches, 'flushEditorInput');
   const replica = spyOn(workerOpenReplica, 'requestWorkerOpenReplica');
+  const ready = spyOn(workerOpenReplica, 'awaitWorkerOpenReplica');
   restoreWorkers.push(() => {
+    ready.mockRestore();
     replica.mockRestore();
     flush.mockRestore();
     read.mockRestore();
@@ -275,7 +283,119 @@ function routeWorker(env: Awaited<ReturnType<typeof setup>>) {
     navigation.mockRestore();
     routing.mockRestore();
   });
-  return { authority, navigation, read, findText, flush, replica, routing };
+  return { authority, navigation, read, findText, flush, replica, routing, ready };
+}
+
+function pendingPluginReplica(env: Awaited<ReturnType<typeof setup>>) {
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const hydrate = mock(async () => {
+    await held;
+    return () => {};
+  });
+  const fallback = mock(() => { throw new Error('unexpected replica fallback'); });
+  const replica = workerOpenReplica.deferWorkerOpenReplica(env.session, hydrate, fallback, () => {});
+  const start = spyOn(replica, 'start');
+  const ensure = spyOn(replica, 'ensure');
+  const requestReady = spyOn(replica, 'requestReady');
+  restoreWorkers.push(() => {
+    start.mockRestore();
+    ensure.mockRestore();
+    requestReady.mockRestore();
+    replica.cancel();
+  });
+  return { replica, hydrate, fallback, release, start, ensure, requestReady };
+}
+
+async function expectPluginPending(result: Promise<unknown>, pending: ReturnType<typeof pendingPluginReplica>) {
+  let settled = false;
+  void result.then(() => { settled = true; }, () => { settled = true; });
+  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve();
+  expect(settled).toBe(false);
+  expect(pending.replica.pending).toBe(true);
+  expect(pending.replica.started).toBe(false);
+  expect(pending.start).not.toHaveBeenCalled();
+  expect(pending.ensure).not.toHaveBeenCalled();
+  expect(pending.requestReady).not.toHaveBeenCalled();
+}
+
+async function expectPluginPeerOutcome(
+  env: Awaited<ReturnType<typeof setup>>,
+  worker: ReturnType<typeof routeWorker>,
+  calls: () => readonly Promise<unknown>[],
+  complete: (values: readonly unknown[]) => void,
+  expectNoEffects: () => void = () => {}
+) {
+  const clock = navigationClock();
+  for (const openFails of [true, false]) {
+    const pending = pendingPluginReplica(env);
+    const readinessCalls = worker.ready.mock.calls.length;
+    const results = calls();
+    const outcomes = results.map((result) => {
+      const outcome = { settled: false, value: undefined as unknown };
+      void result.then(
+        (value) => { outcome.settled = true; outcome.value = value; },
+        (error: unknown) => { outcome.settled = true; outcome.value = error; }
+      );
+      return outcome;
+    });
+    for (const result of results) await expectPluginPending(result, pending);
+    expect(worker.ready).toHaveBeenCalledTimes(readinessCalls + results.length);
+    expect(worker.ready).toHaveBeenCalledWith(env.session);
+    expect(pending.hydrate).not.toHaveBeenCalled();
+    expect(pending.fallback).not.toHaveBeenCalled();
+    expect(worker.replica).not.toHaveBeenCalled();
+    clock.advance(29_999);
+    for (const result of results) await expectPluginPending(result, pending);
+    for (const outcome of outcomes) expect(outcome.settled).toBe(false);
+    if (!openFails) {
+      clock.advance(60_002);
+      for (const result of results) await expectPluginPending(result, pending);
+      for (const outcome of outcomes) expect(outcome.settled).toBe(false);
+      expect(pending.hydrate).not.toHaveBeenCalled();
+      expect(pending.fallback).not.toHaveBeenCalled();
+      expect(worker.replica).not.toHaveBeenCalled();
+      expect(worker.ready).toHaveBeenCalledTimes(readinessCalls + results.length);
+      expectNoEffects();
+      pending.start();
+      for (const outcome of outcomes) expect(outcome.settled).toBe(false);
+      expect(pending.replica.pending).toBe(true);
+      expect(pending.hydrate).toHaveBeenCalledTimes(1);
+      pending.release();
+      for (let turn = 0; turn < 12; turn += 1) await Promise.resolve();
+      for (const outcome of outcomes) expect(outcome.settled).toBe(true);
+      expect(pending.replica.pending).toBe(false);
+      expect(pending.start).toHaveBeenCalledTimes(1);
+      expect(pending.hydrate).toHaveBeenCalledTimes(1);
+      expect(pending.ensure).not.toHaveBeenCalled();
+      expect(pending.requestReady).not.toHaveBeenCalled();
+      expect(pending.fallback).not.toHaveBeenCalled();
+      expect(worker.replica).not.toHaveBeenCalled();
+      expect(worker.ready).toHaveBeenCalledTimes(readinessCalls + results.length);
+      complete(outcomes.map((outcome) => outcome.value));
+      continue;
+    }
+    if (openFails) {
+      workerOpenReplica.failWorkerOpenReplica(
+        env.session,
+        new DocxWorkerError('open', new Error('The editor peer could not open'))
+      );
+    }
+    clock.advance(2);
+    for (let turn = 0; turn < 12; turn += 1) await Promise.resolve();
+    expect(pending.start).not.toHaveBeenCalled();
+    expect(pending.ensure).not.toHaveBeenCalled();
+    expect(pending.requestReady).not.toHaveBeenCalled();
+    expect(pending.hydrate).not.toHaveBeenCalled();
+    expect(pending.fallback).not.toHaveBeenCalled();
+    expect(worker.replica).not.toHaveBeenCalled();
+    expect(worker.ready).toHaveBeenCalledTimes(readinessCalls + results.length);
+    for (const outcome of outcomes) {
+      expect(outcome.settled).toBe(true);
+      expect(outcome.value).toMatchObject({ ok: false, failure: { code: 'input-failed' } });
+    }
+    expectNoEffects();
+  }
 }
 
 describe('plugin edit client', () => {
@@ -362,6 +482,124 @@ describe('plugin edit client', () => {
 });
 
 describe('plugin read and navigation clients', () => {
+  test('reads and versions waiting for the editor peer refuse with input-failed when the open fails and complete after the owner starts the peer, without starting it', async () => {
+    const env = await setup();
+    const worker = routeWorker(env);
+    worker.routing.mockReturnValue(null);
+    const flush = spyOn(env.editor, 'flushPendingInput').mockImplementation(async () => {
+      await workerOpenReplica.awaitWorkerOpenReplica(env.session);
+    });
+    restoreWorkers.push(() => flush.mockRestore());
+    await expectPluginPeerOutcome(env, worker, () => [
+      env.clients.read.version(),
+      env.clients.read.readParagraphs({ view: 'accepted' }),
+      env.clients.read.validateEdits(replace(env.session.version(), '00000001', 'Beta')),
+    ], (values) => {
+      expect(values[0]).toEqual({ ok: true, version: env.session.version() });
+      expect(values[1]).toEqual(env.session.readParagraphs({ view: 'accepted' }));
+      expect(values[1]).toMatchObject({ paragraphs: [
+        expect.objectContaining({ text: 'Alpha' }),
+        expect.objectContaining({ text: 'Tail' }),
+        { story: 'body', paraId: 'body:p2', text: '', atoms: [] },
+      ] });
+      expect(env.session.readParagraphs({ story: 'body:sdt0', view: 'accepted' })).toMatchObject({
+        ok: true, paragraphs: [expect.objectContaining({ text: 'Locked' })],
+      });
+      expect(values[2]).toEqual(env.session.validateEdits(replace(env.session.version(), '00000001', 'Beta')));
+      expect(values[2]).toMatchObject({ ok: true, wouldApply: true });
+    });
+  });
+
+  test('text search waiting for the editor peer refuses with input-failed when the open fails and completes after the owner starts the peer, without starting it', async () => {
+    const env = await setup();
+    const worker = routeWorker(env);
+    await expectPluginPeerOutcome(env, worker, () => [
+      env.clients.read.findText({
+        text: 'Tail', within: { kind: 'story', story: 'body' }, view: 'accepted',
+      }),
+    ], (values) => {
+      expect(values[0]).toEqual(env.session.findText({
+        text: 'Tail', within: { kind: 'story', story: 'body' }, view: 'accepted',
+      }));
+      expect(values[0]).toMatchObject({ ok: true, matches: [expect.objectContaining({ text: 'Tail' })] });
+      expect(worker.flush).toHaveBeenCalledTimes(1);
+      expect(env.events).toEqual(['flush']);
+    }, () => {
+      expect(worker.flush).not.toHaveBeenCalled();
+      expect(env.events).toEqual([]);
+    });
+  });
+
+  test('navigation with focus waiting for the editor peer refuses with input-failed when the open fails and completes after the owner starts the peer, without starting it', async () => {
+    const env = await setup();
+    const worker = routeWorker(env);
+    await expectPluginPeerOutcome(env, worker, () => [
+      env.clients.navigation.scrollToParagraph(
+        { story: 'body', paraId: '00000002' },
+        { expectVersion: env.session.version(), focus: true }
+      ),
+    ], (values) => {
+      expect(values).toEqual([{ ok: true }]);
+      expect(env.events).toEqual(['scroll:42', 'sync:false:*', 'focus']);
+      expect(env.session.selection()?.head).toMatchObject({ story: 'body', paraId: '00000002', offset: 0 });
+      expect(worker.flush).not.toHaveBeenCalled();
+    }, () => {
+      expect(worker.flush).not.toHaveBeenCalled();
+      expect(env.events).toEqual([]);
+    });
+  });
+
+  test('mutations and commands waiting for the editor peer refuse with input-failed when the open fails and complete after the owner starts the peer, without starting it', async () => {
+    const env = await setup();
+    const worker = routeWorker(env);
+    worker.routing.mockReturnValue(null);
+    const flush = spyOn(env.editor, 'flushPendingInput').mockImplementation(async () => {
+      await workerOpenReplica.awaitWorkerOpenReplica(env.session);
+    });
+    restoreWorkers.push(() => flush.mockRestore());
+    const binding = testBinding();
+    binding.state.admission = async () => {
+      const flushed = await editorBatches.flushEditorInput(env.pagedEditorRef);
+      if (!flushed.ok) throw new DocxCommandAdmissionError(flushed.code);
+    };
+    const controller = createDocxCommandController();
+    controller.attach(binding.binding);
+    const invocation: PluginInvocation<DocxPluginSnapshot> = {
+      pluginId: 'acme.review',
+      activation: {},
+      snapshot: {} as DocxPluginSnapshot,
+      signal: env.controller.signal,
+      lifetimeSignal: env.lifetimeController.signal,
+      state: () => null,
+      setState: () => false,
+      onCleanup: () => {},
+      run: async () => {},
+      commit: (write) => write(),
+      refusal: () => env.state.ended ?? (env.controller.signal.aborted ? 'aborted' : null),
+    };
+    const clients = createPluginClients(
+      invocation, env.access, () => env.state.grant, controller.store
+    );
+    const version = env.session.version();
+    const apply = spyOn(env.session, 'applyEdits');
+    restoreWorkers.push(() => apply.mockRestore());
+    await expectPluginPeerOutcome(env, worker, () => [
+      clients.edits!.applyEdits(replace(version, '00000001', 'Beta')),
+      clients.commands.execute('reviewNext', null),
+    ], (values) => {
+      expect(values[0]).toMatchObject({ ok: true, applied: true, changedStories: ['body'] });
+      expect(values[1]).toEqual({ ok: true, status: 'executed' });
+      expect(apply).toHaveBeenCalledTimes(1);
+      expect(binding.calls).toEqual([{ id: 'reviewNext', args: null, ordered: true }]);
+      expect(texts(env.session)[0]).toBe('Beta');
+      expect(env.session.version()).not.toBe(version);
+    }, () => {
+      expect(apply).not.toHaveBeenCalled();
+      expect(binding.calls).toEqual([]);
+      expect(env.session.version()).toBe(version);
+    });
+  });
+
   test('worker navigation waits for the current preview at the same document version', async () => {
     const env = await setup();
     const worker = routeWorker(env);
@@ -583,31 +821,41 @@ describe('plugin read and navigation clients', () => {
     expect(worker.replica).not.toHaveBeenCalled();
   });
 
-  test('worker navigation with focus waits for the replica and checks replacement', async () => {
+  test('worker navigation with focus waits without starting the replica and checks replacement', async () => {
     const env = await setup();
     const worker = routeWorker(env);
     const target = { story: 'body', paraId: '00000002' };
     const version = env.session.version();
-    let release!: () => void;
-    let requested!: () => void;
-    const ready = new Promise<void>((resolve) => (release = resolve));
-    const waiting = new Promise<void>((resolve) => (requested = resolve));
-    worker.replica.mockImplementation(() => {
-      requested();
-      return ready;
+    const pending = pendingPluginReplica(env);
+    let observed!: () => void;
+    const waiting = new Promise<void>((resolve) => (observed = resolve));
+    worker.ready.mockImplementation(() => {
+      observed();
+      return pending.replica.ready;
     });
     const scroll = env.clients.navigation.scrollToParagraph(target, {
       expectVersion: version,
       focus: true,
     });
     await waiting;
-    expect(worker.replica).toHaveBeenCalledWith(env.session);
+    expect(worker.ready).toHaveBeenCalledWith(env.session);
+    expect(worker.replica).not.toHaveBeenCalled();
+    expect(pending.replica.started).toBe(false);
+    expect(pending.hydrate).not.toHaveBeenCalled();
+    expect(pending.fallback).not.toHaveBeenCalled();
     expect(env.events).toEqual([]);
-    release();
+    await expectPluginPending(scroll, pending);
+    expect(env.session.selection()?.head).not.toEqual(expect.objectContaining(target));
+    pending.replica.start();
+    pending.release();
     expect(await scroll).toEqual({ ok: true });
+    expect(pending.replica.pending).toBe(false);
+    expect(pending.start).toHaveBeenCalledTimes(1);
     expect(env.events).toEqual(['scroll:42', 'sync:false:*', 'focus']);
     expect(env.session.selection()?.head).toMatchObject({ ...target, offset: 0 });
-    worker.replica.mockImplementation(async () => {
+    expect(pending.hydrate).toHaveBeenCalledTimes(1);
+    expect(pending.fallback).not.toHaveBeenCalled();
+    worker.ready.mockImplementation(async () => {
       env.pagedEditorRef.current = null;
     });
     expect(
@@ -621,6 +869,7 @@ describe('plugin read and navigation clients', () => {
     });
     expect(env.events).toEqual(['scroll:42', 'sync:false:*', 'focus']);
     expect(worker.flush).not.toHaveBeenCalled();
+    expect(worker.replica).not.toHaveBeenCalled();
   });
 
   test('viewer navigation with focus selects in the viewer input without the replica', async () => {
@@ -741,7 +990,7 @@ describe('plugin read and navigation clients', () => {
     expect(worker.replica).not.toHaveBeenCalled();
   });
 
-  test('editor worker reads skip flushing while text searches retain replica admission', async () => {
+  test('worker reads and versions skip flushing, while text searches wait without starting the replica', async () => {
     const env = await setup();
     const worker = routeWorker(env);
     expect(await env.clients.read.version()).toEqual({ ok: true, version: env.session.version() });
@@ -750,14 +999,33 @@ describe('plugin read and navigation clients', () => {
     expect(worker.read).toHaveBeenCalledTimes(1);
     expect(worker.flush).not.toHaveBeenCalled();
     expect(worker.replica).not.toHaveBeenCalled();
-    expect(
-      await env.clients.read.findText({
-        text: 'Tail',
-        within: { kind: 'story', story: 'body' },
-        view: 'accepted',
-      })
-    ).toMatchObject({ ok: true });
-    expect(worker.replica).toHaveBeenCalledWith(env.session);
+    const pending = pendingPluginReplica(env);
+    const found = env.clients.read.findText({
+      text: 'Tail',
+      within: { kind: 'story', story: 'body' },
+      view: 'accepted',
+    });
+    expect(worker.ready).toHaveBeenCalledWith(env.session);
+    await Promise.resolve();
+    expect(worker.replica).not.toHaveBeenCalled();
+    expect(worker.flush).not.toHaveBeenCalled();
+    expect(pending.replica.started).toBe(false);
+    expect(pending.hydrate).not.toHaveBeenCalled();
+    expect(pending.fallback).not.toHaveBeenCalled();
+    await expectPluginPending(found, pending);
+    expect(env.events).toEqual([]);
+    pending.replica.start();
+    pending.release();
+    expect(await found).toMatchObject({ ok: true });
+    expect(await found).toEqual(env.session.findText({
+      text: 'Tail', within: { kind: 'story', story: 'body' }, view: 'accepted',
+    }));
+    expect(await found).toMatchObject({ matches: [expect.objectContaining({ text: 'Tail' })] });
+    expect(pending.replica.pending).toBe(false);
+    expect(pending.start).toHaveBeenCalledTimes(1);
+    expect(worker.replica).not.toHaveBeenCalled();
+    expect(pending.hydrate).toHaveBeenCalledTimes(1);
+    expect(pending.fallback).not.toHaveBeenCalled();
     expect(worker.flush).toHaveBeenCalledTimes(1);
     expect(env.events).toEqual(['flush']);
   });
@@ -866,24 +1134,75 @@ describe('plugin read and navigation clients', () => {
     expect(worker.replica).not.toHaveBeenCalled();
   });
 
-  test('text searches wait for hydration and return a refusal if the document is replaced', async () => {
+  test('text searches wait without starting hydration and refuse if the document is replaced', async () => {
     const env = await setup();
     const worker = routeWorker(env);
-    let release!: () => void;
-    const waiting = new Promise<void>((resolve) => (release = resolve));
-    worker.replica.mockImplementation(() => waiting);
+    const pending = pendingPluginReplica(env);
     const found = env.clients.read.findText({
       text: 'Tail',
       within: { kind: 'story', story: 'body' },
       view: 'accepted',
     });
-    expect(worker.replica).toHaveBeenCalledWith(env.session);
+    expect(worker.ready).toHaveBeenCalledWith(env.session);
+    expect(worker.replica).not.toHaveBeenCalled();
+    expect(pending.replica.started).toBe(false);
+    expect(pending.hydrate).not.toHaveBeenCalled();
     expect(worker.flush).not.toHaveBeenCalled();
+    await expectPluginPending(found, pending);
     env.pagedEditorRef.current = null;
-    release();
+    pending.replica.start();
+    pending.release();
     expect(await found).toMatchObject({ ok: false, failure: { code: 'document-replaced' } });
     expect(worker.flush).not.toHaveBeenCalled();
+    expect(worker.replica).not.toHaveBeenCalled();
+    expect(pending.fallback).not.toHaveBeenCalled();
+    env.pagedEditorRef.current = env.editor;
+    const replacement = pendingPluginReplica(env);
+    const request = { text: 'Tail', within: { kind: 'story', story: 'body' }, view: 'accepted' } as const;
+    const successful = env.clients.read.findText(request);
+    expect(worker.ready).toHaveBeenCalledTimes(2);
+    await expectPluginPending(successful, replacement);
+    expect(env.events).toEqual([]);
+    replacement.replica.start();
+    replacement.release();
+    expect(await successful).toEqual(env.session.findText(request));
+    expect(await successful).toMatchObject({ ok: true, matches: [expect.objectContaining({ text: 'Tail' })] });
+    expect(replacement.replica.pending).toBe(false);
+    expect(replacement.start).toHaveBeenCalledTimes(1);
+    expect(replacement.hydrate).toHaveBeenCalledTimes(1);
+    expect(replacement.fallback).not.toHaveBeenCalled();
+    expect(worker.replica).not.toHaveBeenCalled();
+    expect(env.events).toEqual(['flush']);
   });
+
+  test.each(['search', 'focus navigation'] as const)(
+    '%s maps failed peer readiness to an input-failed refusal without starting hydration', async (operation) => {
+      const env = await setup();
+      const worker = routeWorker(env);
+      const pending = pendingPluginReplica(env);
+      let observed!: () => void;
+      const waiting = new Promise<void>((resolve) => { observed = resolve; });
+      worker.ready.mockImplementation(() => {
+        observed();
+        return pending.replica.ready;
+      });
+      const result = operation === 'search'
+        ? env.clients.read.findText({ text: 'Tail', within: { kind: 'story', story: 'body' }, view: 'accepted' })
+        : env.clients.navigation.scrollToParagraph(
+            { story: 'body', paraId: '00000002' },
+            { expectVersion: env.session.version(), focus: true }
+          );
+      await waiting;
+      expect(pending.replica.started).toBe(false);
+      pending.replica.fail(new Error('The edit peer could not load'));
+      expect(await result).toMatchObject({ ok: false, failure: { code: 'input-failed' } });
+      expect(worker.replica).not.toHaveBeenCalled();
+      expect(pending.hydrate).not.toHaveBeenCalled();
+      expect(pending.fallback).not.toHaveBeenCalled();
+      expect(worker.flush).not.toHaveBeenCalled();
+      expect(env.events).toEqual([]);
+    }
+  );
 
   test('without a worker authority reads and focus navigation still flush and never request a replica', async () => {
     const env = await setup();

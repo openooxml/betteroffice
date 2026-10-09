@@ -304,6 +304,74 @@ struct ProposalIdArgs {
 
 #[wasm_bindgen]
 impl PptxDocument {
+    #[doc(hidden)]
+    #[wasm_bindgen(js_name = openReplayBaseline)]
+    pub fn open_replay_baseline(
+        source: &[u8],
+        client_id: Option<f64>,
+        initial_update: Option<Vec<u8>>,
+    ) -> Result<PptxDocument, JsValue> {
+        let client_id = client_id
+            .map(|id| {
+                if !id.is_finite()
+                    || id.fract() != 0.0
+                    || id < 1.0
+                    || id > crate::MAX_SAFE_CLIENT_ID as f64
+                {
+                    return Err(peer_error(crate::peer::PeerError::new(
+                        "clientId",
+                        "client id must be a positive safe integer below Number.MAX_SAFE_INTEGER",
+                    )));
+                }
+                Ok(id as u64)
+            })
+            .transpose()?;
+        DeckSession::open_replay_baseline(source, client_id, initial_update.as_deref())
+            .map(Self::opened)
+            .map_err(peer_error)
+    }
+
+    #[doc(hidden)]
+    #[wasm_bindgen(js_name = peerHydrationJson)]
+    pub fn peer_hydration_json(&self, fonts_json: &str) -> Result<String, JsValue> {
+        let fonts = serde_json::from_str(fonts_json).map_err(|error| peer_error(error.into()))?;
+        self.session.peer_identity(fonts).map_err(peer_error)
+    }
+
+    #[doc(hidden)]
+    #[wasm_bindgen(js_name = openPeerDeckJson)]
+    pub fn open_peer_deck_json(
+        source: &[u8],
+        identity_json: &str,
+        initial_update: Option<Vec<u8>>,
+    ) -> Result<PptxDocument, JsValue> {
+        DeckSession::open_peer_deck(source, identity_json, initial_update.as_deref())
+            .map(|session| Self {
+                session,
+                update_observer: None,
+            })
+            .map_err(peer_error)
+    }
+
+    #[doc(hidden)]
+    #[wasm_bindgen(js_name = registerPeerFontsJson)]
+    pub fn register_peer_fonts_json(&self, fonts_json: &str) -> Result<(), JsValue> {
+        let fonts = serde_json::from_str(fonts_json).map_err(|error| peer_error(error.into()))?;
+        self.session.register_peer_fonts(fonts).map_err(peer_error)
+    }
+
+    #[doc(hidden)]
+    #[wasm_bindgen(js_name = adoptPeerIdentity)]
+    pub fn adopt_peer_identity(&self) -> Result<(), JsValue> {
+        self.session.adopt_peer_identity().map_err(peer_error)
+    }
+
+    #[doc(hidden)]
+    #[wasm_bindgen(js_name = replayJson)]
+    pub fn replay_json(&self, envelope: &str) -> Result<String, JsValue> {
+        self.session.replay_json(envelope).map_err(peer_error)
+    }
+
     #[wasm_bindgen(js_name = proposeJson)]
     pub fn propose_json(&self, args: &str) -> Result<String, JsValue> {
         json(
@@ -1144,6 +1212,17 @@ fn parse_client_id(client_id: f64) -> Result<u64, JsValue> {
 
 fn js_error(error: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&error.to_string())
+}
+
+fn peer_error(error: crate::peer::PeerError) -> JsValue {
+    let exception = js_sys::Error::new(&error.message);
+    exception.set_name("PresentationPeerError");
+    let _ = js_sys::Reflect::set(
+        exception.as_ref(),
+        &JsValue::from_str("code"),
+        &JsValue::from_str(&error.code),
+    );
+    exception.into()
 }
 
 fn proposal_error(error: crate::ProposalError) -> JsValue {

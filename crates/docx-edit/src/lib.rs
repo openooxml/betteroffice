@@ -88,6 +88,7 @@ mod list_marker;
 pub mod media;
 mod op;
 mod ops;
+mod peer_bootstrap;
 mod policy;
 mod presence;
 mod queries;
@@ -97,6 +98,7 @@ pub mod read_types;
 mod script_fonts;
 mod search;
 mod seed;
+mod segment_json;
 mod segments;
 pub mod structured;
 mod target;
@@ -137,6 +139,7 @@ pub use ops::paragraph::{
 pub use ops::resolve::ChangeTarget;
 pub use ops::table::{CellLoc, TableLocator, TableRange, TableReceipt};
 pub use ops::text::RichRun;
+pub use peer_bootstrap::{PeerBootstrap, PeerBootstrapSource, PeerMetadataError};
 pub use queries::{
     ChangeInfo, ChangeKind, CommentInfo, FindMatch, FindOptions, LayoutBridge, NavDirection,
     NavUnit, PageContent, PageParagraph, SelectionInfo, TextView,

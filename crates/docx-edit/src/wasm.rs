@@ -70,8 +70,8 @@ use crate::{
     ParaAttrDelta, ParaSelector, ParagraphAnchor, ParagraphIdDiagnostic, ParagraphIdOrigin,
     ParagraphIdRefusal, ParagraphOrigin, ParagraphRef, Patch, PersistedParagraphIds, Position,
     RawOp, ReadParagraphsRequest, SeedParagraph, SegmentContent, SimpleFormat, SourceParagraphRef,
-    SourceStory, SourceStoryKind, StoryRange, StorySegment, TabStop, TableLocator, TableRange,
-    TextTarget, TriState, UndoCaptureMode, UndoSession, story_ref,
+    SourceStory, SourceStoryKind, StoryRange, TabStop, TableLocator, TableRange, TextTarget,
+    TriState, UndoCaptureMode, UndoSession, story_ref,
 };
 
 #[wasm_bindgen]
@@ -125,6 +125,17 @@ fn text_receipt_json(receipt: crate::Receipt) -> String {
 
 fn js_err(error: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&error.to_string())
+}
+
+fn peer_metadata_js_err(error: crate::PeerMetadataError) -> JsValue {
+    let value = js_sys::Error::new(&error.to_string());
+    value.set_name("PeerMetadataError");
+    let _ = js_sys::Reflect::set(
+        &value,
+        &JsValue::from_str("code"),
+        &JsValue::from_str(error.code()),
+    );
+    value.into()
 }
 
 /// Host randomness for version nonces; the wasm target has no ambient entropy source.
@@ -740,34 +751,6 @@ fn parse_para_attr_delta(attrs_json: &str) -> Result<ParaAttrDelta, JsValue> {
         default_text_formatting,
         other,
     })
-}
-
-fn segments_json(segments: Vec<StorySegment>) -> Result<Vec<Value>, JsValue> {
-    segments
-        .into_iter()
-        .map(|segment| {
-            let attributes = attrs_value(&segment.attributes)?;
-            Ok(match segment.content {
-                SegmentContent::Text(text) => {
-                    json!({ "kind": "text", "text": text, "attributes": attributes })
-                }
-                SegmentContent::Pilcrow(properties) => json!({
-                    "kind": "pilcrow",
-                    "paraId": properties.para_id,
-                    "properties": attrs_value(&properties.values)?,
-                    "attributes": attributes,
-                }),
-                SegmentContent::OtherEmbed { kind, payload } => {
-                    json!({
-                        "kind": "embed",
-                        "embedKind": kind,
-                        "payload": attrs_value(&payload)?,
-                        "attributes": attributes,
-                    })
-                }
-            })
-        })
-        .collect()
 }
 
 fn attrs_value(attrs: &std::collections::BTreeMap<String, Any>) -> Result<Value, JsValue> {
@@ -2354,6 +2337,24 @@ impl EditSession {
             .map_err(|error| JsValue::from_str(&error))
     }
 
+    /// @internal
+    pub fn display_range_rects_on_pages_json(
+        &self,
+        from: f64,
+        to: f64,
+        first_page: f64,
+        last_page: f64,
+    ) -> Result<String, JsValue> {
+        let Some((first_page, last_page)) = docx_layout::hit::page_window(first_page, last_page)
+        else {
+            return Ok("[]".to_string());
+        };
+        let _fonts = self.fonts.enter();
+        self.engine
+            .display_range_rects_on_pages_json(from as i64, to as i64, first_page, last_page)
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
     /// Same rectangles as [`EditSession::display_range_rects_json`], scoped to
     /// a region. `region` is `"body"`, `"header"`, `"footer"`, `"footnote"` or
     /// `"endnote"`; `part_id` names one header/footer part (an empty string
@@ -2406,6 +2407,39 @@ impl EditSession {
         }
         self.engine.doc().rotate_version(js_entropy());
         Ok(())
+    }
+
+    pub fn encode_peer_metadata(&self) -> Result<Vec<u8>, JsValue> {
+        self.engine
+            .doc()
+            .encode_peer_metadata()
+            .map_err(peer_metadata_js_err)
+    }
+
+    pub fn bootstrap_peer(
+        &self,
+        state: &[u8],
+        metadata: &[u8],
+        source: Option<Vec<u8>>,
+    ) -> Result<(), JsValue> {
+        let source = source.map(PackageBytes::from);
+        let bootstrap = self
+            .engine
+            .doc()
+            .prepare_peer_bootstrap(state, metadata, source)
+            .map_err(peer_metadata_js_err)?;
+        let retained = self
+            .engine
+            .doc()
+            .install_peer_bootstrap(bootstrap, js_entropy())
+            .map_err(peer_metadata_js_err)?;
+        self.docx_source.replace(Some(retained.source));
+        self.docx_digest.replace(Some(retained.digest));
+        self.awaiting_comment_baseline.set(true);
+        self.engine.set_partial_document(false);
+        self.engine.set_relayout_trigger(RelayoutTrigger::Open);
+        self.engine.doc().rotate_version(js_entropy());
+        self.load(state)
     }
 
     /// [`EditSession::open_docx`] with seeding always on.
@@ -4732,7 +4766,7 @@ impl EditSession {
     /// tracked-change stamps. Errors on an unknown story.
     pub fn story_segments(&self, story: &str) -> Result<String, JsValue> {
         let segments = self.engine.doc().story_segments(story).map_err(js_err)?;
-        serde_json::to_string(&segments_json(segments)?).map_err(js_err)
+        crate::segment_json::segments_json_string(&segments).map_err(js_err)
     }
 
     /// `story_segments` split after each pilcrow into units, as one hex digest
@@ -4765,7 +4799,7 @@ impl EditSession {
                 let unit = all
                     .get(index as usize)
                     .ok_or_else(|| js_err(format!("no segment unit {index} in {story}")))?;
-                segments_json(unit.clone())
+                crate::segment_json::segments_json(unit.clone()).map_err(js_err)
             })
             .collect::<Result<Vec<Vec<Value>>, JsValue>>()?;
         serde_json::to_string(&requested).map_err(js_err)

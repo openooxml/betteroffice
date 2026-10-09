@@ -363,19 +363,38 @@ impl EditingDoc {
 
     /// Deletes a range while preserving surviving paragraph properties.
     pub fn delete_range(&self, ctx: &EditCtx, range: StoryRange) -> OpResult<Receipt> {
+        self.delete_range_observed(ctx, range, |_| {})
+    }
+
+    pub(crate) fn delete_range_observed(
+        &self,
+        ctx: &EditCtx,
+        range: StoryRange,
+        observe: impl FnOnce(bool),
+    ) -> OpResult<Receipt> {
         let len = crate::format::range_len(&range)?;
         if len == 0 {
             return Err(OpError::EmptyRange);
         }
         let mut txn = self.transact_for(ctx);
-        self.delete_range_in(&mut txn, ctx, range)
+        self.delete_range_in_observed(&mut txn, ctx, range, observe)
     }
 
     pub(crate) fn delete_range_in(
         &self,
         txn: &mut TransactionMut<'_>,
         ctx: &EditCtx,
+        range: StoryRange,
+    ) -> OpResult<Receipt> {
+        self.delete_range_in_observed(txn, ctx, range, |_| {})
+    }
+
+    fn delete_range_in_observed(
+        &self,
+        txn: &mut TransactionMut<'_>,
+        ctx: &EditCtx,
         mut range: StoryRange,
+        observe: impl FnOnce(bool),
     ) -> OpResult<Receipt> {
         let len = crate::format::range_len(&range)?;
         if len == 0 {
@@ -383,7 +402,8 @@ impl EditingDoc {
         }
         let story = story_ref(txn, &range.story)?;
         check_range(&story, txn, range.start, len)?;
-        let chunks = range_chunks(&story, txn, &mut range);
+        let (chunks, single) = crate::ops::range_chunks_observed(&story, txn, &mut range);
+        observe(single);
         let revision_id = ctx.is_suggesting().then(|| {
             adjacent_revision_id(&chunks, range.start, DEL, &ctx.author)
                 .or_else(|| adjacent_revision_id(&chunks, range.end, DEL, &ctx.author))

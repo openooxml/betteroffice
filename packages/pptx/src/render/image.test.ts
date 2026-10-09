@@ -253,7 +253,11 @@ describe('presentation image blobs', () => {
       expect(await decodePresentationImage(svg, 'undecodable')).toBeInstanceOf(globalThis.Image);
       expect(bitmaps).toHaveLength(0);
 
-      const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+      const png = new Uint8Array(24);
+      png.set([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82]);
+      const dimensions = new DataView(png.buffer);
+      dimensions.setUint32(16, 4);
+      dimensions.setUint32(20, 4);
       await decodePresentationImage(png, 'undecodable');
       expect(bitmaps).toHaveLength(1);
 

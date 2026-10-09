@@ -150,6 +150,7 @@ export {
   type DocxSessionSave,
 } from './saveYrsDocx';
 export { sessionSourcePackage } from './sessionInternals';
+export { PeerMetadataError, peerMetadataTags } from './peerMetadata';
 export {
   DirtyProjectionStories,
   dirtyProjectionStory,
@@ -1025,6 +1026,13 @@ export interface YrsSession extends CollaborationReplica {
     goalX: number
   ): string;
   displayRangeRectsJson(from: number, to: number): string;
+  /** @internal */
+  displayRangeRectsOnPagesJson?(
+    from: number,
+    to: number,
+    firstPage: number,
+    lastPage: number
+  ): string;
   displayRangeRectsRegionJson(
     region: 'body' | 'header' | 'footer',
     rId: string,
@@ -1038,6 +1046,14 @@ export interface YrsSession extends CollaborationReplica {
 
   /** Hydrates from an encoded yrs v1 update (typically a peer's {@link encodeState} output). */
   loadState(update: Uint8Array): void;
+  encodePeerMetadata(): Uint8Array;
+  bootstrapPeer(
+    state: Uint8Array,
+    metadata: Uint8Array,
+    source: Uint8Array | undefined,
+    host: YrsDocxHost,
+    options?: YrsOpeningOptions
+  ): YrsDocxHost;
   /** Parses a DOCX, seeds its stories, and returns thin host metadata; see {@link openDocx}. */
   seedFromDocx(bytes: Uint8Array, options?: YrsOpeningOptions): YrsDocxHost;
   /**
@@ -1422,23 +1438,27 @@ export interface YrsSession extends CollaborationReplica {
    * the round applies as one batch outside undo history, or nothing changes. A retried id with
    * the same edit is a no-op; the same id with another edit refuses. Opening another document
    * forgets every proposal.
+   * On an editor peer this registry is peer-local, invisible to worker rounds and ref API results.
    */
   proposeChanges(request: DocxProposalRequest): DocxProposalResult;
   /**
    * Sets how proposals render. Decisions change neither the document, its version nor undo
    * history; each call that changes one increments `previewVersion`.
+   * On an editor peer this registry is peer-local, invisible to worker rounds and ref API results.
    */
   setProposalStates(request: DocxProposalStateRequest): DocxProposalResult;
   /**
    * Withdraws proposals, settling each as its decision previews it: accepted ones apply for good,
    * rejected and undecided ones are removed. The settlement is one change against `expectVersion`
    * outside undo history, so a later round resolves against the text the preview showed.
+   * On an editor peer this registry is peer-local, invisible to worker rounds and ref API results.
    */
   withdrawProposals(request: DocxProposalWithdrawRequest): DocxProposalResult;
   /** The proposals in the order they were made. */
   getProposals(): DocxProposalSnapshot;
   /** @internal */
   mirrorWorkerDocument(mirror: YrsWorkerDocumentMirror | null): void;
+  createWorkerProposalRegistry(state: DocxProposalRegistryState): import('./proposals').DocxProposalRegistry;
   /** @internal */
   workerDocumentMirrored(): boolean;
   /** Listens for new proposals, decisions and a forgotten registry. Returns the unsubscribe. */

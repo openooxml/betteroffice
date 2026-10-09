@@ -57,7 +57,87 @@ struct MediaPart {
     display: Option<Vec<u8>>,
 }
 
+/// Retained media facts and an existing display transcode.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MediaDescriptor {
+    pub path: String,
+    pub position: usize,
+    pub size: u64,
+    pub image: bool,
+    pub mime_type: String,
+    pub display: Option<Vec<u8>>,
+}
+
 impl MediaTable {
+    /// Copies descriptors without inflating or transcoding parts.
+    pub fn descriptors(&self) -> Vec<MediaDescriptor> {
+        self.parts
+            .iter()
+            .map(|part| MediaDescriptor {
+                path: part.path.clone(),
+                position: part.position,
+                size: part.size,
+                image: part.image,
+                mime_type: part.mime_type.to_owned(),
+                display: part.display.clone(),
+            })
+            .collect()
+    }
+
+    /// Restores descriptors against an already retained archive.
+    pub fn from_descriptors(
+        package: RetainedPackage,
+        descriptors: Vec<MediaDescriptor>,
+        warnings: Vec<String>,
+    ) -> Result<Self, String> {
+        let entries: Vec<_> = package
+            .parts()
+            .enumerate()
+            .filter(|(_, (path, _))| is_media_path(path))
+            .collect();
+        if descriptors.len() != entries.len() {
+            return Err("media descriptor count differs from retained package".to_owned());
+        }
+        let mut parts = Vec::with_capacity(descriptors.len());
+        let mut total = 0u64;
+        for (descriptor, (position, (path, size))) in descriptors.into_iter().zip(entries) {
+            if descriptor.path != path || descriptor.position != position || descriptor.size != size
+            {
+                return Err("media descriptor differs from retained package".to_owned());
+            }
+            let mime_type = match descriptor.mime_type.as_str() {
+                "image/png" => "image/png",
+                "image/jpeg" => "image/jpeg",
+                "image/gif" => "image/gif",
+                "image/bmp" => "image/bmp",
+                "image/tiff" => "image/tiff",
+                "image/webp" => "image/webp",
+                "image/svg+xml" => "image/svg+xml",
+                "image/x-emf" => "image/x-emf",
+                "image/x-wmf" => "image/x-wmf",
+                "application/octet-stream" => "application/octet-stream",
+                _ => return Err("unsupported media descriptor MIME".to_owned()),
+            };
+            total = total.checked_add(size).ok_or_else(budget_exceeded)?;
+            if total > MAX_TOTAL_UNCOMPRESSED_BYTES {
+                return Err(budget_exceeded());
+            }
+            parts.push(MediaPart {
+                path: descriptor.path,
+                position,
+                size,
+                image: descriptor.image,
+                mime_type,
+                display: descriptor.display,
+            });
+        }
+        Ok(Self {
+            package,
+            parts: parts.into(),
+            warnings: warnings.into(),
+        })
+    }
+
     /// The media of `package`. The images it leaves compressed must fit the
     /// container budget by their declared sizes.
     pub fn new(package: RetainedPackage) -> Result<Self, String> {

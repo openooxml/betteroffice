@@ -7,6 +7,11 @@ import type { PptxFontFace } from '../types';
 import { wasmAssetUrl } from '../wasm/asset';
 import type { OpenPresentationOptions } from '../wasm/loader';
 import { frameAssetIds } from './frame';
+import { PptxWorkerEditorDisposedError } from './peerHydrationError';
+import {
+  PRESENTATION_EDITOR_METHODS, presentationEditorSessionInternals,
+  type EditorBaseline, type PresentationEditorMethods, type PptxWorkerEditorFrame,
+} from './replay';
 import {
   PRESENTATION_SESSION_METHODS,
   type PresentationFrame,
@@ -103,6 +108,50 @@ function prepareOpen(bytes: Uint8Array | ArrayBuffer, options: OpenPresentationS
   } else if (options.wasm !== undefined) input.wasm = options.wasm;
   else if (!options.worker) input.wasm = wasmModules.get(wasmAssetUrl().href);
   return { document, input, transfer };
+}
+
+export interface PresentationEditorConnection {
+  readonly failure: SessionFailure | undefined;
+  onFailure(listener: (failure: SessionFailure) => void): () => void;
+  begin(): Promise<EditorBaseline>;
+  frame(slideId: string): Promise<PptxWorkerEditorFrame>;
+  dispose(): Promise<void>;
+}
+
+export function createPresentationEditorClient(
+  bytes: Uint8Array | ArrayBuffer,
+  options: OpenPresentationSessionOptions,
+  transport: SessionTransport
+): PresentationEditorConnection {
+  try {
+    const { document, input, transfer } = prepareOpen(bytes, options);
+    if (options.wasm === undefined) delete input.wasm;
+    const client = createSessionClient<PresentationEditorMethods, {}>(transport, {
+      methods: PRESENTATION_EDITOR_METHODS,
+    });
+    const media = new Map<string, Uint8Array>();
+    let disposed = false;
+    const connection: PresentationEditorConnection = {
+      get failure() { return client.failure; },
+      onFailure: (listener) => client.onFailure(listener),
+      begin: () => client.callWithTransfer('beginEditor', [document, input], transfer),
+      frame: async (slideId: string) => {
+        if (disposed) throw new PptxWorkerEditorDisposedError();
+        const wire = await client.call.editorFrame(slideId);
+        if (disposed) throw new PptxWorkerEditorDisposedError();
+        return { ...decodeFrame(wire, media), slideId: wire.slideId, sequence: wire.sequence };
+      },
+      dispose: async () => {
+        disposed = true;
+        try { await client.dispose(); } finally { media.clear(); }
+      },
+    };
+    presentationEditorSessionInternals.set(connection, { client, peerAttached: false });
+    return connection;
+  } catch (error) {
+    try { transport.close(); } catch {}
+    throw error;
+  }
 }
 
 /**

@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use ooxml_drawingml::GeometryPathCommand;
 use ooxml_drawingml::chart::{
-    ChartSpace, PlotChart, PlotOp, PlotRect, PlotSink, PlotTextAlign, chart_aria_label,
-    plot_chart_into,
+    ChartSpace, MAX_PLOT_DATA_SCAN, PlotChart, PlotOp, PlotRect, PlotSeries, PlotSink,
+    PlotTextAlign, chart_aria_label, plot_chart_into,
 };
 use xlsx_model::chart::{AnchorCell, ChartAnchor, SheetChart};
 use xlsx_model::styles::Stylesheet;
@@ -493,7 +493,7 @@ where
         Err(error) if error.refuses_frame() => return ChartOutcome::Fatal(error),
         Err(_) => return ChartOutcome::Degraded(degraded_label(None)),
     };
-    let plot = PlotChart::from(space.as_ref());
+    let mut plot = PlotChart::from(space.as_ref());
     let label = chart_aria_label(&plot);
     if let Some(error) = chart_refusal(chart, &space) {
         if error.refuses_frame() {
@@ -507,6 +507,8 @@ where
         };
         return ChartOutcome::Degraded(degraded_label(Some(&known)));
     }
+    let fallback_x = scatter_fallback_x(&plot);
+    prepare_scatter_plot(&mut plot, &fallback_x);
     let baseline = commands.len();
     let mut sink = ChartSink {
         commands: &mut *commands,
@@ -527,6 +529,54 @@ where
         Some(SinkFailure::Geometry) => {
             commands.truncate(baseline);
             ChartOutcome::Degraded(degraded_label(Some(&label)))
+        }
+    }
+}
+
+fn scatter_fallback_x(plot: &PlotChart<'_>) -> Vec<f64> {
+    let count = plot
+        .series
+        .iter()
+        .filter(|_| plot.plot_groups.is_empty() && plot.chart_type == "scatter")
+        .chain(
+            plot.plot_groups
+                .iter()
+                .filter(|group| group.chart_type.unwrap_or(plot.chart_type) == "scatter")
+                .flat_map(|group| &group.series),
+        )
+        .filter(|series| !series.x_values.iter().any(|value| value.is_finite()))
+        .map(|series| series.values.len())
+        .max()
+        .unwrap_or(0)
+        .min(MAX_PLOT_DATA_SCAN);
+    (1..=count).map(|value| value as f64).collect()
+}
+
+fn prepare_scatter_plot<'a>(plot: &mut PlotChart<'a>, fallback_x: &'a [f64]) {
+    if plot.plot_groups.is_empty() && plot.chart_type == "scatter" {
+        apply_scatter_x(&mut plot.series, fallback_x);
+    }
+    for group in &mut plot.plot_groups {
+        let family = group.chart_type.unwrap_or(plot.chart_type);
+        if matches!(family, "scatter" | "bubble")
+            && group.axis_ids.len() == 2
+            && plot.axes.iter().any(|axis| {
+                axis.id == group.axis_ids.first().copied()
+                    && matches!(axis.position, Some("left" | "right"))
+            })
+        {
+            group.axis_ids.swap(0, 1);
+        }
+        if family == "scatter" {
+            apply_scatter_x(&mut group.series, fallback_x);
+        }
+    }
+}
+
+fn apply_scatter_x<'a>(series: &mut [PlotSeries<'a>], fallback_x: &'a [f64]) {
+    for series in series {
+        if !series.x_values.iter().any(|value| value.is_finite()) {
+            series.x_values = &fallback_x[..series.values.len().min(fallback_x.len())];
         }
     }
 }
@@ -659,14 +709,17 @@ fn unsupported_feature(space: &ChartSpace) -> Option<&'static str> {
     }) {
         return Some("stacked chart grouping");
     }
-    if space.axis_list.as_deref().is_some_and(|axes| {
-        axes.iter().filter(|axis| axis.axis_type == "value").count() > 1
-            || axes
-                .iter()
-                .filter(|axis| matches!(axis.axis_type.as_str(), "category" | "date"))
-                .count()
-                > 1
-    }) {
+    let primary_xy_axes = has_primary_xy_axes(space);
+    if !primary_xy_axes
+        && space.axis_list.as_deref().is_some_and(|axes| {
+            axes.iter().filter(|axis| axis.axis_type == "value").count() > 1
+                || axes
+                    .iter()
+                    .filter(|axis| matches!(axis.axis_type.as_str(), "category" | "date"))
+                    .count()
+                    > 1
+        })
+    {
         return Some("secondary-axis chart combinations");
     }
     let mut axes = space
@@ -674,7 +727,8 @@ fn unsupported_feature(space: &ChartSpace) -> Option<&'static str> {
         .iter()
         .map(|group| group.axis_ids.as_slice())
         .filter(|axis_ids| !axis_ids.is_empty());
-    if let Some(first) = axes.next()
+    if !primary_xy_axes
+        && let Some(first) = axes.next()
         && axes.any(|axis_ids| axis_ids != first)
     {
         return Some("secondary-axis chart combinations");
@@ -688,6 +742,47 @@ fn unsupported_feature(space: &ChartSpace) -> Option<&'static str> {
         return Some("logarithmic chart axes");
     }
     None
+}
+
+fn has_primary_xy_axes(space: &ChartSpace) -> bool {
+    let Some(axes) = space.axis_list.as_deref() else {
+        return false;
+    };
+    if axes.len() != 2 || axes.iter().any(|axis| axis.axis_type != "value") {
+        return false;
+    }
+    let Some(horizontal) = axes
+        .iter()
+        .find(|axis| matches!(axis.position.as_deref(), Some("bottom" | "top")))
+    else {
+        return false;
+    };
+    let Some(vertical) = axes
+        .iter()
+        .find(|axis| matches!(axis.position.as_deref(), Some("left" | "right")))
+    else {
+        return false;
+    };
+    let (Some(x_id), Some(y_id)) = (horizontal.id.as_deref(), vertical.id.as_deref()) else {
+        return false;
+    };
+    if x_id.is_empty()
+        || y_id.is_empty()
+        || x_id == y_id
+        || horizontal.cross_axis_id.as_deref() != Some(y_id)
+        || vertical.cross_axis_id.as_deref() != Some(x_id)
+    {
+        return false;
+    }
+    space.plot_groups.len() == 1
+        && space.plot_groups.iter().all(|group| {
+            matches!(
+                group.chart_type.as_deref().unwrap_or(&space.chart_type),
+                "scatter" | "bubble"
+            ) && group.axis_ids.len() == 2
+                && ((group.axis_ids[0] == x_id && group.axis_ids[1] == y_id)
+                    || (group.axis_ids[0] == y_id && group.axis_ids[1] == x_id))
+        })
 }
 
 fn viewport_geometry(
@@ -977,7 +1072,10 @@ fn positive_f32(value: f64) -> Result<f32, ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ooxml_drawingml::chart::ChartLegend;
+    use ooxml_drawingml::chart::{
+        ChartAxis, ChartDataLabels, ChartLegend, ChartManualLayout, ChartMarker, ChartPlotGroup,
+        ChartSeries,
+    };
     use xlsx_model::chart::{AnchorEditAs, AnchorExtent, AnchorPos};
 
     fn geometry() -> GridGeometry {
@@ -1294,6 +1392,458 @@ mod tests {
             refs: Vec::new(),
         });
         sheet
+    }
+
+    fn scatter_space() -> ChartSpace {
+        let series = ChartSeries {
+            name: Some("Series1".into()),
+            values: vec![5.0, 10.0, 15.0],
+            x_values: Some(vec![1.0, 9.0, 4.0]),
+            color: "#123456".into(),
+            category_formula: Some("Sheet1!$A$1:$A$3".into()),
+            value_formula: Some("Sheet1!$B$1:$B$3".into()),
+            marker: Some(ChartMarker {
+                symbol: Some("square".into()),
+                size: Some(6.0),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        ChartSpace {
+            chart_type: "scatter".into(),
+            series: vec![series.clone()],
+            plot_groups: vec![ChartPlotGroup {
+                chart_type: Some("scatter".into()),
+                axis_ids: vec!["1".into(), "2".into()],
+                scatter_style: Some("marker".into()),
+                series: vec![series],
+                ..Default::default()
+            }],
+            axis_list: Some(vec![
+                ChartAxis {
+                    id: Some("1".into()),
+                    axis_type: "value".into(),
+                    position: Some("bottom".into()),
+                    cross_axis_id: Some("2".into()),
+                    min: Some(0.0),
+                    max: Some(10.0),
+                    ..Default::default()
+                },
+                ChartAxis {
+                    id: Some("2".into()),
+                    axis_type: "value".into(),
+                    position: Some("left".into()),
+                    cross_axis_id: Some("1".into()),
+                    min: Some(0.0),
+                    max: Some(20.0),
+                    ..Default::default()
+                },
+            ]),
+            plot_layout: Some(ChartManualLayout {
+                x: 0.2,
+                y: 0.2,
+                w: 0.6,
+                h: 0.6,
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn render_scatter(space: &ChartSpace) -> (Vec<DrawCmd>, Vec<ChartRegion>) {
+        let sheet = charted_sheet(ChartAnchor::Absolute {
+            pos: AnchorPos { x: 0, y: 0 },
+            extent: AnchorExtent {
+                cx: 3_810_000,
+                cy: 2_857_500,
+            },
+        });
+        let geometry = GridGeometry::new(&sheet, &Stylesheet::default());
+        let mut commands = Vec::new();
+        let mut regions = Vec::new();
+        let mut resolver = |_: &SheetChart| Ok::<_, RenderError>(space.clone());
+        render_charts(
+            &sheet,
+            &geometry,
+            &Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: 400.0,
+                height: 300.0,
+            },
+            0,
+            0,
+            &mut commands,
+            &mut regions,
+            &mut resolver,
+        )
+        .unwrap();
+        assert_eq!(regions.len(), 1);
+        (commands, regions)
+    }
+
+    fn scatter_centers(commands: &[DrawCmd]) -> Vec<(f32, f32)> {
+        commands
+            .iter()
+            .filter_map(|command| match command {
+                DrawCmd::FillRect {
+                    x, y, w, h, color, ..
+                } if color.as_ref() == "#123456" => Some((x + w / 2.0, y + h / 2.0)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn assert_scatter_centers(commands: &[DrawCmd], expected: &[(f32, f32)]) {
+        let centers = scatter_centers(commands);
+        assert_eq!(centers.len(), expected.len());
+        for ((x, y), (expected_x, expected_y)) in centers.iter().zip(expected) {
+            assert!((x - expected_x).abs() < 0.01, "x: {x} != {expected_x}");
+            assert!((y - expected_y).abs() < 0.01, "y: {y} != {expected_y}");
+        }
+    }
+
+    #[test]
+    fn scatter_crossing_value_axes_plot_numeric_xy() {
+        let (commands, regions) = render_scatter(&scatter_space());
+        assert!(!regions[0].placeholder);
+        assert_scatter_centers(&commands, &[(104.0, 195.0), (296.0, 150.0), (176.0, 105.0)]);
+    }
+
+    #[test]
+    fn scatter_auto_axes_reuse_numeric_bounds() {
+        let mut space = scatter_space();
+        for axis in space.axis_list.as_mut().unwrap() {
+            axis.min = None;
+            axis.max = None;
+        }
+        let (commands, regions) = render_scatter(&space);
+        assert!(!regions[0].placeholder);
+        assert_scatter_centers(&commands, &[(80.0, 183.75), (320.0, 127.5), (170.0, 71.25)]);
+    }
+
+    #[test]
+    fn scatter_missing_or_non_numeric_x_uses_one_based_indexes() {
+        for x_values in [None, Some(Vec::new()), Some(vec![f64::NAN; 3])] {
+            let mut space = scatter_space();
+            space.plot_groups[0].series[0].x_values = x_values;
+            let (commands, regions) = render_scatter(&space);
+            assert!(!regions[0].placeholder);
+            assert_scatter_centers(&commands, &[(104.0, 195.0), (128.0, 150.0), (152.0, 105.0)]);
+        }
+    }
+
+    #[test]
+    fn scatter_numeric_x_gaps_do_not_shift_point_pairs() {
+        let mut space = scatter_space();
+        space.plot_groups[0].series[0].x_values = Some(vec![1.0, f64::NAN, 4.0]);
+        let (commands, regions) = render_scatter(&space);
+        assert!(!regions[0].placeholder);
+        assert_scatter_centers(&commands, &[(104.0, 195.0), (176.0, 105.0)]);
+    }
+
+    #[test]
+    fn scatter_axis_order_and_orientation_preserve_numeric_scaling() {
+        let mut space = scatter_space();
+        space.plot_groups[0].axis_ids.reverse();
+        let axes = space.axis_list.as_mut().unwrap();
+        axes[0].position = Some("top".into());
+        axes[1].position = Some("right".into());
+        axes[0].reversed = true;
+        axes[1].reversed = true;
+        axes.reverse();
+        let (commands, regions) = render_scatter(&space);
+        assert!(!regions[0].placeholder);
+        assert_scatter_centers(&commands, &[(296.0, 105.0), (104.0, 150.0), (224.0, 195.0)]);
+    }
+
+    #[test]
+    fn scatter_styles_control_connecting_lines_and_markers() {
+        for (style, lines, markers) in [
+            ("marker", 0, 3),
+            ("lineMarker", 2, 3),
+            ("line", 2, 0),
+            ("smoothMarker", 2, 3),
+            ("smooth", 2, 0),
+        ] {
+            let mut space = scatter_space();
+            space.plot_groups[0].scatter_style = Some(style.into());
+            let (commands, regions) = render_scatter(&space);
+            assert!(!regions[0].placeholder);
+            let series_lines: Vec<_> = commands
+                .iter()
+                .filter_map(|command| match command {
+                    DrawCmd::Line {
+                        x1,
+                        y1,
+                        x2,
+                        y2,
+                        color,
+                        ..
+                    } if color.as_ref() == "#123456" => Some((*x1, *y1, *x2, *y2)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(series_lines.len(), lines, "{style}");
+            assert_eq!(scatter_centers(&commands).len(), markers, "{style}");
+            if lines > 0 {
+                assert_eq!(series_lines[0], (104.0, 195.0, 296.0, 150.0));
+            }
+        }
+    }
+
+    #[test]
+    fn scatter_default_auto_and_none_markers_follow_series_settings() {
+        for (marker, expected) in [
+            (None, 3),
+            (
+                Some(ChartMarker {
+                    symbol: Some("auto".into()),
+                    ..Default::default()
+                }),
+                3,
+            ),
+            (
+                Some(ChartMarker {
+                    symbol: Some("none".into()),
+                    ..Default::default()
+                }),
+                0,
+            ),
+        ] {
+            let mut space = scatter_space();
+            space.plot_groups[0].series[0].marker = marker;
+            let (commands, regions) = render_scatter(&space);
+            assert!(!regions[0].placeholder);
+            let markers = commands
+                .iter()
+                .filter(|command| {
+                    matches!(command, DrawCmd::Path { fill, .. } if fill.as_ref() == "#123456")
+                })
+                .count();
+            assert_eq!(markers, expected);
+        }
+    }
+
+    #[test]
+    fn scatter_multiple_series_reuse_labels_and_x_fallback() {
+        let mut space = scatter_space();
+        let group = &mut space.plot_groups[0];
+        group.data_labels = Some(ChartDataLabels {
+            show_series_name: Some(true),
+            ..Default::default()
+        });
+        let mut second = group.series[0].clone();
+        second.name = Some("Series2".into());
+        second.values = vec![10.0, 5.0];
+        second.x_values = None;
+        group.series.push(second);
+        let (commands, regions) = render_scatter(&space);
+        assert!(!regions[0].placeholder);
+        assert_scatter_centers(
+            &commands,
+            &[
+                (104.0, 195.0),
+                (296.0, 150.0),
+                (176.0, 105.0),
+                (104.0, 150.0),
+                (128.0, 195.0),
+            ],
+        );
+        for (name, expected) in [("Series1", 3), ("Series2", 2)] {
+            assert_eq!(
+                commands
+                    .iter()
+                    .filter(|command| {
+                        matches!(command, DrawCmd::Text { text, .. } if text.as_ref() == name)
+                    })
+                    .count(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn scatter_pair_is_admitted_in_either_reference_order() {
+        let mut space = scatter_space();
+        space.plot_groups[0].axis_ids.reverse();
+        let (commands, regions) = render_scatter(&space);
+        assert!(!regions[0].placeholder);
+        assert_scatter_centers(&commands, &[(104.0, 195.0), (296.0, 150.0), (176.0, 105.0)]);
+    }
+
+    #[test]
+    fn scatter_groups_sharing_the_pair_are_still_refused() {
+        for chart_type in ["scatter", "bubble"] {
+            let mut space = scatter_space();
+            let mut second = space.plot_groups[0].clone();
+            second.chart_type = Some(chart_type.into());
+            second.axis_ids.reverse();
+            space.plot_groups.push(second);
+            assert_eq!(
+                unsupported_feature(&space),
+                Some("secondary-axis chart combinations"),
+                "{chart_type}"
+            );
+            let (_, regions) = render_scatter(&space);
+            assert!(regions[0].placeholder, "{chart_type}");
+        }
+    }
+
+    #[test]
+    fn scatter_auto_y_bounds_include_values_without_an_x_as_on_main() {
+        for (x_values, values) in [
+            (vec![1.0, 9.0], vec![5.0, 10.0, 1e9]),
+            (vec![1.0, f64::NAN, 9.0], vec![5.0, 1e9, 10.0]),
+        ] {
+            let mut space = scatter_space();
+            for axis in space.axis_list.as_mut().unwrap() {
+                axis.min = None;
+                axis.max = None;
+            }
+            space.plot_groups[0].series[0].x_values = Some(x_values);
+            space.plot_groups[0].series[0].values = values;
+            let (commands, regions) = render_scatter(&space);
+            assert!(!regions[0].placeholder);
+            assert_scatter_centers(
+                &commands,
+                &[
+                    (80.0, (240.0 - 180.0 * (5.0 / 1.2e9)) as f32),
+                    (320.0, (240.0 - 180.0 * (10.0 / 1.2e9)) as f32),
+                ],
+            );
+            assert!(commands.iter().any(|command| {
+                matches!(command, DrawCmd::Text { text, .. } if text.as_ref() == "1200000000")
+            }));
+        }
+    }
+
+    #[test]
+    fn scatter_constant_auto_x_keeps_its_value_on_the_axis() {
+        for (x, label, center_x) in [(40.0, "40", 320.0), (-40.0, "-40", 80.0)] {
+            let mut space = scatter_space();
+            let axis = &mut space.axis_list.as_mut().unwrap()[0];
+            axis.min = None;
+            axis.max = None;
+            space.plot_groups[0].series[0].x_values = Some(vec![x; 3]);
+            let (commands, regions) = render_scatter(&space);
+            assert!(!regions[0].placeholder);
+            assert_scatter_centers(
+                &commands,
+                &[(center_x, 195.0), (center_x, 150.0), (center_x, 105.0)],
+            );
+            assert!(
+                commands
+                    .iter()
+                    .any(|command| matches!(command, DrawCmd::Text { text, .. } if text.as_ref() == label)),
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn scatter_primary_pair_does_not_admit_non_scatter_secondary_axes() {
+        for family in [
+            "column", "bar", "line", "area", "radar", "stock", "surface", "pie", "doughnut",
+            "ofPie",
+        ] {
+            let mut space = scatter_space();
+            space.chart_type = family.into();
+            space.plot_groups[0].chart_type = Some(family.into());
+            assert_eq!(
+                unsupported_feature(&space),
+                Some("secondary-axis chart combinations")
+            );
+        }
+    }
+
+    #[test]
+    fn scatter_second_value_axis_pair_is_still_refused() {
+        let mut space = scatter_space();
+        let mut second = space.plot_groups[0].clone();
+        second.axis_ids = vec!["3".into(), "4".into()];
+        space.plot_groups.push(second);
+        let axes = space.axis_list.as_mut().unwrap();
+        let mut x_axis = axes[0].clone();
+        x_axis.id = Some("3".into());
+        x_axis.cross_axis_id = Some("4".into());
+        let mut y_axis = axes[1].clone();
+        y_axis.id = Some("4".into());
+        y_axis.cross_axis_id = Some("3".into());
+        axes.extend([x_axis, y_axis]);
+        assert_eq!(
+            unsupported_feature(&space),
+            Some("secondary-axis chart combinations")
+        );
+        let (_, regions) = render_scatter(&space);
+        assert!(regions[0].placeholder);
+    }
+
+    #[test]
+    fn scatter_pair_requires_crossings_positions_and_unique_references() {
+        for case in 0..8 {
+            let mut space = scatter_space();
+            match case {
+                0 => space.axis_list.as_mut().unwrap()[0].cross_axis_id = None,
+                1 => space.axis_list.as_mut().unwrap()[1].cross_axis_id = Some("2".into()),
+                2 => space.axis_list.as_mut().unwrap()[1].position = Some("top".into()),
+                3 => space.axis_list.as_mut().unwrap()[1].id = Some("1".into()),
+                4 => space.plot_groups[0].axis_ids = vec!["1".into(), "1".into()],
+                5 => space.plot_groups[0].axis_ids = vec!["1".into(), "3".into()],
+                6 => space.plot_groups[0].axis_ids = vec!["1".into()],
+                _ => space.plot_groups[0].axis_ids.push("3".into()),
+            }
+            assert_eq!(
+                unsupported_feature(&space),
+                Some("secondary-axis chart combinations"),
+                "case {case}"
+            );
+        }
+    }
+
+    #[test]
+    fn scatter_pair_keeps_mixed_secondary_stacked_and_logarithmic_refusals() {
+        let mut mixed = scatter_space();
+        let mut column = mixed.plot_groups[0].clone();
+        column.chart_type = Some("column".into());
+        column.axis_ids = vec!["3".into(), "2".into()];
+        mixed.plot_groups.push(column);
+        mixed.axis_list.as_mut().unwrap().push(ChartAxis {
+            id: Some("3".into()),
+            axis_type: "category".into(),
+            ..Default::default()
+        });
+        assert_eq!(
+            unsupported_feature(&mixed),
+            Some("secondary-axis chart combinations")
+        );
+        for grouping in ["stacked", "percentStacked"] {
+            let mut space = scatter_space();
+            space.plot_groups[0].grouping = Some(grouping.into());
+            assert_eq!(unsupported_feature(&space), Some("stacked chart grouping"));
+        }
+        let mut space = scatter_space();
+        space.axis_list.as_mut().unwrap()[0].logarithmic_base = Some(10.0);
+        assert_eq!(unsupported_feature(&space), Some("logarithmic chart axes"));
+    }
+
+    #[test]
+    fn bubble_crossing_value_axes_are_a_primary_pair() {
+        let mut space = scatter_space();
+        space.chart_type = "bubble".into();
+        space.plot_groups[0].chart_type = Some("bubble".into());
+        space.plot_groups[0].series[0].bubble_sizes = Some(vec![1.0, 2.0, 3.0]);
+        assert_eq!(unsupported_feature(&space), None);
+        let (commands, regions) = render_scatter(&space);
+        assert!(!regions[0].placeholder);
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|command| {
+                    matches!(command, DrawCmd::Path { fill, .. } if fill.as_ref() == "#123456")
+                })
+                .count(),
+            3
+        );
     }
 
     #[test]

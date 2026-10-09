@@ -384,16 +384,17 @@ fn yrs_doc_to_mapped_layout_blocks_inner(
     };
     let source = doc.source_metadata();
     local.source = source.as_ref().map(Arc::downgrade).unwrap_or_default();
-    local.blocked |= source.as_ref().is_some_and(|source| {
+    local.block(source.as_ref().is_some_and(|source| {
         source
             .run_revision_stories()
             .any(|story| story == "body" || story.starts_with("body:"))
-    });
+    }));
     let mut list_state = ListState::new(source.map(|source| source.numbering()));
     let txn = doc.yrs_doc().transact();
-    local.blocked |= txn
-        .get_map(COMMENTS)
-        .is_some_and(|comments| comments.len(&txn) != 0);
+    local.block(
+        txn.get_map(COMMENTS)
+            .is_some_and(|comments| comments.len(&txn) != 0),
+    );
     let mut active_stories = BTreeSet::new();
     let mut map = preview::LoweringOutput::default();
     let session = txn.get_map(crate::identity::SESSION);
@@ -407,10 +408,18 @@ fn yrs_doc_to_mapped_layout_blocks_inner(
                 .collect()
         })
         .unwrap_or_default();
-    local.blocked |= has_sequence_metadata;
-    let mut recording =
-        (story_id == "body" && preview_units.is_some()).then(preview::UnitRecorder::new);
-    let _reads = recording.as_ref().map(|_| preview::ReadGuard::new());
+    local.preview_blocked |= has_sequence_metadata;
+    if local.legacy {
+        local.block(has_sequence_metadata);
+    }
+    let mut recording = if story_id == "body" {
+        preview_units
+            .take()
+            .map(|units| preview::UnitRecorder::new(units, local.enabled && !local.legacy))
+    } else {
+        None
+    };
+    let _reads = recording.as_ref().map(preview::UnitRecorder::read_guard);
     let (mut blocks, _) = lower_story_with_preview(
         &txn,
         story_id,
@@ -497,6 +506,21 @@ fn lower_story_with_preview<T: ReadTxn>(
         let story = story_ref(txn, story_id)?;
         let comments = std::rc::Rc::new(resolve_comment_intervals(txn, story_id, env)?);
         let chunks = story.diff(txn, YChange::identity);
+        let share_chunks = !local.blocked && !local.legacy;
+        let (owned_chunks, shared_chunks) = if story_id == "body" && share_chunks {
+            (
+                Vec::new(),
+                Some(std::rc::Rc::new(local::SeedChunks::new(chunks))),
+            )
+        } else {
+            (chunks, None)
+        };
+        if story_id == "body" {
+            local.chunks.clone_from(&shared_chunks);
+        }
+        let chunks = shared_chunks
+            .as_ref()
+            .map_or(owned_chunks.as_slice(), |chunks| chunks.diffs.as_slice());
         let initial = preview::WalkPosition::new(story_slot, pm_base, map);
         let (blocks, after, _) = walk_story_chunks(
             txn,
@@ -511,16 +535,19 @@ fn lower_story_with_preview<T: ReadTxn>(
             local,
             &story,
             &comments,
-            &chunks,
+            chunks,
             initial,
             BTreeSet::new(),
             recording.as_deref_mut(),
         )?;
         if let Some(recording) = recording {
-            recording.save_chunks(&chunks, comments);
+            recording.save_chunks(chunks, comments);
         }
         Ok((blocks, after.pm_cursor - pm_base))
     })();
+    if story_id == "body" {
+        local.chunks = None;
+    }
     active_stories.remove(story_id);
     result
 }
@@ -592,7 +619,20 @@ fn walk_story_chunks<T: ReadTxn>(
     }
     let mut plain = local::ParagraphSeed::default();
     for (chunk_index, diff) in chunks.iter().enumerate() {
-        if let Some(recording) = recording.as_deref_mut() {
+        let local_safe = !local.legacy
+            && !local.blocked
+            && pending_hidden_field_blocks.is_empty()
+            && pending_code_join.is_none()
+            && field_join.is_none()
+            && story_id == "body"
+            && active_stories.len() == 1
+            && active_stories.contains("body");
+        if !local.legacy && !local.blocked && at_block_boundary && paragraph_start == story_index {
+            plain.start(local_safe && paragraph_runs.is_empty() && paragraph_drawings.is_empty());
+        }
+        if let Some(recording) = recording.as_deref_mut()
+            && recording.wants_chunk(story_index)
+        {
             recording.before_chunk(
                 chunk_index,
                 diff,
@@ -607,7 +647,11 @@ fn walk_story_chunks<T: ReadTxn>(
             );
         }
         let attributes = diff.attributes.as_deref();
-        local.observe(&mut plain, diff, txn, story_id);
+        let width = match &diff.insert {
+            Out::Any(Any::String(text)) => utf16_len(text),
+            _ => 0,
+        };
+        local.observe(&mut plain, diff, txn, story_id, chunk_index, width);
         match &diff.insert {
             Out::Any(Any::String(text)) => {
                 let text = text.as_ref();
@@ -620,7 +664,6 @@ fn walk_story_chunks<T: ReadTxn>(
                     env,
                     paragraph_pm_units,
                 );
-                let width = utf16_len(text);
                 story_index += width;
                 paragraph_pm_units += width;
                 at_block_boundary = false;
@@ -640,6 +683,9 @@ fn walk_story_chunks<T: ReadTxn>(
                         map.paragraph_count(),
                     ),
                     story_index + 1 == story.len(txn),
+                    local_safe
+                        && !value_string(values.get("paraId"))
+                            .is_some_and(|id| hidden_field_blocks.contains(&id)),
                 );
                 let para_id = value_string(values.get("paraId")).unwrap_or_default();
                 let code_join = pending_code_join.take();
@@ -1690,7 +1736,7 @@ fn lower_table<T: ReadTxn>(
         })
         .filter_map(any_map)
         .find_map(|cell| map_string(cell, "story"));
-    local.blocked |= table_identity.is_none();
+    local.block(table_identity.is_none());
     let table_identity = table_identity.unwrap_or_else(|| story_index.to_string());
     let table_id = format!("{parent_story}:table:{table_identity}");
 
@@ -1872,10 +1918,12 @@ fn lower_table<T: ReadTxn>(
     });
     let layout_mode = map_string(tbl_pr, "tableLayout")
         .filter(|value| matches!(value.as_str(), "fixed" | "autofit"));
-    let cell_margin_left = table_margins
-        .and_then(|margins| map_number(margins, "left"))
-        .map(twips_to_pixels)
-        .filter(|value| value.is_finite() && *value > 0.0);
+    let table_margin = |side: &str| {
+        table_margins
+            .and_then(|margins| map_number(margins, side))
+            .map(twips_to_pixels)
+            .filter(|value| value.is_finite() && *value > 0.0)
+    };
 
     Ok((
         TableBlock {
@@ -1896,7 +1944,8 @@ fn lower_table<T: ReadTxn>(
             indent,
             floating,
             compatibility_mode,
-            cell_margin_left,
+            cell_margin_left: table_margin("left"),
+            cell_margin_right: table_margin("right"),
             pm_start: Some(pm_start as f64),
             pm_end: Some((pm_start + node_size) as f64),
         },

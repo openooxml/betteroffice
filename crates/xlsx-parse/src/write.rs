@@ -28,6 +28,8 @@ use crate::patch::{SheetPatch, SourceStyles, StyleMatch, sheet_data_regeneration
 use crate::read::SharedStringCells;
 use crate::xml::{resolve_part_path, xml_err};
 
+mod source_coordinates;
+
 /// A saved workbook's parts: generated entries are owned, entries the source
 /// package already held are borrowed from it.
 #[doc(hidden)]
@@ -391,6 +393,40 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
     let shared_strings_stable = wb.shared_strings == package.original_workbook.shared_strings;
     let style_match = StyleMatch::new(&package.original_workbook.styles, &wb.styles);
     let empty_provenance = SharedStringCells::new();
+    let axes_changed = sheet_axes.iter().flatten().any(|axes| !axes.is_identity());
+    let defined_names = package
+        .original_workbook
+        .defined_names
+        .iter()
+        .chain(&wb.defined_names)
+        .map(|defined| defined.name.as_str())
+        .collect::<Vec<_>>();
+    let sheet_names_stable = wb.sheets.len() == package.original_workbook.sheets.len()
+        && origins.iter().flatten().collect::<HashSet<_>>().len() == wb.sheets.len()
+        && wb
+            .sheets
+            .iter()
+            .map(|sheet| sheet.name.to_ascii_lowercase())
+            .collect::<HashSet<_>>()
+            .len()
+            == wb.sheets.len()
+        && wb.sheets.iter().zip(origins).all(|(sheet, origin)| {
+            origin
+                .and_then(|origin| package.original_workbook.sheets.get(origin))
+                .is_some_and(|original| original.name == sheet.name)
+        });
+    let reference_axes = wb
+        .sheets
+        .iter()
+        .enumerate()
+        .map(|(index, sheet)| {
+            let axes = sheet_names_stable
+                .then_some(index)
+                .and_then(|index| sheet_axes.get(index))
+                .and_then(Option::as_ref);
+            (sheet.name.as_str(), axes)
+        })
+        .collect::<Vec<_>>();
     for (index, (sheet, plan)) in wb.sheets.iter().zip(&sheets).enumerate() {
         let source = plan.origin.and_then(|origin| package.sheets.get(origin));
         let original = plan
@@ -402,7 +438,18 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
             Some(source) if source.is_worksheet() => {
                 if shared_strings_stable
                     && original.is_some_and(|original| {
-                        sheet_body_matches(sheet, original, axes, &style_match)
+                        package.part_bytes(&source.path).is_some_and(|bytes| {
+                            sheet_body_matches(
+                                sheet,
+                                original,
+                                bytes,
+                                axes,
+                                &reference_axes,
+                                axes_changed,
+                                Some(&defined_names),
+                                &style_match,
+                            )
+                        })
                     })
                 {
                     continue;
@@ -879,23 +926,40 @@ impl HyperlinkPlan {
 
 /// Everything a worksheet part carries. The sheet name lives in the workbook
 /// part, so a rename leaves the worksheet bytes reusable.
+#[allow(clippy::too_many_arguments)]
 fn sheet_body_matches(
     sheet: &Sheet,
     original: &Sheet,
+    source: &[u8],
     axes: Option<&SheetAxes>,
+    reference_axes: &[(&str, Option<&SheetAxes>)],
+    axes_changed: bool,
+    defined_names: Option<&[&str]>,
     styles: &StyleMatch<'_>,
 ) -> bool {
+    if !source_coordinates::unchanged_with_defined_names(
+        source,
+        axes,
+        reference_axes,
+        axes_changed,
+        defined_names,
+    ) {
+        return false;
+    }
     sheet.freeze_pane == original.freeze_pane
         && sheet.hyperlinks == original.hyperlinks
         && sheet.merges == original.merges
         && sheet.col_widths == original.col_widths
         && sheet.row_heights == original.row_heights
         && sheet.array_formulas().eq(original.array_formulas())
-        && if axes.is_some_and(SheetAxes::is_identity) {
+        && if let Some(axes) = axes {
             let mut sources = original.iter_cells();
             sheet.iter_cells().all(|(at, cell)| {
                 sources.next().is_some_and(|(source, original)| {
-                    at == source && styles.same_cell(original, cell)
+                    at == source
+                        && axes.rows.current(source.row) == Some(source.row)
+                        && axes.cols.current(source.col) == Some(source.col)
+                        && styles.same_cell(original, cell)
                 })
             }) && sources.next().is_none()
         } else {
@@ -2527,9 +2591,22 @@ fn patched_grid(
         )
         .map_err(|error| unwritable_grid(&sheet.name, error))?;
     let sheet_data = match source.template.child("sheetData") {
-        Some(child) => patch
-            .sheet_data(&child.bytes)
-            .map_err(|error| unwritable_grid(&sheet.name, error))?,
+        Some(child) => {
+            let patched = patch
+                .sheet_data(&child.bytes)
+                .map_err(|error| unwritable_grid(&sheet.name, error))?;
+            match patched {
+                Some(patched) => Some(patched),
+                None => match source_coordinates::explicit_rows(&child.bytes, axes)
+                    .map_err(|error| unwritable_grid(&sheet.name, error))?
+                {
+                    Some(explicit) => patch
+                        .sheet_data(&explicit)
+                        .map_err(|error| unwritable_grid(&sheet.name, error))?,
+                    None => None,
+                },
+            }
+        }
         None => None,
     };
     let sheet_data = match sheet_data {

@@ -143,6 +143,62 @@ function setup() {
   return { worker, client };
 }
 
+async function peerResponse<T>(promise: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = realSetTimeout(() => reject(new Error('No peer snapshot response')), 1000);
+      }),
+    ]);
+  } finally {
+    realClearTimeout(timer);
+  }
+}
+
+test.each(['snapshot', 'handover'] as const)('the client carries peer metadata in a single %s request', async (kind) => {
+  const { worker, client } = setup();
+  const pending = kind === 'snapshot' ? client.encodeVersionedState(true) : client.handOver(true);
+  expect(worker.requestAt(0)).toEqual({ id: worker.lastId(), type: 'encodeState', peerMetadata: true });
+  const state = new Uint8Array([7]).buffer;
+  const metadata = new Uint8Array([8]).buffer;
+  const proposals = { previewVersion: 0, entries: [] };
+  worker.reply({ id: worker.lastId(), ok: true, state, peerMetadata: metadata, version: 'v7', proposals });
+  expect(await peerResponse(pending)).toEqual({
+    state: new Uint8Array(state), metadata: new Uint8Array(metadata), metadataReason: undefined,
+    version: 'v7', ...(kind === 'handover' ? { proposals } : {}),
+  });
+  expect(client.hasFailed()).toBe(false);
+});
+
+test.each([undefined, 'unopened: No peer source'])('a legacy or rejecting worker returns state with metadata absent (%s)', async (reason) => {
+  const { worker, client } = setup();
+  const pending = client.encodeVersionedState(true);
+  worker.reply({
+    id: worker.lastId(), ok: true, state: new Uint8Array([7]).buffer,
+    version: 'v7', peerMetadataReason: reason,
+  });
+  expect(await peerResponse(pending)).toEqual({
+    state: new Uint8Array([7]), version: 'v7', metadata: undefined,
+    metadataReason: reason ?? 'missing-capability: Worker omitted peer metadata',
+  });
+  expect(client.hasFailed()).toBe(false);
+});
+
+test.each(['state', 'versioned', 'handover'] as const)('state-only %s callers retain their request and return shape', async (kind) => {
+  const { worker, client } = setup();
+  const pending = kind === 'state' ? client.encodeState()
+    : kind === 'versioned' ? client.encodeVersionedState() : client.handOver();
+  expect(worker.requestAt(0)).toEqual({ id: worker.lastId(), type: 'encodeState' });
+  const state = new Uint8Array([7]).buffer;
+  const proposals = { previewVersion: 0, entries: [] };
+  worker.reply({ id: worker.lastId(), ok: true, state, version: 'v7', proposals });
+  expect(await peerResponse<unknown>(pending)).toEqual(kind === 'state' ? new Uint8Array(state) : {
+    state: new Uint8Array(state), version: 'v7', ...(kind === 'handover' ? { proposals } : {}),
+  });
+});
+
 test('save posts comments and optional host metadata and returns the saved buffer and its updates', async () => {
   const { worker, client } = setup();
   const host = { package: { document: { content: [] } } };
@@ -1044,6 +1100,22 @@ describe('resident worker opening', () => {
     expect(worker.transfers[0]).toEqual([request.bytes]);
     await expect(client.open(new Uint8Array([4]))).rejects.toThrow('already holds a document');
     expect(worker.posted).toHaveLength(1);
+  });
+
+  test.each([undefined, '', 'worker-version'])('versioned state encoding accepts version %s without proposals', async (version) => {
+    const { worker, client } = setup();
+    const state = client.encodeVersionedState();
+    expect(worker.posted).toHaveLength(1);
+    expect(worker.posted[0]).toMatchObject({ type: 'encodeState' });
+    worker.reply({ id: worker.lastId(), ok: true, state: Uint8Array.of(4, 5).buffer, version });
+    expect(await state).toEqual({ state: Uint8Array.of(4, 5), version });
+  });
+
+  test('versioned state encoding requires the worker state', async () => {
+    const { worker, client } = setup();
+    const state = client.encodeVersionedState();
+    worker.reply({ id: worker.lastId(), ok: true, version: 'worker-version' });
+    await expect(state).rejects.toThrow('Resident engine worker omitted its state');
   });
 
   test('open, font requirements, and state handover report memory before an opened bootstrap', async () => {

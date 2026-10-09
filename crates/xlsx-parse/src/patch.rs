@@ -172,7 +172,7 @@ impl SheetPatch<'_> {
         let Some((element, rows)) = scan_sheet_data(source)? else {
             return Ok(None);
         };
-        let dirty = self.dirty_formulas(&rows);
+        let dirty = self.dirty_formulas(source, &rows)?;
         let mut out = Vec::with_capacity(source.len());
         out.extend_from_slice(&element.prefix);
         let mut source_rows = rows
@@ -529,9 +529,7 @@ impl SheetPatch<'_> {
         }
         match formula.group {
             Some(group) => !dirty.groups.contains(&group),
-            None => {
-                formula.reference.is_none() || !dirty.masters.contains(&(cell.at.row, cell.at.col))
-            }
+            None => !dirty.masters.contains(&(cell.at.row, cell.at.col)),
         }
     }
 
@@ -597,40 +595,39 @@ impl SheetPatch<'_> {
         {
             return Ok(false);
         }
-        let (name, mut attributes) = start_tag(&data[source.tag.clone()])?;
-        let (_, formula_attributes) = start_tag(&data[formula.tag.clone()])?;
-        let metadata = attributes
-            .iter()
-            .any(|attribute| matches!(attribute.local_name(), "cm" | "vm"));
-        let array = formula_attributes
-            .iter()
-            .any(|attribute| attribute.local_name() == "t" && attribute.value == "array");
-        if metadata || array {
-            let source_range = self.original.array_formula(source.at);
-            if source_range.is_none()
-                || source_range != formula.reference
-                || source_range != self.sheet.array_formula(at)
-            {
-                return Ok(false);
-            }
-        }
-        let Some(slot) = cached_value_slot(data, source)? else {
+        let Some(slot) = self.cache_patch_slot(data, source, at)? else {
             return Ok(false);
         };
+        let (name, mut attributes) = start_tag(&data[source.tag.clone()])?;
         if source.at != at {
             set_attribute(&mut attributes, "r", "r", at.to_a1());
         }
         let style = self.styles.written(original.style, cell.style);
         if style != original.style {
-            remove_attribute(&mut attributes, "s");
+            attributes.retain(|attribute| attribute.name != "s");
             if let Some(style) = style {
-                set_attribute(&mut attributes, "s", "s", style.to_string());
+                attributes.push(XmlAttribute {
+                    name: "s".to_owned(),
+                    value: style.to_string(),
+                });
             }
         }
         let markup = cell_value_markup(cell, self.sst_index, None);
         match markup.ty {
-            Some(ty) => set_attribute(&mut attributes, "t", "t", ty.to_owned()),
-            None => remove_attribute(&mut attributes, "t"),
+            Some(ty) => {
+                if let Some(attribute) = attributes
+                    .iter_mut()
+                    .find(|attribute| attribute.name == "t")
+                {
+                    attribute.value = ty.to_owned();
+                } else {
+                    attributes.push(XmlAttribute {
+                        name: "t".to_owned(),
+                        value: ty.to_owned(),
+                    });
+                }
+            }
+            None => attributes.retain(|attribute| attribute.name != "t"),
         }
         write_start_tag(out, &name, &attributes, false)?;
         self.emit_source_cell_content(out, data, source, at, slot.start)?;
@@ -644,6 +641,42 @@ impl SheetPatch<'_> {
         }
         out.extend_from_slice(&data[slot.end..source.span.end]);
         Ok(true)
+    }
+
+    fn cache_patch_slot(
+        &self,
+        data: &[u8],
+        source: &SourceCell,
+        at: CellRef,
+    ) -> Result<Option<Range<usize>>, ParseError> {
+        let Some(formula) = &source.formula else {
+            return Ok(None);
+        };
+        let (name, attributes) = start_tag(&data[source.tag.clone()])?;
+        if name != "c"
+            || attributes
+                .iter()
+                .any(|attribute| attribute.name.contains(':') || attribute.name == "xmlns")
+        {
+            return Ok(None);
+        }
+        let (_, formula_attributes) = start_tag(&data[formula.tag.clone()])?;
+        let metadata = attributes
+            .iter()
+            .any(|attribute| matches!(attribute.local_name(), "cm" | "vm"));
+        let array = formula_attributes
+            .iter()
+            .any(|attribute| attribute.local_name() == "t" && attribute.value == "array");
+        if metadata || array {
+            let source_range = self.original.array_formula(source.at);
+            if source_range.is_none()
+                || source_range != formula.reference
+                || source_range != self.sheet.array_formula(at)
+            {
+                return Ok(None);
+            }
+        }
+        cached_value_slot(data, source)
     }
 
     fn emit_cell(
@@ -679,8 +712,9 @@ impl SheetPatch<'_> {
         Ok(())
     }
 
-    fn dirty_formulas(&self, rows: &[SourceRow]) -> DirtyFormulas {
-        let changed = self.changed_source_cells();
+    fn dirty_formulas(&self, data: &[u8], rows: &[SourceRow]) -> Result<DirtyFormulas, ParseError> {
+        let mut changed = self.changed_source_cells();
+        let mut arrays = BTreeSet::new();
         let mut groups: HashMap<u32, (bool, Option<CellRange>)> = HashMap::new();
         let mut masters = Vec::new();
         for cell in rows.iter().flat_map(|row| &row.cells) {
@@ -688,6 +722,17 @@ impl SheetPatch<'_> {
                 continue;
             };
             let key = (cell.at.row, cell.at.col);
+            if self
+                .original
+                .array_formula(cell.at)
+                .and_then(|range| self.remap_range(range))
+                != self
+                    .mapped(cell.at)
+                    .and_then(|mapped| self.sheet.array_formula(mapped))
+            {
+                changed.insert(key);
+                arrays.insert(key);
+            }
             match formula.group {
                 Some(group) => {
                     let entry = groups.entry(group).or_insert((false, None));
@@ -695,6 +740,15 @@ impl SheetPatch<'_> {
                         .mapped(cell.at)
                         .is_none_or(|at| self.inverse(at) != Some(cell.at))
                         || (changed.contains(&key) && self.source_formula_changed(cell.at));
+                    entry.0 |= arrays.contains(&key);
+                    if !entry.0
+                        && formula.reference.is_some()
+                        && let Some(at) = self.mapped(cell.at)
+                    {
+                        entry.0 |= (cell.at != at && formula.positional)
+                            || (changed.contains(&key)
+                                && self.cache_patch_slot(data, cell, at)?.is_none());
+                    }
                     if let Some(reference) = formula.reference
                         && entry.1.replace(reference).is_some()
                     {
@@ -702,13 +756,11 @@ impl SheetPatch<'_> {
                     }
                 }
                 None => {
-                    if let Some(reference) = formula.reference {
-                        masters.push((key, reference));
-                    }
+                    masters.push((key, formula.reference));
                 }
             }
         }
-        DirtyFormulas {
+        Ok(DirtyFormulas {
             groups: groups
                 .into_iter()
                 .filter(|(_, (dirty, master))| {
@@ -719,21 +771,15 @@ impl SheetPatch<'_> {
             masters: masters
                 .into_iter()
                 .filter(|(key, reference)| {
-                    let at = CellRef::new(key.0, key.1);
-                    changed.contains(key)
-                        || !self.moves_uniformly(*reference)
-                        || range_changed(*reference, &changed)
-                        || self
-                            .original
-                            .array_formula(at)
-                            .and_then(|range| self.remap_range(range))
-                            != self
-                                .mapped(at)
-                                .and_then(|mapped| self.sheet.array_formula(mapped))
+                    arrays.contains(key)
+                        || (reference.is_some() && changed.contains(key))
+                        || reference.is_some_and(|reference| {
+                            !self.moves_uniformly(reference) || range_changed(reference, &changed)
+                        })
                 })
                 .map(|(key, _)| key)
                 .collect(),
-        }
+        })
     }
 
     fn source_formula_changed(&self, source: CellRef) -> bool {
@@ -871,17 +917,30 @@ fn cached_value_slot(data: &[u8], cell: &SourceCell) -> Result<Option<Range<usiz
         let before = cell.span.start + reader.buffer_position() as usize;
         let event = reader.read_event().map_err(xml_err)?;
         let after = cell.span.start + reader.buffer_position() as usize;
+        if let Event::Start(element) | Event::Empty(element) = &event {
+            if depth > 1 {
+                return Ok(None);
+            }
+            if depth == 1
+                && (!matches!(element.name().as_ref(), b"f" | b"v" | b"is")
+                    || attributes(element)?.iter().any(|attribute| {
+                        attribute.name == "xmlns" || attribute.name.starts_with("xmlns:")
+                    }))
+            {
+                return Ok(None);
+            }
+        }
         match event {
             Event::Start(element) => {
                 if depth == 1 {
                     child_start = before;
-                    if element.local_name().as_ref() == b"is" {
+                    if element.name().as_ref() == b"is" {
                         return Ok(None);
                     }
                 }
                 depth += 1;
             }
-            Event::Empty(element) if depth == 1 => match element.local_name().as_ref() {
+            Event::Empty(element) if depth == 1 => match element.name().as_ref() {
                 b"f" if formula_end.replace(after).is_some() => return Ok(None),
                 b"v" if value.replace(before..after).is_some() => return Ok(None),
                 b"is" => return Ok(None),
@@ -893,7 +952,7 @@ fn cached_value_slot(data: &[u8], cell: &SourceCell) -> Result<Option<Range<usiz
                     break;
                 }
                 if depth == 1 {
-                    match element.local_name().as_ref() {
+                    match element.name().as_ref() {
                         b"f" if formula_end.replace(after).is_some() => return Ok(None),
                         b"v" if value.replace(child_start..after).is_some() => return Ok(None),
                         _ => {}

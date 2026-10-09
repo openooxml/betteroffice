@@ -11,7 +11,7 @@ use crate::axis::SheetAxes;
 
 /// Style equivalence between the source stylesheet and the one being written.
 pub(crate) struct StyleMatch<'a> {
-    original: &'a Stylesheet,
+    pub(super) original: &'a Stylesheet,
     current: &'a Stylesheet,
     pairs: RefCell<HashMap<(u32, u32), bool>>,
 }

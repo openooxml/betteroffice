@@ -2,14 +2,27 @@
 use betteroffice_xlsx::RenderOptions;
 use betteroffice_xlsx::{
     CalculationOptions, CapturedFormat, CellAddress, CellInput as WorkbookCellInput, CellRange,
-    CellRef, EditProfile, Error, MutationResult, NumberFormatMutation, Op, PrintMetrics, Proposal,
-    ProposalEditInput as WorkbookProposalEditInput, ProposalRequest, SheetId, StylePatch,
-    UpdateEvent, UpdateSubscription, Viewport, Workbook,
+    CellRef, EditProfile, Error, HydratedWorkbook, MutationResult, NumberFormatMutation, Op,
+    PeerHydration as WorkbookPeerHydration, PrintMetrics, Proposal,
+    ProposalEditInput as WorkbookProposalEditInput, ProposalRequest, SheetId, SnapshotBudget,
+    StylePatch, UpdateEvent, UpdateSubscription, Viewport, Workbook, WorkbookSnapshotEncoder,
 };
 use serde::{Deserialize, Serialize};
 
 pub struct Session {
     workbook: Workbook,
+    calculation_context: Option<CalculationOptions>,
+    snapshot: Option<PeerSnapshot>,
+}
+
+struct PeerSnapshot {
+    encoder: WorkbookSnapshotEncoder,
+    version: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PeerHydration {
+    workbook: WorkbookPeerHydration,
     calculation_context: Option<CalculationOptions>,
 }
 
@@ -285,11 +298,93 @@ struct AcceptResult {
 }
 
 impl Session {
+    pub fn begin_peer_snapshot(&mut self, records: usize, bytes: usize) -> Result<(), String> {
+        self.snapshot = None;
+        let budget = SnapshotBudget::new(records, bytes).map_err(|error| error.to_string())?;
+        let encoder =
+            WorkbookSnapshotEncoder::new(&self.workbook, self.calculation_context, budget)
+                .map_err(|error| error.to_string())?;
+        if let Some(reason) = encoder.split_fallback_reason() {
+            return Err(reason.to_owned());
+        }
+        self.snapshot = Some(PeerSnapshot {
+            encoder,
+            version: self.document_version(),
+        });
+        Ok(())
+    }
+
+    pub fn next_peer_snapshot_chunk(&mut self) -> Result<Option<Vec<u8>>, String> {
+        let mut snapshot = self
+            .snapshot
+            .take()
+            .ok_or_else(|| "workbook peer snapshot is not active".to_owned())?;
+        if snapshot.version != self.document_version() {
+            return Err("workbook changed during peer snapshot".to_owned());
+        }
+        let chunk = snapshot
+            .encoder
+            .next(&self.workbook)
+            .map_err(|error| error.to_string())?;
+        if let Some(reason) = snapshot.encoder.split_fallback_reason() {
+            return Err(reason.to_owned());
+        }
+        self.snapshot = Some(snapshot);
+        Ok(chunk)
+    }
+
+    pub fn end_peer_snapshot(&mut self) {
+        self.snapshot = None;
+    }
+
+    pub fn from_hydrated_workbook(hydrated: HydratedWorkbook) -> Self {
+        let (workbook, calculation_context) = hydrated.into_parts();
+        Self {
+            workbook,
+            calculation_context,
+            snapshot: None,
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn adopt_peer_version(&mut self, version: &str) -> Result<(), String> {
+        self.workbook
+            .adopt_peer_version(version)
+            .map_err(|error| error.to_string())
+    }
+
+    #[doc(hidden)]
+    pub fn peer_hydration_json(&self) -> Result<String, String> {
+        let workbook = self
+            .workbook
+            .peer_hydration()
+            .map_err(|error| error.to_string())?;
+        serde_json::to_string(&PeerHydration {
+            workbook,
+            calculation_context: self.calculation_context,
+        })
+        .map_err(|error| error.to_string())
+    }
+
+    #[doc(hidden)]
+    pub fn open_with_peer_hydration_json(bytes: &[u8], hydration: &str) -> Result<Self, String> {
+        let hydration: PeerHydration = serde_json::from_str(hydration)
+            .map_err(|error| format!("bad peer hydration: {error}"))?;
+        let workbook = Workbook::open_with_peer_hydration(bytes, hydration.workbook)
+            .map_err(|error| error.to_string())?;
+        Ok(Self {
+            workbook,
+            calculation_context: hydration.calculation_context,
+            snapshot: None,
+        })
+    }
+
     pub fn open(bytes: &[u8], now_serial: Option<f64>) -> Result<Self, String> {
         Workbook::open_recalculated(bytes, calculation_options(now_serial))
             .map(|workbook| Self {
                 workbook,
                 calculation_context: None,
+                snapshot: None,
             })
             .map_err(|error| error.to_string())
     }
@@ -303,6 +398,7 @@ impl Session {
             .map(|workbook| Self {
                 workbook,
                 calculation_context: Some(options),
+                snapshot: None,
             })
             .map_err(|error| error.to_string())
     }
@@ -338,6 +434,7 @@ impl Session {
             .map(|workbook| Self {
                 workbook,
                 calculation_context: None,
+                snapshot: None,
             })
             .map_err(|error| error.to_string())
     }
@@ -394,7 +491,7 @@ impl Session {
         let display_list = self
             .workbook
             .print_display_list(SheetId(args.sheet), range, &args.metrics, args.gridlines)
-            .map_err(|e| e.to_string())?;
+            .map_err(display_error)?;
         serde_json::to_string(&display_list).map_err(|e| e.to_string())
     }
 
@@ -409,7 +506,7 @@ impl Session {
         let display_list = self
             .workbook
             .display_list_for(SheetId(sheet), &viewport)
-            .map_err(|error| error.to_string())?;
+            .map_err(display_error)?;
         serde_json::to_string(&display_list).map_err(|error| error.to_string())
     }
 
@@ -426,7 +523,7 @@ impl Session {
         let display_list = self
             .workbook
             .display_list(&viewport)
-            .map_err(|error| error.to_string())?;
+            .map_err(display_error)?;
         let built = now();
         let json = serde_json::to_string(&display_list).map_err(|error| error.to_string())?;
         let encoded = now();
@@ -1056,6 +1153,20 @@ pub fn render_xlsx_markdown_json(content: &str, options: &str) -> Result<String,
         .map_err(|error| error.to_string())
 }
 
+fn display_error(error: Error) -> String {
+    let message = error.to_string();
+    match error {
+        Error::DisplayTooLarge { cells, max } => serde_json::json!({
+            "code": "displayTooLarge",
+            "cells": cells,
+            "maxCells": max,
+            "message": message,
+        })
+        .to_string(),
+        _ => message,
+    }
+}
+
 fn calculation_options(now_serial: Option<f64>) -> CalculationOptions {
     CalculationOptions { now_serial }
 }
@@ -1137,6 +1248,37 @@ mod tests {
         model.sheets.push(sheet);
         let parts = xlsx_parse::serialize_workbook(&model).unwrap();
         ooxml_opc::rezip_parts(&parts).unwrap()
+    }
+
+    #[test]
+    fn peer_hydration_nests_workbook_state_and_preserves_calculation_context() {
+        let bytes = formula_xlsx();
+        let mut worker =
+            Session::open_with_calculation_json(&bytes, r#"{"nowSerial":45000.75,"randSeed":42}"#)
+                .unwrap();
+        let hydration = worker.peer_hydration_json().unwrap();
+        let transferred: serde_json::Value = serde_json::from_str(&hydration).unwrap();
+        assert!(transferred["workbook"].is_object());
+        assert_eq!(transferred["workbook"]["delta"], true);
+        assert_eq!(transferred["workbook"]["rand_seed"], 42);
+        let mut peer = Session::open_with_peer_hydration_json(&bytes, &hydration).unwrap();
+        assert_eq!(peer.workbook.version(), worker.workbook.version());
+        assert_eq!(peer.workbook.rand_seed(), worker.workbook.rand_seed());
+        assert_eq!(peer.calculation_context, worker.calculation_context);
+        assert_eq!(
+            peer.workbook.save().unwrap(),
+            worker.workbook.save().unwrap()
+        );
+        let edit = r#"{"sheet":0,"edits":[{"row":0,"col":0,"input":"=NOW()"},{"row":0,"col":2,"input":"=RANDBETWEEN(1,1000000)"}]}"#;
+        assert_eq!(
+            peer.edit_cells_json(edit, Some(1.0)).unwrap(),
+            worker.edit_cells_json(edit, Some(2.0)).unwrap(),
+        );
+        assert_eq!(peer.workbook.version(), worker.workbook.version());
+        assert_eq!(
+            peer.workbook.save().unwrap(),
+            worker.workbook.save().unwrap()
+        );
     }
 
     #[test]
@@ -1315,6 +1457,23 @@ mod tests {
         model.sheets.push(sheet);
         let parts = xlsx_parse::serialize_workbook(&model).unwrap();
         ooxml_opc::rezip_parts(&parts).unwrap()
+    }
+
+    #[test]
+    fn display_list_errors_carry_cell_limit() {
+        let session = Session::open(&sample_xlsx(), None).unwrap();
+        let viewport = r#"{"x":0,"y":0,"width":100,"height":6000000}"#;
+        let mut clock = || 0.0;
+        for result in [
+            session.display_list_json(viewport),
+            session.display_list_for_json(0, viewport),
+            session.display_list_profiled_json(viewport, &mut clock),
+        ] {
+            let error: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
+            assert_eq!(error["code"], "displayTooLarge");
+            assert_eq!(error["cells"], 600_002);
+            assert_eq!(error["maxCells"], betteroffice_xlsx::MAX_DISPLAY_CELLS);
+        }
     }
 
     #[test]

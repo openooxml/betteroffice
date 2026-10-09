@@ -3,6 +3,8 @@ pub(crate) mod batch;
 mod edit_tests;
 #[cfg(test)]
 mod save_oracle_tests;
+#[path = "snapshot/assembly.rs"]
+pub(crate) mod snapshot_assembly;
 mod staging;
 pub(crate) mod target;
 
@@ -12,6 +14,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex, Weak};
 
 use ooxml_drawingml::chart::ChartSpace;
+use serde::{Deserialize, Serialize};
 use xlsx_calc::graph::DepGraph;
 use xlsx_calc::{RecalcResult, rebuild_and_recalc_all_with_seed, recalc_after_with_seed};
 use xlsx_model::{
@@ -48,6 +51,7 @@ use crate::sheet_json::{
     MAX_CHART_ANCHORS_PER_DRAWING, MAX_CHART_FIELD_BYTES, MAX_CHART_REFS_PER_CHART,
     MAX_CHARTS_PER_SHEET, MAX_HYPERLINK_FIELD_BYTES, MAX_HYPERLINKS_PER_SHEET,
 };
+use crate::snapshot::package::PackageSlot;
 use crate::structured::ExportSource;
 use crate::{
     CalculationOptions, CalculationResult, CellAddress, CellEdit, CellInput, EditProfile,
@@ -110,16 +114,16 @@ enum WorkbookMode {
 /// sheet it came from and the shared-string entry each of its cells was
 /// authored against.
 #[derive(Default)]
-struct PreservedSheetState {
-    origins: Vec<Option<usize>>,
-    shared_string_cells: Arc<Vec<xlsx_parse::SharedStringCells>>,
+pub(crate) struct PreservedSheetState {
+    pub(crate) origins: Vec<Option<usize>>,
+    pub(crate) shared_string_cells: Arc<Vec<xlsx_parse::SharedStringCells>>,
     /// Where each sheet's source rows and columns sit after the row and column
     /// edits made since the package was read. `None` once an identity-less
     /// replay replaced the model wholesale, which reserializes edited sheets.
-    axes: Vec<Option<xlsx_parse::SheetAxes>>,
+    pub(crate) axes: Vec<Option<xlsx_parse::SheetAxes>>,
     /// Whether each sheet was added in this session, so its properties are the
     /// defaults of a new sheet rather than unknown ones.
-    created: Vec<bool>,
+    pub(crate) created: Vec<bool>,
 }
 
 impl Clone for PreservedSheetState {
@@ -330,7 +334,8 @@ pub struct Workbook {
     mode: WorkbookMode,
     pending_remote_updates: Vec<Vec<u8>>,
     model: WorkbookModel,
-    source_package: Option<xlsx_parse::PreservedPackage>,
+    source_package: Option<PackageSlot>,
+    snapshot_package_lineage: Option<snapshot_assembly::Lineage>,
     /// Source bytes for verbatim member passthrough on save.
     source_container: Option<ooxml_opc::SourceContainer>,
     preserved: PreservedSheetState,
@@ -338,6 +343,7 @@ pub struct Workbook {
     preserved_redo: Vec<PreservedStateHistory>,
     edited_since_open: bool,
     recalculated_since_open: bool,
+    calculations_since_open: u64,
     moved_references_since_open: bool,
     active_sheet: SheetId,
     undo: UndoStack,
@@ -378,7 +384,150 @@ struct CachedChartSpace {
     space: Arc<ChartSpace>,
 }
 
+type PeerHydrationCell = (CellRef, CellValue, Option<String>, Option<u32>);
+
+#[derive(Serialize, Deserialize)]
+#[doc(hidden)]
+pub struct PeerHydration {
+    cells: Vec<Vec<PeerHydrationCell>>,
+    delta: bool,
+    deleted_cells: Vec<Vec<CellRef>>,
+    arrays: Vec<Vec<(CellRef, CellRange)>>,
+    last_calculation: CalculationResult,
+    recalculated_since_open: bool,
+    calculations_since_open: u64,
+    rand_seed: Option<u32>,
+    active_sheet: SheetId,
+    version_nonce: String,
+    committed_changes: u64,
+    client_id: Option<u64>,
+    #[serde(default)]
+    proposal_id_counter: u64,
+}
+
 impl Workbook {
+    #[doc(hidden)]
+    pub fn peer_hydration_json(&self) -> Result<String> {
+        serde_json::to_string(&self.peer_hydration()?)
+            .map_err(|error| Error::InvalidRequest(error.to_string()))
+    }
+
+    #[doc(hidden)]
+    pub fn peer_hydration(&self) -> Result<PeerHydration> {
+        if self.edited_since_open || !self.proposals.list().is_empty() {
+            return Err(Error::InvalidOperation(
+                "Peer hydration requires an unedited workbook without proposals".into(),
+            ));
+        }
+        let delta = self.calculations_since_open == 1;
+        let mut cells = vec![Vec::new(); self.model.sheets.len()];
+        let mut deleted_cells = vec![Vec::new(); self.model.sheets.len()];
+        if delta {
+            for address in &self.last_calculation.changed {
+                let index = address.sheet.0 as usize;
+                let at = address.cell;
+                if let Some(cell) = self.model.sheets[index].cell(at) {
+                    cells[index].push((at, cell.value.clone(), cell.formula.clone(), cell.style));
+                } else {
+                    deleted_cells[index].push(at);
+                }
+            }
+        } else {
+            for (index, sheet) in self.model.sheets.iter().enumerate() {
+                cells[index] = sheet
+                    .iter_cells()
+                    .map(|(at, cell)| (at, cell.value.clone(), cell.formula.clone(), cell.style))
+                    .collect();
+            }
+        }
+        Ok(PeerHydration {
+            cells,
+            delta,
+            deleted_cells,
+            arrays: self
+                .model
+                .sheets
+                .iter()
+                .map(|sheet| sheet.array_formulas().collect())
+                .collect(),
+            last_calculation: self.last_calculation.clone(),
+            recalculated_since_open: self.recalculated_since_open,
+            calculations_since_open: self.calculations_since_open,
+            rand_seed: self.rand_seed,
+            active_sheet: self.active_sheet,
+            version_nonce: self.version_nonce.clone(),
+            committed_changes: self.committed_changes,
+            client_id: self.is_collaborative().then(|| self.client_id()),
+            proposal_id_counter: self.proposals.id_counter(),
+        })
+    }
+
+    #[doc(hidden)]
+    pub fn open_with_peer_hydration_json(bytes: &[u8], hydration: &str) -> Result<Self> {
+        let hydration: PeerHydration = serde_json::from_str(hydration)
+            .map_err(|error| Error::InvalidRequest(error.to_string()))?;
+        Self::open_with_peer_hydration(bytes, hydration)
+    }
+
+    #[doc(hidden)]
+    pub fn open_with_peer_hydration(bytes: &[u8], hydration: PeerHydration) -> Result<Self> {
+        let mut workbook = Self::open_internal(bytes, false, hydration.client_id)?;
+        if hydration.cells.len() != workbook.model.sheets.len()
+            || hydration.arrays.len() != workbook.model.sheets.len()
+            || hydration.deleted_cells.len() != workbook.model.sheets.len()
+        {
+            return Err(Error::InvalidRequest(
+                "Peer hydration sheet count differs".into(),
+            ));
+        }
+        for (((sheet, cells), arrays), deleted_cells) in workbook
+            .model
+            .sheets
+            .iter_mut()
+            .zip(hydration.cells)
+            .zip(hydration.arrays)
+            .zip(hydration.deleted_cells)
+        {
+            let cells = cells.into_iter().map(|(at, value, formula, style)| {
+                (
+                    at,
+                    xlsx_model::Cell {
+                        value,
+                        formula,
+                        style,
+                    },
+                )
+            });
+            if hydration.delta {
+                for (at, cell) in cells {
+                    sheet.set_cell(at, cell);
+                }
+                for at in deleted_cells {
+                    sheet.set_cell(at, xlsx_model::Cell::default());
+                }
+            } else {
+                sheet.adopt_cells(cells.map(|(at, cell)| ((at.row, at.col), cell)).collect());
+            }
+            let previous: Vec<_> = sheet.array_formulas().map(|(at, _)| at).collect();
+            for at in previous {
+                sheet.clear_array_formula(at);
+            }
+            for (at, range) in arrays {
+                sheet.set_array_formula(at, range);
+            }
+        }
+        validate_model(&workbook.model)?;
+        workbook.last_calculation = hydration.last_calculation;
+        workbook.recalculated_since_open = hydration.recalculated_since_open;
+        workbook.calculations_since_open = hydration.calculations_since_open;
+        workbook.rand_seed = hydration.rand_seed;
+        workbook.set_active_sheet(hydration.active_sheet)?;
+        workbook.version_nonce = hydration.version_nonce;
+        workbook.committed_changes = hydration.committed_changes;
+        workbook.proposals = ProposalSet::with_id_counter(hydration.proposal_id_counter);
+        Ok(workbook)
+    }
+
     pub fn open(bytes: &[u8]) -> Result<Self> {
         Self::open_internal(bytes, true, None)
     }
@@ -438,6 +587,9 @@ impl Workbook {
     }
 
     pub fn set_rand_seed(&mut self, seed: Option<u32>) {
+        if self.rand_seed != seed {
+            self.snapshot_package_lineage = None;
+        }
         self.rand_seed = seed;
     }
 
@@ -553,13 +705,15 @@ impl Workbook {
             mode,
             pending_remote_updates: Vec::new(),
             model,
-            source_package,
+            source_package: source_package.map(PackageSlot::Present),
+            snapshot_package_lineage: None,
             source_container: None,
             preserved,
             preserved_undo: Vec::new(),
             preserved_redo: Vec::new(),
             edited_since_open: false,
             recalculated_since_open: false,
+            calculations_since_open: 0,
             moved_references_since_open: false,
             active_sheet,
             undo: UndoStack::new(),
@@ -579,6 +733,16 @@ impl Workbook {
         })
     }
 
+    fn require_snapshot_standalone(&self) -> crate::snapshot::SnapshotResult<()> {
+        if matches!(self.mode, WorkbookMode::Standalone) {
+            Ok(())
+        } else {
+            Err(crate::snapshot::SnapshotError::new(
+                "collaborative workbooks cannot be snapshotted",
+            ))
+        }
+    }
+
     pub fn client_id(&self) -> u64 {
         self.authority.client_id()
     }
@@ -588,6 +752,27 @@ impl Workbook {
     /// active sheet and proposals do not.
     pub fn version(&self) -> DocumentVersion {
         DocumentVersion::new(&self.version_nonce, self.committed_changes)
+    }
+
+    #[doc(hidden)]
+    pub fn adopt_peer_version(&mut self, version: &str) -> Result<()> {
+        if self.edited_since_open {
+            return Err(Error::InvalidOperation(
+                "Peer version adoption requires an unedited workbook".into(),
+            ));
+        }
+        let (nonce, changes) = version
+            .rsplit_once('-')
+            .ok_or_else(|| Error::InvalidRequest("Invalid peer version".into()))?;
+        let changes = changes
+            .parse::<u64>()
+            .map_err(|error| Error::InvalidRequest(error.to_string()))?;
+        if nonce.is_empty() {
+            return Err(Error::InvalidRequest("Invalid peer nonce".into()));
+        }
+        self.version_nonce = nonce.to_owned();
+        self.committed_changes = changes;
+        Ok(())
     }
 
     pub fn is_collaborative(&self) -> bool {
@@ -732,7 +917,12 @@ impl Workbook {
     /// an adopted snapshot are the same foreign bytes and get the same answer.
     fn gate_incoming(&self, model: &WorkbookModel) -> Result<()> {
         validate_model(model)?;
-        validate_chart_source(model, self.source_package.is_some())?;
+        validate_chart_source(
+            model,
+            self.source_package
+                .as_ref()
+                .is_some_and(|package| package.facts().source_present()),
+        )?;
         self.validate_incoming_anchors(model)
     }
 
@@ -920,6 +1110,7 @@ impl Workbook {
         validate_chart_source(&self.model, self.source_package.is_some())?;
         match &self.source_package {
             Some(package) => {
+                let package = package.materialize()?;
                 let parts = xlsx_parse::serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes(
                     &self.model,
                     package,
@@ -954,20 +1145,20 @@ impl Workbook {
     }
 
     fn has_uncached_source_formulas(&self) -> bool {
-        self.source_package.as_ref().is_some_and(|package| {
-            (0..package.source_sheet_count()).any(|index| {
-                package
-                    .source_cell_facts(index)
-                    .is_some_and(|facts| !facts.uncached_formulas.is_empty())
-            })
-        })
+        self.source_package
+            .as_ref()
+            .is_some_and(|package| package.facts().has_uncached_source_formulas())
     }
 
     /// The committed state a structured export reads.
-    pub(crate) fn export_source(&self) -> ExportSource<'_> {
-        ExportSource {
+    pub(crate) fn try_export_source(&self) -> Result<ExportSource<'_>> {
+        Ok(ExportSource {
             model: &self.model,
-            package: self.source_package.as_ref(),
+            package: self
+                .source_package
+                .as_ref()
+                .map(PackageSlot::materialize)
+                .transpose()?,
             origins: &self.preserved.origins,
             shared_string_cells: &self.preserved.shared_string_cells,
             axes: &self.preserved.axes,
@@ -976,11 +1167,39 @@ impl Workbook {
             edited: self.edited_since_open || self.recalculated_since_open,
             part_hashes: &self.source_part_hashes,
             sheet_ids: self.sheet_keys(),
-        }
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn export_source(&self) -> ExportSource<'_> {
+        self.try_export_source().unwrap()
     }
 
     pub fn into_model(self) -> WorkbookModel {
         self.model
+    }
+
+    #[cfg(test)]
+    pub(crate) fn defer_source_package_for_test(&mut self) -> Result<()> {
+        let source = self
+            .source_container
+            .as_ref()
+            .ok_or_else(|| Error::Package("source container is unavailable".to_owned()))?;
+        let package = self
+            .source_package
+            .as_ref()
+            .ok_or_else(|| Error::Package("source package is unavailable".to_owned()))?;
+        let facts = xlsx_parse::PackageFacts::from_package(package.materialize()?);
+        self.source_package = Some(PackageSlot::deferred(source.clone(), facts));
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn source_package_is_unmaterialized_for_test(&self) -> bool {
+        matches!(
+            &self.source_package,
+            Some(PackageSlot::Deferred { rebuilt, .. }) if rebuilt.get().is_none()
+        )
     }
 
     pub fn sheet(&self, sheet: SheetId) -> Result<&Sheet> {
@@ -1001,6 +1220,9 @@ impl Workbook {
 
     pub fn set_active_sheet(&mut self, sheet: SheetId) -> Result<()> {
         self.sheet(sheet)?;
+        if self.active_sheet != sheet {
+            self.snapshot_package_lineage = None;
+        }
         self.active_sheet = sheet;
         self.invalidate_sheet_info();
         Ok(())
@@ -2289,7 +2511,7 @@ impl Workbook {
     /// what the ops before it left behind rather than what the workbook opened
     /// with.
     fn ensure_references_stay_valid(&self, names: &[String], op: &Op) -> Result<()> {
-        let Some(package) = self.source_package.as_ref() else {
+        let Some(package) = self.source_package.as_ref().map(PackageSlot::facts) else {
             return Ok(());
         };
         let at = |sheet: SheetId| {
@@ -2334,7 +2556,7 @@ impl Workbook {
     /// Whether an op moves cells a preserved part names and no save rewrites,
     /// which is what a save has to be told about.
     fn moves_referenced_cells(&self, names: &[String], op: &Op) -> bool {
-        let Some(package) = self.source_package.as_ref() else {
+        let Some(package) = self.source_package.as_ref().map(PackageSlot::facts) else {
             return false;
         };
         let (sheet, at, by_rows) = match *op {
@@ -2368,7 +2590,7 @@ impl Workbook {
         if origin.is_some_and(|origin| {
             self.source_package
                 .as_ref()
-                .is_some_and(|package| !package.source_sheet_is_worksheet(origin))
+                .is_some_and(|package| !package.facts().source_sheet_is_worksheet(origin))
         }) {
             return Err(Error::InvalidOperation(format!(
                 "sheet {} is not an editable worksheet",
@@ -2609,6 +2831,7 @@ impl Workbook {
     fn rebuild_and_recalculate(&mut self, options: CalculationOptions) -> CalculationResult {
         self.bump_model_epoch();
         self.recalculated_since_open = true;
+        self.calculations_since_open = self.calculations_since_open.saturating_add(1);
         let (graph, result) =
             rebuild_and_recalc_all_with_seed(&mut self.model, options.now_serial, self.rand_seed);
         self.graph = Some(graph);
@@ -4048,15 +4271,16 @@ impl Workbook {
         } else {
             None
         };
-        let package =
-            self.source_package
-                .as_ref()
-                .ok_or_else(|| RenderError::ChartSourceUnavailable {
-                    part: chart.part.clone(),
-                })?;
+        let package = self
+            .source_package
+            .as_ref()
+            .ok_or_else(|| RenderError::ChartSourceUnavailable {
+                part: chart.part.clone(),
+            })?
+            .facts();
         let bytes =
             package
-                .part_bytes(&chart.part)
+                .chart_part_bytes(&chart.part)
                 .ok_or_else(|| RenderError::ChartPartMissing {
                     part: chart.part.clone(),
                 })?;
@@ -4100,11 +4324,6 @@ fn validate_display_region(
     viewport: &Viewport,
 ) -> Result<()> {
     validate_viewport(viewport)?;
-    let right = viewport.x + viewport.width;
-    let bottom = viewport.y + viewport.height;
-    if right > geometry.col_x(MAX_COLS) || bottom > geometry.row_y(MAX_ROWS) {
-        return Err(Error::InvalidViewport);
-    }
     let (rows, columns) = geometry.viewport_range(viewport);
     let (frozen_rows, frozen_cols) = sheet
         .freeze_pane
@@ -4301,13 +4520,15 @@ impl Workbook {
             mode,
             pending_remote_updates: Vec::new(),
             model,
-            source_package,
+            source_package: source_package.map(PackageSlot::Present),
+            snapshot_package_lineage: None,
             source_container: None,
             preserved,
             preserved_undo: Vec::new(),
             preserved_redo: Vec::new(),
             edited_since_open: false,
             recalculated_since_open: false,
+            calculations_since_open: 0,
             moved_references_since_open: false,
             active_sheet,
             undo: UndoStack::new(),
@@ -4542,6 +4763,245 @@ mod tests {
         let end = xml.find("</sheetData>").unwrap() + "</sheetData>".len();
         *sheet = format!("{}{}{}", &xml[..start], sheet_data, &xml[end..]).into_bytes();
         ooxml_opc::rezip_parts(&parts).unwrap()
+    }
+
+    #[test]
+    fn peer_hydration_preserves_seeded_edits_and_active_sheet() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Workbook>();
+        let mut model = crate::authority::open_test_cases::matrix().remove(0).model;
+        model.sheets[0].set_cell(
+            CellRef::new(0, 1),
+            xlsx_model::Cell {
+                value: CellValue::Number { value: 0.0 },
+                formula: Some("RANDBETWEEN(1,1000000)+A1".into()),
+                style: None,
+            },
+        );
+        model.sheets.push(Sheet::new("Second"));
+        let bytes = ooxml_opc::rezip_parts(&generated_source_parts(&model)).unwrap();
+        let options = CalculationOptions {
+            now_serial: Some(45_000.25),
+        };
+        let mut worker =
+            Workbook::open_recalculated_with_seed(&bytes, options, Some(0x5eed)).unwrap();
+        let active = SheetId((worker.sheet_count() - 1) as u32);
+        assert_ne!(active, worker.active_sheet());
+        worker.set_active_sheet(active).unwrap();
+        let hydration = worker.peer_hydration_json().unwrap();
+        let mut peer = Workbook::open_with_peer_hydration_json(&bytes, &hydration).unwrap();
+        assert_eq!(peer.active_sheet(), active);
+        assert_eq!(peer.rand_seed(), Some(0x5eed));
+        assert_eq!(peer.model, worker.model);
+        assert_eq!(peer.version(), worker.version());
+        for input in ["3", "4"] {
+            let cell = CellRef::new(0, 0);
+            let expected = worker.edit_cell(SheetId(0), cell, input, options).unwrap();
+            let actual = peer.edit_cell(SheetId(0), cell, input, options).unwrap();
+            assert_eq!(actual, expected);
+            assert_eq!(peer.model, worker.model);
+            assert_eq!(peer.version(), worker.version());
+            assert!(matches!(
+                peer.model.sheets[0].cell(CellRef::new(0, 1)).unwrap().value,
+                CellValue::Number { value } if value > 0.0
+            ));
+        }
+    }
+
+    #[test]
+    fn peer_hydration_refuses_pending_proposals() {
+        let bytes = source_with_sheet_data(
+            r#"<sheetData><row r="1"><c r="A1"><v>2</v></c></row></sheetData>"#,
+        );
+        let mut worker =
+            Workbook::open_recalculated(&bytes, CalculationOptions::default()).unwrap();
+        worker
+            .propose(
+                ProposalRequest {
+                    agent_id: "agent".into(),
+                    note: None,
+                    edits: vec![crate::ProposalEditInput {
+                        sheet: SheetId(0),
+                        cell: CellRef::new(0, 0),
+                        input: "3".into(),
+                        number_format: None,
+                    }],
+                },
+                CalculationOptions::default(),
+            )
+            .unwrap();
+        assert!(!worker.edited_since_open);
+        assert_eq!(worker.proposals().len(), 1);
+        assert!(matches!(
+            worker.peer_hydration_json(),
+            Err(Error::InvalidOperation(_))
+        ));
+    }
+
+    #[test]
+    fn peer_hydration_preserves_rejected_proposal_id_counter() {
+        let bytes = source_with_sheet_data(
+            r#"<sheetData><row r="1"><c r="A1"><v>2</v></c></row></sheetData>"#,
+        );
+        let options = CalculationOptions::default();
+        let mut worker = Workbook::open_recalculated(&bytes, options).unwrap();
+        let request = ProposalRequest {
+            agent_id: "agent".into(),
+            note: None,
+            edits: vec![crate::ProposalEditInput {
+                sheet: SheetId(0),
+                cell: CellRef::new(0, 0),
+                input: "3".into(),
+                number_format: None,
+            }],
+        };
+        let first = worker.propose(request.clone(), options).unwrap();
+        assert_eq!(first.id, "p1");
+        assert!(worker.reject_proposal(&first.id));
+        assert!(worker.proposals().is_empty());
+        let hydration = worker.peer_hydration_json().unwrap();
+        let mut peer = Workbook::open_with_peer_hydration_json(&bytes, &hydration).unwrap();
+        let original_proposal = worker.propose(request.clone(), options).unwrap();
+        let peer_proposal = peer.propose(request, options).unwrap();
+        assert_eq!(original_proposal.id, "p2");
+        assert_eq!(peer_proposal.id, original_proposal.id);
+        assert_eq!(peer_proposal, original_proposal);
+        let accepted = worker
+            .accept_proposal(&peer_proposal.id, false, options)
+            .unwrap();
+        assert_eq!(accepted.proposal_id, peer_proposal.id);
+        assert!(accepted.mutation.applied);
+        let peer_accepted = peer
+            .accept_proposal(&peer_proposal.id, false, options)
+            .unwrap();
+        assert_eq!(peer_accepted, accepted);
+        assert_eq!(peer.model, worker.model);
+        assert_eq!(peer.version(), worker.version());
+        assert_eq!(peer.save().unwrap(), worker.save().unwrap());
+    }
+
+    fn opening_hydration_bytes() -> Vec<u8> {
+        source_with_sheet_data(
+            r#"<sheetData><row r="1"><c r="A1"><v>2</v></c><c r="B1" s="1"><f>A1+3</f><v>999</v></c><c r="C1"><f>NOW()</f><v>0</v></c><c r="D1"><f>RANDBETWEEN(1,1000000)</f><v>0</v></c><c r="E1"><f t="array" ref="E1:E2">SEQUENCE(4)</f><v>1</v></c><c r="G1"><f t="array" ref="G1:G4">SEQUENCE(2)</f><v>1</v></c><c r="I1"><f>1/0</f><v>0</v></c></row><row r="2"><c r="E2"><v>2</v></c><c r="G2"><v>2</v></c></row><row r="3"><c r="G3"><v>3</v></c></row><row r="4"><c r="G4"><v>4</v></c></row></sheetData>"#,
+        )
+    }
+
+    fn assert_hydrated_opening_equal(peer: &Workbook, worker: &Workbook) {
+        assert_eq!(peer.model, worker.model);
+        for (actual, expected) in peer.model.sheets.iter().zip(&worker.model.sheets) {
+            assert_eq!(
+                actual.array_formulas().collect::<Vec<_>>(),
+                expected.array_formulas().collect::<Vec<_>>()
+            );
+        }
+        assert_eq!(peer.version(), worker.version());
+        assert_eq!(peer.last_calculation(), worker.last_calculation());
+        assert_eq!(peer.rand_seed(), worker.rand_seed());
+        assert_eq!(peer.active_sheet(), worker.active_sheet());
+        assert_eq!(peer.recalculated_since_open, worker.recalculated_since_open);
+        assert_eq!(peer.calculations_since_open, worker.calculations_since_open);
+        assert_eq!(peer.save().unwrap(), worker.save().unwrap());
+    }
+
+    #[test]
+    fn peer_hydration_opening_delta_preserves_stale_volatile_and_resized_spills() {
+        let bytes = opening_hydration_bytes();
+        let worker = Workbook::open_recalculated_with_seed(
+            &bytes,
+            CalculationOptions {
+                now_serial: Some(45_000.25),
+            },
+            Some(0x5eed),
+        )
+        .unwrap();
+        let hydration = worker.peer_hydration_json().unwrap();
+        let transferred: PeerHydration = serde_json::from_str(&hydration).unwrap();
+        assert!(transferred.delta);
+        assert_eq!(transferred.calculations_since_open, 1);
+        let changed: HashSet<_> = worker
+            .last_calculation
+            .changed
+            .iter()
+            .map(|address| (address.sheet.0 as usize, address.cell))
+            .collect();
+        let sent: HashSet<_> = transferred
+            .cells
+            .iter()
+            .enumerate()
+            .flat_map(|(sheet, cells)| cells.iter().map(move |(at, _, _, _)| (sheet, *at)))
+            .chain(
+                transferred
+                    .deleted_cells
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(sheet, cells)| cells.iter().map(move |at| (sheet, *at))),
+            )
+            .collect();
+        assert_eq!(sent, changed);
+        assert!(!sent.contains(&(0, CellRef::new(0, 0))));
+        assert!(transferred.deleted_cells[0].contains(&CellRef::new(2, 6)));
+        assert!(transferred.deleted_cells[0].contains(&CellRef::new(3, 6)));
+        let sheet = &worker.model.sheets[0];
+        assert_eq!(
+            sheet.cell(CellRef::new(0, 1)).unwrap().value,
+            CellValue::Number { value: 5.0 }
+        );
+        assert_eq!(
+            sheet.cell(CellRef::new(0, 2)).unwrap().value,
+            CellValue::Number { value: 45_000.25 }
+        );
+        assert!(matches!(
+            sheet.cell(CellRef::new(0, 3)).unwrap().value,
+            CellValue::Number { value } if value > 0.0
+        ));
+        assert_eq!(
+            sheet.array_formula(CellRef::new(0, 4)),
+            Some(CellRange::parse_a1("E1:E4").unwrap())
+        );
+        assert_eq!(
+            sheet.array_formula(CellRef::new(0, 6)),
+            Some(CellRange::parse_a1("G1:G2").unwrap())
+        );
+        let peer = Workbook::open_with_peer_hydration_json(&bytes, &hydration).unwrap();
+        assert_hydrated_opening_equal(&peer, &worker);
+    }
+
+    #[test]
+    fn peer_hydration_uses_full_cells_after_two_calculations() {
+        let bytes = opening_hydration_bytes();
+        let mut worker = Workbook::open_recalculated_with_seed(
+            &bytes,
+            CalculationOptions {
+                now_serial: Some(45_000.25),
+            },
+            Some(0x5eed),
+        )
+        .unwrap();
+        worker.recalculate(CalculationOptions {
+            now_serial: Some(45_001.5),
+        });
+        let hydration = worker.peer_hydration_json().unwrap();
+        let transferred: PeerHydration = serde_json::from_str(&hydration).unwrap();
+        assert!(!transferred.delta);
+        assert_eq!(transferred.calculations_since_open, 2);
+        assert!(transferred.deleted_cells.iter().all(Vec::is_empty));
+        for (cells, sheet) in transferred.cells.iter().zip(&worker.model.sheets) {
+            assert_eq!(cells.len(), sheet.iter_cells().count());
+        }
+        assert!(
+            transferred.cells[0]
+                .iter()
+                .any(|(at, _, _, _)| *at == CellRef::new(0, 0))
+        );
+        assert!(
+            !worker
+                .last_calculation
+                .changed
+                .iter()
+                .any(|address| address.cell == CellRef::new(0, 1))
+        );
+        let peer = Workbook::open_with_peer_hydration_json(&bytes, &hydration).unwrap();
+        assert_hydrated_opening_equal(&peer, &worker);
     }
 
     #[test]

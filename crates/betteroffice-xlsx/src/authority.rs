@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::sheet_json::{decode_charts, decode_hyperlinks};
 use sha2::{Digest, Sha256};
@@ -28,6 +28,10 @@ use yrs::{
     Any, Array, ArrayRef, BranchID, Doc, ID, Map, MapPrelim, MapRef, Options, Origin, Out, ReadTxn,
     StateVector, Transact, TransactionMut, Update, WriteTxn,
 };
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) mod snapshot;
+pub(crate) mod snapshot_validation;
 
 const META: &str = "xlsx";
 const CELL_FORMATS: &str = "xlsx:cell-formats";
@@ -496,9 +500,15 @@ enum HistoryAction {
     Redo(SheetOrderEntry),
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static SNAPSHOT_VECTOR_ENCODINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub(crate) struct WorkbookAuthority {
     doc: Doc,
     projection_valid: Arc<AtomicBool>,
+    snapshot_revision: Arc<AtomicU64>,
     base: Arc<WorkbookBase>,
     history: SheetOrderHistory,
     next_sheet_id: u64,
@@ -518,10 +528,12 @@ struct SetCellSync {
 
 impl WorkbookAuthority {
     fn hydrated(doc: Doc, base: Arc<WorkbookBase>, next_sheet_id: u64) -> Self {
-        let projection_valid = observe_projection(&doc);
+        let snapshot_revision = Arc::new(AtomicU64::new(0));
+        let projection_valid = observe_projection(&doc, snapshot_revision.clone());
         Self {
             doc,
             projection_valid,
+            snapshot_revision,
             base,
             history: SheetOrderHistory::default(),
             next_sheet_id,
@@ -601,6 +613,65 @@ impl WorkbookAuthority {
 
     pub(crate) fn client_id(&self) -> u64 {
         self.doc.client_id().get()
+    }
+
+    pub(crate) fn snapshot_revision(&self) -> u64 {
+        self.snapshot_revision.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn snapshot_projection_valid(&self) -> crate::snapshot::SnapshotResult<bool> {
+        let _transaction = self.doc.try_transact().map_err(|_| {
+            crate::snapshot::SnapshotError::new("snapshot authority has an active transaction")
+        })?;
+        if !self.history.undo.is_empty()
+            || !self.history.redo.is_empty()
+            || !self.undo_stack.is_empty()
+            || !self.redo_stack.is_empty()
+            || self.next_sheet_id != 0
+            || has_pending(&self.doc)
+        {
+            return Err(crate::snapshot::SnapshotError::new(
+                "snapshot authority is not at the initial boundary",
+            ));
+        }
+        self.base.styles.snapshot_field_counts();
+        Ok(self.projection_valid.load(Ordering::Relaxed))
+    }
+
+    pub(crate) fn set_snapshot_projection_valid(&mut self, valid: bool) {
+        self.projection_valid.store(valid, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn snapshot_transaction_for_test(&self) -> TransactionMut<'_> {
+        self.doc.transact_mut()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn snapshot_skip_gc_for_test(&mut self) {
+        let mut options = Options::with_guid_and_client_id(self.doc.guid(), self.doc.client_id());
+        options.skip_gc = true;
+        let doc = Doc::with_options(options);
+        hydrate_local_doc(&doc, &self.encode_state_as_update_v1()).unwrap();
+        self.doc = doc;
+        self.snapshot_revision.fetch_add(1, Ordering::Relaxed);
+        self.projection_valid = observe_projection(&self.doc, self.snapshot_revision.clone());
+    }
+
+    #[cfg(test)]
+    #[doc(hidden)]
+    pub(crate) fn snapshot_checkpoint_for_test(&mut self) {
+        let mut undo = build_undo_manager(
+            &self.doc,
+            std::mem::take(&mut self.undo_stack),
+            std::mem::take(&mut self.redo_stack),
+        )
+        .unwrap();
+        undo.clear_all();
+        drop(undo);
+        self.doc.transact_mut_with(HYDRATE_ORIGIN).gc(None);
+        self.clear_history();
+        assert_eq!(self.next_sheet_id, 0);
     }
 
     pub(crate) fn state_vector_entries(&self) -> usize {
@@ -762,6 +833,8 @@ impl WorkbookAuthority {
     }
 
     pub(crate) fn encode_state_vector_v1(&self) -> Vec<u8> {
+        #[cfg(test)]
+        SNAPSHOT_VECTOR_ENCODINGS.set(SNAPSHOT_VECTOR_ENCODINGS.get() + 1);
         let state_vector = self.doc.transact().state_vector();
         let mut entries = state_vector
             .iter()
@@ -1238,7 +1311,8 @@ impl WorkbookAuthority {
         ));
         hydrate_local_doc(&doc, restore).map_err(AuthorityError::InvalidState)?;
         self.doc = doc;
-        self.projection_valid = observe_projection(&self.doc);
+        self.snapshot_revision.fetch_add(1, Ordering::Relaxed);
+        self.projection_valid = observe_projection(&self.doc, self.snapshot_revision.clone());
         self.undo_stack = undo_stack;
         self.redo_stack = redo_stack;
         Ok(())
@@ -1642,12 +1716,31 @@ impl WorkbookAuthority {
                     sync_sheet(&sheet_map, &mut txn, sheet, &model.styles)?;
                 }
             }
-            for (key, at) in authored_cells {
+            let order_cells = |targets: HashSet<(String, CellRef)>| {
+                let mut targets = targets.into_iter().collect::<Vec<_>>();
+                targets.sort_unstable_by(|(left_key, left), (right_key, right)| {
+                    (left_key, left.row, left.col, left.abs_row, left.abs_col).cmp(&(
+                        right_key,
+                        right.row,
+                        right.col,
+                        right.abs_row,
+                        right.abs_col,
+                    ))
+                });
+                targets
+            };
+            let mut col_widths = col_widths.into_iter().collect::<Vec<_>>();
+            col_widths.sort_unstable();
+            let mut row_heights = row_heights.into_iter().collect::<Vec<_>>();
+            row_heights.sort_unstable();
+            let mut merges = merges.into_iter().collect::<Vec<_>>();
+            merges.sort_unstable();
+            for (key, at) in order_cells(authored_cells) {
                 let (sheet_map, sheet_model) =
                     sheet_parts_by_key(&sheets, &txn, &keys, model, &key)?;
                 sync_authored_cell(&sheet_map, &mut txn, sheet_model, at)?;
             }
-            for (key, at) in formatted_cells {
+            for (key, at) in order_cells(formatted_cells) {
                 let (sheet_map, sheet_model) =
                     sheet_parts_by_key(&sheets, &txn, &keys, model, &key)?;
                 sync_cell_format(&sheet_map, &mut txn, sheet_model, &model.styles, at)?;
@@ -1818,11 +1911,14 @@ impl WorkbookAuthority {
     }
 }
 
-fn observe_projection(doc: &Doc) -> Arc<AtomicBool> {
+fn observe_projection(doc: &Doc, revision: Arc<AtomicU64>) -> Arc<AtomicBool> {
     let valid = Arc::new(AtomicBool::new(false));
     let observed = valid.clone();
-    doc.observe_after_transaction_with("projection", move |_| {
-        observed.store(false, Ordering::Relaxed)
+    doc.observe_after_transaction_with("projection", move |transaction| {
+        observed.store(false, Ordering::Relaxed);
+        if !transaction.insert_set().is_empty() || !transaction.delete_set().is_empty() {
+            revision.fetch_add(1, Ordering::Relaxed);
+        }
     })
     .expect("authority document has no active transaction");
     valid
@@ -1892,6 +1988,11 @@ fn hydrate_local_doc(doc: &Doc, update: &[u8]) -> Result<(), String> {
     doc.transact_mut_with(HYDRATE_ORIGIN)
         .apply_update(update)
         .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+pub(crate) fn hydrate_snapshot_part(doc: &Doc, update: &[u8]) -> Result<(), String> {
+    hydrate_local_doc(doc, update)
 }
 
 fn has_pending(doc: &Doc) -> bool {
@@ -4852,6 +4953,114 @@ pub(crate) mod open_test_cases {
 mod tests {
     use super::*;
     use xlsx_model::Xf;
+
+    #[test]
+    fn multi_target_twins_emit_identical_updates() {
+        use std::sync::Mutex;
+
+        use crate::{CalculationOptions, Workbook};
+
+        let mut source_model = rich_model();
+        source_model.styles.fonts.push(xlsx_model::Font {
+            bold: true,
+            ..xlsx_model::Font::default()
+        });
+        source_model.styles.cell_xfs.push(Xf {
+            font: Some(0),
+            ..Xf::default()
+        });
+        let parts = xlsx_parse::serialize_workbook(&source_model).unwrap();
+        let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+        let open = || {
+            let mut workbook = Workbook::open_collaborative(&bytes, 71).unwrap();
+            workbook.set_rand_seed(Some(23));
+            workbook
+        };
+        let mut first = open();
+        let mut second = open();
+        let first_updates = Arc::new(Mutex::new(Vec::new()));
+        let second_updates = Arc::new(Mutex::new(Vec::new()));
+        let observed = Arc::clone(&first_updates);
+        let _first_subscription = first
+            .observe_update_v1(move |event| observed.lock().unwrap().push(event.update))
+            .unwrap();
+        let observed = Arc::clone(&second_updates);
+        let _second_subscription = second
+            .observe_update_v1(move |event| observed.lock().unwrap().push(event.update))
+            .unwrap();
+        let mut ops = Vec::new();
+        for sheet in [SheetId(1), SheetId(0)] {
+            for row in [7, 2, 5, 0] {
+                for col in [4, 0, 2] {
+                    ops.push(Op::SetCell {
+                        sheet,
+                        at: CellRef::new(row, col),
+                        cell: CellState {
+                            value: CellValue::Number {
+                                value: f64::from(row * 10 + col),
+                            },
+                            formula: (row == 7 && col == 4).then(|| "RAND()+NOW()".into()),
+                            style: Some(1),
+                        },
+                    });
+                }
+                ops.push(Op::SetRowHeight {
+                    sheet,
+                    row,
+                    height: Some(f64::from(row + 20)),
+                });
+            }
+            for col in [5, 0, 3] {
+                ops.push(Op::SetColWidth {
+                    sheet,
+                    col,
+                    width: Some(f64::from(col + 15)),
+                });
+            }
+        }
+        let options = CalculationOptions {
+            now_serial: Some(45_000.25),
+        };
+        assert_eq!(
+            first.apply_ops(ops.clone(), options).unwrap(),
+            second.apply_ops(ops.clone(), options).unwrap(),
+        );
+        assert!(!first_updates.lock().unwrap().is_empty());
+        assert_eq!(
+            *first_updates.lock().unwrap(),
+            *second_updates.lock().unwrap()
+        );
+        assert_eq!(
+            first.encode_state_vector_v1(),
+            second.encode_state_vector_v1()
+        );
+        assert_eq!(
+            first.encode_state_as_update_v1(),
+            second.encode_state_as_update_v1()
+        );
+        assert_eq!(first.save().unwrap(), second.save().unwrap());
+
+        let mut first = WorkbookAuthority::from_model_with_client_id(&source_model, 71).unwrap();
+        let mut second = WorkbookAuthority::from_model_with_client_id(&source_model, 71).unwrap();
+        ops.extend([
+            Op::MergeCells {
+                sheet: SheetId(1),
+                range: CellRange::new(CellRef::new(10, 0), CellRef::new(10, 2)),
+            },
+            Op::MergeCells {
+                sheet: SheetId(0),
+                range: CellRange::new(CellRef::new(12, 0), CellRef::new(12, 2)),
+            },
+        ]);
+        assert_eq!(
+            first
+                .apply_ops(&ops, SyncOrigin::User, &source_model.styles)
+                .unwrap(),
+            second
+                .apply_ops(&ops, SyncOrigin::User, &source_model.styles)
+                .unwrap(),
+        );
+    }
 
     #[test]
     fn fingerprint_data_matches_clone_oracle_matrix() {

@@ -263,8 +263,12 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
       const session = yrsSessionRef.current;
       const input = yrsInputRef.current;
       if (!input || !session) throw new Error('The editor input is unavailable');
+      if (input.hasHeldInput?.()) {
+        await input.flushPendingInput();
+        return;
+      }
       const pending = input.flushPendingInput();
-      const ready = workerOpenEnabledRef.current && !viewerSelectionRef.current && !workerOpenDocumentHeld(session)
+      const ready = workerOpenEnabledRef.current && !viewerSelectionRef.current && !workerOpenDocumentHeld(session) && !session.isDisplayOnly()
         ? awaitWorkerOpenReplica(session)
         : undefined;
       await (ready ? Promise.all([pending, ready]) : pending);
@@ -294,7 +298,9 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     },
     scrollToParaId: (paraId, options) => {
       beforeNavigation();
-      return scrollToParaIdImpl(paraId, options);
+      const moved = scrollToParaIdImpl(paraId, options);
+      if (moved) syncYrsInputStateRef.current(false);
+      return moved;
     },
     scrollToPage: (pageNumber) => {
       beforeNavigation();

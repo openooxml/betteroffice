@@ -1,5 +1,13 @@
 {
   "_lang": "en",
+  "worker": {
+    "previousRecovery": "Download previous presentation recovery",
+    "preparing": "Preparing editor. Editing will be available shortly.",
+    "failed": "Editing is unavailable. Download the recovered presentation.",
+    "disabled": "This feature is unavailable in this editing mode.",
+    "recovery": "Download recovered presentation",
+    "image": "Preparing image"
+  },
   "toolbar": {
     "label": "Presentation formatting toolbar",
     "save": "Save",

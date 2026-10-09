@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
-use betteroffice_xlsx::{CalculationOptions, CellRange, CellRef, Error, SheetId, Workbook};
+use betteroffice_xlsx::{
+    CalculationOptions, CellRange, CellRef, CellState, CellValue, Error, Op, SheetId, Workbook,
+};
 
 const MAIN: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
 
@@ -227,15 +229,95 @@ fn precedent_edit_keeps_shared_formulas_and_recalculated_caches() {
 }
 
 #[test]
-fn unrelated_edit_keeps_equivalent_style_indices_and_other_parts() {
+fn master_precedent_edit_keeps_shared_formulas_and_reopens() {
     for (name, variant) in VARIANTS {
         let source = package(variant);
         let before = parts(&source);
         let mut workbook = Workbook::open(&source).unwrap();
         workbook
+            .edit_cell(SheetId(1), cell("A1"), "5", CalculationOptions::default())
+            .unwrap();
+        let saved = workbook.save().unwrap();
+        let after = parts(&saved);
+        let source_cells = cells(&text(&before, "xl/worksheets/sheet2.xml"));
+        let saved_cells = cells(&text(&after, "xl/worksheets/sheet2.xml"));
+        let reopened = Workbook::open(&saved).unwrap();
+
+        for address in ["B1", "B2", "B3"] {
+            let expected = if address == "B1" {
+                source_cells[address].replace("<v>2</v>", "<v>10</v>")
+            } else {
+                source_cells[address].clone()
+            };
+            assert_eq!(saved_cells[address], expected, "{name}: {address}");
+            let current = workbook.model().sheets[1].cell(cell(address)).unwrap();
+            let opened = reopened.model().sheets[1].cell(cell(address)).unwrap();
+            assert_eq!(opened.formula, current.formula, "{name}: {address}");
+            assert_eq!(opened.value, current.value, "{name}: {address}");
+        }
+    }
+}
+
+#[test]
+fn shared_cache_type_change_keeps_formula_markup_and_reopens() {
+    for (name, variant) in VARIANTS {
+        let source = package(variant);
+        let before = parts(&source);
+        let mut workbook = Workbook::open(&source).unwrap();
+        workbook
+            .edit_cell(
+                SheetId(1),
+                cell("A2"),
+                "text",
+                CalculationOptions::default(),
+            )
+            .unwrap();
+        let saved = workbook.save().unwrap();
+        let after = parts(&saved);
+        let source_cells = cells(&text(&before, "xl/worksheets/sheet2.xml"));
+        let saved_cells = cells(&text(&after, "xl/worksheets/sheet2.xml"));
+        let reopened = Workbook::open(&saved).unwrap();
+
+        for address in ["B1", "B2", "B3"] {
+            let expected = if address == "B2" {
+                source_cells[address]
+                    .replace(r#"s="2""#, r#"s="2" t="e""#)
+                    .replace("<v>4</v>", "<v>#VALUE!</v>")
+            } else {
+                source_cells[address].clone()
+            };
+            assert_eq!(saved_cells[address], expected, "{name}: {address}");
+            let current = workbook.model().sheets[1].cell(cell(address)).unwrap();
+            let opened = reopened.model().sheets[1].cell(cell(address)).unwrap();
+            assert_eq!(opened.formula, current.formula, "{name}: {address}");
+            assert_eq!(opened.value, current.value, "{name}: {address}");
+        }
+    }
+}
+
+#[test]
+fn unrelated_edit_keeps_equivalent_style_indices_and_other_parts() {
+    for (name, variant) in VARIANTS {
+        let source = package(variant);
+        let before = parts(&source);
+        let mut workbook = Workbook::open(&source).unwrap();
+        let source_styles = workbook.model().styles.clone();
+        let source_style = workbook.model().sheets[0].cell(cell("A1")).unwrap().style;
+        let source_format = source_styles.resolved_format(source_style);
+        workbook
             .edit_cell(SheetId(0), cell("A1"), "5", CalculationOptions::default())
             .unwrap();
-        let after = parts(&workbook.save().unwrap());
+        let saved = workbook.save().unwrap();
+        let after = parts(&saved);
+        let reopened = Workbook::open(&saved).unwrap();
+        assert_eq!(
+            reopened
+                .model()
+                .styles
+                .resolved_format(reopened.model().sheets[0].cell(cell("A1")).unwrap().style),
+            source_format,
+            "{name}"
+        );
 
         for path in ["xl/styles.xml", "xl/worksheets/sheet2.xml"] {
             assert_eq!(after[path], before[path], "{name}: {path}");
@@ -269,6 +351,10 @@ fn genuine_style_change_writes_the_new_index() {
         let source = package(variant);
         let before = parts(&source);
         let mut workbook = Workbook::open(&source).unwrap();
+        let source_styles = workbook.model().styles.clone();
+        let source_style = workbook.model().sheets[0].cell(cell("D1")).unwrap().style;
+        let source_format = source_styles.resolved_format(source_style);
+        let source_xfs = workbook.model().styles.cell_xfs.len();
         let format = workbook
             .capture_format(SheetId(0), CellRange::new(cell("D1"), cell("D1")))
             .unwrap();
@@ -283,7 +369,24 @@ fn genuine_style_change_writes_the_new_index() {
         workbook
             .edit_cell(SheetId(0), cell("B2"), "7", CalculationOptions::default())
             .unwrap();
-        let after = parts(&workbook.save().unwrap());
+        let saved = workbook.save().unwrap();
+        let after = parts(&saved);
+        let reopened = Workbook::open(&saved).unwrap();
+        assert_eq!(
+            reopened
+                .model()
+                .styles
+                .resolved_format(reopened.model().sheets[0].cell(cell("B1")).unwrap().style),
+            source_format,
+            "{name}"
+        );
+        for index in 0..source_xfs {
+            assert_eq!(
+                cell_xf(&text(&after, "xl/styles.xml"), index),
+                cell_xf(&text(&before, "xl/styles.xml"), index),
+                "{name}: cellXfs[{index}]"
+            );
+        }
 
         assert_eq!(
             after["xl/worksheets/sheet2.xml"], before["xl/worksheets/sheet2.xml"],
@@ -348,4 +451,99 @@ fn refused_grid_regeneration_preserves_source_after_undo_and_unrelated_edit() {
         assert_eq!(after_edit[path], before[path], "{path}");
     }
     assert!(cells(&text(&after_edit, "xl/worksheets/sheet1.xml"))["A1"].contains("<v>5</v>"));
+}
+
+fn outlined_package() -> Vec<u8> {
+    let mut parts = parts(&package(VARIANTS[0].1));
+    parts.insert(
+        "xl/worksheets/sheet1.xml".to_owned(),
+        worksheet(r#"<sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>"#).into_bytes(),
+    );
+    parts.insert(
+        "xl/worksheets/sheet2.xml".to_owned(),
+        worksheet(r#"<sheetData><row outlineLevel="1"><c r="A1"><v>1</v></c></row></sheetData>"#)
+            .into_bytes(),
+    );
+    ooxml_opc::rezip_parts(&parts.into_iter().collect::<Vec<_>>()).unwrap()
+}
+
+fn edit_and_insert(workbook: &mut Workbook, row: u32) {
+    workbook
+        .apply_ops(
+            vec![
+                Op::SetCell {
+                    sheet: SheetId(0),
+                    at: cell("A1"),
+                    cell: CellState {
+                        value: CellValue::Number { value: 7.0 },
+                        ..CellState::default()
+                    },
+                },
+                Op::InsertRows {
+                    sheet: SheetId(1),
+                    at: row,
+                    count: 1,
+                },
+            ],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+}
+
+#[test]
+fn insert_below_authored_rows_keeps_unrelated_sheet_byte_identical() {
+    let source = outlined_package();
+    let before = parts(&source);
+    let mut workbook = Workbook::open(&source).unwrap();
+    let original_sheet = workbook.model().sheets[1].clone();
+    edit_and_insert(&mut workbook, 100);
+    assert_eq!(workbook.model().sheets[1], original_sheet);
+
+    let saved = workbook.save().unwrap();
+    let after = parts(&saved);
+    assert_eq!(
+        after["xl/worksheets/sheet2.xml"],
+        before["xl/worksheets/sheet2.xml"]
+    );
+    let reopened = Workbook::open(&saved).unwrap();
+    assert_eq!(
+        reopened.model().sheets[0].cell(cell("A1")).unwrap().value,
+        CellValue::Number { value: 7.0 }
+    );
+    let (oracle, dispatches) = xlsx_parse::with_legacy_save_path(|| workbook.save().unwrap());
+    assert!(dispatches > 0);
+    assert_eq!(parts(&oracle), after);
+}
+
+#[test]
+fn insert_above_authored_row_moves_its_unmodeled_attributes() {
+    let source = outlined_package();
+    let before = parts(&source);
+    let mut workbook = Workbook::open(&source).unwrap();
+    edit_and_insert(&mut workbook, 0);
+
+    let saved = workbook.save().unwrap();
+    let after = parts(&saved);
+    assert_ne!(
+        after["xl/worksheets/sheet2.xml"],
+        before["xl/worksheets/sheet2.xml"]
+    );
+    let sheet = text(&after, "xl/worksheets/sheet2.xml");
+    assert!(
+        sheet.contains(r#"<row outlineLevel="1" r="2"><c r="A2"><v>1</v></c></row>"#),
+        "{sheet}"
+    );
+    let reopened = Workbook::open(&saved).unwrap();
+    assert_eq!(
+        reopened.model().sheets[0].cell(cell("A1")).unwrap().value,
+        CellValue::Number { value: 7.0 }
+    );
+    assert!(reopened.model().sheets[1].cell(cell("A1")).is_none());
+    assert_eq!(
+        reopened.model().sheets[1].cell(cell("A2")).unwrap().value,
+        CellValue::Number { value: 1.0 }
+    );
+    let (oracle, dispatches) = xlsx_parse::with_legacy_save_path(|| workbook.save().unwrap());
+    assert!(dispatches > 0);
+    assert_eq!(parts(&oracle), after);
 }

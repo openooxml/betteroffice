@@ -32,6 +32,7 @@ import {
   SIDEBAR_ANCHOR_STALE_MS,
 } from './internals/sidebarAnchorProjection';
 import { EMPTY_TRACKED_CHANGES_RESULT, type ViewerCommentRanges } from './internals/viewerSidebarReads';
+import { yieldToMainThread } from './internals/yieldToMainThread';
 import { ViewerInput } from './ViewerInput';
 import type { ViewerSelectionChange } from './internals/viewerSelectionController';
 import { CanvasSelectionOverlay } from './overlays/CanvasSelectionOverlay';
@@ -106,7 +107,8 @@ import type {
   LayoutInWorker,
   ResidentFrameApplyResult,
 } from './hooks/useDisplayList';
-import { workerOpenReplicaPending } from './internals/workerOpenReplica';
+import { workerOpenReplicaPending, workerOpenReplicaStarted } from './internals/workerOpenReplica';
+import { registeredWorkerProposalAuthority } from './internals/workerProposalAuthority';
 import type { ResolveDisplayListQueries } from './hooks/displayListQueryEpochGate';
 import { useRustMeasurement, type RustFontChainsProvider } from './hooks/useRustMeasurement';
 import type { YrsCoreSession } from './hooks/useYrsCoreSession';
@@ -205,6 +207,7 @@ export interface PagedEditorProps {
   document: Document | null;
   /** The parent-owned authoritative editing session. */
   yrsCore: YrsCoreSession;
+  pluginHostOpen?: boolean;
   /** Collaboration identity and replica lifecycle callback. */
   collaboration?: DocxEditorCollaborationOptions;
   /** Document styles for style resolution. */
@@ -225,6 +228,9 @@ export interface PagedEditorProps {
   firstPageFooterContent?: HeaderFooter | null;
   /** Whether the editor is read-only. */
   readOnly?: boolean;
+  holdInput?: boolean;
+  inputScope?: number;
+  inputQueries?: DisplayListQueries | null;
   /**
    * A viewer session's reads of the document the resident worker holds. The session holds no
    * document on this thread: selection, copy and point reads go to the worker.
@@ -244,7 +250,7 @@ export interface PagedEditorProps {
   /** Callback when the native Yrs undo/redo availability changes. */
   onYrsHistoryChange?: (canUndo: boolean, canRedo: boolean) => void;
   /** Callback when selection changes. */
-  onSelectionChange?: (from: number, to: number) => void;
+  onSelectionChange?: (from: number, to: number, initializing?: boolean) => void;
   /** Yrs-authoritative toolbar state, emitted while standard yrs input is active. */
   onYrsSelectionChange?: (selection: YrsToolbarSelection) => void;
   onViewerSelectionChange?: (selection: ViewerSelectionChange) => void;
@@ -533,6 +539,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     const {
       document,
       yrsCore,
+      pluginHostOpen,
       collaboration,
       styles,
       theme: _theme,
@@ -541,6 +548,9 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       firstPageHeaderContent,
       firstPageFooterContent,
       readOnly = false,
+      holdInput = false,
+      inputScope,
+      inputQueries,
       viewerDocumentRead: viewerDocumentReadProp,
       onViewerCommentRangesChange,
       viewerSidebarActive = true,
@@ -898,6 +908,18 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     }, []);
 
     const yrsProjectionVersionRef = useRef(0);
+    const [overlayProjectionSession, setOverlayProjectionSession] = useState<YrsSession | null>(null);
+    useEffect(() => {
+      if (!yrsCore.experimentalWorkerOpen || !yrsCore.replicaReady || !yrsCore.session) return;
+      const controller = new AbortController();
+      const session = yrsCore.session;
+      void yieldToMainThread().then(() => {
+        if (!controller.signal.aborted) setOverlayProjectionSession(session);
+      });
+      return () => controller.abort();
+    }, [yrsCore.experimentalWorkerOpen, yrsCore.replicaReady, yrsCore.session]);
+    const overlayProjectionReady = !yrsCore.experimentalWorkerOpen ||
+      (yrsCore.replicaReady && overlayProjectionSession === yrsCore.session);
     const projectionReplicaReadyRef = useRef(yrsCore.replicaReady);
     if (
       yrsCore.experimentalWorkerOpen &&
@@ -955,7 +977,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         residentLayoutReady = false,
         residentCaretReady = false,
         updateOrigin: LayoutUpdateOrigin = 'local',
-        inWorker?: boolean
+        inWorker?: boolean,
+        initializing = false
       ): void => {
         const session = yrsCore.session;
         if (session) {
@@ -1004,6 +1027,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         }
 
         if (partEdit && activeYrsRootStory !== 'body') {
+          lastPublishedBodySelectionKeyRef.current = null;
           onYrsPartSelectionChangeRef.current?.(partEdit, {
             from: selection.anchor,
             to: selection.head,
@@ -1019,7 +1043,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           // projection. React state consumes the authoritative yrs positions
           // directly.
           if (!docChanged && selectionChanged) {
-            onSelectionChangeRef.current?.(selection.anchor, selection.head);
+            onSelectionChangeRef.current?.(selection.anchor, selection.head, initializing);
           }
         }
         // Layout reads the same authoritative selection, but selection state
@@ -1617,14 +1641,17 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       getYrsPositionProjection,
       applyYrsCommand,
       syncYrsInputState,
-      readOnly,
+      readOnly: readOnly && !holdInput,
+      inputScope,
+      inputQueries,
+      queueInput: !!yrsCore.experimentalWorkerOpen && !viewerDocumentRead,
       replicaPending: viewerDocumentRead
         ? undefined
         : () =>
-            !!yrsCore.experimentalWorkerOpen &&
-            !(yrsCore.replicaReadyRef?.current ?? yrsCore.replicaReady),
-      replicaReady: viewerDocumentRead ? true : yrsCore.replicaReady,
-      requestReplica: viewerDocumentRead ? undefined : yrsCore.requestReplica,
+            holdInput ||
+            (!!yrsCore.experimentalWorkerOpen &&
+              !(yrsCore.replicaReadyRef?.current ?? yrsCore.replicaReady)),
+      replicaReady: holdInput ? false : viewerDocumentRead ? true : yrsCore.replicaReady,
       partEdit,
       displayListQueries,
       canvasHostRef,
@@ -1960,6 +1987,23 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       yrsCore.replicaReady, yrsCore.workerProposalsReady,
     ]);
 
+    const fontRefreshStateRef = useRef({ yrsCore, viewerDocumentReadProp });
+    fontRefreshStateRef.current = { yrsCore, viewerDocumentReadProp };
+    const holdFontRefresh = useCallback(() => {
+      const { yrsCore: core, viewerDocumentReadProp: viewerRead } = fontRefreshStateRef.current;
+      const session = core.session;
+      return Boolean(
+        core.experimentalWorkerOpen &&
+        !core.previewing &&
+        !viewerRead &&
+        session &&
+        !session.isDisplayOnly?.() &&
+        workerOpenReplicaStarted(session) &&
+        workerOpenReplicaPending(session) &&
+        registeredWorkerProposalAuthority(session)?.holdsWorkerState() !== true
+      );
+    }, []);
+
     // Re-layout triggers: web-font load complete + header/footer content + render-env changes.
     useLayoutTriggers({
       runLayoutPipeline,
@@ -1969,6 +2013,10 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       firstPageHeaderContent,
       firstPageFooterContent,
       renderEnv: yrsRenderEnv,
+      holdFontRefresh,
+      fontRefreshReleased: Boolean(yrsCore.session) && yrsCore.replicaReady &&
+        pluginHostOpen !== false && !workerOpenReplicaPending(yrsCore.session!),
+      fontRefreshScope: yrsCore.session,
     });
 
     const displayPositionToYrsLoc = (position: number | PointPosition): YrsLoc | null => {
@@ -2184,12 +2232,13 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           <YrsInput
             ref={yrsInputRef}
             enabled
-            readOnly={readOnly || (!!partEdit && activeYrsRootStory === 'body')}
+            readOnly={(readOnly && !holdInput) || (!!partEdit && activeYrsRootStory === 'body')}
+            holdInput={holdInput}
+            inputScope={inputScope}
             replicaReadyRef={yrsCore.experimentalWorkerOpen ? yrsCore.replicaReadyRef : undefined}
-            requestReplica={yrsCore.experimentalWorkerOpen ? yrsCore.requestReplica : undefined}
             inputEpoch={inputEpoch}
             applyPendingSelection={applyPendingSelection}
-            seedSelection={viewerDocumentRead === undefined}
+            seedSelection={viewerDocumentRead === undefined && !holdInput}
             session={yrsCore.session}
             story={activeYrsRootStory}
             isSuggesting={isSuggesting}
@@ -2270,7 +2319,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           {canvasOverlayTarget && displayListQueries && !partEdit && (
             <CanvasCellSelectionOverlay
               session={viewerDocumentRead ? null : yrsCore.session}
-              positionProjection={getYrsPositionProjection('body')}
+              positionProjection={overlayProjectionReady ? getYrsPositionProjection('body') : null}
               overlayTarget={canvasOverlayTarget}
               canvasHostRef={interactionPageHostRef}
               displayListQueries={displayListQueries}
@@ -2304,7 +2353,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
               overlayTarget={canvasOverlayTarget}
               canvasHostRef={interactionPageHostRef}
               displayListQueries={displayListQueries}
-              positionProjection={getYrsPositionProjection('body')}
+              positionProjection={overlayProjectionReady ? getYrsPositionProjection('body') : null}
               applyYrsCommand={applyYrsCommand}
               readOnly={readOnly}
               sidebarOpen={commentsSidebarOpen}

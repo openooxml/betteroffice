@@ -144,11 +144,14 @@ impl AxisLayout {
             }
         }
 
-        if frozen < limit && frozen_extent < extent {
+        let sheet_extent = edge(limit);
+        if frozen < limit && frozen_extent < extent && sheet_extent - scroll > frozen_extent {
             let body_extent = extent - frozen_extent;
             let origin = frozen_extent + scroll;
             let first = at(origin).max(frozen).min(limit - 1);
-            let last = at(origin + body_extent).max(first).min(limit - 1);
+            let last = at((origin + body_extent).min(sheet_extent))
+                .max(first)
+                .min(limit - 1);
             for index in first..=last {
                 let raw_start = edge(index) - scroll;
                 let raw_end = edge(index + 1) - scroll;
@@ -252,6 +255,180 @@ impl AxisLayout {
     }
 }
 
+fn merge_grid_intervals(
+    axis: &AxisLayout,
+    start: u32,
+    end: u32,
+    edge: impl Fn(u32) -> f32,
+) -> Vec<(f32, f32)> {
+    let split = axis.tracks.partition_point(|track| track.pinned);
+    [&axis.tracks[..split], &axis.tracks[split..]]
+        .into_iter()
+        .filter_map(|tracks| {
+            let first = tracks.first()?;
+            let last = tracks.last()?;
+            if start > last.index || end < first.index {
+                return None;
+            }
+            let scroll = if first.pinned { 0.0 } else { axis.scroll };
+            let lower = (edge(start.max(first.index)) - scroll).max(first.start);
+            let upper = (edge(end.saturating_add(1).min(last.index + 1)) - scroll).min(last.end);
+            (upper > lower).then_some((lower, upper))
+        })
+        .collect()
+}
+
+fn emit_grid_segments(
+    merges: &[CellRange],
+    geometry: &GridGeometry,
+    rows: &AxisLayout,
+    cols: &AxisLayout,
+    print: Option<&PrintMetrics>,
+    color: Arc<str>,
+) -> Vec<DrawCmd> {
+    if (rows.tracks.is_empty()
+        && geometry.row_y(MAX_ROWS) - rows.scroll <= geometry.row_y(rows.frozen))
+        || (cols.tracks.is_empty()
+            && geometry.col_x(MAX_COLS) - cols.scroll <= geometry.col_x(cols.frozen))
+    {
+        return Vec::new();
+    }
+    let merges: Vec<_> = merges
+        .iter()
+        .filter(|range| {
+            rows.intersects(range.start.row, range.end.row)
+                && cols.intersects(range.start.col, range.end.col)
+        })
+        .collect();
+    let offset = print.map_or(0.0, |metrics| 48.0 / metrics.dpi);
+    let width = print.map_or(GRIDLINE_WIDTH, |metrics| 96.0 / metrics.dpi);
+    let mut commands = Vec::new();
+    for vertical in [true, false] {
+        let (axis, across) = if vertical { (cols, rows) } else { (rows, cols) };
+        let axis_edge = |index| {
+            if vertical {
+                geometry.col_x(index)
+            } else {
+                geometry.row_y(index)
+            }
+        };
+        let across_edge = |index| {
+            if vertical {
+                geometry.row_y(index)
+            } else {
+                geometry.col_x(index)
+            }
+        };
+        let Some(first) = axis.tracks.first() else {
+            continue;
+        };
+        let boundaries: Vec<_> = std::iter::once((first.index, first.start, first.pinned))
+            .chain(
+                axis.tracks
+                    .iter()
+                    .map(|track| (track.index + 1, track.end, track.pinned)),
+            )
+            .collect();
+        let mut blocked: HashMap<u32, Vec<(f32, f32)>> = HashMap::new();
+        for range in &merges {
+            let (start, end, across_start, across_end) = if vertical {
+                (
+                    range.start.col,
+                    range.end.col,
+                    range.start.row,
+                    range.end.row,
+                )
+            } else {
+                (
+                    range.start.row,
+                    range.end.row,
+                    range.start.col,
+                    range.end.col,
+                )
+            };
+            let intervals = merge_grid_intervals(across, across_start, across_end, across_edge);
+            if intervals.is_empty() {
+                continue;
+            }
+            let first = boundaries.partition_point(|&(index, _, _)| index <= start);
+            let last = boundaries.partition_point(|&(index, _, _)| index <= end);
+            if first >= last {
+                continue;
+            }
+            let lower = axis_edge(start);
+            let upper = axis_edge(end.saturating_add(1));
+            for &(index, position, pinned) in &boundaries[first..last] {
+                let scroll = if pinned { 0.0 } else { axis.scroll };
+                let position = position + offset;
+                let lower = lower - scroll + offset;
+                let upper = upper - scroll + offset;
+                if !(lower < position && position < upper) {
+                    continue;
+                }
+                blocked
+                    .entry(index)
+                    .or_default()
+                    .extend_from_slice(&intervals);
+            }
+        }
+        for intervals in blocked.values_mut() {
+            intervals.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+            let mut merged: Vec<(f32, f32)> = Vec::new();
+            for &(lower, upper) in intervals.iter() {
+                if let Some(last) = merged.last_mut()
+                    && lower <= last.1
+                {
+                    last.1 = last.1.max(upper);
+                } else {
+                    merged.push((lower, upper));
+                }
+            }
+            *intervals = merged;
+        }
+        let start = across.tracks.first().map_or(0.0, |track| track.start);
+        let end = across.tracks.last().map_or(0.0, |track| track.end);
+        for (index, position, _) in boundaries {
+            let mut emit = |start: f32, end: f32| {
+                let (x1, y1, x2, y2) = if vertical {
+                    (position, start, position, end)
+                } else {
+                    (start, position, end, position)
+                };
+                commands.push(DrawCmd::Line {
+                    x1: x1 + offset,
+                    y1: y1 + offset,
+                    x2: x2 + offset,
+                    y2: y2 + offset,
+                    width,
+                    color: color.clone(),
+                    style: None,
+                    clip: None,
+                });
+            };
+            let Some(intervals) = blocked.get(&index) else {
+                emit(start, end);
+                continue;
+            };
+            let mut cursor = start;
+            for &(lower, upper) in intervals {
+                if lower >= end {
+                    break;
+                }
+                if upper > cursor {
+                    if lower > cursor {
+                        emit(cursor, lower);
+                    }
+                    cursor = cursor.max(upper);
+                }
+            }
+            if cursor < end {
+                emit(cursor, end);
+            }
+        }
+    }
+    commands
+}
+
 fn viewport_axes(
     sheet: &Sheet,
     viewport: &Viewport,
@@ -265,22 +442,32 @@ fn viewport_axes(
             .freeze_pane
             .map_or((0, 0), |pane| (pane.rows, pane.cols))
     };
+    let cols_axis = |extent: f32| {
+        AxisLayout::new(
+            MAX_COLS,
+            frozen_cols,
+            viewport.x,
+            extent,
+            |col| geometry.col_x(col),
+            |x| geometry.col_at_x(x),
+        )
+    };
+    let mut cols = cols_axis(viewport.width);
+    let cols_off_grid = cols.tracks.is_empty()
+        && geometry.col_x(MAX_COLS) - cols.scroll <= geometry.col_x(cols.frozen);
     let mut rows = AxisLayout::new(
         MAX_ROWS,
         frozen_rows,
         viewport.y,
-        viewport.height,
+        if cols_off_grid { 0.0 } else { viewport.height },
         |row| geometry.row_y(row),
         |y| geometry.row_at_y(y),
     );
-    let mut cols = AxisLayout::new(
-        MAX_COLS,
-        frozen_cols,
-        viewport.x,
-        viewport.width,
-        |col| geometry.col_x(col),
-        |x| geometry.col_at_x(x),
-    );
+    if rows.tracks.is_empty()
+        && geometry.row_y(MAX_ROWS) - rows.scroll <= geometry.row_y(rows.frozen)
+    {
+        cols = cols_axis(0.0);
+    }
     if print {
         rows.print_extent = Some(viewport.height);
         cols.print_extent = Some(viewport.width);
@@ -541,38 +728,18 @@ where
         .map(|g| (g.row, g.col))
         .collect();
 
-    let mut grid_commands = Vec::new();
-    let grid_offset = print.map_or(0.0, |(m, _)| 48.0 / m.dpi);
-    let row_offsets = rows.offsets();
-    let col_offsets = cols.offsets();
-    let top = row_offsets.first().copied().unwrap_or(0.0);
-    let bottom = row_offsets.last().copied().unwrap_or(0.0);
-    let left = col_offsets.first().copied().unwrap_or(0.0);
-    let right = col_offsets.last().copied().unwrap_or(0.0);
-    for &x in &col_offsets {
-        grid_commands.push(DrawCmd::Line {
-            x1: x + grid_offset,
-            y1: top + grid_offset,
-            x2: x + grid_offset,
-            y2: bottom + grid_offset,
-            width: print.map_or(GRIDLINE_WIDTH, |(m, _)| 96.0 / m.dpi),
-            color: gridline_color.clone(),
-            style: None,
-            clip: None,
-        });
-    }
-    for &y in &row_offsets {
-        grid_commands.push(DrawCmd::Line {
-            x1: left + grid_offset,
-            y1: y + grid_offset,
-            x2: right + grid_offset,
-            y2: y + grid_offset,
-            width: print.map_or(GRIDLINE_WIDTH, |(m, _)| 96.0 / m.dpi),
-            color: gridline_color.clone(),
-            style: None,
-            clip: None,
-        });
-    }
+    let grid_commands = if print.is_some_and(|(_, gridlines)| !gridlines) {
+        Vec::new()
+    } else {
+        emit_grid_segments(
+            &sheet_ref.merges,
+            geom,
+            &rows,
+            &cols,
+            print.map(|(metrics, _)| metrics),
+            gridline_color,
+        )
+    };
 
     if let Some((metrics, gridlines)) = print {
         if gridlines {
@@ -1760,6 +1927,9 @@ fn border_stroke(style: BorderStyle) -> (f32, Option<&'static str>) {
         BorderStyle::Double => (1.0, Some("double")),
     }
 }
+
+#[cfg(test)]
+mod merged_grid_tests;
 
 #[cfg(test)]
 mod tests {

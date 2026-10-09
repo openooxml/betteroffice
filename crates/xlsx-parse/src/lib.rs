@@ -3,9 +3,11 @@
 
 mod axis;
 mod chart;
+mod facts_codec;
 mod formula;
 mod inventory;
 mod package;
+mod package_facts;
 mod patch;
 mod read;
 mod reference;
@@ -20,10 +22,12 @@ pub use axis::SheetAxes;
 pub use chart::{ChartRefresh, ChartRefreshPlan, chart_space, preserved_chart_space};
 #[cfg(feature = "test-counters")]
 pub use chart::{chart_counters, reset_chart_counters};
+pub use facts_codec::{PackageFactsBuilder, PackageFactsEncoder, SNAPSHOT_RECORD_MAX_BYTES};
 pub use inventory::{
     DrawingObject, DrawingObjectKind, InspectionBudget, SheetInventory, SourceObject,
 };
 pub use package::{PreservedPackage, SheetVisibility, SourceSheetKind};
+pub use package_facts::{PackageFacts, PackageFactsView};
 pub use read::{LegacySheetDimensions, SharedStringCells, SourceCellFacts, parse_workbook};
 pub use reference::UnpatchableReference;
 #[cfg(any(test, feature = "test-oracle"))]

@@ -17,7 +17,7 @@ import {
 import type { EditorMode } from '../components/DocxEditor/internals/editing-modes';
 import { isLayoutQueued, sourceVersionOf } from '../components/DocxEditor/internals/layoutProvenance';
 import {
-  requestWorkerOpenReplica,
+  awaitWorkerOpenReplica,
   workerOpenDocumentHeld,
   workerOpenSourceVersion,
 } from '../components/DocxEditor/internals/workerOpenReplica';
@@ -50,6 +50,7 @@ export interface DocxPluginEditorAccess {
   subscribeLayout(listener: () => void): () => void;
   /** Whether the document is open for viewing only, with no copy on this thread. */
   viewer?(): boolean;
+  workerOpen?(): boolean;
 }
 
 const LAYOUT_WAIT_MS = 30_000;
@@ -143,7 +144,7 @@ export function createPluginClients(
   ): Promise<T | DocxPluginRefusal> => {
     const before = refusalOf(invocation);
     if (before) return before;
-    const flush = await flushEditorInput(access.pagedEditorRef);
+    const flush = await flushEditorInput(access.pagedEditorRef, access.workerOpen?.() === true);
     const refused = refusalOf(invocation);
     if (refused) return refused;
     if (!flush.ok) {
@@ -156,7 +157,7 @@ export function createPluginClients(
     const before = invalid(session);
     if (before) return before;
     try {
-      await requestWorkerOpenReplica(session);
+      await awaitWorkerOpenReplica(session);
     } catch {
       return invalid(session) ?? pluginRefusal('input-failed');
     }
@@ -240,7 +241,8 @@ export function createPluginClients(
             access.writeMode,
             request,
             () => batchDenial(request.history),
-            (write) => invocation.commit(write)
+            (write) => invocation.commit(write),
+            access.workerOpen?.() === true
           );
           if (!('flush' in outcome)) return outcome.result;
           return (
@@ -384,7 +386,7 @@ export function createPluginClients(
       if (invocation.signal.aborted || invocation.lifetimeSignal.aborted) abort();
       try {
         const current = access.pagedEditorRef.current?.getYrsSession();
-        const authority = current ? workerProposalAuthority(current) : null;
+        const authority = current ? workerProposalAuthority(current, true) : null;
         const first = current && authority
           ? {
               session: current,

@@ -3,6 +3,7 @@ import type { YrsSession } from '@betteroffice/docx/yrs';
 
 export interface WorkerOpenSave {
   available(): boolean;
+  sourceReplaced?(): boolean;
   save(comments: Comment[], peer?: YrsSession): Promise<ArrayBuffer>;
 }
 

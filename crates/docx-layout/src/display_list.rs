@@ -1160,6 +1160,9 @@ pub enum DecoKind {
 /// The parsed build envelope: the measured blocks and options pagination also
 /// saw, the `Layout` it produced, and the display-only extras.
 pub struct BuildInput {
+    defer_stale_block_pruning: bool,
+    #[cfg(any(test, feature = "test-support"))]
+    stale_block_pruning_passes: usize,
     contract_version: Option<u32>,
     measured: Vec<MeasuredBlockIn>,
     options: Value,
@@ -1185,6 +1188,11 @@ pub struct ResidentDisplayInput {
 }
 
 impl ResidentDisplayInput {
+    #[doc(hidden)]
+    pub fn defer_stale_block_pruning(&mut self, defer: bool) {
+        self.input.defer_stale_block_pruning = defer;
+    }
+
     pub fn font_chains(&self) -> &HashMap<String, Vec<u32>> {
         &self.input.font_chains
     }
@@ -1192,11 +1200,16 @@ impl ResidentDisplayInput {
 
 impl std::fmt::Debug for ResidentDisplayInput {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("ResidentDisplayInput")
+        let mut debug = formatter.debug_struct("ResidentDisplayInput");
+        debug
             .field("measured_blocks", &self.input.measured.len())
-            .field("pages", &self.input.layout.pages.len())
-            .finish_non_exhaustive()
+            .field("pages", &self.input.layout.pages.len());
+        #[cfg(any(test, feature = "test-support"))]
+        debug.field(
+            "stale_block_pruning_passes",
+            &self.input.stale_block_pruning_passes,
+        );
+        debug.finish_non_exhaustive()
     }
 }
 
@@ -1259,6 +1272,9 @@ impl<'de> Deserialize<'de> for BuildInput {
             .transpose()
             .map_err(serde::de::Error::custom)?;
         Ok(Self {
+            defer_stale_block_pruning: false,
+            #[cfg(any(test, feature = "test-support"))]
+            stale_block_pruning_passes: 0,
             contract_version: wire.contract_version,
             measured: wire.measured,
             options: wire.options,
@@ -11247,6 +11263,9 @@ fn resident_build_input_for(
         .transpose()
         .map_err(|e| format!("parse resident display input: {e}"))?;
     Ok(BuildInput {
+        defer_stale_block_pruning: false,
+        #[cfg(any(test, feature = "test-support"))]
+        stale_block_pruning_passes: 0,
         contract_version: extras.contract_version,
         measured,
         options,
@@ -11712,15 +11731,14 @@ fn refresh_resident_display_pages_reading(
     if selected_blocks.is_empty() {
         return Ok(());
     }
-    let current_indices: HashMap<String, usize> = input
-        .measured
-        .iter()
-        .enumerate()
-        .filter_map(|(index, measured)| {
-            measured_block_key(measured).map(|key| (key.into_owned(), index))
-        })
-        .collect();
+    let mut current_indices = HashMap::new();
+    for (index, measured) in input.measured.iter().enumerate() {
+        if let Some(key) = measured_block_key(measured) {
+            current_indices.entry(key.into_owned()).or_insert(index);
+        }
+    }
     let mut pending_blocks = selected_blocks;
+    let mut added_blocks = false;
     for measured in &pagination.measured {
         if pending_blocks.is_empty() {
             break;
@@ -11734,13 +11752,30 @@ fn refresh_resident_display_pages_reading(
         let block = convert_resident_value(measured, "resident display measured block")?;
         match current_indices.get(key.as_ref()) {
             Some(&index) => input.measured[index] = block,
-            None => input.measured.push(block),
+            None => {
+                input.measured.push(block);
+                added_blocks = true;
+            }
         }
     }
     if let Some(key) = pending_blocks.into_iter().next() {
         return Err(format!(
             "resident pagination measured block {key:?} is missing"
         ));
+    }
+    if added_blocks && !input.defer_stale_block_pruning {
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            input.stale_block_pruning_passes += 1;
+        }
+        let keys: HashSet<_> = pagination
+            .measured
+            .iter()
+            .filter_map(|measured| resident_block_key(&measured.block))
+            .collect();
+        input.measured.retain(|measured| {
+            measured_block_key(measured).is_none_or(|key| keys.contains(key.as_ref()))
+        });
     }
     Ok(())
 }

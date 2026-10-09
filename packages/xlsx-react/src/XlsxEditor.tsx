@@ -96,6 +96,8 @@ import {
 import { ProposalsPanel } from './proposals/ProposalsPanel';
 import { deriveLimits, scaledRect } from './viewer/sessionGeometry';
 import { XlsxSessionViewer } from './viewer/XlsxSessionViewer';
+import { XlsxWorkerEditor } from './worker/XlsxWorkerEditor';
+import type { XlsxWorkerEditorApi } from './worker/createWorkerEditorApi';
 import type {
   XlsxAdmission,
   XlsxPluginEditorAccess,
@@ -256,6 +258,19 @@ export type XlsxWorkerViewerProps = Omit<XlsxEditorProps, 'onReady' | 'readOnly'
   experimentalWorkerOpen: true;
   onError?: (error: Error) => void;
   onReady?: (api: XlsxWorkerViewerApi) => void | (() => void);
+};
+
+/** @experimental */
+export type XlsxWorkerEditorProps = Omit<XlsxEditorProps, 'onReady' | 'readOnly' | 'collaboration'> & {
+  readOnly?: false;
+  experimentalWorkerOpen: true;
+  onError?: (error: Error) => void;
+  onReady?: (api: XlsxWorkerEditorApi) => void | (() => void);
+};
+
+type WorkerSessionProps = Omit<XlsxWorkerEditorProps, 'readOnly' | 'onReady'> & {
+  readOnly: boolean;
+  onReady?: (api: XlsxWorkerEditorApi | XlsxWorkerViewerApi) => void | (() => void);
 };
 
 /** the open in-cell editor: which cell it targets and its current draft text. */
@@ -558,12 +573,24 @@ function useSyncedState<T>(initial: T) {
  * The xlsx editor React component.
  */
 export function XlsxEditor(props: XlsxWorkerViewerProps): React.JSX.Element;
+export function XlsxEditor(props: XlsxWorkerEditorProps): React.JSX.Element;
+export function XlsxEditor(props: WorkerSessionProps): React.JSX.Element;
 export function XlsxEditor(props: XlsxEditorProps): React.JSX.Element;
-export function XlsxEditor(props: XlsxWorkerViewerProps | XlsxEditorProps): React.JSX.Element {
+export function XlsxEditor(props: XlsxWorkerViewerProps | XlsxWorkerEditorProps | WorkerSessionProps | XlsxEditorProps): React.JSX.Element {
+  const worker = 'experimentalWorkerOpen' in props && props.experimentalWorkerOpen;
+  const collaboration = (props as XlsxEditorProps).collaboration;
+  const [session, setSession] = useState(() => ({ file: props.file, collaboration, worker, editor: !props.readOnly }));
+  const replaced = session.file !== props.file || session.collaboration !== collaboration || session.worker !== worker;
+  const editor = replaced ? !props.readOnly : session.editor || !props.readOnly;
+  if (replaced || editor !== session.editor) {
+    setSession({ file: props.file, collaboration, worker, editor });
+  }
   return (
     <LocaleProvider i18n={props.i18n}>
-      {'experimentalWorkerOpen' in props && props.experimentalWorkerOpen && props.readOnly ? (
+      {worker && !editor ? (
         <XlsxSessionViewer {...props as XlsxWorkerViewerProps} />
+      ) : worker ? (
+        <XlsxWorkerEditor {...props as XlsxWorkerEditorProps} />
       ) : (
         <XlsxEditorContent {...props as XlsxEditorProps} />
       )}
