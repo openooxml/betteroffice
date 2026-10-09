@@ -29,7 +29,7 @@ import {
   stampWorkerFrameVersion,
 } from '../components/DocxEditor/internals/layoutProvenance';
 import { bindDisplayWindow } from '../components/DocxEditor/internals/displayWindow';
-import { storyAnchorsDocx } from './__fixtures__/storyAnchorsDocx';
+import { sectionedDocx, storyAnchorsDocx } from './__fixtures__/storyAnchorsDocx';
 import { createAnchorReadCache, createPluginGeometry } from './geometry';
 import type { DocxAnchorGeometryResult, DocxGeometryTarget } from './types';
 
@@ -65,8 +65,13 @@ interface LaidOut {
 }
 
 /** The fixture laid out on the main session, with pages outside `[first, end)` left unbuilt. */
-async function laidOut(first = 0, end = 2 ** 32 - 1, window?: [number, number]): Promise<LaidOut> {
-  const bytes = await storyAnchorsDocx();
+async function laidOut(
+  first = 0,
+  end = 2 ** 32 - 1,
+  window?: [number, number],
+  fixture: () => Promise<Uint8Array> = storyAnchorsDocx
+): Promise<LaidOut> {
+  const bytes = await fixture();
   const main = await createYrsSession();
   const engine = await createResidentEngineSession();
   destroy.push(main, engine);
@@ -296,6 +301,37 @@ describe('header and footer targets', () => {
     const footer = ok(main.getAnchorGeometry(range(laid, 'hf:rIdF1', '10000021', '{{first}}')));
     expect(footer.unbuiltPages).toBeUndefined();
     expect(pageIndices(footer)).toEqual([0]);
+  });
+
+  test('unbuilt pages name the parts their build paints across sections and a parity filler', async () => {
+    const full = await laidOut(0, 2 ** 32 - 1, undefined, sectionedDocx);
+    const partial = await laidOut(0, 1, undefined, sectionedDocx);
+    const builtPages = full.queries.displayList!.pages;
+    const unbuiltPages = partial.queries.displayList!.pages;
+    const painted = builtPages.map(({ header, footer }) => [header?.rId ?? null, footer?.rId ?? null]);
+    expect(painted).toEqual([
+      ['rIdA', 'rIdF'],
+      ['rIdE', null],
+      ['rIdA', 'rIdF'],
+      [null, null],
+      ['rIdB', null],
+      ['rIdC', null],
+      ['rIdA', 'rIdF'],
+    ]);
+    expect(unbuiltPages.map(({ unbuilt, hfParts }) => [unbuilt ?? false, hfParts?.header ?? null, hfParts?.footer ?? null])).toEqual([
+      [false, null, null],
+      ...painted.slice(1).map(([header, footer]) => [true, header, footer]),
+    ]);
+    const worker = geometryOf(partial, true);
+    const parts = ['rIdA', 'rIdE', 'rIdF', 'rIdB', 'rIdC'];
+    for (const [index, rId] of parts.entries()) {
+      const pages = painted.flatMap((band, page) => (band.includes(rId) ? [page] : []));
+      const target = sessionParagraph(partial, `hf:${rId}`, `1000000${index + 1}`);
+      const read = ok(await worker.readAnchorGeometry(target));
+      expect([...pageIndices(read), ...read.unbuiltPages!]).toEqual(pages);
+      expect(read.anchor.pageIndex).toBe(pages[0]);
+      expect(pageIndices(await both(full, sessionParagraph(full, `hf:${rId}`, `1000000${index + 1}`)))).toEqual(pages);
+    }
   });
 
   test('footnote stories stay unsupported', async () => {

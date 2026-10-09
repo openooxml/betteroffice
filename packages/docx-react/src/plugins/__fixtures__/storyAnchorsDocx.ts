@@ -3,8 +3,11 @@ import JSZip from 'jszip';
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
 const W14 = 'http://schemas.microsoft.com/office/word/2010/wordml';
-const REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
 const PART = 'application/vnd.openxmlformats-officedocument.wordprocessingml';
+
+const PAGE =
+  '<w:pgSz w:w="12240" w:h="15840"/>' +
+  '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>';
 
 const font = '<w:rPr><w:rFonts w:ascii="Liberation Sans" w:hAnsi="Liberation Sans"/></w:rPr>';
 
@@ -47,9 +50,51 @@ export async function storyAnchorsDocx(): Promise<Uint8Array> {
     paragraph('00000007', 'Page five', true) +
     paragraph('00000008', 'Page six', true) +
     `<w:sectPr><w:headerReference w:type="default" r:id="rIdH1"/><w:headerReference w:type="even" r:id="rIdH2"/>` +
-    '<w:footerReference w:type="first" r:id="rIdF1"/><w:pgSz w:w="12240" w:h="15840"/>' +
-    '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>' +
-    '<w:titlePg/></w:sectPr>';
+    `<w:footerReference w:type="first" r:id="rIdF1"/>${PAGE}<w:titlePg/></w:sectPr>`;
+  return packaged(body, {
+    rIdH1: [
+      'header',
+      paragraph('10000001', 'Odd {{odd}} header') +
+        table([paragraph('10000002', 'Header {{hcell}}')]) +
+        paragraph('10000003', ''),
+    ],
+    rIdH2: ['header', paragraph('10000011', 'Even {{even}} header')],
+    rIdF1: ['footer', paragraph('10000021', 'First {{first}} footer')],
+  });
+}
+
+/**
+ * Two sections under `evenAndOddHeaders`. Section 1 (three pages) references default `rIdA`, even
+ * `rIdE` and footer `rIdF`; section 2 starts on an odd page, so a blank parity filler page
+ * precedes it, inherits those and adds first `rIdB` under `titlePg` and even `rIdC`. Each part
+ * holds one paragraph, `1000000N` in part order A, E, F, B, C.
+ */
+export async function sectionedDocx(): Promise<Uint8Array> {
+  const body =
+    paragraph('00000001', 'One') +
+    paragraph('00000002', 'Two', true) +
+    `<w:p w14:paraId="00000003"><w:pPr><w:pageBreakBefore/><w:sectPr>` +
+    '<w:headerReference w:type="default" r:id="rIdA"/><w:headerReference w:type="even" r:id="rIdE"/>' +
+    `<w:footerReference w:type="default" r:id="rIdF"/>${PAGE}</w:sectPr></w:pPr><w:r>${font}<w:t>Three</w:t></w:r></w:p>` +
+    paragraph('00000004', 'Four') +
+    paragraph('00000005', 'Five', true) +
+    paragraph('00000006', 'Six', true) +
+    '<w:sectPr><w:headerReference w:type="first" r:id="rIdB"/><w:headerReference w:type="even" r:id="rIdC"/>' +
+    `<w:type w:val="oddPage"/>${PAGE}<w:titlePg/></w:sectPr>`;
+  return packaged(
+    body,
+    Object.fromEntries(
+      (['A', 'E', 'F', 'B', 'C'] as const).map((name, index) => [
+        `rId${name}`,
+        [name === 'F' ? 'footer' : 'header', paragraph(`1000000${index + 1}`, `Part ${name}`)],
+      ])
+    ) as Record<string, ['header' | 'footer', string]>
+  );
+}
+
+/** A package with `evenAndOddHeaders`, `body` and one part per relationship id. */
+async function packaged(body: string, parts: Record<string, ['header' | 'footer', string]>) {
+  const entries = Object.entries(parts);
   const zip = new JSZip();
   zip.file(
     '[Content_Types].xml',
@@ -58,33 +103,30 @@ export async function storyAnchorsDocx(): Promise<Uint8Array> {
       '<Default Extension="xml" ContentType="application/xml"/>' +
       `<Override PartName="/word/document.xml" ContentType="${PART}.document.main+xml"/>` +
       `<Override PartName="/word/settings.xml" ContentType="${PART}.settings+xml"/>` +
-      `<Override PartName="/word/header1.xml" ContentType="${PART}.header+xml"/>` +
-      `<Override PartName="/word/header2.xml" ContentType="${PART}.header+xml"/>` +
-      `<Override PartName="/word/footer1.xml" ContentType="${PART}.footer+xml"/>` +
+      entries
+        .map(([rId, [kind]]) => `<Override PartName="/word/${rId}.xml" ContentType="${PART}.${kind}+xml"/>`)
+        .join('') +
       '</Types>'
   );
   zip.file(
     '_rels/.rels',
     '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
-      `<Relationship Id="rId1" Type="${REL}/officeDocument" Target="word/document.xml"/>` +
+      `<Relationship Id="rId1" Type="${R}/officeDocument" Target="word/document.xml"/>` +
       '</Relationships>'
   );
   zip.file(
     'word/_rels/document.xml.rels',
     '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
-      `<Relationship Id="rIdS" Type="${REL}/settings" Target="settings.xml"/>` +
-      `<Relationship Id="rIdH1" Type="${REL}/header" Target="header1.xml"/>` +
-      `<Relationship Id="rIdH2" Type="${REL}/header" Target="header2.xml"/>` +
-      `<Relationship Id="rIdF1" Type="${REL}/footer" Target="footer1.xml"/>` +
+      `<Relationship Id="rIdS" Type="${R}/settings" Target="settings.xml"/>` +
+      entries
+        .map(([rId, [kind]]) => `<Relationship Id="${rId}" Type="${R}/${kind}" Target="${rId}.xml"/>`)
+        .join('') +
       '</Relationships>'
   );
   zip.file('word/settings.xml', `<w:settings xmlns:w="${W}"><w:evenAndOddHeaders/></w:settings>`);
-  zip.file(
-    'word/header1.xml',
-    part('hdr', paragraph('10000001', 'Odd {{odd}} header') + table([paragraph('10000002', 'Header {{hcell}}')]) + paragraph('10000003', ''))
-  );
-  zip.file('word/header2.xml', part('hdr', paragraph('10000011', 'Even {{even}} header')));
-  zip.file('word/footer1.xml', part('ftr', paragraph('10000021', 'First {{first}} footer')));
+  for (const [rId, [kind, content]] of entries) {
+    zip.file(`word/${rId}.xml`, part(kind === 'header' ? 'hdr' : 'ftr', content));
+  }
   zip.file(
     'word/document.xml',
     `<w:document xmlns:w="${W}" xmlns:r="${R}" xmlns:w14="${W14}"><w:body>${body}</w:body></w:document>`
