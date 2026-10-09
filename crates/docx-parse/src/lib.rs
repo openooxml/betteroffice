@@ -43,6 +43,7 @@ pub mod inline;
 pub mod media;
 pub mod notes;
 pub mod numbering;
+mod package_integrity;
 pub mod paragraph;
 pub mod paragraph_identity;
 pub mod relationships;
