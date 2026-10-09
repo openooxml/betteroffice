@@ -5525,9 +5525,7 @@ fn lower_docx_with(
     collect_font_table_fonts(&envelope, &mut referenced_fonts);
     let mut script_fonts = ScriptFontUse::default();
     script_fonts.font_table(&envelope.document.package.font_table.fonts);
-    let parsed: Value = serde_json::to_string(&envelope.document)
-        .and_then(|s| serde_json::from_str(&s))
-        .map_err(|error| error.to_string())?;
+    let parsed = serde_json::to_value(&envelope.document).map_err(|error| error.to_string())?;
     collect_fonts_from_value(&parsed, &mut referenced_fonts);
     let source_json = if payloads && needs_source_json(&parsed) {
         let serialized =
