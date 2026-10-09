@@ -48,6 +48,7 @@ impl StylePlan {
             &original.cell_xfs,
             write_xf,
         )?;
+        xfs.retain(|_, index| wb.styles.format_source(*index).1.is_none());
         for current in 0..wb.styles.cell_xfs.len() as u32 {
             let Some(old) = wb.styles.format_source(current).1 else {
                 continue;
@@ -117,11 +118,7 @@ impl StylePlan {
             };
             let bytes = patch_xf(source_xml, base, &xf)?;
             let key = xml_key(&bytes);
-            let index = xfs
-                .iter()
-                .position(|candidate| candidate == &bytes || xml_key(candidate) == key)
-                .map_or(current, |index| index as u32);
-            xfs[current as usize] = bytes.clone();
+            let index = *xfs.entry(key).or_insert(current);
             plan.styles.cell_xfs[current as usize] = xf;
             plan.overrides.xfs.insert(current as usize, bytes);
             plan.pairs.insert(current, index);
@@ -145,43 +142,55 @@ fn pool_xml<T: PartialEq>(
     current: &[T],
     original: &[T],
     write: fn(&mut Writer<Vec<u8>>, &T) -> io::Result<()>,
-) -> Result<Vec<Vec<u8>>, ParseError> {
-    current
-        .iter()
-        .enumerate()
-        .map(|(index, value)| {
-            if original.get(index) == Some(value)
-                && let Some(bytes) = sources.get(index)
-            {
-                return Ok(bytes.clone());
-            }
-            fragment(|writer| write(writer, value))
-        })
-        .collect()
+) -> Result<HashMap<Vec<u8>, u32>, ParseError> {
+    let mut keys = HashMap::new();
+    for (index, value) in current.iter().enumerate() {
+        let bytes = if original.get(index) == Some(value)
+            && let Some(bytes) = sources.get(index)
+        {
+            bytes.clone()
+        } else {
+            fragment(|writer| write(writer, value))?
+        };
+        keys.entry(xml_key(&bytes)).or_insert(index as u32);
+    }
+    Ok(keys)
 }
 
 fn intern_xml<T>(
     values: &mut Vec<T>,
-    xml: &mut Vec<Vec<u8>>,
+    xml: &mut HashMap<Vec<u8>, u32>,
     overrides: &mut HashMap<usize, Vec<u8>>,
     value: T,
     bytes: Vec<u8>,
 ) -> u32 {
     let key = xml_key(&bytes);
-    if let Some(index) = xml
-        .iter()
-        .position(|candidate| candidate == &bytes || xml_key(candidate) == key)
-    {
-        return index as u32;
+    if let Some(index) = xml.get(&key) {
+        return *index;
     }
     let index = values.len();
     values.push(value);
-    xml.push(bytes.clone());
+    xml.insert(key, index as u32);
     overrides.insert(index, bytes);
     index as u32
 }
 
+#[cfg(test)]
+thread_local! {
+    static XML_KEY_BUDGET: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
 fn xml_key(bytes: &[u8]) -> Vec<u8> {
+    #[cfg(test)]
+    XML_KEY_BUDGET.with(|budget| {
+        if let Some(remaining) = budget.get() {
+            assert!(
+                remaining > 0,
+                "XML canonicalization exceeded the linear budget"
+            );
+            budget.set(Some(remaining - 1));
+        }
+    });
     let Ok(template) = XmlTemplate::capture(bytes) else {
         return bytes.to_vec();
     };
@@ -402,6 +411,56 @@ fn patch_xf(source: &[u8], base: &Xf, xf: &Xf) -> Result<Vec<u8>, ParseError> {
 mod tests {
     use super::*;
     use crate::tests::{package, parse_workbook_with_package};
+    use xlsx_model::CellRange;
+
+    #[test]
+    fn thousands_of_distinct_styled_cells_have_linear_xml_deduplication() {
+        let count = 3000;
+        let mut styles = String::from(
+            r#"<styleSheet><fonts count="2"><font/><font><b/></font></fonts><cellXfs>"#,
+        );
+        let mut sheet = String::from("<sheetData>");
+        for index in 0..count {
+            styles.push_str(&format!(
+                r#"<xf fontId="0"><alignment indent="{}" textRotation="{}"/></xf>"#,
+                index % 250,
+                index / 250
+            ));
+            sheet.push_str(&format!(
+                r#"<row r="{}"><c r="A{}" s="{index}"><v>1</v></c></row>"#,
+                index + 1,
+                index + 1
+            ));
+        }
+        styles.push_str("</cellXfs></styleSheet>");
+        sheet.push_str("</sheetData>");
+        let mut parts = package(&sheet, &[], false);
+        parts.push(("xl/styles.xml".into(), styles.into_bytes()));
+        let parsed = parse_workbook_with_package(&parts).unwrap();
+        let mut workbook = parsed.workbook;
+        xlsx_ops::apply_in_place(
+            &mut workbook,
+            &xlsx_ops::Op::PatchRangeStyle {
+                sheet: SheetId(0),
+                range: CellRange::new(CellRef::new(0, 0), CellRef::new(count - 1, 0)),
+                patch: xlsx_ops::StylePatch {
+                    bold: Some(true),
+                    ..Default::default()
+                },
+            },
+        )
+        .unwrap();
+        XML_KEY_BUDGET.with(|budget| budget.set(Some(count as usize * 20)));
+        let plan = StylePlan::new(
+            &workbook,
+            &parsed.package,
+            &[Some(0)],
+            &[Some(SheetAxes::default())],
+        )
+        .unwrap();
+        XML_KEY_BUDGET.with(|budget| budget.set(None));
+        assert_eq!(plan.overrides.xfs.len(), count as usize);
+    }
 
     #[test]
     fn existing_style_reuse_requires_matching_preserved_properties() {

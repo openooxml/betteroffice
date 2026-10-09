@@ -22,3 +22,6 @@ test-oracle = []
 ooxml-drawingml = { workspace = true, features = ["chart"] }
 quick-xml = "0.41"
 xlsx-model.workspace = true
+
+[dev-dependencies]
+xlsx-ops.workspace = true
