@@ -656,18 +656,28 @@ fn locate(args: &[Expr], ctx: &EvalContext<'_>, case_sensitive: bool) -> CellVal
     if start > hay.len() + 1 {
         return err(ErrorValue::Value);
     }
-    let (needle, tail): (String, String) = if case_sensitive {
-        (needle, hay[start - 1..].iter().collect())
+    let tail: String = hay[start - 1..].iter().collect();
+    let offset = if case_sensitive {
+        char_index_of(&tail, &needle)
     } else {
-        (
-            needle.to_lowercase(),
-            hay[start - 1..].iter().collect::<String>().to_lowercase(),
-        )
+        case_insensitive_char_index_of(&tail, &needle)
     };
-    match char_index_of(&tail, &needle) {
+    match offset {
         Some(off) => num((start + off) as f64),
         None => err(ErrorValue::Value),
     }
+}
+
+fn case_insensitive_char_index_of(haystack: &str, needle: &str) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    let folded_index = char_index_of(&haystack.to_lowercase(), &needle.to_lowercase())?;
+    haystack
+        .chars()
+        .enumerate()
+        .flat_map(|(index, character)| character.to_lowercase().map(move |_| index))
+        .nth(folded_index)
 }
 
 /// position of `needle` in `haystack` measured in characters, not bytes.

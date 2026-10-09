@@ -468,6 +468,52 @@ fn text_functions() {
 }
 
 #[test]
+fn search_offsets_use_original_unicode_positions() {
+    check(&[
+        ("SEARCH(\"b\", \"İb\")", n(2.0)),
+        ("SEARCH(\"i\", \"İ\")", n(1.0)),
+        ("SEARCH(\"b\", \"aİb\", 2)", n(3.0)),
+        ("SEARCH(\"B\", \"İİb\")", n(3.0)),
+        ("SEARCH(\"İB\", \"xİİb\")", n(3.0)),
+        ("SEARCH(\"b\", \"bİb\", 2)", n(3.0)),
+        ("SEARCH(\"b\", \"İİb\", 3)", n(3.0)),
+        ("SEARCH(\"B\", \"éİb\")", n(3.0)),
+        ("SEARCH(\"B\", \"😀İb\", 2)", n(3.0)),
+        ("SEARCH(\"B\", \"i̇İb\")", n(4.0)),
+        ("FIND(\"b\", \"İİb\")", n(3.0)),
+        ("FIND(\"b\", \"aİb\", 2)", n(3.0)),
+        ("FIND(\"i\", \"İ\")", e(ErrorValue::Value)),
+        ("FIND(\"B\", \"İb\")", e(ErrorValue::Value)),
+    ]);
+}
+
+#[test]
+fn search_preserves_contextual_lowercasing() {
+    check(&[
+        ("SEARCH(\"ΟΣ\", \"ΟΣ\")", n(1.0)),
+        ("SEARCH(\"ος\", \"ΟΣ\")", n(1.0)),
+        ("SEARCH(\"ΟΣ\", \"ος\")", n(1.0)),
+        ("SEARCH(\"ΟΣ\", \"İ ΟΣ\")", n(3.0)),
+        ("SEARCH(\"ΟΣ\", \"İ ΟΣ\", 2)", n(3.0)),
+    ]);
+}
+
+#[test]
+fn search_handles_empty_text_and_invalid_starts() {
+    check(&[
+        ("SEARCH(\"\", \"İb\")", n(1.0)),
+        ("SEARCH(\"\", \"İb\", 2)", n(2.0)),
+        ("SEARCH(\"\", \"\")", n(1.0)),
+        ("SEARCH(\"b\", \"\")", e(ErrorValue::Value)),
+        ("SEARCH(\"z\", \"İb\")", e(ErrorValue::Value)),
+        ("SEARCH(\"b\", \"İb\", 0)", e(ErrorValue::Value)),
+        ("SEARCH(\"b\", \"İb\", -1)", e(ErrorValue::Value)),
+        ("SEARCH(\"\", \"İb\", 4)", e(ErrorValue::Value)),
+        ("SEARCH(\"b\", \"İb\", 1E100)", e(ErrorValue::Value)),
+    ]);
+}
+
+#[test]
 fn tilde_criteria_match_literal_text_across_if_functions() {
     let mut wb = Workbook::default();
     let mut sheet = Sheet::new("Sheet1");
