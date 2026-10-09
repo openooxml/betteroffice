@@ -363,3 +363,26 @@ test('a main-thread session answers readAnchorGeometry exactly like getAnchorGeo
   expect(ok).toBeGreaterThan(0);
   expect(await geometry.readAnchorGeometries(targets)).toEqual(targets.map((target) => geometry.getAnchorGeometry(target)));
 });
+
+test('a worker viewer batch before the first paint refuses at once and succeeds on the repeated layout-change', async () => {
+  const answers: Array<Promise<DocxAnchorGeometryResult[]> | null> = [];
+  let batch: DocxGeometryTarget[] = [];
+  const { targets, requests, view, geometry } = await workerViewer({
+    presented: false,
+    onEvent(context, event) {
+      if (event.type === 'layout-change' && event.layout) {
+        answers.push(context.geometry?.readAnchorGeometries(batch) ?? null);
+      }
+    },
+  });
+  batch = targets;
+  expect(await geometry.readAnchorGeometries(targets)).toEqual(
+    targets.map(() => expect.objectContaining({ ok: false, failure: expect.objectContaining({ code: 'layout-unavailable' }) }))
+  );
+  expect(requests).toHaveLength(0);
+  const before = answers.length;
+  await act(async () => view.present());
+  await waitFor(() => expect(answers.length).toBeGreaterThan(before));
+  expect(await answers.at(-1)).toEqual(targets.map(() => expect.objectContaining({ ok: true, unbuiltPages: [] })));
+  expect(requests).toHaveLength(1);
+});
