@@ -27,7 +27,7 @@ import {
 import type { PagedEditorRef } from '../components/DocxEditor/PagedEditor';
 import { defineDocxPlugin } from './defineDocxPlugin';
 import { currentPreviewKey } from './proposalPreview';
-import type { DocxGeometryTarget } from './types';
+import type { DocxAnchorGeometryResult, DocxGeometryTarget } from './types';
 import { useDocxPluginHost, type UseDocxPluginHostOptions } from './useDocxPluginHost';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -124,7 +124,8 @@ function queries(
 async function host(
   session: YrsSession,
   displayQueries: DisplayListQueries,
-  viewerDocumentRead?: ResidentEngineWorkerClient['documentRead']
+  viewerDocumentRead?: ResidentEngineWorkerClient['documentRead'],
+  { presented = true, onEvent }: Pick<Parameters<typeof defineDocxPlugin>[0], 'onEvent'> & { presented?: boolean } = {}
 ) {
   const pages = document.createElement('div');
   for (const pageIndex of displayQueries.displayList.pages.keys()) {
@@ -145,7 +146,7 @@ async function host(
     yrsLocToDisplayPosition: () => 2,
   } as unknown as PagedEditorRef;
   const options: UseDocxPluginHostOptions = {
-    plugins: [defineDocxPlugin({ id: 'test.viewer-anchors', createState: () => null, overlay: () => null })],
+    plugins: [defineDocxPlugin({ id: 'test.viewer-anchors', createState: () => null, overlay: () => null, onEvent })],
     pagedEditorRef: { current: editor },
     writeModeRef: { current: 'viewing' },
     mode: 'viewing',
@@ -163,13 +164,13 @@ async function host(
     i18n: undefined,
     onRenderedDomContextReady: undefined,
   };
-  markPresented(pages, displayQueries.displayList);
+  if (presented) markPresented(pages, displayQueries.displayList);
   const view = renderHook(useDocxPluginHost, { initialProps: options });
   await act(async () => {
     view.result.current.overlayLayerRef(target as HTMLDivElement);
     view.result.current.onRenderedDomContext(createRenderedDomContext(pages, 1), displayQueries);
   });
-  return view;
+  return Object.assign(view, { present: () => markPresented(pages, displayQueries.displayList) });
 }
 
 async function geometryOf(result: Awaited<ReturnType<typeof host>>['result']) {
@@ -198,7 +199,9 @@ const persisted = {
   paraId: '00000003',
 };
 
-async function workerViewer(options: { unbuilt?: boolean; fail?: () => boolean } = {}) {
+async function workerViewer(
+  options: { unbuilt?: boolean; fail?: () => boolean } & Parameters<typeof host>[3] = {}
+) {
   const main = await createYrsSession({ clientId: 901 });
   const engine = await createResidentEngineSession(undefined, 902);
   sessions.push(main, engine);
@@ -218,8 +221,13 @@ async function workerViewer(options: { unbuilt?: boolean; fail?: () => boolean }
   ];
   const { read, requests } = residentRead(engine, options.fail);
   const workerVersion = engine.proposalEngine.version();
-  const view = await host(main, queries(main.version(), workerVersion, currentPreviewKey(main), options.unbuilt), read);
-  return { main, engine, targets, requests, workerVersion, geometry: await geometryOf(view.result) };
+  const view = await host(
+    main,
+    queries(main.version(), workerVersion, currentPreviewKey(main), options.unbuilt),
+    read,
+    options
+  );
+  return { main, engine, targets, requests, workerVersion, view, geometry: await geometryOf(view.result) };
 }
 
 test('a worker viewer reads paragraph, search, range and revision geometry from the worker', async () => {
@@ -246,6 +254,29 @@ test('a worker viewer reports unbuilt pages its targets reach', async () => {
     const answer = await geometry.readAnchorGeometry(target);
     expect(answer).toMatchObject({ ok: true, version: main.version(), unbuiltPages: [1] });
   }
+});
+
+test('a worker viewer read before the first paint refuses at once and succeeds on the repeated layout-change', async () => {
+  const answers: Array<Promise<DocxAnchorGeometryResult> | null> = [];
+  const paragraph = { kind: 'paragraph', paragraph: persisted } as const;
+  const { requests, view, geometry } = await workerViewer({
+    presented: false,
+    onEvent(context, event) {
+      if (event.type === 'layout-change' && event.layout) {
+        answers.push(context.geometry?.readAnchorGeometry(paragraph) ?? null);
+      }
+    },
+  });
+  expect(await geometry.readAnchorGeometry(paragraph)).toMatchObject({
+    ok: false,
+    failure: { code: 'layout-unavailable' },
+  });
+  expect(requests).toHaveLength(0);
+  const before = answers.length;
+  await act(async () => view.present());
+  await waitFor(() => expect(answers.length).toBeGreaterThan(before));
+  expect(await answers.at(-1)).toMatchObject({ ok: true, unbuiltPages: [] });
+  expect(requests).toHaveLength(1);
 });
 
 test('a worker viewer refuses stale targets and superseded worker replies', async () => {
