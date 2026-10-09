@@ -21,6 +21,7 @@ import {
 import { awaitWorkerOpenReplica, requestWorkerOpenReplica } from './internals/workerOpenReplica';
 import { hasEditorWorkerProposalRounds, registeredWorkerProposalAuthority } from './internals/workerProposalAuthority';
 import { resolveAnchorTarget } from '../../plugins/anchorGeometry';
+import { resetEngineChoiceForTests, setMissingWorkerCapabilitiesForTests } from './internals/engineChoice';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -72,6 +73,7 @@ beforeAll(async () => {
 });
 
 beforeEach(() => {
+  setMissingWorkerCapabilitiesForTests([]);
   const originalWorker = globalThis.Worker;
   restores.push(() => { globalThis.Worker = originalWorker; });
   const fonts = Object.getOwnPropertyDescriptor(document, 'fonts');
@@ -89,6 +91,7 @@ afterEach(() => {
   try {
     cleanup();
   } finally {
+    resetEngineChoiceForTests();
     takePreloadedResidentEngineWorker()?.destroy();
     for (const worker of workers.splice(0)) {
       worker.terminate();

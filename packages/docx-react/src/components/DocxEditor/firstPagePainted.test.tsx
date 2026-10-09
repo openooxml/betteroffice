@@ -1,5 +1,5 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, describe, expect, mock, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createRef } from 'react';
@@ -8,11 +8,15 @@ const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
+import * as wasm from '@betteroffice/docx/yrs/wasm/index';
+import { takePreloadedResidentEngineWorker } from '@betteroffice/docx/yrs';
+import { residentWorkerFactory, type InProcessResidentWorker } from '@betteroffice/docx/yrs/__fixtures__/residentWorker';
 import type {
   ResidentEngineWorkerRequest,
   ResidentEngineWorkerResponse,
 } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
 import { pagedDocx } from './__fixtures__/pagedDocx';
+import { resetEngineChoiceForTests, setMissingWorkerCapabilitiesForTests } from './internals/engineChoice';
 import { setupWorkerEngine } from './__fixtures__/workerEngine';
 import { onPresented, presentedWorkerFrame } from './internals/layoutProvenance';
 
@@ -52,9 +56,26 @@ const fixture = (path: string) => {
 };
 const quiet = { error: console.error, warn: console.warn };
 const originalWorker = globalThis.Worker;
+let compileModule: ReturnType<typeof spyOn<typeof wasm, 'editWasmModule'>> | null = null;
+
+async function installWorker() {
+  const startWorker = await residentWorkerFactory();
+  const workers: InProcessResidentWorker[] = [];
+  compileModule = spyOn(wasm, 'editWasmModule').mockResolvedValue(new WebAssembly.Module(
+    new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00])
+  ));
+  setMissingWorkerCapabilitiesForTests([]);
+  globalThis.Worker = class {
+    constructor() {
+      const worker = startWorker();
+      workers.push(worker);
+      return worker;
+    }
+  } as unknown as typeof Worker;
+  return { workers };
+}
 
 beforeAll(async () => {
-  globalThis.Worker = undefined as unknown as typeof Worker;
   if (!window.document.fonts) {
     Object.defineProperty(window.document, 'fonts', {
       value: {
@@ -69,8 +90,17 @@ beforeAll(async () => {
   console.error = () => {};
   console.warn = () => {};
 });
-afterEach(() => {
+beforeEach(() => {
+  globalThis.Worker = undefined as unknown as typeof Worker;
+});
+afterEach(async () => {
   cleanup();
+  takePreloadedResidentEngineWorker()?.destroy();
+  await act(async () => {});
+  compileModule?.mockRestore();
+  compileModule = null;
+  resetEngineChoiceForTests();
+  globalThis.Worker = originalWorker;
   created = 0;
   holdFullOpen = null;
   holdReplays = null;
@@ -92,6 +122,7 @@ test('a preview reports its first page painted before the full document opens', 
     <DocxEditor
       ref={ref}
       previewFirstPage
+      experimentalWorkerOpen={false}
       documentBuffer={fixture('page-fragments/pages.docx')}
       onFirstPagePainted={() => (painted += 1)}
     />
@@ -115,6 +146,7 @@ test('a document reports its first page painted once its canvas presents, not at
   let painted = 0;
   const view = render(
     <DocxEditor
+      experimentalWorkerOpen={false}
       documentBuffer={fixture('page-fragments/pages.docx')}
       onFirstPagePainted={() => (painted += 1)}
     />
@@ -135,7 +167,7 @@ test('each document reports its first page painted once, however often its pages
   const ref = createRef<Editor>();
   const painted: string[] = [];
   const editor = (name: string, buffer: ArrayBuffer) => (
-    <DocxEditor ref={ref} documentBuffer={buffer} onFirstPagePainted={() => painted.push(name)} />
+    <DocxEditor ref={ref} experimentalWorkerOpen={false} documentBuffer={buffer} onFirstPagePainted={() => painted.push(name)} />
   );
   const view = render(editor('pages', fixture('page-fragments/pages.docx')));
   await waitFor(() => expect(painted).toEqual(['pages']), { timeout: 20_000 });
@@ -148,6 +180,32 @@ test('each document reports its first page painted once, however often its pages
 
   view.rerender(editor('principal', fixture('structured-export/principal.docx')));
   await waitFor(() => expect(painted).toEqual(['pages', 'principal']), { timeout: 20_000 });
+  await act(async () => {
+    await new Promise((done) => setTimeout(done, 300));
+  });
+  expect(painted).toEqual(['pages', 'principal']);
+}, 60_000);
+
+test('each worker document reports its first page painted once, however often its pages repaint', async () => {
+  const { workers } = await installWorker();
+  const ref = createRef<Editor>();
+  const painted: string[] = [];
+  const editor = (name: string, buffer: ArrayBuffer) => (
+    <DocxEditor ref={ref} documentBuffer={buffer} onFirstPagePainted={() => painted.push(name)} />
+  );
+  const view = render(editor('pages', await pagedDocx(2)));
+  await waitFor(() => expect(painted).toEqual(['pages']), { timeout: 20_000 });
+  expect(workers.some((worker) => worker.requests.includes('open') && worker.sessions.length > 0)).toBe(true);
+
+  await act(async () => ref.current!.setZoom(1.5));
+  await act(async () => {
+    await new Promise((done) => setTimeout(done, 300));
+  });
+  expect(painted).toEqual(['pages']);
+
+  view.rerender(editor('principal', await pagedDocx(1)));
+  await waitFor(() => expect(painted).toEqual(['pages', 'principal']), { timeout: 20_000 });
+  expect(workers.reduce((count, worker) => count + worker.requests.filter((request) => request === 'open').length, 0)).toBe(2);
   await act(async () => {
     await new Promise((done) => setTimeout(done, 300));
   });

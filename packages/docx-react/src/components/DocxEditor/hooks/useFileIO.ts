@@ -37,14 +37,15 @@ function saveInWorker(
   session: YrsSession,
   viewer: boolean,
   comments: Comment[],
-  assertCurrent: () => void
+  assertCurrent: () => void,
+  experimentalWorkerOpen: boolean
 ): Promise<ArrayBuffer | null> | null {
   const saver = workerOpenSave(session);
   if (!saver || (!viewer && !saver.available())) {
     if (viewer) throw new ResidentWorkerSaveUnavailableError('No document worker');
     return null;
   }
-  return saveWithWorker(pagedEditorRef, session, saver, viewer, comments, assertCurrent);
+  return saveWithWorker(pagedEditorRef, session, saver, viewer, comments, assertCurrent, experimentalWorkerOpen);
 }
 
 async function saveWithWorker(
@@ -53,14 +54,16 @@ async function saveWithWorker(
   saver: WorkerOpenSave,
   viewer: boolean,
   comments: Comment[],
-  assertCurrent: () => void
+  assertCurrent: () => void,
+  experimentalWorkerOpen: boolean
 ): Promise<ArrayBuffer | null> {
   let peer: YrsSession | undefined;
   if (!viewer && workerOpenReplicaStarted(session)) {
     await awaitWorkerOpenReplica(session);
-    peer = (await flushedSession(pagedEditorRef)).session;
+    peer = (await flushedSession(pagedEditorRef, experimentalWorkerOpen)).session;
     assertCurrent();
   }
+  if (!viewer && saver.sourceReplaced?.()) return null;
   const task = () => {
     assertCurrent();
     if (!viewer && !saver.available()) {
@@ -151,6 +154,7 @@ export interface DocxPrintJob {
  */
 export function useFileIO({
   pagedEditorRef,
+  experimentalWorkerOpen = false,
   viewerSession,
   resolveImage,
   shownImageResolver,
@@ -168,6 +172,7 @@ export function useFileIO({
   focusActiveEditor,
 }: {
   pagedEditorRef: React.RefObject<PagedEditorRef | null>;
+  experimentalWorkerOpen?: boolean;
   viewerSession?: boolean;
   resolveImage: ImageResolver;
   /** The resolver of the frame published last; print reads it once its display list settles. */
@@ -206,7 +211,7 @@ export function useFileIO({
           }
         };
         if (initialSession) {
-          const pending = saveInWorker(pagedEditorRef, initialSession, viewer, comments, assertCurrent);
+          const pending = saveInWorker(pagedEditorRef, initialSession, viewer, comments, assertCurrent, experimentalWorkerOpen);
           const inWorker = pending && (await pending);
           if (inWorker) {
             onSave?.(inWorker);
@@ -221,7 +226,7 @@ export function useFileIO({
           ? registeredWorkerProposalAuthority(initialSession) : null;
         if (authority) {
           const task = async (): Promise<ArrayBuffer | null> => {
-            const { editor, session } = await flushedSession(pagedEditorRef);
+            const { editor, session } = await flushedSession(pagedEditorRef, experimentalWorkerOpen);
             assertCurrent();
             if (session.isDisplayOnly?.()) throw new Error('The document is still opening');
             const projected = editor.getDocument();
@@ -238,7 +243,7 @@ export function useFileIO({
           if (buffer) onSave?.(buffer);
           return buffer;
         }
-        const { editor, session } = await flushedSession(pagedEditorRef);
+        const { editor, session } = await flushedSession(pagedEditorRef, experimentalWorkerOpen);
         assertCurrent();
         if (session.isDisplayOnly?.()) throw new Error('The document is still opening');
         const projected = editor.getDocument();
@@ -258,7 +263,7 @@ export function useFileIO({
         return null;
       }
     },
-    [pagedEditorRef, comments, onSave, onError]
+    [pagedEditorRef, comments, onSave, onError, experimentalWorkerOpen]
   );
 
   const reservePrint = useCallback((): DocxPrintJob => {

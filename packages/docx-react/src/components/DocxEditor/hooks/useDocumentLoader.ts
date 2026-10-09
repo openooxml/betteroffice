@@ -35,6 +35,7 @@ export function useDocumentLoader({
   documentBuffer,
   initialDocument,
   workerViewer = false,
+  workerOpen = workerViewer,
   externalContent,
   history,
   pagedEditorRef,
@@ -51,6 +52,7 @@ export function useDocumentLoader({
   documentBuffer: DocxInput | null | undefined;
   initialDocument: Document | null | undefined;
   workerViewer?: boolean;
+  workerOpen?: boolean;
   externalContent: boolean | undefined;
   history: UseHistoryReturn<Document | null>;
   pagedEditorRef: React.RefObject<PagedEditorRef | null>;
@@ -78,7 +80,7 @@ export function useDocumentLoader({
   // separate so PagedEditor can replace its session without treating normal
   // edits as fresh documents.
   const [yrsSeedDocument, setYrsSeedDocument] = useState<Document | null>(
-    workerViewer ? null : initialDocument ?? null
+    workerOpen ? null : initialDocument ?? null
   );
   const [yrsSeedBytes, setYrsSeedBytes] = useState<Uint8Array | null>(null);
   const [yrsSeedGeneration, setYrsSeedGeneration] = useState(0);
@@ -121,7 +123,7 @@ export function useDocumentLoader({
     (doc: Document, seedBytes?: Uint8Array) => {
       const generation = loadGeneration.begin();
       resetForNewDocument();
-      if (workerViewer) {
+      if (workerOpen) {
         setYrsSeedDocument(null);
         setYrsSeedBytes(null);
         setYrsSeedGeneration(generation);
@@ -162,7 +164,7 @@ export function useDocumentLoader({
       );
     },
     [
-      workerViewer,
+      workerOpen,
       loadGeneration,
       resetForNewDocument,
       history,

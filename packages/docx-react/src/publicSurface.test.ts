@@ -52,9 +52,13 @@ test('deprecated ref members have public non-deprecated twins or explicit exempt
 
 test('deprecated props and plugin geometry retain their replacements', () => {
   const props = memberDocs(editor, 'DocxEditorProps');
+  expect(props.has('experimentalWorkerOpen')).toBe(true);
+  expect(props.get('experimentalWorkerOpen')).toContain('@deprecated');
+  expect(editor).toMatch(/^  experimentalWorkerOpen\?: boolean;$/m);
   const propExemptions = new Set(['pluginOverlays', 'pluginSidebarItems', 'pluginRenderedDomContext']);
   for (const [member, doc] of props) {
     if (!doc.includes('@deprecated') || propExemptions.has(member)) continue;
+    if (member === 'experimentalWorkerOpen') continue;
     expect(member).toBe('onChange');
     expect(doc).toContain('{@link onDocumentChange}');
     expect(props.has('onDocumentChange')).toBe(true);

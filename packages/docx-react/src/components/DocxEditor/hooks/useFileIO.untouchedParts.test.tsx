@@ -10,6 +10,9 @@ import type { Comment } from '@betteroffice/docx/types/content';
 import type { Document as DocxDocument } from '@betteroffice/docx/types/document';
 import { getCommentText } from '@betteroffice/docx/utils/comments';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
+import * as wasm from '@betteroffice/docx/yrs/wasm/index';
+import { takePreloadedResidentEngineWorker } from '@betteroffice/docx/yrs';
+import { residentWorkerFactory, type InProcessResidentWorker } from '@betteroffice/docx/yrs/__fixtures__/residentWorker';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -17,6 +20,8 @@ if (ownsDom) GlobalRegistrator.register();
 import { DocxEditor, type DocxEditorRef } from '../../../index';
 import type { PagedEditorRef } from '../PagedEditor';
 import type { PartEditTarget } from '../partEdit';
+import { resetEngineChoiceForTests, setMissingWorkerCapabilitiesForTests } from '../internals/engineChoice';
+import { workerOpenSave } from '../internals/workerOpenSave';
 import { setupWorkerEngine } from '../__fixtures__/workerEngine';
 import { useFileIO } from './useFileIO';
 import { useHeaderFooterEditing } from './useHeaderFooterEditing';
@@ -229,16 +234,19 @@ async function until(done: () => boolean): Promise<void> {
   expect(done()).toBe(true);
 }
 
-async function mount(bytes: ArrayBuffer) {
+async function mount(bytes: ArrayBuffer, options: { experimentalWorkerOpen?: boolean } = { experimentalWorkerOpen: false }) {
+  const { experimentalWorkerOpen } = options;
+  const engineProps = experimentalWorkerOpen === undefined ? {} : { experimentalWorkerOpen };
   const ref = createRef<DocxEditorRef>();
   const errors: Error[] = [];
   const onError = (error: Error) => errors.push(error);
   const view = render(
-    <DocxEditor ref={ref} documentBuffer={bytes} onError={onError} downloadOnSave={false} />
+    <DocxEditor ref={ref} documentBuffer={bytes} onError={onError} downloadOnSave={false}
+      {...engineProps} />
   );
   await until(
     () => ref.current?.commands.getState('save').enabled === true &&
-      !!ref.current.getEditorRef()?.getYrsSession()
+      (experimentalWorkerOpen !== false || !!ref.current.getEditorRef()?.getYrsSession())
   );
   if (unzipContainer(new Uint8Array(bytes))['word/comments.xml']) {
     await until(() => (ref.current?.getComments().length ?? 0) > 0);
@@ -247,6 +255,7 @@ async function mount(bytes: ArrayBuffer) {
   return {
     ref,
     view,
+    worker: experimentalWorkerOpen !== false,
     async save(): Promise<ArrayBuffer> {
       let saved: ArrayBuffer | null = null;
       await act(async () => {
@@ -260,6 +269,7 @@ async function mount(bytes: ArrayBuffer) {
       view.rerender(
         <DocxEditor
           ref={ref}
+          {...engineProps}
           documentBuffer={bytes}
           comments={comments}
           onError={onError}
@@ -271,6 +281,10 @@ async function mount(bytes: ArrayBuffer) {
 }
 
 async function typeBody(editor: Awaited<ReturnType<typeof mount>>, text: string): Promise<void> {
+  if (editor.worker) {
+    await typeWorkerBody(editor, text);
+    return;
+  }
   const paged = editor.ref.current!.getEditorRef()!;
   const session = paged.getYrsSession()!;
   const [first] = session.paragraphs('body');
@@ -278,6 +292,124 @@ async function typeBody(editor: Awaited<ReturnType<typeof mount>>, text: string)
     session.insertText({ story: 'body', paraId: first!.paraId, offset: 0 }, text);
     paged.syncYrsInputState(true, ['body']);
   });
+}
+
+type MountedEditor = Awaited<ReturnType<typeof mount>>;
+type SaveTest = (mountEditor: typeof mount) => Promise<void>;
+
+function testSaveEngines(name: string, inThread: SaveTest, worker: SaveTest = inThread, todo = false) {
+  const engineTest = todo ? test.todo : test;
+  engineTest(name, async () => { await inThread(mount); });
+  engineTest(`${name} on the default worker`, async () => {
+    const originalWorker = globalThis.Worker;
+    const startWorker = await residentWorkerFactory();
+    const workers: InProcessResidentWorker[] = [];
+    const compileModule = spyOn(wasm, 'editWasmModule').mockResolvedValue(new WebAssembly.Module(
+      new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00])
+    ));
+    setMissingWorkerCapabilitiesForTests([]);
+    globalThis.Worker = class {
+      constructor() {
+        const worker = startWorker();
+        workers.push(worker);
+        return worker;
+      }
+    } as unknown as typeof Worker;
+    const mountDefault: typeof mount = async (bytes) => {
+      const opens = workers.flatMap((worker) => worker.requests).filter((type) => type === 'open').length;
+      const editor = await mount(bytes, {});
+      await act(async () => { await editor.ref.current!.flushPendingInput(); });
+      expect(workers.length).toBeGreaterThan(0);
+      expect(workers.flatMap((worker) => worker.requests).filter((type) => type === 'open').length).toBeGreaterThan(opens);
+      expect(workers.some((worker) => worker.sessions.length > 0)).toBe(true);
+      return editor;
+    };
+    try {
+      await worker(mountDefault);
+    } finally {
+      cleanup();
+      takePreloadedResidentEngineWorker()?.destroy();
+      await act(async () => {});
+      for (const worker of workers) worker.terminate();
+      compileModule.mockRestore();
+      resetEngineChoiceForTests();
+      globalThis.Worker = originalWorker;
+    }
+  }, 20_000);
+}
+
+async function workerParagraphs(editor: MountedEditor) {
+  const read = await editor.ref.current!.readParagraphs({ view: 'accepted' });
+  expect(read.ok).toBe(true);
+  if (!read.ok) throw new Error(read.failure.message);
+  return read.paragraphs;
+}
+
+async function selectWorkerParagraph(editor: MountedEditor, index = 0) {
+  let paraId = '';
+  await act(async () => {
+    await editor.ref.current!.whenLayoutComplete({ timeoutMs: 3_000 });
+    paraId = (await workerParagraphs(editor))[index]!.paraId;
+    expect(await editor.ref.current!.scrollToParagraph(paraId)).toBe(true);
+    const input = editor.view.getByTestId('yrs-input') as HTMLTextAreaElement;
+    input.focus();
+    await editor.ref.current!.flushPendingInput();
+  });
+  return paraId;
+}
+
+async function typeWorkerBody(editor: MountedEditor, text: string, index = 0) {
+  const before = (await workerParagraphs(editor))[index]!.text;
+  await selectWorkerParagraph(editor, index);
+  await act(async () => {
+    const input = editor.view.getByTestId('yrs-input') as HTMLTextAreaElement;
+    fireEvent.input(input, { target: { value: text } });
+    await editor.ref.current!.flushPendingInput();
+  });
+  expect((await workerParagraphs(editor))[index]!.text).toBe(text + before);
+}
+
+function documentImages(editor: MountedEditor) {
+  return editor.ref.current!.getDocument()?.package.document.content.flatMap((block) =>
+    block.type === 'paragraph'
+      ? block.content.flatMap((content) => content.type === 'run'
+        ? content.content.flatMap((item) => item.type === 'drawing' ? [item.image] : [])
+        : [])
+      : []) ?? [];
+}
+
+async function insertWorkerImage(editor: MountedEditor, name: string) {
+  await selectWorkerParagraph(editor);
+  await until(() => editor.ref.current!.commands.getState('insertImage').enabled);
+  await act(async () => {
+    const outcome = await editor.ref.current!.commands.execute('insertImage', null);
+    expect(outcome.ok).toBe(true);
+    if (outcome.ok) expect(outcome.status).toBe('opened');
+  });
+  const originalImage = globalThis.Image;
+  class LoadedImage {
+    naturalWidth = 1;
+    naturalHeight = 1;
+    onload: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    set src(_value: string) {
+      queueMicrotask(() => this.onload?.());
+    }
+  }
+  try {
+    globalThis.Image = LoadedImage as never;
+    const input = editor.view.container.querySelector<HTMLInputElement>('input[type="file"][accept="image/*"]');
+    expect(input).not.toBeNull();
+    await act(async () => {
+      fireEvent.change(input!, { target: { files: [new File([PNG], name, { type: 'image/png' })] } });
+    });
+    await until(() => documentImages(editor).length === 1);
+    expect(documentImages(editor)[0]!.src).toBe(`data:image/png;base64,${PNG_BASE64}`);
+    expect(input!.value).toBe('');
+    await act(async () => editor.ref.current!.flushPendingInput());
+  } finally {
+    globalThis.Image = originalImage;
+  }
 }
 
 async function reopened(buffer: ArrayBuffer) {
@@ -307,7 +439,7 @@ function drawing(): string {
   return `<w:r><w:drawing><wp:inline xmlns:wp="${WP}" xmlns:a="${A}" xmlns:pic="${PIC}" distT="0" distB="0" distL="0" distR="0"><wp:extent cx="9525" cy="9525"/><wp:docPr id="42" name="Link"><a:hlinkClick xmlns:a="${A}" r:id="link"/></wp:docPr><wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr><a:graphic><a:graphicData uri="${PIC}"><pic:pic><pic:nvPicPr><pic:cNvPr id="0" name="pixel.png"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="picture"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="9525" cy="9525"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>`;
 }
 
-test('no-edit React save preserves rich comments, body, header and footnotes byte-for-byte', async () => {
+testSaveEngines('no-edit React save preserves rich comments, body, header and footnotes byte-for-byte', async (mount) => {
   const source = commentedFixture({ header: true, footnote: true });
   const editor = await mount(source.bytes);
   const saved = await editor.save();
@@ -316,7 +448,7 @@ test('no-edit React save preserves rich comments, body, header and footnotes byt
   expectUnchanged(source, saved, ['word/comments.xml', 'word/document.xml', 'word/header1.xml', 'word/footnotes.xml']);
 });
 
-test('React saves a plain comment edit and the other comment text', async () => {
+testSaveEngines('React saves a plain comment edit and the other comment text', async (mount) => {
   const source = richCommentsFixture();
   const editor = await mount(source.bytes);
   const comments = editor.ref.current!.getComments().map((comment) => comment.id === 1 ? {
@@ -332,7 +464,7 @@ test('React saves a plain comment edit and the other comment text', async () => 
   expect(getCommentText(reopenedComments.find(({ id }) => id === 0)!.content)).toContain('colorful');
 });
 
-test('React saves a plain comment deletion and the other comment text', async () => {
+testSaveEngines('React saves a plain comment deletion and the other comment text', async (mount) => {
   const source = richCommentsFixture();
   const editor = await mount(source.bytes);
   await act(async () => editor.setComments(editor.ref.current!.getComments().filter(({ id }) => id !== 1)));
@@ -343,7 +475,7 @@ test('React saves a plain comment deletion and the other comment text', async ()
   expect(getCommentText(comments[0]!.content)).toContain('colorful');
 });
 
-test('React saves an added comment and the existing comment text', async () => {
+testSaveEngines('React saves an added comment and the existing comment text', async (mount) => {
   const source = richCommentsFixture();
   const editor = await mount(source.bytes);
   const added: Comment = {
@@ -361,7 +493,7 @@ test('React saves an added comment and the existing comment text', async () => {
   expect(getCommentText(comments.find(({ id }) => id === 1)!.content)).toBe('Plain');
 });
 
-test('React saves a resolved comment and the other comment text', async () => {
+testSaveEngines('React saves a resolved comment and the other comment text', async (mount) => {
   const source = richCommentsFixture();
   const editor = await mount(source.bytes);
   await act(async () => editor.ref.current!.resolveComment(0));
@@ -372,14 +504,14 @@ test('React saves a resolved comment and the other comment text', async () => {
   expect(getCommentText(comments.find(({ id }) => id === 1)!.content)).toBe('Plain');
 });
 
-test('React save after only body text changes preserves both comment elements and rels', async () => {
+testSaveEngines('React save after only body text changes preserves both comment elements and rels', async (mount) => {
   const source = richCommentsFixture();
   const editor = await mount(source.bytes);
   await typeBody(editor, 'Edited body ');
   expectUnchanged(source, await editor.save(), ['word/comments.xml', 'word/_rels/comments.xml.rels']);
 });
 
-test('no-edit React save preserves a field nested inside a hyperlink byte-for-byte', async () => {
+testSaveEngines('no-edit React save preserves a field nested inside a hyperlink byte-for-byte', async (mount) => {
   const source = fixture((p) =>
     p('<w:hyperlink w:anchor="target"><w:fldSimple w:instr="DATE">' + run('October') + '</w:fldSimple></w:hyperlink>') +
     p('<w:bookmarkStart w:id="7" w:name="target"/>' + run('Target') + '<w:bookmarkEnd w:id="7"/>')
@@ -388,7 +520,7 @@ test('no-edit React save preserves a field nested inside a hyperlink byte-for-by
   expectUnchanged(source, await editor.save(), ['word/document.xml']);
 });
 
-test('no-edit React save preserves altChunk and body AlternateContent byte-for-byte', async () => {
+testSaveEngines('no-edit React save preserves altChunk and body AlternateContent byte-for-byte', async (mount) => {
   const source = fixture((p) =>
     p(run('Before chunk')) + '<w:altChunk r:id="chunk"/>' +
     `<mc:AlternateContent><mc:Choice Requires="w14">${p(run('A'))}</mc:Choice><mc:Fallback>${p('')}</mc:Fallback></mc:AlternateContent>` +
@@ -406,7 +538,7 @@ test('no-edit React save preserves altChunk and body AlternateContent byte-for-b
   expectUnchanged(source, saved, ['word/document.xml', 'word/chunk.html']);
 });
 
-test('no-edit React save preserves text in a vertical-merge continuation cell byte-for-byte', async () => {
+testSaveEngines('no-edit React save preserves text in a vertical-merge continuation cell byte-for-byte', async (mount) => {
   const source = fixture((p) =>
     p(run('Table')) +
     '<w:tbl><w:tblPr><w:tblW w:w="8000" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="4000"/><w:gridCol w:w="4000"/></w:tblGrid>' +
@@ -419,13 +551,13 @@ test('no-edit React save preserves text in a vertical-merge continuation cell by
   expectUnchanged(source, await editor.save(), ['word/document.xml']);
 });
 
-test('no-edit React save preserves permission ranges byte-for-byte', async () => {
+testSaveEngines('no-edit React save preserves permission ranges byte-for-byte', async (mount) => {
   const source = fixture((p) => p('<w:permStart w:id="3" w:edGrp="everyone"/>' + run('Editable') + '<w:permEnd w:id="3"/>'));
   const editor = await mount(source.bytes);
   expectUnchanged(source, await editor.save(), ['word/document.xml']);
 });
 
-test('no-edit React save preserves an image hyperlink and its relationship byte-for-byte', async () => {
+testSaveEngines('no-edit React save preserves an image hyperlink and its relationship byte-for-byte', async (mount) => {
   const source = fixture((p) => p(run('Linked image') + drawing()), { image: true });
   const editor = await mount(source.bytes);
   const saved = await editor.save();
@@ -439,25 +571,50 @@ test('no-edit React save preserves an image hyperlink and its relationship byte-
   expectUnchanged(source, saved, ['word/document.xml']);
 });
 
-test('a package part the host replaced in originalBuffer is saved', async () => {
-  const source = fixture((p) => p(run('Linked image') + drawing()), { image: true });
-  const editor = await mount(source.bytes);
-  const replaced = new Uint8Array([...PNG, 0]);
-  const document = editor.ref.current!.getDocument()!;
-  const parts = unzipContainer(new Uint8Array(document.originalBuffer!));
-  parts['word/media/pixel.png'] = replaced;
-  document.originalBuffer = rezipPartsToArrayBuffer(new Map(Object.entries(parts)));
-  const saved = unzipContainer(new Uint8Array(await editor.save()));
-  expect(Array.from(saved['word/media/pixel.png'] ?? [])).toEqual(Array.from(replaced));
+const sourceBufferEngines: Array<[string, boolean | undefined]> = [
+  ['default', undefined],
+  ['in-thread', false],
+];
+test.each(sourceBufferEngines)('a package part the host replaced in originalBuffer is saved with the %s engine', async (engine, experimentalWorkerOpen) => {
+  const originalWorker = globalThis.Worker;
+  const startWorker = await residentWorkerFactory();
+  const compileModule = spyOn(wasm, 'editWasmModule').mockResolvedValue(new WebAssembly.Module(
+    new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00])
+  ));
+  setMissingWorkerCapabilitiesForTests([]);
+  globalThis.Worker = class {
+    constructor() { return startWorker(); }
+  } as unknown as typeof Worker;
+  try {
+    const source = fixture((p) => p(run('Linked image') + drawing()), { image: true });
+    const editor = await mount(source.bytes, { experimentalWorkerOpen });
+    await act(async () => { await editor.ref.current!.flushPendingInput(); });
+    const session = editor.ref.current!.getEditorRef()!.getYrsSession()!;
+    expect(workerOpenSave(session) !== null).toBe(engine === 'default');
+    const replaced = new Uint8Array([...PNG, 0]);
+    const document = editor.ref.current!.getDocument()!;
+    const parts = unzipContainer(new Uint8Array(document.originalBuffer!));
+    parts['word/media/pixel.png'] = replaced;
+    document.originalBuffer = rezipPartsToArrayBuffer(new Map(Object.entries(parts)));
+    const saved = unzipContainer(new Uint8Array(await editor.save()));
+    expect(Array.from(saved['word/media/pixel.png'] ?? [])).toEqual(Array.from(replaced));
+  } finally {
+    cleanup();
+    takePreloadedResidentEngineWorker()?.destroy();
+    await act(async () => {});
+    compileModule.mockRestore();
+    resetEngineChoiceForTests();
+    globalThis.Worker = originalWorker;
+  }
 });
 
-test('no-edit React save preserves empty paragraph section properties byte-for-byte', async () => {
+testSaveEngines('no-edit React save preserves empty paragraph section properties byte-for-byte', async (mount) => {
   const source = fixture((p) => p(run('First section'), '<w:pPr><w:sectPr/></w:pPr>') + p(run('Second section')));
   const editor = await mount(source.bytes);
   expectUnchanged(source, await editor.save(), ['word/document.xml']);
 });
 
-test('a React body edit saves its text and preserves untouched header and rich comments', async () => {
+testSaveEngines('a React body edit saves its text and preserves untouched header and rich comments', async (mount) => {
   const source = commentedFixture({ header: true });
   const editor = await mount(source.bytes);
   await typeBody(editor, 'Typed in body ');
@@ -469,9 +626,20 @@ test('a React body edit saves its text and preserves untouched header and rich c
   const session = second.ref.current!.getEditorRef()!.getYrsSession()!;
   expect(session.paragraphs('body')[0]!.text).toContain('Typed in body Body text');
   expectUnchanged(source, saved, ['word/header1.xml', 'word/comments.xml']);
+}, async (mount) => {
+  const source = commentedFixture({ header: true });
+  const editor = await mount(source.bytes);
+  await typeBody(editor, 'Typed in body ');
+  const saved = await editor.save();
+  const parts = unzipContainer(new Uint8Array(saved));
+  expect(xmlPart(parts, 'word/document.xml') === new TextDecoder().decode(source.parts.get('word/document.xml'))).toBe(false);
+  editor.view.unmount();
+  const second = await mount(saved);
+  expect((await workerParagraphs(second))[0]!.text).toContain('Typed in body Body text');
+  expectUnchanged(source, saved, ['word/header1.xml', 'word/comments.xml']);
 });
 
-test('a comment text edited in React is saved and reopened', async () => {
+testSaveEngines('a comment text edited in React is saved and reopened', async (mount) => {
   const source = commentedFixture();
   const editor = await mount(source.bytes);
   const comments = editor.ref.current!.getComments().map((comment) => ({
@@ -490,7 +658,7 @@ test('a comment text edited in React is saved and reopened', async () => {
   expect(getCommentText(comment!.content)).toBe('Edited by host');
 });
 
-test('an in-place host comment edit keeps its text and resolved state on save', async () => {
+testSaveEngines('an in-place host comment edit keeps its text and resolved state on save', async (mount) => {
   const editor = await mount(commentedFixture().bytes);
   const [comment] = editor.ref.current!.getComments();
   comment!.content = [{ type: 'paragraph', paraId: COMMENT_PARA_ID, content: [{ type: 'run', content: [{ type: 'text', text: 'Edited in place by host' }] }] }];
@@ -603,8 +771,8 @@ test('clicking the startup body caret after header editing expands its covering 
   await clickCommentAfterHeaderReturn(mount, false);
 }, 30_000);
 
-async function deleteTwoCommentsAcrossSaves() {
-  const editor = await mount(twoCommentFixture());
+async function deleteTwoCommentsAcrossSaves(mountEditor: typeof mount = mount) {
+  const editor = await mountEditor(twoCommentFixture());
   await until(() => editor.ref.current!.getComments().length === 2);
   if (!editor.ref.current!.commands.getState('commentsSidebar').active) {
     await act(async () => {
@@ -627,16 +795,16 @@ async function deleteTwoCommentsAcrossSaves() {
   return { first, saved: await editor.save() };
 }
 
-async function removeCommentThroughProp(): Promise<ArrayBuffer> {
-  const editor = await mount(twoCommentFixture());
+async function removeCommentThroughProp(mountEditor: typeof mount = mount): Promise<ArrayBuffer> {
+  const editor = await mountEditor(twoCommentFixture());
   await until(() => editor.ref.current!.getComments().length === 2);
   await act(async () => editor.setComments(editor.ref.current!.getComments().filter(({ id }) => id !== 1)));
   await until(() => editor.ref.current!.getComments().length === 1);
   return editor.save();
 }
 
-test('a comment the host removes through the comments prop leaves its range and definition out', async () => {
-  const saved = await removeCommentThroughProp();
+testSaveEngines('a comment the host removes through the comments prop leaves its range and definition out', async (mount) => {
+  const saved = await removeCommentThroughProp(mount);
   const parts = unzipContainer(new Uint8Array(saved));
   const comments = new DOMParser().parseFromString(xmlPart(parts, 'word/comments.xml'), 'application/xml');
   expect(xmlElements(comments, W, 'comment').map((entry) => entry.getAttribute('w:id'))).toEqual(['2']);
@@ -644,13 +812,13 @@ test('a comment the host removes through the comments prop leaves its range and 
   expect((await reopened(saved)).package.document.comments?.map(({ id }) => id)).toEqual([2]);
 });
 
-test.todo('a removed comment leaves no commentReference in the body (deferred-after-0.4.1: deleted comment keeps its commentReference)', async () => {
-  const saved = await removeCommentThroughProp();
+testSaveEngines('a removed comment leaves no commentReference in the body (deferred-after-0.4.1: deleted comment keeps its commentReference)', async (mount) => {
+  const saved = await removeCommentThroughProp(mount);
   expect(markers(xmlPart(unzipContainer(new Uint8Array(saved)), 'word/document.xml'), 1)).toEqual([]);
-});
+}, undefined, true);
 
 test('deleting two comments across saves does not resurrect the first comment', async () => {
-  const { first, saved } = await deleteTwoCommentsAcrossSaves();
+  const { first, saved } = await deleteTwoCommentsAcrossSaves(mount);
   const firstComments = new DOMParser().parseFromString(xmlPart(first, 'word/comments.xml'), 'application/xml');
   expect(xmlElements(firstComments, W, 'comment').map((entry) => entry.getAttribute('w:id'))).toEqual(['2']);
   expect(markers(xmlPart(first, 'word/document.xml'), 1).filter((marker) => marker !== 'Reference')).toEqual([]);
@@ -662,15 +830,15 @@ test('deleting two comments across saves does not resurrect the first comment', 
   expect((await reopened(saved)).package.document.comments?.some((comment) => comment.id === 1) ?? false).toBe(false);
 });
 
-test.todo('deleting the last comment removes every deleted comment\'s body range markers (deferred-after-0.4.1: last-comment delete leaves markers)', async () => {
-  const { first, saved } = await deleteTwoCommentsAcrossSaves();
+testSaveEngines('deleting the last comment removes every deleted comment\'s body range markers (deferred-after-0.4.1: last-comment delete leaves markers)', async (mount) => {
+  const { first, saved } = await deleteTwoCommentsAcrossSaves(mount);
   expect(markers(xmlPart(first, 'word/document.xml'), 1)).toEqual([]);
   const xml = xmlPart(unzipContainer(new Uint8Array(saved)), 'word/document.xml');
   expect(markers(xml, 1)).toEqual([]);
   expect(markers(xml, 2)).toEqual([]);
-});
+}, undefined, true);
 
-test('a comment resolved in React is saved in commentsExtended and reopened', async () => {
+testSaveEngines('a comment resolved in React is saved in commentsExtended and reopened', async (mount) => {
   const editor = await mount(commentedFixture().bytes);
   await act(async () => editor.ref.current!.resolveComment(1));
   const saved = await editor.save();
@@ -683,7 +851,7 @@ test('a comment resolved in React is saved in commentsExtended and reopened', as
   expect((await reopened(saved)).package.document.comments?.find(({ id }) => id === 1)?.done).toBe(true);
 });
 
-test('a React reply saves its text, thread metadata and body range markers', async () => {
+testSaveEngines('a React reply saves its text, thread metadata and body range markers', async (mount) => {
   const editor = await mount(commentedFixture().bytes);
   let replyId: number | null = null;
   await act(async () => {
@@ -713,7 +881,7 @@ test('a React reply saves its text, thread metadata and body range markers', asy
   expect(replyEx?.getAttribute('w15:paraIdParent')).toBe(parentParaId);
 });
 
-test('a React comment added on selected body text saves its body and range', async () => {
+testSaveEngines('a React comment added on selected body text saves its body and range', async (mount) => {
   const editor = await mount(commentedFixture().bytes);
   const paged = editor.ref.current!.getEditorRef()!;
   const session = paged.getYrsSession()!;
@@ -736,9 +904,34 @@ test('a React comment added on selected body text saves its body and range', asy
   const added = document.package.document.comments?.find((comment) => comment.id === id);
   expect(added?.author).toBe('C');
   expect(getCommentText(added!.content)).toBe('New host comment');
+}, async (mount) => {
+  const editor = await mount(commentedFixture().bytes);
+  const paraId = await selectWorkerParagraph(editor);
+  let id: number | null = null;
+  await act(async () => {
+    const input = editor.view.getByTestId('yrs-input');
+    for (let offset = 0; offset < 4; offset += 1) {
+      fireEvent.keyDown(input, { key: 'ArrowRight', shiftKey: true });
+    }
+    await editor.ref.current!.flushPendingInput();
+    expect((await editor.ref.current!.readSelectionInfo())?.selectedText).toBe('Body');
+    id = await editor.ref.current!.insertComment({ paraId, search: 'Body', text: 'New host comment', author: 'C' });
+  });
+  expect(id).not.toBeNull();
+  const saved = await editor.save();
+  const parts = unzipContainer(new Uint8Array(saved));
+  expect(xmlPart(parts, 'word/comments.xml')).toContain('New host comment');
+  const xml = xmlPart(parts, 'word/document.xml');
+  expect(markers(xml, id!)).toEqual(['RangeStart', 'RangeEnd', 'Reference']);
+  const covered = xml.split(`<w:commentRangeStart w:id="${id}"`)[1]?.split('<w:commentRangeEnd')[0]?.replace(/^[^>]*>/, '').replace(/<[^>]+>/g, '');
+  expect(covered).toBe('Body');
+  const document = await reopened(saved);
+  const added = document.package.document.comments?.find((comment) => comment.id === id);
+  expect(added?.author).toBe('C');
+  expect(getCommentText(added!.content)).toBe('New host comment');
 });
 
-test('two consecutive React saves retain a body edit in valid packages', async () => {
+testSaveEngines('two consecutive React saves retain a body edit in valid packages', async (mount) => {
   const editor = await mount(fixture((p) => p(run('Body text'))).bytes);
   await typeBody(editor, 'Saved twice ');
   const first = await editor.save();
@@ -754,9 +947,25 @@ test('two consecutive React saves retain a body edit in valid packages', async (
   editor.view.unmount();
   const secondEditor = await mount(second);
   expect(secondEditor.ref.current!.getEditorRef()!.getYrsSession()!.paragraphs('body')[0]!.text).toBe('Saved twice Body text');
+}, async (mount) => {
+  const editor = await mount(fixture((p) => p(run('Body text'))).bytes);
+  await typeBody(editor, 'Saved twice ');
+  const first = await editor.save();
+  const second = await editor.save();
+  for (const buffer of [first, second]) {
+    const parts = unzipContainer(new Uint8Array(buffer));
+    expect(xmlPart(parts, '[Content_Types].xml')).toContain('/word/document.xml');
+    expect(xmlPart(parts, '_rels/.rels')).toContain('officeDocument');
+    expect(xmlPart(parts, 'word/document.xml')).toContain('Saved twice ');
+    const document = await reopened(buffer);
+    expect(document.package.document.content.length).toBeGreaterThan(0);
+  }
+  editor.view.unmount();
+  const secondEditor = await mount(second);
+  expect((await workerParagraphs(secondEditor))[0]!.text).toBe('Saved twice Body text');
 });
 
-test('two React saves retain a drawing inserted through the public image picker', async () => {
+testSaveEngines('two React saves retain a drawing inserted through the public image picker', async (mount) => {
   const editor = await mount(fixture((p) => p(run('Body text'))).bytes);
   const paged = editor.ref.current!.getEditorRef()!;
   const session = paged.getYrsSession()!;
@@ -812,9 +1021,31 @@ test('two React saves retain a drawing inserted through the public image picker'
     expect(images[0]?.alt).toBe('Synthetic pixel.png');
     expect(images[0]?.size).toEqual({ width: 9525, height: 9525 });
   }
+}, async (mount) => {
+  const editor = await mount(fixture((p) => p(run('Body text'))).bytes);
+  await insertWorkerImage(editor, 'Synthetic pixel.png');
+  const firstSave = await editor.save();
+  const secondSave = await editor.save();
+  for (const buffer of [firstSave, secondSave]) {
+    const parts = unzipContainer(new Uint8Array(buffer));
+    const xml = new DOMParser().parseFromString(xmlPart(parts, 'word/document.xml'), 'application/xml');
+    const embed = xmlElements(xml, A, 'blip')[0]?.getAttribute('r:embed');
+    expect(embed).toBeTruthy();
+    expect(xmlElements(xml, WP, 'docPr')[0]?.getAttribute('descr')).toBe('Synthetic pixel.png');
+    const document = await reopened(buffer);
+    const images = document.package.document.content.flatMap((block) => block.type === 'paragraph'
+      ? block.content.flatMap((content) => content.type === 'run'
+        ? content.content.flatMap((item) => item.type === 'drawing' ? [item.image] : [])
+        : [])
+      : []);
+    expect(images).toHaveLength(1);
+    expect(images[0]?.rId).toBe(embed!);
+    expect(images[0]?.alt).toBe('Synthetic pixel.png');
+    expect(images[0]?.size).toEqual({ width: 9525, height: 9525 });
+  }
 });
 
-test('two React saves each register a data-URL image the session inserted', async () => {
+testSaveEngines('two React saves each register a data-URL image the session inserted', async (mount) => {
   const editor = await mount(fixture((p) => p(run('Body text'))).bytes);
   const paged = editor.ref.current!.getEditorRef()!;
   const session = paged.getYrsSession()!;
@@ -838,9 +1069,26 @@ test('two React saves each register a data-URL image the session inserted', asyn
     expect(Array.from(parts[name] ?? [])).toEqual(Array.from(PNG));
     await reopened(buffer);
   }
+}, async (mount) => {
+  const editor = await mount(fixture((p) => p(run('Body text'))).bytes);
+  await insertWorkerImage(editor, 'Synthetic pixel');
+  for (const buffer of [await editor.save(), await editor.save()]) {
+    const parts = unzipContainer(new Uint8Array(buffer));
+    const xml = new DOMParser().parseFromString(xmlPart(parts, 'word/document.xml'), 'application/xml');
+    const embed = xmlElements(xml, A, 'blip')[0]?.getAttribute('r:embed');
+    expect(embed).toBeTruthy();
+    const rels = new DOMParser().parseFromString(xmlPart(parts, 'word/_rels/document.xml.rels'), 'application/xml');
+    const relationship = Array.from(rels.getElementsByTagNameNS(RELS, 'Relationship')).find((entry) => entry.getAttribute('Id') === embed);
+    expect(relationship?.getAttribute('Type')).toBe(`${R}/image`);
+    const target = relationship!.getAttribute('Target')!;
+    const name = target.startsWith('/') ? target.slice(1) : `word/${target}`;
+    expect(name.startsWith('word/media/')).toBe(true);
+    expect(Array.from(parts[name] ?? [])).toEqual(Array.from(PNG));
+    await reopened(buffer);
+  }
 });
 
-test('React save after undo restores source document bytes instead of the previous save', async () => {
+testSaveEngines('React save after undo restores source document bytes instead of the previous save', async (mount) => {
   const synthetic = fixture((p) => p(run('Body text')));
   const source = await repackDocx(await reopened(synthetic.bytes));
   const sourceXml = xmlPart(unzipContainer(new Uint8Array(source)), 'word/document.xml');
@@ -855,9 +1103,26 @@ test('React save after undo restores source document bytes instead of the previo
   const undone = await editor.save();
   expectSameXml(xmlPart(unzipContainer(new Uint8Array(undone)), 'word/document.xml'), sourceXml, 'word/document.xml after undo');
   await reopened(undone);
+}, async (mount) => {
+  const synthetic = fixture((p) => p(run('Body text')));
+  const source = await repackDocx(await reopened(synthetic.bytes));
+  const sourceXml = xmlPart(unzipContainer(new Uint8Array(source)), 'word/document.xml');
+  const editor = await mount(source);
+  await typeBody(editor, 'Undo this ');
+  const edited = await editor.save();
+  expect(xmlPart(unzipContainer(new Uint8Array(edited)), 'word/document.xml')).toContain('Undo this ');
+  await act(async () => {
+    const outcome = await editor.ref.current!.commands.execute('undo', null);
+    expect(outcome.ok).toBe(true);
+    if (outcome.ok) expect(outcome.status).toBe('executed');
+  });
+  expect((await workerParagraphs(editor))[0]!.text).toBe('Body text');
+  const undone = await editor.save();
+  expectSameXml(xmlPart(unzipContainer(new Uint8Array(undone)), 'word/document.xml'), sourceXml, 'word/document.xml after undo');
+  await reopened(undone);
 });
 
-test('React save after undo restores raw source document bytes with permission ranges', async () => {
+testSaveEngines('React save after undo restores raw source document bytes with permission ranges', async (mount) => {
   const source = fixture((p) =>
     p('<w:permStart w:id="3" w:edGrp="everyone"/>' + run('Editable') + '<w:permEnd w:id="3"/>') +
     p(run('Body text'))
@@ -880,9 +1145,29 @@ test('React save after undo restores raw source document bytes with permission r
   const undone = await editor.save();
   expectUnchanged(source, undone, ['word/document.xml']);
   await reopened(undone);
+}, async (mount) => {
+  const source = fixture((p) =>
+    p('<w:permStart w:id="3" w:edGrp="everyone"/>' + run('Editable') + '<w:permEnd w:id="3"/>') +
+    p(run('Body text'))
+  );
+  const editor = await mount(source.bytes);
+  await typeWorkerBody(editor, 'Undo this ', 1);
+  const edited = await editor.save();
+  expect(xmlPart(unzipContainer(new Uint8Array(edited)), 'word/document.xml')).toContain('Undo this ');
+  await act(async () => {
+    const outcome = await editor.ref.current!.commands.execute('undo', null);
+    expect(outcome.ok).toBe(true);
+    if (outcome.ok) expect(outcome.status).toBe('executed');
+  });
+  const paragraphs = await workerParagraphs(editor);
+  expect(paragraphs[0]!.text).toBe('Editable');
+  expect(paragraphs[1]!.text).toBe('Body text');
+  const undone = await editor.save();
+  expectUnchanged(source, undone, ['word/document.xml']);
+  await reopened(undone);
 });
 
-test('a host page-setup change is saved even when body text is untouched', async () => {
+testSaveEngines('a host page-setup change is saved even when body text is untouched', async (mount) => {
   const editor = await mount(fixture((p) => p(run('Body text'))).bytes);
   await act(async () => {
     const outcome = await editor.ref.current!.commands.execute('pageSetup', null);
@@ -902,7 +1187,7 @@ test('a host page-setup change is saved even when body text is untouched', async
 });
 
 async function mountHeaderFooterEditing() {
-  const editor = await mount(fixture((p) => p(run('Body text'))).bytes);
+  const editor = await mount(fixture((p) => p(run('Body text'))).bytes, { experimentalWorkerOpen: false });
   const paged = editor.ref.current!.getEditorRef()!;
   const session = paged.getYrsSession()!;
   let host = paged.getDocument()!;
@@ -991,7 +1276,7 @@ test.each(['header', 'footer'] as const)('adding and removing a %s before the fi
   expect(opened.package[mapKey]?.size ?? 0).toBe(0);
 });
 
-test('an edit in one paragraph keeps the rest of the body byte-for-byte', async () => {
+testSaveEngines('an edit in one paragraph keeps the rest of the body byte-for-byte', async (mount) => {
   const source = fixture((p) =>
     p(run('Edited here')) +
     p('<w:hyperlink w:anchor="target"><w:fldSimple w:instr="DATE">' + run('October') + '</w:fldSimple></w:hyperlink>') +
