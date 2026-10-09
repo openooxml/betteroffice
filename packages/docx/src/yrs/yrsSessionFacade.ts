@@ -229,7 +229,34 @@ export function wrapSession(
     ? editorSaveKeys(opened.host.document)
     : null;
 
+  let readCacheRevision = 0;
+  let cachedHeaderFooterAliases: {
+    revision: number;
+    aliases: ReadonlyMap<string, string>;
+  } | null = null;
+  const headerFooterAliases = (): ReadonlyMap<string, string> => {
+    if (!cachedHeaderFooterAliases || cachedHeaderFooterAliases.revision !== readCacheRevision) {
+      let aliases = new Map<string, string>();
+      if (!destroyed) {
+        try {
+          const value: unknown = JSON.parse(session.header_footer_aliases_json());
+          if (
+            value !== null &&
+            typeof value === 'object' &&
+            Object.getPrototypeOf(value) === Object.prototype &&
+            Object.values(value).every((entry) => typeof entry === 'string')
+          ) {
+            aliases = new Map(Object.entries(value) as Array<[string, string]>);
+          }
+        } catch {}
+      }
+      cachedHeaderFooterAliases = { revision: readCacheRevision, aliases };
+    }
+    return cachedHeaderFooterAliases.aliases;
+  };
+
   const invalidateReadCaches = (): void => {
+    readCacheRevision += 1;
     cachedSelection = undefined;
     cachedSelectionContext = null;
   };
@@ -315,6 +342,7 @@ export function wrapSession(
     if (observing) return;
     session.set_update_observer((update: Uint8Array, origin: number) => {
       if (origin !== 0 && origin !== 1) return;
+      readCacheRevision += 1;
       pendingUpdates.push({
         update: update.slice(),
         origin: origin === 0 ? 'local' : 'remote',
@@ -1450,6 +1478,7 @@ export function wrapSession(
     destroy: () => {
       if (destroyed) return;
       destroyed = true;
+      invalidateReadCaches();
       residentFonts.length = 0;
       docxSource = null;
       docxSourceKeys = null;
@@ -1465,6 +1494,8 @@ export function wrapSession(
   };
 
   registerSessionInternals(facade, {
+    headerFooterAliases,
+    setHeaderFooterAliases: (json) => mutate(() => session.set_header_footer_aliases(json)),
     sourcePackage: () =>
       docxSource && docxSourceKeys
         ? { buffer: docxSourceBuffer(docxSource), keys: docxSourceKeys }

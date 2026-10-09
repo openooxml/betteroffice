@@ -10,6 +10,7 @@
  */
 
 import type { YrsRevisionInfo, YrsSession } from '../../yrs';
+import { headerFooterDisplayRIds } from '../../yrs/sessionInternals';
 import type { DisplayListQueries, DisplayListRect } from './displayListQueries';
 import { canvasPageTops } from './canvasPageMetrics';
 import {
@@ -175,7 +176,18 @@ export function computeAnchorPositionsFromYrs(
       ];
     }
   }
-  return anchorPositionsFromPoints(points(), queries, hfRegions, projectY);
+  function* displayedPoints(): IterableIterator<readonly [string, YrsSidebarDisplayPoint | null]> {
+    for (const [key, point] of points()) {
+      if (!point?.hfRid) {
+        yield [key, point];
+        continue;
+      }
+      for (const rId of headerFooterDisplayRIds(session, point.hfRid)) {
+        yield [key, { ...point, hfRid: rId }];
+      }
+    }
+  }
+  return anchorPositionsFromPoints(displayedPoints(), queries, hfRegions, projectY);
 }
 
 export function anchorPositionsFromPoints(

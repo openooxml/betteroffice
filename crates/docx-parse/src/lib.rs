@@ -94,8 +94,8 @@ pub use formatting::{
     parse_table_row_properties,
 };
 pub use header_footer::{
-    HeaderFooter, normalize_header_footer_type, parse_header_footer, parse_related_header_footers,
-    select_for_page,
+    HeaderFooter, HeaderFooterAliasGroup, normalize_header_footer_type, parse_header_footer,
+    parse_related_header_footers, parse_related_header_footers_with_aliases, select_for_page,
 };
 pub use inline::{
     BookmarkEnd, BookmarkStart, ComplexField, FieldFormData, FieldSwitch, Hyperlink, InlineNode,
