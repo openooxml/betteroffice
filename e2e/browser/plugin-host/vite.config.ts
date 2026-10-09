@@ -12,17 +12,17 @@ export default defineConfig({
   root: import.meta.dirname,
   plugins: [
     {
-      name: 'worker-proposal-replica-probe',
+      name: 'main-document-load-probe',
       enforce: 'pre',
       transform(source, id) {
         const file = id.split('?')[0];
-        if (file.endsWith('/DocxEditor/internals/workerOpenReplica.ts')) {
-          if (!source.includes('replicas.set(session, replica);')) {
-            this.error('Update the worker-proposal session capture for workerOpenReplica.ts');
+        if (file.endsWith('/DocxEditor/hooks/useYrsCoreSession.ts')) {
+          const creation = /const (\w+) = await yrs\.createYrsSession\([^;]+\);/g;
+          if (!creation.test(source)) {
+            this.error('Update the main-document session capture for useYrsCoreSession.ts');
           }
-          return source.replace(
-            'replicas.set(session, replica);',
-            'replicas.set(session, replica); globalThis.__workerProposalTest?.captureSession(session);'
+          return source.replace(creation, (statement, session) =>
+            `${statement} globalThis.__workerProposalTest?.captureSession(${session});`
           );
         }
       },

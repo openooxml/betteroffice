@@ -59,6 +59,64 @@ import {
 
 type Attrs = Record<string, unknown>;
 
+/**
+ * Aggregate cap, in xml bytes, for opaque drawing payloads copied into yrs
+ * state while seeding. Opaque markup replays verbatim through raw ops and
+ * yrs map values, so uncapped documents multiply memory once per layer.
+ * Both seeders enforce this constant and refuse over-budget documents
+ * instead of silently dropping content.
+ */
+export const OPAQUE_SEED_BUDGET_BYTES = 8 * 1024 * 1024;
+
+const OPAQUE_SEED_BUDGET_MESSAGE = 'opaque drawing seed budget exceeded';
+
+export class OpaqueSeedBudgetError extends Error {
+  readonly total: number;
+  readonly budget = OPAQUE_SEED_BUDGET_BYTES;
+  constructor(total: number) {
+    super(`${OPAQUE_SEED_BUDGET_MESSAGE} (${total} bytes of opaque xml, budget ${OPAQUE_SEED_BUDGET_BYTES} bytes)`);
+    this.name = 'OpaqueSeedBudgetError';
+    this.total = total;
+  }
+}
+
+export function normalizeSeedError(error: unknown): unknown {
+  if (error instanceof OpaqueSeedBudgetError) return error;
+  const message =
+    typeof error === 'string' ? error : error instanceof Error ? error.message : undefined;
+  if (message?.startsWith(OPAQUE_SEED_BUDGET_MESSAGE)) {
+    const total = /(\d+) bytes of opaque xml/.exec(message)?.[1];
+    return new OpaqueSeedBudgetError(total === undefined ? 0 : Number(total));
+  }
+  return error;
+}
+
+const textEncoder = new TextEncoder();
+
+function opaqueXmlBytes(value: unknown): number {
+  if (typeof value === 'string') return 0;
+  if (Array.isArray(value)) return value.reduce<number>((sum, entry) => sum + opaqueXmlBytes(entry), 0);
+  if (value instanceof Map) {
+    let sum = 0;
+    for (const entry of value.values()) sum += opaqueXmlBytes(entry);
+    return sum;
+  }
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    const own =
+      record.type === 'opaqueDrawing' && typeof record.xml === 'string'
+        ? textEncoder.encode(record.xml).length
+        : 0;
+    return own + Object.values(record).reduce<number>((sum, entry) => sum + opaqueXmlBytes(entry), 0);
+  }
+  return 0;
+}
+
+export function assertOpaqueSeedBudget(document: Document): void {
+  const total = opaqueXmlBytes(document);
+  if (total > OPAQUE_SEED_BUDGET_BYTES) throw new OpaqueSeedBudgetError(total);
+}
+
 interface MarkDescriptor {
   name: string;
   /** Complete schema attrs, including non-null defaults. */
@@ -699,7 +757,7 @@ function noteRefUnit(
 
 /** The tracked insertion or deletion a drawing keeps from its run. */
 function trackedMarks(marks: readonly MarkDescriptor[]): MarkDescriptor[] {
-  return marks.filter((mark) => mark.name === 'insertion' || mark.name === 'deletion');
+  return marks.filter((mark) => mark.name === 'insertion' || mark.name === 'deletion' || mark.name === 'hyperlink');
 }
 
 function runContentToUnits(
@@ -769,6 +827,8 @@ function runContentToUnits(
       return [embedUnit('shape', shapePayload(content.shape), trackedMarks(marks))];
     case 'chart':
       return [embedUnit('chart', chartPayload(content.chart), trackedMarks(marks))];
+    case 'opaqueDrawing':
+      return [embedUnit('opaqueDrawing', { kind: content.kind, xml: content.xml }, trackedMarks(marks))];
     case 'footnoteRef':
       return [noteRefUnit(content.id, 'footnote', marks)];
     case 'endnoteRef':
@@ -2045,6 +2105,7 @@ export function documentToYrs(
   options: YrsOpeningOptions = {}
 ): void {
   noteYrsStoriesDirty(session, 'all');
+  assertOpaqueSeedBudget(document);
   const context: LoweringContext = {
     styleResolver: document.package.styles ? createStyleResolver(document.package.styles) : null,
     theme: document.package.theme ?? null,

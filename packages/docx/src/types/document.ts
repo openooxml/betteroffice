@@ -117,6 +117,7 @@ export type {
   DrawingContent,
   ShapeContent,
   ChartContent,
+  OpaqueDrawingContent,
   RunContent,
   Run,
   Hyperlink,

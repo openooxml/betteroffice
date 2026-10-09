@@ -28,9 +28,10 @@ pub struct S13ParagraphIds {
     pub spliced_parts: Vec<S13SplicedPart>,
 }
 
-/// A story part whose model paragraphs each come from one source `w:p`, in source order: it is
-/// written as its source XML with only the paragraphs that changed, or whose written XML no
-/// longer agrees with their source on comments, revisions, notes or relationships, replaced.
+/// A story part whose model paragraphs each come from one source `w:p`, in source order, or are
+/// new: it is written as its source XML with only the paragraphs that changed, or whose written
+/// XML no longer agrees with their source on comments, revisions, notes or relationships,
+/// replaced, the removed ones dropped and the new ones inserted.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct S13SplicedPart {
@@ -43,6 +44,29 @@ pub struct S13SplicedPart {
     /// Of those, the ones whose content changed since the source was opened.
     #[serde(default)]
     pub changed: Vec<u32>,
+    /// Where each model paragraph written without a `sourceOrdinal` goes, in writing order.
+    #[serde(default)]
+    pub inserted: Vec<S13SpliceAnchor>,
+    /// The source paragraphs the model no longer holds.
+    #[serde(default)]
+    pub removed: Vec<u32>,
+}
+
+/// Where a spliced part takes a paragraph its source lacks: right before or right after the
+/// source paragraph with this ordinal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum S13SpliceAnchor {
+    Before(u32),
+    After(u32),
+}
+
+impl S13SpliceAnchor {
+    pub(crate) fn ordinal(self) -> u32 {
+        match self {
+            Self::Before(ordinal) | Self::After(ordinal) => ordinal,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

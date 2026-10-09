@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { DocxProposalSnapshot, YrsSession } from '@betteroffice/docx/yrs';
 import { yrsIdToNumericId } from '@betteroffice/docx/layout/render';
+import { hasEditorWorkerProposalRounds, registeredWorkerProposalAuthority, subscribeEditorWorkerProposalAuthority } from '../internals/workerProposalAuthority';
 
 const NO_REVISIONS = new Set<string>();
 
@@ -11,7 +12,11 @@ export function useHostProposalRevisions(session: YrsSession | null): Set<string
     if (!session) return;
     const update = (snapshot: DocxProposalSnapshot): void => {
       const keys = new Set<string>();
-      for (const proposal of snapshot.proposals) {
+      const workerSnapshot = hasEditorWorkerProposalRounds(session)
+        ? registeredWorkerProposalAuthority(session)?.snapshot()
+        : null;
+      const proposals = workerSnapshot ? [...snapshot.proposals, ...workerSnapshot.proposals] : snapshot.proposals;
+      for (const proposal of proposals) {
         for (const revisionId of proposal.revisionIds) {
           keys.add(`revision-${yrsIdToNumericId(revisionId)}`);
         }
@@ -25,7 +30,9 @@ export function useHostProposalRevisions(session: YrsSession | null): Set<string
       );
     };
     update(session.getProposals());
-    return session.onProposalChange(update);
+    const unsubscribe = session.onProposalChange(update);
+    const unsubscribeWorker = subscribeEditorWorkerProposalAuthority(session, () => update(session.getProposals()));
+    return () => { unsubscribe(); unsubscribeWorker(); };
   }, [session]);
   return state && state.session === session && state.keys.size > 0 ? state.keys : NO_REVISIONS;
 }

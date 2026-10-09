@@ -896,6 +896,8 @@ pub struct TableBlock {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table_layout: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub width_algorithm: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub style_cascade: Option<Value>,
@@ -913,6 +915,8 @@ pub struct TableBlock {
     pub compatibility_mode: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cell_margin_left: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cell_margin_right: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pm_start: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1473,6 +1477,7 @@ impl PartialEq for TableBlock {
             width_type: _,
             preferred_width: _,
             layout_mode: _,
+            table_layout: _,
             width_algorithm: _,
             style_cascade: _,
             background: _,
@@ -1482,6 +1487,7 @@ impl PartialEq for TableBlock {
             floating: _,
             compatibility_mode: _,
             cell_margin_left: _,
+            cell_margin_right: _,
             pm_start: _,
             pm_end: _,
         } = other;
@@ -1494,6 +1500,7 @@ impl PartialEq for TableBlock {
             && self.width_type == other.width_type
             && self.preferred_width == other.preferred_width
             && self.layout_mode == other.layout_mode
+            && self.table_layout == other.table_layout
             && self.width_algorithm == other.width_algorithm
             && self.style_cascade == other.style_cascade
             && self.background == other.background
@@ -1503,6 +1510,7 @@ impl PartialEq for TableBlock {
             && self.floating == other.floating
             && self.compatibility_mode == other.compatibility_mode
             && self.cell_margin_left == other.cell_margin_left
+            && self.cell_margin_right == other.cell_margin_right
     }
 }
 
@@ -1951,6 +1959,8 @@ pub struct LayoutOptions {
     pub title_page: Option<bool>,
     pub even_and_odd_headers: Option<bool>,
     pub footnote_reserved_heights: Option<BTreeMap<String, f64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note_separator_heights: Option<crate::footnotes::NoteSeparatorHeights>,
     pub body_break_type: Option<SectionBreakType>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub section_page_restarts: Option<Vec<Option<SectionPageRestart>>>,
@@ -2071,6 +2081,15 @@ pub struct ParagraphFragment {
     pub resolved_lines: Option<Vec<ResolvedLine>>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CellClip {
+    pub row: usize,
+    pub cell: usize,
+    pub top: f64,
+    pub bottom: f64,
+}
+
 /// One page's slice of a table: rows `[row_start, row_end)`, plus
 /// `clip_top` / `clip_bottom` when the boundary cuts through a row that broke
 /// mid-content, and `header_row_count` when this fragment repeats the header
@@ -2101,6 +2120,8 @@ pub struct TableFragment {
     pub clip_top: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub clip_bottom: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cell_clips: Option<Vec<CellClip>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2301,6 +2322,8 @@ pub struct Page {
     pub fragments: Vec<Fragment>,
     #[serde(skip)]
     pub(crate) float_bands: Vec<PageFloatBand>,
+    #[serde(skip)]
+    pub(crate) opening_fragment_geometry: Option<Box<crate::page_flow::OpeningFragmentGeometry>>,
     pub margins: PageMargins,
     /// Body flow margins when they differ from the anchor frame.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2352,6 +2375,12 @@ pub struct Page {
     pub parity_filler: Option<bool>,
 }
 
+impl Page {
+    pub fn has_float_bands(&self) -> bool {
+        !self.float_bands.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct HeaderFooterLayout {
     pub height: f64,
@@ -2372,10 +2401,12 @@ pub struct Layout {
     pub footers: Option<BTreeMap<String, HeaderFooterLayout>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub page_gap: Option<f64>,
-    /// Lays out only part of the document, so its page count is not the
-    /// document's and NUMPAGES fields render empty.
+    /// Covers only part of the document.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub partial: bool,
+    /// While `partial`, NUMPAGES renders the field's cached result.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cached_page_totals: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -2782,6 +2813,27 @@ pub struct DisplayCommentAuthorContract {
 mod contract_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn optional_table_layout_round_trips_and_changes_measurement_identity() {
+        let legacy: TableBlock = serde_json::from_value(json!({"id": 0, "rows": []})).unwrap();
+        assert_eq!(legacy.table_layout, None);
+        assert!(
+            serde_json::to_value(&legacy)
+                .unwrap()
+                .get("tableLayout")
+                .is_none()
+        );
+        let mut fixed = legacy.clone();
+        fixed.table_layout = Some("fixed".to_owned());
+        assert_ne!(legacy, fixed);
+        let value = serde_json::to_value(&fixed).unwrap();
+        assert_eq!(value["tableLayout"], "fixed");
+        assert_eq!(serde_json::from_value::<TableBlock>(value).unwrap(), fixed);
+        let mut autofit = fixed.clone();
+        autofit.table_layout = Some("autofit".to_owned());
+        assert_ne!(fixed, autofit);
+    }
 
     #[test]
     fn old_optional_contracts_deserialize_to_noop_defaults() {

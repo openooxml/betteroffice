@@ -707,9 +707,10 @@ const read = workbook.readCells({
 });
 if (!read.ok) throw new Error(read.failure.message);
 
+const now = new Date();
 const result = workbook.applyEdits({
   expectVersion: read.version,
-  calculation: { nowSerial: Date.now() / 86_400_000 + 25_569 },
+  calculation: { nowSerial: (now.getTime() - now.getTimezoneOffset() * 60_000) / 86_400_000 + 25_569 },
   steps: [
     {
       op: "setCellInputs",

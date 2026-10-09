@@ -1,10 +1,25 @@
 import { MAX_TIFF_BYTES, isTiff } from '../../../../shared/media';
 import { decodeTiffImage } from '../wasm/loader';
+import { rasterImageSize, type ImageSize } from './imageSize';
 
 const MAX_BITMAP_PIXELS = 33_554_432;
 const SVG_MEDIA_TYPE = 'image/svg+xml';
 /** Matches `MAX_SVG_BYTES` in pptx-raster: the largest SVG either backend decodes. */
 const MAX_SVG_BYTES = 4_194_304;
+const MAX_IMAGE_DIMENSION = 4096;
+const decodeScales = new WeakMap<CanvasImageSource, { x: number; y: number }>();
+
+export interface PresentationImageDecodeOptions {
+  maxDimension?: number;
+}
+
+export function imageDecodeScale(source: CanvasImageSource): { x: number; y: number } {
+  return decodeScales.get(source) ?? { x: 1, y: 1 };
+}
+
+export function setImageDecodeScale(source: CanvasImageSource, scale: { x: number; y: number }): void {
+  decodeScales.set(source, scale);
+}
 
 /** Convert presentation image formats that browsers cannot decode. */
 export function presentationImageBlob(bytes: Uint8Array): Blob {
@@ -30,23 +45,85 @@ export function needsElementDecode(blob: Blob): boolean {
  */
 export async function decodePresentationImage(
   bytes: Uint8Array,
-  errorMessage: string
+  errorMessage: string,
+  options: PresentationImageDecodeOptions = {}
 ): Promise<CanvasImageSource> {
+  const maximum = options.maxDimension ?? MAX_IMAGE_DIMENSION;
+  if (!Number.isSafeInteger(maximum) || maximum < 1) throw new Error('invalid image dimension limit');
   const blob = presentationImageBlob(bytes);
   if (typeof createImageBitmap === 'function' && !needsElementDecode(blob)) {
-    return createImageBitmap(blob);
+    const original = rasterImageSize(new Uint8Array(await blob.arrayBuffer()));
+    if (original && Math.max(original.width, original.height) > maximum) {
+      const factor = maximum / Math.max(original.width, original.height);
+      const source = await createImageBitmap(blob, {
+        resizeWidth: Math.max(1, Math.floor(original.width * factor)),
+        resizeHeight: Math.max(1, Math.floor(original.height * factor)),
+      });
+      return boundImage(source, original, maximum);
+    }
+    const source = await createImageBitmap(blob);
+    return boundImage(source, { width: source.width, height: source.height }, maximum);
   }
   const url = URL.createObjectURL(blob);
   try {
-    return await new Promise<HTMLImageElement>((resolve, reject) => {
+    const source = await new Promise<HTMLImageElement>((resolve, reject) => {
       const image = new Image();
       image.onload = () => resolve(image);
       image.onerror = () => reject(new Error(errorMessage));
       image.src = url;
     });
+    return await boundImage(source, { width: source.naturalWidth, height: source.naturalHeight }, maximum);
   } finally {
     URL.revokeObjectURL(url);
   }
+}
+
+async function boundImage(
+  source: ImageBitmap | HTMLImageElement,
+  natural: ImageSize,
+  maximum: number
+): Promise<CanvasImageSource> {
+  const width = 'naturalWidth' in source ? source.naturalWidth : source.width;
+  const height = 'naturalHeight' in source ? source.naturalHeight : source.height;
+  let result: ImageBitmap | HTMLImageElement | HTMLCanvasElement | OffscreenCanvas = source;
+  if (Math.max(width, height) > maximum) {
+    const factor = maximum / Math.max(width, height);
+    const size = { width: Math.max(1, Math.floor(width * factor)), height: Math.max(1, Math.floor(height * factor)) };
+    let canvas: OffscreenCanvas | HTMLCanvasElement | undefined;
+    let ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null | undefined;
+    try {
+      if (typeof OffscreenCanvas === 'function') {
+        canvas = new OffscreenCanvas(size.width, size.height);
+        ctx = canvas.getContext('2d');
+      }
+    } catch {
+      canvas = undefined;
+    }
+    if (!ctx && typeof document !== 'undefined') {
+      try {
+        canvas = document.createElement('canvas');
+        canvas.width = size.width;
+        canvas.height = size.height;
+        ctx = canvas.getContext('2d');
+      } catch {
+        canvas = undefined;
+      }
+    }
+    if (canvas && ctx) {
+      ctx.drawImage(source, 0, 0, size.width, size.height);
+      if ('close' in source && typeof source.close === 'function') source.close();
+      try {
+        result = typeof createImageBitmap === 'function' ? await createImageBitmap(canvas) : canvas;
+      } catch {
+        result = canvas;
+      }
+    }
+  }
+  const actualWidth = 'naturalWidth' in result ? result.naturalWidth : result.width;
+  const actualHeight = 'naturalHeight' in result ? result.naturalHeight : result.height;
+  if (natural.width !== actualWidth || natural.height !== actualHeight)
+    setImageDecodeScale(result, { x: natural.width / actualWidth, y: natural.height / actualHeight });
+  return result;
 }
 
 /** An SVG a browser will decode: typed, and sized where only a `viewBox` says how big it is. */

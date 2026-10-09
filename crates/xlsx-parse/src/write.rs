@@ -24,9 +24,11 @@ use crate::package::{
     XmlTemplate, attributes_from_fragment, effective_content_type, normalized_part_name,
     parse_relationships, relationship_part_path, remove_attribute, set_attribute,
 };
-use crate::patch::SheetPatch;
+use crate::patch::{SheetPatch, SourceStyles, StyleMatch, sheet_data_regeneration_loss};
 use crate::read::SharedStringCells;
 use crate::xml::{resolve_part_path, xml_err};
+
+mod source_coordinates;
 
 /// A saved workbook's parts: generated entries are owned, entries the source
 /// package already held are borrowed from it.
@@ -389,7 +391,42 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
     patch_chart_parts(wb, package, origins, &mut parts)?;
 
     let shared_strings_stable = wb.shared_strings == package.original_workbook.shared_strings;
+    let style_match = StyleMatch::new(&package.original_workbook.styles, &wb.styles);
     let empty_provenance = SharedStringCells::new();
+    let axes_changed = sheet_axes.iter().flatten().any(|axes| !axes.is_identity());
+    let defined_names = package
+        .original_workbook
+        .defined_names
+        .iter()
+        .chain(&wb.defined_names)
+        .map(|defined| defined.name.as_str())
+        .collect::<Vec<_>>();
+    let sheet_names_stable = wb.sheets.len() == package.original_workbook.sheets.len()
+        && origins.iter().flatten().collect::<HashSet<_>>().len() == wb.sheets.len()
+        && wb
+            .sheets
+            .iter()
+            .map(|sheet| sheet.name.to_ascii_lowercase())
+            .collect::<HashSet<_>>()
+            .len()
+            == wb.sheets.len()
+        && wb.sheets.iter().zip(origins).all(|(sheet, origin)| {
+            origin
+                .and_then(|origin| package.original_workbook.sheets.get(origin))
+                .is_some_and(|original| original.name == sheet.name)
+        });
+    let reference_axes = wb
+        .sheets
+        .iter()
+        .enumerate()
+        .map(|(index, sheet)| {
+            let axes = sheet_names_stable
+                .then_some(index)
+                .and_then(|index| sheet_axes.get(index))
+                .and_then(Option::as_ref);
+            (sheet.name.as_str(), axes)
+        })
+        .collect::<Vec<_>>();
     for (index, (sheet, plan)) in wb.sheets.iter().zip(&sheets).enumerate() {
         let source = plan.origin.and_then(|origin| package.sheets.get(origin));
         let original = plan
@@ -400,7 +437,20 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
         let output = match source {
             Some(source) if source.is_worksheet() => {
                 if shared_strings_stable
-                    && original.is_some_and(|original| sheet_body_matches(sheet, original))
+                    && original.is_some_and(|original| {
+                        package.part_bytes(&source.path).is_some_and(|bytes| {
+                            sheet_body_matches(
+                                sheet,
+                                original,
+                                bytes,
+                                axes,
+                                &reference_axes,
+                                axes_changed,
+                                Some(&defined_names),
+                                &style_match,
+                            )
+                        })
+                    })
                 {
                     continue;
                 }
@@ -413,6 +463,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
                     provenance,
                     shared_string_plan.as_ref(),
                     axes,
+                    &style_match,
                 )?
             }
             Some(_) => continue,
@@ -693,6 +744,10 @@ fn unwritable_chart(part: &str, sheet: &str) -> ParseError {
     ))
 }
 
+fn unwritable_grid(sheet: &str, reason: impl std::fmt::Display) -> ParseError {
+    ParseError::UnsupportedEdit(format!("sheet {sheet}: {reason}"))
+}
+
 /// Everything a save over a preserved package must satisfy before a byte is
 /// written: no part this crate cannot rewrite is stranded, and every chart the
 /// model carries lines up one for one with the source it must be patched from.
@@ -871,13 +926,45 @@ impl HyperlinkPlan {
 
 /// Everything a worksheet part carries. The sheet name lives in the workbook
 /// part, so a rename leaves the worksheet bytes reusable.
-fn sheet_body_matches(sheet: &Sheet, original: &Sheet) -> bool {
+#[allow(clippy::too_many_arguments)]
+fn sheet_body_matches(
+    sheet: &Sheet,
+    original: &Sheet,
+    source: &[u8],
+    axes: Option<&SheetAxes>,
+    reference_axes: &[(&str, Option<&SheetAxes>)],
+    axes_changed: bool,
+    defined_names: Option<&[&str]>,
+    styles: &StyleMatch<'_>,
+) -> bool {
+    if !source_coordinates::unchanged_with_defined_names(
+        source,
+        axes,
+        reference_axes,
+        axes_changed,
+        defined_names,
+    ) {
+        return false;
+    }
     sheet.freeze_pane == original.freeze_pane
         && sheet.hyperlinks == original.hyperlinks
         && sheet.merges == original.merges
         && sheet.col_widths == original.col_widths
         && sheet.row_heights == original.row_heights
-        && sheet.iter_cells().eq(original.iter_cells())
+        && sheet.array_formulas().eq(original.array_formulas())
+        && if let Some(axes) = axes {
+            let mut sources = original.iter_cells();
+            sheet.iter_cells().all(|(at, cell)| {
+                sources.next().is_some_and(|(source, original)| {
+                    at == source
+                        && axes.rows.current(source.row) == Some(source.row)
+                        && axes.cols.current(source.col) == Some(source.col)
+                        && styles.same_cell(original, cell)
+                })
+            }) && sources.next().is_none()
+        } else {
+            sheet.iter_cells().eq(original.iter_cells())
+        }
 }
 
 #[derive(Clone)]
@@ -2450,6 +2537,7 @@ fn worksheet_xml_with_namespace(
             wb,
             &SharedStringCells::new(),
             shared_string_plan,
+            None,
         )?;
         write_merges(writer, sheet)?;
         write_hyperlinks(writer, sheet, &links.ids, REL_ID_ATTRIBUTE, &[])?;
@@ -2466,8 +2554,8 @@ struct WorksheetOutput {
 }
 
 /// The `<cols>` and `<sheetData>` elements with only the changed columns, rows
-/// and cells rewritten and every other byte kept verbatim. `None` when the
-/// source cannot be patched cell by cell, which reserializes from the model.
+/// and cells rewritten and every other byte kept verbatim.
+#[allow(clippy::too_many_arguments)]
 fn patched_grid(
     sheet: &Sheet,
     wb: &Workbook,
@@ -2476,7 +2564,8 @@ fn patched_grid(
     axes: &SheetAxes,
     shared_string_cells: &SharedStringCells,
     shared_string_plan: Option<&SharedStringPlan>,
-) -> Option<(Option<Vec<u8>>, Vec<u8>)> {
+    styles: &StyleMatch<'_>,
+) -> Result<(Option<Vec<u8>>, Vec<u8>), ParseError> {
     let mut sst_index: HashMap<&str, usize> = HashMap::with_capacity(wb.shared_strings.len());
     if shared_string_plan.is_none() {
         for (index, value) in wb.shared_strings.iter().enumerate() {
@@ -2491,6 +2580,7 @@ fn patched_grid(
         sst_index: &sst_index,
         retained: shared_string_cells,
         plan: shared_string_plan,
+        styles,
     };
     let columns = patch
         .cols(
@@ -2499,18 +2589,52 @@ fn patched_grid(
                 .child("cols")
                 .map(|child| child.bytes.as_slice()),
         )
-        .ok()?;
+        .map_err(|error| unwritable_grid(&sheet.name, error))?;
     let sheet_data = match source.template.child("sheetData") {
-        Some(child) => patch.sheet_data(&child.bytes).ok()?,
+        Some(child) => {
+            let patched = patch
+                .sheet_data(&child.bytes)
+                .map_err(|error| unwritable_grid(&sheet.name, error))?;
+            match patched {
+                Some(patched) => Some(patched),
+                None => match source_coordinates::explicit_rows(&child.bytes, axes)
+                    .map_err(|error| unwritable_grid(&sheet.name, error))?
+                {
+                    Some(explicit) => patch
+                        .sheet_data(&explicit)
+                        .map_err(|error| unwritable_grid(&sheet.name, error))?,
+                    None => None,
+                },
+            }
+        }
         None => None,
-    }
-    .or_else(|| {
-        fragment(|writer| {
-            write_sheet_data(writer, sheet, wb, shared_string_cells, shared_string_plan)
-        })
-        .ok()
-    })?;
-    Some((columns, sheet_data))
+    };
+    let sheet_data = match sheet_data {
+        Some(sheet_data) => sheet_data,
+        None => {
+            if let Some(child) = source.template.child("sheetData")
+                && let Some(loss) = sheet_data_regeneration_loss(&child.bytes)
+                    .map_err(|error| unwritable_grid(&sheet.name, error))?
+            {
+                return Err(unwritable_grid(&sheet.name, loss));
+            }
+            fragment(|writer| {
+                write_sheet_data(
+                    writer,
+                    sheet,
+                    wb,
+                    shared_string_cells,
+                    shared_string_plan,
+                    Some(SourceStyles {
+                        original,
+                        axes,
+                        styles,
+                    }),
+                )
+            })?
+        }
+    };
+    Ok((columns, sheet_data))
 }
 
 /// Preserved fragments (filters, validations, anchors) keep their source
@@ -2525,10 +2649,11 @@ fn worksheet_xml_with_template(
     shared_string_cells: &SharedStringCells,
     shared_string_plan: Option<&SharedStringPlan>,
     sheet_axes: Option<&SheetAxes>,
+    styles: &StyleMatch<'_>,
 ) -> Result<WorksheetOutput, ParseError> {
     let template = &source.template;
     let patched = match (original, sheet_axes) {
-        (Some(original), Some(axes)) => patched_grid(
+        (Some(original), Some(axes)) => Some(patched_grid(
             sheet,
             wb,
             original,
@@ -2536,7 +2661,8 @@ fn worksheet_xml_with_template(
             axes,
             shared_string_cells,
             shared_string_plan,
-        ),
+            styles,
+        )?),
         _ => None,
     };
     let (columns, sheet_data) = match patched {
@@ -2546,7 +2672,20 @@ fn worksheet_xml_with_template(
                 .then(|| fragment(|writer| write_cols(writer, sheet)))
                 .transpose()?,
             Some(fragment(|writer| {
-                write_sheet_data(writer, sheet, wb, shared_string_cells, shared_string_plan)
+                write_sheet_data(
+                    writer,
+                    sheet,
+                    wb,
+                    shared_string_cells,
+                    shared_string_plan,
+                    original
+                        .zip(sheet_axes)
+                        .map(|(original, axes)| SourceStyles {
+                            original,
+                            axes,
+                            styles,
+                        }),
+                )
             })?),
         ),
     };
@@ -2709,6 +2848,7 @@ fn write_sheet_data(
     wb: &Workbook,
     retained: &SharedStringCells,
     shared_string_plan: Option<&SharedStringPlan>,
+    source_styles: Option<SourceStyles<'_>>,
 ) -> io::Result<()> {
     let mut sst_index: HashMap<&str, usize> = HashMap::with_capacity(wb.shared_strings.len());
     if shared_string_plan.is_none() {
@@ -2740,6 +2880,7 @@ fn write_sheet_data(
                     &sst_index,
                     retained,
                     shared_string_plan,
+                    source_styles,
                 )?;
                 if height_row == Some(row) {
                     heights.next();
@@ -2865,6 +3006,7 @@ pub(crate) fn write_row<'a, I>(
     sst_index: &HashMap<&str, usize>,
     retained: &SharedStringCells,
     shared_string_plan: Option<&SharedStringPlan>,
+    source_styles: Option<SourceStyles<'_>>,
 ) -> io::Result<()>
 where
     I: Iterator<Item = (CellRef, &'a Cell)>,
@@ -2883,10 +3025,12 @@ where
     w.write_event(Event::Start(start))?;
     while let Some((addr, cell)) = cells.next_if(|(addr, _)| addr.row == row) {
         let retained = shared_string_index(cell, addr, wb, sst_index, retained, shared_string_plan);
+        let style = source_styles.map_or(cell.style, |source| source.style(addr, cell));
         write_cell(
             w,
             addr,
             cell,
+            style,
             sst_index,
             retained,
             sheet.array_formula(addr),
@@ -2918,50 +3062,23 @@ pub(crate) fn shared_string_index(
     }
 }
 
-/// serialize a single cell, choosing the `t` type and body from its value and
-/// whether it carries a formula.
+/// serialize a single cell with `style` as its `s`, choosing the `t` type and
+/// body from its value and whether it carries a formula.
 pub(crate) fn write_cell(
     w: &mut Writer<Vec<u8>>,
     addr: CellRef,
     cell: &Cell,
+    style: Option<u32>,
     sst_index: &HashMap<&str, usize>,
     retained: Option<usize>,
     array_ref: Option<xlsx_model::CellRange>,
 ) -> io::Result<()> {
     let a1 = addr.to_a1();
-    let has_formula = cell.formula.is_some();
-
-    let mut ty: Option<&str> = None;
-    let mut value: Option<String> = None;
-    let mut inline: Option<String> = None;
-    match &cell.value {
-        CellValue::Empty => {}
-        CellValue::Number { value: n } => value = Some(fmt_num(*n)),
-        CellValue::Bool { value: b } => {
-            ty = Some("b");
-            value = Some(if *b { "1" } else { "0" }.to_string());
-        }
-        CellValue::Error { value: e } => {
-            ty = Some("e");
-            value = Some(e.as_str().to_string());
-        }
-        CellValue::Text { value: s } => {
-            if has_formula {
-                ty = Some("str");
-                value = Some(s.clone());
-            } else if let Some(idx) = retained.or_else(|| sst_index.get(s.as_str()).copied()) {
-                ty = Some("s");
-                value = Some(idx.to_string());
-            } else {
-                ty = Some("inlineStr");
-                inline = Some(s.clone());
-            }
-        }
-    }
+    let CellValueMarkup { ty, value, inline } = cell_value_markup(cell, sst_index, retained);
 
     let mut start = BytesStart::new("c");
     start.push_attribute(("r", a1.as_str()));
-    let style = cell.style.map(|s| s.to_string());
+    let style = style.map(|s| s.to_string());
     if let Some(s) = &style {
         start.push_attribute(("s", s.as_str()));
     }
@@ -2990,6 +3107,50 @@ pub(crate) fn write_cell(
     }
     w.write_event(Event::End(BytesEnd::new("c")))?;
     Ok(())
+}
+
+pub(crate) struct CellValueMarkup {
+    pub(crate) ty: Option<&'static str>,
+    pub(crate) value: Option<String>,
+    inline: Option<String>,
+}
+
+pub(crate) fn cell_value_markup(
+    cell: &Cell,
+    sst_index: &HashMap<&str, usize>,
+    retained: Option<usize>,
+) -> CellValueMarkup {
+    let mut markup = CellValueMarkup {
+        ty: None,
+        value: None,
+        inline: None,
+    };
+    match &cell.value {
+        CellValue::Empty => {}
+        CellValue::Number { value } => markup.value = Some(fmt_num(*value)),
+        CellValue::Bool { value } => {
+            markup.ty = Some("b");
+            markup.value = Some(if *value { "1" } else { "0" }.to_owned());
+        }
+        CellValue::Error { value } => {
+            markup.ty = Some("e");
+            markup.value = Some(value.as_str().to_owned());
+        }
+        CellValue::Text { value } => {
+            if cell.formula.is_some() {
+                markup.ty = Some("str");
+                markup.value = Some(value.clone());
+            } else if let Some(index) = retained.or_else(|| sst_index.get(value.as_str()).copied())
+            {
+                markup.ty = Some("s");
+                markup.value = Some(index.to_string());
+            } else {
+                markup.ty = Some("inlineStr");
+                markup.inline = Some(value.clone());
+            }
+        }
+    }
+    markup
 }
 
 fn write_merges(w: &mut Writer<Vec<u8>>, sheet: &Sheet) -> io::Result<()> {

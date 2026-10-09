@@ -7,6 +7,7 @@ import { rezipPartsToArrayBuffer, toBytes } from '../docx/rezip/parts';
 import { unzipContainer } from '../docx/wasm';
 import { preloadEditWasm } from '../wasm/edit';
 import { createYrsSession, saveYrsDocx, type YrsSession } from './index';
+import { captureSessionSave, writeSessionSave } from './saveYrsDocx';
 import { yrsToDocument } from './yrsToDocument';
 
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
@@ -75,6 +76,64 @@ function insertAtStart(session: YrsSession, text: string, inserted: string): voi
   session.insertText({ story: 'body', paraId: target.paraId, offset: 0 }, inserted);
 }
 
+function paragraph(session: YrsSession, text: string) {
+  const found = session.paragraphs('body').find((candidate) => candidate.text === text);
+  if (!found) throw new Error(`no paragraph reads ${text}`);
+  return found;
+}
+
+function structuralFixture() {
+  const texts = [
+    'Before QA',
+    'Split QA',
+    'Kept QA',
+    'Merge QA',
+    'Into QA',
+    'Middle QA',
+    'Insert QA',
+    'Remove QA',
+    'After QA',
+  ];
+  const paragraphs = texts.map((text, index) => {
+    const id = (index + 1).toString(16).padStart(8, '0').toUpperCase();
+    return `<w:p w14:paraId="${id}" w:rsidR="00AA0001"><w:pPr><w:jc w:val="center"/><w:spacing w:after="${index * 20}"/></w:pPr><w:r w:rsidRPr="00AA0002"><w:t>${text}</w:t></w:r></w:p>`;
+  });
+  return {
+    texts,
+    paragraphs,
+    bytes: docx(paragraphs.join('\n'), `xmlns:w="${W}" xmlns:w14="${W14}"`),
+  };
+}
+
+async function equivalentSave(session: YrsSession, untouched: string[], texts: string[]) {
+  const base = session.materializeDocx()!;
+  const capture = captureSessionSave(session);
+  const document = yrsToDocument(session, base);
+  const options = { updateModifiedDate: false };
+  const saved = await saveYrsDocx(session, options);
+  const whole = await writeSessionSave(
+    session,
+    document,
+    capture,
+    base.originalBuffer!,
+    options,
+    () => false
+  );
+  const xml = part(saved.bytes);
+  const wholeXml = part(whole.bytes);
+  for (const source of untouched) {
+    expect(xml).toContain(source);
+    expect(wholeXml).not.toContain(source);
+  }
+  const reopened = await open(saved.bytes);
+  const full = await open(whole.bytes);
+  const paragraphs = (session: YrsSession) =>
+    session.paragraphs('body').map(({ text, properties }) => ({ text, properties }));
+  expect(reopened.paragraphs('body').map(({ text }) => text)).toEqual(texts);
+  expect(paragraphs(reopened)).toEqual(paragraphs(full));
+  return xml;
+}
+
 beforeAll(() =>
   preloadEditWasm(
     new Uint8Array(readFileSync(resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm')))
@@ -127,20 +186,193 @@ describe('a session save after an edit', () => {
     expect(part(bytes, 'word/styles.xml')).toBe(part(source, 'word/styles.xml'));
   });
 
-  it('still saves a part whose paragraphs were split', async () => {
+  it('writes split, merged and appended paragraphs and keeps every other paragraph as authored', async () => {
+    const kept = '<w:p w14:paraId="00000002" w:rsidR="00AA0001"><w:r w:rsidRPr="00AA0002"><w:t>Kept QA</w:t></w:r></w:p>';
+    const last = '<w:p w14:paraId="00000005" w:rsidR="00AA0003"><w:r><w:t>Last QA</w:t></w:r></w:p>';
+    const section = '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>';
     const source = docx(
-      '<w:p><w:r><w:t>First QA</w:t></w:r></w:p><w:p><w:r><w:t>Second QA</w:t></w:r></w:p>'
+      [
+        '<w:p w14:paraId="00000001"><w:r><w:t>First QA</w:t></w:r></w:p>',
+        kept,
+        '<w:p w14:paraId="00000003"><w:r><w:t>Merge QA</w:t></w:r></w:p>',
+        '<w:p w14:paraId="00000004"><w:r><w:t>Into QA</w:t></w:r></w:p>',
+        last,
+        section,
+      ].join(''),
+      `xmlns:w="${W}" xmlns:w14="${W14}"`
     );
     const session = await open(source);
-    const [first] = session.paragraphs('body');
-    session.splitParagraph({ story: 'body', paraId: first!.paraId, offset: 5 });
-    const xml = part((await saveYrsDocx(session)).bytes);
-    expect(paragraphsWith(xml, 'First')).toHaveLength(1);
-    expect(paragraphsWith(xml, 'QA')).toHaveLength(2);
+    const paragraph = (text: string) => {
+      const found = session.paragraphs('body').find((candidate) => candidate.text === text);
+      if (!found) throw new Error(`no paragraph reads ${text}`);
+      return found;
+    };
+    session.splitParagraph({ story: 'body', paraId: paragraph('First QA').paraId, offset: 5 });
+    session.mergeParagraphs('body', paragraph('Merge QA').paraId);
+    session.splitParagraph({ story: 'body', paraId: paragraph('Last QA').paraId, offset: 7 });
+    const bytes = (await saveYrsDocx(session, { updateModifiedDate: false })).bytes;
+    const xml = part(bytes);
+
+    expect(xml).toContain(`${kept}<w:p`);
+    expect(xml).toContain(last);
+    expect(xml.endsWith(`${section}</w:body></w:document>`)).toBe(true);
+    expect(paragraphsWith(xml, 'Merge QA')).toHaveLength(1);
+    expect(paragraphsWith(xml, 'Into QA')).toHaveLength(1);
+    const reopened = await open(bytes);
+    expect(reopened.paragraphs('body').map(({ text }) => text)).toEqual([
+      'First',
+      ' QA',
+      'Kept QA',
+      'Merge QAInto QA',
+      'Last QA',
+      '',
+    ]);
   });
 
-  it.todo(
-    'keeps inherited paragraph properties inherited in the edited paragraph (#1067, deferred-after-0.4.1: touched paragraphs)',
+  it('keeps the paragraphs around a tracked paragraph insertion as authored', async () => {
+    const before = '<w:p w14:paraId="00000001" w:rsidR="00AA0001"><w:r><w:t>Before QA</w:t></w:r></w:p>';
+    const after = '<w:p w14:paraId="00000002" w:rsidR="00AA0002"><w:r><w:t>After QA</w:t></w:r></w:p>';
+    const source = docx(`${before}${after}`, `xmlns:w="${W}" xmlns:w14="${W14}"`);
+    const session = await open(source);
+    const [first] = session.paragraphs('body');
+    const author = { name: 'Reviewer', date: '2026-01-01T00:00:00Z' };
+    session.splitParagraph({ story: 'body', paraId: first!.paraId, offset: 'Before QA'.length }, author);
+    const inserted = session.paragraphs('body')[1]!;
+    session.insertText({ story: 'body', paraId: inserted.paraId, offset: 0 }, 'New QA', author);
+    const bytes = (await saveYrsDocx(session, { updateModifiedDate: false })).bytes;
+    const xml = part(bytes);
+
+    expect(xml).toContain(after);
+    expect(paragraphsWith(xml, 'New QA')).toHaveLength(1);
+    expect(paragraphsWith(xml, 'New QA')[0]).toContain('<w:ins ');
+    const reopened = await open(bytes);
+    expect(reopened.paragraphs('body').map(({ text }) => text)).toEqual([
+      'Before QA',
+      'New QA',
+      'After QA',
+    ]);
+  });
+
+  for (const edit of ['split', 'merge', 'insert', 'remove', 'combined'] as const) {
+    it(`matches the whole-part save after ${edit} and keeps every untouched paragraph verbatim`, async () => {
+      const fixture = structuralFixture();
+      const session = await open(fixture.bytes);
+      const untouched = [...fixture.paragraphs];
+      const expected = [...fixture.texts];
+      const forget = (...texts: string[]) => {
+        for (const text of texts) {
+          const source = fixture.paragraphs[fixture.texts.indexOf(text)]!;
+          untouched.splice(untouched.indexOf(source), 1);
+        }
+      };
+      if (edit === 'split' || edit === 'combined') {
+        session.splitParagraph({
+          story: 'body',
+          paraId: paragraph(session, 'Split QA').paraId,
+          offset: 5,
+        });
+        expected.splice(expected.indexOf('Split QA'), 1, 'Split', ' QA');
+        forget('Split QA');
+      }
+      if (edit === 'merge' || edit === 'combined') {
+        session.mergeParagraphs('body', paragraph(session, 'Merge QA').paraId);
+        expected.splice(expected.indexOf('Merge QA'), 2, 'Merge QAInto QA');
+        forget('Merge QA', 'Into QA');
+      }
+      if (edit === 'insert' || edit === 'combined') {
+        const split = session.splitParagraph({
+          story: 'body',
+          paraId: paragraph(session, 'Insert QA').paraId,
+          offset: 'Insert QA'.length,
+        });
+        session.insertText({ story: 'body', paraId: split.secondParaId, offset: 0 }, 'New QA');
+        expected.splice(expected.indexOf('Insert QA') + 1, 0, 'New QA');
+      }
+      if (edit === 'remove' || edit === 'combined') {
+        const paragraphs = session.paragraphs('body');
+        const at = paragraphs.findIndex(({ text }) => text === 'Remove QA');
+        const before = paragraphs[at - 1]!;
+        const removed = paragraphs[at]!;
+        session.deleteRange({
+          story: 'body',
+          start: { paraId: before.paraId, offset: before.text.length },
+          end: { paraId: removed.paraId, offset: removed.text.length },
+        });
+        expected.splice(expected.indexOf('Remove QA'), 1);
+        forget('Remove QA');
+      }
+      await equivalentSave(session, untouched, expected);
+    });
+  }
+
+  for (const edit of ['insertion', 'removal'] as const) {
+    for (const resolution of ['pending', 'accept', 'reject'] as const) {
+      it(`keeps untouched paragraphs through a tracked paragraph ${edit} and ${resolution}`, async () => {
+        const fixture = structuralFixture();
+        const session = await open(fixture.bytes);
+        const author = { name: 'Reviewer', date: '2026-01-01T00:00:00Z' };
+        const expected = [...fixture.texts];
+        const revisions: string[] = [];
+        let marked: string;
+        let untouched: string[];
+        if (edit === 'insertion') {
+          const split = session.splitParagraph(
+            {
+              story: 'body',
+              paraId: paragraph(session, 'Insert QA').paraId,
+              offset: 'Insert QA'.length,
+            },
+            author
+          );
+          const text = session.insertText(
+            { story: 'body', paraId: split.secondParaId, offset: 0 },
+            'New QA',
+            author
+          );
+          expect(split.revisionId).not.toBeNull();
+          expect(text.revisionId).not.toBeNull();
+          revisions.push(text.revisionId!, split.revisionId!);
+          expected.splice(expected.indexOf('Insert QA') + 1, 0, 'New QA');
+          marked = 'Insert QA';
+          untouched = fixture.paragraphs.filter((_, index) => fixture.texts[index] !== marked);
+        } else {
+          const receipt = session.deleteRange(
+            {
+              story: 'body',
+              start: { paraId: paragraph(session, 'Remove QA').paraId, offset: 0 },
+              end: { paraId: paragraph(session, 'After QA').paraId, offset: 0 },
+            },
+            author
+          );
+          expect(receipt.revisionId).not.toBeNull();
+          revisions.push(receipt.revisionId!);
+          marked = 'Remove QA';
+          untouched = fixture.paragraphs.filter((_, index) => fixture.texts[index] !== marked);
+        }
+        const xml = await equivalentSave(session, untouched, expected);
+        expect(paragraphsWith(xml, marked)[0]).toMatch(
+          edit === 'insertion'
+            ? /<w:pPr>[\s\S]*<w:rPr>[\s\S]*<w:ins /
+            : /<w:pPr>[\s\S]*<w:rPr>[\s\S]*<w:del /
+        );
+        if (resolution === 'pending') return;
+        for (const revisionId of new Set(revisions)) {
+          if (resolution === 'accept') session.acceptChange({ revisionId });
+          else session.rejectChange({ revisionId });
+        }
+        if (edit === 'insertion' && resolution === 'reject') {
+          expected.splice(expected.indexOf('New QA'), 1);
+        }
+        if (edit === 'removal' && resolution === 'accept') {
+          expected.splice(expected.indexOf('Remove QA'), 1);
+        }
+        await equivalentSave(session, untouched, expected);
+      });
+    }
+  }
+
+  it(
+    'keeps inherited paragraph properties inherited in the edited paragraph (#1067)',
     async () => {
       const session = await open(inheritedSpacing());
       insertAtStart(session, 'Conclusion QA', 'Edited ');
@@ -150,8 +382,8 @@ describe('a session save after an edit', () => {
       ]);
     }
   );
-  it.todo(
-    'keeps inherited paragraph properties inherited through yrsToDocument and repackDocx (#1067, deferred-after-0.4.1: full repack)',
+  it(
+    'keeps inherited paragraph properties inherited through yrsToDocument and repackDocx (#1067)',
     async () => {
       const session = await open(inheritedSpacing());
       const xml = part(

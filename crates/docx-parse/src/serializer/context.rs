@@ -10,11 +10,13 @@ use super::s10::SerializerDeterminism;
 
 /// Per-serialization state. Generated identities are taken only from the
 /// injected seed; serializers never consult ambient randomness or a clock.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct SerializerContext {
     ids: HexIdAllocator,
     now: String,
     rendered_page_breaks: Vec<bool>,
+    chart_drawings: HashMap<String, String>,
+    warnings: Vec<String>,
     paragraph_ids: BTreeSet<u32>,
     pub(crate) deletion: bool,
     pub(crate) in_control: bool,
@@ -23,11 +25,23 @@ pub struct SerializerContext {
 }
 
 /// The XML written for each model paragraph a spliced part addresses by `sourceOrdinal`.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct SpliceRecorder {
     expected: HashSet<u32>,
-    written: HashMap<u32, String>,
+    recorded: RecordedParagraphs,
     conflict: bool,
+}
+
+/// The paragraphs written for a spliced part, outside any other paragraph.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RecordedParagraphs {
+    /// The XML of each paragraph written from a source paragraph, by `sourceOrdinal`.
+    pub(crate) written: HashMap<u32, String>,
+    /// The XML of each paragraph without a `sourceOrdinal`, in writing order.
+    pub(crate) inserted: Vec<String>,
+    /// Every recorded paragraph in writing order: its `sourceOrdinal`, or `None` for the next
+    /// of `inserted`.
+    pub(crate) order: Vec<Option<u32>>,
 }
 
 impl SerializerContext {
@@ -37,6 +51,8 @@ impl SerializerContext {
             ids: HexIdAllocator::from_sha256(&determinism.seed)?,
             now: determinism.now.clone(),
             rendered_page_breaks: Vec::new(),
+            chart_drawings: HashMap::new(),
+            warnings: Vec::new(),
             paragraph_ids: BTreeSet::new(),
             deletion: false,
             in_control: false,
@@ -56,6 +72,27 @@ impl SerializerContext {
             .expect("parse budgets keep packages far below 2^31 paragraphs");
         self.paragraph_ids.insert(id);
         format_paragraph_id(id)
+    }
+
+    /// Authored `w:drawing` placements for one story part, keyed by chart
+    /// relationship id. Sessions seeded before drawings were replayed carry
+    /// chart runs without one; the source part still names their placement.
+    pub fn set_chart_drawings(&mut self, drawings: HashMap<String, String>) {
+        self.chart_drawings = drawings;
+    }
+
+    pub(crate) fn chart_drawing(&self, relationship_id: &str) -> Option<&str> {
+        self.chart_drawings.get(relationship_id).map(String::as_str)
+    }
+
+    /// Records a non-fatal save diagnostic for the caller to report.
+    pub fn warn(&mut self, warning: impl Into<String>) {
+        self.warnings.push(warning.into());
+    }
+
+    /// Drains the diagnostics recorded so far.
+    pub fn take_warnings(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.warnings)
     }
 
     pub fn allocate_hex_id(&mut self) -> String {
@@ -86,16 +123,16 @@ impl SerializerContext {
     }
 
     /// The recorded paragraphs; `None` when one source paragraph was written twice differently,
-    /// or a paragraph the part does not address was written.
-    pub(crate) fn end_splice(&mut self) -> Option<HashMap<u32, String>> {
+    /// or one with a `sourceOrdinal` the part does not address was written.
+    pub(crate) fn end_splice(&mut self) -> Option<RecordedParagraphs> {
         self.splice
             .take()
             .filter(|recorder| !recorder.conflict)
-            .map(|recorder| recorder.written)
+            .map(|recorder| recorder.recorded)
     }
 
-    /// Records a paragraph written outside any other paragraph. One the part does not address,
-    /// such as a paragraph the source does not hold, refuses the splice.
+    /// Records a paragraph written outside any other paragraph: by its `sourceOrdinal`, which
+    /// must be one the part addresses, or as a paragraph the source lacks.
     pub(crate) fn record_paragraph(&mut self, ordinal: Option<u32>, xml: &str) {
         if !self.rendered_page_breaks.is_empty() {
             return;
@@ -103,16 +140,22 @@ impl SerializerContext {
         let Some(recorder) = self.splice.as_mut() else {
             return;
         };
-        let Some(ordinal) = ordinal.filter(|ordinal| recorder.expected.contains(ordinal)) else {
-            recorder.conflict = true;
-            return;
-        };
-        match recorder.written.get(&ordinal) {
-            Some(previous) => recorder.conflict |= previous != xml,
-            None => {
-                recorder.written.insert(ordinal, xml.to_owned());
+        let recorded = &mut recorder.recorded;
+        match ordinal {
+            None => recorded.inserted.push(xml.to_owned()),
+            Some(ordinal) if recorder.expected.contains(&ordinal) => {
+                if let Some(previous) = recorded.written.get(&ordinal) {
+                    recorder.conflict |= previous != xml;
+                    return;
+                }
+                recorded.written.insert(ordinal, xml.to_owned());
+            }
+            Some(_) => {
+                recorder.conflict = true;
+                return;
             }
         }
+        recorded.order.push(ordinal);
     }
 
     pub(crate) fn enter_paragraph(&mut self, rendered_page_break_before: bool) {

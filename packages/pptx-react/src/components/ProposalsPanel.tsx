@@ -24,6 +24,7 @@ interface Props {
   onNavigate: (slideId: string, shapeId: string | null, proposalId?: string) => void;
   /** Called after the panel closed itself, to restore focus. */
   onClose: () => void;
+  visualDisabledReason?: string;
 }
 
 function ProposalAction({
@@ -72,6 +73,7 @@ export function ProposalsPanel({
   resolveImage,
   onNavigate,
   onClose,
+  visualDisabledReason,
 }: Props) {
   const { t } = useTranslation();
   const store = usePptxCommands();
@@ -243,7 +245,7 @@ export function ProposalsPanel({
               >
                 {location(change)}
               </button>
-              {change.oldText !== change.newText ? (
+              {!visualDisabledReason && change.oldText !== change.newText ? (
                 <div style={styles.textDiff}>
                   <del style={styles.deleted}>
                     {change.oldText || t('proposals.blank')}
@@ -253,10 +255,12 @@ export function ProposalsPanel({
                   </ins>
                 </div>
               ) : null}
-              {change.before && change.after && <ShapeChange change={change} />}
+              {!visualDisabledReason && change.before && change.after && <ShapeChange change={change} />}
               <button
                 type="button"
                 data-testid="pptx-proposal-preview"
+                disabled={!!visualDisabledReason}
+                title={visualDisabledReason}
                 style={styles.button}
                 onClick={(event) =>
                   openPreview(proposal, index, event.currentTarget)
@@ -264,6 +268,7 @@ export function ProposalsPanel({
               >
                 {t('proposals.preview')}
               </button>
+              {visualDisabledReason && <p style={styles.muted}>{visualDisabledReason}</p>}
             </div>
           ))}
           {proposal.staleTargets.length > 0 && (

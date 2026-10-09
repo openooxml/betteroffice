@@ -7,7 +7,9 @@ import type { PointPosition, RenderedDomContext } from '@betteroffice/docx/plugi
 import { createCanvasHostProjector } from '@betteroffice/docx/plugin-api/RenderedDomContext';
 import {
   proposalSetIdentity,
+  type AnchorGeometryTarget,
   type ProposalGeometryMirror,
+  type ProposalGeometryTarget,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
 import { sourceVersionOf } from '../components/DocxEditor/internals/layoutProvenance';
@@ -23,10 +25,27 @@ import {
 import { currentPreviewKey, proposalSnapshot, renderedPreviewKey } from './proposalPreview';
 import type { DocxAnchorRect, DocxPluginGeometry, DocxPluginLayout, DocxPluginRect } from './types';
 
+import { flushEditorInput } from '../components/DocxEditor/editorBatches';
+import { isWorkerViewer } from '../components/DocxEditor/internals/workerViewer';
+import { hasEditorWorkerProposalRounds } from '../components/DocxEditor/internals/workerProposalAuthority';
+import { workerOpenReplicaReady } from '../components/DocxEditor/internals/workerOpenReplica';
+
+export async function readPluginPositionAtPoint(
+  editorRef: React.RefObject<PagedEditorRef | null>,
+  clientX: number,
+  clientY: number,
+  experimentalWorkerOpen = false
+): Promise<DocxPointPosition | null> {
+  if (isWorkerViewer(editorRef.current)) return editorRef.current?.readPositionAtPoint(clientX, clientY) ?? null;
+  const flushed = await flushEditorInput(editorRef, experimentalWorkerOpen);
+  if (!flushed.ok && flushed.code !== 'editor-unavailable') throw flushed.error;
+  return editorRef.current?.getPositionAtPoint(clientX, clientY) ?? null;
+}
+
 const layoutIds = new WeakMap<DisplayListQueries, string>();
 let nextLayoutId = 0;
 
-function layoutIdOf(queries: DisplayListQueries): string {
+export function layoutIdOf(queries: DisplayListQueries): string {
   let id = layoutIds.get(queries);
   if (!id) {
     nextLayoutId += 1;
@@ -89,6 +108,10 @@ export interface AnchorGeometryAccess {
   session: YrsSession;
   /** @internal */
   proposalGeometry?: ProposalGeometryMirror;
+  /** @internal Display geometry of other targets at `proposalGeometry`; undefined until known. */
+  anchorTarget?(
+    target: Exclude<AnchorGeometryTarget, { kind: 'proposal' }>
+  ): ProposalGeometryTarget | undefined;
   editor: Pick<PagedEditorRef, 'yrsLocToDisplayPosition' | 'hasPendingInput'>;
   /** Whether the pages show this layout's pixels. */
   presented: boolean;
@@ -167,7 +190,8 @@ export function createPluginGeometry(
   resolve: (hit: PointPosition | null) => DocxPointPosition | null,
   queries: DisplayListQueries,
   access: () => AnchorGeometryAccess | null,
-  held: () => boolean = () => false
+  held: () => boolean = () => false,
+  readPoint?: (clientX: number, clientY: number) => Promise<DocxPointPosition | null>
 ): DocxPluginGeometry {
   const shown = () => dom.zoom === layout.zoom && current();
   const projector = createCanvasHostProjector(dom.pagesContainer, queries, dom.zoom);
@@ -241,6 +265,14 @@ export function createPluginGeometry(
       const position = resolve(dom.getPositionAtPoint?.(clientX, clientY) ?? null);
       return position ? { ...position, layoutId: layout.id } : null;
     },
+    async readPositionAtPoint(clientX, clientY) {
+      if (!shown()) return null;
+      const position = readPoint
+        ? await readPoint(clientX, clientY)
+        : resolve(dom.getPositionAtPoint?.(clientX, clientY) ?? null);
+      return shown() && position && position.version === layout.version
+        ? { ...position, layoutId: layout.id } : null;
+    },
     getAnchorGeometry(target) {
       if (!shown()) return unavailable();
       const live = access();
@@ -258,19 +290,20 @@ export function createPluginGeometry(
       const mirror = live.proposalGeometry;
       if (
         mirror &&
-        (target.kind !== 'proposal' ||
-          mirror.version !== layout.version ||
+        (mirror.version !== layout.version ||
           mirror.previewVersion !== layout.previewVersion ||
           !snapshot ||
           mirror.proposals !== proposalSetIdentity(snapshot))
       )
         return unavailable();
-      const mirrored =
-        mirror && target.kind === 'proposal'
+      const mirrored = !mirror
+        ? null
+        : target.kind === 'proposal'
           ? Object.hasOwn(mirror.targets, target.id)
             ? mirror.targets[target.id]
             : anchorFailure('unknown-proposal', 'The proposal is not registered in this document')
-          : null;
+          : live.anchorTarget?.(target);
+      if (mirror && !mirrored) return unavailable();
       if (mirrored && !mirrored.ok) return mirrored;
       const resolved = mirror ? null : resolveAnchorTarget(session, target, layout.version);
       if (resolved && !resolved.ok) return resolved;
@@ -303,7 +336,9 @@ export function createPluginGeometry(
       )
         return unavailable();
       const hidden =
-        mirror?.hidden ??
+        (mirror && (!hasEditorWorkerProposalRounds(session) || !workerOpenReplicaReady(session))
+          ? mirror.hidden
+          : undefined) ??
         hiddenRanges(session, layout.version)
           .map(display)
           .filter((range): range is Interval => range !== null);
