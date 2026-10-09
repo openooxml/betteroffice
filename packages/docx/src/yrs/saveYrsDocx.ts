@@ -281,11 +281,13 @@ export async function writeSessionSave(
     ...(spliced.length === 0
       ? {}
       : {
-          splicedParts: spliced.map(({ part, sha256, paragraphs, changed }) => ({
+          splicedParts: spliced.map(({ part, sha256, paragraphs, changed, inserted, removed }) => ({
             part,
             sha256,
             paragraphs: paragraphs.map(([ordinal]) => ordinal),
             changed,
+            ...(inserted?.length ? { inserted } : {}),
+            ...(removed?.length ? { removed } : {}),
           })),
         }),
   };

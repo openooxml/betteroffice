@@ -407,7 +407,9 @@ paged export reads the `markup` view, and `accepted` or `original` return
 `unsupported-revision-layout`. The other refusal codes are `stale-document`,
 `stale-layout` (stale section, settings or note metadata, fonts, options or
 `expectLayoutVersion`), `layout-unavailable`, `layout-not-converged` and
-`unsupported`.
+`unsupported`. When note placement alternates between layouts, pages keep the larger
+note area, and each page reserving more than its notes take has a
+`note-layout-fallback` diagnostic.
 Geometry is off by default; rectangles are unzoomed CSS pixels (96 per inch) from
 the physical page's top-left corner. `maxFragments` (100,000 by default) and
 `maxLayoutBytes` bound the map separately and mark it `truncated`; mapping stops a

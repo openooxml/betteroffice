@@ -150,18 +150,33 @@ pub fn write_docx_s13(
     request: S13SaveRequest,
     original_docx: &[u8],
 ) -> Result<Vec<u8>, ParseError> {
+    write_docx_s13_with_warnings(request, original_docx).map(|(bytes, _)| bytes)
+}
+
+pub fn write_docx_s13_with_warnings(
+    request: S13SaveRequest,
+    original_docx: &[u8],
+) -> Result<(Vec<u8>, Vec<String>), ParseError> {
     let original_parts = ooxml_opc::unzip_parts(original_docx).map_err(ParseError::Container)?;
-    write_docx_s13_parts(request, &original_parts, Some(original_docx))
+    write_docx_s13_parts_with_warnings(request, &original_parts, Some(original_docx))
 }
 
 /// [`write_docx_s13`] seeded from already-inflated parts. `source` is the
 /// original container, when the caller still holds it, so unchanged members
 /// re-emit verbatim instead of being re-deflated.
 pub fn write_docx_s13_parts(
-    mut request: S13SaveRequest,
+    request: S13SaveRequest,
     original_parts: &[(String, Vec<u8>)],
     source: Option<&[u8]>,
 ) -> Result<Vec<u8>, ParseError> {
+    write_docx_s13_parts_with_warnings(request, original_parts, source).map(|(bytes, _)| bytes)
+}
+
+fn write_docx_s13_parts_with_warnings(
+    mut request: S13SaveRequest,
+    original_parts: &[(String, Vec<u8>)],
+    source: Option<&[u8]>,
+) -> Result<(Vec<u8>, Vec<String>), ParseError> {
     request.determinism.validate()?;
     let limits = crate::xml::ParseLimits::default();
     let mut budget = crate::xml::ParseBudget::new(&limits);
@@ -199,11 +214,15 @@ pub fn write_docx_s13_parts(
             .bytes("word/document.xml")
             .ok_or_else(|| save_error("selective save has no word/document.xml"))?;
         let mut context = SerializerContext::new(&request.determinism)?;
+        context.set_chart_drawings(chart_drawings_in_part(
+            &package.text("word/document.xml").unwrap_or_default(),
+        ));
         let patched =
             build_source_patched_document_xml(&request.document, original, sources, &mut context)?;
         package.set_text("word/document.xml", patched);
         update_core_part(&request.options, &mut package, context.now());
-        return rezip_package(&package, source);
+        let bytes = rezip_package(&package, source)?;
+        return Ok((bytes, context.take_warnings()));
     }
     let relationships: IndexMap<_, _> = request.relationship_entries.iter().cloned().collect();
     let paragraph_ids = request.paragraph_ids.take().unwrap_or_default();
@@ -305,6 +324,9 @@ pub fn write_docx_s13_parts(
     }
 
     let mut context = SerializerContext::new(&request.determinism)?;
+    context.set_chart_drawings(chart_drawings_in_part(
+        &package.text(&package.document_path).unwrap_or_default(),
+    ));
     let document_xml = if let Some(patched) = patched_parts.remove(&package.document_path) {
         String::from_utf8(patched).map_err(|error| save_error(error.to_string()))?
     } else if let Some(selective) = request.selective.as_ref() {
@@ -387,7 +409,49 @@ pub fn write_docx_s13_parts(
             }
             context.reserve_paragraph_ids(reserved);
         }
-        serialize_comment_parts(&request.document, &mut package, &mut context);
+        serialize_comment_parts(
+            &request.document,
+            &mut package,
+            &mut context,
+            &request.determinism.seed,
+            !patched.contains_key(COMMENTS_PART) && !assignments.contains_key(COMMENTS_PART),
+        );
+    }
+
+    let document_rels = package
+        .text(&package.document_relationships_path)
+        .unwrap_or_default();
+    warn_about_dangling_opaque_refs(
+        &request.document.content,
+        &document_rels,
+        &package.document_relationships_path,
+        &mut context,
+    );
+    for entries in [&request.header_entries, &request.footer_entries] {
+        for (relationship_id, story) in entries {
+            let Some(relationship) = relationships.get(relationship_id) else {
+                continue;
+            };
+            let Ok(rels_path) = owner_relationships_path(&package, &relationship.target) else {
+                continue;
+            };
+            let rels_xml = package.text(&rels_path).unwrap_or_default();
+            warn_about_dangling_opaque_refs(&story.content, &rels_xml, &rels_path, &mut context);
+        }
+    }
+    for (notes, rels_path) in [
+        (
+            &request.footnote_separators,
+            "word/_rels/footnotes.xml.rels",
+        ),
+        (&request.footnotes, "word/_rels/footnotes.xml.rels"),
+        (&request.endnote_separators, "word/_rels/endnotes.xml.rels"),
+        (&request.endnotes, "word/_rels/endnotes.xml.rels"),
+    ] {
+        let rels_xml = package.text(rels_path).unwrap_or_default();
+        for note in notes {
+            warn_about_dangling_opaque_refs(&note.content, &rels_xml, rels_path, &mut context);
+        }
     }
 
     if request.selective.is_none() {
@@ -414,7 +478,143 @@ pub fn write_docx_s13_parts(
     }
 
     update_core_part(&request.options, &mut package, context.now());
-    rezip_package(&package, source)
+    let bytes = rezip_package(&package, source)?;
+    Ok((bytes, context.take_warnings()))
+}
+
+/// Authored chart placements in one story part, keyed by relationship id.
+fn chart_drawings_in_part(xml: &str) -> HashMap<String, String> {
+    let drawing_prefix = declared_prefix(xml, &WORDPROCESSINGML_URIS, "w");
+    let chart_prefix = declared_prefix(xml, &CHART_URIS, "c");
+    let open = format!("<{drawing_prefix}:drawing");
+    let close = format!("</{drawing_prefix}:drawing>");
+    let chart_open = format!("<{chart_prefix}:chart");
+    let mut drawings = HashMap::new();
+    let mut cursor = 0;
+    while let Some(relative) = xml[cursor..].find(&open) {
+        let start = cursor + relative;
+        let boundary = xml.as_bytes().get(start + open.len()).copied();
+        if !matches!(boundary, Some(b' ' | b'\t' | b'\r' | b'\n' | b'/' | b'>')) {
+            cursor = start + open.len();
+            continue;
+        }
+        let Some(tag_end) = find_tag_end(xml.as_bytes(), start) else {
+            break;
+        };
+        cursor = tag_end + 1;
+        if xml.as_bytes()[start..tag_end].ends_with(b"/") {
+            continue;
+        }
+        let Some(relative_close) = xml[cursor..].find(&close) else {
+            continue;
+        };
+        let span = &xml[start..cursor + relative_close + close.len()];
+        let Some(chart) = prefixed_tag(span, &chart_open) else {
+            continue;
+        };
+        if let Some(id) = xml_attribute(chart, "r:id").or_else(|| xml_attribute(chart, "id")) {
+            drawings
+                .entry(id.to_owned())
+                .or_insert_with(|| span.to_owned());
+        }
+    }
+    drawings
+}
+
+/// Namespace URIs a part may bind the drawing placement prefix to.
+const WORDPROCESSINGML_URIS: [&str; 2] = [
+    crate::xml::namespaces::W,
+    "http://purl.oclc.org/ooxml/wordprocessingml/main",
+];
+
+/// Namespace URIs a part may bind the chart reference prefix to.
+const CHART_URIS: [&str; 2] = [
+    "http://schemas.openxmlformats.org/drawingml/2006/chart",
+    "http://purl.oclc.org/ooxml/drawingml/chart",
+];
+
+/// Prefix the root element binds to one of `uris`, or `fallback` when the
+/// part declares none.
+fn declared_prefix(xml: &str, uris: &[&str], fallback: &str) -> String {
+    let Some(end) = root_tag_end(xml) else {
+        return fallback.to_owned();
+    };
+    let tag = &xml[..end];
+    let bytes = tag.as_bytes();
+    let mut cursor = 0;
+    while let Some(found) = tag[cursor..].find("xmlns:") {
+        let mut at = cursor + found + "xmlns:".len();
+        let name_start = at;
+        while matches!(
+            bytes.get(at),
+            Some(b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-' | b'.')
+        ) {
+            at += 1;
+        }
+        let prefix = &tag[name_start..at];
+        while matches!(bytes.get(at), Some(b' ' | b'\t' | b'\r' | b'\n')) {
+            at += 1;
+        }
+        let mut next = at + 1;
+        if bytes.get(at) != Some(&b'=') || prefix.is_empty() {
+            cursor = cursor + found + 1;
+            continue;
+        }
+        while matches!(bytes.get(next), Some(b' ' | b'\t' | b'\r' | b'\n')) {
+            next += 1;
+        }
+        let Some(quote) = bytes
+            .get(next)
+            .copied()
+            .filter(|q| matches!(q, b'\'' | b'"'))
+        else {
+            cursor = cursor + found + 1;
+            continue;
+        };
+        let value_start = next + 1;
+        let Some(value_len) = tag[value_start..].find(quote as char) else {
+            cursor = cursor + found + 1;
+            continue;
+        };
+        if uris.contains(&tag[value_start..value_start + value_len].as_ref()) {
+            return prefix.to_owned();
+        }
+        cursor = value_start + value_len + 1;
+    }
+    fallback.to_owned()
+}
+
+/// End of the first element's opening tag, skipping declarations and comments.
+fn root_tag_end(xml: &str) -> Option<usize> {
+    let mut cursor = 0;
+    loop {
+        let start = xml[cursor..].find('<')? + cursor;
+        match xml.as_bytes().get(start + 1) {
+            Some(b'?') => cursor = xml[start..].find("?>")? + start + 2,
+            Some(b'!') if xml[start..].starts_with("<!--") => {
+                cursor = xml[start..].find("-->")? + start + 4;
+            }
+            Some(b'!') => cursor = find_tag_end(xml.as_bytes(), start)? + 1,
+            Some(_) => return find_tag_end(xml.as_bytes(), start),
+            None => return None,
+        }
+    }
+}
+
+/// First opening tag starting with `open`, requiring a tag-name boundary.
+fn prefixed_tag<'a>(xml: &'a str, open: &str) -> Option<&'a str> {
+    let mut cursor = 0;
+    while let Some(relative) = xml[cursor..].find(open) {
+        let start = cursor + relative;
+        let boundary = xml.as_bytes().get(start + open.len()).copied();
+        if !matches!(boundary, Some(b' ' | b'\t' | b'\r' | b'\n' | b'/' | b'>')) {
+            cursor = start + open.len();
+            continue;
+        }
+        let end = find_tag_end(xml.as_bytes(), start)?;
+        return Some(&xml[start..=end]);
+    }
+    None
 }
 
 fn update_core_part(options: &S13SaveOptions, package: &mut Package, now: &str) {
@@ -727,6 +927,9 @@ impl StoryParts<'_> {
         serialize: impl FnOnce(&mut SerializerContext) -> Result<String, ParseError>,
     ) -> Result<String, ParseError> {
         let path = package.resolve_path(path);
+        context.set_chart_drawings(chart_drawings_in_part(
+            &package.text(path).unwrap_or_default(),
+        ));
         let Some(part) = self.spliced.get(path) else {
             return serialize(context);
         };
@@ -784,26 +987,27 @@ fn ensure_header_footer_parts(
     relationships: &IndexMap<String, Relationship>,
     package: &mut Package,
 ) -> Result<(), ParseError> {
-    let parts: Vec<_> = relationships
-        .iter()
-        .filter_map(|(relationship_id, relationship)| {
-            if relationship.target_mode == Some(TargetMode::External) {
-                return None;
-            }
-            let content_type = match relationship.relationship_type.as_str() {
-                relationship_types::HEADER => HEADER_CONTENT_TYPE,
-                relationship_types::FOOTER => FOOTER_CONTENT_TYPE,
-                _ => return None,
-            };
-            let target = relationship.target.clone();
-            Some((
-                relationship_id.as_str(),
-                relationship.relationship_type.as_str(),
-                target,
-                content_type,
-            ))
-        })
-        .collect();
+    let mut parts = Vec::new();
+    for (relationship_id, relationship) in relationships {
+        if relationship.target_mode == Some(TargetMode::External) {
+            continue;
+        }
+        let content_type = match relationship.relationship_type.as_str() {
+            relationship_types::HEADER => HEADER_CONTENT_TYPE,
+            relationship_types::FOOTER => FOOTER_CONTENT_TYPE,
+            _ => continue,
+        };
+        let path = resolve_relative_path(&package.document_path, &relationship.target)?;
+        if !package.contains(&path) {
+            continue;
+        }
+        parts.push((
+            relationship_id.as_str(),
+            relationship.relationship_type.as_str(),
+            relationship.target.clone(),
+            content_type,
+        ));
+    }
     if parts.is_empty() {
         return Ok(());
     }
@@ -884,6 +1088,8 @@ fn serialize_comment_parts(
     document: &DocumentBody,
     package: &mut Package,
     context: &mut SerializerContext,
+    seed: &str,
+    allow_source_splice: bool,
 ) {
     let Some(comments) = document
         .comments
@@ -892,7 +1098,26 @@ fn serialize_comment_parts(
     else {
         return;
     };
-    let (comments_xml, infos) = serialize_comments_with_info(comments, context);
+    let source_context = allow_source_splice
+        .then(|| package.original_bytes(COMMENTS_PART))
+        .flatten()
+        .map(|source| (source, context.clone()));
+    let (mut comments_xml, mut infos) = serialize_comments_with_info(comments, context);
+    if let Some((source, source_context)) = source_context {
+        let original_infos = infos.clone();
+        match super::comment_splice::splice_comments(
+            source,
+            package.original,
+            seed,
+            comments,
+            &comments_xml,
+            &mut infos,
+            source_context,
+        ) {
+            Ok(spliced) => comments_xml = spliced,
+            Err(_) => infos = original_infos,
+        }
+    }
     package.set_text("word/comments.xml", comments_xml);
 
     let companions = [
@@ -945,7 +1170,9 @@ fn ensure_comment_parts(package: &mut Package) {
     if let Some(mut content_types) = package.text("[Content_Types].xml") {
         let mut changed = false;
         for (part_name, content_type, _, _) in parts {
-            if content_types.contains(part_name) {
+            if !package.contains(part_name.trim_start_matches('/'))
+                || content_types.contains(part_name)
+            {
                 continue;
             }
             let entry =
@@ -965,8 +1192,10 @@ fn ensure_comment_parts(package: &mut Package) {
         return;
     };
     let mut relationships = RelationshipsIndex::parse(relationships_xml);
-    for (_, _, target, relationship_type) in parts {
-        if relationships.xml_contains(target) {
+    for (part_name, _, target, relationship_type) in parts {
+        if !package.contains(part_name.trim_start_matches('/'))
+            || relationships.xml_contains(target)
+        {
             continue;
         }
         let relationship_id = relationships.next_id();
@@ -1014,6 +1243,109 @@ fn append_before(xml: &str, closing: &str, value: &str) -> Option<String> {
     updated.push_str(value);
     updated.push_str(&xml[offset..]);
     Some(updated)
+}
+
+fn opaque_relationship_references(xml: &str) -> Vec<&str> {
+    const RELATIONSHIP_URIS: &[&str] =
+        &["http://schemas.openxmlformats.org/officeDocument/2006/relationships"];
+    let prefix = declared_prefix(xml, RELATIONSHIP_URIS, "r");
+    let mut references = Vec::new();
+    for name in ["embed", "id"] {
+        for quote in ['"', '\''] {
+            let marker = format!("{prefix}:{name}={quote}");
+            let mut cursor = 0usize;
+            while cursor < xml.len() {
+                let Some(relative) = xml[cursor..].find(&marker) else {
+                    break;
+                };
+                let at = cursor + relative;
+                let preceded = at > 0
+                    && matches!(
+                        xml.as_bytes()[at - 1],
+                        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'.' | b'-' | b':'
+                    );
+                let start = at + marker.len();
+                let end = start + xml[start..].find(quote).unwrap_or(xml.len() - start);
+                if end > start && !preceded {
+                    references.push(&xml[start..end]);
+                }
+                cursor = end + 1;
+            }
+        }
+    }
+    references
+}
+
+fn visit_opaque_drawings(blocks: &[BlockContent], visit: &mut impl FnMut(&str)) {
+    fn visit_run(run: &Run, visit: &mut impl FnMut(&str)) {
+        for content in &run.content {
+            if let RunContent::OpaqueDrawing { xml, .. } = content {
+                visit(xml);
+            }
+        }
+    }
+    fn visit_inline(node: &InlineNode, visit: &mut impl FnMut(&str)) {
+        match node {
+            InlineNode::Run(run) => visit_run(run, visit),
+            InlineNode::Hyperlink(hyperlink) => {
+                for child in hyperlink
+                    .children
+                    .iter()
+                    .chain(hyperlink.structured_children.iter().flatten())
+                {
+                    visit_inline(child, visit);
+                }
+            }
+            _ => {}
+        }
+    }
+    for block in blocks {
+        match block {
+            BlockContent::Paragraph(paragraph) => {
+                for content in &paragraph.content {
+                    match content {
+                        ParagraphContent::Inline(node) => visit_inline(node, visit),
+                        ParagraphContent::Tracked(tracked) => {
+                            for inline in &tracked.content {
+                                visit_inline(inline, visit);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            BlockContent::Table(table) => {
+                for row in &table.rows {
+                    for cell in &row.cells {
+                        visit_opaque_drawings(&cell.content, visit);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn warn_about_dangling_opaque_refs(
+    blocks: &[BlockContent],
+    rels_xml: &str,
+    rels_path: &str,
+    context: &mut SerializerContext,
+) {
+    let mut reported = HashSet::new();
+    visit_opaque_drawings(blocks, &mut |xml| {
+        for id in opaque_relationship_references(xml) {
+            if rels_xml.contains(&format!("Id=\"{id}\""))
+                || rels_xml.contains(&format!("Id='{id}'"))
+                || !reported.insert(id.to_owned())
+            {
+                continue;
+            }
+            context.warn(format!(
+                "opaque drawing references relationship {id:?} absent from {rels_path}; keeping the markup verbatim"
+            ));
+        }
+    });
 }
 
 fn find_max_relationship_id(xml: &str) -> u64 {
@@ -2351,7 +2683,9 @@ impl<'a> SelectiveParagraphIndex<'a> {
                     }
                     if let Some(text_body) = shape.text_body.as_ref() {
                         for value in &text_body.content {
-                            let block: BlockContent = serde_json::from_value(value.clone()).ok()?;
+                            let block: BlockContent = serde_json::to_string(&(value.clone()))
+                                .and_then(|s| serde_json::from_str(&s))
+                                .ok()?;
                             self.story(std::slice::from_ref(&block))?;
                         }
                     }
@@ -3151,7 +3485,7 @@ mod tests {
         let original_document = concat!(
             "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\"><w:body>",
             "<w:p w14:paraId=\"0000000A\" w:rsidR=\"00AB12CD\"><w:r><w:t>keep</w:t></w:r></w:p>",
-            "<!-- authored gap -->",
+            "\n  ",
             "<w:p w14:paraId=\"0000000B\"><w:r><w:t>old</w:t></w:r></w:p>",
             "</w:body></w:document>"
         );
@@ -3188,7 +3522,7 @@ mod tests {
         assert!(spliced.contains("<w:t>edited</w:t>"));
         assert!(!spliced.contains("old"));
         let stale = save("0".repeat(64));
-        assert!(!stale.contains("authored gap"));
+        assert!(!stale.contains("w:rsidR="));
         assert!(stale.contains("<w:t>edited</w:t>"));
     }
 
@@ -3365,6 +3699,244 @@ mod tests {
 
         assert!(document.contains("w:anchor=\"inside\""));
         assert!(!relationships.contains(relationship_types::HYPERLINK));
+    }
+
+    #[test]
+    fn chart_run_without_a_drawing_replays_the_source_part_placement() {
+        let drawing = "<w:drawing><wp:inline><wp:extent cx=\"5486400\" cy=\"3200400\"/><wp:docPr id=\"1\" name=\"Chart 1\"/><a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/chart\"><c:chart r:id=\"rIdChart1\"/></a:graphicData></a:graphic></wp:inline></w:drawing>";
+        let original = base_package(&format!(
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:t>old</w:t></w:r></w:p><w:p><w:r>{drawing}</w:r></w:p></w:body></w:document>"
+        ));
+        let request: S13SaveRequest = serde_json::from_value(json!({
+            "determinism": determinism(),
+            "document": { "content": [
+                text_paragraph("new", None),
+                {
+                    "type": "paragraph",
+                    "content": [{
+                        "type": "run",
+                        "content": [{
+                            "type": "chart",
+                            "chart": {
+                                "type": "chart", "chartType": "column",
+                                "rId": "rIdChart1", "path": "word/charts/chart1.xml",
+                                "series": [], "plotGroups": []
+                            }
+                        }]
+                    }]
+                }
+            ] },
+            "options": { "updateModifiedDate": false }
+        }))
+        .expect("request");
+        let (saved, warnings) = write_docx_s13_with_warnings(request, &original).expect("save");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let document = String::from_utf8(part_map(&saved)["word/document.xml"].clone()).unwrap();
+        assert!(document.contains("<w:t>new</w:t>"));
+        assert!(document.contains(drawing));
+    }
+
+    #[test]
+    fn opaque_drawings_reference_missing_relationships_with_a_warning() {
+        let original = base_package(
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:t>old</w:t></w:r></w:p></w:body></w:document>",
+        );
+        let request: S13SaveRequest = serde_json::from_value(json!({
+            "determinism": determinism(),
+            "document": { "content": [
+                text_paragraph("new", None),
+                {
+                    "type": "paragraph",
+                    "content": [{
+                        "type": "run",
+                        "content": [{
+                            "type": "opaqueDrawing",
+                            "kind": "object",
+                            "xml": "<w:object><o:OLEObject Type=\"Embed\" ProgID=\"Eq\" r:id=\"rIdOle\"/></w:object>"
+                        }]
+                    }]
+                }
+            ] },
+            "options": { "updateModifiedDate": false }
+        }))
+        .expect("request");
+        let (saved, warnings) = write_docx_s13_with_warnings(request, &original).expect("save");
+        assert!(
+            warnings.iter().any(|warning| warning.contains("rIdOle")),
+            "{warnings:?}"
+        );
+        let document = String::from_utf8(part_map(&saved)["word/document.xml"].clone()).unwrap();
+        assert!(document.contains("<w:t>new</w:t>"));
+        assert!(document.contains("rIdOle"));
+    }
+
+    #[test]
+    fn chart_run_without_any_placement_is_dropped_with_a_warning() {
+        let original = base_package(
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:t>old</w:t></w:r></w:p></w:body></w:document>",
+        );
+        let request: S13SaveRequest = serde_json::from_value(json!({
+            "determinism": determinism(),
+            "document": { "content": [
+                text_paragraph("new", None),
+                {
+                    "type": "paragraph",
+                    "content": [{
+                        "type": "run",
+                        "content": [{
+                            "type": "chart",
+                            "chart": {
+                                "type": "chart", "chartType": "column",
+                                "rId": "rIdChart1", "path": "word/charts/chart1.xml",
+                                "series": [], "plotGroups": []
+                            }
+                        }]
+                    }]
+                }
+            ] },
+            "options": { "updateModifiedDate": false }
+        }))
+        .expect("request");
+        let (saved, warnings) = write_docx_s13_with_warnings(request, &original).expect("save");
+        assert_eq!(
+            warnings,
+            [
+                "chart run carries no drawing to replay (rId rIdChart1); keeping the run out of the output"
+            ]
+        );
+        let document = String::from_utf8(part_map(&saved)["word/document.xml"].clone()).unwrap();
+        assert!(document.contains("<w:t>new</w:t>"));
+        assert!(!document.contains("c:chart"));
+    }
+
+    #[test]
+    fn chart_placements_resolve_under_declared_namespace_prefixes() {
+        let drawing = "<x:drawing><wp:inline><a:graphic><a:graphicData><ch:chart r:id=\"rId5\"/></a:graphicData></a:graphic></wp:inline></x:drawing>";
+        let xml = format!(
+            "<x:document xmlns:x=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:ch=\"http://schemas.openxmlformats.org/drawingml/2006/chart\"><x:body><x:p><x:r>{drawing}</x:r></x:p></x:body></x:document>"
+        );
+        assert_eq!(
+            chart_drawings_in_part(&xml).get("rId5").map(String::as_str),
+            Some(drawing)
+        );
+        let strict_drawing = "<s:drawing><wp:inline><a:graphic><a:graphicData><t:chart r:id=\"rId5\"/></a:graphicData></a:graphic></wp:inline></s:drawing>";
+        let strict = format!(
+            "<?xml version=\"1.0\"?><s:document xmlns:s=\"http://purl.oclc.org/ooxml/wordprocessingml/main\" xmlns:t=\"http://purl.oclc.org/ooxml/drawingml/chart\"><s:body><s:p><s:r>{strict_drawing}</s:r></s:p></s:body></s:document>"
+        );
+        assert_eq!(
+            chart_drawings_in_part(&strict)
+                .get("rId5")
+                .map(String::as_str),
+            Some(strict_drawing)
+        );
+        let legacy = "<w:document><w:body><w:p><w:r><w:drawing><c:chart r:id=\"rId5\"/></w:drawing></w:r></w:p></w:body></w:document>";
+        assert_eq!(
+            chart_drawings_in_part(legacy)
+                .get("rId5")
+                .map(String::as_str),
+            Some("<w:drawing><c:chart r:id=\"rId5\"/></w:drawing>")
+        );
+    }
+
+    #[test]
+    fn removed_new_header_footer_relationships_are_not_registered() {
+        let original = base_package(
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body/></w:document>",
+        );
+        let request: S13SaveRequest = serde_json::from_value(json!({
+            "determinism": determinism(),
+            "document": { "content": [text_paragraph("Body text", None)] },
+            "relationshipEntries": [
+                ["rId_new_header_default", {
+                    "id": "rId_new_header_default",
+                    "type": relationship_types::HEADER,
+                    "target": "header1.xml"
+                }],
+                ["rId_new_footer_default", {
+                    "id": "rId_new_footer_default",
+                    "type": relationship_types::FOOTER,
+                    "target": "footer1.xml"
+                }]
+            ],
+            "options": { "updateModifiedDate": false }
+        }))
+        .expect("request");
+        let before = part_map(&original);
+        let after = part_map(&write_docx_s13(request, &original).expect("save"));
+
+        for path in ["[Content_Types].xml", "word/_rels/document.xml.rels"] {
+            assert_eq!(after[path], before[path], "{path}");
+        }
+        for path in ["word/header1.xml", "word/footer1.xml"] {
+            assert!(!after.contains_key(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn removed_source_header_footer_relationships_and_parts_are_preserved() {
+        let original = base_package(
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body/></w:document>",
+        );
+        let mut parts = part_map(&original);
+        let rels_path = "word/_rels/document.xml.rels";
+        let mut rels = String::from_utf8(parts[rels_path].clone()).expect("relationships");
+        let mut types = String::from_utf8(parts["[Content_Types].xml"].clone()).expect("types");
+        let mut relationships = Vec::new();
+        for (kind, rel_type, content_type, xml) in [
+            (
+                "header",
+                relationship_types::HEADER,
+                HEADER_CONTENT_TYPE,
+                "<w:hdr/>",
+            ),
+            (
+                "footer",
+                relationship_types::FOOTER,
+                FOOTER_CONTENT_TYPE,
+                "<w:ftr/>",
+            ),
+        ] {
+            let id = format!("rId_{kind}");
+            let target = format!("{kind}1.xml");
+            let path = format!("word/{target}");
+            rels = rels.replace(
+                "</Relationships>",
+                &format!("<Relationship Id=\"{id}\" Type=\"{rel_type}\" Target=\"{target}\"/></Relationships>"),
+            );
+            types = types.replace(
+                "</Types>",
+                &format!("<Override PartName=\"/{path}\" ContentType=\"{content_type}\"/></Types>"),
+            );
+            parts.insert(path, xml.as_bytes().to_vec());
+            relationships.push(json!([id, { "id": id, "type": rel_type, "target": target }]));
+            let new_id = format!("rId_new_{kind}_default");
+            relationships.push(json!([new_id, {
+                "id": new_id, "type": rel_type, "target": format!("{kind}2.xml")
+            }]));
+        }
+        parts[rels_path] = rels.into_bytes();
+        parts["[Content_Types].xml"] = types.into_bytes();
+        let original_parts: Vec<_> = parts
+            .iter()
+            .map(|(path, bytes)| (path.clone(), bytes.clone()))
+            .collect();
+        let request: S13SaveRequest = serde_json::from_value(json!({
+            "determinism": determinism(),
+            "document": { "content": [text_paragraph("Body text", None)] },
+            "relationshipEntries": relationships,
+            "options": { "updateModifiedDate": false }
+        }))
+        .expect("request");
+        let saved = part_map(&write_docx_s13_parts(request, &original_parts, None).expect("save"));
+
+        for path in [
+            "[Content_Types].xml",
+            rels_path,
+            "word/header1.xml",
+            "word/footer1.xml",
+        ] {
+            assert_eq!(saved[path], parts[path], "{path}");
+        }
     }
 
     #[test]

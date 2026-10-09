@@ -7,8 +7,17 @@ export { XlsxEditor, XlsxSaveRefusedError } from './XlsxEditor';
 export type {
   XlsxEditorProps,
   XlsxEditorApi,
+  XlsxPointPosition,
   XlsxEditorCollaborationOptions,
+  XlsxWorkerViewerApi,
+  XlsxWorkerViewerProps,
 } from './XlsxEditor';
+/** @experimental */
+export type { XlsxWorkerEditorProps } from './XlsxEditor';
+/** @experimental */
+export type { XlsxWorkerEditorApi } from './worker/createWorkerEditorApi';
+/** @experimental */
+export { XlsxPeerNotReadyError, XlsxWorkerEditorCollaborationError } from './worker/createWorkerEditorApi';
 export { EditorToolbar } from './components/EditorToolbar';
 export {
   Toolbar,

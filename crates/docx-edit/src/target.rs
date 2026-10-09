@@ -536,6 +536,17 @@ impl StoryView {
     ) -> Option<(Self, bool)> {
         let story = story_ref(txn, story_id).ok()?;
         let chunks = doc.chunk_snapshot(story_id, &story, txn);
+        Self::from_chunks(doc, txn, story_id, view, limit, &chunks)
+    }
+
+    fn from_chunks<T: ReadTxn>(
+        doc: &EditingDoc,
+        txn: &T,
+        story_id: &str,
+        view: EditTextView,
+        limit: u32,
+        chunks: &[crate::ops::Chunk],
+    ) -> Option<(Self, bool)> {
         let source = doc.source_metadata();
         let mut paragraphs = Vec::new();
         let mut current = ParagraphBuilder::new(0);
@@ -681,6 +692,7 @@ pub(crate) struct Views<'a, T: ReadTxn> {
     doc: &'a EditingDoc,
     txn: &'a T,
     epoch: Option<u64>,
+    fresh: bool,
     cache: HashMap<(String, EditTextView), Option<Arc<StoryView>>>,
     ownership: Option<Rc<Ownership>>,
     controls: Option<Rc<Inventory>>,
@@ -745,12 +757,21 @@ impl<'a, 'doc> Views<'a, yrs::Transaction<'doc>> {
     }
 }
 
+impl<'a, 'doc> Views<'a, yrs::TransactionMut<'doc>> {
+    pub fn uncommitted(doc: &'a EditingDoc, txn: &'a yrs::TransactionMut<'doc>) -> Self {
+        let mut views = Self::new(doc, txn);
+        views.fresh = true;
+        views
+    }
+}
+
 impl<'a, T: ReadTxn> Views<'a, T> {
     pub fn new(doc: &'a EditingDoc, txn: &'a T) -> Self {
         Self {
             doc,
             txn,
             epoch: None,
+            fresh: false,
             cache: HashMap::new(),
             ownership: None,
             controls: None,
@@ -766,11 +787,16 @@ impl<'a, T: ReadTxn> Views<'a, T> {
     }
 
     pub fn story(&mut self, story: &str, view: EditTextView) -> Option<Arc<StoryView>> {
-        let (doc, txn, epoch) = (self.doc, self.txn, self.epoch);
+        let (doc, txn, epoch, fresh) = (self.doc, self.txn, self.epoch, self.fresh);
         self.cache
             .entry((story.to_owned(), view))
             .or_insert_with(|| {
-                if let Some(epoch) = epoch {
+                if fresh {
+                    let text = story_ref(txn, story).ok()?;
+                    let chunks = crate::ops::snapshot(&text, txn);
+                    StoryView::from_chunks(doc, txn, story, view, u32::MAX, &chunks)
+                        .map(|(view, _)| Arc::new(view))
+                } else if let Some(epoch) = epoch {
                     let key = story_view_key(story, view);
                     let mut cache = doc.story_views.lock().unwrap();
                     if let Some(built) = cache.get(&key, epoch) {
@@ -811,6 +837,12 @@ impl<'a, T: ReadTxn> Views<'a, T> {
                     .is_some()
             });
         let units = yrs::Text::len(&story_ref(self.txn, story).ok()?, self.txn);
+        if self.fresh {
+            let text = story_ref(self.txn, story).ok()?;
+            let chunks = crate::ops::snapshot(&text, self.txn);
+            return StoryView::from_chunks(self.doc, self.txn, story, view, limit, &chunks)
+                .map(|(view, complete)| (Arc::new(view), complete));
+        }
         if cached || units <= limit {
             return self.story(story, view).map(|built| (built, true));
         }

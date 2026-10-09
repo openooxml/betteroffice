@@ -3,7 +3,7 @@ import type { YrsSession } from '@betteroffice/docx/yrs';
 import { createDocxPluginHost } from './createDocxPluginHost';
 import { defineDocxPlugin } from './defineDocxPlugin';
 import type { DocxProposalSnapshot } from './proposalPreview';
-import type { DocxPluginEvent, DocxPluginLayout } from './types';
+import type { DocxPluginEvent, DocxPluginGeometry, DocxPluginLayout } from './types';
 
 function stubSession(previewVersion = 0) {
   const updates = new Set<() => void>();
@@ -36,7 +36,7 @@ function stubSession(previewVersion = 0) {
   };
 }
 
-function setup() {
+function setup(geometry: () => DocxPluginGeometry | null = () => null) {
   const events: DocxPluginEvent[] = [];
   const host = createDocxPluginHost({
     pagedEditorRef: { current: null },
@@ -44,7 +44,7 @@ function setup() {
     commands: () => null,
     layout: () => ({ queries: null, complete: false, failed: false }),
     subscribeLayout: () => () => {},
-    geometry: () => null,
+    geometry,
     translate: (key) => key,
   });
   const plugin = defineDocxPlugin({
@@ -164,6 +164,52 @@ describe('plugin host proposal previews', () => {
     await settle();
     expect(events).toEqual([
       { type: 'layout-change', generation: host.generation()!, layout: layout(0) },
+    ]);
+    host.close('unmounted');
+  });
+
+  test('repeats the current layout once its geometry exists, unless a layout change carried it', async () => {
+    let geometry: DocxPluginGeometry | null = null;
+    const { host, plugin, events } = setup(() => geometry);
+    const registry = stubSession();
+    host.setPlugins([plugin]);
+    host.open(registry.session);
+    await settle();
+    host.layoutChanged(layout(0));
+    await settle();
+    events.length = 0;
+    host.geometryPresented(layout(0));
+    geometry = { layout: layout(0) } as DocxPluginGeometry;
+    host.geometryPresented({ ...layout(0), id: 'older' });
+    await settle();
+    expect(events).toEqual([]);
+    host.geometryPresented(layout(0));
+    await settle();
+    host.geometryPresented(layout(0));
+    await settle();
+    expect(events).toEqual([
+      { type: 'layout-change', generation: host.generation()!, layout: layout(0) },
+    ]);
+    const next = { ...layout(0), id: 'next' };
+    geometry = { layout: next } as DocxPluginGeometry;
+    events.length = 0;
+    host.layoutChanged(next);
+    await settle();
+    host.geometryPresented(next);
+    await settle();
+    expect(events).toEqual([
+      { type: 'layout-change', generation: host.generation()!, layout: next },
+    ]);
+    geometry = null;
+    host.layoutChanged(null);
+    host.layoutChanged(next);
+    await settle();
+    events.length = 0;
+    geometry = { layout: next } as DocxPluginGeometry;
+    host.geometryPresented(next);
+    await settle();
+    expect(events).toEqual([
+      { type: 'layout-change', generation: host.generation()!, layout: next },
     ]);
     host.close('unmounted');
   });

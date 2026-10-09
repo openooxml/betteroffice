@@ -25,6 +25,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use docx_parse::paragraph_identity::{
     ParagraphOccurrence, allocate_paragraph_id_where, format_paragraph_id, parse_paragraph_id,
 };
+use ooxml_opc::PackageBytes;
 use yrs::branch::Branch;
 use yrs::types::text::YChange;
 use yrs::types::{Delta, EntryChange, Event};
@@ -83,7 +84,8 @@ pub(crate) fn entropy() -> [u64; 2] {
 }
 
 /// Kind of Word story a source part holds.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum SourceStoryKind {
     Body,
     Header,
@@ -94,12 +96,14 @@ pub enum SourceStoryKind {
 }
 
 /// A Word story qualified by the package part it is read from.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SourceStory {
     /// The OPC part name, such as `/word/document.xml`.
     pub part_uri: String,
     pub kind: SourceStoryKind,
     /// The note or comment ID, for the stories that share a part.
+    #[serde(deserialize_with = "crate::peer_bootstrap::required_option")]
     pub item_id: Option<String>,
 }
 
@@ -283,16 +287,41 @@ pub struct ParagraphSavePlan {
     pub spliced_parts: Vec<SplicedPart>,
 }
 
-/// A story part whose stories hold the paragraphs seeded from it, in order.
+/// A story part whose stories hold the paragraphs seeded from it that they still hold in the
+/// same order, with paragraphs the source lacks only next to one seeded from it.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SplicedPart {
     pub part: String,
     /// Lowercase hex SHA-256 of the source part.
     pub sha256: String,
-    /// `(ordinal, session key)` of every paragraph seeded from the part.
+    /// `(ordinal, session key)` of every paragraph seeded from the part that the stories hold.
     pub paragraphs: Vec<(u32, String)>,
     /// The ordinals of those whose segments changed since seeding.
     pub changed: Vec<u32>,
+    /// Where each paragraph the source lacks goes, in document order.
+    pub inserted: Vec<SpliceAnchor>,
+    /// The ordinals of the paragraphs seeded from the part that the stories no longer hold.
+    pub removed: Vec<u32>,
+}
+
+/// Where a spliced part takes a paragraph its source lacks: next to a source paragraph of the
+/// same story, with no table or block content control between them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SpliceAnchor {
+    /// Right before the source paragraph with this ordinal.
+    Before(u32),
+    /// Right after the source paragraph with this ordinal.
+    After(u32),
+}
+
+impl SpliceAnchor {
+    /// Orders anchors as the positions they name.
+    pub fn position(self) -> (u32, bool) {
+        match self {
+            Self::Before(ordinal) => (ordinal, false),
+            Self::After(ordinal) => (ordinal, true),
+        }
+    }
 }
 
 /// One paragraph as the seeder lowers it, in document order.
@@ -315,6 +344,8 @@ pub(crate) struct SourcePartInput {
     pub(crate) roots: Vec<(String, Option<String>)>,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SourcePart {
     uri: String,
     /// Lowercase hex SHA-256 of the part's XML.
@@ -322,9 +353,11 @@ struct SourcePart {
     /// Whether the parser reads the part's XML exactly as written, so its bytes can be kept.
     as_written: bool,
     kind: SourceStoryKind,
+    #[serde(with = "crate::peer_bootstrap::occurrences")]
     occurrences: Vec<ParagraphOccurrence>,
     /// Occurrence ordinal to the session keys seeded from it: one per root
     /// story sharing the part, each a view of the same paragraph, first seeded first.
+    #[serde(with = "crate::peer_bootstrap::sorted_map")]
     backed: HashMap<u32, Vec<String>>,
     roots: Vec<String>,
 }
@@ -351,35 +384,115 @@ impl SourcePart {
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Seeded {
     root: String,
+    #[serde(deserialize_with = "crate::peer_bootstrap::required_option")]
     part: Option<usize>,
+    #[serde(deserialize_with = "crate::peer_bootstrap::required_option")]
     ordinal: Option<u32>,
+    #[serde(deserialize_with = "crate::peer_bootstrap::required_option")]
     source_para_id: Option<String>,
 }
 
 /// Identity index of the retained source package, reconstructible from its bytes.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SourceIndex {
     package_sha256: String,
-    bytes: Arc<[u8]>,
+    #[serde(skip, default = "empty_package_bytes")]
+    bytes: PackageBytes,
     occupied: BTreeSet<u32>,
     /// Story parts in package order.
     parts: Vec<SourcePart>,
+    #[serde(with = "crate::peer_bootstrap::sorted_map")]
     roots: HashMap<String, SourceStory>,
+    #[serde(with = "crate::peer_bootstrap::sorted_map")]
     seeded: HashMap<String, Seeded>,
     /// IDs the comment companion parts reference.
     comment_references: BTreeSet<u32>,
+    #[serde(skip)]
     seed_states: OnceLock<HashMap<String, StoryState>>,
 }
 
+fn empty_package_bytes() -> PackageBytes {
+    Vec::new().into()
+}
+
 impl SourceIndex {
-    pub(crate) fn bytes(&self) -> Arc<[u8]> {
-        Arc::clone(&self.bytes)
+    pub(crate) fn attach_peer_source(&mut self, bytes: PackageBytes) -> Result<(), String> {
+        for (part_index, part) in self.parts.iter().enumerate() {
+            if !part.uri.starts_with('/') || part.uri.len() == 1 {
+                return Err("invalid source part URI".to_owned());
+            }
+            for (ordinal, occurrence) in part.occurrences.iter().enumerate() {
+                if occurrence.ordinal as usize != ordinal
+                    || occurrence.tag.start >= occurrence.tag.end
+                {
+                    return Err("invalid source paragraph occurrence".to_owned());
+                }
+            }
+            for (ordinal, views) in &part.backed {
+                if *ordinal as usize >= part.occurrences.len() || views.is_empty() {
+                    return Err("invalid source paragraph views".to_owned());
+                }
+                let mut roots = HashSet::new();
+                for key in views {
+                    let seed = self
+                        .seeded
+                        .get(key)
+                        .ok_or("invalid source paragraph view")?;
+                    if seed.part != Some(part_index)
+                        || seed.ordinal != Some(*ordinal)
+                        || !roots.insert(&seed.root)
+                    {
+                        return Err("inconsistent source paragraph view".to_owned());
+                    }
+                }
+            }
+        }
+        for (key, seed) in &self.seeded {
+            if let Some(part) = seed.part {
+                let part = self.parts.get(part).ok_or("invalid seeded part")?;
+                if seed
+                    .ordinal
+                    .is_some_and(|ordinal| ordinal as usize >= part.occurrences.len())
+                {
+                    return Err("invalid seeded paragraph ordinal".to_owned());
+                }
+                if let Some(ordinal) = seed.ordinal
+                    && !part
+                        .backed
+                        .get(&ordinal)
+                        .is_some_and(|views| views.contains(key))
+                {
+                    return Err("seeded paragraph missing its source view".to_owned());
+                }
+            } else if seed.ordinal.is_some() {
+                return Err("seeded paragraph ordinal without a part".to_owned());
+            }
+        }
+        self.bytes = bytes;
+        Ok(())
+    }
+
+    pub(crate) fn package_digest(&self) -> &str {
+        &self.package_sha256
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_states_initialized(&self) -> bool {
+        self.seed_states.get().is_some()
+    }
+
+    pub(crate) fn bytes(&self) -> PackageBytes {
+        self.bytes.clone()
     }
 
     pub(crate) fn new(
         package_sha256: String,
-        bytes: Arc<[u8]>,
+        bytes: PackageBytes,
         occupied: BTreeSet<u32>,
         inputs: Vec<SourcePartInput>,
         comment_references: BTreeSet<u32>,
@@ -530,7 +643,7 @@ impl SourceIndex {
 /// The retained source package: its bytes, and their digest when known,
 /// until an identity read needs the index.
 pub(crate) enum SourcePackage {
-    Pending(Arc<[u8]>, Option<String>),
+    Pending(PackageBytes, Option<String>),
     Ready(Arc<SourceIndex>),
 }
 
@@ -558,6 +671,13 @@ struct UnitState {
     blocks: [u8; 32],
     /// Whether the unit holds anything besides those embeds and its pilcrow.
     inline: bool,
+}
+
+impl UnitState {
+    fn has_blocks(&self) -> bool {
+        use sha2::{Digest, Sha256};
+        self.blocks != <[u8; 32]>::from(Sha256::new().finalize())
+    }
 }
 
 fn story_states(doc: &EditingDoc) -> HashMap<String, StoryState> {
@@ -1145,6 +1265,22 @@ pub(crate) fn promote_at(
     if index + 1 == story.len(txn) {
         promote_story(doc, txn, story_id);
     }
+}
+
+pub(crate) fn would_promote_at<T: ReadTxn>(
+    doc: &EditingDoc,
+    txn: &T,
+    story_id: &str,
+    story: &TextRef,
+    index: u32,
+) -> bool {
+    index.checked_add(1) == Some(story.len(txn))
+        && doc.with_seen(txn, |seen| {
+            seen.synthetic.iter().any(|(id, pilcrow)| {
+                id == story_id
+                    && map_string(pilcrow, txn, PARA_ORIGIN).as_deref() == Some(SYNTHETIC)
+            })
+        })
 }
 
 /// [`promote`] for an edit that authored into the paragraph ending `story_id`.
@@ -2367,8 +2503,10 @@ fn part_stories<'a>(
 }
 
 /// `source.parts[index]` as a part a save can splice: one whose stories still hold, in order
-/// and each with the block embeds it was seeded with, every paragraph seeded from it and no
-/// other but empty editor-only ones, each the only view of its source paragraph.
+/// and each with the block embeds it was seeded with, the paragraphs seeded from it that they
+/// hold, each the only view of its source paragraph. Removed source paragraphs held no block
+/// embeds, and a paragraph the source lacks holds none and sits next to a source paragraph of
+/// its story with no block embed between them, unless it is an empty editor-only one.
 fn spliced_part(
     source: &SourceIndex,
     index: usize,
@@ -2388,46 +2526,121 @@ fn spliced_part(
     if !before.keys().eq(after.keys()) {
         return None;
     }
+    let synthetic = |key: &str| by_key.get(key).is_some_and(|pilcrow| pilcrow.synthetic);
     let mut paragraphs = Vec::new();
     let mut changed = Vec::new();
+    let mut inserted = Vec::new();
+    let mut removed = Vec::new();
     for (seed, now) in before.values().zip(after.values()) {
-        if seed.units.len() != now.units.len() {
+        let (was_units, was_tail) = split_tail(&seed.units);
+        let (is_units, is_tail) = split_tail(&now.units);
+        match (was_tail, is_tail) {
+            (None, None) => {}
+            (Some(was), Some(is))
+                if was.digest == is.digest && was.blocks == is.blocks && !is.inline => {}
+            _ => return None,
+        }
+        let was_keys: HashMap<&str, &UnitState> = was_units
+            .iter()
+            .map(|unit| Some((unit.key.as_deref()?, unit)))
+            .collect::<Option<_>>()?;
+        let is_keys: HashSet<&str> = is_units
+            .iter()
+            .map(|unit| unit.key.as_deref())
+            .collect::<Option<_>>()?;
+        fn kept<'u>(units: &'u [UnitState], keep: impl Fn(&str) -> bool) -> Vec<&'u str> {
+            units
+                .iter()
+                .filter_map(|unit| unit.key.as_deref())
+                .filter(|key| keep(key))
+                .collect()
+        }
+        if kept(was_units, |key| is_keys.contains(key))
+            != kept(is_units, |key| was_keys.contains_key(key))
+        {
             return None;
         }
-        for (was, is) in seed.units.iter().zip(&now.units) {
-            if was.key != is.key || was.blocks != is.blocks {
+        for was in was_units {
+            let key = was.key.as_deref()?;
+            if is_keys.contains(key) {
+                continue;
+            }
+            match source.view_of(key) {
+                Some(((part_index, ordinal), 0)) if part_index == index && !was.has_blocks() => {
+                    removed.push(ordinal);
+                }
+                None if !was.inline && !was.has_blocks() => {}
+                _ => return None,
+            }
+        }
+        let mut anchor = None;
+        let mut pending = 0usize;
+        for is in is_units {
+            let key = is.key.as_deref()?;
+            if is.has_blocks() {
+                anchor = None;
+                if pending > 0 {
+                    return None;
+                }
+            }
+            let Some(was) = was_keys.get(key) else {
+                if is.has_blocks() || source.view_of(key).is_some() {
+                    return None;
+                }
+                if synthetic(key) && !is.inline {
+                    continue;
+                }
+                match anchor {
+                    Some(ordinal) => inserted.push(SpliceAnchor::After(ordinal)),
+                    None => pending += 1,
+                }
+                continue;
+            };
+            if was.blocks != is.blocks {
                 return None;
             }
             let same = was.digest == is.digest;
-            let Some(key) = is.key.as_deref() else {
-                if same && !is.inline {
-                    continue;
-                }
-                return None;
-            };
             match source.view_of(key) {
                 Some(((part_index, ordinal), 0)) if part_index == index => {
                     paragraphs.push((ordinal, key.to_owned()));
                     if !same {
                         changed.push(ordinal);
                     }
+                    inserted.extend(std::iter::repeat_n(SpliceAnchor::Before(ordinal), pending));
+                    pending = 0;
+                    anchor = Some(ordinal);
                 }
-                None if same && by_key.get(key).is_some_and(|pilcrow| pilcrow.synthetic) => {}
+                None if same && synthetic(key) => {}
                 _ => return None,
             }
         }
+        if pending > 0 {
+            return None;
+        }
     }
-    if paragraphs.len() != part.backed.len() {
+    if paragraphs.len() + removed.len() != part.backed.len() {
         return None;
     }
     paragraphs.sort_unstable();
     changed.sort_unstable();
+    removed.sort_unstable();
+    inserted.sort_by_key(|anchor| anchor.position());
     Some(SplicedPart {
         part: part.path().to_owned(),
         sha256: part.sha256.clone(),
         paragraphs,
         changed,
+        inserted,
+        removed,
     })
+}
+
+/// `units` without, and then with, the segments after the last pilcrow.
+fn split_tail(units: &[UnitState]) -> (&[UnitState], Option<&UnitState>) {
+    match units.split_last() {
+        Some((tail, rest)) if tail.key.is_none() => (rest, Some(tail)),
+        _ => (units, None),
+    }
 }
 
 fn holder_ref(scan: &Scan, source: Option<&SourceIndex>, holder: Holder) -> Option<ParagraphRef> {

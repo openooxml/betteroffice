@@ -2058,9 +2058,17 @@
               {
                 "id": "s0.b22.i5",
                 "anchor": {
-                  "kind": "paragraph",
+                  "kind": "range",
                   "story": "body",
-                  "paraId": "00000015"
+                  "start": {
+                    "paraId": "00000015",
+                    "offset": 34
+                  },
+                  "end": {
+                    "paraId": "00000015",
+                    "offset": 35
+                  },
+                  "view": "original"
                 },
                 "marks": [],
                 "link": null,
@@ -2076,11 +2084,11 @@
                   "story": "body",
                   "start": {
                     "paraId": "00000015",
-                    "offset": 34
+                    "offset": 35
                   },
                   "end": {
                     "paraId": "00000015",
-                    "offset": 37
+                    "offset": 38
                   },
                   "view": "original"
                 },
@@ -2919,9 +2927,17 @@
       "code": "unsupported-content",
       "severity": "warning",
       "anchor": {
-        "kind": "paragraph",
+        "kind": "range",
         "story": "body",
-        "paraId": "00000015"
+        "start": {
+          "paraId": "00000015",
+          "offset": 34
+        },
+        "end": {
+          "paraId": "00000015",
+          "offset": 35
+        },
+        "view": "original"
       },
       "message": "An inline w:drawing is not represented in the export; it stays in the package."
     },

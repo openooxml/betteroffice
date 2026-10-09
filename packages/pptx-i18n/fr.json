@@ -1,5 +1,13 @@
 {
   "_lang": "fr",
+  "worker": {
+    "previousRecovery": null,
+    "preparing": "Préparation de l’éditeur. La modification sera bientôt disponible.",
+    "failed": "La modification est indisponible. Téléchargez la présentation récupérée.",
+    "disabled": "Cette fonctionnalité est indisponible dans ce mode de modification.",
+    "recovery": null,
+    "image": null
+  },
   "toolbar": {
     "label": null,
     "save": "Enregistrer",

@@ -82,7 +82,7 @@ export const PACKAGES_SECTION = {
 export const PACKAGES = [
   {
     name: "@betteroffice/docx",
-    desc: "Framework-free .docx core — parsing, CRDT editing and page layout on the Rust engine, with version-checked atomic text, paragraph and content-control batches, content-control discovery, structured JSON and Markdown export with page references, document comparison into tracked changes, host proposals with reversible accept and reject previews, undoable reanchoring of existing comments, and font loading kept apart between editors on one page.",
+    desc: "Framework-free .docx core — parsing, CRDT editing and page layout on the Rust engine, with unrecognized drawing markup preserved through editor saves, version-checked atomic text, paragraph and content-control batches, content-control discovery, structured JSON and Markdown export with page references, document comparison into tracked changes, host proposals with reversible accept and reject previews, undoable reanchoring of existing comments, and font loading kept apart between editors on one page.",
   },
   {
     name: "@betteroffice/docx-react",
@@ -94,7 +94,7 @@ export const PACKAGES = [
   },
   {
     name: "@betteroffice/xlsx-react",
-    desc: "The spreadsheet editor as a drop-in React component, with composable toolbar controls, version-checked edit batches that flush pending input first, and host-owned plugins with explicitly granted access.",
+    desc: "The spreadsheet editor as a drop-in React component, with host-controlled saving, awaited input flushing, pointer position queries, composable toolbar controls, version-checked edit batches that flush pending input first, and host-owned plugins with explicitly granted access.",
   },
   {
     name: "@betteroffice/pptx",
@@ -150,7 +150,7 @@ export const COLLABORATION = {
 export const PEERS = [
   {
     name: "People",
-    desc: "Live co-editing over any WebSocket relay. Offline edits converge on reconnect — merging is the data structure, not a server feature.",
+    desc: "Live co-editing over any WebSocket relay. Offline edits converge on reconnect. The reference relay checkpoints updates and restores rooms after restarts; its 24-hour idle expiration still applies.",
   },
   {
     name: "Agents",

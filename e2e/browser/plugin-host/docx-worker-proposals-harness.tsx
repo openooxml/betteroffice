@@ -11,6 +11,7 @@ import type { DocxProposalSnapshot, YrsSession } from '@betteroffice/docx/yrs';
 import { setGoogleFontsEnabled } from '@betteroffice/docx/utils';
 import { pagedDocx } from '../../../packages/docx-react/src/components/DocxEditor/__fixtures__/pagedDocx';
 import { workerOpenReplicaPending } from '../../../packages/docx-react/src/components/DocxEditor/internals/workerOpenReplica';
+import { proposalSnapshot } from '../../../packages/docx-react/src/plugins/proposalPreview';
 import fontUrl from '../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf?url';
 import '../../../packages/docx-react/src/styles/editor.css';
 
@@ -32,6 +33,10 @@ const keepSidebarClosed = options.get('sidebar') === 'closed';
 const reportChanges = options.get('onChange') === '1';
 setGoogleFontsEnabled(false);
 
+const loadMethods = ['openDocx', 'openDocxPreview', 'loadState', 'applyUpdate'] as const;
+type DocumentLoads = Record<typeof loadMethods[number], number>;
+const sessions: YrsSession[] = [];
+const documentLoads: DocumentLoads[] = [];
 const probe = {
   editor: null as DocxEditorRef | null,
   session: null as YrsSession | null,
@@ -45,14 +50,24 @@ const probe = {
   layoutComplete: null as number | null,
   renderedDomContextCalls: 0,
   contentChanges: [] as { bodyContainsProposedText: boolean }[],
+  documentChanges: [] as string[],
   load: null as { version: string; sessionVersion: string; snapshotVersion: string } | null,
   events: { load: 0, 'proposal-change': 0, 'layout-change': 0 },
   eventSerial: 0,
   errors: [] as string[],
+  mainDocumentLoads() {
+    return {
+      sessionsCaptured: sessions.length,
+      total: documentLoads.reduce((total, counts) =>
+        total + loadMethods.reduce((sum, method) => sum + counts[method], 0), 0),
+      sessions: documentLoads.map((counts) => ({ ...counts })),
+    };
+  },
   status() {
     return {
       pending: this.session ? workerOpenReplicaPending(this.session) : null,
       captures: this.captures,
+      mainDocumentLoads: this.mainDocumentLoads(),
       hydratedBeforeSidebar: this.hydratedBeforeSidebar,
       sidebarOpen: this.sidebarOpen,
       sidebarOpenChanges: [...this.sidebarOpenChanges],
@@ -60,6 +75,7 @@ const probe = {
       layoutComplete: this.layoutComplete,
       renderedDomContextCalls: this.renderedDomContextCalls,
       contentChanges: [...this.contentChanges],
+      documentChanges: [...this.documentChanges],
       load: this.load,
       events: { ...this.events },
       errors: [...this.errors],
@@ -67,7 +83,10 @@ const probe = {
   },
   view(): ViewState {
     const scroller = document.querySelector<HTMLElement>('.docx-editor__scroll-container')!;
-    return { scrollTop: scroller.scrollTop, selection: this.session!.selection() };
+    return {
+      scrollTop: scroller.scrollTop,
+      selection: this.mainDocumentLoads().total === 0 ? null : this.session!.selection(),
+    };
   },
   async navigate(
     target: { story: string; paraId: string },
@@ -92,15 +111,21 @@ export type WorkerProposalProbe = typeof probe;
   __workerProposalTest: { captureSession(session: YrsSession): void };
 }).__workerProposalTest = {
   captureSession(session) {
+    if (sessions.includes(session)) return;
+    sessions.push(session);
     probe.session = session;
     probe.captures += 1;
-    const sample = () => {
-      if (!probe.sidebarOpened && !workerOpenReplicaPending(session)) {
-        probe.hydratedBeforeSidebar = true;
-      }
-      if (probe.session === session) requestAnimationFrame(sample);
-    };
-    requestAnimationFrame(sample);
+    const loads: DocumentLoads = { openDocx: 0, openDocxPreview: 0, loadState: 0, applyUpdate: 0 };
+    documentLoads.push(loads);
+    const target = session as unknown as Record<string, (...args: unknown[]) => unknown>;
+    for (const method of loadMethods) {
+      const original = target[method]!;
+      target[method] = (...args) => {
+        loads[method] += 1;
+        if (!probe.sidebarOpened) probe.hydratedBeforeSidebar = true;
+        return original.apply(session, args);
+      };
+    }
   },
 };
 
@@ -176,8 +201,8 @@ const overlay = defineDocxPlugin<OverlayState>({
         snapshotVersion: context.snapshot.version,
       };
     }
-    const snapshot = probe.session!.getProposals();
-    context.setState({ snapshot, eventSerial: probe.eventSerial }, snapshot.version);
+    const snapshot = proposalSnapshot(probe.session!);
+    if (snapshot) context.setState({ snapshot, eventSerial: probe.eventSerial }, snapshot.version);
   },
   overlay: ProposalOverlay,
 });
@@ -232,6 +257,7 @@ function Harness() {
             });
           } : undefined
         }
+        onDocumentChange={reportChanges ? ({ version }) => { probe.documentChanges.push(version); } : undefined}
         onError={(error) => probe.errors.push(error.message)}
         onPluginError={(error) => probe.errors.push(String(error.error))}
       />

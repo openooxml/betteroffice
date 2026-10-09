@@ -43,6 +43,7 @@ pub mod inline;
 pub mod media;
 pub mod notes;
 pub mod numbering;
+mod package_integrity;
 pub mod paragraph;
 pub mod paragraph_identity;
 pub mod relationships;
@@ -152,10 +153,11 @@ pub use s8::{
 };
 pub use s9::{
     BinaryPartWire, S9DocumentBodyWire, S9DocumentWire, S9PackageWire, S9ParseOptions,
-    S9SectionWire, S9WireEnvelope, media_table_parts, parse_docx_s9_preview_from_parts,
-    parse_docx_s9_preview_with_media_table, parse_docx_s9_wire,
-    parse_docx_s9_wire_parts_with_limits, parse_docx_s9_wire_with_limits,
-    parse_docx_s9_wire_with_media_table,
+    S9SectionWire, S9WireEnvelope, media_table_parts, media_table_parts_bytes,
+    parse_docx_s9_preview_from_parts, parse_docx_s9_preview_from_parts_with_budget,
+    parse_docx_s9_preview_with_media_table, parse_docx_s9_preview_with_media_table_with_budget,
+    parse_docx_s9_wire, parse_docx_s9_wire_parts_with_limits, parse_docx_s9_wire_with_limits,
+    parse_docx_s9_wire_with_media_table, parse_docx_s9_wire_with_media_table_bytes,
 };
 pub use scalars::{
     ColorValue, RunScalarProperties, ShadingProperties, UnderlineValue, parse_color_value,
@@ -172,6 +174,7 @@ pub use serializer::{
     S13SaveOptions, S13SaveRequest, S13SelectiveSave, S13SourceParagraph, S13SourceParagraphs,
     SerializerDeterminism, canonical_xml_events, element_span, serialize_s10_wire,
     serialize_s11_wire, serialize_s12_wire, write_docx_s13, write_docx_s13_parts,
+    write_docx_s13_with_warnings,
 };
 pub use settings::{
     CompatibilityFlags, DocumentSettings, RevisionView, ThemeFontLanguage, parse_settings,
@@ -330,6 +333,25 @@ pub fn write_docx_s13_wasm(request_json: &str, original_docx: &[u8]) -> Result<V
     let request =
         serde_json::from_str(request_json).map_err(|error| js_error(error.to_string()))?;
     write_docx_s13(request, original_docx).map_err(js_error)
+}
+
+/// [`write_docx_s13_wasm`], framing save diagnostics ahead of the package
+/// bytes: `u64 LE warnings_len || warnings_json || docx_bytes`.
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn write_docx_s13_wasm_with_warnings(
+    request_json: &str,
+    original_docx: &[u8],
+) -> Result<Vec<u8>, JsValue> {
+    let request =
+        serde_json::from_str(request_json).map_err(|error| js_error(error.to_string()))?;
+    let (bytes, warnings) =
+        write_docx_s13_with_warnings(request, original_docx).map_err(js_error)?;
+    let warnings = serde_json::to_vec(&warnings).map_err(|error| js_error(error.to_string()))?;
+    let mut framed = (warnings.len() as u64).to_le_bytes().to_vec();
+    framed.extend_from_slice(&warnings);
+    framed.extend_from_slice(&bytes);
+    Ok(framed)
 }
 
 /// Decodes TIFF bytes to PNG bytes for browsers without a TIFF decoder.

@@ -306,17 +306,23 @@ impl<'a> DataUrls<'a> {
     /// `json` with each `"src":"media:{n}"` holding the part's `data:` URL.
     fn json(&mut self, json: &str) -> String {
         const KEY: &str = "\"src\":\"";
-        let mut out = String::with_capacity(json.len());
+        let mut sources = Vec::new();
+        let mut len = json.len();
         let mut rest = json;
         while let Some(at) = rest.find(KEY) {
             let value = &rest[at + KEY.len()..];
             let end = value.find('"').unwrap_or(value.len());
-            out.push_str(&rest[..at + KEY.len()]);
-            match media_token_index(&value[..end]).and_then(|index| self.url(index)) {
-                Some(url) => out.push_str(&url),
-                None => out.push_str(&value[..end]),
+            let url = media_token_index(&value[..end]).and_then(|index| self.url(index));
+            if let Some(url) = &url {
+                len = len - end + url.len();
             }
+            sources.push((&rest[..at + KEY.len()], &value[..end], url));
             rest = &value[end..];
+        }
+        let mut out = String::with_capacity(len);
+        for (before, token, url) in sources {
+            out.push_str(before);
+            out.push_str(url.as_deref().unwrap_or(token));
         }
         out.push_str(rest);
         out
@@ -382,5 +388,42 @@ mod tests {
         assert_eq!(loaded.token_of("data:b").as_deref(), Some("media:4"));
         assert_eq!(MediaSources::default(), MediaSources::default());
         assert!(MediaSources::from_json(r#"{"key":["zz","0"],"parts":[]}"#).is_err());
+    }
+
+    #[test]
+    fn json_payload_sources_become_data_urls() {
+        let bytes = ooxml_opc::rezip_parts(&[
+            ("word/media/a.png".to_owned(), vec![1, 2, 3, 4]),
+            ("word/media/b.png".to_owned(), vec![5]),
+        ])
+        .unwrap();
+        let table =
+            MediaTable::new(ooxml_opc::RetainedPackage::new(Arc::from(bytes)).unwrap()).unwrap();
+        let index = |path| {
+            (0..table.len())
+                .find(|&i| table.path(i) == Some(path))
+                .unwrap()
+        };
+        let (a, b) = (index("word/media/a.png"), index("word/media/b.png"));
+        let (url_a, url_b) = (
+            "data:image/png;base64,AQIDBA==",
+            "data:image/png;base64,BQ==",
+        );
+        assert_eq!(table.data_url(a).unwrap(), url_a);
+        assert_eq!(table.data_url(b).unwrap(), url_b);
+
+        let mut writer = DataUrls::new(&table);
+        let json = format!(
+            r#"{{"a":{{"src":"media:{a}"}},"b":[{{"src":"media:{b}","label":"media:{a}"}},{{"src":"https://x"}}],"c":{{"src":"media:{a}"}}}}"#
+        );
+        assert_eq!(
+            writer.json(&json),
+            format!(
+                r#"{{"a":{{"src":"{url_a}"}},"b":[{{"src":"{url_b}","label":"media:{a}"}},{{"src":"https://x"}}],"c":{{"src":"{url_a}"}}}}"#
+            )
+        );
+        assert!(writer.error.is_none());
+        assert_eq!(writer.json(r#"{"src":"media:9"}"#), r#"{"src":"media:9"}"#);
+        assert!(writer.error.is_some());
     }
 }

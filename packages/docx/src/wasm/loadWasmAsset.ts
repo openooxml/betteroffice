@@ -24,6 +24,35 @@
 export type WasmSyncInput = BufferSource | WebAssembly.Module;
 export type WasmAsyncInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
+/** @internal */
+export async function compileWasm(input: WasmAsyncInput): Promise<WebAssembly.Module> {
+  if (input instanceof WebAssembly.Module) return input;
+  if (
+    typeof input === 'string' ||
+    (typeof Request === 'function' && input instanceof Request) ||
+    (typeof URL === 'function' && input instanceof URL)
+  ) {
+    input = await fetch(input);
+  }
+  if (typeof Response === 'function' && input instanceof Response) {
+    if (typeof WebAssembly.compileStreaming === 'function') {
+      try {
+        return await WebAssembly.compileStreaming(input);
+      } catch (error) {
+        if (
+          !input.ok ||
+          !['basic', 'cors', 'default'].includes(input.type) ||
+          input.headers.get('Content-Type') === 'application/wasm'
+        ) {
+          throw error;
+        }
+      }
+    }
+    return WebAssembly.compile(await input.arrayBuffer());
+  }
+  return WebAssembly.compile(input as BufferSource);
+}
+
 interface NodeFsLike {
   readFileSync(path: string): Uint8Array;
 }
@@ -74,6 +103,12 @@ function defaultAsyncInput(url: URL): WasmAsyncInput {
 export interface WasmModuleState {
   /** Async init from the packaged asset URL (or an explicit override). */
   preload(input?: WasmAsyncInput): Promise<void>;
+  /** @internal */
+  module(): Promise<WebAssembly.Module>;
+  /** @internal This thread's shared compile, or null when it loaded the engine from another input. */
+  sharedModule(): Promise<WebAssembly.Module | null>;
+  /** @internal */
+  preloadFrom(source: Promise<WebAssembly.Module | null>): Promise<void>;
   /** Sync guard used by every call site; disk-inits on Node/Bun, throws in a browser before `preload()`. */
   ensure(): void;
 }
@@ -131,11 +166,13 @@ export function createWasmModuleState(options: {
   assetUrl: () => URL;
   initAsync: (input: { module_or_path: WasmAsyncInput | Promise<WasmAsyncInput> }) => Promise<unknown>;
   initSync: (input: { module: WasmSyncInput }) => unknown;
+  shareModule?: boolean;
   /** Reads the module's allocator counters, if it counts; called only once initialized. */
   heap?: () => WasmHeapStats | undefined;
 }): WasmModuleState {
   let initialized = false;
   let pending: Promise<void> | undefined;
+  let compiled: Promise<WebAssembly.Module> | undefined;
   let memory: WebAssembly.Memory | null = null;
   registered.push({
     label: options.label,
@@ -143,23 +180,61 @@ export function createWasmModuleState(options: {
     ...(options.heap ? { heap: options.heap } : {}),
   });
 
+  function module(): Promise<WebAssembly.Module> {
+    if (!compiled) {
+      const compiling = compileWasm(defaultAsyncInput(options.assetUrl())).catch((error) => {
+        if (compiled === compiling) compiled = undefined;
+        throw error;
+      });
+      compiled = compiling;
+    }
+    return compiled;
+  }
+
+  function initialize(input: WasmAsyncInput | Promise<WasmAsyncInput>): Promise<void> {
+    pending = options.initAsync({ module_or_path: input }).then(
+      (output) => {
+        memory = exportedMemory(output);
+        initialized = true;
+      },
+      (error: unknown) => {
+        pending = undefined;
+        compiled = undefined;
+        throw error instanceof Error ? error : new Error(String(error));
+      }
+    );
+    return pending;
+  }
+
   return {
+    module,
+    sharedModule(): Promise<WebAssembly.Module | null> {
+      if (compiled) return compiled;
+      if (initialized || pending) return Promise.resolve(null);
+      return module();
+    },
     preload(input?: WasmAsyncInput): Promise<void> {
       if (initialized) return Promise.resolve();
       if (pending) return pending;
-      pending = options
-        .initAsync({ module_or_path: input ?? defaultAsyncInput(options.assetUrl()) })
-        .then(
-          (output) => {
-            memory = exportedMemory(output);
-            initialized = true;
-          },
-          (error: unknown) => {
-            pending = undefined;
-            throw error instanceof Error ? error : new Error(String(error));
+      if (typeof WebAssembly !== 'undefined' && input instanceof WebAssembly.Module) {
+        compiled = Promise.resolve(input);
+      }
+      return initialize(
+        input ?? (options.shareModule ? module() : defaultAsyncInput(options.assetUrl()))
+      );
+    },
+    preloadFrom(source: Promise<WebAssembly.Module | null>): Promise<void> {
+      if (initialized) return Promise.resolve();
+      if (pending) return pending;
+      return initialize(
+        source.catch(() => null).then((input) => {
+          if (input) {
+            compiled = Promise.resolve(input);
+            return input;
           }
-        );
-      return pending;
+          return options.shareModule ? module() : defaultAsyncInput(options.assetUrl());
+        })
+      );
     },
     ensure(): void {
       if (initialized) return;

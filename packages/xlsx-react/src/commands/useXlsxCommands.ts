@@ -45,6 +45,7 @@ export interface XlsxEditorView {
 
 /** The editor operations commands are built from; every member reads live state. */
 export interface XlsxEditorBridge {
+  requestSave?: XlsxCommandBinding['requestSave'];
   handle(): WorkbookHandle | null;
   status(): XlsxCommandEnvironment['status'];
   readOnly(): boolean;
@@ -412,6 +413,7 @@ export function useXlsxCommandBinding(
     };
 
     const binding: XlsxCommandBinding = {
+      requestSave: (save) => bridgeRef.current.requestSave?.(save) ?? save(),
       environment,
       ordered: (id) => {
         const current = bridgeRef.current;

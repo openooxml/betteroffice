@@ -52,9 +52,11 @@
 #[cfg(test)]
 extern crate self as docx_edit;
 
+#[cfg(feature = "wasm")]
+use std::collections::HashSet;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use yrs::types::text::YChange;
@@ -78,6 +80,7 @@ mod ctx;
 mod deterministic;
 mod fingerprint;
 mod format;
+mod geometry;
 mod heading;
 mod identity;
 mod inline_content;
@@ -85,6 +88,7 @@ mod list_marker;
 pub mod media;
 mod op;
 mod ops;
+mod peer_bootstrap;
 mod policy;
 mod presence;
 mod queries;
@@ -94,6 +98,7 @@ pub mod read_types;
 mod script_fonts;
 mod search;
 mod seed;
+mod segment_json;
 mod segments;
 pub mod structured;
 mod target;
@@ -116,11 +121,15 @@ pub use format::{
     ColorPatch, FontFamilyPatch, FormatPolicy, HYPERLINK, InlineFormatDelta, Patch, SimpleFormat,
     StrikePatch, UnderlinePatch, highlight_color_name,
 };
+pub use geometry::{
+    GeometryEndpoint, GeometryParagraphOutline, GeometryPositionOutline, GeometryRange,
+    GeometryRead, GeometrySentinel, GeometryStoryOutline, OwnedRevisionRange,
+};
 pub use identity::{
     AnchorResolution, AnchorUnsupported, ParagraphAnchor, ParagraphIdAssignment,
     ParagraphIdDiagnostic, ParagraphIdOrigin, ParagraphIdRefusal, ParagraphIdentities,
     ParagraphIdentity, ParagraphOrigin, ParagraphRef, ParagraphSavePlan, PersistedParagraphIds,
-    SourceParagraphRef, SourceStory, SourceStoryKind, SplicedPart,
+    SourceParagraphRef, SourceStory, SourceStoryKind, SpliceAnchor, SplicedPart,
 };
 pub use op::{Loc, LocRange, OpError, OpResult, Receipt, SplitReceipt};
 pub use ops::paragraph::{
@@ -130,6 +139,7 @@ pub use ops::paragraph::{
 pub use ops::resolve::ChangeTarget;
 pub use ops::table::{CellLoc, TableLocator, TableRange, TableReceipt};
 pub use ops::text::RichRun;
+pub use peer_bootstrap::{PeerBootstrap, PeerBootstrapSource, PeerMetadataError};
 pub use queries::{
     ChangeInfo, ChangeKind, CommentInfo, FindMatch, FindOptions, LayoutBridge, NavDirection,
     NavUnit, PageContent, PageParagraph, SelectionInfo, TextView,
@@ -137,8 +147,11 @@ pub use queries::{
 pub use raw::RawOp;
 pub use read_state::{RevisionInfo, SelectionContextInfo, TriState};
 pub use search::{TextSearchError, TextSearchMatch};
-pub use seed::{seed_docx_preview, seed_from_docx, seed_from_docx_with_generation};
-use segments::SegmentIndex;
+pub use seed::{
+    OPAQUE_SEED_BUDGET_BYTES, is_opaque_seed_budget_error, opaque_seed_budget_exceeded,
+    seed_docx_preview, seed_from_docx, seed_from_docx_with_generation,
+};
+use segments::{ParagraphIndex, SegmentIndex, build_indexes};
 pub use target::{
     AtomKind, EditTextView, FindTextRequest, FindTextResponse, ParagraphTarget, ParagraphText,
     ReadParagraphsRequest, ReadParagraphsResponse, SearchScope, TextAtom, TextMatch, TextPosition,
@@ -503,6 +516,13 @@ impl<T> EpochCache<T> {
         self.entries.get(story_id).cloned()
     }
 
+    fn take(&mut self, story_id: &str, epoch: u64) -> Option<Arc<T>> {
+        if self.epoch != epoch {
+            return None;
+        }
+        self.entries.remove(story_id)
+    }
+
     fn insert(&mut self, story_id: &str, epoch: u64, value: Arc<T>) {
         if epoch < self.epoch {
             return;
@@ -521,11 +541,19 @@ pub(crate) enum UpdateOrigin {
     Host,
 }
 
+struct SourceNoteSeparators {
+    source: Arc<seed::SourceMetadata>,
+    state: Result<Option<Arc<[u8]>>, String>,
+}
+
 /// A single yrs replica of the DOCX editing model.
 pub struct EditingDoc {
     doc: Doc,
     client_id: u64,
     id_counter: AtomicU64,
+    direct_batches: AtomicBool,
+    direct_batches_applied: AtomicU64,
+    host_edit_depth: Arc<AtomicU32>,
     /// Bumped once per committed update (local ops, remote merges, undo/redo); segment
     /// indexes and chunk snapshots older than the current value are rebuilt on next lookup.
     epoch: Arc<AtomicU64>,
@@ -535,6 +563,7 @@ pub struct EditingDoc {
     version_nonce: AtomicU64,
     metadata: Mutex<Option<Arc<seed::SourceMetadata>>>,
     segment_indexes: Mutex<EpochCache<SegmentIndex>>,
+    paragraph_indexes: Mutex<EpochCache<ParagraphIndex>>,
     chunk_snapshots: Mutex<EpochCache<Vec<ops::Chunk>>>,
     shared_read_depth: AtomicU32,
     /// Story projections held only inside a shared-read scope.
@@ -542,6 +571,8 @@ pub struct EditingDoc {
     source: Mutex<Option<identity::SourcePackage>>,
     media: Mutex<Option<Arc<docx_parse::media::MediaTable>>>,
     media_sources: Mutex<media::MediaSources>,
+    source_note_separators: Mutex<Option<SourceNoteSeparators>>,
+    loaded_note_separator_state: Mutex<Option<Arc<[u8]>>>,
     seen: identity::SeenCell,
     scan_cache: identity::ScanCache,
     story_revisions: Arc<Mutex<StoryRevisions>>,
@@ -584,17 +615,23 @@ impl EditingDoc {
             doc,
             client_id,
             id_counter: AtomicU64::new(0),
+            direct_batches: AtomicBool::new(false),
+            direct_batches_applied: AtomicU64::new(0),
+            host_edit_depth: Arc::new(AtomicU32::new(0)),
             epoch,
             instance: DOC_INSTANCES.fetch_add(1, Ordering::Relaxed),
             version_nonce: AtomicU64::new(batch::mint_nonce(client_id, 0)),
             metadata: Mutex::new(None),
             segment_indexes: Mutex::default(),
+            paragraph_indexes: Mutex::default(),
             chunk_snapshots: Mutex::default(),
             shared_read_depth: AtomicU32::new(0),
             story_views: Mutex::default(),
             source: Mutex::new(None),
             media: Mutex::new(None),
             media_sources: Mutex::default(),
+            source_note_separators: Mutex::default(),
+            loaded_note_separator_state: Mutex::default(),
             seen,
             scan_cache: identity::ScanCache::default(),
             story_revisions,
@@ -602,6 +639,16 @@ impl EditingDoc {
             _story_revision_sub: story_revision_sub,
             _seen_subs: seen_subs,
         }
+    }
+
+    #[doc(hidden)]
+    pub fn set_direct_batches(&self, on: bool) {
+        self.direct_batches.store(on, Ordering::Relaxed);
+    }
+
+    #[doc(hidden)]
+    pub fn direct_batches_applied(&self) -> u64 {
+        self.direct_batches_applied.load(Ordering::Relaxed)
     }
 
     /// The optimistic-concurrency token of this replica's committed state.
@@ -636,23 +683,145 @@ impl EditingDoc {
         self.metadata.lock().unwrap().clone()
     }
 
+    #[cfg(feature = "wasm")]
+    pub(crate) fn rebase_comment_writes(&self, mut written: HashSet<(String, Option<String>)>) {
+        let Some(source) = self.source_metadata() else {
+            return;
+        };
+        let read = source.read();
+        let txn = self.doc.transact();
+        if let Some(comments) = txn.get_map(COMMENTS) {
+            for source_comment in &read.comments {
+                let Some(comment) = comments
+                    .get(&txn, &source_comment.id)
+                    .and_then(|value| value.cast::<MapRef>().ok())
+                else {
+                    continue;
+                };
+                for (key, placeholder) in [
+                    ("author", Any::String("".into())),
+                    ("date", Any::String("".into())),
+                    ("parentId", Any::Null),
+                    ("body", Any::Null),
+                    ("done", Any::Bool(false)),
+                ] {
+                    let authored = match comment.get(&txn, key) {
+                        Some(Out::Any(value)) => value != placeholder,
+                        _ => true,
+                    };
+                    if authored {
+                        written.insert((source_comment.id.clone(), Some(key.to_owned())));
+                    }
+                }
+            }
+        }
+        read.comment_writes.replace(written);
+    }
+
+    #[doc(hidden)]
+    pub fn committed_epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Relaxed)
+    }
+
     /// Cached segment geometry for `story_id`, rebuilt when the doc changes.
+    #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
     pub(crate) fn segment_index(&self, story_id: &str) -> EditResult<Arc<SegmentIndex>> {
-        // Sampling before the read txn lets a racing commit tag the fresh index
-        // stale rather than serve a pre-commit snapshot as current.
-        let epoch = self.epoch.load(Ordering::Relaxed);
+        let epoch = self.committed_epoch();
         if let Some(index) = self.segment_indexes.lock().unwrap().get(story_id, epoch) {
             return Ok(index);
         }
+        self.build_story_indexes(story_id)
+            .map(|(segments, _)| segments)
+    }
+
+    pub(crate) fn paragraph_index(&self, story_id: &str) -> EditResult<Arc<ParagraphIndex>> {
+        let epoch = self.committed_epoch();
+        if let Some(index) = self.paragraph_indexes.lock().unwrap().get(story_id, epoch) {
+            return Ok(index);
+        }
+        self.build_story_indexes(story_id)
+            .map(|(_, paragraphs)| paragraphs)
+    }
+
+    fn build_story_indexes(
+        &self,
+        story_id: &str,
+    ) -> EditResult<(Arc<SegmentIndex>, Arc<ParagraphIndex>)> {
         let txn = self.doc.transact();
+        // Commits bump the epoch while they hold the store's write lock, so this read txn pins it
+        // to the snapshot being indexed.
+        let epoch = self.committed_epoch();
         let story = story_ref(&txn, story_id)?;
-        let index = Arc::new(SegmentIndex::build(&story, &txn));
+        let (segments, paragraphs) = build_indexes(&story, &txn);
         drop(txn);
+        let segments = Arc::new(segments);
+        let paragraphs = Arc::new(paragraphs);
         self.segment_indexes
             .lock()
             .unwrap()
-            .insert(story_id, epoch, Arc::clone(&index));
-        Ok(index)
+            .insert(story_id, epoch, Arc::clone(&segments));
+        self.paragraph_indexes
+            .lock()
+            .unwrap()
+            .insert(story_id, epoch, Arc::clone(&paragraphs));
+        Ok((segments, paragraphs))
+    }
+
+    pub(crate) fn advance_indexes_after_text_insert(
+        &self,
+        story_id: &str,
+        before: u64,
+        after: u64,
+        index: u32,
+        text: &str,
+    ) {
+        if before.checked_add(1) != Some(after) {
+            return;
+        }
+        {
+            let mut indexes = self.paragraph_indexes.lock().unwrap();
+            if let Some(mut paragraphs) = indexes.take(story_id, before) {
+                if Arc::make_mut(&mut paragraphs)
+                    .shift_for_text_insert(index, text.encode_utf16().count() as u32)
+                {
+                    indexes.insert(story_id, after, paragraphs);
+                }
+            }
+        }
+        let mut indexes = self.segment_indexes.lock().unwrap();
+        if let Some(mut segments) = indexes.take(story_id, before) {
+            if Arc::make_mut(&mut segments).shift_for_text_insert(index, text) {
+                indexes.insert(story_id, after, segments);
+            }
+        }
+    }
+
+    /// Advances cached story indexes after a single plain text deletion.
+    pub(crate) fn advance_indexes_after_text_delete(
+        &self,
+        story_id: &str,
+        before: u64,
+        after: u64,
+        start: u32,
+        end: u32,
+    ) {
+        if before.checked_add(1) != Some(after) {
+            return;
+        }
+        {
+            let mut indexes = self.paragraph_indexes.lock().unwrap();
+            if let Some(mut paragraphs) = indexes.take(story_id, before) {
+                if Arc::make_mut(&mut paragraphs).shift_for_text_delete(start, end) {
+                    indexes.insert(story_id, after, paragraphs);
+                }
+            }
+        }
+        let mut indexes = self.segment_indexes.lock().unwrap();
+        if let Some(mut segments) = indexes.take(story_id, before) {
+            if Arc::make_mut(&mut segments).shift_for_text_delete(start, end) {
+                indexes.insert(story_id, after, segments);
+            }
+        }
     }
 
     /// Shared `ops::snapshot` for `story_id`, rebuilt per committed epoch.
@@ -732,16 +901,97 @@ impl EditingDoc {
         }
     }
 
+    /// The separator notes as a yrs v1 update for replicas without the source.
+    #[doc(hidden)]
+    pub fn note_separator_state(&self) -> Result<Option<Arc<[u8]>>, String> {
+        let Some(source) = self.source_metadata() else {
+            return Ok(self.loaded_note_separator_state.lock().unwrap().clone());
+        };
+        let mut cache = self.source_note_separators.lock().unwrap();
+        if cache
+            .as_ref()
+            .is_none_or(|cached| !Arc::ptr_eq(&cached.source, &source))
+        {
+            let state = Self::derive_note_separator_state(&source);
+            *cache = Some(SourceNoteSeparators { source, state });
+        }
+        cache.as_ref().unwrap().state.clone()
+    }
+
+    fn derive_note_separator_state(
+        source: &seed::SourceMetadata,
+    ) -> Result<Option<Arc<[u8]>>, String> {
+        fn replace_marks(value: &mut serde_json::Value) {
+            if matches!(
+                value.get("type").and_then(serde_json::Value::as_str),
+                Some("separator" | "continuationSeparator")
+            ) {
+                *value = serde_json::json!({"type": "text", "text": "\u{200b}"});
+            } else {
+                match value {
+                    serde_json::Value::Array(values) => values.iter_mut().for_each(replace_marks),
+                    serde_json::Value::Object(values) => {
+                        values.values_mut().for_each(replace_marks)
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let mut stories = Vec::new();
+        for kind in ["footnote", "endnote"] {
+            if let Some(paragraphs) = source.read().note_separator_paragraphs.get(kind)
+                && !paragraphs.is_empty()
+            {
+                let mut paragraphs = paragraphs.clone();
+                paragraphs.iter_mut().for_each(replace_marks);
+                stories.push((kind.to_owned(), paragraphs));
+            }
+        }
+        if stories.is_empty() {
+            return Ok(None);
+        }
+        let scratch = EditingDoc::new(0);
+        seed::seed_blocks(
+            &scratch,
+            Some(source),
+            &stories
+                .iter()
+                .map(|(kind, paragraphs)| (kind.clone(), paragraphs.as_slice()))
+                .collect::<Vec<_>>(),
+        )?;
+        Ok(Some(scratch.encode_state_as_update_v1().into()))
+    }
+
+    #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
+    pub(crate) fn has_note_separator_state(&self, state: &[u8]) -> bool {
+        self.loaded_note_separator_state
+            .lock()
+            .unwrap()
+            .as_deref()
+            .unwrap_or_default()
+            == state
+    }
+
+    /// Replaces loaded separator notes, preserving their Arc when the bytes match.
+    #[doc(hidden)]
+    pub fn set_note_separator_state(&self, state: Option<Arc<[u8]>>) {
+        let state = state.filter(|state| !state.is_empty());
+        let mut current = self.loaded_note_separator_state.lock().unwrap();
+        if current.as_deref() != state.as_deref() {
+            *current = state;
+        }
+    }
+
     /// The media behind the `media:{n}` image sources of the stories seeded
     /// from the retained package, read from that package on first use.
     pub fn media_table(&self) -> Option<Arc<docx_parse::media::MediaTable>> {
         let mut media = self.media.lock().unwrap();
         if media.is_none() {
             let bytes = match self.source.lock().unwrap().as_ref()? {
-                identity::SourcePackage::Pending(bytes, _) => Arc::clone(bytes),
+                identity::SourcePackage::Pending(bytes, _) => bytes.clone(),
                 identity::SourcePackage::Ready(index) => index.bytes(),
             };
-            let package = ooxml_opc::RetainedPackage::new(bytes).ok()?;
+            let package = ooxml_opc::RetainedPackage::from_bytes(bytes).ok()?;
             *media = Some(Arc::new(docx_parse::media::MediaTable::new(package).ok()?));
         }
         media.clone()
@@ -751,6 +1001,7 @@ impl EditingDoc {
     /// a replica hydrated from state resolves source and persisted anchors and
     /// reserves the package's paragraph IDs. Indexed on first identity use.
     pub fn retain_source_docx(&self, bytes: impl Into<Arc<[u8]>>) {
+        let bytes: Arc<[u8]> = bytes.into();
         self.retain_source(identity::SourcePackage::Pending(bytes.into(), None));
     }
 
@@ -781,7 +1032,7 @@ impl EditingDoc {
         let index = match source.as_ref()? {
             identity::SourcePackage::Ready(index) => return Some(Arc::clone(index)),
             identity::SourcePackage::Pending(bytes, digest) => {
-                seed::source_index(Arc::clone(bytes), digest.clone())
+                seed::source_index(bytes.clone(), digest.clone())
                     .ok()
                     .map(Arc::new)
             }
@@ -987,13 +1238,14 @@ impl EditingDoc {
             let len = range.len()?;
             let story = story_ref(&txn, &range.story)?;
             check_range(&story, &txn, range.start, len)?;
+            let (from, to) = crate::ops::code_point_range(&story, &txn, range.start, range.end);
             let start = story
-                .sticky_index(&txn, range.start, Assoc::After)
+                .sticky_index(&txn, from, Assoc::After)
                 .ok_or_else(|| {
                     EditError::InvalidComment("start anchor could not be made".into())
                 })?;
             let end = story
-                .sticky_index(&txn, range.end, Assoc::Before)
+                .sticky_index(&txn, to, Assoc::Before)
                 .ok_or_else(|| EditError::InvalidComment("end anchor could not be made".into()))?;
             anchors.push(anchor_value(&range.story, &start, &end));
         }
@@ -1033,13 +1285,14 @@ impl EditingDoc {
             }
             let story = story_ref(&txn, &range.story)?;
             check_range(&story, &txn, range.start, len)?;
+            let (from, to) = crate::ops::code_point_range(&story, &txn, range.start, range.end);
             let start = story
-                .sticky_index(&txn, range.start, Assoc::After)
+                .sticky_index(&txn, from, Assoc::After)
                 .ok_or_else(|| {
                     EditError::InvalidComment("start anchor could not be made".into())
                 })?;
             let end = story
-                .sticky_index(&txn, range.end, Assoc::Before)
+                .sticky_index(&txn, to, Assoc::Before)
                 .ok_or_else(|| EditError::InvalidComment("end anchor could not be made".into()))?;
             anchors.push(anchor_value(&range.story, &start, &end));
         }
@@ -1194,6 +1447,8 @@ impl EditingDoc {
 
     /// Applies an update, then repairs any paragraph identities it duplicated.
     pub(crate) fn integrate_update(&self, update: Update, origin: UpdateOrigin) -> EditResult<()> {
+        let _host_edit = matches!(origin, UpdateOrigin::Host)
+            .then(|| batch::HostEditGuard::new(&self.host_edit_depth));
         let watch = identity::IdentityWatch::new(self);
         let reanchored = comment_references::CommentWatch::new(self);
         let result = match origin {
@@ -1519,6 +1774,18 @@ mod tests {
             "a value built before a commit is not kept"
         );
         assert_eq!(cache.entries.len(), 1);
+    }
+
+    #[test]
+    fn epoch_cache_takes_only_the_current_epoch() {
+        let mut cache = EpochCache::default();
+        cache.insert("body", 1, Arc::new(1));
+        assert_eq!(cache.take("body", 0), None);
+        assert_eq!(cache.take("body", 2), None);
+        assert_eq!(cache.get("body", 1).as_deref(), Some(&1));
+        assert_eq!(cache.take("body", 1).as_deref(), Some(&1));
+        assert_eq!(cache.get("body", 1), None);
+        assert_eq!(cache.take("body", 1), None);
     }
 
     #[test]

@@ -1136,7 +1136,7 @@ impl EditingDoc {
     pub fn insert_table(
         &self,
         ctx: &EditCtx,
-        at: Position,
+        mut at: Position,
         rows: u32,
         columns: u32,
     ) -> OpResult<TableReceipt> {
@@ -1147,6 +1147,7 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &at.story)?;
         check_position(&story, &txn, at.index)?;
+        at.index = crate::ops::code_point_range(&story, &txn, at.index, at.index).0;
 
         let mut ordinal = 0u32;
         let mut offset = 0u32;
