@@ -801,6 +801,31 @@ fn draws(src: &str, seed: Option<u64>, count: usize) -> Vec<f64> {
         .collect()
 }
 
+#[test]
+fn randbetween_draws_use_the_shared_random_stream() {
+    let values = draws("RANDBETWEEN(1,1000000)", Some(42), 8);
+    assert!(
+        values
+            .iter()
+            .all(|value| (1.0..=1_000_000.0).contains(value))
+    );
+    assert!(values.iter().all(|value| value.fract() == 0.0));
+    assert!(values.windows(2).all(|pair| pair[0] != pair[1]));
+    assert_eq!(values, draws("RANDBETWEEN(1,1000000)", Some(42), 8));
+    assert_ne!(values, draws("RANDBETWEEN(1,1000000)", Some(43), 8));
+    let wb = fixture();
+    let mut ctx = EvalContext::new(&wb, SheetId(0));
+    ctx.rand_seed = Some(42);
+    assert_eq!(
+        evaluate(&parse_formula("RANDBETWEEN(1)").unwrap(), &ctx),
+        e(ErrorValue::Value)
+    );
+    check(&[
+        ("RANDBETWEEN(1)", e(ErrorValue::Value)),
+        ("RANDBETWEEN(1,1000000,1)", e(ErrorValue::Value)),
+    ]);
+}
+
 /// the rounding and error rules here were measured against Excel for Mac over
 /// 400 draws per case: `bottom > top` errors before any rounding, the draw
 /// spans `ceil(bottom)..=floor(top)`, and an empty span yields `ceil(bottom)`.

@@ -305,8 +305,13 @@ fn parse_run_contents(element: &XmlElement) -> Vec<RunContent> {
                     .unwrap_or_default()
                     .to_owned(),
             }),
-            "footnoteReference" => output.push(parse_note_reference(child, false)),
-            "endnoteReference" => output.push(parse_note_reference(child, true)),
+            "footnoteReference" | "endnoteReference" => {
+                if let Some(reference) =
+                    parse_note_reference(child, child.local_name() == "endnoteReference")
+                {
+                    output.push(reference);
+                }
+            }
             "fldChar" => output.push(parse_field_char(child)),
             "instrText" => output.push(RunContent::InstrText {
                 text: text_node_content(child),
@@ -352,15 +357,13 @@ fn parse_break(element: &XmlElement) -> RunContent {
     RunContent::Break { break_type, clear }
 }
 
-fn parse_note_reference(element: &XmlElement, endnote: bool) -> RunContent {
-    let id = element
-        .parse_numeric_attribute(Some("w"), "id", 1.0)
-        .unwrap_or(0.0);
+fn parse_note_reference(element: &XmlElement, endnote: bool) -> Option<RunContent> {
+    let id = element.parse_numeric_attribute(Some("w"), "id", 1.0)?;
     let custom_mark_follows = element
         .attribute(Some("w"), "customMarkFollows")
         .filter(|raw| !matches_ci(raw, &["0", "false", "off"]))
         .map(|_| true);
-    if endnote {
+    Some(if endnote {
         RunContent::EndnoteRef {
             id,
             custom_mark_follows,
@@ -370,7 +373,7 @@ fn parse_note_reference(element: &XmlElement, endnote: bool) -> RunContent {
             id,
             custom_mark_follows,
         }
-    }
+    })
 }
 
 fn parse_field_char(element: &XmlElement) -> RunContent {
@@ -894,7 +897,11 @@ pub(crate) fn raw_foreign_node(
 
 /// Whether `element` is foreign markup the model keeps as raw XML, read from its name alone.
 pub(crate) fn is_foreign(element: &crate::xml::XmlElement) -> bool {
-    let prefix = match element.name.split_once(':') {
+    is_foreign_name(&element.name)
+}
+
+pub(crate) fn is_foreign_name(name: &str) -> bool {
+    let prefix = match name.split_once(':') {
         Some((prefix, _)) => prefix,
         None => "",
     };
@@ -924,9 +931,38 @@ pub enum InlineNode {
     InlineSdt(Box<InlineSdt>),
     Math(MathEquation),
     RawXml(Box<RawInlineXml>),
+    Tracked(Box<crate::paragraph::TrackedInline>),
 }
 
 impl InlineNode {
+    pub(crate) fn has_tracked_control(&self, control: bool, revision: bool) -> bool {
+        let (children, control, revision) = match self {
+            Self::InlineSdt(sdt) => (&sdt.content, true, revision),
+            Self::Tracked(change) => (&change.content, control, true),
+            Self::Hyperlink(link) => (
+                link.structured_children.as_ref().unwrap_or(&link.children),
+                control,
+                revision,
+            ),
+            Self::ComplexField(field) => {
+                return field
+                    .structured_result
+                    .as_ref()
+                    .and_then(|result| result.inline.as_ref())
+                    .is_some_and(|children| {
+                        children
+                            .iter()
+                            .any(|child| child.has_tracked_control(control, revision))
+                    });
+            }
+            _ => return false,
+        };
+        control && revision
+            || children
+                .iter()
+                .any(|child| child.has_tracked_control(control, revision))
+    }
+
     pub fn node_type(&self) -> &'static str {
         match self {
             Self::Run(_) => "run",
@@ -938,6 +974,13 @@ impl InlineNode {
             Self::InlineSdt(_) => "inlineSdt",
             Self::Math(_) => "mathEquation",
             Self::RawXml(_) => "rawXml",
+            Self::Tracked(change) => match change.node_type.as_str() {
+                "insertion" => "insertion",
+                "deletion" => "deletion",
+                "moveFrom" => "moveFrom",
+                "moveTo" => "moveTo",
+                _ => "tracked",
+            },
         }
     }
 }
@@ -1137,6 +1180,12 @@ pub struct ContentPosition {
     pub offset: Option<f64>,
 }
 
+pub(crate) fn has_bookmark_id(element: &XmlElement) -> bool {
+    element
+        .parse_numeric_attribute(Some("w"), "id", 1.0)
+        .is_some()
+}
+
 pub fn parse_bookmark_start(element: &XmlElement) -> BookmarkStart {
     BookmarkStart {
         node_type: BookmarkStartType::BookmarkStart,
@@ -1234,6 +1283,29 @@ pub fn parse_hyperlink(
     part: &str,
     budget: &ParseBudget<'_>,
 ) -> Result<Hyperlink, ParseError> {
+    parse_hyperlink_at_depth(
+        element,
+        relationships,
+        theme,
+        styles,
+        doc_defaults,
+        part,
+        budget,
+        0,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_hyperlink_at_depth(
+    element: &XmlElement,
+    relationships: Option<&RelationshipMap>,
+    theme: Option<&Theme>,
+    styles: Option<&StyleMap>,
+    doc_defaults: Option<&DocDefaults>,
+    part: &str,
+    budget: &ParseBudget<'_>,
+    depth: usize,
+) -> Result<Hyperlink, ParseError> {
     let relationship_id = element.attribute(Some("r"), "id").map(str::to_owned);
     let mut href = relationship_id
         .as_deref()
@@ -1273,11 +1345,17 @@ pub fn parse_hyperlink(
                 structured.push(InlineNode::Run(run));
             }
             "bookmarkStart" => {
+                if !has_bookmark_id(child) {
+                    continue;
+                }
                 let bookmark = parse_bookmark_start(child);
                 children.push(InlineNode::BookmarkStart(bookmark.clone()));
                 structured.push(InlineNode::BookmarkStart(bookmark));
             }
             "bookmarkEnd" => {
+                if !has_bookmark_id(child) {
+                    continue;
+                }
                 let bookmark = parse_bookmark_end(child);
                 children.push(InlineNode::BookmarkEnd(bookmark.clone()));
                 structured.push(InlineNode::BookmarkEnd(bookmark));
@@ -1298,6 +1376,7 @@ pub fn parse_hyperlink(
                 doc_defaults,
                 part,
                 budget,
+                depth + 1,
             )?))),
             "oMath" | "oMathPara" => structured.push(InlineNode::Math(parse_hyperlink_math(child))),
             _ => {}
@@ -1804,6 +1883,27 @@ pub enum InlineSdtType {
     InlineSdt,
 }
 
+pub(crate) fn xml_has_tracked_control(element: &XmlElement, control: bool, revision: bool) -> bool {
+    let mut pending = vec![(element, control, revision)];
+    while let Some((element, control, revision)) = pending.pop() {
+        let control = control || element.local_name() == "sdt";
+        let revision =
+            revision || matches!(element.local_name(), "ins" | "del" | "moveFrom" | "moveTo");
+        if control && revision {
+            return true;
+        }
+        if element.local_name() != "r" {
+            pending.extend(
+                element
+                    .child_elements()
+                    .map(|child| (child, control, revision)),
+            );
+        }
+    }
+    false
+}
+
+#[allow(clippy::too_many_arguments)]
 fn parse_hyperlink_inline_sdt(
     element: &XmlElement,
     relationships: Option<&RelationshipMap>,
@@ -1812,6 +1912,7 @@ fn parse_hyperlink_inline_sdt(
     doc_defaults: Option<&DocDefaults>,
     part: &str,
     budget: &ParseBudget<'_>,
+    depth: usize,
 ) -> Result<InlineSdt, ParseError> {
     // SDT run properties omit the theme.
     let properties = parse_sdt_properties(
@@ -1821,27 +1922,35 @@ fn parse_hyperlink_inline_sdt(
     );
     let mut content = Vec::new();
     if let Some(container) = element.child("w", "sdtContent") {
-        for child in container.child_elements().take(MAX_HYPERLINK_CHILDREN) {
-            match child.local_name() {
-                "r" => content.push(InlineNode::Run(
-                    parse_run(child, theme, styles, doc_defaults).run,
-                )),
-                "fldSimple" => content.push(InlineNode::SimpleField(Box::new(parse_simple_field(
-                    child,
-                    theme,
-                    styles,
-                    doc_defaults,
-                    part,
-                    budget,
-                )?))),
-                "oMath" | "oMathPara" => {
-                    content.push(InlineNode::Math(parse_hyperlink_math(child)))
+        if xml_has_tracked_control(element, false, false) {
+            content = parse_inline_container_at_depth(
+                container,
+                relationships,
+                theme,
+                styles,
+                doc_defaults,
+                part,
+                budget,
+                depth + 1,
+                true,
+            )?;
+        } else {
+            for child in container.child_elements().take(MAX_HYPERLINK_CHILDREN) {
+                match child.local_name() {
+                    "r" => content.push(InlineNode::Run(
+                        parse_run(child, theme, styles, doc_defaults).run,
+                    )),
+                    "fldSimple" => content.push(InlineNode::SimpleField(Box::new(
+                        parse_simple_field(child, theme, styles, doc_defaults, part, budget)?,
+                    ))),
+                    "oMath" | "oMathPara" => {
+                        content.push(InlineNode::Math(parse_hyperlink_math(child)))
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
         }
     }
-    let _ = relationships;
     Ok(InlineSdt {
         node_type: InlineSdtType::InlineSdt,
         properties,
@@ -1977,6 +2086,31 @@ pub fn parse_inline_container(
     budget: &ParseBudget<'_>,
     depth: usize,
 ) -> Result<Vec<InlineNode>, ParseError> {
+    parse_inline_container_at_depth(
+        element,
+        relationships,
+        theme,
+        styles,
+        doc_defaults,
+        part,
+        budget,
+        depth,
+        element.local_name() == "sdtContent",
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_inline_container_at_depth(
+    element: &XmlElement,
+    relationships: Option<&RelationshipMap>,
+    theme: Option<&Theme>,
+    styles: Option<&StyleMap>,
+    doc_defaults: Option<&DocDefaults>,
+    part: &str,
+    budget: &ParseBudget<'_>,
+    depth: usize,
+    in_control: bool,
+) -> Result<Vec<InlineNode>, ParseError> {
     budget.check_nesting_depth(depth, part)?;
     let mut output = Vec::new();
     let mut fields: Vec<OpenComplexField> = Vec::new();
@@ -2034,7 +2168,7 @@ pub fn parse_inline_container(
                 }
             }
             "hyperlink" => {
-                let hyperlink = parse_hyperlink(
+                let hyperlink = parse_hyperlink_at_depth(
                     child,
                     relationships,
                     theme,
@@ -2042,6 +2176,7 @@ pub fn parse_inline_container(
                     doc_defaults,
                     part,
                     budget,
+                    depth + 1,
                 )?;
                 if let Some(active) = fields.last_mut() {
                     let runs: Vec<Run> = hyperlink
@@ -2058,6 +2193,9 @@ pub fn parse_inline_container(
                 }
             }
             "bookmarkStart" => {
+                if !has_bookmark_id(child) {
+                    continue;
+                }
                 let node = InlineNode::BookmarkStart(parse_bookmark_start(child));
                 match fields.last_mut() {
                     Some(active) => active.absorb(node, Vec::new()),
@@ -2065,6 +2203,9 @@ pub fn parse_inline_container(
                 }
             }
             "bookmarkEnd" => {
+                if !has_bookmark_id(child) {
+                    continue;
+                }
                 let node = InlineNode::BookmarkEnd(parse_bookmark_end(child));
                 match fields.last_mut() {
                     Some(active) => active.absorb(node, Vec::new()),
@@ -2112,6 +2253,7 @@ pub fn parse_inline_container(
                                     | InlineNode::ComplexField(_)
                                     | InlineNode::InlineSdt(_)
                                     | InlineNode::Math(_)
+                                    | InlineNode::Tracked(_)
                             )
                         })
                         .collect();
@@ -2125,6 +2267,41 @@ pub fn parse_inline_container(
                         content: allowed,
                     })));
                 }
+            }
+            "ins" | "del" | "moveFrom" | "moveTo"
+                if in_control || xml_has_tracked_control(child, false, false) =>
+            {
+                let normalized;
+                let element = if matches!(child.local_name(), "del" | "moveFrom") {
+                    normalized = crate::paragraph::normalize_deletion_element(child);
+                    &normalized
+                } else {
+                    child
+                };
+                let content = parse_inline_container_at_depth(
+                    element,
+                    relationships,
+                    theme,
+                    styles,
+                    doc_defaults,
+                    part,
+                    budget,
+                    depth + 1,
+                    in_control,
+                )?;
+                let node_type = match child.local_name() {
+                    "ins" => "insertion",
+                    "del" => "deletion",
+                    "moveFrom" => "moveFrom",
+                    _ => "moveTo",
+                };
+                output.push(InlineNode::Tracked(Box::new(
+                    crate::paragraph::TrackedInline {
+                        node_type: node_type.to_owned(),
+                        info: crate::paragraph::parse_tracked_change_info(child),
+                        content,
+                    },
+                )));
             }
             "oMath" | "oMathPara" => output.push(InlineNode::Math(parse_paragraph_math(child))),
             _ => {}
@@ -2178,6 +2355,7 @@ fn parse_rich_simple_field(
                 | InlineNode::ComplexField(_)
                 | InlineNode::InlineSdt(_)
                 | InlineNode::Math(_)
+                | InlineNode::Tracked(_)
         )
     })
     .collect();
@@ -2299,6 +2477,7 @@ fn inline_content_length(node: &InlineNode) -> usize {
             .map(|node| inline_content_length(&node))
             .sum(),
         InlineNode::InlineSdt(sdt) => sdt.content.iter().map(inline_content_length).sum(),
+        InlineNode::Tracked(change) => change.content.iter().map(inline_content_length).sum(),
         InlineNode::Math(math) => math
             .plain_text
             .as_deref()
@@ -2326,6 +2505,92 @@ mod tests {
         .root()
         .unwrap()
         .clone()
+    }
+
+    #[test]
+    fn keeps_note_reference_zero_and_drops_references_without_an_id() {
+        let run = parse_run(
+            &root(
+                r#"<w:r xmlns:w="w"><w:footnoteReference/><w:footnoteReference w:id="x"/><w:footnoteReference w:id="0" w:customMarkFollows="1"/><w:t>A</w:t><w:endnoteReference w:id="0"/><w:endnoteReference/><w:endnoteReference w:id="x"/></w:r>"#,
+            ),
+            None,
+            None,
+            None,
+        )
+        .run;
+        assert_eq!(
+            run.content,
+            [
+                RunContent::FootnoteRef {
+                    id: 0.0,
+                    custom_mark_follows: Some(true),
+                },
+                RunContent::Text {
+                    text: "A".to_owned(),
+                    preserve_space: None,
+                },
+                RunContent::EndnoteRef {
+                    id: 0.0,
+                    custom_mark_follows: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_bookmark_zero_and_drops_bookmarks_without_an_id() {
+        let content = r#"<w:bookmarkStart/><w:bookmarkStart w:id="x"/><w:bookmarkStart w:id="0" w:name="zero"/><w:r><w:t>A😀</w:t></w:r><w:bookmarkEnd w:id="0"/><w:bookmarkEnd/><w:bookmarkEnd w:id="x"/>"#;
+        let limits = ParseLimits::default();
+        let budget = ParseBudget::new(&limits);
+        let nodes = parse_inline_container(
+            &root(&format!(r#"<w:p xmlns:w="w">{content}</w:p>"#)),
+            None,
+            None,
+            None,
+            None,
+            "word/document.xml",
+            &budget,
+            0,
+        )
+        .unwrap();
+        assert_eq!(nodes.len(), 3);
+        let InlineNode::BookmarkStart(start) = &nodes[0] else {
+            panic!("bookmark start")
+        };
+        assert_eq!(start.id, 0.0);
+        assert_eq!(start.name, "zero");
+        assert_eq!(start.position.as_ref().unwrap().offset, Some(0.0));
+        let InlineNode::BookmarkEnd(end) = &nodes[2] else {
+            panic!("bookmark end")
+        };
+        assert_eq!(end.id, 0.0);
+        assert_eq!(end.position.as_ref().unwrap().offset, Some(3.0));
+
+        let hyperlink = parse_hyperlink(
+            &root(&format!(
+                r#"<w:hyperlink xmlns:w="w" w:anchor="zero">{content}</w:hyperlink>"#
+            )),
+            None,
+            None,
+            None,
+            None,
+            "word/document.xml",
+            &budget,
+        )
+        .unwrap();
+        assert_eq!(hyperlink.children.len(), 3);
+        assert_eq!(
+            hyperlink.structured_children.as_ref().unwrap(),
+            &hyperlink.children
+        );
+        let InlineNode::BookmarkStart(start) = &hyperlink.children[0] else {
+            panic!("bookmark start")
+        };
+        assert_eq!(start.id, 0.0);
+        let InlineNode::BookmarkEnd(end) = &hyperlink.children[2] else {
+            panic!("bookmark end")
+        };
+        assert_eq!(end.id, 0.0);
     }
 
     #[test]

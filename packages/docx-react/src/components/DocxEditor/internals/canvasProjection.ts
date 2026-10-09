@@ -9,11 +9,13 @@
  * `translateX`, and any zoom, so a projected point lands on the painted glyph /
  * image / cell edge in every case; `scaleX`/`scaleY` are 1 while the canvas
  * paints at logical px (CSS size == display-list page size) and stay correct if
- * a future zoom scales the canvas.
- *
+ * a future zoom scales the canvas. Client rects also carry a CSS `zoom` on the
+ * overlay target or its ancestors, which the target's own pixels do not, so
+ * projections divide it out.
  */
 
 import {
+  effectiveZoom,
   resolveDisplayPageClientRect,
   type DisplayPageClientRect,
   type DisplayListQueries,
@@ -24,11 +26,14 @@ export interface CanvasProjectedRect {
   top: number;
   width: number;
   height: number;
+  /** Overlay-target px per page-local px. */
   scaleX: number;
   scaleY: number;
+  /** Client px per overlay-target px: the CSS zoom the overlay target renders at. */
+  targetZoom: number;
 }
 
-/** page-local px per one overlay-target px on `pageIndex`, or null if unresolved. */
+/** Client px per page-local px on `pageIndex`, or null if unresolved. */
 export function canvasPageScale(
   host: HTMLElement,
   queries: DisplayListQueries,
@@ -60,13 +65,17 @@ export function projectPageLocalRect(
   const scale = canvasPageScale(host, queries, pageIndex);
   if (!scale) return null;
   const targetRect = overlayTarget.getBoundingClientRect();
-  const { canvasRect, scaleX, scaleY } = scale;
+  const targetZoom = effectiveZoom(overlayTarget);
+  const { canvasRect } = scale;
+  const scaleX = scale.scaleX / targetZoom;
+  const scaleY = scale.scaleY / targetZoom;
   return {
-    left: canvasRect.left - targetRect.left + x * scaleX,
-    top: canvasRect.top - targetRect.top + y * scaleY,
+    left: (canvasRect.left - targetRect.left) / targetZoom + x * scaleX,
+    top: (canvasRect.top - targetRect.top) / targetZoom + y * scaleY,
     width: w * scaleX,
     height: h * scaleY,
     scaleX,
     scaleY,
+    targetZoom,
   };
 }

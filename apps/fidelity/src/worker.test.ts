@@ -1,5 +1,8 @@
 import { expect, test } from 'bun:test';
 import worker, { type Env } from './worker';
+import * as entry from './worker';
+
+const HOST = 'benchmarks.betteroffice.dev';
 
 const sha = 'a'.repeat(40);
 const page = `renders/${sha}/alpha/page_0001.png`;
@@ -19,8 +22,8 @@ function environment(store: Record<string, unknown> = { [page]: object('png') })
   } as unknown as Env;
 }
 
-const get = (path: string, env = environment(), init?: RequestInit) =>
-  worker.fetch(new Request(`https://fidelity.betteroffice.dev${path}`, init), env);
+const get = (path: string, env = environment(), init?: RequestInit, host = HOST) =>
+  worker.fetch(new Request(`https://${host}${path}`, init), env);
 
 test('a malformed escape is a client error, not a crash', async () => {
   const response = await get('/renders/%ZZ');
@@ -79,4 +82,39 @@ test('a conditional hit returns 304 and an unbound bucket reports unconfigured',
 
   const unbound = { ASSETS: { fetch: async () => new Response('asset') } } as unknown as Env;
   expect((await get(`/${page}`, unbound)).status).toBe(503);
+});
+
+test('the old host redirects permanently and keeps viewer links on the viewer', async () => {
+  const root = await get('/?report=/r.json', environment(), undefined, 'fidelity.betteroffice.dev');
+  expect(root.status).toBe(301);
+  expect(root.headers.get('location')).toBe(`https://${HOST}/compare?report=/r.json`);
+  const pointer = await get('/renders/latest.json', environment(), undefined, 'fidelity.betteroffice.dev');
+  expect(pointer.headers.get('location')).toBe(`https://${HOST}/renders/latest.json`);
+});
+
+test('the redirect never leaves the new host', async () => {
+  for (const path of ['//evil.example/x', '/\\evil.example/x', '//evil.example'])
+    expect(
+      new URL((await get(path, environment(), undefined, 'fidelity.betteroffice.dev')).headers.get('location')!).host
+    ).toBe(HOST);
+});
+
+test('end-to-end timings share the bucket guards', async () => {
+  const key = `e2e/${sha}/docx.json`;
+  const response = await get(`/${key}`, environment({ [key]: object('{}') }));
+  expect(response.status).toBe(200);
+  expect(response.headers.get('cache-control')).toBe('public, max-age=0, must-revalidate');
+  expect((await get('/e2e//docx.json')).status).toBe(404);
+  expect(await (await get('/e2enope')).text()).toBe('asset');
+});
+
+test('the entry module exports only its handler, which workerd requires', () => {
+  expect(Object.keys(entry)).toEqual(['default']);
+});
+
+test('the worker runs before assets, or the old host would serve pages instead of redirecting', async () => {
+  const config = JSON.parse(await Bun.file(new URL('../wrangler.jsonc', import.meta.url)).text());
+  const hosts = config.routes.map((route: { pattern: string }) => route.pattern);
+  expect(hosts).toEqual([HOST, 'fidelity.betteroffice.dev']);
+  expect(config.assets.run_worker_first).toBe(true);
 });

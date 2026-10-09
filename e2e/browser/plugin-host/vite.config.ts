@@ -10,11 +10,33 @@ const autoprefixer = fromReact('autoprefixer');
 /** Serves the plugin-host harnesses against the package sources. */
 export default defineConfig({
   root: import.meta.dirname,
+  plugins: [
+    {
+      name: 'main-document-load-probe',
+      enforce: 'pre',
+      transform(source, id) {
+        const file = id.split('?')[0];
+        if (file.endsWith('/DocxEditor/hooks/useYrsCoreSession.ts')) {
+          const creation = /const (\w+) = await yrs\.createYrsSession\([^;]+\);/g;
+          if (!creation.test(source)) {
+            this.error('Update the main-document session capture for useYrsCoreSession.ts');
+          }
+          return source.replace(creation, (statement, session) =>
+            `${statement} globalThis.__workerProposalTest?.captureSession(${session});`
+          );
+        }
+      },
+    },
+  ],
   resolve: {
     alias: [
       {
         find: /^@betteroffice\/docx-react$/,
         replacement: resolve(root, 'packages/docx-react/src/index.ts'),
+      },
+      {
+        find: /^@betteroffice\/docx-react\/styles\.css$/,
+        replacement: resolve(root, 'packages/docx-react/src/styles/editor.css'),
       },
       {
         find: /^@betteroffice\/docx-i18n$/,

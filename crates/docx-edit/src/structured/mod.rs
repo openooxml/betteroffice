@@ -482,8 +482,8 @@ pub struct MarkdownOptions {
 }
 
 /// Markdown rendered from structured content. Each `<!-- docx-export:N -->` marker precedes the
-/// block it names; `anchors` maps markers to source anchors. Markdown does not preserve Word
-/// pagination, typography or layout.
+/// block it names; `anchors` maps markers to source anchors. Markdown carries the text and block
+/// structure.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MarkdownContent {

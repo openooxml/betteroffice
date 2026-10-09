@@ -485,13 +485,13 @@ class Presentation:
         initials: str = "",
         created: str,
     ) -> CommentEdit:
-        """Reply to a thread. Modern comments only: legacy has no reply list."""
+        """Reply to a modern comment thread."""
         return self._inner.reply_to_comment(
             comment_id, text, author=author, initials=initials, created=created
         )
 
     def set_comment_status(self, comment_id: str, resolved: bool = True) -> CommentEdit:
-        """Mark a thread resolved. Modern comments only; legacy has no status."""
+        """Resolve or reopen a modern comment thread."""
         return self._inner.set_comment_status(comment_id, resolved)
 
     def remove_comment(self, comment_id: str) -> CommentEdit:
@@ -519,7 +519,7 @@ class Presentation:
         bold: bool = False,
         italic: bool = False,
     ) -> int:
-        """Register a face for layout. No face is embedded in the wheel."""
+        """Register a face for layout."""
         return self._inner.register_font(
             family, _as_bytes(data), bold=bold, italic=italic
         )

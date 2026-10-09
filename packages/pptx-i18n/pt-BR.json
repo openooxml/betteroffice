@@ -1,5 +1,13 @@
 {
   "_lang": "pt-BR",
+  "worker": {
+    "previousRecovery": null,
+    "preparing": "Preparando o editor. A edição estará disponível em breve.",
+    "failed": "A edição está indisponível. Baixe a apresentação recuperada.",
+    "disabled": "Este recurso está indisponível neste modo de edição.",
+    "recovery": null,
+    "image": null
+  },
   "toolbar": {
     "label": null,
     "save": "Salvar",

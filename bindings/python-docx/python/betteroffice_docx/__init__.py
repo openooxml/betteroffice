@@ -132,16 +132,12 @@ class Document:
 
     @property
     def paragraph_ids(self) -> "list[str | None]":
-        """Body paragraph IDs in document order.
-
-        A paragraph Word never stamped with a ``w14:paraId`` reads as ``None``
-        and cannot be addressed by ID.
-        """
+        """Body paragraph IDs in document order; missing IDs are ``None``."""
         return self._inner.paragraph_ids
 
     @property
     def warnings(self) -> "list[str]":
-        """What the parser could not represent. Parsing still succeeded."""
+        """Parser diagnostics."""
         return self._inner.warnings
 
     @property
@@ -221,8 +217,7 @@ class Document:
     ) -> "dict[str, Any]":
         """``export_structured`` rendered as Markdown with source anchors.
 
-        Returns ``{"markdown", "anchors", "diagnostics", "truncated"}``. Markdown
-        does not preserve Word layout.
+        Returns ``{"markdown", "anchors", "diagnostics", "truncated"}``.
         """
         return self._inner.export_markdown(
             revision_view=revision_view,
@@ -243,10 +238,8 @@ class Document:
 
         Each control carries its tag, alias, type, lock, placement, anchor and
         current ``value``. ``stories`` defaults to every category. Ids and
-        anchors address this snapshot. Filling controls needs an editing
-        session (JavaScript or React) and is not available here yet. Raises
-        ``ExportError`` for unusable limits or more controls than
-        ``max_controls``.
+        anchors address this snapshot. Raises ``ExportError`` for unusable
+        limits or more controls than ``max_controls``.
         """
         return self._inner.list_content_controls(
             stories=None if stories is None else list(stories),
@@ -279,8 +272,7 @@ class Document:
     def layout(self, input: "str | Mapping[str, Any]") -> Layout:
         """Paginate a ``{"measured": [...], "options": {...}}`` envelope.
 
-        The engine paginates blocks that were measured already; it does not
-        measure them, so the envelope carries the metrics.
+        The envelope supplies measured blocks and their metrics.
         """
         return self._inner.layout(input if isinstance(input, str) else dict(input))
 
@@ -292,7 +284,7 @@ class Document:
         bold: bool = False,
         italic: bool = False,
     ) -> int:
-        """Register a face for rasterization. No face is embedded in the wheel."""
+        """Register a face for rasterization."""
         return self._inner.register_font(family, _as_bytes(data), bold=bold, italic=italic)
 
     def register_image(

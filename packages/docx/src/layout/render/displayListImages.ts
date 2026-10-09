@@ -16,6 +16,7 @@
 
 import type { DisplayList, DisplayPage, ImagePrimitive } from './displayList';
 import type { DisplayListQueries } from './displayListQueries';
+import { clipPaintsPoint } from './displayListGeometry';
 import { pixelsToEmu } from '../../utils/units';
 
 export type DisplayListImageRegion = 'body' | 'header' | 'footer';
@@ -72,7 +73,7 @@ export function findImagePrimitiveByDocPos(
   return null;
 }
 
-/** Topmost positioned image under a page-local point, or null. */
+/** Topmost positioned image painted under a page-local point, or null. */
 export function findImagePrimitiveAtPoint(
   list: DisplayList,
   pageIndex: number,
@@ -89,6 +90,7 @@ export function findImagePrimitiveAtPoint(
     const primitive = images[index];
     if (x < primitive.x || x > primitive.x + primitive.w) continue;
     if (y < primitive.y || y > primitive.y + primitive.h) continue;
+    if (!clipPaintsPoint(primitive, x, y)) continue;
     return {
       primitive,
       pageIndex: page.pageIndex,

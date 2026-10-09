@@ -159,6 +159,8 @@ Pass `renderDocxPage` to enable PNG previews. The CLI configures it automaticall
 - The MCP server opens at most 10 files, each up to 64 MiB, and retains at most
   64 proposals per document. Closed proposal receipts may be evicted. Sessions
   and pending work are in memory; export before closing the client.
+- Stdio input is capped at 1 MiB; paths and IDs are capped at 4,096 and 128 characters.
+- Previews decode PNG, JPEG, GIF, WebP, BMP, and ICO images up to 16 MiB and 16 megapixels each, with a 64 megapixel page budget. Other images are skipped with warnings.
 
 ## What verification means
 

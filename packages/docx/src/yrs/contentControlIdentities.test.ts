@@ -3,6 +3,8 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
+import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
+import { unzipContainer } from '../docx/wasm';
 import { preloadEditWasm } from '../wasm/edit';
 import {
   createYrsSession,
@@ -62,6 +64,16 @@ function savedBody(bytes: Uint8Array): SavedBody {
   expect(result.stderr).toBe('');
   expect(result.status).toBe(0);
   return JSON.parse(result.stdout) as SavedBody;
+}
+
+/** The template with its multi-line plain-text address control turned into a rich-text one. */
+function richAddressTemplate(): Uint8Array {
+  const parts: PartsMap = new Map(Object.entries(unzipContainer(new Uint8Array(readFileSync(TEMPLATE)))));
+  const xml = new TextDecoder().decode(parts.get('word/document.xml'));
+  const rich = xml.replace('<w:text w:multiLine="1"/>', '<w:richText/>');
+  expect(rich).not.toBe(xml);
+  parts.set('word/document.xml', toBytes(rich));
+  return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
 function control(body: SavedBody, tag: string): SavedControl {
@@ -127,7 +139,7 @@ afterEach(() => {
 
 describe('content controls and paragraph identities', () => {
   it('keeps identities and controls through a batch with fills, a save, a reopen and an ooxmlId fill', async () => {
-    const template = new Uint8Array(readFileSync(TEMPLATE));
+    const template = richAddressTemplate();
     const source = savedBody(template);
     const opened = await open(template, 83001);
     const name = byTag(snapshot(opened.listContentControls()), 'customer.name');

@@ -1,0 +1,10 @@
+{
+  "source": "Word for Mac 16.113 PDF export: MARKER HEADING baseline in pt from the page top, and line count of the first body paragraph after the table",
+  "right-4660": {"markerBaseline": 221.8, "anchorLines": 9},
+  "right-4695": {"markerBaseline": 221.8, "anchorLines": 9},
+  "right-5500": {"markerBaseline": 247.1, "anchorLines": 11},
+  "left-5500": {"markerBaseline": 247.1, "anchorLines": 11},
+  "right-5500-empty-anchor": {"markerBaseline": 259.8, "anchorLines": 1},
+  "right-4820-margin": {"markerBaseline": 221.8, "anchorLines": 9},
+  "right-4820-no-anchor": {"markerBaseline": 221.8, "anchorLines": 9}
+}

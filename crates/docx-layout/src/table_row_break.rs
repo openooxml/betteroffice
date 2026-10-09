@@ -1,10 +1,17 @@
 //! Whole-line table row-break geometry.
 
+use std::cell::OnceCell;
+
 use serde::Serialize;
 
-use crate::cell_layout::{cell_vertical_offset, layout_cell_content, nested_table_float_offset};
+use crate::cell_layout::{
+    cell_vertical_offset, is_floating_image, layout_cell_content, nested_table_float_offset,
+};
+use crate::keep_together::{paragraph_is_unbreakable, paragraph_widow_control};
 use crate::table_grid::resolve_cell_grid;
-use crate::types::{BlockExtent, LayoutBlock, TableBlock, TableExtent};
+use crate::types::{
+    BlockExtent, CellClip, LayoutBlock, Run, TableBlock, TableCell, TableCellExtent, TableExtent,
+};
 
 /// Per-table break geometry consumed by `snap_row_break`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -30,11 +37,14 @@ fn cell_unbreakable_ranges(
     blocks: &[LayoutBlock],
     measures: &[BlockExtent],
     start_y: f64,
+    paragraph_rules: bool,
 ) -> Vec<(f64, f64)> {
     let mut ranges = Vec::new();
     let mut y = start_y;
     let mut previous_after = 0.0_f64;
+    let mut keep_next_top: Option<f64> = None;
     for (index, measure) in measures.iter().enumerate() {
+        let preceding_keep_top = keep_next_top.take();
         let block = blocks.get(index);
         if let (Some(LayoutBlock::Paragraph(paragraph)), BlockExtent::Paragraph(extent)) =
             (block, measure)
@@ -44,11 +54,37 @@ fn cell_unbreakable_ranges(
                 .as_ref()
                 .and_then(|attrs| attrs.spacing.as_ref());
             y += previous_after.max(spacing.and_then(|value| value.before).unwrap_or(0.0));
+            let first = ranges.len();
             for line in &extent.lines {
                 y += line.float_skip_before.unwrap_or(0.0);
                 let top = y;
                 y += line.line_height;
                 ranges.push((top, y));
+            }
+            let lines = &ranges[first..];
+            let first_bottom = lines.first().map(|&(_, bottom)| bottom);
+            let last_top = lines.last().map(|&(top, _)| top);
+            if paragraph_rules
+                && let (Some(&(top, _)), Some(&(_, bottom))) = (lines.first(), lines.last())
+            {
+                if paragraph_is_unbreakable(paragraph, extent) {
+                    ranges.push((top, bottom));
+                } else if paragraph_widow_control(paragraph, extent) {
+                    let (second_bottom, penultimate_top) = (lines[1].1, lines[lines.len() - 2].0);
+                    ranges.push((top, second_bottom));
+                    ranges.push((penultimate_top, bottom));
+                }
+            }
+            if paragraph_rules {
+                if let (Some(top), Some(bottom)) = (preceding_keep_top, first_bottom) {
+                    ranges.push((top, bottom));
+                }
+                keep_next_top =
+                    if paragraph.attrs.as_ref().and_then(|attrs| attrs.keep_next) == Some(true) {
+                        last_top
+                    } else {
+                        None
+                    };
             }
             previous_after = spacing.and_then(|value| value.after).unwrap_or(0.0);
             continue;
@@ -88,8 +124,459 @@ fn cell_unbreakable_ranges(
 }
 
 /// Resolves the cell grid once and collects, per row, every whole-line bottom
-/// a break is allowed to snap to.
+/// a break is allowed to snap to, where widow/orphan control and `keepLines`
+/// allow one.
 pub fn build_table_row_break_info(block: &TableBlock, measure: &TableExtent) -> TableRowBreakInfo {
+    row_break_info(block, measure, true)
+}
+
+/// A table's row break geometry under the paragraph rules, with every
+/// whole-line bottom built on first use for a row those rules leave no break
+/// in a whole column, which Word then breaks at any line. A floating table
+/// keeps whole-line breaks throughout.
+/// Whether row `r`'s `w:trHeight` minimum, not its cells' content, sets its
+/// measured height. A row a vertically merged cell covers can grow with that
+/// cell's content, so it keeps its line breaks.
+fn minimum_height_governs(
+    block: &TableBlock,
+    measure: &TableExtent,
+    resolved: &[crate::table_grid::ResolvedGridCell],
+    r: usize,
+) -> bool {
+    let Some(minimum) = block
+        .rows
+        .get(r)
+        .and_then(|row| row.height)
+        .filter(|height| *height > 0.0)
+    else {
+        return false;
+    };
+    if resolved
+        .iter()
+        .any(|grid| grid.row_span > 1 && grid.row_index <= r && r < grid.row_index + grid.row_span)
+    {
+        return false;
+    }
+    let (mut content, mut padding) = (0.0_f64, 0.0_f64);
+    for grid in resolved.iter().filter(|grid| grid.row_index == r) {
+        let (Some(cell), Some(measured)) = (
+            block.rows[r].cells.get(grid.cell_index),
+            measure.rows[r].cells.get(grid.cell_index),
+        ) else {
+            continue;
+        };
+        content = content.max(measured.height);
+        padding = padding.max(
+            cell.padding
+                .as_ref()
+                .map_or(0.0, |padding| padding.top + padding.bottom),
+        );
+    }
+    content > 0.0 && minimum + padding >= content
+}
+
+fn cell_has_drawing(blocks: &[LayoutBlock]) -> bool {
+    blocks.iter().any(|block| match block {
+        LayoutBlock::Paragraph(paragraph) => paragraph.runs.iter().any(|run| {
+            matches!(run, Run::Image(image) if image.position.is_some()
+                || is_floating_image(image.wrap_type.as_deref(), image.display_mode.as_deref()))
+        }),
+        LayoutBlock::Table(table) => {
+            table.floating.is_some()
+                || table
+                    .rows
+                    .iter()
+                    .any(|row| row.cells.iter().any(|cell| cell_has_drawing(&cell.blocks)))
+        }
+        _ => true,
+    })
+}
+
+pub(crate) struct RowBreaks<'a> {
+    block: &'a TableBlock,
+    measure: &'a TableExtent,
+    pub(crate) kept: TableRowBreakInfo,
+    lines: OnceCell<TableRowBreakInfo>,
+    cells: OnceCell<Vec<Option<Vec<CellBreaks>>>>,
+}
+
+impl<'a> RowBreaks<'a> {
+    pub(crate) fn new(block: &'a TableBlock, measure: &'a TableExtent) -> Self {
+        Self {
+            block,
+            measure,
+            kept: row_break_info(block, measure, block.floating.is_none()),
+            lines: OnceCell::new(),
+            cells: OnceCell::new(),
+        }
+    }
+
+    pub(crate) fn lines(&self) -> &TableRowBreakInfo {
+        self.lines
+            .get_or_init(|| row_break_info(self.block, self.measure, false))
+    }
+
+    fn cells(&self, row: usize) -> Option<&[CellBreaks]> {
+        self.cells
+            .get_or_init(|| {
+                let resolved = resolve_cell_grid(self.block);
+                self.block
+                    .rows
+                    .iter()
+                    .enumerate()
+                    .map(|(r, row)| {
+                        let measured = self.measure.rows.get(r)?;
+                        if row.cant_split == Some(true)
+                            || row.is_exact_height()
+                            || row.is_header == Some(true)
+                            || minimum_height_governs(self.block, self.measure, &resolved, r)
+                            || resolved.iter().any(|g| {
+                                g.row_span > 1 && g.row_index <= r && r < g.row_index + g.row_span
+                            })
+                            || row.cells.iter().any(|cell| {
+                                cell.row_span.is_some_and(|span| span != 1.0)
+                                    || !matches!(cell.vertical_align.as_deref(), None | Some("top"))
+                                    || !matches!(
+                                        cell.text_direction.as_deref(),
+                                        None | Some("lrTb")
+                                    )
+                                    || !crate::footnotes::collect_note_refs(&cell.blocks).is_empty()
+                                    || cell_has_drawing(&cell.blocks)
+                            })
+                        {
+                            return None;
+                        }
+                        let mut cells: Vec<_> = row
+                            .cells
+                            .iter()
+                            .enumerate()
+                            .map(|(index, cell)| {
+                                let measure = measured.cells.get(index)?;
+                                let kept = cell_row_geometry(
+                                    cell,
+                                    measure,
+                                    r,
+                                    1,
+                                    r,
+                                    &self.kept.row_tops,
+                                    self.block.floating.is_none(),
+                                );
+                                let lines = cell_row_geometry(
+                                    cell,
+                                    measure,
+                                    r,
+                                    1,
+                                    r,
+                                    &self.kept.row_tops,
+                                    false,
+                                );
+                                let end = kept.end.min(measured.height).max(0.0);
+                                Some(CellBreaks {
+                                    kept: cell_offsets(&kept, end),
+                                    lines: cell_offsets(&lines, end),
+                                    end,
+                                })
+                            })
+                            .collect::<Option<Vec<_>>>()?;
+                        if let Some(cell) = cells.iter_mut().max_by(|a, b| a.end.total_cmp(&b.end))
+                            && cell.end < measured.height
+                        {
+                            cell.kept.retain(|offset| *offset != cell.end);
+                            cell.lines.retain(|offset| *offset != cell.end);
+                            cell.end = measured.height;
+                            cell.kept.push(cell.end);
+                            cell.lines.push(cell.end);
+                        }
+                        Some(cells)
+                    })
+                    .collect()
+            })
+            .get(row)?
+            .as_deref()
+    }
+
+    pub(crate) fn cell_remaining(&self, row: usize, tops: &[f64]) -> f64 {
+        self.cells(row)
+            .into_iter()
+            .flatten()
+            .zip(tops)
+            .map(|(cell, top)| (cell.end - top).max(0.0))
+            .fold(0.0, f64::max)
+    }
+
+    pub(crate) fn first_cell_slice(&self, row: usize, consumed: f64, capacity: f64) -> Option<f64> {
+        let minimum = self
+            .cells(row)?
+            .iter()
+            .filter_map(|cell| {
+                let top = consumed.min(cell.end);
+                cell.kept
+                    .iter()
+                    .copied()
+                    .find(|offset| *offset > top)
+                    .map(|offset| offset - top)
+            })
+            .min_by(f64::total_cmp)?;
+        let shared = snap_row_break(&self.kept, row, consumed, minimum);
+        (minimum <= capacity
+            && self
+                .cell_slice(row, consumed, None, minimum, shared, false, capacity)
+                .is_some())
+        .then_some(minimum)
+    }
+
+    pub(crate) fn cell_slice(
+        &self,
+        row: usize,
+        consumed: f64,
+        tops: Option<&[f64]>,
+        budget: f64,
+        shared_slice: f64,
+        whole_lines: bool,
+        capacity: f64,
+    ) -> Option<CellRowSlice> {
+        let cells = self.cells(row)?;
+        let last_fitting = |offsets: &[f64], top: f64| {
+            offsets
+                .iter()
+                .copied()
+                .rfind(|offset| *offset > top && *offset <= top + budget)
+                .unwrap_or(top)
+        };
+        let mut clips: Vec<_> = cells
+            .iter()
+            .enumerate()
+            .map(|(index, cell)| {
+                let top = tops
+                    .and_then(|tops| tops.get(index))
+                    .copied()
+                    .unwrap_or(consumed)
+                    .min(cell.end);
+                let offsets = if whole_lines { &cell.lines } else { &cell.kept };
+                CellClip {
+                    row,
+                    cell: index,
+                    top,
+                    bottom: last_fitting(offsets, top),
+                }
+            })
+            .collect();
+        let height = |clips: &[CellClip]| {
+            clips
+                .iter()
+                .map(|clip| clip.bottom - clip.top)
+                .fold(0.0, f64::max)
+        };
+        if height(&clips) <= 0.0
+            || (tops.is_none()
+                && !cells.iter().zip(&clips).any(|(cell, clip)| {
+                    cell.end > consumed + shared_slice && clip.bottom > consumed + shared_slice
+                }))
+        {
+            return None;
+        }
+        // A cell its paragraph rules leave no break even on a fresh page cuts at
+        // whole lines, as an oversized row does, while the other cells progress.
+        for (cell, clip) in cells.iter().zip(&mut clips) {
+            if !whole_lines && clip.bottom == clip.top && cell.kept_oversized(clip.top, capacity) {
+                clip.bottom = last_fitting(&cell.lines, clip.top);
+            }
+        }
+        let height = height(&clips);
+        let complete = cells
+            .iter()
+            .zip(&clips)
+            .all(|(cell, clip)| clip.bottom == cell.end);
+        Some(CellRowSlice {
+            clips,
+            height,
+            complete,
+        })
+    }
+
+    pub(crate) fn cell_fresh_slice(&self, row: usize, tops: &[f64], capacity: f64) -> f64 {
+        let minimum = |whole_lines| {
+            self.cells(row)
+                .into_iter()
+                .flatten()
+                .zip(tops)
+                .filter_map(|(cell, top)| {
+                    let offsets = if whole_lines { &cell.lines } else { &cell.kept };
+                    offsets
+                        .iter()
+                        .copied()
+                        .find(|offset| *offset > *top)
+                        .map(|offset| offset - top)
+                })
+                .min_by(f64::total_cmp)
+                .unwrap_or(0.0)
+        };
+        let kept = minimum(false);
+        if kept > capacity { minimum(true) } else { kept }
+    }
+
+    pub(crate) fn cell_remainder(&self, row: usize, tops: &[f64]) -> CellRowSlice {
+        let clips: Vec<_> = self
+            .cells(row)
+            .into_iter()
+            .flatten()
+            .zip(tops)
+            .enumerate()
+            .map(|(cell, (info, top))| CellClip {
+                row,
+                cell,
+                top: *top,
+                bottom: info.end,
+            })
+            .collect();
+        CellRowSlice {
+            clips,
+            height: self.cell_remaining(row, tops),
+            complete: true,
+        }
+    }
+
+    /// Whether the paragraph rules alone leave `row` no break from `consumed`
+    /// on in a column `capacity` tall.
+    pub(crate) fn kept_oversized(&self, row: usize, consumed: f64, capacity: f64) -> bool {
+        let kept = minimum_break_slice(self.measure, &self.kept, row, consumed);
+        kept > capacity && minimum_break_slice(self.measure, self.lines(), row, consumed) < kept
+    }
+
+    /// The smallest slice of `row` from `consumed` on that a fresh column
+    /// `capacity` tall places.
+    pub(crate) fn fresh_slice(&self, row: usize, consumed: f64, capacity: f64) -> f64 {
+        if self
+            .block
+            .rows
+            .get(row)
+            .is_some_and(|row| row.cant_split.unwrap_or(false))
+        {
+            return minimum_row_slice(self.block, self.measure, self.lines(), row, consumed);
+        }
+        let info = if self.kept_oversized(row, consumed, capacity) {
+            self.lines()
+        } else {
+            &self.kept
+        };
+        minimum_break_slice(self.measure, info, row, consumed)
+    }
+}
+
+struct CellBreaks {
+    kept: Vec<f64>,
+    lines: Vec<f64>,
+    end: f64,
+}
+
+impl CellBreaks {
+    /// Whether the paragraph rules leave this cell no break from `top` on in a
+    /// fresh column `capacity` tall while whole lines still break it sooner, so
+    /// the cell falls back to whole lines as an oversized row does.
+    fn kept_oversized(&self, top: f64, capacity: f64) -> bool {
+        let next = |offsets: &[f64]| {
+            offsets
+                .iter()
+                .copied()
+                .find(|offset| *offset > top)
+                .map(|offset| offset - top)
+        };
+        matches!((next(&self.kept), next(&self.lines)), (Some(kept), Some(line)) if kept > capacity && line < kept)
+    }
+}
+
+pub(crate) struct CellRowSlice {
+    pub(crate) clips: Vec<CellClip>,
+    pub(crate) height: f64,
+    pub(crate) complete: bool,
+}
+
+fn cell_offsets(geometry: &CellRowGeometry, end: f64) -> Vec<f64> {
+    let mut offsets: Vec<_> = geometry
+        .offsets
+        .iter()
+        .copied()
+        .filter(|offset| {
+            *offset > 0.0
+                && *offset < end
+                && geometry.ranges.iter().any(|(_, bottom)| *bottom > *offset)
+                && !geometry
+                    .ranges
+                    .iter()
+                    .any(|(top, bottom)| *offset > *top && *offset < *bottom)
+        })
+        .collect();
+    add_unique(&mut offsets, end);
+    offsets.sort_by(f64::total_cmp);
+    offsets
+}
+
+struct CellRowGeometry {
+    offsets: Vec<f64>,
+    ranges: Vec<(f64, f64)>,
+    end: f64,
+}
+
+fn cell_row_geometry(
+    cell: &TableCell,
+    measured: &TableCellExtent,
+    source_row: usize,
+    row_span: usize,
+    r: usize,
+    row_tops: &[f64],
+    paragraph_rules: bool,
+) -> CellRowGeometry {
+    // OOXML TableNormal defaults top padding to zero.
+    let pad_top = cell.padding.as_ref().map(|p| p.top).unwrap_or(0.0);
+    let pad_bottom = cell.padding.as_ref().map(|p| p.bottom).unwrap_or(0.0);
+    let border_width = |edge: Option<&crate::types::CellBorderSpec>| {
+        edge.filter(|edge| !matches!(edge.style.as_deref(), Some("none" | "nil")))
+            .map_or(0.0, |edge| edge.width.unwrap_or(1.0))
+    };
+    let border_top = if source_row == 0 {
+        border_width(cell.borders.as_ref().and_then(|b| b.top.as_ref()))
+    } else {
+        0.0
+    };
+    let border_bottom = border_width(cell.borders.as_ref().and_then(|b| b.bottom.as_ref()));
+    let layout = layout_cell_content(Some(&cell.blocks), Some(&measured.blocks), pad_top);
+    let cell_end = (source_row + row_span).min(row_tops.len() - 1);
+    let cell_height = row_tops[cell_end] - row_tops[source_row];
+    let content_offset = border_top
+        + cell_vertical_offset(
+            cell.vertical_align.as_deref(),
+            cell_height,
+            measured.height,
+            layout.content_height,
+            pad_top + border_top,
+            pad_bottom + border_bottom,
+        );
+    let shift = row_tops[r] - row_tops[source_row];
+
+    CellRowGeometry {
+        offsets: layout
+            .flat_bottoms
+            .iter()
+            .map(|b| b + content_offset - shift)
+            .collect(),
+        ranges: cell_unbreakable_ranges(&cell.blocks, &measured.blocks, pad_top, paragraph_rules)
+            .into_iter()
+            .map(|(top, bottom)| {
+                (
+                    top + content_offset - shift,
+                    bottom + content_offset - shift,
+                )
+            })
+            .collect(),
+        end: pad_top + content_offset + layout.content_height + pad_bottom + border_bottom - shift,
+    }
+}
+
+fn row_break_info(
+    block: &TableBlock,
+    measure: &TableExtent,
+    paragraph_rules: bool,
+) -> TableRowBreakInfo {
     let row_count = measure.rows.len();
     // Pagination uses unrounded row offsets; border painting rounds separately.
     let mut row_tops: Vec<f64> = Vec::with_capacity(row_count + 1);
@@ -114,7 +601,11 @@ pub fn build_table_row_break_info(block: &TableBlock, measure: &TableExtent) -> 
         // check in the paginator — makes every downstream consumer
         // (`snap_row_break`, `minimum_row_slice`, `first_table_fragment_height`)
         // see the row as atomic by construction.
-        if block.rows.get(r).is_some_and(|row| row.is_exact_height()) {
+        // A row its minimum height sizes, taller than its content, moves whole
+        // too: Word breaks a row only inside content that overflows it.
+        if block.rows.get(r).is_some_and(|row| row.is_exact_height())
+            || minimum_height_governs(block, measure, &resolved, r)
+        {
             break_offsets.push(vec![row_height]);
             continue;
         }
@@ -141,58 +632,21 @@ pub fn build_table_row_break_info(block: &TableBlock, measure: &TableExtent) -> 
             else {
                 continue;
             };
-            // OOXML TableNormal defaults top padding to zero.
-            let pad_top = source_cell.padding.as_ref().map(|p| p.top).unwrap_or(0.0);
-            let pad_bottom = source_cell
-                .padding
-                .as_ref()
-                .map(|p| p.bottom)
-                .unwrap_or(0.0);
-            let border_width = |edge: Option<&crate::types::CellBorderSpec>| {
-                edge.filter(|edge| !matches!(edge.style.as_deref(), Some("none" | "nil")))
-                    .map_or(0.0, |edge| edge.width.unwrap_or(1.0))
-            };
-            let border_top = if g.row_index == 0 {
-                border_width(source_cell.borders.as_ref().and_then(|b| b.top.as_ref()))
-            } else {
-                0.0
-            };
-            let border_bottom =
-                border_width(source_cell.borders.as_ref().and_then(|b| b.bottom.as_ref()));
-            let layout = layout_cell_content(
-                Some(&source_cell.blocks),
-                Some(&measured_cell.blocks),
-                pad_top,
+            let geometry = cell_row_geometry(
+                source_cell,
+                measured_cell,
+                g.row_index,
+                g.row_span,
+                r,
+                &row_tops,
+                paragraph_rules,
             );
-            let cell_end = (g.row_index + g.row_span).min(row_count);
-            let cell_height = row_tops[cell_end] - row_tops[g.row_index];
-            let content_offset = border_top
-                + cell_vertical_offset(
-                    source_cell.vertical_align.as_deref(),
-                    cell_height,
-                    measured_cell.height,
-                    layout.content_height,
-                    pad_top + border_top,
-                    pad_bottom + border_bottom,
-                );
-            // Map cell-content y (relative to the cell/region top at
-            // row_tops[start_row]) into this row's coordinate space
-            // (relative to row_tops[r]).
-            let shift = row_tops[r] - row_tops[g.row_index];
-            for &b in &layout.flat_bottoms {
-                let off = b + content_offset - shift;
+            for off in geometry.offsets {
                 if off > 0.0 && off < row_height {
                     add_unique(&mut offsets, off);
                 }
             }
-            for (top, bottom) in
-                cell_unbreakable_ranges(&source_cell.blocks, &measured_cell.blocks, pad_top)
-            {
-                unbreakable_ranges.push((
-                    top + content_offset - shift,
-                    bottom + content_offset - shift,
-                ));
-            }
+            unbreakable_ranges.extend(geometry.ranges);
         }
         offsets.retain(|offset| {
             *offset == row_height
@@ -229,6 +683,16 @@ pub(crate) fn minimum_row_slice(
     {
         return remaining;
     }
+    minimum_break_slice(measure, info, row, consumed)
+}
+
+fn minimum_break_slice(
+    measure: &TableExtent,
+    info: &TableRowBreakInfo,
+    row: usize,
+    consumed: f64,
+) -> f64 {
+    let remaining = measure.rows[row].height - consumed;
     info.break_offsets[row]
         .iter()
         .copied()
@@ -297,7 +761,7 @@ mod tests {
     const LINE: f64 = 20.0;
 
     fn para() -> serde_json::Value {
-        json!({ "kind": "paragraph", "id": 0, "runs": [] })
+        json!({ "kind": "paragraph", "id": 0, "runs": [], "attrs": { "widowControl": false } })
     }
 
     fn para_with_spacing(before: f64, after: f64) -> serde_json::Value {
@@ -305,7 +769,10 @@ mod tests {
             "kind": "paragraph",
             "id": 0,
             "runs": [],
-            "attrs": { "spacing": { "before": before, "after": after } },
+            "attrs": {
+                "spacing": { "before": before, "after": after },
+                "widowControl": false,
+            },
         })
     }
 
@@ -327,6 +794,118 @@ mod tests {
 
     fn measured_cell(blocks: Vec<serde_json::Value>) -> serde_json::Value {
         json!({ "blocks": blocks, "width": 100.0, "height": 0.0 })
+    }
+
+    fn single_cell_table(
+        blocks: Vec<serde_json::Value>,
+        measures: Vec<serde_json::Value>,
+        row_height: f64,
+    ) -> (TableBlock, TableExtent) {
+        let block = serde_json::from_value(json!({
+            "id": 0,
+            "rows": [{ "id": 0, "cells": [cell(None, blocks)] }],
+            "columnWidths": [100.0],
+        }))
+        .unwrap();
+        let measure = serde_json::from_value(json!({
+            "columnWidths": [100.0],
+            "totalWidth": 100.0,
+            "totalHeight": row_height,
+            "rows": [{ "height": row_height, "cells": [measured_cell(measures)] }],
+        }))
+        .unwrap();
+        (block, measure)
+    }
+
+    #[test]
+    fn keep_next_removes_only_the_paragraph_boundary() {
+        for keep_next in [Some(true), Some(false), None] {
+            let mut middle = para();
+            if let Some(keep_next) = keep_next {
+                middle["attrs"]["keepNext"] = json!(keep_next);
+            }
+            let (block, measure) =
+                single_cell_table(vec![para(), middle, para()], vec![para_measure(1); 3], 60.0);
+            let info = build_table_row_break_info(&block, &measure);
+            let (offsets, snapped) = if keep_next == Some(true) {
+                (vec![20.0, 60.0], 20.0)
+            } else {
+                (vec![20.0, 40.0, 60.0], 40.0)
+            };
+            assert_eq!(info.break_offsets[0], offsets);
+            assert_eq!(snap_row_break(&info, 0, 0.0, 40.0), snapped);
+        }
+    }
+
+    #[test]
+    fn keep_next_allows_splitting_both_paragraphs() {
+        let mut kept = para();
+        kept["attrs"]["keepNext"] = json!(true);
+        let (block, measure) =
+            single_cell_table(vec![para(), kept, para()], vec![para_measure(2); 3], 120.0);
+        let info = build_table_row_break_info(&block, &measure);
+        assert_eq!(info.break_offsets[0], vec![20.0, 40.0, 60.0, 100.0, 120.0]);
+        assert_eq!(snap_row_break(&info, 0, 0.0, 60.0), 60.0);
+        assert_eq!(snap_row_break(&info, 0, 0.0, 100.0), 100.0);
+    }
+
+    #[test]
+    fn keep_next_composes_with_follower_widow_control() {
+        for widow_control in [Some(true), None] {
+            for (lines, offsets) in [(2, vec![60.0]), (3, vec![80.0]), (4, vec![60.0, 100.0])] {
+                let mut kept = para();
+                kept["attrs"]["keepNext"] = json!(true);
+                let mut follower = para();
+                follower["attrs"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("widowControl");
+                if let Some(widow_control) = widow_control {
+                    follower["attrs"]["widowControl"] = json!(widow_control);
+                }
+                let (block, measure) = single_cell_table(
+                    vec![kept, follower],
+                    vec![para_measure(1), para_measure(lines)],
+                    (lines + 1) as f64 * LINE,
+                );
+                let info = build_table_row_break_info(&block, &measure);
+                assert_eq!(info.break_offsets[0], offsets);
+                assert_eq!(snap_row_break(&info, 0, 0.0, 40.0), 0.0);
+                if lines == 4 {
+                    assert_eq!(snap_row_break(&info, 0, 0.0, 60.0), 60.0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn keep_next_stops_at_nested_tables() {
+        let mut kept = para();
+        kept["attrs"]["keepNext"] = json!(true);
+        let (nested, nested_measure) = single_cell_table(vec![para()], vec![para_measure(2)], 40.0);
+        let mut nested = serde_json::to_value(nested).unwrap();
+        nested["kind"] = json!("table");
+        let mut nested_measure = serde_json::to_value(nested_measure).unwrap();
+        nested_measure["kind"] = json!("table");
+        let (block, measure) = single_cell_table(
+            vec![kept, nested, para()],
+            vec![para_measure(1), nested_measure, para_measure(1)],
+            80.0,
+        );
+        let info = build_table_row_break_info(&block, &measure);
+        assert_eq!(info.break_offsets[0], vec![20.0, 60.0, 80.0]);
+    }
+
+    #[test]
+    fn floating_table_ignores_local_keep_next() {
+        let mut kept = para();
+        kept["attrs"]["keepNext"] = json!(true);
+        let (mut block, measure) =
+            single_cell_table(vec![para(), kept, para()], vec![para_measure(1); 3], 60.0);
+        block.floating = Some(serde_json::from_value(json!({})).unwrap());
+        let breaks = RowBreaks::new(&block, &measure);
+        assert_eq!(&breaks.kept, breaks.lines());
+        assert_eq!(breaks.kept.break_offsets[0], vec![20.0, 40.0, 60.0]);
     }
 
     /// The integration-test table: 3 rows, 2 cols; col 0 is a rowSpan=3 merged
@@ -500,6 +1079,34 @@ mod tests {
         let info = build_table_row_break_info(&block, &measure);
         assert_eq!(info.break_offsets[0], vec![60.0]);
         assert_eq!(snap_row_break(&info, 0, 0.0, 40.0), 0.0);
+        let breaks = RowBreaks::new(&block, &measure);
+        let slice = breaks
+            .cell_slice(0, 0.0, None, 40.0, 0.0, false, f64::INFINITY)
+            .unwrap();
+        assert_eq!(slice.height, 40.0);
+        assert_eq!(
+            slice.clips,
+            vec![
+                CellClip {
+                    row: 0,
+                    cell: 0,
+                    top: 0.0,
+                    bottom: 40.0
+                },
+                CellClip {
+                    row: 0,
+                    cell: 1,
+                    top: 0.0,
+                    bottom: 30.0
+                },
+            ]
+        );
+        let tops: Vec<_> = slice.clips.iter().map(|clip| clip.bottom).collect();
+        let continuation = breaks.cell_remainder(0, &tops);
+        assert_eq!(continuation.height, 30.0);
+        assert_eq!(continuation.clips[0].top, continuation.clips[0].bottom);
+        assert_eq!(continuation.clips[1].top, 30.0);
+        assert_eq!(continuation.clips[1].bottom, 60.0);
     }
 
     #[test]
@@ -609,6 +1216,27 @@ mod tests {
         }))
         .unwrap();
         (block, measure)
+    }
+
+    #[test]
+    fn a_row_its_minimum_height_sizes_offers_only_its_full_height_boundary() {
+        for (lines, atomic) in [(2, true), (3, true), (4, false)] {
+            let content = lines as f64 * LINE;
+            let (block, mut measure) =
+                single_row_table(Some(3.0 * LINE), None, None, lines, content.max(3.0 * LINE));
+            measure.rows[0].cells[0].height = content;
+            let info = build_table_row_break_info(&block, &measure);
+            assert_eq!(info.break_offsets[0].len() == 1, atomic, "{lines} lines");
+        }
+    }
+
+    #[test]
+    fn a_minimum_height_row_a_merged_cell_covers_keeps_its_line_breaks() {
+        let (mut block, mut measure) = build_table(40, [20.0, 20.0, 760.0]);
+        block.rows[2].height = Some(60.0);
+        measure.rows[2].cells[0].height = LINE;
+        let info = build_table_row_break_info(&block, &measure);
+        assert!(info.break_offsets[2].len() > 1);
     }
 
     #[test]

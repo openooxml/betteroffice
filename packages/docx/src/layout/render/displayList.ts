@@ -34,6 +34,8 @@ export interface DisplayPage {
   /** Formatted PAGE label (for example, "vii"). */
   pageLabel?: string;
   primitives: DisplayPrimitive[]; // body content, paint order
+  /** Leading primitives painted beneath the header and footer. */
+  watermarkPrimitiveCount?: number;
   /** Resolved page background. Undefined = transparent/host white. */
   background?: string;
   pageBorders?: PageBorderPrimitive[];
@@ -41,6 +43,10 @@ export interface DisplayPage {
   footer?: HfRegion;
   /** Footnote/endnote regions in page coordinates. Undefined = none. */
   noteAreas?: NoteRegion[];
+  /** Geometry only: the page's content is built when the host asks for it. */
+  unbuilt?: boolean;
+  /** For an unbuilt page, the lowest and highest body position its layout places. */
+  positionSpan?: [number, number];
 }
 
 /** A page-local rectangle emitted as display-list metadata. */

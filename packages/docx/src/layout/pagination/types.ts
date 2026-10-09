@@ -360,16 +360,22 @@ export type FieldRun = RunFormatting & {
   fieldType: 'PAGE' | 'NUMPAGES' | 'DATE' | 'TIME' | 'OTHER';
   /**
    * Raw Word field type token (e.g. `TOC`, `PAGEREF`) when `fieldType`
-   * collapsed it to a painter category. Carried for a11y announcement only.
+   * collapsed it to a painter category. Carried for a11y announcement, and
+   * read to number `SEQ` fields.
    */
   rawType?: string;
   /**
    * Raw field instruction text (`w:instrText`), carried INERT so the display
-   * list can announce field identity. Never parsed into behavior or executed.
+   * list can announce field identity. Never executed; only a `SEQ` field's is
+   * parsed, to number it.
    */
   instruction?: string;
-  /** Fallback text if field can't be resolved */
+  /** Text shown when the painter doesn't resolve the field: Word's cached result, or a `SEQ` field's number. */
   fallback?: string;
+  /** `w:fldLock`: the field keeps its cached result. */
+  locked?: boolean;
+  /** Sequences of `SEQ` fields nested in this field; they keep their cached results. */
+  nestedSequences?: string[];
   pmStart?: number;
   pmEnd?: number;
 };
@@ -810,6 +816,7 @@ export type ShapeBlock = {
   y?: number;
   /** Optional inner paragraphs for future text-bearing shape rendering. */
   innerText?: ParagraphBlock[];
+  nestedSequences?: string[];
   /** Pre-measured inner paragraph measures for display-list shape text. */
   innerMeasures?: ParagraphExtent[];
   /** Child shapes positioned relative to this shape's top-left corner. */
@@ -1069,6 +1076,8 @@ export type TypesetRow = {
    * as marginTop on the line element; measurement adds it to totalHeight.
    */
   floatSkipBefore?: number;
+  /** Extra first-line indent after a list number overruns its hanging indent. */
+  markerTabOffset?: number;
   /** Exact per-run advances in visual paint order. Undefined = legacy estimation. */
   runAdvances?: TypesetRunAdvance[];
   /** Exact shaped cluster advances. Undefined = legacy estimation. */
@@ -1301,6 +1310,7 @@ export type TableFragment = FragmentBase & {
    * visible band of that single row is `[clipTop, clipBottom)`.
    */
   clipBottom?: number;
+  cellClips?: { row: number; cell: number; top: number; bottom: number }[];
 };
 
 /**
@@ -1465,6 +1475,8 @@ export type Page = {
   fragments: Fragment[];
   /** Page margins. */
   margins: PageMargins;
+  bodyMargins?: PageMargins;
+  bodyAnchorMargins?: PageMargins;
   /** Page size (width, height). */
   size: { w: number; h: number };
   /** Page orientation. */
@@ -1532,6 +1544,7 @@ export type HeaderFooterLayout = {
  * The paginator's complete result — everything the painter needs.
  */
 export type Layout = {
+  summaryOnly?: true;
   /** Serialization contract version. Undefined reads as legacy version 0. */
   contractVersion?: number;
   /** Default page size for the document. */
@@ -1546,6 +1559,8 @@ export type Layout = {
   footers?: Record<string, HeaderFooterLayout>;
   /** Gap between pages in pixels (for rendering). */
   pageGap?: number;
+  /** Lays out only part of the document, so its page count is not the document's. */
+  partial?: boolean;
 };
 
 // =============================================================================
@@ -1616,6 +1631,12 @@ export type LayoutOptions = {
   footnoteReservedHeights?: Map<number, number>;
   /** Section break type for the body-level (final) section (for section transition logic). */
   bodyBreakType?: 'continuous' | 'nextPage' | 'evenPage' | 'oddPage' | 'nextColumn';
+  sectionPageFloatBands?: Array<{
+    default: Array<{ top: number; bottom: number; oddPage?: boolean }>;
+    first?: Array<{ top: number; bottom: number; oddPage?: boolean }> | null;
+    even?: Array<{ top: number; bottom: number; oddPage?: boolean }> | null;
+    anchorMargins?: PageMargins;
+  }>;
   /** Effective section states, indexed by section. Undefined = legacy globals. */
   sections?: Array<{
     sectionId?: string;

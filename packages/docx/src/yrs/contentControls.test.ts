@@ -19,6 +19,7 @@ import {
   type DocxContentControlsSnapshot,
   type DocxEditResult,
   type YrsSession,
+  saveYrsDocx,
 } from './index';
 import { yrsToDocument } from './yrsToDocument';
 
@@ -56,6 +57,30 @@ function applied(result: DocxEditResult): Extract<DocxEditResult, { ok: true }> 
   return result;
 }
 
+/** A package whose body is `body`, with the w14 namespace for paragraph ids. */
+function bodyPackage(body: string): Uint8Array {
+  const parts: PartsMap = new Map();
+  parts.set(
+    '[Content_Types].xml',
+    toBytes(
+      `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>`
+    )
+  );
+  parts.set(
+    '_rels/.rels',
+    toBytes(
+      `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${REL}/officeDocument" Target="word/document.xml"/></Relationships>`
+    )
+  );
+  parts.set(
+    'word/document.xml',
+    toBytes(
+      `<w:document xmlns:w="${W}" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body>${body}<w:sectPr/></w:body></w:document>`
+    )
+  );
+  return new Uint8Array(rezipPartsToArrayBuffer(parts));
+}
+
 function part(bytes: ArrayBuffer | Uint8Array, name: string): Uint8Array {
   const entry = unzipContainer(new Uint8Array(bytes))[name];
   if (!(entry instanceof Uint8Array)) throw new Error(`missing part ${name}`);
@@ -72,6 +97,7 @@ interface SdtRecord {
   binding: string | null;
   appearance: string | null;
   endProperties: boolean;
+  inCell: boolean;
   paragraphs: string[];
   text: string;
 }
@@ -86,6 +112,7 @@ function controlsInXml(xml: Uint8Array): SdtRecord[] {
 W='{${W}}'
 W15='{http://schemas.microsoft.com/office/word/2012/wordml}'
 root=E.fromstring(sys.stdin.buffer.read())
+in_cell={id(sdt) for tc in root.iter(W+'tc') for sdt in tc.iter(W+'sdt')}
 def val(pr,name):
   el=pr.find(W+name) if pr is not None else None
   return None if el is None else el.get(W+'val')
@@ -109,6 +136,7 @@ for sdt in root.iter(W+'sdt'):
     'binding':None if binding is None else binding.get(W+'xpath'),
     'appearance':None if appearance is None else appearance.get(W15+'val'),
     'endProperties':sdt.find(W+'sdtEndPr') is not None,
+    'inCell':id(sdt) in in_cell,
     'paragraphs':[text(p) for p in content.findall(W+'p')],
     'text':text(content)})
 print(json.dumps(out))`,
@@ -278,7 +306,7 @@ describe('content controls', () => {
       expect(name).toMatchObject({ placeholder: false, appearance: 'tags', text: 'Ada Lovelace' });
       expect(after.find((control) => control.tag === 'customer.address')).toMatchObject({
         placeholder: false,
-        paragraphs: ['12 Example Street', 'London'],
+        paragraphs: ['12 Example Street\nLondon'],
         multiLine: '1',
       });
       for (const tag of ['account.reference', 'terms.standard', 'customer.email']) {
@@ -462,6 +490,163 @@ describe('content controls', () => {
     } finally {
       left.destroy();
       right.destroy();
+    }
+  });
+
+  it('writes a multi-line plain-text fill as line breaks in one paragraph', async () => {
+    const bytes = template();
+    const session = await open(bytes);
+    const setter = await open(bytes);
+    const reopened = await createYrsSession({ clientId: nextClientId++ });
+    try {
+      const text = 'Line one\n\nLine two';
+      const result = applied(
+        session.applyEdits({
+          expectVersion: session.version(),
+          steps: [{ op: 'setContentControlText', target: { kind: 'tag', tag: 'customer.address' }, text }],
+        })
+      );
+      expect(result.receipts[0]!.newParagraphs).toEqual([]);
+      expect(session.paragraphs('body:sdt0').map((paragraph) => paragraph.paraId)).toEqual(['10000006']);
+      setter.setContentControlValue('105', text);
+
+      for (const filled of [session, setter]) {
+        const xml = part((await saveYrsDocx(filled)).bytes, 'word/document.xml');
+        const address = controlsInXml(xml).find((control) => control.tag === 'customer.address')!;
+        expect(address).toMatchObject({ paragraphs: [text], multiLine: '1', placeholder: false });
+        const decoded = new TextDecoder().decode(xml);
+        const start = decoded.indexOf('customer.address');
+        const content = decoded.slice(start, decoded.indexOf('</w:sdtContent>', start));
+        expect(content.match(/<w:p[ >]/g)).toHaveLength(1);
+        expect(content.match(/<w:r>(?:(?!<\/w:r>).)*<w:br[ />]/g)).toHaveLength(2);
+      }
+
+      reopened.openDocx(new Uint8Array((await saveYrsDocx(session)).bytes), true);
+      expect(byTag(snapshot(reopened.listContentControls()), 'customer.address').value).toEqual({ kind: 'text', text });
+      const again = applied(
+        reopened.applyEdits({
+          expectVersion: reopened.version(),
+          steps: [{ op: 'setContentControlText', target: { kind: 'tag', tag: 'customer.address' }, text }],
+        })
+      );
+      expect(again.receipts[0]!.changed).toBe(false);
+    } finally {
+      reopened.destroy();
+      setter.destroy();
+      session.destroy();
+    }
+  });
+
+  it('collapses a split plain-text control filled with its own text', async () => {
+    const paragraph = (id: string, text: string) => `<w:p w14:paraId="${id}"><w:r><w:t>${text}</w:t></w:r></w:p>`;
+    const session = await open(
+      bodyPackage(
+        `<w:sdt><w:sdtPr><w:tag w:val="lines"/><w:text w:multiLine="1"/></w:sdtPr><w:sdtContent>${paragraph('0E000010', 'a')}${paragraph('0E000011', 'b')}</w:sdtContent></w:sdt>`
+      )
+    );
+    const reopened = await createYrsSession({ clientId: nextClientId++ });
+    try {
+      const fill = (target: YrsSession) =>
+        applied(
+          target.applyEdits({
+            expectVersion: target.version(),
+            steps: [{ op: 'setContentControlText', target: { kind: 'tag', tag: 'lines' }, text: 'a\nb' }],
+          })
+        );
+      expect(fill(session).receipts[0]!.changed).toBe(true);
+      const saved = new Uint8Array((await saveYrsDocx(session)).bytes);
+      const lines = controlsInXml(part(saved, 'word/document.xml')).find((control) => control.tag === 'lines')!;
+      expect(lines.paragraphs).toEqual(['a\nb']);
+
+      reopened.openDocx(saved, true);
+      expect(byTag(snapshot(reopened.listContentControls()), 'lines').value).toEqual({ kind: 'text', text: 'a\nb' });
+      expect(fill(reopened).receipts[0]!.changed).toBe(false);
+    } finally {
+      reopened.destroy();
+      session.destroy();
+    }
+  });
+
+  it('keeps block controls in table cells through fills, edits, saves and reopen', async () => {
+    const control = (tag: string, id: number, kind: string, content: string, binding = '') =>
+      `<w:sdt><w:sdtPr><w:alias w:val="${tag} alias"/><w:tag w:val="${tag}"/><w:id w:val="${id}"/><w:lock w:val="sdtLocked"/>${binding}${kind}</w:sdtPr><w:sdtEndPr><w:rPr><w:b/></w:rPr></w:sdtEndPr><w:sdtContent>${content}</w:sdtContent></w:sdt>`;
+    const paragraph = (id: string, text = '') =>
+      text ? `<w:p w14:paraId="${id}"><w:r><w:t>${text}</w:t></w:r></w:p>` : `<w:p w14:paraId="${id}"/>`;
+    const table = (...cells: string[]) =>
+      `<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid>${cells.map(() => '<w:gridCol w:w="3000"/>').join('')}</w:tblGrid><w:tr>${cells.map((cell) => `<w:tc><w:tcPr><w:tcW w:w="3000" w:type="dxa"/></w:tcPr>${cell}</w:tc>`).join('')}</w:tr></w:tbl>`;
+    const bytes = bodyPackage(
+      table(
+        control('cell', 201, '<w:text/>', paragraph('0B000001', 'cell text')) + paragraph('0B000002'),
+        table(
+          control(
+            'nested',
+            202,
+            '<w:text/>',
+            paragraph('0B000003', 'nested text'),
+            '<w:dataBinding w:xpath="/root[1]/nested[1]" w:storeItemID="{6F2C8B5D-3E1A-4C7B-9D2E-1A2B3C4D5E6F}"/>'
+          ) + paragraph('0B000004')
+        ) + paragraph('0B000005'),
+        control('holder', 203, '<w:richText/>', table(paragraph('0B000006', 'held table')) + paragraph('0B000007')) +
+          paragraph('0B000008')
+      ) + paragraph('0B000009', 'after')
+    );
+    const source = controlsInXml(part(bytes, 'word/document.xml'));
+    expect(source.map((entry) => [entry.tag, entry.inCell])).toEqual([
+      ['cell', true],
+      ['nested', true],
+      ['holder', true],
+    ]);
+    const sessions: YrsSession[] = [];
+    const session = async (from = bytes) => {
+      const opened = await open(from);
+      sessions.push(opened);
+      return opened;
+    };
+    try {
+      const untouched = await session();
+      const base = untouched.materializeDocx();
+      if (!base) throw new Error('the opened package must materialize');
+      expect(controlsInXml(part(await repackDocx(yrsToDocument(untouched, base)), 'word/document.xml'))).toEqual(
+        source
+      );
+
+      const edited = await session();
+      applied(
+        edited.applyEdits({
+          expectVersion: edited.version(),
+          steps: [
+            {
+              op: 'insertText',
+              target: { kind: 'paragraph', story: 'body', paraId: '0B000009' },
+              at: 'end',
+              text: '!',
+            },
+          ],
+        })
+      );
+      expect(controlsInXml(part((await saveYrsDocx(edited)).bytes, 'word/document.xml'))).toEqual(source);
+
+      const filled = await session();
+      applied(
+        filled.applyEdits({
+          expectVersion: filled.version(),
+          steps: [{ op: 'setContentControlText', target: { kind: 'tag', tag: 'cell' }, text: 'filled value' }],
+        })
+      );
+      const saved = (await saveYrsDocx(filled)).bytes;
+      expect(controlsInXml(part(saved, 'word/document.xml'))).toEqual(
+        source.map((entry) =>
+          entry.tag === 'cell' ? { ...entry, paragraphs: ['filled value'], text: 'filled value' } : entry
+        )
+      );
+      const reopened = snapshot((await session(new Uint8Array(saved))).listContentControls());
+      expect(reopened.controls.map((entry) => [entry.tag, entry.alias, entry.ooxmlId, entry.value])).toEqual([
+        ['cell', 'cell alias', '201', { kind: 'text', text: 'filled value' }],
+        ['nested', 'nested alias', '202', { kind: 'text', text: 'nested text' }],
+        ['holder', 'holder alias', '203', expect.anything()],
+      ]);
+    } finally {
+      for (const opened of sessions) opened.destroy();
     }
   });
 

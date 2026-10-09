@@ -36,12 +36,20 @@ export class FileWorkspace {
     if (!['.docx', '.xlsx', '.pptx'].includes(format)) throw new DocumentToolError('UNSUPPORTED_FORMAT', 'Open a DOCX, XLSX, or PPTX file.');
     for (const [id, entry] of this.documents) if (entry.path === file) return { document: id, ...entry.document.overview() };
     if (this.documents.size >= 10) throw new DocumentToolError('DOCUMENT_LIMIT', 'Close a document before opening more than 10.');
-    const handle = await open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    const handle = await open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
     let bytes: Uint8Array;
     try {
       const info = await this.validateHandle(file, handle);
       if (!info.isFile() || info.size > 64 * 1024 * 1024) throw new DocumentToolError('FILE_TOO_LARGE', 'Open an Office file up to 64 MiB.');
-      bytes = await handle.readFile();
+      const buffer = new Uint8Array(info.size + 1);
+      let length = 0;
+      while (length < buffer.length) {
+        const { bytesRead } = await handle.read(buffer, length, buffer.length - length, length);
+        if (!bytesRead) break;
+        length += bytesRead;
+      }
+      if (length !== info.size) throw new DocumentToolError('FILE_CHANGED', 'The file changed during access. Retry with a stable workspace.');
+      bytes = buffer.subarray(0, length);
     } finally { await handle.close(); }
     const options = { name: basename(file) };
     const document = format === '.xlsx' ? await openXlsx(bytes, options) : format === '.pptx' ? await openPptx(bytes, options) : await openDocx(bytes, { ...options, renderer: this.renderer });
