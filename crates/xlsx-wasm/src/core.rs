@@ -2,14 +2,46 @@
 use betteroffice_xlsx::RenderOptions;
 use betteroffice_xlsx::{
     CalculationOptions, CapturedFormat, CellAddress, CellInput as WorkbookCellInput, CellRange,
-    CellRef, EditProfile, Error, MutationResult, NumberFormatMutation, Op, PrintMetrics, Proposal,
-    ProposalEditInput as WorkbookProposalEditInput, ProposalRequest, SheetId, StylePatch,
-    UpdateEvent, UpdateSubscription, Viewport, Workbook,
+    CellRef, EditProfile, Error, HydratedWorkbook, MutationResult, NumberFormatMutation, Op,
+    PeerHydration as WorkbookPeerHydration, PrintMetrics, Proposal,
+    ProposalEditInput as WorkbookProposalEditInput, ProposalRequest, SheetId, SnapshotBudget,
+    StylePatch, UpdateEvent, UpdateSubscription, Viewport, Workbook, WorkbookSnapshotEncoder,
 };
 use serde::{Deserialize, Serialize};
 
 pub struct Session {
     workbook: Workbook,
+    calculation_context: Option<CalculationOptions>,
+    snapshot: Option<PeerSnapshot>,
+}
+
+struct PeerSnapshot {
+    encoder: WorkbookSnapshotEncoder,
+    version: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PeerHydration {
+    workbook: WorkbookPeerHydration,
+    calculation_context: Option<CalculationOptions>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WorkbookCalculationContext {
+    now_serial: f64,
+    rand_seed: u32,
+}
+
+impl WorkbookCalculationContext {
+    fn options(self) -> Result<CalculationOptions, String> {
+        if !self.now_serial.is_finite() {
+            return Err("nowSerial must be finite".to_owned());
+        }
+        Ok(CalculationOptions {
+            now_serial: Some(self.now_serial),
+        })
+    }
 }
 
 #[derive(Serialize)]
@@ -24,6 +56,22 @@ struct SheetInfo {
     frozen_cols: u32,
     initial_scroll_x: f32,
     initial_scroll_y: f32,
+}
+
+impl From<betteroffice_xlsx::SheetInfo> for SheetInfo {
+    fn from(info: betteroffice_xlsx::SheetInfo) -> Self {
+        Self {
+            sheet_ids: info.sheet_ids,
+            sheet_names: info.sheet_names,
+            active_sheet: info.active_sheet.0,
+            content_width: info.content_width,
+            content_height: info.content_height,
+            frozen_rows: info.frozen_rows,
+            frozen_cols: info.frozen_cols,
+            initial_scroll_x: info.initial_scroll_x,
+            initial_scroll_y: info.initial_scroll_y,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -250,10 +298,131 @@ struct AcceptResult {
 }
 
 impl Session {
+    pub fn begin_peer_snapshot(&mut self, records: usize, bytes: usize) -> Result<(), String> {
+        self.snapshot = None;
+        let budget = SnapshotBudget::new(records, bytes).map_err(|error| error.to_string())?;
+        let encoder =
+            WorkbookSnapshotEncoder::new(&self.workbook, self.calculation_context, budget)
+                .map_err(|error| error.to_string())?;
+        if let Some(reason) = encoder.split_fallback_reason() {
+            return Err(reason.to_owned());
+        }
+        self.snapshot = Some(PeerSnapshot {
+            encoder,
+            version: self.document_version(),
+        });
+        Ok(())
+    }
+
+    pub fn next_peer_snapshot_chunk(&mut self) -> Result<Option<Vec<u8>>, String> {
+        let mut snapshot = self
+            .snapshot
+            .take()
+            .ok_or_else(|| "workbook peer snapshot is not active".to_owned())?;
+        if snapshot.version != self.document_version() {
+            return Err("workbook changed during peer snapshot".to_owned());
+        }
+        let chunk = snapshot
+            .encoder
+            .next(&self.workbook)
+            .map_err(|error| error.to_string())?;
+        if let Some(reason) = snapshot.encoder.split_fallback_reason() {
+            return Err(reason.to_owned());
+        }
+        self.snapshot = Some(snapshot);
+        Ok(chunk)
+    }
+
+    pub fn end_peer_snapshot(&mut self) {
+        self.snapshot = None;
+    }
+
+    pub fn from_hydrated_workbook(hydrated: HydratedWorkbook) -> Self {
+        let (workbook, calculation_context) = hydrated.into_parts();
+        Self {
+            workbook,
+            calculation_context,
+            snapshot: None,
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn adopt_peer_version(&mut self, version: &str) -> Result<(), String> {
+        self.workbook
+            .adopt_peer_version(version)
+            .map_err(|error| error.to_string())
+    }
+
+    #[doc(hidden)]
+    pub fn peer_hydration_json(&self) -> Result<String, String> {
+        let workbook = self
+            .workbook
+            .peer_hydration()
+            .map_err(|error| error.to_string())?;
+        serde_json::to_string(&PeerHydration {
+            workbook,
+            calculation_context: self.calculation_context,
+        })
+        .map_err(|error| error.to_string())
+    }
+
+    #[doc(hidden)]
+    pub fn open_with_peer_hydration_json(bytes: &[u8], hydration: &str) -> Result<Self, String> {
+        let hydration: PeerHydration = serde_json::from_str(hydration)
+            .map_err(|error| format!("bad peer hydration: {error}"))?;
+        let workbook = Workbook::open_with_peer_hydration(bytes, hydration.workbook)
+            .map_err(|error| error.to_string())?;
+        Ok(Self {
+            workbook,
+            calculation_context: hydration.calculation_context,
+            snapshot: None,
+        })
+    }
+
     pub fn open(bytes: &[u8], now_serial: Option<f64>) -> Result<Self, String> {
         Workbook::open_recalculated(bytes, calculation_options(now_serial))
-            .map(|workbook| Self { workbook })
+            .map(|workbook| Self {
+                workbook,
+                calculation_context: None,
+                snapshot: None,
+            })
             .map_err(|error| error.to_string())
+    }
+
+    pub fn open_with_calculation_json(bytes: &[u8], context: &str) -> Result<Self, String> {
+        let context: WorkbookCalculationContext = serde_json::from_str(context)
+            .map_err(|error| format!("bad calculation context: {error}"))?;
+        let rand_seed = context.rand_seed;
+        let options = context.options()?;
+        Workbook::open_recalculated_with_seed(bytes, options, Some(rand_seed))
+            .map(|workbook| Self {
+                workbook,
+                calculation_context: Some(options),
+                snapshot: None,
+            })
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn set_calculation_context_json(&mut self, context: &str) -> Result<(), String> {
+        let context: Option<WorkbookCalculationContext> = serde_json::from_str(context)
+            .map_err(|error| format!("bad calculation context: {error}"))?;
+        if context.is_some() && self.workbook.is_collaborative() {
+            return Err(
+                "calculation context is unavailable for collaborative workbooks".to_owned(),
+            );
+        }
+        let rand_seed = context.as_ref().map(|context| context.rand_seed);
+        let options = context
+            .map(WorkbookCalculationContext::options)
+            .transpose()?;
+        self.workbook.set_rand_seed(rand_seed);
+        self.calculation_context = options;
+        Ok(())
+    }
+
+    fn calculation_options(&self, now_serial: Option<f64>) -> CalculationOptions {
+        self.calculation_context
+            .unwrap_or_else(|| calculation_options(now_serial))
     }
 
     pub fn open_collaborative(
@@ -262,7 +431,11 @@ impl Session {
         now_serial: Option<f64>,
     ) -> Result<Self, String> {
         Workbook::open_collaborative_recalculated(bytes, client_id, calculation_options(now_serial))
-            .map(|workbook| Self { workbook })
+            .map(|workbook| Self {
+                workbook,
+                calculation_context: None,
+                snapshot: None,
+            })
             .map_err(|error| error.to_string())
     }
 
@@ -291,7 +464,7 @@ impl Session {
     ) -> Result<String, String> {
         let result = self
             .workbook
-            .apply_update_v1(update, calculation_options(now_serial))
+            .apply_update_v1(update, self.calculation_options(now_serial))
             .map_err(|error| error.to_string())?;
         self.edit_result(result)
     }
@@ -323,11 +496,16 @@ impl Session {
     }
 
     pub fn display_list_json(&self, viewport_json: &str) -> Result<String, String> {
+        self.display_list_for_json(self.workbook.active_sheet().0, viewport_json)
+    }
+
+    /// @experimental
+    pub fn display_list_for_json(&self, sheet: u32, viewport_json: &str) -> Result<String, String> {
         let viewport: Viewport = serde_json::from_str(viewport_json)
             .map_err(|error| format!("bad viewport: {error}"))?;
         let display_list = self
             .workbook
-            .display_list(&viewport)
+            .display_list_for(SheetId(sheet), &viewport)
             .map_err(|error| error.to_string())?;
         serde_json::to_string(&display_list).map_err(|error| error.to_string())
     }
@@ -381,7 +559,7 @@ impl Session {
                 &args.chart,
                 args.dx,
                 args.dy,
-                calculation_options(now_serial),
+                self.calculation_options(now_serial),
             )
             .map_err(|error| error.to_string())?;
         self.edit_result(result)
@@ -428,6 +606,18 @@ impl Session {
         serde_json::to_string(&self.sheet_info()?).map_err(|error| error.to_string())
     }
 
+    pub fn sheet_count(&self) -> usize {
+        self.workbook.sheet_count()
+    }
+
+    pub fn sheet_info_for_json(&self, sheet: u32) -> Result<String, String> {
+        let info = self
+            .workbook
+            .sheet_info_for(SheetId(sheet))
+            .map_err(|error| error.to_string())?;
+        serde_json::to_string(&SheetInfo::from(info)).map_err(|error| error.to_string())
+    }
+
     pub fn calculation_status_json(&self) -> Result<String, String> {
         serde_json::to_string(&CalculationStatus {
             limited_cells: self.changed_list(&self.workbook.last_calculation().limited_cells),
@@ -454,7 +644,7 @@ impl Session {
                 SheetId(args.sheet),
                 CellRef::new(args.row, args.col),
                 &args.input,
-                calculation_options(now_serial),
+                self.calculation_options(now_serial),
             )
             .map_err(|error| error.to_string())?;
         self.edit_result(result)
@@ -475,7 +665,7 @@ impl Session {
                 SheetId(args.sheet),
                 CellRef::new(args.row, args.col),
                 &args.input,
-                calculation_options(now_serial),
+                self.calculation_options(now_serial),
                 now,
             )
             .map_err(|error| error.to_string())?;
@@ -499,7 +689,11 @@ impl Session {
             .collect::<Vec<_>>();
         let result = self
             .workbook
-            .edit_cells(SheetId(args.sheet), &edits, calculation_options(now_serial))
+            .edit_cells(
+                SheetId(args.sheet),
+                &edits,
+                self.calculation_options(now_serial),
+            )
             .map_err(|error| error.to_string())?;
         self.edit_result(result)
     }
@@ -513,7 +707,7 @@ impl Session {
             serde_json::from_str(transaction_json).map_err(|error| format!("bad ops: {error}"))?;
         let result = self
             .workbook
-            .apply_ops(args.ops, calculation_options(now_serial))
+            .apply_ops(args.ops, self.calculation_options(now_serial))
             .map_err(|error| error.to_string())?;
         self.edit_result(result)
     }
@@ -529,7 +723,7 @@ impl Session {
             serde_json::from_str(transaction_json).map_err(|error| format!("bad ops: {error}"))?;
         let (result, profile) = self
             .workbook
-            .apply_ops_profiled(args.ops, calculation_options(now_serial), now)
+            .apply_ops_profiled(args.ops, self.calculation_options(now_serial), now)
             .map_err(|error| error.to_string())?;
         self.profiled_edit_result(result, profile)
     }
@@ -537,7 +731,7 @@ impl Session {
     pub fn undo_json(&mut self, now_serial: Option<f64>) -> Result<String, String> {
         let result = self
             .workbook
-            .undo(calculation_options(now_serial))
+            .undo(self.calculation_options(now_serial))
             .map_err(|error| error.to_string())?;
         self.edit_result(result)
     }
@@ -545,7 +739,7 @@ impl Session {
     pub fn redo_json(&mut self, now_serial: Option<f64>) -> Result<String, String> {
         let result = self
             .workbook
-            .redo(calculation_options(now_serial))
+            .redo(self.calculation_options(now_serial))
             .map_err(|error| error.to_string())?;
         self.edit_result(result)
     }
@@ -606,6 +800,16 @@ impl Session {
         serde_json::to_string(&CellPosition { x, y }).map_err(|error| error.to_string())
     }
 
+    pub fn cell_rect_json(&self, args: &str) -> Result<String, String> {
+        let args: CellArgs =
+            serde_json::from_str(args).map_err(|error| format!("bad cell args: {error}"))?;
+        let rect = self
+            .workbook
+            .cell_rect(SheetId(args.sheet), CellRef::new(args.row, args.col))
+            .map_err(|error| error.to_string())?;
+        serde_json::to_string(&rect).map_err(|error| error.to_string())
+    }
+
     pub fn range_cells_json(&self, args: &str) -> Result<String, String> {
         let args: RangeArgs =
             serde_json::from_str(args).map_err(|error| format!("bad range args: {error}"))?;
@@ -643,7 +847,7 @@ impl Session {
                 SheetId(args.sheet),
                 range,
                 args.patch,
-                calculation_options(now_serial),
+                self.calculation_options(now_serial),
             )
             .map_err(|error| error.to_string())?;
         self.edit_result(result)
@@ -663,7 +867,7 @@ impl Session {
                 SheetId(args.sheet),
                 range,
                 args.format,
-                calculation_options(now_serial),
+                self.calculation_options(now_serial),
             )
             .map_err(|error| error.to_string())?;
         self.edit_result(result)
@@ -703,7 +907,7 @@ impl Session {
                 SheetId(args.sheet),
                 range,
                 args.format,
-                calculation_options(now_serial),
+                self.calculation_options(now_serial),
             )
             .map_err(|error| error.to_string())?;
         self.edit_result(result)
@@ -715,6 +919,20 @@ impl Session {
         let ranges = self
             .workbook
             .merged_ranges(SheetId(args.sheet), parse_range(&args.range)?)
+            .map_err(|error| error.to_string())?;
+        serde_json::to_string(&MergedRanges { ranges }).map_err(|error| error.to_string())
+    }
+
+    pub fn visible_merged_ranges_json(
+        &self,
+        sheet: u32,
+        viewport_json: &str,
+    ) -> Result<String, String> {
+        let viewport: Viewport = serde_json::from_str(viewport_json)
+            .map_err(|error| format!("bad viewport: {error}"))?;
+        let ranges = self
+            .workbook
+            .visible_merged_ranges(SheetId(sheet), &viewport)
             .map_err(|error| error.to_string())?;
         serde_json::to_string(&MergedRanges { ranges }).map_err(|error| error.to_string())
     }
@@ -743,7 +961,7 @@ impl Session {
                         })
                         .collect(),
                 },
-                calculation_options(now_serial),
+                self.calculation_options(now_serial),
             )
             .map_err(|error| error.to_string())?;
         serde_json::to_string(&proposal).map_err(|error| error.to_string())
@@ -765,7 +983,7 @@ impl Session {
             serde_json::from_str(args).map_err(|error| format!("bad accept args: {error}"))?;
         let result = self
             .workbook
-            .accept_proposal(&args.id, args.force, calculation_options(now_serial))
+            .accept_proposal(&args.id, args.force, self.calculation_options(now_serial))
             .map_err(|error| self.proposal_error(error))?;
         serde_json::to_string(&AcceptResult {
             applied: result.mutation.applied,
@@ -814,11 +1032,14 @@ impl Session {
             .map_err(|error| error.to_string())
     }
 
-    /// Calculates against `calculation.nowSerial` from the request alone; no clock is added.
     pub fn apply_edits_json(&mut self, request: &str) -> Result<String, String> {
-        self.workbook
-            .apply_edits_json(request)
-            .map_err(|error| error.to_string())
+        match self.calculation_context {
+            Some(context) => self
+                .workbook
+                .apply_edits_json_with_calculation(request, context),
+            None => self.workbook.apply_edits_json(request),
+        }
+        .map_err(|error| error.to_string())
     }
 
     /// `{"ok":true,"version","content"}` or a refusal; nothing is recalculated.
@@ -875,17 +1096,7 @@ impl Session {
     fn sheet_info(&self) -> Result<SheetInfo, String> {
         self.workbook
             .sheet_info()
-            .map(|info| SheetInfo {
-                sheet_ids: info.sheet_ids,
-                sheet_names: info.sheet_names,
-                active_sheet: info.active_sheet.0,
-                content_width: info.content_width,
-                content_height: info.content_height,
-                frozen_rows: info.frozen_rows,
-                frozen_cols: info.frozen_cols,
-                initial_scroll_x: info.initial_scroll_x,
-                initial_scroll_y: info.initial_scroll_y,
-            })
+            .map(SheetInfo::from)
             .map_err(|error| error.to_string())
     }
 
@@ -1025,6 +1236,193 @@ mod tests {
         ooxml_opc::rezip_parts(&parts).unwrap()
     }
 
+    #[test]
+    fn peer_hydration_nests_workbook_state_and_preserves_calculation_context() {
+        let bytes = formula_xlsx();
+        let mut worker =
+            Session::open_with_calculation_json(&bytes, r#"{"nowSerial":45000.75,"randSeed":42}"#)
+                .unwrap();
+        let hydration = worker.peer_hydration_json().unwrap();
+        let transferred: serde_json::Value = serde_json::from_str(&hydration).unwrap();
+        assert!(transferred["workbook"].is_object());
+        assert_eq!(transferred["workbook"]["delta"], true);
+        assert_eq!(transferred["workbook"]["rand_seed"], 42);
+        let mut peer = Session::open_with_peer_hydration_json(&bytes, &hydration).unwrap();
+        assert_eq!(peer.workbook.version(), worker.workbook.version());
+        assert_eq!(peer.workbook.rand_seed(), worker.workbook.rand_seed());
+        assert_eq!(peer.calculation_context, worker.calculation_context);
+        assert_eq!(
+            peer.workbook.save().unwrap(),
+            worker.workbook.save().unwrap()
+        );
+        let edit = r#"{"sheet":0,"edits":[{"row":0,"col":0,"input":"=NOW()"},{"row":0,"col":2,"input":"=RANDBETWEEN(1,1000000)"}]}"#;
+        assert_eq!(
+            peer.edit_cells_json(edit, Some(1.0)).unwrap(),
+            worker.edit_cells_json(edit, Some(2.0)).unwrap(),
+        );
+        assert_eq!(peer.workbook.version(), worker.workbook.version());
+        assert_eq!(
+            peer.workbook.save().unwrap(),
+            worker.workbook.save().unwrap()
+        );
+    }
+
+    #[test]
+    fn calculation_context_overrides_boundary_clocks_and_null_restores_defaults() {
+        let mut session = Session::open_with_calculation_json(
+            &sample_xlsx(),
+            r#"{"nowSerial":45000.75,"randSeed":42}"#,
+        )
+        .unwrap();
+        session
+            .edit_cells_json(
+                r#"{"sheet":0,"edits":[{"row":9,"col":0,"input":"=NOW()"},{"row":9,"col":1,"input":"=TODAY()"},{"row":9,"col":2,"input":"=RANDBETWEEN(1,1000000)"},{"row":9,"col":3,"input":"=RANDBETWEEN(1,1000000)"}]}"#,
+                Some(1.0),
+            )
+            .unwrap();
+        let value = |session: &Session, column| {
+            session
+                .workbook
+                .sheet(SheetId(0))
+                .unwrap()
+                .cell(CellRef::new(9, column))
+                .unwrap()
+                .value
+                .clone()
+        };
+        assert_eq!(value(&session, 0), CellValue::Number { value: 45_000.75 });
+        assert_eq!(value(&session, 1), CellValue::Number { value: 45_000.0 });
+        let random = value(&session, 2);
+        let random_integer = value(&session, 3);
+        session
+            .apply_ops_json(
+                r#"{"ops":[{"type":"setRowHeight","sheet":0,"row":9,"height":25}]}"#,
+                Some(2.0),
+            )
+            .unwrap();
+        assert_eq!(value(&session, 0), CellValue::Number { value: 45_000.75 });
+        assert_eq!(value(&session, 2), random);
+        session.undo_json(Some(3.0)).unwrap();
+        session.redo_json(Some(4.0)).unwrap();
+        assert_eq!(value(&session, 2), random);
+        let batch = serde_json::json!({
+            "expectVersion": session.document_version(),
+            "steps": [{
+                "op": "setCellInputs",
+                "target": { "sheetId": "sheet:0", "range": { "kind": "a1", "a1": "Z40" } },
+                "inputs": [["1"]]
+            }]
+        });
+        session.apply_edits_json(&batch.to_string()).unwrap();
+        assert_eq!(value(&session, 0), CellValue::Number { value: 45_000.75 });
+        assert_eq!(value(&session, 2), random);
+        session.set_calculation_context_json("null").unwrap();
+        assert_eq!(session.workbook.rand_seed(), None);
+        session
+            .edit_cell_json(
+                r#"{"sheet":0,"row":39,"col":25,"input":"2"}"#,
+                Some(46_000.25),
+            )
+            .unwrap();
+        assert_eq!(value(&session, 0), CellValue::Number { value: 46_000.25 });
+        let mut draws = vec![value(&session, 3)];
+        for input in ["3", "4", "5"] {
+            session
+                .edit_cell_json(
+                    &serde_json::json!({ "sheet": 0, "row": 39, "col": 25, "input": input })
+                        .to_string(),
+                    Some(46_000.25),
+                )
+                .unwrap();
+            draws.push(value(&session, 3));
+        }
+        assert!(draws.iter().any(|draw| *draw != random_integer));
+    }
+
+    #[test]
+    fn clock_only_batch_overrides_preserve_the_session_seed_and_save_bytes() {
+        let bytes = sample_xlsx();
+        let context = r#"{"nowSerial":45000.75,"randSeed":42}"#;
+        let mut first = Session::open_with_calculation_json(&bytes, context).unwrap();
+        let mut second = Session::open_with_calculation_json(&bytes, context).unwrap();
+        for session in [&mut first, &mut second] {
+            let request = serde_json::json!({
+                "expectVersion": session.document_version(),
+                "calculation": { "nowSerial": 46_000.25 },
+                "steps": [{
+                    "op": "setFormulas",
+                    "target": { "sheetId": "sheet:0", "range": { "kind": "a1", "a1": "A10:B10" } },
+                    "formulas": [["NOW()", "RANDBETWEEN(1,1000000)"]]
+                }]
+            });
+            let result: serde_json::Value =
+                serde_json::from_str(&session.apply_edits_json(&request.to_string()).unwrap())
+                    .unwrap();
+            assert_eq!(result["ok"], true);
+            assert_eq!(result["applied"], true);
+            assert_eq!(session.workbook.rand_seed(), Some(42));
+            assert_eq!(
+                session.calculation_options(None).now_serial,
+                Some(45_000.75)
+            );
+        }
+        let values = |session: &Session| {
+            [0, 1].map(|column| {
+                session
+                    .workbook
+                    .sheet(SheetId(0))
+                    .unwrap()
+                    .cell(CellRef::new(9, column))
+                    .unwrap()
+                    .value
+                    .clone()
+            })
+        };
+        let first_values = values(&first);
+        assert_eq!(first_values[0], CellValue::Number { value: 46_000.25 });
+        assert!(
+            matches!(first_values[1], CellValue::Number { value } if (1.0..=1_000_000.0).contains(&value))
+        );
+        assert_eq!(first_values, values(&second));
+        assert_eq!(first.save().unwrap(), second.save().unwrap());
+    }
+
+    #[test]
+    fn calculation_context_json_rejects_invalid_shapes_without_replacing_the_context() {
+        let bytes = sample_xlsx();
+        let context = r#"{"nowSerial":45000.75,"randSeed":42}"#;
+        let mut session = Session::open_with_calculation_json(&bytes, context).unwrap();
+        for invalid in [
+            "null",
+            "[]",
+            "{}",
+            "1",
+            r#"{"nowSerial":45000}"#,
+            r#"{"randSeed":42}"#,
+            r#"{"nowSerial":1e400,"randSeed":42}"#,
+            r#"{"nowSerial":45000,"randSeed":-1}"#,
+            r#"{"nowSerial":45000,"randSeed":0.5}"#,
+            r#"{"nowSerial":45000,"randSeed":4294967296}"#,
+            r#"{"nowSerial":45000,"randSeed":"42"}"#,
+            r#"{"nowSerial":45000,"randSeed":42,"extra":true}"#,
+        ] {
+            assert!(Session::open_with_calculation_json(&bytes, invalid).is_err());
+            if invalid != "null" {
+                assert!(session.set_calculation_context_json(invalid).is_err());
+                assert_eq!(
+                    session.calculation_context,
+                    Some(CalculationOptions {
+                        now_serial: Some(45_000.75),
+                    })
+                );
+                assert_eq!(session.workbook.rand_seed(), Some(42));
+            }
+        }
+        let mut collaborative = Session::open_collaborative(&bytes, 731, None).unwrap();
+        assert!(collaborative.set_calculation_context_json(context).is_err());
+        collaborative.set_calculation_context_json("null").unwrap();
+    }
+
     fn currency_xlsx() -> Vec<u8> {
         let mut sheet = Sheet::new("Data");
         sheet.set_cell(
@@ -1083,6 +1481,74 @@ mod tests {
                 .unwrap()
                 .contains(r#""activeSheet":1"#)
         );
+    }
+
+    #[test]
+    fn opening_and_painting_preserve_source_bytes() {
+        let source = formula_xlsx();
+        for session in [
+            Session::open(&source, Some(45000.25)).unwrap(),
+            Session::open_collaborative(&source, 706, Some(45000.25)).unwrap(),
+        ] {
+            assert_eq!(
+                session.workbook.model().sheets[0]
+                    .cell(CellRef::parse_a1("B1").unwrap())
+                    .unwrap()
+                    .value,
+                CellValue::Number { value: 15.0 },
+            );
+            text_command(&display_value(&session), "15");
+            assert_eq!(session.save().unwrap(), source);
+        }
+    }
+
+    #[test]
+    fn sheet_view_json_reads_preserve_active_sheet_version_and_saved_bytes() {
+        let bytes = sample_xlsx();
+        let mut session = Session::open(&bytes, None).unwrap();
+        let mut reference = Session::open(&bytes, None).unwrap();
+        let info = session.sheet_info_json().unwrap();
+        let version = session.document_version();
+        let saved = session.save().unwrap();
+        reference.set_active_sheet(1).unwrap();
+        assert_eq!(
+            session.sheet_info_for_json(1).unwrap(),
+            reference.sheet_info_json().unwrap()
+        );
+        let rect: serde_json::Value = serde_json::from_str(
+            &session
+                .cell_rect_json(r#"{"sheet":1,"row":3,"col":2}"#)
+                .unwrap(),
+        )
+        .unwrap();
+        let at: serde_json::Value = serde_json::from_str(
+            &session
+                .cell_position_json(r#"{"sheet":1,"row":3,"col":2}"#)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(rect["x"], at["x"]);
+        assert_eq!(rect["y"], at["y"]);
+        assert!(rect["w"].as_f64().unwrap() > 0.0);
+        assert!(rect["h"].as_f64().unwrap() > 0.0);
+        assert!(session.sheet_info_for_json(2).is_err());
+        assert!(
+            session
+                .cell_rect_json(r#"{"sheet":1,"row":1048576,"col":0}"#)
+                .is_err()
+        );
+        assert_eq!(session.sheet_info_json().unwrap(), info);
+        assert_eq!(session.document_version(), version);
+        assert_eq!(session.save().unwrap(), saved);
+        session
+            .edit_cell_json(r#"{"sheet":1,"row":70,"col":20,"input":"grown"}"#, None)
+            .unwrap();
+        assert_ne!(session.document_version(), version);
+        assert_ne!(
+            session.sheet_info_for_json(1).unwrap(),
+            reference.sheet_info_json().unwrap()
+        );
+        assert_eq!(session.workbook.active_sheet(), SheetId(0));
     }
 
     #[test]

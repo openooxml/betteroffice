@@ -17,12 +17,15 @@ import {
   createYrsInputPositionMap,
   createYrsSession,
   displayPositionToYrsLoc,
+  type ResidentDocumentRead,
+  type ResidentEngineWorkerClient,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
 import { createPluginGeometry, pluginLayout } from '../../../plugins/geometry';
-import { markPresented, stampSourceVersion } from './layoutProvenance';
+import { markPresented, stampSourceVersion, stampWorkerFrameVersion } from './layoutProvenance';
 import {
   positionAtClientPoint,
+  readViewerPositionAtClientPoint,
   resolvePointPosition,
   type PointPositionEditor,
 } from './pointPosition';
@@ -161,6 +164,116 @@ async function open() {
   session.openDocx(fixture(), true);
   return session;
 }
+
+test('a superseded viewer point read waits for a new presented frame and re-hit-tests the same point', async () => {
+  const session = await open();
+  const { queries, host, point } = await paint(session);
+  stampWorkerFrameVersion(queries, 'A', true, false);
+  const next = createDisplayListQueries({
+    ...queries.displayList,
+    pages: queries.displayList.pages.map((page) => ({ ...page,
+      primitives: page.primitives.map((primitive) => ({ ...primitive,
+        ...(primitive.docStart === undefined ? {} : { docStart: primitive.docStart + 7 }),
+        ...(primitive.docEnd === undefined ? {} : { docEnd: primitive.docEnd + 7 }),
+      })),
+    })),
+  });
+  await next.whenReady();
+  disposables.push(next);
+  stampWorkerFrameVersion(next, 'B', false, false);
+  let shown = queries;
+  let present!: (queries: DisplayListQueries) => void;
+  const frame = new Promise<DisplayListQueries>((resolve) => { present = resolve; });
+  const pending: Array<{
+    request: Extract<ResidentDocumentRead, { kind: 'pointPosition' }>;
+    resolve(reply: { version: string; value: unknown }): void;
+  }> = [];
+  const read = ((request: ResidentDocumentRead) =>
+    new Promise<{ version: string; value: unknown }>((resolve) => {
+      if (request.kind !== 'pointPosition') throw new Error('Expected a point-position read');
+      pending.push({ request, resolve });
+    })) as unknown as ResidentEngineWorkerClient['documentRead'];
+  const { clientX, clientY } = point(225, 145);
+  let waits = 0;
+  const result = readViewerPositionAtClientPoint(read, host, queries, 1, clientX, clientY, () => shown,
+    (previous, timeoutMs) => {
+      expect(previous).toBe(queries);
+      expect(timeoutMs).toBeLessThanOrEqual(10_000);
+      waits += 1;
+      return frame;
+    });
+  expect(pending).toHaveLength(1);
+  const first = pending[0]!;
+  first.resolve({ version: 'B', value: null });
+  for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+  expect(waits).toBe(1);
+  expect(pending).toHaveLength(1);
+  shown = next;
+  markPresented(host, next.displayList);
+  present(next);
+  for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+  expect(pending).toHaveLength(2);
+  const second = pending[1]!;
+  expect(second.request.expectVersion).toBe('B');
+  expect(second.request.hit.position).toBe(first.request.hit.position + 7);
+  const value = { ...second.request.hit, version: 'B', target: {
+    kind: 'range' as const, story: 'body', start: { paraId: '00000001', offset: 8 },
+    end: { paraId: '00000001', offset: 8 }, view: 'accepted' as const,
+  } };
+  second.resolve({ version: 'B', value });
+  expect(await result).toEqual(value);
+});
+
+test('a viewer point read stops after five superseded attempts', async () => {
+  const session = await open();
+  const { queries, host, point } = await paint(session);
+  stampWorkerFrameVersion(queries, 'V0', true, false);
+  let shown = queries;
+  let reads = 0;
+  let frames = 0;
+  const read = ((_request: ResidentDocumentRead) => new Promise<{ version: string; value: unknown }>((resolve) => {
+    reads += 1;
+    resolve({ version: 'later', value: null });
+  })) as unknown as ResidentEngineWorkerClient['documentRead'];
+  const { clientX, clientY } = point(225, 145);
+  const result = await readViewerPositionAtClientPoint(read, host, queries, 1, clientX, clientY, () => shown,
+    async () => {
+      frames += 1;
+      shown = { ...queries };
+      stampWorkerFrameVersion(shown, `V${frames}`, false, false);
+      return shown;
+    });
+  expect(result).toBeNull();
+  expect(reads).toBe(5);
+  expect(frames).toBe(4);
+});
+
+test('a rejected viewer point read retries on a new frame at the same document version', async () => {
+  const session = await open();
+  const { queries, host, point } = await paint(session);
+  const { queries: next } = await paint(session);
+  stampWorkerFrameVersion(queries, 'A', false, false);
+  stampWorkerFrameVersion(next, 'A', false, false);
+  let shown = queries;
+  let reads = 0;
+  const read = (async (request: Extract<ResidentDocumentRead, { kind: 'pointPosition' }>) => {
+    reads += 1;
+    if (reads === 1) throw new Error('read failed');
+    return { version: 'A', value: { ...request.hit, version: 'A', target: {
+      kind: 'range', story: 'body', start: { paraId: '00000001', offset: 8 },
+      end: { paraId: '00000001', offset: 8 }, view: 'accepted',
+    } } };
+  }) as unknown as ResidentEngineWorkerClient['documentRead'];
+  const { clientX, clientY } = point(225, 145);
+  const result = await readViewerPositionAtClientPoint(read, host, queries, 1, clientX, clientY, () => shown,
+    async () => {
+      shown = next;
+      markPresented(host, next.displayList);
+      return next;
+    });
+  expect(result).toMatchObject({ version: 'A', target: { story: 'body' } });
+  expect(reads).toBe(2);
+});
 
 /** Plugin geometry over `queries` as the plugin host builds it. */
 function pluginGeometry(

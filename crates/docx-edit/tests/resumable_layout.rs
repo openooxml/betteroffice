@@ -66,6 +66,41 @@ fn type_into(engine: &EngineSession) {
         .unwrap();
 }
 
+fn assert_retained_matches_fresh(
+    name: &str,
+    engine: &EngineSession,
+    request: &str,
+    bytes: &[u8],
+    font: u32,
+) {
+    let (fresh, _) = seeded(bytes, font);
+    fresh
+        .doc()
+        .apply_update_v1(&engine.doc().encode_state_as_update_v1())
+        .unwrap();
+    let expected = fresh
+        .layout_document_with_regions_retained_json(request)
+        .unwrap();
+    assert_eq!(
+        engine.retained_layout_json().unwrap(),
+        expected,
+        "{name}: retained JSON"
+    );
+    assert_eq!(
+        engine.retained_kernel_inputs_json().unwrap(),
+        fresh.retained_kernel_inputs_json().unwrap(),
+        "{name}: kernel inputs"
+    );
+    engine.build_display_list_frame("{}", 0).unwrap();
+    fresh.build_display_list_frame("{}", 0).unwrap();
+    let pages = |engine: &EngineSession| {
+        engine
+            .with_display_list(|list| serde_json::to_vec(&list.pages).unwrap())
+            .unwrap()
+    };
+    assert_eq!(pages(engine), pages(&fresh), "{name}: display pages");
+}
+
 fn assert_stepped_equals_whole(name: &str, bytes: &[u8], edit_after: bool) {
     docx_layout::clear_measure_fonts();
     let font = docx_layout::register_measure_font(FONT).unwrap();
@@ -73,6 +108,14 @@ fn assert_stepped_equals_whole(name: &str, bytes: &[u8], edit_after: bool) {
     let expected = whole
         .layout_document_with_regions_retained_json(&request)
         .unwrap();
+    assert_eq!(
+        whole
+            .layout_document_with_regions_retained_json(&request)
+            .unwrap(),
+        expected,
+        "{name}: identical resident pass"
+    );
+    assert_retained_matches_fresh(name, &whole, &request, bytes, font);
     for blocks in [1, 5, 64] {
         let (engine, _) = seeded(bytes, font);
         assert_eq!(
@@ -106,6 +149,7 @@ fn assert_stepped_equals_whole(name: &str, bytes: &[u8], edit_after: bool) {
         after_edit,
         "{name}: the pass after an edit"
     );
+    assert_retained_matches_fresh(name, &engine, &request, bytes, font);
 }
 
 #[test]

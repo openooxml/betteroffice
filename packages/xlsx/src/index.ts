@@ -5,6 +5,42 @@
  * (lint-enforced).
  */
 
+/** @experimental */
+export { openWorkbookSession } from './session/client';
+/** @internal */
+export { hydratePeer } from './session/client';
+/** @experimental */
+export { WorkbookPeerHydrationError } from './session/peerHydrationError';
+/** @experimental */
+export type { OpenWorkbookSessionOptions, WorkbookSession } from './session/client';
+/** @internal */
+export { createWorkbookEditPeer } from './session/editPeer';
+/** @internal */
+export type { WorkbookEditPeer, WorkbookEditPeerOptions } from './session/editPeer';
+/** @experimental */
+export { WorkbookEditPeerFailedError } from './session/editPeer';
+/** @internal */
+export {
+  createWorkbookRecoveryMutators, failWorkbookEditPeer, WorkbookRecoveryRefusal, workbookEditPeerOperations,
+} from './session/editPeerInternals';
+/** @internal */
+export { workbookSessionInternals } from './session/replay';
+/** @internal */
+export type { WorkbookReplayOp } from './session/replay';
+/** @experimental */
+export type {
+  WorkbookCellGeometry,
+  WorkbookCellInputs,
+  WorkbookFrame,
+  WorkbookFrameOptions,
+  WorkbookSessionEvents,
+  WorkbookSessionMethods,
+  WorkbookSessionOpenOptions,
+  WorkbookSessionState,
+  WorkbookSheetSummary,
+  WorkbookSheetView,
+} from './session/methods';
+
 export type {
   Rect,
   TextAlign,
@@ -92,6 +128,7 @@ export {
 export type {
   WasmInitInput,
   OpenWorkbookOptions,
+  WorkbookCalculationContext,
   Viewport,
   PrintMetrics,
   SheetInfo,

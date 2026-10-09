@@ -23,6 +23,12 @@ pub struct RecalcResult {
     pub limited_cells: Vec<(SheetId, CellRef)>,
 }
 
+#[derive(Clone, Copy)]
+struct RecalcContext {
+    now_serial: Option<f64>,
+    rand_seed: Option<u32>,
+}
+
 /// normalized cell identity (avoids `$`-anchor `Hash`/`Eq` mismatches).
 type Key = (SheetId, RowId, ColId);
 
@@ -42,8 +48,22 @@ pub fn recalc_after(
     dirty_seeds: &[(SheetId, CellRef)],
     now_serial: Option<f64>,
 ) -> RecalcResult {
+    recalc_after_with_seed(wb, graph, dirty_seeds, now_serial, None)
+}
+
+pub fn recalc_after_with_seed(
+    wb: &mut Workbook,
+    graph: &mut DepGraph,
+    dirty_seeds: &[(SheetId, CellRef)],
+    now_serial: Option<f64>,
+    rand_seed: Option<u32>,
+) -> RecalcResult {
     let recompute = collect_recompute(graph, dirty_seeds);
-    let result = run_recalc(wb, graph, recompute, now_serial);
+    let context = RecalcContext {
+        now_serial,
+        rand_seed,
+    };
+    let result = run_recalc(wb, graph, recompute, context);
     graph.refresh_spills(wb);
     result
 }
@@ -53,9 +73,21 @@ pub fn rebuild_and_recalc_all(
     wb: &mut Workbook,
     now_serial: Option<f64>,
 ) -> (DepGraph, RecalcResult) {
+    rebuild_and_recalc_all_with_seed(wb, now_serial, None)
+}
+
+pub fn rebuild_and_recalc_all_with_seed(
+    wb: &mut Workbook,
+    now_serial: Option<f64>,
+    rand_seed: Option<u32>,
+) -> (DepGraph, RecalcResult) {
     let mut graph = DepGraph::build(wb);
     let recompute: HashSet<Key> = graph.formula_cells().map(|(s, c)| key(s, c)).collect();
-    let result = run_recalc(wb, &graph, recompute, now_serial);
+    let context = RecalcContext {
+        now_serial,
+        rand_seed,
+    };
+    let result = run_recalc(wb, &graph, recompute, context);
     graph.refresh_spills(wb);
     (graph, result)
 }
@@ -108,7 +140,7 @@ fn run_recalc(
     wb: &mut Workbook,
     graph: &DepGraph,
     recompute: HashSet<Key>,
-    now_serial: Option<f64>,
+    context: RecalcContext,
 ) -> RecalcResult {
     let budget = Rc::new(EvaluationBudget::new(MAX_RECALCULATION_CELL_VISITS));
     let mut changed: Vec<(SheetId, CellRef)> = Vec::new();
@@ -120,7 +152,7 @@ fn run_recalc(
         let (order, cycle) = topo_order(graph, &pending);
         let mut spilled: Vec<(SheetId, CellRef)> = Vec::new();
         for u in &order {
-            let (value, limited) = eval_node(wb, *u, now_serial, Rc::clone(&budget), graph);
+            let (value, limited) = eval_node(wb, *u, context, Rc::clone(&budget), graph);
             if limited {
                 limited_cells.push((u.0, cell_of(*u)));
             }
@@ -149,7 +181,7 @@ fn run_recalc(
             wb,
             &cycle,
             graph,
-            now_serial,
+            context,
             &budget,
             &mut changed,
             &mut limited_cells,
@@ -311,7 +343,7 @@ fn settle_deferred(
     wb: &mut Workbook,
     cycle: &[Key],
     graph: &DepGraph,
-    now_serial: Option<f64>,
+    context: RecalcContext,
     budget: &Rc<EvaluationBudget>,
     changed: &mut Vec<(SheetId, CellRef)>,
     limited_cells: &mut Vec<(SheetId, CellRef)>,
@@ -331,8 +363,7 @@ fn settle_deferred(
                 watch: &unsettled,
                 touched: Flag::new(false),
             };
-            let (value, limited) =
-                eval_node_with(&log, wb, *u, now_serial, Rc::clone(budget), graph);
+            let (value, limited) = eval_node_with(&log, wb, *u, context, Rc::clone(budget), graph);
             // a spill rewrites a rectangle, which the ordered pass owns
             if log.touched.get() || matches!(value, Some(NodeValue::Spill(_) | NodeValue::Refused))
             {
@@ -416,14 +447,27 @@ impl CellProvider for ReadLog<'_> {
     }
 }
 
+fn mix_random_seed(mut state: u64) -> u64 {
+    state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    state = (state ^ (state >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    state = (state ^ (state >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    state ^ (state >> 31)
+}
+
+fn cell_random_seed(seed: u32, cell: Key) -> u64 {
+    let seed_sheet = (u64::from(seed) << 32) | u64::from(cell.0.0);
+    let row_col = (u64::from(cell.1) << 32) | u64::from(cell.2);
+    mix_random_seed(mix_random_seed(seed_sheet) ^ row_col)
+}
+
 fn eval_node(
     wb: &Workbook,
     u: Key,
-    now_serial: Option<f64>,
+    context: RecalcContext,
     budget: Rc<EvaluationBudget>,
     graph: &DepGraph,
 ) -> (Option<NodeValue>, bool) {
-    eval_node_with(wb, wb, u, now_serial, budget, graph)
+    eval_node_with(wb, wb, u, context, budget, graph)
 }
 
 /// evaluate one node, reading cells through `provider` while `wb` supplies the
@@ -432,7 +476,7 @@ fn eval_node_with(
     provider: &dyn CellProvider,
     wb: &Workbook,
     u: Key,
-    now_serial: Option<f64>,
+    context: RecalcContext,
     budget: Rc<EvaluationBudget>,
     graph: &DepGraph,
 ) -> (Option<NodeValue>, bool) {
@@ -443,7 +487,8 @@ fn eval_node_with(
     let authored = wb.sheet(u.0).and_then(|sheet| sheet.array_formula(cell));
     let mut ctx = EvalContext::with_budget(provider, u.0, budget);
     ctx.cell = Some(cell);
-    ctx.now_serial = now_serial;
+    ctx.now_serial = context.now_serial;
+    ctx.rand_seed = context.rand_seed.map(|seed| cell_random_seed(seed, u));
     ctx.date_system = wb.date_system;
     ctx.parse_cache = Some(graph.asts());
     let value = match authored {
@@ -1449,6 +1494,125 @@ mod tests {
         assert_ne!(value(&wb, s, "C1"), sentinel);
         assert_ne!(value(&wb, s, "D1"), sentinel);
         assert_eq!(changed_a1(&r), vec!["B1", "C1", "D1"]);
+    }
+
+    #[test]
+    fn seeded_draws_distinguish_seed_sheet_and_row_col_pairs() {
+        let wb = Workbook::default();
+        for (first, second) in [
+            ((0, (SheetId(1), 1, 2)), (1, (SheetId(0), 1, 2))),
+            ((42, (SheetId(0), 1, 2)), (42, (SheetId(0), 2, 1))),
+        ] {
+            let first_seed = cell_random_seed(first.0, first.1);
+            let second_seed = cell_random_seed(second.0, second.1);
+            assert_ne!(first_seed, second_seed);
+            let mut first_ctx = EvalContext::new(&wb, first.1.0);
+            first_ctx.rand_seed = Some(first_seed);
+            let mut second_ctx = EvalContext::new(&wb, second.1.0);
+            second_ctx.rand_seed = Some(second_seed);
+            let first_draws: [f64; 4] = std::array::from_fn(|_| first_ctx.next_random_unit());
+            let second_draws: [f64; 4] = std::array::from_fn(|_| second_ctx.next_random_unit());
+            for (first, second) in first_draws.into_iter().zip(second_draws) {
+                assert_ne!(first, second);
+            }
+            assert!(first_draws.windows(2).all(|draws| draws[0] != draws[1]));
+            assert!(second_draws.windows(2).all(|draws| draws[0] != draws[1]));
+        }
+    }
+
+    #[test]
+    fn earlier_independent_random_cells_preserve_seeded_draws() {
+        let (mut wb, sheet) = one_sheet();
+        put_formula(&mut wb, sheet, "B3", "RANDBETWEEN(1,1000000)");
+        put_formula(
+            &mut wb,
+            sheet,
+            "C3",
+            "RANDBETWEEN(1,1000000)*1000000+RANDBETWEEN(1,1000000)",
+        );
+        put_formula(
+            &mut wb,
+            sheet,
+            "E3",
+            "MAKEARRAY(2,2,LAMBDA(r,c,RANDBETWEEN(1,1000000)))",
+        );
+        wb.sheet_mut(sheet)
+            .unwrap()
+            .set_array_formula(a1("E3"), CellRange::parse_a1("E3:F4").unwrap());
+        let (mut graph, _) = rebuild_and_recalc_all_with_seed(&mut wb, Some(45_000.5), Some(42));
+        let addresses = ["B3", "C3", "E3", "E4", "F3", "F4"];
+        let before = addresses.map(|address| value(&wb, sheet, address));
+        assert!(
+            before
+                .iter()
+                .all(|value| matches!(value, CellValue::Number { .. }))
+        );
+
+        put_formula(&mut wb, sheet, "A1", "RANDBETWEEN(1,1000000)");
+        graph.set_formula(sheet, a1("A1"), Some("RANDBETWEEN(1,1000000)"));
+        let seeds = [(sheet, a1("A1"))];
+        let recompute = collect_recompute(&graph, &seeds);
+        let (order, cycle) = topo_order(&graph, &recompute);
+        assert!(cycle.is_empty());
+        assert_eq!(order[0], key(sheet, a1("A1")));
+        for address in ["B3", "C3", "E3"] {
+            assert!(order.contains(&key(sheet, a1(address))));
+        }
+        recalc_after_with_seed(&mut wb, &mut graph, &seeds, Some(45_000.5), Some(42));
+        assert!(matches!(value(&wb, sheet, "A1"), CellValue::Number { .. }));
+        assert_eq!(addresses.map(|address| value(&wb, sheet, address)), before);
+        let formulas = graph.formula_cells().map(|(s, c)| key(s, c)).collect();
+        assert_eq!(topo_order(&graph, &formulas).0[0], key(sheet, a1("A1")));
+        rebuild_and_recalc_all_with_seed(&mut wb, Some(45_000.5), Some(42));
+        assert_eq!(addresses.map(|address| value(&wb, sheet, address)), before);
+    }
+
+    #[test]
+    fn seeded_draws_survive_deferred_and_spill_recalculation() {
+        let (mut wb, sheet) = one_sheet();
+        put_formula(
+            &mut wb,
+            sheet,
+            "A1",
+            "IF(ROW()=1,RANDBETWEEN(1,1000000),INDEX(A1:A2,ROW()-1))",
+        );
+        put_formula(&mut wb, sheet, "A2", "A1*2");
+        put_formula(
+            &mut wb,
+            sheet,
+            "B1",
+            "MAKEARRAY(2,2,LAMBDA(r,c,RANDBETWEEN(1,1000000)))",
+        );
+        wb.sheet_mut(sheet)
+            .unwrap()
+            .set_array_formula(a1("B1"), CellRange::parse_a1("B1:C2").unwrap());
+        let (mut graph, result) =
+            rebuild_and_recalc_all_with_seed(&mut wb, Some(45_000.5), Some(7));
+        assert!(result.cycle_cells.is_empty());
+        let addresses = ["A1", "A2", "B1", "B2", "C1", "C2"];
+        let before = addresses.map(|address| value(&wb, sheet, address));
+        for index in [0, 2, 3, 4, 5] {
+            match before[index] {
+                CellValue::Number { value } => {
+                    assert!((1.0..=1_000_000.0).contains(&value));
+                    assert_eq!(value.fract(), 0.0);
+                }
+                ref other => panic!("expected random number, got {other:?}"),
+            }
+        }
+        assert_ne!(before[2], before[3]);
+        assert_ne!(before[2], before[4]);
+        rebuild_and_recalc_all_with_seed(&mut wb, Some(45_000.5), Some(7));
+        assert_eq!(addresses.map(|address| value(&wb, sheet, address)), before);
+        put_num(&mut wb, sheet, "Z10", 1.0);
+        recalc_after_with_seed(
+            &mut wb,
+            &mut graph,
+            &[(sheet, a1("Z10"))],
+            Some(45_000.5),
+            Some(7),
+        );
+        assert_eq!(addresses.map(|address| value(&wb, sheet, address)), before);
     }
 
     #[test]

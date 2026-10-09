@@ -43,6 +43,7 @@ import type { BundledFontProvider } from '@betteroffice/docx/layout';
 import {
   createYrsSidebarProjection,
   extractTrackedChangesFromYrs,
+  loadRustDisplayListQueryEngine,
   yrsIdToNumericId,
   type TrackedChangesResult,
 } from '@betteroffice/docx/layout/render';
@@ -54,7 +55,12 @@ import type {
   SelectionState,
   TableContextInfo,
 } from './DocxEditor/types';
-import { onPresented, onReplayFailed } from './DocxEditor/internals/layoutProvenance';
+import {
+  isPresented,
+  onPresented,
+  onReplayFailed,
+  workerFrameVersionOf,
+} from './DocxEditor/internals/layoutProvenance';
 import { SupersededPreviewError } from './DocxEditor/internals/supersededPreview';
 import { useOutlineSidebar } from './DocxEditor/hooks/useOutlineSidebar';
 import { useKeyboardShortcuts } from './DocxEditor/hooks/useKeyboardShortcuts';
@@ -75,8 +81,13 @@ import {
 } from './DocxEditor/overlays/CanvasSidebarBrightenOverlay';
 import { useCanvasOverlayTarget } from './DocxEditor/internals/useCanvasOverlayTarget';
 import { isWithinPageArea } from './DocxEditor/internals/pageAreaRouting';
-import { requestWorkerOpenReplica } from './DocxEditor/internals/workerOpenReplica';
-import { pagePressNeedsReplica } from './DocxEditor/internals/replicaTriggers';
+import { awaitWorkerOpenReplica, workerOpenDocumentHeld } from './DocxEditor/internals/workerOpenReplica';
+import { hasEditorWorkerProposalRounds, registeredWorkerProposalAuthority } from './DocxEditor/internals/workerProposalAuthority';
+import { isWorkerViewer } from './DocxEditor/internals/workerViewer';
+import { warnDeprecatedViewerMember } from './DocxEditor/internals/deprecatedViewerMembers';
+import type { ViewerCommentRanges } from './DocxEditor/internals/viewerSidebarReads';
+import { useViewerSession } from './DocxEditor/internals/viewerSession';
+import type { ViewerSelectionChange } from './DocxEditor/internals/viewerSelectionController';
 import { useImageActions } from './DocxEditor/hooks/useImageActions';
 import { useDocxEditorRefApi } from './DocxEditor/hooks/useDocxEditorRefApi';
 import {
@@ -169,6 +180,28 @@ import type { RenderedDomContext } from '../plugin-api/types';
 // TYPES
 // ============================================================================
 
+export type { DocxParagraphMatch } from '@betteroffice/docx/yrs';
+import type { DocxParagraphMatch } from '@betteroffice/docx/yrs';
+
+export interface DocxSelectionInfo {
+  paraId: string | null;
+  selectedText: string;
+  paragraphText: string;
+  before: string;
+  after: string;
+}
+
+export interface DocxCommentInsertion {
+  paraId: string;
+  text: string;
+  author: string;
+  search?: string;
+}
+
+export interface DocxDocumentChange {
+  version: string;
+}
+
 export type { DocxEditorCollaborationOptions, DocxPointPosition } from './DocxEditor/types';
 
 /**
@@ -216,8 +249,10 @@ export interface DocxEditorProps extends DocxEditorPluginProps {
   onOpen?: (file: File) => void | Promise<void>;
   /** Author name used for comments and track changes */
   author?: string;
-  /** Callback when document changes */
+  /** @deprecated Use {@link onDocumentChange}. Worker viewers do not fire this callback. */
   onChange?: (document: Document) => void;
+  /** Receives the version after a committed edit or a changed document is presented by the worker. */
+  onDocumentChange?: (change: DocxDocumentChange) => void;
   /** Callback when selection changes */
   onSelectionChange?: (state: SelectionState | null) => void;
   /** Callback on error */
@@ -442,9 +477,9 @@ export interface DocxEditorRef {
    * @experimental
    */
   readonly commands: DocxCommandStore;
-  /** Get the current document */
+  /** @deprecated Use {@link readParagraphs} or {@link exportStructuredWithPages}. Throws DocxAsyncOnlyError in worker viewers. */
   getDocument: () => Document | null;
-  /** Get the editor ref */
+  /** @deprecated The paged editor is internal; use the editor ref's members. Returns null in viewer sessions. */
   getEditorRef: () => PagedEditorRef | null;
   /** Commits accepted input and selection; waits for active IME composition. */
   flushPendingInput: () => Promise<void>;
@@ -509,19 +544,16 @@ export interface DocxEditorRef {
    * fonts, when it was not. The references describe that layout, which a later edit may
    * supersede before it is painted. Refuses as data when no such layout is ready in time, and
    * never lays out again when `expectLayoutVersion` names a layout. Throws when the document is
-   * replaced meanwhile.
+   * replaced meanwhile. In a viewer session, reads the worker's layout and waits for the layout
+   * the editor runs on its own instead of laying out again.
    */
   exportStructuredWithPages: (
     options: DocxPageExportOptions
   ) => Promise<DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>>;
-  /**
-   * The text under a client point, such as a drop event's `clientX`/`clientY`, from the same
-   * hit testing as the caret, without moving selection or focus. Its `target` and `version` form
-   * an edit batch step's target and `expectVersion`. Null outside text (margins, images, page
-   * gaps), while typed or composed input is pending, and until the painted pages show the current
-   * version; retry after {@link flushPendingInput} or on the next frame.
-   */
+  /** @deprecated Use {@link readPositionAtPoint}. Worker viewers return a cached answer or null while reading it. */
   getPositionAtPoint: (clientX: number, clientY: number) => DocxPointPosition | null;
+  /** Reads the text under client coordinates after pending input commits. Worker viewers resolve it against the presented frame, retrying superseded reads. */
+  readPositionAtPoint: (clientX: number, clientY: number) => Promise<DocxPointPosition | null>;
   /** Save the document to a buffer. */
   save: () => Promise<ArrayBuffer | null>;
   /** Set zoom level */
@@ -556,12 +588,7 @@ export interface DocxEditorRef {
    * @example ref.current?.scrollToPage(2)
    */
   scrollToPage: (pageNumber: number) => void;
-  /**
-   * Scroll the paginated view to the paragraph with the given Word `w14:paraId`.
-   * Pass `options.highlight` to briefly flash it in a custom color.
-   * @returns whether a matching paragraph exists in the live document
-   * @example ref.current?.scrollToParaId('1A2B3C4D', { highlight: { color: 'rgba(255, 235, 59, 0.55)' } })
-   */
+  /** @deprecated Use {@link scrollToParagraph}. Worker viewers start the async navigation and return true. */
   scrollToParaId: (paraId: string, options?: ScrollToParaIdOptions) => boolean;
   /**
    * Scroll the paginated view to a specific display position.
@@ -570,26 +597,9 @@ export interface DocxEditorRef {
    * @example ref.current?.scrollToPosition(42)
    */
   scrollToPosition: (displayPosition: number) => void;
-  /**
-   * Scroll the paginated view to the comment with the given id and select its
-   * anchored range so the selection overlay highlights it. Resolves the id
-   * against the live comment marks at call time.
-   * @returns `false` when the id no longer resolves (the comment was deleted
-   *   or its anchored text removed between render and click), so the caller
-   *   can surface a "location no longer exists" affordance rather than
-   *   silently no-op'ing.
-   * @example ref.current?.scrollToCommentId(3)
-   */
+  /** @deprecated Use {@link scrollToComment}. Worker viewers start the async navigation and return true. */
   scrollToCommentId: (commentId: number) => boolean;
-  /**
-   * Scroll the paginated view to the tracked change with the given Word
-   * revision `w:id` and select its range so the selection overlay highlights
-   * it. Resolves the id against the live tracked-change marks at call time
-   * (matching coalesced revisions the way the changes sidebar does).
-   * @returns `false` when the id no longer resolves (the change was
-   *   accepted, rejected, or deleted between render and click).
-   * @example ref.current?.scrollToChangeId(42)
-   */
+  /** @deprecated Use {@link scrollToChange}. Worker viewers start the async navigation and return true. */
   scrollToChangeId: (revisionId: number) => boolean;
   /**
    * Select the display-position range `[from, to]` so the selection
@@ -608,41 +618,25 @@ export interface DocxEditorRef {
   loadDocument: (doc: Document) => void;
   /** Load a DOCX buffer programmatically (ArrayBuffer, Uint8Array, Blob, or File) */
   loadDocumentBuffer: (buffer: DocxInput) => Promise<void>;
-  /** Add a comment programmatically. Anchored by Word `w14:paraId` so
-   * it survives unrelated edits. Returns the comment ID, or null if
-   * the paraId is unknown or the search text isn't found / is ambiguous. */
-  addComment: (options: {
-    paraId: string;
-    text: string;
-    author: string;
-    /** Optional: anchor to a specific phrase within the paragraph (must be unique). */
-    search?: string;
-  }) => number | null;
-  /** Reply to an existing comment. Returns the reply comment ID. */
+  /** @deprecated Use {@link insertComment}. Returns null in viewer sessions. */
+  addComment: (options: DocxCommentInsertion) => number | null;
+  /** @deprecated Use {@link insertCommentReply}. Returns null in viewer sessions. */
   replyToComment: (commentId: number, text: string, author: string) => number | null;
-  /** Resolve (mark as done) a comment. */
+  /** Resolve (mark as done) a comment. Does nothing in viewer sessions. */
   resolveComment: (commentId: number) => void;
-  /** Suggest a tracked change. Pass `replaceWith: ''` to delete the matched text;
-   * pass `search: ''` to insert at paragraph end. Returns false on missing paraId,
-   * missing/ambiguous search, or attempt to layer on an existing tracked change. */
+  /** @deprecated In a viewer session it queues the change through the worker and returns true; use {@link proposeChanges} for the result. */
   proposeChange: (options: {
     paraId: string;
     search: string;
     replaceWith: string;
     author: string;
   }) => boolean;
-  /** Locate every paragraph containing `query` (case-insensitive substring).
-   * Returns a stable handle (paraId + the matched phrase) the agent can pass
-   * back to `addComment` / `proposeChange`. */
+  /** @deprecated Use {@link findParagraphs}. Throws DocxAsyncOnlyError in worker viewers. */
   findInDocument: (
     query: string,
     options?: { caseSensitive?: boolean; limit?: number }
   ) => Array<{ paraId: string; match: string; before: string; after: string }>;
-  /**
-   * Apply character formatting (bold / italic / color / size / font / etc.)
-   * to a paragraph or to a unique phrase within it. This is a direct edit,
-   * not a tracked change. Returns false on missing paraId or ambiguous search.
-   */
+  /** @deprecated Use {@link commands}; they act on the selection. Returns false in viewer sessions. */
   applyFormatting: (options: {
     paraId: string;
     search?: string;
@@ -657,44 +651,24 @@ export interface DocxEditorRef {
       fontFamily?: { ascii?: string; hAnsi?: string };
     };
   }) => boolean;
-  /**
-   * Apply a paragraph style by styleId (e.g. `'Heading1'`, `'Quote'`).
-   * Direct edit, not a tracked change. Returns false if paraId is unknown.
-   */
+  /** @deprecated Use {@link applyEdits} with a `setParagraphStyle` step. Returns false in viewer sessions. */
   setParagraphStyle: (options: { paraId: string; styleId: string }) => boolean;
-  /**
-   * Insert a page or section break after the paragraph identified by `paraId`.
-   * `'page'` adds a page break; `'sectionNextPage'` / `'sectionContinuous'`
-   * start a new section on a new page / the same page. Direct edit, not a
-   * tracked change. Returns false if paraId is unknown.
-   */
+  /** @deprecated Use {@link commands}; they act on the selection. Returns false in viewer sessions. */
   insertBreak: (options: {
     paraId: string;
     type: 'page' | 'sectionNextPage' | 'sectionContinuous';
   }) => boolean;
-  /**
-   * Read the contents of a single page. 1-indexed; returns null if the page
-   * does not exist or the document is not laid out in full yet (its first
-   * pages paint before the rest). Each paragraph is returned with its stable
-   * paraId so the agent can comment on or modify it without an extra
-   * round-trip.
-   */
+  /** @deprecated Use {@link exportStructuredWithPages}. Throws DocxAsyncOnlyError in worker viewers. */
   getPageContent: (pageNumber: number) => {
     pageNumber: number;
     text: string;
     paragraphs: Array<{ paraId: string; text: string; styleId?: string }>;
   } | null;
-  /** Read the user's current cursor / selection — what's highlighted right now. */
-  getSelectionInfo: () => {
-    paraId: string | null;
-    selectedText: string;
-    paragraphText: string;
-    before: string;
-    after: string;
-  } | null;
+  /** @deprecated Use {@link readSelectionInfo}. Worker viewers return null. */
+  getSelectionInfo: () => DocxSelectionInfo | null;
   /** Get all comments. */
   getComments: () => Comment[];
-  /** Subscribe to document changes. Fires after every committed edit. Returns unsubscribe. */
+  /** @deprecated Use {@link onDocumentChange}. Worker viewers do not fire these listeners. */
   onContentChange: (listener: (document: Document) => void) => () => void;
   /** Subscribe to selection changes (cursor moves / selection changes). Returns unsubscribe. */
   onSelectionChange: (listener: (selection: SelectionState | null) => void) => () => void;
@@ -721,6 +695,22 @@ export interface DocxEditorRef {
    * and clearing (null). Returns unsubscribe.
    */
   onSearchChange: (listener: (state: DocxSearchState | null) => void) => () => void;
+  /** Reads the current caret or selection, returning null when there is no selection. */
+  readSelectionInfo: () => Promise<DocxSelectionInfo | null>;
+  /** Finds paragraphs containing one unique occurrence of the query. */
+  findParagraphs: (query: string, options?: { caseSensitive?: boolean; limit?: number }) => Promise<DocxParagraphMatch[]>;
+  /** Selects and reveals a paragraph, optionally flashing its text. */
+  scrollToParagraph: (paraId: string, options?: ScrollToParaIdOptions) => Promise<boolean>;
+  /** Selects and reveals a comment's anchored range, returning false when it no longer exists. */
+  scrollToComment: (commentId: number) => Promise<boolean>;
+  /** Selects and reveals a revision's range, returning false when it no longer exists. */
+  scrollToChange: (revisionId: number) => Promise<boolean>;
+  /** Inserts an anchored comment after pending input commits. Returns null in viewer sessions. */
+  insertComment: (options: DocxCommentInsertion) => Promise<number | null>;
+  /** Adds a reply to an existing comment. Returns null in viewer sessions. */
+  insertCommentReply: (commentId: number, text: string, author: string) => Promise<number | null>;
+  /** Subscribes to committed document versions and returns an unsubscribe function. */
+  onDocumentChange: (listener: (change: DocxDocumentChange) => void) => () => void;
 }
 
 /**
@@ -801,7 +791,8 @@ function displayRangeToYrsRange(
 /** Sidebar anchor keys of host proposals' revisions, which never open the sidebar themselves. */
 function proposalAnchorKeys(session: YrsSession | null): Set<string> {
   const keys = new Set<string>();
-  for (const proposal of session?.getProposals().proposals ?? []) {
+  const worker = session && hasEditorWorkerProposalRounds(session) ? registeredWorkerProposalAuthority(session)?.snapshot() : null;
+  for (const proposal of [...(session?.getProposals().proposals ?? []), ...(worker?.proposals ?? [])]) {
     for (const revisionId of proposal.revisionIds) {
       keys.add(`revision-${yrsIdToNumericId(revisionId)}`);
     }
@@ -845,6 +836,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     onOpen,
     author = 'User',
     onChange,
+    onDocumentChange,
     onSelectionChange,
     onError,
     onMemoryPressure,
@@ -997,13 +989,15 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   // display-list build so the canvas drops the comment wash of resolved
   // threads (and re-tints the one whose sidebar card is expanded).
   const handoffFromRef = useRef<YrsSession | null>(null);
+  const viewerSessionRef = useRef(false);
   const canvasRenderer = useCanvasRenderer(
     rustFontChainsProviderRef,
     resolvedIdsForRender,
     () => pagedEditorRef.current?.relayout(),
     memoryBudget?.workerLimitBytes,
     handoffFromRef,
-    experimentalWorkerOpen
+    experimentalWorkerOpen,
+    viewerSessionRef
   );
   // The full session failing to lay out or render as it opens fails the
   // load, which reports it. Each render error is handled once: one the
@@ -1060,6 +1054,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   };
   // 'viewing' mode acts as read-only
   const modeReadOnly = readOnlyProp || editingMode === 'viewing';
+  const workerViewer = Boolean(experimentalWorkerOpen) && !mediaTokens && modeReadOnly && !collaboration;
   const commandBridgeRef = useRef<PagedEditorCommandBridge | null>(null);
   const writeModeRef = useRef<EditorMode>(editingMode);
   writeModeRef.current = modeReadOnly ? 'viewing' : editingMode;
@@ -1070,12 +1065,15 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   // onSelectionChange paths so multiple listeners (host app, MCP server, etc.)
   // can observe edits without competing for the single React prop.
   const contentChangeSubscribersRef = useRef(new Set<(doc: Document) => void>());
+  const documentChangeSubscribersRef = useRef(new Set<(change: DocxDocumentChange) => void>());
+  const onDocumentChangeRef = useRef(onDocumentChange);
+  onDocumentChangeRef.current = onDocumentChange;
   const [contentSubscriberCount, setContentSubscriberCount] = useState(0);
   const selectionChangeSubscribersRef = useRef(new Set<(s: SelectionState | null) => void>());
   const legacyProjectionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // History hook for undo/redo - start with null document
-  const history = useDocumentHistory<Document | null>(initialDocument || null, {
+  const history = useDocumentHistory<Document | null>(workerViewer ? null : initialDocument || null, {
     maxEntries: 100,
     groupingInterval: 500,
   });
@@ -1085,6 +1083,9 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   const editorContentRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const [documentFonts, setDocumentFonts] = useState<FontOption[]>([]);
+  // The loader needs outline setters before it identifies the viewer session.
+  const viewerOutlineRef = useRef(false);
+  const [viewerCommentRanges, setViewerCommentRanges] = useState<ViewerCommentRanges>(new Map());
   const {
     showOutline,
     setShowOutline,
@@ -1092,9 +1093,13 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     outlineHeadings,
     setHeadingInfos,
     refreshHeadings,
+    navigateViewerHeading,
     editorScrollLeft,
   } = useOutlineSidebar({
     showOutlineProp,
+    viewerRef: viewerOutlineRef,
+    viewerRead: canvasRenderer.readWorkerDocument,
+    queries: canvasRenderer.queries,
     pagedEditorRef,
     scrollContainerRef,
     isLoading: state.isLoading,
@@ -1180,6 +1185,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     firstPagePendingRef.current = true;
     firstPageGenerationRef.current += 1;
     resetEditorState();
+    setViewerCommentRanges(new Map());
     resetSettled();
   }, [resetEditorState, resetSettled]);
 
@@ -1197,6 +1203,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   } = useDocumentLoader({
     documentBuffer,
     initialDocument,
+    workerViewer,
     externalContent: false,
     history,
     pagedEditorRef,
@@ -1233,6 +1240,13 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   useDocxEnginePrewarmOnBytes(experimentalPrewarm, yrsSeedBytes);
   // A read-only worker-open document keeps host proposals in the worker until the replica loads.
   const workerProposals = modeReadOnly && !collaboration;
+  // A viewer session holds no document here: selection, copy and point reads go to the worker.
+  const viewerSession = useViewerSession(Boolean(experimentalWorkerOpen) && !mediaTokens, workerProposals, yrsSeedGeneration);
+  viewerSessionRef.current = viewerSession;
+  // Hit testing answers from the first painted page once the query engine has loaded.
+  useEffect(() => {
+    if (viewerSession) void loadRustDisplayListQueryEngine().catch(() => {});
+  }, [viewerSession]);
   const workerContentChangeRef = useRef<() => void>(() => {});
   const workerRevisionsRef = useRef<() => void>(() => {});
   const yrsCore = useYrsCoreSession(
@@ -1260,17 +1274,22 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
             openInWorker: canvasRenderer.openInWorker,
             openPreviewInWorker: canvasRenderer.openPreviewInWorker,
             workerProposals,
+            viewer: viewerSession,
             refreshWorkerLayout: () => pagedEditorRef.current?.refreshWorkerLayout(),
             renderedFrame: canvasRenderer.status === 'ready' ? canvasRenderer.displayList : null,
+            settledDisplayList: canvasRenderer.settledDisplayList,
             pendingCompletion: canvasRenderer.pendingCompletion,
-            hydrateOnDemand: workerProposals,
+            layoutCompleteSession: canvasRenderer.layoutCompleteSession,
             onWorkerContentChange: () => workerContentChangeRef.current(),
+            onPeerUpdate: (stories) => pagedEditorRef.current?.syncYrsInputState(true, stories, { inWorker: true }),
             onWorkerRevisions: () => workerRevisionsRef.current(),
           }
         : undefined,
       mediaTokens,
     }
   );
+  const viewerReads = viewerSession;
+  viewerOutlineRef.current = viewerReads;
   // Until the full session's pages are shown, the editor takes no input and its
   // API and commands see a document that is still loading.
   const opening = yrsCore.opening;
@@ -1287,6 +1306,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     [untakenWorkerSession, reportLayoutError]
   );
   const readOnly = modeReadOnly || opening;
+  const holdOpeningInput = Boolean(experimentalWorkerOpen) && opening && !modeReadOnly && !viewerSession;
   if (opening) writeModeRef.current = 'viewing';
   const openingRef = useRef(opening);
   openingRef.current = opening;
@@ -1371,6 +1391,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     handleImageFileChange,
   } = useFileIO({
     pagedEditorRef,
+    viewerSession,
     resolveImage: canvasRenderer.resolveImage,
     shownImageResolver: canvasRenderer.imageResolverForShownFrame,
     fontFamilies: fontAliases,
@@ -1399,6 +1420,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     parseError: state.parseError,
     document: history.state,
     session: yrsCore.session,
+    viewerSession,
     readOnly: readOnlyProp || opening,
     mode: editingMode,
     modeControlled: modeProp !== undefined,
@@ -1473,8 +1495,41 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     [history]
   );
 
+  const notifiedVersionRef = useRef<string | null>(null);
+  const notifyDocumentVersion = useCallback((version: string) => {
+    if (notifiedVersionRef.current === version) return;
+    notifiedVersionRef.current = version;
+    const change = { version };
+    for (const listener of [onDocumentChangeRef.current, ...documentChangeSubscribersRef.current]) {
+      try {
+        listener?.(change);
+      } catch (error) {
+        console.error('documentChange listener threw:', error);
+      }
+    }
+  }, []);
+  const presentedVersionRef = useRef<{ generation: number | null; version: string | null }>({ generation: null, version: null });
+  const observePresentedVersion = useCallback((displayList: object) => {
+    if (!isWorkerViewer(pagedEditorRef.current) || !isPresented(canvasRenderer.canvasHostRef.current, displayList)) return;
+    const version = workerFrameVersionOf(displayList);
+    if (version === null) return;
+    const previous = presentedVersionRef.current;
+    presentedVersionRef.current = { generation: yrsSeedGeneration, version };
+    if (previous.generation === yrsSeedGeneration && previous.version !== null && previous.version !== version) {
+      notifyDocumentVersion(version);
+    }
+  }, [canvasRenderer.canvasHostRef, notifyDocumentVersion, yrsSeedGeneration]);
+  useEffect(() => {
+    if (canvasRenderer.displayList) observePresentedVersion(canvasRenderer.displayList);
+    return onPresented(observePresentedVersion);
+  }, [canvasRenderer.displayList, observePresentedVersion]);
+
   const notifyDocumentChange = useCallback(
     (document: Document) => {
+      if (isWorkerViewer(pagedEditorRef.current)) {
+        if (onChange) warnDeprecatedViewerMember('onChange', 'does not fire in viewer sessions', 'onDocumentChange');
+        return;
+      }
       onChange?.(document);
       for (const callback of contentChangeSubscribersRef.current) {
         try {
@@ -1492,8 +1547,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     if (cleanOrphanedCommentsTimerRef.current) {
       clearTimeout(cleanOrphanedCommentsTimerRef.current);
     }
-    cleanOrphanedCommentsTimerRef.current = setTimeout(cleanOrphanedComments, 300);
-  }, [cleanOrphanedComments, refreshHeadings, showOutlineRef]);
+    if (!viewerReads) cleanOrphanedCommentsTimerRef.current = setTimeout(cleanOrphanedComments, 300);
+  }, [cleanOrphanedComments, refreshHeadings, showOutlineRef, viewerReads]);
 
   const scheduleLegacyProjection = useCallback((project: () => void) => {
     if (legacyProjectionTimerRef.current !== null) {
@@ -1529,11 +1584,14 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
         },
         scheduleLegacyProjection
       );
+      if (!isWorkerViewer(pagedEditorRef.current) && yrsCore.session) notifyDocumentVersion(yrsCore.session.version());
       handleContentHousekeeping();
     },
     [
       handleContentHousekeeping,
       notifyDocumentChange,
+      notifyDocumentVersion,
+      yrsCore.session,
       onChange,
       pushDocument,
       scheduleLegacyProjection,
@@ -1541,7 +1599,11 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     ]
   );
 
-  const handleYrsContentChange = useCallback(() => {
+  const projectYrsContentChange = useCallback(() => {
+    if (isWorkerViewer(pagedEditorRef.current)) {
+      if (onChange) warnDeprecatedViewerMember('onChange', 'does not fire in viewer sessions', 'onDocumentChange');
+      return;
+    }
     if (onChange || contentChangeSubscribersRef.current.size > 0) {
       commitYrsDocumentChange(yrsCore.documentFromYrs, {
         push: pushDocument,
@@ -1556,14 +1618,26 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     pushDocument,
     yrsCore.documentFromYrs,
   ]);
+  const handleYrsContentChange = useCallback(() => {
+    if (!isWorkerViewer(pagedEditorRef.current) && yrsCore.session) {
+      notifyDocumentVersion(yrsCore.session.version());
+    }
+    projectYrsContentChange();
+  }, [notifyDocumentVersion, projectYrsContentChange, yrsCore.session]);
   // A worker-held change reaches document listeners once the replica holds it; without them,
   // nothing needs the replica.
   workerContentChangeRef.current = () => {
+    if (viewerSession || isWorkerViewer(pagedEditorRef.current)) {
+      if (onChange) warnDeprecatedViewerMember('onChange', 'does not fire in viewer sessions', 'onDocumentChange');
+      return;
+    }
     const session = yrsCore.session;
-    if (!session || (!onChange && contentChangeSubscribersRef.current.size === 0)) return;
-    void requestWorkerOpenReplica(session)?.then(
+    if (!session) return;
+    notifyDocumentVersion(session.version());
+    if (!onChange && contentChangeSubscribersRef.current.size === 0) return;
+    void awaitWorkerOpenReplica(session)?.then(
       () => {
-        if (coreSessionRef.current === session) handleYrsContentChange();
+        if (coreSessionRef.current === session) projectYrsContentChange();
       },
       () => {}
     );
@@ -1588,7 +1662,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     displayListQueries: canvasRenderer.queries,
   });
 
-  const { handleYrsSelectionChange } = useSelectionTracker({
+  const { handleYrsSelectionChange, handleViewerSelectionChange } = useSelectionTracker({
     borderSpecRef,
     theme,
     setFloatingCommentBtn,
@@ -1637,11 +1711,15 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
 
   // Navigate to a heading from the outline
   const handleHeadingInfoClick = useCallback((pmPos: number) => {
+    if (viewerReads) {
+      navigateViewerHeading(pmPos);
+      return;
+    }
     pagedEditorRef.current?.scrollToPosition(pmPos);
     // Also set selection to the heading
     pagedEditorRef.current?.setSelection(pmPos + 1);
     pagedEditorRef.current?.focus();
-  }, []);
+  }, [viewerReads, navigateViewerHeading]);
 
   // Handle shape insertion
   // Handle image wrap type change
@@ -1791,6 +1869,16 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   }, [state.parseError, resetCanvasRenderer, setScrollPageInfo]);
 
   const pluginOverlayTarget = useCanvasOverlayTarget((plugins?.length ?? 0) > 0, editorContentRef);
+  const pluginHostSession =
+    yrsCore.session &&
+    !opening &&
+    (yrsCore.replicaReady || (hasEditorWorkerProposalRounds(yrsCore.session) ? workerOpenDocumentHeld(yrsCore.session) && yrsCore.workerProposalsReady : yrsCore.workerProposalsReady)) &&
+    yrsCore.sessionGeneration === yrsSeedGeneration &&
+    history.state &&
+    !state.isLoading &&
+    !state.parseError
+      ? yrsCore.session
+      : null;
   const pluginHost = useDocxPluginHost({
     plugins,
     pluginGrants,
@@ -1800,18 +1888,11 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     mode: editingMode,
     readOnly,
     commands: commandController,
-    session:
-      yrsCore.session &&
-      !opening &&
-      (yrsCore.replicaReady || yrsCore.workerProposalsReady) &&
-      yrsCore.sessionGeneration === yrsSeedGeneration &&
-      history.state &&
-      !state.isLoading &&
-      !state.parseError
-        ? yrsCore.session
-        : null,
+    viewerSelection: viewerSession,
+    session: pluginHostSession,
     loadGeneration: yrsSeedGeneration,
     queries: canvasRenderer.queries,
+    viewerDocumentRead: viewerReads ? canvasRenderer.readWorkerDocument : undefined,
     layoutError: canvasRenderer.error,
     zoom: state.zoom,
     canvasHostRef: canvasRenderer.canvasHostRef,
@@ -1879,6 +1960,10 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     if (expandedSidebarItem.startsWith('comment-')) {
       const id = parseInt(expandedSidebarItem.slice('comment-'.length), 10);
       if (!Number.isFinite(id)) return null;
+      if (viewerReads) {
+        const range = viewerCommentRanges.get(id);
+        return range ? { ...range, variant: 'comment' } : null;
+      }
       const session = pagedEditorRef.current?.getYrsSession();
       if (!session) return null;
       try {
@@ -1907,7 +1992,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       return { from: tc.from, to: tc.to, variant: isDeletion ? 'deletion' : 'insertion' };
     }
     return null;
-  }, [canvasRenderer.queries, expandedSidebarItem, trackedChanges]);
+  }, [canvasRenderer.queries, expandedSidebarItem, trackedChanges, viewerReads, viewerCommentRanges]);
 
   // Expose ref methods
   const hostSearch = useHostSearch({
@@ -1918,6 +2003,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
 
   useDocxEditorRefApi({
     experimentalWorkerOpen,
+    viewerSession,
     ref,
     document: history.state,
     documentFromYrs: yrsCore.documentFromYrs,
@@ -1934,6 +2020,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     setComments,
     setShowCommentsSidebar,
     contentChangeSubscribersRef,
+    documentChangeSubscribersRef,
     onContentSubscribersChange: setContentSubscriberCount,
     selectionChangeSubscribersRef,
     getCachedStyleResolver,
@@ -1944,6 +2031,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     allowHostProposalsRef,
     workerMemory: canvasRenderer.workerMemory,
     settledDisplayList: canvasRenderer.settledDisplayList,
+    readWorkerDocument: viewerSession ? canvasRenderer.readWorkerDocument : undefined,
     awaitingDocument,
     hostSearch: hostSearch.api,
   });
@@ -2019,19 +2107,22 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       const editor = pagedEditorRef.current;
       const session = editor?.getYrsSession();
       if (session) {
-        try {
-          session.applyRawOps('body', [{ op: 'removeComment', id: String(id) }]);
-          editor?.syncYrsInputState(true);
-        } catch {
-          // The anchor may already have disappeared with its content.
-        }
+        const main = () => {
+          try {
+            session.applyRawOps('body', [{ op: 'removeComment', id: String(id) }]);
+            editor?.syncYrsInputState(true);
+          } catch {}
+        };
+        const authority = viewerReads ? registeredWorkerProposalAuthority(session) : null;
+        if (authority) void authority.removeComment(String(id), main).catch(() => {});
+        else main();
       }
       if (target) onCommentDelete?.(target);
     },
     onAddComment: (addText) => {
       const comment = createComment(commentIdAllocatorRef.current, addText, author);
       const editor = pagedEditorRef.current;
-      const session = editor?.getYrsSession();
+      const session = viewerReads ? null : editor?.getYrsSession();
       if (editor && session && commentSelectionRange) {
         const { from, to } = commentSelectionRange;
         const start = editor.displayPositionToYrsLoc(from);
@@ -2064,7 +2155,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     onAcceptChange: (from, to) => {
       if (readOnly) return;
       const editor = pagedEditorRef.current;
-      const session = editor?.getYrsSession();
+      const session = viewerReads ? null : editor?.getYrsSession();
       const range = editor ? displayRangeToYrsRange(editor, from, to) : null;
       if (!session || !range) return;
       session.acceptChange(range);
@@ -2074,7 +2165,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     onRejectChange: (from, to) => {
       if (readOnly) return;
       const editor = pagedEditorRef.current;
-      const session = editor?.getYrsSession();
+      const session = viewerReads ? null : editor?.getYrsSession();
       const range = editor ? displayRangeToYrsRange(editor, from, to) : null;
       if (!session || !range) return;
       session.rejectChange(range);
@@ -2082,6 +2173,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       refreshTrackedChanges(session);
     },
     onAcceptChangeById: (revisionId) => {
+      if (viewerSession) return;
       const revision = pagedEditorRef.current
         ?.getYrsSession()
         ?.listRevisions()
@@ -2091,6 +2183,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       }
     },
     onRejectChangeById: (revisionId) => {
+      if (viewerSession) return;
       const revision = pagedEditorRef.current
         ?.getYrsSession()
         ?.listRevisions()
@@ -2195,36 +2288,11 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   const sidebarOpen =
     allSidebarItems.some((item) => !item.hidden) || (opening && showCommentsSidebar);
 
-  const requestReplica = yrsCore.requestReplica;
-  const replicaPending = Boolean(
-    experimentalWorkerOpen && yrsCore.hydrateOnDemand && yrsCore.session && !yrsCore.replicaReady
-  );
-  // Sidebars and the outline read the replica; so do plugins and geometry callbacks, unless the
-  // worker serves them proposals.
-  const replicaWanted =
-    (!(experimentalWorkerOpen && workerProposals) &&
-      ((plugins?.length ?? 0) > 0 || Boolean(onRenderedDomContextReady))) ||
-    showCommentsSidebar ||
-    sidebarOpen ||
-    showOutline;
-  useEffect(() => {
-    if (replicaPending && replicaWanted) requestReplica();
-  }, [replicaPending, replicaWanted, requestReplica, yrsCore.session]);
   // An outline opened before the replica loaded reads its headings once it has.
   const replicaReady = yrsCore.replicaReady;
   useEffect(() => {
-    if (experimentalWorkerOpen && replicaReady && showOutlineRef.current) refreshHeadings();
-  }, [experimentalWorkerOpen, replicaReady, refreshHeadings, showOutlineRef]);
-  // A tap asks through its gesture, the input for itself.
-  useEffect(() => {
-    const content = editorContentRef.current;
-    if (!replicaPending || !content) return;
-    const onPointer = (event: PointerEvent) => {
-      if (pagePressNeedsReplica(event)) requestReplica();
-    };
-    content.addEventListener('pointerdown', onPointer, true);
-    return () => content.removeEventListener('pointerdown', onPointer, true);
-  }, [replicaPending, requestReplica]);
+    if (!viewerReads && experimentalWorkerOpen && replicaReady && showOutlineRef.current) refreshHeadings();
+  }, [experimentalWorkerOpen, replicaReady, refreshHeadings, showOutlineRef, viewerReads]);
 
   // Reserve 2× the left-edge allowance so the centered page clears whatever
   // outline UI is showing, without forcing a shift on wide viewports.
@@ -2261,6 +2329,11 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     ? Math.round(sectionPropsPageWidth / 15)
     : DEFAULT_PAGE_WIDTH;
 
+  const handlePagedViewerSelectionChange = useCallback((selection: ViewerSelectionChange) => {
+    pluginHost.publishViewerSelection(selection);
+    handleViewerSelectionChange(selection);
+  }, [handleViewerSelectionChange, pluginHost.publishViewerSelection]);
+
   // PagedEditor selection callback: resolve sticky comment/revision coverage
   // from Yrs so the matching sidebar card opens as the caret moves.
   const handlePagedSelectionChange = useCallback(() => {
@@ -2270,6 +2343,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     // state deduplication.
     canvasA11yNotifyRef.current?.();
     pluginHost.publishSelection();
+    if (viewerReads) return;
     const session = pagedEditorRef.current?.getYrsSession();
     const head = session?.selection()?.head;
     if (!session || !head) return;
@@ -2321,6 +2395,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     }
     setExpandedSidebarItem(cursorSidebarItem);
   }, [
+    viewerReads,
     comments,
     resolvedCommentIds,
     commentSidebarItems,
@@ -2534,6 +2609,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
             <DocxEditorPagedArea
               commandBridgeRef={commandBridgeRef}
               yrsCore={yrsCore}
+              pluginHostOpen={pluginHostSession !== null}
               onError={reportPagedError}
               collaboration={collaboration}
               pagedEditorRef={pagedEditorRef}
@@ -2555,6 +2631,10 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
               onBodyClick={handleBodyClick}
               zoom={state.zoom}
               readOnly={readOnly}
+              holdInput={holdOpeningInput}
+              inputScope={yrsSeedGeneration}
+              inputQueries={viewerSession ? undefined : canvasRenderer.inputQueries}
+              viewerDocumentRead={viewerSession ? canvasRenderer.readWorkerDocument : undefined}
               showHiddenText={showHiddenText}
               isSuggesting={editingMode === 'suggesting'}
               author={author}
@@ -2563,6 +2643,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
               onYrsContentChange={handleYrsContentChange}
               onPagedSelectionChange={handlePagedSelectionChange}
               onYrsSelectionChange={handleYrsToolbarSelectionChange}
+              onViewerSelectionChange={handlePagedViewerSelectionChange}
               onRenderedDomContextReady={
                 pluginHost.managed || onRenderedDomContextReady
                   ? pluginHost.onRenderedDomContext
@@ -2582,6 +2663,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
               anchorPositions={anchorPositions}
               onAnchorPositionsChange={setAnchorPositions}
               onYrsTrackedChangesChange={setYrsTrackedChangesResult}
+              onViewerCommentRangesChange={setViewerCommentRanges}
+              viewerSidebarActive={showCommentsSidebar || sidebarOpen}
               pluginRenderedDomContext={sidebarDomContext}
               pageWidthPx={pageWidthPx}
               expandedSidebarItem={expandedSidebarItem}
@@ -2604,6 +2687,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
               applyResidentDelete={canvasRenderer.applyDelete}
               displayListQueries={canvasRenderer.queries}
               resolveDisplayListQueries={canvasRenderer.resolveQueries}
+              pageNavigation={canvasRenderer.pageNavigation}
               canvasDisplayList={canvasRenderer.displayList}
               displayListFrameEpoch={canvasRenderer.frame?.frameEpoch ?? null}
               residentCaret={canvasRenderer.caret}

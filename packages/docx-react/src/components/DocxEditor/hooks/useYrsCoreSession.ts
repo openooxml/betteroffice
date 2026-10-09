@@ -1,12 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { LayoutBlock } from '@betteroffice/docx/layout/pagination';
-import type {
-  Document,
-  Endnote,
-  Footnote,
-  HeaderFooter,
-  Section,
-} from '@betteroffice/docx/types/document';
+import type { Document } from '@betteroffice/docx/types/document';
 import type {
   YrsDocxHost,
   YrsInputPositionMap,
@@ -14,23 +8,46 @@ import type {
   YrsRenderEnv,
   YrsSession,
 } from '@betteroffice/docx/yrs';
+import {
+  EditorDirtyStories,
+  ResidentWorkerSaveUnavailableError,
+  hostSaveMetadata,
+  mergeDocxHostMetadata,
+  serialWorkerSaves,
+} from '@betteroffice/docx/yrs';
 import type { DocxEditorCollaborationOptions } from '../types';
-import type { OpenInWorker, OpenPreviewInWorker, WorkerOpenedDocument } from './useDisplayList';
+import type {
+  OpenInWorker,
+  OpenPreviewInWorker,
+  UseRustDisplayListResult,
+  WorkerOpenedDocument,
+} from './useDisplayList';
 import { markLayoutQueued } from '../internals/layoutProvenance';
 import {
   adoptWorkerOpenHandoverVersion,
   adoptWorkerOpenMirrorVersion,
   deferWorkerOpenReplica,
-  ensureWorkerOpenReplica,
+  holdWorkerOpenDocument,
+  releaseWorkerOpenDocument,
   requestWorkerOpenReplica,
+  workerOpenDocumentHeld,
   workerOpenReplicaPending,
 } from '../internals/workerOpenReplica';
+import { DocxWorkerError } from '../internals/docxWorkerError';
 import {
   beginWorkerProposalHandover,
+  installEditorWorkerProposalActivation,
+  hasEditorWorkerProposalRounds,
   registerWorkerProposalAuthority,
   registeredWorkerProposalAuthority,
   workerProposalFailure,
 } from '../internals/workerProposalAuthority';
+import { registerWorkerOpenSave } from '../internals/workerOpenSave';
+import { registerWorkerOpenExport } from '../internals/workerOpenExport';
+import { registerQueuedOpeningInput } from '../internals/queuedOpeningInput';
+import { bootstrapWorkerOpenPeer } from '../internals/bootstrapWorkerOpenPeer';
+
+export { dirtyProjectionStory, mergeDocxHostMetadata } from '@betteroffice/docx/yrs';
 
 type YrsFacadeModule = typeof import('@betteroffice/docx/yrs');
 
@@ -40,7 +57,6 @@ export interface YrsCoreSession {
   /** The seed generation `session` was created for. */
   sessionGeneration: number | null;
   replicaReady: boolean;
-  hydrateOnDemand: boolean;
   /** Starts loading the main-thread replica when needed. */
   requestReplica(): void;
   workerProposalsReady: boolean;
@@ -99,14 +115,16 @@ interface WorkerOpenOptions {
   /** Opens the first-page preview in the worker too, so this thread runs none of it. */
   openPreviewInWorker?: OpenPreviewInWorker;
   renderedFrame: object | null;
+  settledDisplayList?: UseRustDisplayListResult['settledDisplayList'];
   workerProposals?: boolean;
+  viewer?: boolean;
   refreshWorkerLayout?: () => void;
   /** The engine whose provisional layout is shown with the rest not yet asked of the worker. */
   pendingCompletion?: unknown;
-  /** Leaves the replica unhydrated until a caller needs it; see requestReplica. */
-  hydrateOnDemand?: boolean;
+  layoutCompleteSession?: unknown;
   /** A worker-held proposal changed document content. */
   onWorkerContentChange?: () => void;
+  onPeerUpdate?: (stories: readonly string[]) => void;
   /** The worker found tracked changes of its own in the opened document. */
   onWorkerRevisions?: () => void;
 }
@@ -127,87 +145,19 @@ export interface YrsCoreSessionOptions {
 
 /** Body blocks a first-page preview parses. */
 const PREVIEW_BODY_BLOCKS = 200;
+/** Paragraph weight budget for a first-page preview. */
+const PREVIEW_PARAGRAPH_BUDGET = 256;
 /** How long the full open waits for the preview's pages to paint. */
 const PREVIEW_PAINT_TIMEOUT_MS = 2000;
 /** Bounds the wait for the painted preview to reach the screen; hidden tabs get no frames. */
 const PREVIEW_FRAME_WAIT_MS = 100;
-/** Bounds the wait for a worker frame to reach the screen before the replica hydrates. */
 const REPLICA_FRAME_WAIT_MS = 1000;
-/** Bounds the wait for a worker-opened session's first frame before the replica hydrates. */
-const REPLICA_OPEN_WAIT_MS = 5000;
 /**
  * How long a preview waits for the full session, from the end of its own
  * paint. A full open that has not produced one by then fails the load; once
  * it exists, the preview stays until the full session's first frame shows.
  */
 const FULL_OPEN_TIMEOUT_MS = 10_000;
-
-function mergeHeaderFooterMaps(
-  full: Map<string, HeaderFooter> | undefined,
-  host: Map<string, HeaderFooter> | undefined
-): Map<string, HeaderFooter> | undefined {
-  if (host === undefined) return undefined;
-  return new Map(
-    [...host].map(([relationshipId, metadata]) => {
-      const existing = full?.get(relationshipId);
-      return [relationshipId, existing ? { ...metadata, content: existing.content } : metadata];
-    })
-  );
-}
-
-function mergeNotes<T extends Footnote | Endnote>(
-  full: T[] | undefined,
-  host: T[] | undefined
-): T[] | undefined {
-  if (host === undefined) return undefined;
-  return host.map((metadata) => {
-    const existing = full?.find((note) => note.id === metadata.id);
-    return existing ? { ...existing, ...metadata, content: existing.content } : metadata;
-  });
-}
-
-function mergeSections(
-  full: Section[] | undefined,
-  host: Section[] | undefined
-): Section[] | undefined {
-  if (host === undefined) return undefined;
-  return host.map((metadata, index) => {
-    const existing =
-      full?.find((section) => section.id !== undefined && section.id === metadata.id) ??
-      full?.[index];
-    return existing ? { ...metadata, content: existing.content } : metadata;
-  });
-}
-
-export function mergeDocxHostMetadata(full: Document, host: Document): Document {
-  const fullPackage = full.package;
-  const hostPackage = host.package;
-  return {
-    ...full,
-    contractVersion: host.contractVersion ?? full.contractVersion,
-    originalBuffer: full.originalBuffer ?? host.originalBuffer,
-    warnings: host.warnings,
-    package: {
-      ...fullPackage,
-      contractVersion: hostPackage.contractVersion ?? fullPackage.contractVersion,
-      styles: hostPackage.styles,
-      theme: hostPackage.theme,
-      settings: hostPackage.settings,
-      fontTable: hostPackage.fontTable,
-      relationships: hostPackage.relationships,
-      headers: mergeHeaderFooterMaps(fullPackage.headers, hostPackage.headers),
-      footers: mergeHeaderFooterMaps(fullPackage.footers, hostPackage.footers),
-      footnotes: mergeNotes(fullPackage.footnotes, hostPackage.footnotes),
-      endnotes: mergeNotes(fullPackage.endnotes, hostPackage.endnotes),
-      document: {
-        ...fullPackage.document,
-        sections: mergeSections(fullPackage.document.sections, hostPackage.document.sections),
-        finalSectionProperties: hostPackage.document.finalSectionProperties,
-        comments: hostPackage.document.comments,
-      },
-    },
-  };
-}
 
 /** A display-only session of the first pages of `bytes`, or null when it cannot open. */
 async function openPreview(
@@ -217,7 +167,7 @@ async function openPreview(
 ): Promise<{ session: YrsSession; host: YrsDocxHost } | null> {
   const session = await yrs.createYrsSession({ clientId });
   try {
-    const host = session.openDocxPreview(bytes, PREVIEW_BODY_BLOCKS);
+    const host = session.openDocxPreview(bytes, PREVIEW_BODY_BLOCKS, PREVIEW_PARAGRAPH_BUDGET);
     if (host) return { session, host };
     session.destroy();
     return null;
@@ -238,20 +188,22 @@ async function openWorkerPreview(
   bytes: Uint8Array,
   clientId: number | undefined,
   openPreviewInWorker: OpenPreviewInWorker,
-  onPosted: () => void
+  onPosted: () => void,
+  viewer: boolean
 ): Promise<{ session: YrsSession; host: YrsDocxHost; laidOut: Promise<void> } | null> {
   const session = await yrs.createYrsSession({ clientId });
   session.markDisplayOnly();
-  // A cut that holds the whole body lays out like the whole document.
-  const loadHere = (): void => {
-    const host = session.openDocxPreview(bytes, PREVIEW_BODY_BLOCKS);
-    if (!host) throw new Error('The first-page preview cannot open');
-    if (host.wholeBody) session.setPartialDocument(false);
-  };
   let release = (): void => {};
-  deferWorkerOpenReplica(session, async () => loadHere, loadHere, () => release());
+  if (!viewer) {
+    const loadHere = (): void => {
+      const host = session.openDocxPreview(bytes, PREVIEW_BODY_BLOCKS, PREVIEW_PARAGRAPH_BUDGET);
+      if (!host) throw new Error('The first-page preview cannot open');
+      if (host.wholeBody) session.setPartialDocument(false);
+    };
+    deferWorkerOpenReplica(session, async () => loadHere, loadHere, () => release());
+  }
   try {
-    const pending = openPreviewInWorker(session, bytes, PREVIEW_BODY_BLOCKS);
+    const pending = openPreviewInWorker(session, bytes, PREVIEW_BODY_BLOCKS, PREVIEW_PARAGRAPH_BUDGET);
     onPosted();
     const opened = await pending;
     if (opened) {
@@ -314,13 +266,6 @@ export function warmCompatibilityBase(
   }
 }
 
-/** Story a direct-input edit dirties: the hf/note root it sits in, everything else the body. */
-export function dirtyProjectionStory(activeStory: string): string {
-  return ['hf:', 'fn:', 'en:'].some((prefix) => activeStory.startsWith(prefix))
-    ? activeStory.split(':', 2).join(':')
-    : 'body';
-}
-
 /**
  * Frees sessions the editor let go of. Consumers' effects in the commit that replaces a session
  * still run with the session they rendered, and `held` names sessions still shown after it (a
@@ -378,8 +323,6 @@ export function useYrsCoreSession(
   options?: YrsCoreSessionOptions
 ): YrsCoreSession {
   const workerOpen = options?.workerOpen;
-  const hydrateOnDemandRef = useRef(workerOpen?.hydrateOnDemand === true);
-  hydrateOnDemandRef.current = workerOpen?.hydrateOnDemand === true;
   const collaborationClientId = collaboration?.clientId;
   const collaborationInitialUpdate = collaboration?.initialUpdate;
   const sessionRef = useRef<YrsSession | null>(null);
@@ -395,12 +338,16 @@ export function useYrsCoreSession(
   const mediaTokensRef = useRef(options?.mediaTokens);
   mediaTokensRef.current = options?.mediaTokens;
   const inputPositionMapsRef = useRef(new Map<string, YrsInputPositionMap>());
-  const projectionStoriesRef = useRef(new Set<string>());
+  const dirtyStoriesRef = useRef(new EditorDirtyStories());
+  const markProjectionStories = useCallback((stories: readonly string[]): void => {
+    for (const story of stories) dirtyStoriesRef.current.add(story);
+  }, []);
   const enabledRef = useRef(enabled);
   enabledRef.current = enabled;
   const [session, setSession] = useState<YrsSession | null>(null);
   const [sessionGeneration, setSessionGeneration] = useState<number | null>(null);
   const [replicaReady, setReplicaReady] = useState(true);
+  const [replicaRequestVersion, setReplicaRequestVersion] = useState(0);
   const [workerProposalsReady, setWorkerProposalsReady] = useState(false);
   const workerOpenRef = useRef(workerOpen);
   workerOpenRef.current = workerOpen;
@@ -412,33 +359,21 @@ export function useYrsCoreSession(
   workerOpenEnabledRef.current = Boolean(openInWorker);
   const pendingReplicaRef = useRef<ReturnType<typeof deferWorkerOpenReplica> | null>(null);
   const startReplicaRef = useRef<(() => void) | null>(null);
+  const replicaStatePrefetchRef = useRef<{ start(): void; clear(): void } | null>(null);
   // Asks the worker whether the document has tracked changes, once per session.
   const revisionQueryRef = useRef<(() => void) | null>(null);
   const workerLaidOutRef = useRef<(() => void) | null>(null);
-  // An on-demand replica loads once wanted and past the point main's automatic load waits for.
-  const replicaGateRef = useRef<{ reached: boolean; wanted: boolean } | null>(null);
+  const replicaGateRef = useRef<{ reached: boolean } | null>(null);
   const requestReplicaRef = useRef<(() => void) | null>(null);
-  const replicaWaitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const openingInputSessionRef = useRef<YrsSession | null>(null);
+  const eagerPeerStartRef = useRef<{ session: YrsSession; start(): void } | null>(null);
   const openReplicaGate = useCallback((): void => {
     const gate = replicaGateRef.current;
     const start = startReplicaRef.current;
     if (!gate || !start) return;
-    if (!gate.reached) {
-      gate.reached = true;
-      if (hydrateOnDemandRef.current) revisionQueryRef.current?.();
-    }
-    if (!hydrateOnDemandRef.current || gate.wanted) start();
+    gate.reached = true;
+    start();
   }, []);
-  const armReplicaGate = useCallback(
-    (delayMs: number): void => {
-      if (replicaWaitTimerRef.current !== null) clearTimeout(replicaWaitTimerRef.current);
-      replicaWaitTimerRef.current = setTimeout(() => {
-        replicaWaitTimerRef.current = null;
-        openReplicaGate();
-      }, delayMs);
-    },
-    [openReplicaGate]
-  );
   const inheritedFrameRef = useRef<object | null>(null);
   const renderedFrameRef = useRef(workerOpen?.renderedFrame ?? null);
   renderedFrameRef.current = workerOpen?.renderedFrame ?? null;
@@ -485,8 +420,11 @@ export function useYrsCoreSession(
     if (!enabled || (!seedDocument && !seedBytes)) return;
     let cancelled = false;
     let openedWorker: WorkerOpenedDocument | null = null;
+    let unregisterSave: (() => void) | null = null;
+    let unregisterExport: (() => void) | null = null;
+    let unregisterOpeningInput: (() => void) | null = null;
     inputPositionMapsRef.current.clear();
-    projectionStoriesRef.current.clear();
+    dirtyStoriesRef.current.clear();
     compatibilityBaseRef.current = null;
 
     let abandoned = false;
@@ -585,10 +523,11 @@ export function useYrsCoreSession(
             } catch (error) {
               openedWorker?.destroy();
               openedWorker = null;
+              next.destroy();
               if (error instanceof yrs.ResidentWorkerOutOfMemoryError) {
-                next.destroy();
                 throw error;
               }
+              throw error instanceof DocxWorkerError ? error : new DocxWorkerError('open', error);
             }
             if (stale()) {
               openedWorker?.destroy();
@@ -641,12 +580,13 @@ export function useYrsCoreSession(
                 seedBytes,
                 collaborationClientId,
                 openPreviewInWorker,
-                () => void prepare()
+                () => void prepare(),
+                workerOpenRef.current?.viewer === true
               )
             : null;
         const opened =
           inWorker ??
-          (previewFirstPage && seedBytes && !stale()
+          (previewFirstPage && seedBytes && !stale() && !workerOpenRef.current?.viewer
             ? await openPreview(yrs, seedBytes, collaborationClientId)
             : null);
         shown = opened;
@@ -715,57 +655,226 @@ export function useYrsCoreSession(
             inheritedFrameRef.current = renderedFrameRef.current;
             const worker = openedWorker;
             const source = bytes;
-            const gate = { reached: false, wanted: false };
-            let recoveredRendering = false;
-            let warnedSyncAccess = false;
-            const request = (): void => {
-              gate.wanted = true;
-              if (gate.reached) startReplicaRef.current?.();
+            const workerHost = full.host!;
+            unregisterExport = registerWorkerOpenExport(next, {
+              export: (options, context) => {
+                if (stale()) return Promise.reject(new Error('The document changed while exporting'));
+                return worker.exportStructuredWithPages(next, options, context);
+              },
+            });
+            const saveInOrder = serialWorkerSaves(dirtyStoriesRef.current);
+            unregisterSave = registerWorkerOpenSave(next, {
+              available: () => !stale() && worker.canSave(),
+              save: (comments, peer) => {
+                const task = () => saveInOrder(async (stories) => {
+                  if (stale()) throw new Error('The document changed while saving');
+                  if (!worker.canSave()) throw new ResidentWorkerSaveUnavailableError('No document worker');
+                  const currentHost = documentRef.current ?? host?.document;
+                  return worker.save({
+                    comments,
+                    ...(currentHost ? { host: hostSaveMetadata(currentHost) } : {}),
+                    ...(peer ? { stories } : {}),
+                  }, peer, (apply) => dirtyStoriesRef.current.adoptWorkerSaveUpdates(apply));
+                });
+                const authority = hasEditorWorkerProposalRounds(next) ? registeredWorkerProposalAuthority(next) : null;
+                return authority ? authority.save(task) : task();
+              },
+            });
+            let revisionsQueried = false;
+            const queryRevisions = (): void => {
+              if (revisionsQueried) return;
+              revisionsQueried = true;
+              void worker.revisionCount().then(
+                (count) => {
+                  if (stale() || sessionRef.current !== next || count === 0) return;
+                  workerOpenRef.current?.onWorkerRevisions?.();
+                },
+                () => {}
+              );
             };
-            const pending = deferWorkerOpenReplica(
-              next,
-              async () => {
-                const handover = beginWorkerProposalHandover(next);
-                const handedOver = handover ? await handover : null;
-                const update = handedOver ? handedOver.state : await worker.encodeState();
-                return () => {
-                  next.openDocx(source, false);
-                  next.loadState(update);
-                  handedOver?.complete();
-                };
-              },
-              (reason) => {
-                if (registeredWorkerProposalAuthority(next)?.holdsWorkerState()) {
-                  throw new Error('The resident worker holds proposals the main thread cannot rebuild');
-                }
-                const recoverRendering = worker.fallback(reason);
-                if (reason !== 'failure' && !warnedSyncAccess) {
-                  warnedSyncAccess = true;
-                  console.warn(
-                    `[DocxEditor] ${reason.syncAccess}() needed the main-thread document before it was ready, ` +
-                    'so the document was opened on the main thread. Use the asynchronous APIs ' +
-                    '(for example getParagraphIdentities) to keep it in the worker.'
-                  );
-                }
-                next.openDocx(source, true);
-                if (registeredWorkerProposalAuthority(next)) next.mirrorWorkerDocument(null);
-                if (recoverRendering) {
-                  recoveredRendering = recoverRendering();
-                }
-              },
-              () => {
-                if (stale()) return;
-                inputPositionMapsRef.current.clear();
-                replicaReadyRef.current = true;
-                worker.replicaReady();
-                if (recoveredRendering) {
+            const activateEditorProposals = () => {
+              if (stale() || !worker.canSave()) return null;
+              let laidOut = renderedFrameRef.current && renderedFrameRef.current !== inheritedFrameRef.current
+                ? Promise.resolve()
+                : new Promise<void>((resolve) => {
+                    workerLaidOutRef.current = resolve;
+                  });
+              const authority = registerWorkerProposalAuthority(next, worker, {
+                editorPeer: true,
+                relayout: () => {
+                  if (!authority.initialized) {
+                    laidOut = new Promise<void>((resolve) => {
+                      workerLaidOutRef.current = resolve;
+                    });
+                  }
                   markLayoutQueued(next, true);
                   workerOpenRef.current?.refreshWorkerLayout?.();
+                },
+                current: () => !stale(),
+                laidOut: () => worker.whenBootstrapSent
+                  ? Promise.race([laidOut, worker.whenBootstrapSent()])
+                  : laidOut,
+                contentChanged: () => workerOpenRef.current?.onWorkerContentChange?.(),
+                projectionChanged: (stories) => {
+                  inputPositionMapsRef.current.clear();
+                  markProjectionStories(stories);
+                },
+                peerUpdated: (stories) => {
+                  if (!workerOpenReplicaPending(next)) workerOpenRef.current?.onPeerUpdate?.(stories);
+                },
+                adopted: (version) => {
+                  adoptWorkerOpenMirrorVersion(next, version);
+                  worker.mirrorReady();
+                },
+              });
+              authority.subscribe(() => {
+                if (!stale()) setWorkerProposalsReady(authority.initialized);
+              });
+              return authority;
+            };
+            const deferEditorReplica = (): ReturnType<typeof deferWorkerOpenReplica> => {
+              type StateRevision = NonNullable<ReturnType<NonNullable<WorkerOpenedDocument['stateRevision']>>>;
+              type StateSnapshot = Awaited<ReturnType<NonNullable<WorkerOpenedDocument['encodeVersionedState']>>>;
+              type PrefetchedState = {
+                revision: StateRevision;
+                result: Promise<StateSnapshot>;
+              };
+              let prefetchedState: PrefetchedState | null = null;
+              const clearPrefetchedState = (): void => {
+                prefetchedState = null;
+              };
+              const sameRevision = (revision: StateRevision): boolean => {
+                const current = worker.stateRevision?.();
+                return current?.owner === revision.owner && current.sequence === revision.sequence;
+              };
+              const encodeState = async (prefetch?: boolean): Promise<StateSnapshot> =>
+                worker.encodeVersionedState
+                  ? worker.encodeVersionedState(prefetch)
+                  : { state: await worker.encodeState(prefetch), version: undefined };
+              const encodeReplicaState = async (): Promise<StateSnapshot> => {
+                const cached = prefetchedState;
+                clearPrefetchedState();
+                let update: StateSnapshot;
+                if (cached && sameRevision(cached.revision)) {
+                  update = await cached.result;
+                  if (!sameRevision(cached.revision)) update = await encodeState();
+                } else {
+                  update = await encodeState();
                 }
-                setReplicaReady(true);
-              },
-              { active: () => hydrateOnDemandRef.current, request }
-            );
+                if (stale() || sessionRef.current !== next || !pending.pending) {
+                  throw new Error('The document changed while opening the replica');
+                }
+                return update;
+              };
+              const gate = { reached: false };
+              const request = (): void => {
+                pending.requestReady();
+                if (gate.reached) startReplicaRef.current?.();
+              };
+              const pending = deferWorkerOpenReplica(
+                next,
+                async () => {
+                  const handover = beginWorkerProposalHandover(next);
+                  const handedOver = handover ? await handover : null;
+                  const update = handedOver ?? await encodeReplicaState();
+                  let bootstrapped = false;
+                  return [
+                    () => {
+                      bootstrapped = bootstrapWorkerOpenPeer(next, update, source, workerHost);
+                    },
+                    () => { if (!bootstrapped) next.loadState(update.state); },
+                    () => {
+                      if (handedOver) handedOver.complete();
+                      else if ('version' in update && update.version !== undefined) {
+                        adoptWorkerOpenHandoverVersion(next, update.version);
+                      }
+                    },
+                  ];
+                },
+                () => {
+                  clearPrefetchedState();
+                  if (registeredWorkerProposalAuthority(next)?.holdsWorkerState()) {
+                    throw new Error('The resident worker holds proposals the main thread cannot rebuild');
+                  }
+                  worker.fallback();
+                  if (hasEditorWorkerProposalRounds(next) && registeredWorkerProposalAuthority(next)?.retire('source-fallback')) {
+                    console.warn('[yrs] the source fallback retired worker proposal authority to the peer');
+                  }
+                  next.openDocx(source, true);
+                  if (registeredWorkerProposalAuthority(next)) next.mirrorWorkerDocument(null);
+                },
+                () => {
+                  if (stale()) return;
+                  inputPositionMapsRef.current.clear();
+                  replicaReadyRef.current = true;
+                  worker.replicaReady();
+                  setReplicaReady(true);
+                },
+                {
+                  current: () => !stale() && sessionRef.current === next &&
+                    pendingReplicaRef.current === pending,
+                  cancel: () => {
+                    clearPrefetchedState();
+                    worker.destroy();
+                  },
+                  waitForLayout: true,
+                }
+              );
+              pendingReplicaRef.current = pending;
+              replicaStatePrefetchRef.current = {
+                clear: clearPrefetchedState,
+                start: () => {
+                  if (
+                    stale() || sessionRef.current !== next ||
+                    !pending.pending || pending.started || prefetchedState ||
+                    registeredWorkerProposalAuthority(next)
+                  ) return;
+                  const revision = worker.stateRevision?.();
+                  if (!revision) return;
+                  const result = encodeState(true);
+                  prefetchedState = { revision, result };
+                  void result.catch(() => {});
+                },
+              };
+              replicaGateRef.current = gate;
+              requestReplicaRef.current = request;
+              unregisterOpeningInput = registerQueuedOpeningInput(next, () => {
+                if (stale() || sessionRef.current !== next || !pending.pending) return;
+                openingInputSessionRef.current = next;
+                if (eagerPeerStartRef.current?.session === next) eagerPeerStartRef.current.start();
+              });
+              startReplicaRef.current = () => {
+                if (
+                  stale() ||
+                  sessionRef.current !== next ||
+                  pendingReplicaRef.current !== pending
+                ) return;
+                requestWorkerOpenReplica(next);
+              };
+              replicaReadyRef.current = false;
+              setReplicaReady(false);
+              void pending.ready.catch((error: unknown) => {
+                clearPrefetchedState();
+                if (!stale() && sessionRef.current === next && pendingReplicaRef.current === pending) {
+                  const onError = callbacksRef.current?.onReplicaError ?? callbacksRef.current?.onError;
+                  onError?.(
+                    error instanceof Error ? error : new Error(String(error)),
+                    seedGeneration
+                  );
+                }
+              });
+              revisionQueryRef.current = queryRevisions;
+              return pending;
+            };
+            if (workerOpenRef.current?.viewer) {
+              holdWorkerOpenDocument(next, deferEditorReplica);
+              revisionQueryRef.current = queryRevisions;
+              replicaReadyRef.current = false;
+              setReplicaReady(false);
+            } else {
+              deferEditorReplica();
+              if (!workerOpenRef.current?.workerProposals) installEditorWorkerProposalActivation(next, activateEditorProposals);
+            }
             if (workerOpenRef.current?.workerProposals) {
               let laidOut = new Promise<void>((resolve) => {
                 workerLaidOutRef.current = resolve;
@@ -783,6 +892,7 @@ export function useYrsCoreSession(
                 current: () => !stale(),
                 laidOut: () => laidOut,
                 contentChanged: () => workerOpenRef.current?.onWorkerContentChange?.(),
+                projectionChanged: markProjectionStories,
                 adopted: (version) => {
                   adoptWorkerOpenMirrorVersion(next, version);
                   worker.mirrorReady();
@@ -793,53 +903,10 @@ export function useYrsCoreSession(
                 if (!stale()) setWorkerProposalsReady(authority.initialized);
               });
             }
-            pendingReplicaRef.current = pending;
-            replicaGateRef.current = gate;
-            requestReplicaRef.current = request;
-            let revisionsQueried = false;
-            revisionQueryRef.current = () => {
-              if (revisionsQueried) return;
-              revisionsQueried = true;
-              // Tracked changes show cards that read the replica.
-              void worker.revisionCount().then(
-                (count) => {
-                  if (stale() || sessionRef.current !== next || count === 0) return;
-                  // Cards for them open the sidebar, whose trigger loads the replica.
-                  if (workerOpenRef.current?.onWorkerRevisions) {
-                    workerOpenRef.current.onWorkerRevisions();
-                  } else {
-                    request();
-                  }
-                },
-                () => {
-                  if (!stale() && sessionRef.current === next) request();
-                }
-              );
-            };
-            startReplicaRef.current = () => {
-              if (
-                stale() ||
-                sessionRef.current !== next ||
-                pendingReplicaRef.current !== pending
-              ) return;
-              if (replicaWaitTimerRef.current !== null) {
-                clearTimeout(replicaWaitTimerRef.current);
-                replicaWaitTimerRef.current = null;
-              }
-              requestWorkerOpenReplica(next);
-            };
-            replicaReadyRef.current = false;
-            setReplicaReady(false);
-            void pending.ready.catch((error: unknown) => {
-              if (!stale()) {
-                const onError = callbacksRef.current?.onReplicaError ?? callbacksRef.current?.onError;
-                onError?.(
-                  error instanceof Error ? error : new Error(String(error)),
-                  seedGeneration
-                );
-              }
-            });
           } else {
+            if (workerOpenRef.current?.viewer) {
+              throw new DocxWorkerError('open', new Error('The document worker is unavailable'));
+            }
             host = seedYrsSession(next, (document) => yrs.documentToYrs(next, document), {
               bytes,
               document: seedDocument,
@@ -861,7 +928,7 @@ export function useYrsCoreSession(
         if (opened) {
           // Maps and projections of the preview do not describe this session.
           inputPositionMapsRef.current.clear();
-          projectionStoriesRef.current.clear();
+          dirtyStoriesRef.current.clear();
           compatibilityBaseRef.current = null;
           previewingRef.current = false;
           retiringRef.current = opened.session;
@@ -870,7 +937,6 @@ export function useYrsCoreSession(
         setSession(next);
         setPreviewing(false);
         setSessionGeneration(seedGeneration);
-        if (openedWorker && startReplicaRef.current) armReplicaGate(REPLICA_OPEN_WAIT_MS);
         if (host) callbacksRef.current?.onHostDocument?.(host, seedGeneration, next);
       })
       .catch((error) => {
@@ -882,6 +948,12 @@ export function useYrsCoreSession(
 
     return () => {
       cancelled = true;
+      replicaStatePrefetchRef.current?.clear();
+      replicaStatePrefetchRef.current = null;
+      unregisterSave?.();
+      unregisterExport?.();
+      unregisterOpeningInput?.();
+      openingInputSessionRef.current = null;
       pendingReplicaRef.current?.cancel();
       pendingReplicaRef.current = null;
       startReplicaRef.current = null;
@@ -890,8 +962,6 @@ export function useYrsCoreSession(
       workerLaidOutRef.current = null;
       replicaGateRef.current = null;
       requestReplicaRef.current = null;
-      if (replicaWaitTimerRef.current !== null) clearTimeout(replicaWaitTimerRef.current);
-      replicaWaitTimerRef.current = null;
       openedWorker?.destroy();
       failOpeningRef.current = null;
       if (fullOpenTimer !== null) clearTimeout(fullOpenTimer);
@@ -905,7 +975,7 @@ export function useYrsCoreSession(
       sessionRef.current = null;
       facadeRef.current = null;
       inputPositionMapsRef.current.clear();
-      projectionStoriesRef.current.clear();
+      dirtyStoriesRef.current.clear();
     };
   }, [
     enabled,
@@ -915,9 +985,23 @@ export function useYrsCoreSession(
     collaborationClientId,
     collaborationInitialUpdate,
     openInWorker,
+    markProjectionStories,
     retire,
     retirePreview,
   ]);
+
+  useEffect(() => {
+    if (
+      workerOpen?.viewer ||
+      !openInWorker ||
+      !session ||
+      session !== sessionRef.current ||
+      sessionGeneration !== seedGeneration ||
+      !workerOpenDocumentHeld(session)
+    ) return;
+    const pending = releaseWorkerOpenDocument(session);
+    if (pending?.pending) setReplicaRequestVersion((version) => version + 1);
+  }, [workerOpen?.viewer, openInWorker, session, sessionGeneration, seedGeneration]);
 
   const hasOwnWorkerFrame = workerOpen?.renderedFrame != null &&
     workerOpen.renderedFrame !== inheritedFrameRef.current;
@@ -927,8 +1011,8 @@ export function useYrsCoreSession(
       !session ||
       session !== sessionRef.current ||
       !hasOwnWorkerFrame ||
-      !pendingReplicaRef.current?.pending ||
-      !startReplicaRef.current ||
+      (!workerOpenDocumentHeld(session) &&
+        ((!pendingReplicaRef.current?.pending && !hasEditorWorkerProposalRounds(session)) || !startReplicaRef.current)) ||
       previewing ||
       (handoffFrom && options?.shownEngine !== session)
     ) return;
@@ -951,55 +1035,115 @@ export function useYrsCoreSession(
 
   useEffect(() => {
     if (!openInWorker) return;
-    const pending = pendingReplicaRef.current;
-    const start = startReplicaRef.current;
     if (
       !session ||
       session !== sessionRef.current ||
-      !hasOwnWorkerFrame ||
-      !pending?.pending ||
-      !start
+      !hasOwnWorkerFrame
     ) return;
     if (previewing || (handoffFrom && options?.shownEngine !== session)) return;
-    // The replica blocks this thread: it loads once the worker is laying out the rest.
     if (workerOpen?.pendingCompletion === session) return;
-    armReplicaGate(REPLICA_FRAME_WAIT_MS);
-    if (typeof requestAnimationFrame !== 'function') {
-      const timer = setTimeout(openReplicaGate, 0);
-      return () => clearTimeout(timer);
-    }
-    let frameId = requestAnimationFrame(() => {
-      frameId = requestAnimationFrame(openReplicaGate);
-    });
-    return () => cancelAnimationFrame(frameId);
+    if (workerOpen?.viewer || workerOpenDocumentHeld(session)) revisionQueryRef.current?.();
   }, [
     openInWorker,
     session,
     hasOwnWorkerFrame,
     workerOpen?.pendingCompletion,
-    workerOpen?.hydrateOnDemand,
+    workerOpen?.viewer,
     previewing,
     handoffFrom,
     options?.shownEngine,
   ]);
 
-  // Turning on-demand hydration off restores the bounded start a frame may never trigger.
-  const hydrateOnDemand = workerOpen?.hydrateOnDemand === true && Boolean(openInWorker);
-  const wasOnDemandRef = useRef(hydrateOnDemand);
   useEffect(() => {
-    const was = wasOnDemandRef.current;
-    wasOnDemandRef.current = hydrateOnDemand;
-    const start = startReplicaRef.current;
+    if (!openInWorker) return;
+    const pending = pendingReplicaRef.current;
+    const prefetch = replicaStatePrefetchRef.current;
     if (
-      !was ||
-      hydrateOnDemand ||
-      !openInWorker ||
-      !start ||
-      !pendingReplicaRef.current?.pending ||
-      replicaWaitTimerRef.current !== null
+      !session ||
+      session !== sessionRef.current ||
+      workerOpen?.viewer ||
+      workerOpenDocumentHeld(session) ||
+      !pending?.pending ||
+      pending.started ||
+      !startReplicaRef.current ||
+      previewing
     ) return;
-    replicaWaitTimerRef.current = setTimeout(start, REPLICA_OPEN_WAIT_MS);
-  }, [hydrateOnDemand, openInWorker]);
+    const visibilityDocument = globalThis.document;
+    const controller = new AbortController();
+    let frameId: number | null = null;
+    let idleId: number | null = null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const cleanup = (): void => {
+      controller.abort();
+      if (eagerPeerStartRef.current === eagerStart) eagerPeerStartRef.current = null;
+      clearTimeout(fallbackTimer);
+      if (timer !== null) clearTimeout(timer);
+      if (frameId !== null) cancelAnimationFrame(frameId);
+      if (idleId !== null) cancelIdleCallback(idleId);
+      visibilityDocument?.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+    const startPeer = (): void => {
+      if (controller.signal.aborted) return;
+      cleanup();
+      if (sessionRef.current === session && pendingReplicaRef.current === pending) openReplicaGate();
+    };
+    const onVisibilityChange = (): void => {
+      if (visibilityDocument?.visibilityState === 'hidden') startPeer();
+    };
+    const fallbackTimer = setTimeout(startPeer, 10_000);
+    const eagerStart = { session, start: startPeer };
+    eagerPeerStartRef.current = eagerStart;
+    visibilityDocument?.addEventListener('visibilitychange', onVisibilityChange);
+    if (visibilityDocument?.visibilityState === 'hidden') {
+      startPeer();
+    } else if (openingInputSessionRef.current === session) {
+      startPeer();
+    } else if (
+      workerOpen?.layoutCompleteSession === session &&
+      hasOwnWorkerFrame && retiringRef.current === null &&
+      workerOpen?.pendingCompletion !== session &&
+      (!handoffFrom || options?.shownEngine === session)
+    ) {
+      const settled = workerOpenRef.current?.settledDisplayList?.(
+        null, null, 'window', controller.signal, () => {
+          if (!controller.signal.aborted && retiringRef.current === null) prefetch?.start();
+        }
+      ) ?? Promise.resolve();
+      const authority = registeredWorkerProposalAuthority(session) !== null;
+      if (authority) {
+        timer = setTimeout(startPeer, REPLICA_FRAME_WAIT_MS);
+        if (typeof requestAnimationFrame === 'function') {
+          frameId = requestAnimationFrame(() => {
+            frameId = requestAnimationFrame(startPeer);
+          });
+        } else {
+          clearTimeout(timer);
+          timer = setTimeout(startPeer, 0);
+        }
+      }
+      void settled.then(() => {
+        if (controller.signal.aborted || authority) return;
+        if (typeof requestIdleCallback === 'function') {
+          idleId = requestIdleCallback(startPeer, { timeout: 2000 });
+        } else {
+          timer = setTimeout(startPeer, 0);
+        }
+      }, () => {});
+    }
+    return cleanup;
+  }, [
+    openInWorker,
+    session,
+    hasOwnWorkerFrame,
+    openReplicaGate,
+    replicaRequestVersion,
+    workerOpen?.pendingCompletion,
+    workerOpen?.layoutCompleteSession,
+    workerOpen?.viewer,
+    previewing,
+    handoffFrom,
+    options?.shownEngine,
+  ]);
 
   const requestReplica = useCallback((): void => {
     requestReplicaRef.current?.();
@@ -1021,9 +1165,13 @@ export function useYrsCoreSession(
         return true;
       }
       const owner = session ?? sessionRef.current;
+      if (owner && workerOpenDocumentHeld(owner as YrsSession)) return false;
       if (owner === sessionRef.current && owner &&
         workerProposalFailure(owner as YrsSession) === error) return false;
-      if (session === undefined || session === sessionRef.current) startReplicaRef.current?.();
+      if (session === undefined || session === sessionRef.current) {
+        pendingReplicaRef.current?.requestReady();
+        startReplicaRef.current?.();
+      }
       return false;
     },
     []
@@ -1129,20 +1277,21 @@ export function useYrsCoreSession(
     const host = baseDocument === undefined ? documentRef.current : baseDocument;
     let base = host;
     // A preview holds only the first pages: nothing saves or exports it.
-    if (!enabledRef.current || previewingRef.current || !live || !facade || !base) return null;
+    if (!enabledRef.current || previewingRef.current || !live || !facade || !base ||
+      workerOpenDocumentHeld(live)) return null;
     try {
-      if (workerOpenEnabledRef.current) ensureWorkerOpenReplica(live);
+      if (workerOpenEnabledRef.current && workerOpenReplicaPending(live)) return null;
       const compatibilityBase = compatibilityBaseRef.current ?? live.materializeDocx();
       if (compatibilityBase) {
         base = mergeDocxHostMetadata(compatibilityBase, base);
       }
-      const dirtyStories = projectionStoriesRef.current;
+      const dirtyStories = dirtyStoriesRef.current;
       const projected = facade.yrsToDocument(
         live,
         base,
-        dirtyStories.size > 0 ? { storyIds: new Set(dirtyStories) } : undefined
+        dirtyStories.projection.projectionOptions()
       );
-      dirtyStories.clear();
+      dirtyStories.projected();
       if (compatibilityBase) compatibilityBaseRef.current = projected;
       return projected;
     } catch (error) {
@@ -1161,14 +1310,13 @@ export function useYrsCoreSession(
         : typeof stories === 'string'
           ? [stories]
           : stories;
-    for (const story of dirty) projectionStoriesRef.current.add(dirtyProjectionStory(story));
-  }, []);
+    markProjectionStories(dirty);
+  }, [markProjectionStories]);
 
   return {
     session,
     sessionGeneration,
     replicaReady: !openInWorker || replicaReady,
-    hydrateOnDemand,
     requestReplica,
     workerProposalsReady,
     replicaReadyRef: openInWorker ? replicaReadyRef : undefined,

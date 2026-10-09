@@ -22,8 +22,10 @@ mod inherit;
 mod model;
 mod outline_gradients;
 pub mod paragraph;
+mod peer;
 mod proposal_diff;
 mod proposals;
+mod replay;
 mod save;
 mod search;
 mod source_run_properties;
@@ -40,6 +42,8 @@ pub use batch::{
     TextGuard, ValidationOutcome, outcome_json, oversized_request,
 };
 pub use model::*;
+#[doc(hidden)]
+pub use peer::{PeerError, PeerFont};
 pub use proposal_diff::*;
 pub use proposals::*;
 pub use search::TextSearchMatch;
@@ -90,6 +94,8 @@ pub struct DeckSession {
     epoch: Arc<AtomicU64>,
     /// Scopes version tokens to this session object.
     version_nonce: AtomicU64,
+    baseline_epoch: u64,
+    replay_state: RefCell<replay::ReplayState>,
     _epoch_observer: UpdateSubscription,
     state_update: RefCell<Option<(u64, Arc<Vec<u8>>)>>,
 }
@@ -199,6 +205,8 @@ impl DeckSession {
             proposals: Default::default(),
             epoch,
             version_nonce: AtomicU64::new(version_nonce),
+            baseline_epoch: 0,
+            replay_state: Default::default(),
             _epoch_observer,
             state_update: RefCell::new(None),
         })
@@ -256,6 +264,7 @@ impl DeckSession {
         import.sync_package_json(&self.doc, self.package())?;
         Ok(Self {
             package: Arc::new(package),
+            baseline_epoch: self.epoch(),
             ..self
         })
     }
