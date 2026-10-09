@@ -1347,6 +1347,8 @@ mod tests {
                         })).unwrap();
                         let expected = if algorithm == Some("autofit") {
                             554.2
+                        } else if width_type == Some("auto") {
+                            200.0
                         } else {
                             2000.0 / 3.0
                         };
