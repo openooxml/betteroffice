@@ -850,6 +850,7 @@ fn writable_style(
         style.font_size_pt,
         style.spacing_pt,
         style.baseline_pct,
+        style.kern_pt,
     )
     .map_err(|error| {
         unsupported(
@@ -1014,6 +1015,7 @@ fn plan_format(
         patch.font_size_pt,
         patch.spacing_pt,
         patch.baseline_pct,
+        None,
     )
     .map_err(|error| invalid(error, &requested))?;
     let (start, end) = (selection.start, selection.end);

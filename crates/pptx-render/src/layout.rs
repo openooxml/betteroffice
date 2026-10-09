@@ -2432,6 +2432,8 @@ struct ResolvedStyle {
     line_font_size_pt: f32,
     /// `spc`: tracking added after every cluster, in points.
     spacing_pt: f32,
+    /// `kern`: the smallest size, in points, the run is kerned at.
+    kern_pt: Option<f32>,
     baseline_shift_px: f32,
     bold: bool,
     italic: bool,
@@ -2777,6 +2779,10 @@ fn resolve_style(
         .map(|value| value as f32)
         .filter(|value| value.is_finite())
         .unwrap_or(0.0);
+    let kern_pt = direct
+        .kern_pt
+        .or_else(|| fallback.and_then(|value| value.kern_pt))
+        .map(|value| value as f32);
     let baseline_shift_px = points_to_px(font_size_pt) * baseline_pct / 100.0;
     let font_size_pt = if baseline_pct == 0.0 {
         font_size_pt
@@ -2789,6 +2795,7 @@ fn resolve_style(
         font_size_pt,
         line_font_size_pt: font_size_pt,
         spacing_pt,
+        kern_pt,
         baseline_shift_px,
         bold,
         italic,
@@ -2874,17 +2881,36 @@ fn named_cluster_width(style: &ResolvedStyle, text: &str, size_px: f32) -> Optio
 /// named family's widths: either way every character needs its own cluster, or
 /// the browser draws the substitute's narrower ligature into a wider slot.
 fn ligature_features(separate: bool) -> &'static [ShapeFeature] {
-    const OFF: [ShapeFeature; 2] = [
-        ShapeFeature {
-            tag: *b"liga",
-            value: 0,
-        },
-        ShapeFeature {
-            tag: *b"clig",
-            value: 0,
-        },
-    ];
-    if separate { &OFF } else { &[] }
+    run_features(separate, true)
+}
+
+/// The features a run shapes with: ligatures off when its characters must
+/// keep their own clusters, and kerning off below its `kern` threshold.
+/// PowerPoint kerns only at or above `kern`, and not at all at `0`; with no
+/// threshold anywhere in the cascade every size is kerned.
+fn kerned(kern_pt: Option<f32>, size_pt: f32) -> bool {
+    kern_pt.is_none_or(|threshold| threshold > 0.0 && size_pt >= threshold)
+}
+
+fn run_features(separate: bool, kerned: bool) -> &'static [ShapeFeature] {
+    const LIGA: ShapeFeature = ShapeFeature {
+        tag: *b"liga",
+        value: 0,
+    };
+    const CLIG: ShapeFeature = ShapeFeature {
+        tag: *b"clig",
+        value: 0,
+    };
+    const KERN: ShapeFeature = ShapeFeature {
+        tag: *b"kern",
+        value: 0,
+    };
+    match (separate, kerned) {
+        (false, true) => &[],
+        (true, true) => &[LIGA, CLIG],
+        (false, false) => &[KERN],
+        (true, false) => &[LIGA, CLIG, KERN],
+    }
 }
 
 /// One shaped line of chart text, in the family, weight, slant and pixel size
@@ -3261,6 +3287,7 @@ fn key_style(key: &mut Vec<u8>, style: &ResolvedStyle) {
         font_size_pt,
         line_font_size_pt,
         spacing_pt,
+        kern_pt,
         baseline_shift_px,
         bold,
         italic,
@@ -3278,6 +3305,8 @@ fn key_style(key: &mut Vec<u8>, style: &ResolvedStyle) {
     key_f32(key, *font_size_pt);
     key_f32(key, *line_font_size_pt);
     key_f32(key, *spacing_pt);
+    key.push(u8::from(kern_pt.is_some()));
+    key_f32(key, kern_pt.unwrap_or(0.0));
     key_f32(key, *baseline_shift_px);
     key.push(u8::from(*bold));
     key.push(u8::from(*italic));
@@ -3899,14 +3928,18 @@ fn add_shaped_segment(
     if text.is_empty() {
         return Ok(());
     }
-    let size_px = points_to_px(autofit_size_pt(run.style.font_size_pt, scale));
+    let size_pt = autofit_size_pt(run.style.font_size_pt, scale);
+    let size_px = points_to_px(size_pt);
     let tracking = points_to_px(run.style.spacing_pt * scale);
     let shaped = shape(
         fonts,
         run.style.face.id,
         text,
         size_px,
-        ligature_features(tracking != 0.0 || run.style.face.widths.is_some()),
+        run_features(
+            tracking != 0.0 || run.style.face.widths.is_some(),
+            kerned(run.style.kern_pt, size_pt),
+        ),
     )
     .map_err(|error| RenderError::Font(error.to_string()))?;
     let mut starts = shaped
@@ -4769,6 +4802,7 @@ fn style_from_properties(properties: &RunProperties, theme: &Theme) -> TextStyle
             .or_else(|| linked.then(|| "sng".to_owned())),
         spacing_pt: properties.spacing_pt,
         baseline_pct: properties.baseline_pct,
+        kern_pt: properties.kern_pt,
         caps: properties.caps,
     }
 }
@@ -6154,6 +6188,7 @@ mod tests {
                     font_size_pt: 18.0,
                     line_font_size_pt: 18.0,
                     spacing_pt: 0.0,
+                    kern_pt: None,
                     baseline_shift_px: 0.0,
                     bold: false,
                     italic: false,
@@ -6392,6 +6427,7 @@ mod tests {
             font_size_pt: 14.0,
             line_font_size_pt: 14.0,
             spacing_pt: 0.0,
+            kern_pt: None,
             baseline_shift_px: 0.0,
             bold: false,
             italic: false,
@@ -6483,6 +6519,7 @@ mod tests {
             font_size_pt: 14.0,
             line_font_size_pt: 14.0,
             spacing_pt: 0.0,
+            kern_pt: None,
             baseline_shift_px: 0.0,
             bold: false,
             italic: false,
@@ -6561,6 +6598,7 @@ mod tests {
             font_size_pt: 24.0,
             line_font_size_pt: 24.0,
             spacing_pt: 0.0,
+            kern_pt: None,
             baseline_shift_px: 0.0,
             bold: false,
             italic: false,
@@ -9772,6 +9810,95 @@ mod tests {
         let line = family_line_box(substituted.line.expect("trebuchet ms lines"), 1000.0);
         assert!((line.ascent - 939.0).abs() < 1e-3);
         assert!((line.descent - 222.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_run_below_its_kern_threshold_is_not_kerned() {
+        let renderer = renderer();
+        let width = |kern_pt: Option<f32>, scale: f32| {
+            let mut paragraph = paragraph(&renderer, "l", "AVAVAV");
+            paragraph.runs[0].style.kern_pt = kern_pt;
+            layout_paragraph(
+                &renderer.fonts,
+                &paragraph,
+                0.0,
+                0.0,
+                1_000.0,
+                scale,
+                false,
+                true,
+            )
+            .unwrap()[0]
+                .width
+        };
+        assert!(
+            width(Some(0.0), 1.0) > width(None, 1.0) + 1.0,
+            "{} vs {}",
+            width(Some(0.0), 1.0),
+            width(None, 1.0)
+        );
+        assert_eq!(width(Some(18.0), 1.0), width(None, 1.0));
+        assert!(
+            width(Some(18.0), 0.5) > width(None, 0.5) + 0.5,
+            "autofit shapes the 18pt run at 9pt, below its threshold"
+        );
+    }
+
+    #[test]
+    fn the_kern_threshold_resolves_against_the_shaped_size() {
+        let renderer = renderer();
+        let theme = Theme::default();
+        let resolved = |style: &TextStyle, fallback: RunProperties| {
+            let style = resolve_style(
+                &renderer,
+                &theme,
+                style,
+                Some(&fallback),
+                &mut SubstitutionLog::default(),
+            )
+            .unwrap();
+            kerned(style.kern_pt, style.font_size_pt)
+        };
+        let inherited = |size: f64, kern: Option<f64>| {
+            let fallback = RunProperties {
+                font_size_pt: Some(size),
+                kern_pt: kern,
+                ..RunProperties::default()
+            };
+            resolved(&TextStyle::default(), fallback)
+        };
+        let direct = |size: f64, own: f64, inherited: f64| {
+            let fallback = RunProperties {
+                font_size_pt: Some(size),
+                kern_pt: Some(inherited),
+                ..RunProperties::default()
+            };
+            let style = TextStyle {
+                kern_pt: Some(own),
+                ..TextStyle::default()
+            };
+            resolved(&style, fallback)
+        };
+        assert!(direct(10.0, 1.0, 12.0), "the run's own threshold wins");
+        assert!(!direct(40.0, 0.0, 12.0), "a run can turn its kerning off");
+        assert!(inherited(11.0, None), "no threshold kerns every size");
+        assert!(!inherited(11.0, Some(12.0)));
+        assert!(inherited(12.0, Some(12.0)));
+        assert!(inherited(12.03, Some(12.03)), "sz=1203 kern=1203");
+        assert!(
+            !inherited(40.0, Some(0.0)),
+            "a zero threshold turns kerning off"
+        );
+        let superscript = RunProperties {
+            font_size_pt: Some(20.0),
+            kern_pt: Some(15.0),
+            baseline_pct: Some(30.0),
+            ..RunProperties::default()
+        };
+        assert!(
+            !resolved(&TextStyle::default(), superscript),
+            "a superscript shapes at 11.6pt"
+        );
     }
 
     #[test]

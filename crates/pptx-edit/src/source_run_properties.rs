@@ -21,6 +21,7 @@ use crate::{
 pub(crate) enum SourceProperty {
     Baseline,
     Spacing,
+    Kern,
     Caps,
     Color,
 }
@@ -31,6 +32,7 @@ impl SourceProperty {
         match self {
             Self::Baseline => ("baselinesPendingSource", &["baselinePct"], "baseline"),
             Self::Spacing => ("spacingPendingSource", &["spacingPt"], "spacing"),
+            Self::Kern => ("kernPendingSource", &["kernPt"], "kern"),
             Self::Caps => ("capsPendingSource", &["caps"], "caps"),
             Self::Color => (
                 "colorsPendingSource",
@@ -50,6 +52,7 @@ impl SourceProperty {
         match self {
             Self::Baseline => style.baseline_pct.map(Any::Number),
             Self::Spacing => style.spacing_pt.map(Any::Number),
+            Self::Kern => style.kern_pt.map(Any::Number),
             Self::Caps => style.caps.map(|caps| Any::from(caps.as_attribute())),
             Self::Color => style.color.as_deref().map(Any::from),
         }

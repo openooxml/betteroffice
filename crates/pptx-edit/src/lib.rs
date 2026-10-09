@@ -254,6 +254,7 @@ impl DeckSession {
         effects::import_source(&mut import);
         for property in [
             source_run_properties::SourceProperty::Spacing,
+            source_run_properties::SourceProperty::Kern,
             source_run_properties::SourceProperty::Caps,
             source_run_properties::SourceProperty::Color,
         ] {
