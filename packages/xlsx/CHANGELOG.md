@@ -1,5 +1,36 @@
 # @betteroffice/xlsx
 
+## 0.4.0
+
+### Minor Changes
+
+- d920761: `openWorkbook` accepts a `calculation` option with a `WorkbookCalculationContext` (`nowSerial`, `randSeed`), and `WorkbookHandle.setCalculationContext` changes it, so date, time and random functions such as `RANDBETWEEN` compute the same values on every handle that shares the context.
+- 3e47c79: `openWorkbookSession` sessions add an experimental `call.frame(viewport, { sheet })` that returns the viewport's display list with the workbook version it was built from; a newer frame request replaces a queued older one.
+- f7cf3ff: Experimental workbook sessions add `call.sheetView`, `call.cellGeometry` and `call.cellInputs` for worker-owned viewing, and `openWorkbookSession` accepts a `signal` that cancels an open in flight. Session frames include visible `mergedRanges` by default; session use remains opt-in.
+- a0c86f2: Adds experimental, opt-in `openWorkbookSession` for async workbook reads, version-checked edits, sheet metadata, and saving while keeping caller buffers usable.
+
+### Patch Changes
+
+- 1ed2ad0: Built-in worker sessions for presentations and workbooks start compiling the engine as soon as the worker starts, and later built-in sessions in the same page reuse the compiled module, so opening another document is faster.
+- 14919ef: Editable sessions with `experimentalWorkerOpen` now use the worker-owned editor and show pending cell text before edits commit. The flag remains experimental and opt-in; the default editor is unchanged.
+- 4d0cbda: Workbooks with charts repaint faster after edits that don't change a chart's data.
+- 97c818d: Recalculation without a `nowSerial` clock no longer overwrites the saved results of `TODAY()`, `NOW()` and year-less `DATEVALUE()` formulas with `#VALUE!`. Passing `nowSerial` recalculates them normally.
+- 2f7efc6: Single-cell edits apply directly instead of rebuilding the workbook's editing state, so cell edits on large workbooks are much faster, with identical results.
+- 11db7d8: Scrolling large workbooks repaints faster: the grid's row and column geometry is reused between frames until the workbook changes.
+- 355675f: Edited saves keep a formula cell's original markup, including shared formulas, when only its calculated result or style changes.
+- f2042f0: Improves preservation of original cell styles during edited saves, including protection and rotation, and keeps unrelated sheets unchanged.
+- 1fef3e9: Fixes literal tilde matching in conditional formulas and wildcard lookups.
+- 3f8c882: Merged cells no longer show grid lines inside them, matching Excel.
+- 30bf7b2: Saving a workbook without edits now returns the original file unchanged, keeping its cached values and calculation chain.
+- 400ac5e: Workbooks open faster and with a lower peak memory, with identical results.
+- 451cfb9: Fixes editing in apps that install the XLSX packages so it no longer fails with "Workbook edit peer does not support retained operations". Recovery and worker cell previews also work correctly.
+- c8a1e86: An edited save that would have to rewrite a worksheet's cells without source markup the editor does not model now fails with an error naming the sheet and the markup, and the workbook stays editable.
+- accc7a0: Saving an edited workbook is faster, with identical output.
+- d402284: Supported scatter and bubble charts now render instead of a placeholder.
+- f98fc39: Fixes `SEARCH` character positions after Unicode case conversion and preserves case-insensitive matches for Greek text.
+- 611d365: TODAY() and NOW() use the computer's local time, matching Excel.
+- 37c7e36: Display lists now clamp to the sheet grid by default. Adds `DisplayTooLargeError` and `getDisplayListCellLimit` so callers can size tiles when a viewport exceeds the display limit.
+
 ## 0.3.0
 
 ### Minor Changes

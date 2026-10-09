@@ -1,5 +1,56 @@
 # @betteroffice/docx
 
+## 0.5.0
+
+### Minor Changes
+
+- 2586016: Worker-open editors build their editing copy from the worker's opened document instead of parsing the file a second time. The `yrs` entry adds `encodePeerMetadata`, `bootstrapPeer`, `PeerMetadataError` and `peerMetadataTags`.
+
+### Patch Changes
+
+- de864b6: Accepting or rejecting the first suggestion that needs a new font face is faster.
+- 899ca8f: Edits that start or end inside an emoji, such as deleting or typing over a double-clicked emoji, now apply to the whole emoji.
+- 46b2035: After a section's margins or columns change, text that carries over onto the next page is laid out at the same width as a full layout.
+- 28a4685: Text on pages after an edit keeps its document positions when the editor redraws, so clicks and selections there land in the right place.
+- 2e387c3: Preserves opaque drawings, tracked changes and hyperlinks through editor saves by default, and recovers legacy chart placements. Adds opt-in `repackDocxWithWarnings` with `warnings`; seeding rejects opaque payloads over 8 MiB with `OpaqueSeedBudgetError`.
+- 0650355: Footnote and endnote areas now take the height of the document's own separator, so pages with notes break where Word breaks them.
+- 13d91c2: Deleting text in long documents is faster.
+- 3462280: Typing in a plain paragraph stays fast when other paragraphs hold tables, fields or lists.
+- 42d185e: Documents open faster in the engine, with identical output. The Rust crates add `PackageBytes`, `RetainedPackage::from_bytes` and `*_bytes` parse entry points that take owned package bytes.
+- dad1895: Opening a DOCX now surfaces non-fatal warnings for parts without content types and duplicate drawing, bookmark, and Word paragraph IDs. Hosts addressing paragraphs by raw Word IDs should prefer session anchors with `resolveParagraphAnchor()` or call `persistParagraphIds()` to repair duplicates.
+- 50c17a0: Reading paragraph identities again on an unchanged document returns the previous result without walking the document. Applies with and without `experimentalWorkerOpen`.
+- a41dc2e: Accepting or rejecting a suggestion repaints faster.
+- ca379ae: Documents whose first pages hold dense tables show their first page sooner. `openDocxPreview` accepts an optional `paragraphBudget` that ends the preview at the first whole block where the paragraphs read reach it.
+- db592dd: Plain-text edits refresh only the affected preview record instead of rebuilding every record.
+- af1ca31: Find highlights and remote selections inside long tables with repeating header rows now query only the pages in view.
+- 9d5732d: The editor ref adds async twins for its synchronous document members (`readSelectionInfo`, `findParagraphs`, `scrollToParagraph`, `scrollToComment`, `scrollToChange`, `insertComment`, `insertCommentReply`, `onDocumentChange`) and deprecates the originals. In viewer sessions selections reach `onSelectionChange` and plugins, and `getDocument`, `getPageContent` and `findInDocument` throw `DocxAsyncOnlyError`, which `DocxReplicaNotReadyError` retry loops do not catch.
+- d6c88fd: In viewer sessions deleting a comment from its card removes it in the document worker, without a main-thread document copy.
+- 2ade521: In viewer sessions `exportStructuredWithPages` reads from the document worker without a main-thread document copy, and its result now includes comment authors and dates and source page-break positions.
+- 44872e9: Documents opened read-only or for viewing with `experimentalWorkerOpen` select, copy and resolve points through the document worker, without a main-thread document copy. Adds `readPositionAtPoint` to the editor ref.
+- 9b01ae9: Documents opened read-only or for viewing with `experimentalWorkerOpen` show comment and tracked-change cards, plugin cards and the outline from the document worker, without a main-thread document copy.
+- 893351b: In viewer sessions `listContentControls`, `findContentControls` and the built-in Find read from the document worker without a main-thread document copy, and tracked-change accept and reject commands refuse at once.
+- ffb5f20: Adding a header or footer and removing it before saving no longer leaves the saved file pointing at a header or footer part it does not contain.
+- 8470707: Structured exports of documents opened with `experimentalWorkerOpen` keep their comments' authors and dates.
+- 9d335e8: Accepting, rejecting or undoing a suggestion in a long document lays out faster.
+- 65e1070: Saving after splitting, merging, adding or removing paragraphs now also keeps the paragraphs you didn't edit as they were.
+- 27973a5: Destroying an edit session releases document and font memory even when the application keeps the session object.
+- 378d706: Typing in long documents does less font work per keystroke when the edit leaves the fonts unchanged.
+- 6dc21f0: Editing text after a paragraph that spans two pages now keeps that paragraph's page break the same as a fresh layout.
+- 10a7185: Story segment reads for the editor are faster on large documents, with identical output.
+- 4df7290: A table row split at the page bottom now moves to the next page whole when one of its cells would show no line on the page, like Word.
+- 2f97c01: Tall table rows now split at each cell's own line boundary at the page bottom, like Word, instead of moving whole to the next page when the cells' lines don't line up.
+- 3149184: Tables honor fixed and autofit layouts and preferred cell widths by default, sizing autofit columns from their content within the available width; adds `measure_intrinsic_widths` for measuring paragraph content widths.
+- 11f68f2: Read-only sessions take each layout update from the worker as a compact summary instead of the full layout, which cuts main-thread work per update with identical rendering.
+- e6f0556: Background page building in long documents is faster, in both editor modes.
+- 452f8d7: Accepting or rejecting a suggestion in a long document repaints faster.
+- 869088b: Plugin `getAnchorGeometry` now supports paragraph, search, range and revision targets while a worker viewer serves host proposals. Worker mode is on by default; the first request can return `layout-unavailable` until geometry arrives.
+- 270ebbb: Canvas image rendering works in workers and bounds cached image memory by default. Adds optional `maxCacheBytes` to `createCanvasImageResolver` to customize the memory budget.
+- 49e6237: Typing, proposal decisions and document reads stay responsive while a large document finishes laying out in the background.
+- 86cc000: Documents opened with `experimentalWorkerOpen` save in the document worker, so viewing sessions save and download without loading the document on the main thread and editors no longer pause while saving.
+- bbf6885: Paged structured exports of documents whose footnote placement alternates between layouts now succeed instead of returning `layout-not-converged`, with a `note-layout-fallback` diagnostic on each page that keeps extra note space.
+- d402284: Scatter and bubble chart X axes now fit charts whose X values are all equal, and X values without a Y value no longer stretch the X axis.
+- 403e502: Run font sizes outside Word's 1–1638 pt range, such as `w:sz="0"`, now lay out and paint at the nearest size in that range, so paged structured exports of such documents succeed instead of returning `layout-unavailable`.
+
 ## 0.4.3
 
 ### Patch Changes

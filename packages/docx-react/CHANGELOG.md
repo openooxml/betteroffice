@@ -1,5 +1,90 @@
 # @betteroffice/docx-react
 
+## 0.5.0
+
+### Minor Changes
+
+- 9d5732d: The editor ref adds async twins for its synchronous document members (`readSelectionInfo`, `findParagraphs`, `scrollToParagraph`, `scrollToComment`, `scrollToChange`, `insertComment`, `insertCommentReply`, `onDocumentChange`) and deprecates the originals. In viewer sessions selections reach `onSelectionChange` and plugins, and `getDocument`, `getPageContent` and `findInDocument` throw `DocxAsyncOnlyError`, which `DocxReplicaNotReadyError` retry loops do not catch.
+- 3ba8e8e: Worker-open editors load their editing copy eagerly and replay input typed while it loads instead of dropping it; until it is ready, synchronous ref reads return empty answers and synchronous edits throw `DocxReplicaNotReadyError`.
+- 731c4f2: Worker-open editors now apply host proposal changes (`proposeChanges`, `setProposalStates`, `withdrawProposals`) in the document worker, as viewers already do.
+- 4702106: With `experimentalWorkerOpen`, viewer sessions (read-only or viewing) answer synchronous edits without a main-thread copy: `getEditorRef` returns `null`, `setParagraphStyle`, `applyFormatting` and `insertBreak` return `false`, and comment insert and reply members return `null`. Tracked-change decisions and navigation are refused.
+- 17a722c: With `experimentalWorkerOpen`, read-only and viewing editors keep documents only in the worker: `getDocument`, `getPageContent` and `findInDocument` throw `DocxAsyncOnlyError`, `getSelectionInfo` returns `null`, and unanswerable async calls reject. Opens and viewer renders failing on a replacement worker report the new `DocxWorkerError` to `onError` and show an alert.
+- 5df87da: The worker-owned editor is now the default; `experimentalWorkerOpen={false}` keeps the in-thread engine as a deprecated opt-in. Missing browser features, `mediaTokens`, `collaboration.initialUpdate`, and editable `document` sources without `documentBuffer` fall back with a console warning.
+
+### Patch Changes
+
+- af009f4: When a long document finishes laying out after its first pages appear, only the pages that changed are sent to the main thread instead of every page. Applies with and without `experimentalWorkerOpen`.
+- 2e387c3: Preserves opaque drawings, tracked changes and hyperlinks through editor saves by default, and recovers legacy chart placements. Adds opt-in `repackDocxWithWarnings` with `warnings`; seeding rejects opaque payloads over 8 MiB with `OpaqueSeedBudgetError`.
+- 2586016: Worker-open editors build their editing copy from the worker's opened document instead of parsing the file a second time. The `yrs` entry adds `encodePeerMetadata`, `bootstrapPeer`, `PeerMetadataError` and `peerMetadataTags`.
+- 47cb8e2: Makes the Insert menu's table picker and break choices keyboard accessible by default, with arrow navigation and predictable focus return.
+- 682ac35: Keeps plugin page overlays mounted as the worker editor publishes new layout frames after edits.
+- ca379ae: Documents whose first pages hold dense tables show their first page sooner. `openDocxPreview` accepts an optional `paragraphBudget` that ends the preview at the first whole block where the paragraphs read reach it.
+- af1ca31: Find highlights and remote selections inside long tables with repeating header rows now query only the pages in view.
+- c8ae8fd: Accepting, rejecting or undoing a suggestion no longer scrolls an editable document back to the caret.
+- 457b336: Editor sessions using `experimentalWorkerOpen` now preserve source page breaks in `exportStructuredWithPages` and return versions usable with editor edits.
+- 5c43f15: Idle-time page mirror and story cache work now yields to the browser in slices of at most 8 ms instead of running as one long task.
+- 4e03a24: Jumping to a heading, paragraph, comment or change on a page that has not been drawn yet settles on the target line sooner.
+- 47601c1: Jumping to a heading or position that a large document has not paginated yet scrolls there once pagination reaches it.
+- 48351a3: `insertBreak({ type: 'page' })` on a paragraph with text now splits it and places the page break between the two parts, like the editor's own page break command, so the document keeps laying out.
+- 5827185: Backspace and Delete respond faster in long documents.
+- d6c88fd: In viewer sessions deleting a comment from its card removes it in the document worker, without a main-thread document copy.
+- 2ade521: In viewer sessions `exportStructuredWithPages` reads from the document worker without a main-thread document copy, and its result now includes comment authors and dates and source page-break positions.
+- 44872e9: Documents opened read-only or for viewing with `experimentalWorkerOpen` select, copy and resolve points through the document worker, without a main-thread document copy. Adds `readPositionAtPoint` to the editor ref.
+- 9b01ae9: Documents opened read-only or for viewing with `experimentalWorkerOpen` show comment and tracked-change cards, plugin cards and the outline from the document worker, without a main-thread document copy.
+- 893351b: In viewer sessions `listContentControls`, `findContentControls` and the built-in Find read from the document worker without a main-thread document copy, and tracked-change accept and reject commands refuse at once.
+- 73d0ca6: Comment cards stay collapsed when a document opens, including with `experimentalWorkerOpen`. `scrollToParaId` now updates the toolbar and command state for the paragraph it moves to.
+- 65e1070: Saving after splitting, merging, adding or removing paragraphs now also keeps the paragraphs you didn't edit as they were.
+- 3149184: Tables honor fixed and autofit layouts and preferred cell widths by default, sizing autofit columns from their content within the available width; adds `measure_intrinsic_widths` for measuring paragraph content widths.
+- 11f68f2: Read-only sessions take each layout update from the worker as a compact summary instead of the full layout, which cuts main-thread work per update with identical rendering.
+- 869088b: Plugin `getAnchorGeometry` now supports paragraph, search, range and revision targets while a worker viewer serves host proposals. Worker mode is on by default; the first request can return `layout-unavailable` until geometry arrives.
+- 86cc000: Documents opened with `experimentalWorkerOpen` save in the document worker, so viewing sessions save and download without loading the document on the main thread and editors no longer pause while saving.
+- a97e75c: Fixes toolbar overflow crashes with "Maximum update depth exceeded" when toolbar groups change width as items move into More, such as when a Content Security Policy blocks the package stylesheet.
+- Updated dependencies [de864b6]
+- Updated dependencies [899ca8f]
+- Updated dependencies [46b2035]
+- Updated dependencies [28a4685]
+- Updated dependencies [2e387c3]
+- Updated dependencies [2586016]
+- Updated dependencies [0650355]
+- Updated dependencies [13d91c2]
+- Updated dependencies [3462280]
+- Updated dependencies [42d185e]
+- Updated dependencies [dad1895]
+- Updated dependencies [50c17a0]
+- Updated dependencies [a41dc2e]
+- Updated dependencies [ca379ae]
+- Updated dependencies [db592dd]
+- Updated dependencies [af1ca31]
+- Updated dependencies [9d5732d]
+- Updated dependencies [d6c88fd]
+- Updated dependencies [2ade521]
+- Updated dependencies [44872e9]
+- Updated dependencies [9b01ae9]
+- Updated dependencies [893351b]
+- Updated dependencies [ffb5f20]
+- Updated dependencies [8470707]
+- Updated dependencies [9d335e8]
+- Updated dependencies [65e1070]
+- Updated dependencies [27973a5]
+- Updated dependencies [378d706]
+- Updated dependencies [6dc21f0]
+- Updated dependencies [10a7185]
+- Updated dependencies [4df7290]
+- Updated dependencies [2f97c01]
+- Updated dependencies [3149184]
+- Updated dependencies [11f68f2]
+- Updated dependencies [e6f0556]
+- Updated dependencies [452f8d7]
+- Updated dependencies [869088b]
+- Updated dependencies [270ebbb]
+- Updated dependencies [49e6237]
+- Updated dependencies [86cc000]
+- Updated dependencies [bbf6885]
+- Updated dependencies [d402284]
+- Updated dependencies [403e502]
+  - @betteroffice/docx@0.5.0
+  - @betteroffice/docx-i18n@0.5.0
+
 ## 0.4.3
 
 ### Patch Changes
