@@ -2092,6 +2092,23 @@ export function PptxEditorContent({
     }
   };
 
+  const deleteSelectedShape = (target: PptxShapeSelection) => {
+    const handle = handleRef.current;
+    if (!handle || readOnlyRef.current) return;
+    try {
+      handle.removeShape(target.slideId, target.shapeId);
+      setShapeSelection(null);
+      setDragPreview(null);
+      pointerGestureRef.current = null;
+      resizeRef.current = null;
+      setResizeDelta(null);
+      refreshAt(undefined, true);
+    } catch (value) {
+      reportError(value);
+      throw value;
+    }
+  };
+
   const cancelPointerGesture = (event: PointerEvent<HTMLCanvasElement>) => {
     if (pointerGestureRef.current?.pointerId !== event.pointerId) return;
     pointerGestureRef.current = null;
@@ -2125,6 +2142,18 @@ export function PptxEditorContent({
       resizeRef.current = null;
       setResizeDelta(null);
       event.preventDefault();
+      return;
+    }
+    if (
+      (event.key === 'Backspace' || event.key === 'Delete') &&
+      !readOnlyRef.current &&
+      !reviewingRef.current &&
+      selectionRef.current === null &&
+      shapeSelectionRef.current
+    ) {
+      const target = shapeSelectionRef.current;
+      event.preventDefault();
+      void coordinator.input(() => deleteSelectedShape(target)).catch(() => {});
       return;
     }
     const input: KeyInput = {
