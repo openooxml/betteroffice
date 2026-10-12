@@ -955,6 +955,7 @@ fn translate_op(op: PlotOp, chart_clip: Rect) -> Result<Option<DrawCmd>, ()> {
                 highlight: None,
                 dashed_underline: false,
                 font_family: Some(font.family.into()),
+                number_format: None,
                 ghost: false,
                 chart: true,
             }))

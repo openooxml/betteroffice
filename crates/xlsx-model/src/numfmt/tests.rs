@@ -67,6 +67,30 @@ fn implied_currency_and_accounting_codes() {
 }
 
 #[test]
+fn display_padding_retains_character_and_fill_position() {
+    let formatted = format_value(&num(12.0), "_(€* #,##0_)", DateSystem::V1900);
+    let json = serde_json::to_value(&formatted).unwrap();
+    assert_eq!(formatted.text, " €12 ");
+    assert_eq!(json["layout"], serde_json::json!([
+        {"offset": 0, "kind": "padding", "character": "("},
+        {"offset": 4, "kind": "fill", "character": " "},
+        {"offset": 6, "kind": "padding", "character": ")"}
+    ]));
+    let question = serde_json::to_value(format_value(&num(1.2), "??0.??", DateSystem::V1900)).unwrap();
+    assert_eq!(question["layout"], serde_json::json!([
+        {"offset": 0, "kind": "padding", "character": "0"},
+        {"offset": 1, "kind": "padding", "character": "0"},
+        {"offset": 5, "kind": "padding", "character": "0"}
+    ]));
+    let between = serde_json::to_value(format_value(&num(12.0), "0*x0", DateSystem::V1900)).unwrap();
+    assert_eq!(between["layout"], serde_json::json!([
+        {"offset": 1, "kind": "fill", "character": "x"}
+    ]));
+    let repeated = format_value(&num(12.0), "*x0*y", DateSystem::V1900);
+    assert_eq!(repeated.layout.len(), 1);
+}
+
+#[test]
 fn builtin_table_ids() {
     assert_eq!(builtin_format_code(0), Some("General"));
     assert_eq!(builtin_format_code(1), Some("0"));

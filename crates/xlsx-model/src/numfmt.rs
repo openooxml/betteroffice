@@ -15,6 +15,71 @@ use crate::value::CellValue;
 pub struct FormattedValue {
     pub text: String,
     pub color: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layout: Vec<FormatPart>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FormatPartKind {
+    Padding,
+    Fill,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FormatPart {
+    pub offset: usize,
+    pub kind: FormatPartKind,
+    pub character: char,
+}
+
+impl FormattedValue {
+    fn push_str(&mut self, text: &str) {
+        self.text.push_str(text);
+    }
+
+    fn push(&mut self, character: char) {
+        self.text.push(character);
+    }
+
+    fn padding(&mut self, character: char) {
+        self.layout.push(FormatPart {
+            offset: self.text.len(),
+            kind: FormatPartKind::Padding,
+            character,
+        });
+        self.text.push(' ');
+    }
+
+    fn fill(&mut self, character: char) {
+        if !self.layout.iter().any(|part| part.kind == FormatPartKind::Fill) {
+            self.layout.push(FormatPart {
+                offset: self.text.len(),
+                kind: FormatPartKind::Fill,
+                character,
+            });
+        }
+    }
+
+    fn digits(&mut self, text: &str) {
+        if !text.contains(' ') {
+            self.push_str(text);
+            return;
+        }
+        for character in text.chars() {
+            if character == ' ' {
+                self.padding('0');
+            } else {
+                self.push(character);
+            }
+        }
+    }
+}
+
+impl From<String> for FormattedValue {
+    fn from(text: String) -> Self {
+        Self { text, ..Self::default() }
+    }
 }
 
 /// format a cell value with a number-format code. bools, errors, and empties
@@ -24,10 +89,12 @@ pub fn format_value(value: &CellValue, code: &str, date_system: DateSystem) -> F
         CellValue::Bool { value } => FormattedValue {
             text: if *value { "TRUE" } else { "FALSE" }.to_string(),
             color: None,
+            layout: Vec::new(),
         },
         CellValue::Error { value } => FormattedValue {
             text: value.as_str().to_string(),
             color: None,
+            layout: Vec::new(),
         },
         CellValue::Empty => FormattedValue::default(),
         CellValue::Text { value } => format_text_value(value, code),
@@ -91,8 +158,8 @@ enum Tok {
     At,
     General,
     Literal(String),
-    Width,
-    Fill,
+    Width(char),
+    Fill(char),
     Year(u8),
     Mon(u8), // month or minute, resolved by adjacency
     Day(u8),
@@ -316,16 +383,18 @@ fn tokenize(input: &str) -> Section {
             '_' => {
                 i += 1;
                 if i < n {
+                    section.toks.push(Tok::Width(chars[i]));
                     i += 1;
                 }
-                section.toks.push(Tok::Width);
             }
             '*' => {
                 i += 1;
                 if i < n {
+                    if !section.has(|t| matches!(t, Tok::Fill(_))) {
+                        section.toks.push(Tok::Fill(chars[i]));
+                    }
                     i += 1;
                 }
-                section.toks.push(Tok::Fill);
             }
             '[' => {
                 i += 1;
@@ -573,19 +642,26 @@ fn format_number_value(n: f64, code: &str, ds: DateSystem) -> FormattedValue {
         return FormattedValue {
             text: format_general(n),
             color: None,
+            layout: Vec::new(),
         };
     }
     let parsed = parsed_sections(code);
     let (idx, auto_minus) = select(&parsed, n);
     let sec = &parsed[idx];
-    let color = sec.color.clone();
-    let text = if sec.has_date() {
+    let mut formatted = if sec.has_date() {
         render_date_section(sec, n, ds)
     } else {
-        let body = render_number_section(sec, n.abs());
-        if auto_minus { format!("-{body}") } else { body }
+        let mut body = render_number_section(sec, n.abs());
+        if auto_minus {
+            body.text.insert(0, '-');
+            for part in &mut body.layout {
+                part.offset += 1;
+            }
+        }
+        body
     };
-    FormattedValue { text, color }
+    formatted.color = sec.color.clone();
+    formatted
 }
 
 /// whether formatting `value` with `code` degrades to a general render
@@ -608,12 +684,12 @@ fn degrades_to_general(sec: &Section) -> bool {
     !sec.has(|t| matches!(t, Tok::General)) && sec.has(|t| matches!(t, Tok::Slash))
 }
 
-fn render_number_section(sec: &Section, mag: f64) -> String {
+fn render_number_section(sec: &Section, mag: f64) -> FormattedValue {
     if sec.has(|t| matches!(t, Tok::General)) {
         return render_general_section(sec, mag);
     }
     if degrades_to_general(sec) {
-        return format_general(mag);
+        return format_general(mag).into();
     }
     if sec.has(|t| matches!(t, Tok::Exp(_))) {
         return render_scientific(sec, mag);
@@ -655,34 +731,51 @@ fn render_number_section(sec: &Section, mag: f64) -> String {
     let int_number = build_int_number(&int_kinds, &int_digits, grouping);
     let frac_str = build_frac(&frac_kinds, &frac_digits);
 
-    let mut out = String::new();
-    let mut int_emitted = false;
+    let mut out = FormattedValue::default();
+    let mut int_cursor = 0;
+    let mut int_placeholder = 0;
+    let mut frac_placeholder = 0;
     let mut passed_dot = false;
     for t in &sec.toks {
         match t {
             Tok::Digit(_) => {
-                if !passed_dot && !int_emitted {
-                    out.push_str(&int_number);
-                    int_emitted = true;
+                if !passed_dot {
+                    int_placeholder += 1;
+                    let remaining = int_kinds[int_placeholder..].iter().enumerate()
+                        .filter(|(index, kind)| {
+                            int_digits.len() > int_kinds.len() - int_placeholder - index - 1
+                                || matches!(**kind, '0' | '?')
+                        }).count();
+                    let end = int_number.len().saturating_sub(remaining);
+                    out.digits(&int_number[int_cursor..end]);
+                    int_cursor = end;
+                } else {
+                    let j = frac_placeholder;
+                    let significant = (j..frac_kinds.len())
+                        .any(|k| frac_digits.as_bytes()[k] != b'0' || frac_kinds[k] == '0');
+                    if significant {
+                        out.push(frac_digits.as_bytes()[j] as char);
+                    } else if frac_kinds[j] == '?' {
+                        out.padding('0');
+                    }
+                    frac_placeholder += 1;
                 }
             }
             Tok::Dot => {
                 passed_dot = true;
-                if !int_emitted {
-                    out.push_str(&int_number);
-                    int_emitted = true;
+                if int_kinds.is_empty() {
+                    out.digits(&int_number);
                 }
                 if !frac_str.is_empty() {
                     out.push('.');
-                    out.push_str(&frac_str);
                 }
             }
             Tok::Comma => {}
             Tok::Percent => out.push('%'),
             Tok::At => out.push_str(&format_general(mag)),
             Tok::Literal(s) => out.push_str(s),
-            Tok::Width => out.push(' '),
-            Tok::Fill => {}
+            Tok::Width(c) => out.padding(*c),
+            Tok::Fill(c) => out.fill(*c),
             _ => {}
         }
     }
@@ -818,25 +911,27 @@ fn build_frac(kinds: &[char], frac_digits: &str) -> String {
     out
 }
 
-fn emit_literals_only(sec: &Section) -> String {
-    let mut out = String::new();
+fn emit_literals_only(sec: &Section) -> FormattedValue {
+    let mut out = FormattedValue::default();
     for t in &sec.toks {
         match t {
             Tok::Literal(s) => out.push_str(s),
-            Tok::Width => out.push(' '),
+            Tok::Width(c) => out.padding(*c),
+            Tok::Fill(c) => out.fill(*c),
             _ => {}
         }
     }
     out
 }
 
-fn render_general_section(sec: &Section, mag: f64) -> String {
-    let mut out = String::new();
+fn render_general_section(sec: &Section, mag: f64) -> FormattedValue {
+    let mut out = FormattedValue::default();
     for t in &sec.toks {
         match t {
             Tok::General => out.push_str(&format_general(mag)),
             Tok::Literal(s) => out.push_str(s),
-            Tok::Width => out.push(' '),
+            Tok::Width(c) => out.padding(*c),
+            Tok::Fill(c) => out.fill(*c),
             _ => {}
         }
     }
@@ -845,7 +940,7 @@ fn render_general_section(sec: &Section, mag: f64) -> String {
 
 /// `0.00E+00` / engineering `##0.0E+0`: the count of integer placeholders sets
 /// the exponent step, so the mantissa's integer part fills 1..=p digits.
-fn render_scientific(sec: &Section, mag: f64) -> String {
+fn render_scientific(sec: &Section, mag: f64) -> FormattedValue {
     let exp_idx = sec
         .toks
         .iter()
@@ -906,9 +1001,27 @@ fn render_scientific(sec: &Section, mag: f64) -> String {
     };
     let exp_digits = format!("{:0width$}", exp_val.unsigned_abs(), width = exp_width);
 
-    let prefix = leading_literals(mant_toks);
-    let suffix = trailing_literals(exp_toks);
-    format!("{prefix}{mant_out}E{sign}{exp_digits}{suffix}")
+    let mut out = FormattedValue::default();
+    for t in mant_toks {
+        match t {
+            Tok::Literal(s) => out.push_str(s),
+            Tok::Width(c) => out.padding(*c),
+            Tok::Fill(c) => out.fill(*c),
+            Tok::Digit(_) | Tok::Dot => break,
+            _ => {}
+        }
+    }
+    out.digits(&mant_out);
+    out.push_str(&format!("E{sign}{exp_digits}"));
+    for t in exp_toks {
+        match t {
+            Tok::Literal(s) => out.push_str(s),
+            Tok::Width(c) => out.padding(*c),
+            Tok::Fill(c) => out.fill(*c),
+            _ => {}
+        }
+    }
+    out
 }
 
 fn build_mantissa(int_kinds: &[char], frac_kinds: &[char], m: f64) -> String {
@@ -920,28 +1033,6 @@ fn build_mantissa(int_kinds: &[char], frac_kinds: &[char], m: f64) -> String {
     } else {
         format!("{int_number}.{frac_str}")
     }
-}
-
-fn leading_literals(toks: &[Tok]) -> String {
-    let mut out = String::new();
-    for t in toks {
-        match t {
-            Tok::Literal(s) => out.push_str(s),
-            Tok::Digit(_) | Tok::Dot => break,
-            _ => {}
-        }
-    }
-    out
-}
-
-fn trailing_literals(toks: &[Tok]) -> String {
-    let mut out = String::new();
-    for t in toks {
-        if let Tok::Literal(s) = t {
-            out.push_str(s);
-        }
-    }
-    out
 }
 
 /// excel's "general" render: signed, ~11 significant digits, switching to
@@ -1007,23 +1098,23 @@ fn format_text_value(text: &str, code: &str) -> FormattedValue {
     };
     match sec {
         Some(s) => {
-            let mut out = String::new();
+            let mut out = FormattedValue::default();
             for t in &s.toks {
                 match t {
                     Tok::At => out.push_str(text),
                     Tok::Literal(l) => out.push_str(l),
-                    Tok::Width => out.push(' '),
+                    Tok::Width(c) => out.padding(*c),
+                    Tok::Fill(c) => out.fill(*c),
                     _ => {}
                 }
             }
-            FormattedValue {
-                text: out,
-                color: s.color.clone(),
-            }
+            out.color = s.color.clone();
+            out
         }
         None => FormattedValue {
             text: text.to_string(),
             color: None,
+            layout: Vec::new(),
         },
     }
 }
@@ -1054,9 +1145,9 @@ const DAY_FULL: [&str; 7] = [
 ];
 
 /// render a serial through a date/time section; negatives show excel's `#######`.
-fn render_date_section(sec: &Section, serial: f64, ds: DateSystem) -> String {
+fn render_date_section(sec: &Section, serial: f64, ds: DateSystem) -> FormattedValue {
     if serial < 0.0 {
-        return "#######".to_string();
+        return "#######".to_string().into();
     }
     let secfrac = fractional_second_digits(&sec.toks);
     let sub = 10i128.pow(secfrac);
@@ -1073,13 +1164,13 @@ fn render_date_section(sec: &Section, serial: f64, ds: DateSystem) -> String {
 
     let (year, month, day) = match serial_to_civil(day_serial, ds) {
         Some(v) => v,
-        None => return "#######".to_string(),
+        None => return "#######".to_string().into(),
     };
     let weekday = weekday_sun0(year, month, day);
     let ampm = sec.has(|t| matches!(t, Tok::AmPm(_, _)));
     let minute_flags = minute_flags(&sec.toks);
 
-    let mut out = String::new();
+    let mut out = FormattedValue::default();
     let mut i = 0;
     while i < sec.toks.len() {
         match &sec.toks[i] {
@@ -1130,7 +1221,8 @@ fn render_date_section(sec: &Section, serial: f64, ds: DateSystem) -> String {
             Tok::Slash => out.push('/'),
             Tok::Comma => out.push(','),
             Tok::Literal(s) => out.push_str(s),
-            Tok::Width => out.push(' '),
+            Tok::Width(c) => out.padding(*c),
+            Tok::Fill(c) => out.fill(*c),
             _ => {}
         }
         i += 1;

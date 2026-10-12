@@ -488,6 +488,15 @@ fn search_offsets_use_original_unicode_positions() {
 }
 
 #[test]
+fn text_number_formats_are_width_free() {
+    check(&[
+        ("TEXT(12, \"_(€* #,##0_)\")", t(" €12 ")),
+        ("TEXT(12, \"0*x0\")", t("12")),
+        ("TEXT(1.2, \"??0.??\")", t("  1.2 ")),
+    ]);
+}
+
+#[test]
 fn search_preserves_contextual_lowercasing() {
     check(&[
         ("SEARCH(\"ΟΣ\", \"ΟΣ\")", n(1.0)),

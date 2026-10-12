@@ -83,6 +83,8 @@ pub enum DrawCmd {
         /// font family from the style font; the backend falls back to its default face.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         font_family: Option<Arc<str>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        number_format: Option<crate::NumberFormatLayout>,
         /// preview text that is not the cell's committed value (a ghost `new`);
         /// excluded from a11y text recovery.
         #[serde(default, skip_serializing_if = "is_false")]
@@ -244,6 +246,7 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
                 highlight,
                 dashed_underline,
                 font_family,
+                number_format,
                 ghost,
                 chart,
             } => DrawCmd::Text {
@@ -261,6 +264,11 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
                 highlight,
                 dashed_underline,
                 font_family,
+                number_format: number_format.map(|mut layout| {
+                    layout.left *= factor;
+                    layout.width *= factor;
+                    layout
+                }),
                 ghost,
                 chart,
             },
@@ -419,6 +427,7 @@ mod tests {
                     highlight: None,
                     dashed_underline: false,
                     font_family: None,
+                    number_format: None,
                     ghost: false,
                     chart: false,
                 },

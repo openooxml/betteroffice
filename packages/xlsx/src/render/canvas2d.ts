@@ -15,6 +15,7 @@ import type {
   Rect,
   TextCmd,
 } from '../display-list/types';
+import { paintNumberFormat } from './number-format';
 
 const PX_PER_PT = 96 / 72;
 
@@ -176,10 +177,20 @@ function paintText(ctx: CanvasRenderingContext2D, cmd: TextCmd): void {
   ctx.font = fontString(cmd);
   ctx.textAlign = ALIGN_TO_TEXT_ALIGN[cmd.align ?? 'left'];
   ctx.textBaseline = 'alphabetic';
-  if (cmd.highlight) paintHighlight(ctx, cmd);
-  ctx.fillStyle = cmd.color;
-  ctx.fillText(cmd.text, cmd.x, cmd.y);
-  if (cmd.underline || cmd.strike || cmd.dashedUnderline) paintDecorations(ctx, cmd);
+  const paint = (text: string, x: number, align = cmd.align ?? 'left') => {
+    const run = { ...cmd, text, x, align };
+    ctx.textAlign = ALIGN_TO_TEXT_ALIGN[align];
+    if (cmd.highlight) paintHighlight(ctx, run);
+    ctx.fillStyle = cmd.color;
+    ctx.fillText(text, x, cmd.y);
+    if (cmd.underline || cmd.strike || cmd.dashedUnderline) paintDecorations(ctx, run);
+  };
+  if (cmd.numberFormat) {
+    paintNumberFormat(cmd.text, cmd.numberFormat, cmd.align ?? 'left',
+      (text) => ctx.measureText(text).width, (text, x) => paint(text, x, 'left'));
+  } else {
+    paint(cmd.text, cmd.x);
+  }
   ctx.restore();
 }
 

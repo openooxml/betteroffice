@@ -10,7 +10,7 @@ use tiny_skia::{
     Transform,
 };
 
-use xlsx_render::{DisplayList, DrawCmd, GeometryPathCommand, Rect as DlRect};
+use xlsx_render::{Align, DisplayList, DrawCmd, GeometryPathCommand, Rect as DlRect};
 
 /// paint a display list and encode it as png bytes.
 pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
@@ -149,12 +149,11 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
                 highlight,
                 dashed_underline,
                 font_family: _,
+                number_format,
                 ghost: _,
                 chart: _,
             } => {
-                font::paint_text(
-                    &mut pixmap,
-                    &font::TextRun {
+                let run = font::TextRun {
                         x: *x,
                         y: *y,
                         text,
@@ -168,8 +167,23 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
                         strike: *strike,
                         highlight: highlight.as_deref().map(parse_color).transpose()?,
                         dashed_underline: *dashed_underline,
-                    },
-                );
+                };
+                if let Some(layout) = number_format {
+                    xlsx_render::paint_number_format(
+                        text,
+                        layout,
+                        *align,
+                        |literal| font::measure_text(literal, *font_size),
+                        |literal, x| font::paint_text(&mut pixmap, &font::TextRun {
+                            x,
+                            text: literal,
+                            align: Align::Left,
+                            ..run
+                        }),
+                    );
+                } else {
+                    font::paint_text(&mut pixmap, &run);
+                }
             }
         }
     }
@@ -493,6 +507,7 @@ mod tests {
                     highlight: None,
                     dashed_underline: false,
                     font_family: None,
+                    number_format: None,
                     ghost: false,
                     chart: false,
                 },

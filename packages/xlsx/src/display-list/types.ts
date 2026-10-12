@@ -91,6 +91,12 @@ export interface PathCmd {
  * clipped to the cell box, so `clip` is the cell rect and `align` places the
  * run within it. Text metrics are owned upstream in Rust.
  */
+export interface NumberFormatLayout {
+  left: number;
+  width: number;
+  parts: { offset: number; kind: 'padding' | 'fill'; character: string }[];
+}
+
 export interface TextCmd {
   op: 'text';
   x: number;
@@ -115,6 +121,7 @@ export interface TextCmd {
   dashedUnderline?: boolean;
   /** css/font family from the style font; the backend falls back to its default. */
   fontFamily?: string;
+  numberFormat?: NumberFormatLayout;
   /**
    * Preview text that is not the cell's committed value (a proposal ghost's
    * `new` text). Painted normally, but excluded from a11y text recovery.

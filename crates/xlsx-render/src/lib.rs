@@ -5,6 +5,7 @@ pub mod chart;
 pub mod display_list;
 pub mod geometry;
 pub mod hit;
+pub mod number_format;
 pub mod region;
 
 pub use ooxml_drawingml::GeometryPathCommand;
@@ -35,6 +36,7 @@ pub use display_list::{
 };
 pub use geometry::{GridGeometry, PrintMetrics, autofit_relevant};
 pub use hit::chart_at_point;
+pub use number_format::{NumberFormatLayout, paint_number_format};
 pub use region::{viewport_for_range, viewport_for_used_range, viewport_for_used_range_within};
 
 /// a scrolled window in pixels; `x`/`y` offset the non-frozen body.
@@ -843,13 +845,13 @@ where
         }
         let hyperlink = link_index.at(at);
         let xf = &**fx.xf(cell.style);
-        let Some((text, color)) =
+        let Some((text, color, parts)) =
             cell_display_text(xf, wb.date_system, cell, &text_color).or_else(|| {
                 hyperlink
                     .filter(|link| link.range.start == at)
                     .and_then(|link| link.display.clone())
                     .filter(|display| !display.is_empty())
-                    .map(|display| (display.into(), hyperlink_color.clone()))
+                    .map(|display| (display.into(), hyperlink_color.clone(), Vec::new()))
             })
         else {
             continue;
@@ -886,6 +888,11 @@ where
             Align::Center => cell_box.x + cell_box.w / 2.0,
         };
         let ty = text_baseline(cell_box, size, valign, print.map(|(m, _)| m));
+        let number_format = (!parts.is_empty()).then(|| NumberFormatLayout {
+            left: cell_box.x + print.map_or(TEXT_PAD_PX, |(m, _)| 3.0 * 96.0 / m.dpi),
+            width: (cell_box.w - print.map_or(2.0 * TEXT_PAD_PX, |(m, _)| 5.0 * 96.0 / m.dpi)).max(0.0),
+            parts,
+        });
         let clip = spill_clip(
             geom,
             &cols,
@@ -916,6 +923,7 @@ where
             highlight: None,
             dashed_underline: false,
             font_family,
+            number_format,
             ghost: false,
             chart: false,
         });
@@ -950,6 +958,7 @@ where
             highlight: None,
             dashed_underline: false,
             font_family: print_font_family.clone(),
+            number_format: None,
             ghost: false,
             chart: false,
         });
@@ -1077,6 +1086,7 @@ fn emit_ghost(
             ),
             dashed_underline: preview,
             font_family: font.family.clone(),
+            number_format: None,
             ghost: preview,
             chart: false,
         });
@@ -1738,7 +1748,7 @@ fn cell_display_text(
     date_system: xlsx_model::DateSystem,
     cell: &xlsx_model::Cell,
     default_color: &Arc<str>,
-) -> Option<(Arc<str>, Arc<str>)> {
+) -> Option<(Arc<str>, Arc<str>, Vec<xlsx_model::numfmt::FormatPart>)> {
     if matches!(cell.value, CellValue::Empty) {
         return None;
     }
@@ -1755,7 +1765,7 @@ fn cell_display_text(
         },
         Arc::from,
     );
-    Some((formatted.text.into(), color))
+    Some((formatted.text.into(), color, formatted.layout))
 }
 
 /// the number-format code a cell's xf resolves to; general when unset or when
@@ -1948,6 +1958,31 @@ mod tests {
         Cell {
             value: CellValue::Number { value: n },
             ..Cell::default()
+        }
+    }
+
+    #[test]
+    fn accounting_display_list_keeps_layout_at_column_widths() {
+        for width in [12.0, 24.0] {
+            let mut wb = Workbook::default();
+            wb.styles.num_fmts.push((164, "_(€* #,##0_)".into()));
+            wb.styles.cell_xfs.push(Xf {
+                num_fmt_id: Some(164),
+                ..Xf::default()
+            });
+            let mut sheet = Sheet::new("Sheet1");
+            sheet.col_widths.insert(0, width);
+            let mut cell = num_cell(12.0);
+            cell.style = Some(0);
+            sheet.set_cell(CellRef::new(0, 0), cell);
+            wb.sheets.push(sheet);
+            let viewport = Viewport { x: 0.0, y: 0.0, width: 400.0, height: 100.0 };
+            let dl = build_display_list(&wb, SheetId(0), &viewport).unwrap();
+            let command = dl.commands.iter().find(|c| matches!(c, DrawCmd::Text { .. })).unwrap();
+            let json = serde_json::to_value(command).unwrap();
+            assert_eq!(json["numberFormat"]["left"], 2.0);
+            assert_eq!(json["numberFormat"]["width"], geometry::col_chars_to_px(width) - 4.0);
+            assert_eq!(json["numberFormat"]["parts"][1]["kind"], "fill");
         }
     }
 
