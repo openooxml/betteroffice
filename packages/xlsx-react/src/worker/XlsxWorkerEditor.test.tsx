@@ -377,6 +377,13 @@ function peerlessHarness(toolbarCommands = false, workerCommands = false, defaul
   const listeners = new Set<(ack: xlsx.WorkbookAck) => void>();
   const failures = new Set<Parameters<WorkbookSession['onFailure']>[0]>();
   const sent: PeerlessWorkerCommand[] = [];
+  const commandWaiters = new Map<number, ReturnType<typeof deferred<PeerlessWorkerCommand>>>();
+  const commandAt = (index: number) => {
+    if (sent[index]) return Promise.resolve(sent[index]);
+    let waiter = commandWaiters.get(index);
+    if (!waiter) { waiter = deferred<PeerlessWorkerCommand>(); commandWaiters.set(index, waiter); }
+    return waiter.promise;
+  };
   const replies = new Map<number, ReturnType<typeof deferred<xlsx.CommandStatus>>>();
   const presentations: { seq: number; resolve(): void }[] = [];
   const cells = new Map<string, string>([['0:0:0', 'initial']]);
@@ -425,6 +432,7 @@ function peerlessHarness(toolbarCommands = false, workerCommands = false, defaul
     call: { sheetView, cellInputs, cellGeometry, frame } as unknown as WorkbookSession['call'],
     submit: mock(async (command: xlsx.WorkbookCommand) => {
       sent.push(command);
+      commandWaiters.get(sent.length - 1)?.resolve(command);
       const reply = deferred<xlsx.CommandStatus>();
       replies.set(command.seq, reply);
       return reply.promise;
@@ -504,7 +512,9 @@ function peerlessHarness(toolbarCommands = false, workerCommands = false, defaul
     status?: xlsx.CommandStatus['status']; paint?: boolean; result?: unknown; selection?: xlsx.WorkbookCommandSelection;
   } = {}) => {
     const { frame: _wireFrame, ...applied } = workerCommands ? applyWorkbookCommand(workbook, commandState, command) : {};
-    const status = { seq: command.seq, status: options.status ?? 'applied', committed: command.kind !== 'select',
+    const reading = command.kind === 'select' || command.kind === 'applyOps' && 'toolbar' in command.payload &&
+      (command.payload.toolbar.id === 'paintFormat' || command.payload.toolbar.id === 'refreshProposals');
+    const status = { seq: command.seq, status: options.status ?? 'applied', committed: !reading,
       ...(options.status === 'refused' ? { reason: 'invalid-step' } : {}),
       result: options.result ?? (command.kind === 'applyUpdate' ? { remoteUpdate: true, proposals: [] } : undefined) };
     if (status.status === 'applied' && command.kind === 'editCell') {
@@ -534,7 +544,7 @@ function peerlessHarness(toolbarCommands = false, workerCommands = false, defaul
     <XlsxEditor {...asyncProps} file={file} toolbar={<Chrome />} {...props} />
   );
   const fail = (error: SessionFailure) => { for (const listener of failures) listener(error); };
-  return { mount, replace, asyncEditor, fail, ready, open, sent, ack, push, session, frame, sheetView, cellInputs, cellGeometry, hydrate, attach, cells, charts,
+  return { mount, replace, asyncEditor, fail, ready, open, sent, commandAt, ack, push, session, frame, sheetView, cellInputs, cellGeometry, hydrate, attach, cells, charts,
     renderCount, commands: () => commands };
 }
 
@@ -1900,7 +1910,8 @@ describe('peerless workbook worker editor', () => {
     restorers.push(() => available.mockRestore());
     const view = await host.mount();
     await host.commands().execute('proposalsPanel', { open: true });
-    await act(async () => host.ack(host.sent[0], {
+    const refresh = await host.commandAt(0);
+    await act(async () => host.ack(refresh, {
       result: { proposals: [{ id: 'p1', agentId: 'agent', note: null, cells: [] }] },
     }));
     const accepting = host.commands().execute('proposalAccept', { proposalId: 'p1' });
@@ -6275,4 +6286,183 @@ it('restores a pre-hydration cut preview when clipboard writing is refused', asy
   expect(host.editMethods.editCells).not.toHaveBeenCalled();
   expect(host.replay).not.toHaveBeenCalled();
   expect(host.peerMethods.displayList).not.toHaveBeenCalled();
+});
+
+
+describe('peerless keyboard navigation and proposal freshness', () => {
+  const refreshes = (host: ReturnType<typeof peerlessHarness>) => host.sent.filter((command) =>
+    command.kind === 'applyOps' && 'toolbar' in command.payload && command.payload.toolbar.id === 'refreshProposals');
+  const available = () => {
+    const proposals = spyOn(xlsx, 'isProposalsAvailable').mockReturnValue(true);
+    restorers.push(() => proposals.mockRestore());
+  };
+
+  it('outlines the full merge containing the focused cell', async () => {
+    const host = peerlessHarness();
+    const frame = host.frame.getMockImplementation()!;
+    host.frame.mockImplementation(async (...args) => ({ ...await frame(...args),
+      mergedRanges: [{ start: { row: 0, col: 0 }, end: { row: 1, col: 1 } }] }));
+    const view = await host.mount();
+    const outline = view.getByTestId('xlsx-overlay-host').children[1] as HTMLElement;
+    expect(outline.style.width).toBe('192px');
+    expect(outline.style.height).toBe('48px');
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'ArrowRight' });
+    expect(outline.style.width).toBe('192px');
+    expect(outline.style.height).toBe('48px');
+  });
+
+  for (const source of ['cell', 'formula'] as const) {
+    it(`refreshes proposals after ${source} input, undo and redo`, async () => {
+      available();
+      const host = peerlessHarness();
+      const view = await host.mount();
+      if (source === 'cell') fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'z' });
+      const input = view.getByTestId(source === 'cell' ? 'xlsx-cell-editor' : 'xlsx-formula-input');
+      fireEvent.change(input, { target: { value: 'changed' } });
+      fireEvent.keyDown(input, { key: 'Enter' });
+      await act(async () => host.ack(host.sent[0], { paint: true }));
+      expect(refreshes(host)).toHaveLength(1);
+      await act(async () => host.ack(refreshes(host)[0], { result: { proposals: [] } }));
+      for (const id of ['undo', 'redo'] as const) {
+        const changing = host.commands().execute(id, null);
+        await act(async () => {});
+        const command = host.sent.slice().reverse().find((command) => command.kind === id)!;
+        expect(command).toBeDefined();
+        const count = refreshes(host).length;
+        await act(async () => host.ack(command, { paint: true }));
+        await changing;
+        expect(refreshes(host)).toHaveLength(count + 1);
+        await act(async () => host.ack(refreshes(host)[count], { result: { proposals: [] } }));
+      }
+      expect(host.hydrate).not.toHaveBeenCalled();
+      expect(host.attach).not.toHaveBeenCalled();
+    });
+  }
+
+  it('coalesces refreshes behind edits newer than a pending proposal read', async () => {
+    available();
+    const host = peerlessHarness();
+    const view = await host.mount();
+    await act(async () => { await host.commands().execute('proposalsPanel', { open: true }); });
+    const stale = refreshes(host)[0];
+    expect(stale).toBeDefined();
+    for (const value of ['a', 'b']) {
+      fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: value });
+      fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Enter' });
+    }
+    const edits = host.sent.filter((command) => command.kind === 'editCell');
+    await act(async () => {
+      host.ack(stale, { result: { proposals: [{ id: 'old', agentId: 'agent', note: 'Old preview', cells: [] }] } });
+      for (const command of edits) host.ack(command, { paint: true });
+    });
+    expect(refreshes(host)).toHaveLength(2);
+    expect(view.queryByText('Old preview')).toBeNull();
+    const current = refreshes(host)[1];
+    expect(current.seq).toBeGreaterThan(edits[1].seq);
+    expect(current.frame).toBeUndefined();
+    await act(async () => host.ack(current, { result: { proposals: [{ id: 'fresh', agentId: 'agent', note: 'Current preview', cells: [] }] } }));
+    expect(view.getByText('Current preview')).toBeDefined();
+    expect(refreshes(host)).toHaveLength(2);
+  });
+
+  it('prints an acknowledged edit without waiting for proposal reads to paint', async () => {
+    available();
+    const host = peerlessHarness();
+    const view = await host.mount();
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'p' });
+    fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Enter' });
+    const edit = host.sent[0];
+    await act(async () => host.ack(edit, { paint: true }));
+    expect(refreshes(host)).toHaveLength(1);
+    await act(async () => host.ack(refreshes(host)[0], { result: { proposals: [] } }));
+    const print = mock(() => {});
+    replacePrint(print);
+    const printing = host.commands().execute('print', null);
+    await act(async () => {});
+    expect(host.session.whenPresented).toHaveBeenLastCalledWith(edit.seq);
+    await printing;
+    expect(print).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('peerless composition keyboard focus', () => {
+  for (const source of ['cell', 'formula'] as const) {
+    it(`restores ${source} keyboard focus after submitting composed text once and running a toolbar command`, async () => {
+      const host = peerlessHarness(true);
+      const view = await host.mount();
+      if (source === 'cell') fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'F2' });
+      const input = view.getByTestId(source === 'cell' ? 'xlsx-cell-editor' : 'xlsx-formula-input') as HTMLInputElement;
+      act(() => input.focus());
+      fireEvent.compositionStart(input);
+      fireEvent.change(input, { target: { value: 'unfinished' } });
+      const blur = spyOn(input, 'blur');
+      input.addEventListener('blur', () => {
+        input.value = 'final composed text';
+        fireEvent.compositionEnd(input);
+      }, { once: true });
+      restorers.push(() => blur.mockRestore());
+      const bold = view.container.querySelector<HTMLButtonElement>('button[aria-label="Bold"]')!;
+      await act(async () => fireEvent.click(bold));
+      expect(blur).toHaveBeenCalledTimes(1);
+      await waitFor(() => expect(host.sent).toHaveLength(2));
+      expect(host.sent[0]).toMatchObject({ kind: 'editCell', payload: { args: [0, 0, 0, 'final composed text'] } });
+      expect(host.sent[1]).toMatchObject({ kind: 'applyOps', payload: { toolbar: { id: 'bold' } } });
+      await act(async () => {
+        fireEvent.change(input, { target: { value: 'final composed text' } });
+        fireEvent.compositionEnd(input);
+        for (const command of host.sent) host.ack(command, { paint: true });
+      });
+      await advance();
+      expect(host.sent.filter(({ kind }) => kind === 'editCell')).toHaveLength(1);
+      expect(host.cells.get('0:0:0')).toBe('final composed text');
+      expect((view.getByTestId('xlsx-formula-input') as HTMLInputElement).value).toBe('final composed text');
+      expect(view.queryByTestId('xlsx-cell-editor')).toBeNull();
+      const sink = view.getByTestId(source === 'cell' ? 'xlsx-scroll' : 'xlsx-formula-input');
+      expect(document.activeElement).toBe(sink);
+      if (source === 'cell') {
+        fireEvent.keyDown(document.activeElement!, { key: 'F2' });
+        await waitFor(() => expect((view.getByTestId('xlsx-cell-editor') as HTMLInputElement).value).toBe('final composed text'));
+      } else {
+        fireEvent.change(document.activeElement!, { target: { value: 'final composed textx' } });
+        expect((view.getByTestId('xlsx-formula-input') as HTMLInputElement).value).toBe('final composed textx');
+        fireEvent.keyDown(document.activeElement!, { key: 'Enter' });
+        await waitFor(() => expect(host.sent.filter(({ kind }) => kind === 'editCell')).toHaveLength(2));
+        const edits = host.sent.filter(({ kind }) => kind === 'editCell');
+        expect(edits[edits.length - 1]).toMatchObject({ payload: { args: [0, 0, 0, 'final composed textx'] } });
+      }
+    });
+
+    it(`preserves host dialog focus after saving ${source} IME composition`, async () => {
+      const host = peerlessHarness(false, false, true);
+      const dialog = render(<input aria-label="Save dialog input" />);
+      const hostInput = dialog.getByRole('textbox', { name: 'Save dialog input' });
+      const saved = mock(() => hostInput.focus());
+      const view = await host.mount(saved);
+      if (source === 'cell') fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'F2' });
+      const input = view.getByTestId(source === 'cell' ? 'xlsx-cell-editor' : 'xlsx-formula-input') as HTMLInputElement;
+      act(() => input.focus());
+      fireEvent.compositionStart(input);
+      fireEvent.change(input, { target: { value: 'unfinished' } });
+      input.addEventListener('blur', () => {
+        input.value = 'final composed text';
+        fireEvent.compositionEnd(input);
+      }, { once: true });
+      await act(async () => fireEvent.click(view.getByTestId('xlsx-save')));
+      await waitFor(() => expect(host.sent).toHaveLength(1));
+      expect(host.sent[0]).toMatchObject({ kind: 'editCell', payload: { args: [0, 0, 0, 'final composed text'] } });
+      await act(async () => {
+        fireEvent.change(input, { target: { value: 'final composed text' } });
+        fireEvent.compositionEnd(input);
+        host.ack(host.sent[0], { paint: true });
+      });
+      await advance();
+      await waitFor(() => expect(saved).toHaveBeenCalledTimes(1));
+      expect(host.session.save).toHaveBeenCalledTimes(1);
+      expect(host.sent).toHaveLength(1);
+      expect(host.cells.get('0:0:0')).toBe('final composed text');
+      expect(view.queryByTestId('xlsx-cell-editor')).toBeNull();
+      expect(document.activeElement === hostInput).toBe(true);
+    });
+  }
+
 });

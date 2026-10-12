@@ -432,7 +432,10 @@ describe('peer-less plugins', () => {
       await act(async () => { host.ack(command, 'v2'); await finished.promise; });
       expect(receipts).toMatchObject([{ ok: true, applied: true, version: 'v2' }]);
       expect(loads).toEqual(['v1']);
-      expect(host.sent).toHaveLength(1);
+      expect(host.sent).toMatchObject([
+        { kind: 'applyEdits' }, { kind: 'applyOps', payload: { toolbar: { id: 'refreshProposals' } } },
+      ]);
+      expect(host.sent).toHaveLength(2);
       expect(writing.signal.aborted).toBe(false);
       expect(writing.lifetimeSignal.aborted).toBe(false);
       expect(errors).toEqual([]);
@@ -502,6 +505,17 @@ describe('peer-less plugins', () => {
       expect(presented).toHaveBeenCalledTimes(1);
       await act(async () => { host.push('v1'); });
       expect(last(plugin.contexts).snapshot.selection?.cells).toBeNull();
+      const surface = view.getByTestId('xlsx-scroll');
+      fireEvent.mouseDown(surface, { clientX: 120, clientY: 36, button: 0, shiftKey: true });
+      expect(host.sent).toHaveLength(1);
+      fireEvent.mouseDown(surface, { clientX: 120, clientY: 36, button: 0 });
+      fireEvent.mouseUp(window, { clientX: 120, clientY: 36, button: 0 });
+      const selecting = host.sent[1];
+      expect(selecting).toMatchObject({ kind: 'select', payload: { selection: {
+        sheetId: 'sheet:1', activeCell: { row: 1, col: 1 },
+      } } });
+      await act(async () => host.ack(selecting));
+      expect(last(plugin.contexts).snapshot.selection?.cells).toEqual(selectionAt({ row: 1, col: 1 }));
     } finally { host.restore(); }
   });
 
@@ -600,7 +614,10 @@ describe('peer-less plugins', () => {
         await act(async () => { host.ack(command, 'v2'); await writing; });
         expect(await navigation).toMatchObject(expectVersion === 'v2'
           ? { ok: true } : { ok: false, failure: { code: 'stale-version' } });
-        expect(host.sent).toHaveLength(1);
+        expect(host.sent).toMatchObject([
+          { kind: 'applyEdits' }, { kind: 'applyOps', payload: { toolbar: { id: 'refreshProposals' } } },
+        ]);
+        expect(host.sent).toHaveLength(2);
       } finally { host.restore(); }
     });
   }

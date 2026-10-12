@@ -15,6 +15,7 @@ export interface InputSeal {
   refused?: 'gesture-active';
   /** True once an IME composition in progress ends, false if its input goes away first. */
   composition?: Promise<boolean>;
+  restoreFocus?(): void;
 }
 
 export interface InputCoordinatorHooks {

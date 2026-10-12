@@ -257,6 +257,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   const requests = useMemo(() => new Map<number, WorkerPaintRequest>(), [run]);
   const selectionCommands = useMemo(() => new Set<number>(), [run]);
   const selectionRevisions = useMemo(() => new Map<number, number>(), [run]);
+  const issued = useMemo(() => new Map<number, PeerlessWorkerCommandInput>(), [run]);
   const inputEvents = useRef<(event: PeerlessWorkerInputEvent, publish?: () => void) => void>(() => {});
   const coordinatorRef = useRef<ReturnType<typeof createPeerlessWorkerInputCoordinator> | null>(null);
   const draftController = useMemo(() => new WorkerDraftController({
@@ -354,19 +355,53 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   }), [run, coordinator]);
   useLayoutEffect(() => { run?.connectRecoveryInput(coordinator, draftController); }, [run, coordinator, draftController]);
   const proposalsRevision = useRef(0);
-  const refreshProposals = useCallback(() => {
+  const proposalsMutation = useRef(0);
+  const proposalsLanded = useRef<{ owner: PeerlessWorkbookSession; revision: number; sequence: number } | null>(null);
+  const proposalsPending = useRef<{ owner: PeerlessWorkbookSession; requiredSequence: number; promise: Promise<void> } | null>(null);
+  const refreshProposals = useCallback((force = false): Promise<void> => {
     const owner = ownerRef.current;
-    if (!owner?.ready || !isProposalsAvailable()) return;
-    const revision = ++proposalsRevision.current;
-    const ticket = coordinator.command({ kind: 'applyOps', payload: { toolbar: { id: 'refreshProposals', args: null } } });
-    void ticket.result.then((status) => {
-      if (ownerRef.current !== owner || !owner.current || revision !== proposalsRevision.current) return;
-      const result = status.result as { proposals?: Proposal[] } | undefined;
-      if (result?.proposals && JSON.stringify(result.proposals) !== JSON.stringify(proposalsRef.current)) {
-        setProposals(result.proposals); commands.refresh();
+    if (!owner?.ready || owner.failure || owner.retiring || !isProposalsAvailable()) return Promise.resolve();
+    const requiredSequence = force ? coordinator.submittedThroughSeq : proposalsMutation.current;
+    if (proposalsPending.current?.owner === owner) {
+      proposalsPending.current.requiredSequence = Math.max(proposalsPending.current.requiredSequence, requiredSequence);
+      return proposalsPending.current.promise;
+    }
+    if (force) proposalsRevision.current++;
+    if (proposalsLanded.current?.owner === owner && proposalsLanded.current.revision === proposalsRevision.current &&
+      proposalsLanded.current.sequence >= proposalsMutation.current) return Promise.resolve();
+    const pending = { owner, requiredSequence, promise: Promise.resolve() };
+    proposalsPending.current = pending;
+    pending.promise = Promise.resolve().then(async () => {
+      while (true) {
+        if (ownerRef.current !== owner || !owner.current || owner.retiring) throw new XlsxCommandAdmissionError('document-replaced');
+        if (owner.failure) throw owner.failure;
+        const required = pending.requiredSequence;
+        await coordinator.whenApplied(required);
+        if (required !== pending.requiredSequence) continue;
+        const revision = proposalsRevision.current;
+        const ticket = coordinator.command({ kind: 'applyOps', payload: { toolbar: { id: 'refreshProposals', args: null } } },
+          { after: null, frame: undefined });
+        const status = await ticket.result;
+        if (ownerRef.current !== owner || !owner.current || owner.retiring) throw new XlsxCommandAdmissionError('document-replaced');
+        if (owner.failure) throw owner.failure;
+        const sequence = ticket.seq ?? 0;
+        if (revision !== proposalsRevision.current || sequence < Math.max(proposalsMutation.current, pending.requiredSequence)) continue;
+        const result = status.result as { proposals?: Proposal[] } | undefined;
+        if (result?.proposals && JSON.stringify(result.proposals) !== JSON.stringify(proposalsRef.current)) {
+          setProposals(result.proposals); commands.refresh();
+        }
+        proposalsLanded.current = { owner, revision, sequence };
+        return;
       }
-    }).catch(report);
-  }, [coordinator, commands, report]);
+    }).finally(() => { if (proposalsPending.current === pending) proposalsPending.current = null; });
+    return pending.promise;
+  }, [coordinator, commands]);
+  const requestProposals = (force = false) => {
+    const owner = ownerRef.current;
+    void refreshProposals(force).catch((error) => {
+      if (owner?.current && !owner.retiring && !owner.failure && ownerRef.current === owner) report(error);
+    });
+  };
   const geometryRevision = useRef(0);
   const refreshSheetGeometry = useCallback((paint = false) => {
     const owner = ownerRef.current;
@@ -393,6 +428,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     if (!run?.current || run.failure) return;
     if (event.type === 'dispatched' && event.seq !== null && event.command) {
       const command = event.command;
+      issued.set(event.seq, command);
       const revision = command.kind === 'editCells' &&
         JSON.stringify(command.payload.selection) === JSON.stringify(selectedTarget())
         ? navigation.current : event.selectionRevision ?? navigation.current;
@@ -401,7 +437,8 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       if (command.frame) requests.set(event.seq, { ...command.frame as WorkerPaintRequest,
         navigation: revision, coversThroughSeq: event.seq });
       while (requests.size > 256) requests.delete(requests.keys().next().value!);
-      if (command.kind === 'select' || command.kind === 'undo' || command.kind === 'redo' || 'selection' in command.payload) {
+      if (command.kind === 'select' || command.kind === 'setActiveSheet' || command.kind === 'undo' || command.kind === 'redo' ||
+        'selection' in command.payload) {
         selectionCommands.add(event.seq); causalSelection.current = event.seq;
       }
       if (command.kind === 'applyOps' && 'toolbar' in command.payload && command.payload.toolbar.id === 'paintFormat') {
@@ -428,7 +465,23 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       }
       return;
     }
+    if (event.type === 'accepted' && event.seq !== null) {
+      const command = issued.get(event.seq);
+      issued.delete(event.seq);
+      const refreshed = command?.kind === 'applyOps' && 'toolbar' in command.payload && command.payload.toolbar.id === 'refreshProposals';
+      if (command && !refreshed && command.kind !== 'select' && command.kind !== 'setActiveSheet' &&
+        command.kind !== 'setReadOnly' && command.kind !== 'applyUpdate' &&
+        (event.status?.committed || command.kind === 'rejectProposal' ||
+          (command.kind === 'propose' || command.kind === 'acceptProposal' || command.kind === 'undo' || command.kind === 'redo') &&
+            event.status?.status === 'applied')) {
+        proposalsMutation.current = Math.max(proposalsMutation.current, event.seq);
+        requestProposals();
+      }
+      return;
+    }
     if (event.type === 'refused' || event.type === 'cancelled') {
+      if (event.status?.reason === 'stale-proposal') { proposalsRevision.current++; requestProposals(); }
+      if (event.seq !== null) issued.delete(event.seq);
       if (event.seq !== null) echoRef.current?.refuse(event.seq);
       if (event.type === 'refused' && event.draft) {
         draftController.refused(event.seq, event.draft);
@@ -461,7 +514,8 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       setCatalog(ack.editState.sheets);
     }
     const latestSelection = Math.max(0, ...selectionCommands);
-    const reconcile = ack.throughSeq >= latestSelection && selectionRevisions.get(ack.throughSeq) === navigation.current &&
+    const reconcile = latestSelection > 0 && ack.throughSeq >= latestSelection &&
+      selectionRevisions.get(latestSelection) === navigation.current &&
       !draftController.ownsFocus;
     if (ack.selection && reconcile) {
       const target = ack.selection;
@@ -633,6 +687,8 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     setCatalog(run?.session.editState.sheets ?? run?.session.state.sheets ?? []);
     navigation.current += 1;
     causalSelection.current = null;
+    proposalsRevision.current++;
+    proposalsMutation.current = 0;
     acknowledgedSelection.current = null;
     pluginNavigation.current = null;
     if (!run) return;
@@ -898,9 +954,9 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     setFormatToken,
     setZoom: (scale) => setZoom(scale),
     setBorderStyle: (value) => { borderStyle.current = value; }, setBorderColor: (value) => { borderColor.current = value; },
-    setProposalsPanelOpen: (open) => { setProposalsPanelOpen(open); if (open) refreshProposals(); },
+    setProposalsPanelOpen: (open) => { setProposalsPanelOpen(open); if (open) requestProposals(true); },
     markStale: (id, cells) => setStaleFor(({ [id]: _removed, ...rest }) => cells ? { ...rest, [id]: cells } : rest),
-    refreshProposals, i18n: () => propsRef.current.i18n, translate: t,
+    refreshProposals: () => requestProposals(), i18n: () => propsRef.current.i18n, translate: t,
     fail: (error) => run?.fail(error), afterPaint: () => coordinator.whenPresented().then(() => true, () => false),
     deliver(bytes) {
       if (propsRef.current.onSave) propsRef.current.onSave(bytes);
@@ -974,8 +1030,9 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       focus(); event.preventDefault(); return;
     }
     setSelectedChart(null);
-    if (!cell || !selectionRef.current) return;
-    const next = event.shiftKey ? extendTo(selectionRef.current, cell, limits()) : selectionAt(cell);
+    const selected = selectionRef.current;
+    if (!cell || event.shiftKey && !selected) return;
+    const next = event.shiftKey ? extendTo(selected!, cell, limits()) : selectionAt(cell);
     predict(activeRef.current, next);
     command({ kind: 'select', payload: { selection: rangeTarget(activeRef.current, next) } });
     clickStart.current = cell; dragging.current = true; focus();

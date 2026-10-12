@@ -213,6 +213,7 @@ export function createPeerlessWorkerInputCoordinator(
   let suspended = false;
   let nextSeq = 1;
   let throughSeq = 0;
+  let presentationSeq = 0;
   let inputBarrier: { ticket?: PeerlessWorkerCommandTicket; composition?: Promise<boolean> } | undefined;
   let boundary: PeerlessWorkerCommandTicket | undefined;
   let last: PeerlessWorkerCommandTicket | undefined;
@@ -284,6 +285,7 @@ export function createPeerlessWorkerInputCoordinator(
     failure = null;
     localReadOnly = hooks.readOnly?.() ?? false;
     throughSeq = session?.throughSeq ?? 0;
+    presentationSeq = throughSeq;
     nextSeq = throughSeq + 1;
     const lease = cycle;
     offAck = session?.onAck((ack) => {
@@ -416,6 +418,8 @@ export function createPeerlessWorkerInputCoordinator(
           queue.shift();
           const dispatch = () => {
             const seq = nextSeq++;
+            if (entry.frame || !(entry.input?.kind === 'applyOps' && 'toolbar' in entry.input.payload &&
+              entry.input.payload.toolbar.id === 'refreshProposals')) presentationSeq = seq;
             Object.defineProperty(entry.ticket, 'seq', { value: seq, configurable: true });
             const command = { ...structuredClone(entry.input!), ...session!.commandIdentity, seq,
               basis: { ...session!.confirmedBasis }, ...(afterSeq ? { afterSeq } : {}),
@@ -617,7 +621,10 @@ export function createPeerlessWorkerInputCoordinator(
         admittedAfter = dependency ? { last: dependency, boundary: dependency } : after;
         try {
           const value = operation();
-          void lease.wait(value).then(result.resolve, result.reject);
+          void lease.wait(value).then((value) => {
+            seal.restoreFocus?.();
+            result.resolve(value);
+          }, result.reject);
           return fence === true ? Promise.resolve(value).then(() => {}) : undefined;
         } finally { admittedReadOnly = previous; admittedAfter = previousAfter; }
       };
@@ -765,7 +772,7 @@ export function createPeerlessWorkerInputCoordinator(
       } catch (error) { return Promise.reject(error); }
     },
     save: () => runAfterPendingInput(() => session!.save(), true),
-    whenPresented: (seq) => runAfterPendingInput(() => session!.whenPresented(seq ?? nextSeq - 1), true),
+    whenPresented: (seq) => runAfterPendingInput(() => session!.whenPresented(seq ?? presentationSeq), true),
     subscribe(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
     fail,
     reset() { current(); invalidate(new XlsxCommandAdmissionError('document-replaced')); suspended = true; },

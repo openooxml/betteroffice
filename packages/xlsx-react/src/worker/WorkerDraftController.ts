@@ -251,8 +251,17 @@ export class WorkerDraftController {
       if (!this.draft && this.snapshot.cell) this.publish({ cell: null });
       return {};
     }
-    this.composing.sealed = true;
-    return { composition: this.composing.done };
+    const composition = this.composing;
+    composition.sealed = true;
+    const input = composition.source === 'cell' ? this.cellInput : this.formulaInput;
+    input?.blur();
+    return { composition: composition.done, restoreFocus: () => {
+      if (this.disposed || this.composing || this.draft || !this.options.editable()) return;
+      const active = document.activeElement;
+      if (active && active !== document.body && active !== input) return;
+      if (composition.source === 'formula') this.formulaInput?.focus({ preventScroll: true });
+      else this.options.focus();
+    } };
   };
 
   refused(seq: number | null, value: InputDraft): void {
