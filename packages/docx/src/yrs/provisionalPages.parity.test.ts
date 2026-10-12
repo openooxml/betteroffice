@@ -276,12 +276,23 @@ function featureSection(feature: string): string {
 function featureBody(feature: string, body: string): string {
   const field = (type: string) => `<w:p><w:fldSimple w:instr=" ${type} "><w:r><w:t>9</w:t></w:r></w:fldSimple></w:p>`;
   if (['PAGE', 'NUMPAGES', 'SECTIONPAGES', 'DATE', 'TIME'].includes(feature)) return field(feature) + body;
+  if (feature === 'late-NUMPAGES') return body + field('NUMPAGES');
+  if (feature === 'complex-NUMPAGES') return '<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> NUMPAGES </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>9</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>' + body;
   if (feature === 'nested-NUMPAGES') return '<w:tbl><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc>' + field('NUMPAGES') + '</w:tc></w:tr></w:tbl>' + body;
   if (feature === 'table') return '<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid>' +
     Array.from({ length: 8 }, (_, i) => `<w:tr><w:tc><w:p><w:r><w:t>Row ${i}</w:t></w:r></w:p></w:tc></w:tr>`).join('') + '</w:tbl>' + body;
-  if (feature === 'keep') return body.replace('<w:pageBreakBefore/>', '<w:keepNext/><w:keepLines/>');
+  if (feature === 'keep') {
+    let kept = body;
+    for (const index of [2, 3, 31, 32, 33]) {
+      const id = (index + 1).toString(16).padStart(8, '0');
+      kept = kept.replace(`<w:p w14:paraId="${id}"><w:pPr><w:pageBreakBefore/>`,
+        `<w:p w14:paraId="${id}"><w:pPr><w:pStyle w:val="Heading1"/><w:outlineLvl w:val="0"/><w:keepNext/><w:keepLines/>`);
+    }
+    return kept;
+  }
+  if (feature === 'continuous-section') return featureBody('section', body).replace('<w:pgSz w:w="9000"', '<w:type w:val="continuous"/><w:pgSz w:w="9000"');
   if (feature === 'section') return body.replace(
-    '<w:p w14:paraId="00000029">', '<w:p><w:pPr><w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:pPr></w:p><w:p w14:paraId="00000029">');
+    '<w:p w14:paraId="00000021">', '<w:p><w:pPr><w:sectPr><w:pgSz w:w="9000" w:h="15840"/></w:sectPr></w:pPr></w:p><w:p w14:paraId="00000021">');
   if (feature === 'float') return '<w:tbl><w:tblPr><w:tblpPr w:vertAnchor="margin" w:horzAnchor="margin" w:tblpX="0" w:tblpY="0"/></w:tblPr><w:tblGrid><w:gridCol w:w="1500"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>Float</w:t></w:r></w:p></w:tc></w:tr></w:tbl>' + body;
   if (feature === 'footnote' || feature === 'endnote') return `<w:p><w:r><w:${feature}Reference w:id="1"/></w:r></w:p>` + body;
   return body;
@@ -333,7 +344,7 @@ async function commandFixture(feature = 'plain') {
   };
 }
 
-for (const feature of ['plain', 'table', 'keep', 'section', 'PAGE', 'header-PAGE']) {
+for (const feature of ['plain', 'table', 'keep', 'section', 'PAGE', 'header-PAGE', 'footer-PAGE']) {
   test(`command prefix ${feature} is exact and bounded before a full pass`, async () => {
     const f = await commandFixture(feature);
     try {
@@ -354,13 +365,12 @@ for (const feature of ['plain', 'table', 'keep', 'section', 'PAGE', 'header-PAGE
       const completed = f.w.frames.at(-1)!;
       expect(completed.payload.layoutProvisional).not.toBe(true);
       const final = commandFramesAfter(f.frame, f.w.frames);
-      expect(final.pages.length).toBe(f.full.pages.length);
-      for (let i = 0; i < 3; i += 1) expect(final.displayList.pages[i]).toEqual(f.full.displayList.pages[i]);
+      expect(final.displayList.pages).toEqual(f.full.displayList.pages);
     } finally { f.destroy(); }
   });
 }
 
-for (const feature of ['NUMPAGES', 'SECTIONPAGES', 'nested-NUMPAGES', 'header-NUMPAGES', 'footer-SECTIONPAGES', 'footnote', 'endnote', 'float', 'columns', 'DATE', 'TIME']) {
+for (const feature of ['NUMPAGES', 'SECTIONPAGES', 'late-NUMPAGES', 'complex-NUMPAGES', 'nested-NUMPAGES', 'header-NUMPAGES', 'footer-SECTIONPAGES', 'footnote', 'endnote', 'float', 'columns', 'continuous-section', 'DATE', 'TIME']) {
   test(`command prefix excludes ${feature} and returns the cold full layout`, async () => {
     const f = await commandFixture(feature);
     try {
@@ -425,6 +435,12 @@ test('an edit overtakes sliced completion and finishes it before changing the do
     } });
     expect(edited.ok && edited.commandAck?.outcomes[0]?.status).toBe('applied');
     expect(edited.ok && edited.commandAck?.frame?.payload.layoutProvisional).not.toBe(true);
+    if (!edited.ok || !edited.commandAck?.frame) throw new Error('Missing edit frame');
+    f.cold.loadState(f.engine.encodeState());
+    f.cold.layoutDocumentWithRegionsRetained(f.init.layoutInput);
+    const cold = applyFrameDelta(null, decodeFrameDelta(f.cold.buildDisplayListFrame(f.init.extras, 0)));
+    const final = commandFramesAfter(commandFramesAfter(f.frame, f.w.frames), [edited.commandAck.frame]);
+    expect(final.displayList.pages).toEqual(cold.displayList.pages);
     const count = f.w.frames.length;
     await f.w.drain();
     expect(f.w.frames).toHaveLength(count);

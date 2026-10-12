@@ -25,3 +25,16 @@ test('a document edit while printing rejects the mixed-version job', async () =>
   const capture = createWorkerPrintCapture(binding, () => 'png', () => true);
   await expect(capture.collect(async () => { snapshot.version += 1; })).rejects.toThrow('changed');
 });
+
+test('a provisional prefix is unavailable as a whole-document print layout', async () => {
+  const { binding, snapshot } = fixture();
+  Object.assign(snapshot.geometry, { layoutProvisional: true });
+  const capture = createWorkerPrintCapture(binding, () => 'png', () => true);
+  const build = mock(async (pages: number[]) => {
+    capture.accept({ payload: { stagedPresentation: { pages: pages.map((pageIndex) => ({
+      page: { pageIndex, pageId: String(pageIndex + 1) }, bitmap: { width: 1 },
+    })) } } } as unknown as DocxCommandFrame);
+  });
+  await expect(capture.collect(build)).rejects.toThrow('Worker print layout is unavailable');
+  expect(build).not.toHaveBeenCalled();
+});

@@ -20840,11 +20840,14 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 (0..200).map(|i| format!("<w:p><w:r><w:t>Paragraph {i} fills several pages.</w:t></w:r></w:p>")).collect::<String>()
             );
             let bytes = docx_bytes("", &body);
-            let (full, prefix) = full_and_prefix(&bytes, &request.to_string(), &|_| {});
+            let (full, prefix) = full_and_prefix(&bytes, &request.to_string(), &|_| {
+                BODY_MEASUREMENT_WORK.with(|work| work.borrow_mut().0.clear());
+            });
             if field == "PAGE" {
                 assert_eq!(prefix["provisional"], true);
                 assert_eq!(prefix["layout"]["pages"].as_array().unwrap().len(), 3);
                 assert_eq!(first_pages(&prefix), first_pages(&full));
+                BODY_MEASUREMENT_WORK.with(|work| assert!(work.borrow().0.len() < 201));
             } else {
                 assert_ne!(prefix["provisional"], true, "{field}");
                 assert_eq!(prefix["layout"], full["layout"], "{field}");

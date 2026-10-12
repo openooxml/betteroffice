@@ -60,7 +60,8 @@ function frame(revision: number, indices: number[], caretPage = 0): DocxCommandF
   } };
 }
 
-async function mount(zoom = 1, caretPage = 0) {
+async function mount(zoom = 1, caretPage = 0, prefix = false) {
+  let complete = !prefix;
   const scroller = document.createElement('div');
   scroller.style.overflowY = 'auto';
   Object.defineProperties(scroller, { clientHeight: { value: 60 }, scrollHeight: { value: stride * 20 * zoom } });
@@ -89,6 +90,8 @@ async function mount(zoom = 1, caretPage = 0) {
   const frames: DocxCommandFrame[] = [];
   const nextFrame = (indices: number[]) => {
     const candidate = frame(revision, indices, caretPage);
+    if (prefix) Object.assign(candidate.payload, { documentWidth: 300,
+      ...(!complete ? { layoutProvisional: true, finalizedPages: 3 } : {}) });
     frames.push(candidate);
     return candidate;
   };
@@ -123,9 +126,10 @@ async function mount(zoom = 1, caretPage = 0) {
     canvasForPage: () => null,
     prepareGeometry(candidate) {
       return { identity, coversThroughSeq: candidate.coversThroughSeq, frameEpoch: candidate.revision, layoutRevision: 1,
-        pages: Array.from({ length: 20 }, (_, pageIndex): PeerlessFrameGeometry['pages'][number] => ({
+        ...(prefix ? { documentWidth: 300 } : {}),
+        pages: Array.from({ length: complete ? 20 : 3 }, (_, pageIndex): PeerlessFrameGeometry['pages'][number] => ({
           page: { pageId: String(pageIndex + 1), pageIndex },
-          bounds: { x: 0, y: pageIndex * stride, width: 200, height: 100 }, transform: [1, 0, 0, 1, 0, 0],
+          bounds: { x: prefix && pageIndex < 3 ? 50 : 0, y: pageIndex * stride, width: prefix && pageIndex >= 3 ? 300 : 200, height: 100 }, transform: [1, 0, 0, 1, 0, 0],
         })), caret: candidate.payload.caret.caretRect ? { x: 10,
           y: candidate.payload.caret.caretRect.pageIndex * stride, width: 1, height: 20 } : null, selectionRects: [],
       };
@@ -135,6 +139,12 @@ async function mount(zoom = 1, caretPage = 0) {
   const view = render(<PeerlessPagedEditor sessionOptions={options} zoom={zoom} onReady={(ready) => { binding = ready; }} />, { container: scroller });
   await waitFor(() => expect(binding).toBeDefined());
   return { ...view, scroller, requests, edits, frames, pixels, binding: binding!,
+    async complete() {
+      complete = true;
+      revision += 1;
+      act(() => receive?.(nextFrame([0, 1, 2])));
+      await waitFor(() => expect(binding!.viewStore.getSnapshot().geometry?.pages).toHaveLength(20));
+    },
     async scrollTo(pageIndex: number) {
       const before = requests.length;
       act(() => { scroller.scrollTop = (pageIndex * stride + 1) * zoom; fireEvent.scroll(scroller); });
@@ -226,4 +236,21 @@ test('worker page column centers at the scaled width', async () => {
   expect(column.style.width).toBe('300px');
   expect(column.style.marginLeft).toBe('auto');
   expect(column.style.marginRight).toBe('auto');
+});
+
+
+test('a certified prefix grows its scroll column without moving the visible pages', async () => {
+  const editor = await mount(1, 0, true);
+  expect(editor.binding.viewStore.getSnapshot().geometry?.pages).toHaveLength(3);
+  const column = editor.container.querySelector<HTMLDivElement>('div[style*="transform: scale"]')!;
+  expect(column.style.width).toBe('300px');
+  const first = editor.binding.viewStore.getSnapshot().geometry!.pages[0]!.bounds;
+  editor.scroller.scrollTop = 20;
+  await editor.complete();
+  expect(editor.scroller.scrollTop).toBe(20);
+  expect(editor.binding.viewStore.getSnapshot().geometry!.pages[0]!.bounds).toEqual(first);
+  expect(column.style.width).toBe('300px');
+  expect(column.parentElement!.style.height).toBe(`${19 * stride + 100}px`);
+  await editor.scrollTo(10);
+  expect(editor.container.querySelector('[data-page-id="11"] canvas')?.getAttribute('width')).toBe('200');
 });
