@@ -70,6 +70,52 @@ function peerlessHarness(maxOutstanding = 8, maxQueued = 8, controller?: WorkerD
   return { coordinator, session, state, sent, events, errors, saved, draft, ack, replies, listeners };
 }
 
+describe('queued composition snapshots', () => {
+  for (const source of ['cell', 'formula'] as const) {
+    for (const successor of ['composition', 'typing'] as const) {
+      test(`preserves completed ${source} input before later ${successor} and saves each boundary`, async () => {
+        const selected = { anchor: { row: 0, col: 0 }, focus: { row: 0, col: 0 } };
+        const controller = new WorkerDraftController({
+          generation: () => 1, identity: () => 'book', navigation: () => 0,
+          selection: () => selected, sheet: () => 0,
+          target: () => ({ sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A1' } }),
+          resolveSheet: () => 0, editable: () => true, prefill: async () => '',
+          select: () => {}, selectionTarget: () => undefined, dependency: () => null,
+          navigate: () => {}, committed: () => {}, fail: (error) => { throw error; }, focus: () => {},
+        });
+        const { coordinator, sent, saved, ack } = peerlessHarness(8, 8, controller);
+        controller.attach(coordinator);
+        coordinator.subscribe((event) => {
+          if (event.type === 'dispatched' && event.seq !== null) queueMicrotask(() => ack(event.seq!));
+        });
+        const entered = deferred<void>();
+        const reply = deferred<void>();
+        const reading = coordinator.runAfterPendingInput(() => {
+          entered.resolve();
+          return reply.promise;
+        }, true);
+        await entered.promise;
+        controller.start(source);
+        controller.change(source, 'first', null);
+        const first = coordinator.save();
+        controller.end();
+        await Promise.resolve();
+        if (successor === 'composition') controller.start(source);
+        controller.change(source, 'second', null);
+        const second = coordinator.save();
+        if (successor === 'composition') controller.end();
+        await Promise.resolve();
+        expect(saved).toEqual([]);
+        reply.resolve();
+        await Promise.all([reading, first, second]);
+        expect(sent.map((command) => command.kind === 'editCell' ? command.payload.args[3] : command.kind))
+          .toEqual(['first', 'second']);
+        expect(saved).toEqual([1, 2]);
+      });
+    }
+  }
+});
+
 describe('peerless worker input', () => {
   test('refuses overlapping plugin edits behind invalid input and accepts a correction', async () => {
     const { coordinator, session, draft, sent, ack } = peerlessHarness();

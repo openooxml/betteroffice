@@ -1,5 +1,5 @@
 import { XlsxCommandAdmissionError } from './createXlsxCommandStore';
-import type { InputCoordinatorHooks, InputDraft } from './inputCoordinator';
+import type { InputCoordinatorHooks, InputDraft, InputSeal } from './inputCoordinator';
 import type {
   CommandStatus, WorkbookAck, WorkbookCommand, WorkbookCommandFrameRequest,
   WorkbookCommandSelection, WorkbookSession, XlsxRangeTarget,
@@ -102,8 +102,13 @@ export type PeerlessWorkerInputEvent = {
   ack: WorkbookAck;
 };
 
+export interface PeerlessWorkerInputSeal extends InputSeal {
+  compositionDraft?(): InputDraft | null;
+}
+
 export interface PeerlessWorkerInputCoordinatorHooks
   extends Pick<InputCoordinatorHooks, 'generation' | 'seal' | 'sync'> {
+  seal(): PeerlessWorkerInputSeal;
   session(): PeerlessWorkerCommandSession | null;
   isReady(): boolean;
   compositionId?(): string | undefined;
@@ -177,6 +182,12 @@ interface PeerlessGate {
   reject(error: unknown): void;
 }
 
+interface PeerlessInputBarrier {
+  ticket?: PeerlessWorkerCommandTicket;
+  composition?: Promise<boolean>;
+  compositionDraft?(): InputDraft | null;
+}
+
 function commandTarget(input: PeerlessWorkerCommandInput): XlsxRangeTarget | null {
   if ('target' in input.payload) return structuredClone(input.payload.target ?? null);
   if ('toolbar' in input.payload) return structuredClone(input.payload.toolbar.target ?? null);
@@ -214,7 +225,7 @@ export function createPeerlessWorkerInputCoordinator(
   let nextSeq = 1;
   let throughSeq = 0;
   let presentationSeq = 0;
-  let inputBarrier: { ticket?: PeerlessWorkerCommandTicket; composition?: Promise<boolean> } | undefined;
+  let inputBarrier: PeerlessInputBarrier | undefined;
   let boundary: PeerlessWorkerCommandTicket | undefined;
   let last: PeerlessWorkerCommandTicket | undefined;
   let compositions = new Map<string, PeerlessWorkerCommandTicket>();
@@ -577,8 +588,11 @@ export function createPeerlessWorkerInputCoordinator(
       if (seal.refused) throw new XlsxCommandAdmissionError(seal.refused);
       const previousInput = inputBarrier;
       const composition = seal.composition !== previousInput?.composition ? seal.composition : undefined;
-      const input: { ticket?: PeerlessWorkerCommandTicket; composition?: Promise<boolean> } =
-        !composition && previousInput?.composition ? previousInput : {};
+      if (!seal.composition) hooks.sync();
+      const completed = previousInput?.compositionDraft?.();
+      const changed = completed && draft && (!sameCell(completed, draft) || completed.value !== draft.value ||
+        'revision' in completed && 'revision' in draft && completed.revision !== draft.revision);
+      const input: PeerlessInputBarrier = !composition && previousInput?.composition && !changed ? previousInput : {};
       const reserved = composition ? deferred<CommandStatus>() : undefined;
       const retainInput = (ticket?: PeerlessWorkerCommandTicket) => {
         input.ticket = ticket;
@@ -597,10 +611,11 @@ export function createPeerlessWorkerInputCoordinator(
         void reserved.promise.then((status) => { ticket.outcome = status; pump(); }, (error) => { ticket.failure = { error }; pump(); });
         void result.promise.catch(reserved.reject);
         input.composition = composition;
+        input.compositionDraft = seal.compositionDraft;
         inputBarrier = input;
         retainInput(ticket);
       } else if (!input.composition) {
-        hooks.sync();
+        if (seal.composition) hooks.sync();
         if (draft) {
           inputBarrier = input;
           sealed = submit(draft, { after: previousInput?.ticket });
@@ -644,15 +659,16 @@ export function createPeerlessWorkerInputCoordinator(
             insertion = 0;
             try {
               if (ended) {
-                hooks.sync();
+                let finished = seal.compositionDraft?.();
+                if (!seal.compositionDraft) { hooks.sync(); finished = draft; }
                 const previous = admittedReadOnly;
                 admittedReadOnly = readOnly;
                 try {
-                  if (draft) {
-                    const finished = composedTarget ? { ...draft, generation: composedTarget.generation,
+                  if (finished) {
+                    const captured = composedTarget ? { ...finished, generation: composedTarget.generation,
                       sheet: composedTarget.sheet, row: composedTarget.row, col: composedTarget.col,
-                      source: composedTarget.source } : draft;
-                    sealed = submit(finished, { compositionId, after: previousInput?.ticket });
+                      source: composedTarget.source } : finished;
+                    sealed = submit(captured, { compositionId, after: previousInput?.ticket });
                   }
                 }
                 finally { admittedReadOnly = previous; }

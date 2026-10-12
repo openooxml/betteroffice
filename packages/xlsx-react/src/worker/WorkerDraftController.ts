@@ -1,6 +1,6 @@
 import type { CellAddr, Direction, Selection, WorkbookCommandSelection, XlsxRangeTarget } from '@betteroffice/xlsx';
-import type { InputDraft, InputSeal } from '../commands/inputCoordinator';
-import type { PeerlessWorkerCommandOptions, PeerlessWorkerCommandTicket, PeerlessWorkerInputCoordinator } from '../commands/peerlessWorkerInputCoordinator';
+import type { InputDraft } from '../commands/inputCoordinator';
+import type { PeerlessWorkerCommandOptions, PeerlessWorkerCommandTicket, PeerlessWorkerInputCoordinator, PeerlessWorkerInputSeal } from '../commands/peerlessWorkerInputCoordinator';
 
 export type WorkerNativeDraft = InputDraft & { revision: number; modified: boolean;
   after?: PeerlessWorkerCommandOptions['after']; target?: XlsxRangeTarget };
@@ -46,7 +46,7 @@ export class WorkerDraftController {
   private revision = 0;
   private compositionRevision = 0;
   private composing: { id: string; source: InputDraft['source']; target: WorkerNativeDraft;
-    done: Promise<boolean>; settle(value: boolean): void; sealed: boolean } | null = null;
+    done: Promise<boolean>; settle(value: boolean): void; sealed: boolean; completed: WorkerNativeDraft | null } | null = null;
   private trailing: { source: InputDraft['source']; input: HTMLInputElement; value: string } | null = null;
   private conversionEnter = false;
   private disposed = false;
@@ -194,7 +194,7 @@ export class WorkerDraftController {
     let settle!: (value: boolean) => void;
     const done = new Promise<boolean>((resolve) => { settle = resolve; });
     this.composing = { id: `${this.options.identity()}:composition:${++this.compositionRevision}`,
-      source, target, done, settle, sealed: false };
+      source, target, done, settle, sealed: false, completed: null };
   }
 
   end(): void {
@@ -210,6 +210,7 @@ export class WorkerDraftController {
     const input = composition.source === 'cell' ? this.cellInput : this.formulaInput;
     const draft: WorkerNativeDraft = { ...composition.target, value: input?.value ?? this.draft?.value ?? '',
       modified: true, revision: ++this.revision };
+    composition.completed = draft.value !== '' ? Object.freeze({ ...draft }) : null;
     this.composing = null;
     this.setDraft(composition.sealed && draft.value !== '' ? draft : null);
     if (input) this.trailing = { source: draft.source, input, value: draft.value };
@@ -246,7 +247,7 @@ export class WorkerDraftController {
 
   keyUp(): void { if (!this.composing) { this.trailing = null; this.conversionEnter = false; } }
 
-  seal = (): InputSeal => {
+  seal = (): PeerlessWorkerInputSeal => {
     if (!this.composing) {
       if (!this.draft && this.snapshot.cell) this.publish({ cell: null });
       return {};
@@ -255,7 +256,7 @@ export class WorkerDraftController {
     composition.sealed = true;
     const input = composition.source === 'cell' ? this.cellInput : this.formulaInput;
     input?.blur();
-    return { composition: composition.done, restoreFocus: () => {
+    return { composition: composition.done, compositionDraft: () => composition.completed, restoreFocus: () => {
       if (this.disposed || this.composing || this.draft || !this.options.editable()) return;
       const active = document.activeElement;
       if (active && active !== document.body && active !== input) return;
