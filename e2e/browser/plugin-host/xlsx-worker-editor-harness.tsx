@@ -196,12 +196,12 @@ let readOnly = false;
 let readyCount = 0;
 const open = (bytes: Uint8Array) => {
   source = bytes;
-  const editor = peerless ? <XlsxEditor asyncApi file={bytes} readOnly={readOnly} plugins={[plugin]}
+  const editor = peerless ? <XlsxEditor file={bytes} readOnly={readOnly} plugins={[plugin]}
     pluginGrants={{ routes: { document: 'write', editBatches: true } }} onError={(error) => errors.push(error.message)}
     onSave={(bytes) => { savedBytes = bytes; }} onReady={(value) => {
       readyCount += 1;
       peerlessApi = value; peerlessCurrent.resolve(value);
-    }} /> : <XlsxEditor file={bytes} experimentalWorkerOpen readOnly={readOnly} plugins={[plugin]}
+    }} /> : <XlsxEditor legacySyncApi file={bytes} experimentalWorkerOpen readOnly={readOnly} plugins={[plugin]}
     pluginGrants={{ routes: { document: 'write', editBatches: true } }} onError={(error) => errors.push(error.message)}
     onReady={(value) => {
       readyCount += 1;
