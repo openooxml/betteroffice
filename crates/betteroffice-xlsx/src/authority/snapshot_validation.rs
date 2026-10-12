@@ -5,6 +5,38 @@ use crate::snapshot::{SnapshotBudget, SnapshotError, SnapshotResult};
 
 use super::*;
 
+#[cfg(test)]
+mod format_tests {
+    use super::*;
+
+    #[test]
+    fn declared_builtin_snapshot_formats_match_resolved_styles() {
+        for id in [0, 14, 44] {
+            let mut model = WorkbookModel::default();
+            model.styles.num_fmts.push((id, "_(€* #,##0.00_)".into()));
+            model.styles.cell_xfs.push(xlsx_model::styles::Xf {
+                num_fmt_id: Some(id),
+                ..Default::default()
+            });
+            let formats = BTreeMap::from([(id, 0)]);
+            for style in [None, Some(0)] {
+                let mut position = JsonPosition::default();
+                let mut window = JsonWindow {
+                    position: &mut position,
+                    token: 0,
+                    bytes: Vec::new(),
+                    limit: usize::MAX,
+                };
+                window.format(&model, style.and_then(|s| model.styles.xf(s)), &formats).unwrap();
+                assert_eq!(
+                    serde_json::from_slice::<serde_json::Value>(&window.bytes).unwrap(),
+                    serde_json::to_value(model.styles.cell_format(style)).unwrap()
+                );
+            }
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct SnapshotValidation {
     phase: u8,
@@ -245,7 +277,7 @@ impl JsonWindow<'_> {
         }
         self.raw(b"},\"numberFormat\":")?;
         let id = xf.and_then(|xf| xf.num_fmt_id).unwrap_or(0);
-        if let Some(&index) = formats.get(&id).filter(|_| id >= 164) {
+        if let Some(&index) = formats.get(&id).filter(|_| xf.is_some()) {
             self.raw(b"{\"kind\":\"custom\",\"pattern\":")?;
             self.string(&model.styles.num_fmts[index].1)?;
             self.raw(b"}")?;

@@ -627,16 +627,13 @@ impl Stylesheet {
         self.xf(style_index)?.alignment.as_ref()
     }
 
-    /// the number-format for a cell style: custom code when id >= 164, else the
-    /// builtin id. a missing/unset xf resolves to builtin `0` (General).
+    /// Declared codes override implied builtins for every id.
     pub fn format_code_for(&self, style_index: u32) -> FormatCode<'_> {
         let id = self
             .xf(style_index)
             .and_then(|xf| xf.num_fmt_id)
             .unwrap_or(0);
-        if id >= 164
-            && let Some((_, code)) = self.num_fmts.iter().find(|(k, _)| *k == id)
-        {
+        if let Some((_, code)) = self.num_fmts.iter().find(|(k, _)| *k == id) {
             return FormatCode::Custom(code);
         }
         FormatCode::Builtin(id)

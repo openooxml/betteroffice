@@ -22,6 +22,29 @@ fn time_serial(secs: f64) -> f64 {
 }
 
 #[test]
+fn declared_builtin_codes_win() {
+    use crate::styles::{FormatCode, Stylesheet, Xf};
+    let code = "_(€* #,##0.00_);_(€* (#,##0.00);_(€* \"-\"??_);_(@_)";
+    let mut styles = Stylesheet::default();
+    for id in [0, 5, 8, 14, 41, 44, 164] {
+        styles.num_fmts.push((id, code.into()));
+        styles.cell_xfs.push(Xf {
+            num_fmt_id: Some(id),
+            ..Xf::default()
+        });
+        let index = styles.cell_xfs.len() as u32 - 1;
+        assert_eq!(styles.format_code_for(index), FormatCode::Custom(code));
+        assert_eq!(
+            styles.cell_format(Some(index)).number_format,
+            crate::NumberFormat::Custom {
+                pattern: code.into()
+            }
+        );
+        assert_eq!(fv(1234.5, code), " €1,234.50 ");
+    }
+}
+
+#[test]
 fn builtin_table_ids() {
     assert_eq!(builtin_format_code(0), Some("General"));
     assert_eq!(builtin_format_code(1), Some("0"));
