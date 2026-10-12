@@ -116,6 +116,10 @@
     "./editor": {
       "types": "./dist/editor/index.d.mts",
       "import": "./dist/editor/index.mjs"
+    },
+    "./peerless": {
+      "types": "./dist/peerless.d.mts",
+      "import": "./dist/peerless.mjs"
     }
   },
   "typesVersions": {
@@ -197,6 +201,9 @@
       ],
       "editor": [
         "./dist/editor/index.d.mts"
+      ],
+      "peerless": [
+        "./dist/peerless.d.mts"
       ]
     }
   },

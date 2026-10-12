@@ -43,6 +43,8 @@ export interface DocxCommandEnvironment {
   sidebarOpen: boolean;
   sidebarControl: DocxCommandControl;
   zoom: number;
+  zoomWhileOpening?: boolean;
+  supportedCommands?: ReadonlySet<DocxCommandId>;
   canOpen: boolean;
   canReportIssue: boolean;
   /** The body, not a header, footer or note, has the input. */
@@ -644,7 +646,7 @@ function evaluate<K extends DocxCommandId>(
     case 'zoom': {
       const zoomArgs = args as DocxCommandArgs['zoom'] | undefined;
       return result<'zoom'>({
-        gate: documentGate(env),
+        gate: env.zoomWhileOpening && env.status === 'loading' ? null : documentGate(env),
         value: env.zoom,
         options: ZOOM_LEVELS.map((scale) => ({
           args: { scale },
@@ -678,7 +680,7 @@ export function evaluateDocxCommand<K extends DocxCommandId>(
     return { enabled: false, disabledReason: commandReason('editor-unavailable', null) };
   }
   const evaluation: Evaluation<K> = validArgs(id, args)
-    ? evaluate(id, args, env)
+    ? env.supportedCommands && !env.supportedCommands.has(id) ? { gate: 'unsupported-command' } : evaluate(id, args, env)
     : { gate: documentGate(env) ?? 'invalid-arguments' };
   const presentation: {
     active?: boolean | 'mixed';

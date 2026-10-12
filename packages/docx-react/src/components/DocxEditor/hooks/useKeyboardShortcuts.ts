@@ -20,7 +20,7 @@ const FIND_REPLACE: ReadonlySet<DocxCommandId> = new Set(['find', 'replace']);
 function isForeignTextField(target: EventTarget | null): boolean {
   const element = target instanceof Element ? target : null;
   const field = element?.closest('input, textarea, select, [contenteditable]');
-  if (!field || field.matches('.paged-editor__yrs-input')) return false;
+  if (!field || field.matches('.paged-editor__yrs-input, .paged-editor__peerless-input')) return false;
   return field.getAttribute('contenteditable') !== 'false';
 }
 
@@ -41,7 +41,7 @@ export function useKeyboardShortcuts({
   pagedEditorRef: React.RefObject<PagedEditorRef | null>;
   containerRef?: React.RefObject<HTMLElement | null>;
   disableFindReplaceShortcuts: boolean;
-  tableSelection: ReturnType<typeof useTableSelection>;
+  tableSelection?: ReturnType<typeof useTableSelection>;
 }) {
   const optionsRef = useRef({ disableFindReplaceShortcuts, tableSelection });
   optionsRef.current = { disableFindReplaceShortcuts, tableSelection };
@@ -58,7 +58,7 @@ export function useKeyboardShortcuts({
       const { disableFindReplaceShortcuts: noFind, tableSelection: table } = optionsRef.current;
       const plain = !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey;
       if (plain && (event.key === 'Delete' || event.key === 'Backspace')) {
-        if (table.state.tableIndex !== null && !isForeignTextField(event.target)) {
+        if (table && table.state.tableIndex !== null && !isForeignTextField(event.target)) {
           event.preventDefault();
           table.handleAction('deleteTable');
         }

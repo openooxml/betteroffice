@@ -10,7 +10,11 @@
       "types": "./dist/index.d.mts",
       "import": "./dist/index.mjs"
     },
-    "./styles.css": "./dist/styles.css"
+    "./styles.css": "./dist/styles.css",
+    "./peerless-harness": {
+      "types": "./dist/peerless-harness.d.mts",
+      "import": "./dist/peerless-harness.mjs"
+    }
   },
   "sideEffects": [
     "*.css"

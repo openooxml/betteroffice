@@ -105,6 +105,7 @@ afterEach(async () => {
 });
 
 afterAll(async () => {
+  await act(async () => { await new Promise<void>((resolve) => setImmediate(resolve)); });
   if (originalFonts) Object.defineProperty(document, 'fonts', originalFonts);
   else Reflect.deleteProperty(document, 'fonts');
   if (ownsDom) await GlobalRegistrator.unregister();

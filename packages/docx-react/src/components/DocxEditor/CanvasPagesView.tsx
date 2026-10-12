@@ -117,7 +117,7 @@ interface PageWindowRange {
   end: number;
 }
 
-function nextPageWindow(
+export function nextPageWindow(
   previous: PageWindowRange | null,
   firstVisible: number,
   lastVisible: number,

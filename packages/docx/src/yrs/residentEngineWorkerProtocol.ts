@@ -1,10 +1,25 @@
+import type { ResidentRangeHighlights } from './residentRangeHighlights';
+import type { YrsStoryRange } from './index';
 import type { LayoutMetaV1 } from './layoutMeta';
+import type { Checkpoint } from '../../../../shared/office-session/commands/types';
+import type { ReplyError } from '../../../../shared/office-session/protocol';
+import type { SessionFailureCode } from '../../../../shared/office-session/types';
+import type {
+  DocxCommandAck,
+  DocxCommandEnvelope,
+  DocxCommandFrame,
+  DocxCommandSelection,
+  ResidentCommandInitReply,
+  ResidentCommandInitRequest,
+  ResidentCommandViewportRequest,
+} from './residentCommandProtocol';
 import type {
   YrsEngineApplyProfile,
   YrsLoc,
   YrsResidentCaretSnapshot,
   YrsResidentWorkerSnapshot,
   YrsSelection,
+  YrsSelectionText,
   YrsStickyPosition,
 } from './index';
 import type { PointPosition } from '../plugin-api';
@@ -78,9 +93,11 @@ export type ResidentDocumentRead =
   | { kind: 'exportStructuredWithPages'; options: DocxPageExportOptions; currentRequest: string }
   | { kind: 'listContentControls'; options: DocxContentControlsOptions }
   | { kind: 'findContentControls'; query: DocxContentControlQuery; options: DocxContentControlsOptions }
+  | { kind: 'rangeHighlights'; ranges: YrsStoryRange[]; expectVersion: string; expectFrameEpoch?: number; expectLayoutRevision?: number }
   | { kind: 'paragraphIdentities' }
   | { kind: 'resolveParagraphAnchors'; anchors: DocxParagraphAnchor[] }
   | { kind: 'readParagraphs'; request: DocxReadParagraphsRequest }
+  | { kind: 'rawSelectionInfo'; selection: DocxCommandSelection }
   | { kind: 'findText'; request: DocxFindTextRequest }
   | { kind: 'findMatches'; searchText: string; options: FindOptions; expectVersion: string }
   | { kind: 'searchText'; query: string; caseSensitive: boolean; carry?: YrsStickyPosition | null }
@@ -110,9 +127,11 @@ export interface ResidentDocumentReadValues {
   exportStructuredWithPages: string;
   listContentControls: DocxContentControlsResult;
   findContentControls: DocxContentControlsResult;
+  rangeHighlights: ResidentRangeHighlights | null;
   paragraphIdentities: DocxParagraphIdentitySnapshot;
   resolveParagraphAnchors: { results: DocxParagraphAnchorResult[] };
   readParagraphs: DocxReadParagraphsResult;
+  rawSelectionInfo: YrsSelectionText;
   findText: DocxFindTextResult;
   findMatches: DocxFindDisplayMatch[] | null;
   navigationTarget: ReturnType<typeof resolveNavigationTarget>;
@@ -143,6 +162,12 @@ export type ResidentEngineWorkerHostModule = {
 
 export type ResidentEngineWorkerRequest =
   | { id: number; type: 'warm'; hostModule?: true }
+  | { id: number; type: 'commandInit'; request: ResidentCommandInitRequest }
+  | { id: number; type: 'edit'; command: DocxCommandEnvelope }
+  | { id: number; type: 'checkpoint' }
+  | { id: number; type: 'requestFullFrame' }
+  | { id: number; type: 'commandUpdate'; update: Uint8Array }
+  | { id: number; type: 'commandViewport'; request: ResidentCommandViewportRequest }
   | {
       id: number;
       type: 'bootstrap';
@@ -315,6 +340,10 @@ export type ResidentEngineWorkerResponse = (
   | {
       id: number;
       ok: true;
+      commandInitial?: ResidentCommandInitReply;
+      commandAck?: DocxCommandAck;
+      commandFrame?: { session: string; incarnation: number; epoch: number; frame: DocxCommandFrame };
+      checkpoint?: Checkpoint;
       frame?: ArrayBuffer;
       pageFrames?: ArrayBuffer[];
       pageBuildSuperseded?: boolean;
@@ -375,6 +404,8 @@ export type ResidentEngineWorkerResponse = (
       id: number;
       ok: false;
       error: string;
+      commandError?: ReplyError;
+      failureCode?: SessionFailureCode;
       /** @internal */
       code?: 'save-unavailable';
       residentUnavailable?: boolean;

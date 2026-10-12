@@ -1,4 +1,16 @@
 import type { LayoutMetaV1 } from './layoutMeta';
+import { isCommandAck, type Checkpoint } from '../../../../shared/office-session/commands/types';
+import { SessionFailure } from '../../../../shared/office-session/types';
+import { discardCommandPresentation } from './residentCommandPresentation';
+import type {
+  DocxCommandAck,
+  DocxCommandEnvelope,
+  DocxCommandFrame,
+  ResidentCommandClient,
+  ResidentCommandInitReply,
+  ResidentCommandInitRequest,
+  ResidentCommandViewportRequest,
+} from './residentCommandProtocol';
 import type {
   YrsEngineApplyProfile,
   YrsResidentCaretSnapshot,
@@ -32,6 +44,7 @@ export interface ResidentProposalReply
 }
 
 export interface ResidentEngineWorkerFrame {
+  commandInitial?: ResidentCommandInitReply;
   frame: Uint8Array;
   pageFrames?: Uint8Array[];
   updates: Uint8Array[];
@@ -108,6 +121,11 @@ const EMPTY_YRS_UPDATE_V1_BYTES = 2;
 
 // Not `completeLayout`: page builds run between the steps of a sliced completion.
 const FRAME_REQUESTS = new Set<AwaitedRequest['type']>([
+  'commandInit',
+  'edit',
+  'requestFullFrame',
+  'commandUpdate',
+  'commandViewport',
   'bootstrap',
   'sync',
   'layoutJson',
@@ -156,11 +174,15 @@ function spawnResidentEngineWorker(): ResidentEngineWorkerPort {
 }
 
 /** Dedicated-worker owner for resident input, pagination, and FrameDelta output. */
-export class ResidentEngineWorkerClient {
+export class ResidentEngineWorkerClient implements ResidentCommandClient {
   private readonly pending = new Map<number, PendingRequest>();
   private watchdog: ReturnType<typeof setTimeout> | null = null;
   private nextId = 1;
   private terminalError: Error | null = null;
+  private commandSession = false;
+  private commandGenerationValue = 0;
+  private readonly commandInitialGenerations = new WeakMap<ResidentCommandInitReply, number>();
+  private commandReplacementPending = false;
   private ready = false;
   private revision = 0;
   private documentSequence = 0;
@@ -182,10 +204,34 @@ export class ResidentEngineWorkerClient {
   private answeredFrameEpoch = 0;
   private retainBuiltPages = false;
   private failureListener: ((error: Error) => void) | null = null;
+  private readonly frameListeners = new Set<(frame: DocxCommandFrame) => void>();
+  private commandIdentity: { session: string; incarnation: number; epoch: number } | null = null;
 
   constructor(private readonly worker: ResidentEngineWorkerPort = spawnResidentEngineWorker()) {
     this.worker.onmessage = (event) => {
       const response = event.data;
+      if (response.ok && response.commandFrame) {
+        const pushed = response.commandFrame;
+        const identity = this.commandIdentity;
+        if (this.terminalError || this.commandReplacementPending || !identity ||
+          pushed.session !== identity.session || pushed.incarnation !== identity.incarnation ||
+          pushed.epoch !== identity.epoch) {
+          discardCommandPresentation(pushed.frame);
+          const pending = this.pending.get(response.id);
+          if (pending) {
+            this.pending.delete(response.id);
+            pending.reject(new SessionFailure('disposed', 'Resident command frame was superseded'));
+          }
+          if (this.pending.size > 0) this.armWatchdog();
+          else this.disarmWatchdog();
+          return;
+        }
+        if (!isCommandAck({ ...identity, version: 0, throughSeq: 0, outcomes: [], frame: pushed.frame })) {
+          discardCommandPresentation(pushed.frame);
+          this.fail(new SessionFailure('message', 'Malformed resident command frame'));
+          return;
+        }
+      }
       if (response.memory) this.lastMemory = response.memory;
       if (response.ok && response.caret) {
         this.answeredFrameEpoch = Math.max(this.answeredFrameEpoch, response.caret.frameEpoch);
@@ -196,15 +242,32 @@ export class ResidentEngineWorkerClient {
       }
       if (!response.ok && response.terminal) {
         this.fail(
-          response.outOfMemory
+          this.commandSession
+            ? new SessionFailure(response.failureCode ?? (response.outOfMemory ? 'out-of-memory' : 'trap'), response.error)
+            : response.outOfMemory
             ? new ResidentWorkerOutOfMemoryError(response.error, response.memory ?? [])
             : new ResidentWorkerUnavailableError(response.error)
         );
         return;
       }
       if (this.pending.size > 0) this.armWatchdog();
+      if (response.ok && response.commandFrame) {
+        const pushed = response.commandFrame;
+        if (this.frameListeners.size === 0) discardCommandPresentation(pushed.frame);
+        this.answeredFrameEpoch = Math.max(this.answeredFrameEpoch, pushed.frame.revision);
+        this.revision = pushed.frame.payload.layoutRevision;
+        for (const listener of [...this.frameListeners]) {
+          try { listener(pushed.frame); } catch {}
+        }
+      }
       const pending = this.pending.get(response.id);
-      if (!pending) return;
+      if (!pending) {
+        if (response.ok) {
+          discardCommandPresentation(response.commandInitial?.frame);
+          discardCommandPresentation(response.commandAck?.frame);
+        }
+        return;
+      }
       this.pending.delete(response.id);
       if (this.pending.size === 0) this.disarmWatchdog();
       if (response.ok) pending.resolve(response);
@@ -214,7 +277,11 @@ export class ResidentEngineWorkerClient {
           this.lastFailedFontsSnapshotId = this.nextId - 1;
         }
         pending.reject(
-          response.code === 'save-unavailable'
+          response.commandError
+            ? response.failureCode
+              ? new SessionFailure(response.failureCode, response.commandError.message)
+              : Object.assign(new Error(response.commandError.message), response.commandError)
+            : response.code === 'save-unavailable'
             ? new ResidentWorkerSaveUnavailableError(response.error)
             : residentWorkerError(response.error, response.residentUnavailable)
         );
@@ -224,12 +291,91 @@ export class ResidentEngineWorkerClient {
       this.fail(new ResidentWorkerFailureError(`Resident engine worker failed: ${event.message}`));
     };
     this.worker.onmessageerror = () => {
-      this.fail(new ResidentWorkerFailureError('Resident engine worker returned an unreadable message'));
+      const message = 'Resident engine worker returned an unreadable message';
+      this.fail(this.commandSession ? new SessionFailure('message', message) : new ResidentWorkerFailureError(message));
     };
   }
 
   isReady(): boolean {
     return this.ready;
+  }
+
+  get commandGeneration(): number {
+    return this.commandGenerationValue;
+  }
+
+  get commandFailure(): Error | undefined {
+    return this.terminalError ?? undefined;
+  }
+
+  commandInitialGeneration(initial: ResidentCommandInitReply): number | undefined {
+    return this.commandInitialGenerations.get(initial);
+  }
+
+  async commandInit(request: ResidentCommandInitRequest): Promise<ResidentCommandInitReply> {
+    this.commandSession = true;
+    const generation = this.commandGeneration;
+    const response = await this.request({ type: 'commandInit', request });
+    if (generation !== this.commandGeneration) {
+      discardCommandPresentation(response.commandInitial?.frame);
+      throw new SessionFailure('disposed', 'Resident command initialization was superseded');
+    }
+    const initial = response.commandInitial;
+    if (!initial || !isCommandAck(initial) || initial.selection === undefined ||
+      initial.editState === undefined || !initial.frame) {
+      discardCommandPresentation(initial?.frame);
+      throw new SessionFailure('message', 'Resident command initialization omitted its state or frame');
+    }
+    this.commandInitialGenerations.set(initial, generation);
+    this.commandIdentity = { session: initial.session, incarnation: initial.incarnation, epoch: initial.epoch };
+    this.ready = true;
+    this.revision = initial.frame.payload.layoutRevision;
+    this.answeredFrameEpoch = Math.max(this.answeredFrameEpoch, initial.frame.revision);
+    return initial;
+  }
+
+  async edit(command: DocxCommandEnvelope): Promise<DocxCommandAck> {
+    const response = await this.request({ type: 'edit', command });
+    return this.commandAck(response);
+  }
+
+  async checkpoint(): Promise<Checkpoint> {
+    const response = await this.request({ type: 'checkpoint' });
+    if (!response.checkpoint || !(response.checkpoint.state instanceof Uint8Array)) {
+      throw new SessionFailure('message', 'Resident command checkpoint omitted its state');
+    }
+    return response.checkpoint;
+  }
+
+  async requestFullFrame(): Promise<DocxCommandAck> {
+    return this.commandAck(await this.request({ type: 'requestFullFrame' }));
+  }
+
+  async requestViewport(request: ResidentCommandViewportRequest): Promise<void> {
+    await this.request({ type: 'commandViewport', request });
+  }
+
+  onFrame(listener: (frame: DocxCommandFrame) => void): () => void {
+    this.frameListeners.add(listener);
+    return () => { this.frameListeners.delete(listener); };
+  }
+
+  async applyRemoteUpdate(update: Uint8Array): Promise<void> {
+    const owned = update.slice();
+    await this.request({ type: 'commandUpdate', update: owned }, [owned.buffer]);
+  }
+
+  private commandAck(response: ResidentEngineWorkerResponse & { ok: true }): DocxCommandAck {
+    const frame = response.commandAck?.frame;
+    if (!response.commandAck || !isCommandAck(response.commandAck)) {
+      discardCommandPresentation(frame);
+      throw new SessionFailure('message', 'Resident command response omitted its acknowledgement');
+    }
+    if (response.commandAck.frame) {
+      this.answeredFrameEpoch = Math.max(this.answeredFrameEpoch, response.commandAck.frame.revision);
+      this.revision = response.commandAck.frame.payload.layoutRevision;
+    }
+    return response.commandAck;
   }
 
   /** @internal */
@@ -301,6 +447,7 @@ export class ResidentEngineWorkerClient {
    * new document's pages paint where the old ones were.
    */
   rebootstrap(): void {
+    if (this.commandSession) this.fenceCommands();
     this.documentSequence += 1;
     this.bootstrapped = false;
     this.remoteVector = null;
@@ -617,11 +764,14 @@ export class ResidentEngineWorkerClient {
       );
     }
     const fontsRevision = snapshot.fontsRevision;
+    const commandReplacement = this.commandSession && !options.opened;
+    if (commandReplacement) this.fenceCommands();
     this.bootstrapped = true;
     for (const resolve of this.bootstrapWaiters.splice(0)) resolve();
     const keepSurfaces = this.keepSurfaces;
     this.keepSurfaces = false;
     const generation = ++this.bootstraps;
+    const commandGeneration = this.commandGeneration;
     const pending = this.request(
       {
         type: 'bootstrap',
@@ -660,6 +810,22 @@ export class ResidentEngineWorkerClient {
       throw error;
     }
     const result = frameResult(response);
+    if (commandReplacement) {
+      if (generation !== this.bootstraps) {
+        discardCommandPresentation(response.commandInitial?.frame);
+        throw new SessionFailure('disposed', 'Resident command replacement was superseded');
+      }
+      const initial = response.commandInitial;
+      if (!initial || !isCommandAck(initial) || initial.selection === undefined ||
+        initial.editState === undefined || !initial.frame || initial.frame.baseRevision !== undefined) {
+        discardCommandPresentation(initial?.frame);
+        throw new SessionFailure('message', 'Resident replacement omitted its initial command state');
+      }
+      result.commandInitial = initial;
+      this.commandInitialGenerations.set(initial, commandGeneration);
+      this.commandIdentity = { session: initial.session, incarnation: initial.incarnation, epoch: initial.epoch };
+      this.commandReplacementPending = false;
+    }
     this.recordSync(response, fontsRevision);
     this.ready = true;
     this.revision = result.layoutRevision;
@@ -916,6 +1082,11 @@ export class ResidentEngineWorkerClient {
     transfer: Transferable[] = []
   ): Promise<ResidentEngineWorkerResponse & { ok: true }> {
     if (this.terminalError) return Promise.reject(this.terminalError);
+    if (this.commandReplacementPending &&
+      (request.type === 'edit' || request.type === 'checkpoint' || request.type === 'requestFullFrame' ||
+        request.type === 'commandUpdate' || request.type === 'buildPages' || request.type === 'commandViewport')) {
+      return Promise.reject(new SessionFailure('disposed', 'Resident command document is being replaced'));
+    }
     if (
       request.type === 'open' ||
       ((request.type === 'bootstrap' || request.type === 'sync') &&
@@ -931,6 +1102,23 @@ export class ResidentEngineWorkerClient {
       this.pending.set(id, { type: request.type, resolve, reject });
       this.worker.postMessage({ ...request, id } as ResidentEngineWorkerRequest, transfer);
     });
+  }
+
+  private fenceCommands(): void {
+    this.commandReplacementPending = true;
+    this.commandGenerationValue += 1;
+    this.commandIdentity = null;
+    const failure = new SessionFailure('disposed', 'Resident command document was replaced');
+    const listener = this.failureListener;
+    this.failureListener = null;
+    for (const [id, pending] of this.pending) {
+      if (pending.type !== 'edit' && pending.type !== 'checkpoint' && pending.type !== 'requestFullFrame' &&
+        pending.type !== 'commandUpdate' && pending.type !== 'buildPages' && pending.type !== 'commandViewport') continue;
+      this.pending.delete(id);
+      pending.reject(failure);
+    }
+    if (this.pending.size === 0) this.disarmWatchdog();
+    listener?.(failure);
   }
 
   /**
@@ -951,10 +1139,9 @@ export class ResidentEngineWorkerClient {
     this.watchdog = setTimeout(() => {
       this.watchdog = null;
       const waiting = this.pending.values().next().value?.type ?? 'a request';
+      const message = `Resident engine worker did not answer ${waiting} within ${RESIDENT_WORKER_SILENCE_MS}ms`;
       this.fail(
-        new ResidentWorkerFailureError(
-          `Resident engine worker did not answer ${waiting} within ${RESIDENT_WORKER_SILENCE_MS}ms`
-        )
+        this.commandSession ? new SessionFailure('silence', message) : new ResidentWorkerFailureError(message)
       );
     }, RESIDENT_WORKER_SILENCE_MS);
   }
@@ -984,6 +1171,7 @@ export class ResidentEngineWorkerClient {
     this.worker.terminate();
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
+    this.frameListeners.clear();
     for (const resolve of this.bootstrapWaiters.splice(0)) resolve();
     if (notify && first) this.failureListener?.(error);
   }

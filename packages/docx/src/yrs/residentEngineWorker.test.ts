@@ -1,8 +1,9 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { afterEach, beforeAll, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
 import { applyFrameDeltaOwned, decodeFrameDelta } from '../layout/render/frameDelta';
+import { encodeDisplayListFrameExtras, loadRustDisplayListQueryEngine, loadedRustDisplayListQueryEngine } from '../layout/render/rustDisplayList';
 import { createResidentEngineSession, type ResidentEngineSession } from './residentEngineSession';
 import type { ResidentSaveRecord } from './residentSave';
 import { syntheticDocx } from './__fixtures__/previewChain';
@@ -17,7 +18,21 @@ import { findBodyMatches } from './findMatches';
 import { createYrsInputPositionMap } from './inputPositionMap';
 import { createYrsPositionProjection, yrsLocToProjectedDisplayPosition } from './yrsPositionProjection';
 import { preloadEditWasm } from './wasm/index';
+import * as editWasm from './wasm/index';
+import { preloadOpcWasm } from '../wasm/opc';
 import { PeerMetadataError } from './peerMetadata';
+import { ResidentEngineWorkerClient, type ResidentEngineWorkerPort } from './residentEngineWorkerClient';
+import { createResidentCommandConnection } from './residentCommandConnection';
+import { createDocxWorkerEditSession } from './createDocxWorkerEditSession';
+import type {
+  DocxCommandEnvelope,
+  DocxCommandFrame,
+  DocxEditState,
+  ResidentCommandConnection,
+  ResidentCommandHooksFactory,
+  ResidentCommandInitRequest,
+} from './residentCommandProtocol';
+import type { ResidentScheduler, SchedulerMessage } from './residentScheduler';
 import type { DecodedFrameDelta, FramePageOperation } from '../layout/render/frameDelta';
 import type { DisplayPage } from '../layout/render/displayList';
 import type {
@@ -38,17 +53,20 @@ import {
   type ResidentProposalOperation,
 } from './residentEngineWorkerProtocol';
 
-let startWorker: (scope: unknown, canvas: unknown, harness: unknown, clock: unknown) => void;
+let startWorker: (scope: unknown, canvas: unknown, harness: unknown, clock: unknown, fetch: unknown, decode: unknown) => void;
 
 beforeAll(async () => {
   const frameDelta = resolve(import.meta.dir, '../layout/render/frameDelta.ts');
+  const scheduler = resolve(import.meta.dir, 'residentScheduler.ts');
   const modules: Record<string, string> = {
     './residentEngineSession':
       `export const createResidentEngineSession = async (heapLimitBytes) => {
         await testHarness.preload();
         testHarness.sessionsCreated += 1;
         (testHarness.heapLimits ??= []).push(heapLimitBytes);
-        return testHarness.session;
+        return testHarness.createSession
+          ? testHarness.createSession(heapLimitBytes)
+          : testHarness.session;
       };`,
     './wasm/index': `
       export const preloadEditWasm = () => testHarness.preload();
@@ -57,9 +75,21 @@ beforeAll(async () => {
     '../layout/render/glyphCache':
       'export class GlyphCache { constructor(options) { testHarness.glyphs = options.provider; testHarness.glyphCacheCreations += 1; } }',
     '../wasm/loadWasmAsset': 'export const wasmModuleMemories = () => testHarness.memories;',
+    './residentCommandViewProjection':
+      'export const projectCommandEchoContext = () => undefined;',
     '../layout/render/frameDelta': `
-      export { applyFrameDeltaOwned, retainedFramePageById } from ${JSON.stringify(frameDelta)};
-      export const decodeFrameDelta = () => testHarness.delta;
+      export { applyFrameDelta, applyFrameDeltaOwned, retainedFramePageById } from ${JSON.stringify(frameDelta)};
+      export const decodeFrameDelta = () => { testHarness.decodes += 1; return testHarness.delta; };
+    `,
+    './residentScheduler': `
+      import { createResidentScheduler as create } from ${JSON.stringify(scheduler)};
+      export const createResidentScheduler = (host) => {
+        const scheduler = create(host);
+        testHarness.scheduler = scheduler;
+        const submit = scheduler.submit;
+        scheduler.submit = (message) => { testHarness.messages.push(message); submit(message); };
+        return scheduler;
+      };
     `,
     '../layout/render/canvasBackend': `
       export const rasterizeDisplayPageToBackBuffer = (...args) => testHarness.rasterize(...args);
@@ -76,8 +106,21 @@ beforeAll(async () => {
       {
         name: 'isolated-worker-dependencies',
         setup(build) {
+          build.onLoad({ filter: /\/rustDisplayList\.ts$/ }, () => ({
+            contents: `
+              export const encodeDisplayListFrameExtras = (...args) => testHarness.encodeDisplayListFrameExtras(...args);
+              export const loadRustDisplayListQueryEngine = () => testHarness.loadRustDisplayListQueryEngine();
+              export const loadedRustDisplayListQueryEngine = () => testHarness.loadedRustDisplayListQueryEngine();
+            `,
+            loader: 'js',
+          }));
+          build.onLoad({ filter: /\/residentEngineWorker\.ts$/ }, ({ path }) => ({
+            contents: `${readFileSync(path, 'utf8')}\ntestHarness.installCommands = setResidentCommandHooksFactory; testHarness.pendingPages = pendingOffscreenPageIds;`,
+            loader: 'ts',
+          }));
           build.onResolve({ filter: /.*/ }, ({ path, importer }) =>
-            importer.endsWith('/residentEngineWorker.ts') && path in modules
+            (importer.endsWith('/residentEngineWorker.ts') ||
+              (importer.endsWith('/residentCommandFrame.ts') && path === '../layout/render/frameDelta')) && path in modules
               ? { path, namespace: 'worker-test' }
               : undefined
           );
@@ -95,6 +138,8 @@ beforeAll(async () => {
     'OffscreenCanvas',
     'testHarness',
     'performance',
+    'fetch',
+    'createImageBitmap',
     await result.outputs[0].text()
   ) as typeof startWorker;
 });
@@ -102,6 +147,16 @@ beforeAll(async () => {
 class Surface {
   pixels: string | null = null;
   constructor(public width = 1, public height = 1) {}
+  getContext(_kind: string) {
+    return { drawImage: (source: Surface) => { this.pixels = source.pixels; } };
+  }
+  transferToImageBitmap(): ImageBitmap {
+    const bitmap = new Surface(this.width, this.height);
+    bitmap.pixels = this.pixels;
+    this.pixels = null;
+    return bitmap as unknown as ImageBitmap;
+  }
+  close() { this.pixels = null; }
 }
 
 function worker() {
@@ -122,6 +177,27 @@ function worker() {
     },
   };
   const harness = {
+    encodeDisplayListFrameExtras, loadRustDisplayListQueryEngine, loadedRustDisplayListQueryEngine,
+    createSession: null as ((heapLimitBytes?: number) => Promise<ResidentEngineSession>) | null,
+    installCommands: null as ((factory: ResidentCommandHooksFactory) => void) | null,
+    scheduler: null as ResidentScheduler | null,
+    messages: [] as SchedulerMessage[],
+    decodes: 0,
+    commandText: null as string | null,
+    pendingPages: null as Set<string> | null,
+    failImageDecode: false,
+    imageDecodes: 0,
+    resolvedImages: [] as unknown[],
+    async fetchImage(source: string) { return { blob: async () => new Blob([source]) }; },
+    async decodeImage(_blob?: Blob) {
+      harness.imageDecodes += 1;
+      if (harness.failImageDecode) throw new Error('unsupported image');
+      return new Surface() as unknown as ImageBitmap;
+    },
+    updateListeners: new Set<(update: Uint8Array) => void>(),
+    emitUpdate() {
+      for (const listener of harness.updateListeners) listener(new Uint8Array([8, 9]));
+    },
     now: () => performance.now(),
     initializations: 0,
     glyphCacheCreations: 0,
@@ -167,6 +243,7 @@ function worker() {
     memories: [{ label: 'docx-edit', bufferBytes: 65536, liveBytes: 100, peakBytes: 100, failedAllocationBytes: 0 }],
     session: {
       proposalEngine: { version: () => 'v' },
+      geometryReader: { storyIds: () => ['body'] },
       markProjectionStories(_stories: readonly string[]) {},
       loadState(state: Uint8Array) {
         harness.loadedStates.push(state);
@@ -212,8 +289,9 @@ function worker() {
       retainedHeadersFootersJson(): string | undefined {
         return undefined;
       },
-      onUpdate() {
-        return () => {};
+      onUpdate(listener: (update: Uint8Array) => void) {
+        harness.updateListeners.add(listener);
+        return () => { harness.updateListeners.delete(listener); };
       },
       buildDisplayListFrame() {
         return new Uint8Array([frameEpoch]);
@@ -260,24 +338,27 @@ function worker() {
     async rasterize(
       buffer: Surface,
       page: DisplayPage,
-      _options: unknown,
+      options: { resolveImage?: (source: string) => unknown },
       dpr: number,
-      zoom: number
+      zoom = 1
     ) {
       const id = page.pageIndex + 1;
       harness.rasterized.push(id);
       harness.buffers.push(buffer);
+      for (const primitive of page.primitives) {
+        if (primitive.kind === 'image') harness.resolvedImages.push(await options.resolveImage?.(primitive.relId));
+      }
       if (harness.failRaster === id) {
         harness.failRaster = null;
         throw new Error('raster failed');
       }
       buffer.width = page.width * dpr * zoom;
       buffer.height = page.height * dpr * zoom;
-      buffer.pixels = `${id}:${page.width}`;
+      buffer.pixels = harness.commandText ?? `${id}:${page.width}`;
     },
     present(canvas: Surface, buffer: Surface) {
       if (!buffer.pixels) throw new Error('presented a detached buffer');
-      const id = Number(buffer.pixels.split(':')[0]);
+      const id = harness.commandText === null ? Number(buffer.pixels.split(':')[0]) : 1;
       if (harness.failPresent === id) {
         harness.failPresent = null;
         throw new Error('present failed');
@@ -301,7 +382,8 @@ function worker() {
       canvas.height = buffer.height;
     },
   };
-  startWorker(scope, Surface, harness, { now: () => harness.now() });
+  startWorker(scope, Surface, harness, { now: () => harness.now() },
+    (source: string) => harness.fetchImage(source), (blob: Blob) => harness.decodeImage(blob));
   function send(request: ResidentEngineWorkerRequestWithoutId) {
     const id = ++nextId;
     return new Promise<ResidentEngineWorkerResponse>((resolve) => {
@@ -428,6 +510,1146 @@ function worker() {
 function caret(page: number): YrsResidentCaretRect {
   return { pageIndex: page - 1, pageId: String(page), x: 5, y: 6, height: 12 };
 }
+
+const COMMAND_INIT: ResidentCommandInitRequest = {
+  session: 'resident-dispatch-test', incarnation: 1, epoch: 7, readOnly: false,
+  fonts: [], layoutInput: '', layoutWithRegions: false, layoutRevision: 1, extras: '{}',
+};
+
+async function commandWorker() {
+  const w = worker();
+  let terminated = false;
+  const posted: ResidentEngineWorkerRequest[] = [];
+  const replies: ResidentEngineWorkerResponse[] = [];
+  const held: ResidentEngineWorkerRequest[] = [];
+  let holdEdits = false;
+  const port: ResidentEngineWorkerPort = {
+    onmessage: null, onerror: null, onmessageerror: null,
+    postMessage(message) {
+      if ('id' in message) posted.push(message);
+      if (message.type === 'edit' && holdEdits) held.push(message);
+      else w.scope.onmessage({ data: message });
+    },
+    terminate() { terminated = true; },
+  };
+  const post = w.scope.postMessage;
+  w.scope.postMessage = (response, transfer) => {
+    replies.push(response);
+    post(response, transfer);
+    port.onmessage?.({ data: response } as MessageEvent<ResidentEngineWorkerResponse>);
+  };
+  w.harness.commandText = 'Seed';
+  Object.assign(w.harness.session, {
+    openDocx: () => '{}',
+    encodeState: () => new TextEncoder().encode(w.harness.commandText!),
+    buildDisplayListFrame: (_extras: string, expected: number) => {
+      w.delta([1], expected === 0, 100, 1);
+      return new Uint8Array([w.harness.delta!.frameEpoch]);
+    },
+    applyInput: () => {
+      w.delta([1], false, 100, 1);
+      return new Uint8Array([w.harness.delta!.frameEpoch]);
+    },
+    applyDelete: () => {
+      w.delta([1], false, 100, 1);
+      return new Uint8Array([w.harness.delta!.frameEpoch]);
+    },
+  });
+  w.harness.installCommands!((_engine, init) => {
+    const selection = init.selection ?? null;
+    const editState: DocxEditState = {
+      readOnly: init.readOnly, toolbar: null, effectiveFormatting: null, storedMarks: null,
+      canUndo: false, canRedo: false, hyperlink: null, tableContext: null,
+    };
+    return {
+      preflight(command) {
+        if (command.kind !== 'insertText' || !('text' in command.payload)) {
+          return { status: 'refused', reason: 'invalid-payload' };
+        }
+        return {
+          status: 'ready', prepared: {
+            command: { ...command, kind: 'insertText', payload: { text: command.payload.text } },
+            selection, range: null,
+          },
+        };
+      },
+      apply({ command }) {
+        if (command.kind !== 'insertText') throw new Error('Unexpected test command');
+        if (command.payload.text === 'throw') throw new Error('command apply failed');
+        w.harness.commandText += command.payload.text;
+        w.harness.emitUpdate();
+        return { status: 'applied' };
+      },
+      selection: () => selection,
+      editState: () => editState,
+    };
+  });
+  const client = new ResidentEngineWorkerClient(port);
+  await client.open(new Uint8Array([1]));
+  return {
+    w, client, posted, replies,
+    get terminated() { return terminated; },
+    holdEdits() { holdEdits = true; },
+    crash() { port.onerror?.({ message: 'command worker crashed' } as ErrorEvent); },
+    releaseEdits() {
+      holdEdits = false;
+      for (const message of held.splice(0)) w.scope.onmessage({ data: message });
+    },
+  };
+}
+
+function commandEnvelope(seq: number, text = '!'): DocxCommandEnvelope {
+  return {
+    session: COMMAND_INIT.session, incarnation: COMMAND_INIT.incarnation,
+    basis: { epoch: COMMAND_INIT.epoch, version: 0 }, seq, kind: 'insertText', payload: { text },
+  };
+}
+
+function replaceCommandDocument(client: ResidentEngineWorkerClient) {
+  return client.bootstrap({
+    clientId: 1, state: new Uint8Array(), selection: null,
+    fonts: [], fontsRevision: 0, renderInputs: [], measureInputs: [],
+    layoutInput: '', layoutWithRegions: false, layoutRevision: 2,
+  }, '{}');
+}
+
+async function nativeCommandWorker(withHeader = false, withImage = false) {
+  await preloadEditWasm(new Uint8Array(readFileSync(resolve(
+    import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm'
+  ))));
+  await preloadOpcWasm(new Uint8Array(readFileSync(resolve(
+    import.meta.dir, '../wasm/generated/opc/ooxml_opc_bg.wasm'
+  ))));
+  const parts: PartsMap = new Map();
+  parts.set('[Content_Types].xml', toBytes(
+    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'
+  ));
+  parts.set('_rels/.rels', toBytes(
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDoc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'
+  ));
+  parts.set('word/document.xml', toBytes(
+    `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p w14:paraId="00000001"><w:r><w:t>Seed</w:t></w:r></w:p><w:sectPr>${withHeader ? '<w:headerReference w:type="default" r:id="rIdHeader"/>' : ''}</w:sectPr></w:body></w:document>`
+  ));
+  if (withHeader) {
+    parts.set('[Content_Types].xml', toBytes(
+      '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/></Types>'
+    ));
+    parts.set('word/_rels/document.xml.rels', toBytes(
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdHeader" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/></Relationships>'
+    ));
+    parts.set('word/header1.xml', toBytes(
+      '<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:p w14:paraId="00000002"><w:r><w:t>Header</w:t></w:r></w:p></w:hdr>'
+    ));
+  }
+  if (withImage) {
+    const fixture = resolve(import.meta.dir, '__fixtures__/seed-parity/images/word');
+    parts.set('word/document.xml', new Uint8Array(readFileSync(resolve(fixture, 'document.xml'))));
+    parts.set('word/_rels/document.xml.rels', new Uint8Array(readFileSync(resolve(fixture, '_rels/document.xml.rels'))));
+    parts.set('word/media/image1.png', new Uint8Array(Buffer.from(readFileSync(resolve(fixture, 'media/image1.png.base64'), 'utf8'), 'base64')));
+    parts.set('[Content_Types].xml', toBytes(new TextDecoder().decode(parts.get('[Content_Types].xml')!)
+      .replace('</Types>', '<Default Extension="png" ContentType="image/png"/></Types>')));
+  }
+  const w = worker();
+  const engines: ResidentEngineSession[] = [];
+  let updateListeners = 0;
+  w.harness.createSession = async (heapLimitBytes) => {
+    const engine = await createResidentEngineSession(heapLimitBytes);
+    engines.push(engine);
+    return {
+      ...engine,
+      onUpdate(listener) {
+        updateListeners += 1;
+        const release = engine.onUpdate(listener);
+        return () => { updateListeners -= 1; release(); };
+      },
+      buildDisplayListFrame(extras, epoch) {
+        const frame = engine.buildDisplayListFrame(extras, epoch);
+        w.harness.delta = decodeFrameDelta(frame);
+        return frame;
+      },
+    };
+  };
+  w.harness.installCommands!((engine, init) => {
+    const selection = () => {
+      const current = engine.selection();
+      return current ? { anchor: current.anchor, focus: current.head } : null;
+    };
+    return {
+      preflight(command) {
+        if (command.kind !== 'insertText' || !('text' in command.payload)) {
+          return { status: 'refused', reason: 'invalid-payload' };
+        }
+        return {
+          status: 'ready', prepared: {
+            command: { ...command, kind: 'insertText', payload: { text: command.payload.text } },
+            selection: selection(), range: null,
+          },
+        };
+      },
+      apply({ command }) {
+        if (command.kind !== 'insertText') throw new Error('Unexpected test command');
+        engine.applyInput(command.payload.text, engine.residentCaretSnapshot().frameEpoch);
+        return { status: 'applied' };
+      },
+      selection,
+      editState: () => ({
+        readOnly: init.readOnly, toolbar: null, effectiveFormatting: null, storedMarks: null,
+        canUndo: false, canRedo: false, hyperlink: null, tableContext: null,
+      }),
+    };
+  });
+  expect((await w.send({ type: 'open', bytes: rezipPartsToArrayBuffer(parts) })).ok).toBe(true);
+  const read = engines[0]!.proposalEngine.readParagraphs({ view: 'accepted' });
+  if (!read.ok) throw new Error(read.failure.message);
+  const point = { story: 'body', paraId: read.paragraphs[0]!.paraId, offset: 4 };
+  const init: ResidentCommandInitRequest = {
+    ...COMMAND_INIT,
+    fonts: [new Uint8Array(readFileSync(resolve(
+      import.meta.dir, '../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'
+    )))],
+    layoutInput: JSON.stringify({
+      bodyStory: 'body', regions: { sections: [{
+        sectionId: 'main', properties: {},
+        ...(withHeader ? { headerFooterRefs: { headerDefault: 'rIdHeader' } } : {}),
+      }] },
+      measurement: { defaults: { fontSize: 11, fontFamily: 'Liberation Sans' } }, renderEnv: {},
+    }),
+    layoutWithRegions: true,
+    selection: { anchor: point, focus: point },
+  };
+  const snapshot = (): YrsResidentWorkerSnapshot => ({
+    clientId: 1, state: engines.at(-1)!.encodeState(), selection: engines.at(-1)!.selection(),
+    fonts: init.fonts, fontsRevision: 0, renderInputs: [], measureInputs: [],
+    layoutInput: init.layoutInput, layoutWithRegions: true, layoutRevision: 2,
+  });
+  return { w, engines, init, snapshot, get updateListeners() { return updateListeners; } };
+}
+
+test('d0_replacement_command_edit_saves_native_package_and_reopens', async () => {
+  const { w, engines, init, snapshot } = await nativeCommandWorker();
+  let reopened: ResidentEngineSession | undefined;
+  try {
+    expect((await w.send({ type: 'commandInit', request: init })).ok).toBe(true);
+    expect(await w.send({ type: 'edit', command: commandEnvelope(1, 'old') }))
+      .toMatchObject({ ok: true, commandAck: { version: 1 } });
+    const replacement = await w.send({
+      type: 'bootstrap', snapshot: snapshot(), extras: '{}', expectedFrameEpoch: 0,
+    });
+    expect(replacement).toMatchObject({
+      ok: true, commandInitial: { epoch: 8, version: 0, throughSeq: 0 },
+    });
+    expect(engines).toHaveLength(2);
+    expect(await w.send({
+      type: 'edit', command: { ...commandEnvelope(1, '!'), basis: { epoch: 8, version: 0 } },
+    })).toMatchObject({
+      ok: true, commandAck: { version: 1, outcomes: [{ seq: 1, status: 'applied' }] },
+    });
+    const saved = await w.send({ type: 'save', comments: [] });
+    expect(saved.ok).toBe(true);
+    if (!saved.ok || !saved.saved) throw new Error('Expected a saved native package');
+    reopened = await createResidentEngineSession();
+    reopened.openDocx(new Uint8Array(saved.saved));
+    const read = reopened.proposalEngine.readParagraphs({ view: 'accepted' });
+    expect(read.ok).toBe(true);
+    if (!read.ok) throw new Error(read.failure.message);
+    expect(read.paragraphs.map(({ text }) => text)).toEqual(['Seedold!']);
+  } finally {
+    reopened?.destroy();
+    for (const engine of engines) engine.destroy();
+  }
+}, 15_000);
+
+test('d0_replacement_save_preserves_restored_header_and_new_body_edits', async () => {
+  const { w, engines, init, snapshot } = await nativeCommandWorker(true);
+  let reopened: ResidentEngineSession | undefined;
+  try {
+    expect((await w.send({ type: 'commandInit', request: init })).ok).toBe(true);
+    engines[0]!.applyRawOps('hf:rIdHeader', [{ op: 'insert', index: 0, text: 'Edited ' }]);
+    expect(engines[0]!.geometryReader.paragraphs('hf:rIdHeader').map(({ text }) => text))
+      .toEqual(['Edited Header']);
+    expect(await w.send({
+      type: 'bootstrap', snapshot: snapshot(), extras: '{}', expectedFrameEpoch: 0,
+    })).toMatchObject({ ok: true, commandInitial: { epoch: 8, version: 0 } });
+    expect(engines).toHaveLength(2);
+    expect(engines[1]!.geometryReader.paragraphs('hf:rIdHeader').map(({ text }) => text))
+      .toEqual(['Edited Header']);
+    expect(await w.send({
+      type: 'edit', command: { ...commandEnvelope(1, '!'), basis: { epoch: 8, version: 0 } },
+    })).toMatchObject({
+      ok: true, commandAck: { version: 1, outcomes: [{ seq: 1, status: 'applied' }] },
+    });
+    const saved = await w.send({ type: 'save', comments: [] });
+    expect(saved.ok).toBe(true);
+    if (!saved.ok || !saved.saved) throw new Error('Expected a saved native package');
+    reopened = await createResidentEngineSession();
+    reopened.openDocx(new Uint8Array(saved.saved));
+    expect(reopened.geometryReader.paragraphs('body').map(({ text }) => text)).toEqual(['Seed!']);
+    expect(reopened.geometryReader.paragraphs('hf:rIdHeader').map(({ text }) => text))
+      .toEqual(['Edited Header']);
+  } finally {
+    reopened?.destroy();
+    for (const engine of engines) engine.destroy();
+  }
+}, 15_000);
+
+test('d0_callback_destroy_defers_native_cleanup_and_free_once', async () => {
+  const nativeCreate = editWasm.createEditSession;
+  const rawSessions: ReturnType<typeof nativeCreate>[] = [];
+  const create = spyOn(editWasm, 'createEditSession').mockImplementation((...args) => {
+    const raw = nativeCreate(...args);
+    rawSessions.push(raw);
+    return raw;
+  });
+  const engines: ResidentEngineSession[] = [];
+  try {
+    const arm = await nativeCommandWorker();
+    engines.push(...arm.engines);
+    const engine = engines[0]!;
+    const raw = rawSessions[0]!;
+    const clear = spyOn(raw, 'clear_update_observer');
+    const free = spyOn(raw, 'free');
+    let updates = 0;
+    try {
+      const release = engine.onUpdate(() => {
+        updates += 1;
+        release();
+        engine.destroy();
+        engine.destroy();
+      });
+      engine.applyRawOps('body', [{ op: 'insert', index: 0, text: 'Edited ' }]);
+      expect(updates).toBe(1);
+      expect(clear).not.toHaveBeenCalled();
+      expect(free).not.toHaveBeenCalled();
+      engine.destroy();
+      await Promise.resolve();
+      expect(clear).toHaveBeenCalledTimes(1);
+      expect(clear.mock.results[0]!.type).toBe('return');
+      expect(free).toHaveBeenCalledTimes(1);
+      expect(free.mock.results[0]!.type).toBe('return');
+      release();
+      engine.destroy();
+      await Promise.resolve();
+      expect(clear).toHaveBeenCalledTimes(1);
+      expect(free).toHaveBeenCalledTimes(1);
+    } finally {
+      engine.destroy();
+      clear.mockRestore();
+      free.mockRestore();
+    }
+  } finally {
+    for (const engine of engines) engine.destroy();
+    create.mockRestore();
+  }
+}, 15_000);
+
+test('d0_command_proposal_snapshots_survive_init_and_replacement_without_update_capture', async () => {
+  const arm = await nativeCommandWorker();
+  const { w, engines, init, snapshot } = arm;
+  try {
+    expect(await w.send({ type: 'proposal', operation: { kind: 'snapshot' } }))
+      .toMatchObject({ ok: false, error: 'Resident engine worker has not laid out its document' });
+    expect((await w.send({
+      type: 'bootstrap', opened: true, snapshot: snapshot(), extras: '{}', expectedFrameEpoch: 0,
+    })).ok).toBe(true);
+    expect(arm.updateListeners).toBe(1);
+    expect((await w.send({ type: 'commandInit', request: init })).ok).toBe(true);
+    expect(arm.updateListeners).toBe(0);
+    expect(await w.send({ type: 'proposal', operation: { kind: 'snapshot' } }))
+      .toMatchObject({ ok: true, proposal: { updates: [], mirror: { proposals: { entries: [] } } } });
+    expect((await w.send({
+      type: 'bootstrap', snapshot: snapshot(), extras: '{}', expectedFrameEpoch: 0,
+    })).ok).toBe(true);
+    expect(await w.send({ type: 'proposal', operation: { kind: 'snapshot' } }))
+      .toMatchObject({ ok: true, proposal: { updates: [], mirror: { proposals: { entries: [] } } } });
+    expect(arm.updateListeners).toBe(0);
+  } finally {
+    for (const engine of engines) engine.destroy();
+  }
+}, 15_000);
+
+test('d0_command_edits_skip_legacy_update_capture', async () => {
+  const { client, w } = await commandWorker();
+  const applyInput = w.harness.session.applyInput;
+  w.harness.session.applyInput = () => {
+    w.harness.emitUpdate();
+    return applyInput();
+  };
+  try {
+    const legacy = await client.bootstrap({
+      clientId: 1, state: new Uint8Array(), selection: null,
+      fonts: [], fontsRevision: 0, renderInputs: [], measureInputs: [],
+      layoutInput: '', layoutWithRegions: false, layoutRevision: 1,
+    }, '{}', { opened: true });
+    expect(w.harness.updateListeners.size).toBe(1);
+    w.harness.caret = caret(1);
+    const point = { story: 'body', paraId: 'p1', offset: 0 };
+    const edited = await client.applyInput('legacy', { anchor: point, head: point }, legacy.caret.frameEpoch);
+    expect(edited).toMatchObject({ applied: true, updates: [new Uint8Array([8, 9])] });
+    await client.commandInit(COMMAND_INIT);
+    expect(await client.edit(commandEnvelope(1))).toMatchObject({ version: 1, throughSeq: 1 });
+    expect(w.harness.updateListeners.size).toBe(0);
+    await replaceCommandDocument(client);
+    expect(await client.edit({ ...commandEnvelope(1), basis: { epoch: 8, version: 0 } }))
+      .toMatchObject({ version: 1, throughSeq: 1 });
+    expect(w.harness.updateListeners.size).toBe(0);
+  } finally {
+    client.destroy();
+  }
+}, 15_000);
+
+test('command_lazy_pages_and_remote_updates_repaint_at_same_coverage_without_full_frame_requests', async () => {
+  for (const background of [false, true]) {
+    const arm = await commandWorker();
+    const { client, w } = arm;
+    const layouts: string[] = [];
+    const layoutInput = JSON.stringify({
+      measured: [], retainOnly: true, workerOwned: { bodyStory: 'body' },
+    });
+    let relayoutPages = false;
+    function frameBytes(): Uint8Array {
+      const delta = w.harness.delta!;
+      const keys = ['pageIndex', 'width', 'height', 'primitives', 'unbuilt', 'positionSpan'];
+      const u32 = (value: number): number[] => {
+        const bytes = new Uint8Array(4);
+        new DataView(bytes.buffer).setUint32(0, value, true);
+        return [...bytes];
+      };
+      const encode = (value: number | boolean | readonly number[]): number[] => {
+        if (typeof value === 'boolean') return [value ? 2 : 1];
+        if (typeof value === 'number') {
+          const bytes = new Uint8Array(8);
+          new DataView(bytes.buffer).setFloat64(0, value, true);
+          return [5, ...bytes];
+        }
+        const body = value.flatMap((item) => encode(item));
+        return [7, ...u32(body.length), ...u32(value.length), ...body];
+      };
+      const payloads = delta.operations.map((operation) => {
+        if (operation.kind !== 'upsert') throw new Error('Expected a page upsert');
+        const values: Array<number | boolean | readonly number[]> = [
+          operation.pageIndex, operation.page.width, operation.page.height, [],
+          ...(operation.page.unbuilt ? [true, operation.page.positionSpan!] : []),
+        ];
+        const body = values.flatMap((value, index) => [...u32(index), ...encode(value)]);
+        return [8, ...u32(body.length), ...u32(values.length), ...body];
+      });
+      const strings = [...u32(keys.length), ...keys.flatMap((key) => {
+        const bytes = new TextEncoder().encode(key);
+        return [...u32(bytes.length), ...bytes];
+      })];
+      const stringsOffset = 80 + 48 * payloads.length;
+      const dataOffset = Math.ceil((stringsOffset + strings.length) / 8) * 8;
+      const sizes = payloads.map((payload, index) => index === payloads.length - 1
+        ? payload.length : Math.ceil(payload.length / 8) * 8);
+      const bytes = new Uint8Array(dataOffset + sizes.reduce((total, size) => total + size, 0));
+      const view = new DataView(bytes.buffer);
+      bytes.set([0x46, 0x44, 0x56, 0x31]);
+      view.setUint16(4, 1, true);
+      view.setUint16(6, 80, true);
+      view.setUint32(8, bytes.length, true);
+      view.setUint32(12, delta.full ? 1 : 0, true);
+      for (const [offset, value] of [[16, delta.docEpoch], [24, delta.layoutEpoch],
+        [32, delta.frameEpoch], [40, delta.full ? 0 : delta.baseFrameEpoch]] as const) {
+        view.setBigUint64(offset, BigInt(value), true);
+      }
+      for (const [offset, value] of [[48, delta.pageCount], [52, payloads.length], [56, 80],
+        [60, stringsOffset], [64, strings.length], [68, dataOffset]] as const) view.setUint32(offset, value, true);
+      bytes.set(strings, stringsOffset);
+      let payloadOffset = dataOffset;
+      delta.operations.forEach((operation, index) => {
+        if (operation.kind !== 'upsert') throw new Error('Expected a page upsert');
+        const offset = 80 + index * 48;
+        bytes[offset] = 1;
+        view.setUint32(offset + 4, operation.pageIndex, true);
+        view.setBigUint64(offset + 8, operation.pageId, true);
+        view.setBigUint64(offset + 16, operation.fingerprint, true);
+        view.setUint32(offset + 28, payloadOffset, true);
+        view.setUint32(offset + 32, payloadOffset, true);
+        view.setUint32(offset + 36, payloads[index]!.length, true);
+        bytes.set(payloads[index]!, payloadOffset);
+        payloadOffset += sizes[index]!;
+      });
+      return bytes;
+    }
+    Object.assign(w.harness.session, {
+      layoutDocumentJson(input: string) { layouts.push(input); relayoutPages = true; },
+      buildDisplayListFrame(_extras: string, expected: number) {
+        const lazy = expected === 0 || relayoutPages;
+        relayoutPages = false;
+        w.delta(lazy ? [1, 2] : [1], expected === 0, 100, 2, lazy ? [1] : []);
+        return frameBytes();
+      },
+      buildDisplayPagesFrame(pages: number[], _expected: number) {
+        w.delta(pages.map((index) => index + 1), false, 100, 2);
+        return frameBytes();
+      },
+    });
+    const applyUpdate = w.harness.session.applyUpdate;
+    w.harness.session.applyUpdate = (update: Uint8Array) => {
+      applyUpdate(update);
+      w.harness.commandText += new TextDecoder().decode(update);
+    };
+    const connection = await createResidentCommandConnection(client, COMMAND_INIT);
+    const installed: DocxCommandFrame[] = [];
+    const retired: number[] = [];
+    const remaining: string[][] = [];
+    const applied: number[] = [];
+    const queued: Array<() => void> = [];
+    let retained: ReturnType<typeof applyFrameDeltaOwned> | null = null;
+    const surface = new Surface();
+    const session = createDocxWorkerEditSession<Uint8Array, string>({
+      source: new Uint8Array([1]), connection, enqueue(callback) { queued.push(callback); },
+      echo: {
+        paint() {}, drop() {},
+        present(frame, done, pending) {
+          for (const bytes of [...(frame.payload.pageFrames ?? []), frame.payload.frame]) {
+            const delta = decodeFrameDelta(bytes);
+            expect(delta.baseFrameEpoch).toBe(delta.full ? 0 : retained!.frameEpoch);
+            expect(applied).not.toContain(delta.frameEpoch);
+            retained = applyFrameDeltaOwned(retained, delta);
+            applied.push(delta.frameEpoch);
+          }
+          installed.push(frame);
+          retired.push(done.length);
+          remaining.push(pending.map(({ value }) => value));
+          const page = frame.payload.stagedPresentation!.pages.find(({ page }) => page.pageId === '1');
+          if (page) surface.getContext('2d').drawImage(page.bitmap as unknown as Surface);
+        },
+      },
+      recovery: { reopen: () => Promise.reject(new Error('Unexpected recovery')) },
+    });
+    try {
+      const ticket = session.submit('insertText', { text: 'pending' }, { echo: 'pending' });
+      let acknowledged = false;
+      let presented = false;
+      void ticket.ack.then(() => { acknowledged = true; });
+      void ticket.presented.then(() => { presented = true; });
+      expect(retained!.pages[1]!.page.unbuilt).toBe(true);
+      await client.attachCanvases([{ pageId: '1', canvas: surface as unknown as OffscreenCanvas }],
+        ['1'], 1, 1, { color: '#000', width: 1 });
+      const built = await client.buildPages([1], installed[0]!.revision, false, background);
+      expect(installed).toHaveLength(2);
+      expect(built?.frame.buffer).toBe(installed[1]!.payload.frame);
+      expect(retained!.pages[1]!.page.unbuilt).not.toBe(true);
+      expect(installed[1]).toMatchObject({ coversThroughSeq: 0, baseRevision: installed[0]!.revision });
+      await client.applyRemoteUpdate(new TextEncoder().encode(' remote'));
+      expect(installed).toHaveLength(3);
+      expect(installed[2]).toMatchObject({ coversThroughSeq: 0, baseRevision: installed[1]!.revision });
+      expect(installed[2]!.revision).toBeGreaterThan(installed[1]!.revision);
+      expect(surface.pixels).toBe('Seed remote');
+      expect(layouts).toEqual([COMMAND_INIT.layoutInput, layoutInput, layoutInput]);
+      expect(session.state).toMatchObject({ version: 0, throughSeq: 0, presentedThroughSeq: 0 });
+      expect(retired).toEqual([0, 0, 0]);
+      expect(remaining.slice(1)).toEqual([['pending'], ['pending']]);
+      await Promise.resolve();
+      expect(acknowledged).toBe(false);
+      expect(presented).toBe(false);
+      expect(arm.posted.filter(({ type }) => type === 'requestFullFrame' || type === 'edit')).toEqual([]);
+      expect(arm.replies.filter((response) => response.ok && response.commandFrame)).toHaveLength(2);
+      expect(await client.checkpoint()).toMatchObject({
+        state: new TextEncoder().encode('Seed remote'), version: 0, throughSeq: 0,
+      });
+      const blocked = deferred();
+      const entered = deferred();
+      w.harness.scheduler!.submit({ lane: 'interactive', run: async () => {
+        entered.resolve();
+        await blocked.promise;
+      } });
+      await entered.promise;
+      const base = retained!.frameEpoch;
+      const replyStart = arm.replies.length;
+      const updated = client.applyRemoteUpdate(new TextEncoder().encode(' combined'));
+      const pages = client.buildPages([1], base, false, background);
+      const admission = deferred();
+      const waiting = deferred();
+      w.harness.scheduler!.submit({ lane: 'interactive', run: async () => {
+        waiting.resolve();
+        await admission.promise;
+      } });
+      while (queued.length) queued.shift()!();
+      expect(arm.posted.at(-1)?.type).toBe('edit');
+      blocked.resolve();
+      await waiting.promise;
+      expect(installed).toHaveLength(3);
+      expect(arm.replies.slice(replyStart)).toEqual([]);
+      expect(w.harness.commandText).toBe('Seed remote');
+      expect(acknowledged).toBe(false);
+      expect(presented).toBe(false);
+      admission.resolve();
+      await ticket.ack;
+      expect(await ticket.presented).toBe('presented');
+      await updated;
+      const combined = await pages;
+      const returned = arm.replies.slice(replyStart).flatMap((response) => response.ok
+        ? response.commandAck?.frame ? [response.commandAck.frame]
+          : response.commandFrame ? [response.commandFrame.frame] : [] : []);
+      expect(returned).toHaveLength(3);
+      expect(returned.map(({ coversThroughSeq }) => coversThroughSeq)).toEqual([1, 1, 1]);
+      expect(returned.map(({ revision, baseRevision }) => [revision, baseRevision])).toEqual([
+        [base + 2, base], [base + 3, base + 2], [base + 4, base + 3],
+      ]);
+      expect(returned[0]!.payload.pageFrames).toHaveLength(1);
+      expect(returned.slice(1).map(({ payload }) => payload.pageFrames)).toEqual([undefined, undefined]);
+      const preceding = decodeFrameDelta(returned[0]!.payload.pageFrames![0]!);
+      const builtPages = decodeFrameDelta(returned[0]!.payload.frame);
+      expect([preceding.frameEpoch, preceding.baseFrameEpoch]).toEqual([base + 1, base]);
+      expect([builtPages.frameEpoch, builtPages.baseFrameEpoch]).toEqual([base + 2, base + 1]);
+      expect(preceding.operations.map(({ pageId }) => pageId)).toEqual([1n, 2n]);
+      expect(preceding.operations[1]).toMatchObject({ kind: 'upsert', page: { unbuilt: true } });
+      expect(builtPages.operations.map(({ pageId }) => pageId)).toEqual([2n]);
+      expect(installed.slice(3)).toEqual(returned);
+      expect(applied).toEqual(Array.from({ length: base + 4 }, (_, index) => index + 1));
+      expect(new Set(applied).size).toBe(applied.length);
+      expect(combined?.frame.buffer).toBe(returned[2]!.payload.frame);
+      expect(retained!.pages[1]!.page.unbuilt).not.toBe(true);
+      expect(retired).toEqual([0, 0, 0, 1, 0, 0]);
+      expect(remaining.slice(3)).toEqual([[], [], []]);
+      expect(layouts).toEqual([COMMAND_INIT.layoutInput, layoutInput, layoutInput, layoutInput, layoutInput]);
+      expect(surface.pixels).toBe('Seed remotepending combined');
+      expect(session.state).toMatchObject({ version: 1, throughSeq: 1, presentedThroughSeq: 1 });
+      expect(arm.posted.filter(({ type }) => type === 'requestFullFrame')).toEqual([]);
+      expect(await client.checkpoint()).toMatchObject({
+        state: new TextEncoder().encode('Seed remotepending combined'), version: 1, throughSeq: 1,
+      });
+    } finally {
+      await session.dispose();
+      client.destroy();
+    }
+  }
+}, 15_000);
+
+test('command_applied_edit_with_queued_pages_emits_preceding_display_list_frame', async () => {
+  for (const full of [false, true]) {
+    const arm = await commandWorker();
+    const { client, w } = arm;
+    const blocked = deferred();
+    const entered = deferred();
+    try {
+      const initial = await client.commandInit(COMMAND_INIT);
+      const frames: Array<{ kind: string; delta: DecodedFrameDelta }> = [];
+      Object.assign(w.harness.session, {
+        buildDisplayListFrame(_extras: string, expected: number) {
+          expect(expected).toBe(w.harness.delta!.frameEpoch);
+          w.delta(frames.length && !full ? [1] : [1, 2], full, 100, 2, frames.length ? [] : [1]);
+          frames.push({ kind: 'list', delta: w.harness.delta! });
+          return new Uint8Array([w.harness.delta!.frameEpoch]);
+        },
+        buildDisplayPagesFrame(pages: number[], expected: number) {
+          expect(pages).toEqual([1]);
+          expect(expected).toBe(w.harness.delta!.frameEpoch);
+          w.delta([2], false, 100, 2);
+          frames.push({ kind: 'pages', delta: w.harness.delta! });
+          return new Uint8Array([w.harness.delta!.frameEpoch]);
+        },
+      });
+      w.harness.scheduler!.submit({ lane: 'interactive', run: async () => {
+        entered.resolve();
+        await blocked.promise;
+      } });
+      await entered.promise;
+      const pages = client.buildPages([1], initial.frame.revision);
+      const edit = client.edit(commandEnvelope(1));
+      blocked.resolve();
+      const ack = await edit;
+      await pages;
+      expect(ack).toMatchObject({ version: 1, throughSeq: 1, outcomes: [{ seq: 1, status: 'applied' }] });
+      expect(w.harness.commandText).toBe('Seed!');
+      expect(arm.posted.filter(({ type }) => type === 'commandUpdate' || type === 'requestFullFrame')).toEqual([]);
+      expect(frames.map(({ kind }) => kind)).toEqual(['list', 'pages', 'list']);
+      const preceding = frames[0]!.delta;
+      const builtPages = frames[1]!.delta;
+      expect(ack.frame).toMatchObject({ coversThroughSeq: 1, revision: builtPages.frameEpoch });
+      expect(ack.frame!.payload.pageFrames).toHaveLength(1);
+      expect(new Uint8Array(ack.frame!.payload.pageFrames![0]!)).toEqual(new Uint8Array([preceding.frameEpoch]));
+      expect(new Uint8Array(ack.frame!.payload.frame)).toEqual(new Uint8Array([builtPages.frameEpoch]));
+      expect(preceding.full).toBe(full);
+      expect(builtPages.full).toBe(false);
+      expect(preceding.baseFrameEpoch).toBe(initial.frame.revision);
+      expect(builtPages.baseFrameEpoch).toBe(preceding.frameEpoch);
+      expect(ack.frame!.baseRevision).toBe(full ? undefined : preceding.baseFrameEpoch);
+      const clean = await client.buildPages([1], frames.at(-1)!.delta.frameEpoch);
+      expect(frames.map(({ kind }) => kind)).toEqual(['list', 'pages', 'list', 'pages']);
+      expect(clean?.pageFrames).toBeUndefined();
+    } finally {
+      blocked.resolve();
+      client.destroy();
+    }
+  }
+}, 15_000);
+
+test.each(['commandUpdate', 'buildPages'] as const)(
+  '%s frame rendering serializes canvas replay', async (kind) => {
+    const { client, w } = await commandWorker();
+    const paint = deferred();
+    const entered = deferred();
+    const attaching = deferred();
+    try {
+      const initial = await client.commandInit(COMMAND_INIT);
+      const surface = new Surface();
+      await client.attachCanvases([{ pageId: '1', canvas: surface as unknown as OffscreenCanvas }],
+        ['1'], 1, 1, { color: '#000', width: 1 });
+      w.harness.session.buildDisplayPagesFrame = () => {
+        w.delta([1], false, 100, 1);
+        return new Uint8Array([w.harness.delta!.frameEpoch]);
+      };
+      w.resetCalls();
+      const rasterize = w.harness.rasterize;
+      let rasterCalls = 0;
+      w.harness.rasterize = async (...args) => {
+        rasterCalls += 1;
+        if (rasterCalls === 1) {
+          entered.resolve();
+          await paint.promise;
+        }
+        await rasterize(...args);
+      };
+      const framed = kind === 'commandUpdate'
+        ? client.applyRemoteUpdate(new Uint8Array([7]))
+        : client.buildPages([0], initial.frame.revision);
+      await entered.promise;
+      const scheduler = w.harness.scheduler!;
+      const submit = scheduler.submit;
+      scheduler.submit = (message) => submit({ ...message,
+        run: () => { attaching.resolve(); return message.run(); },
+      });
+      const attached = client.attachCanvases([], ['1'], 1, 2, { color: '#000', width: 1 });
+      scheduler.submit = submit;
+      await attaching.promise;
+      expect(rasterCalls).toBe(1);
+      expect(surface.pixels).toBe('Seed');
+      paint.resolve();
+      await framed;
+      await attached;
+      expect(rasterCalls).toBe(2);
+      expect(w.harness.presented).toEqual([1]);
+      expect(surface.pixels).toBe('Seed');
+      expect(surface.width).toBe(200);
+      expect(client.hasFailed()).toBe(false);
+    } finally {
+      paint.resolve();
+      client.destroy();
+    }
+  }, 15_000
+);
+
+test('d0_real_client_round_trips_init_edit_checkpoint_full_frame_and_error', async () => {
+  const arm = await commandWorker();
+  const { client, w } = arm;
+  try {
+    const initial = await client.commandInit(COMMAND_INIT);
+    expect(initial).toMatchObject({ epoch: 7, version: 0, throughSeq: 0, selection: null });
+    const decodes = w.harness.decodes;
+    const edited = await client.edit(commandEnvelope(1));
+    expect(edited).toMatchObject({ version: 1, throughSeq: 1, outcomes: [{ seq: 1, status: 'applied' }] });
+    expect(w.harness.commandText).toBe('Seed!');
+    expect(w.harness.decodes - decodes).toBe(1);
+    expect(edited.frame).toMatchObject({ revision: w.harness.delta!.frameEpoch, baseRevision: initial.frame.revision });
+    expect(await client.checkpoint()).toEqual({
+      state: new TextEncoder().encode('Seed!'), epoch: 7, version: 1, throughSeq: 1,
+    });
+    const full = await client.requestFullFrame();
+    expect(full.frame).toMatchObject({ coversThroughSeq: 1 });
+    expect(full.frame).not.toHaveProperty('baseRevision');
+    await expect(client.edit(commandEnvelope(2, 'throw'))).rejects.toMatchObject({
+      name: 'CommandOutcomeUnknown', refusal: { seq: 2 },
+    });
+    expect(arm.posted.map(({ type }) => type)).toEqual([
+      'open', 'commandInit', 'edit', 'checkpoint', 'requestFullFrame', 'edit',
+    ]);
+  } finally {
+    client.destroy();
+  }
+}, 15_000);
+
+test('d2c_command_image_decode_failure_preserves_initial_and_edit_frames', async () => {
+  const { client, w } = await commandWorker();
+  const build = (w.harness.session as unknown as ResidentEngineSession).buildDisplayListFrame;
+  Object.assign(w.harness.session, {
+    buildDisplayListFrame(extras: string, expected: number) {
+      const bytes = build(extras, expected);
+      w.harness.delta = { ...w.harness.delta!, operations: w.harness.delta!.operations.map((operation): FramePageOperation =>
+        operation.kind === 'upsert' ? { ...operation, page: { ...operation.page, primitives: [
+          { kind: 'image', relId: 'data:image/unsupported;base64,AA==', x: 0, y: 0, w: 10, h: 10 },
+          { kind: 'image', relId: 'data:image/unsupported;base64,AA==', x: 10, y: 0, w: 10, h: 10 },
+        ] } } : operation) };
+      return bytes;
+    },
+  });
+  w.harness.failImageDecode = true;
+  try {
+    const initial = await client.commandInit(COMMAND_INIT);
+    expect(initial.frame.payload.stagedPresentation?.pages).toHaveLength(1);
+    const ack = await client.edit(commandEnvelope(1));
+    expect(ack.outcomes).toMatchObject([{ seq: 1, status: 'applied' }]);
+    expect(ack.frame?.payload.stagedPresentation?.pages).toHaveLength(1);
+    expect(w.harness.imageDecodes).toBe(2);
+    expect(w.harness.resolvedImages).toEqual([null, null, null, null]);
+  } finally {
+    client.destroy();
+  }
+});
+
+test('d2c_command_edit_stages_only_the_damaged_visible_page', async () => {
+  const { client, w } = await commandWorker();
+  Object.assign(w.harness.session, {
+    buildDisplayListFrame(_extras: string, expected: number) {
+      w.delta(expected === 0 ? [1, 2, 3, 4, 5] : [1], expected === 0, 100, 5);
+      return new Uint8Array([w.harness.delta!.frameEpoch]);
+    },
+  });
+  try {
+    const initial = await client.commandInit(COMMAND_INIT);
+    expect(initial.frame.payload.stagedPresentation?.pages.map(({ page }) => page.pageId)).toEqual(['1', '2', '3']);
+    w.resetCalls();
+    const ack = await client.edit(commandEnvelope(1));
+    expect(w.harness.rasterized).toEqual([1]);
+    expect(ack.frame?.payload.stagedPresentation?.pages.map(({ page }) => page.pageId)).toEqual(['1']);
+  } finally {
+    client.destroy();
+  }
+});
+
+test('d2c_command_staging_consumes_damage_and_prunes_deleted_pages', async () => {
+  const { client, w } = await commandWorker();
+  Object.assign(w.harness.session, {
+    buildDisplayListFrame(_extras: string, expected: number) {
+      w.delta(expected === 0 ? [1, 2, 3, 4, 5] : [1], true, 100, expected === 0 ? 5 : 1);
+      return new Uint8Array([w.harness.delta!.frameEpoch]);
+    },
+  });
+  try {
+    await client.commandInit(COMMAND_INIT);
+    expect([...w.harness.pendingPages!]).toEqual(['4', '5']);
+    await client.edit(commandEnvelope(1));
+    expect([...w.harness.pendingPages!]).toEqual([]);
+  } finally {
+    client.destroy();
+  }
+});
+
+test.each(['window', 'requested', 'active'] as const)(
+  'd2c_command_stages_all_nine_damaged_%s_pages', async (visibility) => {
+    const { client, w, replies } = await commandWorker();
+    const pages = Array.from({ length: 9 }, (_, index) => index);
+    const pageIds = pages.map((index) => index + 1);
+    Object.assign(w.harness.session, {
+      buildDisplayListFrame(_extras: string, expected: number) {
+        w.delta(expected === 0 ? [...pageIds, 10, 11] : [...pageIds, 11], expected === 0, 100, 11);
+        return new Uint8Array([w.harness.delta!.frameEpoch]);
+      },
+      buildDisplayPagesFrame(indices: number[]) {
+        w.delta(indices.map((index) => index + 1), false, 100, 11);
+        return new Uint8Array([w.harness.delta!.frameEpoch]);
+      },
+    });
+    try {
+      const initial = await client.commandInit({ ...COMMAND_INIT,
+        displayWindow: [0, visibility === 'window' ? 9 : 1],
+      });
+      if (visibility === 'requested') {
+        await client.buildPages(pages, initial.frame.revision);
+        const reply = replies.at(-1)!;
+        expect(reply.ok ? reply.commandFrame?.frame.payload.stagedPresentation?.pages.map(({ page }) => page.pageId)
+          : undefined).toEqual(pageIds.map(String));
+      }
+      if (visibility === 'active') {
+        await client.attachCanvases(pageIds.map((id) => ({
+          pageId: String(id), canvas: new Surface() as unknown as OffscreenCanvas,
+        })), pageIds.map(String), 1, 1, { color: '#000', width: 1 });
+      }
+      w.resetCalls();
+      const ack = await client.edit(commandEnvelope(1));
+      expect(ack.frame?.coversThroughSeq).toBe(1);
+      expect(ack.frame?.payload.stagedPresentation?.pages.map(({ page }) => page.pageId)).toEqual(pageIds.map(String));
+      expect(w.harness.rasterized).toEqual(pageIds);
+      expect([...w.harness.pendingPages!]).toEqual(['10', '11']);
+    } finally {
+      client.destroy();
+    }
+  }
+);
+
+test('d2c_declined_echo_stages_outside_window_caret_and_tracks_page_build_viewport', async () => {
+  const { client, w } = await commandWorker();
+  const paint = deferred();
+  const entered = deferred();
+  let edits = 0;
+  Object.assign(w.harness.session, {
+    buildDisplayListFrame(_extras: string, expected: number) {
+      const ids = expected === 0 ? [1, 2, 3, 4, 5, 6] : ++edits === 1 ? [1, 6] : [1, 4, 6];
+      const [start, end] = w.harness.displayWindows.at(-1)!;
+      const unbuilt = ids.map((id) => id - 1).filter((index) =>
+        (index < start || index >= end) && index !== w.harness.caret?.pageIndex);
+      w.delta(ids, expected === 0, 100, 6, unbuilt);
+      return new Uint8Array([w.harness.delta!.frameEpoch]);
+    },
+    buildDisplayPagesFrame(pages: number[]) {
+      w.delta(pages.map((index) => index + 1), false, 100, 6);
+      return new Uint8Array([w.harness.delta!.frameEpoch]);
+    },
+  });
+  w.harness.caret = caret(1);
+  try {
+    await client.commandInit({ ...COMMAND_INIT, displayWindow: [0, 1] });
+    w.harness.caret = caret(6);
+    w.resetCalls();
+    const rasterize = w.harness.rasterize;
+    w.harness.rasterize = async (...args) => {
+      if (args[1].pageIndex === 5) {
+        entered.resolve();
+        await paint.promise;
+      }
+      await rasterize(...args);
+    };
+    let replied = false;
+    const edit = client.edit(commandEnvelope(1)).then((ack) => { replied = true; return ack; });
+    expect(await Promise.race([entered.promise.then(() => 'painting'), edit.then(() => 'reply')])).toBe('painting');
+    expect(replied).toBe(false);
+    paint.resolve();
+    const ack = await edit;
+    expect(ack.frame?.payload.echoContext).toBeUndefined();
+    expect(ack.frame?.coversThroughSeq).toBe(1);
+    expect(ack.frame?.payload.stagedPresentation?.pages.map(({ page }) => page.pageId)).toEqual(['6', '1']);
+    expect(w.harness.rasterized).toEqual([6, 1]);
+    await client.buildPages([3, 4], ack.frame!.revision);
+    expect(w.harness.displayWindows.at(-1)).toEqual([3, 5]);
+    w.resetCalls();
+    const next = await client.edit(commandEnvelope(2));
+    expect(next.frame?.payload.stagedPresentation?.pages.map(({ page }) => page.pageId)).toEqual(['6', '4']);
+    expect(w.harness.rasterized).toEqual([6, 4]);
+  } finally {
+    paint.resolve();
+    client.destroy();
+  }
+});
+
+test('d2c_command_bitmap_is_staged_before_edit_reply', async () => {
+  const { client, w } = await commandWorker();
+  const paint = deferred();
+  const entered = deferred();
+  try {
+    await client.commandInit(COMMAND_INIT);
+    const surface = new Surface();
+    await client.attachCanvases([{ pageId: '1', canvas: surface as unknown as OffscreenCanvas }],
+      ['1'], 1, 1, { color: '#000', width: 2 });
+    expect(surface.pixels).toBe('Seed');
+    const rasterize = w.harness.rasterize;
+    w.harness.rasterize = async (...args) => {
+      entered.resolve();
+      await paint.promise;
+      await rasterize(...args);
+    };
+    let replied = false;
+    const edit = client.edit(commandEnvelope(1)).then((ack) => { replied = true; return ack; });
+    expect(await Promise.race([entered.promise.then(() => 'painting'), edit.then(() => 'reply')])).toBe('painting');
+    expect(replied).toBe(false);
+    expect(surface.pixels).toBe('Seed');
+    paint.resolve();
+    const ack = await edit;
+    expect(ack).toMatchObject({ throughSeq: 1, version: 1 });
+    expect(ack.frame?.payload.stagedPresentation).toBeDefined();
+    const bitmap = ack.frame!.payload.stagedPresentation!.pages[0]!.bitmap;
+    expect((bitmap as unknown as Surface).pixels).toBe('Seed!');
+    expect(surface.pixels).toBe('Seed');
+  } finally {
+    paint.resolve();
+    client.destroy();
+  }
+}, 15_000);
+
+test('d0_replacement_fences_sent_and_queued_tickets_and_recreates_main_session', async () => {
+  const arm = await commandWorker();
+  const connection = await createResidentCommandConnection(arm.client, COMMAND_INIT);
+  const queued: (() => void)[] = [];
+  const options = {
+    source: new Uint8Array([1]), connection,
+    echo: { paint() {}, drop() {}, present() {} },
+    recovery: { reopen: () => Promise.reject(new Error('Unexpected recovery')) },
+    enqueue: (callback: () => void) => { queued.push(callback); },
+    maxInFlight: 1,
+  };
+  const old = createDocxWorkerEditSession(options);
+  let replacement: typeof old | undefined;
+  function pump() {
+    let remaining = 1024;
+    while (queued.length) {
+      if (--remaining < 0) throw new Error('Command queue did not drain');
+      queued.shift()!();
+    }
+  }
+  try {
+    arm.holdEdits();
+    const sent = old.submit('insertText', { text: 'old' });
+    const waiting = old.submit('insertText', { text: 'queued' });
+    pump();
+    const flushed = old.flush();
+    const frame = await replaceCommandDocument(arm.client);
+    await expect(sent.ack).rejects.toMatchObject({ code: 'disposed' });
+    await expect(waiting.ack).rejects.toMatchObject({ code: 'disposed' });
+    await expect(flushed).rejects.toMatchObject({ code: 'disposed' });
+    await expect(sent.presented).resolves.toBe('dropped');
+    await expect(waiting.presented).resolves.toBe('dropped');
+    expect(frame.commandInitial).toMatchObject({ epoch: 8, version: 0, throughSeq: 0 });
+    await old.dispose();
+    expect(arm.terminated).toBe(false);
+    const next = await createResidentCommandConnection(arm.client, frame.commandInitial!);
+    replacement = createDocxWorkerEditSession({ ...options, connection: next });
+    arm.releaseEdits();
+    expect(await arm.client.checkpoint()).toMatchObject({ epoch: 8, version: 0, throughSeq: 0 });
+    expect(arm.w.harness.commandText).toBe('Seed');
+    expect(arm.replies.find((reply) => reply.ok && reply.commandAck?.outcomes.some(({ reason }) =>
+      reason === 'stale-epoch'))).toMatchObject({
+      commandAck: { epoch: 8, version: 0, throughSeq: 0,
+        outcomes: [{ seq: 1, status: 'refused', reason: 'stale-epoch', committed: false }] },
+    });
+    const ticket = replacement.submit('insertText', { text: 'new' });
+    pump();
+    await expect(ticket.ack).resolves.toMatchObject({ seq: 1, status: 'applied' });
+    await expect(ticket.presented).resolves.toBe('presented');
+    expect(replacement.state).toMatchObject({ epoch: 8, version: 1, throughSeq: 1 });
+    expect(arm.w.harness.commandText).toBe('Seednew');
+    expect(await arm.client.checkpoint()).toEqual({
+      state: new TextEncoder().encode('Seednew'), epoch: 8, version: 1, throughSeq: 1,
+    });
+  } finally {
+    await replacement?.dispose();
+    await old.dispose();
+    arm.client.destroy();
+  }
+}, 15_000);
+
+test('d0_cached_initial_ack_is_bound_to_its_client_generation', async () => {
+  const arm = await commandWorker();
+  let older: ResidentCommandConnection | undefined;
+  let current: ResidentCommandConnection | undefined;
+  try {
+    const initial = await arm.client.commandInit(COMMAND_INIT);
+    const first = await replaceCommandDocument(arm.client);
+    older = await createResidentCommandConnection(arm.client, first.commandInitial!);
+    const second = await replaceCommandDocument(arm.client);
+    current = await createResidentCommandConnection(arm.client, second.commandInitial!);
+    for (const stale of [initial, first.commandInitial!]) {
+      await expect(createResidentCommandConnection(arm.client, stale)).rejects.toMatchObject({ code: 'disposed' });
+      expect(arm.terminated).toBe(false);
+    }
+    await older.client.dispose();
+    expect(arm.terminated).toBe(false);
+    expect(current.client.failure).toBeUndefined();
+    expect(await current.client.call.edit({ ...commandEnvelope(1, 'current'), basis: { epoch: 9, version: 0 } }))
+      .toMatchObject({ epoch: 9, throughSeq: 1, version: 1, outcomes: [{ seq: 1, status: 'applied' }] });
+    await replaceCommandDocument(arm.client);
+    expect(current.client.failure).toMatchObject({ code: 'disposed' });
+    await current.client.dispose();
+    expect(arm.terminated).toBe(false);
+  } finally {
+    await current?.client.dispose();
+    await older?.client.dispose();
+    arm.client.destroy();
+  }
+}, 15_000);
+
+test('d0_cached_initial_ack_adoption_replays_recorded_worker_failure', async () => {
+  const arm = await commandWorker();
+  let connection: ResidentCommandConnection | undefined;
+  try {
+    await arm.client.commandInit(COMMAND_INIT);
+    const frame = await replaceCommandDocument(arm.client);
+    const requests = arm.posted.length;
+    arm.crash();
+    connection = await createResidentCommandConnection(arm.client, frame.commandInitial!);
+    expect(connection.client.failure).toMatchObject({ code: 'crash', message: expect.stringContaining('command worker crashed') });
+    const failures: unknown[] = [];
+    const off = connection.client.onFailure((failure) => { failures.push(failure); });
+    expect(failures).toEqual([connection.client.failure]);
+    expect(arm.posted).toHaveLength(requests);
+    off();
+    const recovering = deferred();
+    const session = createDocxWorkerEditSession({
+      source: new Uint8Array([1]), connection,
+      echo: { paint() {}, drop() {}, present() {} },
+      recovery: {
+        reopen() {
+          recovering.resolve();
+          return Promise.reject(new Error('No replacement test worker'));
+        },
+      },
+    });
+    try {
+      await recovering.promise;
+      expect(arm.posted).toHaveLength(requests);
+    } finally {
+      await session.dispose();
+    }
+  } finally {
+    await connection?.client.dispose();
+    arm.client.destroy();
+  }
+}, 15_000);
+
+test('d0_command_input_renews_scheduler_budget_and_idle_hold', async () => {
+  const { client, w } = await commandWorker();
+  try {
+    await client.commandInit(COMMAND_INIT);
+    let now = 2000;
+    w.harness.now = () => now;
+    const kinds = ['insertText', 'select', 'replaceSelection', 'deleteBackward', 'deleteForward',
+      'paragraphBreak', 'toggleMark', 'formatRange', 'clearFormatting', 'setParagraphAttrs', 'applyParagraphStyle'];
+    for (const [index, kind] of kinds.entries()) {
+      expect(w.harness.scheduler!.budget()).toBe(24);
+      await client.edit({ ...commandEnvelope(index + 1), kind });
+      expect(w.harness.scheduler!.budget()).toBe(8);
+      expect(w.harness.messages.at(-1)).toMatchObject({ userInput: true, holdsIdleTasks: true });
+      now += 1001;
+    }
+    await client.edit({ ...commandEnvelope(kinds.length + 1), kind: 'setReadOnly', payload: { readOnly: true } });
+    expect(w.harness.scheduler!.budget()).toBe(24);
+    expect(w.harness.messages.at(-1)).not.toHaveProperty('holdsIdleTasks');
+  } finally {
+    client.destroy();
+  }
+}, 15_000);
+
+test('d0_command_host_rejects_legacy_mutations_without_changing_checkpoint', async () => {
+  const { client, w } = await commandWorker();
+  try {
+    await client.commandInit(COMMAND_INIT);
+    const before = await client.checkpoint();
+    const point = { story: 'body', paraId: 'p1', offset: 0 };
+    const snapshot: YrsResidentWorkerSnapshot = {
+      clientId: 1, state: new Uint8Array([1]), selection: null, fonts: [], fontsRevision: 0,
+      renderInputs: [], measureInputs: [], layoutInput: '', layoutWithRegions: false, layoutRevision: 1,
+    };
+    const requests: ResidentEngineWorkerRequestWithoutId[] = [
+      { type: 'applyInput', text: 'legacy', selection: { anchor: point, head: point },
+        expectedFrameEpoch: 0, profile: false, paintCaret: false },
+      { type: 'applyDelete', direction: 'backward', count: 1, selection: { anchor: point, head: point },
+        expectedFrameEpoch: 0, profile: false, paintCaret: false },
+      { type: 'applyUpdate', update: new Uint8Array([1]), selection: null },
+      { type: 'syncUpdate', update: new Uint8Array([1]), stateVector: new Uint8Array([1]) },
+      { type: 'sync', snapshot, extras: '{}', expectedFrameEpoch: 0, paintCaret: false },
+      { type: 'bootstrap', opened: true, snapshot, extras: '{}', expectedFrameEpoch: 0 },
+      { type: 'proposal', operation: { kind: 'setStates', request: {
+        expectVersion: 'v', expectPreviewVersion: 0, changes: [],
+      } } },
+    ];
+    for (const request of requests) {
+      expect(await w.send(request)).toMatchObject({
+        ok: false, error: 'Legacy mutations are unavailable in a resident command session',
+      });
+    }
+    expect(w.harness.releaseSuperseded).toBe(false);
+    expect(w.harness.loadedStates).toEqual([]);
+    expect(await client.checkpoint()).toEqual(before);
+    expect(await client.edit(commandEnvelope(1))).toMatchObject({ version: 1, throughSeq: 1 });
+    const legacy = worker();
+    await legacy.bootstrap();
+    void legacy.send({ type: 'applyUpdate', update: new Uint8Array([1]), selection: null });
+    expect(await legacy.build([])).toMatchObject({ ok: true });
+    expect(legacy.harness.releaseSuperseded).toBe(true);
+  } finally {
+    client.destroy();
+  }
+}, 15_000);
 
 function deferred() {
   let resolve!: () => void;
@@ -4440,3 +5662,35 @@ describe('resident worker opening', () => {
     expect(opened.ok).toBe(true);
   });
 });
+
+
+test('package_image_remains_decodable_after_edit_on_its_page', async () => {
+  const { w, engines, init } = await nativeCommandWorker(false, true);
+  const decoded: Uint8Array[] = [];
+  w.harness.fetchImage = async (source) => ({ blob: async () => (await fetch(source)).blob() });
+  w.harness.decodeImage = async function(blob?: Blob) {
+    decoded.push(new Uint8Array(await blob!.arrayBuffer()));
+    return new Surface() as unknown as ImageBitmap;
+  };
+  try {
+    const initial = await w.send({ type: 'commandInit', request: init });
+    expect(initial.ok).toBe(true);
+    if (!initial.ok) throw new Error(initial.error);
+    expect(initial.commandInitial?.frame.payload.stagedPresentation?.pages).toHaveLength(1);
+    expect(w.harness.resolvedImages.length).toBeGreaterThan(0);
+    expect(w.harness.resolvedImages.every((image) => image instanceof Surface)).toBe(true);
+    decoded.length = 0;
+    w.harness.resolvedImages.length = 0;
+    const edited = await w.send({ type: 'edit', command: commandEnvelope(1) });
+    if (!edited.ok) throw new Error(edited.error);
+    expect(edited.commandAck?.outcomes).toEqual([{ seq: 1, status: 'applied' }]);
+    expect(edited.commandAck?.frame?.coversThroughSeq).toBe(1);
+    expect(w.harness.resolvedImages.length).toBeGreaterThan(0);
+    expect(w.harness.resolvedImages.every((image) => image instanceof Surface)).toBe(true);
+    const png = Uint8Array.from(Buffer.from(readFileSync(resolve(import.meta.dir,
+      '__fixtures__/seed-parity/images/word/media/image1.png.base64'), 'utf8'), 'base64'));
+    expect(decoded).toEqual([png]);
+  } finally {
+    for (const engine of engines) engine.destroy();
+  }
+}, 15_000);

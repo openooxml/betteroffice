@@ -14,6 +14,7 @@ import type {
   YrsSelectionText,
   YrsSession,
   YrsStorySegment,
+  YrsStoryRange,
   YrsTextMatch,
   YrsLoc,
 } from './index';
@@ -47,6 +48,28 @@ export type ResidentEngineSession = Pick<
   | 'applyInputProfiled'
   | 'applyRawOps'
   | 'applyUpdate'
+  | 'paragraphs'
+  | 'selectionContext'
+  | 'storySegments'
+  | 'cellSelection'
+  | 'setCellSelection'
+  | 'insertRow'
+  | 'tablePayload'
+  | 'insertText'
+  | 'replaceRange'
+  | 'deleteRange'
+  | 'splitParagraph'
+  | 'toggleMark'
+  | 'formatRange'
+  | 'clearFormatting'
+  | 'setParagraphAttrs'
+  | 'applyParagraphStyle'
+  | 'beginUndoCapture'
+  | 'canUndo'
+  | 'canRedo'
+  | 'undo'
+  | 'redo'
+  | 'addUndoBoundary'
   | 'beginRegionLayout'
   | 'buildDisplayListFrame'
   | 'buildDisplayPagesFrame'
@@ -87,6 +110,7 @@ export type ResidentEngineSession = Pick<
   | 'storiesChangedSince'
   | 'yrsBlocksForStory'
 > & {
+  mediaDataUrl(token: string): string | null;
   /** @internal */
   proposalEngine: DocxProposalSession;
   /** @internal */
@@ -108,7 +132,7 @@ export type ResidentEngineSession = Pick<
   /** @internal */
   markProjectionStories(stories: readonly string[]): void;
   /** Parses and seeds a DOCX; returns the host metadata JSON the main thread decodes. */
-  openDocx(bytes: Uint8Array, digest?: string, generation?: string): string;
+  openDocx(bytes: Uint8Array, digest?: string, generation?: string, seedStories?: boolean): string;
   /** Opens a display-only preview with a block limit and optional paragraph budget; null when refused. */
   openDocxPreview(bytes: Uint8Array, blocks: number, paragraphBudget?: number): string | null;
   /** The whole document state as one yrs v1 update. */
@@ -143,6 +167,7 @@ export async function createResidentEngineSession(
     (update: Uint8Array, origin: CollaborationUpdateOrigin) => void
   >();
   let observing = false;
+  let dispatchingUpdates = false;
   let destroyed = false;
   let undoTracked = false;
   const geometryStories = new Map<string, {
@@ -204,12 +229,31 @@ export async function createResidentEngineSession(
     undoTracked = true;
   };
 
+  const detachObserver = (): void => {
+    if (destroyed || !observing || listeners.size > 0) return;
+    session.clear_update_observer();
+    observing = false;
+  };
+
+  const destroyNative = (): void => {
+    if (observing) {
+      session.clear_update_observer();
+      observing = false;
+    }
+    session.free();
+  };
+
   const ensureObserver = (): void => {
     if (observing) return;
     session.set_update_observer((update: Uint8Array, origin: number) => {
       if (origin !== 0 && origin !== 1) return;
-      for (const listener of [...listeners]) {
-        listener(update, origin === 0 ? 'local' : 'remote');
+      dispatchingUpdates = true;
+      try {
+        for (const listener of [...listeners]) {
+          listener(update, origin === 0 ? 'local' : 'remote');
+        }
+      } finally {
+        dispatchingUpdates = false;
       }
     });
     observing = true;
@@ -225,6 +269,19 @@ export async function createResidentEngineSession(
     const selection = JSON.parse(session.selection()) as YrsSelection | null;
     projectionStories.add(selection?.head.story ?? 'body');
     return result;
+  };
+
+  const rangeArgs = (range: YrsStoryRange): [string, string, number, string, number] =>
+    [range.story, range.start.paraId, range.start.offset, range.end.paraId, range.end.offset];
+
+  const applyCommandMutation = <T>(story: string, apply: () => T): T => {
+    ensureUndo();
+    const version = session.version();
+    try {
+      return apply();
+    } finally {
+      if (session.version() !== version) projectionStories.add(story);
+    }
   };
 
   const proposalEngine: DocxProposalSession = {
@@ -319,6 +376,52 @@ export async function createResidentEngineSession(
   return {
     proposalEngine,
     geometryReader,
+    paragraphs: geometryReader.paragraphs,
+    storySegments: (story) => geometryStory(story).segments,
+    selectionContext: (range) => JSON.parse(session.selection_context(...rangeArgs(range))),
+    cellSelection: () => JSON.parse(session.cell_selection()),
+    setCellSelection: (range) => session.set_cell_selection(JSON.stringify(range)),
+    insertRow: (at, side, author) => applyCommandMutation(at.story, () => {
+      const receipt = JSON.parse(session.insert_row(JSON.stringify(at), side === 'below', author?.name, author?.date));
+      markProjectionStories([...receipt.changedStoryIds, ...receipt.createdStoryIds, ...receipt.deletedStoryIds]);
+      return receipt;
+    }),
+    tablePayload: (story, index) => {
+      const payload = session.table_payload(story, index);
+      return payload === undefined ? null : JSON.parse(payload);
+    },
+    beginUndoCapture: ensureUndo,
+    addUndoBoundary: () => session.add_undo_boundary(),
+    undo: () => {
+      const changed = session.undo();
+      if (changed) markProjectionStories(session.history_stories());
+      return changed;
+    },
+    redo: () => {
+      const changed = session.redo();
+      if (changed) markProjectionStories(session.history_stories());
+      return changed;
+    },
+    canUndo: () => session.can_undo(),
+    canRedo: () => session.can_redo(),
+    insertText: (at, text, author) => applyCommandMutation(at.story, () =>
+      JSON.parse(session.insert_text(at.story, at.paraId, at.offset, text, author?.name, author?.date))),
+    replaceRange: (range, text, author) => applyCommandMutation(range.story, () =>
+      JSON.parse(session.replace_range(...rangeArgs(range), text, author?.name, author?.date))),
+    deleteRange: (range, author) => applyCommandMutation(range.story, () =>
+      JSON.parse(session.delete_range(...rangeArgs(range), author?.name, author?.date))),
+    splitParagraph: (at, author) => applyCommandMutation(at.story, () =>
+      JSON.parse(session.split_paragraph(at.story, at.paraId, at.offset, author?.name, author?.date))),
+    toggleMark: (range, mark) => applyCommandMutation(range.story, () =>
+      session.toggle_mark(...rangeArgs(range), JSON.stringify(mark))),
+    formatRange: (range, delta) => applyCommandMutation(range.story, () =>
+      session.format_range(...rangeArgs(range), JSON.stringify(delta))),
+    clearFormatting: (range) => applyCommandMutation(range.story, () =>
+      session.clear_formatting(...rangeArgs(range))),
+    setParagraphAttrs: (range, attrs, author) => applyCommandMutation(range.story, () =>
+      session.set_paragraph_attrs(...rangeArgs(range), JSON.stringify(attrs), author?.name, author?.date)),
+    applyParagraphStyle: (range, styleId, author) => applyCommandMutation(range.story, () =>
+      session.apply_paragraph_style(...rangeArgs(range), styleId, author?.name, author?.date)),
     resolveComment: (commentId) =>
       JSON.parse(session.resolve_comment(commentId)) as YrsResolvedCommentAnchor[],
     paragraphSegments: (story, indices) =>
@@ -361,11 +464,11 @@ export async function createResidentEngineSession(
         session.find_content_controls_json(JSON.stringify(query), JSON.stringify(options))
       ) as DocxContentControlsResult,
     storiesChangedSince,
-    openDocx: (bytes, digest, generation) => {
+    openDocx: (bytes, digest, generation, seedStories = true) => {
       geometryStories.clear();
       projectionStories.clear();
       return resolveHostJsonCommentMedia(
-        session.open_docx(bytes, true, generation, digest),
+        session.open_docx(bytes, seedStories, generation, digest),
         (token) => (token.startsWith('media:') ? (session.media_data_url(token) ?? null) : null)
       );
     },
@@ -383,6 +486,7 @@ export async function createResidentEngineSession(
             (token) => (token.startsWith('media:') ? (session.media_data_url(token) ?? null) : null)
           );
     },
+    mediaDataUrl: (token) => session.media_data_url(token) ?? null,
     encodeState: () => session.encode_state(),
     encodePeerMetadata: () => {
       const peerSession = session as typeof session & { encode_peer_metadata?: () => Uint8Array };
@@ -500,7 +604,13 @@ export async function createResidentEngineSession(
     onUpdate: (listener) => {
       listeners.add(listener);
       ensureObserver();
-      return () => listeners.delete(listener);
+      return () => {
+        listeners.delete(listener);
+        if (!destroyed && observing && listeners.size === 0) {
+          if (dispatchingUpdates) queueMicrotask(detachObserver);
+          else detachObserver();
+        }
+      };
     },
     setSelection: (anchor, head = anchor) => {
       if (anchor.story !== head.story) throw new Error('yrs selection must stay inside one story');
@@ -515,8 +625,8 @@ export async function createResidentEngineSession(
       geometryStories.clear();
       storyRevisions.clear();
       projectionStories.clear();
-      if (observing) session.clear_update_observer();
-      session.free();
+      if (dispatchingUpdates) queueMicrotask(destroyNative);
+      else destroyNative();
     },
   };
 }

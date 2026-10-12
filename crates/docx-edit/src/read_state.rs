@@ -4,8 +4,8 @@ use std::collections::HashSet;
 
 use yrs::{Any, Map, Out, ReadTxn, TextRef, Transact};
 
-use crate::op::{OpError, OpResult, para_bounds};
-use crate::ops::{Chunk, ChunkKind, capture_pilcrow};
+use crate::op::{OpError, OpResult};
+use crate::ops::{ChunkKind, capture_pilcrow};
 use crate::queries::TextView;
 use crate::{
     ChangeInfo, EditingDoc, KIND_KEY, ParagraphId, StoryId, StoryRange, map_string, story_ref,
@@ -133,6 +133,8 @@ pub(crate) fn table_cell_stories<T: ReadTxn>(doc: &EditingDoc, txn: &T) -> HashS
         return cells;
     };
     for (story_id, value) in stories.iter(txn) {
+        #[cfg(test)]
+        crate::TABLE_MEMBERSHIP_STORIES_SCANNED.with(|scanned| scanned.set(scanned.get() + 1));
         let Out::YText(story) = value else {
             continue;
         };
@@ -141,30 +143,23 @@ pub(crate) fn table_cell_stories<T: ReadTxn>(doc: &EditingDoc, txn: &T) -> HashS
     cells
 }
 
-/// Whether `story` is a table cell story. Cell stories are named
-/// `{parent}:t{table}:r{row}c{cell}`, so that parent's tables are read first;
-/// only a story they do not list costs the whole-document scan.
 pub(crate) fn is_table_cell_story<T: ReadTxn>(doc: &EditingDoc, txn: &T, story: &str) -> bool {
-    if let Some(parent) = cell_story_parent(story)
-        && let Some(Out::YText(parent_story)) = txn
-            .get_map(crate::STORIES)
-            .and_then(|stories| stories.get(txn, parent))
+    let epoch = doc.committed_epoch();
+    let structure = doc.story_revisions.lock().unwrap().structure;
+    let mut membership = doc.table_membership.lock().unwrap();
+    if membership
+        .as_ref()
+        .is_none_or(|cached| cached.structure != structure)
     {
-        let mut cells = HashSet::new();
-        collect_table_cell_stories(doc, txn, parent, &parent_story, &mut cells);
-        if cells.contains(story) {
-            return true;
-        }
+        *membership = Some(crate::TableMembership {
+            epoch,
+            structure,
+            cells: table_cell_stories(doc, txn),
+        });
     }
-    table_cell_stories(doc, txn).contains(story)
-}
-
-fn cell_story_parent(story: &str) -> Option<&str> {
-    let (rest, cell) = story.rsplit_once(':')?;
-    let (parent, table) = rest.rsplit_once(':')?;
-    let digits = |value: &str| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit());
-    let (row, column) = cell.strip_prefix('r')?.split_once('c')?;
-    (digits(table.strip_prefix('t')?) && digits(row) && digits(column)).then_some(parent)
+    let membership = membership.as_mut().unwrap();
+    membership.epoch = epoch;
+    membership.cells.contains(story)
 }
 
 fn collect_table_cell_stories<T: ReadTxn>(
@@ -214,8 +209,7 @@ impl EditingDoc {
         }
         let txn = self.yrs_doc().transact();
         let story = story_ref(&txn, &range.story)?;
-        let chunks = self.chunk_snapshot(&range.story, &story, &txn);
-        let story_len = chunks.last().map_or(0, Chunk::end);
+        let story_len = yrs::Text::len(&story, &txn);
         if range.end > story_len {
             return Err(OpError::OutOfBounds {
                 index: range.end,
@@ -223,17 +217,26 @@ impl EditingDoc {
             });
         }
 
-        let bounds = para_bounds(&story, &txn);
+        let bounds = self.paragraph_index(&range.story)?;
         let start_para = bounds
-            .iter()
-            .find(|para| range.start <= para.pilcrow)
+            .para_at(range.start)
             .ok_or_else(|| OpError::UnknownStory(range.story.clone()))?;
         let end_para = bounds
-            .iter()
-            .find(|para| range.end <= para.pilcrow)
-            .or_else(|| bounds.last())
+            .para_at(range.end.min(story_len.saturating_sub(1)))
             .ok_or_else(|| OpError::UnknownStory(range.story.clone()))?;
         let is_multi_paragraph = start_para.para_id != end_para.para_id;
+        let segments = self.segment_index(&range.story)?;
+        let units = segments.segment_units().expect("formatted index built");
+        let (first, last) = bounds.unit_range(range.start, range.end);
+        let mut chunks = Vec::new();
+        for (unit, segments) in units.iter().enumerate().take(last + 1).skip(first) {
+            let mut offset = bounds.unit_start(unit).expect("paragraph unit");
+            for (insert, attributes) in segments.iter() {
+                let chunk = crate::ops::chunk_at(insert, attributes.as_deref(), offset, &txn);
+                offset += chunk.len;
+                chunks.push(chunk);
+            }
+        }
 
         // Paragraph properties from the start paragraph's pilcrow map.
         let (para_id, para_props) = chunks
@@ -496,6 +499,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::op::para_bounds;
     use crate::{
         ChangeKind, ColorPatch, EditCtx, FontFamilyPatch, FormatPolicy, InlineFormatDelta, Patch,
         Position, RawOp, SimpleFormat,

@@ -63,6 +63,8 @@ export interface DocxPluginHost {
   setReporter(report: ((error: DocxPluginError) => void) | undefined): void;
   /** Starts a document generation over `session`. */
   open(session: YrsSession): void;
+  openWorker(version: string): void;
+  workerChanged(version: string): void;
   close(reason: 'document-replaced' | 'unmounted'): void;
   generation(): string | null;
   version(): string;
@@ -249,8 +251,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       selection: state.selection,
       layout: state.layout,
     }),
-    currentVersion: () =>
-      session && runtime.generation() !== null ? readSessionVersion(session) : null,
+    currentVersion: () => runtime.generation() === null ? null : session ? readSessionVersion(session) : state.version,
     loadEvent: (snapshot, reason) => ({
       type: 'load',
       generation: snapshot.generation,
@@ -402,6 +403,27 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
     close(reason) {
       closeSession();
       runtime.close(reason);
+    },
+
+    openWorker(version) {
+      closeSession();
+      state.version = version;
+      state.previewVersion = 0;
+      state.layout = null;
+      state.selection = EMPTY_SELECTION;
+      generations += 1;
+      runtime.open(`document-${generations}`);
+    },
+
+    workerChanged(version) {
+      const generation = runtime.generation();
+      if (!generation || version === state.version) return;
+      state.version = version;
+      notify({ type: 'document-change', generation, version });
+      if (state.layout) {
+        state.layout = null;
+        notify({ type: 'layout-change', generation, layout: null });
+      }
     },
 
     generation: () => runtime.generation(),

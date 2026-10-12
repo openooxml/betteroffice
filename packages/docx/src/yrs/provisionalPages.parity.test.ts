@@ -7,6 +7,8 @@ import { buildResidentRegionLayoutRequest } from '../editor/computeLayout';
 import { applyFrameDelta, decodeFrameDelta, type RetainedFrame } from '../layout/render/frameDelta';
 import {
   encodeDisplayListFrameExtras,
+  loadRustDisplayListQueryEngine,
+  loadedRustDisplayListQueryEngine,
   type DisplayListBuildInputs,
 } from '../layout/render/rustDisplayList';
 import { preloadEditWasm } from '../wasm/edit';
@@ -40,6 +42,14 @@ beforeAll(async () => {
     plugins: [{
       name: 'resident-worker-real-engine',
       setup(build) {
+        build.onLoad({ filter: /\/rustDisplayList\.ts$/ }, () => ({
+          contents: `
+            export const encodeDisplayListFrameExtras = (...args) => testHarness.encodeDisplayListFrameExtras(...args);
+            export const loadRustDisplayListQueryEngine = () => testHarness.loadRustDisplayListQueryEngine();
+            export const loadedRustDisplayListQueryEngine = () => testHarness.loadedRustDisplayListQueryEngine();
+          `,
+          loader: 'js',
+        }));
         build.onResolve({ filter: /.*/ }, ({ path, importer }) =>
           importer.endsWith('/residentEngineWorker.ts') && path in modules
             ? { path, namespace: 'worker-test' }
@@ -93,7 +103,7 @@ function worker(session: ResidentEngineSession) {
       replies.delete(reply.id);
     },
   };
-  startWorker(scope, { session });
+  startWorker(scope, { session, encodeDisplayListFrameExtras, loadRustDisplayListQueryEngine, loadedRustDisplayListQueryEngine });
   return {
     send(request: ResidentEngineWorkerRequestWithoutId): Promise<ResidentEngineWorkerResponse> {
       const id = ++nextId;

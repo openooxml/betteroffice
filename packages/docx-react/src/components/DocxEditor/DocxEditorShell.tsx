@@ -131,6 +131,7 @@ export function DocxEditorShell({
   overlays,
   dialogs,
   fileInputs,
+  scrollContainerProps,
 }: {
   i18n: React.ComponentProps<typeof LocaleProvider>['i18n'];
   isDark?: boolean;
@@ -171,6 +172,7 @@ export function DocxEditorShell({
   overlays: ReactNode;
   dialogs: ReactNode;
   fileInputs: ReactNode;
+  scrollContainerProps?: Pick<React.HTMLAttributes<HTMLDivElement>, 'tabIndex' | 'onKeyDown'>;
 }) {
   const [dockAreaRef, dockArea] = useDockArea();
   return (
@@ -221,6 +223,7 @@ export function DocxEditorShell({
                       }}
                     >
                       <div
+                        {...scrollContainerProps}
                         ref={scrollContainerRef}
                         className="docx-editor__scroll-container"
                         style={editorContainerStyle}

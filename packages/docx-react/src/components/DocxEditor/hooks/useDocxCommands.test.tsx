@@ -50,6 +50,7 @@ afterEach(() => {
   for (const session of sessions.splice(0)) session.destroy();
 });
 afterAll(async () => {
+  await act(async () => { await new Promise<void>((resolve) => setImmediate(resolve)); });
   if (ownsDom) await GlobalRegistrator.unregister();
 });
 

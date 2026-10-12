@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { DocxEditorProps } from '../../DocxEditor';
+import { LEGACY_SYNC_API_PROP } from '../peerless/contracts';
 
 type WorkerCapability =
   | 'Worker'
@@ -39,7 +40,7 @@ function chooseEngine(props: EngineProps): { workerOpen: boolean; warnings: stri
   const warnings: string[] = [];
   const missing = missingCapabilities();
   if (missing.length > 0) {
-    warnings.push(`[DocxEditor] Using the in-thread engine because these browser features are unavailable: ${missing.join(', ')}; use a browser with these features for the worker-owned editor.`);
+    warnings.push(capabilityWarning(missing));
   }
   if (props.mediaTokens === true) {
     warnings.push('[DocxEditor] mediaTokens requires the in-thread engine; omit mediaTokens to use the worker-owned editor.');
@@ -51,6 +52,24 @@ function chooseEngine(props: EngineProps): { workerOpen: boolean; warnings: stri
     warnings.push('[DocxEditor] An editable document source requires the in-thread engine; pass documentBuffer to use the worker-owned editor.');
   }
   return { workerOpen: warnings.length === 0, warnings };
+}
+
+function capabilityWarning(missing: readonly WorkerCapability[]) {
+  return `[DocxEditor] Using the in-thread engine because these browser features are unavailable: ${missing.join(', ')}; use a browser with these features for the worker-owned editor.`;
+}
+
+export function usePeerlessEngineChoice(requested: boolean, legacySync: boolean): boolean {
+  const [missing] = useState(missingCapabilities);
+  useEffect(() => {
+    const warnings = legacySync ? [`[DocxEditor] ${LEGACY_SYNC_API_PROP}={true} selects the deprecated hybrid synchronous API, removed in 0.6.0.`] : [];
+    if (requested && missing.length) warnings.push(capabilityWarning(missing));
+    for (const warning of warnings) {
+      if (warned.has(warning)) continue;
+      warned.add(warning);
+      console.warn(warning);
+    }
+  }, [requested, legacySync, missing]);
+  return requested && missing.length === 0;
 }
 
 export function useEditorEngineChoice(props: EngineProps): boolean {

@@ -51,6 +51,7 @@ export interface DocxPluginEditorAccess {
   /** Whether the document is open for viewing only, with no copy on this thread. */
   viewer?(): boolean;
   workerOpen?(): boolean;
+  workerRead?: Pick<DocxPluginReadClient, 'version' | 'readParagraphs' | 'findText'>;
 }
 
 const LAYOUT_WAIT_MS = 30_000;
@@ -130,6 +131,35 @@ export function createPluginClients(
   grant: () => DocxPluginGrant,
   store: DocxCommandStore
 ): DocxPluginClients {
+  if (access.workerRead) {
+    const read = access.workerRead;
+    const guarded = async <T>(operation: () => Promise<T>) => {
+      const before = refusalOf(invocation);
+      if (before) return before;
+      const result = await operation();
+      return refusalOf(invocation) ?? result;
+    };
+    return {
+      read: {
+        version: () => guarded(() => read.version()),
+        readParagraphs: (request) => guarded(() => read.readParagraphs(request)),
+        findText: (request) => guarded(() => read.findText(request)),
+        validateEdits: async () => refusalOf(invocation) ?? pluginRefusal('unsupported-policy'),
+      },
+      commands: {
+        getDescriptor: (id: never) => store.getDescriptor(id),
+        getState: (id: never, args?: never) => store.getState(id, args),
+        subscribe: store.subscribe,
+        execute: async (id: never, args: never) => refusalOf(invocation) ?? store.execute(id, args),
+      } as unknown as DocxPluginCommandClient,
+      edits: grantsEditBatch(grant(), 'separate') ? {
+        applyEdits: async () => refusalOf(invocation) ?? pluginRefusal('unsupported-policy'),
+      } : null,
+      navigation: {
+        scrollToParagraph: async () => refusalOf(invocation) ?? pluginRefusal('unsupported-policy'),
+      },
+    };
+  }
   /** Why `session` may not be touched now; call in the continuation that touches it. */
   const invalid = (session: YrsSession): DocxPluginRefusal | null => {
     const refused = refusalOf(invocation);

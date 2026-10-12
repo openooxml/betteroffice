@@ -24,6 +24,12 @@ import "@betteroffice/docx-react/styles.css";
 configureDefaultFonts({ load: () => import("@betteroffice/fonts") });
 setGoogleFontsEnabled(false);
 
+function peerlessDocx() {
+  if (typeof location === "undefined") return false;
+  const query = new URLSearchParams(location.search);
+  return query.get("format") === "docx" && query.get("peerless") === "1";
+}
+
 export interface PreparedFile {
   bytes: Uint8Array;
   format: Format;
@@ -35,6 +41,7 @@ export async function prepareFile(
   format: Format
 ): Promise<PreparedFile> {
   if (format === "docx") {
+    if (peerlessDocx()) return { bytes, format };
     const { parseDocx } = await import("@betteroffice/docx/docx");
     await parseDocx(bytes);
     return { bytes, format };
@@ -102,6 +109,19 @@ export default function Editor({
   const docx = useRef<DocxEditorRef>(null);
   const xlsx = useRef<XlsxEditorApi | null>(null);
   const pptx = useRef<PptxEditorApi | null>(null);
+  const harness = (globalThis as typeof globalThis & { __DOCX_PEERLESS_HARNESS__?: boolean }).__DOCX_PEERLESS_HARNESS__
+    && file.format === "docx" && peerlessDocx();
+  const [harnessMode, setHarnessMode] = useState<"editing" | "viewing">("editing");
+  useEffect(() => {
+    if (!(globalThis as typeof globalThis & { __DOCX_PEERLESS_HARNESS__?: boolean }).__DOCX_PEERLESS_HARNESS__) return;
+    if (!harness) return;
+    let current = true;
+    let unregister: (() => void) | undefined;
+    void import("@betteroffice/docx-react/peerless-harness").then((module) => {
+      if (current) unregister = module.registerBrowserHarness({ setMode: setHarnessMode });
+    });
+    return () => { current = false; unregister?.(); };
+  }, [harness]);
   const clientId = useRef(
     crypto.getRandomValues(new Uint32Array(1))[0] & 0x7fffffff || 1
   ).current;
@@ -205,15 +225,24 @@ export default function Editor({
 
   if (file.format === "docx")
     return (
+      <>
+      {harness && <div data-testid="peerless-harness-mode">
+        <button type="button" aria-pressed={harnessMode === "viewing"} onClick={() => setHarnessMode("viewing")}>Viewing</button>
+        <button type="button" aria-pressed={harnessMode === "editing"} onClick={() => setHarnessMode("editing")}>Editing</button>
+      </div>}
       <DocxEditor
         ref={docx}
+        experimentalPeerless={peerlessDocx()}
+        mode={harness ? harnessMode : undefined}
+        readOnly={harness ? harnessMode === "viewing" : undefined}
         documentBuffer={file.bytes}
         downloadOnSave={false}
         onSave={(buffer) => {
           if (!serialization.current) saveBytes(new Uint8Array(buffer));
         }}
         documentName={name}
-        onChange={changed}
+        onChange={peerlessDocx() ? undefined : changed}
+        onDocumentChange={peerlessDocx() ? changed : undefined}
         onError={error}
         onOpen={onOpen}
         showToolbar
@@ -233,6 +262,7 @@ export default function Editor({
             : undefined
         }
       />
+      </>
     );
   if (file.format === "xlsx")
     return (

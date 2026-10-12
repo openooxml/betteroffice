@@ -5,6 +5,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use yrs::types::Attrs;
 use yrs::types::text::YChange;
 use yrs::{Any, Out, ReadTxn, Text, TextRef};
 
@@ -40,11 +41,14 @@ pub(crate) struct Seg {
     pub kind: SegKind,
 }
 
+type IndexedUnit = Vec<(Out, Option<Box<Attrs>>)>;
+
 /// Text segments may split anywhere; cold builds follow formatting runs, advanced indexes preserve only per-unit kind and text.
 #[derive(Clone)]
 pub(crate) struct SegmentIndex {
     len: u32,
     segs: Vec<Seg>,
+    units: Option<Vec<Arc<IndexedUnit>>>,
 }
 
 #[derive(Clone)]
@@ -63,15 +67,22 @@ pub(crate) fn build_indexes<T: ReadTxn>(
     let mut para_start = 0_u32;
     let mut node_start = 0_u32;
     let mut segs = Vec::new();
+    let mut units = Vec::new();
+    let mut unit = Vec::new();
     let mut paras: Vec<ParaEntry> = Vec::new();
     let mut by_para = HashMap::new();
     let mut repeated = HashSet::new();
     for diff in story.diff(txn, YChange::identity) {
-        let units = out_len(&diff.insert);
-        let kind = match diff.insert {
-            Out::Any(Any::String(text)) => SegKind::Text(text),
-            Out::YMap(map) if is_pilcrow(&map, txn) => {
-                let para_id: Box<str> = map_string(&map, txn, PARA_ID)
+        #[cfg(test)]
+        crate::STORY_INDEX_UNITS_BUILT.with(|built| built.set(built.get() + 1));
+        let length = out_len(&diff.insert);
+        if length == 0 {
+            continue;
+        }
+        let kind = match &diff.insert {
+            Out::Any(Any::String(text)) => SegKind::Text(Arc::clone(text)),
+            Out::YMap(map) if is_pilcrow(map, txn) => {
+                let para_id: Box<str> = map_string(map, txn, PARA_ID)
                     .unwrap_or_default()
                     .into_boxed_str();
                 let slot = paras.len() as u32;
@@ -92,7 +103,7 @@ pub(crate) fn build_indexes<T: ReadTxn>(
             }
             insert => {
                 let kind = match insert {
-                    Out::YMap(map) => map_string(&map, txn, KIND_KEY).unwrap_or_default(),
+                    Out::YMap(map) => map_string(map, txn, KIND_KEY).unwrap_or_default(),
                     _ => String::new(),
                 };
                 let block = is_block_embed(&kind);
@@ -102,14 +113,23 @@ pub(crate) fn build_indexes<T: ReadTxn>(
                 SegKind::Embed
             }
         };
-        if units == 0 {
-            continue;
+        let closes = matches!(kind, SegKind::Pilcrow);
+        unit.push((diff.insert, diff.attributes));
+        if closes {
+            units.push(Arc::new(std::mem::take(&mut unit)));
         }
         segs.push(Seg { start: len, kind });
-        len += units;
+        len += length;
+    }
+    if !unit.is_empty() {
+        units.push(Arc::new(unit));
     }
     (
-        SegmentIndex { len, segs },
+        SegmentIndex {
+            len,
+            segs,
+            units: Some(units),
+        },
         ParagraphIndex {
             paras,
             by_para,
@@ -119,6 +139,16 @@ pub(crate) fn build_indexes<T: ReadTxn>(
 }
 
 impl ParagraphIndex {
+    pub(crate) fn unit_range(&self, start: u32, end: u32) -> (usize, usize) {
+        let first = self.paras.partition_point(|para| para.pilcrow < start);
+        let last = self.paras.partition_point(|para| para.pilcrow < end);
+        (first, last.min(self.paras.len().saturating_sub(1)))
+    }
+
+    pub(crate) fn unit_start(&self, unit: usize) -> Option<u32> {
+        self.paras.get(unit).map(|para| para.start)
+    }
+
     /// `(start, pilcrow)` span of `para_id`, matching the first paragraph with that id.
     pub(crate) fn para_span(&self, para_id: &str) -> Option<(u32, u32)> {
         let para = self.paras.get(*self.by_para.get(para_id)? as usize)?;
@@ -182,11 +212,116 @@ impl ParagraphIndex {
 }
 
 impl SegmentIndex {
+    pub(crate) fn segment_units(&self) -> Option<&[Arc<IndexedUnit>]> {
+        self.units.as_deref()
+    }
+
+    pub(crate) fn splice_unit_text(
+        &mut self,
+        start: u32,
+        end: u32,
+        text: &str,
+        attrs: Option<&Attrs>,
+    ) {
+        let slot = self.segs.partition_point(|seg| seg.start < start);
+        let paragraph = self.segs[..slot]
+            .iter()
+            .filter(|seg| matches!(seg.kind, SegKind::Pilcrow))
+            .count();
+        let paragraph_start = self.segs[..slot]
+            .iter()
+            .rev()
+            .find(|seg| matches!(seg.kind, SegKind::Pilcrow))
+            .map_or(0, |seg| seg.start + 1);
+        let Some(unit) = self
+            .units
+            .as_mut()
+            .and_then(|units| units.get_mut(paragraph))
+        else {
+            return;
+        };
+        let mut replacement: IndexedUnit = Vec::new();
+        let mut offset = paragraph_start;
+        let mut inserted = text.is_empty();
+        let attrs = attrs.map(|attrs| {
+            let mut attrs = attrs.clone();
+            attrs.retain(|_, value| *value != Any::Null);
+            attrs
+        });
+        for (value, attributes) in unit.iter() {
+            let length = out_len(value);
+            let next = offset + length;
+            let mut push_text = |value: &str, attributes: &Option<Box<Attrs>>| {
+                if value.is_empty() {
+                    return;
+                }
+                if let Some((Out::Any(Any::String(previous)), previous_attrs)) =
+                    replacement.last_mut()
+                    && previous_attrs.as_deref() == attributes.as_deref()
+                {
+                    *previous = Arc::from(format!("{previous}{value}"));
+                } else {
+                    replacement.push((Out::Any(Any::String(value.into())), attributes.clone()));
+                }
+            };
+            if let Out::Any(Any::String(value)) = value {
+                if offset < start {
+                    let cut = utf16_byte_offset(value, (start - offset).min(length))
+                        .expect("text boundary");
+                    push_text(&value[..cut], attributes);
+                }
+                if !inserted && start <= next {
+                    let inserted_attrs = attrs
+                        .as_ref()
+                        .map(|attrs| Box::new(attrs.clone()))
+                        .or_else(|| attributes.clone())
+                        .filter(|attrs| !attrs.is_empty());
+                    push_text(text, &inserted_attrs);
+                    inserted = true;
+                }
+                if next > end {
+                    let cut = utf16_byte_offset(value, end.saturating_sub(offset))
+                        .expect("text boundary");
+                    push_text(&value[cut..], attributes);
+                }
+            } else {
+                if !inserted && offset >= start {
+                    let inserted_attrs = attrs
+                        .as_ref()
+                        .map(|attrs| Box::new(attrs.clone()))
+                        .or_else(|| attributes.clone())
+                        .filter(|attrs| !attrs.is_empty());
+                    push_text(text, &inserted_attrs);
+                    inserted = true;
+                }
+                replacement.push((value.clone(), attributes.clone()));
+            }
+            offset = next;
+        }
+        #[cfg(test)]
+        crate::STORY_INDEX_UNITS_BUILT.with(|built| built.set(built.get() + replacement.len()));
+        *unit = Arc::new(replacement);
+    }
+
     pub(crate) fn shift_for_text_insert(&mut self, index: u32, text: &str) -> bool {
+        self.shift_for_text_insert_formatted(index, text, None)
+    }
+
+    pub(crate) fn shift_for_text_insert_formatted(
+        &mut self,
+        index: u32,
+        text: &str,
+        attrs: Option<&Attrs>,
+    ) -> bool {
         let units = text.encode_utf16().count() as u32;
-        if text.is_empty() || index > self.len || self.len.checked_add(units).is_none() {
+        if text.is_empty()
+            || index > self.len
+            || self.len.checked_add(units).is_none()
+            || !self.is_char_boundary(index)
+        {
             return false;
         }
+        self.splice_unit_text(index, index, text, attrs);
         let slot = self.segs.partition_point(|seg| seg.start < index);
         let text_slot = slot
             .checked_sub(1)
@@ -246,6 +381,7 @@ impl SegmentIndex {
             };
             cuts.push((slot, from, to));
         }
+        self.splice_unit_text(start, end, "", None);
         for (slot, from, to) in cuts {
             let seg = &mut self.segs[slot];
             if let SegKind::Text(text) = &seg.kind {
@@ -613,6 +749,7 @@ pub(crate) mod tests {
     fn segment_index_shifts_preserve_units_and_reject_surrogate_cuts() {
         let original = SegmentIndex {
             len: 12,
+            units: None,
             segs: vec![
                 Seg {
                     start: 0,
@@ -686,6 +823,7 @@ pub(crate) mod tests {
         }
         let mut empty = SegmentIndex {
             len: 0,
+            units: None,
             segs: Vec::new(),
         };
         assert!(empty.shift_for_text_insert(0, "é😀"));
@@ -894,6 +1032,70 @@ pub(crate) mod tests {
                 assert!(!shifted.shift_for_text_delete(start, end));
                 assert_paragraph_indexes_eq(&shifted, &original);
             }
+        }
+    }
+
+    #[test]
+    fn cached_plain_insert_merges_untracked_runs() {
+        for mark in [None, Some(crate::INS), Some(crate::DEL)] {
+            let doc = EditingDoc::new(32);
+            doc.create_story("body", "Second paragraph", "Normal", "left")
+                .unwrap();
+            if let Some(mark) = mark {
+                let mut txn = doc.yrs_doc().transact_mut();
+                let story = crate::story_ref(&txn, "body").unwrap();
+                story.format(
+                    &mut txn,
+                    0,
+                    2,
+                    Attrs::from([(Arc::from(mark), Any::from("revision"))]),
+                );
+            }
+            doc.segment_index("body").unwrap();
+            doc.paragraph_index("body").unwrap();
+            let before = doc.committed_epoch();
+            let mut attrs = Attrs::new();
+            doc.insert_text_observed(
+                &EditCtx::local("", ""),
+                Position::new("body", 2),
+                "xyz",
+                FormatPolicy::Inherit,
+                |effective| attrs = effective.clone(),
+            )
+            .unwrap();
+            let after = doc.committed_epoch();
+            doc.advance_indexes_after_formatted_text_insert(
+                "body",
+                before,
+                after,
+                2,
+                "xyz",
+                Some(&attrs),
+            );
+            assert!(
+                doc.segment_indexes
+                    .lock()
+                    .unwrap()
+                    .get("body", after)
+                    .is_some()
+            );
+            let cached = doc.story_segment_units_at("body", &[0]).unwrap();
+            assert_eq!(cached, doc.story_segment_units("body").unwrap());
+            let unit = &cached[0];
+            assert_eq!(unit.len(), if mark.is_some() { 3 } else { 2 });
+            let plain = &unit[usize::from(mark.is_some())];
+            assert_eq!(
+                plain.content,
+                SegmentContent::Text(
+                    if mark.is_some() {
+                        "xyzcond paragraph"
+                    } else {
+                        "Sexyzcond paragraph"
+                    }
+                    .into()
+                )
+            );
+            assert!(plain.attributes.is_empty());
         }
     }
 

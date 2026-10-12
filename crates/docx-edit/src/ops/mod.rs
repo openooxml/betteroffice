@@ -169,7 +169,14 @@ pub(crate) fn revision_id_in_range(
         })
 }
 
-fn chunk_at<T: ReadTxn>(insert: &Out, attrs: Option<&Attrs>, offset: u32, txn: &T) -> Chunk {
+pub(crate) fn chunk_at<T: ReadTxn>(
+    insert: &Out,
+    attrs: Option<&Attrs>,
+    offset: u32,
+    txn: &T,
+) -> Chunk {
+    #[cfg(test)]
+    crate::SNAPSHOT_CHUNKS_BUILT.with(|built| built.set(built.get() + 1));
     let kind = match insert {
         Out::Any(Any::String(value)) => ChunkKind::Text(value.to_string()),
         Out::YMap(map) if is_pilcrow(map, txn) => ChunkKind::Pilcrow(map.clone()),

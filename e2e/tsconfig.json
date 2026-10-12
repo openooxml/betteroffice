@@ -3,11 +3,6 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "Bundler",
-    "paths": {
-      "@betteroffice/pptx": ["../packages/pptx/src/index.ts"],
-      "@betteroffice/pptx/peerless": ["../packages/pptx/src/peerless.ts"],
-      "@betteroffice/pptx/editor": ["../packages/pptx/src/editor.ts"]
-    },
     "lib": [
       "ES2022",
       "DOM",
@@ -25,7 +20,24 @@
     "resolveJsonModule": true,
     "esModuleInterop": true,
     "noUnusedLocals": true,
-    "noUnusedParameters": true
+    "noUnusedParameters": true,
+    "paths": {
+      "@betteroffice/docx/peerless": [
+        "../packages/docx/src/peerless.ts"
+      ],
+      "@betteroffice/docx-react/peerless-harness": [
+        "../packages/docx-react/src/components/DocxEditor/peerless/browserHarness.ts"
+      ],
+      "@betteroffice/pptx": [
+        "../packages/pptx/src/index.ts"
+      ],
+      "@betteroffice/pptx/peerless": [
+        "../packages/pptx/src/peerless.ts"
+      ],
+      "@betteroffice/pptx/editor": [
+        "../packages/pptx/src/editor.ts"
+      ]
+    }
   },
   "include": [
     "./**/*.ts"

@@ -36,7 +36,7 @@ function finiteNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
-function yrsSelectionState(selection: YrsToolbarSelection): SelectionState {
+export function yrsSelectionState(selection: Pick<YrsToolbarSelection, 'context' | 'startParagraphIndex' | 'endParagraphIndex'>): SelectionState {
   const { context } = selection;
   const properties = context.paragraphProperties;
   const paragraphFormatting: ParagraphFormatting = {};

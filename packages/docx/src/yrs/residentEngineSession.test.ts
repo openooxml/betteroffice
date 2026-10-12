@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, expect, spyOn, test } from 'bun:test';
+import { afterEach, beforeAll, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { preloadEditWasm } from '../wasm/edit';
@@ -8,6 +8,7 @@ import * as projection from './yrsToDocument';
 import { createYrsSession, decodeDocxHostJson, type YrsSession } from './index';
 import { createResidentEngineSession, type ResidentEngineSession } from './residentEngineSession';
 import type { ResidentSaveRecord } from './residentSave';
+import * as wasm from './wasm/index';
 
 const source = new Uint8Array(readFileSync(resolve(import.meta.dir, '__fixtures__/comment-ranges/structure.docx')));
 const owned: Array<YrsSession | ResidentEngineSession> = [];
@@ -34,6 +35,87 @@ async function open() {
   expect(header).toBeDefined();
   return { session, hostJson, host, record, header };
 }
+
+test('d0_last_update_unsubscribe_detaches_native_observer_and_can_resubscribe', async () => {
+  const raw = {
+    set_local_lowering() {},
+    set_update_observer: mock((_listener: (update: Uint8Array, origin: number) => void) => {}),
+    clear_update_observer: mock(() => {}),
+    free() {},
+  };
+  const create = spyOn(wasm, 'createEditSession')
+    .mockReturnValue(raw as unknown as ReturnType<typeof wasm.createEditSession>);
+  let session: ResidentEngineSession | undefined;
+  try {
+    session = await createResidentEngineSession();
+    const first = session.onUpdate(() => {});
+    const second = session.onUpdate(() => {});
+    expect(raw.set_update_observer).toHaveBeenCalledTimes(1);
+    first();
+    expect(raw.clear_update_observer).not.toHaveBeenCalled();
+    second();
+    expect(raw.clear_update_observer).toHaveBeenCalledTimes(1);
+    second();
+    expect(raw.clear_update_observer).toHaveBeenCalledTimes(1);
+    const third = session.onUpdate(() => {});
+    expect(raw.set_update_observer).toHaveBeenCalledTimes(2);
+    session.destroy();
+    expect(raw.clear_update_observer).toHaveBeenCalledTimes(2);
+    third();
+    expect(raw.clear_update_observer).toHaveBeenCalledTimes(2);
+  } finally {
+    session?.destroy();
+    create.mockRestore();
+  }
+}, 15_000);
+
+test('d0_self_unsubscribe_detaches_native_observer_after_callback_returns', async () => {
+  type UpdateObserver = (update: Uint8Array, origin: number) => void;
+  let observer: UpdateObserver | null = null;
+  let borrowed = false;
+  const raw = {
+    set_local_lowering() {},
+    set_update_observer: mock((listener: UpdateObserver) => { observer = listener; }),
+    clear_update_observer: mock(() => {
+      if (borrowed) throw new Error('recursive use of an object detected');
+      observer = null;
+    }),
+    free() {},
+  };
+  const create = spyOn(wasm, 'createEditSession')
+    .mockReturnValue(raw as unknown as ReturnType<typeof wasm.createEditSession>);
+  let session: ResidentEngineSession | undefined;
+  try {
+    session = await createResidentEngineSession();
+    const release = session.onUpdate(() => { release(); });
+    const dispatch = raw.set_update_observer.mock.calls[0]![0];
+    borrowed = true;
+    try {
+      dispatch(new Uint8Array([1]), 0);
+    } catch {} finally {
+      borrowed = false;
+    }
+    expect(raw.clear_update_observer).not.toHaveBeenCalled();
+    await Promise.resolve();
+    expect(raw.clear_update_observer).toHaveBeenCalledTimes(1);
+    expect(observer).toBeNull();
+    expect(raw.clear_update_observer.mock.results[0]!.type).toBe('return');
+
+    const second = session.onUpdate(() => { second(); });
+    raw.set_update_observer.mock.calls[1]![0](new Uint8Array([2]), 1);
+    const third = session.onUpdate(() => {});
+    await Promise.resolve();
+    expect(observer).not.toBeNull();
+    expect(raw.set_update_observer).toHaveBeenCalledTimes(2);
+    expect(raw.clear_update_observer).toHaveBeenCalledTimes(1);
+    third();
+    expect(observer).toBeNull();
+    expect(raw.clear_update_observer).toHaveBeenCalledTimes(2);
+  } finally {
+    session?.destroy();
+    create.mockRestore();
+  }
+}, 15_000);
 
 test('resident saves use peer marks even when another story changed or was already projected by the peer', async () => {
   const { session, hostJson, host, record, header } = await open();

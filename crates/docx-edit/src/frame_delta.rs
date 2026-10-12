@@ -49,7 +49,6 @@ const POSITION_FIELDS: [u8; 5] = [
 ];
 
 const MAGIC: [u8; 4] = *b"FDV1";
-const MAX_U32: usize = u32::MAX as usize;
 const MAX_SAFE_INTEGER: i64 = (1 << 53) - 1;
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -716,13 +715,11 @@ fn encode_ops(
     out.reserve_exact(prefix.len());
     out.splice(0..0, prefix);
 
-    if out.len() > MAX_U32 {
-        return Err("FrameDelta exceeds the v1 u32 byte-length limit".to_owned());
-    }
+    let total_len = u32::try_from(out.len())
+        .map_err(|_| "FrameDelta exceeds the v1 u32 byte-length limit".to_owned())?;
     out[0..4].copy_from_slice(&MAGIC);
     patch_u16(&mut out, 4, FRAME_DELTA_VERSION);
     patch_u16(&mut out, 6, FRAME_HEADER_LEN as u16);
-    let total_len = out.len() as u32;
     patch_u32(&mut out, 8, total_len);
     patch_u32(&mut out, 12, if full { FRAME_FLAG_FULL } else { 0 });
     patch_u64(&mut out, 16, epochs.doc_epoch);

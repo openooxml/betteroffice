@@ -615,6 +615,21 @@ fn default_true() -> bool {
     true
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TableMeasurementFrame {
+    pub section_width_known: bool,
+    pub allow_side_switch: bool,
+}
+
+impl From<bool> for TableMeasurementFrame {
+    fn from(frame: bool) -> Self {
+        Self {
+            section_width_known: frame,
+            allow_side_switch: frame,
+        }
+    }
+}
+
 pub fn measure_blocks(
     blocks: &mut [LayoutBlock],
     content_width: f64,
@@ -692,15 +707,34 @@ pub fn measure_blocks_with_table_wrap_frames(
     page_geometry: Option<&FloatPageGeometry>,
     shape_offsets: &BTreeMap<usize, f64>,
 ) -> Result<Vec<BlockExtent>, String> {
-    let default_width = widths.first().copied().unwrap_or(0.0);
-    let extracted = extract_floating_zones(
+    measure_blocks_with_table_frames(
         blocks,
-        default_width,
         widths,
         table_wrap_frames,
         config,
         page_geometry,
         shape_offsets,
+    )
+}
+
+pub fn measure_blocks_with_table_frames(
+    blocks: &mut [LayoutBlock],
+    widths: &[f64],
+    table_frames: &[impl Copy + Into<TableMeasurementFrame>],
+    config: &MeasurementConfig,
+    page_geometry: Option<&FloatPageGeometry>,
+    shape_offsets: &BTreeMap<usize, f64>,
+) -> Result<Vec<BlockExtent>, String> {
+    let default_width = widths.first().copied().unwrap_or(0.0);
+    let (extracted, _) = extract_floating_zones_recorded(
+        blocks,
+        default_width,
+        widths,
+        table_frames,
+        config,
+        page_geometry,
+        shape_offsets,
+        false,
     )?;
     let (paragraph_zones, zones_by_anchor) = group_floating_zones(extracted);
     let marks = section_break_marks(blocks);
@@ -804,11 +838,31 @@ pub fn measure_float_segment_with_font_dependencies(
     page_geometry: Option<&FloatPageGeometry>,
     section_break_marks: &[bool],
 ) -> Result<Option<(Vec<BlockExtent>, Vec<FontChainDependencies>)>, String> {
+    measure_float_segment_with_table_frames(
+        blocks,
+        widths,
+        default_width,
+        table_wrap_frames,
+        config,
+        page_geometry,
+        section_break_marks,
+    )
+}
+
+pub fn measure_float_segment_with_table_frames(
+    blocks: &mut [LayoutBlock],
+    widths: &[f64],
+    default_width: f64,
+    table_frames: &[impl Copy + Into<TableMeasurementFrame>],
+    config: &MeasurementConfig,
+    page_geometry: Option<&FloatPageGeometry>,
+    section_break_marks: &[bool],
+) -> Result<Option<(Vec<BlockExtent>, Vec<FontChainDependencies>)>, String> {
     let (extracted, zone_dependencies) = extract_floating_zones_recorded(
         blocks,
         default_width,
         widths,
-        table_wrap_frames,
+        table_frames,
         config,
         page_geometry,
         &BTreeMap::new(),
@@ -1071,12 +1125,22 @@ impl FloatFlow {
         config: &MeasurementConfig,
         page_geometry: Option<&FloatPageGeometry>,
     ) -> Result<Self, String> {
+        Self::with_table_frames(blocks, widths, table_wrap_frames, config, page_geometry)
+    }
+
+    pub fn with_table_frames(
+        blocks: &[LayoutBlock],
+        widths: &[f64],
+        table_frames: &[impl Copy + Into<TableMeasurementFrame>],
+        config: &MeasurementConfig,
+        page_geometry: Option<&FloatPageGeometry>,
+    ) -> Result<Self, String> {
         let default_width = widths.first().copied().unwrap_or(0.0);
         let (extracted, zone_dependencies) = extract_floating_zones_recorded(
             blocks,
             default_width,
             widths,
-            table_wrap_frames,
+            table_frames,
             config,
             page_geometry,
             &BTreeMap::new(),
@@ -1817,7 +1881,7 @@ fn extract_floating_zones_recorded(
     blocks: &[LayoutBlock],
     content_width: f64,
     widths: &[f64],
-    table_wrap_frames: &[bool],
+    table_wrap_frames: &[impl Copy + Into<TableMeasurementFrame>],
     config: &MeasurementConfig,
     page_geometry: Option<&FloatPageGeometry>,
     shape_offsets: &BTreeMap<usize, f64>,
@@ -1836,6 +1900,11 @@ fn extract_floating_zones_recorded(
                     extract_image_zones(paragraph, block_index, content_width, &mut zones);
                 }
                 LayoutBlock::Table(table) => {
+                    let frame: TableMeasurementFrame = table_wrap_frames
+                        .get(block_index)
+                        .copied()
+                        .map(Into::into)
+                        .unwrap_or(false.into());
                     extract_table_zone(
                         table,
                         block_index,
@@ -1843,7 +1912,8 @@ fn extract_floating_zones_recorded(
                         widths
                             .get(block_index)
                             .copied()
-                            .filter(|_| table_wrap_frames.get(block_index) == Some(&true)),
+                            .filter(|_| frame.section_width_known),
+                        frame.allow_side_switch,
                         config,
                         &mut zones,
                     )?;
@@ -2098,15 +2168,22 @@ fn extract_table_zone(
     block_index: usize,
     content_width: f64,
     column_width: Option<f64>,
+    allow_side_switch: bool,
     config: &MeasurementConfig,
     zones: &mut Vec<AnchoredFloatingZone>,
 ) -> Result<(), String> {
     if table.floating.is_none() {
         return Ok(());
     }
+    let content_width = column_width.unwrap_or(content_width);
     let mut measured_table = table.clone();
     let measure = measure_table(&mut measured_table, content_width, config)?;
-    if let Some(mut zone) = table_floating_zone(table, &measure, content_width, column_width) {
+    if let Some(mut zone) = table_floating_zone(
+        table,
+        &measure,
+        content_width,
+        column_width.filter(|_| allow_side_switch),
+    ) {
         (zone.left_margin, zone.right_margin) =
             clamp_margins(zone.left_margin, zone.right_margin, content_width);
         zones.push(AnchoredFloatingZone {
@@ -4079,6 +4156,65 @@ mod tests {
             .unwrap();
             let zone = &flow.paragraph_zones[&0][0];
             assert_eq!((zone.left_margin, zone.right_margin), expected);
+        }
+    }
+
+    #[test]
+    fn negative_indents_preserve_known_section_table_geometry() {
+        for (width, table_width, position, expected, switched) in [
+            (
+                380.0,
+                100.0,
+                json!({"tblpXSpec": "right"}),
+                (0.0, 110.0),
+                (0.0, 110.0),
+            ),
+            (
+                600.0,
+                360.0,
+                json!({"tblpX": 240}),
+                (0.0, 0.0),
+                (0.0, 370.0),
+            ),
+        ] {
+            let mut floating = position;
+            floating["horzAnchor"] = json!("text");
+            floating["leftFromText"] = json!(10);
+            floating["rightFromText"] = json!(10);
+            let blocks: Vec<LayoutBlock> = serde_json::from_value(json!([
+                {"kind": "paragraph", "id": "first", "runs": []},
+                {"kind": "sectionBreak", "id": "break", "type": "nextPage"},
+                {
+                    "kind": "table", "id": "float", "columnWidths": [table_width],
+                    "layoutMode": "fixed", "floating": floating,
+                    "rows": [{"id": "row", "height": 100, "heightRule": "exact", "cells": []}]
+                },
+                {"kind": "paragraph", "id": "text", "runs": []},
+                {"kind": "paragraph", "id": "later", "runs": [],
+                 "attrs": {"indent": {"right": -1}}}
+            ]))
+            .unwrap();
+            let mut frames: Vec<_> =
+                negative_indent_float_flows(&blocks.iter().collect::<Vec<_>>())
+                    .into_iter()
+                    .map(|negative| TableMeasurementFrame {
+                        section_width_known: true,
+                        allow_side_switch: !negative,
+                    })
+                    .collect();
+            assert!(frames[2..].iter().all(|frame| !frame.allow_side_switch));
+            let widths = [180.0, 180.0, width, width, width];
+            let config = MeasurementConfig::default();
+            let flow =
+                FloatFlow::with_table_frames(&blocks, &widths, &frames, &config, None).unwrap();
+            let zone = &flow.paragraph_zones[&2][0];
+            assert_eq!((zone.left_margin, zone.right_margin), expected);
+            assert_eq!((zone.top_y, zone.bottom_y), (0.0, 100.0));
+            frames[2].allow_side_switch = true;
+            let flow =
+                FloatFlow::with_table_frames(&blocks, &widths, &frames, &config, None).unwrap();
+            let zone = &flow.paragraph_zones[&2][0];
+            assert_eq!((zone.left_margin, zone.right_margin), switched);
         }
     }
 

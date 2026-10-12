@@ -72,6 +72,29 @@ import type {
 import { preparedDigests, randomClientId, wrapSession } from './yrsSessionFacade';
 export { decodeDocxHostJson } from './yrsSessionFacade';
 
+/** @internal */
+export type {
+  DocxCommandEchoContext,
+  DocxCommandFrame,
+  DocxCommandPageIdentity,
+  DocxCommandPayloads,
+  DocxCommandSelection,
+  DocxEditState,
+  DocxEchoRect,
+  DocxEchoTransform,
+  DocxNavigationIntent,
+  DocxSelectionPointIntent,
+  DocxWorkerEditSession,
+  ResidentCommandConnection,
+  ResidentCommandInitReply,
+} from './residentCommandProtocol';
+/** @internal */
+export type {
+  ResidentEngineWorkerHostModule,
+  ResidentEngineWorkerRequest,
+  ResidentEngineWorkerResponse,
+} from './residentEngineWorkerProtocol';
+
 export * from './layoutMeta';
 export * from './edits';
 export * from './contentControls';
@@ -83,7 +106,8 @@ export * from './pagedExport';
 export * from './inputPositionMap';
 export * from './storyPlainText';
 export type { DocxResolvedPointPosition } from './pointPosition';
-export type { ResidentDocumentRead } from './residentEngineWorkerProtocol';
+export type { ResidentRangeHighlights } from './residentRangeHighlights';
+export type { ResidentDocumentRead, ResidentDocumentReadValues } from './residentEngineWorkerProtocol';
 export type {
   DocxDisplayRange,
   DocxDisplaySelectionInfo,

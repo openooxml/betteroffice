@@ -20,6 +20,7 @@ use docx_layout::header_footer::{
     resolve_header_footer_field_widths,
 };
 use docx_layout::hit::{CaretRect, VerticalDirection};
+use docx_layout::measure_blocks::TableMeasurementFrame;
 use docx_layout::paragraph_spacing::resolve_doc_grid_pitch;
 use docx_layout::paragraph_spacing::resolve_line_unit_spacing;
 use docx_layout::place::LayoutCheckpoint;
@@ -139,6 +140,14 @@ struct MeasurementState {
     compatibility_calls: u64,
     resident_measure_calls: u64,
     resident_reused_blocks: u64,
+}
+
+#[derive(Debug)]
+struct PlainWorkerMeasurement {
+    configuration: u64,
+    layout_epoch: u64,
+    blocks: Vec<Rc<LayoutBlock>>,
+    fingerprints: Vec<Fingerprint>,
 }
 
 #[derive(Debug)]
@@ -349,7 +358,7 @@ struct PreparedRegionLayout {
     has_floats: bool,
     measured_widths: Vec<f64>,
     measured_font_dependencies: Vec<FontChainDependencies>,
-    measured_table_wrap_frames: Vec<bool>,
+    measured_table_wrap_frames: Vec<TableMeasurementFrame>,
     measured_float_geometry: Option<[f64; 5]>,
     provisional: bool,
     cached_page_totals: bool,
@@ -513,11 +522,27 @@ fn column_measurement_width(
     ((content_width - (columns.count - 1.0) * columns.gap) / columns.count).floor()
 }
 
+#[cfg(test)]
 fn region_measurement_frames<'a>(
     blocks: impl IntoIterator<Item = &'a LayoutBlock>,
     input: &LayoutInput,
     regions: &DocumentRegions,
 ) -> (Vec<f64>, Vec<bool>) {
+    let (widths, frames) = region_table_measurement_frames(blocks, input, regions);
+    (
+        widths,
+        frames
+            .into_iter()
+            .map(|frame| frame.allow_side_switch)
+            .collect(),
+    )
+}
+
+fn region_table_measurement_frames<'a>(
+    blocks: impl IntoIterator<Item = &'a LayoutBlock>,
+    input: &LayoutInput,
+    regions: &DocumentRegions,
+) -> (Vec<f64>, Vec<TableMeasurementFrame>) {
     let blocks: Vec<_> = blocks.into_iter().collect();
     let section_breaks: Vec<_> = blocks
         .iter()
@@ -537,6 +562,33 @@ fn region_measurement_frames<'a>(
         });
     let fallback_margins =
         docx_layout::section_breaks::resolve_page_margins(input.options.margins.as_ref());
+    let initial = docx_layout::prescan::SectionLayoutConfig {
+        page_size: fallback_size.clone(),
+        margins: fallback_margins.clone(),
+        columns: input.options.columns.clone(),
+    };
+    let final_config = docx_layout::prescan::SectionLayoutConfig {
+        page_size: input
+            .options
+            .final_page_size
+            .clone()
+            .unwrap_or_else(|| initial.page_size.clone()),
+        margins: input
+            .options
+            .final_margins
+            .clone()
+            .unwrap_or_else(|| initial.margins.clone()),
+        columns: input.options.columns.clone(),
+    };
+    let measured_breaks: Vec<_> = section_breaks
+        .iter()
+        .map(|section_break| MeasuredBlock {
+            block: LayoutBlock::SectionBreak((*section_break).clone()),
+            measure: BlockExtent::SectionBreak,
+        })
+        .collect();
+    let (fallback_sections, _) =
+        docx_layout::prescan::collect_section_configs(&measured_breaks, &initial, final_config);
     let mut section_index = 0;
     let mut previous_section = None;
     let mut placement_page_width = fallback_size.w;
@@ -551,15 +603,16 @@ fn region_measurement_frames<'a>(
                 .sections
                 .get(section_index)
                 .or_else(|| regions.sections.last());
+            let fallback = &fallback_sections[section_index];
             let size = section
                 .and_then(|section| section.page_size.as_ref())
-                .unwrap_or(&fallback_size);
+                .unwrap_or(&fallback.page_size);
             let margins = section
                 .and_then(|section| section.margins.as_ref())
-                .unwrap_or(&fallback_margins);
+                .unwrap_or(&fallback.margins);
             let columns = section
                 .and_then(|section| section.columns.as_ref())
-                .or(input.options.columns.as_ref());
+                .or(fallback.columns.as_ref());
             let width = column_measurement_width(size.w, margins, columns);
             let section_break = section_breaks.get(section_index);
             let placement_columns = match section_break {
@@ -623,16 +676,20 @@ fn region_measurement_frames<'a>(
                     && (deferred_width || previous_content_width != content_width);
                 previous_section = Some(section_index);
             }
-            let table_wrap_frame = regions.sections.get(section_index).is_some()
+            let section_width_known = (regions.sections.is_empty()
+                || regions.sections.get(section_index).is_some())
                 && columns.is_none_or(|columns| columns.count == 1.0)
                 && placement_columns.is_none_or(|columns| columns.count == 1.0)
                 && width == placement_page_width - placement_margins.left - placement_margins.right
-                && !deferred_width
-                && !negative_flow;
+                && !deferred_width;
+            let table_frame = TableMeasurementFrame {
+                section_width_known,
+                allow_side_switch: section_width_known && !negative_flow,
+            };
             if matches!(block, LayoutBlock::SectionBreak(_)) {
                 section_index += 1;
             }
-            (width, table_wrap_frame)
+            (width, table_frame)
         })
         .unzip()
 }
@@ -719,7 +776,7 @@ fn options_through_section(
 fn measure_page_prefix_plain(
     blocks: &mut [LayoutBlock],
     widths: &[f64],
-    table_wrap_frames: &[bool],
+    table_wrap_frames: &[impl Copy + Into<TableMeasurementFrame>],
     measurement: &docx_layout::measure_blocks::MeasurementConfig,
     geometry: &docx_layout::measure_blocks::FloatPageGeometry,
     request_options: &docx_layout::types::LayoutOptions,
@@ -735,7 +792,7 @@ fn measure_page_prefix_plain(
         let end = prefix_boundary(blocks, (start + step).min(blocks.len()));
         if anchored {
             let mut prefix = blocks[..end].to_vec();
-            let mut flow = docx_layout::measure_blocks::FloatFlow::with_table_wrap_frames(
+            let mut flow = docx_layout::measure_blocks::FloatFlow::with_table_frames(
                 &prefix,
                 &widths[..end],
                 &table_wrap_frames[..end],
@@ -749,7 +806,7 @@ fn measure_page_prefix_plain(
                 *block = measured;
             }
         } else {
-            let mut flow = docx_layout::measure_blocks::FloatFlow::with_table_wrap_frames(
+            let mut flow = docx_layout::measure_blocks::FloatFlow::with_table_frames(
                 &blocks[start..end],
                 &widths[start..end],
                 &table_wrap_frames[start..end],
@@ -803,7 +860,7 @@ fn measure_page_prefix_plain(
 fn measure_page_prefix(
     blocks: &mut [LayoutBlock],
     widths: &[f64],
-    table_wrap_frames: &[bool],
+    table_wrap_frames: &[impl Copy + Into<TableMeasurementFrame>],
     measurement: &docx_layout::measure_blocks::MeasurementConfig,
     geometry: &docx_layout::measure_blocks::FloatPageGeometry,
     request_options: &docx_layout::types::LayoutOptions,
@@ -833,7 +890,7 @@ fn measure_page_prefix(
         let end = prefix_boundary(blocks, (start + step).min(blocks.len()));
         if anchored {
             let prefix = &mut blocks[..end];
-            let mut flow = docx_layout::measure_blocks::FloatFlow::with_table_wrap_frames(
+            let mut flow = docx_layout::measure_blocks::FloatFlow::with_table_frames(
                 prefix,
                 &widths[..end],
                 &table_wrap_frames[..end],
@@ -844,7 +901,7 @@ fn measure_page_prefix(
             dependencies = flow.font_dependencies().to_vec();
             measures = flow.into_extents();
         } else {
-            let mut flow = docx_layout::measure_blocks::FloatFlow::with_table_wrap_frames(
+            let mut flow = docx_layout::measure_blocks::FloatFlow::with_table_frames(
                 &blocks[start..end],
                 &widths[start..end],
                 &table_wrap_frames[start..end],
@@ -1071,7 +1128,8 @@ where
         .iter()
         .map(|measured| measured.block.clone())
         .collect::<Vec<_>>();
-    let (widths, table_wrap_frames) = region_measurement_frames(blocks.iter(), input, regions);
+    let (widths, table_wrap_frames) =
+        region_table_measurement_frames(blocks.iter(), input, regions);
     let geometry = initial_float_page_geometry(input, regions);
     let mut previous_offsets = BTreeMap::new();
     let mut touched = false;
@@ -1098,7 +1156,7 @@ where
         if offsets == previous_offsets {
             return Ok(touched);
         }
-        let measures = docx_layout::measure_blocks::measure_blocks_with_table_wrap_frames(
+        let measures = docx_layout::measure_blocks::measure_blocks_with_table_frames(
             &mut blocks,
             &widths,
             &table_wrap_frames,
@@ -1331,7 +1389,7 @@ struct PaginationState {
     measured_widths: Vec<f64>,
     measured_font_dependencies: Vec<FontChainDependencies>,
     measured_font_chains: Option<BTreeMap<String, Vec<u32>>>,
-    measured_table_wrap_frames: Vec<bool>,
+    measured_table_wrap_frames: Vec<TableMeasurementFrame>,
     measured_float_geometry: Option<[f64; 5]>,
     measured_with_floats: bool,
     /// Pages whose note areas changed since the last display build.
@@ -1560,6 +1618,8 @@ pub struct EngineSession {
     #[cfg(test)]
     font_dependency_work: RefCell<FontDependencyWork>,
     regions: RefCell<Option<ResidentRegionState>>,
+    plain_worker_measurement: RefCell<Option<PlainWorkerMeasurement>>,
+    plain_headers_footers: RefCell<Option<serde_json::Value>>,
     pagination: Rc<RefCell<PaginationState>>,
     display: RefCell<DisplayState>,
     /// The resident caret head and the body or nested body story it lies in.
@@ -3813,6 +3873,8 @@ impl EngineSession {
             #[cfg(test)]
             font_dependency_work: RefCell::new(FontDependencyWork::default()),
             regions: RefCell::new(None),
+            plain_worker_measurement: RefCell::new(None),
+            plain_headers_footers: RefCell::new(None),
             pagination,
             display: RefCell::new(DisplayState::default()),
             resident_caret_head: RefCell::new(None),
@@ -4127,13 +4189,24 @@ impl EngineSession {
                             after.checked_sub(before) == Some(text.encode_utf16().count() as u32)
                         }) =>
                 {
-                    self.doc.advance_indexes_after_text_insert(
-                        &range.story,
-                        before,
-                        self.doc.committed_epoch(),
-                        range.start,
-                        text,
-                    );
+                    if let Some(attrs) = attrs.as_ref() {
+                        self.doc.advance_indexes_after_formatted_text_insert(
+                            &range.story,
+                            before,
+                            self.doc.committed_epoch(),
+                            range.start,
+                            text,
+                            Some(attrs),
+                        );
+                    } else {
+                        self.doc.advance_indexes_after_text_insert(
+                            &range.story,
+                            before,
+                            self.doc.committed_epoch(),
+                            range.start,
+                            text,
+                        );
+                    }
                 }
                 None if plain_text_delete
                     && receipt.new_para_ids.is_empty()
@@ -4860,13 +4933,213 @@ impl EngineSession {
     /// Parses, paginates, and retains measured input and layout.
     pub fn layout_document_json(&self, input_json: &str) -> Result<String, String> {
         let _trigger_reset = RelayoutTriggerReset(self);
-        let input: LayoutInput = serde_json::from_str(input_json).map_err(|error| {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Request {
+            #[serde(flatten)]
+            input: LayoutInput,
+            #[serde(default)]
+            regions: DocumentRegions,
+            #[serde(default)]
+            worker_owned: Option<RegionLayoutInput>,
+            #[serde(default)]
+            retain_only: bool,
+            #[serde(default)]
+            worker_headers_footers: Option<serde_json::Value>,
+        }
+        let request: Request = serde_json::from_str(input_json).map_err(|error| {
             self.consume_relayout_trigger();
             format!("parse: {error}")
         })?;
+        let mut input = request.input;
+        let mut headers_footers = None;
+        let mut header_measurement = None;
+        let mut header_regions = None;
+        let worker_owned = request.worker_owned.is_some();
+        if let Some(worker) = request.worker_owned {
+            let env = if worker.render_env.is_null() {
+                RenderEnv::default()
+            } else {
+                serde_json::from_value(worker.render_env.clone())
+                    .map_err(|error| format!("parse render environment: {error}"))?
+            };
+            let story = worker.body_story.as_deref().unwrap_or("body");
+            let mut regions = request.regions;
+            regions.normalize_authored();
+            if let Some(payload) = request.worker_headers_footers {
+                let value = serde_json::json!({ "headersFooters": payload });
+                for variant in value["headersFooters"]["variants"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                {
+                    let index = variant["sectionIndex"].as_u64().unwrap_or(0) as usize;
+                    while regions.sections.len() <= index {
+                        regions
+                            .sections
+                            .push(docx_layout::regions::RegionSection::default());
+                    }
+                }
+                for (index, section) in regions.sections.iter_mut().enumerate() {
+                    let mut refs = serde_json::json!({});
+                    for variant in value["headersFooters"]["variants"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                    {
+                        if variant["sectionIndex"].as_u64().unwrap_or(0) as usize != index {
+                            continue;
+                        }
+                        let key = match (variant["kind"].as_str(), variant["type"].as_str()) {
+                            (Some("header"), Some("first")) => "headerFirst",
+                            (Some("header"), Some("even")) => "headerEven",
+                            (Some("header"), _) => "headerDefault",
+                            (Some("footer"), Some("first")) => "footerFirst",
+                            (Some("footer"), Some("even")) => "footerEven",
+                            _ => "footerDefault",
+                        };
+                        refs[key] = variant["rId"].clone();
+                    }
+                    section.header_footer_refs = Some(
+                        serde_json::from_value(refs)
+                            .map_err(|error| format!("parse header/footer refs: {error}"))?,
+                    );
+                    section.title_pg = value["headersFooters"]["titlePg"]
+                        .as_bool()
+                        .unwrap_or(false)
+                        || value["headersFooters"]["titlePageSections"]
+                            .as_array()
+                            .is_some_and(|sections| {
+                                sections
+                                    .iter()
+                                    .any(|section| section.as_u64() == Some(index as u64))
+                            });
+                    section.even_and_odd_headers = Some(
+                        value["headersFooters"]["evenAndOddSections"]
+                            .as_array()
+                            .is_some_and(|sections| {
+                                sections
+                                    .iter()
+                                    .any(|section| section.as_u64() == Some(index as u64))
+                            })
+                            || value["headersFooters"]["evenAndOddHeaders"]
+                                .as_bool()
+                                .unwrap_or(false),
+                    );
+                }
+                regions.even_and_odd_headers = value["headersFooters"]["evenAndOddHeaders"]
+                    .as_bool()
+                    .unwrap_or(false);
+                regions.watermark = value["headersFooters"].get("watermark").cloned();
+                regions.headers_footers = value.get("headersFooters").cloned();
+            }
+            let needs_regions = self
+                .with_resident_story(story, &env, |blocks| {
+                    blocks.iter().any(|block| match block.as_ref() {
+                        LayoutBlock::SectionBreak(_)
+                        | LayoutBlock::TextBox(_)
+                        | LayoutBlock::Shape(_) => true,
+                        LayoutBlock::Table(table) => table.floating.is_some(),
+                        LayoutBlock::Image(image) => image
+                            .anchor
+                            .as_ref()
+                            .is_some_and(|anchor| anchor.is_anchored == Some(true)),
+                        LayoutBlock::Paragraph(paragraph) => {
+                            paragraph.runs.iter().any(|run| match run {
+                                Run::Image(image) => {
+                                    image.position.is_some()
+                                        || image.css_float.is_some()
+                                        || image
+                                            .wrap_type
+                                            .as_deref()
+                                            .is_some_and(|wrap| wrap != "inline")
+                                        || matches!(
+                                            image.display_mode.as_deref(),
+                                            Some("anchor" | "float")
+                                        )
+                                }
+                                _ => false,
+                            })
+                        }
+                        _ => false,
+                    })
+                })
+                .map_err(|error| error.to_string())?;
+            if needs_regions {
+                let mut full_request: serde_json::Value =
+                    serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?;
+                full_request["bodyStory"] = serde_json::json!(story);
+                full_request["renderEnv"] = if worker.render_env.is_null() {
+                    serde_json::json!({})
+                } else {
+                    worker.render_env
+                };
+                full_request["measurement"] =
+                    serde_json::to_value(&worker.measurement).map_err(|error| error.to_string())?;
+                full_request["regions"] =
+                    serde_json::to_value(&regions).map_err(|error| error.to_string())?;
+                self.plain_worker_measurement.replace(None);
+                self.layout_regions_for_trigger(
+                    &full_request.to_string(),
+                    None,
+                    self.relayout_trigger.get(),
+                )?;
+                self.plain_headers_footers.replace(None);
+                if request.retain_only {
+                    return Ok(String::new());
+                }
+                return serde_json::to_string(self.pagination.borrow().layout.as_ref().unwrap())
+                    .map_err(|error| format!("serialize: {error}"));
+            }
+            headers_footers = self.measure_header_footer_payload(
+                &mut input,
+                &regions,
+                &worker.measurement,
+                &env,
+            )?;
+            input.measured = self.measure_plain_worker(story, &env, &input, &worker.measurement)?;
+            header_measurement = Some(worker.measurement);
+            if !regions.sections.is_empty() {
+                header_regions = Some(regions);
+            }
+        }
         self.regions.borrow_mut().take();
         self.layout_document_value(input)?;
-        let pagination = self.pagination.borrow();
+        let mut pagination = self.pagination.borrow_mut();
+        if let Some(regions) = header_regions {
+            let mut restamped_pages = Vec::new();
+            let layout = pagination
+                .layout
+                .as_mut()
+                .expect("layout retained after successful pagination");
+            apply_document_regions_tracked(layout, &regions, &mut restamped_pages);
+            if let Some(pages) = &mut pagination.restamped_pages {
+                pages.extend(restamped_pages);
+            }
+        }
+        if worker_owned {
+            if let Some(cache) = self.plain_worker_measurement.borrow_mut().as_mut() {
+                cache.layout_epoch = pagination.layout_epoch;
+            }
+        } else {
+            self.plain_worker_measurement.replace(None);
+        }
+        if let Some(payload) = headers_footers.as_mut() {
+            resolve_header_footer_field_widths(
+                payload,
+                pagination.layout.as_ref().unwrap(),
+                header_measurement.as_ref().unwrap(),
+            )?;
+        }
+        self.plain_headers_footers.replace(
+            headers_footers
+                .map(serde_json::to_value)
+                .transpose()
+                .map_err(|error| error.to_string())?,
+        );
+        if request.retain_only {
+            return Ok(String::new());
+        }
         serde_json::to_string(
             pagination
                 .layout
@@ -4874,6 +5147,180 @@ impl EngineSession {
                 .expect("layout retained after successful pagination"),
         )
         .map_err(|error| format!("serialize: {error}"))
+    }
+
+    fn measure_plain_worker(
+        &self,
+        story: &str,
+        env: &RenderEnv,
+        input: &LayoutInput,
+        measurement: &docx_layout::measure_blocks::MeasurementConfig,
+    ) -> Result<Vec<MeasuredBlock>, String> {
+        let configuration = hash_bytes(
+            &serde_json::to_vec(&(
+                story,
+                env,
+                &input.options,
+                measurement,
+                docx_layout::measure_fonts_generation(),
+            ))
+            .map_err(|error| error.to_string())?,
+        );
+        self.with_resident_story(story, env, |blocks| {
+            let mut cache = self.plain_worker_measurement.borrow_mut();
+            let retained = cache.as_ref().filter(|cache| {
+                cache.configuration == configuration
+                    && cache.layout_epoch == self.pagination.borrow().layout_epoch
+                    && cache.blocks.len() == blocks.len()
+            });
+            let simple = blocks.iter().all(|block| match block.as_ref() {
+                LayoutBlock::Paragraph(paragraph) => paragraph.runs.iter().all(|run| match run {
+                    Run::Text(_) | Run::Tab(_) | Run::Field(_) | Run::LineBreak(_) => true,
+                    Run::Image(image) => {
+                        image.position.is_none()
+                            && image.css_float.is_none()
+                            && image
+                                .wrap_type
+                                .as_deref()
+                                .is_none_or(|wrap| wrap == "inline")
+                            && !matches!(image.display_mode.as_deref(), Some("anchor" | "float"))
+                    }
+                    Run::Unsupported => false,
+                }),
+                LayoutBlock::Table(table) => table.floating.is_none(),
+                LayoutBlock::Image(_)
+                | LayoutBlock::Chart(_)
+                | LayoutBlock::PageBreak(_)
+                | LayoutBlock::ColumnBreak(_)
+                | LayoutBlock::Unsupported => true,
+                _ => false,
+            });
+            let fingerprints: Vec<_> = blocks
+                .iter()
+                .enumerate()
+                .map(|(index, block)| {
+                    if let Some(cache) = retained
+                        && Rc::ptr_eq(block, &cache.blocks[index])
+                    {
+                        Ok(cache.fingerprints[index])
+                    } else {
+                        crate::fingerprint::fingerprint_without_positions(block.as_ref())
+                    }
+                })
+                .collect::<Result<_, _>>()
+                .map_err(|error| error.to_string())?;
+            let (widths, table_frames) = region_table_measurement_frames(
+                blocks.iter().map(Rc::as_ref),
+                input,
+                &DocumentRegions::default(),
+            );
+            let mut previous = self.pagination.borrow_mut().input.take();
+            let reusable = simple
+                && retained.is_some()
+                && previous
+                    .as_ref()
+                    .is_some_and(|input| input.measured.len() == blocks.len());
+            let measured = if reusable {
+                let retained = retained.unwrap();
+                let previous = previous.as_mut().unwrap();
+                let dirty = blocks
+                    .iter()
+                    .enumerate()
+                    .map(|(index, block)| {
+                        if fingerprints[index] == retained.fingerprints[index] {
+                            Ok(None)
+                        } else {
+                            let mut block = block.as_ref().clone();
+                            self.measurement.borrow_mut().resident_measure_calls += 1;
+                            let measure = docx_layout::measure_blocks::measure_block(
+                                &mut block,
+                                widths[index],
+                                measurement,
+                            )?;
+                            Ok(Some(MeasuredBlock { block, measure }))
+                        }
+                    })
+                    .collect::<Result<Vec<_>, String>>();
+                dirty.map(|dirty| {
+                    dirty
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, entry)| {
+                            entry.unwrap_or_else(|| {
+                                self.measurement.borrow_mut().resident_reused_blocks += 1;
+                                let mut entry = std::mem::replace(
+                                    &mut previous.measured[index],
+                                    MeasuredBlock {
+                                        block: LayoutBlock::Unsupported,
+                                        measure: BlockExtent::Unsupported,
+                                    },
+                                );
+                                if !Rc::ptr_eq(&blocks[index], &retained.blocks[index]) {
+                                    Self::refresh_plain_worker_positions(
+                                        &mut entry.block,
+                                        blocks[index].as_ref(),
+                                    );
+                                }
+                                entry
+                            })
+                        })
+                        .collect()
+                })
+            } else {
+                let mut owned: Vec<_> = blocks.iter().map(|block| block.as_ref().clone()).collect();
+                let geometry = initial_float_page_geometry(input, &DocumentRegions::default());
+                self.measurement.borrow_mut().resident_measure_calls += owned.len() as u64;
+                docx_layout::measure_blocks::measure_blocks_with_table_frames(
+                    &mut owned,
+                    &widths,
+                    &table_frames,
+                    measurement,
+                    Some(&geometry),
+                    &BTreeMap::new(),
+                )
+                .map(|measures| {
+                    owned
+                        .into_iter()
+                        .zip(measures)
+                        .map(|(block, measure)| MeasuredBlock { block, measure })
+                        .collect()
+                })
+            };
+            self.pagination.borrow_mut().input = previous;
+            if measured.is_ok() {
+                *cache = Some(PlainWorkerMeasurement {
+                    configuration,
+                    layout_epoch: self.pagination.borrow().layout_epoch,
+                    blocks: blocks.to_vec(),
+                    fingerprints,
+                });
+            }
+            measured
+        })
+        .map_err(|error| error.to_string())?
+    }
+
+    fn refresh_plain_worker_positions(previous: &mut LayoutBlock, next: &LayoutBlock) {
+        if let (LayoutBlock::Paragraph(previous), LayoutBlock::Paragraph(next)) =
+            (&mut *previous, next)
+        {
+            previous.pm_start = next.pm_start;
+            previous.pm_end = next.pm_end;
+            for (previous, next) in previous.runs.iter_mut().zip(&next.runs) {
+                let (start, end) = match previous {
+                    Run::Text(run) => (&mut run.pm_start, &mut run.pm_end),
+                    Run::Tab(run) => (&mut run.pm_start, &mut run.pm_end),
+                    Run::Field(run) => (&mut run.pm_start, &mut run.pm_end),
+                    Run::LineBreak(run) => (&mut run.pm_start, &mut run.pm_end),
+                    Run::Image(run) => (&mut run.pm_start, &mut run.pm_end),
+                    Run::Unsupported => continue,
+                };
+                *start = next.pm_start();
+                *end = next.pm_end();
+            }
+        } else {
+            *previous = next.clone();
+        }
     }
 
     pub fn layout_font_requirements_json(&self, input_json: &str) -> Result<String, String> {
@@ -5176,14 +5623,14 @@ impl EngineSession {
     /// The retained region layout's `headersFooters`, serialized as its
     /// retained reply carries them.
     pub fn retained_headers_footers_json(&self) -> Result<Option<String>, String> {
-        self.regions
-            .borrow()
-            .as_ref()
-            .and_then(|state| state.headers_footers.as_ref())
-            .map(|value| {
-                serde_json::to_string(value).map_err(|error| format!("serialize: {error}"))
-            })
-            .transpose()
+        let regions = self.regions.borrow();
+        let plain = self.plain_headers_footers.borrow();
+        match regions.as_ref() {
+            Some(state) => state.headers_footers.as_ref(),
+            None => plain.as_ref(),
+        }
+        .map(|value| serde_json::to_string(value).map_err(|error| format!("serialize: {error}")))
+        .transpose()
     }
 
     /// [`Self::layout_document_with_regions_retained_json`] over only as much
@@ -5573,7 +6020,7 @@ impl EngineSession {
                         input_lowering = Some(lowering);
                         apply_section_geometry(&mut input, &regions);
                         let (widths, table_wrap_frames) =
-                            region_measurement_frames(blocks.iter(), &input, &regions);
+                            region_table_measurement_frames(blocks.iter(), &input, &regions);
                         let geometry = initial_float_page_geometry(&input, &regions);
                         measured_widths.clone_from(&widths);
                         measured_table_wrap_frames.clone_from(&table_wrap_frames);
@@ -5647,7 +6094,7 @@ impl EngineSession {
                     }
                     apply_section_geometry_to_blocks(&mut blocks, &mut input.options, &regions);
                     let (widths, table_wrap_frames) =
-                        region_measurement_frames(blocks.iter(), &input, &regions);
+                        region_table_measurement_frames(blocks.iter(), &input, &regions);
                     let geometry = initial_float_page_geometry(&input, &regions);
                     match prefix_pages {
                         // Floats whose zones only settle later, such as shapes that page-side
@@ -5686,14 +6133,13 @@ impl EngineSession {
                                 .collect();
                         }
                         _ => {
-                            let flow =
-                                docx_layout::measure_blocks::FloatFlow::with_table_wrap_frames(
-                                    &blocks,
-                                    &widths,
-                                    &table_wrap_frames,
-                                    &measurement,
-                                    Some(&geometry),
-                                )?;
+                            let flow = docx_layout::measure_blocks::FloatFlow::with_table_frames(
+                                &blocks,
+                                &widths,
+                                &table_wrap_frames,
+                                &measurement,
+                                Some(&geometry),
+                            )?;
                             body = Some(BodyMeasure {
                                 blocks,
                                 widths,
@@ -7779,7 +8225,7 @@ impl EngineSession {
         blocks: &(impl BlockSource + ?Sized),
         lowered_generation: Option<u64>,
         widths: &[f64],
-        table_wrap_frames: &[bool],
+        table_wrap_frames: &[TableMeasurementFrame],
         regions: &DocumentRegions,
         measurement: &docx_layout::measure_blocks::MeasurementConfig,
         measurement_fingerprint: u64,
@@ -8063,7 +8509,7 @@ impl EngineSession {
                         })
                         .collect();
                     let Some((extents, reads)) =
-                        docx_layout::measure_blocks::measure_float_segment_with_font_dependencies(
+                        docx_layout::measure_blocks::measure_float_segment_with_table_frames(
                             &mut segment,
                             &widths[start..end],
                             default_width,
@@ -8192,7 +8638,7 @@ impl EngineSession {
         blocks: &(impl BlockSource + ?Sized),
         lowered_generation: Option<u64>,
         widths: &[f64],
-        table_wrap_frames: &[bool],
+        table_wrap_frames: &[TableMeasurementFrame],
         regions: &DocumentRegions,
         measurement: &docx_layout::measure_blocks::MeasurementConfig,
         measurement_fingerprint: u64,
@@ -8490,7 +8936,7 @@ impl EngineSession {
                         }
                     }
                     let extents =
-                        docx_layout::measure_blocks::measure_float_segment_with_font_dependencies(
+                        docx_layout::measure_blocks::measure_float_segment_with_table_frames(
                             &mut segment,
                             &widths[start..end],
                             default_width,
@@ -8702,7 +9148,7 @@ impl EngineSession {
                             return Ok(None);
                         };
                         (
-                            region_measurement_frames(blocks.iter(), input, &regions).0,
+                            region_table_measurement_frames(blocks.iter(), input, &regions).0,
                             initial_float_page_geometry(input, &regions),
                             layout.pages.len(),
                         )
@@ -10544,6 +10990,538 @@ mod tests {
 
         assert_eq!(engine.stats().lower_cache_hits, 0);
         assert_eq!(engine.stats().lower_cache_misses, 2);
+    }
+
+    #[test]
+    fn plain_worker_layout_measures_only_changed_blocks() {
+        const FONT: &[u8] =
+            include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+        docx_layout::clear_measure_fonts();
+        let font_id = docx_layout::register_measure_font(FONT).unwrap();
+        let engine = EngineSession::new(130);
+        let paragraphs: Vec<_> = (0..80)
+            .map(|index| crate::SeedParagraph {
+                text: format!("Paragraph {index}"),
+                p_style: "Normal".into(),
+                alignment: "left".into(),
+            })
+            .collect();
+        let ids = engine.doc().seed_story("body", &paragraphs).unwrap();
+        let request = serde_json::json!({
+            "measured": [], "retainOnly": true,
+            "options": {
+                "pageSize": { "w": 200, "h": 120 },
+                "margins": { "top": 10, "right": 10, "bottom": 10, "left": 10 }
+            },
+            "workerOwned": {
+                "bodyStory": "body", "renderEnv": {},
+                "measurement": {
+                    "fontChains": { "liberation sans|0|0": [font_id] },
+                    "defaults": { "fontSize": 11, "fontFamily": "Liberation Sans" }
+                }
+            }
+        })
+        .to_string();
+        assert_eq!(engine.layout_document_json(&request).unwrap(), "");
+        let text_pointer = |index: usize| {
+            let pagination = engine.pagination.borrow();
+            let LayoutBlock::Paragraph(paragraph) =
+                &pagination.input.as_ref().unwrap().measured[index].block
+            else {
+                panic!("expected paragraph");
+            };
+            let Run::Text(run) = &paragraph.runs[0] else {
+                panic!("expected text");
+            };
+            run.text.as_ptr()
+        };
+        for index in [0, 40, 79] {
+            let untouched = (index + 1) % 80;
+            let allocation = text_pointer(untouched);
+            let (_, pilcrow) = engine
+                .doc()
+                .paragraph_index("body")
+                .unwrap()
+                .para_span(&ids[index])
+                .unwrap();
+            engine
+                .doc()
+                .insert_text(
+                    &crate::EditCtx::local("", ""),
+                    crate::Position::new("body", pilcrow),
+                    "!",
+                    crate::FormatPolicy::Inherit,
+                )
+                .unwrap();
+            let before = engine.stats();
+            assert_eq!(engine.layout_document_json(&request).unwrap(), "");
+            let after = engine.stats();
+            assert_eq!(
+                after.resident_measure_calls - before.resident_measure_calls,
+                1
+            );
+            assert_eq!(
+                after.resident_reused_blocks - before.resident_reused_blocks,
+                79
+            );
+            assert_eq!(text_pointer(untouched), allocation);
+            let cold = EngineSession::new(131);
+            cold.doc()
+                .apply_update_v1(&engine.doc().encode_state_as_update_v1())
+                .unwrap();
+            cold.layout_document_json(&request).unwrap();
+            assert_eq!(
+                serde_json::to_value(&engine.pagination.borrow().input.as_ref().unwrap().measured)
+                    .unwrap(),
+                serde_json::to_value(&cold.pagination.borrow().input.as_ref().unwrap().measured)
+                    .unwrap(),
+            );
+            assert_eq!(
+                serde_json::to_value(&engine.pagination.borrow().layout).unwrap(),
+                serde_json::to_value(&cold.pagination.borrow().layout).unwrap(),
+            );
+        }
+    }
+
+    #[test]
+    fn plain_worker_layout_measures_final_section_like_full_layout_after_insert() {
+        docx_layout::clear_measure_fonts();
+        let font_id = docx_layout::register_measure_font(LIBERATION).unwrap();
+        let engine = EngineSession::new(132);
+        let ids = engine
+            .doc()
+            .seed_story(
+                "body",
+                &[
+                    crate::SeedParagraph {
+                        text: "First section".into(),
+                        p_style: "Normal".into(),
+                        alignment: "left".into(),
+                    },
+                    crate::SeedParagraph {
+                        text: "Long text wrapping across the final section. ".repeat(20),
+                        p_style: "Normal".into(),
+                        alignment: "left".into(),
+                    },
+                ],
+            )
+            .unwrap();
+        let first = json!({
+            "pageWidth": 3000, "pageHeight": 12000,
+            "marginTop": 150, "marginRight": 150, "marginBottom": 150, "marginLeft": 150,
+            "sectionStart": "nextPage"
+        });
+        engine
+            .doc()
+            .set_paragraph_attr(
+                &ids[0],
+                "sectPr",
+                Any::from_json(&first.to_string()).unwrap(),
+            )
+            .unwrap();
+        let full_request = json!({
+            "bodyStory": "body", "renderEnv": {},
+            "regions": { "sections": [
+                { "sectionId": "first", "properties": first },
+                { "sectionId": "final", "properties": {
+                    "pageWidth": 6000, "pageHeight": 12000,
+                    "marginTop": 150, "marginRight": 300, "marginBottom": 150, "marginLeft": 450,
+                    "sectionStart": "nextPage"
+                } }
+            ] },
+            "measurement": {
+                "fontChains": { "liberation sans|0|0": [font_id] },
+                "defaults": { "fontSize": 11, "fontFamily": "Liberation Sans" }
+            }
+        });
+        let (mut input, regions, _, _, _, _) =
+            serde_json::from_value::<RegionLayoutInput>(full_request.clone())
+                .unwrap()
+                .split();
+        apply_section_geometry(&mut input, &regions);
+        let plain_request = json!({
+            "measured": [], "retainOnly": true, "options": input.options,
+            "workerOwned": {
+                "bodyStory": "body", "renderEnv": {},
+                "measurement": full_request["measurement"]
+            }
+        })
+        .to_string();
+        engine.layout_document_json(&plain_request).unwrap();
+        let (_, pilcrow) = engine
+            .doc()
+            .paragraph_index("body")
+            .unwrap()
+            .para_span(&ids[1])
+            .unwrap();
+        engine
+            .doc()
+            .insert_text(
+                &crate::EditCtx::local("", ""),
+                crate::Position::new("body", pilcrow),
+                "Inserted text in the wide final section.",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+        engine.layout_document_json(&plain_request).unwrap();
+        let cold = EngineSession::new(133);
+        cold.doc()
+            .apply_update_v1(&engine.doc().encode_state_as_update_v1())
+            .unwrap();
+        cold.layout_document_with_regions_retained_json(&full_request.to_string())
+            .unwrap();
+        let actual = engine.pagination.borrow();
+        let expected = cold.pagination.borrow();
+        let BlockExtent::Paragraph(actual_measure) = &actual
+            .input
+            .as_ref()
+            .unwrap()
+            .measured
+            .last()
+            .unwrap()
+            .measure
+        else {
+            panic!("expected final paragraph");
+        };
+        let BlockExtent::Paragraph(expected_measure) = &expected
+            .input
+            .as_ref()
+            .unwrap()
+            .measured
+            .last()
+            .unwrap()
+            .measure
+        else {
+            panic!("expected final paragraph");
+        };
+        assert!(expected_measure.lines.len() > 1);
+        assert!(expected_measure.lines.iter().any(|line| line.width > 180.0));
+        assert_eq!(actual_measure, expected_measure);
+        let page = actual.layout.as_ref().unwrap().pages.last().unwrap();
+        assert_eq!(page.size.w, 400.0);
+        assert_eq!(page.margins.left, 30.0);
+        assert_eq!(page.margins.right, 20.0);
+    }
+
+    #[test]
+    fn plain_worker_layout_wraps_final_section_floating_table_like_full_layout_after_insert() {
+        docx_layout::clear_measure_fonts();
+        let font_id = docx_layout::register_measure_font(LIBERATION).unwrap();
+        let engine = EngineSession::new(134);
+        let body = format!(
+            r#"<w:p><w:pPr><w:sectPr>
+<w:type w:val="nextPage"/><w:pgSz w:w="3000" w:h="12000"/>
+<w:pgMar w:top="150" w:right="150" w:bottom="150" w:left="150"/>
+</w:sectPr></w:pPr><w:r><w:t>First section</w:t></w:r></w:p>
+<w:tbl><w:tblPr><w:tblpPr w:horzAnchor="text" w:vertAnchor="text" w:tblpXSpec="right"
+w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
+<w:tblW w:w="1500" w:type="dxa"/><w:tblLayout w:type="fixed"/></w:tblPr>
+<w:tblGrid><w:gridCol w:w="1500"/></w:tblGrid>
+<w:tr><w:trPr><w:trHeight w:val="1500" w:hRule="exact"/></w:trPr>
+<w:tc><w:tcPr><w:tcW w:w="1500" w:type="dxa"/></w:tcPr><w:p/></w:tc></w:tr></w:tbl>
+<w:p><w:r><w:t>{text}</w:t></w:r></w:p>
+<w:sectPr><w:type w:val="nextPage"/><w:pgSz w:w="6000" w:h="12000"/>
+<w:pgMar w:top="150" w:right="150" w:bottom="150" w:left="150"/></w:sectPr>"#,
+            text = "Long text wrapping beside the final section floating table. ".repeat(20)
+        );
+        crate::seed::seed_from_docx(engine.doc(), &docx_bytes("", &body)).unwrap();
+        let section = |width| {
+            json!({
+                "properties": {
+                    "pageWidth": width, "pageHeight": 12000,
+                    "marginTop": 150, "marginRight": 150,
+                    "marginBottom": 150, "marginLeft": 150, "sectionStart": "nextPage"
+                }
+            })
+        };
+        let full_request = json!({
+            "bodyStory": "body", "renderEnv": {},
+            "regions": { "sections": [section(3000), section(6000)] },
+            "measurement": {
+                "fontChains": { "liberation sans|0|0": [font_id] },
+                "defaults": { "fontSize": 11, "fontFamily": "Liberation Sans" }
+            }
+        });
+        let (mut input, regions, _, _, _, _) =
+            serde_json::from_value::<RegionLayoutInput>(full_request.clone())
+                .unwrap()
+                .split();
+        apply_section_geometry(&mut input, &regions);
+        let plain_request = json!({
+            "measured": [], "retainOnly": true, "options": input.options,
+            "workerOwned": {
+                "bodyStory": "body", "renderEnv": {},
+                "measurement": full_request["measurement"]
+            }
+        })
+        .to_string();
+        engine.layout_document_json(&plain_request).unwrap();
+        let id = {
+            let pagination = engine.pagination.borrow();
+            let LayoutBlock::Paragraph(paragraph) = &pagination
+                .input
+                .as_ref()
+                .unwrap()
+                .measured
+                .last()
+                .unwrap()
+                .block
+            else {
+                panic!("expected final paragraph");
+            };
+            block_key(&paragraph.id).into_owned()
+        };
+        let (_, pilcrow) = engine
+            .doc()
+            .paragraph_index("body")
+            .unwrap()
+            .para_span(&id)
+            .unwrap();
+        engine
+            .doc()
+            .insert_text(
+                &crate::EditCtx::local("", ""),
+                crate::Position::new("body", pilcrow),
+                "Inserted text beside the floating table.",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+        engine.layout_document_json(&plain_request).unwrap();
+        let cold = EngineSession::new(135);
+        cold.doc()
+            .apply_update_v1(&engine.doc().encode_state_as_update_v1())
+            .unwrap();
+        cold.layout_document_with_regions_retained_json(&full_request.to_string())
+            .unwrap();
+        let actual = engine.pagination.borrow();
+        let expected = cold.pagination.borrow();
+        let BlockExtent::Paragraph(actual_measure) = &actual
+            .input
+            .as_ref()
+            .unwrap()
+            .measured
+            .last()
+            .unwrap()
+            .measure
+        else {
+            panic!("expected final paragraph");
+        };
+        let BlockExtent::Paragraph(expected_measure) = &expected
+            .input
+            .as_ref()
+            .unwrap()
+            .measured
+            .last()
+            .unwrap()
+            .measure
+        else {
+            panic!("expected final paragraph");
+        };
+        assert_eq!(actual_measure, expected_measure);
+        assert!(
+            actual_measure
+                .lines
+                .iter()
+                .all(|line| line.synthetic_fallback != Some(true))
+        );
+        assert!(
+            actual_measure
+                .lines
+                .iter()
+                .any(|line| line.right_offset == Some(110.0))
+        );
+        let mut checked_lines = 0;
+        for page in &actual.layout.as_ref().unwrap().pages {
+            let Some(table) = page.fragments.iter().find_map(|fragment| match fragment {
+                Fragment::Table(table) if table.is_floating == Some(true) => Some(table),
+                _ => None,
+            }) else {
+                continue;
+            };
+            assert_eq!(page.size.w, 400.0);
+            assert_eq!((table.x, table.width, table.height), (290.0, 100.0, 100.0));
+            for fragment in &page.fragments {
+                let Fragment::Paragraph(paragraph) = fragment else {
+                    continue;
+                };
+                if block_key(&paragraph.block_id).as_ref() != id.as_str() {
+                    continue;
+                }
+                let mut y = paragraph.y;
+                for line in &actual_measure.lines[paragraph.from_line..paragraph.to_line] {
+                    y += line.float_skip_before.unwrap_or(0.0);
+                    if y < table.y + table.height && y + line.line_height > table.y {
+                        let x = paragraph.x + line.left_offset.unwrap_or(0.0);
+                        assert!(x + line.width <= table.x || x >= table.x + table.width);
+                        checked_lines += 1;
+                    }
+                    y += line.line_height;
+                }
+            }
+        }
+        assert!(checked_lines > 0);
+    }
+
+    #[test]
+    fn negative_indents_preserve_final_section_float_exclusions_after_plain_insert() {
+        docx_layout::clear_measure_fonts();
+        let font_id = docx_layout::register_measure_font(LIBERATION).unwrap();
+        let engine = EngineSession::new(136);
+        let body = format!(
+            r#"<w:p><w:pPr><w:sectPr>
+<w:type w:val="nextPage"/><w:pgSz w:w="3000" w:h="12000"/>
+<w:pgMar w:top="150" w:right="150" w:bottom="150" w:left="150"/>
+</w:sectPr></w:pPr><w:r><w:t>First section</w:t></w:r></w:p>
+<w:tbl><w:tblPr><w:tblpPr w:horzAnchor="text" w:vertAnchor="text" w:tblpXSpec="right"
+w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
+<w:tblW w:w="1500" w:type="dxa"/><w:tblLayout w:type="fixed"/></w:tblPr>
+<w:tblGrid><w:gridCol w:w="1500"/></w:tblGrid>
+<w:tr><w:trPr><w:trHeight w:val="1500" w:hRule="exact"/></w:trPr>
+<w:tc><w:tcPr><w:tcW w:w="1500" w:type="dxa"/></w:tcPr><w:p/></w:tc></w:tr></w:tbl>
+<w:p><w:r><w:t>{text}</w:t></w:r></w:p>
+<w:p><w:pPr><w:ind w:right="-15"/></w:pPr><w:r><w:t>Trailing indent</w:t></w:r></w:p>
+<w:sectPr><w:type w:val="nextPage"/><w:pgSz w:w="6000" w:h="12000"/>
+<w:pgMar w:top="150" w:right="150" w:bottom="150" w:left="150"/></w:sectPr>"#,
+            text = "Long text wrapping beside the final section floating table. ".repeat(20)
+        );
+        crate::seed::seed_from_docx(engine.doc(), &docx_bytes("", &body)).unwrap();
+        let full_request = json!({
+            "bodyStory": "body", "renderEnv": {}, "regions": {},
+            "options": {
+                "pageSize": {"w": 200, "h": 800},
+                "finalPageSize": {"w": 400, "h": 800},
+                "margins": {"top": 10, "right": 10, "bottom": 10, "left": 10},
+                "finalMargins": {"top": 10, "right": 10, "bottom": 10, "left": 10},
+                "bodyBreakType": "nextPage"
+            },
+            "measurement": {
+                "fontChains": { "liberation sans|0|0": [font_id] },
+                "defaults": { "fontSize": 11, "fontFamily": "Liberation Sans" }
+            }
+        });
+        engine
+            .layout_document_with_regions_retained_json(&full_request.to_string())
+            .unwrap();
+        let id = {
+            let pagination = engine.pagination.borrow();
+            let measured = &pagination.input.as_ref().unwrap().measured;
+            let LayoutBlock::Paragraph(paragraph) = &measured[measured.len() - 2].block else {
+                panic!("expected prose before the trailing indent");
+            };
+            block_key(&paragraph.id).into_owned()
+        };
+        let check_exclusions = |engine: &EngineSession| {
+            let pagination = engine.pagination.borrow();
+            let measured = &pagination.input.as_ref().unwrap().measured;
+            let prose_index = measured
+                .iter()
+                .position(|entry| {
+                    matches!(&entry.block, LayoutBlock::Paragraph(paragraph)
+                        if block_key(&paragraph.id).as_ref() == id.as_str())
+                })
+                .unwrap();
+            assert_eq!(pagination.measured_widths[prose_index], 380.0);
+            assert!(pagination.measured_table_wrap_frames[prose_index].section_width_known);
+            assert!(!pagination.measured_table_wrap_frames[prose_index].allow_side_switch);
+            let LayoutBlock::Paragraph(trailing) = &measured.last().unwrap().block else {
+                panic!("expected trailing paragraph");
+            };
+            let indent = trailing.attrs.as_ref().unwrap().indent.as_ref().unwrap();
+            assert_eq!(indent.right, Some(-1.0));
+            let BlockExtent::Paragraph(prose) = &measured[prose_index].measure else {
+                panic!("expected measured prose");
+            };
+            assert!(
+                prose
+                    .lines
+                    .iter()
+                    .all(|line| line.synthetic_fallback != Some(true))
+            );
+            assert!(prose.lines.iter().any(|line| line.width > 270.0));
+            let mut checked_lines = 0;
+            let mut checked_prose_lines = 0;
+            for page in &pagination.layout.as_ref().unwrap().pages {
+                let Some(table) = page.fragments.iter().find_map(|fragment| match fragment {
+                    Fragment::Table(table) if table.is_floating == Some(true) => Some(table),
+                    _ => None,
+                }) else {
+                    continue;
+                };
+                assert_eq!(page.size.w, 400.0);
+                assert_eq!((page.margins.left, page.margins.right), (10.0, 10.0));
+                assert_eq!((table.x, table.width, table.height), (290.0, 100.0, 100.0));
+                for fragment in &page.fragments {
+                    let Fragment::Paragraph(paragraph) = fragment else {
+                        continue;
+                    };
+                    let entry = measured
+                        .iter()
+                        .find(|entry| {
+                            matches!(&entry.block, LayoutBlock::Paragraph(block)
+                                if block.id == paragraph.block_id)
+                        })
+                        .unwrap();
+                    let BlockExtent::Paragraph(extent) = &entry.measure else {
+                        panic!("expected measured paragraph");
+                    };
+                    let mut y = paragraph.y;
+                    for line in &extent.lines[paragraph.from_line..paragraph.to_line] {
+                        y += line.float_skip_before.unwrap_or(0.0);
+                        if y < table.y + table.height && y + line.line_height > table.y {
+                            let x = paragraph.x + line.left_offset.unwrap_or(0.0);
+                            assert!(x + line.width <= table.x || x >= table.x + table.width);
+                            checked_lines += 1;
+                            if block_key(&paragraph.block_id).as_ref() == id.as_str() {
+                                assert_eq!(line.right_offset, Some(110.0));
+                                checked_prose_lines += 1;
+                            }
+                        }
+                        y += line.line_height;
+                    }
+                }
+            }
+            assert!(checked_lines > 0);
+            assert!(checked_prose_lines > 0);
+        };
+        check_exclusions(&engine);
+        let plain_request = json!({
+            "measured": [], "retainOnly": true, "options": full_request["options"],
+            "workerOwned": {
+                "bodyStory": "body", "renderEnv": {},
+                "measurement": full_request["measurement"]
+            }
+        })
+        .to_string();
+        let (_, pilcrow) = engine
+            .doc()
+            .paragraph_index("body")
+            .unwrap()
+            .para_span(&id)
+            .unwrap();
+        engine
+            .doc()
+            .insert_text(
+                &crate::EditCtx::local("", ""),
+                crate::Position::new("body", pilcrow),
+                "Inserted text beside the floating table.",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+        engine.layout_document_json(&plain_request).unwrap();
+        let cold = EngineSession::new(137);
+        cold.doc()
+            .apply_update_v1(&engine.doc().encode_state_as_update_v1())
+            .unwrap();
+        cold.layout_document_with_regions_retained_json(&full_request.to_string())
+            .unwrap();
+        check_exclusions(&engine);
+        check_exclusions(&cold);
+        let actual = engine.pagination.borrow();
+        let expected = cold.pagination.borrow();
+        assert_eq!(
+            serde_json::to_value(&actual.input.as_ref().unwrap().measured).unwrap(),
+            serde_json::to_value(&expected.input.as_ref().unwrap().measured).unwrap(),
+        );
     }
 
     #[test]

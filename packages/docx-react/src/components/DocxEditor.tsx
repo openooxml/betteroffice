@@ -62,7 +62,7 @@ import {
   workerFrameVersionOf,
 } from './DocxEditor/internals/layoutProvenance';
 import { SupersededPreviewError } from './DocxEditor/internals/supersededPreview';
-import { useEditorEngineChoice } from './DocxEditor/internals/engineChoice';
+import { useEditorEngineChoice, usePeerlessEngineChoice } from './DocxEditor/internals/engineChoice';
 import { useOutlineSidebar } from './DocxEditor/hooks/useOutlineSidebar';
 import { useKeyboardShortcuts } from './DocxEditor/hooks/useKeyboardShortcuts';
 import { useFileIO } from './DocxEditor/hooks/useFileIO';
@@ -135,6 +135,8 @@ import { DocxEditorPagedArea } from './DocxEditor/DocxEditorPagedArea';
 import { ContentControlWidgets } from './DocxEditor/ContentControlWidgets';
 import { CanvasPagedArea } from './DocxEditor/CanvasPagesView';
 import { useCanvasRenderer } from './DocxEditor/hooks/useDisplayList';
+import { LazyPeerlessDocxEditor } from './DocxEditor/peerless/PeerlessDocxEditorLoader';
+import { LEGACY_SYNC_API_PROP, PeerlessSyncApiError } from './DocxEditor/peerless/contracts';
 import type { RustFontChainsProvider } from './DocxEditor/hooks/useRustMeasurement';
 import { useResetEditorState } from './DocxEditor/hooks/useResetEditorState';
 import type { YrsToolbarSelection } from './DocxEditor/yrsToolbar';
@@ -209,6 +211,10 @@ export type { DocxEditorCollaborationOptions, DocxPointPosition } from './DocxEd
  * DocxEditor props
  */
 export interface DocxEditorProps extends DocxEditorPluginProps {
+  /** @internal */
+  experimentalPeerless?: boolean;
+  /** @deprecated Enables the hybrid synchronous API, removed in 0.6.0. */
+  legacySyncApi?: boolean;
   /** Document data — ArrayBuffer, Uint8Array, Blob, or File */
   documentBuffer?: DocxInput | null;
   /**
@@ -820,6 +826,20 @@ import {
  * DocxEditor - Complete DOCX editor component
  */
 export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function DocxEditor(
+  props,
+  ref
+) {
+  const requested = props.experimentalPeerless === true && !props[LEGACY_SYNC_API_PROP] && props.experimentalWorkerOpen !== false;
+  const peerless = usePeerlessEngineChoice(requested, props[LEGACY_SYNC_API_PROP] === true);
+  if (requested) {
+    if (props.onChange) throw new PeerlessSyncApiError('onChange(Document)');
+    if (props.collaboration) throw new PeerlessSyncApiError('CollaborationReplica');
+  }
+  if (peerless) return <LazyPeerlessDocxEditor {...props} ref={ref} />;
+  return <LegacyDocxEditor {...props} ref={ref} />;
+});
+
+const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function LegacyDocxEditor(
   {
     documentBuffer,
     experimentalPrewarm = false,
