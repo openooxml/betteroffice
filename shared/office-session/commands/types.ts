@@ -1,5 +1,6 @@
-import { hasOwn, type TransferResult } from '../protocol';
+import { hasOwn, type DeferredReply, type TransferResult } from '../protocol';
 import type { MethodPolicy, SessionFailure } from '../types';
+import type { CommandTable, QueryFence, QueryHandlers, QueryReply, QueryTable } from './spec';
 
 /** @internal Reply error name for an indeterminate command outcome. */
 export const COMMAND_OUTCOME_UNKNOWN = 'CommandOutcomeUnknown';
@@ -63,6 +64,7 @@ export type CommandAck<S, E, F> = {
   selection?: S;
   editState?: E;
   frame?: FrameEnvelope<F>;
+  revisions?: { selection: number; layout: number };
 };
 
 /** @internal Snapshot captured at a settled command boundary. */
@@ -208,6 +210,11 @@ export type CommandHostOptions<P, S, E, F> = {
   prunedDuplicateReason?: string;
   refusedSeqs?: readonly number[];
   replayAppliedSeqs?: readonly number[];
+  commands?: CommandTable;
+  queries?: { specs: QueryTable; handlers: QueryHandlers<QueryTable> };
+  readOnly?(): boolean;
+  layoutRevision?(): number;
+  checkRefusals?: boolean;
   selectionEquals?(previous: S | undefined, next: S | undefined): boolean;
   editStateEquals?(previous: E | undefined, next: E | undefined): boolean;
   getVersion(): number;
@@ -230,6 +237,10 @@ export interface CommandHost<P, S, E, F> {
   policy(envelope: CommandEnvelope<P>): MethodPolicy;
   checkpoint(context: unknown): Promise<Checkpoint | TransferResult<Checkpoint>>;
   checkpointPolicy(): MethodPolicy;
+  query?(context: unknown, fence: QueryFence, kind: string, args: unknown[]):
+    Promise<QueryReply | TransferResult<QueryReply>> | DeferredReply<QueryReply>;
+  queryPolicy?(fence: QueryFence, kind: string, args: unknown[]): MethodPolicy;
+  revise?(change?: { selection?: S; editState?: E }): CommandAck<S, E, F> | undefined;
   /** @internal Builds a frame at a command boundary after admitted edits. */
   frame(): Promise<FrameEnvelope<F> | TransferResult<FrameEnvelope<F>>>;
 }
@@ -237,7 +248,7 @@ export interface CommandHost<P, S, E, F> {
 /** @internal Factory contract implemented by host.ts. */
 export type CreateCommandHost = <P, S, E, F>(
   options: CommandHostOptions<P, S, E, F>
-) => CommandHost<P, S, E, F>;
+) => Required<CommandHost<P, S, E, F>>;
 
 /** @internal Queued merged draft and all tickets sharing its eventual sequence and outcome. */
 export type OutboxEntry<P, X> = {
@@ -393,7 +404,9 @@ export function isCommandAck(value: unknown): value is CommandAck<unknown, unkno
   return record(value) && typeof value.session === 'string' &&
     counter(value.incarnation) && counter(value.epoch) && counter(value.throughSeq) &&
     finite(value.version) && Array.isArray(value.outcomes) && value.outcomes.every(outcome) &&
-    (value.frame === undefined || frame(value.frame));
+    (value.frame === undefined || frame(value.frame)) &&
+    (value.revisions === undefined || (record(value.revisions) &&
+      counter(value.revisions.selection) && counter(value.revisions.layout)));
 }
 
 /** @internal Identifies the unknown-outcome reply error and its preserved sequence. */

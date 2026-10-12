@@ -1,6 +1,7 @@
-import { hasOwn, isTransferResult, transferable, type TransferResult } from '../protocol';
+import { deferReply, hasOwn, isTransferResult, transferable, type DeferredReply, type TransferResult } from '../protocol';
 import { SessionFailure, type MethodPolicy } from '../types';
 import { cloneData } from './clone';
+import { BASE_REFUSALS, isRefusalResult, type QueryFence, type QueryReply } from './spec';
 import {
   COMMAND_OUTCOME_UNKNOWN, isCommandAck, isCommandEnvelope,
   type ApplyResult, type CommandAck, type CommandEnvelope, type CommandHost,
@@ -132,7 +133,7 @@ function terminalFailure(cause: unknown): SessionFailure {
 /** @internal Serial worker command handlers with replay dedupe and covering frame replies. */
 export function createCommandHost<P, S, E, F>(
   options: CommandHostOptions<P, S, E, F>
-): CommandHost<P, S, E, F> {
+): Required<CommandHost<P, S, E, F>> {
   const retainedLimit = options.retainedOutcomes ?? 256;
   const { session, incarnation, epoch, getVersion, apply, frame, snapshot, prunedDuplicateReason } = options;
   let throughSeq = options.throughSeq ?? 0;
@@ -161,6 +162,24 @@ export function createCommandHost<P, S, E, F>(
   let editState: E | undefined;
   let hasSelection = false;
   let hasEditState = false;
+  let highestSeen = throughSeq;
+  let selectionRevision = 0;
+  let ackLayout = options.queries ? layoutRevision() : 0;
+  const queryBarriers = new Map<number, Array<{ start(): void; reject(error: Error): void }>>();
+
+  function layoutRevision(): number {
+    const revision = options.layoutRevision?.() ?? 0;
+    if (!Number.isSafeInteger(revision) || revision < 0) throw new TypeError('Invalid layout revision');
+    return revision;
+  }
+
+  function checkRefusal(code: string, declared: readonly string[] = []): void {
+    if (!options.checkRefusals || BASE_REFUSALS.includes(code as typeof BASE_REFUSALS[number]) ||
+      declared.includes(code) || ['stale-epoch', 'stale-incarnation', 'wrong-session', 'stale-version',
+        'dependency-refused', 'unknown-outcome', 'disposed'].includes(code)) return;
+    poison = new TypeError(`Undeclared refusal: ${code}`);
+    throw poison;
+  }
 
   function serialize<T>(run: () => Promise<T>): Promise<T> {
     if (pendingHandlers === MAX_PENDING_HANDLERS) {
@@ -190,6 +209,8 @@ export function createCommandHost<P, S, E, F>(
   function releasePoisonedFrames(): void {
     if (!poison) return;
     for (const boundary of frameBarriers.keys()) releaseFrames(boundary);
+    for (const waiting of queryBarriers.values()) for (const waiter of waiting) waiter.reject(poison);
+    queryBarriers.clear();
   }
 
   async function buildFrame(): Promise<FrameEnvelope<F> | TransferResult<FrameEnvelope<F>> | undefined> {
@@ -224,6 +245,12 @@ export function createCommandHost<P, S, E, F>(
       outcomes.set(outcome.seq, copyOutcome(outcome));
       if (outcomes.size > retainedLimit) outcomes.delete(outcomes.keys().next().value!);
     }
+    for (const boundary of [...queryBarriers.keys()].sort((a, b) => a - b)) {
+      if (boundary > throughSeq) break;
+      const waiting = queryBarriers.get(boundary)!;
+      queryBarriers.delete(boundary);
+      for (const waiter of waiting) waiter.start();
+    }
     return outcome;
   }
 
@@ -231,10 +258,10 @@ export function createCommandHost<P, S, E, F>(
     return { seq, status: cancelled ? 'cancelled' : 'refused', reason, committed: false };
   }
 
-  function ack(outcome: CommandOutcome, result?: ApplyResult<S, E>): CommandAck<S, E, F> {
+  function ack(outcome?: CommandOutcome, result?: { selection?: S; editState?: E }): CommandAck<S, E, F> {
     const reply: CommandAck<S, E, F> = {
       session, incarnation, epoch,
-      throughSeq, version, outcomes: [copyOutcome(outcome)],
+      throughSeq, version, outcomes: outcome ? [copyOutcome(outcome)] : [],
     };
     try {
       if (result && hasOwn(result, 'selection') &&
@@ -242,12 +269,17 @@ export function createCommandHost<P, S, E, F>(
         selection = cloneData(result.selection);
         hasSelection = true;
         reply.selection = cloneData(selection);
+        if (options.queries) selectionRevision += 1;
       }
       if (result && hasOwn(result, 'editState') &&
         (!hasEditState || !(options.editStateEquals ?? sameState)(editState, result.editState))) {
         editState = cloneData(result.editState);
         hasEditState = true;
         reply.editState = cloneData(editState);
+      }
+      if (options.queries) {
+        ackLayout = layoutRevision();
+        reply.revisions = { selection: selectionRevision, layout: ackLayout };
       }
     } catch (error) {
       poison = terminalFailure(error);
@@ -313,6 +345,15 @@ export function createCommandHost<P, S, E, F>(
       return withFrame(ack(settle(refusal(command.seq, 'dependency-refused', true))));
     }
     const replayPreviouslyApplied = command.replay === true && replayApplied.has(command.seq);
+    if (options.commands) {
+      if (!hasOwn(options.commands, command.kind)) {
+        return withFrame(ack(settle(refusal(command.seq, 'unsupported'))));
+      }
+      if (options.commands[command.kind]!.admission === 'local-write' &&
+        !replayPreviouslyApplied && options.readOnly?.()) {
+        return withFrame(ack(settle(refusal(command.seq, 'read-only'))));
+      }
+    }
     const before = checkedVersion(command.seq);
     if (command.expectVersion && !replayPreviouslyApplied && command.basis.version !== before) {
       return withFrame(ack(settle(refusal(command.seq, 'stale-version'))));
@@ -322,6 +363,7 @@ export function createCommandHost<P, S, E, F>(
       result = await apply(command, {
         basis: command.basis, currentVersion: before, replayPreviouslyApplied,
       });
+      if (result?.status === 'refused') checkRefusal(result.reason, options.commands?.[command.kind]?.refusals);
       if (!result || typeof result !== 'object' ||
         (result.status !== 'applied' && result.status !== 'noop' &&
           result.status !== 'cancelled' && result.status !== 'refused') ||
@@ -336,6 +378,7 @@ export function createCommandHost<P, S, E, F>(
       }
       version = after;
     } catch (error) {
+      if (poison) throw poison;
       poison = unknownOutcome(command.seq, error);
       throw poison;
     }
@@ -350,11 +393,45 @@ export function createCommandHost<P, S, E, F>(
   }
 
   const editPolicy: MethodPolicy = { lane: 'input', mutates: true, reframes: true, reorderable: false };
+
+  function queryRefusal(code: string, detail?: string): QueryReply {
+    return { ok: false, refusal: { code, ...(detail === undefined ? {} : { detail }) } };
+  }
+
+  function validFence(fence: QueryFence): boolean {
+    return !!fence && typeof fence === 'object' && typeof fence.session === 'string' &&
+      [fence.incarnation, fence.epoch, fence.afterSeq].every((value) => Number.isSafeInteger(value) && value >= 0);
+  }
+
+  function runQuery(context: unknown, kind: string, args: unknown[]): Promise<QueryReply | TransferResult<QueryReply>> {
+    return serialize(async () => {
+      let result: unknown;
+      try {
+        result = await options.queries!.handlers[kind]!(args, context);
+      } catch (error) {
+        if (error instanceof SessionFailure ||
+          (typeof WebAssembly !== 'undefined' && error instanceof WebAssembly.RuntimeError)) {
+          poison = terminalFailure(error);
+          throw poison;
+        }
+        return queryRefusal('invalid-payload', error instanceof Error ? error.message : String(error));
+      }
+      if (isRefusalResult(result)) {
+        checkRefusal(result.refusal.code, options.queries!.specs[kind]!.refusals);
+        return { ok: false, refusal: result.refusal };
+      }
+      const reply: QueryReply = { ok: true, value: isTransferResult(result) ? result.value : result,
+        at: { incarnation, epoch, throughSeq, doc: version, selection: selectionRevision, layout: layoutRevision() } };
+      return isTransferResult(result) ? transferable(reply, result.transfer) : reply;
+    });
+  }
+
   return {
     handler(_context, command) {
       const live = liveCommand(command);
       const admission = live && admitted > 0;
       if (live) {
+        highestSeen = Math.max(highestSeen, command.seq);
         admitted = Math.max(0, admitted - 1);
         queuedEdits += 1;
       }
@@ -367,8 +444,41 @@ export function createCommandHost<P, S, E, F>(
       });
     },
     policy(command) {
-      if (liveCommand(command)) admitted += 1;
+      if (liveCommand(command)) {
+        admitted += 1;
+        highestSeen = Math.max(highestSeen, command.seq);
+      }
       return { ...editPolicy };
+    },
+    query(context, fence, kind, args): Promise<QueryReply | TransferResult<QueryReply>> | DeferredReply<QueryReply> {
+      if (poison) return Promise.reject(poison);
+      if (!validFence(fence) || typeof kind !== 'string' || !Array.isArray(args)) {
+        return Promise.resolve(queryRefusal('invalid-payload'));
+      }
+      if (fence.session !== session || fence.incarnation !== incarnation || fence.epoch !== epoch ||
+        fence.afterSeq > highestSeen) return Promise.resolve(queryRefusal('stale'));
+      if (!options.queries || !hasOwn(options.queries.specs, kind) || !hasOwn(options.queries.handlers, kind)) {
+        return Promise.resolve(queryRefusal('unsupported'));
+      }
+      if (throughSeq >= fence.afterSeq) return runQuery(context, kind, args);
+      return deferReply(new Promise<QueryReply | TransferResult<QueryReply>>((resolve, reject) => {
+        let waiting = queryBarriers.get(fence.afterSeq);
+        if (!waiting) queryBarriers.set(fence.afterSeq, waiting = []);
+        waiting.push({ start: () => { void runQuery(context, kind, args).then(resolve, reject); }, reject });
+      }));
+    },
+    queryPolicy(_fence, kind, _args) {
+      const spec = options.queries && hasOwn(options.queries.specs, kind) ? options.queries.specs[kind] : undefined;
+      return { lane: 'interactive', reorderable: spec?.stale !== 'answer-at-fence' };
+    },
+    revise(change) {
+      if (poison) throw poison;
+      const previousVersion = version;
+      const previousLayout = ackLayout;
+      version = getVersion();
+      const reply = ack(undefined, change);
+      return version !== previousVersion || ackLayout !== previousLayout ||
+        hasOwn(reply, 'selection') || hasOwn(reply, 'editState') ? reply : undefined;
     },
     checkpoint(_context) {
       return serialize(async () => {
@@ -407,5 +517,13 @@ export function createCommandHost<P, S, E, F>(
         });
       });
     },
+  };
+}
+
+/** @internal RPC registrations for a command host. */
+export function commandSessionMethods<P, S, E, F>(host: Required<CommandHost<P, S, E, F>>) {
+  return {
+    handlers: { edit: host.handler, checkpoint: host.checkpoint, query: host.query },
+    policies: { edit: host.policy, checkpoint: host.checkpointPolicy, query: host.queryPolicy },
   };
 }
