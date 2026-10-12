@@ -152,6 +152,10 @@ import { warnPptxEngine, type PptxEngineWarning } from './engineWarnings';
 const THUMBNAIL_SLICE_MS = 12;
 export const PEERLESS_FLAG = 'asyncApi' as const;
 export const pptxPeerlessEditorLoader = { load: () => import('./worker/PeerlessPptxSurface') };
+const peerlessPptxSurfaces = new WeakMap<
+  typeof pptxPeerlessEditorLoader.load,
+  Awaited<ReturnType<typeof pptxPeerlessEditorLoader.load>>['PeerlessPptxSurface']
+>();
 
 export class PptxWorkerEditorChunkLoadError extends Error {
   readonly code = 'chunk-load-failed';
@@ -612,9 +616,20 @@ export function PptxEditor({ i18n, ...props }:
 
 function PptxAsyncEditorSession(props: PptxAsyncEditorProps) {
   const { t } = useTranslation();
-  const [PeerlessPptxSurface] = useState(() => lazy(() => pptxPeerlessEditorLoader.load()
-    .then((module) => ({ default: module.PeerlessPptxSurface }))
-    .catch((cause: unknown) => { throw new PptxWorkerEditorChunkLoadError(cause); })));
+  const [PeerlessPptxSurface] = useState(() => {
+    const load = pptxPeerlessEditorLoader.load;
+    const cached = peerlessPptxSurfaces.get(load);
+    if (cached) return cached;
+    return lazy(() => load()
+      .then((module) => {
+        peerlessPptxSurfaces.set(load, module.PeerlessPptxSurface);
+        return { default: module.PeerlessPptxSurface };
+      })
+      .catch((cause: unknown) => {
+        peerlessPptxSurfaces.delete(load);
+        throw new PptxWorkerEditorChunkLoadError(cause);
+      }));
+  });
   const [PptxAsyncInThreadSession] = useState(() => lazy(() => import('./PptxAsyncInThreadSession')
     .then((module) => ({ default: module.PptxAsyncInThreadSession }))));
   const inThread = props.experimentalWorkerOpen === false;
