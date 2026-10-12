@@ -166,6 +166,8 @@ export class CollaborationProvider {
   private readonly peerListeners = new Map<number, CollaborationPeerListener>();
   private readonly pendingFrames: Uint8Array[] = [];
   private awarenessRecords: ReadonlyMap<number, AwarenessRecord> = new Map();
+  private readonly awarenessGenerations = new Map<number, number>();
+  private awarenessGeneration = 0;
   private unsubscribeReplica: () => void;
   private unsubscribeTransport: () => void = () => {};
   private hasTransportSubscription = false;
@@ -633,7 +635,7 @@ export class CollaborationProvider {
               this.replica.clientId,
               nowMs()
             );
-            this.awarenessRecords = reduction.records;
+            this.setAwarenessRecords(reduction.records);
             if (reduction.peersChanged) this.emitPeers();
           } catch (cause) {
             this.report(normalizeError('protocol', 'Failed to apply awareness update', cause));
@@ -681,7 +683,7 @@ export class CollaborationProvider {
   ): void {
     const connection = frame.connection;
     if (!this.isCurrentOpen(token, connection)) return;
-    const awarenessAtArrival = this.awarenessRecords;
+    const awarenessAtArrival = this.awarenessGeneration;
     const operation = this.replicaTail.then(async () => {
       for (const message of messages) {
         if (!this.isCurrentOpen(token, connection)) return;
@@ -776,16 +778,26 @@ export class CollaborationProvider {
     }
   }
 
-  private applyTypingInference(
-    applied: unknown,
-    awarenessAtArrival?: ReadonlyMap<number, AwarenessRecord>
-  ): void {
+  private setAwarenessRecords(records: ReadonlyMap<number, AwarenessRecord>): void {
+    if (this.asyncReplica && records !== this.awarenessRecords) {
+      for (const [clientId, record] of records) {
+        if (record.clock === this.awarenessRecords.get(clientId)?.clock) continue;
+        this.awarenessGenerations.set(clientId, ++this.awarenessGeneration);
+      }
+      for (const clientId of this.awarenessRecords.keys()) {
+        if (records.has(clientId)) continue;
+        this.awarenessGenerations.set(clientId, ++this.awarenessGeneration);
+      }
+    }
+    this.awarenessRecords = records;
+  }
+
+  private applyTypingInference(applied: unknown, awarenessAtArrival?: number): void {
     const inference = typingInference(applied);
     if (!inference) return;
     if (
-      awarenessAtArrival &&
-      (this.awarenessRecords.get(inference.clientId)?.clock ?? -1) !==
-        (awarenessAtArrival.get(inference.clientId)?.clock ?? -1)
+      awarenessAtArrival !== undefined &&
+      (this.awarenessGenerations.get(inference.clientId) ?? 0) > awarenessAtArrival
     ) return;
     const reduction = reduceTypingInference(
       this.awarenessRecords,
@@ -913,7 +925,7 @@ export class CollaborationProvider {
         nowMs(),
         PEER_EXPIRY_MS
       );
-      this.awarenessRecords = reduction.records;
+      this.setAwarenessRecords(reduction.records);
       if (reduction.peersChanged) this.emitPeers();
     }, EXPIRY_SWEEP_INTERVAL_MS);
     unrefTimer(this.heartbeatTimer);
@@ -927,7 +939,8 @@ export class CollaborationProvider {
     this.heartbeatTimer = null;
     this.expiryTimer = null;
     const hadPeers = awarenessPeers(this.awarenessRecords).length > 0;
-    this.awarenessRecords = new Map();
+    this.setAwarenessRecords(new Map());
+    this.awarenessGenerations.clear();
     if (hadPeers) this.emitPeers();
   }
 
