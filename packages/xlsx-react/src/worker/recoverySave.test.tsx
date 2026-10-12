@@ -16,6 +16,7 @@ import { createPeerlessWorkerInputCoordinator } from '../commands/peerlessWorker
 import { createXlsxCommandController } from '../commands/createXlsxCommandStore';
 import { createAsyncEditorApi } from './createAsyncEditorApi';
 import { PeerlessWorkbookSession } from './usePeerlessSessionWorkbook';
+import { WorkerDraftController } from './WorkerDraftController';
 
 const calculation = { nowSerial: 46_000.5, randSeed: 123456789 };
 
@@ -81,6 +82,52 @@ async function recoveredInputs(bytes: Uint8Array, range: string) {
   try { return (await reopened.call.cellInputs(0, range)).cells.map((row) => row[0]?.input ?? ''); }
   finally { await reopened.dispose(); }
 }
+
+test('public recovery includes a completed held prefill behind a read', async () => {
+  const zip = await JSZip.loadAsync(await initialPaintBook());
+  const xml = await zip.file('xl/worksheets/sheet1.xml')!.async('string');
+  zip.file('xl/worksheets/sheet1.xml', xml.replace('<row r="20">',
+    '<row r="11"><c r="A11" t="inlineStr"><is><t>Q3 Sales Dashboard</t></is></c></row><row r="20">'));
+  const host = crashableHost();
+  const opener = recoveryWorker();
+  const session = await createTestWorkbookSession(await zip.generateAsync({ type: 'uint8array' }), host.wrap,
+    { includeEditState: true, calculation });
+  const { run, api } = recoveryEditor(session);
+  let resolve!: (value: string) => void;
+  const prefill = new Promise<string>((done) => { resolve = done; });
+  const controller = new WorkerDraftController({
+    generation: () => 1, identity: () => 'book', navigation: () => 0,
+    selection: () => ({ anchor: { row: 10, col: 0 }, focus: { row: 10, col: 0 } }), sheet: () => 0,
+    target: () => ({ sheetId: session.state.sheets[0].id, range: { kind: 'a1', a1: 'A11' } }),
+    resolveSheet: () => 0, editable: () => true, prefill: () => prefill,
+    select: () => {}, selectionTarget: () => undefined, dependency: () => null,
+    navigate: () => {}, committed: () => {}, fail: () => {}, focus: () => {},
+  });
+  const coordinator = createPeerlessWorkerInputCoordinator({
+    generation: () => 1, session: () => run.session, isReady: () => run.ready,
+    target: () => ({ sheetId: session.state.sheets[0].id, range: { kind: 'a1', a1: 'A11' } }),
+    seal: controller.seal, sync: controller.sync,
+  });
+  controller.attach(coordinator);
+  run.connectRecoveryInput(coordinator, controller);
+  const entered = new Promise<void>((done) => {
+    void coordinator.runAfterPendingInput(() => { done(); return new Promise<void>(() => {}); }, true).catch(() => {});
+  });
+  try {
+    await entered;
+    controller.open();
+    controller.holdCellEdit({ kind: 'insert', text: 'X' });
+    controller.commit('cell');
+    const saving = coordinator.save();
+    void saving.catch(() => {});
+    resolve('Q3 Sales Dashboard');
+    await Promise.resolve();
+    await crashAndWait(session, host);
+    await saving.catch(() => {});
+    expect(coordinator.recoveryCommands.filter((command) => command.kind === 'editCell')).toHaveLength(1);
+    expect(await recoveredInputs((await api.recoverySave()).bytes, 'A11')).toEqual(['Q3 Sales DashboardX']);
+  } finally { controller.dispose(); coordinator.retire(); opener.mockRestore(); await run.dispose(); }
+});
 
 function recoveryPair() {
   const listeners = [new Set<(message: unknown) => void>(), new Set<(message: unknown) => void>()];

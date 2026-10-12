@@ -76,6 +76,53 @@ function peerlessHarness(maxOutstanding = 8, maxQueued = 8, controller?: WorkerD
   return { coordinator, session, state, sent, events, errors, saved, draft, ack, replies, listeners, failSession };
 }
 
+describe('prefill reservation recovery', () => {
+  for (const failed of ['read', 'session'] as const) for (const cleared of [false, true]) {
+    test(`retains a ${cleared ? 'cleared' : 'completed'} prefill once before later edits after ${failed} failure`, async () => {
+      const prefill = deferred<string>();
+      const controller = new WorkerDraftController({
+        generation: () => 1, identity: () => 'book', navigation: () => 0,
+        selection: () => ({ anchor: { row: 0, col: 0 }, focus: { row: 0, col: 0 } }), sheet: () => 0,
+        target: () => ({ sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A1' } }),
+        resolveSheet: () => 0, editable: () => true, prefill: () => prefill.promise,
+        select: () => {}, selectionTarget: () => undefined, dependency: () => null,
+        navigate: () => {}, committed: () => {}, fail: () => {}, focus: () => {},
+      });
+      const { coordinator, failSession, draft, sent } = peerlessHarness(8, 8, controller);
+      controller.attach(coordinator);
+      const entered = deferred<void>();
+      const reply = deferred<void>();
+      const reading = coordinator.runAfterPendingInput(async () => {
+        entered.resolve();
+        try { await reply.promise; }
+        catch (error) { coordinator.fail(error); throw error; }
+      }, true);
+      await entered.promise;
+      controller.open();
+      if (cleared) {
+        controller.holdCellEdit({ kind: 'selectAll' });
+        controller.holdCellEdit({ kind: 'delete', direction: 'backward', unit: 'character' });
+      } else controller.holdCellEdit({ kind: 'insert', text: 'X' });
+      controller.commit('cell', 'down');
+      const later = coordinator.submit(draft('Y', 1));
+      const saving = coordinator.save();
+      const repeated = coordinator.save();
+      prefill.resolve('Q3 Sales Dashboard');
+      await Promise.resolve();
+      const failure = new SessionFailure('crash', 'Worker stopped');
+      if (failed === 'read') reply.reject(failure);
+      else failSession(failure);
+      await Promise.allSettled([reading, later.result, saving, repeated]);
+      expect(sent).toEqual([]);
+      expect(coordinator.recoveryCommands).toMatchObject([
+        { kind: 'editCell', payload: { args: [0, 0, 0, cleared ? '' : 'Q3 Sales DashboardX'] } },
+        { kind: 'editCell', payload: { args: [0, 1, 0, 'Y'] } },
+      ]);
+      expect(coordinator.recoveryCommands).toHaveLength(2);
+    });
+  }
+});
+
 describe('completed composition recovery', () => {
   function setup() {
     const selected = { anchor: { row: 0, col: 0 }, focus: { row: 0, col: 0 } };

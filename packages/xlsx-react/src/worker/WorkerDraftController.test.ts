@@ -72,29 +72,31 @@ describe('loading cell input', () => {
     });
   }
 
-  test('starts composition with held edits replayed onto the empty input', async () => {
+  test('keeps the prefill pending while composing after held input', async () => {
     const { controller, beforeInput, complete, edits } = setup();
     controller.open();
     controller.holdCellEdit({ kind: 'selectAll' });
     beforeInput('insertText', 'probe');
     controller.start('cell');
-    expect(controller.getSnapshot().cell?.value).toBe('probe');
+    expect(controller.getSnapshot().cell?.value).toBe('');
     expect(beforeInput('insertCompositionText', '変')).toBe(false);
-    controller.change('cell', 'probe変', null);
+    controller.change('cell', '変', null);
     controller.end();
     await Promise.resolve();
+    controller.commit('cell');
     await complete();
     expect(edits.map((draft) => draft.value)).toEqual(['probe変']);
   });
 
-  test('prevents later keys and input once a commit is held', async () => {
+  test('closes a held commit so subsequent input belongs to another editor', async () => {
     const { controller, beforeInput, complete, edits } = setup();
     controller.open();
     controller.holdCellEdit({ kind: 'selectAll' });
     beforeInput('insertText', 'probe');
     controller.commit('cell', 'down');
-    expect(controller.holdCellKey({ key: 'X', ctrlKey: false, metaKey: false, altKey: false, shiftKey: false })).toBe(true);
-    expect(beforeInput('insertText', 'later')).toBe(true);
+    expect(controller.getSnapshot().cell).toBeNull();
+    expect(controller.holdCellKey({ key: 'X', ctrlKey: false, metaKey: false, altKey: false, shiftKey: false })).toBe(false);
+    expect(beforeInput('insertText', 'later')).toBe(false);
     await complete();
     expect(edits.map((draft) => draft.value)).toEqual(['probe']);
   });
@@ -104,6 +106,10 @@ describe('loading cell input', () => {
     controller.open();
     beforeInput('insertText', 'X');
     controller.commit('cell', 'down');
+    expect(select).toHaveBeenCalledTimes(1);
+    expect(focus).toHaveBeenCalledTimes(1);
+    select.mockClear();
+    focus.mockClear();
     state.navigation++;
     state.selection = { anchor: { row: 2, col: 1 }, focus: { row: 2, col: 1 } };
     controller.selectionChanged();
@@ -114,13 +120,13 @@ describe('loading cell input', () => {
     expect(focus).not.toHaveBeenCalled();
   });
 
-  test('finishes loading input without submitting held keys', async () => {
+  test('finishes loading input by reserving held keys for submission', async () => {
     const { controller, beforeInput, complete, edits } = setup();
     controller.open();
     beforeInput('insertText', 'X');
     controller.finish();
     await complete();
-    expect(edits).toEqual([]);
+    expect(edits.map((draft) => draft.value)).toEqual(['Q3 Sales DashboardX']);
     expect(controller.getSnapshot().cell).toBeNull();
   });
 

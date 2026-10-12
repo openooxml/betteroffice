@@ -542,8 +542,12 @@ function peerlessHarness(toolbarCommands = false, workerCommands = false, defaul
   const asyncEditor = (props: Partial<XlsxAsyncEditorProps> = {}) => (
     <XlsxEditor file={file} toolbar={<Chrome />} {...props} />
   );
+  const setReadOnly = (view: ReturnType<typeof render>, readOnly: boolean) => view.rerender(
+    <Profiler id="peerless" onRender={renderCount}>
+      <XlsxWorkerEditor backend="peerless" file={file} readOnly={readOnly} toolbar={<Chrome />} onReady={ready} />
+    </Profiler>);
   const fail = (error: SessionFailure) => { for (const listener of failures) listener(error); };
-  return { mount, replace, asyncEditor, fail, ready, open, sent, commandAt, ack, push, session, frame, sheetView, cellInputs, cellGeometry, hydrate, attach, cells, charts,
+  return { mount, replace, asyncEditor, setReadOnly, fail, ready, open, sent, commandAt, ack, push, session, frame, sheetView, cellInputs, cellGeometry, hydrate, attach, cells, charts,
     renderCount, commands: () => commands };
 }
 
@@ -596,9 +600,9 @@ it('saving while F2 prefill is pending preserves the untouched cell', async () =
 
 describe('peerless F2 prefill keyboard replay', () => {
   const value = 'Q3 Sales Dashboard';
-  const key = (input: HTMLInputElement, name: string, options: { ctrlKey?: boolean; shiftKey?: boolean } = {}) => {
+  const key = (input: HTMLInputElement, name: string, options: { ctrlKey?: boolean; metaKey?: boolean; altKey?: boolean; shiftKey?: boolean } = {}) => {
     const allowed = fireEvent.keyDown(input, { key: name, ...options });
-    if (allowed && options.ctrlKey && name.toLowerCase() === 'a') input.select();
+    if (allowed && (options.ctrlKey || options.metaKey) && !options.altKey && name.toLowerCase() === 'a') input.select();
   };
   const type = (input: HTMLInputElement, text: string) => {
     act(() => {
@@ -617,10 +621,10 @@ describe('peerless F2 prefill keyboard replay', () => {
       }
     });
   };
-  const setup = async () => {
+  const setup = async (onSave: (bytes: Uint8Array) => void = () => {}) => {
     const host = peerlessHarness();
     host.cells.set('0:0:0', value);
-    const view = await host.mount(() => {});
+    const view = await host.mount(onSave);
     const prefill = deferred<Awaited<ReturnType<typeof host.cellInputs>>>();
     host.cellInputs.mockReturnValueOnce(prefill.promise);
     fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'F2' });
@@ -662,11 +666,12 @@ describe('peerless F2 prefill keyboard replay', () => {
     expect(input.selectionStart).toBe(value.length + 1);
   });
 
-  it('holds Enter until replay and commits once with the selection moved down', async () => {
-    const { host, input, resolve } = await setup();
+  it('closes Enter immediately and commits once after replay with the selection moved down', async () => {
+    const { host, view, input, resolve } = await setup();
     key(input, 'a', { ctrlKey: true });
     type(input, 'probe');
     key(input, 'Enter');
+    expect(view.queryByTestId('xlsx-cell-editor')).toBeNull();
     expect(host.sent.filter((command) => command.kind === 'editCell')).toEqual([]);
     await resolve();
     const edits = host.sent.filter((command) => command.kind === 'editCell');
@@ -694,23 +699,211 @@ describe('peerless F2 prefill keyboard replay', () => {
     expect(host.cells.get('0:0:0')).toBe(value);
   });
 
-  it('saving discards held input while preserving the untouched loading cell', async () => {
-    const { host, view, input, resolve } = await setup();
-    type(input, 'X');
-    let saving!: Promise<unknown>;
-    await act(async () => {
-      saving = host.commands().execute('save', null);
-      await Promise.resolve();
+  describe('prefill reservation regressions', () => {
+    const acknowledge = (host: ReturnType<typeof peerlessHarness>, history?: string[]) => {
+      const submit = host.session.submit;
+      host.session.submit = (command) => {
+        const result = submit(command);
+        queueMicrotask(() => {
+          if (command.kind === 'editCell') history?.push(host.cells.get('0:0:0')!);
+          if (command.kind === 'undo' && history) host.cells.set('0:0:0', history.pop()!);
+          host.ack(command, { paint: true });
+        });
+        return result;
+      };
+      restorers.push(() => { host.session.submit = submit; });
+    };
+
+    it('includes held input in saved bytes before saving', async () => {
+      const delivered = mock((_bytes: Uint8Array) => {});
+      const { host, input, resolve } = await setup(delivered);
+      acknowledge(host);
+      const save = spyOn(host.session, 'save').mockImplementation(async () => new TextEncoder().encode(host.cells.get('0:0:0')));
+      restorers.push(() => save.mockRestore());
+      type(input, 'X');
+      let saving!: Promise<unknown>;
+      await act(async () => { saving = host.commands().execute('save', null); });
+      await resolve();
+      await act(async () => { await saving; });
+      expect(host.sent.filter((command) => command.kind === 'editCell').map((command) => command.payload.args))
+        .toEqual([[0, 0, 0, `${value}X`]]);
+      expect(new TextDecoder().decode(delivered.mock.calls[0]![0])).toBe(`${value}X`);
     });
-    await act(async () => {
-      for (const command of host.sent) host.ack(command);
-      await saving;
+
+    it('closes and moves immediately so the next cell accepts typing in order', async () => {
+      const { host, view, input, resolve } = await setup();
+      acknowledge(host);
+      type(input, 'X');
+      key(input, 'Enter');
+      expect(view.queryByTestId('xlsx-cell-editor')).toBeNull();
+      fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'Y' });
+      key(view.getByTestId('xlsx-cell-editor') as HTMLInputElement, 'Enter');
+      await resolve();
+      await waitFor(() => expect(host.cells.get('0:1:0')).toBe('Y'));
+      expect(host.sent.filter((command) => command.kind === 'editCell').map((command) => command.payload.args))
+        .toEqual([[0, 0, 0, `${value}X`], [0, 1, 0, 'Y']]);
     });
-    await resolve();
-    expect(view.queryByTestId('xlsx-cell-editor')).toBeNull();
-    expect(host.sent.filter((command) => command.kind === 'editCell')).toEqual([]);
-    expect(host.cells.get('0:0:0')).toBe(value);
-    expect(host.session.save).toHaveBeenCalledTimes(1);
+
+    it('keeps the earlier committed input when Escape follows Enter', async () => {
+      const { host, view, input, resolve } = await setup();
+      acknowledge(host);
+      type(input, 'X');
+      key(input, 'Enter');
+      fireEvent.keyDown(view.queryByTestId('xlsx-cell-editor') ?? view.getByTestId('xlsx-scroll'), { key: 'Escape' });
+      await resolve();
+      await waitFor(() => expect(host.cells.get('0:0:0')).toBe(`${value}X`));
+      expect(host.sent.filter((command) => command.kind === 'editCell')).toHaveLength(1);
+    });
+
+    it('reads the reserved edit when F2 reopens the same cell', async () => {
+      const { host, view, input, resolve } = await setup();
+      acknowledge(host);
+      type(input, 'X');
+      const scroll = view.getByTestId('xlsx-scroll');
+      fireEvent.mouseDown(scroll, { clientX: 150, clientY: 40 });
+      expect(view.queryByTestId('xlsx-cell-editor')).toBeNull();
+      fireEvent.mouseDown(scroll, { clientX: 20, clientY: 10 });
+      fireEvent.keyDown(scroll, { key: 'F2' });
+      await resolve();
+      const reopened = view.getByTestId('xlsx-cell-editor') as HTMLInputElement;
+      await waitFor(() => expect(reopened.value).toBe(`${value}X`));
+      type(reopened, 'Y');
+      key(reopened, 'Enter');
+      await waitFor(() => expect(host.cells.get('0:0:0')).toBe(`${value}XY`));
+      expect(host.sent.filter((command) => command.kind === 'editCell').map((command) => command.payload.args[3]))
+        .toEqual([`${value}X`, `${value}XY`]);
+    });
+
+    it('orders click-away input before Undo and reverts that edit', async () => {
+      const { host, view, input, resolve } = await setup();
+      const history: string[] = ['older'];
+      acknowledge(host, history);
+      type(input, 'X');
+      fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 150, clientY: 40 });
+      let undo!: Promise<unknown>;
+      await act(async () => { undo = host.commands().execute('undo', null); });
+      await resolve();
+      await act(async () => { await undo; });
+      expect(host.sent.filter((command) => command.kind === 'editCell' || command.kind === 'undo').map((command) => command.kind))
+        .toEqual(['editCell', 'undo']);
+      expect(host.cells.get('0:0:0')).toBe(value);
+    });
+
+    it('replays held text and an IME result against the current cell input', async () => {
+      const { host, input, resolve } = await setup();
+      acknowledge(host);
+      type(input, 'X');
+      fireEvent.compositionStart(input);
+      fireEvent.change(input, { target: { value: '変' } });
+      fireEvent.compositionEnd(input, { data: '変' });
+      await act(async () => { await Promise.resolve(); });
+      fireEvent.keyUp(input, { key: 'Enter' });
+      key(input, 'Enter');
+      await resolve();
+      await waitFor(() => expect(host.cells.get('0:0:0')).toBe(`${value}X変`));
+    });
+
+    it('waits for composition to finish if the prefill arrives during IME', async () => {
+      const { host, input, resolve } = await setup();
+      acknowledge(host);
+      type(input, 'X');
+      fireEvent.compositionStart(input);
+      fireEvent.change(input, { target: { value: '変' } });
+      await resolve();
+      expect(input.value).toBe('変');
+      fireEvent.compositionEnd(input, { data: '変' });
+      await act(async () => { await Promise.resolve(); });
+      fireEvent.keyUp(input, { key: 'Enter' });
+      key(input, 'Enter');
+      await waitFor(() => expect(host.cells.get('0:0:0')).toBe(`${value}X変`));
+    });
+
+    it('includes a detached held commit in Save', async () => {
+      const { host, view, input, resolve } = await setup();
+      acknowledge(host);
+      const saved: string[] = [];
+      const save = spyOn(host.session, 'save').mockImplementation(async () => {
+        saved.push(host.cells.get('0:0:0')!);
+        return new TextEncoder().encode(saved.at(-1));
+      });
+      restorers.push(() => save.mockRestore());
+      type(input, 'X');
+      fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 150, clientY: 40 });
+      let saving!: Promise<unknown>;
+      await act(async () => { saving = host.commands().execute('save', null); });
+      expect(save).not.toHaveBeenCalled();
+      await resolve();
+      await act(async () => { await saving; });
+      expect(host.cells.get('0:0:0')).toBe(`${value}X`);
+      expect(host.sent.filter((command) => command.kind === 'editCell')).toHaveLength(1);
+      expect(host.session.save).toHaveBeenCalledTimes(1);
+      expect(saved).toEqual([`${value}X`]);
+    });
+
+    it('drains held input before the read-only fence', async () => {
+      const { host, view, input, resolve } = await setup();
+      acknowledge(host);
+      type(input, 'X');
+      host.setReadOnly(view, true);
+      await resolve();
+      await waitFor(() => expect(host.sent.some((command) => command.kind === 'setReadOnly')).toBe(true));
+      expect(host.sent.filter((command) => command.kind === 'editCell' || command.kind === 'setReadOnly').map((command) => command.kind))
+        .toEqual(['editCell', 'setReadOnly']);
+      expect(host.cells.get('0:0:0')).toBe(`${value}X`);
+    });
+
+    it('uses non-mac Ctrl Shift Left to replace only the last word', async () => {
+      const platform = Object.getOwnPropertyDescriptor(navigator, 'platform');
+      Object.defineProperty(navigator, 'platform', { configurable: true, value: 'Linux' });
+      restorers.push(() => { if (platform) Object.defineProperty(navigator, 'platform', platform); else Reflect.deleteProperty(navigator, 'platform'); });
+      const { input, resolve } = await setup();
+      key(input, 'ArrowLeft', { ctrlKey: true, shiftKey: true });
+      type(input, 'X');
+      await resolve();
+      expect(input.value).toBe('Q3 Sales X');
+    });
+
+    it('uses mac Option Shift Left for words and Cmd Left for the line', async () => {
+      const platform = Object.getOwnPropertyDescriptor(navigator, 'platform');
+      Object.defineProperty(navigator, 'platform', { configurable: true, value: 'MacIntel' });
+      restorers.push(() => { if (platform) Object.defineProperty(navigator, 'platform', platform); else Reflect.deleteProperty(navigator, 'platform'); });
+      const { input, resolve } = await setup();
+      key(input, 'ArrowLeft', { altKey: true, shiftKey: true });
+      type(input, 'X');
+      key(input, 'ArrowLeft', { metaKey: true });
+      type(input, 'Y');
+      await resolve();
+      expect(input.value).toBe('YQ3 Sales X');
+    });
+
+    for (const scenario of [
+      { name: 'Home and Delete', platform: 'Linux', keys: [{ key: 'Home' }, { key: 'Delete' }], expected: value.slice(1) },
+      { name: 'Ctrl Backspace', platform: 'Linux', keys: [{ key: 'Backspace', ctrlKey: true }], expected: 'Q3 Sales ' },
+      { name: 'Option Delete', platform: 'MacIntel', keys: [{ key: 'Home' }, { key: 'Delete', altKey: true }], expected: ' Sales Dashboard' },
+      { name: 'Cmd Backspace', platform: 'MacIntel', keys: [{ key: 'Backspace', metaKey: true }], expected: '' },
+    ]) it(`replays ${scenario.name} in the grid while cell geometry is pending`, async () => {
+      const platform = Object.getOwnPropertyDescriptor(navigator, 'platform');
+      Object.defineProperty(navigator, 'platform', { configurable: true, value: scenario.platform });
+      restorers.push(() => { if (platform) Object.defineProperty(navigator, 'platform', platform); else Reflect.deleteProperty(navigator, 'platform'); });
+      const host = peerlessHarness();
+      const view = await host.mount();
+      const geometry = deferred<xlsx.WorkbookCellGeometry>();
+      host.cellGeometry.mockReturnValueOnce(geometry.promise);
+      const scroll = view.getByTestId('xlsx-scroll');
+      fireEvent.keyDown(scroll, { key: 'ArrowDown', ctrlKey: true });
+      act(() => host.ack(host.sent[0]!, { paint: true }));
+      acknowledge(host);
+      const prefill = deferred<Awaited<ReturnType<typeof host.cellInputs>>>();
+      host.cellInputs.mockReturnValueOnce(prefill.promise);
+      fireEvent.keyDown(scroll, { key: 'F2' });
+      expect(view.queryByTestId('xlsx-cell-editor')).toBeNull();
+      for (const event of scenario.keys) fireEvent.keyDown(scroll, event);
+      fireEvent.keyDown(scroll, { key: 'Enter' });
+      await act(async () => prefill.resolve({ sheet: 0, version: 'v1', cells: [[{ a1: 'A251', input: value, isFormula: false }]] }));
+      await waitFor(() => expect(host.sent.some((command) => command.kind === 'editCell')).toBe(true));
+      expect(host.sent.filter((command) => command.kind === 'editCell')[0]).toMatchObject({ payload: { args: [0, 250, 0, scenario.expected] } });
+      await act(async () => geometry.resolve({ sheet: 0, version: 'v1', rect: { x: 0, y: 6000, w: 96, h: 24 }, scrollPosition: { x: 0, y: 6000 } }));
+    });
   });
 
   it('commits held input on blur without taking focus back from the host', async () => {

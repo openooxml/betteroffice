@@ -40,6 +40,19 @@ describe('cell input replay', () => {
       .toEqual({ value: 'Q3 Sales ', anchor: 9, focus: 9 });
   });
 
+  test('word movement with Shift selects only the preceding word', () => {
+    expect(replayCellInput('Q3 Sales Dashboard', [{ kind: 'move', direction: 'left', unit: 'word', extend: true },
+      { kind: 'insert', text: 'X' }])).toEqual({ value: 'Q3 Sales X', anchor: 10, focus: 10 });
+  });
+
+  test('word movement skips whitespace and supports forward selection', () => {
+    expect(replayCellInput('Q3 Sales  ', [{ kind: 'move', direction: 'left', unit: 'word' }]))
+      .toEqual({ value: 'Q3 Sales  ', anchor: 3, focus: 3 });
+    expect(replayCellInput('Q3 Sales', [{ kind: 'move', direction: 'start' },
+      { kind: 'move', direction: 'right', unit: 'word', extend: true }, { kind: 'insert', text: 'X' }]))
+      .toEqual({ value: 'X Sales', anchor: 1, focus: 1 });
+  });
+
   test('forward word deletion starts at the current caret', () => {
     expect(replayCellInput('Q3 Sales', [{ kind: 'move', direction: 'start' },
       { kind: 'delete', direction: 'forward', unit: 'word' }]))
