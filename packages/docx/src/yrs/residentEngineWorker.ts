@@ -137,6 +137,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
   if (!session) throw new Error('Resident engine worker is not initialized');
   if (!commandHooksFactory) throw new Error('Resident command hooks are not installed');
   const engine = session;
+  if (init.rasterScale !== undefined) setCommandRasterScale(init.rasterScale);
   const input = JSON.parse(init.layoutInput || '{}');
   let layoutInput = init.layoutWithRegions ? init.layoutInput : JSON.stringify({
     ...input, measured: [], retainOnly: true,
@@ -386,6 +387,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
       },
       async frame({ coversThroughSeq, full }) {
         const viewport = changes.viewport;
+        const previousWindow = changes.window ?? commandDisplayWindow ?? init.displayWindow;
         changes.viewport = undefined;
         const pages = [...changes.pages];
         changes.pages.clear();
@@ -566,11 +568,20 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
           }
         }
         const layout = { frame: retainedFrame!, layoutRevision };
+        const scaleOnlyViewport = viewport?.rasterScale !== undefined && !pages.length && !updates.length && !relaid &&
+          previousWindow?.[0] === viewport.start && previousWindow?.[1] === viewport.end;
+        if (viewport?.rasterScale !== undefined) {
+          const indices = new Set<number>();
+          for (let index = viewport.start; index < Math.min(viewport.end, layout.frame.pages.length); index += 1) indices.add(index);
+          if (caretPage !== undefined) indices.add(caretPage);
+          setCommandRasterScale(viewport.rasterScale, indices);
+          init.rasterScale = viewport.rasterScale;
+        }
         const requestedPages = new Set(pages);
-        if (viewport) {
+        if (viewport && !scaleOnlyViewport) {
           for (let index = viewport.start; index < Math.min(viewport.end, layout.frame.pages.length); index += 1) requestedPages.add(index);
         }
-        if (changes.window && caretPage !== undefined) requestedPages.add(caretPage);
+        if (changes.window && caretPage !== undefined && !scaleOnlyViewport) requestedPages.add(caretPage);
         const projectedEcho = hooks.editState().storedMarks ? undefined : projectCommandEchoContext({
           engine: engine as ResidentDocxCommandEngine, selection: hooks.selection(), layout,
         });
@@ -2617,6 +2628,24 @@ function forgetOffscreenPagePixels(pageId: string): void {
 
 function retainedPageByKey(frame: RetainedFrame, pageId: string) {
   return /^\d+$/.test(pageId) ? retainedFramePageById(frame, BigInt(pageId)) : undefined;
+}
+
+function setCommandRasterScale(scale: number, indices?: ReadonlySet<number>): void {
+  if (!Number.isFinite(scale) || scale <= 0) throw new Error('Invalid pixel ratio');
+  const previous = offscreenDpr * offscreenZoom;
+  if (previous === scale) return;
+  const pages = retainedFrame?.pages.filter(({ page, pageIndex }) => !page.unbuilt &&
+    (indices === undefined || indices.has(pageIndex))) ?? [];
+  const resized = pages.some(({ page }) => Math.ceil(page.width * previous) !== Math.ceil(page.width * scale) ||
+    Math.ceil(page.height * previous) !== Math.ceil(page.height * scale));
+  offscreenDpr = scale;
+  offscreenZoom = 1;
+  offscreenBackBuffers.clear();
+  intactBackBuffers.clear();
+  caretStage = null;
+  paintedCaretPageId = null;
+  paintedCaretKey = null;
+  if (resized) for (const { pageId } of pages) pendingOffscreenPageIds.add(pageId.toString());
 }
 
 function applyWorkerFrame(bytes: Uint8Array) {
