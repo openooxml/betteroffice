@@ -213,8 +213,8 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorProps) {
   const commands = usePeerlessCommandBinding(presentation, { tool: insertion.tool, setTool: insertion.setTool,
     openPicture, save, focus, i18n: props.i18n, zoom, setZoom, review, proposals, setReview, exportPng });
   const [workspace, available] = useDockArea(Boolean(props.plugins?.length));
-  useCommandShortcuts({ commands: pptxCommandController(commands)!, containerRef: editor,
-    suspended: () => review.presenting });
+  useCommandShortcuts({ commands: pptxCommandController(commands)!, containerRef: editor, editorInput: inputRef,
+    suspended: () => review.presenting || Boolean(presentation?.store.getSnapshot().composition) });
   useLayoutEffect(() => {
     api.current = null;
     if (!presentation?.current || !canvas.current) return;
