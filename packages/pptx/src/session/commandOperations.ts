@@ -1,3 +1,4 @@
+import type { PptxEditStep } from '../edits';
 import type { PresentationHandle } from '../wasm/loader';
 import type { PresentationCommandMutation } from './commandProtocol';
 import { findTopLevelShape } from './commandShapes';
@@ -6,6 +7,61 @@ export function prepareCommandOperation(handle: PresentationHandle, mutation: Pr
   if (!mutation || !Array.isArray(mutation.args) || mutation.args.length > 4) return null;
   const { method, args } = mutation;
   const snapshot = handle.snapshot();
+  const text = (value: unknown, limit = 1e6): value is string => typeof value === 'string' && value.length <= limit &&
+    !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\ud800-\udfff\ufffe\uffff]/u.test(value);
+  const position = (value: unknown): value is { xEmu: number; yEmu: number } => Boolean(value && typeof value === 'object' &&
+    ['xEmu', 'yEmu'].every((key) => Number.isSafeInteger((value as Record<string, unknown>)[key])));
+  const commentDraft = (value: unknown) => Boolean(value && typeof value === 'object' &&
+    text((value as Record<string, unknown>).author, 1024) && text((value as Record<string, unknown>).text) &&
+    (value as { text: string }).text.length > 0 &&
+    text((value as Record<string, unknown>).created, 128) && Number.isFinite(Date.parse((value as { created: string }).created)) &&
+    ((value as { initials?: string }).initials === undefined || text((value as { initials: string }).initials, 128)));
+  if (method === 'setCommentFlavor') return ['legacy', 'modern'].includes(args[0]) && !snapshot.comments?.length ? () => handle.setCommentFlavor(args[0]) : null;
+  if (method === 'replyToComment' || method === 'setCommentStatus' || method === 'setCommentPosition' || method === 'removeComment') {
+    const comment = snapshot.comments?.find((comment) => comment.id === args[0]);
+    if (!comment) return null;
+    switch (method) {
+      case 'replyToComment': return snapshot.commentFlavor === 'modern' && !comment.parentId && commentDraft(args[1]) ? () => handle.replyToComment(comment.id, args[1]) : null;
+      case 'setCommentStatus': return snapshot.commentFlavor === 'modern' && typeof args[1] === 'boolean' ? () => handle.setCommentStatus(comment.id, args[1]) : null;
+      case 'setCommentPosition': return !comment.parentId && position(args[1]) ? () => handle.setCommentPosition(comment.id, args[1]) : null;
+      case 'removeComment': return () => handle.removeComment(comment.id);
+    }
+  }
+  if (method === 'propose') {
+    const [agent, note, edits] = args;
+    if (typeof agent !== 'string' || !agent || agent.length > 1024 || note !== null && typeof note !== 'string' ||
+      !Array.isArray(edits) || !edits.length || edits.length > 256 || JSON.stringify(edits).length > 1e6) return null;
+    const content = handle.readContent();
+    if (!content.ok) return null;
+    const steps: PptxEditStep[] = [];
+    for (const edit of edits) {
+      if (!edit || typeof edit !== 'object') return null;
+      if ('storyId' in edit) {
+        const story = content.stories.find((story) => story.storyId === edit.storyId);
+        if (!story) return null;
+        const target = { kind: 'range' as const, slideId: story.slideId, shapeId: story.shapeId, storyId: story.storyId, start: edit.start, end: edit.end };
+        if (edit.type === 'replaceText') steps.push({ op: 'replaceText', target, text: edit.text });
+        else if (edit.type === 'formatText') steps.push({ op: 'formatText', target, patch: edit.patch });
+        else if (edit.type === 'setParagraphAlignment') steps.push({ op: 'setParagraphAlignment', target, alignment: edit.alignment as 'l' | 'ctr' | 'r' | 'just' | null });
+        else return null;
+      } else {
+        const { type, ...fields } = edit;
+        const { slideId, ...rest } = fields;
+        const shapeId = 'shapeId' in rest ? rest.shapeId : undefined;
+        if ('shapeId' in rest) delete (rest as { shapeId?: string }).shapeId;
+        steps.push({ op: type, target: shapeId === undefined ? { slideId } : { slideId, shapeId }, ...rest } as PptxEditStep);
+      }
+    }
+    if (!handle.validateEdits({ expectVersion: handle.version(), steps }).ok) return null;
+    return () => handle.propose(agent, note, edits);
+  }
+  if (method === 'acceptProposal' || method === 'rejectProposal') {
+    const proposal = handle.listProposals().find((proposal) => proposal.id === args[0]);
+    if (!proposal) return null;
+    if (method === 'rejectProposal') return () => handle.rejectProposal(proposal.id);
+    if (args[1]?.force !== undefined && typeof args[1].force !== 'boolean' || proposal.staleTargets.length && !args[1]?.force) return null;
+    return () => handle.acceptProposal(proposal.id, args[1]);
+  }
   if (method === 'insertSlide') {
     const [index, layout] = args;
     if (!Number.isSafeInteger(index) || index < 0 || index > snapshot.slides.length ||
@@ -14,6 +70,12 @@ export function prepareCommandOperation(handle: PresentationHandle, mutation: Pr
   }
   const slide = snapshot.slides.find((slide) => slide.id === args[0]);
   if (!slide) return null;
+  if (method === 'setSlideNotes') return text(args[1]) ? () => handle.setSlideNotes(slide.id, args[1]) : null;
+  if (method === 'addComment') {
+    const draft = args[1];
+    return commentDraft(draft) && (draft.xEmu === undefined && draft.yEmu === undefined || position(draft))
+      ? () => handle.addComment(slide.id, draft) : null;
+  }
   if (method === 'deleteSlide') return () => handle.deleteSlide(slide.id);
   if (method === 'moveSlide') {
     const index = args[1];

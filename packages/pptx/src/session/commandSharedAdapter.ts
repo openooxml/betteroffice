@@ -16,7 +16,7 @@ export type PresentationSharedAck = CommandAck<
 > & {
   selection: PresentationCommandSelected | null;
   editState: PresentationCommandEditState;
-  pptx: Pick<PresentationCommandAck, 'incarnation' | 'version' | 'outcomes' | 'dirtySlideIds' | 'activeSlideId' | 'historyThroughSeq' | 'slides' | 'size' | 'creation' | 'editResult' | 'fontId' | 'updates' | 'mutationResult'> & {
+  pptx: Pick<PresentationCommandAck, 'incarnation' | 'version' | 'outcomes' | 'dirtySlideIds' | 'activeSlideId' | 'historyThroughSeq' | 'slides' | 'size' | 'creation' | 'editResult' | 'fontId' | 'updates' | 'mutationResult' | 'change'> & {
     retainedBasis?: VersionAssociation;
   };
 };
@@ -75,6 +75,7 @@ export function createPresentationCommandProjection() {
           outcomes: value.outcomes, dirtySlideIds: value.dirtySlideIds, activeSlideId: value.activeSlideId,
           historyThroughSeq: value.historyThroughSeq,
           ...(value.creation ? { creation: value.creation } : {}),
+          ...(value.change ? { change: value.change } : {}),
           ...("mutationResult" in value ? { mutationResult: value.mutationResult } : {}),
           ...(value.updates ? { updates: value.updates } : {}),
           ...(value.editResult ? { editResult: value.editResult } : {}),
@@ -126,6 +127,7 @@ export function createPresentationSharedAdapter(initial: PresentationSharedAck) 
         activeSlideId: value.pptx.activeSlideId,
         historyThroughSeq: value.pptx.historyThroughSeq,
         ...(value.pptx.creation ? { creation: value.pptx.creation } : {}),
+        ...(value.pptx.change ? { change: value.pptx.change } : {}),
         ...("mutationResult" in value.pptx ? { mutationResult: value.pptx.mutationResult } : {}),
         ...(value.pptx.updates ? { updates: value.pptx.updates } : {}),
         ...(value.pptx.editResult ? { editResult: value.pptx.editResult } : {}),

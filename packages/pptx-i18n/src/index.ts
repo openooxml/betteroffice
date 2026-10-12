@@ -49,6 +49,7 @@ export type DeepPartial<T> = {
 
 export type PartialLocaleStrings = DeepPartial<LocaleStrings> & {
   _lang?: LocaleCode | (string & {});
+  editor?: DeepPartial<LocaleStrings['editor']> & { textInput?: string | null; selectionAnnouncement?: string | null };
 };
 
 export type Translations = PartialLocaleStrings;
@@ -59,7 +60,7 @@ type DotPath<T, Prefix extends string = ''> = {
     : `${Prefix}${K}`;
 }[keyof T & string];
 
-export type TranslationKey = DotPath<LocaleStrings>;
+export type TranslationKey = DotPath<LocaleStrings> | 'editor.textInput' | 'editor.selectionAnnouncement';
 
 type AnyRecord = Record<string, unknown>;
 

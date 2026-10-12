@@ -24,6 +24,7 @@ let client: PresentationCommandClient;
 let commands: PresentationCommandEnvelope[];
 let owner: PeerlessSession | undefined;
 let refuseFormatting = false;
+let startupDelay = 0;
 
 
 function bounded<T>(promise: Promise<T>): Promise<T> {
@@ -58,6 +59,7 @@ beforeEach(() => {
   restorers.push(() => toolbarRect.mockRestore());
   commands = [];
   refuseFormatting = false;
+  startupDelay = 0;
 
   const createPainter = peerlessPainterFactories.frame;
   const painter = spyOn(peerlessPainterFactories, 'frame').mockImplementation((canvas, options) =>
@@ -108,7 +110,10 @@ beforeEach(() => {
     };
     const off = pair.client.listen((message) => endpoint.dispatchEvent(new MessageEvent('message', { data: message })));
     restorers.push(off);
-    const font = readFile(new URL('../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url));
+    const font = readFile(new URL('../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url)).then(async (bytes) => {
+      if (startupDelay) await new Promise((resolve) => setTimeout(resolve, startupDelay));
+      return bytes;
+    });
     const value = font.then((font) => createPeerlessSession(bytes, { readOnly: options.readOnly,
       activeSlideIndex: options.activeSlideIndex, worker: () => endpoint as unknown as Worker,
       fonts: [{ family: 'Liberation Sans', bytes: new Uint8Array(font) }] }));
@@ -131,6 +136,8 @@ async function open(options: Partial<PptxAsyncEditorProps> = {}) {
   const ready = mock((value: PptxAsyncEditorApi) => { api = value; });
   const bytes = await bounded(deck());
   const view = render(<PptxEditor fonts={[]} file={bytes} {...{ [PEERLESS_FLAG]: true as const }} onReady={ready} {...options} />);
+  await waitFor(() => expect(owner).toBeDefined());
+  await act(async () => { await owner!.ready; });
   await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
   const canvas = view.getByTestId('pptx-slide-canvas') as HTMLCanvasElement;
   const list = decodeCommandDisplayList(client.state.frame!);
@@ -232,6 +239,7 @@ test('gesture_flush_and_save_refuse_unreleased_pointer', async () => {
 });
 
 test('checkpoint_and_font_registration_are_fenced', async () => {
+  startupDelay = 1100;
   const { api } = await open();
   const access = await api.handleAsync();
   const font = await readFile(new URL('../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url));

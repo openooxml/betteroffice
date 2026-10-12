@@ -5,7 +5,7 @@
 //! rehearsed against an untouched copy of the base and adopted as one transaction.
 
 use std::cmp::Reverse;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -14,7 +14,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use yrs::{ReadTxn, Transact, Update};
 
-use crate::deck::{shape_fill, stroked_outline, validate_rect};
+use crate::deck::{shape_fill, stroked_outline, validate_adjustments, validate_rect};
 use crate::model::validate_xml_text;
 use crate::proposals::inherited_style;
 use crate::staging::Adoption;
@@ -274,6 +274,10 @@ pub enum EditStep {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expect: Option<OutlineGuard>,
     },
+    SetShapeAdjust {
+        target: ShapeTarget,
+        adjustments: BTreeMap<String, f64>,
+    },
 }
 
 fn units(text: &str) -> usize {
@@ -508,6 +512,7 @@ enum Property {
     Rect,
     Fill,
     Stroke,
+    Adjust,
 }
 
 enum Effect {
@@ -540,6 +545,7 @@ enum Effect {
     Rect(ShapeRect),
     Fill(Option<String>),
     Stroke(ShapeStroke),
+    Adjust(BTreeMap<String, f64>),
 }
 
 impl Effect {
@@ -1300,6 +1306,41 @@ fn plan_step(deck: &Deck<'_>, index: u32, step: &EditStep) -> Result<Planned, Ed
             stroke,
             expect,
         } => plan_stroke(deck, index, target, stroke, expect.as_ref()),
+        EditStep::SetShapeAdjust {
+            target,
+            adjustments,
+        } => {
+            let requested = EditTarget::Shape(target.clone());
+            let shape = top_level_shape(deck, target, &requested)?;
+            require_preset(shape, &requested)?;
+            if shape.geometry == "custom" {
+                return Err(unsupported(
+                    "custom geometry does not support adjustments",
+                    &requested,
+                ));
+            }
+            validate_adjustments(adjustments).map_err(|error| invalid(error, &requested))?;
+            let adjusted: BTreeMap<_, _> = adjustments
+                .iter()
+                .map(|(name, value)| {
+                    let maximum = if shape.geometry == "roundRect" && name == "adj" {
+                        0.5
+                    } else {
+                        1.0
+                    };
+                    (name.clone(), value.clamp(0.0, maximum))
+                })
+                .collect();
+            let effect = (shape.adjust_values != adjusted).then_some(Effect::Adjust(adjusted));
+            Ok(Planned::property(
+                index,
+                requested,
+                &target.slide_id,
+                Some(&shape.id),
+                Property::Adjust,
+                effect,
+            ))
+        }
     }
 }
 
@@ -1355,6 +1396,9 @@ fn execute(stage: &DeckSession, steps: &[Planned]) -> EditResult<()> {
             }
             Some(Effect::Stroke(stroke)) => {
                 stage.set_shape_stroke(&context, slide, shape, stroke)?;
+            }
+            Some(Effect::Adjust(adjustments)) => {
+                stage.set_shape_adjust(&context, slide, shape, adjustments)?;
             }
         }
         Ok(())

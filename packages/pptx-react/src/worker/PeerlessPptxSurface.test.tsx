@@ -226,9 +226,11 @@ class FakeCommandClient implements PresentationCommandClient {
       else if (intent.kind === 'selectAtPoint') {
         const hit = pptx.hitGeometry(pptx.indexHitGeometry(pptx.decodeCommandDisplayList(this.state.frame)), intent.payload);
         if (hit?.kind === 'text') selected = { slideId: intent.payload.frame.slideId,
-          shapeId: hit.shapeId, storyId: hit.storyId, anchor: hit.position, focus: hit.position,
+          shapeId: hit.shapeId, storyId: hit.storyId, anchor: intent.payload.extend && selected ? selected.anchor : hit.position, focus: hit.position,
           affinity: hit.affinity ?? 'downstream' };
       }
+      else if (intent.kind === 'moveSelection') selected = pptx.navigateGeometry(
+        pptx.indexGeometry(pptx.decodeCommandDisplayList(this.state.frame)), selected, intent.payload.motion, intent.payload.extend, this.text);
       else if (intent.kind === 'insertText' || intent.kind === 'replaceText' || intent.kind === 'compositionCommit') {
         const reference = intent.payload.at;
         const original = reference.source === 'confirmed' ? reference.selection : this.selections.get(reference.seq);
@@ -250,6 +252,7 @@ class FakeCommandClient implements PresentationCommandClient {
       outcomes.push(outcome);
       this.outcomes.set(sequence, outcome);
     }
+    if (!frame && outcomes.some((outcome) => this.sent[outcome.seq - 1]?.kind === 'selectAtPoint')) frame = this.state.frame;
     if (frame) frame = { ...coveringFrame(this, this.text, seq, frame), version };
     const ack: PresentationCommandAck = { ...base, version, throughSeq: seq, selection: selected,
       outcomes, dirtySlideIds: ['slide'], editState: { ...base.editState, readOnly }, ...(frame ? { frame } : {}) };
@@ -2779,8 +2782,8 @@ describe('peerless stage fit', () => {
       expect(value.client.sent[0]).toMatchObject({ kind: 'selectAtPoint', payload: { x: 40, y: 55 } });
       expect(value.client.state.selection).toMatchObject({ anchor: 2, focus: 2 });
       await flushStage(() => { fireEvent.keyDown(input, { key: 'ArrowLeft' }); beforeInput(input, 'insertText', 'X'); });
-      expect(value.client.sent.map((intent) => intent.kind)).toEqual(['selectAtPoint', 'moveSelection']);
-      expect(value.client.sent[1]).toMatchObject({ payload: { motion: 'left', extend: false } });
+      expect(value.client.sent.map((intent) => intent.kind)).toEqual(['selectAtPoint', 'setSelection']);
+      expect(value.client.sent[1]).toMatchObject({ payload: { selection: { anchor: 1, focus: 1 } } });
       expect(value.client.text).toBe('abc');
       value.client.hold = true;
       await flushStage(() => { view.rerender(<PptxEditor fonts={[]} file={file} {...{ [PEERLESS_FLAG]: true as const }} onReady={ready} />); });
@@ -2789,7 +2792,7 @@ describe('peerless stage fit', () => {
         fireEvent.pointerUp(canvas, pointer);
         beforeInput(input, 'insertText', 'X');
       });
-      expect(value.client.sent.map((intent) => intent.kind)).toEqual(['selectAtPoint', 'moveSelection', 'setReadOnly', 'selectAtPoint']);
+      expect(value.client.sent.map((intent) => intent.kind)).toEqual(['selectAtPoint', 'setSelection', 'setReadOnly', 'selectAtPoint']);
       await flushStage(() => { value.client.ack(4); });
       value.client.hold = false;
       await flushStage(() => { beforeInput(input, 'insertText', 'X'); });

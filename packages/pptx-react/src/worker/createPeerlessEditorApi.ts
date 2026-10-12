@@ -20,9 +20,9 @@ export type PptxPeerlessEditorAccess = {
 };
 
 export type PptxAsyncEditorApi = Omit<PptxWorkerEditorApi,
-  'handle' | 'save' | 'handleAsync' | keyof AsyncOperations> & {
+  'handle' | 'save' | 'handleAsync' | 'recoverySave' | keyof AsyncOperations> & {
   [K in keyof AsyncOperations]: (...args: Parameters<AsyncOperations[K]>) => Promise<ReturnType<AsyncOperations[K]>>;
-} & { handleAsync(): Promise<PptxPeerlessEditorAccess> };
+} & { handleAsync(): Promise<PptxPeerlessEditorAccess>; recoverySave(): ReturnType<PeerlessPresentation['recover']> };
 
 function unsupported(operation: string): never {
   throw new PptxPeerlessUnsupportedError(operation);
@@ -85,11 +85,7 @@ export function createPeerlessEditorApi(run: PeerlessPresentation, canvas: HTMLC
     get hydrated() { run.require(); return run.hydrated; },
     get failure() { return run.failure; },
     saveAsync: () => fenced(() => run.client.save()),
-    recoverySave: () => fenced(async () => {
-      const result = await run.client.checkpoint?.();
-      if (!result) return unsupported('recoverySave');
-      return { bytes: new Uint8Array(result.bytes), recovery: true as const };
-    }),
+    recoverySave: () => run.recover(),
     whenHydrated: installed,
     handleAsync: async () => { await installed(); return access; },
     flushPendingInput: () => fenced(async () => { await run.client.flush(); await installed(); }),
@@ -135,19 +131,25 @@ export function createPeerlessEditorApi(run: PeerlessPresentation, canvas: HTMLC
       await installed(); return peerlessPositionAtPoint(run, canvas, clientX, clientY);
     }),
   };
-  const mutations = Object.fromEntries(PRESENTATION_COMMAND_MUTATIONS.map((method) => [method, (...args: unknown[]) => fenced(async () => {
+  const mutations = Object.fromEntries(PRESENTATION_COMMAND_MUTATIONS.map((method) => [method, async (...args: unknown[]) => {
+    admit();
     const ack = await invokePeerless(run, { method, args } as PresentationCommandMutation);
-    if (ack.outcomes.some((outcome) => outcome.status === 'refused' || outcome.status === 'cancelled')) {
-      throw new PptxCommandAdmissionError('target-changed');
+    run.require();
+    const refused = ack.outcomes.find((outcome) => outcome.status === 'refused' || outcome.status === 'cancelled');
+    if (refused) {
+      throw new PptxCommandAdmissionError(refused.reason === 'invalid-payload' ? 'invalid-arguments'
+        : refused.reason === 'read-only' ? 'read-only' : 'target-changed');
     }
     await installed();
     return ack.mutationResult;
-  })])) as Pick<PptxPeerlessEditorAccess, keyof PresentationCommandMutationMethods>;
+  }])) as Pick<PptxPeerlessEditorAccess, keyof PresentationCommandMutationMethods>;
   const access: PptxPeerlessEditorAccess = Object.freeze({
     ...mutations,
     encodeStateVector: () => read('encodeStateVector'),
     encodeStateAsUpdate: (vector) => read('encodeStateAsUpdate', vector),
-    snapshot: () => read('snapshot'), story: (id) => read('story', id), findText: api.findText,
+    previewProposal: (id) => read('previewProposal', id), layoutSlide: (index) => read('layoutSlide', index),
+    layoutProposalSlide: (id, index) => read('layoutProposalSlide', id, index), layoutProposalDiffSlide: (id, index) => read('layoutProposalDiffSlide', id, index),
+    comments: () => read('comments'), snapshot: () => read('snapshot'), story: (id) => read('story', id), findText: api.findText,
     searchText: (query, options) => read('searchText', query, options), listProposals: () => read('listProposals'),
     exportStructured: (options) => read('exportStructured', options), exportMarkdown: (options) => read('exportMarkdown', options),
     version: api.version, readContent: api.readContent, validateEdits: api.validateEdits, applyEdits: api.applyEdits,

@@ -888,6 +888,48 @@ fn shape_steps_follow_the_existing_shape_policy() {
 }
 
 #[test]
+fn adjustment_batches_validate_apply_clamp_and_undo() {
+    let session = open();
+    let before = read(&session);
+    let target = shape_target(&before, "Card");
+    let base_version = session.version();
+    let batch = request(
+        &base_version,
+        json!({"steps": [{"op": "setShapeAdjust", "target": target, "adjustments": {"adj": 0.32}}]}),
+    );
+    assert!(session.validate_edits(&batch).unwrap().unwrap().would_apply);
+    assert_eq!(session.version(), base_version);
+    assert!(session.apply_edits(&batch).unwrap().unwrap().applied);
+    assert_eq!(shape(&read(&session), "Card").adjust_values["adj"], 0.32);
+    assert!(session.undo());
+    assert_eq!(
+        shape(&read(&session), "Card").adjust_values,
+        shape(&before, "Card").adjust_values
+    );
+    let clamped = json!([{"op": "setShapeAdjust", "target": target, "adjustments": {"adj": 2.0}}]);
+    assert!(edit(&session, clamped.clone()).unwrap().applied);
+    assert_eq!(shape(&read(&session), "Card").adjust_values["adj"], 0.5);
+    assert!(!edit(&session, clamped.clone()).unwrap().applied);
+    assert_eq!(
+        refused(edit(&session, json!([clamped[0], clamped[0]]))).code,
+        EditFailureCode::OverlappingSteps
+    );
+    assert_eq!(
+        refused(edit(
+            &session,
+            json!([{
+                "op": "setShapeAdjust", "target": target, "adjustments": {"invalid": 0.2}
+            }])
+        ))
+        .code,
+        EditFailureCode::InvalidStep
+    );
+    assert_eq!(refused(edit(&session, json!([{
+        "op": "setShapeAdjust", "target": shape_target(&before, "Table"), "adjustments": {"adj": 0.2}
+    }]))).code, EditFailureCode::Unsupported);
+}
+
+#[test]
 fn overlapping_text_writes_refuse_with_both_step_indices() {
     let session = open();
     let title = story(&read(&session), "Title");

@@ -94,6 +94,7 @@ export type PptxEditStep =
     }
   | { op: 'setSlideNotes'; target: PptxSlideTarget; text: string; expect?: PptxTextGuard }
   | { op: 'setShapeRect'; target: PptxShapeTarget; rect: ShapeRect; expect?: { rect: ShapeRect } }
+  | { op: 'setShapeAdjust'; target: PptxShapeTarget; adjustments: Record<string, number> }
   | {
       op: 'setShapeFill';
       target: PptxShapeTarget;

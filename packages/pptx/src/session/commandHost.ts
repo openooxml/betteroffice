@@ -59,6 +59,7 @@ export function registerPresentationCommandHandlers(
     focus: PptxCaretAnchor;
   };
   type Admission =
+    | { kind: 'observer'; enabled: boolean }
     | { kind: 'invoke'; run(): unknown; result?: unknown; method: string; receipt?: PresentationHistoryReceipt }
     | { kind: 'remote'; bytes: ArrayBuffer; receipt?: PresentationHistoryReceipt }
     | { kind: 'batch'; request: PptxEditRequest; result?: PptxEditResult; receipt?: PresentationHistoryReceipt }
@@ -105,6 +106,7 @@ export function registerPresentationCommandHandlers(
   const objectTokens = new Map<string, { signature: string; token: string }>();
   let pointerRange: { group: string; selection: AnchoredSelection } | undefined;
   let readOnly = false;
+  let observeChanges = false;
   let failedSeq: number | undefined;
   const storedMarks: TextStyle = {};
   let lastEditState: PresentationCommandEditState | undefined;
@@ -120,6 +122,7 @@ export function registerPresentationCommandHandlers(
   const mutations = new Map<number, Mutation>();
   const storyMutations = new Map<string, Map<number, Mutation>>();
   const stories = new Map<string, CachedStory>();
+  const notes = new Map<string, string>();
   const slideStoryKeys = new Map<string, Set<string>>();
   const selections = new Map<number, AnchoredSelection | null>();
   const revisions = new Map<string, number>();
@@ -141,6 +144,7 @@ export function registerPresentationCommandHandlers(
   }
 
   function cacheStories(content: Extract<PresentationCommandReadResult, { ok: true }>): void {
+    for (const slide of content.slides) notes.set(slide.id, slide.notes ?? '');
     const sources = new Map(content.sources.map((source) => [source.storyId, source.paragraphs]));
     for (const story of content.stories) {
       const key = storyKey(story);
@@ -473,7 +477,7 @@ export function registerPresentationCommandHandlers(
     const slide = objectSelection ? opened.snapshot().slides.find((slide) => slide.id === objectSelection!.slideId) : null;
     const shape = slide && findTopLevelShape(slide, objectSelection!.shapeId);
     const color = (value: string | null | undefined) => value && /^[#]?[0-9a-f]{6}$/i.test(value) ? `#${value.replace(/^#/, '')}` : null;
-    lastEditState = { readOnly,
+    lastEditState = { readOnly, proposals: opened.listProposals(), notes: activeSlideId ? { slideId: activeSlideId, text: notes.get(activeSlideId) ?? '' } : null,
       object: shape && slide ? { formattable: shape.kind === 'shape', geometry: shape.geometry ?? null,
         fill: shape.fill?.type === 'none' ? null : color(shape.resolvedFillColor), stroke: color(shape.resolvedOutlineColor),
         strokeWidth: shape.resolvedOutlineColor ? (shape.outline?.width ?? 12700) / 12700 : null,
@@ -553,6 +557,7 @@ export function registerPresentationCommandHandlers(
     const updates = pendingUpdates.splice(0);
     return transferable({ ...identity!, epoch: documentEpoch, throughSeq, version,
       ...(updates.length ? { updates } : {}),
+      ...(observeChanges && commandOutcomes.some((outcome) => outcome.committed) ? { change: { ...identity!, throughSeq, version, snapshot: presentation().snapshot() } } : {}),
       selection: objectSelection ?? (selection ? { ...selection } : null), editState: edit, outcomes: commandOutcomes,
       dirtySlideIds, activeSlideId, historyThroughSeq, ...(creation ? { creation } : {}), ...(editResult ? { editResult } : {}), ...(fontId !== undefined ? { fontId } : {}),
       ...(history ? { slides: metadata!.slides, size: metadata!.size } : {}),
@@ -615,6 +620,7 @@ export function registerPresentationCommandHandlers(
       return typeof slideId === 'string' && revisions.has(slideId) && slideIndices.has(slideId)
         ? { kind: 'activation', slideId } : 'bad-target';
     }
+    if (command.kind === 'setChangeObserver') return typeof command.payload.enabled === 'boolean' ? { kind: 'observer', enabled: command.payload.enabled } : 'invalid-payload';
     if (command.kind === 'invoke') {
       if (composition) return 'invalid-composition';
       if (command.basis.version !== version) return 'stale-basis';
@@ -1077,6 +1083,7 @@ export function registerPresentationCommandHandlers(
       readOnly = admitted.readOnly;
       return false;
     }
+    if (admitted.kind === 'observer') { observeChanges = admitted.enabled; return false; }
     if (admitted.kind === 'invoke') {
       const selected = selection ? anchor(selection) : null;
       const object = objectSelection;
@@ -1262,7 +1269,7 @@ export function registerPresentationCommandHandlers(
           fonts: input.fonts?.map((face) => ({ ...face, bytes: new Uint8Array(face.bytes) })),
           fallbackFonts: input.fallbackFonts?.map((face) => ({ ...face, bytes: new Uint8Array(face.bytes) })),
           initialUpdate: input.initialUpdate });
-        if (input.collaboration) offUpdates = handle.onUpdate((update, origin) => {
+        offUpdates = handle.onUpdate((update, origin) => {
           pendingUpdates.push({ bytes: update.slice().buffer, origin });
         });
         const openedMetadata = refreshMetadata();
@@ -1272,6 +1279,7 @@ export function registerPresentationCommandHandlers(
         }
         identity = { session: input.session, incarnation: input.incarnation };
         readOnly = input.readOnly ?? false;
+        observeChanges = input.observeChanges ?? false;
         initialUpdate = input.initialUpdate !== undefined;
         activeSlideId = openedMetadata.slides[Math.max(0, Math.min(index, openedMetadata.slides.length - 1))]?.id ?? null;
         handle.setUndoCaptureMode('manual');
@@ -1284,9 +1292,10 @@ export function registerPresentationCommandHandlers(
         cacheStories(content);
         for (const slide of openedMetadata.slides) revisions.set(slide.id, 0);
         const result = ack();
+        const recoveryUpdate = handle.encodeStateAsUpdate().slice().buffer;
         return transferable({ ...result.value, shared: projection.ack(result.value),
           slides: openedMetadata.slides, size: openedMetadata.size,
-          activeSlideId, frame: result.value.frame ?? null }, result.transfer);
+          activeSlideId, frame: result.value.frame ?? null, recoveryUpdate }, [...result.transfer, recoveryUpdate]);
       } catch (error) {
         dispose();
         throw error;
@@ -1439,6 +1448,7 @@ export function registerPresentationCommandHandlers(
         case 'encodeStateVector': return opened.encodeStateVector();
         case 'encodeStateAsUpdate': return opened.encodeStateAsUpdate(args[0] as Uint8Array | undefined);
         case 'snapshot': return opened.snapshot();
+        case 'comments': return opened.comments();
         case 'story': return opened.story(args[0] as string);
         case 'findText': return opened.findText(args[0] as Parameters<PresentationHandle['findText']>[0]);
         case 'validateEdits': return readOnly ? { ok: false as const, version,
@@ -1447,15 +1457,19 @@ export function registerPresentationCommandHandlers(
         case 'exportMarkdown': return opened.exportMarkdown(args[0] as Parameters<PresentationHandle['exportMarkdown']>[0]);
         case 'searchText': return opened.searchText(args[0] as string, args[1] as Parameters<PresentationHandle['searchText']>[1]);
         case 'listProposals': return opened.listProposals();
+        case 'previewProposal': return opened.previewProposal(args[0] as string);
+        case 'layoutSlide': return opened.layoutSlide(args[0] as number);
+        case 'layoutProposalSlide': return opened.layoutProposalSlide(args[0] as string, args[1] as number);
+        case 'layoutProposalDiffSlide': return opened.layoutProposalDiffSlide(args[0] as string, args[1] as number);
         default: throw new TypeError('Unsupported access method');
       }
     },
     checkpointCommandEditor(_, request) {
       fence(request);
       const bytes = presentation().save().slice().buffer;
-      const updates = pendingUpdates.splice(0);
-    return transferable({ ...identity!, epoch: documentEpoch, throughSeq, version,
-      ...(updates.length ? { updates } : {}), bytes }, [bytes]);
+      const recoveryUpdate = presentation().encodeStateAsUpdate().slice().buffer;
+      return transferable({ ...identity!, epoch: documentEpoch, throughSeq, version,
+        bytes, recoveryUpdate }, [bytes, recoveryUpdate]);
     },
     prepareCommandPicture(_, request, bytes) {
       fence(request);
