@@ -5,7 +5,7 @@ import { SessionFailure, type MethodHandlers, type MethodPolicies } from '../../
 import type { PptxEditRequest, PptxEditResult, PptxStoryTarget, PptxStoryText, PptxTextField } from '../edits';
 import { DEFAULT_EDITOR_TEXT_STYLE, insertionEchoRun } from '../textFormatting';
 import type { ParagraphAlignment, PptxCaretAnchor, SlideDisplayList, ShapeRect, ShapeDraft, PresetShapeDraft, PictureDraft, ShapeReceipt, ShapeSnapshot, StorySnapshot, TextStyle, TextStyleSnapshot } from '../types';
-import { canMoveShape, canResizeShape, effectiveShapeRect, findTopLevelShape, MIN_SHAPE_SIZE_EMU } from './commandShapes';
+import { canMoveShape, canResizeShape, effectiveShapeRect, findShape, findTopLevelShape, MIN_SHAPE_SIZE_EMU } from './commandShapes';
 import {
   decodeTiffImage, initWasm, openPresentation, presentationMetadata, presentationStoryFormatting, type PresentationCommandReadResult,
   type PresentationHandle, type PresentationHistoryReceipt,
@@ -227,7 +227,7 @@ export function registerPresentationCommandHandlers(
   function selectedObject(slideId: string, shapeId: string): PresentationCommandObjectSelection | null {
     const deck = presentation().snapshot();
     const slide = deck.slides.find((slide) => slide.id === slideId);
-    const shape = slide && findTopLevelShape(slide, shapeId);
+    const shape = slide && findShape(slide.shapes, shapeId);
     const geometry = authoritativeGeometry(slideId);
     if (!shape || shape.id !== shapeId || !geometry) return null;
     const ids = new Set<string>();
@@ -256,7 +256,8 @@ export function registerPresentationCommandHandlers(
     const story = shape.textStories[0];
     return { kind: 'object', slideId, shapeId, storyId: story?.id ?? '',
       anchor: 0, focus: 0, affinity: 'downstream', token: objectToken(slideId, shape), bounds, rect,
-      canMove: canMoveShape(shape), canResize: canResizeShape(shape), units };
+      canMove: slide!.shapes.includes(shape) && canMoveShape(shape),
+      canResize: slide!.shapes.includes(shape) && canResizeShape(shape), units };
   }
 
   function objectStory(object: PresentationCommandObjectSelection): PresentationCommandSelection | null {
@@ -482,7 +483,7 @@ export function registerPresentationCommandHandlers(
           && paragraph.editable && paragraph.fields.length === 0)) echoRun = neighbour.neighbour;
     }
     const slide = objectSelection ? opened.snapshot().slides.find((slide) => slide.id === objectSelection!.slideId) : null;
-    const shape = slide && findTopLevelShape(slide, objectSelection!.shapeId);
+    const shape = slide && slide.shapes.find((shape) => shape.id === objectSelection!.shapeId);
     const color = (value: string | null | undefined) => value && /^[#]?[0-9a-f]{6}$/i.test(value) ? `#${value.replace(/^#/, '')}` : null;
     lastEditState = { readOnly, proposals: opened.listProposals(), notes: activeSlideId ? { slideId: activeSlideId, text: notes.get(activeSlideId) ?? '' } : null,
       object: shape && slide ? { formattable: shape.kind === 'shape', geometry: shape.geometry ?? null,
