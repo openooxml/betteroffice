@@ -21,12 +21,16 @@ if (ownsDom) GlobalRegistrator.register();
 const { act, cleanup, render, waitFor } = await import('@testing-library/react');
 const restores: Array<() => void> = [];
 afterEach(() => { cleanup(); for (const restore of restores.splice(0).reverse()) restore(); });
-afterAll(async () => { if (ownsDom) await GlobalRegistrator.unregister(); });
+afterAll(async () => {
+  await act(async () => { await new Promise<void>(resolve => setImmediate(resolve)); });
+  if (ownsDom) await GlobalRegistrator.unregister();
+});
 const source = new Uint8Array([1]);
+type CollaborationUpdateEvent = Parameters<Parameters<ResidentEngineWorkerClient['onCollabUpdates']>[0]>[0];
 
 function setup() {
-  const listeners = new Set<(event: { updates: Uint8Array[]; inferences: [] }) => void>();
-  const client = { onCollabUpdates: (listener: (event: { updates: Uint8Array[]; inferences: [] }) => void) => {
+  const listeners = new Set<(event: CollaborationUpdateEvent) => void>();
+  const client = { onCollabUpdates: (listener: (event: CollaborationUpdateEvent) => void) => {
     listeners.add(listener); return () => { listeners.delete(listener); };
   }, documentRead: mock(async () => ({ value: new Uint8Array([0]) })),
   documentReadAt: mock(async () => ({ status: 'ok', version: 'native-1', value: null })) } as unknown as ResidentEngineWorkerClient;
@@ -83,6 +87,30 @@ test('async replica uses the edit session fence and forwards local updates', asy
   await expect(replica.async.encodeStateVector()).rejects.toThrow('retired');
 });
 
+test('typing follows an unacknowledged merge and the adapter returns its inference', async () => {
+  const s = setup();
+  let resolve!: (outcome: { status: 'applied' }) => void;
+  const ticket = { id: 1, seq: 1, ack: new Promise<{ status: 'applied' }>(done => { resolve = done; }),
+    presented: Promise.resolve('presented' as const) };
+  const submit = mock((..._args: Parameters<DocxWorkerEditSession['submit']>) => ticket as ReturnType<DocxWorkerEditSession['submit']>);
+  s.session.submit = submit as unknown as typeof s.session.submit;
+  const replica = createPeerlessCollaborationReplica(s.client, s.session, 41);
+  const merged = replica.async.applyUpdate(source);
+  s.session.submit('insertText', { text: 'queued' });
+  expect(submit.mock.calls[1]?.[2]).toEqual({ after: ticket });
+  const older = { ...ticket, id: 0, seq: 0 };
+  s.session.submit('insertText', { text: 'after older input' }, { after: older });
+  expect(submit.mock.calls[2]?.[2]).toEqual({ after: ticket });
+  const later = { ...ticket, id: 2, seq: 2 };
+  s.session.submit('insertText', { text: 'after later input' }, { after: later });
+  expect(submit.mock.calls[3]?.[2]).toEqual({ after: later });
+  const insertion = { clientId: 42, story: 'body', paraId: 'p', endOffset: 4 };
+  for (const receive of s.listeners) receive({ updates: [], inferences: [{ seq: 1, insertion }] });
+  resolve({ status: 'applied' });
+  expect(await merged).toEqual(insertion);
+  replica.retire();
+});
+
 test('local cursor publication suppresses broadcast on document changes and clears on unmount', async () => {
   const s = setup();
   const presence: CollaborationPresence = { peers: [], setCursor: mock(() => {}), onPeers: () => () => {} };
@@ -107,11 +135,14 @@ test('presence overlay ignores a reply from an older installed geometry', async 
     setCursor() {}, onPeers: () => () => {} };
   const view = render(<PeerlessRemotePresence binding={s.binding} client={s.client} presence={presence} pages={[0, 1]} />);
   await waitFor(() => expect(s.client.documentReadAt).toHaveBeenCalled());
+  view.rerender(<PeerlessRemotePresence binding={s.binding} client={s.client} presence={presence} pages={[1, 2]} />);
+  expect(s.client.documentReadAt).toHaveBeenCalledTimes(1);
   await act(async () => {
     s.viewStore.installFrameGeometry({ ...geometry, frameEpoch: 2 });
     resolveRead!({ status: 'ok', version: 'native-1', value: { version: 'native-1', frameEpoch: 1, layoutRevision: 1,
       peers: [{ clientId: 42, clock: 1, status: 'ok', rects: [], caret: { pageId: '1', pageIndex: 0, x: 12, y: 10, width: 0, height: 14 } }] } });
   });
+  await waitFor(() => expect(s.client.documentReadAt).toHaveBeenCalledTimes(2));
   expect(view.queryByTestId('remote-presence-caret')).toBeNull();
 });
 
@@ -172,10 +203,20 @@ test('editor opens the requested room, reopens on room and document changes, and
   expect(open).toHaveBeenCalledTimes(2);
   await expect(original.applyUpdate(source)).rejects.toThrow('retired');
   const second = next.mock.calls.at(-1)![0]!;
-  view.rerender(<DocxEditor experimentalPeerless documentBuffer={new Uint8Array([3])} showToolbar={false} collaboration={{ clientId: 42, initialUpdate, onReplica: next }} />);
+  const replacement = new Uint8Array([3]);
+  view.rerender(<DocxEditor experimentalPeerless documentBuffer={replacement} showToolbar={false} collaboration={{ clientId: 42, initialUpdate, onReplica: next }} />);
   await waitFor(() => expect(open).toHaveBeenCalledTimes(3));
   await waitFor(() => expect(next.mock.calls.at(-1)![0]).not.toBe(second));
   await expect(second.applyUpdate(source)).rejects.toThrow('retired');
+  const swapped = next.mock.calls.at(-1)![0]!;
+  view.rerender(<DocxEditor experimentalPeerless documentBuffer={replacement} showToolbar={false} />);
+  await waitFor(() => expect(open).toHaveBeenCalledTimes(4));
+  expect(open.mock.calls[3]![1]?.collaboration).toBeUndefined();
+  expect(next.mock.calls.at(-1)![0]).toBeNull();
+  await expect(swapped.applyUpdate(source)).rejects.toThrow('retired');
+  view.rerender(<DocxEditor experimentalPeerless documentBuffer={replacement} showToolbar={false} collaboration={{ clientId: 42, initialUpdate, onReplica: next }} />);
+  await waitFor(() => expect(open).toHaveBeenCalledTimes(5));
+  await waitFor(() => expect(next.mock.calls.at(-1)![0]?.clientId).toBe(42));
   view.unmount();
   expect(next.mock.calls.at(-1)![0]).toBeNull();
 });
