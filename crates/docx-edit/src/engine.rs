@@ -20830,6 +20830,29 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
     }
 
     #[test]
+    fn exact_prefix_rejects_page_totals_and_trims_certified_pages() {
+        let mut request: serde_json::Value =
+            serde_json::from_str(&float_page_request(serde_json::json!({}))).unwrap();
+        request["exactPrefix"] = serde_json::json!(true);
+        for field in ["PAGE", "NUMPAGES", "SECTIONPAGES"] {
+            let body = format!(
+                r#"<w:p><w:fldSimple w:instr=" {field} "><w:r><w:t>9</w:t></w:r></w:fldSimple></w:p>{}"#,
+                (0..200).map(|i| format!("<w:p><w:r><w:t>Paragraph {i} fills several pages.</w:t></w:r></w:p>")).collect::<String>()
+            );
+            let bytes = docx_bytes("", &body);
+            let (full, prefix) = full_and_prefix(&bytes, &request.to_string(), &|_| {});
+            if field == "PAGE" {
+                assert_eq!(prefix["provisional"], true);
+                assert_eq!(prefix["layout"]["pages"].as_array().unwrap().len(), 3);
+                assert_eq!(first_pages(&prefix), first_pages(&full));
+            } else {
+                assert_ne!(prefix["provisional"], true, "{field}");
+                assert_eq!(prefix["layout"], full["layout"], "{field}");
+            }
+        }
+    }
+
+    #[test]
     fn a_provisional_layout_renders_numpages_empty_until_the_full_pass() {
         assert_partial_numpages(false);
     }
