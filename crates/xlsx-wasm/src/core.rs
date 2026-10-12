@@ -1764,6 +1764,62 @@ mod tests {
     }
 
     #[test]
+    fn format_facets_capture_apply_and_reopen() {
+        let expected = serde_json::json!({
+            "font": null, "fill": null, "border": null, "num_fmt_id": null,
+            "alignment": {"h": "Fill", "v": null, "wrap_text": false, "shrink_to_fit": false,
+                "text_rotation": 255, "indent": 4, "relative_indent": -2,
+                "justify_last_line": true, "reading_order": 2},
+            "protection": {"locked": false, "hidden": true},
+            "xf_id": 1, "quote_prefix": true, "pivot_button": true
+        });
+        let mut model = WorkbookModel {
+            sheets: vec![Sheet::new("Data")],
+            ..Default::default()
+        };
+        model
+            .styles
+            .cell_xfs
+            .push(serde_json::from_value(expected.clone()).unwrap());
+        model.sheets[0].set_cell(
+            CellRef::new(0, 0),
+            Cell {
+                value: CellValue::Number { value: 7.0 },
+                style: Some(0),
+                ..Default::default()
+            },
+        );
+        let bytes =
+            ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap();
+        let mut session = Session::open(&bytes, None).unwrap();
+        session
+            .patch_range_style_json(r#"{"sheet":0,"range":"A1","patch":{"bold":true}}"#, None)
+            .unwrap();
+        let captured = session
+            .capture_format_json(r#"{"sheet":0,"range":"A1"}"#)
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&captured).unwrap();
+        assert_eq!(value["formats"][0]["protection"], expected["protection"]);
+        assert_eq!(value["formats"][0]["alignment"], expected["alignment"]);
+        assert_eq!(value["formats"][0]["xfId"], expected["xf_id"]);
+        assert_eq!(value["formats"][0]["quotePrefix"], expected["quote_prefix"]);
+        assert_eq!(value["formats"][0]["pivotButton"], expected["pivot_button"]);
+        session
+            .apply_format_json(
+                &format!(r#"{{"sheet":0,"range":"B1","format":{captured}}}"#),
+                None,
+            )
+            .unwrap();
+        let reopened = Session::open(&session.save().unwrap(), None).unwrap();
+        assert_eq!(
+            reopened
+                .capture_format_json(r#"{"sheet":0,"range":"B1"}"#)
+                .unwrap(),
+            captured
+        );
+    }
+
+    #[test]
     fn formatting_mutations_change_display_list_json() {
         let mut session = Session::open(&sample_xlsx(), None).unwrap();
         let before_patch = display_value(&session);

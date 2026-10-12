@@ -1126,6 +1126,74 @@ mod tests {
     use super::*;
 
     #[test]
+    fn format_facets_intern_and_serialize_in_small_and_large_pools() {
+        let mut value = serde_json::to_value(CellFormat::default()).unwrap();
+        value["protection"] = serde_json::json!({"locked": false, "hidden": true});
+        value["xfId"] = serde_json::json!(3);
+        value["quotePrefix"] = serde_json::json!(true);
+        value["pivotButton"] = serde_json::json!(true);
+        value["alignment"]["text_rotation"] = serde_json::json!(255);
+        value["alignment"]["indent"] = serde_json::json!(4);
+        value["alignment"]["relative_indent"] = serde_json::json!(-2);
+        value["alignment"]["justify_last_line"] = serde_json::json!(true);
+        value["alignment"]["reading_order"] = serde_json::json!(2);
+        let format: CellFormat = serde_json::from_value(value.clone()).unwrap();
+        for size in [0, INTERN_CACHE_MIN_POOL, INTERN_CACHE_MIN_POOL + 1] {
+            let mut styles = Stylesheet::default();
+            for id in 0..size {
+                styles.cell_xfs.push(Xf {
+                    num_fmt_id: Some(id as u16),
+                    ..Default::default()
+                });
+            }
+            for number_format in [
+                NumberFormat::default(),
+                NumberFormat::Custom {
+                    pattern: "0.000".into(),
+                },
+            ] {
+                let mut format = format.clone();
+                format.number_format = number_format;
+                let index = styles.intern_cell_format(&format).unwrap().unwrap();
+                assert_eq!(styles.intern_cell_format(&format).unwrap(), Some(index));
+                let resolved = styles.cell_format(Some(index));
+                let mut expected = value.clone();
+                expected["numberFormat"] = serde_json::to_value(&format.number_format).unwrap();
+                assert_eq!(serde_json::to_value(&resolved).unwrap(), expected);
+                let mut other = expected.clone();
+                other["protection"]["locked"] = serde_json::json!(true);
+                let other = serde_json::from_value(other).unwrap();
+                let other_index = styles.intern_cell_format(&other).unwrap().unwrap();
+                assert_ne!(index, other_index);
+                assert_ne!(
+                    styles.resolved_format(Some(index)),
+                    styles.resolved_format(Some(other_index))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_cell_format_json_stays_unchanged() {
+        let value = serde_json::json!({
+            "font": {"name": null, "size_pt": null, "bold": false, "italic": false,
+                "underline": false, "strike": false, "color": null},
+            "fill": "None", "border": {"left": null, "right": null, "top": null, "bottom": null},
+            "numberFormat": {"kind": "builtin", "id": 0},
+            "alignment": {"h": null, "v": null, "wrap_text": false, "shrink_to_fit": false}
+        });
+        let format: CellFormat = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(format, CellFormat::default());
+        assert_eq!(serde_json::to_value(format).unwrap(), value);
+        let xf = serde_json::json!({"font": null, "fill": null, "border": null,
+            "num_fmt_id": null, "alignment": null});
+        assert_eq!(
+            serde_json::to_value(serde_json::from_value::<Xf>(xf.clone()).unwrap()).unwrap(),
+            xf
+        );
+    }
+
+    #[test]
     fn theme_slot_swaps_first_two_pairs() {
         let t = Theme::default();
         assert_eq!(t.slot(0), Some("#ffffff"));

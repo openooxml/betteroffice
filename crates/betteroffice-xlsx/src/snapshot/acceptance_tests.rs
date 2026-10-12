@@ -3,6 +3,7 @@ use crate::{
     EditStep, ProposalEditInput, ProposalRequest, RangeAddress, RangeTarget, UpdateEvent, Viewport,
     WorkbookModel, XlsxExportOptions,
 };
+use xlsx_model::CellRange;
 use xlsx_ops::{CellState, Op};
 
 use super::*;
@@ -260,6 +261,78 @@ fn hydrate(workbook: &Workbook, budget: SnapshotBudget) -> Workbook {
     assert!(!peer.can_undo());
     assert!(!peer.can_redo());
     peer
+}
+
+#[test]
+fn format_facets_bounded_snapshot_and_replay() {
+    let expected = serde_json::json!({
+        "font": null, "fill": null, "border": null, "num_fmt_id": null,
+        "alignment": {
+            "h": "Distributed", "v": null, "wrap_text": false, "shrink_to_fit": false,
+            "text_rotation": 255, "indent": 4, "relative_indent": -2,
+            "justify_last_line": true, "reading_order": 2
+        },
+        "protection": {"locked": false, "hidden": true},
+        "xf_id": 1, "quote_prefix": true, "pivot_button": true
+    });
+    let xf = serde_json::from_value(expected.clone()).unwrap();
+    let mut model = WorkbookModel {
+        sheets: vec![crate::Sheet::new("Data")],
+        ..Default::default()
+    };
+    model.styles.cell_xfs.push(xf);
+    model.sheets[0].set_cell(
+        CellRef::new(0, 0),
+        Cell {
+            style: Some(0),
+            value: CellValue::Number { value: 7.0 },
+            ..Default::default()
+        },
+    );
+    let mut workbook = Workbook::from_model(model).unwrap();
+    for budget in [
+        SnapshotBudget::new(1, 128).unwrap(),
+        SnapshotBudget::new(7, 1024).unwrap(),
+    ] {
+        let peer = hydrate(&workbook, budget);
+        assert_eq!(
+            serde_json::to_value(&peer.model().styles.cell_xfs[0]).unwrap(),
+            expected
+        );
+    }
+    workbook
+        .patch_range_style(
+            SheetId(0),
+            CellRange::new(CellRef::new(0, 0), CellRef::new(0, 0)),
+            crate::StylePatch {
+                bold: Some(true),
+                ..Default::default()
+            },
+            context(),
+        )
+        .unwrap();
+    let mut peer = hydrate(&workbook, SnapshotBudget::new(1, 128).unwrap());
+    assert_eq!(peer.model().styles, workbook.model().styles);
+    peer.patch_range_style(
+        SheetId(0),
+        CellRange::new(CellRef::new(0, 0), CellRef::new(0, 0)),
+        crate::StylePatch {
+            italic: Some(true),
+            ..Default::default()
+        },
+        context(),
+    )
+    .unwrap();
+    let style = peer.model().sheets[0]
+        .cell(CellRef::new(0, 0))
+        .unwrap()
+        .style;
+    let format = serde_json::to_value(peer.model().styles.cell_format(style)).unwrap();
+    assert_eq!(format["protection"], expected["protection"]);
+    assert_eq!(format["alignment"], expected["alignment"]);
+    assert_eq!(format["xfId"], expected["xf_id"]);
+    assert_eq!(format["quotePrefix"], expected["quote_prefix"]);
+    assert_eq!(format["pivotButton"], expected["pivot_button"]);
 }
 
 fn canonical_model(model: &WorkbookModel) -> Vec<Vec<u8>> {
