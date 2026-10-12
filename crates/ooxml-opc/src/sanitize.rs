@@ -28,7 +28,10 @@ pub fn sanitize_package(data: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 pub fn sanitize_package_for_format(data: &[u8], expected_format: &str) -> Result<Vec<u8>, String> {
-    if !matches!(expected_format, "docx" | "xlsx" | "pptx" | "vsdx" | "vstx") {
+    if !matches!(
+        expected_format,
+        "docx" | "dotx" | "xlsx" | "xltx" | "pptx" | "potx" | "ppsx" | "vsdx" | "vstx"
+    ) {
         return Err(format!("unsupported OOXML format: {expected_format}"));
     }
     sanitize_package_inner(data, Some(expected_format))
@@ -55,7 +58,13 @@ fn sanitize_package_inner(data: &[u8], expected_format: Option<&str>) -> Result<
 
     let mut removed: HashSet<String> = parts
         .iter()
-        .filter(|(path, _)| dangerous_path(path))
+        .filter(|(path, _)| {
+            dangerous_path(path)
+                || content_types
+                    .as_ref()
+                    .and_then(|types| types.content_type_for(path))
+                    .is_some_and(dangerous_content_type)
+        })
         .map(|(path, _)| normalize_part_name(path).into_owned())
         .collect();
     if let Some(content_types) = &content_types {
@@ -98,6 +107,16 @@ pub enum DocumentKind {
     Vssm,
     Vstx,
     Vstm,
+    Dotx,
+    Dotm,
+    Xltx,
+    Xltm,
+    Xlam,
+    Potx,
+    Potm,
+    Ppsx,
+    Ppsm,
+    Ppam,
 }
 
 impl DocumentKind {
@@ -105,10 +124,20 @@ impl DocumentKind {
         match self {
             Self::Docx => "docx",
             Self::Docm => "docm",
+            Self::Dotx => "dotx",
+            Self::Dotm => "dotm",
             Self::Xlsx => "xlsx",
             Self::Xlsm => "xlsm",
+            Self::Xltx => "xltx",
+            Self::Xltm => "xltm",
+            Self::Xlam => "xlam",
             Self::Pptx => "pptx",
             Self::Pptm => "pptm",
+            Self::Potx => "potx",
+            Self::Potm => "potm",
+            Self::Ppsx => "ppsx",
+            Self::Ppsm => "ppsm",
+            Self::Ppam => "ppam",
             Self::Vsdx => "vsdx",
             Self::Vsdm => "vsdm",
             Self::Vssx => "vssx",
@@ -121,8 +150,12 @@ impl DocumentKind {
     fn sanitized_format(self) -> &'static str {
         match self {
             Self::Docm => "docx",
-            Self::Xlsm => "xlsx",
-            Self::Pptm => "pptx",
+            Self::Dotm => "dotx",
+            Self::Xlsm | Self::Xlam => "xlsx",
+            Self::Xltm => "xltx",
+            Self::Pptm | Self::Ppam => "pptx",
+            Self::Potm => "potx",
+            Self::Ppsm => "ppsx",
             _ => self.format(),
         }
     }
@@ -446,10 +479,20 @@ impl MainRelationshipKind {
                 kind,
                 DocumentKind::Docx
                     | DocumentKind::Docm
+                    | DocumentKind::Dotx
+                    | DocumentKind::Dotm
                     | DocumentKind::Xlsx
                     | DocumentKind::Xlsm
+                    | DocumentKind::Xltx
+                    | DocumentKind::Xltm
+                    | DocumentKind::Xlam
                     | DocumentKind::Pptx
                     | DocumentKind::Pptm
+                    | DocumentKind::Potx
+                    | DocumentKind::Potm
+                    | DocumentKind::Ppsx
+                    | DocumentKind::Ppsm
+                    | DocumentKind::Ppam
             ),
             Self::VisioDocument => matches!(
                 kind,
@@ -620,16 +663,34 @@ fn declared_main_kind(content_type: &str) -> Option<DocumentKind> {
             Some(DocumentKind::Docx)
         }
         "application/vnd.ms-word.document.macroenabled.main+xml" => Some(DocumentKind::Docm),
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.template.main+xml" => {
+            Some(DocumentKind::Dotx)
+        }
+        "application/vnd.ms-word.template.macroenabledtemplate.main+xml" => Some(DocumentKind::Dotm),
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml" => {
             Some(DocumentKind::Xlsx)
         }
         "application/vnd.ms-excel.sheet.macroenabled.main+xml" => Some(DocumentKind::Xlsm),
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.template.main+xml" => {
+            Some(DocumentKind::Xltx)
+        }
+        "application/vnd.ms-excel.template.macroenabled.main+xml" => Some(DocumentKind::Xltm),
+        "application/vnd.ms-excel.addin.macroenabled.main+xml" => Some(DocumentKind::Xlam),
         "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml" => {
             Some(DocumentKind::Pptx)
         }
         "application/vnd.ms-powerpoint.presentation.macroenabled.main+xml" => {
             Some(DocumentKind::Pptm)
         }
+        "application/vnd.openxmlformats-officedocument.presentationml.template.main+xml" => {
+            Some(DocumentKind::Potx)
+        }
+        "application/vnd.ms-powerpoint.template.macroenabled.main+xml" => Some(DocumentKind::Potm),
+        "application/vnd.openxmlformats-officedocument.presentationml.slideshow.main+xml" => {
+            Some(DocumentKind::Ppsx)
+        }
+        "application/vnd.ms-powerpoint.slideshow.macroenabled.main+xml" => Some(DocumentKind::Ppsm),
+        "application/vnd.ms-powerpoint.addin.macroenabled.main+xml" => Some(DocumentKind::Ppam),
         "application/vnd.ms-visio.drawing.main+xml" => Some(DocumentKind::Vsdx),
         "application/vnd.ms-visio.drawing.macroenabled.main+xml" => Some(DocumentKind::Vsdm),
         "application/vnd.ms-visio.stencil.main+xml" => Some(DocumentKind::Vssx),
@@ -777,11 +838,25 @@ fn macro_free_content_type(content_type: &str) -> &str {
         "application/vnd.ms-word.document.macroenabled.main+xml" => {
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"
         }
-        "application/vnd.ms-excel.sheet.macroenabled.main+xml" => {
+        "application/vnd.ms-word.template.macroenabledtemplate.main+xml" => {
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.template.main+xml"
+        }
+        "application/vnd.ms-excel.sheet.macroenabled.main+xml"
+        | "application/vnd.ms-excel.addin.macroenabled.main+xml" => {
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"
         }
-        "application/vnd.ms-powerpoint.presentation.macroenabled.main+xml" => {
+        "application/vnd.ms-excel.template.macroenabled.main+xml" => {
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.template.main+xml"
+        }
+        "application/vnd.ms-powerpoint.presentation.macroenabled.main+xml"
+        | "application/vnd.ms-powerpoint.addin.macroenabled.main+xml" => {
             "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"
+        }
+        "application/vnd.ms-powerpoint.template.macroenabled.main+xml" => {
+            "application/vnd.openxmlformats-officedocument.presentationml.template.main+xml"
+        }
+        "application/vnd.ms-powerpoint.slideshow.macroenabled.main+xml" => {
+            "application/vnd.openxmlformats-officedocument.presentationml.slideshow.main+xml"
         }
         _ => content_type,
     }
@@ -1003,6 +1078,9 @@ fn dangerous_path(path: &str) -> bool {
             Cow::Borrowed(path)
         };
     path.ends_with("vbaproject.bin")
+        || path.ends_with("vbaprojectsignature.bin")
+        || path.ends_with("vbaprojectsignatureagile.bin")
+        || path.ends_with("vbaprojectsignaturev3.bin")
         || path.ends_with("vbadata.xml")
         || path.contains("/macrosheets/")
         || path.contains("/embeddings/")
@@ -1479,26 +1557,43 @@ mod tests {
                         ),
                     )
                     .into_bytes();
-                parts.push((format!("{directory}/vbaProject.bin"), b"macro payload".to_vec()));
+                parts.push((
+                    format!("{directory}/vbaProject.bin"),
+                    b"macro payload".to_vec(),
+                ));
                 parts.push((
                     format!("{directory}/_rels/{main_file}.rels"),
                     br#"<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='macro' Type='http://schemas.microsoft.com/office/2006/relationships/vbaProject' Target='vbaProject.bin'/></Relationships>"#.to_vec(),
                 ));
                 let package = rezip_parts(&parts).unwrap();
                 let sanitized = sanitize_package(&package).unwrap();
+                let sanitized_for_format =
+                    sanitize_package_for_format(&package, sanitized_format).unwrap();
+                assert_eq!(
+                    unzip_parts(&sanitized_for_format).unwrap(),
+                    unzip_parts(&sanitized).unwrap()
+                );
                 let output = unzip_parts(&sanitized).unwrap();
-                assert!(!has_part(&output, &format!("{directory}/vbaProject.bin")), "{format}");
+                assert!(
+                    !has_part(&output, &format!("{directory}/vbaProject.bin")),
+                    "{format}"
+                );
                 let all = output
                     .iter()
                     .map(|(_, bytes)| String::from_utf8_lossy(bytes).to_ascii_lowercase())
                     .collect::<String>();
                 assert!(!all.contains("vbaproject"), "{format}");
                 assert_eq!(
-                    parse_content_types(&output).unwrap().content_type_for(part_name),
+                    parse_content_types(&output)
+                        .unwrap()
+                        .content_type_for(part_name),
                     Some(sanitized_type),
                     "{format}"
                 );
-                assert_eq!(detect_package_kind(&output).unwrap().format(), sanitized_format);
+                assert_eq!(
+                    detect_package_kind(&output).unwrap().format(),
+                    sanitized_format
+                );
                 assert_all_parts_declared(&output);
             }
         }
@@ -1509,15 +1604,31 @@ mod tests {
         for [format, content_type, sanitized_format, _] in TEMPLATE_AND_ADDIN_KINDS {
             let (part_name, base_format) = office_main_part(format);
             let package = rezip_parts(&package_parts(part_name, content_type, b"<root/>")).unwrap();
-            assert!(sanitize_package_for_format(&package, sanitized_format).is_ok(), "{format}");
+            assert!(
+                sanitize_package_for_format(&package, sanitized_format).is_ok(),
+                "{format}"
+            );
             if sanitized_format == base_format {
-                let template_format = if base_format == "xlsx" { "xltx" } else { "potx" };
-                assert!(sanitize_package_for_format(&package, template_format).is_err(), "{format}");
+                let template_format = if base_format == "xlsx" {
+                    "xltx"
+                } else {
+                    "potx"
+                };
+                assert!(
+                    sanitize_package_for_format(&package, template_format).is_err(),
+                    "{format}"
+                );
             } else {
-                assert!(sanitize_package_for_format(&package, base_format).is_err(), "{format}");
+                assert!(
+                    sanitize_package_for_format(&package, base_format).is_err(),
+                    "{format}"
+                );
             }
             if format != sanitized_format {
-                assert!(sanitize_package_for_format(&package, format).is_err(), "{format}");
+                assert!(
+                    sanitize_package_for_format(&package, format).is_err(),
+                    "{format}"
+                );
             }
         }
     }
@@ -1537,9 +1648,17 @@ mod tests {
             ] {
                 let output = unzip_parts(&sanitized).unwrap();
                 assert_eq!(output.len(), parts.len());
-                assert_eq!(parse_content_types(&output).unwrap().content_type_for(part_name), Some(content_type));
+                assert_eq!(
+                    parse_content_types(&output)
+                        .unwrap()
+                        .content_type_for(part_name),
+                    Some(content_type)
+                );
                 assert_eq!(detect_package_kind(&output).unwrap().format(), format);
-                assert_eq!(output.iter().find(|(path, _)| path == part_name).unwrap().1, b"<root/>");
+                assert_eq!(
+                    output.iter().find(|(path, _)| path == part_name).unwrap().1,
+                    b"<root/>"
+                );
             }
         }
     }
@@ -1591,12 +1710,20 @@ mod tests {
 
     #[test]
     fn strips_signatures_declared_only_by_default() {
-        for signature in ["vbaProjectSignature", "vbaProjectSignatureAgile", "vbaProjectSignatureV3"] {
-            for part_name in [format!("xl/{signature}.bin"), "xl/custom/signature.BIN".to_owned()] {
+        for signature in [
+            "vbaProjectSignature",
+            "vbaProjectSignatureAgile",
+            "vbaProjectSignatureV3",
+        ] {
+            for part_name in [
+                format!("xl/{signature}.bin"),
+                "xl/custom/signature.BIN".to_owned(),
+            ] {
                 let content_type = format!("application/vnd.ms-office.{signature}");
                 let parts = default_payload_parts(&content_type, &part_name);
                 let package = rezip_parts(&parts).unwrap();
-                let output = unzip_parts(&sanitize_package_for_format(&package, "xlsx").unwrap()).unwrap();
+                let output =
+                    unzip_parts(&sanitize_package_for_format(&package, "xlsx").unwrap()).unwrap();
                 assert!(!has_part(&output, &part_name), "{signature}: {part_name}");
                 let all = output
                     .iter()
@@ -1612,25 +1739,39 @@ mod tests {
 
     #[test]
     fn strips_signature_paths_without_content_types() {
-        for signature in ["vbaProjectSignature", "vbaProjectSignatureAgile", "vbaProjectSignatureV3"] {
+        for signature in [
+            "vbaProjectSignature",
+            "vbaProjectSignatureAgile",
+            "vbaProjectSignatureV3",
+        ] {
             let part_name = format!("xl/{signature}.bin");
             let mut parts = default_payload_parts("application/octet-stream", &part_name);
             parts.remove(0);
             let package = rezip_parts(&parts).unwrap();
             let output = unzip_parts(&sanitize_package(&package).unwrap()).unwrap();
             assert!(!has_part(&output, &part_name), "{signature}");
-            assert!(output.iter().all(|(_, bytes)| !String::from_utf8_lossy(bytes).contains(signature)));
+            assert!(
+                output
+                    .iter()
+                    .all(|(_, bytes)| !String::from_utf8_lossy(bytes).contains(signature))
+            );
         }
     }
 
     #[test]
     fn preserves_safe_binary_override_next_to_dangerous_default() {
-        let mut parts = default_payload_parts("application/vnd.ms-office.vbaProject", "xl/custom/payload.bin");
+        let mut parts = default_payload_parts(
+            "application/vnd.ms-office.vbaProject",
+            "xl/custom/payload.bin",
+        );
         let safe_part = "xl/printerSettings/printerSettings1.bin";
         let safe_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.printerSettings";
         parts[0].1 = String::from_utf8(parts[0].1.clone())
             .unwrap()
-            .replace("</Types>", &format!("<Override PartName='/{safe_part}' ContentType='{safe_type}'/></Types>"))
+            .replace(
+                "</Types>",
+                &format!("<Override PartName='/{safe_part}' ContentType='{safe_type}'/></Types>"),
+            )
             .into_bytes();
         parts.push((safe_part.to_owned(), b"printer settings".to_vec()));
         parts[4].1 = String::from_utf8(parts[4].1.clone())
@@ -1639,9 +1780,20 @@ mod tests {
             .into_bytes();
         let package = rezip_parts(&parts).unwrap();
         let output = unzip_parts(&sanitize_package_for_format(&package, "xlsx").unwrap()).unwrap();
-        assert_eq!(output.iter().find(|(path, _)| path == safe_part).unwrap().1, b"printer settings");
-        assert_eq!(parse_content_types(&output).unwrap().content_type_for(safe_part), Some(safe_type));
-        let relationships = output.iter().find(|(path, _)| path == "xl/_rels/workbook.xml.rels").unwrap();
+        assert_eq!(
+            output.iter().find(|(path, _)| path == safe_part).unwrap().1,
+            b"printer settings"
+        );
+        assert_eq!(
+            parse_content_types(&output)
+                .unwrap()
+                .content_type_for(safe_part),
+            Some(safe_type)
+        );
+        let relationships = output
+            .iter()
+            .find(|(path, _)| path == "xl/_rels/workbook.xml.rels")
+            .unwrap();
         assert!(String::from_utf8_lossy(&relationships.1).contains("printerSettings1.bin"));
         assert!(!has_part(&output, "xl/custom/payload.bin"));
         assert_all_parts_declared(&output);
@@ -1649,7 +1801,10 @@ mod tests {
 
     #[test]
     fn leaves_no_parts_undeclared_after_removing_dangerous_defaults() {
-        let parts = default_payload_parts("application/vnd.ms-office.vbaProjectSignature", "xl/custom/payload.bin");
+        let parts = default_payload_parts(
+            "application/vnd.ms-office.vbaProjectSignature",
+            "xl/custom/payload.bin",
+        );
         let package = rezip_parts(&parts).unwrap();
         let output = unzip_parts(&sanitize_package(&package).unwrap()).unwrap();
         assert_all_parts_declared(&output);
