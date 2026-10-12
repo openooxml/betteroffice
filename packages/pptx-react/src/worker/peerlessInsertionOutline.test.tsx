@@ -82,7 +82,7 @@ for (const [start, end] of [[[200.123, 150.456], [400.789, 220.123]],
   });
 }
 
-test('existing text editing outline leaves with object selection, Escape and slide navigation', async () => {
+test('existing text editing survives Escape and leaves with object selection and slide navigation', async () => {
   const h = await open();
   await editExisting(h);
   bounds(outline(h.view), { x: h.box.x, y: h.box.y, width: h.box.w, height: h.box.h },
@@ -90,16 +90,42 @@ test('existing text editing outline leaves with object selection, Escape and sli
   await h.select();
   expect(h.view.queryByTestId('pptx-text-edit-outline') === null).toBe(true);
   await editExisting(h);
-  fireEvent.keyDown(h.view.getByRole('textbox', { name: 'Slide text' }), { key: 'Escape' });
-  await waitFor(() => expect(h.view.queryByTestId('pptx-text-edit-outline') === null).toBe(true));
-  await waitFor(() => expect(h.client.state.selection).toBeNull());
-  await editExisting(h);
+  const selection = { ...h.client.state.selection! };
+  const style = outline(h.view).getAttribute('style');
+  const submit = spyOn(presentationSharedInputs.get(h.client)!, 'submit');
+  try {
+    await act(async () => {
+      fireEvent.keyDown(h.view.getByRole('textbox', { name: 'Slide text' }), { key: 'Escape' });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    });
+    expect(submit).not.toHaveBeenCalled();
+    expect(h.client.state.selection).toEqual(selection);
+    expect(outline(h.view).getAttribute('style')).toBe(style);
+  } finally { submit.mockRestore(); }
   fireEvent.click(h.view.getByRole('button', { name: '2' }));
   await waitFor(() => expect(h.client.state.activeSlideId).toBe(h.client.state.slides[1]!.id));
   await waitFor(() => expect(h.view.queryByTestId('pptx-text-edit-outline') === null).toBe(true));
 });
 
-for (const change of ['failure', 'tool', 'slide', 'readOnly', 'replacement'] as const) {
+test('Escape cancels a textbox drag preview without inserting', async () => {
+  const h = await open();
+  const submit = spyOn(presentationSharedInputs.get(h.client)!, 'submit');
+  try {
+    fireEvent.click(h.view.getByRole('button', { name: 'Text box' }));
+    act(() => {
+      fireEvent.pointerDown(h.canvas, h.point(200, 150));
+      fireEvent.pointerMove(h.stage, h.point(400, 220));
+    });
+    expect(h.view.queryByTestId('pptx-insertion-preview') !== null).toBe(true);
+    fireEvent.keyDown(h.stage, { key: 'Escape' });
+    expect(h.view.queryByTestId('pptx-insertion-preview') === null).toBe(true);
+    expect(h.view.queryByTestId('pptx-text-edit-outline') === null).toBe(true);
+    act(() => { fireEvent.pointerUp(h.stage, h.point(400, 220)); });
+    expect(submit).not.toHaveBeenCalled();
+  } finally { submit.mockRestore(); }
+});
+
+for (const change of ['failure', 'tool', 'slide', 'readOnly', 'replacement', 'Escape'] as const) {
   test(`pending textbox outline clears on ${change}`, async () => {
     const h = await open();
     const input = presentationSharedInputs.get(h.client)!;
@@ -122,15 +148,21 @@ for (const change of ['failure', 'tool', 'slide', 'readOnly', 'replacement'] as 
       if (change === 'slide') fireEvent.click(h.view.getByRole('button', { name: '2' }));
       if (change === 'readOnly') h.view.rerender(h.ui(true));
       if (change === 'replacement') h.view.rerender(<div />);
-      if (change === 'tool' || change === 'readOnly' || change === 'replacement') {
+      if (change === 'Escape') fireEvent.keyDown(h.view.getByRole('textbox', { name: 'Slide text' }), { key: 'Escape' });
+      if (change === 'tool' || change === 'readOnly' || change === 'replacement' || change === 'Escape') {
         await waitFor(() => expect(h.view.queryByTestId('pptx-text-edit-outline') === null).toBe(true));
       }
+      if (change === 'Escape') expect(h.view.queryByTestId('pptx-insertion-preview') === null).toBe(true);
       await act(async () => { replyControl.release(); });
       if (change === 'failure') await waitFor(() => expect(h.client.state.outcomes).toEqual(
         expect.arrayContaining([expect.objectContaining({ status: 'refused' })])));
       if (change === 'failure' || change === 'slide') {
         await waitFor(() => expect(h.view.queryByTestId('pptx-text-edit-outline') === null).toBe(true));
       }
+      if (change === 'Escape') await waitFor(() => {
+        expect(h.client.state.selection).toMatchObject({ anchor: 0, focus: 0 });
+        outline(h.view);
+      });
     } finally { refusal.mockRestore(); replyControl.release(); }
   });
 }

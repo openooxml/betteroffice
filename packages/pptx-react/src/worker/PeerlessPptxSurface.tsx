@@ -249,17 +249,7 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorProps) {
       <div ref={stage} role="application" aria-label={t('editor.appLabel')} tabIndex={0}
         aria-readonly={Boolean(props.readOnly || failure)} style={styles.stage}
         onKeyDownCapture={(event) => {
-          if (event.key === 'Escape') {
-            insertion.cancel();
-            const selected = presentation?.store.getSnapshot().selection;
-            if (presentation?.selectionEnabled && selected && selected.kind !== 'object') {
-              event.preventDefault();
-              void presentation.store.dispatch({ kind: 'setSelection', payload: {
-                selection: null,
-                inputTime: event.timeStamp, undoGroup: 'selection',
-              } }).catch(() => {});
-            }
-          }
+          if (event.key === 'Escape') insertion.cancel();
           shapes.onKeyDown(event);
         }}
         onKeyDown={(event) => {
