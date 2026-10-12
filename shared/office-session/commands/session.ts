@@ -210,6 +210,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
     const record = connection;
     if (!record || !live(record)) return;
     for (const request of waitingReads) {
+      if (!live(record) || recovering) return;
       let queued = false;
       for (const ticket of pending) {
         if (ticket.ticket.id <= request.watermark && ticket.seq === undefined && !ticket.ackSettled) {
