@@ -6,13 +6,15 @@ import type { PptxCommandStore } from '../commands/types';
 import type { PeerlessPresentation } from './usePeerlessPresentation';
 import type { PptxAsyncEditorApi } from './createPeerlessEditorApi';
 import type { PresentationCommandAck, PresentationCommandIntent } from '@betteroffice/pptx';
+import { peerlessGestureActive } from './peerlessViewStore';
 
 export function peerlessPluginClients(invocation: PluginInvocation<PptxPluginSnapshot>, run: PeerlessPresentation,
   api: () => PptxAsyncEditorApi | null, grant: () => PptxPluginGrant, store: PptxCommandStore,
   commit: (intent: PresentationCommandIntent) => Promise<PresentationCommandAck>): PptxPluginClients {
   const denial = () => {
     const reason = invocation.refusal();
-    return reason ? pluginRefusal(reason) : !run.current ? pluginRefusal('document-replaced') : null;
+    return reason ? pluginRefusal(reason) : !run.current ? pluginRefusal('document-replaced')
+      : peerlessGestureActive(run.store) ? pluginRefusal('input-failed', 'An editor gesture is active') : null;
   };
   async function admitted<T>(operation: () => Promise<T>, writing = false): Promise<T | PptxPluginRefusal> {
     const before = denial();
