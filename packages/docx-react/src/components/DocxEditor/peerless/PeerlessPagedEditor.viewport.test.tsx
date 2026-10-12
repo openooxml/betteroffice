@@ -121,7 +121,7 @@ async function mount(zoom = 1, caretPage = 0) {
     },
   };
   const options: UsePeerlessEditSessionOptions = { source: Uint8Array.of(1), openConnection: async (...args: unknown[]) => {
-    initialScales.push(args[2] as number | undefined);
+    initialScales.push(typeof args[2] === 'function' ? (args[2] as () => number)() : undefined);
     return connection;
   },
     canvasForPage: () => null,
