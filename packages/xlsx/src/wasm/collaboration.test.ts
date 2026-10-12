@@ -253,6 +253,47 @@ describe('wasm collaboration', () => {
     }
   });
 
+  it('syncs idle standalone edits before late subscription and after resubscription', () => {
+    for (const fullState of [false, true]) {
+      const source = openWorkbook(sampleBytes());
+      const peer = collaborative(fullState ? 3101 : 3102);
+      const events: Uint8Array[] = [];
+      let unsubscribe = () => {};
+      try {
+        const baseline = peer.encodeStateVector();
+        source.editCell(0, 20, 0, 'idle');
+        source.editCell(0, 20, 0, '');
+        source.editCell(0, 21, 0, 'retained');
+        unsubscribe = source.onUpdate((update) => events.push(update));
+        expect(events).toHaveLength(0);
+        peer.applyUpdate(source.encodeStateAsUpdate(fullState ? undefined : baseline));
+        expect(peer.cell(0, 20, 0).input).toBe('');
+        expect(peer.cell(0, 21, 0).input).toBe('retained');
+        source.editCell(0, 21, 0, 'observed');
+        source.undo();
+        source.redo();
+        expect(events).toHaveLength(3);
+        for (const update of events.splice(0)) peer.applyUpdate(update);
+        expect(peer.encodeStateVector()).toEqual(source.encodeStateVector());
+        unsubscribe();
+        source.editCell(0, 21, 0, '');
+        expect(events).toHaveLength(0);
+        unsubscribe = source.onUpdate((update) => events.push(update));
+        peer.applyUpdate(source.encodeStateAsUpdate(peer.encodeStateVector()));
+        source.editCell(0, 22, 0, 'resubscribed');
+        expect(events).toHaveLength(1);
+        peer.applyUpdate(events[0]);
+        expect(peer.cell(0, 21, 0).input).toBe('');
+        expect(peer.cell(0, 22, 0).input).toBe('resubscribed');
+        expect(peer.encodeStateAsUpdate()).toEqual(source.encodeStateAsUpdate());
+      } finally {
+        unsubscribe();
+        source.dispose();
+        peer.dispose();
+      }
+    }
+  });
+
   it('keeps duplicate listener registrations independent', () => {
     const handle = collaborative(3002);
     let calls = 0;
