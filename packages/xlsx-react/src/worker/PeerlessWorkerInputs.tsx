@@ -91,7 +91,10 @@ export const PeerlessWorkerCellInput = memo(function PeerlessWorkerCellInput({ c
     const input = controller.cellInput;
     if (!draft || !input || controller.isComposing('cell')) return;
     if (input.value !== draft.value) input.value = draft.value;
-    if (document.activeElement !== input) {
+    const active = input.ownerDocument.activeElement;
+    if (active !== input) {
+      const surface = input.closest('[tabindex]');
+      if (active && active !== input.ownerDocument.body && !surface?.contains(active)) return;
       input.focus({ preventScroll: true }); input.setSelectionRange(input.value.length, input.value.length);
     }
   }, [controller, draft, bounds !== null]);
