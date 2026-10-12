@@ -908,6 +908,38 @@ describe('XlsxEditor async API', () => {
         expect(edits[edits.length - 1]).toMatchObject({ payload: { args: [0, 0, 0, 'final composed textx'] } });
       }
     });
+
+    it(`preserves host dialog focus after saving ${source} IME composition`, async () => {
+      const host = peerlessHarness(false, false, true);
+      const dialog = render(<input aria-label="Save dialog input" />);
+      const hostInput = dialog.getByRole('textbox', { name: 'Save dialog input' });
+      const saved = mock(() => hostInput.focus());
+      const view = await host.mount(saved);
+      if (source === 'cell') fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'F2' });
+      const input = view.getByTestId(source === 'cell' ? 'xlsx-cell-editor' : 'xlsx-formula-input') as HTMLInputElement;
+      act(() => input.focus());
+      fireEvent.compositionStart(input);
+      fireEvent.change(input, { target: { value: 'unfinished' } });
+      input.addEventListener('blur', () => {
+        input.value = 'final composed text';
+        fireEvent.compositionEnd(input);
+      }, { once: true });
+      await act(async () => fireEvent.click(view.getByTestId('xlsx-save')));
+      await waitFor(() => expect(host.sent).toHaveLength(1));
+      expect(host.sent[0]).toMatchObject({ kind: 'editCell', payload: { args: [0, 0, 0, 'final composed text'] } });
+      await act(async () => {
+        fireEvent.change(input, { target: { value: 'final composed text' } });
+        fireEvent.compositionEnd(input);
+        host.ack(host.sent[0], { paint: true });
+      });
+      await advance();
+      await waitFor(() => expect(saved).toHaveBeenCalledTimes(1));
+      expect(host.session.save).toHaveBeenCalledTimes(1);
+      expect(host.sent).toHaveLength(1);
+      expect(host.cells.get('0:0:0')).toBe('final composed text');
+      expect(view.queryByTestId('xlsx-cell-editor')).toBeNull();
+      expect(document.activeElement === hostInput).toBe(true);
+    });
   }
 
   it('names legacySyncApi when default onReplica encoding is called synchronously', async () => {
