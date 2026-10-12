@@ -1107,9 +1107,9 @@ impl<'a> Exporter<'a> {
                 });
             }
         }
-        let last = self
-            .read()
-            .and_then(|read| read.final_section.clone())
+        let last = views
+            .doc()
+            .final_section_properties()
             .and_then(|value| serde_json::from_value::<docx_parse::SectionProperties>(value).ok());
         sections.push(Section {
             end: None,

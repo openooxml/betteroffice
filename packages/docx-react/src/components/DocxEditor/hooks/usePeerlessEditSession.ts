@@ -12,16 +12,20 @@ import { createEchoPainter } from '../peerless/echoPainter';
 import type { PeerlessEchoIntent, PeerlessEchoPainter } from '../peerless/echoPainter';
 import { createFramePresentation, type PeerlessFramePresentation } from '../peerless/framePresentation';
 import { coalesceInputDrafts } from '../peerless/inputCoalescing';
+import type { Document } from '@betteroffice/docx/types/document';
 import { createInputAdmission, type PeerlessInputAdmission } from '../peerless/inputAdmission';
 import { createPeerlessViewStore, type PeerlessFrameGeometry, type PeerlessViewStore } from '../peerless/viewStore';
 
 /** @internal Opens worker authority without creating a main-thread document. */
+export type PeerlessDocumentSource = Uint8Array | Document;
+
 export interface UsePeerlessEditSessionOptions {
-  source: Uint8Array;
-  openConnection(source: Uint8Array, signal: AbortSignal): Promise<ResidentCommandConnection>;
-  recovery?: DocxWorkerEditSessionOptions<Uint8Array, PeerlessEchoIntent>['recovery'];
+  source: PeerlessDocumentSource;
+  openConnection(source: PeerlessDocumentSource, signal: AbortSignal): Promise<ResidentCommandConnection>;
+  recovery?: DocxWorkerEditSessionOptions<PeerlessDocumentSource, PeerlessEchoIntent>['recovery'];
   canvasForPage(page: DocxCommandPageIdentity): HTMLCanvasElement | null;
   prepareGeometry(frame: DocxCommandFrame): PeerlessFrameGeometry | undefined;
+  canEchoFont?(family: string): boolean;
   onError?(error: Error): void;
 }
 
@@ -107,7 +111,7 @@ export function usePeerlessEditSession(
         });
         cleanups.push(() => viewStore.dispose());
         const canvasForPage = (page: DocxCommandPageIdentity) => callbacks.current.canvasForPage(page);
-        const echoPainter = createEchoPainter({ canvasForPage });
+        const echoPainter = createEchoPainter({ canvasForPage, canEchoFont: family => callbacks.current.canEchoFont?.(family) ?? true });
         cleanups.push(() => echoPainter.dispose());
         const presentation = createFramePresentation({
           viewStore, echoPainter, canvasForPage, prepareGeometry: (frame) => callbacks.current.prepareGeometry(frame),
@@ -124,7 +128,7 @@ export function usePeerlessEditSession(
           },
         });
         cleanups.push(() => presentation.dispose());
-        const session = createDocxWorkerEditSession<Uint8Array, PeerlessEchoIntent>({
+        const session = createDocxWorkerEditSession<PeerlessDocumentSource, PeerlessEchoIntent>({
           source, connection: connect(connection), echo: presentation.hooks, coalesce: coalesceInputDrafts,
           transactionalPresentation: true, echoOverflow: 'decline', maxEchoEntries: 256,
           maxRecoveryAttempts: callbacks.current.recovery ? undefined : 0,

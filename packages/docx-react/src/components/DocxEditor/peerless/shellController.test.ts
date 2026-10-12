@@ -9,10 +9,10 @@ import type { PeerlessEchoIntent, PeerlessEchoPainter } from './echoPainter';
 import type { CommandTicket } from '../../../../../../shared/office-session/commands/types';
 import { normalizeInputEvent } from './inputEvents';
 
-function fixture() {
+function fixture(presentedThroughSeq = 0) {
   const viewStore = createPeerlessViewStore({
     identity: { session: 'worker', incarnation: 1, epoch: 1 }, version: 0,
-    throughSeq: 0, presentedThroughSeq: 0, workerSelection: null, anchors: null,
+    throughSeq: 0, presentedThroughSeq, workerSelection: null, anchors: null,
     editState: { readOnly: false, toolbar: null, effectiveFormatting: null, storedMarks: null,
       canUndo: true, canRedo: false, hyperlink: null, tableContext: null }, geometry: null,
   });
@@ -22,6 +22,47 @@ function fixture() {
   const controller = createPeerlessShellController({ read: read as never, focus() {}, zoom: 1 });
   return { controller, binding, viewStore, flush, read };
 }
+
+test('font selection prepares measurement before formatting and rejects replacement', async () => {
+  const { controller, binding, viewStore } = fixture();
+  const state = viewStore.getSnapshot();
+  viewStore.acceptWorkerState(state.identity, { ...state, epoch: 1, selection: null,
+    editState: { ...state.editState!, toolbar: PLAIN_CONTEXT } });
+  const order: string[] = [];
+  const format = mock(() => { order.push('format'); return { status: 'submitted', ticket: { ack: Promise.resolve({ status: 'applied' }) } }; });
+  const fonts = { faces: [], families: ['Times New Roman'], chains: { 'times new roman|0|0': [0] } };
+  const submit = mock(() => { order.push('environment'); return { status: 'submitted', ticket: { ack: Promise.resolve({ status: 'noop' }) } }; });
+  binding.commands = { format, submit } as never;
+  const prepareFontFamily = mock(async (family: string): Promise<typeof fonts | void> => { order.push(family); return fonts; });
+  controller.update({ read: async () => ({} as never), focus() {}, zoom: 1, prepareFontFamily });
+  controller.attach(binding);
+  expect(await controller.commands.store.execute('fontFamily', { family: 'Times New Roman' })).toMatchObject({ ok: true });
+  expect(order).toEqual(['Times New Roman', 'environment', 'format']);
+  expect(submit).toHaveBeenCalledWith({ kind: 'setFontEnvironment', payload: fonts }, { fence: true });
+  prepareFontFamily.mockImplementation(async () => { controller.detach(binding); });
+  expect(await controller.commands.store.execute('fontFamily', { family: 'Arial' })).toMatchObject({ ok: false });
+  expect(format).toHaveBeenCalledTimes(1);
+});
+
+test('preview remains read-only until the command frame is presented', () => {
+  const { controller, binding, viewStore } = fixture(-1);
+  controller.opening();
+  const preview = { frame: Uint8Array.of(1), documentPreview: true } as never;
+  controller.preview(preview);
+  expect(controller.getSnapshot()).toMatchObject({ status: 'opening', preview, previewPainted: false });
+  controller.previewPresented(preview);
+  expect(controller.getSnapshot().previewPainted).toBe(true);
+  expect(controller.commands.store.getState('undo').enabled).toBe(false);
+  const state = viewStore.getSnapshot();
+  viewStore.acceptWorkerState(state.identity, { ...state, epoch: 1, presentedThroughSeq: -1, selection: null });
+  controller.attach(binding);
+  expect(controller.getSnapshot().preview).toBe(preview);
+  viewStore.installFrameGeometry({ identity: state.identity, coversThroughSeq: 0, frameEpoch: 1, layoutRevision: 1, pages: [], caret: null, selectionRects: [] });
+  expect(controller.getSnapshot()).toMatchObject({ status: 'ready', preview: null });
+  controller.empty();
+  controller.previewPresented(preview);
+  expect(controller.getSnapshot()).toMatchObject({ status: 'empty', preview: null, previewPainted: false });
+});
 
 test('save includes navigation and typing deferred behind the first acknowledgement', async () => {
   const { controller, binding, viewStore } = fixture();
@@ -77,6 +118,39 @@ test('worker state opens shell command gates without a legacy document or sessio
   expect(controller.commands.store.getState('redo').enabled).toBe(false);
   controller.detach(binding);
   expect(controller.commands.store.getState('undo').enabled).toBe(false);
+});
+
+test('font readiness updates choices and callbacks while screen paint waits for accepted geometry', async () => {
+  const { controller, binding, viewStore } = fixture(-1);
+  const onFontsLoaded = mock(() => {});
+  const onFirstPagePainted = mock(() => {});
+  const onMemoryPressure = mock(() => {});
+  controller.update({ read: async () => ({} as never), focus() {}, zoom: 1, onFontsLoaded, onFirstPagePainted, onMemoryPressure,
+    fontFamilies: ['Host face'], memoryBudget: { warningBytes: 10, criticalBytes: 20 } });
+  controller.opening();
+  controller.fontEnvironment({ phase: 'ready', revision: 1, families: ['Custom face'] });
+  expect(onFontsLoaded).toHaveBeenCalledTimes(1);
+  expect(onFirstPagePainted).not.toHaveBeenCalled();
+  expect(controller.environment().fonts.map(option => option.label)).toEqual(['Host face', 'Custom face']);
+  controller.fontEnvironment({ phase: 'presentation', revision: 1, families: ['Custom face'], frameEpoch: 2 });
+  expect(onFirstPagePainted).not.toHaveBeenCalled();
+  controller.memory([{ label: 'docx-edit', bufferBytes: 30, liveBytes: 12 }]);
+  expect(controller.ref.getMemoryStats()).toMatchObject({ main: [], worker: [{ label: 'docx-edit', liveBytes: 12 }] });
+  expect(onMemoryPressure).toHaveBeenCalledWith(expect.objectContaining({ level: 'warning' }));
+  controller.attach(binding);
+  viewStore.installFrameGeometry({ identity: viewStore.getSnapshot().identity, coversThroughSeq: 0,
+    frameEpoch: 2, layoutRevision: 2, pages: [{ page: { pageId: '1', pageIndex: 0 },
+      bounds: { x: 0, y: 0, width: 600, height: 800 }, transform: [1, 0, 0, 1, 0, 0] }], caret: null, selectionRects: [] });
+  expect(onFirstPagePainted).toHaveBeenCalledTimes(1);
+  controller.fontEnvironment({ phase: 'ready', revision: 1, families: ['Custom face'] });
+  expect(onFontsLoaded).toHaveBeenCalledTimes(1);
+  const state = viewStore.getSnapshot();
+  viewStore.acceptWorkerState(state.identity, { ...state, epoch: 1, selection: null,
+    editState: { ...state.editState!, toolbar: PLAIN_CONTEXT } });
+  const format = mock(() => ({ status: 'submitted', ticket: { ack: Promise.resolve({ status: 'applied' }) } }));
+  binding.commands = { format } as never;
+  expect(await controller.commands.store.execute('fontFamily', { family: 'Custom face' })).toMatchObject({ ok: true });
+  expect(format).toHaveBeenCalledWith({ kind: 'formatRange', payload: { delta: { fontFamily: { ascii: 'Custom face', hAnsi: 'Custom face' } } } }, { fence: true });
 });
 
 test('sync model APIs fail loudly and async reads flush worker input', async () => {
@@ -226,4 +300,32 @@ test('controlled mode requests notify the host and preserve the committed prop',
   expect(await controller.commands.store.execute('editingMode', { mode: 'suggesting' })).toMatchObject({ ok: true, status: 'requested' });
   expect(onModeChange).toHaveBeenCalledWith('suggesting');
   expect(controller.environment().mode).toBe('editing');
+});
+
+test('queries pin the native version and refuse commands after replacement', async () => {
+  const { controller, binding, read } = fixture();
+  const readAt = mock(async () => ({ status: 'ok', version: 'native', value: { metadata: {}, geometry: [], frameEpoch: 1, layoutRevision: 1 } }));
+  read.mockImplementation(async () => ({ status: 'ok', version: 'native', value: { version: 'native', paragraphs: [] } }));
+  const submit = mock(() => ({ status: 'submitted', ticket: { ack: Promise.resolve({ status: 'noop' }) } }));
+  binding.commands = { submit } as never;
+  controller.update({ read: read as never, readAt: readAt as never, focus() {}, zoom: 1 });
+  controller.attach(binding);
+  const query = await controller.query({ kind: 'partSnapshot' });
+  expect(readAt).toHaveBeenCalledWith({ kind: 'partSnapshot' }, 'native');
+  expect(await controller.applyQuery(query, { kind: 'setWatermark', payload: { watermark: null, expectVersion: query.version } }))
+    .toMatchObject({ ok: true, status: 'noop' });
+  expect((submit.mock.calls[0] as unknown[])[0]).toMatchObject({ kind: 'setWatermark', payload: { watermark: null, expectVersion: 'native' } });
+  controller.detach(binding);
+  controller.attach({ ...binding } as PeerlessEditSessionBinding);
+  expect(await controller.applyQuery(query, { kind: 'setWatermark', payload: { watermark: null, expectVersion: query.version } }))
+    .toMatchObject({ ok: false, failure: { code: 'document-replaced' } });
+  expect(submit).toHaveBeenCalledTimes(1);
+});
+
+test('superseded part queries do not expose chrome metadata', async () => {
+  const { controller, binding, read } = fixture();
+  const readAt = mock(async () => ({ status: 'superseded' }));
+  controller.update({ read: read as never, readAt: readAt as never, focus() {}, zoom: 1 });
+  controller.attach(binding);
+  await expect(controller.query({ kind: 'partSnapshot' })).rejects.toThrow('superseded');
 });

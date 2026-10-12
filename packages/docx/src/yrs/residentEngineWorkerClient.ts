@@ -175,22 +175,22 @@ function spawnResidentEngineWorker(): ResidentEngineWorkerPort {
 
 /** Dedicated-worker owner for resident input, pagination, and FrameDelta output. */
 export class ResidentEngineWorkerClient implements ResidentCommandClient {
-  private readonly pending = new Map<number, PendingRequest>();
+  protected readonly pending = new Map<number, PendingRequest>();
   private watchdog: ReturnType<typeof setTimeout> | null = null;
   private nextId = 1;
-  private terminalError: Error | null = null;
+  protected terminalError: Error | null = null;
   private commandSession = false;
   private commandGenerationValue = 0;
   private readonly commandInitialGenerations = new WeakMap<ResidentCommandInitReply, number>();
   private commandReplacementPending = false;
   private ready = false;
-  private revision = 0;
-  private documentSequence = 0;
+  protected revision = 0;
+  protected documentSequence = 0;
   private remoteVector: Uint8Array | null = null;
   private appliedFontsRevision: number | null = null;
-  private bootstrapped = false;
+  protected bootstrapped = false;
   /** Set once `open` is sent, with the heap limit it opened under. */
-  private openedHeapLimit: { bytes?: number } | null = null;
+  protected openedHeapLimit: { bytes?: number } | null = null;
   private bootstraps = 0;
   /** The font-requirements read still in flight, shared while nothing was posted after it. */
   private fontRead: { layoutInput: string; id: number; reply: Promise<string> } | null = null;
@@ -205,9 +205,9 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
   private retainBuiltPages = false;
   private failureListener: ((error: Error) => void) | null = null;
   private readonly frameListeners = new Set<(frame: DocxCommandFrame) => void>();
-  private commandIdentity: { session: string; incarnation: number; epoch: number } | null = null;
+  protected commandIdentity: { session: string; incarnation: number; epoch: number } | null = null;
 
-  constructor(private readonly worker: ResidentEngineWorkerPort = spawnResidentEngineWorker()) {
+  constructor(protected readonly worker: ResidentEngineWorkerPort = spawnResidentEngineWorker()) {
     this.worker.onmessage = (event) => {
       const response = event.data;
       if (response.ok && response.commandFrame) {
@@ -1077,7 +1077,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
     this.fail(new ResidentWorkerFailureError('Resident engine worker was destroyed'), false);
   }
 
-  private request(
+  protected request(
     request: AwaitedRequest,
     transfer: Transferable[] = []
   ): Promise<ResidentEngineWorkerResponse & { ok: true }> {
@@ -1104,7 +1104,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
     });
   }
 
-  private fenceCommands(): void {
+  protected fenceCommands(): void {
     this.commandReplacementPending = true;
     this.commandGenerationValue += 1;
     this.commandIdentity = null;
@@ -1163,7 +1163,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
     }
   }
 
-  private fail(error: Error, notify = true): void {
+  protected fail(error: Error, notify = true): void {
     const first = this.terminalError === null;
     this.terminalError = error;
     this.ready = false;

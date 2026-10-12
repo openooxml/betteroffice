@@ -46,6 +46,8 @@ let surface: ReturnType<typeof installSurface>;
 let binding: PeerlessEditSessionBinding | undefined;
 let hostJson: string;
 let fontRequirements: measurement.ResidentFontRequirement[];
+let holdInitial = false;
+let holdPreviewPaint = false;
 
 function hostMetadata() {
   return {
@@ -76,6 +78,7 @@ class FakeWorker {
   holdEdits = false;
   refuseNextEdit = false;
   refused = new Set<number>();
+  fontRevision = 0;
   pendingReplies: ResidentEngineWorkerResponse[] = [];
 
   constructor() {
@@ -86,9 +89,11 @@ class FakeWorker {
     if (!('id' in message)) return;
     requests.push(message);
     let response: ResidentEngineWorkerResponse;
-    if (message.type === 'open') {
+    if (message.type === 'openSource') {
       this.text = '';
-      response = { id: message.id, ok: true, hostJson, stateVector: new ArrayBuffer(0) };
+      response = { id: message.id, ok: true, hostJson, sourceDocument: yrs.decodeDocxHostJson(hostJson, source).document, stateVector: new ArrayBuffer(0),
+        ...(message.source.preview ? { frame: commandFrame(1).payload.frame, documentPreview: true,
+          caret: { frameEpoch: 1, caretRect: null }, selection: null, layoutRevision: 1 } : {}) };
     } else if (message.type === 'fontRequirements') {
       response = { id: message.id, ok: true, requirementsJson: JSON.stringify(fontRequirements) };
     } else if (message.type === 'save') {
@@ -96,6 +101,7 @@ class FakeWorker {
     } else if (message.type === 'documentRead') {
       response = { id: message.id, ok: true, read: { version: 'worker-version', value: message.read.kind === 'headings'
         ? [{ story: 'body', paraId: 'heading', text: 'Worker heading', level: 0, position: 1 }]
+        : message.read.kind === 'sectionProperties' ? { version: 'worker-version', sections: [{ section: 'final', properties: { marginLeft: 2160 } }], paragraphs: [] }
         : message.read.kind === 'searchText' ? { matches: [], carried: -1 }
         : message.read.kind === 'rangeHighlights' ? null
         : message.read.kind === 'navigationTarget' ? { loc: { story: 'body', paraId: 'heading', offset: 0 }, position: 1 }
@@ -115,6 +121,7 @@ class FakeWorker {
       };
       this.initial = initial;
       response = { id: message.id, ok: true, commandInitial: initial };
+      if (holdInitial) { this.pendingReplies.push(response); return; }
     } else if (message.type === 'edit' && this.initial) {
       const command = message.command;
       const state = this.initial;
@@ -140,12 +147,17 @@ class FakeWorker {
       };
       this.initial = { ...state, ...ack };
       response = { id: message.id, ok: true, commandAck: ack };
+      if (!refused && !cancelled && command.kind === 'setFontEnvironment') {
+        response.fontEnvironmentEvent = { session: state.session, incarnation: state.incarnation, epoch: state.epoch,
+          phase: 'ready', revision: ++this.fontRevision, families: (command.payload as yrs.DocxCommandPayloads['setFontEnvironment']).families };
+      }
       if (this.holdEdits) {
         this.pendingReplies.push(response);
         return;
       }
     } else {
       response = { id: message.id, ok: true };
+      if (message.type === 'attachCanvases' && holdPreviewPaint) { this.pendingReplies.push(response); return; }
     }
     queueMicrotask(() => this.onmessage?.({ data: response } as MessageEvent<ResidentEngineWorkerResponse>));
   }
@@ -216,7 +228,7 @@ function installSurface() {
       void sessionOptions.openConnection(sessionOptions.source, controller.signal).then((value) => {
         if (controller.signal.aborted) void value.client.dispose();
         else {
-          session = peerless.createDocxWorkerEditSession<Uint8Array, PeerlessEchoIntent>({
+          session = peerless.createDocxWorkerEditSession<typeof sessionOptions.source, PeerlessEchoIntent>({
             source: sessionOptions.source,
             connection: value,
             echo: { paint() {}, drop() {}, present() {} },
@@ -240,6 +252,8 @@ function installSurface() {
 }
 
 beforeEach(() => {
+  holdInitial = false;
+  holdPreviewPaint = false;
   setMissingWorkerCapabilitiesForTests([]);
   requests.length = 0;
   workers.length = 0;
@@ -289,7 +303,7 @@ test('d8a_peerless_mount_creates_no_main_document', async () => {
   expect(workerSession).toHaveBeenCalledTimes(1);
   expect(commands).toHaveBeenCalledTimes(1);
   expect(workers).toHaveLength(1);
-  expect(requests.filter(({ type }) => type === 'open')).toHaveLength(1);
+  expect(requests.filter(({ type }) => type === 'openSource')).toHaveLength(1);
   expect(requests.filter(({ type }) => type === 'commandInit')).toHaveLength(1);
   expect(requests.some(({ type }) => type === 'encodeState' || type === 'bootstrap')).toBe(false);
   const props = surface.mock.calls[0][0];
@@ -297,6 +311,44 @@ test('d8a_peerless_mount_creates_no_main_document', async () => {
   expect(props.sessionOptions.source).toEqual(source);
   view.unmount();
   await waitFor(() => expect(workers[0].terminate).toHaveBeenCalledTimes(1));
+});
+
+test('parsed input opens once in the worker with source options and no main engine', async () => {
+  const parsed = yrs.decodeDocxHostJson(hostJson, source).document;
+  const view = render(<DocxEditor experimentalPeerless document={parsed} mediaTokens previewFirstPage showToolbar={false} />);
+  await waitFor(() => expect(requests.some(request => request.type === 'openSource')).toBe(true));
+  expect(requests.find(request => request.type === 'openSource')).toMatchObject({ source: {
+    document: parsed, mediaTokens: true, preview: true,
+  } });
+  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  expect(requests.filter(request => request.type === 'commandInit')).toHaveLength(1);
+  expect(requests.some(request => request.type === 'open' || request.type === 'bootstrap')).toBe(false);
+  expect(requests.filter(request => request.type === 'warm')).toHaveLength(1);
+  expect(coreSession).not.toHaveBeenCalled();
+});
+
+test('preview paint hides opening while commands and plugins wait for handoff', async () => {
+  holdInitial = true;
+  holdPreviewPaint = true;
+  const ref = createRef<DocxEditorRef>();
+  const initialize = mock(() => {});
+  const plugin = defineDocxPlugin({ id: 'preview-check', createState: () => null, initialize });
+  const view = render(<DocxEditor {...peerlessProps} ref={ref} previewFirstPage plugins={[plugin]}
+    showToolbar={false} loadingIndicator={<span>Opening source</span>} />);
+  await waitFor(() => expect(requests.some(request => request.type === 'attachCanvases')).toBe(true));
+  expect(view.getByText('Opening source')).toBeTruthy();
+  expect(ref.current!.commands.getState('save').enabled).toBe(false);
+  expect(initialize).not.toHaveBeenCalled();
+  await act(async () => workers[0].onmessage?.({ data: workers[0].pendingReplies.shift()! } as MessageEvent<ResidentEngineWorkerResponse>));
+  await waitFor(() => expect(requests.some(request => request.type === 'commandInit')).toBe(true));
+  expect(view.queryByText('Opening source')).toBeNull();
+  expect(view.getByLabelText('Document preview')).toBeTruthy();
+  expect(initialize).not.toHaveBeenCalled();
+  await act(async () => workers[0].onmessage?.({ data: workers[0].pendingReplies.shift()! } as MessageEvent<ResidentEngineWorkerResponse>));
+  await waitFor(() => expect(initialize).toHaveBeenCalledTimes(1));
+  expect(view.queryByLabelText('Document preview')).toBeNull();
+  expect(ref.current!.commands.getState('save').enabled).toBe(true);
+  expect(requests.filter(request => request.type === 'openSource')).toHaveLength(1);
 });
 
 test('worker render props initialize layout and update through the shared command tail', async () => {
@@ -314,8 +366,57 @@ test('worker render props initialize layout and update through the shared comman
     payload: { themeColors: { accent1: '0000FF' }, showHiddenText: false },
   } });
   expect(view.getByTestId('docx-editor').classList.contains('dark')).toBe(false);
-  expect(requests.filter((request) => request.type === 'open')).toHaveLength(1);
+  expect(requests.filter((request) => request.type === 'openSource')).toHaveLength(1);
   expect(coreSession).not.toHaveBeenCalled();
+});
+
+test('font callbacks follow worker readiness and a reverted provider is reapplied after a held acknowledgement', async () => {
+  const onFontsLoaded = mock(() => {});
+  const view = render(<DocxEditor {...peerlessProps} onFontsLoaded={onFontsLoaded} />);
+  await waitFor(() => expect(onFontsLoaded).toHaveBeenCalledTimes(1));
+  const client = workers[0];
+  client.holdEdits = true;
+  view.rerender(<DocxEditor {...peerlessProps} onFontsLoaded={onFontsLoaded} measurementFontProvider={{ resolve: () => undefined }} />);
+  await waitFor(() => expect(client.pendingReplies).toHaveLength(1));
+  expect(onFontsLoaded).toHaveBeenCalledTimes(1);
+  view.rerender(<DocxEditor {...peerlessProps} onFontsLoaded={onFontsLoaded} />);
+  client.holdEdits = false;
+  await act(async () => {
+    for (const response of client.pendingReplies.splice(0)) client.onmessage?.({ data: response } as MessageEvent<ResidentEngineWorkerResponse>);
+  });
+  await waitFor(() => expect(requests.filter(request => request.type === 'edit' && request.command.kind === 'setFontEnvironment')).toHaveLength(3));
+  await waitFor(() => expect(onFontsLoaded).toHaveBeenCalledTimes(3));
+  expect(requests.filter(request => request.type === 'openSource')).toHaveLength(1);
+  expect(coreSession).not.toHaveBeenCalled();
+});
+
+test('custom fonts fetch bytes for worker faces without global CSS and wait for composition', async () => {
+  const original = document.head.innerHTML;
+  const fontBytes = new Uint8Array(16);
+  new DataView(fontBytes.buffer).setUint32(0, 0x774f4632);
+  const fetchFont = spyOn(globalThis, 'fetch').mockResolvedValue(new Response(fontBytes));
+  const measure = spyOn(measurement, 'createRustMeasureSource').mockImplementation(({ engine }) => {
+    let embedded: { data: ArrayBuffer }[] = [];
+    let slots: number[] = [];
+    return { setCompat() {}, setEmbeddedFaces(faces) { embedded = faces; },
+      async prepareFontRequirements() { slots = embedded.map(face => engine.registerFont(new Uint8Array(face.data))); return true; },
+      measurementConfigForRequirements: () => ({ fontChains: { 'custom|0|0': slots }, defaults: { fontFamily: 'Custom', fontSize: 11 },
+        compat: { noLeading: false, doNotExpandShiftReturn: false }, authoritativeShaping: true }), clear() {} };
+  });
+  restorers.push(() => fetchFont.mockRestore(), () => measure.mockRestore());
+  const onFontsLoaded = mock(() => {});
+  const view = render(<DocxEditor {...peerlessProps} />);
+  await waitFor(() => expect(binding).toBeDefined());
+  const reservation = binding!.admission.reserveComposition();
+  view.rerender(<DocxEditor {...peerlessProps} fonts={[{ family: 'Custom', src: '/custom.woff2' }]} onFontsLoaded={onFontsLoaded} />);
+  await act(async () => { await Promise.resolve(); });
+  expect(fetchFont).not.toHaveBeenCalled();
+  await act(async () => binding!.admission.settleComposition(reservation.slot, { text: 'x', target: reservation.target }));
+  await waitFor(() => expect(onFontsLoaded).toHaveBeenCalledTimes(1));
+  const fontCommand = requests.find(request => request.type === 'edit' && request.command.kind === 'setFontEnvironment');
+  expect(fontCommand).toMatchObject({ command: { payload: { faces: [{ family: 'Custom', data: fontBytes }],
+    chains: { 'custom|0|0': [0] }, families: ['Custom'] } } });
+  expect(document.head.innerHTML).toBe(original);
 });
 
 test('peerless shell ref and plugin readiness use worker state', async () => {
@@ -413,7 +514,7 @@ test('worker ref buffer loads replace the worker and resolve on readiness', asyn
   await waitFor(() => expect(workers).toHaveLength(2));
   await waitFor(() => expect(ref.current!.commands.getState('save').enabled).toBe(true));
   await pending;
-  expect(requests.filter(({ type }) => type === 'open')).toHaveLength(2);
+  expect(requests.filter(({ type }) => type === 'openSource')).toHaveLength(2);
   expect(workers[0]!.terminate).toHaveBeenCalled();
   expect(coreSession).not.toHaveBeenCalled();
 });
@@ -735,7 +836,7 @@ test('d8a_edits_survive_readonly_and_budget_changes', async () => {
   view.rerender(<DocxEditor {...peerlessProps} readOnly memoryBudget={{ workerLimitBytes: 2048 }} />);
   expect(surface.mock.calls.at(-1)![0].sessionOptions).toBe(options);
   expect(workers).toHaveLength(1);
-  expect(requests.filter(({ type }) => type === 'open')).toHaveLength(1);
+  expect(requests.filter(({ type }) => type === 'openSource')).toHaveLength(1);
   expect(requests.filter(({ type }) => type === 'commandInit')).toHaveLength(1);
   expect(workers[0].terminate).not.toHaveBeenCalled();
   workers[0].holdEdits = false;

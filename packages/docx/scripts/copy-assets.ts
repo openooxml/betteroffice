@@ -4,7 +4,7 @@
  * tsup bundles JS/TS only; CSS and similar resources have to be copied
  * explicitly so they're reachable through the package's subpath exports.
  */
-import { cp, mkdir } from 'node:fs/promises';
+import { cp, mkdir, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -38,3 +38,5 @@ for (const { from, to } of assets) {
   await cp(src, dst);
   console.log(`[copy-assets] ${from} → ${to}`);
 }
+
+await writeFile(resolve(root, 'dist/residentEngineWorker.mjs'), "import './yrs/residentEngineWorker.mjs';\n");

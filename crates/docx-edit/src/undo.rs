@@ -152,6 +152,24 @@ impl DocUndoManager {
             .get_map(COMMENTS)
             .expect("comments root is declared");
         inner.expand_scope(doc.yrs_doc(), &comments);
+        let parts = doc
+            .yrs_doc()
+            .transact()
+            .get_map(crate::part_metadata::PART_METADATA)
+            .expect("part metadata root is declared");
+        inner.expand_scope(doc.yrs_doc(), &parts);
+        let properties = doc
+            .yrs_doc()
+            .transact()
+            .get_map(crate::document_properties::DOCUMENT_PROPERTIES)
+            .expect("document properties root is declared");
+        inner.expand_scope(doc.yrs_doc(), &properties);
+        let margins = doc
+            .yrs_doc()
+            .transact()
+            .get_map(crate::section_margins::SECTION_MARGINS)
+            .expect("section margins root is declared");
+        inner.expand_scope(doc.yrs_doc(), &margins);
         let anchor_root = comments.clone();
         let anchor_state = Arc::new(Mutex::new(AnchorState {
             current: comment_boundaries(&doc.doc.transact()),
@@ -165,7 +183,10 @@ impl DocUndoManager {
                 if let Some(latest) = state.lock().unwrap().latest.upgrade() {
                     merge_boundaries(&mut latest.lock().unwrap(), &event.meta().0.lock().unwrap());
                 }
-                let comments_changed = event.has_changed(&comments);
+                let comments_changed = event.has_changed(&comments)
+                    || event.has_changed(&parts)
+                    || event.has_changed(&properties)
+                    || event.has_changed(&margins);
                 let mut changed: Vec<String> = stories_root(txn)
                     .iter(txn)
                     .filter_map(|(story, value)| match value {

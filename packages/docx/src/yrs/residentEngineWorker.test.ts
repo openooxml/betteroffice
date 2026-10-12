@@ -59,6 +59,7 @@ beforeAll(async () => {
   const frameDelta = resolve(import.meta.dir, '../layout/render/frameDelta.ts');
   const scheduler = resolve(import.meta.dir, 'residentScheduler.ts');
   const modules: Record<string, string> = {
+    './yrsSessionFacade': 'export const decodeDocxHostJson = () => { throw new Error("Unexpected source decode"); };',
     './residentEngineSession':
       `export const createResidentEngineSession = async (heapLimitBytes) => {
         await testHarness.preload();
@@ -242,6 +243,7 @@ function worker() {
     failPresent: null as number | null,
     memories: [{ label: 'docx-edit', bufferBytes: 65536, liveBytes: 100, peakBytes: 100, failedAllocationBytes: 0 }],
     session: {
+      partGeometry: () => [],
       proposalEngine: { version: () => 'v' },
       geometryReader: { storyIds: () => ['body'] },
       markProjectionStories(_stories: readonly string[]) {},

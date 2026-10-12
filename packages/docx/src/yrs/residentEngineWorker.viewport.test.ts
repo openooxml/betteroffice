@@ -85,7 +85,7 @@ function commandFrames(options: { cell?: boolean; range?: boolean; splitEnd?: bo
   };
   const init: ResidentCommandInitRequest = { session: 'viewport', incarnation: 1, epoch: 1, readOnly: false,
     fonts: [], layoutInput: '{}', layoutWithRegions: true, layoutRevision: 1, extras: '{}', displayWindow: [0, 3] };
-  const dependencies = { engine, init, layoutRevision: 1, revision: 0, relayout() {},
+  const dependencies = { engine: { ...engine, partGeometry: () => [] }, fonts: { snapshot: null }, init, layoutRevision: 1, revision: 0, relayout() {},
     hooks: { selection: () => ({ anchor: { ...focus(), offset: focus().offset - (options.range ? 1 : 0) }, focus: focus() }),
       editState: () => ({ storedMarks: null }) },
     displayPositionIndex: () => ({ positionOf: (at: { offset: number }) => {

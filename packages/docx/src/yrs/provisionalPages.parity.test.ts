@@ -29,6 +29,7 @@ let startWorker: (scope: unknown, harness: unknown) => void;
 beforeAll(async () => {
   await preloadEditWasm(new Uint8Array(readFileSync(WASM)));
   const modules: Record<string, string> = {
+    './yrsSessionFacade': 'export const decodeDocxHostJson = () => { throw new Error("Unused source opening"); };',
     './residentEngineSession':
       'export const createResidentEngineSession = async () => testHarness.session;',
     './wasm/index':

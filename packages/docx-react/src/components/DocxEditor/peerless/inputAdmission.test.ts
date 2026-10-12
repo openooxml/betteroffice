@@ -117,6 +117,22 @@ function lane() {
   return { admission, session, snapshot, submitted, waitForSubmitted, execute, results, content: () => content };
 }
 
+test('font environments are allowed read-only and ordered behind composition without author metadata', () => {
+  const { admission, submitted } = lane();
+  admission.setSuggesting?.('Writer');
+  const reservation = admission.reserveComposition();
+  const payload = { faces: [], chains: {}, families: ['Arial'] };
+  const result = admitIntent(admission, { kind: 'setFontEnvironment', payload }, { fence: true });
+  expect(result.status).toBe('held');
+  admission.settleComposition(reservation.slot, { text: 'text', target: reservation.target });
+  expect(submitted[1]!.kind).toBe('setFontEnvironment');
+  expect(submitted[1]!.payload).toEqual(payload);
+  expect(submitted[1]!.options.after).toBe(submitted[0]!.ticket);
+  admission.setReadOnly(true);
+  expect(admitIntent(admission, { kind: 'setFontEnvironment', payload }).status).toBe('submitted');
+  admission.dispose();
+});
+
 test('d2b_intent_behind_unacked_insert_uses_worker_result', async () => {
   const { admission, submitted, execute, results } = lane();
   admitIntent(admission, { kind: 'insertText', payload: { text: '🦊' } });

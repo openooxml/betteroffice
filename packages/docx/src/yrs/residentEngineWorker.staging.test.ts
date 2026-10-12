@@ -56,6 +56,7 @@ async function stageRequestedPages(requested: number[], damaged: number[] = [], 
   const dependencies = {
     changes: { pages: new Set(requested), updates: [] },
     engine: {
+      partGeometry: () => [],
       mediaDataUrl(token: string) {
         mediaReads.push(token);
         return token === 'media:0' ? 'data:image/png;base64,' + readFileSync(new URL('./__fixtures__/seed-parity/images/word/media/image1.png.base64', import.meta.url), 'utf8').replace(/\s/g, '') : null;
@@ -66,6 +67,7 @@ async function stageRequestedPages(requested: number[], damaged: number[] = [], 
     },
     commandDisplayWindow: null, layoutDirty: false, revision: 7,
     init: { extras: '{}' }, retainedFrame, layoutRevision: 0,
+    fonts: { snapshot: undefined },
     finalizeResidentFrame: async () => ({ bytes, delta, caret: { frameEpoch: 7, caretRect: null } }),
     hooks: { editState: () => ({ storedMarks: null }), selection: () => null },
     projectCommandEchoContext: () => echoContext,

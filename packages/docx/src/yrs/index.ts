@@ -136,6 +136,8 @@ export {
   type ResidentProposalReply,
   type ResidentEngineOffscreenPage,
 } from './residentEngineWorkerClient';
+export type { ResidentSourceOpenRequest, ResidentSourcePreviewOptions } from './residentSource';
+export type { ResidentFontFace, ResidentFontEnvironment, ResidentFontEnvironmentEvent, ResidentFontEnvironmentSnapshot } from './residentFontEnvironment';
 export { preloadDocxEngine } from './preloadDocxEngine';
 export {
   residentCaretSnapshotForFrame,
@@ -1581,3 +1583,4 @@ export async function createYrsSession(options?: CreateYrsSessionOptions): Promi
   await wasm.preloadEditWasm();
   return wrapSession(wasm.createEditSession(clientId), clientId);
 }
+export type { ResidentEngineWorkerSourceOpened } from './residentSourceWorkerClient';

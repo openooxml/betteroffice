@@ -29,7 +29,7 @@ function entry(id: number, value: PeerlessEchoIntent): EchoEntry<PeerlessEchoInt
     ack: Promise.resolve({ status: 'applied', seq: id }), presented: Promise.resolve('presented') } };
 }
 
-function setup(characterWidth = 10) {
+function setup(characterWidth = 10, canEchoFont?: (family: string) => boolean) {
   const draws: unknown[][] = [];
   const texts: string[] = [];
   const transforms: number[][] = [];
@@ -42,7 +42,7 @@ function setup(characterWidth = 10) {
   };
   const canvas = { width: 100, height: 20, getContext: () => ctx } as unknown as HTMLCanvasElement;
   let mountedPages: ReadonlySet<string> | undefined;
-  const painter = createEchoPainter({ canvasForPage: (item) =>
+  const painter = createEchoPainter({ canEchoFont, canvasForPage: (item) =>
     mountedPages === undefined || mountedPages.has(item.pageId) ? canvas : null });
   const bitmap = { width: 100, height: 20, close() {} } as ImageBitmap;
   const background = { width: 100, height: 20, close() {} } as ImageBitmap;
@@ -57,6 +57,12 @@ function setup(characterWidth = 10) {
     mountPages(pages: ReadonlySet<string>) { mountedPages = pages; },
   };
 }
+
+test('worker-only fonts decline main-canvas echo while retaining authoritative pixels', () => {
+  const { painter, texts } = setup(10, () => false);
+  expect(painter.preview({ kind: 'insertText', payload: { text: 'x' } })).toBeUndefined();
+  expect(texts).toEqual([]);
+});
 
 function sessionWithHeldReplies(painter: PeerlessEchoPainter) {
   type Payload = PeerlessTextIntent['payload'];
