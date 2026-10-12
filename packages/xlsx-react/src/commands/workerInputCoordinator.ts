@@ -1,4 +1,6 @@
 import { XlsxCommandAdmissionError } from './createXlsxCommandStore';
+import { WorkerInputRefusal } from './workerInputErrors';
+export { WorkerInputRefusal } from './workerInputErrors';
 import type { InputCoordinatorHooks, InputDraft, InputSeal } from './inputCoordinator';
 
 export type WorkerInputKind =
@@ -36,13 +38,6 @@ export interface WorkerInputLease {
   (): void;
   check(): void;
   refuse(error: unknown, barrier?: boolean): void;
-}
-
-export class WorkerInputRefusal extends XlsxCommandAdmissionError {
-  constructor(message: string, readonly barrier = false) {
-    super('input-failed');
-    this.message = message;
-  }
 }
 
 export function inputRefusal(error: unknown): WorkerInputRefusal | null {

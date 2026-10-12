@@ -1,5 +1,5 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, describe, expect, mock, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, describe, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { StrictMode, useState } from 'react';
@@ -13,9 +13,18 @@ import {
   initWasm,
   openWorkbook,
   selectionAt,
+  type ChartRegion,
   type XlsxEditRequest,
+  type WorkbookAck,
+  type WorkbookCommand,
+  type WorkbookCommandFrame,
+  type WorkbookSession,
 } from '@betteroffice/xlsx';
-import { xlsxCommandController } from '../commands/createXlsxCommandStore';
+import { PLAIN_FORMATTING, testSessionCommands } from '../commands/testing';
+import { editableWorkbookSessionBackend } from '../worker/useEditableSessionWorkbook';
+import { createXlsxCommandController, xlsxCommandController } from '../commands/createXlsxCommandStore';
+import type { XlsxPluginEditorAccess } from './createPluginClients';
+import { useXlsxPluginHost } from './useXlsxPluginHost';
 import { isMacPlatform } from '../commands/descriptors';
 import { pluginDefinition } from './defineXlsxPlugin';
 import * as publicApi from '../index';
@@ -31,6 +40,7 @@ import {
   type XlsxCommandStore,
   type XlsxEditorApi,
   type XlsxEditorProps,
+  type XlsxAsyncEditorProps,
   type XlsxPlugin,
   type XlsxPluginCommandResult,
   type XlsxPluginContext,
@@ -40,7 +50,7 @@ import {
   type XlsxPluginGeometry,
 } from '../index';
 
-const { act, cleanup, fireEvent, render, within } = await import('@testing-library/react');
+const { act, cleanup, fireEvent, render, renderHook, within } = await import('@testing-library/react');
 
 const root = resolve(import.meta.dir, '../../../..');
 const VIEWPORT = { width: 800, height: 600 };
@@ -224,6 +234,596 @@ const chord = isMacPlatform() ? { metaKey: true } : { ctrlKey: true };
 
 const sheetTabs = (view: ReturnType<typeof render>) =>
   within(view.getByTestId('xlsx-sheet-tabs')).getAllByRole('tab');
+
+function promisePair<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+function pluginWorker(sheetCount = 2) {
+  const listeners = new Set<(ack: WorkbookAck) => void>();
+  const failures = new Set<Parameters<WorkbookSession['onFailure']>[0]>();
+  const sent: WorkbookCommand[] = [];
+  const replies = new Map<number, ReturnType<typeof promisePair<WorkbookAck['statuses'][number]>>>();
+  const dispatches = new Map<number, ReturnType<typeof promisePair<WorkbookCommand>>>();
+  const animations = new Map<number, FrameRequestCallback>();
+  let nextAnimation = 0;
+  let version = 'v1';
+  let throughSeq = 0;
+  let presentedThroughSeq = 0;
+  const presentations = new Set<{ seq: number; done: ReturnType<typeof promisePair<void>> }>();
+  const charts: ChartRegion[] = [];
+  let selected: WorkbookAck['selection'];
+  const sheets = Array.from({ length: sheetCount }, (_, index) => ({
+    id: `sheet:${index}`, index, name: `Sheet${index + 1}`,
+  }));
+  const editState = { formatting: PLAIN_FORMATTING, formattingAvailable: true,
+    selectionEditable: true, canUndo: false, canRedo: false, mergedRanges: [],
+    calculation: { limitedCells: [] }, activeSheet: 0, sheets, readOnly: false };
+  const grid = { startRow: 0, startCol: 0, rowOffsets: [0, 24, 48, 72], colOffsets: [0, 96, 192] };
+  const identity = testSessionCommands().commandIdentity;
+  const frame = (requestGeneration = 0): WorkbookCommandFrame => ({ ...identity,
+    coversThroughSeq: throughSeq, requestGeneration, zoom: 1, dpr: window.devicePixelRatio || 1,
+    sheet: editState.activeSheet, viewport: { x: 0, y: 0, ...VIEWPORT }, version, epoch: 1, sequence: throughSeq,
+    displayList: { ...VIEWPORT, commands: [], grid, charts } });
+  const sheetView = { sheet: 0, version, contentWidth: 4000, contentHeight: 6000,
+    frozenRows: 0, frozenCols: 0, frozenWidth: 0, frozenHeight: 0, initialScrollX: 0, initialScrollY: 0 };
+  const calls = {
+    version: mock(async () => version),
+    readCells: mock(async () => ({ ok: true, version, ranges: [], sheets: [] })),
+    findText: mock(async () => ({ ok: true, version, matches: [] })),
+    validateEdits: mock(async () => ({ ok: true, version, wouldApply: true })),
+    applyEdits: mock(async () => { throw new Error('Direct writes are unavailable'); }),
+    sheetView: mock(async (sheet: number) => ({ ...sheetView, sheet, version })),
+    cellGeometry: mock(async (sheet: number, row: number, col: number) => ({ sheet, version,
+      rect: { x: col * 96, y: row * 24, w: 96, h: 24 },
+      scrollPosition: { x: 0, y: 0 } })),
+    cellInputs: mock(async () => ({ sheet: 0, version, cells: [[{ input: '', isFormula: false }]] })),
+    frame: mock(async () => frame()),
+  };
+  const session = {
+    ...testSessionCommands(), state: { format: 'xlsx', stage: 'ready', version: 0,
+      dirty: false, activeSheet: 0, sheets }, editState,
+    get confirmedBasis() { return { epoch: 1, version }; },
+    get throughSeq() { return throughSeq; }, get selection() { return selected; },
+    initialPaint: { frame: frame(), sheetView, editState },
+    call: calls,
+    submit: mock((command: WorkbookCommand) => {
+      sent.push(command);
+      const reply = promisePair<WorkbookAck['statuses'][number]>();
+      replies.set(command.seq, reply);
+      dispatches.get(command.seq)?.resolve(command);
+      return reply.promise;
+    }),
+    onAck: (listener: (ack: WorkbookAck) => void) => {
+      listeners.add(listener); return () => { listeners.delete(listener); };
+    },
+    onFailure: (listener: Parameters<WorkbookSession['onFailure']>[0]) => {
+      failures.add(listener); return () => { failures.delete(listener); };
+    },
+    on: () => () => {},
+    get presentedThroughSeq() { return presentedThroughSeq; },
+    markPresented: mock((paint: Parameters<WorkbookSession['markPresented']>[0]) => {
+      if (paint.session !== identity.session || paint.incarnation !== identity.incarnation ||
+        paint.coversThroughSeq < presentedThroughSeq || paint.coversThroughSeq > throughSeq) return false;
+      presentedThroughSeq = paint.coversThroughSeq;
+      for (const waiting of presentations) if (waiting.seq <= presentedThroughSeq) {
+        presentations.delete(waiting); waiting.done.resolve();
+      }
+      return true;
+    }),
+    whenPresented: mock((seq: number) => {
+      if (seq <= presentedThroughSeq) return Promise.resolve();
+      const done = promisePair<void>();
+      presentations.add({ seq, done });
+      return done.promise;
+    }),
+    save: async () => new Uint8Array([1]),
+    dispose: mock(async () => {}),
+  } as unknown as WorkbookSession;
+  const canvas = Object.getOwnPropertyDescriptor(globalThis, 'OffscreenCanvas');
+  Object.defineProperty(globalThis, 'OffscreenCanvas', { configurable: true, value: class {} });
+  const worker = Object.getOwnPropertyDescriptor(globalThis, 'Worker');
+  Object.defineProperty(globalThis, 'Worker', { configurable: true, value: class {} });
+  const open = spyOn(editableWorkbookSessionBackend, 'open').mockResolvedValue(session);
+  const hydrate = spyOn(editableWorkbookSessionBackend, 'hydrate').mockImplementation(() => { throw new Error('Model unavailable'); });
+  const attach = spyOn(editableWorkbookSessionBackend, 'attach').mockImplementation(() => { throw new Error('Edit peer unavailable'); });
+  const raf = spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+    animations.set(++nextAnimation, callback); return nextAnimation;
+  });
+  const caf = spyOn(window, 'cancelAnimationFrame').mockImplementation((id) => { animations.delete(id); });
+  return {
+    session, calls, sent, charts, hydrate, attach,
+    setReadOnly(value: boolean) { editState.readOnly = value; },
+    async paint() {
+      const pending = [...animations.values()];
+      animations.clear();
+      await act(async () => { for (const callback of pending) callback(0); });
+    },
+    async mount(props: Partial<XlsxAsyncEditorProps>) {
+      const file = new Uint8Array([1]);
+      const element = (next: Partial<XlsxAsyncEditorProps>) =>
+        <XlsxEditor asyncApi file={file} showToolbar={false} {...props} {...next} />;
+      const view = render(element({}));
+      await act(async () => {});
+      return { ...view, rerender: (next: Partial<XlsxAsyncEditorProps>) => view.rerender(element(next)) };
+    },
+    dispatched(seq: number) {
+      if (sent.some((command) => command.seq === seq)) return Promise.resolve(sent.find((command) => command.seq === seq)!);
+      const pair = promisePair<WorkbookCommand>();
+      dispatches.set(seq, pair); return pair.promise;
+    },
+    ack(command: WorkbookCommand, nextVersion = version, paint = true, state: 'applied' | 'noop' = 'applied') {
+      version = nextVersion; throughSeq = command.seq;
+      if (command.kind === 'setActiveSheet') {
+        editState.activeSheet = command.payload.args[0];
+        selected = { sheetId: sheets[editState.activeSheet].id,
+          range: { kind: 'rowCol', start: { row: 0, col: 0 }, end: { row: 0, col: 0 } },
+          activeCell: { row: 0, col: 0 } };
+      }
+      if ('selection' in command.payload && command.payload.selection) selected = command.payload.selection;
+      const status = { seq: command.seq, status: state,
+        committed: state === 'applied' && (command.kind === 'applyEdits' || command.kind === 'editCell'),
+        result: command.kind === 'applyEdits' ? { ok: true, applied: true, version } : undefined };
+      const ack: WorkbookAck = { throughSeq, version, statuses: [status], selection: selected, editState,
+        ...(paint && command.frame ? { frame: { ...frame(command.frame.requestGeneration),
+          viewport: command.frame.viewport, zoom: command.frame.zoom, dpr: command.frame.dpr } } : {}) };
+      for (const listener of listeners) listener(ack);
+      replies.get(command.seq)!.resolve(status);
+    },
+    push(nextVersion: string) {
+      version = nextVersion;
+      for (const listener of listeners) listener({ throughSeq, version, statuses: [], editState });
+    },
+    refuse(command: WorkbookCommand, reason: string) {
+      throughSeq = command.seq;
+      const status = { seq: command.seq, status: 'refused' as const, reason, committed: false };
+      for (const listener of listeners) listener({ throughSeq, version, statuses: [status], editState });
+      replies.get(command.seq)!.resolve(status);
+    },
+    fail() { for (const listener of failures) listener(new Error('Worker closed') as Parameters<typeof listener>[0]); },
+    restore() {
+      cleanup(); open.mockRestore(); hydrate.mockRestore(); attach.mockRestore(); raf.mockRestore(); caf.mockRestore();
+      if (canvas) Object.defineProperty(globalThis, 'OffscreenCanvas', canvas);
+      else Reflect.deleteProperty(globalThis, 'OffscreenCanvas');
+      if (worker) Object.defineProperty(globalThis, 'Worker', worker);
+      else Reflect.deleteProperty(globalThis, 'Worker');
+    },
+  };
+}
+
+describe('workbook plugin binding', () => {
+  test('skip workbook lookup while loading', () => {
+    const commands = createXlsxCommandController();
+    const lookup = mock(() => { throw new Error('Workbook unavailable'); });
+    const access: XlsxPluginEditorAccess = { handle: lookup, commands: () => commands,
+      admit: async () => lookup(), readOnlyRefusal: lookup, applyEdits: lookup,
+      navigator: { selectCells: lookup, scrollToCell: lookup } };
+    renderHook(() => useXlsxPluginHost({ access, commands, handle: null,
+      readOnly: false, selection: null, canvasRef: { current: null }, t: () => '' }));
+    expect(lookup).not.toHaveBeenCalled();
+  });
+});
+
+describe('peer-less plugins', () => {
+  test('a writing load settles after one acknowledgement', async () => {
+    const host = pluginWorker();
+    const finished = promisePair<void>();
+    const loads: string[] = [];
+    const receipts: unknown[] = [];
+    const changes: string[] = [];
+    const errors: XlsxPluginError[] = [];
+    let writing!: XlsxPluginContext<State>;
+    const plugin = recorder('writer', { async onEvent(context, event) {
+      if (event.type === 'document-change') changes.push(event.version);
+      if (event.type !== 'load') return;
+      loads.push(event.version);
+      writing = context;
+      const result = await context.edits!.applyEdits(setCell(event.version, 'A1', 'value'));
+      receipts.push(result);
+      finished.resolve();
+    } });
+    try {
+      await host.mount({ plugins: [plugin.plugin],
+        pluginGrants: { writer: { document: 'write', editBatches: true } },
+        onPluginError: (error) => errors.push(error) });
+      const command = await host.dispatched(1);
+      await act(async () => { host.ack(command, 'v2'); await finished.promise; });
+      expect(receipts).toMatchObject([{ ok: true, applied: true, version: 'v2' }]);
+      expect(loads).toEqual(['v1']);
+      expect(host.sent).toHaveLength(1);
+      expect(writing.signal.aborted).toBe(false);
+      expect(writing.lifetimeSignal.aborted).toBe(false);
+      expect(errors).toEqual([]);
+      expect(changes).toEqual(['v2']);
+    } finally { host.restore(); }
+  });
+
+  for (const ending of ['replacement', 'removal'] as const) {
+    test(`a waiting batch preserves its refusal on ${ending}`, async () => {
+      const host = pluginWorker();
+      const plugin = recorder('writer');
+      try {
+        const view = await host.mount({ plugins: [plugin.plugin],
+          pluginGrants: { writer: { document: 'write', editBatches: true } } });
+        fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'x' });
+        const cell = view.getByTestId('xlsx-cell-editor');
+        fireEvent.compositionStart(cell);
+        fireEvent.change(cell, { target: { value: 'input' } });
+        const pending = plugin.contexts[0].edits!.applyEdits(setCell('v1', 'A1', 'value'));
+        view.rerender(ending === 'replacement' ? { file: new Uint8Array([2]) } : { plugins: [] });
+        expect(await pending).toMatchObject({ ok: false, failure: {
+          code: ending === 'replacement' ? 'document-replaced' : 'plugin-unavailable',
+        } });
+        expect(host.sent.filter((command) => command.kind === 'applyEdits')).toEqual([]);
+      } finally { host.restore(); }
+    });
+  }
+
+  test('attach with acknowledged selection and mode while no plugins were installed', async () => {
+    const host = pluginWorker();
+    const plugin = recorder('reader');
+    try {
+      const view = await host.mount({});
+      fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'ArrowDown' });
+      const selected = await host.dispatched(1);
+      await act(async () => { host.ack(selected); });
+      view.rerender({ readOnly: true });
+      const mode = await host.dispatched(2);
+      host.setReadOnly(true);
+      await act(async () => { host.ack(mode); });
+      view.rerender({ plugins: [plugin.plugin], readOnly: true });
+      expect(plugin.contexts[0].snapshot).toMatchObject({ readOnly: true,
+        selection: { sheetId: 'sheet:0', cells: selectionAt({ row: 1, col: 0 }) } });
+    } finally { host.restore(); }
+  });
+
+  test('cross-sheet scrolling publishes an empty selection and paints only the destination', async () => {
+    const host = pluginWorker();
+    const plugin = recorder('navigator');
+    try {
+      const view = await host.mount({ plugins: [plugin.plugin] });
+      const presented = host.session.markPresented as ReturnType<typeof mock>;
+      presented.mockClear();
+      const navigation = plugin.contexts[0].navigation.scrollToCell(
+        { sheetId: 'sheet:1', row: 0, col: 0 }, { expectVersion: 'v1' });
+      const command = await host.dispatched(1);
+      expect(command.frame).toBeUndefined();
+      await act(async () => { host.ack(command); });
+      expect(await navigation).toEqual({ ok: true });
+      await host.paint();
+      expect(last(plugin.contexts).snapshot.selection).toEqual({ sheetId: 'sheet:1',
+        sheetIndex: 1, cells: null, chartId: null });
+      expect(view.container.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe('Sheet2');
+      expect(host.calls.sheetView).toHaveBeenCalledTimes(1);
+      expect(host.calls.cellGeometry).toHaveBeenCalledTimes(1);
+      expect(host.calls.frame).toHaveBeenCalledTimes(1);
+      expect(presented).toHaveBeenCalledTimes(1);
+      await act(async () => { host.push('v1'); });
+      expect(last(plugin.contexts).snapshot.selection?.cells).toBeNull();
+    } finally { host.restore(); }
+  });
+
+  test('visible selection lets print finish and later input proceed', async () => {
+    const host = pluginWorker();
+    const plugin = recorder('navigator');
+    const printDescriptor = Object.getOwnPropertyDescriptor(window, 'print');
+    const printed = mock(() => {});
+    Object.defineProperty(window, 'print', { configurable: true, writable: true, value: printed });
+    try {
+      const view = await host.mount({ plugins: [plugin.plugin],
+        pluginGrants: { navigator: { commands: ['print'] } } });
+      const presented = host.session.markPresented as ReturnType<typeof mock>;
+      presented.mockClear();
+      const navigation = plugin.contexts[0].navigation.selectCells({ sheetId: 'sheet:0',
+        selection: selectionAt({ row: 1, col: 0 }) }, { expectVersion: 'v1' });
+      const command = await host.dispatched(1);
+      expect(command.frame).toBeUndefined();
+      await act(async () => { host.ack(command); expect(await navigation).toEqual({ ok: true }); });
+      await host.paint();
+      expect(host.calls.cellGeometry).not.toHaveBeenCalled();
+      expect(host.calls.sheetView).not.toHaveBeenCalled();
+      expect(host.calls.frame).not.toHaveBeenCalled();
+      let printing!: ReturnType<XlsxPluginContext<State>['commands']['execute']>;
+      await act(async () => { printing = plugin.contexts[0].commands.execute('print', null); await printing; });
+      expect(host.session.whenPresented).toHaveBeenCalledWith(1);
+      expect(printed).toHaveBeenCalledTimes(1);
+      expect(await printing).toMatchObject({ ok: true });
+      expect(host.session.presentedThroughSeq).toBe(1);
+      expect(presented).toHaveBeenCalledTimes(1);
+      fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'ArrowDown' });
+      const next = await host.dispatched(2);
+      await act(async () => { host.ack(next); });
+      expect(host.session.selection?.activeCell).toEqual({ row: 2, col: 0 });
+      expect(last(plugin.contexts).snapshot.selection?.cells).toEqual(selectionAt({ row: 2, col: 0 }));
+    } finally {
+      if (printDescriptor) Object.defineProperty(window, 'print', printDescriptor);
+      else Reflect.deleteProperty(window, 'print');
+      host.restore();
+    }
+  });
+
+  test('concurrent sheet navigation finishes each reveal before starting the next', async () => {
+    const host = pluginWorker(3);
+    const plugin = recorder('navigator');
+    const geometry = promisePair<Awaited<ReturnType<typeof host.calls.cellGeometry>>>();
+    const revealing = promisePair<void>();
+    host.calls.cellGeometry.mockImplementationOnce(() => { revealing.resolve(); return geometry.promise; });
+    try {
+      const view = await host.mount({ plugins: [plugin.plugin] });
+      const context = plugin.contexts[0];
+      const first = context.navigation.scrollToCell({ sheetId: 'sheet:1', row: 0, col: 0 }, { expectVersion: 'v1' });
+      const second = context.navigation.scrollToCell({ sheetId: 'sheet:2', row: 0, col: 0 }, { expectVersion: 'v1' });
+      const command = await host.dispatched(1);
+      await act(async () => { host.ack(command); await revealing.promise; });
+      expect(host.sent).toHaveLength(1);
+      await act(async () => {
+        geometry.resolve({ sheet: 1, version: 'v1', rect: { x: 0, y: 0, w: 96, h: 24 },
+          scrollPosition: { x: 0, y: 0 } });
+        expect(await first).toEqual({ ok: true });
+      });
+      const next = await host.dispatched(2);
+      expect(next).toMatchObject({ kind: 'setActiveSheet', payload: { args: [2] } });
+      await act(async () => { host.ack(next); expect(await second).toEqual({ ok: true }); });
+      await host.paint();
+      expect(host.session.editState.activeSheet).toBe(2);
+      expect(view.getByRole('tab', { name: 'Sheet3' }).getAttribute('aria-selected')).toBe('true');
+      expect(last(plugin.contexts).snapshot.layout?.sheetId).toBe('sheet:2');
+      expect(last(plugin.contexts).snapshot.selection).toEqual({ sheetId: 'sheet:2',
+        sheetIndex: 2, cells: null, chartId: null });
+      expect(host.calls.cellGeometry).toHaveBeenCalledTimes(2);
+      expect(host.calls.sheetView).toHaveBeenCalledTimes(2);
+      expect(host.calls.frame).toHaveBeenCalledTimes(1);
+    } finally { host.restore(); }
+  });
+
+  for (const expectVersion of ['v1', 'v2']) {
+    test(`same-sheet navigation checks ${expectVersion} after a held edit acknowledgement`, async () => {
+      const host = pluginWorker();
+      const plugin = recorder('writer');
+      try {
+        await host.mount({ plugins: [plugin.plugin],
+          pluginGrants: { writer: { document: 'write', editBatches: true } } });
+        const context = plugin.contexts[0];
+        const writing = context.edits!.applyEdits(setCell('v1', 'A1', 'value'));
+        const command = await host.dispatched(1);
+        let outcome: Awaited<ReturnType<typeof context.navigation.scrollToCell>> | undefined;
+        let navigation!: ReturnType<typeof context.navigation.scrollToCell>;
+        await act(async () => {
+          navigation = context.navigation.scrollToCell({ sheetId: 'sheet:0', row: 0, col: 0 }, { expectVersion })
+            .then((result) => { outcome = result; return result; });
+        });
+        expect(outcome).toBeUndefined();
+        expect(host.calls.cellGeometry).not.toHaveBeenCalled();
+        expect(host.calls.sheetView).not.toHaveBeenCalled();
+        await act(async () => { host.ack(command, 'v2'); await writing; });
+        expect(await navigation).toMatchObject(expectVersion === 'v2'
+          ? { ok: true } : { ok: false, failure: { code: 'stale-version' } });
+        expect(host.sent).toHaveLength(1);
+      } finally { host.restore(); }
+    });
+  }
+
+  for (const status of ['applied', 'noop'] as const) {
+    test(`selecting current cells clears the chart after an ${status} acknowledgement`, async () => {
+      const host = pluginWorker();
+      const plugin = recorder('navigator');
+      host.charts.push({ id: 'chart', label: 'Chart', movable: false,
+        rect: { x: 100, y: 100, w: 200, h: 100 }, clip: { x: 100, y: 100, w: 200, h: 100 } });
+      try {
+        const view = await host.mount({ plugins: [plugin.plugin] });
+        const surface = view.getByTestId('xlsx-scroll');
+        fireEvent.keyDown(surface, { key: 'ArrowDown' });
+        const selected = await host.dispatched(1);
+        await act(async () => { host.ack(selected); });
+        await act(async () => fireEvent.mouseDown(surface, { button: 0, clientX: 120, clientY: 120 }));
+        expect(view.getByTestId('xlsx-chart-selection').getAttribute('data-chart-id')).toBe('chart');
+        expect(last(plugin.contexts).snapshot.selection?.chartId).toBe('chart');
+        plugin.events.length = 0;
+        const navigation = plugin.contexts[0].navigation.selectCells({ sheetId: 'sheet:0',
+          selection: selectionAt({ row: 1, col: 0 }) }, { expectVersion: 'v1' });
+        const command = await host.dispatched(2);
+        expect(view.queryByTestId('xlsx-chart-selection')).not.toBeNull();
+        await act(async () => { host.ack(command, 'v1', false, status); expect(await navigation).toEqual({ ok: true }); });
+        expect(view.queryByTestId('xlsx-chart-selection')).toBeNull();
+        expect(view.getByTestId('xlsx-selection')).toBeDefined();
+        expect(plugin.events).toContainEqual(expect.objectContaining({ type: 'selection-change',
+          selection: { sheetId: 'sheet:0', sheetIndex: 0, cells: selectionAt({ row: 1, col: 0 }), chartId: null } }));
+        expect(host.calls.cellGeometry).not.toHaveBeenCalled();
+        expect(host.calls.sheetView).not.toHaveBeenCalled();
+        expect(host.calls.frame).not.toHaveBeenCalled();
+      } finally { host.restore(); }
+    });
+  }
+
+  test('refuse focus when a plugin ends between reveal and its continuation', async () => {
+    const host = pluginWorker();
+    const plugin = recorder('navigator');
+    const geometry = promisePair<Awaited<ReturnType<typeof host.calls.cellGeometry>>>();
+    host.calls.cellGeometry.mockImplementationOnce(() => geometry.promise);
+    try {
+      const view = await host.mount({ plugins: [plugin.plugin] });
+      const surface = view.getByTestId('xlsx-scroll');
+      const focused = spyOn(surface, 'focus');
+      let top = 0;
+      Object.defineProperty(surface, 'scrollTop', { configurable: true, get: () => top,
+        set(value: number) {
+          top = value;
+          if (value > 0) queueMicrotask(() => view.rerender({ plugins: [] }));
+        } });
+      const navigation = plugin.contexts[0].navigation.selectCells({ sheetId: 'sheet:0',
+        selection: selectionAt({ row: 60, col: 0 }) }, { expectVersion: 'v1', focus: true });
+      const command = await host.dispatched(1);
+      await act(async () => { host.ack(command); });
+      await act(async () => { geometry.resolve({ sheet: 0, version: 'v1',
+        rect: { x: 0, y: 1440, w: 96, h: 24 }, scrollPosition: { x: 0, y: 1440 } }); });
+      expect(await navigation).toMatchObject({ ok: false, failure: { code: 'unsupported' } });
+      expect(focused).not.toHaveBeenCalled();
+      focused.mockRestore();
+    } finally { host.restore(); }
+  });
+
+  test('initialize once, read through the worker and end on replacement', async () => {
+    const host = pluginWorker();
+    const plugin = recorder('reader');
+    try {
+      const view = await host.mount({ plugins: [plugin.plugin] });
+      expect(plugin.log.slice(0, 2)).toEqual(['initialize', 'load:loaded']);
+      const context = plugin.contexts[0];
+      await act(async () => {
+        expect(await context.read.version()).toEqual({ ok: true, version: 'v1' });
+        await context.read.readCells({ ranges: [] });
+        await context.read.findText({ text: 'value' });
+        await context.read.validateEdits(setCell('v1', 'A1', 'value'));
+      });
+      expect(host.calls.version).toHaveBeenCalledTimes(1);
+      expect(host.calls.readCells).toHaveBeenCalledTimes(1);
+      expect(host.calls.findText).toHaveBeenCalledTimes(1);
+      expect(host.calls.validateEdits).toHaveBeenCalledTimes(1);
+      view.rerender({ plugins: [plugin.plugin] });
+      await act(async () => {});
+      expect(plugin.log.filter((entry) => entry === 'initialize')).toHaveLength(1);
+      view.rerender({ file: new Uint8Array([2]) });
+      expect(context.lifetimeSignal.aborted).toBe(true);
+      expect(plugin.log.filter((entry) => entry === 'cleanup:document-replaced')).toHaveLength(1);
+      expect(await context.read.version()).toMatchObject({ ok: false, failure: { code: 'document-replaced' } });
+      await act(async () => {});
+      expect(plugin.log.filter((entry) => entry === 'initialize')).toHaveLength(2);
+      expect(host.hydrate).not.toHaveBeenCalled();
+      expect(host.attach).not.toHaveBeenCalled();
+      view.unmount();
+      expect(plugin.log.filter((entry) => entry === 'cleanup:unmounted')).toHaveLength(1);
+    } finally { host.restore(); }
+  });
+
+  test('refuse a revoked batch after admission into a saturated queue', async () => {
+    const host = pluginWorker();
+    const plugin = recorder('writer');
+    try {
+      const view = await host.mount({ plugins: [plugin.plugin],
+        pluginGrants: { writer: { document: 'write', editBatches: true } } });
+      expect(plugin.log[0]).toBe('initialize');
+      const edits = plugin.contexts[0].edits!;
+      expect(edits).not.toBeNull();
+      for (let i = 0; i < 64; i += 1) {
+        fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'ArrowDown' });
+      }
+      await host.dispatched(64);
+      let pending!: ReturnType<typeof edits.applyEdits>;
+      await act(async () => { pending = edits.applyEdits(setCell('v1', 'A1', 'plugin')); });
+      expect(host.sent).toHaveLength(64);
+      view.rerender({ pluginGrants: {} });
+      const input = await host.dispatched(1);
+      await act(async () => { host.ack(input); });
+      expect(await pending).toMatchObject({ ok: false, failure: { code: 'permission-denied' } });
+      expect(host.sent.filter((command) => command.kind === 'applyEdits')).toHaveLength(0);
+      await act(async () => { for (const command of host.sent.slice(1)) host.ack(command); });
+      view.rerender({ pluginGrants: { writer: { document: 'write', editBatches: true } } });
+      const allowed = edits.applyEdits(setCell('v1', 'A1', 'plugin'));
+      const command = await host.dispatched(65);
+      expect(command).toMatchObject({ kind: 'applyEdits', payload: { args: [setCell('v1', 'A1', 'plugin')] } });
+      await act(async () => { host.ack(command, 'v3'); });
+      expect(await allowed).toMatchObject({ ok: true, applied: true, version: 'v3' });
+      expect(host.calls.applyEdits).not.toHaveBeenCalled();
+    } finally { host.restore(); }
+  });
+
+  test('publish acknowledged document, selection and painted layout events', async () => {
+    const host = pluginWorker();
+    const plugin = recorder('events');
+    try {
+      const view = await host.mount({ plugins: [plugin.plugin],
+        pluginGrants: { events: { document: 'write', editBatches: true } } });
+      expect(plugin.log[0]).toBe('initialize');
+      fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'ArrowDown' });
+      const selected = await host.dispatched(1);
+      expect(plugin.events.filter((event) => event.type === 'selection-change' && event.selection?.cells?.focus.row === 1)).toHaveLength(0);
+      await act(async () => { host.ack(selected); });
+      expect(plugin.events).toContainEqual(expect.objectContaining({ type: 'selection-change', version: 'v1',
+        selection: expect.objectContaining({ cells: selectionAt({ row: 1, col: 0 }) }) }));
+      const context = last(plugin.contexts);
+      const writing = context.edits!.applyEdits(setCell('v1', 'A1', 'value'));
+      const command = await host.dispatched(2);
+      expect(plugin.events.filter((event) => event.type === 'document-change')).toHaveLength(0);
+      await act(async () => { host.ack(command, 'v2'); });
+      await writing;
+      expect(plugin.events).toContainEqual(expect.objectContaining({ type: 'document-change', version: 'v2' }));
+      expect(plugin.events).toContainEqual(expect.objectContaining({ type: 'layout-change',
+        layout: expect.objectContaining({ version: 'v2' }) }));
+      view.rerender({ readOnly: true });
+      const mode = await host.dispatched(3);
+      host.setReadOnly(true);
+      await act(async () => { host.ack(mode); });
+      expect(plugin.events).toContainEqual(expect.objectContaining({ type: 'mode-change', readOnly: true }));
+    } finally { host.restore(); }
+  });
+
+  test('cancel a superseded read before pending composition releases it', async () => {
+    const host = pluginWorker();
+    let reading: ReturnType<XlsxPluginContext<State>['read']['version']> | undefined;
+    const plugin = recorder('reader', { async onEvent(context, event) {
+      if (event.type === 'document-change' && event.version === 'v2') {
+        reading = context.read.version();
+        await reading;
+      }
+    } });
+    try {
+      const view = await host.mount({ plugins: [plugin.plugin] });
+      expect(plugin.log[0]).toBe('initialize');
+      fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'x' });
+      const cell = view.getByTestId('xlsx-cell-editor');
+      fireEvent.compositionStart(cell);
+      fireEvent.change(cell, { target: { value: 'input' } });
+      await act(async () => { host.push('v2'); });
+      expect(reading).toBeDefined();
+      await act(async () => { host.push('v3'); });
+      expect(await reading).toMatchObject({ ok: false, failure: { code: 'aborted' } });
+      expect(host.calls.version).not.toHaveBeenCalled();
+      fireEvent.compositionEnd(cell, { data: 'input', target: { value: 'input' } });
+      const command = await host.dispatched(1);
+      await act(async () => { host.ack(command, 'v4'); });
+      expect(host.calls.version).not.toHaveBeenCalled();
+    } finally { host.restore(); }
+  });
+
+  test('send navigation with a worker version precondition and preserve a stale refusal', async () => {
+    const host = pluginWorker();
+    const plugin = recorder('navigator');
+    try {
+      await host.mount({ plugins: [plugin.plugin] });
+      expect(plugin.log[0]).toBe('initialize');
+      const navigation = plugin.contexts[0].navigation.selectCells({ sheetId: 'sheet:0',
+        selection: selectionAt({ row: 2, col: 0 }) }, { expectVersion: 'v1' });
+      const command = await host.dispatched(1);
+      expect(command).toMatchObject({ kind: 'setActiveSheet', payload: { expectVersion: 'v1' } });
+      await act(async () => { host.push('v2'); host.refuse(command, 'stale-version'); });
+      expect(await navigation).toMatchObject({ ok: false, failure: { code: 'stale-version' } });
+      expect(host.calls.cellGeometry).not.toHaveBeenCalled();
+      expect(plugin.events.filter((event) => event.type === 'selection-change' && event.selection?.cells?.focus.row === 2)).toHaveLength(0);
+    } finally { host.restore(); }
+  });
+
+  test('isolate a failed renderer and close surviving activations on worker failure', async () => {
+    const host = pluginWorker();
+    const errors: XlsxPluginError[] = [];
+    const broken = recorder('broken', { panel: { title: 'Broken', placement: 'right',
+      render: () => { throw new Error('Panel failed'); } } });
+    const healthy = recorder('healthy', { panel: { title: 'Healthy', placement: 'left',
+      render: () => <span>Still open</span> } });
+    try {
+      const view = await host.mount({ plugins: [broken.plugin, healthy.plugin], onPluginError: (error) => errors.push(error) });
+      expect(broken.log[0]).toBe('initialize');
+      expect(view.getByText('Still open')).toBeDefined();
+      expect(errors).toContainEqual(expect.objectContaining({ pluginId: 'broken', phase: 'render' }));
+      expect(broken.log.filter((entry) => entry === 'cleanup:failed')).toHaveLength(1);
+      await act(async () => { host.fail(); });
+      expect(healthy.contexts[0].lifetimeSignal.aborted).toBe(true);
+      expect(view.queryByText('Still open')).toBeNull();
+      expect(view.getByTestId('xlsx-error')).toBeDefined();
+    } finally { host.restore(); }
+  });
+});
 
 describe('XlsxEditor plugins', () => {
   test('initialize, load, one change per committed change, and cleanup on removal', async () => {

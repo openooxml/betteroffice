@@ -1,5 +1,17 @@
 export interface WorkerEditorProbe {
   ready: Promise<void>;
+  mainThreadEngines(): number;
+  peerless: {
+    cells(sheet: number, range: string): Promise<string[][]>;
+    selection(): Promise<{
+      sheetIndex: number;
+      cells: { anchor: { row: number; col: number }; focus: { row: number; col: number } } | null;
+    } | null>;
+    failure(): string | null;
+    workerCount(): number;
+    saveAndReopen(): Promise<number>;
+    recoverAndReopen(): Promise<number>;
+  } | null;
   peerEntries: { generation: number; method: string; args: unknown[] }[];
   replayEntries: { generation: number; sequence: number; method: string; args: unknown[] }[];
   generation(): number;
@@ -49,5 +61,6 @@ export interface WorkerEditorProbe {
 }
 
 declare global {
+  var __xlsxMainEngineProbe: { capture(): void } | undefined;
   interface Window { __xlsxWorkerEditor: WorkerEditorProbe }
 }

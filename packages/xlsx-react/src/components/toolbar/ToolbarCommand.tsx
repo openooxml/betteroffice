@@ -25,6 +25,7 @@ import type {
   XlsxSelectCommandId,
 } from '../../commands/types';
 import { useTranslation } from '../../i18n';
+import { PeerlessChromeContext } from '../EditorToolbarContext';
 import type { BorderPreset, BorderStyle, HorizontalAlignment, VerticalAlignment } from '../Toolbar';
 import { ColorPicker } from '../ui/ColorPicker';
 import { EditableCombobox } from '../ui/EditableCombobox';
@@ -441,6 +442,7 @@ function BuiltInCommandButton<K extends XlsxCommandId>(props: ToolbarCommandButt
   const command = useXlsxCommand(id, args);
   const { t } = useTranslation();
   const tools = useContext(ToolbarOverflowContext);
+  const peerless = useContext(PeerlessChromeContext);
   const state = command.state as XlsxCommandState;
   const name = label ?? command.label;
   const toggle = TOGGLES.has(id) && state.active !== undefined;
@@ -449,6 +451,8 @@ function BuiltInCommandButton<K extends XlsxCommandId>(props: ToolbarCommandButt
       active={toggle ? state.active : undefined}
       toggle={toggle}
       disabled={!state.enabled}
+      unavailable={peerless && !state.enabled &&
+        (state.disabledReason.code === 'unsupported-command' || state.disabledReason.code === 'png-unavailable')}
       description={reasonOf(state)}
       title={name}
       shortcut={command.shortcut}

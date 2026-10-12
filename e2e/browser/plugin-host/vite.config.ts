@@ -21,6 +21,11 @@ export default defineConfig({
           if (!source.includes(construction)) this.error('Update the main-thread presentation engine capture');
           return source.replace(construction, `${construction} globalThis.__pptxMainEngineProbe?.capture();`);
         }
+        if (file.endsWith('/xlsx/src/wasm/loader.ts')) {
+          const wrapping = /(function wrapWorkbookDocument\([\s\S]*?\): WorkbookHandle \{)/;
+          if (!wrapping.test(source)) this.error('Update the main-thread workbook capture for loader.ts');
+          return source.replace(wrapping, '$1 globalThis.__xlsxMainEngineProbe?.capture();');
+        }
         if (file.endsWith('/DocxEditor/hooks/useYrsCoreSession.ts')) {
           const creation = /const (\w+) = await yrs\.createYrsSession\([^;]+\);/g;
           if (!creation.test(source)) {

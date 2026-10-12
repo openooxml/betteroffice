@@ -27,6 +27,7 @@ import {
   type XlsxPluginEditorAccess,
 } from './createPluginClients';
 import { definitionProblem, pluginDefinition } from './defineXlsxPlugin';
+import type { XlsxPluginDocumentAccess } from './createPluginDocumentAccess';
 import type {
   XlsxPlugin,
   XlsxPluginCommand,
@@ -48,7 +49,7 @@ type Context = XlsxPluginContext<unknown>;
 export type XlsxPluginActivation = RuntimeActivation<Definition, Context>;
 
 /** The editor as the plugin host reaches it; members are read at call time. */
-export interface XlsxPluginHostAccess extends XlsxPluginEditorAccess {
+export type XlsxPluginHostAccess = (XlsxPluginEditorAccess | XlsxPluginDocumentAccess) & {
   translate(key: TranslationKey): string;
   /** Geometry of the painted frame that shows the current version, or null. */
   geometry(): XlsxPluginGeometry | null;
@@ -59,7 +60,7 @@ export interface XlsxPluginHost {
   setGrants(grants: Readonly<Record<string, XlsxPluginGrant>> | undefined): void;
   setReporter(report: ((error: XlsxPluginError) => void) | undefined): void;
   /** Starts a document generation over `handle`. */
-  open(handle: WorkbookHandle): void;
+  open(handle: object): void;
   close(reason: 'document-replaced' | 'unmounted'): void;
   generation(): string | null;
   version(): string;
@@ -127,9 +128,11 @@ function readVersion(handle: WorkbookHandle): string | null {
   }
 }
 
-export function createXlsxPluginHost(access: XlsxPluginHostAccess): XlsxPluginHost {
+export function createXlsxPluginHost(
+  access: XlsxPluginHostAccess, clientFactory: typeof createPluginClients = createPluginClients
+): XlsxPluginHost {
   let reporter: ((error: XlsxPluginError) => void) | undefined;
-  let handle: WorkbookHandle | null = null;
+  let handle: object | null = null;
   let detachUpdates: (() => void) | null = null;
   let installed = false;
   let generations = 0;
@@ -184,7 +187,7 @@ export function createXlsxPluginHost(access: XlsxPluginHostAccess): XlsxPluginHo
 
   const createContext = (invocation: PluginInvocation<XlsxPluginSnapshot>): Context => {
     const pluginId = invocation.pluginId;
-    const clients = createPluginClients(
+    const clients = clientFactory(
       invocation,
       access,
       () => runtime.grant(pluginId) as XlsxPluginGrant,
@@ -202,7 +205,12 @@ export function createXlsxPluginHost(access: XlsxPluginHostAccess): XlsxPluginHo
       read: clients.read,
       commands: clients.commands,
       edits: clients.edits,
-      geometry: geometry && invocation.snapshot.layout?.id === geometry.layout.id ? geometry : null,
+      geometry: geometry && invocation.snapshot.layout?.id === geometry.layout.id ? 'identity' in access ? {
+        layout: geometry.layout,
+        getCellRect: (target) => invocation.refusal() ? null : geometry.getCellRect(target),
+        getRangeRect: (target) => invocation.refusal() ? null : geometry.getRangeRect(target),
+        getPositionAtPoint: null,
+      } : geometry : null,
       navigation: clients.navigation,
       setState: (next, atVersion) => invocation.setState(next, atVersion),
       onCleanup: (cleanup) => invocation.onCleanup(cleanup),
@@ -231,7 +239,8 @@ export function createXlsxPluginHost(access: XlsxPluginHostAccess): XlsxPluginHo
       selection: state.selection,
       layout: state.layout,
     }),
-    currentVersion: () => (handle && runtime.generation() !== null ? readVersion(handle) : null),
+    currentVersion: () => (handle && runtime.generation() !== null
+      ? 'identity' in access ? access.currentVersion(handle) : readVersion(handle as WorkbookHandle) : null),
     loadEvent: (snapshot, reason) => ({
       type: 'load',
       generation: snapshot.generation,
@@ -251,14 +260,35 @@ export function createXlsxPluginHost(access: XlsxPluginHostAccess): XlsxPluginHo
 
   const documentChanged = (): void => {
     const generation = runtime.generation();
-    const version = handle ? readVersion(handle) : null;
-    if (!generation || !version || version === state.version) return;
-    state.version = version;
-    notify({ type: 'document-change', generation, version });
-    if (state.layout && state.layout.version !== version) {
-      state.layout = null;
-      notify({ type: 'layout-change', generation, layout: null });
+    if (!('identity' in access)) {
+      const version = handle ? readVersion(handle as WorkbookHandle) : null;
+      if (!generation || !version || version === state.version) return;
+      state.version = version;
+      notify({ type: 'document-change', generation, version });
+      if (state.layout && state.layout.version !== version) {
+        state.layout = null;
+        notify({ type: 'layout-change', generation, layout: null });
+      }
+      return;
     }
+    const version = handle ? access.version(handle) : null;
+    if (handle && access.identity() !== handle) {
+      closeHandle();
+      state.layout = null;
+      runtime.close('document-replaced');
+      return;
+    }
+    if (!generation || !version) return;
+    if (version !== state.version) {
+      state.version = version;
+      notify({ type: 'document-change', generation, version });
+      if (state.layout && state.layout.version !== version) {
+        state.layout = null;
+        notify({ type: 'layout-change', generation, layout: null });
+      }
+    }
+    if (handle && access.selection) binding.selectionChanged(access.selection(handle));
+    if (handle && access.readOnly) binding.modeChanged(access.readOnly(handle));
   };
 
   /** Observes committed changes only while plugins are installed. */
@@ -269,9 +299,14 @@ export function createXlsxPluginHost(access: XlsxPluginHostAccess): XlsxPluginHo
       return;
     }
     if (detachUpdates) return;
-    state.version = readVersion(handle) ?? state.version;
+    state.version = ('identity' in access ? access.version(handle) : readVersion(handle as WorkbookHandle)) ?? state.version;
+    if ('identity' in access) {
+      state.selection = access.selection ? access.selection(handle) : null;
+      if (access.readOnly) state.readOnly = access.readOnly(handle);
+    }
     try {
-      detachUpdates = handle.onUpdate(documentChanged);
+      detachUpdates = 'identity' in access ? access.subscribe(handle, documentChanged)
+        : (handle as WorkbookHandle).onUpdate(documentChanged);
     } catch (error) {
       console.error('[XlsxEditor] observing workbook changes for plugins failed', error);
     }
@@ -306,7 +341,7 @@ export function createXlsxPluginHost(access: XlsxPluginHostAccess): XlsxPluginHo
     return { ok: false, failure: commandReason(code, { translate: access.translate }) };
   };
 
-  return {
+  const binding: XlsxPluginHost = {
     setPlugins(plugins) {
       const definitions: Definition[] = [];
       for (const plugin of plugins ?? []) {
@@ -340,9 +375,10 @@ export function createXlsxPluginHost(access: XlsxPluginHostAccess): XlsxPluginHo
     open(next) {
       closeHandle();
       handle = next;
-      state.version = readVersion(next) ?? '';
+      state.version = ('identity' in access ? access.version(next) : readVersion(next as WorkbookHandle)) ?? '';
       state.layout = null;
-      state.selection = null;
+      state.selection = 'identity' in access && access.selection ? access.selection(next) : null;
+      if ('identity' in access && access.readOnly) state.readOnly = access.readOnly(next);
       observe();
       generations += 1;
       runtime.open(`workbook-${generations}`);
@@ -456,4 +492,5 @@ export function createXlsxPluginHost(access: XlsxPluginHostAccess): XlsxPluginHo
     guard: (pluginId, phase, call, fallback) => runtime.guard(pluginId, phase, call, fallback),
     fail: (pluginId, phase, error) => runtime.fail(pluginId, phase, error),
   };
+  return binding;
 }

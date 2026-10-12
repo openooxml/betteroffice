@@ -1,16 +1,24 @@
 import { createSessionHost, type SessionHost } from '../../../../shared/office-session/host';
-import { transferable } from '../../../../shared/office-session/protocol';
+import { deferReply, transferable } from '../../../../shared/office-session/protocol';
 import type { SessionTransport } from '../../../../shared/office-session/transport';
 import { SessionFailure, type MethodHandlers, type MethodPolicy } from '../../../../shared/office-session/types';
+import type { XlsxEditRefusal } from '../edits';
+import type { XlsxExportOptions, XlsxExportResult, XlsxStructuredContent } from '../exports';
 import { wasmAssetUrl } from '../wasm/asset';
 import {
-  initWasm, openWorkbook, openWorkbookPeer, StaleProposalError, workbookDisplayListJson, workbookPeerHydration,
+  initWasm, isPngExportAvailable, openWorkbook, openWorkbookPeer, StaleProposalError, workbookDisplayListJson, workbookPeerHydration,
   workbookPeerSnapshot,
+  openWorkbookRecoveryCheckpoint, adoptWorkbookPeerVersion,
   type SheetInfo, type WorkbookCalculationContext, type WorkbookHandle,
+  type Viewport,
 } from '../wasm/loader';
 import { localNowSerial } from './calculationClock';
+import { createWorkbookCommandState, projectEditState, translateWorkbookSheetIds, type WorkbookCommandState } from './commandHandlers';
+import { createWorkbookCommandHost } from './commandHost';
+import { isWorkbookCommandFrameRequest, WorkbookCommandRefusal } from './commandProtocol';
 import {
   WORKBOOK_SESSION_POLICIES,
+  WorkbookPngUnavailableError,
   type WorkbookSessionEvents,
   type WorkbookSessionMethods,
   type WorkbookSheetSummary,
@@ -24,6 +32,7 @@ import {
   type WorkbookReplayEnvelope,
 } from './replay';
 import { WorkbookPeerHydrationError } from './peerHydrationError';
+import { decodeWorkbookRecovery, isCollaborativeWorkbookRecovery, restoreWorkbookCommandState, type WorkbookRecovery } from './recovery';
 
 type Events = { [K in keyof WorkbookSessionEvents]: WorkbookSessionEvents[K] } & {
   peerOpened: { version: string; initialCalculation?: WorkbookCalculationContext | null };
@@ -32,6 +41,11 @@ type Methods = WorkbookSessionMethods & WorkbookInternalSessionMethods;
 
 function sheets(info: SheetInfo): WorkbookSheetSummary[] {
   return info.sheetIds.map((id, index) => ({ id, index, name: info.sheetNames[index] }));
+}
+
+function commandId(): string {
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
 export function createWorkbookSessionHost(
@@ -50,6 +64,11 @@ export function createWorkbookSessionHost(
   let revision = 0;
   let retainedHydration = false;
   let peerAttached = false;
+  const commandIdentity = { session: commandId(), incarnation: commandId() };
+  let commands: WorkbookCommandState | undefined;
+  let commandHost: ReturnType<typeof createWorkbookCommandHost> | undefined;
+  let collaborative = false;
+  let offUpdates = () => {};
   let previewSource: { bytes: Uint8Array; hydration: string } | undefined;
   let peerSnapshot: {
     version: string; sequence: number; records: number; bytes: number; pending?: Uint8Array;
@@ -67,16 +86,106 @@ export function createWorkbookSessionHost(
     disposed = true;
     const opened = handle;
     handle = undefined;
+    offUpdates();
+    offUpdates = () => {};
     opened?.dispose();
     previewSource = undefined;
     peerSnapshot = undefined;
     committed.length = 0;
+    commands = undefined;
+    commandHost = undefined;
   }
 
   function checkSheet(opened: WorkbookHandle, sheet: number): void {
     if (!Number.isInteger(sheet) || sheet < 0 || sheet >= opened.sheetCount()) {
       throw new RangeError('Sheet index is out of range');
     }
+  }
+
+  function orderedRequest<T, R>(request: T, read: (request: T) => R): R | XlsxEditRefusal {
+    const opened = workbook();
+    if (!commands?.throughSeq) return read(request);
+    const positional = opened.sheetInfo().sheetIds;
+    let resolved: T;
+    try { resolved = translateWorkbookSheetIds(request, commands.sheetIds, positional, true); }
+    catch (error) {
+      if (!(error instanceof WorkbookCommandRefusal)) throw error;
+      return { ok: false, version: opened.version(),
+        failure: { code: 'missing-target', message: 'The command sheet no longer exists' } };
+    }
+    return translateWorkbookSheetIds(read(resolved), positional, commands.sheetIds);
+  }
+
+  function frame(viewport: Viewport, sheet: number) {
+    const opened = workbook();
+    checkSheet(opened, sheet);
+    const buffer = encoder.encode(workbookDisplayListJson(opened, viewport, sheet)).buffer;
+    epoch += 1;
+    return { displayList: buffer, version: opened.version(), epoch,
+      sequence: commands?.throughSeq || sequence, sheet, viewport,
+      mergedRanges: opened.visibleMergedRanges(sheet, viewport) };
+  }
+
+  function renderPng(sheet: number, render: (opened: WorkbookHandle) => Uint8Array) {
+    const opened = workbook();
+    if (!isPngExportAvailable()) throw new WorkbookPngUnavailableError();
+    checkSheet(opened, sheet);
+    const active = opened.sheetInfo().activeSheet;
+    try {
+      if (sheet !== active) opened.setActiveSheet(sheet);
+      return transferBytes(render(opened));
+    } finally {
+      if (sheet !== active) opened.setActiveSheet(active);
+    }
+  }
+
+  function transferBytes(bytes: Uint8Array) {
+    const buffer = bytes.buffer instanceof ArrayBuffer && bytes.byteOffset === 0 &&
+      bytes.byteLength === bytes.buffer.byteLength ? bytes.buffer : new Uint8Array(bytes).buffer;
+    return transferable(buffer, [buffer]);
+  }
+
+  function exported(options?: XlsxExportOptions): XlsxExportResult<XlsxStructuredContent> {
+    const opened = workbook();
+    const result = opened.exportStructured(options);
+    if (!commands?.throughSeq) return result;
+    const requestedMaxBytes = options?.maxBytes;
+    const maxBytes = requestedMaxBytes !== undefined && Number.isFinite(requestedMaxBytes)
+      ? requestedMaxBytes : 8 * 1024 * 1024;
+    const translated = translateWorkbookSheetIds(result, opened.sheetInfo().sheetIds, commands.sheetIds);
+    if (translated.ok && encoder.encode(JSON.stringify(translated.content)).byteLength > maxBytes) {
+      return { ok: false, version: translated.version,
+        failure: { code: 'limit-exceeded', target: null, message: 'The exported content exceeds maxBytes' } };
+    }
+    return translated;
+  }
+
+  function sheetView(sheet: number) {
+    const opened = workbook();
+    checkSheet(opened, sheet);
+    const { contentWidth, contentHeight, frozenRows, frozenCols, initialScrollX, initialScrollY } =
+      opened.sheetInfoFor(sheet);
+    const edge = opened.cellRect(sheet, Math.max(0, frozenRows - 1), Math.max(0, frozenCols - 1));
+    return { sheet, version: opened.version(), contentWidth, contentHeight, frozenRows, frozenCols,
+      initialScrollX, initialScrollY,
+      frozenWidth: frozenCols === 0 ? 0 : edge.x + edge.w,
+      frozenHeight: frozenRows === 0 ? 0 : edge.y + edge.h };
+  }
+
+  function installCommandHost(recovery?: WorkbookRecovery): void {
+    commandHost = createWorkbookCommandHost({ handle: workbook(), state: commands!,
+      ...(recovery ? { revision: recovery.revision, versions: recovery.versions, refusedSeqs: recovery.refusedSeqs,
+        refusedRanges: recovery.refusedRanges, refusedOutcomes: recovery.refusedOutcomes } : {}),
+      sessionState: () => ({ version, dirty }),
+      frame: (request, coversThroughSeq) => ({ ...frame(request.viewport, request.sheet), ...commandIdentity,
+        sequence: coversThroughSeq, coversThroughSeq, requestGeneration: request.requestGeneration ?? request.generation,
+        zoom: request.zoom, dpr: request.dpr }),
+      onCommit() {
+        version += 1;
+        dirty = true;
+        host.emit('changed', { version, dirty });
+      },
+    });
   }
 
   const internalHandlers: MethodHandlers<WorkbookInternalSessionMethods, null> = {
@@ -226,9 +335,47 @@ export function createWorkbookSessionHost(
   }
 
   const handlers: MethodHandlers<WorkbookSessionMethods, null> = {
+    async openRecovery(_, checkpoint, input = {}) {
+      if (disposed) throw new Error('Workbook session is disposed');
+      if (handle) throw new Error('Workbook session is already open');
+      const recovery = decodeWorkbookRecovery(checkpoint.state);
+      if (checkpoint.epoch !== recovery.epoch || checkpoint.version !== recovery.revision ||
+        checkpoint.throughSeq !== recovery.throughSeq) throw new TypeError('Workbook recovery envelope mismatch');
+      if (isCollaborativeWorkbookRecovery(recovery.engine)) throw new Error('Recovery is unavailable for collaborative workbooks');
+      await (options.initWasm ?? initWasm)(input.wasm);
+      if (disposed) throw new Error('Workbook session is disposed');
+      const opened = openWorkbookRecoveryCheckpoint(recovery.engine, recovery.throughSeq);
+      try {
+        commandIdentity.session = recovery.session;
+        commands = restoreWorkbookCommandState(opened, recovery, commandIdentity);
+        version = recovery.hostVersion;
+        dirty = recovery.dirty;
+        handle = opened;
+        installCommandHost(recovery);
+        const info = opened.sheetInfo();
+        return { format: 'xlsx' as const, stage: 'ready' as const, version, dirty,
+          sheets: commands.sheetIds.map((id, index) => ({ id, index, name: info.sheetNames[index] })),
+          activeSheet: info.activeSheet, commandContext: { ...commandIdentity,
+            basis: { epoch: commands.epoch, version: opened.version() } },
+          throughSeq: commands.throughSeq, revision: recovery.revision, historyReset: commands.historyReset === true, pngExport: isPngExportAvailable(),
+          selection: commands.selection, editState: commands.editState };
+      } catch (error) {
+        handle = undefined;
+        commands = undefined;
+        commandHost = undefined;
+        opened.dispose();
+        throw error;
+      }
+    },
     async open(_, bytes, input = {}) {
       if (disposed) throw new Error('Workbook session is disposed');
       if (handle) throw new Error('Workbook session is already open');
+      const initial = input.initialViewport;
+      if (initial && !isWorkbookCommandFrameRequest({ sheet: initial.sheet ?? 0,
+        viewport: { x: 0, y: 0, width: initial.width, height: initial.height },
+        zoom: initial.zoom, dpr: initial.dpr, generation: initial.requestGeneration })) {
+        throw new TypeError('Invalid workbook initial paint request');
+      }
       const retainPeerHydration = 'retainPeerHydration' in input && input.retainPeerHydration === true;
       retainedHydration = retainPeerHydration;
       let wasm = input.wasm;
@@ -245,7 +392,17 @@ export function createWorkbookSessionHost(
         clientId: input.clientId,
         calculation,
       });
+      collaborative = input.collaborative === true;
       try {
+        if (input.initialUpdate) {
+          if (!collaborative || retainPeerHydration) throw new Error('Initial updates require a collaborative worker replica');
+          opened.applyUpdate(input.initialUpdate);
+        }
+        if (input.recoveryVersion !== undefined) adoptWorkbookPeerVersion(opened, input.recoveryVersion);
+        if (initial?.sheet !== undefined) {
+          checkSheet(opened, initial.sheet);
+          opened.setActiveSheet(initial.sheet);
+        }
         let initialCalculation: WorkbookCalculationContext | null | undefined;
         if (retainPeerHydration) previewSource = {
           bytes: new Uint8Array(bytes).slice(), hydration: workbookPeerHydration(opened),
@@ -266,51 +423,99 @@ export function createWorkbookSessionHost(
         const info = opened.sheetInfo();
         const summaries = sheets(info);
         handle = opened;
-        host.emit('peerOpened', { version: opened.version(), initialCalculation });
-        return { format: 'xlsx', stage: 'ready', version, dirty,
-          sheets: summaries, activeSheet: info.activeSheet };
+        if (collaborative && !retainPeerHydration) offUpdates = opened.onUpdate((update, origin) => {
+          host.emit('collaborationUpdate', { update, origin });
+        });
+        commands = createWorkbookCommandState(commandIdentity, { epoch: 1, version: opened.version() },
+          { sheetId: info.sheetIds[info.activeSheet], range: { kind: 'a1', a1: 'A1' } }, info.sheetIds, calculation ?? null);
+        installCommandHost();
+        if (retainPeerHydration) host.emit('peerOpened', { version: opened.version(), initialCalculation });
+        const projection = { ...commands };
+        if (initial || !retainPeerHydration && input.includeEditState) projectEditState(opened, projection);
+        const state = { format: 'xlsx' as const, stage: 'ready' as const, version, dirty,
+          ...(collaborative && !retainPeerHydration ? { clientId: opened.clientId } : {}),
+          sheets: summaries, activeSheet: info.activeSheet, pngExport: isPngExportAvailable(),
+          commandContext: { ...commandIdentity, basis: { epoch: commands.epoch, version: opened.version() } },
+          ...(!retainPeerHydration && projection.editState ? { editState: projection.editState, selection: commands.selection } : {}) };
+        if (!initial) return state;
+        const view = sheetView(info.activeSheet);
+        const paint = { ...frame({ x: view.initialScrollX, y: view.initialScrollY,
+          width: initial.width / initial.zoom, height: initial.height / initial.zoom }, info.activeSheet),
+          ...commandIdentity, coversThroughSeq: 0, requestGeneration: initial.requestGeneration,
+          zoom: initial.zoom, dpr: initial.dpr };
+        commandHost!.rememberFrame({ sheet: info.activeSheet, viewport: paint.viewport,
+          zoom: initial.zoom, dpr: initial.dpr, generation: initial.requestGeneration });
+        return transferable({ ...state, initialPaint: {
+          sheetView: view, frame: paint, editState: projection.editState!,
+        } }, [paint.displayList]);
       } catch (error) {
+        handle = undefined;
+        commands = undefined;
+        commandHost = undefined;
+        previewSource = undefined;
+        offUpdates();
+        offUpdates = () => {};
         opened.dispose();
         throw error;
       }
     },
     version: () => workbook().version(),
-    readCells: (_, request) => workbook().readCells(request),
-    findText: (_, request) => workbook().findText(request),
-    validateEdits: (_, request) => workbook().validateEdits(request),
+    collaborationStateVector() {
+      checkCollaboration();
+      return workbook().encodeStateVector();
+    },
+    collaborationStateAsUpdate(_, remoteStateVector) {
+      checkCollaboration();
+      return workbook().encodeStateAsUpdate(remoteStateVector);
+    },
+    readCells: (_, request) => orderedRequest(request, (resolved) => workbook().readCells(resolved)),
+    findText: (_, request) => orderedRequest(request, (resolved) => workbook().findText(resolved)),
+    validateEdits: (_, request) => request.expectVersion !== workbook().version()
+      ? workbook().validateEdits(request) : orderedRequest(request, (resolved) => workbook().validateEdits(resolved)),
     applyEdits(_, request) {
+      if (commands?.throughSeq) throw new Error('Workbook command sessions require command batches');
+      commandHost?.validateDirectEdits();
       const result = workbook().applyEdits(request);
       if (result.ok && result.applied) {
+        commandHost?.synchronizeDirectEdits(result.version);
         version += 1;
         dirty = true;
         host.emit('changed', { version, dirty });
       }
       return result;
     },
+    async command(_, command) {
+      checkCommands();
+      if (command.kind === 'applyUpdate') checkCollaboration();
+      const before = workbook().version();
+      const reply = await commandHost!.command(command);
+      if (workbook().version() !== before) host.scheduler.bump({ version: true, generation: true });
+      return reply;
+    },
+    edit(_, command) {
+      checkCommands();
+      if (command.kind === 'applyUpdate') checkCollaboration();
+      return commandHost!.handler(null, command);
+    },
+    checkpoint(_, preserveHistory = false) {
+      checkCommands();
+      return commandHost!.checkpoint(null, preserveHistory);
+    },
+    commandFrame(_, request) {
+      checkCommands();
+      const rendered = request ? commandHost!.requestFrame(request) : commandHost!.frame();
+      return deferReply(rendered.catch((error: unknown) => {
+        if (error instanceof Error && !(error instanceof SessionFailure) &&
+          error.message === 'No frame is available at the settled command boundary') return undefined;
+        throw error;
+      }));
+    },
     frame(_, viewport, options = {}) {
-      const opened = workbook();
-      const sheet = options.sheet === undefined ? opened.sheetInfo().activeSheet : options.sheet;
-      checkSheet(opened, sheet);
-      const json = workbookDisplayListJson(opened, viewport, options.sheet);
-      const mergedRanges = opened.visibleMergedRanges(sheet, viewport);
-      const buffer = encoder.encode(json).buffer;
-      epoch += 1;
-      return transferable({
-        displayList: buffer, version: opened.version(), epoch, sequence, sheet, viewport, mergedRanges,
-      }, [buffer]);
+      const paint = frame(viewport, options.sheet ?? workbook().sheetInfo().activeSheet);
+      return transferable(paint, [paint.displayList]);
     },
     sheetView(_, sheet) {
-      const opened = workbook();
-      checkSheet(opened, sheet);
-      const { contentWidth, contentHeight, frozenRows, frozenCols, initialScrollX, initialScrollY } =
-        opened.sheetInfoFor(sheet);
-      const edge = opened.cellRect(sheet, Math.max(0, frozenRows - 1), Math.max(0, frozenCols - 1));
-      return {
-        sheet, version: opened.version(), contentWidth, contentHeight, frozenRows, frozenCols,
-        initialScrollX, initialScrollY,
-        frozenWidth: frozenCols === 0 ? 0 : edge.x + edge.w,
-        frozenHeight: frozenRows === 0 ? 0 : edge.y + edge.h,
-      };
+      return sheetView(sheet);
     },
     cellGeometry(_, sheet, row, col) {
       const opened = workbook();
@@ -325,8 +530,36 @@ export function createWorkbookSessionHost(
       checkSheet(opened, sheet);
       return { sheet, version: opened.version(), cells: opened.rangeCells(sheet, range) };
     },
-    sheets: () => sheets(workbook().sheetInfo()),
+    captureFormat(_, sheet, range) {
+      const opened = workbook();
+      checkSheet(opened, sheet);
+      return opened.captureFormat(sheet, range);
+    },
+    sheets: () => sheets({ ...workbook().sheetInfo(),
+      ...(commands?.throughSeq ? { sheetIds: commands.sheetIds } : {}) }),
     calculationStatus: () => workbook().calculationStatus(),
+    renderPng(_, viewport, options = {}) {
+      return renderPng(options.sheet ?? workbook().sheetInfo().activeSheet, (opened) => opened.renderPng(viewport));
+    },
+    renderRangePng(_, options, frameOptions = {}) {
+      return renderPng(frameOptions.sheet ?? workbook().sheetInfo().activeSheet, (opened) => opened.renderRangePng(options));
+    },
+    exportStructured: (_, options) => exported(options),
+    exportMarkdown(_, options, markdownOptions) {
+      const opened = workbook();
+      const result = opened.exportMarkdown(options, markdownOptions);
+      if (!commands?.throughSeq) return result;
+      if (result.ok) {
+        const structured = exported(options);
+        if (!structured.ok) return structured;
+      }
+      return translateWorkbookSheetIds(result, opened.sheetInfo().sheetIds, commands.sheetIds);
+    },
+    printDisplayList(_, sheet, range, metrics, gridlines) {
+      const opened = workbook();
+      checkSheet(opened, sheet);
+      return transferBytes(encoder.encode(JSON.stringify(opened.printDisplayList(sheet, range, metrics, gridlines))));
+    },
     save() {
       const bytes = workbook().save();
       const buffer = bytes.buffer instanceof ArrayBuffer && bytes.byteOffset === 0 &&
@@ -338,6 +571,19 @@ export function createWorkbookSessionHost(
       dispose();
     },
   };
+
+  function checkCommands(): void {
+    workbook();
+    if (!commandHost) throw new Error('Workbook commands are not open');
+    if (retainedHydration || peerAttached || sequence > 0) {
+      throw new Error('Workbook commands require a session without an edit peer');
+    }
+  }
+
+  function checkCollaboration(): void {
+    checkCommands();
+    if (!collaborative) throw new Error('Workbook session is not collaborative');
+  }
 
   for (const method of Object.keys(handlers) as (keyof WorkbookSessionMethods)[]) {
     const configured = WORKBOOK_SESSION_POLICIES[method];
@@ -355,7 +601,10 @@ export function createWorkbookSessionHost(
 
   const host = createSessionHost<Methods, Events, null>(transport, {
     handlers: { ...handlers, ...internalHandlers },
-    policies: { ...WORKBOOK_SESSION_POLICIES, ...WORKBOOK_INTERNAL_SESSION_POLICIES },
+    policies: { ...WORKBOOK_SESSION_POLICIES, ...WORKBOOK_INTERNAL_SESSION_POLICIES,
+      edit: (command) => commandHost?.policy(command) ?? { lane: 'input', reorderable: false },
+      checkpoint: () => commandHost?.checkpointPolicy() ?? { lane: 'input', reorderable: false },
+    },
     context: null, onDispose: dispose,
   });
   return host;

@@ -72,6 +72,7 @@ export interface ToolbarButtonProps {
 }
 
 export interface ToolbarButtonBaseProps extends Omit<ToolbarButtonProps, 'active'> {
+  unavailable?: boolean;
   active?: boolean | 'mixed';
   /** Always exposes the pressed state, also when not pressed. */
   toggle?: boolean;
@@ -86,6 +87,7 @@ export function ToolbarButtonBase({
   active,
   toggle = false,
   disabled = false,
+  unavailable = false,
   description,
   title,
   shortcut,
@@ -126,7 +128,7 @@ export function ToolbarButtonBase({
         type="button"
         className={className}
         data-testid={testId}
-        disabled={disabled && !reason}
+        disabled={disabled && (!reason || unavailable)}
         aria-disabled={reason ? true : undefined}
         aria-describedby={reason ? id : undefined}
         aria-label={title}

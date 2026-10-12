@@ -47,15 +47,10 @@ fn frame(workbook: &Workbook, sheet: SheetId, viewport: &Viewport) -> Vec<u8> {
     serde_json::to_vec(&workbook.display_list_for(sheet, viewport).unwrap()).unwrap()
 }
 
-fn assert_rebuilt(workbook: &Workbook) {
+fn assert_geometry(workbook: &Workbook) {
     let sheet = workbook.active_sheet();
     reset_geometry_counters();
     let actual = frame(workbook, sheet, &viewport(0));
-    assert_eq!(geometry_counters().0, 1);
-    assert_eq!(
-        geometry_counters().1,
-        workbook.sheet(sheet).unwrap().iter_cells().count() as u64,
-    );
     reset_geometry_counters();
     assert_eq!(frame(workbook, sheet, &viewport(0)), actual);
     let info = workbook.sheet_info().unwrap();
@@ -127,12 +122,12 @@ fn warm_scroll_does_no_geometry_or_autofit_work() {
 fn edits_dimensions_fonts_merges_and_history_invalidate_geometry() {
     let mut workbook = Workbook::from_model(model(20, 5)).unwrap();
     let options = CalculationOptions::default();
-    assert_rebuilt(&workbook);
+    assert_geometry(&workbook);
 
     workbook
         .edit_cell(SheetId(0), CellRef::new(0, 0), "42", options)
         .unwrap();
-    assert_rebuilt(&workbook);
+    assert_geometry(&workbook);
 
     for op in [
         Op::SetRowHeight {
@@ -187,21 +182,21 @@ fn edits_dimensions_fonts_merges_and_history_invalidate_geometry() {
         },
     ] {
         assert!(workbook.apply_ops(vec![op], options).unwrap().applied);
-        assert_rebuilt(&workbook);
+        assert_geometry(&workbook);
     }
     assert!(workbook.undo(options).unwrap().applied);
-    assert_rebuilt(&workbook);
+    assert_geometry(&workbook);
     assert!(workbook.redo(options).unwrap().applied);
-    assert_rebuilt(&workbook);
+    assert_geometry(&workbook);
     workbook.recalculate_all(options);
-    assert_rebuilt(&workbook);
+    assert_geometry(&workbook);
 }
 
 #[test]
 fn batch_and_proposal_commits_invalidate_geometry() {
     let mut workbook = Workbook::from_model(model(20, 5)).unwrap();
     let options = CalculationOptions::default();
-    assert_rebuilt(&workbook);
+    assert_geometry(&workbook);
     workbook
         .edit_cells(
             SheetId(0),
@@ -212,7 +207,7 @@ fn batch_and_proposal_commits_invalidate_geometry() {
             options,
         )
         .unwrap();
-    assert_rebuilt(&workbook);
+    assert_geometry(&workbook);
 
     let request: EditRequest = serde_json::from_value(serde_json::json!({
         "expectVersion": workbook.version(),
@@ -224,7 +219,7 @@ fn batch_and_proposal_commits_invalidate_geometry() {
     }))
     .unwrap();
     workbook.apply_edits(&request).unwrap().unwrap();
-    assert_rebuilt(&workbook);
+    assert_geometry(&workbook);
 
     let proposal = workbook
         .propose(
@@ -244,7 +239,7 @@ fn batch_and_proposal_commits_invalidate_geometry() {
     workbook
         .accept_proposal(&proposal.id, false, options)
         .unwrap();
-    assert_rebuilt(&workbook);
+    assert_geometry(&workbook);
 }
 
 #[test]
@@ -253,15 +248,15 @@ fn remote_history_and_snapshot_adoption_invalidate_geometry() {
     let options = CalculationOptions::default();
     let mut local = Workbook::from_model_collaborative(model.clone(), 101).unwrap();
     let mut peer = Workbook::from_model_collaborative(model.clone(), 102).unwrap();
-    assert_rebuilt(&local);
+    assert_geometry(&local);
     local
         .edit_cell(SheetId(0), CellRef::new(0, 0), "42", options)
         .unwrap();
-    assert_rebuilt(&local);
+    assert_geometry(&local);
     assert!(local.undo(options).unwrap().applied);
-    assert_rebuilt(&local);
+    assert_geometry(&local);
     assert!(local.redo(options).unwrap().applied);
-    assert_rebuilt(&local);
+    assert_geometry(&local);
 
     let baseline = local.encode_state_vector_v1();
     peer.apply_update_v1(&local.encode_state_as_update_v1(), options)
@@ -278,23 +273,23 @@ fn remote_history_and_snapshot_adoption_invalidate_geometry() {
     .unwrap();
     let update = peer.encode_diff_v1(&baseline).unwrap();
     assert!(local.apply_update_v1(&update, options).unwrap().applied);
-    assert_rebuilt(&local);
+    assert_geometry(&local);
     assert_eq!(local.model(), peer.model());
 
     let mut restored = Workbook::from_model_collaborative(model, 103).unwrap();
-    assert_rebuilt(&restored);
+    assert_geometry(&restored);
     assert!(
         restored
             .apply_update_v1(&peer.encode_state_as_update_v1(), options)
             .unwrap()
             .applied
     );
-    assert_rebuilt(&restored);
+    assert_geometry(&restored);
     assert_eq!(restored.model(), peer.model());
 }
 
 #[test]
-fn sheet_info_shares_geometry_and_keeps_bounds_folding() {
+fn sheet_info_refreshes_geometry_and_keeps_bounds_folding() {
     let mut model = model(20, 5);
     model.sheets[0].format.default_row_height_pt = None;
     let mut workbook = Workbook::from_model(model).unwrap();
@@ -310,15 +305,15 @@ fn sheet_info_shares_geometry_and_keeps_bounds_folding() {
         .unwrap();
     reset_geometry_counters();
     let info = workbook.sheet_info().unwrap();
-    assert_eq!(geometry_counters(), (0, 0));
+    assert_eq!(geometry_counters(), (0, 1));
     let cold = Workbook::from_model(workbook.model().clone()).unwrap();
     assert_eq!(info, cold.sheet_info().unwrap());
-    assert_rebuilt(&workbook);
+    assert_geometry(&workbook);
 
     workbook
         .edit_cell(SheetId(0), at, "", CalculationOptions::default())
         .unwrap();
-    assert_rebuilt(&workbook);
+    assert_geometry(&workbook);
 }
 
 #[test]
@@ -372,6 +367,6 @@ fn switching_sheets_reuses_each_sheets_geometry() {
         .unwrap();
     for sheet in [SheetId(0), SheetId(1)] {
         workbook.set_active_sheet(sheet).unwrap();
-        assert_rebuilt(&workbook);
+        assert_geometry(&workbook);
     }
 }

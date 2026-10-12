@@ -340,6 +340,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   const inputLifetimeRef = useRef({ session, enabled, mounted: true });
   inputLifetimeRef.current.session = session;
   inputLifetimeRef.current.enabled = enabled;
+  const inputOperationQueueRef = useRef<InputOperationQueue | null>(null);
   const isCurrentInput = useCallback(
     (started: YrsSession | null, queue = inputOperationQueueRef.current): boolean =>
       inputLifetimeRef.current.mounted && inputLifetimeRef.current.enabled &&
@@ -367,7 +368,6 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     },
     [holdInput, readOnly, requestOpeningPeer]
   );
-  const inputOperationQueueRef = useRef<InputOperationQueue | null>(null);
   const queuedSessionRef = useRef(session);
   if (!inputOperationQueueRef.current || queuedSessionRef.current !== session) {
     queuedSessionRef.current = session;

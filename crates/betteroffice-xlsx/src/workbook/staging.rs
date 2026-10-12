@@ -106,7 +106,7 @@ impl Workbook {
             .authority
             .adopt_local_update(authority, local_history)
             .map_err(authority_error)?;
-        self.install_model(model)?;
+        self.install_model_with_ops(model, &ops)?;
         self.update_sheet_info_cache(&ops, &prior_styles);
         if !collaborative && recorded {
             self.undo.record(inverse);

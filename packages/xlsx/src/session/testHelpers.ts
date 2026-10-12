@@ -2,9 +2,18 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import type { SessionTransport } from '../../../../shared/office-session';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
+import { isClientMessage } from '../../../../shared/office-session/protocol';
 import { initWasm } from '../wasm/loader';
 import { createWorkbookSession, type OpenWorkbookSessionOptions, type WorkbookSession } from './client';
 import { createWorkbookSessionHost } from './host';
+import type { WorkbookCommand, WorkbookSharedCommand } from './commandProtocol';
+
+export function capturedWorkbookCommand(message: unknown): WorkbookCommand | undefined {
+  if (!isClientMessage(message) || message.kind !== 'call') return undefined;
+  if (message.method === 'command') return message.args[0] as WorkbookCommand;
+  if (message.method === 'edit') return (message.args[0] as WorkbookSharedCommand).payload.compatibility;
+  return undefined;
+}
 
 export async function loadWorkbookSessionFixtures(): Promise<{
   fixture: Uint8Array;

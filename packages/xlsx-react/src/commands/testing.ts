@@ -1,4 +1,4 @@
-import type { SelectionFormatting } from '@betteroffice/xlsx';
+import type { SelectionFormatting, WorkbookSession } from '@betteroffice/xlsx';
 import type { Translations } from '@betteroffice/xlsx-i18n';
 import type { XlsxCommandBinding } from './createXlsxCommandStore';
 import {
@@ -8,6 +8,18 @@ import {
   type XlsxCommandEnvironment,
 } from './evaluate';
 import type { XlsxCommandArgs, XlsxCommandId, XlsxCommandResult } from './types';
+
+export function testSessionCommands(): Pick<WorkbookSession,
+  'commandIdentity' | 'confirmedBasis' | 'throughSeq' | 'presentedThroughSeq' | 'editState' |
+  'selection' | 'submit' | 'onAck' | 'markPresented' | 'whenPresented'> {
+  return {
+    commandIdentity: { session: 'book', incarnation: 'worker' },
+    confirmedBasis: { epoch: 1, version: 'v1' },
+    throughSeq: 0, presentedThroughSeq: 0, editState: {}, selection: undefined,
+    submit: async () => { throw new Error('Unexpected command'); },
+    onAck: () => () => {}, markPresented: () => false, whenPresented: async () => {},
+  };
+}
 
 /** Uniform formatting of a plain selection, for tests. */
 export const PLAIN_FORMATTING: SelectionFormatting = {

@@ -1,5 +1,5 @@
-import { createContext, useContext } from 'react';
-import type { CSSProperties, Ref } from 'react';
+import { createContext, useContext, useLayoutEffect, useRef } from 'react';
+import type { CSSProperties, KeyboardEvent, Ref } from 'react';
 import { useTranslation } from '../../i18n';
 
 /** The editor's formula input, shared with whichever chrome renders the formula bar. */
@@ -17,6 +17,10 @@ export interface FormulaBarBinding {
   onBlur(): void;
   onCompositionStart(): void;
   onCompositionEnd(): void;
+  native?: boolean;
+  isComposing?(): boolean;
+  onKeyDown?(event: KeyboardEvent<HTMLInputElement>): boolean;
+  onKeyUp?(): void;
 }
 
 export const FormulaBarContext = createContext<FormulaBarBinding | null>(null);
@@ -85,7 +89,13 @@ export interface FormulaBarProps {
  */
 export function FormulaBar({ className, style }: FormulaBarProps) {
   const binding = useContext(FormulaBarContext);
+  const input = useRef<HTMLInputElement | null>(null);
   const { t } = useTranslation();
+  useLayoutEffect(() => {
+    if (binding?.native && input.current && !binding.isComposing?.() && input.current.value !== binding.value) {
+      input.current.value = binding.value;
+    }
+  }, [binding]);
   if (!binding) return null;
   return (
     <div
@@ -106,9 +116,14 @@ export function FormulaBar({ className, style }: FormulaBarProps) {
         fx
       </span>
       <input
-        ref={binding.inputRef}
+        ref={binding.native ? (value) => {
+          input.current = value;
+          if (typeof binding.inputRef === 'function') binding.inputRef(value);
+          else if (binding.inputRef) binding.inputRef.current = value;
+        } : binding.inputRef}
         data-testid="xlsx-formula-input"
-        value={binding.value}
+        value={binding.native ? undefined : binding.value}
+        defaultValue={binding.native ? binding.value : undefined}
         placeholder={t('toolbar.formulaPlaceholder')}
         aria-label={t('toolbar.formulaPlaceholder')}
         disabled={binding.disabled}
@@ -117,6 +132,7 @@ export function FormulaBar({ className, style }: FormulaBarProps) {
         onCompositionStart={binding.onCompositionStart}
         onCompositionEnd={binding.onCompositionEnd}
         onKeyDown={(event) => {
+          if (binding.onKeyDown?.(event)) return;
           if (binding.readOnly || event.nativeEvent.isComposing || event.keyCode === 229) return;
           if (event.key === 'Enter') {
             binding.onCommit(event.shiftKey ? 'up' : 'down');
@@ -126,6 +142,7 @@ export function FormulaBar({ className, style }: FormulaBarProps) {
             event.preventDefault();
           }
         }}
+        onKeyUp={binding.onKeyUp}
         onBlur={binding.onBlur}
         style={styles.input}
       />

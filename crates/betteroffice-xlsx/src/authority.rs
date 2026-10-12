@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::sheet_json::{decode_charts, decode_hyperlinks};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use xlsx_model::{
     AnchorEditAs, AnchorExtent, AnchorPos, Cell, CellFormat, CellRange, CellRef, CellValue,
@@ -482,14 +483,16 @@ pub(crate) struct HistoryUpdate {
     pub(crate) update: Vec<u8>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SheetOrderEntry {
     before: Vec<String>,
     after: Vec<String>,
 }
 
-#[derive(Default)]
-struct SheetOrderHistory {
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SheetOrderHistory {
     undo: Vec<SheetOrderEntry>,
     redo: Vec<SheetOrderEntry>,
 }
@@ -528,6 +531,108 @@ struct SetCellSync {
 }
 
 impl WorkbookAuthority {
+    pub(crate) fn recovery_sheet_order_history(&self) -> SheetOrderHistory {
+        self.history.clone()
+    }
+
+    pub(crate) fn restore_recovery_sheet_order_history(
+        &mut self,
+        history: SheetOrderHistory,
+        undo_depth: usize,
+        redo_depth: usize,
+    ) -> crate::snapshot::SnapshotResult<()> {
+        if history.undo.len() != undo_depth || history.redo.len() != redo_depth {
+            return Err(crate::snapshot::SnapshotError::new(
+                "Recovery sheet-order history depth mismatch",
+            ));
+        }
+        self.history = history;
+        Ok(())
+    }
+
+    pub(crate) fn encode_recovery_state(&self) -> crate::snapshot::SnapshotResult<Vec<u8>> {
+        use crate::snapshot::wire::Writer;
+        use snapshot::Codec;
+        let mut writer = Writer::new();
+        let base = &self.base;
+        base.bootstrap_client_id.write(&mut writer);
+        base.date_system.write(&mut writer);
+        base.defined_names.write(&mut writer);
+        base.fingerprint.write(&mut writer);
+        base.fingerprints.write(&mut writer);
+        base.freeze_panes.write(&mut writer);
+        base.formats.write(&mut writer);
+        base.col_styles.write(&mut writer);
+        base.hyperlinks.write(&mut writer);
+        base.charts.write(&mut writer);
+        base.hidden_dimensions.write(&mut writer);
+        base.shared_strings.write(&mut writer);
+        base.tables.write(&mut writer);
+        let styles = serde_json::to_vec(&base.styles)
+            .map_err(|error| crate::snapshot::SnapshotError::new(error.to_string()))?;
+        writer.bytes(&styles);
+        writer.bytes(&self.encode_state_as_update_v1());
+        Ok(writer.into_bytes())
+    }
+
+    pub(crate) fn restore_recovery_state(
+        bytes: &[u8],
+        client_id: u64,
+        next_sheet_id: u64,
+    ) -> crate::snapshot::SnapshotResult<Self> {
+        use crate::snapshot::SnapshotError;
+        use crate::snapshot::wire::Reader;
+        use snapshot::Codec;
+        if client_id > MAX_SAFE_CLIENT_ID {
+            return Err(SnapshotError::new("Recovery client id is out of range"));
+        }
+        let mut reader = Reader::new(bytes);
+        let base = WorkbookBase {
+            bootstrap_client_id: Codec::read(&mut reader)?,
+            date_system: Codec::read(&mut reader)?,
+            defined_names: Codec::read(&mut reader)?,
+            fingerprint: Codec::read(&mut reader)?,
+            fingerprints: Codec::read(&mut reader)?,
+            freeze_panes: Codec::read(&mut reader)?,
+            formats: Codec::read(&mut reader)?,
+            col_styles: Codec::read(&mut reader)?,
+            hyperlinks: Codec::read(&mut reader)?,
+            charts: Codec::read(&mut reader)?,
+            hidden_dimensions: Codec::read(&mut reader)?,
+            shared_strings: Codec::read(&mut reader)?,
+            tables: Codec::read(&mut reader)?,
+            styles: serde_json::from_slice(reader.bytes()?)
+                .map_err(|error| SnapshotError::new(error.to_string()))?,
+        };
+        if client_id == base.bootstrap_client_id {
+            return Err(SnapshotError::new(
+                "Recovery client id conflicts with the base",
+            ));
+        }
+        let update = reader.bytes()?;
+        reader.finish()?;
+        let doc = loop {
+            let candidate = Doc::new();
+            let id = candidate.client_id();
+            if id.get() == client_id || id.get() == base.bootstrap_client_id {
+                continue;
+            }
+            hydrate_local_doc(&candidate, update).map_err(SnapshotError::new)?;
+            let existing_client = candidate.transact().state_vector().contains_client(&id);
+            if !existing_client {
+                break candidate;
+            }
+        };
+        if has_pending(&doc) {
+            return Err(SnapshotError::new(
+                "Recovery authority has unresolved Yrs state",
+            ));
+        }
+        let authority = Self::hydrated(doc, Arc::new(base), next_sheet_id);
+        authority.strict_materialize().map_err(SnapshotError::new)?;
+        Ok(authority)
+    }
+
     fn hydrated(doc: Doc, base: Arc<WorkbookBase>, next_sheet_id: u64) -> Self {
         let snapshot_revision = Arc::new(AtomicU64::new(0));
         let projection_valid = observe_projection(&doc, snapshot_revision.clone());
