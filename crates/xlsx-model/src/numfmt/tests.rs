@@ -45,6 +45,28 @@ fn declared_builtin_codes_win() {
 }
 
 #[test]
+fn implied_currency_and_accounting_codes() {
+    let codes = [
+        (5, r##""$"#,##0_);("$"#,##0)"##),
+        (6, r##""$"#,##0_);[Red]("$"#,##0)"##),
+        (7, r##""$"#,##0.00_);("$"#,##0.00)"##),
+        (8, r##""$"#,##0.00_);[Red]("$"#,##0.00)"##),
+        (41, r##"_(* #,##0_);_(* (#,##0);_(* "-"_);_(@_)"##),
+        (42, r##"_("$"* #,##0_);_("$"* (#,##0);_("$"* "-"_);_(@_)"##),
+        (43, r##"_(* #,##0.00_);_(* (#,##0.00);_(* "-"??_);_(@_)"##),
+        (44, r##"_("$"* #,##0.00_);_("$"* (#,##0.00);_("$"* "-"??_);_(@_)"##),
+    ];
+    for (id, code) in codes {
+        assert_eq!(builtin_format_code(id), Some(code), "id {id}");
+    }
+    for id in 23..=36 {
+        assert_eq!(builtin_format_code(id), None, "id {id}");
+    }
+    assert_eq!(fv(-1234.5, codes[3].1), "($1,234.50)");
+    assert_eq!(color(-1234.5, codes[3].1).as_deref(), Some("#FF0000"));
+}
+
+#[test]
 fn builtin_table_ids() {
     assert_eq!(builtin_format_code(0), Some("General"));
     assert_eq!(builtin_format_code(1), Some("0"));
@@ -74,10 +96,10 @@ fn builtin_table_ids() {
     assert_eq!(builtin_format_code(47), Some("mmss.0"));
     assert_eq!(builtin_format_code(48), Some("##0.0E+0"));
     assert_eq!(builtin_format_code(49), Some("@"));
-    assert_eq!(builtin_format_code(5), None);
-    assert_eq!(builtin_format_code(8), None);
+    assert!(builtin_format_code(5).is_some());
+    assert!(builtin_format_code(8).is_some());
     assert_eq!(builtin_format_code(23), None);
-    assert_eq!(builtin_format_code(44), None);
+    assert!(builtin_format_code(44).is_some());
     assert_eq!(builtin_format_code(163), None);
     assert_eq!(builtin_format_code(164), None);
 }
