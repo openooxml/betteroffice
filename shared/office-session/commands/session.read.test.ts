@@ -70,6 +70,7 @@ function harness(extra: Partial<Options> = {}) {
   });
   return { session, worker, timers,
     pump() { while (queue.length) queue.shift()!(); },
+    elapse(ms: number) { now += ms; },
     tick(ms: number) {
       now += ms;
       for (const [key, task] of timers) if (task.at <= now) { timers.delete(key); task.run(); }
@@ -147,6 +148,19 @@ describe('fenced session reads and holds', () => {
     h.tick(2000);
     expect(await h.session.read('text', [])).toEqual({ ok: false, refusal: { code: 'busy' } });
     await h.session.dispose();
+  });
+
+  it('returns busy when a late release runs before its delayed timeout callback', async () => {
+    const h = harness();
+    try {
+      const hold = h.session.hold('draft');
+      const read = h.session.read('text', []);
+      h.elapse(2000);
+      hold.release();
+      expect(h.worker.reads).toHaveLength(0);
+      expect(await read).toEqual({ ok: false, refusal: { code: 'busy' } });
+      expect(h.timers.size).toBe(0);
+    } finally { await h.session.dispose(); }
   });
 
   it('releases a signal-owned hold and handles a signal already aborted', async () => {
