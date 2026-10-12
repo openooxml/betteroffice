@@ -167,10 +167,10 @@ function presentationClock() {
     } });
     return timer;
   }) as typeof schedule);
-  const cancelling = spyOn(globalThis, "clearTimeout").mockImplementation((timer: Parameters<typeof cancel>[0]) => {
+  const cancelling = spyOn(globalThis, "clearTimeout").mockImplementation(((timer: Parameters<typeof cancel>[0]) => {
     timers.delete(timer);
     cancel(timer);
-  });
+  }) as typeof cancel);
   return {
     advance(milliseconds: number) {
       now += milliseconds;
