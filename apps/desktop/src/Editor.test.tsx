@@ -157,16 +157,17 @@ function presentationClock() {
   const timers = new Map<unknown, { at: number; run(): void }>();
   const schedule = globalThis.setTimeout;
   const cancel = globalThis.clearTimeout;
-  const scheduling = spyOn(globalThis, "setTimeout").mockImplementation((callback, delay, ...args) => {
-    if (delay !== 30_000) return schedule(callback, delay, ...args);
+  const scheduling = spyOn(globalThis, "setTimeout").mockImplementation(((...parameters: Parameters<typeof schedule>) => {
+    const [callback, delay, ...args] = parameters;
+    if (delay !== 30_000) return schedule(...parameters);
     const timer = schedule(() => {}, 0);
     timers.set(timer, { at: now + delay, run() {
       if (typeof callback !== "function") throw new Error("Expected a timeout callback");
       callback(...args);
     } });
     return timer;
-  });
-  const cancelling = spyOn(globalThis, "clearTimeout").mockImplementation((timer) => {
+  }) as typeof schedule);
+  const cancelling = spyOn(globalThis, "clearTimeout").mockImplementation((timer: Parameters<typeof cancel>[0]) => {
     timers.delete(timer);
     cancel(timer);
   });

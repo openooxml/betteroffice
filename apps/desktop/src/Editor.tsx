@@ -22,6 +22,8 @@ import type { Format } from "./bridge";
 import { savedBytes } from "./session";
 import "@betteroffice/docx-react/styles.css";
 
+const PRESENTATION_READY_TIMEOUT_MS = 30_000;
+
 configureDefaultFonts({ load: () => import("@betteroffice/fonts") });
 setGoogleFontsEnabled(false);
 
@@ -245,9 +247,17 @@ export default function Editor({
               if (!active) throw disposed;
               if (!presentation) {
                 if (presentationFailure.current) throw presentationFailure.current;
+                let timeout: ReturnType<typeof setTimeout> | undefined;
                 presentation = await new Promise<PptxAsyncEditorApi>((resolve, reject) => {
-                  presentationWaiter.current = { resolve, reject };
-                });
+                  const waiter = { resolve, reject };
+                  presentationWaiter.current = waiter;
+                  timeout = setTimeout(() => {
+                    if (presentationWaiter.current !== waiter) return;
+                    presentationUnavailable(new Error(
+                      "The editor is still opening the file. Try again in a moment."
+                    ));
+                  }, PRESENTATION_READY_TIMEOUT_MS);
+                }).finally(() => clearTimeout(timeout));
               }
               if (!active || pptx.current !== presentation) throw disposed;
             }
