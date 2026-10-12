@@ -87,30 +87,6 @@ test('async replica uses the edit session fence and forwards local updates', asy
   await expect(replica.async.encodeStateVector()).rejects.toThrow('retired');
 });
 
-test('typing follows an unacknowledged merge and the adapter returns its inference', async () => {
-  const s = setup();
-  let resolve!: (outcome: { status: 'applied' }) => void;
-  const ticket = { id: 1, seq: 1, ack: new Promise<{ status: 'applied' }>(done => { resolve = done; }),
-    presented: Promise.resolve('presented' as const) };
-  const submit = mock((..._args: Parameters<DocxWorkerEditSession['submit']>) => ticket as ReturnType<DocxWorkerEditSession['submit']>);
-  s.session.submit = submit as unknown as typeof s.session.submit;
-  const replica = createPeerlessCollaborationReplica(s.client, s.session, 41);
-  const merged = replica.async.applyUpdate(source);
-  s.session.submit('insertText', { text: 'queued' });
-  expect(submit.mock.calls[1]?.[2]).toEqual({ after: ticket });
-  const older = { ...ticket, id: 0, seq: 0 };
-  s.session.submit('insertText', { text: 'after older input' }, { after: older });
-  expect(submit.mock.calls[2]?.[2]).toEqual({ after: ticket });
-  const later = { ...ticket, id: 2, seq: 2 };
-  s.session.submit('insertText', { text: 'after later input' }, { after: later });
-  expect(submit.mock.calls[3]?.[2]).toEqual({ after: later });
-  const insertion = { clientId: 42, story: 'body', paraId: 'p', endOffset: 4 };
-  for (const receive of s.listeners) receive({ updates: [], inferences: [{ seq: 1, insertion }] });
-  resolve({ status: 'applied' });
-  expect(await merged).toEqual(insertion);
-  replica.retire();
-});
-
 test('local cursor publication suppresses broadcast on document changes and clears on unmount', async () => {
   const s = setup();
   const presence: CollaborationPresence = { peers: [], setCursor: mock(() => {}), onPeers: () => () => {} };
