@@ -503,6 +503,7 @@ enum HistoryAction {
 #[cfg(test)]
 thread_local! {
     pub(crate) static SNAPSHOT_VECTOR_ENCODINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static LOCAL_UPDATE_ENCODINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 pub(crate) struct WorkbookAuthority {
@@ -697,7 +698,17 @@ impl WorkbookAuthority {
         origin: SyncOrigin,
         styles: &Stylesheet,
     ) -> Result<Option<Vec<u8>>, AuthorityError> {
-        let state_vector = self.doc.transact().state_vector();
+        self.apply_ops_with_update(ops, origin, styles, true)
+    }
+
+    pub(crate) fn apply_ops_with_update(
+        &mut self,
+        ops: &[Op],
+        origin: SyncOrigin,
+        styles: &Stylesheet,
+        encode_update: bool,
+    ) -> Result<Option<Vec<u8>>, AuthorityError> {
+        let state_vector = encode_update.then(|| self.doc.transact().state_vector());
         if let Some(prepared) = self.prepare_set_cell_sync(ops, styles)
             && let Ok((keys, history)) =
                 self.plan_sheet_keys(&prepared.keys, ops, prepared.keys.len(), origin)
@@ -724,8 +735,7 @@ impl WorkbookAuthority {
             self.projection_valid.store(true, Ordering::Relaxed);
             #[cfg(test)]
             FAST_SET_CELL_COUNT.set(FAST_SET_CELL_COUNT.get() + 1);
-            let update = self.doc.transact().encode_diff_v1(&state_vector);
-            return Ok((update.as_slice() != Update::EMPTY_V1).then_some(update));
+            return Ok(self.encode_ops_update(state_vector));
         }
         let mut model = self.materialize()?;
         let ops =
@@ -763,8 +773,15 @@ impl WorkbookAuthority {
         {
             self.projection_valid.store(true, Ordering::Relaxed);
         }
+        Ok(self.encode_ops_update(state_vector))
+    }
+
+    fn encode_ops_update(&self, state_vector: Option<StateVector>) -> Option<Vec<u8>> {
+        let state_vector = state_vector?;
+        #[cfg(test)]
+        LOCAL_UPDATE_ENCODINGS.set(LOCAL_UPDATE_ENCODINGS.get() + 1);
         let update = self.doc.transact().encode_diff_v1(&state_vector);
-        Ok((update.as_slice() != Update::EMPTY_V1).then_some(update))
+        (update.as_slice() != Update::EMPTY_V1).then_some(update)
     }
 
     fn prepare_set_cell_sync(&self, ops: &[Op], source: &Stylesheet) -> Option<SetCellSync> {
