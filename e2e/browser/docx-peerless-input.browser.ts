@@ -985,3 +985,40 @@ test('table_tab_and_shift_tab_preserve_typing_with_acks_withheld', async ({ page
   expect(await savedText(page)).toBe('ZXAYB');
   expect(await page.evaluate(() => window.__docxPeerlessInput.mainInstances)).toBe(0);
 });
+
+test('viewport-first open preserves pixels and page position as certified geometry grows', async ({ page }) => {
+  await installProbe(page);
+  await page.goto('/?format=docx&peerless=1');
+  await page.evaluate(() => { window.__docxPeerlessInput.holdFrames = true; });
+  await page.locator('input[type=file]').last().setInputFiles({
+    name: 'generated-pages.docx',
+    mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    buffer: await documentBytes(80),
+  });
+  const canvas = documentCanvas(page);
+  await expect(canvas).toBeVisible();
+  await expect.poll(() => page.evaluate(() => !!window.__docxPeerlessInput.initial)).toBe(true);
+  const initial = await page.evaluate(() => {
+    const payload = window.__docxPeerlessInput.initial!.frame!.payload;
+    return { provisional: payload.layoutProvisional, frame: Array.from(new Uint8Array(payload.frame)) };
+  });
+  expect(initial.provisional).toBe(true);
+  expect(applyFrameDelta(null, decodeFrameDelta(Uint8Array.from(initial.frame))).pages).toHaveLength(3);
+  const before = await canvas.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return { pixels: (element as HTMLCanvasElement).toDataURL(), x: rect.x, y: rect.y };
+  });
+  await expect.poll(() => page.evaluate(() => window.__docxPeerlessInput.heldFrames.some(({ message }) =>
+    message.ok && message.commandFrame?.frame.payload.layoutProvisional !== true))).toBe(true);
+  await page.evaluate(() => window.__docxPeerlessInput.releaseFrames());
+  await expect.poll(() => page.locator('[data-peerless-docx] [data-page-id]').count()).toBeGreaterThan(3);
+  const after = await canvas.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return { pixels: (element as HTMLCanvasElement).toDataURL(), x: rect.x, y: rect.y };
+  });
+  expect(after).toEqual(before);
+  await page.evaluate(async () => { await window.__docxPeerlessHarness!.setViewport!([40, 41, 42]); });
+  const later = page.locator('[data-peerless-docx] [data-page-index="40"] canvas');
+  await expect(later).toBeAttached();
+  await expect.poll(() => later.evaluate((element) => (element as HTMLCanvasElement).width)).toBeGreaterThan(0);
+});

@@ -93,9 +93,21 @@ function syntheticDocx(feature = 'plain'): Uint8Array {
   ).join('');
   parts.set('word/document.xml', toBytes(
     '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" ' +
-    'xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml">' +
-    `<w:body>${featureBody(feature, body)}${feature === 'columns' ? '<w:sectPr><w:cols w:num="2"/></w:sectPr>' : '<w:sectPr/>'}</w:body></w:document>`
+    'xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">' +
+    `<w:body>${featureBody(feature, body)}${featureSection(feature)}</w:body></w:document>`
   ));
+  if (feature.startsWith('header-') || feature.startsWith('footer-') || feature === 'footnote' || feature === 'endnote') {
+    const kind = feature.split('-')[0]!;
+    const part = kind === 'footnote' || kind === 'endnote' ? `${kind}s` : kind;
+    const content = kind === 'footnote' || kind === 'endnote'
+      ? `<w:${part}><w:${kind} w:id="1"><w:p><w:r><w:t>Note</w:t></w:r></w:p></w:${kind}></w:${part}>`
+      : `<w:${kind === 'header' ? 'hdr' : 'ftr'}><w:tbl><w:tblGrid><w:gridCol w:w="3000"/></w:tblGrid><w:tr><w:tc><w:p><w:fldSimple w:instr=" ${feature.split('-')[1]} "><w:r><w:t>9</w:t></w:r></w:fldSimple></w:p></w:tc></w:tr></w:tbl></w:${kind === 'header' ? 'hdr' : 'ftr'}>`;
+    parts.set(`word/${part}.xml`, toBytes(content.replace(/^<w:([^>]+)>/, '<w:$1 xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">')));
+    parts.set('word/_rels/document.xml.rels', toBytes(
+      `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdPart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/${part}" Target="${part}.xml"/></Relationships>`));
+    parts.set('[Content_Types].xml', toBytes(new TextDecoder().decode(parts.get('[Content_Types].xml')!).replace('</Types>',
+      `<Override PartName="/word/${part}.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.${part}+xml"/></Types>`)));
+  }
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
@@ -112,12 +124,14 @@ function worker(session: ResidentEngineSession, controlled = false) {
       replies.delete(reply.id);
     },
   };
-  startWorker(scope, { session, encodeDisplayListFrameExtras, loadRustDisplayListQueryEngine, loadedRustDisplayListQueryEngine }, controlled ? class {
+  const harness = { session, encodeDisplayListFrameExtras, loadRustDisplayListQueryEngine, loadedRustDisplayListQueryEngine };
+  startWorker(scope, harness, controlled ? class {
     port1 = { onmessage: () => {} };
     port2 = { postMessage: () => turns.push(() => this.port1.onmessage()) };
   } : MessageChannel);
   return {
     frames,
+    replaceSession(next: ResidentEngineSession) { harness.session = next; },
     async turn() { turns.shift()?.(); await new Promise<void>((resolve) => setTimeout(resolve, 0)); },
     async drain() { for (let i = 0; i < 2000 && turns.length; i += 1) { turns.shift()!(); await new Promise<void>((resolve) => setTimeout(resolve, 0)); } },
     send(request: ResidentEngineWorkerRequestWithoutId): Promise<ResidentEngineWorkerResponse> {
@@ -253,9 +267,16 @@ for (const path of ['bootstrap', 'sync', 'no-window'] as const) {
 }
 
 
+function featureSection(feature: string): string {
+  if (feature === 'columns') return '<w:sectPr><w:cols w:num="2"/></w:sectPr>';
+  if (feature.startsWith('header-') || feature.startsWith('footer-')) return `<w:sectPr><w:${feature.split('-')[0]}Reference w:type="default" r:id="rIdPart"/></w:sectPr>`;
+  return '<w:sectPr/>';
+}
+
 function featureBody(feature: string, body: string): string {
   const field = (type: string) => `<w:p><w:fldSimple w:instr=" ${type} "><w:r><w:t>9</w:t></w:r></w:fldSimple></w:p>`;
   if (['PAGE', 'NUMPAGES', 'SECTIONPAGES', 'DATE', 'TIME'].includes(feature)) return field(feature) + body;
+  if (feature === 'nested-NUMPAGES') return '<w:tbl><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc>' + field('NUMPAGES') + '</w:tc></w:tr></w:tbl>' + body;
   if (feature === 'table') return '<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid>' +
     Array.from({ length: 8 }, (_, i) => `<w:tr><w:tc><w:p><w:r><w:t>Row ${i}</w:t></w:r></w:p></w:tc></w:tr>`).join('') + '</w:tbl>' + body;
   if (feature === 'keep') return body.replace('<w:pageBreakBefore/>', '<w:keepNext/><w:keepLines/>');
@@ -274,7 +295,6 @@ async function commandFixture(feature = 'plain') {
   const host = decodeDocxHostJson(cold.openDocx(bytes), bytes);
   const request = buildResidentRegionLayoutRequest(host.document, 24, {});
   if (feature === 'footnote' || feature === 'endnote') {
-    cold.proposalEngine.readParagraphs({ view: 'accepted' });
     request.notes = { contents: [{ id: 1, noteKind: feature, height: 0 }] } as typeof request.notes;
   }
   const requirements = JSON.parse(cold.layoutFontRequirementsJson(JSON.stringify(request))) as Array<{ key: string }>;
@@ -287,7 +307,7 @@ async function commandFixture(feature = 'plain') {
   cold.setDisplayWindow(0, 3);
   cold.setDisplayRetainBuiltPages(false);
   cold.setWindowedIncrementalBuilds(true);
-  const extras = JSON.stringify({ fontChains });
+  const extras = JSON.stringify({ fontChains, headersFooters: JSON.parse(cold.retainedHeadersFootersJson() ?? 'null') });
   const full = applyFrameDelta(null, decodeFrameDelta(cold.buildDisplayListFrame(extras, 0)));
   await w.send({ type: 'open', bytes: bytes.slice().buffer });
   const methods = ['layoutDocumentWithRegionsRetained', 'layoutDocumentWithRegionsRetainedJson', 'beginRegionLayout', 'resumeRegionLayout'] as const;
@@ -313,7 +333,7 @@ async function commandFixture(feature = 'plain') {
   };
 }
 
-for (const feature of ['plain', 'table', 'keep', 'section', 'PAGE']) {
+for (const feature of ['plain', 'table', 'keep', 'section', 'PAGE', 'header-PAGE']) {
   test(`command prefix ${feature} is exact and bounded before a full pass`, async () => {
     const f = await commandFixture(feature);
     try {
@@ -340,7 +360,7 @@ for (const feature of ['plain', 'table', 'keep', 'section', 'PAGE']) {
   });
 }
 
-for (const feature of ['NUMPAGES', 'SECTIONPAGES', 'footnote', 'endnote', 'float', 'columns', 'DATE', 'TIME']) {
+for (const feature of ['NUMPAGES', 'SECTIONPAGES', 'nested-NUMPAGES', 'header-NUMPAGES', 'footer-SECTIONPAGES', 'footnote', 'endnote', 'float', 'columns', 'DATE', 'TIME']) {
   test(`command prefix excludes ${feature} and returns the cold full layout`, async () => {
     const f = await commandFixture(feature);
     try {
@@ -418,8 +438,21 @@ test('collaboration and replacement cannot publish an abandoned command completi
       expect(f.initial.frame.payload.layoutProvisional).toBe(true);
       await f.present();
       await f.w.turn();
-      if (replace) await f.w.send({ type: 'open', bytes: syntheticDocx('PAGE').buffer });
-      else await f.w.send({ type: 'commandUpdate', update: f.cold.encodeState() });
+      if (replace) {
+        const replacement = await createResidentEngineSession();
+        f.w.replaceSession(replacement);
+        const reply = await f.w.send({ type: 'bootstrap', snapshot: {
+          clientId: 1, state: f.cold.encodeState(), fontsRevision: 1, fonts: [FONT], renderInputs: [], measureInputs: [],
+          layoutInput: f.init.layoutInput, layoutWithRegions: true, layoutRevision: 1, selection: null,
+        }, extras: f.init.extras, expectedFrameEpoch: 0, displayWindow: [0, 3] });
+        expect(reply.ok && reply.commandInitial?.epoch).toBe(2);
+        expect(reply.ok && reply.commandInitial?.frame.payload.layoutProvisional).toBe(true);
+        replacement.destroy();
+      } else {
+        const reply = await f.w.send({ type: 'commandUpdate', update: f.engine.encodeState() });
+        expect(reply.ok).toBe(true);
+        expect(f.w.frames.at(-1)!.payload.layoutProvisional).not.toBe(true);
+      }
       const count = f.w.frames.length;
       await f.w.drain();
       expect(f.w.frames).toHaveLength(count);

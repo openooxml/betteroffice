@@ -1173,3 +1173,12 @@ test('controlled viewing mode locks admission before parent layout input', async
   expect(submitted.result).toEqual({ status: 'ignored', reason: 'read-only' });
   expect(workers[0].text).toBe('');
 });
+
+test('worker-only opens request the font-ready certified initial display window', async () => {
+  render(<DocxEditor {...peerlessProps} showToolbar={false} />);
+  await waitFor(() => expect(requests.some(request => request.type === 'commandInit')).toBe(true));
+  const request = requests.find(request => request.type === 'commandInit');
+  expect(request?.type === 'commandInit' && request.request).toMatchObject({
+    provisionalPages: 3, displayWindow: [0, 3], layoutWithRegions: true,
+  });
+});
