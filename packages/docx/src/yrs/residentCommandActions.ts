@@ -116,7 +116,7 @@ function validCommandIntent(command: DocxCommandEnvelope, error: { reason: strin
     deleteBackward: ['count'], deleteForward: ['count'], paragraphBreak: [], toggleMark: ['mark'],
     formatRange: ['delta'], clearFormatting: [], setParagraphAttrs: ['attrs'],
     applyParagraphStyle: ['styleId'], setReadOnly: ['readOnly'], setRenderEnvironment: ['themeColors', 'showHiddenText'],
-  } satisfies Record<DocxCommandKind, string[]>;
+  } satisfies Record<Exclude<DocxCommandKind, 'applyRemoteUpdate'>, string[]>;
   const keys = Object.hasOwn(allowed, command.kind) ? allowed[command.kind] : undefined;
   const semanticSelection = ['navigate', 'selectPoint', 'extendSelection', 'undo', 'redo', 'replaceMatches', 'setRenderEnvironment'].includes(command.kind);
   if (!keys || Object.keys(payload).some((key) => !keys.includes(key) &&

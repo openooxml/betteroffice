@@ -79,7 +79,10 @@ test('read-only merges bypass basis admission and invalid updates leave the docu
   try {
     await a.run('setReadOnly', { readOnly: true });
     await b.run('insertText', { text: 'B' });
-    expect((await a.run('applyRemoteUpdate', { update: b.buffer.drain()!.updates[0] })).status).toBe('applied');
+    const update = b.buffer.drain()!.updates[0]!;
+    const stale = command(a.arm, 'applyRemoteUpdate', { update }, { basis: { epoch: 1, version: 999 } });
+    expect((await a.hooks.preflight(stale, context(a.arm, stale))).status).toBe('ready');
+    expect((await a.run('applyRemoteUpdate', { update })).status).toBe('applied');
     const before = a.arm.engine.encodeStateVector();
     expect(await a.run('applyRemoteUpdate', { update: new Uint8Array([255]).buffer })).toMatchObject({ status: 'refused', reason: 'invalid-update' });
     expect(await a.run('applyRemoteUpdate', { update: new ArrayBuffer(0) })).toMatchObject({ status: 'refused', reason: 'invalid-payload' });

@@ -194,6 +194,7 @@ export interface DocxCommandStagedPresentation {
 }
 
 export interface DocxCommandPayloads {
+  applyRemoteUpdate: { update: ArrayBuffer };
   setRenderEnvironment: { themeColors: Record<string, string>; showHiddenText: boolean };
   replaceMatches: { targets: DocxTextRange[]; text: string; expectVersion: string; suggesting?: YrsAuthor };
   undo: Record<string, never>;

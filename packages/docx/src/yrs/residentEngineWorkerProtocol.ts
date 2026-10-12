@@ -1,4 +1,6 @@
 import type { ResidentRangeHighlights } from './residentRangeHighlights';
+import type { ResidentPresencePeer, ResidentPresenceGeometry, ResidentCollaborationUpdates } from './residentCollaboration';
+export type { ResidentPresencePeer, ResidentPresenceGeometry } from './residentCollaboration';
 import type { YrsStoryRange } from './index';
 import type { LayoutMetaV1 } from './layoutMeta';
 import type { Checkpoint } from '../../../../shared/office-session/commands/types';
@@ -90,6 +92,9 @@ export interface ResidentProposalResponse {
 
 /** @internal */
 export type ResidentDocumentRead =
+  | { kind: 'collabStateVector' }
+  | { kind: 'collabDiff'; stateVector?: Uint8Array }
+  | { kind: 'collabPresence'; peers: ResidentPresencePeer[]; pages: [number, number]; expectVersion: string; expectFrameEpoch: number; expectLayoutRevision: number }
   | { kind: 'exportStructuredWithPages'; options: DocxPageExportOptions; currentRequest: string }
   | { kind: 'listContentControls'; options: DocxContentControlsOptions }
   | { kind: 'findContentControls'; query: DocxContentControlQuery; options: DocxContentControlsOptions }
@@ -124,6 +129,9 @@ export type ResidentDocumentRead =
 
 /** @internal */
 export interface ResidentDocumentReadValues {
+  collabStateVector: Uint8Array;
+  collabDiff: Uint8Array;
+  collabPresence: ResidentPresenceGeometry | null;
   exportStructuredWithPages: string;
   listContentControls: DocxContentControlsResult;
   findContentControls: DocxContentControlsResult;
@@ -198,6 +206,7 @@ export type ResidentEngineWorkerRequest =
   | {
       id: number;
       type: 'open';
+      collaboration?: { clientId: number; initialUpdate?: ArrayBuffer };
       /** The DOCX package, parsed and seeded in a fresh session here. */
       bytes: ArrayBuffer;
       /** The package's SHA-256, when the caller already took it. */
@@ -415,6 +424,7 @@ export type ResidentEngineWorkerResponse = (
       outOfMemory?: boolean;
     }
 ) & {
+  collabUpdates?: ResidentCollaborationUpdates & { session?: string; incarnation?: number; epoch?: number };
   /** The worker's wasm memories as the reply left. */
   memory?: WasmModuleMemory[];
 };

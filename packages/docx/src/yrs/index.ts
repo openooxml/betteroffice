@@ -107,6 +107,7 @@ export * from './inputPositionMap';
 export * from './storyPlainText';
 export type { DocxResolvedPointPosition } from './pointPosition';
 export type { ResidentRangeHighlights } from './residentRangeHighlights';
+export type { ResidentPresencePeer, ResidentPresenceGeometry } from './residentCollaboration';
 export type { ResidentDocumentRead, ResidentDocumentReadValues } from './residentEngineWorkerProtocol';
 export type {
   DocxDisplayRange,

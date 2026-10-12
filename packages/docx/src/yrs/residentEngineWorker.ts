@@ -1,6 +1,7 @@
 /// <reference lib="webworker" />
 
 import { readResidentRangeHighlights } from './residentRangeHighlights';
+import { createResidentCollaboration, readResidentCollaborationState, readResidentPresence } from './residentCollaboration';
 import { LAYOUT_META_VERSION, type LayoutMetaV1, type RetainedLayoutMeta } from './layoutMeta';
 import { isCommandOutcomeUnknownError } from '../../../../shared/office-session/commands/types';
 import { isTransferResult, type TransferResult } from '../../../../shared/office-session/protocol';
@@ -98,6 +99,7 @@ const scope = self as unknown as DedicatedWorkerGlobalScope;
 let resolveHostEditModule: (module: WebAssembly.Module | null) => void;
 let hostEditModule = nextHostEditModule();
 let session: ResidentEngineSession | null = null;
+let collaboration: ReturnType<typeof createResidentCollaboration> | null = null;
 let commandHost: ResidentCommandHost | null = null;
 let commandInit: ResidentCommandInitRequest | null = null;
 let commandHooksFactory: ResidentCommandHooksFactory | null = null;
@@ -161,7 +163,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
     }
     return selectionQueries.queries;
   };
-  const hooks = commandHooksFactory(engine, init, {
+  const baseHooks = commandHooksFactory(engine, init, {
     setRenderEnvironment(environment) {
       const input = JSON.parse(init.layoutInput);
       input.renderEnv = { ...input.renderEnv, ...environment };
@@ -283,6 +285,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
     },
   });
   const changes: NonNullable<typeof commandFrameChanges> = { pages: new Set<number>(), updates: [] };
+  const hooks = collaboration?.wrap(baseHooks) ?? baseHooks;
   commandFrameChanges = changes;
   let revision = 0;
   const host = createResidentCommandHost({
@@ -1080,18 +1083,23 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     if (session) destroySession(true);
     openedSource = null;
     editorSaves = { full: false };
-    const opening = await createResidentEngineSession(request.heapLimitBytes);
+    if (request.collaboration && request.previewBlocks !== undefined) throw new TypeError('Collaboration previews are unavailable');
+    if (request.collaboration && (!Number.isSafeInteger(request.collaboration.clientId) || request.collaboration.clientId < 0)) {
+      throw new TypeError('Collaboration clientId must be a non-negative safe integer');
+    }
+    const opening = await createResidentEngineSession(request.heapLimitBytes, request.collaboration?.clientId);
     let hostJson: string | null;
     try {
       if (request.previewBlocks === undefined) opening.setDirectBatches(true);
       hostJson =
         request.previewBlocks === undefined
-          ? opening.openDocx(new Uint8Array(request.bytes), request.digest, request.generation)
+          ? opening.openDocx(new Uint8Array(request.bytes), request.digest, request.generation, !request.collaboration?.initialUpdate)
           : opening.openDocxPreview(
               new Uint8Array(request.bytes),
               request.previewBlocks,
               request.previewParagraphBudget
             );
+      if (request.collaboration?.initialUpdate) opening.loadState(new Uint8Array(request.collaboration.initialUpdate));
     } catch (error) {
       if (!(error instanceof WebAssembly.RuntimeError)) opening.destroy();
       throw error;
@@ -1104,6 +1112,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     proposals?.destroy();
     proposals = null;
     session = opening;
+    if (request.collaboration) collaboration = createResidentCollaboration(opening);
     if (request.previewBlocks === undefined) openedVersion = undefined;
     openedDocument = { heapLimitBytes: request.heapLimitBytes };
     previewing = request.previewBlocks !== undefined;
@@ -1429,6 +1438,17 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     }
     let value: unknown;
     switch (request.read.kind) {
+      case 'collabStateVector':
+        value = session.encodeStateVector();
+        break;
+      case 'collabDiff':
+        value = readResidentCollaborationState(session, request.read.stateVector);
+        break;
+      case 'collabPresence':
+        value = !retainedFrame || engine.version() !== request.read.expectVersion || retainedLayoutVersion !== engine.version() ||
+          request.read.expectFrameEpoch !== retainedFrame.frameEpoch || request.read.expectLayoutRevision !== layoutRevision
+          ? null : await readResidentPresence(session, retainedFrame, request.read.peers, request.read.pages, layoutRevision);
+        break;
       case 'rawSelectionInfo': {
         const { anchor, focus } = request.read.selection;
         if (anchor.story !== focus.story) throw new Error('Cross-story selection is unavailable');
@@ -2413,6 +2433,7 @@ function asciiProposalFontsUnchanged(
  * showing the old pages, for a document that replaces it page for page.
  */
 function destroySession(keepSurfaces = false): void {
+  collaboration?.dispose(); collaboration = null;
   supersedeBackgroundPageBuild();
   fontRequirements = null;
   forgetRequirementsCache();
@@ -2757,5 +2778,8 @@ function reply(response: ResidentEngineWorkerResponse, transfer: Transferable[] 
   // A trap the raster painted past fails the request that would succeed, and
   // every request waiting on it, through the paths that answer failures.
   if (trap && response.ok) throw trap;
-  scope.postMessage({ ...response, memory: wasmModuleMemories() }, transfer);
+  const collabUpdates = collaboration?.drain();
+  scope.postMessage({ ...response, ...(collabUpdates ? { collabUpdates: { ...collabUpdates,
+    ...(commandInit ? { session: commandInit.session, incarnation: commandInit.incarnation, epoch: commandInit.epoch } : {}) } } : {}),
+    memory: wasmModuleMemories() }, [...transfer, ...(collabUpdates?.updates ?? [])]);
 }

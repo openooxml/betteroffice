@@ -69,7 +69,7 @@ test('update push precedes command ack and queued typing survives a merge', asyn
     await a.session.submit('insertText', { text: 'A' }).ack.then(() => events.push('ack'));
     expect(events).toEqual(['update', 'ack']);
     await b.session.submit('insertText', { text: 'B' }).ack;
-    const merge = a.session.submit('applyRemoteUpdate', { update: b.engine.encodeStateAsUpdate(a.engine.encodeStateVector()).buffer }, { lane: 'collab', fence: true });
+    const merge = a.session.submit('applyRemoteUpdate', { update: b.engine.encodeStateAsUpdate(a.engine.encodeStateVector()).slice().buffer }, { lane: 'collab', fence: true });
     const typing = a.session.submit('insertText', { text: '!' }, { after: merge });
     expect((await merge.ack).status).toBe('applied');
     expect((await typing.ack).status).toBe('applied');
@@ -97,11 +97,41 @@ test('presence reads are tied to the covering frame and unresolved anchors are m
     expect((await a.client.documentRead({ ...read, peers: [{ clientId: 9202, clock: 2,
       cursor: { ...cursor, anchor: new Uint8Array([255]) } }] })).value?.peers[0]?.status).toBe('unresolved');
     remote.loadState(a.engine.encodeState());
-    remote.deleteRange({ story: 'body', start: { paraId: paragraphs[0]!.paraId, offset: 4 }, end: { paraId: paragraphs[1]!.paraId, offset: 6 } });
-    await a.session.submit('applyRemoteUpdate', { update: remote.encodeStateAsUpdate(a.engine.encodeStateVector()).buffer }, { lane: 'collab', fence: true }).ack;
+    const table = remote.insertTable({ story: 'body', paraId: paragraphs[0]!.paraId, offset: 0 }, 1, 1);
+    const story = table.createdStoryIds[0]!;
+    const paraId = remote.paragraphs(story)[0]!.paraId;
+    remote.insertText({ story, paraId, offset: 0 }, 'Anchor');
+    await a.session.submit('applyRemoteUpdate', { update: remote.encodeStateAsUpdate(a.engine.encodeStateVector()).slice().buffer }, { lane: 'collab', fence: true }).ack;
+    remote.setSelection({ story, paraId, offset: 3 });
+    const deletedCursor = remote.encodeSelection()!;
+    remote.deleteTable(table.table);
+    await a.session.submit('applyRemoteUpdate', { update: remote.encodeStateAsUpdate(a.engine.encodeStateVector()).slice().buffer }, { lane: 'collab', fence: true }).ack;
     const frame = await a.client.requestFullFrame();
     const current = a.engine.proposalEngine.version();
-    expect((await a.client.documentRead({ ...read, pages: [0, 2], expectVersion: current,
+    expect((await a.client.documentRead({ ...read, peers: [{ clientId: 9203, clock: 3, cursor: deletedCursor }], pages: [0, 2], expectVersion: current,
       expectFrameEpoch: frame.frame!.revision, expectLayoutRevision: frame.frame!.payload.layoutRevision })).value?.peers[0]?.status).toBe('unresolved');
+  } finally { remote.destroy(); a.session.dispose(); }
+}, TIMEOUT);
+
+test('inferred remote carets rebase through a later local insert', async () => {
+  const a = await open(9201);
+  const remote = await createYrsSession({ clientId: 9203 });
+  try {
+    remote.loadState(a.engine.encodeState());
+    const paraId = a.engine.paragraphs('body')[0]!.paraId;
+    remote.insertText({ story: 'body', paraId, offset: 4 }, 'A');
+    await a.session.submit('applyRemoteUpdate', { update: remote.encodeStateAsUpdate(a.engine.encodeStateVector()).slice().buffer }, { lane: 'collab', fence: true }).ack;
+    const presence = async () => {
+      const frame = (await a.client.requestFullFrame()).frame!;
+      return (await a.client.documentRead({ kind: 'collabPresence', peers: [{ clientId: 9203, clock: 1,
+        inferred: { story: 'body', paraId, offset: 5 } }], pages: [0, 1], expectVersion: a.engine.proposalEngine.version(),
+        expectFrameEpoch: frame.revision, expectLayoutRevision: frame.payload.layoutRevision })).value?.peers[0]?.caret;
+    };
+    const before = await presence();
+    const at = { story: 'body', paraId, offset: 0 };
+    await a.session.submit('insertText', { text: 'prefix', selection: { anchor: at, focus: at } }).ack;
+    const after = await presence();
+    expect(before).not.toBeNull();
+    expect(after!.x).toBeGreaterThan(before!.x);
   } finally { remote.destroy(); a.session.dispose(); }
 }, TIMEOUT);
