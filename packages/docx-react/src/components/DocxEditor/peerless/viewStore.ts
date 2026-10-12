@@ -23,6 +23,7 @@ export interface PeerlessSelectionAnchors {
 
 /** @internal Installed geometry is independent of acknowledged worker selection. */
 export interface PeerlessFrameGeometry {
+  documentVersion?: string;
   identity: PeerlessViewIdentity;
   coversThroughSeq: number;
   frameEpoch: number;

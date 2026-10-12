@@ -26,7 +26,13 @@ const emit = (index: number, event: CollaborationTransportEvent) => { for (const
 function transport(index: number): CollaborationTransport {
   const endpoint = endpoints[index]!;
   return {
-    connect() { endpoint.connected = true; emit(index, { type: 'open' }); },
+    connect() {
+      endpoint.connected = true;
+      const peer = endpoints[1 - index]!;
+      if (peer.connected) emit(1 - index, { type: 'close' });
+      emit(index, { type: 'open' });
+      if (peer.connected) emit(1 - index, { type: 'open' });
+    },
     disconnect() { endpoint.connected = false; endpoint.queued.length = 0; emit(index, { type: 'close' }); },
     send(data) {
       const target = endpoints[1 - index]!;
@@ -61,7 +67,7 @@ const onReplica = slots.map((slot, index) => (replica: CollaborationReplica | nu
 function render() {
   root.render(<div style={{ display: 'flex', height: '100%' }}>{slots.slice(0, count).map((slot, index) =>
     <div key={index} data-editor={index} style={{ width: '50%', height: '100%', minWidth: 0 }}>
-      <DocxEditor ref={slot.ref} documentBuffer={slot.file} {...(mixed && index === 1 ? {} : workerOnly())}
+      <DocxEditor ref={slot.ref} documentBuffer={slot.file} {...(mixed && index === 1 ? { legacySyncApi: true } : workerOnly())}
         showToolbar={false} showRuler={false} showOutlineButton={false} measurementFontProvider={fonts}
         collaboration={{ clientId: slot.clientId, initialUpdate: slot.initialUpdate, onReplica: onReplica[index], presence: slot.provider }}
         onError={error => errors.push(error.message)} />
@@ -94,9 +100,17 @@ export const probe: DocxPeerlessCollaborationProbe = {
   errors,
   ready: Promise.resolve(),
   async text(index: number) {
-    const read = await slots[index]!.ref.current!.readParagraphs({ story: 'body', view: 'accepted' });
-    if (!read.ok) throw new Error(read.failure.message);
-    return read.paragraphs.map(paragraph => paragraph.text).join('\n');
+    for (let attempt = 0; attempt < 20; attempt++) {
+      try {
+        const read = await slots[index]!.ref.current!.readParagraphs({ story: 'body', view: 'accepted' });
+        if (!read.ok) throw new Error(read.failure.message);
+        return read.paragraphs.map(paragraph => paragraph.text).join('\n');
+      } catch (error) {
+        if (!(error instanceof Error) || !error.message.includes('superseded')) throw error;
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+    }
+    throw new Error('Document text did not settle');
   },
   painted(index: number) { return Array.from(document.querySelectorAll(`[data-editor="${index}"] .canvas-page-mirror`))
     .map(host => host.textContent ?? '').join(''); },

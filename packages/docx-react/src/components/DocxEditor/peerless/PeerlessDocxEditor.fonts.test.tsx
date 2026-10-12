@@ -21,7 +21,7 @@ type ResidentCommandInitRequest = Parameters<ResidentEngineWorkerClient['command
 async function openFontConnection(hold = false, fontKeys: readonly string[] = ['face']) {
   const source = readFileSync(`${import.meta.dir}/PeerlessDocxEditor.tsx`, 'utf8');
   const start = source.indexOf('    signal.throwIfAborted();', source.indexOf('const openConnection ='));
-  const end = source.indexOf('\n  }, []);', start);
+  const end = source.indexOf('\n  }, [', start);
   const transpiler = new Bun.Transpiler({ loader: 'tsx' });
   const body = transpiler.transformSync(`async function open(bytes, signal) {${source.slice(start, end).replace(
     'const fonts: YrsResidentFontRegistration[] = [];',
@@ -57,6 +57,7 @@ async function openFontConnection(hold = false, fontKeys: readonly string[] = ['
     return connection;
   });
   const dependencies = {
+    collaborationBinding: { retire() {}, begin() {}, openOptions: undefined },
     active: { current: null },
     worker: { current: null },
     sourceComments: { current: [] },

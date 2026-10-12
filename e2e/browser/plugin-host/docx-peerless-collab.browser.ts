@@ -2,7 +2,10 @@ import { expect, test, type Locator, type Page } from 'playwright/test';
 import type {} from './docx-peerless-collab-probe';
 
 const editor = (page: Page, index: number) => page.locator(`[data-editor="${index}"]`);
-const input = (page: Page, index: number) => editor(page, index).locator('textarea.paged-editor__peerless-input, textarea[data-testid="yrs-input"]').last();
+const input = (page: Page, index: number) => {
+  const worker = editor(page, index).locator('textarea.paged-editor__peerless-input');
+  return index === 1 ? worker.or(page.locator('textarea[data-testid="yrs-input"]')).last() : worker;
+};
 const text = (page: Page, index: number) => page.evaluate(index => window.__docxPeerlessCollab.text(index), index);
 async function open(page: Page, mixed = false) {
   await page.goto(`/docx-peerless-collab.html${mixed ? '?mixed=1' : ''}`);
@@ -16,14 +19,16 @@ async function select(page: Page, index: number, end = true) {
   await target.focus(); await target.press(end ? 'ControlOrMeta+End' : 'ControlOrMeta+Home');
   return target;
 }
-async function type(target: Locator, value: string) {
+async function type(target: Locator, value: string, withoutFocus = false) {
+  if (!withoutFocus) { await target.pressSequentially(value); return; }
   await target.evaluate((element, value) => element.dispatchEvent(new InputEvent('beforeinput', {
     bubbles: true, cancelable: true, inputType: 'insertText', data: value,
   })), value);
 }
 async function converged(page: Page, expected?: string) {
-  await expect.poll(async () => { const a = await text(page, 0); return a === await text(page, 1) ? a : null; }).toBe(expected ?? await text(page, 0));
-  if (expected) for (const index of [0, 1]) await expect.poll(() => page.evaluate(index => window.__docxPeerlessCollab.painted(index), index)).toContain(expected);
+  const value = expected ?? await text(page, 0);
+  await expect.poll(async () => { const a = await text(page, 0); return a === await text(page, 1) ? a : null; }).toBe(value);
+  for (const index of [0, 1]) await expect.poll(() => page.evaluate(index => window.__docxPeerlessCollab.painted(index), index)).toContain(value);
 }
 
 test.afterEach(async ({ page }) => {
@@ -67,7 +72,7 @@ test('room change reopens with the shared state and document swap stays consiste
 });
 
 test('composition survives a remote merge and commits at its rebased position', async ({ page }) => {
-  await open(page); const target = await select(page, 0);
+  await open(page); await select(page, 1, false); const target = await select(page, 0);
   await target.evaluate(element => {
     const textarea = element as HTMLTextAreaElement;
     textarea.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true, data: '' }));
@@ -76,8 +81,9 @@ test('composition survives a remote merge and commits at its rebased position', 
     textarea.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'insertCompositionText', data: 'かな', isComposing: true }));
     textarea.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertCompositionText', data: 'かな', isComposing: true }));
   });
-  await type(await select(page, 1, false), 'R');
-  await expect.poll(() => text(page, 0)).toBe('RSeed'); await expect(target).toHaveValue('かな');
+  await type(input(page, 1), 'R', true);
+  await expect.poll(() => page.evaluate(() => window.__docxPeerlessCollab.painted(0))).toContain('RSeed');
+  await expect(target).toHaveValue('かな');
   await target.evaluate(element => element.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: '漢字' })));
   await converged(page, 'RSeed漢字');
 });
@@ -85,7 +91,7 @@ test('composition survives a remote merge and commits at its rebased position', 
 test('worker and hybrid replicas converge and paint each other cursors', async ({ page }) => {
   await open(page, true);
   await type(await select(page, 0), 'A'); await converged(page, 'SeedA');
-  await expect(editor(page, 1).getByTestId('remote-presence-overlay')).toBeVisible();
+  await expect(editor(page, 1).getByTestId('remote-presence-overlay').locator(':scope > div').first()).toBeVisible();
   await type(await select(page, 1), 'B'); await converged(page, 'SeedAB');
   await expect(editor(page, 0).getByTestId('remote-presence-caret')).toBeVisible();
 });

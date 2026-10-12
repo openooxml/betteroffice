@@ -833,7 +833,6 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   const peerless = usePeerlessEngineChoice(requested, props[LEGACY_SYNC_API_PROP] === true);
   if (requested) {
     if (props.onChange) throw new PeerlessSyncApiError('onChange(Document)');
-    if (props.collaboration) throw new PeerlessSyncApiError('CollaborationReplica');
   }
   if (peerless) return <LazyPeerlessDocxEditor {...props} ref={ref} />;
   return <LegacyDocxEditor {...props} ref={ref} />;
