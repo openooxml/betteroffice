@@ -89,6 +89,15 @@ export const PeerlessWorkerCellInput = memo(function PeerlessWorkerCellInput({ c
   const bounds = retained.current.rect;
   useLayoutEffect(() => {
     const input = controller.cellInput;
+    if (!input) return;
+    const beforeInput = (event: InputEvent) => {
+      if (controller.holdCellBeforeInput(event)) event.preventDefault();
+    };
+    input.addEventListener('beforeinput', beforeInput);
+    return () => input.removeEventListener('beforeinput', beforeInput);
+  }, [controller, draft !== null, bounds !== null]);
+  useLayoutEffect(() => {
+    const input = controller.cellInput;
     if (!draft || !input || controller.isComposing('cell')) return;
     if (input.value !== draft.value) input.value = draft.value;
     const active = input.ownerDocument.activeElement;
@@ -97,6 +106,7 @@ export const PeerlessWorkerCellInput = memo(function PeerlessWorkerCellInput({ c
       if (active && active !== input.ownerDocument.body && !surface?.contains(active)) return;
       input.focus({ preventScroll: true }); input.setSelectionRange(input.value.length, input.value.length);
     }
+    controller.restoreCellSelection();
   }, [controller, draft, bounds !== null]);
   if (!draft) return null;
   if (!bounds) return null;
@@ -111,6 +121,7 @@ export const PeerlessWorkerCellInput = memo(function PeerlessWorkerCellInput({ c
     onKeyDown={(event) => {
       if (!commandForEvent(event)) event.stopPropagation();
       if (controller.key('cell', event)) return;
+      if (controller.holdCellKey(event)) { event.preventDefault(); event.stopPropagation(); return; }
       if (event.key === 'Enter') { controller.commit('cell', event.shiftKey ? 'up' : 'down'); event.preventDefault(); }
       else if (event.key === 'Tab') { controller.commit('cell', event.shiftKey ? 'left' : 'right'); event.preventDefault(); }
       else if (event.key === 'Escape') { controller.cancel(); event.preventDefault(); }

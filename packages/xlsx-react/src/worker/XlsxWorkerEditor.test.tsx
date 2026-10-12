@@ -620,7 +620,7 @@ describe('peerless F2 prefill keyboard replay', () => {
   const setup = async () => {
     const host = peerlessHarness();
     host.cells.set('0:0:0', value);
-    const view = await host.mount();
+    const view = await host.mount(() => {});
     const prefill = deferred<Awaited<ReturnType<typeof host.cellInputs>>>();
     host.cellInputs.mockReturnValueOnce(prefill.promise);
     fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'F2' });
@@ -692,6 +692,41 @@ describe('peerless F2 prefill keyboard replay', () => {
     key(input, 'Enter');
     expect(host.sent.filter((command) => command.kind === 'editCell')).toEqual([]);
     expect(host.cells.get('0:0:0')).toBe(value);
+  });
+
+  it('saving discards held input while preserving the untouched loading cell', async () => {
+    const { host, view, input, resolve } = await setup();
+    type(input, 'X');
+    let saving!: Promise<unknown>;
+    await act(async () => {
+      saving = host.commands().execute('save', null);
+      await Promise.resolve();
+    });
+    await act(async () => {
+      for (const command of host.sent) host.ack(command);
+      await saving;
+    });
+    await resolve();
+    expect(view.queryByTestId('xlsx-cell-editor')).toBeNull();
+    expect(host.sent.filter((command) => command.kind === 'editCell')).toEqual([]);
+    expect(host.cells.get('0:0:0')).toBe(value);
+    expect(host.session.save).toHaveBeenCalledTimes(1);
+  });
+
+  it('commits held input on blur without taking focus back from the host', async () => {
+    const { host, input, resolve } = await setup();
+    const button = document.createElement('button');
+    document.body.appendChild(button);
+    try {
+      type(input, 'X');
+      act(() => button.focus());
+      expect(host.sent.filter((command) => command.kind === 'editCell')).toEqual([]);
+      await resolve();
+      const edits = host.sent.filter((command) => command.kind === 'editCell');
+      expect(edits).toHaveLength(1);
+      expect(edits[0]).toMatchObject({ payload: { args: [0, 0, 0, `${value}X`] } });
+      expect(document.activeElement).toBe(button);
+    } finally { button.remove(); }
   });
 });
 

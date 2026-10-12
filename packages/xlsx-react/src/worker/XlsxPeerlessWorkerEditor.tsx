@@ -946,7 +946,10 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     onSaveRequest: props.onSaveRequest, fail: report,
   });
   usePeerlessWorkerXlsxCommands(commands, {
-    requestSave,
+    requestSave: (save) => requestSave(() => {
+      if (draftController.loadingCell) draftController.finish();
+      return save();
+    }),
     session: () => run?.session ?? null, coordinator,
     status: () => run?.ready ? 'ready' : run && !run.failure || loading ? 'loading' : 'empty',
     readOnly: () => propsRef.current.readOnly ?? false, collaborative: () => propsRef.current.collaboration !== undefined,
@@ -1088,11 +1091,17 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     const draft = draftController.getSnapshot().cell;
     if (draft) {
       if (draftController.cellInput || draftController.key('cell', event)) return;
+      if (draftController.holdCellKey(event)) { event.preventDefault(); return; }
       if (event.key === 'Enter') draftController.commit('cell', event.shiftKey ? 'up' : 'down');
       else if (event.key === 'Tab') draftController.commit('cell', event.shiftKey ? 'left' : 'right');
       else if (event.key === 'Escape') draftController.cancel();
-      else if (!mod && event.key === 'Backspace') draftController.change('cell', draft.value.slice(0, -1), null);
-      else if (!mod && event.key.length === 1) draftController.change('cell', draft.value + event.key, null);
+      else if (!mod && event.key === 'Backspace') {
+        if (!draftController.holdCellEdit({ kind: 'delete', direction: 'backward', unit: 'character' })) {
+          draftController.change('cell', draft.value.slice(0, -1), null);
+        }
+      } else if (!mod && event.key.length === 1) {
+        if (!draftController.holdCellEdit({ kind: 'insert', text: event.key })) draftController.change('cell', draft.value + event.key, null);
+      }
       else return;
       event.preventDefault(); return;
     }
