@@ -240,7 +240,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     return () => { current = false; };
   }, [documentBuffer, reportError]);
 
-  const openConnection = useCallback(async (input: PeerlessDocumentSource, signal: AbortSignal): Promise<ResidentCommandConnection> => {
+  const openConnection = useCallback(async (input: PeerlessDocumentSource, signal: AbortSignal, getRasterScale?: () => number): Promise<ResidentCommandConnection> => {
     signal.throwIfAborted();
     active.current = null;
     const client = takePreloadedResidentEngineWorker() ?? new ResidentEngineWorkerClient();
@@ -335,6 +335,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       const initial = await client.commandInit({
         session: crypto.randomUUID(), incarnation: 1, epoch: 1, readOnly: settings.current.readOnly,
         fonts: fonts.slice(),
+        rasterScale: getRasterScale?.() ?? 1,
         fontRegistrationSlots: { fontChains: config.fontChains },
         layoutInput: JSON.stringify(layout),
         layoutWithRegions: true, layoutRevision: 1, extras: JSON.stringify({ fontChains: config.fontChains }), displayWindow: [0, 3],

@@ -176,7 +176,7 @@ test('raster scale starts at device pixels and settles zoom and rearmed DPR chan
   const timeout = spyOn(globalThis, 'setTimeout').mockImplementation(((run: () => void, delay: number) => {
     const id = ++timerId;
     pending.set(id, { at: now + delay, run });
-    return id;
+    return id as unknown as ReturnType<typeof setTimeout>;
   }) as typeof setTimeout);
   const cancel = spyOn(globalThis, 'clearTimeout').mockImplementation(((id: number) => { pending.delete(id); }) as typeof clearTimeout);
   restorers.push(() => timeout.mockRestore(), () => cancel.mockRestore());

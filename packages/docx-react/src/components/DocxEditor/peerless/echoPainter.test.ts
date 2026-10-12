@@ -314,7 +314,7 @@ test('d2c_fractional_raster_scale_uses_page_dimensions_for_crop_and_text', () =>
     canvas.height = raster.height * zoom;
     const pending = entry(1, painter.preview({ kind: 'insertText', payload: { text: 'c' } })!);
     painter.paint([pending]);
-    expect(draws.at(-1)).toEqual([crop, 0, 0, crop.width, crop.height, 40, 400, 100, 21]);
+    expect(draws.at(-1)).toEqual([crop, 0, 0, crop.width, 21 * (crop.height / 21), 40, 400, 100, 21]);
     expect(transforms.at(-1)).toEqual([scale * zoom, 0, 0, scale * zoom, 0, 0]);
     expect(transforms.at(-2)).toEqual(transforms.at(-1));
     expect(transforms.at(-1)![3]! * damage.y).toBe(400 * scale * zoom);

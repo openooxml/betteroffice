@@ -1,4 +1,4 @@
-import { memo, useCallback, useInsertionEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type PointerEvent, type ReactElement } from 'react';
+import { memo, useCallback, useEffect, useInsertionEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type PointerEvent, type ReactElement } from 'react';
 import type { DocxEchoRect } from '@betteroffice/docx/peerless';
 import type { DocxCommandPageIdentity } from '@betteroffice/docx/peerless';
 import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVerticalScrollParent';
@@ -275,6 +275,23 @@ export interface PeerlessPagedEditorProps {
 
 /** @internal */
 export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoFocus, onReady, displayWindow, onDisplayWindowChange, onClipboard, highlights, onNavigateCell }: PeerlessPagedEditorProps): ReactElement | null {
+  const [devicePixelRatio, setDevicePixelRatio] = useState(() => typeof window === 'undefined' ? 1 : window.devicePixelRatio || 1);
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return;
+    let media: MediaQueryList;
+    const arm = () => {
+      media?.removeEventListener('change', change);
+      media = window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
+      media.addEventListener('change', change);
+    };
+    const change = () => {
+      setDevicePixelRatio(window.devicePixelRatio || 1);
+      arm();
+    };
+    change();
+    return () => media.removeEventListener('change', change);
+  }, []);
+  const rasterScale = devicePixelRatio * zoom;
   const canvases = useRef(new Map<string, HTMLCanvasElement>());
   const [measuredWindow, setMeasuredWindow] = useState<readonly [number, number]>([0, 3]);
   const window = displayWindow ?? measuredWindow;
@@ -323,8 +340,8 @@ export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoF
     }
     return geometry;
   }, [options.prepareGeometry, canvasForPage]);
-  const session = usePeerlessEditSession(useMemo(() => ({ ...options, canvasForPage: residentCanvasForPage, prepareGeometry }), [
-    options.source, options.openConnection, options.recovery, prepareGeometry, options.onError, residentCanvasForPage,
+  const session = usePeerlessEditSession(useMemo(() => ({ ...options, rasterScale, canvasForPage: residentCanvasForPage, prepareGeometry }), [
+    options.source, options.openConnection, options.recovery, prepareGeometry, options.onError, residentCanvasForPage, rasterScale,
   ]));
   useLayoutEffect(() => {
     if (session.status === 'ready') onReady?.(session.binding);
