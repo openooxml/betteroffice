@@ -1,6 +1,6 @@
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { GlobalWindow } from "happy-dom";
-import { afterAll, afterEach, expect, mock, test } from "bun:test";
+import { afterAll, afterEach, expect, mock, spyOn, test } from "bun:test";
 import { forwardRef, useEffect, useImperativeHandle } from "react";
 import type { PptxAsyncEditorApi, PptxAsyncEditorProps } from "@betteroffice/pptx-react";
 import type { EditorApi } from "./Editor";
@@ -152,6 +152,38 @@ async function mount(format: "docx" | "pptx" = "docx", collaborative = false, on
   return { api: ready.api!, errors, saved, view };
 }
 
+function presentationClock() {
+  let now = 0;
+  const timers = new Map<unknown, { at: number; run(): void }>();
+  const schedule = globalThis.setTimeout;
+  const cancel = globalThis.clearTimeout;
+  const scheduling = spyOn(globalThis, "setTimeout").mockImplementation((callback, delay, ...args) => {
+    if (delay !== 30_000) return schedule(callback, delay, ...args);
+    const timer = schedule(() => {}, 0);
+    timers.set(timer, { at: now + delay, run() {
+      if (typeof callback !== "function") throw new Error("Expected a timeout callback");
+      callback(...args);
+    } });
+    return timer;
+  });
+  const cancelling = spyOn(globalThis, "clearTimeout").mockImplementation((timer) => {
+    timers.delete(timer);
+    cancel(timer);
+  });
+  return {
+    advance(milliseconds: number) {
+      now += milliseconds;
+      for (const [timer, deadline] of timers) {
+        if (deadline.at > now) continue;
+        timers.delete(timer);
+        deadline.run();
+      }
+    },
+    get pending() { return timers.size; },
+    restore() { scheduling.mockRestore(); cancelling.mockRestore(); },
+  };
+}
+
 test("peerless preview reports dirty state through worker document events", async () => {
   const previousUrl = location.href;
   const browser = window as unknown as GlobalWindow;
@@ -237,6 +269,39 @@ test("presentation serialization waits for the editor API before saving", async 
   expect(await result).toEqual(Uint8Array.of(5));
   expect(savePresentation).toHaveBeenCalledTimes(1);
   expect(saved).toEqual([]);
+});
+
+test("presentation readiness timeout drains queued serializations", async () => {
+  deferPresentationReady = true;
+  savePresentation = mock(async () => Uint8Array.of(9));
+  const { api } = await mount("pptx");
+  const clock = presentationClock();
+  const flush = async () => {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  };
+  const opening = "The editor is still opening the file. Try again in a moment.";
+  const results: (Uint8Array | string)[] = ["pending", "pending"];
+  try {
+    void api.serialize().then((bytes) => { results[0] = bytes; }, (cause: Error) => { results[0] = cause.message; });
+    void api.serialize().then((bytes) => { results[1] = bytes; }, (cause: Error) => { results[1] = cause.message; });
+    await flush();
+    clock.advance(29_999);
+    await flush();
+    expect(results).toEqual(["pending", "pending"]);
+    expect(savePresentation).not.toHaveBeenCalled();
+    clock.advance(1);
+    await flush();
+    expect(results).toEqual([opening, opening]);
+    expect(clock.pending).toBe(0);
+    expect(savePresentation).not.toHaveBeenCalled();
+    await act(async () => { readyPresentation!(); });
+    expect(await api.serialize()).toEqual(Uint8Array.of(9));
+  } finally {
+    clock.restore();
+  }
 });
 
 test("unmount rejects waiting, queued, and subsequent presentation saves", async () => {
