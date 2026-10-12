@@ -9,6 +9,7 @@ pub mod region;
 
 pub use ooxml_drawingml::GeometryPathCommand;
 use std::sync::Arc;
+pub use xlsx_model::PatternType;
 
 use hashbrown::HashMap;
 use ooxml_drawingml::chart::ChartSpace;
@@ -31,7 +32,7 @@ pub use chart::{
 };
 pub use display_list::{
     Align, ChartA11yAttrs, ChartRegion, DisplayList, DrawCmd, GridMeta, HyperlinkRegion,
-    PathStroke, Rect, scaled,
+    PathStroke, Rect, border_dash, scaled,
 };
 pub use geometry::{GridGeometry, PrintMetrics, autofit_relevant};
 pub use hit::chart_at_point;
@@ -764,7 +765,7 @@ where
 
     for &(at, cell) in &anchors {
         // a cell naming no style still inherits its column's
-        let Some(hex) = &fx
+        let Some(fill) = &fx
             .xf(cell.style.or_else(|| sheet_ref.col_style(at.col)))
             .fill
         else {
@@ -774,14 +775,19 @@ where
             continue;
         };
         let clip = cell_box.clip;
-        commands.push(DrawCmd::FillRect {
-            x: clip.x,
-            y: clip.y,
-            w: clip.w,
-            h: clip.h,
-            color: hex.clone(),
-            clip: None,
-        });
+        let origin = (
+            if at.col < cols.frozen {
+                0.0
+            } else {
+                -cols.scroll
+            },
+            if at.row < rows.frozen {
+                0.0
+            } else {
+                -rows.scroll
+            },
+        );
+        commands.push(fill.command(clip, origin));
     }
 
     if print.is_none() {
@@ -1196,48 +1202,56 @@ fn emit_column_fills(
         let Some(style) = sheet.col_style(col.index) else {
             continue;
         };
-        let Some(Fill::Solid(color)) = styles.fill_for(style) else {
+        let Some(fill) = styles
+            .fill_for(style)
+            .and_then(|fill| ResolvedFill::resolve(styles, fill))
+        else {
             continue;
         };
-        let Some(hex) = styles.resolve_color(color) else {
-            continue;
-        };
-        let mut run: Option<(f32, f32, u32)> = None;
+        let origin_x = if col.pinned { 0.0 } else { -cols.scroll };
+        let mut run: Option<(f32, f32, u32, f32)> = None;
         for row in &rows.tracks {
             let at = CellRef::new(row.index, col.index);
             let owned = sheet.cell(at).is_some() || merges.covering(at).is_some();
+            let origin_y = if row.pinned { 0.0 } else { -rows.scroll };
             match run {
-                Some((start, _, last)) if !owned && row.index == last + 1 => {
-                    run = Some((start, row.end, row.index));
+                Some((start, _, last, origin))
+                    if !owned
+                        && row.index == last + 1
+                        && (matches!(&fill, ResolvedFill::Solid(_)) || origin == origin_y) =>
+                {
+                    run = Some((start, row.end, row.index, origin));
                 }
                 _ => {
-                    if let Some((start, end, _)) = run.take()
+                    if let Some((start, end, _, origin_y)) = run.take()
                         && end > start
                     {
-                        commands.push(DrawCmd::FillRect {
-                            x: col.start,
-                            y: start,
-                            w: (col.end - col.start).max(0.0),
-                            h: end - start,
-                            color: hex.clone().into(),
-                            clip: None,
-                        });
+                        commands.push(fill.command(
+                            Rect {
+                                x: col.start,
+                                y: start,
+                                w: (col.end - col.start).max(0.0),
+                                h: end - start,
+                            },
+                            (origin_x, origin_y),
+                        ));
                     }
-                    run = (!owned).then_some((row.start, row.end, row.index));
+                    run = (!owned).then_some((row.start, row.end, row.index, origin_y));
                 }
             }
         }
-        if let Some((start, end, _)) = run
+        if let Some((start, end, _, origin_y)) = run
             && end > start
         {
-            commands.push(DrawCmd::FillRect {
-                x: col.start,
-                y: start,
-                w: (col.end - col.start).max(0.0),
-                h: end - start,
-                color: hex.into(),
-                clip: None,
-            });
+            commands.push(fill.command(
+                Rect {
+                    x: col.start,
+                    y: start,
+                    w: (col.end - col.start).max(0.0),
+                    h: end - start,
+                },
+                (origin_x, origin_y),
+            ));
         }
     }
 }
@@ -1591,12 +1605,71 @@ fn cell_box(
 struct ResolvedXf {
     format_code: Arc<str>,
     font: Option<ResolvedFont>,
-    fill: Option<Arc<str>>,
+    fill: Option<ResolvedFill>,
     border: Option<ResolvedBorder>,
     h: Option<HAlign>,
     v: Option<VAlign>,
     /// wrap_text or shrink_to_fit — both suppress text spill.
     wrap_or_shrink: bool,
+}
+
+enum ResolvedFill {
+    Solid(Arc<str>),
+    Pattern {
+        pattern: PatternType,
+        fg: Arc<str>,
+        bg: Arc<str>,
+    },
+}
+
+impl ResolvedFill {
+    fn resolve(styles: &Stylesheet, fill: &Fill) -> Option<Self> {
+        match fill {
+            Fill::None => None,
+            Fill::Solid(color) => styles
+                .resolve_color(color)
+                .map(|color| Self::Solid(color.into())),
+            Fill::Pattern { pattern, fg, bg } => Some(Self::Pattern {
+                pattern: *pattern,
+                fg: fg
+                    .as_ref()
+                    .and_then(|color| styles.resolve_color(color))
+                    .unwrap_or_else(|| "#000000".into())
+                    .into(),
+                bg: bg
+                    .as_ref()
+                    .and_then(|color| styles.resolve_color(color))
+                    .unwrap_or_else(|| "#ffffff".into())
+                    .into(),
+            }),
+        }
+    }
+
+    fn command(&self, rect: Rect, (origin_x, origin_y): (f32, f32)) -> DrawCmd {
+        let Rect { x, y, w, h } = rect;
+        match self {
+            Self::Solid(color) => DrawCmd::FillRect {
+                x,
+                y,
+                w,
+                h,
+                color: color.clone(),
+                clip: None,
+            },
+            Self::Pattern { pattern, fg, bg } => DrawCmd::PatternFill {
+                x,
+                y,
+                w,
+                h,
+                pattern: *pattern,
+                fg: fg.clone(),
+                bg: bg.clone(),
+                origin_x,
+                origin_y,
+                clip: None,
+            },
+        }
+    }
 }
 
 struct ResolvedFont {
@@ -1677,10 +1750,7 @@ impl<'a> FrameStyles<'a> {
             });
         let fill = style
             .and_then(|s| styles.fill_for(s))
-            .and_then(|fill| match fill {
-                Fill::Solid(color) => styles.resolve_color(color).map(Arc::from),
-                _ => None,
-            });
+            .and_then(|fill| ResolvedFill::resolve(styles, fill));
         let border = style
             .and_then(|s| styles.border_for(s))
             .map(|border| ResolvedBorder {
@@ -1924,7 +1994,13 @@ fn border_stroke(style: BorderStyle) -> (f32, Option<&'static str>) {
         BorderStyle::Thick => (3.0, None),
         BorderStyle::Dashed => (1.0, Some("dashed")),
         BorderStyle::Dotted => (1.0, Some("dotted")),
-        BorderStyle::Double => (1.0, Some("double")),
+        BorderStyle::Double => (3.0, Some("double")),
+        BorderStyle::MediumDashed => (2.0, Some("mediumDashed")),
+        BorderStyle::DashDot => (1.0, Some("dashDot")),
+        BorderStyle::MediumDashDot => (2.0, Some("mediumDashDot")),
+        BorderStyle::DashDotDot => (1.0, Some("dashDotDot")),
+        BorderStyle::MediumDashDotDot => (2.0, Some("mediumDashDotDot")),
+        BorderStyle::SlantDashDot => (1.0, Some("slantDashDot")),
     }
 }
 

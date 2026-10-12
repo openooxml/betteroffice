@@ -3486,6 +3486,20 @@ fn write_fill(w: &mut Writer<Vec<u8>>, fill: &Fill) -> io::Result<()> {
                     })?;
                 Ok(())
             }
+            Fill::Pattern { pattern, fg, bg } => {
+                w.create_element("patternFill")
+                    .with_attribute(("patternType", pattern.as_sml()))
+                    .write_inner_content(|w| {
+                        if let Some(color) = fg {
+                            write_color(w, "fgColor", color)?;
+                        }
+                        if let Some(color) = bg {
+                            write_color(w, "bgColor", color)?;
+                        }
+                        Ok(())
+                    })?;
+                Ok(())
+            }
         })?;
     Ok(())
 }

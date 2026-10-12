@@ -1,7 +1,7 @@
 //! fixtures are raw xml parts written from the ecma-376 spec. the parser
 //! matches local element names, so fixtures omit namespace declarations.
 
-use xlsx_model::styles::{BorderStyle, Color, Fill, FormatCode, HAlign, VAlign};
+use xlsx_model::styles::{BorderStyle, Color, Fill, FormatCode, HAlign, PatternType, VAlign};
 use xlsx_model::{
     Cell, CellRange, CellRef, CellValue, ColStyle, DateSystem, DefinedName, ErrorValue, FreezePane,
     Hyperlink, SheetId, Workbook,
@@ -1582,8 +1582,14 @@ fn parses_full_styled_workbook() {
         ss.fill_for(1),
         Some(&Fill::Solid(Color::Rgb("#ffff00".into())))
     );
-    // the gray125 convention fill collapses to a solid auto fill
-    assert_eq!(ss.fills[1], Fill::Solid(Color::Auto));
+    assert_eq!(
+        ss.fills[1],
+        Fill::Pattern {
+            pattern: PatternType::Gray125,
+            fg: None,
+            bg: None
+        }
+    );
 
     let border = ss.border_for(1).unwrap();
     let left = border.left.as_ref().unwrap();

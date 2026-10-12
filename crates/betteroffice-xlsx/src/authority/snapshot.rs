@@ -1,7 +1,8 @@
 use std::collections::LinkedList;
 
 use xlsx_model::styles::{
-    Alignment, Border, BorderEdge, BorderStyle, Color, Fill, Font, HAlign, Theme, VAlign, Xf,
+    Alignment, Border, BorderEdge, BorderStyle, Color, Fill, Font, HAlign, PatternType, Theme,
+    VAlign, Xf,
 };
 use xlsx_model::{AnchorCell, ChartRefKind};
 
@@ -714,6 +715,14 @@ macro_rules! enum_codec {
 enum_codec!(DateSystem { V1900 = 0, V1904 = 1 });
 enum_codec!(BorderStyle {
     Thin = 0, Medium = 1, Thick = 2, Dashed = 3, Dotted = 4, Double = 5, Hair = 6,
+    MediumDashed = 7, DashDot = 8, MediumDashDot = 9, DashDotDot = 10,
+    MediumDashDotDot = 11, SlantDashDot = 12,
+});
+enum_codec!(PatternType {
+    Gray125 = 0, Gray0625 = 1, MediumGray = 2, DarkGray = 3, LightGray = 4,
+    DarkHorizontal = 5, DarkVertical = 6, DarkDown = 7, DarkUp = 8, DarkGrid = 9,
+    DarkTrellis = 10, LightHorizontal = 11, LightVertical = 12, LightDown = 13,
+    LightUp = 14, LightGrid = 15, LightTrellis = 16,
 });
 enum_codec!(HAlign {
     General = 0, Left = 1, Center = 2, Right = 3, Fill = 4, Justify = 5,
@@ -912,13 +921,24 @@ impl Codec for Fill {
                 r.position = child.position;
                 r.complete = child.complete;
             }
+            2 => {
+                let mut child = DecodePreflight::new(r.payload, r.position, r.state);
+                child.value::<(PatternType, (Option<Color>, Option<Color>))>()?;
+                r.cost = r.cost.max(1usize.saturating_add(child.cost));
+                r.position = child.position;
+                r.complete = child.complete;
+            }
             _ => return Err(SnapshotError::new("invalid snapshot fill")),
         }
         Ok(())
     }
 
     fn decode_cost() -> usize {
-        preparation_cost::<Self>().max(1usize.saturating_add(Color::decode_cost()))
+        preparation_cost::<Self>().max(1usize.saturating_add(Color::decode_cost().max(<(
+            PatternType,
+            (Option<Color>, Option<Color>),
+        )>::decode_cost(
+        ))))
     }
 
     fn write(&self, w: &mut Writer) {
@@ -928,6 +948,12 @@ impl Codec for Fill {
                 w.u8(1);
                 color.write(w);
             }
+            Self::Pattern { pattern, fg, bg } => {
+                w.u8(2);
+                pattern.write(w);
+                fg.write(w);
+                bg.write(w);
+            }
         }
     }
 
@@ -935,6 +961,11 @@ impl Codec for Fill {
         match r.u8()? {
             0 => Ok(Self::None),
             1 => Ok(Self::Solid(Codec::read(r)?)),
+            2 => Ok(Self::Pattern {
+                pattern: Codec::read(r)?,
+                fg: Codec::read(r)?,
+                bg: Codec::read(r)?,
+            }),
             _ => Err(SnapshotError::new("invalid snapshot fill")),
         }
     }
@@ -942,6 +973,10 @@ impl Codec for Fill {
         match r.atomic::<u8>()? {
             0 => Ok(Self::None),
             1 => r.value().map(Self::Solid),
+            2 => {
+                let (pattern, (fg, bg)) = r.value()?;
+                Ok(Self::Pattern { pattern, fg, bg })
+            }
             _ => Err(SnapshotError::new("invalid snapshot fill")),
         }
     }
@@ -2208,6 +2243,50 @@ mod tests {
     use crate::snapshot::wire::unframe;
 
     use super::*;
+
+    #[test]
+    fn pattern_border_authority_codec_round_trip() {
+        for pattern in PatternType::ALL {
+            let fill = Fill::Pattern {
+                pattern,
+                fg: Some(Color::Rgb("#123456".into())),
+                bg: Some(Color::Theme { idx: 4, tint: 0.25 }),
+            };
+            let mut writer = Writer::new();
+            fill.write(&mut writer);
+            let bytes = writer.into_bytes();
+            assert_eq!(Fill::read(&mut Reader::new(&bytes)).unwrap(), fill);
+            let mut state = BaseDecode::default();
+            let budget = SnapshotBudget::new(1, 1024).unwrap();
+            let restored = loop {
+                if let Some((fill, offset)) =
+                    decode_record::<Fill>(&mut state, (1, 0), &bytes, budget).unwrap()
+                {
+                    assert_eq!(offset, bytes.len());
+                    break fill;
+                }
+            };
+            assert_eq!(restored, fill);
+        }
+        for token in [
+            "mediumDashed",
+            "dashDot",
+            "mediumDashDot",
+            "dashDotDot",
+            "mediumDashDotDot",
+            "slantDashDot",
+        ] {
+            let style = BorderStyle::from_sml(token);
+            let mut writer = Writer::new();
+            style.write(&mut writer);
+            assert_eq!(
+                BorderStyle::read(&mut Reader::new(&writer.into_bytes()))
+                    .unwrap()
+                    .as_sml(),
+                token
+            );
+        }
+    }
 
     fn model() -> WorkbookModel {
         let mut sheet = Sheet::new("Data");

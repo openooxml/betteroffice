@@ -46,15 +46,114 @@ pub struct Font {
     pub color: Option<Color>,
 }
 
-/// a cell fill. non-solid patterns collapse to their foreground color.
+/// A cell fill.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub enum Fill {
     #[default]
     None,
     Solid(Color),
+    Pattern {
+        pattern: PatternType,
+        fg: Option<Color>,
+        bg: Option<Color>,
+    },
 }
 
-/// border line weight/style, collapsed from the full sml set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PatternType {
+    Gray125,
+    Gray0625,
+    MediumGray,
+    DarkGray,
+    LightGray,
+    DarkHorizontal,
+    DarkVertical,
+    DarkDown,
+    DarkUp,
+    DarkGrid,
+    DarkTrellis,
+    LightHorizontal,
+    LightVertical,
+    LightDown,
+    LightUp,
+    LightGrid,
+    LightTrellis,
+}
+
+impl PatternType {
+    pub const ALL: [Self; 17] = [
+        Self::Gray125,
+        Self::Gray0625,
+        Self::MediumGray,
+        Self::DarkGray,
+        Self::LightGray,
+        Self::DarkHorizontal,
+        Self::DarkVertical,
+        Self::DarkDown,
+        Self::DarkUp,
+        Self::DarkGrid,
+        Self::DarkTrellis,
+        Self::LightHorizontal,
+        Self::LightVertical,
+        Self::LightDown,
+        Self::LightUp,
+        Self::LightGrid,
+        Self::LightTrellis,
+    ];
+
+    pub fn from_sml(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|pattern| pattern.as_sml() == value)
+    }
+
+    pub fn as_sml(self) -> &'static str {
+        match self {
+            Self::Gray125 => "gray125",
+            Self::Gray0625 => "gray0625",
+            Self::MediumGray => "mediumGray",
+            Self::DarkGray => "darkGray",
+            Self::LightGray => "lightGray",
+            Self::DarkHorizontal => "darkHorizontal",
+            Self::DarkVertical => "darkVertical",
+            Self::DarkDown => "darkDown",
+            Self::DarkUp => "darkUp",
+            Self::DarkGrid => "darkGrid",
+            Self::DarkTrellis => "darkTrellis",
+            Self::LightHorizontal => "lightHorizontal",
+            Self::LightVertical => "lightVertical",
+            Self::LightDown => "lightDown",
+            Self::LightUp => "lightUp",
+            Self::LightGrid => "lightGrid",
+            Self::LightTrellis => "lightTrellis",
+        }
+    }
+
+    pub fn mask(self) -> [u8; 8] {
+        match self {
+            Self::Gray125 => [0x11, 0, 0x44, 0, 0x11, 0, 0x44, 0],
+            Self::Gray0625 => [0x01, 0, 0, 0, 0x10, 0, 0, 0],
+            Self::MediumGray => [0x55, 0xaa, 0x55, 0xaa, 0x55, 0xaa, 0x55, 0xaa],
+            Self::DarkGray => [0x77, 0xdd, 0x77, 0xdd, 0x77, 0xdd, 0x77, 0xdd],
+            Self::LightGray => [0x11, 0x44, 0x11, 0x44, 0x11, 0x44, 0x11, 0x44],
+            Self::DarkHorizontal => [0xff, 0xff, 0, 0, 0xff, 0xff, 0, 0],
+            Self::DarkVertical => [0x33; 8],
+            Self::DarkDown => [0x33, 0x66, 0xcc, 0x99, 0x33, 0x66, 0xcc, 0x99],
+            Self::DarkUp => [0x33, 0x99, 0xcc, 0x66, 0x33, 0x99, 0xcc, 0x66],
+            Self::DarkGrid => [0xff, 0xff, 0x33, 0x33, 0xff, 0xff, 0x33, 0x33],
+            Self::DarkTrellis => [0x33, 0xff, 0xcc, 0xff, 0x33, 0xff, 0xcc, 0xff],
+            Self::LightHorizontal => [0xff, 0, 0, 0, 0xff, 0, 0, 0],
+            Self::LightVertical => [0x11; 8],
+            Self::LightDown => [0x11, 0x22, 0x44, 0x88, 0x11, 0x22, 0x44, 0x88],
+            Self::LightUp => [0x11, 0x88, 0x44, 0x22, 0x11, 0x88, 0x44, 0x22],
+            Self::LightGrid => [0xff, 0x11, 0x11, 0x11, 0xff, 0x11, 0x11, 0x11],
+            Self::LightTrellis => [0x11, 0xaa, 0x44, 0xaa, 0x11, 0xaa, 0x44, 0xaa],
+        }
+    }
+}
+
+/// Border line style.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BorderStyle {
     Thin,
@@ -64,6 +163,12 @@ pub enum BorderStyle {
     Dotted,
     Double,
     Hair,
+    MediumDashed,
+    DashDot,
+    MediumDashDot,
+    DashDotDot,
+    MediumDashDotDot,
+    SlantDashDot,
 }
 
 impl BorderStyle {
@@ -71,9 +176,15 @@ impl BorderStyle {
     pub fn from_sml(s: &str) -> Self {
         match s {
             "thin" => BorderStyle::Thin,
-            "medium" | "mediumDashed" | "mediumDashDot" | "mediumDashDotDot" => BorderStyle::Medium,
+            "medium" => BorderStyle::Medium,
             "thick" => BorderStyle::Thick,
-            "dashed" | "dashDot" | "dashDotDot" | "slantDashDot" => BorderStyle::Dashed,
+            "dashed" => BorderStyle::Dashed,
+            "mediumDashed" => BorderStyle::MediumDashed,
+            "dashDot" => BorderStyle::DashDot,
+            "mediumDashDot" => BorderStyle::MediumDashDot,
+            "dashDotDot" => BorderStyle::DashDotDot,
+            "mediumDashDotDot" => BorderStyle::MediumDashDotDot,
+            "slantDashDot" => BorderStyle::SlantDashDot,
             "dotted" => BorderStyle::Dotted,
             "double" => BorderStyle::Double,
             "hair" => BorderStyle::Hair,
@@ -91,6 +202,12 @@ impl BorderStyle {
             BorderStyle::Dotted => "dotted",
             BorderStyle::Double => "double",
             BorderStyle::Hair => "hair",
+            BorderStyle::MediumDashed => "mediumDashed",
+            BorderStyle::DashDot => "dashDot",
+            BorderStyle::MediumDashDot => "mediumDashDot",
+            BorderStyle::DashDotDot => "dashDotDot",
+            BorderStyle::MediumDashDotDot => "mediumDashDotDot",
+            BorderStyle::SlantDashDot => "slantDashDot",
         }
     }
 }
@@ -362,6 +479,11 @@ impl<'a> FontKey<'a> {
 enum FillKey<'a> {
     None,
     Solid(ColorKey<'a>),
+    Pattern {
+        pattern: PatternType,
+        fg: Option<ColorKey<'a>>,
+        bg: Option<ColorKey<'a>>,
+    },
 }
 
 impl<'a> FillKey<'a> {
@@ -369,6 +491,17 @@ impl<'a> FillKey<'a> {
         Some(match fill {
             Fill::None => FillKey::None,
             Fill::Solid(color) => FillKey::Solid(ColorKey::new(color)?),
+            Fill::Pattern { pattern, fg, bg } => FillKey::Pattern {
+                pattern: *pattern,
+                fg: match fg {
+                    Some(color) => Some(ColorKey::new(color)?),
+                    None => None,
+                },
+                bg: match bg {
+                    Some(color) => Some(ColorKey::new(color)?),
+                    None => None,
+                },
+            },
         })
     }
 }

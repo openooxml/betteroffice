@@ -3,8 +3,8 @@
 
 use quick_xml::events::{BytesStart, Event};
 use xlsx_model::styles::{
-    Alignment, Border, BorderEdge, BorderStyle, Color, Fill, Font, HAlign, Stylesheet, Theme,
-    VAlign, Xf,
+    Alignment, Border, BorderEdge, BorderStyle, Color, Fill, Font, HAlign, PatternType, Stylesheet,
+    Theme, VAlign, Xf,
 };
 
 use crate::xml::{attr, local_name, next_event, reader};
@@ -117,14 +117,33 @@ fn parse_styles(data: &[u8]) -> Result<(Stylesheet, Vec<Xf>), ParseError> {
                     font.as_mut().unwrap().color = parse_color(&e)?;
                 }
                 b"patternFill" if fill.is_some() => {
-                    if attr(&e, b"patternType")?.as_deref() != Some("none") {
-                        // any non-none pattern collapses to solid auto until fgColor is seen
-                        *fill.as_mut().unwrap() = Fill::Solid(Color::Auto);
-                    }
+                    let token = attr(&e, b"patternType")?;
+                    *fill.as_mut().unwrap() = match token.as_deref() {
+                        Some("none") => Fill::None,
+                        token => match token.and_then(PatternType::from_sml) {
+                            Some(pattern) => Fill::Pattern {
+                                pattern,
+                                fg: None,
+                                bg: None,
+                            },
+                            None => Fill::Solid(Color::Auto),
+                        },
+                    };
                 }
                 b"fgColor" if fill.is_some() => {
-                    if let Some(c) = parse_color(&e)? {
-                        *fill.as_mut().unwrap() = Fill::Solid(c);
+                    let color = parse_color(&e)?;
+                    match fill.as_mut().unwrap() {
+                        Fill::Pattern { fg, .. } => *fg = color,
+                        other => {
+                            if let Some(color) = color {
+                                *other = Fill::Solid(color);
+                            }
+                        }
+                    }
+                }
+                b"bgColor" if fill.is_some() => {
+                    if let Fill::Pattern { bg, .. } = fill.as_mut().unwrap() {
+                        *bg = parse_color(&e)?;
                     }
                 }
                 b"left" | b"start" if border.is_some() => edge = begin_edge(&e, 0)?,

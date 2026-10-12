@@ -69,6 +69,7 @@ fn absolute_chart() -> SheetChart {
 fn is_chart_command(command: &DrawCmd) -> bool {
     match command {
         DrawCmd::FillRect { clip, .. }
+        | DrawCmd::PatternFill { clip, .. }
         | DrawCmd::Line { clip, .. }
         | DrawCmd::Path { clip, .. } => clip.is_some(),
         DrawCmd::Text { chart, .. } => *chart,

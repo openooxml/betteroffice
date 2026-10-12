@@ -4,8 +4,8 @@ use std::ops::Bound::{Excluded, Unbounded};
 use xlsx_model::{
     Alignment, AnchorCell, AnchorEditAs, AnchorExtent, AnchorPos, Border, BorderEdge, BorderStyle,
     Cell, CellRef, ChartAnchor, ChartRef, ChartRefKind, ColStyle, Color, DateSystem, DefinedName,
-    Fill, Font, FreezePane, HAlign, Hyperlink, Sheet, SheetChart, SheetFormat, SheetId, Table,
-    Theme, VAlign, Workbook, Xf,
+    Fill, Font, FreezePane, HAlign, Hyperlink, PatternType, Sheet, SheetChart, SheetFormat,
+    SheetId, Table, Theme, VAlign, Workbook, Xf,
 };
 
 use super::cells::{CellCursor, read_cell, read_range, read_ref, write_range, write_ref};
@@ -1481,6 +1481,12 @@ fn write_fill(w: &mut Writer, value: &Fill) {
             w.u8(1);
             write_color(w, color);
         }
+        Fill::Pattern { pattern, fg, bg } => {
+            w.u8(2);
+            write_pattern(w, pattern);
+            w.option(fg.as_ref(), write_color);
+            w.option(bg.as_ref(), write_color);
+        }
     }
 }
 
@@ -1488,6 +1494,11 @@ fn read_fill(r: &mut Reader<'_>) -> SnapshotResult<Fill> {
     Ok(match r.u8()? {
         0 => Fill::None,
         1 => Fill::Solid(read_color(r)?),
+        2 => Fill::Pattern {
+            pattern: read_pattern(r)?,
+            fg: r.option(read_color)?,
+            bg: r.option(read_color)?,
+        },
         _ => return Err(SnapshotError::new("invalid snapshot fill")),
     })
 }
@@ -1517,6 +1528,19 @@ enum_codec!(write_border_style, read_border_style, BorderStyle, {
     Dotted => 4,
     Double => 5,
     Hair => 6,
+    MediumDashed => 7,
+    DashDot => 8,
+    MediumDashDot => 9,
+    DashDotDot => 10,
+    MediumDashDotDot => 11,
+    SlantDashDot => 12,
+});
+
+enum_codec!(write_pattern, read_pattern, PatternType, {
+    Gray125 => 0, Gray0625 => 1, MediumGray => 2, DarkGray => 3, LightGray => 4,
+    DarkHorizontal => 5, DarkVertical => 6, DarkDown => 7, DarkUp => 8, DarkGrid => 9,
+    DarkTrellis => 10, LightHorizontal => 11, LightVertical => 12, LightDown => 13,
+    LightUp => 14, LightGrid => 15, LightTrellis => 16,
 });
 
 enum_codec!(write_halign, read_halign, HAlign, {

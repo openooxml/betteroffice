@@ -2,6 +2,7 @@
 //! server-side twin of the browser's canvas backend; never enters the wasm build.
 
 mod font;
+use std::collections::{HashMap, hash_map::Entry};
 
 pub use font::measure_text;
 
@@ -19,9 +20,67 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
     let mut pixmap = Pixmap::new(w, h).ok_or_else(|| "invalid pixmap size".to_string())?;
     pixmap.fill(Color::WHITE);
     let mut clip_surface = ClipSurface::default();
+    let mut patterns = HashMap::new();
 
     for cmd in &dl.commands {
         match cmd {
+            DrawCmd::PatternFill {
+                x,
+                y,
+                w,
+                h,
+                pattern,
+                fg,
+                bg,
+                origin_x,
+                origin_y,
+                clip,
+            } => {
+                let tile = match patterns.entry((*pattern, fg.clone(), bg.clone())) {
+                    Entry::Occupied(entry) => entry.into_mut(),
+                    Entry::Vacant(entry) => {
+                        let mut tile =
+                            Pixmap::new(8, 8).ok_or_else(|| "invalid pattern tile".to_string())?;
+                        tile.fill(parse_color(bg)?);
+                        let foreground = parse_color(fg)?.to_color_u8().premultiply();
+                        for (y, row) in pattern.mask().into_iter().enumerate() {
+                            for x in 0..8 {
+                                if row & (1 << x) != 0 {
+                                    tile.pixels_mut()[y * 8 + x] = foreground;
+                                }
+                            }
+                        }
+                        entry.insert(tile)
+                    }
+                };
+                let Some(rect) = Rect::from_xywh(
+                    pixel_round(*x),
+                    pixel_round(*y),
+                    pixel_round(x + w) - pixel_round(*x),
+                    pixel_round(y + h) - pixel_round(*y),
+                ) else {
+                    continue;
+                };
+                let paint = Paint {
+                    shader: tiny_skia::Pattern::new(
+                        tile.as_ref(),
+                        tiny_skia::SpreadMode::Repeat,
+                        tiny_skia::FilterQuality::Nearest,
+                        1.0,
+                        Transform::from_translate(pixel_round(*origin_x), pixel_round(*origin_y)),
+                    ),
+                    anti_alias: false,
+                    ..Paint::default()
+                };
+                if let Some(clip) = clip {
+                    clip_surface.paint(&mut pixmap, *clip, |target, transform, mask| {
+                        target.fill_rect(rect, &paint, transform, mask);
+                        Ok(())
+                    })?;
+                } else {
+                    pixmap.fill_rect(rect, &paint, Transform::identity(), None);
+                }
+            }
             DrawCmd::FillRect {
                 x,
                 y,
@@ -205,12 +264,27 @@ fn paint_line(
     mask: Option<&Mask>,
 ) -> Result<(), String> {
     let color = parse_color(color)?;
+    let (mut x1, mut y1, mut x2, mut y2) = (x1, y1, x2, y2);
+    if style.is_some() {
+        let offset = (width.round() as u32 % 2) as f32 / 2.0;
+        if y1 == y2 {
+            y1 = y1.floor() + offset;
+            y2 = y1;
+            x1 = x1.round();
+            x2 = x2.round();
+        } else if x1 == x2 {
+            x1 = x1.floor() + offset;
+            x2 = x1;
+            y1 = y1.round();
+            y2 = y2.round();
+        }
+    }
     match style.as_deref() {
         Some("double") => {
-            let off = (width * 0.8).max(0.8);
+            let off = width / 3.0;
             let horizontal = (y1 - y2).abs() <= (x1 - x2).abs();
             let (dx, dy) = if horizontal { (0.0, off) } else { (off, 0.0) };
-            let w = (width * 0.6).max(0.5);
+            let w = width / 3.0;
             stroke_seg(
                 pixmap,
                 x1 - dx,
@@ -236,13 +310,31 @@ fn paint_line(
                 mask,
             );
         }
-        Some("dashed") => {
-            let dash = StrokeDash::new(vec![4.0, 2.0], 0.0);
-            stroke_seg(pixmap, x1, y1, x2, y2, width, color, dash, transform, mask);
-        }
-        Some("dotted") => {
-            let dash = StrokeDash::new(vec![1.0, 2.0], 0.0);
-            stroke_seg(pixmap, x1, y1, x2, y2, width, color, dash, transform, mask);
+        Some(style) if !xlsx_render::border_dash(style).is_empty() => {
+            let scale = if style.starts_with("medium") {
+                width / 2.0
+            } else {
+                width
+            };
+            let dash = StrokeDash::new(
+                xlsx_render::border_dash(style)
+                    .iter()
+                    .map(|run| run * scale)
+                    .collect(),
+                0.0,
+            );
+            stroke_seg(
+                pixmap,
+                x1,
+                y1,
+                x2,
+                y2,
+                width.round().max(1.0),
+                color,
+                dash,
+                transform,
+                mask,
+            );
         }
         _ => stroke_seg(pixmap, x1, y1, x2, y2, width, color, None, transform, mask),
     }
@@ -286,6 +378,10 @@ struct ClipSurface {
     origin: (i32, i32),
     pixmap: Option<Pixmap>,
     mask: Option<Mask>,
+}
+
+fn pixel_round(value: f32) -> f32 {
+    (value + 0.5).floor()
 }
 
 impl ClipSurface {
@@ -492,7 +588,11 @@ mod tests {
         let pixels = Pixmap::decode_png(&render_png(&zoomed).unwrap()).unwrap();
         for y in 0..16 {
             for x in 0..64 {
-                assert_eq!(pixels.pixel(x, y).unwrap().red(), if (x + y) % 4 == 0 { 0 } else { 255 }, "zoomed {x},{y}");
+                assert_eq!(
+                    pixels.pixel(x, y).unwrap().red(),
+                    if (x + y) % 4 == 0 { 0 } else { 255 },
+                    "zoomed {x},{y}"
+                );
             }
         }
     }
