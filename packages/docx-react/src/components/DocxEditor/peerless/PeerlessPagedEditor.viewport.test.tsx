@@ -188,12 +188,18 @@ test('raster scale starts at device pixels and settles zoom and rearmed DPR chan
   };
   const scales = () => editor.requests.filter(({ rasterScale }) => rasterScale !== undefined).map(({ rasterScale }) => rasterScale);
   const before = scales().length;
+  const canvas = editor.container.querySelector<HTMLCanvasElement>('[data-page-id="1"] canvas')!;
+  const pixels = editor.pixels.get(canvas);
+  const caret = editor.binding.viewStore.getSnapshot().geometry!.caret;
   act(() => editor.setZoom(1.25));
   await advance(100);
   act(() => editor.setZoom(2));
   expect(editor.container.querySelector('div[style*="transform: scale"]')?.parentElement?.style.width).toBe('400px');
   await advance(149);
   expect(scales().slice(before)).toEqual([]);
+  expect(canvas.width).toBe(200);
+  expect(editor.pixels.get(canvas)).toBe(pixels);
+  expect(editor.binding.viewStore.getSnapshot().geometry!.caret).toEqual(caret);
   await advance(1);
   expect(scales().slice(before)).toEqual([4]);
   Object.defineProperty(window, 'devicePixelRatio', { configurable: true, value: 1 });
@@ -207,6 +213,11 @@ test('raster scale starts at device pixels and settles zoom and rearmed DPR chan
   expect(scales().slice(before)).toEqual([4]);
   await advance(1);
   expect(scales().slice(before)).toEqual([4, 3]);
+  act(() => editor.setZoom(1.75));
+  editor.unmount();
+  await advance(150);
+  expect(scales().slice(before)).toEqual([4, 3]);
+  expect(media.every(({ listener }) => listener === undefined)).toBe(true);
 });
 
 test('peerless_page_offsets_are_monotonic_and_non_overlapping', () => {
