@@ -432,6 +432,136 @@ fn parse_color(s: &str) -> Result<Color, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pattern_border_pixels_follow_device_mask_and_dash_runs() {
+        let mut workbook = xlsx_model::Workbook::default();
+        let mut sheet = xlsx_model::Sheet::new("Sheet1");
+        sheet.col_widths.insert(0, 8.0 / 7.0);
+        sheet.row_heights.insert(0, 6.0);
+        let mut format = workbook.styles.cell_format(None);
+        format.fill = serde_json::from_value(serde_json::json!({"Pattern": {
+            "pattern": "lightUp", "fg": {"Rgb": "#000000"}, "bg": {"Rgb": "#ffffff"}
+        }}))
+        .unwrap();
+        let style = workbook.styles.intern_cell_format(&format).unwrap();
+        for col in 0..3 {
+            sheet.set_cell(
+                xlsx_model::CellRef::new(0, col),
+                xlsx_model::Cell {
+                    style,
+                    ..Default::default()
+                },
+            );
+        }
+        workbook.sheets.push(sheet);
+        let mut dl = xlsx_render::build_display_list(
+            &workbook,
+            xlsx_model::SheetId(0),
+            &xlsx_render::Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: 32.0,
+                height: 16.0,
+            },
+        )
+        .unwrap();
+        dl.commands
+            .retain(|cmd| !matches!(cmd, DrawCmd::Line { .. }));
+        dl.commands.push(DrawCmd::Line {
+            x1: 0.0,
+            y1: 12.5,
+            x2: 32.0,
+            y2: 12.5,
+            width: 1.0,
+            color: "#000000".into(),
+            style: Some("dashDot".into()),
+            clip: None,
+        });
+        let pixels = Pixmap::decode_png(&render_png(&dl).unwrap()).unwrap();
+        for y in 0..8 {
+            for x in 0..32 {
+                let expected = if (x + y) % 4 == 0 { 0 } else { 255 };
+                assert_eq!(pixels.pixel(x, y).unwrap().red(), expected, "{x},{y}");
+            }
+        }
+        for x in 0..32 {
+            let expected = if matches!(x % 9, 0..=3 | 6) { 0 } else { 255 };
+            assert_eq!(pixels.pixel(x, 12).unwrap().red(), expected, "dash at {x}");
+        }
+        let zoomed = xlsx_render::scaled(dl, 2.0);
+        let pixels = Pixmap::decode_png(&render_png(&zoomed).unwrap()).unwrap();
+        for y in 0..16 {
+            for x in 0..64 {
+                assert_eq!(pixels.pixel(x, y).unwrap().red(), if (x + y) % 4 == 0 { 0 } else { 255 }, "zoomed {x},{y}");
+            }
+        }
+    }
+
+    #[test]
+    fn pattern_border_all_dash_runs_and_double_pixels() {
+        for (style, width, runs) in [
+            ("dashed", 1.0, vec![4, 2]),
+            ("dotted", 1.0, vec![1, 2]),
+            ("mediumDashed", 2.0, vec![8, 4]),
+            ("dashDot", 1.0, vec![4, 2, 1, 2]),
+            ("mediumDashDot", 2.0, vec![8, 4, 2, 4]),
+            ("dashDotDot", 1.0, vec![4, 2, 1, 2, 1, 2]),
+            ("mediumDashDotDot", 2.0, vec![8, 4, 2, 4, 2, 4]),
+            ("slantDashDot", 1.0, vec![4, 2, 1, 2]),
+        ] {
+            let mut pixmap = Pixmap::new(64, 8).unwrap();
+            pixmap.fill(Color::WHITE);
+            let y = if width == 1.0 { 4.5 } else { 4.0 };
+            paint_line(
+                &mut pixmap,
+                0.0,
+                y,
+                64.0,
+                y,
+                width,
+                "#000000",
+                &Some(style.into()),
+                Transform::identity(),
+                None,
+            )
+            .unwrap();
+            let period: u32 = runs.iter().sum();
+            for x in 0..64 {
+                let mut offset = x % period;
+                let mut on = true;
+                for run in &runs {
+                    if offset < *run {
+                        break;
+                    }
+                    offset -= *run;
+                    on = !on;
+                }
+                assert_eq!(
+                    pixmap.pixel(x, 4).unwrap().red(),
+                    if on { 0 } else { 255 },
+                    "{style} at {x}"
+                );
+            }
+        }
+        let mut pixmap = Pixmap::new(16, 8).unwrap();
+        pixmap.fill(Color::WHITE);
+        paint_line(
+            &mut pixmap,
+            0.0,
+            4.5,
+            16.0,
+            4.5,
+            3.0,
+            "#000000",
+            &Some("double".into()),
+            Transform::identity(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(pixmap.pixel(8, 3).unwrap().red(), 0);
+        assert_eq!(pixmap.pixel(8, 4).unwrap().red(), 255);
+        assert_eq!(pixmap.pixel(8, 5).unwrap().red(), 0);
+    }
     use super::*;
     use serde::Deserialize;
     use tiny_skia::PathSegment;

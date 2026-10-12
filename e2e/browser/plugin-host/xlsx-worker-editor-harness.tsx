@@ -7,6 +7,7 @@ import { editableWorkbookSessionBackend } from '../../../packages/xlsx-react/src
 import { cellRect, openWorkbookSession, rangeRect, type WorkbookEditPeer, type WorkbookFrame, type WorkbookSession } from '@betteroffice/xlsx';
 import { workbookSessionInternals, WORKBOOK_REPLAY_MUTATORS } from '../../../packages/xlsx/src/session/replay';
 import type { WorkerEditorProbe } from './xlsx-worker-editor-probe';
+import { addPatternSheet } from './xlsx-pattern-workbook';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -72,6 +73,7 @@ ${variant === 'merged-grid' ? '<mergeCells count="1"><mergeCell ref="B2:C3"/></m
 <xdr:oneCellAnchor><xdr:from><xdr:col>2</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>4</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:ext cx="1714500" cy="1143000"/><xdr:graphicFrame macro=""><xdr:nvGraphicFramePr><xdr:cNvPr id="2" name="Route chart"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr><xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart r:id="rId1"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:oneCellAnchor></xdr:wsDr>`);
   zip.file('xl/drawings/_rels/drawing1.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/></Relationships>');
   zip.file('xl/charts/chart1.xml', `<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:layout/><c:barChart><c:barDir val="col"/><c:grouping val="clustered"/><c:ser><c:idx val="0"/><c:order val="0"/><c:cat><c:strLit><c:ptCount val="1"/><c:pt idx="0"><c:v>Route</c:v></c:pt></c:strLit></c:cat><c:val><c:numLit><c:formatCode>General</c:formatCode><c:ptCount val="1"/><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val></c:ser><c:axId val="1"/><c:axId val="2"/></c:barChart><c:catAx><c:axId val="1"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:axPos val="b"/><c:crossAx val="2"/></c:catAx><c:valAx><c:axId val="2"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:axPos val="l"/><c:crossAx val="1"/></c:valAx></c:plotArea></c:chart></c:chartSpace>`);
+  if (variant === 'patterns') addPatternSheet(zip);
   return zip.generateAsync({ type: 'uint8array' });
 }
 
@@ -273,7 +275,7 @@ window.__xlsxWorkerEditor = {
   },
   releaseHydration() { holdingHydration = false; hydrationRelease.resolve(); },
   async flush() { await api!.flush(); },
-  async zoom(scale) { await api!.commands.execute('zoom', { scale }); },
+  async zoom(scale) { await (peerless ? peerlessApi : api)!.commands.execute('zoom', { scale }); },
   cellClip() {
     const grid = latestFrame?.displayList.grid;
     const canvas = rootElement.querySelector<HTMLCanvasElement>('[data-paint-source="worker"]');

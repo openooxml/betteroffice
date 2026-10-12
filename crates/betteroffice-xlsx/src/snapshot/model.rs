@@ -1760,6 +1760,58 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn pattern_border_snapshot_round_trip() {
+        let mut model = Workbook::default();
+        for pattern in [
+            "gray125",
+            "gray0625",
+            "mediumGray",
+            "darkGray",
+            "lightGray",
+            "darkHorizontal",
+            "darkVertical",
+            "darkDown",
+            "darkUp",
+            "darkGrid",
+            "darkTrellis",
+            "lightHorizontal",
+            "lightVertical",
+            "lightDown",
+            "lightUp",
+            "lightGrid",
+            "lightTrellis",
+        ] {
+            model.styles.fills.push(
+                serde_json::from_value(serde_json::json!({"Pattern": {
+                    "pattern": pattern, "fg": {"Theme": {"idx": 4, "tint": -0.25}}, "bg": "Auto"
+                }}))
+                .unwrap(),
+            );
+        }
+        for token in [
+            "mediumDashed",
+            "dashDot",
+            "mediumDashDot",
+            "dashDotDot",
+            "mediumDashDotDot",
+            "slantDashDot",
+        ] {
+            model.styles.borders.push(Border {
+                top: Some(BorderEdge {
+                    style: BorderStyle::from_sml(token),
+                    color: Some(Color::Indexed(5)),
+                }),
+                ..Border::default()
+            });
+        }
+        let restored = decode(&encode(
+            &model,
+            SnapshotBudget::new(256, 64 * 1024).unwrap(),
+        ));
+        assert_eq!(restored.styles, model.styles);
+    }
+
     fn encode(model: &Workbook, budget: SnapshotBudget) -> Vec<Vec<u8>> {
         let mut encoder = ModelSnapshotEncoder::new();
         let mut chunks = Vec::new();

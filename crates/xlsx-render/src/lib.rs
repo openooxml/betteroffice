@@ -1933,6 +1933,111 @@ mod merged_grid_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pattern_border_display_list_preserves_pattern_and_dash_styles() {
+        let mut wb = Workbook::default();
+        let mut sheet = Sheet::new("Sheet1");
+        for (col, token) in [
+            "mediumDashed",
+            "dashDot",
+            "mediumDashDot",
+            "dashDotDot",
+            "mediumDashDotDot",
+            "slantDashDot",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut format = wb.styles.cell_format(None);
+            format.fill = serde_json::from_value(serde_json::json!({"Pattern": {
+                "pattern": "lightUp", "fg": {"Rgb": "#123456"}, "bg": {"Rgb": "#fedcba"}
+            }}))
+            .unwrap();
+            format.border.top = Some(xlsx_model::BorderEdge {
+                style: BorderStyle::from_sml(token),
+                color: Some(xlsx_model::Color::Rgb("#654321".into())),
+            });
+            let style = wb.styles.intern_cell_format(&format).unwrap();
+            sheet.set_cell(
+                CellRef::new(1, col as u32),
+                Cell {
+                    style,
+                    ..Cell::default()
+                },
+            );
+        }
+        let mut format = wb.styles.cell_format(None);
+        format.fill = serde_json::from_value(serde_json::json!({"Pattern": {
+            "pattern": "gray125", "fg": "Auto", "bg": null
+        }}))
+        .unwrap();
+        let style = wb.styles.intern_cell_format(&format).unwrap();
+        sheet.set_cell(
+            CellRef::new(1, 6),
+            Cell {
+                style,
+                ..Cell::default()
+            },
+        );
+        wb.sheets.push(sheet);
+        let dl = build_display_list(
+            &wb,
+            SheetId(0),
+            &Viewport {
+                x: 3.0,
+                y: 2.0,
+                width: 500.0,
+                height: 80.0,
+            },
+        )
+        .unwrap();
+        let zoomed = serde_json::to_value(scaled(dl.clone(), 2.0)).unwrap();
+        let zoomed_fill = zoomed["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|cmd| cmd["op"] == "patternFill")
+            .unwrap();
+        assert_eq!(zoomed_fill["originX"], -6.0);
+        assert_eq!(zoomed_fill["pattern"], "lightUp");
+        let json = serde_json::to_value(dl).unwrap();
+        let cmds = json["commands"].as_array().unwrap();
+        let fills: Vec<_> = cmds
+            .iter()
+            .filter(|cmd| cmd["op"] == "patternFill")
+            .collect();
+        assert_eq!(fills.len(), 7);
+        assert_eq!(fills[0]["pattern"], "lightUp");
+        assert_eq!(fills[0]["fg"], "#123456");
+        assert_eq!(fills[0]["bg"], "#fedcba");
+        assert_eq!(fills[0]["originX"], -3.0);
+        assert_eq!(fills[0]["originY"], -2.0);
+        assert_eq!(fills[6]["fg"], "#000000");
+        assert_eq!(fills[6]["bg"], "#ffffff");
+        let lines: Vec<_> = cmds
+            .iter()
+            .filter(|cmd| cmd["color"] == "#654321")
+            .collect();
+        assert_eq!(lines.len(), 6);
+        for (line, token) in lines.iter().zip([
+            "mediumDashed",
+            "dashDot",
+            "mediumDashDot",
+            "dashDotDot",
+            "mediumDashDotDot",
+            "slantDashDot",
+        ]) {
+            assert_eq!(line["style"], token);
+            assert_eq!(
+                line["width"],
+                if token.starts_with("medium") {
+                    2.0
+                } else {
+                    1.0
+                }
+            );
+        }
+    }
     use super::*;
     use xlsx_model::Hyperlink;
     use xlsx_model::styles::{Alignment, HAlign, Xf};

@@ -95,6 +95,52 @@ impl BorderStyle {
     }
 }
 
+#[cfg(test)]
+mod pattern_border_tests {
+    use super::*;
+
+    #[test]
+    fn pattern_border_tokens_round_trip() {
+        for token in [
+            "thin",
+            "medium",
+            "dashed",
+            "dotted",
+            "thick",
+            "double",
+            "hair",
+            "mediumDashed",
+            "dashDot",
+            "mediumDashDot",
+            "dashDotDot",
+            "mediumDashDotDot",
+            "slantDashDot",
+        ] {
+            assert_eq!(BorderStyle::from_sml(token).as_sml(), token);
+        }
+        assert_eq!(BorderStyle::from_sml("unknown"), BorderStyle::Thin);
+    }
+
+    #[test]
+    fn pattern_fill_interning_preserves_both_colors() {
+        let value = serde_json::json!({"Pattern": {
+            "pattern": "lightUp", "fg": {"Rgb": "#123456"}, "bg": {"Indexed": 5}
+        }});
+        let fill: Fill = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&fill).unwrap(), value);
+        let mut ss = Stylesheet::default();
+        let mut format = ss.cell_format(None);
+        format.fill = fill;
+        let first = ss.intern_cell_format(&format).unwrap();
+        assert_eq!(ss.intern_cell_format(&format).unwrap(), first);
+        format.fill = serde_json::from_value(serde_json::json!({"Pattern": {
+            "pattern": "lightUp", "fg": {"Rgb": "#123456"}, "bg": {"Indexed": 6}
+        }}))
+        .unwrap();
+        assert_ne!(ss.intern_cell_format(&format).unwrap(), first);
+    }
+}
+
 /// one edge of a cell border.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BorderEdge {
