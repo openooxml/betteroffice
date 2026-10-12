@@ -666,7 +666,9 @@ fn declared_main_kind(content_type: &str) -> Option<DocumentKind> {
         "application/vnd.openxmlformats-officedocument.wordprocessingml.template.main+xml" => {
             Some(DocumentKind::Dotx)
         }
-        "application/vnd.ms-word.template.macroenabledtemplate.main+xml" => Some(DocumentKind::Dotm),
+        "application/vnd.ms-word.template.macroenabledtemplate.main+xml" => {
+            Some(DocumentKind::Dotm)
+        }
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml" => {
             Some(DocumentKind::Xlsx)
         }
@@ -1695,7 +1697,8 @@ mod tests {
         for part_name in ["xl/vbaProject.bin", "xl/custom/payload.BIN"] {
             let parts = default_payload_parts("application/vnd.ms-office.vbaProject", part_name);
             let package = rezip_parts(&parts).unwrap();
-            let output = unzip_parts(&sanitize_package_for_format(&package, "xlsx").unwrap()).unwrap();
+            let output =
+                unzip_parts(&sanitize_package_for_format(&package, "xlsx").unwrap()).unwrap();
             assert!(!has_part(&output, part_name), "{part_name}");
             let all = output
                 .iter()
@@ -1765,7 +1768,8 @@ mod tests {
             "xl/custom/payload.bin",
         );
         let safe_part = "xl/printerSettings/printerSettings1.bin";
-        let safe_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.printerSettings";
+        let safe_type =
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.printerSettings";
         parts[0].1 = String::from_utf8(parts[0].1.clone())
             .unwrap()
             .replace(
