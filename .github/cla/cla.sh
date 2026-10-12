@@ -128,6 +128,42 @@ cla_add_ccla_signature() {
   mv "$ccla_file.tmp" "$ccla_file"
 }
 
+# Commits $file after running the recorder "$@", and pushes it to main. Signers who
+# comment at the same moment race for main, so on a rejected push the row is
+# rebuilt on the new main and pushed again.
+cla_record() {
+  local file="$1" message="$2"; shift 2
+  local attempt
+  for attempt in 1 2 3 4 5; do
+    "$@"
+    git add "$file"
+    git diff --cached --quiet && return 0
+    git commit -m "$message"
+    # the push works because the App is on the main ruleset's bypass list
+    git push origin main && return 0
+    sleep "$attempt"
+    git fetch origin main
+    git reset --hard origin/main
+  done
+  echo "ERROR: could not record the signature in $file" >&2
+  return 1
+}
+
+cla_record_signature() {
+  local signatures_file="$1"
+  cla_init_signatures "$signatures_file"
+  cla_signed "$COMMENT_USER_ID" "$signatures_file" ||
+    cla_add_signature "$COMMENT_USER_LOGIN" "$COMMENT_USER_ID" \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$PR_NUMBER" "$signatures_file"
+}
+
+cla_record_ccla_signature() {
+  local ccla_file="$1" entity="$2" designated="$3"
+  cla_init_ccla "$ccla_file"
+  cla_add_ccla_signature "$entity" "$COMMENT_USER_LOGIN" "$COMMENT_USER_ID" \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$PR_NUMBER" "$designated" "$ccla_file"
+}
+
 # Orchestrates the workflow; the only function with side effects. Env: REPO,
 # PR_NUMBER, EVENT_NAME, ALLOWLIST, CLA_URL, SIGN_PHRASE (+ COMMENT_USER_*).
 cla_main() {
@@ -147,14 +183,10 @@ cla_main() {
       entity=$(cla_ccla_parse_company "$comment_body")
       designated=$(cla_ccla_parse_designated "$comment_body")
       if [ -n "$entity" ] && [ -n "$designated" ]; then
-        cla_add_ccla_signature "$entity" "$COMMENT_USER_LOGIN" "$COMMENT_USER_ID" \
-          "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$PR_NUMBER" "$designated" "$ccla"
         git config user.name "$GIT_AUTHOR_NAME"
         git config user.email "$GIT_AUTHOR_EMAIL"
-        git add "$ccla"
-        git commit -m "Record CCLA signature for ${entity} (PR #${PR_NUMBER})"
-        # the push works because the App is on the main ruleset's bypass list
-        git push origin main
+        cla_record "$ccla" "Record CCLA signature for ${entity} (PR #${PR_NUMBER})" \
+          cla_record_ccla_signature "$ccla" "$entity" "$designated"
       else
         echo "WARN: corporate sign comment missing company:/designated: lines; not recorded" >&2
       fi
@@ -162,14 +194,10 @@ cla_main() {
       if cla_should_skip "$COMMENT_USER_LOGIN" "$ALLOWLIST" "${CLA_ORG:-}"; then
         : # exempt — no signature row needed
       elif ! cla_signed "$COMMENT_USER_ID" "$signatures"; then
-        cla_add_signature "$COMMENT_USER_LOGIN" "$COMMENT_USER_ID" \
-          "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$PR_NUMBER" "$signatures"
         git config user.name "$GIT_AUTHOR_NAME"
         git config user.email "$GIT_AUTHOR_EMAIL"
-        git add "$signatures"
-        git commit -m "Record CLA signature for @${COMMENT_USER_LOGIN} (PR #${PR_NUMBER})"
-        # the push works because the App is on the main ruleset's bypass list
-        git push origin main
+        cla_record "$signatures" "Record CLA signature for @${COMMENT_USER_LOGIN} (PR #${PR_NUMBER})" \
+          cla_record_signature "$signatures"
       fi
     fi
   fi

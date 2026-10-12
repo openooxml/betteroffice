@@ -7,6 +7,8 @@ mod save_oracle_tests;
 pub(crate) mod snapshot_assembly;
 mod staging;
 pub(crate) mod target;
+#[cfg(test)]
+mod update_tests;
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, hash_map::Entry};
@@ -1865,7 +1867,12 @@ impl Workbook {
         };
         let update = self
             .authority
-            .apply_ops(&ops, SyncOrigin::Undo, &self.model.styles)
+            .apply_ops_with_update(
+                &ops,
+                SyncOrigin::Undo,
+                &self.model.styles,
+                self.has_update_consumers(),
+            )
             .map_err(authority_error)?;
         let prior_styles = self.pre_edit_cell_styles(&ops);
         self.bump_model_epoch();
@@ -1903,7 +1910,12 @@ impl Workbook {
         };
         let update = self
             .authority
-            .apply_ops(&ops, SyncOrigin::Redo, &self.model.styles)
+            .apply_ops_with_update(
+                &ops,
+                SyncOrigin::Redo,
+                &self.model.styles,
+                self.has_update_consumers(),
+            )
             .map_err(authority_error)?;
         let prior_styles = self.pre_edit_cell_styles(&ops);
         self.bump_model_epoch();
@@ -2621,7 +2633,12 @@ impl Workbook {
         } else {
             let update = self
                 .authority
-                .apply_ops(ops, SyncOrigin::User, &self.model.styles)
+                .apply_ops_with_update(
+                    ops,
+                    SyncOrigin::User,
+                    &self.model.styles,
+                    self.has_update_consumers(),
+                )
                 .map_err(authority_error)?;
             let transaction = Transaction::new(ops.to_vec(), Provenance::User);
             self.apply_model_history(|undo, model| undo.commit(model, &transaction))?;
@@ -2688,6 +2705,16 @@ impl Workbook {
         validate_collaboration_size(&staged.update)?;
         validate_collaboration_state(staged.state_bytes, staged.state_vector_entries)?;
         Ok(staged)
+    }
+
+    fn has_update_consumers(&self) -> bool {
+        self.is_collaborative()
+            || !self
+                .update_observers
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .listeners
+                .is_empty()
     }
 
     fn emit_update(&self, event: UpdateEvent) {
