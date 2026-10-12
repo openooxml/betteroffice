@@ -213,6 +213,7 @@ export function createPeerlessWorkerInputCoordinator(
   let suspended = false;
   let nextSeq = 1;
   let throughSeq = 0;
+  let inputBarrier: { ticket?: PeerlessWorkerCommandTicket; composition?: Promise<boolean> } | undefined;
   let boundary: PeerlessWorkerCommandTicket | undefined;
   let last: PeerlessWorkerCommandTicket | undefined;
   let compositions = new Map<string, PeerlessWorkerCommandTicket>();
@@ -261,6 +262,7 @@ export function createPeerlessWorkerInputCoordinator(
     blocked = null;
     cycle = deferred<never>();
     boundary = undefined;
+    inputBarrier = undefined;
     last = undefined;
     draft = null;
     rejected = [];
@@ -569,22 +571,50 @@ export function createPeerlessWorkerInputCoordinator(
       const after = { last: last ?? null, boundary: boundary ?? null };
       const seal = hooks.seal();
       if (seal.refused) throw new XlsxCommandAdmissionError(seal.refused);
-      const composedTarget = seal.composition && draft ? { ...draft } : null;
-      const compositionId = seal.composition ? hooks.compositionId?.() ?? compositionIds.get(seal.composition) ??
+      const previousInput = inputBarrier;
+      const composition = seal.composition !== previousInput?.composition ? seal.composition : undefined;
+      const input: { ticket?: PeerlessWorkerCommandTicket; composition?: Promise<boolean> } =
+        !composition && previousInput?.composition ? previousInput : {};
+      const reserved = composition ? deferred<CommandStatus>() : undefined;
+      const retainInput = (ticket?: PeerlessWorkerCommandTicket) => {
+        input.ticket = ticket;
+        const clear = () => { if (inputBarrier === input) inputBarrier = undefined; };
+        if (ticket) void ticket.result.then(clear, clear);
+        else clear();
+      };
+      const composedTarget = composition && draft ? { ...draft } : null;
+      const compositionId = composition ? hooks.compositionId?.() ?? compositionIds.get(composition) ??
         `local-composition:${nextCompositionId++}` : undefined;
-      if (seal.composition && compositionId) compositionIds.set(seal.composition, compositionId);
+      if (composition && compositionId) compositionIds.set(composition, compositionId);
       let sealed: PeerlessWorkerCommandTicket | undefined;
-      if (!seal.composition) { hooks.sync(); if (draft) sealed = submit(draft); }
+      if (reserved) {
+        const ticket: PeerlessTicket = { seq: null, result: reserved.promise, lease: cycle };
+        Object.defineProperty(ticket, 'seq', { get: () => sealed?.seq ?? null });
+        void reserved.promise.then((status) => { ticket.outcome = status; pump(); }, (error) => { ticket.failure = { error }; pump(); });
+        void result.promise.catch(reserved.reject);
+        input.composition = composition;
+        inputBarrier = input;
+        retainInput(ticket);
+      } else if (!input.composition) {
+        hooks.sync();
+        if (draft) {
+          inputBarrier = input;
+          sealed = submit(draft, { after: previousInput?.ticket });
+          retainInput(sealed);
+        }
+      }
       const ahead = [...outstanding.values(), ...queue.slice(0, insertion ?? queue.length)
         .filter((entry): entry is PeerlessEntry => 'ticket' in entry)]
         .map((entry) => entry.ticket.result);
+      if (input.ticket) ahead.push(input.ticket.result);
       const invoke = () => {
         if (lease !== cycle) throw new XlsxCommandAdmissionError('document-replaced');
         check();
         const previous = admittedReadOnly;
         const previousAfter = admittedAfter;
         admittedReadOnly = readOnly;
-        admittedAfter = sealed ? { last: sealed, boundary: sealed } : after;
+        const dependency = sealed ?? input.ticket ?? previousInput?.ticket;
+        admittedAfter = dependency ? { last: dependency, boundary: dependency } : after;
         try {
           const value = operation();
           void lease.wait(value).then(result.resolve, result.reject);
@@ -599,9 +629,9 @@ export function createPeerlessWorkerInputCoordinator(
         await invoke();
       };
       enqueue({ reject: result.reject, run: () => {
-        if (seal.composition || fence) return (async () => {
-          if (seal.composition) {
-            const ended = await lease.wait(seal.composition);
+        if (composition || fence) return (async () => {
+          if (composition) {
+            const ended = await lease.wait(composition);
             if (lease !== cycle) throw new XlsxCommandAdmissionError('document-replaced');
             pumping = true;
             insertion = 0;
@@ -615,12 +645,14 @@ export function createPeerlessWorkerInputCoordinator(
                     const finished = composedTarget ? { ...draft, generation: composedTarget.generation,
                       sheet: composedTarget.sheet, row: composedTarget.row, col: composedTarget.col,
                       source: composedTarget.source } : draft;
-                    sealed = submit(finished, { compositionId });
-                    ahead.push(sealed.result);
+                    sealed = submit(finished, { compositionId, after: previousInput?.ticket });
                   }
                 }
                 finally { admittedReadOnly = previous; }
               }
+              sealed ??= previousInput?.ticket;
+              reserved!.resolve(sealed?.result ?? { seq: 0, status: 'noop', committed: false });
+              input.composition = undefined;
               if (fence) enqueue({ run: fencedInvoke, reject: result.reject });
               else invoke();
             } finally {
@@ -654,7 +686,11 @@ export function createPeerlessWorkerInputCoordinator(
     get throughSeq() { current(); return throughSeq; },
     get submittedThroughSeq() { current(); return nextSeq - 1; },
     get recoveryCommands() { return structuredClone(recoveryCommands); },
-    setDraft(value) { current(); draft = value ? Object.freeze({ ...value }) : null; },
+    setDraft(value) {
+      current();
+      if (!value || (!draft && !inputBarrier?.composition)) inputBarrier = undefined;
+      draft = value ? Object.freeze({ ...value }) : null;
+    },
     discardRejected(value) {
       current();
       rejected = rejected.filter((entry) => !sameCell(entry, value));

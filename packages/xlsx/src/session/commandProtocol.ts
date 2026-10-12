@@ -179,6 +179,38 @@ function finite(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value);
 }
 
+function batchValue(value: unknown): boolean {
+  let remaining = 1_000_000;
+  let textRemaining = 16_777_216;
+  const parents = new Set<unknown>();
+  const visit = (field: unknown, depth: number): boolean => {
+    if (--remaining < 0 || depth > 64) return false;
+    if (typeof field === 'string') {
+      textRemaining -= field.length;
+      return textRemaining >= 0;
+    }
+    if (field === null || field === undefined || typeof field === 'boolean') return true;
+    if (typeof field === 'number') return finite(field);
+    if ((!Array.isArray(field) && !record(field)) || parents.has(field)) return false;
+    parents.add(field);
+    let valid = true;
+    if (Array.isArray(field)) {
+      if (field.length > remaining) valid = false;
+      else for (let index = 0; index < field.length; index++) {
+        if (!Object.prototype.hasOwnProperty.call(field, index) || !visit(field[index], depth + 1)) { valid = false; break; }
+      }
+    } else {
+      for (const key in field) {
+        textRemaining -= key.length;
+        if (textRemaining < 0 || !visit(field[key], depth + 1)) { valid = false; break; }
+      }
+    }
+    parents.delete(field);
+    return valid;
+  };
+  return visit(value, 0);
+}
+
 function point(value: unknown): boolean {
   return record(value) && integer(value.row) && integer(value.col);
 }
@@ -241,11 +273,12 @@ export function validateWorkbookCommandPayload(command: WorkbookCommand): void {
           (entry.target === undefined || target(entry.target)));
       }
       try {
+        if (command.kind === 'applyEdits' && !batchValue(payload.args)) throw new WorkbookCommandRefusal('invalid-command');
         validateWorkbookReplayEnvelope({ sequence: command.seq,
           calculation: payload.calculation ?? { nowSerial: 0, randSeed: 0 },
           op: { method: command.kind, args: payload.args } });
       } catch (error) {
-        if (!(error instanceof Error) || error.name !== 'WorkbookReplayValidationError') throw error;
+        if (command.kind !== 'applyEdits' && (!(error instanceof Error) || error.name !== 'WorkbookReplayValidationError')) throw error;
         valid = false;
       }
     }

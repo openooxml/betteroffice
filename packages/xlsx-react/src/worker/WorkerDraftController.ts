@@ -211,18 +211,17 @@ export class WorkerDraftController {
     const draft: WorkerNativeDraft = { ...composition.target, value: input?.value ?? this.draft?.value ?? '',
       modified: true, revision: ++this.revision };
     this.composing = null;
-    this.setDraft(null);
+    this.setDraft(composition.sealed && draft.value !== '' ? draft : null);
     if (input) this.trailing = { source: draft.source, input, value: draft.value };
     if (draft.value !== '') {
       const sheet = draft.target ? this.options.resolveSheet(draft.target.sheetId) : draft.sheet;
-      if (sheet !== undefined && sheet !== this.options.sheet()) this.options.select(sheet, draft);
+      if (!composition.sealed && sheet !== undefined && sheet !== this.options.sheet()) this.options.select(sheet, draft);
       if (draft.source === 'formula') {
         this.formulaTarget = { ...draft, modified: false };
         this.formulaThroughSeq = null;
         this.publish({ formula: draft.value });
       }
-      if (composition.sealed) this.setDraft(draft);
-      else {
+      if (!composition.sealed) {
         const ticket = this.coordinator.submit(draft, { compositionId: composition.id,
           selection: this.options.selectionTarget(), after: draft.after });
         this.options.committed(ticket, draft);
