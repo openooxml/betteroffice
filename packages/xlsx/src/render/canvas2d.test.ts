@@ -128,6 +128,17 @@ describe('Canvas2D text', () => {
     expect(trace[0]).toEqual({ text: '1', x: 88, align: 'left' });
   });
 
+  it('fills a narrow date cell with hashes', () => {
+    expect(formattedTrace('1/1/2020', { left: 2, width: 26, parts: [], overflow: true }, 30))
+      .toEqual([{ text: '##', x: 8, align: 'left' }]);
+  });
+
+  it('shrinks General decimals before scientific and hashes', () => {
+    expect(formattedTrace('1234.56789', { left: 2, width: 76, parts: [], general: 1234.56789, overflow: true }, 80)[0].text).toBe('1234.57');
+    expect(formattedTrace('123456789', { left: 2, width: 66, parts: [], general: 123456789, overflow: true }, 70)[0].text).toBe('1E+08');
+    expect(formattedTrace('123456789', { left: 2, width: 26, parts: [], general: 123456789, overflow: true }, 30)[0].text).toBe('##');
+  });
+
   it('uses point-sized fonts for cells, ghosts, and charts at every display scale', () => {
     const fonts: string[] = [];
     const transforms: number[][] = [];

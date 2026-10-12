@@ -888,10 +888,15 @@ where
             Align::Center => cell_box.x + cell_box.w / 2.0,
         };
         let ty = text_baseline(cell_box, size, valign, print.map(|(m, _)| m));
-        let number_format = (!parts.is_empty()).then(|| NumberFormatLayout {
+        let number_format = (!parts.is_empty() || matches!(cell.value, CellValue::Number { .. })).then(|| NumberFormatLayout {
             left: cell_box.x + print.map_or(TEXT_PAD_PX, |(m, _)| 3.0 * 96.0 / m.dpi),
             width: (cell_box.w - print.map_or(2.0 * TEXT_PAD_PX, |(m, _)| 5.0 * 96.0 / m.dpi)).max(0.0),
             parts,
+            general: match cell.value {
+                CellValue::Number { value } if value.is_finite() && xlsx_model::numfmt::is_general(&cell.value, &xf.format_code) => Some(value),
+                _ => None,
+            },
+            overflow: matches!(cell.value, CellValue::Number { .. }),
         });
         let clip = spill_clip(
             geom,
@@ -1984,6 +1989,28 @@ mod tests {
             assert_eq!(json["numberFormat"]["width"], geometry::col_chars_to_px(width) - 4.0);
             assert_eq!(json["numberFormat"]["parts"][1]["kind"], "fill");
         }
+    }
+
+    #[test]
+    fn narrow_date_display_list_enables_numeric_overflow() {
+        let mut wb = Workbook::default();
+        wb.styles.cell_xfs.push(Xf { num_fmt_id: Some(14), ..Xf::default() });
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.col_widths.insert(0, 3.0);
+        let mut cell = num_cell(43831.0);
+        cell.style = Some(0);
+        assert_eq!(display_text(&wb.styles, wb.date_system, &cell), "1/1/20");
+        sheet.set_cell(CellRef::new(0, 0), cell);
+        wb.sheets.push(sheet);
+        let vp = Viewport { x: 0.0, y: 0.0, width: 200.0, height: 100.0 };
+        let dl = build_display_list(&wb, SheetId(0), &vp).unwrap();
+        let command = dl.commands.iter().find(|c| matches!(c, DrawCmd::Text { .. })).unwrap();
+        let DrawCmd::Text { text, number_format: Some(layout), align, .. } = command else { panic!("missing numeric layout") };
+        assert!(layout.overflow);
+        let mut displayed = String::new();
+        paint_number_format(text, layout, *align, |s| s.len() as f32 * 10.0,
+            |run, _| displayed.push_str(run));
+        assert!(!displayed.is_empty() && displayed.chars().all(|c| c == '#'));
     }
 
     #[test]

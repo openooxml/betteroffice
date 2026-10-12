@@ -95,6 +95,8 @@ export interface NumberFormatLayout {
   left: number;
   width: number;
   parts: { offset: number; kind: 'padding' | 'fill'; character: string }[];
+  general?: number;
+  overflow?: boolean;
 }
 
 export interface TextCmd {

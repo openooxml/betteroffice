@@ -1072,6 +1072,50 @@ fn general_scientific(a: f64, e: i32) -> String {
     format!("{m}E{sign}{:02}", e.unsigned_abs())
 }
 
+pub fn is_general(value: &CellValue, code: &str) -> bool {
+    let CellValue::Number { value } = value else {
+        return false;
+    };
+    let code = code.trim();
+    if code.is_empty() || code.eq_ignore_ascii_case("general") {
+        return true;
+    }
+    let parsed = parsed_sections(code);
+    parsed[select(&parsed, *value).0].toks == [Tok::General]
+}
+
+pub fn fit_general(
+    value: f64,
+    width: f32,
+    mut measure: impl FnMut(&str) -> f32,
+) -> Option<String> {
+    if !value.is_finite() || value == 0.0 {
+        return None;
+    }
+    let exponent = value.abs().log10().floor() as i32;
+    if (-4..11).contains(&exponent) {
+        for decimals in (0..=(10 - exponent).clamp(0, 15) as usize).rev() {
+            let mut candidate = round_fixed(value, decimals);
+            trim_trailing_zeros(&mut candidate);
+            if candidate.parse::<f64>().ok() != Some(0.0) && measure(&candidate) <= width {
+                return Some(candidate);
+            }
+        }
+    }
+    for decimals in (0..=5).rev() {
+        let raw = format!("{value:.decimals$e}");
+        let (mantissa, exponent) = raw.split_once('e')?;
+        let mut mantissa = mantissa.to_string();
+        trim_trailing_zeros(&mut mantissa);
+        let exponent: i32 = exponent.parse().ok()?;
+        let candidate = format!("{mantissa}E{}{:\u{0030}2}", if exponent < 0 { '-' } else { '+' }, exponent.unsigned_abs());
+        if measure(&candidate) <= width {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 fn round_fixed(a: f64, decimals: usize) -> String {
     let factor = 10f64.powi(decimals as i32);
     let r = (a * factor).round() / factor;
