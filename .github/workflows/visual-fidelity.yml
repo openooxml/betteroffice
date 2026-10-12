@@ -29,10 +29,11 @@ concurrency:
 jobs:
   prepare:
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
       source-sha: ${{ steps.source.outputs.sha }}
+      runner-image: ${{ steps.runner.outputs.image }}
       formats: ${{ steps.plan.outputs.formats }}
       roundtrip-builds: ${{ steps.plan.outputs.roundtrip-builds }}
       roundtrip-shards: ${{ steps.plan.outputs.roundtrip-shards }}
@@ -59,6 +60,10 @@ jobs:
           remote_sha=$(git ls-remote --heads origin "refs/heads/$TARGET_BRANCH" | cut -f1)
           test "$source_sha" = "$remote_sha"
           echo "sha=$source_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Record the runner image
+        id: runner
+        run: echo "image=$ImageVersion" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
@@ -107,6 +112,15 @@ jobs:
       matrix:
         format: ${{ fromJSON(needs.prepare.outputs.formats) }}
     steps:
+      - name: Require the planned runner image
+        env:
+          PLANNED_IMAGE: ${{ needs.prepare.outputs.runner-image }}
+        run: |
+          if [ "$ImageVersion" != "$PLANNED_IMAGE" ]; then
+            echo "::error::Runner image $ImageVersion differs from the planned $PLANNED_IMAGE; re-run the failed jobs"
+            exit 1
+          fi
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
           ref: ${{ needs.prepare.outputs.source-sha }}
@@ -154,6 +168,7 @@ jobs:
           tool: wasm-pack@0.15.0
 
       - name: Build the format renderer and install comparison tools
+        timeout-minutes: 30
         env:
           QUALITY_FORMAT: ${{ matrix.format }}
         run: |
@@ -337,6 +352,15 @@ jobs:
       matrix:
         shard: ${{ fromJSON(needs.prepare.outputs.docx-shards) }}
     steps:
+      - name: Require the planned runner image
+        env:
+          PLANNED_IMAGE: ${{ needs.prepare.outputs.runner-image }}
+        run: |
+          if [ "$ImageVersion" != "$PLANNED_IMAGE" ]; then
+            echo "::error::Runner image $ImageVersion differs from the planned $PLANNED_IMAGE; re-run the failed jobs"
+            exit 1
+          fi
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
           ref: ${{ needs.prepare.outputs.source-sha }}
@@ -371,6 +395,7 @@ jobs:
           python-version: "3.13"
 
       - name: Install LibreOffice and comparison tools
+        timeout-minutes: 15
         run: |
           bash scripts/office-quality/install-libreoffice.sh
           python -m pip install -r scripts/office-quality/requirements.txt
@@ -473,6 +498,15 @@ jobs:
       matrix:
         shard: ${{ fromJSON(needs.prepare.outputs.xlsx-shards) }}
     steps:
+      - name: Require the planned runner image
+        env:
+          PLANNED_IMAGE: ${{ needs.prepare.outputs.runner-image }}
+        run: |
+          if [ "$ImageVersion" != "$PLANNED_IMAGE" ]; then
+            echo "::error::Runner image $ImageVersion differs from the planned $PLANNED_IMAGE; re-run the failed jobs"
+            exit 1
+          fi
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
           ref: ${{ needs.prepare.outputs.source-sha }}
@@ -496,6 +530,7 @@ jobs:
         with:
           python-version: "3.13"
       - name: Install LibreOffice and comparison tools
+        timeout-minutes: 15
         run: |
           bash scripts/office-quality/install-libreoffice.sh
           python -m pip install -r scripts/office-quality/requirements.txt
@@ -577,6 +612,15 @@ jobs:
     env:
       SOFFICE: /opt/libreoffice26.2/program/soffice
     steps:
+      - name: Require the planned runner image
+        env:
+          PLANNED_IMAGE: ${{ needs.prepare.outputs.runner-image }}
+        run: |
+          if [ "$ImageVersion" != "$PLANNED_IMAGE" ]; then
+            echo "::error::Runner image $ImageVersion differs from the planned $PLANNED_IMAGE; re-run the failed jobs"
+            exit 1
+          fi
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
           ref: ${{ needs.prepare.outputs.source-sha }}
@@ -603,6 +647,7 @@ jobs:
         with:
           bun-version: "1.4.2"
       - name: Install LibreOffice and comparison tools
+        timeout-minutes: 15
         run: |
           bash scripts/office-quality/install-libreoffice.sh
           python -m pip install -r scripts/office-quality/requirements.txt
@@ -651,6 +696,15 @@ jobs:
       matrix:
         shard: ${{ fromJSON(needs.prepare.outputs.xlsx-fidelity-shards) }}
     steps:
+      - name: Require the planned runner image
+        env:
+          PLANNED_IMAGE: ${{ needs.prepare.outputs.runner-image }}
+        run: |
+          if [ "$ImageVersion" != "$PLANNED_IMAGE" ]; then
+            echo "::error::Runner image $ImageVersion differs from the planned $PLANNED_IMAGE; re-run the failed jobs"
+            exit 1
+          fi
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
           ref: ${{ needs.prepare.outputs.source-sha }}
@@ -669,6 +723,7 @@ jobs:
         with:
           bun-version: "1.4.2"
       - name: Install LibreOffice and comparison tools
+        timeout-minutes: 15
         run: |
           bash scripts/office-quality/install-libreoffice.sh
           python -m pip install -r scripts/office-quality/requirements.txt
@@ -755,6 +810,15 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.prepare.outputs.roundtrip-shards) }}
     steps:
+      - name: Require the planned runner image
+        env:
+          PLANNED_IMAGE: ${{ needs.prepare.outputs.runner-image }}
+        run: |
+          if [ "$ImageVersion" != "$PLANNED_IMAGE" ]; then
+            echo "::error::Runner image $ImageVersion differs from the planned $PLANNED_IMAGE; re-run the failed jobs"
+            exit 1
+          fi
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
           ref: ${{ needs.prepare.outputs.source-sha }}
@@ -778,6 +842,7 @@ jobs:
         with:
           python-version: "3.13"
       - name: Install the pinned LibreOffice release
+        timeout-minutes: 15
         run: bash scripts/office-quality/install-libreoffice.sh
       - name: Download the frozen originals
         env:
