@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'bun:test';
 import type { XlsxEditorApi } from './XlsxEditor';
-import { XlsxCommandAdmissionError } from './commands/createXlsxCommandStore';
+import { createXlsxCommandController, XlsxCommandAdmissionError } from './commands/createXlsxCommandStore';
 import { createInThreadAsyncEditorApi } from './createInThreadAsyncEditorApi';
 import { XlsxAsyncApiSyncAccessError } from './worker/asyncApiErrors';
 
@@ -11,10 +11,11 @@ test('fallback exports wait for pending input and keep sync access unavailable',
     content: { markdown: 'accepted cells', truncated: false, anchors: [], diagnostics: [] } };
   const exportMarkdown = mock(() => exported);
   const sync = {
+    commands: createXlsxCommandController().store,
     flushPendingInput: () => input,
     handle: { exportMarkdown },
   } as unknown as XlsxEditorApi;
-  const api = createInThreadAsyncEditorApi(sync, false);
+  const api = createInThreadAsyncEditorApi(sync, false, () => {});
   const result = api.exportMarkdown();
   await Promise.resolve();
   expect(exportMarkdown).not.toHaveBeenCalled();
@@ -29,10 +30,11 @@ test('fallback exports stop when input admission rejects a retired document', as
   const failure = new XlsxCommandAdmissionError('document-replaced');
   const exportMarkdown = mock(() => ({}));
   const sync = {
+    commands: createXlsxCommandController().store,
     flushPendingInput: async () => { throw failure; },
     handle: { exportMarkdown },
   } as unknown as XlsxEditorApi;
-  const api = createInThreadAsyncEditorApi(sync, false);
+  const api = createInThreadAsyncEditorApi(sync, false, () => { throw failure; });
   await expect(api.exportMarkdown()).rejects.toBe(failure);
   expect(exportMarkdown).not.toHaveBeenCalled();
 });

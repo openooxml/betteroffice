@@ -628,8 +628,17 @@ function XlsxAsyncEditorSession(props: XlsxAsyncEditorProps) {
 }
 
 function XlsxAsyncInThreadSession(props: XlsxAsyncEditorProps) {
-  const ready = useCallback((api: XlsxEditorApi) => props.onReady?.(createInThreadAsyncEditorApi(api,
-    props.collaboration !== undefined)), [props.onReady, props.collaboration]);
+  const current = useRef<XlsxEditorApi | null>(null);
+  const ready = useCallback((api: XlsxEditorApi) => {
+    current.current = api;
+    const cleanup = props.onReady?.(createInThreadAsyncEditorApi(api, props.collaboration !== undefined, () => {
+      if (current.current !== api) throw new XlsxCommandAdmissionError('document-replaced');
+    }));
+    return () => {
+      if (current.current === api) current.current = null;
+      cleanup?.();
+    };
+  }, [props.onReady, props.collaboration]);
   return <XlsxEditorContent {...props} experimentalWorkerOpen={false} onReady={ready} />;
 }
 

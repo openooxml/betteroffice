@@ -4,6 +4,7 @@ import * as xlsx from '@betteroffice/xlsx';
 import { useEffect, useState } from 'react';
 import type { XlsxInThreadEditorProps } from './XlsxEditor';
 import type { XlsxAsyncEditorApi } from './worker/createAsyncEditorApi';
+import { xlsxCommandController } from './commands/createXlsxCommandStore';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -63,7 +64,7 @@ function inThreadWorkbook() {
   const init = spyOn(xlsx, 'initWasm').mockResolvedValue(undefined);
   const open = spyOn(xlsx, 'openWorkbook').mockReturnValue(handle);
   restorers.push(() => open.mockRestore(), () => init.mockRestore());
-  return { open, init, displayList };
+  return { open, init, displayList, handle };
 }
 
 function inThreadPainting() {
@@ -182,6 +183,38 @@ describe('XlsxEditor engine dispatch', () => {
     expect(mounts).toHaveBeenCalledTimes(1);
     expect(unmounts).not.toHaveBeenCalled();
   });
+
+  for (const reason of ['Worker', 'OffscreenCanvas', 'experimentalWorkerOpen'] as const) {
+    it(`rejects retired fallback commands after workbook replacement (${reason})`, async () => {
+      if (reason !== 'experimentalWorkerOpen') Reflect.deleteProperty(globalThis, reason);
+      const host = inThreadWorkbook();
+      const undo = mock<xlsx.WorkbookHandle['undo']>(() => ({ applied: true, sheetInfo: host.handle.sheetInfo() }));
+      const replacement = { ...host.handle, undo } as xlsx.WorkbookHandle;
+      const ready = mock((_api: XlsxAsyncEditorApi) => {});
+      const props = { onReady: ready, experimentalWorkerOpen: reason === 'experimentalWorkerOpen' ? false : undefined };
+      const view = render(<XlsxEditor {...props} file={file} />);
+      await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+      const retired = ready.mock.calls[0]![0];
+      const prepared = xlsxCommandController(retired.commands)!.prepare('undo');
+      host.open.mockReturnValue(replacement);
+      view.rerender(<XlsxEditor {...props} file={new Uint8Array([4, 5, 6])} />);
+      await waitFor(() => expect(ready).toHaveBeenCalledTimes(2));
+      await expect(retired.whenHydrated()).rejects.toMatchObject({ code: 'document-replaced' });
+      await expect(retired.commands.execute('undo', null)).rejects.toMatchObject({ code: 'document-replaced' });
+      await expect(retired.commands.execute('bold', null)).rejects.toMatchObject({ code: 'document-replaced' });
+      await expect(prepared.execute(null)).rejects.toMatchObject({ code: 'document-replaced' });
+      expect(() => xlsxCommandController(retired.commands)!.prepare('undo')).toThrow('The workbook was replaced');
+      expect(undo).not.toHaveBeenCalled();
+      const current = ready.mock.calls[1]![0];
+      await act(async () => {
+        await expect(current.commands.execute('undo', null)).resolves.toMatchObject({ ok: true });
+      });
+      expect(undo).toHaveBeenCalledTimes(1);
+      view.unmount();
+      await expect(current.commands.execute('undo', null)).rejects.toMatchObject({ code: 'document-replaced' });
+      expect(undo).toHaveBeenCalledTimes(1);
+    });
+  }
 
   it('opens default collaboration in the worker-only editor', () => {
     const host = inThreadWorkbook();

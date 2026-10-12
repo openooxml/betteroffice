@@ -1,8 +1,9 @@
 import type { XlsxEditorApi } from './XlsxEditor';
 import type { XlsxAsyncEditorApi } from './worker/createAsyncEditorApi';
 import { guardAsyncEditorApi } from './worker/guardAsyncEditorApi';
+import { xlsxCommandController } from './commands/createXlsxCommandStore';
 
-export function createInThreadAsyncEditorApi(api: XlsxEditorApi, collaborative: boolean): XlsxAsyncEditorApi {
+export function createInThreadAsyncEditorApi(api: XlsxEditorApi, collaborative: boolean, assertCurrent: () => void): XlsxAsyncEditorApi {
   async function read<T>(operation: () => T): Promise<T> {
     await api.flushPendingInput();
     return operation();
@@ -13,7 +14,7 @@ export function createInThreadAsyncEditorApi(api: XlsxEditorApi, collaborative: 
     failure: null,
     whenHydrated: api.flushPendingInput,
     recoverySave: () => read(() => ({ bytes: api.save(), recovery: true as const })),
-    commands: api.commands,
+    commands: xlsxCommandController(api.commands)!.guarded(assertCurrent),
     collaboration: collaborative ? {
       clientId: handle.clientId,
       encodeStateVector: () => read(() => handle.encodeStateVector()),

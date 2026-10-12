@@ -863,6 +863,51 @@ function replacePrint(value: (() => void) | undefined) {
 }
 
 describe('XlsxEditor async API', () => {
+  for (const source of ['cell', 'formula'] as const) {
+    it(`blurs composing ${source} input and submits final text once before a toolbar command`, async () => {
+      const host = peerlessHarness(true);
+      const view = await host.mount();
+      if (source === 'cell') fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'F2' });
+      const input = view.getByTestId(source === 'cell' ? 'xlsx-cell-editor' : 'xlsx-formula-input') as HTMLInputElement;
+      act(() => input.focus());
+      fireEvent.compositionStart(input);
+      fireEvent.change(input, { target: { value: 'unfinished' } });
+      const blur = spyOn(input, 'blur').mockImplementation(() => {
+        fireEvent.blur(input);
+        input.value = 'final composed text';
+        fireEvent.compositionEnd(input);
+      });
+      restorers.push(() => blur.mockRestore());
+      const bold = view.container.querySelector<HTMLButtonElement>('button[aria-label="Bold"]')!;
+      await act(async () => fireEvent.click(bold));
+      expect(blur).toHaveBeenCalledTimes(1);
+      await waitFor(() => expect(host.sent).toHaveLength(2));
+      expect(host.sent[0]).toMatchObject({ kind: 'editCell', payload: { args: [0, 0, 0, 'final composed text'] } });
+      expect(host.sent[1]).toMatchObject({ kind: 'applyOps', payload: { toolbar: { id: 'bold' } } });
+      await act(async () => {
+        fireEvent.change(input, { target: { value: 'final composed text' } });
+        fireEvent.compositionEnd(input);
+        for (const command of host.sent) host.ack(command, { paint: true });
+      });
+      await advance();
+      expect(host.sent.filter(({ kind }) => kind === 'editCell')).toHaveLength(1);
+      expect(host.cells.get('0:0:0')).toBe('final composed text');
+      expect((view.getByTestId('xlsx-formula-input') as HTMLInputElement).value).toBe('final composed text');
+    });
+  }
+
+  it('names legacySyncApi when default onReplica encoding is called synchronously', async () => {
+    const host = collaborativePeerlessHarness();
+    const replicas = mock((_replica: CollaborationReplica | null) => {});
+    render(host.asyncEditor({ collaboration: { onReplica: replicas } }));
+    await opened();
+    await waitFor(() => expect(replicas).toHaveBeenCalledWith(host.replica));
+    const replica = replicas.mock.calls.find(([value]) => value !== null)![0]!;
+    expect(() => replica.encodeStateVector()).toThrow('legacySyncApi');
+    expect(() => replica.encodeStateAsUpdate()).toThrow('legacySyncApi');
+    await expect(host.replica.async.encodeStateVector()).resolves.toEqual(Uint8Array.of(1));
+  });
+
   for (const route of ['renderPng', 'renderRangePng', 'exportStructured', 'exportMarkdown', 'printDisplayList', 'exportPng'] as const) {
     for (const status of ['applied', 'refused'] as const) {
       it(`exports acknowledged composition and preserves input refusals (${route}, ${status})`, async () => {
