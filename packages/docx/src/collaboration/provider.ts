@@ -146,6 +146,10 @@ function typingInference(value: unknown): CollaborationTextInsertion | null {
   };
 }
 
+function isReplicaMessage(message: ReturnType<typeof decodeMessages>[number]): boolean {
+  return message.type === 'sync-step-1' || message.type === 'sync-step-2' || message.type === 'update';
+}
+
 export class CollaborationProvider {
   private readonly replica: CollaborationReplica;
   private readonly asyncReplica: AsyncCollaborationReplica | undefined;
@@ -551,6 +555,7 @@ export class CollaborationProvider {
     data: Uint8Array,
     decoded?: ReturnType<typeof decodeMessages>
   ): void {
+    const connection = this.openEpoch;
     let messages: ReturnType<typeof decodeMessages>;
     try {
       messages = decoded ?? decodeMessages(data.slice(), this.maxFrameBytes, this.maxMessagesPerFrame);
@@ -563,17 +568,30 @@ export class CollaborationProvider {
     }
 
     if (this.asyncReplica && !decoded) {
-      const replicaMessages: typeof messages = [];
+      const frame = {
+        connection,
+        bytes: data.byteLength,
+        remaining: messages.filter(isReplicaMessage).length,
+      };
+      let charged = false;
       for (const message of messages) {
-        if (!this.isCurrent(token) || !this.isOpen) return;
-        if (message.type === 'sync-step-1' || message.type === 'sync-step-2' || message.type === 'update') {
-          replicaMessages.push(message);
+        if (!this.isCurrentOpen(token, connection)) return;
+        if (isReplicaMessage(message)) {
+          if (!charged) {
+            if (frame.bytes > this.maxPendingBytes - this.replicaBytes) {
+              this.failConnection(
+                token,
+                new CollaborationError('backpressure', 'Pending replica data exceeds the byte limit')
+              );
+              return;
+            }
+            this.replicaBytes += frame.bytes;
+            charged = true;
+          }
+          this.enqueueReplicaMessages(token, frame, [message]);
         } else {
           this.handleMessage(token, new Uint8Array(), [message]);
         }
-      }
-      if (replicaMessages.length && this.isCurrent(token) && this.isOpen) {
-        this.enqueueReplicaMessages(token, data.byteLength, replicaMessages);
       }
       return;
     }
@@ -658,18 +676,12 @@ export class CollaborationProvider {
 
   private enqueueReplicaMessages(
     token: number,
-    bytes: number,
+    frame: { connection: number; bytes: number; remaining: number },
     messages: ReturnType<typeof decodeMessages>
   ): void {
-    if (bytes > this.maxPendingBytes - this.replicaBytes) {
-      this.failConnection(
-        token,
-        new CollaborationError('backpressure', 'Pending replica data exceeds the byte limit')
-      );
-      return;
-    }
-    this.replicaBytes += bytes;
-    const connection = this.openEpoch;
+    const connection = frame.connection;
+    if (!this.isCurrentOpen(token, connection)) return;
+    const awarenessAtArrival = this.awarenessRecords;
     const operation = this.replicaTail.then(async () => {
       for (const message of messages) {
         if (!this.isCurrentOpen(token, connection)) return;
@@ -700,7 +712,7 @@ export class CollaborationProvider {
                 }
               }
             } else {
-              this.applyTypingInference(applied);
+              this.applyTypingInference(applied, awarenessAtArrival);
             }
           }
         } catch (cause) {
@@ -720,7 +732,10 @@ export class CollaborationProvider {
         }
       }
     }).finally(() => {
-      if (connection === this.openEpoch) this.replicaBytes -= bytes;
+      frame.remaining -= messages.length;
+      if (frame.remaining === 0 && connection === this.openEpoch) {
+        this.replicaBytes -= frame.bytes;
+      }
     });
     this.replicaTail = operation.catch(() => {});
   }
@@ -761,9 +776,17 @@ export class CollaborationProvider {
     }
   }
 
-  private applyTypingInference(applied: unknown): void {
+  private applyTypingInference(
+    applied: unknown,
+    awarenessAtArrival?: ReadonlyMap<number, AwarenessRecord>
+  ): void {
     const inference = typingInference(applied);
     if (!inference) return;
+    if (
+      awarenessAtArrival &&
+      (this.awarenessRecords.get(inference.clientId)?.clock ?? -1) !==
+        (awarenessAtArrival.get(inference.clientId)?.clock ?? -1)
+    ) return;
     const reduction = reduceTypingInference(
       this.awarenessRecords,
       inference,
