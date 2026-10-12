@@ -52,8 +52,9 @@ export function usePeerlessPluginHost(run: PeerlessPresentation | null, commands
     return host.subscribe(() => host.syncCommands());
   }, [host]);
 
-  const subscribe = useCallback((listener: () => void) => run?.subscribeVisual(listener) ?? (() => {}), [run]);
-  const snapshot = useCallback(() => run?.getVisualSnapshot() ?? null, [run]);
+  const subscribe = useCallback((listener: () => void) =>
+    managed && run ? run.subscribeVisual(listener) : () => {}, [run, managed]);
+  const snapshot = useCallback(() => managed ? run?.getVisualSnapshot() ?? null : null, [run, managed]);
   const visual = useSyncExternalStore(subscribe, snapshot, snapshot);
   const confirmed = visual?.view.confirmed;
   const fit = visual?.fit;
