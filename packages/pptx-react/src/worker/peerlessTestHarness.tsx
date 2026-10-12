@@ -44,7 +44,7 @@ function bounded<T>(promise: Promise<T>): Promise<T> {
   })]).finally(() => clearTimeout(timer));
 }
 
-async function deck(small = false): Promise<Uint8Array> {
+export async function deck(small = false): Promise<Uint8Array> {
   const zip = new JSZip();
   const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
   const ns = `xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="${rel}"`;
@@ -192,7 +192,7 @@ export async function open(options: Partial<PptxAsyncEditorProps> = {}) {
     await waitFor(() => expect(client.state.selection).toMatchObject({ kind: 'object', shapeId: box.shapeId }));
     await waitFor(() => expect(view.getAllByTestId(/pptx-resize-/)).toHaveLength(8));
   };
-  return { view, stage, canvas, box, point, select, list, bytes, api, ui, client };
+  return { view, stage, canvas, box, point, select, list, bytes, api, ui, client, commands };
 }
 
 

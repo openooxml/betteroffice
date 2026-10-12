@@ -71,18 +71,17 @@ test('collaboration identity tracks room, client and initial bytes while callbac
   expect(owner.dispose).toHaveBeenCalledTimes(4);
 });
 
-test('untyped default plugins report the legacy opt-in once and block unsupported startup', async () => {
+test('default plugins start the worker session without a legacy opt-in', async () => {
   const { opener } = openingSession();
   const onError = mock((_error: Error) => {});
   const plugin = definePptxPlugin({ id: 'review', createState: () => ({}) });
   const props = { fonts: [], file, plugins: [plugin], onError } as unknown as PptxAsyncEditorProps;
   const view = render(<PptxEditor {...props} />);
-  await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
-  expect(onError.mock.calls[0][0].message).toContain('legacySyncApi');
-  expect(view.getByRole('alert').textContent).toContain('legacySyncApi');
+  await waitFor(() => expect(opener).toHaveBeenCalledTimes(1));
+  expect(view.queryByRole('alert')).toBeNull();
   view.rerender(<PptxEditor {...props} onError={(error) => onError(error)} />);
-  expect(onError).toHaveBeenCalledTimes(1);
-  expect(opener).not.toHaveBeenCalled();
+  expect(onError).not.toHaveBeenCalled();
+  expect(opener).toHaveBeenCalledTimes(1);
 });
 
 test('switching to legacy sync disposes a pending worker session', async () => {
