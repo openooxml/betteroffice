@@ -538,11 +538,11 @@ describe('XlsxEditor chart objects', () => {
     await selectChart(view, chart);
 
     // key repeat: five presses preview locally and touch nothing.
-    for (let press = 0; press < 5; press++) {
-      await act(async () => {
+    act(() => {
+      for (let press = 0; press < 5; press++) {
         fireEvent.keyDown(view.surface, { key: 'ArrowRight' });
-      });
-    }
+      }
+    });
     expect(view.outlineAt().x).toBe(Math.round(chart.rect.x + 5));
     expect(view.canUndo()).toBe(false);
 

@@ -1,12 +1,7 @@
 import { useLayoutEffect, useRef } from 'react';
 import { normalizeRange, StaleProposalError } from '@betteroffice/xlsx';
-import type {
-  EditResult,
-  MergedRange,
-  SelectionFormatting,
-  WorkbookHandle,
-  WorkbookEditPeer,
-} from '@betteroffice/xlsx';
+import type { EditResult, MergedRange, SelectionFormatting, WorkbookHandle, WorkbookEditPeer } from '@betteroffice/xlsx';
+
 import type { MergeAction } from '../components/Toolbar';
 import {
   XlsxCommandAdmissionError, type XlsxCommandBinding, type XlsxCommandController,
@@ -21,6 +16,7 @@ import {
 } from './evaluate';
 import { XLSX_COMMAND_DESCRIPTORS } from './descriptors';
 import { inputRefusal, WorkerInputRefusal, type WorkerInputCoordinator } from './workerInputCoordinator';
+
 import type { XlsxEditorBridge } from './useXlsxCommands';
 import type {
   XlsxCommandArgs,

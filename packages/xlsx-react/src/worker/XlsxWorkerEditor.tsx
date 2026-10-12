@@ -6,21 +6,23 @@ import {
   workbookEditPeerOperations, workbookSessionInternals,
 } from '@betteroffice/xlsx';
 import type {
-  CapturedFormat, CellAddr, CellEdit, CellInputEdit, Direction, EditResult, Proposal,
-  Selection, WorkbookFrame, WorkbookHandle, WorkbookReplayOp, WorkbookSheetView, XlsxEditResult,
+  CapturedFormat, CellAddr, CellEdit, CellInputEdit, Direction, EditResult, Proposal, Selection,
+  WorkbookFrame, WorkbookHandle, WorkbookReplayOp, WorkbookSheetView, XlsxEditResult,
 } from '@betteroffice/xlsx';
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { CSSProperties, KeyboardEvent, MouseEvent, SetStateAction, SyntheticEvent } from 'react';
+import { Component, lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import type { CSSProperties, KeyboardEvent, MouseEvent, ReactNode, SetStateAction, SyntheticEvent } from 'react';
 import { flushSync } from 'react-dom';
 import { createXlsxCommandController, XlsxCommandAdmissionError } from '../commands/createXlsxCommandStore';
 import { commandForEvent } from '../commands/descriptors';
+
 import type { InputDraft, InputSeal } from '../commands/inputCoordinator';
 import { inPluginChrome, pluginEventStore } from '../commands/pluginEvents';
 import { useCommandShortcuts } from '../commands/useCommandShortcuts';
 import { useSaveRequest } from '../commands/useSaveRequest';
 import { useWorkerXlsxCommands } from '../commands/useWorkerXlsxCommands';
 import {
-  createWorkerInputCoordinator, inputRefusal, WorkerInputRefusal, type WorkerInputCoordinatorHooks, type WorkerInputLease,
+  createWorkerInputCoordinator, inputRefusal, WorkerInputRefusal, type WorkerInputCoordinatorHooks,
+  type WorkerInputLease,
 } from '../commands/workerInputCoordinator';
 import { XlsxCommandContext } from '../commands/XlsxCommandProvider';
 import { EditorToolbar } from '../components/EditorToolbar';
@@ -28,18 +30,20 @@ import { EditorChromeContext } from '../components/EditorToolbarContext';
 import type { BorderStyle } from '../components/Toolbar';
 import { FormulaBarContext, type FormulaBarBinding } from '../components/toolbar/FormulaBar';
 import { ToolbarCommandButton } from '../components/toolbar/ToolbarCommand';
-import { useTranslation } from '../i18n';
+import { LocaleProvider, useTranslation } from '../i18n';
 import type { XlsxPluginEditorAccess, XlsxRevealAlignment } from '../plugins/createPluginClients';
+
 import { PluginOverlays } from '../plugins/PluginOverlays';
 import { PluginDock, useDockArea, type DockPlacement } from '../plugins/PluginPanels';
 import { useXlsxPluginHost } from '../plugins/useXlsxPluginHost';
 import { ProposalsPanel } from '../proposals/ProposalsPanel';
 import { deriveLimits, expandRangeToMergedCells, positionAtPoint, scaledRect } from '../viewer/sessionGeometry';
 import type { WorkerEditorApiBridge } from './createWorkerEditorApi';
-import {
-  useEditableSessionWorkbook, type EditableSessionWorkbookProps, type EditableWorkbookSession,
-} from './useEditableSessionWorkbook';
-import { WorkerPaintSource, type WorkerPaintRequest, type WorkerPaintResult } from './WorkerPaintSource';
+
+import { asError, useLegacySessionWorkbook, EditableWorkbookSession, type EditableSessionWorkbookProps } from './useEditableSessionWorkbook';
+import type { PeerlessSessionWorkbookProps } from './usePeerlessSessionWorkbook';
+import type { WorkerPaintRequest, WorkerPaintResult } from './WorkerPaintSource';
+import { WorkerPaintSource } from './WorkerPaintSource';
 
 const BRAND = '#217346';
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -99,7 +103,63 @@ function revealAxis(position: number, size: number, frozen: boolean, scroll: num
   return position < scroll || size >= body ? position : Math.max(0, position + size - body);
 }
 
-export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
+export const xlsxPeerlessEditorLoader = { load: () => import('./XlsxPeerlessWorkerEditor') };
+
+export class XlsxWorkerEditorChunkLoadError extends Error {
+  readonly code = 'chunk-load-failed';
+  constructor(readonly cause: unknown) {
+    super('Failed to load the worker editor. Remount the editor to retry.');
+    this.name = 'XlsxWorkerEditorChunkLoadError';
+  }
+}
+
+type PeerlessEditorBoundaryProps = Pick<PeerlessSessionWorkbookProps, 'onError' | 'className'> & {
+  children: ReactNode;
+};
+
+function PeerlessEditorError({ error, className }: { error: Error; className?: string }) {
+  const { t } = useTranslation();
+  return <div data-testid="xlsx-error" role="alert" className={className}>
+    {t('editor.openError')}: {error.message}
+  </div>;
+}
+
+class PeerlessEditorBoundary extends Component<PeerlessEditorBoundaryProps, { error: Error | null }> {
+  state = { error: null as Error | null };
+  private reported: Error | null = null;
+
+  static getDerivedStateFromError(error: unknown) { return { error: asError(error) }; }
+
+  componentDidCatch() {
+    const error = this.state.error;
+    if (!error || this.reported === error) return;
+    this.reported = error;
+    try { this.props.onError?.(error); } catch {}
+  }
+
+  render() {
+    return this.state.error ? <PeerlessEditorError error={this.state.error} className={this.props.className} />
+      : this.props.children;
+  }
+}
+
+type XlsxWorkerEditorProps = (EditableSessionWorkbookProps & { backend?: 'legacy' }) |
+  (PeerlessSessionWorkbookProps & { backend: 'peerless' });
+
+export function XlsxWorkerEditor(props: XlsxWorkerEditorProps) {
+  const backend = useRef(props.backend ?? 'legacy').current;
+  const [XlsxPeerlessWorkerEditor] = useState(() => lazy(() => xlsxPeerlessEditorLoader.load()
+    .then((module) => ({ default: module.XlsxPeerlessWorkerEditor }))
+    .catch((cause: unknown) => { throw new XlsxWorkerEditorChunkLoadError(cause); })));
+  return backend === 'peerless' ? <LocaleProvider i18n={props.i18n}>
+    <PeerlessEditorBoundary onError={props.onError} className={props.className}>
+      <Suspense fallback={null}><XlsxPeerlessWorkerEditor {...(props as PeerlessSessionWorkbookProps)} /></Suspense>
+    </PeerlessEditorBoundary>
+  </LocaleProvider> :
+    <LegacyXlsxWorkerEditor {...(props as EditableSessionWorkbookProps)} />;
+}
+
+function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
   const { t } = useTranslation();
   const rootRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -173,7 +233,7 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     previewEdits: (sheet, edits, op) => apiBridgeRef.current?.previewEdits?.(sheet, edits, op) ?? Promise.resolve(),
     canNavigateSync: () => apiBridgeRef.current?.canNavigateSync?.() ?? false,
   }));
-  const { run, error, loading } = useEditableSessionWorkbook(props, commands.store, apiBridge);
+  const { run, error, loading } = useLegacySessionWorkbook(props, commands.store, apiBridge);
   runRef.current = run;
   const inputHooks = useMemo(() => ({ current: null as WorkerInputCoordinatorHooks | null }), [run]);
   const acceptedCells = useMemo(() => new Map<string, string>(), [run]);

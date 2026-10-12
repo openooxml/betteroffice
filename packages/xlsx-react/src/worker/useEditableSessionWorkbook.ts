@@ -1,6 +1,6 @@
 import {
-  createWorkbookEditPeer, failWorkbookEditPeer, hydratePeer, openWorkbookSession,
-  type WorkbookHandle, type WorkbookSession, type WorkbookEditPeer,
+  createWorkbookEditPeer, failWorkbookEditPeer, hydratePeer, openWorkbookSession, type WorkbookHandle,
+  type WorkbookSession, type WorkbookEditPeer,
 } from '@betteroffice/xlsx';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { XlsxEditorProps } from '../XlsxEditor';
@@ -30,7 +30,7 @@ export interface EditableWorkbookSessionOptions {
   isCurrent(): boolean;
 }
 
-function asError(value: unknown): Error {
+export function asError(value: unknown): Error {
   return value instanceof Error ? value : new Error(
     value && typeof value === 'object' && 'message' in value ? String(value.message) : String(value)
   );
@@ -209,7 +209,22 @@ export class EditableWorkbookSession implements WorkerEditorSessionAccess {
   }
 }
 
+export class XlsxWorkerSessionFailedError extends Error {
+  readonly code = 'worker-session-failed';
+  constructor(readonly cause: unknown) {
+    super(`Workbook worker session failed: ${asError(cause).message}`);
+    this.name = 'XlsxWorkerSessionFailedError';
+  }
+}
+
 export function useEditableSessionWorkbook(
+  props: EditableSessionWorkbookProps, commands: XlsxCommandStore, bridge: WorkerEditorApiBridge,
+  _options?: { backend: 'legacy' }
+) {
+  return useLegacySessionWorkbook(props, commands, bridge);
+}
+
+export function useLegacySessionWorkbook(
   props: EditableSessionWorkbookProps, commands: XlsxCommandStore, bridge: WorkerEditorApiBridge
 ): {
   run: EditableWorkbookSession | null;

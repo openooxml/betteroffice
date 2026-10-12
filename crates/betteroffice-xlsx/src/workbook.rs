@@ -1,6 +1,8 @@
 pub(crate) mod batch;
 #[cfg(test)]
 mod edit_tests;
+mod geometry;
+mod recovery;
 #[cfg(test)]
 mod save_oracle_tests;
 #[path = "snapshot/assembly.rs"]
@@ -40,9 +42,8 @@ use xlsx_render::region::{
 use xlsx_render::scaled;
 use xlsx_render::{
     ChartRegion, DisplayList, GhostEdit, GridGeometry, PrintMetrics, RenderError, Viewport,
-    autofit_relevant, build_display_list_with_geometry, build_print_display_list_with_charts,
-    chart_at_point, display_text, moved_chart_anchor, resolve_chart_anchor,
-    visible_merged_ranges_with_geometry,
+    build_display_list_with_geometry, build_print_display_list_with_charts, chart_at_point,
+    display_text, moved_chart_anchor, resolve_chart_anchor, visible_merged_ranges_with_geometry,
 };
 
 use crate::authority::{
@@ -229,25 +230,27 @@ struct PreservedStateHistory {
     after: PreservedSheetState,
 }
 
-/// A memoized `sheet_info` plus the two inputs that decide whether a committed
-/// op can have moved it: the active sheet's used range and the grid geometry
-/// the content extent was measured in.
 struct SheetInfoCache {
     info: SheetInfo,
     bounds: Option<CellRange>,
-    geometry: Arc<GridGeometry>,
+    geometry_generation: Option<u64>,
 }
 
 impl SheetInfoCache {
-    /// Grow the used range to cover `at` and re-derive the fields it drives.
-    /// Ids, names, the active sheet and the freeze pane can't move here.
-    fn extend_bounds(&mut self, at: CellRef, freeze_pane: Option<FreezePane>) {
+    fn extend_bounds(&mut self, at: CellRef) {
+        if self.bounds.is_some_and(|bounds| bounds.contains(at)) {
+            return;
+        }
         let bounds = self.bounds.get_or_insert(CellRange::new(at, at));
         *bounds = CellRange::new(
             CellRef::new(bounds.start.row.min(at.row), bounds.start.col.min(at.col)),
             CellRef::new(bounds.end.row.max(at.row), bounds.end.col.max(at.col)),
         );
-        let content = sheet_content(self.bounds, freeze_pane, &self.geometry);
+        self.geometry_generation = None;
+    }
+
+    fn refresh_content(&mut self, freeze_pane: Option<FreezePane>, geometry: &GridGeometry) {
+        let content = sheet_content(self.bounds, freeze_pane, geometry);
         self.info.content_width = content.width;
         self.info.content_height = content.height;
         self.info.frozen_rows = content.frozen_rows;
@@ -361,7 +364,7 @@ pub struct Workbook {
     sheet_info_cache: Mutex<Option<SheetInfoCache>>,
     /// Mutation counter; chart resolutions cache against it.
     model_epoch: u64,
-    geometry_cache: Mutex<HashMap<SheetId, (u64, Arc<GridGeometry>)>>,
+    geometry_cache: Mutex<HashMap<SheetId, geometry::GeometryState>>,
     /// Rotated whenever the authority is replaced; half of [`Workbook::version`].
     version_nonce: String,
     /// Changes committed since the nonce was minted; the other half.
@@ -1231,17 +1234,21 @@ impl Workbook {
     }
 
     pub fn sheet_info(&self) -> Result<SheetInfo> {
+        let sheet = self.sheet(self.active_sheet)?;
+        let (geometry, generation) = self.sheet_geometry_with_generation(self.active_sheet)?;
         {
-            let slot = self
+            let mut slot = self
                 .sheet_info_cache
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if let Some(cached) = &*slot {
+            if let Some(cached) = &mut *slot {
+                if cached.geometry_generation != Some(generation) {
+                    cached.refresh_content(sheet.freeze_pane, &geometry);
+                    cached.geometry_generation = Some(generation);
+                }
                 return Ok(cached.info.clone());
             }
         }
-        let sheet = self.sheet(self.active_sheet)?;
-        let geometry = self.sheet_geometry(self.active_sheet)?;
         let bounds = sheet.used_range();
         let content = sheet_content(bounds, sheet.freeze_pane, &geometry);
         let info = SheetInfo {
@@ -1266,7 +1273,7 @@ impl Workbook {
             .unwrap_or_else(|p| p.into_inner()) = Some(SheetInfoCache {
             info: info.clone(),
             bounds,
-            geometry,
+            geometry_generation: Some(generation),
         });
         Ok(info)
     }
@@ -1875,8 +1882,10 @@ impl Workbook {
             )
             .map_err(authority_error)?;
         let prior_styles = self.pre_edit_cell_styles(&ops);
-        self.bump_model_epoch();
+        let delta = self.geometry_delta(&ops);
         self.apply_model_history(|undo, model| undo.undo(model))?;
+        self.bump_model_epoch();
+        self.queue_geometry_delta(delta);
         self.edited_since_open = true;
         self.update_sheet_info_cache(&ops, &prior_styles);
         if let Some(history) = self.preserved_undo.pop() {
@@ -1918,8 +1927,10 @@ impl Workbook {
             )
             .map_err(authority_error)?;
         let prior_styles = self.pre_edit_cell_styles(&ops);
-        self.bump_model_epoch();
+        let delta = self.geometry_delta(&ops);
         self.apply_model_history(|undo, model| undo.redo(model))?;
+        self.bump_model_epoch();
+        self.queue_geometry_delta(delta);
         self.edited_since_open = true;
         self.update_sheet_info_cache(&ops, &prior_styles);
         if let Some(history) = self.preserved_redo.pop() {
@@ -2615,7 +2626,7 @@ impl Workbook {
     /// Commits a single-cell edit without staging a copy of the authority. Returns the update
     /// to publish once the caller has recalculated.
     fn commit_user(&mut self, ops: &[Op]) -> Result<Option<Vec<u8>>> {
-        self.bump_model_epoch();
+        let delta = self.geometry_delta(ops);
         let preserved_before = (!self.is_collaborative()).then(|| self.preserved.clone());
         let names_before = self.sheet_names();
         let prior_styles = self.pre_edit_cell_styles(ops);
@@ -2627,7 +2638,7 @@ impl Workbook {
             let mut model = staged.model;
             retain_formula_caches(&self.model, &mut model);
             retain_array_formulas(&self.model, &mut model);
-            self.install_model(model)?;
+            self.install_model_with_ops(model, ops)?;
             self.update_sheet_info_cache(ops, &prior_styles);
             Some(staged.update)
         } else {
@@ -2642,6 +2653,8 @@ impl Workbook {
                 .map_err(authority_error)?;
             let transaction = Transaction::new(ops.to_vec(), Provenance::User);
             self.apply_model_history(|undo, model| undo.commit(model, &transaction))?;
+            self.bump_model_epoch();
+            self.queue_geometry_delta(delta);
             self.update_sheet_info_cache(ops, &prior_styles);
             update
         };
@@ -2678,10 +2691,6 @@ impl Workbook {
     /// the update, so they see the recalculated state it produced.
     fn publish(&mut self, update: Option<Vec<u8>>) {
         self.committed_changes += 1;
-        self.geometry_cache
-            .get_mut()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear();
         if let Some(update) = update {
             self.emit_update(UpdateEvent {
                 update,
@@ -2768,12 +2777,6 @@ impl Workbook {
             .collect()
     }
 
-    /// Fold a committed op batch into the `sheet_info` memo. A `SetCell` that
-    /// keeps its target's style and can't contribute to row autofit only moves
-    /// the used range outward, which `extend_bounds` folds in without a rescan;
-    /// a cell leaving the used-range edge, a style change (fonts feed autofit),
-    /// or an op touching sheets, names, geometry or the freeze drops the memo
-    /// for the next `sheet_info` to rebuild.
     fn update_sheet_info_cache(&self, ops: &[Op], prior_styles: &HashMap<CellRef, Option<u32>>) {
         let mut slot = self
             .sheet_info_cache
@@ -2814,45 +2817,25 @@ impl Workbook {
                     if *sheet != self.active_sheet {
                         continue;
                     }
-                    let prior = prior_styles.get(at);
-                    let invalid = if *cell == CellState::default() {
-                        prior.is_some()
-                            && (on_used_edge(cache.bounds, *at)
-                                || self.cell_moves_row_fit(*at, prior.copied().flatten()))
-                    } else {
-                        match prior {
-                            // style moved -> the autofit contribution moved
-                            Some(&prior) if prior != cell.style => true,
-                            // pure value change on a live cell
-                            Some(_) => false,
-                            // new cell: only grows the result if its font fits
-                            // its row taller than what the row already had
-                            None => self.cell_moves_row_fit(*at, cell.style),
-                        }
-                    };
-                    if invalid {
+                    if prior_styles.get(at).copied().flatten() != cell.style {
                         *slot = None;
                         return;
                     }
-                    cache.extend_bounds(*at, self.active_sheet_freeze_pane());
+                    if self
+                        .model
+                        .sheet(*sheet)
+                        .and_then(|sheet| sheet.cell(*at))
+                        .is_some()
+                    {
+                        cache.extend_bounds(*at);
+                    } else if prior_styles.contains_key(at) && on_used_edge(cache.bounds, *at) {
+                        *slot = None;
+                        return;
+                    }
                 }
                 Op::SetCharts { .. } | Op::SetChartAnchor { .. } | Op::SetDefinedNames { .. } => {}
             }
         }
-    }
-
-    /// Whether a cell carrying `style` at `at` participates in the active
-    /// sheet's row autofit — unsized rows take their tallest content.
-    fn cell_moves_row_fit(&self, at: CellRef, style: Option<u32>) -> bool {
-        self.model
-            .sheet(self.active_sheet)
-            .is_some_and(|sheet| autofit_relevant(sheet, &self.model.styles, at, style))
-    }
-
-    fn active_sheet_freeze_pane(&self) -> Option<FreezePane> {
-        self.model
-            .sheet(self.active_sheet)
-            .and_then(|sheet| sheet.freeze_pane)
     }
 
     fn rebuild_and_recalculate(&mut self, options: CalculationOptions) -> CalculationResult {
@@ -2862,6 +2845,7 @@ impl Workbook {
         let (graph, result) =
             rebuild_and_recalc_all_with_seed(&mut self.model, options.now_serial, self.rand_seed);
         self.graph = Some(graph);
+        self.dirty_geometry_cells(&result.changed);
         let result = calculation_result(&result);
         self.last_calculation = result.clone();
         result
@@ -2879,6 +2863,7 @@ impl Workbook {
         result: RecalcResult,
         seeds: &[(SheetId, CellRef)],
     ) -> MutationResult {
+        self.dirty_geometry_cells(&result.changed);
         let seeds: HashSet<_> = seeds
             .iter()
             .map(|(sheet, cell)| (sheet.0, cell.row, cell.col))
@@ -3279,10 +3264,6 @@ impl Workbook {
     /// charts revalidate against their refresh value after the bump.
     fn bump_model_epoch(&mut self) {
         self.model_epoch = self.model_epoch.wrapping_add(1);
-        self.geometry_cache
-            .get_mut()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear();
     }
 
     /// The one way a model becomes this workbook's own. Per-op commit paths
@@ -3292,24 +3273,10 @@ impl Workbook {
     /// what changed.
     fn install_model(&mut self, model: WorkbookModel) -> Result<()> {
         self.bump_model_epoch();
+        self.clear_geometry();
+        self.invalidate_sheet_info();
         self.model = model;
         Ok(())
-    }
-
-    fn sheet_geometry(&self, sheet: SheetId) -> Result<Arc<GridGeometry>> {
-        let sheet_ref = self.sheet(sheet)?;
-        let mut cache = self
-            .geometry_cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Some((epoch, geometry)) = cache.get(&sheet)
-            && *epoch == self.model_epoch
-        {
-            return Ok(Arc::clone(geometry));
-        }
-        let geometry = Arc::new(GridGeometry::new(sheet_ref, &self.model.styles));
-        cache.insert(sheet, (self.model_epoch, Arc::clone(&geometry)));
-        Ok(geometry)
     }
 }
 
@@ -5279,3 +5246,6 @@ mod tests {
         assert!(!contains_lowercased("ΟΔΟΣ", "ο\u{3c3}"));
     }
 }
+
+#[cfg(test)]
+mod geometry_tests;

@@ -18,6 +18,8 @@ export const ToolbarModeContext = createContext<ToolbarMode | null>(null);
 /** Whether chrome renders inside an `XlsxEditor`, which supplies locale and shortcuts. */
 export const EditorChromeContext = createContext(false);
 
+export const PeerlessChromeContext = createContext(false);
+
 export function useEditorToolbar(): ToolbarProps {
   const context = useContext(EditorToolbarContext);
   if (!context)

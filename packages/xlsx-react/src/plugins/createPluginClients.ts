@@ -14,6 +14,7 @@ import {
 } from '../commands/createXlsxCommandStore';
 import { isPluginCommandId, XLSX_COMMAND_DESCRIPTORS } from '../commands/descriptors';
 import type { XlsxCommandStore } from '../commands/types';
+import type { XlsxPluginDocumentAccess } from './createPluginDocumentAccess';
 import type {
   XlsxPluginCommandClient,
   XlsxPluginEditClient,
@@ -90,7 +91,7 @@ const MESSAGES: Record<XlsxPluginFailureCode, string> = {
   'plugin-failed': 'The plugin failed',
 };
 
-const NAVIGATION_MESSAGES: Record<XlsxPluginNavigationFailureCode, string> = {
+export const NAVIGATION_MESSAGES: Record<XlsxPluginNavigationFailureCode, string> = {
   'stale-version': 'The workbook changed after that version',
   'missing-target': 'The target is not in the workbook',
   'ambiguous-target': 'The target does not identify one place',
@@ -98,7 +99,7 @@ const NAVIGATION_MESSAGES: Record<XlsxPluginNavigationFailureCode, string> = {
   unsupported: 'The editor cannot show this target now',
 };
 
-const ALIGNMENTS: ReadonlySet<string> = new Set(['nearest', 'start', 'center']);
+export const ALIGNMENTS: ReadonlySet<string> = new Set(['nearest', 'start', 'center']);
 
 export function pluginRefusal(
   code: XlsxPluginFailureCode,
@@ -149,7 +150,7 @@ type Admitted<T> = { refused: XlsxPluginRefusal } | { value: T };
  * `work`'s outcome, or null when a signal aborts before `started` turns true. Once the work has
  * started its outcome is authoritative, so an abort it causes itself cannot hide it.
  */
-function unlessAborted<T>(
+export function unlessAborted<T>(
   signals: readonly AbortSignal[],
   work: Promise<T>,
   started: () => boolean
@@ -181,10 +182,11 @@ function unlessAborted<T>(
 /** Clients bound to one invocation: they refuse once it is superseded or its plugin ends. */
 export function createPluginClients(
   invocation: PluginInvocation<XlsxPluginSnapshot>,
-  access: XlsxPluginEditorAccess,
+  access: XlsxPluginEditorAccess | XlsxPluginDocumentAccess,
   grant: () => XlsxPluginGrant,
   store: XlsxCommandStore
 ): XlsxPluginClients {
+  if ('identity' in access) throw new Error('Document access requires async plugin clients');
   /**
    * Runs `use` after pending input, checking this invocation in the same step. A superseded or
    * ended invocation refuses at once rather than waiting for the input ahead of it; once `use`

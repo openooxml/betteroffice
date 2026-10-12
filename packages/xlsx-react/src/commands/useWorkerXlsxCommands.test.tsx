@@ -1,22 +1,94 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, describe, expect, mock, test } from 'bun:test';
+import { afterAll, afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import { selectionAt, StaleProposalError } from '@betteroffice/xlsx';
-import type { EditResult, WorkbookHandle } from '@betteroffice/xlsx';
+import type { CommandStatus, EditResult, WorkbookAck, WorkbookCommandSelection, WorkbookEditState, WorkbookHandle } from '@betteroffice/xlsx';
 import { WorkbookEditPeerFailedError, type WorkbookEditPeer } from '@betteroffice/xlsx';
 import { createXlsxCommandController } from './createXlsxCommandStore';
 import type { XlsxCommandEnvironment } from './evaluate';
+import type { WorkbookFormatTokenResult } from '../../../xlsx/src/session/commandProtocol';
 import type { InputDraft } from './inputCoordinator';
 import { PLAIN_FORMATTING } from './testing';
 import type { XlsxEditorView } from './useXlsxCommands';
-import {
-  createWorkerXlsxCommandBinding, useWorkerXlsxCommands, type WorkerXlsxEditorBridge,
-} from './useWorkerXlsxCommands';
+import { createWorkerXlsxCommandBinding, useWorkerXlsxCommands, type WorkerXlsxEditorBridge } from './useWorkerXlsxCommands';
+import { createPeerlessWorkerXlsxCommandBinding, usePeerlessWorkerXlsxCommands, type PeerlessWorkerXlsxEditorBridge } from './usePeerlessWorkerXlsxCommands';
 import { createWorkerInputCoordinator } from './workerInputCoordinator';
+import { createPeerlessWorkerInputCoordinator, type PeerlessWorkerCommand } from './peerlessWorkerInputCoordinator';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 const { act, cleanup, renderHook } = await import('@testing-library/react');
 const restorers: (() => void)[] = [];
+
+function peerlessCommands(attach = true) {
+  const legacy = harness(true, false);
+  const listeners = new Set<(ack: WorkbookAck) => void>();
+  const sent: PeerlessWorkerCommand[] = [];
+  const replies = new Map<number, ReturnType<typeof deferred<CommandStatus>>>();
+  let throughSeq = 0;
+  let version = 'v0';
+  let workerBold = false;
+  let editState: Partial<WorkbookEditState> = {
+    formatting: { ...PLAIN_FORMATTING }, formattingAvailable: true, selectionEditable: true,
+    mergedRanges: [], canUndo: true, canRedo: true, readOnly: false,
+    activeSheet: 0, sheets: [{ index: 0, id: 'sheet:0', name: 'Sheet' }],
+  };
+  let selection: WorkbookCommandSelection | undefined;
+  let token: string | null = null;
+  let formatRevision = 0;
+  const session = {
+    commandIdentity: { session: 'book', incarnation: 'worker' },
+    get confirmedBasis() { return { epoch: 1, version }; },
+    get throughSeq() { return throughSeq; },
+    get editState() { return editState; },
+    get selection() { return selection; },
+    submit(command: PeerlessWorkerCommand) {
+      sent.push(command);
+      const result = deferred<CommandStatus>();
+      replies.set(command.seq, result);
+      return result.promise;
+    },
+    onAck(listener: (ack: WorkbookAck) => void) {
+      listeners.add(listener); return () => { listeners.delete(listener); };
+    },
+    save: async () => new Uint8Array([8, 9]), whenPresented: mock(async (_seq: number) => {}),
+  };
+  const coordinator = createPeerlessWorkerInputCoordinator({
+    session: () => session, generation: () => legacy.state.generation,
+    isReady: () => legacy.state.ready,
+    seal: () => ({}), sync: () => {},
+    target: (_sheet, row, col) => ({ sheetId: 'sheet:0', range: {
+      kind: 'rowCol', start: { row, col }, end: { row, col },
+    } }),
+    onError: legacy.bridge.fail,
+  });
+  const bridge: PeerlessWorkerXlsxEditorBridge = {
+    ...legacy.bridge, session: () => session, coordinator,
+    frame: () => undefined, selectionRevision: () => 0,
+    formatToken: () => token, formatRevision: () => formatRevision,
+    setFormatToken: (value) => { token = value; formatRevision++; },
+  };
+  const binding = createPeerlessWorkerXlsxCommandBinding(() => bridge);
+  if (attach) legacy.controller.attach(binding);
+  const push = (ack: WorkbookAck) => {
+    if (ack.throughSeq >= throughSeq) version = ack.version;
+    throughSeq = Math.max(throughSeq, ack.throughSeq);
+    editState = { ...editState, ...ack.editState };
+    if (ack.selection) selection = ack.selection;
+    for (const listener of listeners) listener(ack);
+    for (const status of ack.statuses) replies.get(status.seq)?.resolve(status);
+  };
+  const ack = (seq: number, edits?: Partial<WorkbookEditState>, restored?: WorkbookCommandSelection, status: CommandStatus['status'] = 'applied') => {
+    const command = sent.find((entry) => entry.seq === seq);
+    if (status === 'applied' && command?.kind === 'applyOps' && 'toolbar' in command.payload && command.payload.toolbar.id === 'bold') {
+      workerBold = !workerBold;
+      edits = { ...edits, formatting: { ...PLAIN_FORMATTING, bold: workerBold } };
+    }
+    push({ throughSeq: seq, version: `v${seq}`, editState: edits, selection: restored,
+      statuses: [{ seq, status, ...(status === 'refused' ? { reason: 'stale-proposal', result: { cells: ['A1'] } } : {}) }],
+    });
+  };
+  return { ...legacy, bridge, coordinator, binding, session, sent, push, ack };
+}
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -116,6 +188,294 @@ afterEach(() => {
   restorers.length = 0;
 });
 afterAll(async () => { if (ownsDom) await GlobalRegistrator.unregister(); });
+
+describe('peerless worker XLSX commands', () => {
+  test('save consults the host request and honors its veto', async () => {
+    const { store, bridge, session } = peerlessCommands();
+    const save = spyOn(session, 'save');
+    restorers.push(() => save.mockRestore());
+    bridge.requestSave = mock(async () => ({ ok: true as const, status: 'noop' as const }));
+    expect(await store.execute('save', null)).toEqual({ ok: true, status: 'noop' });
+    expect(bridge.requestSave).toHaveBeenCalledTimes(1);
+    expect(save).not.toHaveBeenCalled();
+    expect(bridge.deliver).not.toHaveBeenCalled();
+  });
+
+  for (const readOnly of [false, true]) {
+    test(`queued peerless formatting keeps submission-time permissions (${readOnly ? 'read-only' : 'editable'})`, async () => {
+      const { store, state, coordinator, sent, ack } = peerlessCommands();
+      const capture = deferred<string>();
+      const pasted = coordinator.clipboard(() => capture.promise, (value) => ({
+        kind: 'editCell', payload: { args: [0, 0, 0, value] },
+      }));
+      state.readOnly = readOnly;
+      const formatting = store.execute('bold', null);
+      state.readOnly = !readOnly;
+      const posted = deferred<void>();
+      const off = coordinator.subscribe((event) => {
+        if (event.type === 'dispatched' && event.seq === (readOnly ? 1 : 2)) posted.resolve();
+      });
+      capture.resolve('paste');
+      await posted.promise;
+      off();
+      ack(1);
+      if (!readOnly) ack(2);
+      expect(await formatting).toMatchObject(readOnly
+        ? { ok: false, failure: { code: 'read-only' } } : { ok: true, status: 'executed' });
+      await pasted.result;
+      expect(sent.map((command) => command.kind)).toEqual(readOnly ? ['editCell'] : ['editCell', 'applyOps']);
+    });
+  }
+
+  test('peerless scoped grants are rechecked after clipboard preparation', async () => {
+    const { controller, coordinator, sent, ack, errors } = peerlessCommands();
+    const capture = deferred<string>();
+    let denied = false;
+    const scoped = controller.scoped({ deny: () => denied ? 'permission-denied' : null, subscribe: () => () => {} });
+    const pasted = coordinator.clipboard(() => capture.promise, (value) => ({
+      kind: 'editCell', payload: { args: [0, 0, 0, value] },
+    }));
+    const undo = scoped.execute('undo', null);
+    denied = true;
+    capture.resolve('paste');
+    expect(await undo).toMatchObject({ ok: false, failure: { code: 'permission-denied' } });
+    expect(sent.map((command) => command.kind)).toEqual(['editCell']);
+    ack(1);
+    await pasted.result;
+    expect(errors).toEqual([]);
+  });
+
+  test('non-document capture stays executed and arms the exact token at an unchanged opaque version', async () => {
+    const { store, bridge, push, session, errors } = peerlessCommands();
+    push({ throughSeq: 0, version: 'engine:opaque/α', statuses: [] });
+    const capturing = store.execute('paintFormat', null);
+    push({ throughSeq: 1, version: 'engine:opaque/α', statuses: [{
+      seq: 1, status: 'applied', committed: false, result: { formatToken: 'format:opaque/β' },
+    }] });
+    expect(await capturing).toEqual({ ok: true, status: 'executed' });
+    expect(bridge.formatToken()).toBe('format:opaque/β');
+    expect(store.getState('paintFormat').active).toBe(true);
+    expect(session.throughSeq).toBe(1);
+    expect(session.confirmedBasis.version).toBe('engine:opaque/α');
+    expect(errors).toEqual([]);
+  });
+
+  test('successful non-document proposal rejection differs from a false noop result', async () => {
+    const { store, push, bridge, errors } = peerlessCommands();
+    const accepted = store.execute('proposalReject', { proposalId: 'p1' });
+    push({ throughSeq: 1, version: 'engine:opaque/α', statuses: [{
+      seq: 1, status: 'applied', committed: false, result: true,
+    }] });
+    expect(await accepted).toEqual({ ok: true, status: 'executed' });
+    expect(bridge.markStale).toHaveBeenCalledWith('p1', null);
+    expect(bridge.refreshProposals).toHaveBeenCalledTimes(1);
+    const missing = store.execute('proposalReject', { proposalId: 'p1' });
+    push({ throughSeq: 2, version: 'engine:opaque/α', statuses: [{
+      seq: 2, status: 'noop', committed: false, result: false,
+    }] });
+    expect(await missing).toMatchObject({ ok: false, failure: { code: 'proposal-not-found' } });
+    expect(bridge.refreshProposals).toHaveBeenCalledTimes(2);
+    expect(errors).toEqual([]);
+  });
+
+  for (const id of ['bold', 'fillColor', 'numberFormat'] as const) {
+    test(`${id} preserves the admitted reverse selection focus`, async () => {
+      const { store, bridge, sent, push } = peerlessCommands();
+      const selection: WorkbookCommandSelection = { sheetId: 'sheet:0', activeCell: { row: 0, col: 0 },
+        range: { kind: 'rowCol', start: { row: 0, col: 0 }, end: { row: 2, col: 0 } } };
+      bridge.selection = () => selection;
+      const formatting = id === 'bold' ? store.execute(id, null) : id === 'fillColor'
+        ? store.execute(id, { color: '#123456' }) : store.execute(id, { value: 'number' });
+      expect(sent[0].payload).toMatchObject({ selection });
+      expect('target' in sent[0].payload ? sent[0].payload.target :
+        'toolbar' in sent[0].payload ? sent[0].payload.toolbar.target : undefined).toEqual({
+        sheetId: selection.sheetId, range: selection.range,
+      });
+      push({ throughSeq: 1, version: 'v1', statuses: [{ seq: 1, status: 'applied' }], selection });
+      expect(await formatting).toMatchObject({ ok: true });
+    });
+  }
+
+  test('delayed formatting retains its admitted frame and selection revision', async () => {
+    const host = peerlessCommands();
+    const capture = deferred<string>();
+    const pasted = host.coordinator.clipboard(() => capture.promise, (value) => ({
+      kind: 'editCell', payload: { args: [0, 0, 0, value] },
+    }));
+    const frame = { sheet: 0, viewport: { x: 0, y: 0, width: 800, height: 600 }, zoom: 1, dpr: 1,
+      generation: 1, requestGeneration: 2 };
+    let revision = 3;
+    host.bridge.frame = () => frame;
+    host.bridge.selectionRevision = () => revision;
+    const events: import('./peerlessWorkerInputCoordinator').PeerlessWorkerInputEvent[] = [];
+    host.coordinator.subscribe((event) => events.push(event));
+    const formatting = host.store.execute('bold', null);
+    revision = 4;
+    frame.requestGeneration = 5;
+    capture.resolve('paste');
+    await act(async () => {});
+    expect(host.sent[1].frame).toMatchObject({ requestGeneration: 2 });
+    expect(events.find((event) => event.type === 'dispatched' && event.seq === 2))
+      .toMatchObject({ selectionRevision: 3 });
+    host.ack(1); host.ack(2);
+    await Promise.all([pasted.result, formatting]);
+  });
+
+  test('refuses a malformed format capture token at runtime', async () => {
+    const required: WorkbookFormatTokenResult extends { formatToken: string } ? true : false = true;
+    expect(required).toBe(true);
+    const { store, bridge, push, errors } = peerlessCommands();
+    const capturing = store.execute('paintFormat', null);
+    push({ throughSeq: 1, version: 'v1', statuses: [{ seq: 1, status: 'applied', result: { formatToken: 7 } }] });
+    expect(await capturing).toMatchObject({ ok: false, failure: { code: 'command-failed' } });
+    expect(bridge.formatToken()).toBeNull();
+    expect(errors).toHaveLength(1);
+  });
+
+  test('uses pushed toolbar state', async () => {
+    const { controller, store, bridge, push, peer } = peerlessCommands(false);
+    const renders = mock(() => {});
+    renderHook(() => { renders(); usePeerlessWorkerXlsxCommands(controller, bridge); });
+    const renderCount = renders.mock.calls.length;
+    const release = controller.hold('bold');
+    const changed = mock(() => {});
+    const unsubscribe = store.subscribe(changed);
+    await act(async () => {
+      push({ throughSeq: 0, version: 'v0', statuses: [], editState: { formatting: { ...PLAIN_FORMATTING, bold: true } } });
+    });
+    expect(store.getState('bold').active).toBe(true);
+    expect(changed).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      push({ throughSeq: 0, version: 'v0', statuses: [] });
+      push({ throughSeq: 0, version: 'v0', statuses: [], editState: { formatting: { ...PLAIN_FORMATTING, bold: true } } });
+    });
+    expect(changed).toHaveBeenCalledTimes(1);
+    expect(peer.selectionFormatting).not.toHaveBeenCalled();
+    expect(renders).toHaveBeenCalledTimes(renderCount);
+    unsubscribe(); release();
+  });
+
+  test('rapid relative toggles resolve in worker', async () => {
+    const { store, sent, ack, peer } = peerlessCommands();
+    const first = store.execute('bold', null);
+    const second = store.execute('bold', null);
+    expect(sent).toHaveLength(2);
+    expect(sent.map((command) => command.payload)).toEqual([
+      expect.objectContaining({ toolbar: expect.objectContaining({ id: 'bold', args: null }) }),
+      expect.objectContaining({ toolbar: expect.objectContaining({ id: 'bold', args: null }) }),
+    ]);
+    ack(1);
+    ack(2);
+    expect(await first).toMatchObject({ ok: true });
+    expect(await second).toMatchObject({ ok: true });
+    expect(store.getState('bold').active).toBe(false);
+    expect(peer.selectionFormatting).not.toHaveBeenCalled();
+  });
+
+  test('undo redo restore worker selection', async () => {
+    const { store, binding, ack } = peerlessCommands();
+    const undo = store.execute('undo', null);
+    ack(1, { canUndo: false, canRedo: true }, { sheetId: 'sheet:0', range: {
+      kind: 'rowCol', start: { row: 4, col: 2 }, end: { row: 4, col: 2 },
+    } });
+    expect(await undo).toMatchObject({ ok: true });
+    expect(binding.environment(false).selection).toMatchObject({ top: 4, left: 2, bottom: 4, right: 2 });
+    const redo = store.execute('redo', null);
+    ack(2, { canUndo: true, canRedo: false }, { sheetId: 'sheet:0', range: { kind: 'a1', a1: 'B9:C10' } });
+    expect(await redo).toMatchObject({ ok: true });
+    expect(binding.environment(false).selection).toMatchObject({ top: 8, left: 1, bottom: 9, right: 2 });
+  });
+
+  test('stale proposal refresh remains usable', async () => {
+    const { store, bridge, errors, ack, sent } = peerlessCommands();
+    const stale = store.execute('proposalAccept', { proposalId: 'p1' });
+    ack(1, undefined, undefined, 'refused');
+    expect(await stale).toMatchObject({ ok: false, failure: { code: 'proposal-stale' } });
+    expect(bridge.markStale).toHaveBeenCalledWith('p1', ['A1']);
+    expect(bridge.refreshProposals).toHaveBeenCalledTimes(1);
+    expect(errors).toEqual([]);
+    const forced = store.execute('proposalAccept', { proposalId: 'p1', force: true });
+    expect(sent[1]).toMatchObject({ kind: 'acceptProposal', payload: { args: ['p1', { force: true }] } });
+    ack(2);
+    expect(await forced).toMatchObject({ ok: true });
+  });
+
+  test('cancels armed formatting locally and captures a fresh token', async () => {
+    const { store, bridge, sent, push, peer } = peerlessCommands();
+    const capturing = store.execute('paintFormat', null);
+    expect(sent[0]).toMatchObject({ kind: 'applyOps', payload: {
+      toolbar: { id: 'paintFormat', args: null, target: { sheetId: 'sheet:0' } },
+    } });
+    push({ throughSeq: 1, version: 'v1', statuses: [{ seq: 1, status: 'applied', result: { formatToken: 'format:1' } }] });
+    expect(await capturing).toMatchObject({ ok: true });
+    expect(bridge.formatToken()).toBe('format:1');
+    expect(store.getState('paintFormat').active).toBe(true);
+    expect(await store.execute('paintFormat', null)).toMatchObject({ ok: true });
+    expect(bridge.formatToken()).toBeNull();
+    expect(store.getState('paintFormat').active).toBe(false);
+    expect(sent).toHaveLength(1);
+    const recapturing = store.execute('paintFormat', null);
+    expect(sent).toHaveLength(2);
+    push({ throughSeq: 2, version: 'v2', statuses: [{ seq: 2, status: 'applied', result: { formatToken: 'format:2' } }] });
+    expect(await recapturing).toMatchObject({ ok: true });
+    expect(bridge.formatToken()).toBe('format:2');
+    expect(store.getState('paintFormat').active).toBe(true);
+    expect(peer.captureFormat).not.toHaveBeenCalled();
+  });
+
+  test('ignores a capture reply after local cancellation', async () => {
+    const { store, bridge, sent, push } = peerlessCommands();
+    const capturing = store.execute('paintFormat', null);
+    bridge.setFormatToken(null);
+    push({ throughSeq: 1, version: 'v1', statuses: [{ seq: 1, status: 'applied', result: { formatToken: 'format:1' } }] });
+    expect(await capturing).toMatchObject({ ok: true });
+    expect(bridge.formatToken()).toBeNull();
+    expect(store.getState('paintFormat').active).toBe(false);
+    expect(sent).toHaveLength(1);
+  });
+
+  test('ignores an older capture reply while a newer capture is pending', async () => {
+    const { store, bridge, sent, push } = peerlessCommands();
+    const first = store.execute('paintFormat', null);
+    const second = store.execute('paintFormat', null);
+    expect(sent).toHaveLength(2);
+    push({ throughSeq: 1, version: 'v1', statuses: [{ seq: 1, status: 'applied', result: { formatToken: 'format:1' } }] });
+    expect(await first).toMatchObject({ ok: true });
+    expect(bridge.formatToken()).toBeNull();
+    push({ throughSeq: 2, version: 'v2', statuses: [{ seq: 2, status: 'applied', result: { formatToken: 'format:2' } }] });
+    expect(await second).toMatchObject({ ok: true });
+    expect(bridge.formatToken()).toBe('format:2');
+  });
+
+  test('ignores an older capture reply after a newer token is applied', async () => {
+    const { store, bridge, coordinator, sent, push } = peerlessCommands();
+    const first = store.execute('paintFormat', null);
+    const second = store.execute('paintFormat', null);
+    push({ throughSeq: 2, version: 'v2', statuses: [{ seq: 2, status: 'applied', result: { formatToken: 'format:2' } }] });
+    expect(await second).toMatchObject({ ok: true });
+    const applied = coordinator.command({ kind: 'applyFormat', payload: {
+      target: { sheetId: 'sheet:0', range: { kind: 'a1', a1: 'D4' } }, formatToken: bridge.formatToken()!,
+    } });
+    expect(sent[2]).toMatchObject({ kind: 'applyFormat', payload: { formatToken: 'format:2' } });
+    push({ throughSeq: 3, version: 'v3', statuses: [{ seq: 3, status: 'applied' }] });
+    await applied.result;
+    bridge.setFormatToken(null);
+    push({ throughSeq: 3, version: 'v3', statuses: [{ seq: 1, status: 'applied', result: { formatToken: 'format:1' } }] });
+    expect(await first).toMatchObject({ ok: true });
+    expect(bridge.formatToken()).toBeNull();
+    expect(store.getState('paintFormat').active).toBe(false);
+  });
+
+  test('rejecting a stale proposal listing reports proposal-not-found', async () => {
+    const { store, sent, push, bridge, errors } = peerlessCommands();
+    const rejecting = store.execute('proposalReject', { proposalId: 'p1' });
+    expect(sent[0]).toMatchObject({ kind: 'rejectProposal', payload: { args: ['p1'] } });
+    push({ throughSeq: 1, version: 'v1', statuses: [{ seq: 1, status: 'noop', result: false }] });
+    expect(await rejecting).toMatchObject({ ok: false, failure: { code: 'proposal-not-found' } });
+    expect(bridge.refreshProposals).toHaveBeenCalledTimes(1);
+    expect(errors).toEqual([]);
+  });
+});
 
 describe('worker XLSX commands', () => {
   test('reads formatting, merged ranges and history from the peer and writes styles through the facade', async () => {

@@ -12,6 +12,23 @@ use crate::date::DateSystem;
 use crate::styles::Stylesheet;
 use crate::value::CellValue;
 
+#[cfg(feature = "test-counters")]
+thread_local! {
+    static USED_RANGE_SCANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(feature = "test-counters")]
+#[doc(hidden)]
+pub fn used_range_scans() -> u64 {
+    USED_RANGE_SCANS.get()
+}
+
+#[cfg(feature = "test-counters")]
+#[doc(hidden)]
+pub fn reset_used_range_scans() {
+    USED_RANGE_SCANS.set(0);
+}
+
 /// upper bound on the cells one array formula may fill. a malformed or hostile
 /// `ref` must not be able to ask for a sheet's worth of cells.
 pub const MAX_SPILL_CELLS: usize = 262_144;
@@ -386,6 +403,8 @@ impl Sheet {
     }
 
     pub fn used_range(&self) -> Option<CellRange> {
+        #[cfg(feature = "test-counters")]
+        USED_RANGE_SCANS.set(USED_RANGE_SCANS.get().wrapping_add(1));
         let mut bounds = self
             .cells
             .keys()

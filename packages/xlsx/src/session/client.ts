@@ -11,11 +11,14 @@ import {
 import {
   WORKBOOK_SESSION_METHODS,
   WORKBOOK_SESSION_POLICIES,
+  WorkbookPngUnavailableError,
   type WorkbookFrame,
   type WorkbookFrameOptions,
+  type WorkbookInitialPaint,
   type WorkbookSessionEvents,
   type WorkbookSessionMethods,
   type WorkbookSessionOpenOptions,
+  type WorkbookSessionOpenReply,
   type WorkbookSessionState,
   type WorkbookWireFrame,
 } from './methods';
@@ -27,6 +30,15 @@ import {
 } from './replay';
 import { WorkbookPeerHydrationError } from './peerHydrationError';
 import { workbookPeerSources as peerSources, type WorkbookPeerSource } from './clientInternals';
+import type {
+  CommandBasis, CommandIdentity, CommandStatus, WorkbookAck, WorkbookCommand,
+  WorkbookCommandContext, WorkbookCommandFrame, WorkbookCommandSelection, WorkbookEditState,
+  WorkbookSharedAck, WorkbookSharedWireAck,
+} from './commandProtocol';
+import { createWorkbookEditSession, type WorkbookEditSession } from './editSession';
+import { createAsyncCollaborationReplica, type AsyncReplicaAdapter } from '../collaboration/asyncReplica';
+import { localNowSerial } from './calculationClock';
+import { createWorkbookSessionRecovery, workbookSessionRecovery } from './clientRecovery';
 
 type Events = { [K in keyof WorkbookSessionEvents]: WorkbookSessionEvents[K] } & {
   peerOpened: { version: string; initialCalculation?: WorkbookCalculationContext | null };
@@ -47,6 +59,9 @@ export interface OpenWorkbookSessionOptions extends OpenWorkbookOptions {
   retainPeerHydration?: boolean;
   /** Aborting closes the session worker while the open is still in flight. */
   signal?: AbortSignal;
+  initialViewport?: WorkbookSessionOpenOptions['initialViewport'];
+  includeEditState?: boolean;
+  initialUpdate?: Uint8Array;
 }
 
 /**
@@ -54,8 +69,29 @@ export interface OpenWorkbookSessionOptions extends OpenWorkbookOptions {
  * @experimental
  */
 export interface WorkbookSession {
+  readonly pngExport?: boolean;
+  readonly replica?: AsyncReplicaAdapter;
+  bindCollaboration?(apply: (update: Uint8Array) => Promise<unknown>): () => void;
   readonly state: WorkbookSessionState;
-  readonly call: Promisified<Omit<WorkbookSessionMethods, 'open' | 'dispose' | 'frame'>> & {
+  readonly initialPaint?: WorkbookInitialPaint;
+  readonly commandIdentity: CommandIdentity;
+  readonly confirmedBasis: CommandBasis;
+  readonly throughSeq: number;
+  readonly presentedThroughSeq: number;
+  readonly editState: Readonly<Partial<WorkbookEditState>>;
+  readonly selection: WorkbookCommandSelection | undefined;
+  readonly editSession?: WorkbookEditSession;
+  submit(command: WorkbookCommand): Promise<CommandStatus>;
+  onAck(listener: (ack: WorkbookAck) => void): () => void;
+  markPresented(frame: WorkbookCommandFrame | Pick<WorkbookCommandFrame, 'session' | 'incarnation' | 'coversThroughSeq'>): boolean;
+  whenPresented(seq: number): Promise<void>;
+  readonly call: Promisified<Omit<WorkbookSessionMethods,
+    'open' | 'openRecovery' | 'dispose' | 'frame' | 'command' | 'edit' | 'checkpoint' | 'commandFrame' |
+    'renderPng' | 'renderRangePng' | 'printDisplayList'>> & {
+    renderPng(viewport: Viewport, options?: WorkbookFrameOptions): Promise<Uint8Array>;
+    renderRangePng(options?: { range?: string; scale?: number }, frameOptions?: WorkbookFrameOptions): Promise<Uint8Array>;
+    printDisplayList(...args: Parameters<WorkbookHandle['printDisplayList']>): Promise<ReturnType<WorkbookHandle['printDisplayList']>>;
+    command(command: WorkbookCommand): Promise<WorkbookAck>;
     /**
      * @experimental A newer `frame` call replaces a queued one, which rejects with an error
      * named `SessionSuperseded`.
@@ -84,6 +120,14 @@ function decodeFrame(frame: WorkbookWireFrame): WorkbookFrame {
   };
 }
 
+async function pngBytes(render: Promise<ArrayBuffer>): Promise<Uint8Array> {
+  try { return new Uint8Array(await render); }
+  catch (error) {
+    if (error instanceof Error && error.name === 'WorkbookPngUnavailableError') throw new WorkbookPngUnavailableError();
+    throw error;
+  }
+}
+
 function prepareOpen(bytes: Uint8Array | ArrayBuffer, options: OpenWorkbookSessionOptions): {
   document: ArrayBuffer;
   input: WorkbookSessionOpenOptions & { retainPeerHydration?: boolean };
@@ -91,11 +135,17 @@ function prepareOpen(bytes: Uint8Array | ArrayBuffer, options: OpenWorkbookSessi
 } {
   const document = copyBytes(bytes).buffer;
   const transfer: Transferable[] = [document];
+  const calculation = options.calculation ?? (options.includeEditState && !options.retainPeerHydration && !options.collaborative
+    ? { nowSerial: localNowSerial(Date.now()), randSeed: globalThis.crypto.getRandomValues(new Uint32Array(1))[0] >>> 0 }
+    : undefined);
   const input: WorkbookSessionOpenOptions & { retainPeerHydration?: boolean } = {
     collaborative: options.collaborative,
     clientId: options.clientId,
-    calculation: options.calculation === undefined ? undefined : { ...options.calculation },
+    calculation: calculation ? { ...calculation } : undefined,
     retainPeerHydration: options.retainPeerHydration,
+    initialViewport: options.initialViewport ? { ...options.initialViewport } : undefined,
+    includeEditState: options.includeEditState,
+    initialUpdate: options.initialUpdate?.slice(),
   };
   if (options.wasm instanceof ArrayBuffer ||
     Object.prototype.toString.call(options.wasm) === '[object ArrayBuffer]') {
@@ -210,12 +260,17 @@ export async function createWorkbookSession(
   let transfer: Transferable[];
   let client: SessionClient<Methods, Events>;
   let peerSource: WorkbookPeerSource | undefined;
-  let rejectHydration!: (error: WorkbookPeerHydrationError) => void;
-  const hydrationFailure = new Promise<never>((_, reject) => { rejectHydration = reject; });
-  void hydrationFailure.catch(() => {});
+  let rejectHydration: ((error: WorkbookPeerHydrationError) => void) | undefined;
+  let hydrationFailure: Promise<never> | undefined;
+  let recoverySource: Uint8Array | undefined;
   try {
     ({ document, input, transfer } = prepareOpen(bytes, options));
+    if (options.includeEditState && !options.retainPeerHydration && !input.collaborative) {
+      recoverySource = new Uint8Array(document).slice();
+    }
     if (options.retainPeerHydration) {
+      hydrationFailure = new Promise<never>((_, reject) => { rejectHydration = reject; });
+      void hydrationFailure.catch(() => {});
       peerSource = {
         bytes: new Uint8Array(document).slice(),
         options: {
@@ -231,13 +286,13 @@ export async function createWorkbookSession(
         if (url !== wasmAssetUrl().href) return;
         if (peerSource) {
           if (hydration === undefined) {
-            rejectHydration(new WorkbookPeerHydrationError('missing-hydration',
+            rejectHydration!(new WorkbookPeerHydrationError('missing-hydration',
               'Workbook worker did not retain peer calculation state'));
             return;
           }
           if (typeof version !== 'string' || typeof sequence !== 'number' ||
             !Number.isSafeInteger(sequence) || sequence < 0) {
-            rejectHydration(new WorkbookPeerHydrationError('missing-hydration',
+            rejectHydration!(new WorkbookPeerHydrationError('missing-hydration',
               'Workbook worker hydration is missing its committed version or sequence'));
             return;
           }
@@ -256,8 +311,14 @@ export async function createWorkbookSession(
     throw error;
   }
   let state: WorkbookSessionState;
+  let commandContext: WorkbookCommandContext | undefined;
   let initialVersion: string | undefined;
-  client.on('peerOpened', (opened) => {
+  let initialPaint: WorkbookInitialPaint | undefined;
+  let openedEditState: WorkbookEditState | undefined;
+  let openedSelection: WorkbookCommandSelection | undefined;
+  let pngExport = false;
+  let clientId: number | undefined;
+  if (peerSource) client.on('peerOpened', (opened) => {
     initialVersion = opened.version;
     if (peerSource) peerSource.initialCalculation = opened.initialCalculation;
   });
@@ -272,9 +333,18 @@ export async function createWorkbookSession(
   try {
     signal?.addEventListener('abort', abort, { once: true });
     if (signal?.aborted) abort();
-    state = await Promise.race([
-      client.callWithTransfer('open', [document, input], transfer), hydrationFailure,
-    ]);
+    const opening = client.callWithTransfer('open', [document, input], transfer);
+    const reply: WorkbookSessionOpenReply = await (hydrationFailure ? Promise.race([opening, hydrationFailure]) : opening);
+    const { commandContext: openedCommands, initialPaint: paint, clientId: replicaId,
+      editState: edits, selection: selected, pngExport: png, ...projection } = reply;
+    pngExport = png === true;
+    if (paint) initialPaint = { ...paint, frame: { ...paint.frame, ...decodeFrame(paint.frame) } };
+    openedEditState = edits ?? paint?.editState;
+    openedSelection = selected;
+    clientId = replicaId;
+    commandContext = openedCommands;
+    initialVersion ??= openedCommands?.basis.version;
+    state = projection;
     if (signal?.aborted) throw new SessionFailure('disposed', 'Session was disposed');
     if (peerSource && !peerSource.module) {
       throw new WorkbookPeerHydrationError('missing-module',
@@ -292,6 +362,12 @@ export async function createWorkbookSession(
   const calls = { ...client.call };
   for (const method of Object.keys(WORKBOOK_SESSION_METHODS) as (keyof WorkbookSessionMethods)[]) {
     Object.defineProperty(calls, method, { value: (...args: unknown[]) => {
+      if (method === 'command' && (peerSource || workbookSessionInternals.get(session)?.editPeerAttached)) {
+        return Promise.reject(new Error('Workbook commands require a session without an edit peer'));
+      }
+      if (method === 'applyEdits' && commandMode) {
+        return Promise.reject(new Error('Workbook command sessions require command batches'));
+      }
       if (peerSource || workbookSessionInternals.get(session)?.editPeerAttached) {
         const configured = WORKBOOK_SESSION_POLICIES[method];
         const policy = typeof configured === 'function'
@@ -305,29 +381,165 @@ export async function createWorkbookSession(
         }
       }
       const call = client.call[method] as (...args: unknown[]) => Promise<unknown>;
-      return call(...args);
+      try {
+        if (method === 'renderPng' || method === 'renderRangePng') {
+          const options = args[1] as WorkbookFrameOptions | undefined;
+          args = structuredClone([args[0], { ...options, sheet: options?.sheet ?? state.activeSheet }]);
+        } else if (method === 'exportStructured' || method === 'exportMarkdown' || method === 'printDisplayList') {
+          args = structuredClone(args);
+        }
+      } catch (error) { return Promise.reject(error); }
+      return edits.runAfterEdits(() => call(...args));
     } });
   }
   const {
     version, readCells, findText, validateEdits, applyEdits, frame, sheetView, cellGeometry,
-    cellInputs, sheets, calculationStatus, save,
+    cellInputs, captureFormat, sheets, calculationStatus, save,
+    renderPng, renderRangePng, exportStructured, exportMarkdown, printDisplayList,
+    collaborationStateVector, collaborationStateAsUpdate,
   } = calls;
+  const commandIdentity: CommandIdentity = Object.freeze(commandContext ? {
+    session: commandContext.session, incarnation: commandContext.incarnation,
+  } : { session: '', incarnation: '' });
+  let commandMode = false;
+  let selectionPublished = openedSelection !== undefined;
+  const basis = commandContext?.basis ?? { epoch: 1, version: initialVersion ?? '' };
+  const recovery = recoverySource ? createWorkbookSessionRecovery(recoverySource,
+    { ...options, calculation: input.calculation },
+    async (allowed) => {
+      const dispatched = await edits.runAfterEdits(() => Promise.resolve({
+        reply: allowed() ? client.call.checkpoint(true) : undefined,
+      }));
+      return dispatched.reply;
+    }, basis.epoch, options.calculation === undefined, initialVersion) : undefined;
+  recoverySource = undefined;
+  function decodeAck(reply: WorkbookSharedWireAck): WorkbookSharedAck {
+    const { frame: paint, compatibility, ...receipt } = reply;
+    const decoded: WorkbookSharedAck = { ...receipt,
+      ...(paint ? { frame: { ...paint, payload: { ...paint.payload, ...decodeFrame(paint.payload) } } } : {}) };
+    if (compatibility) {
+      const { frame, ...status } = compatibility;
+      decoded.compatibility = { ...status,
+        ...(frame ? { frame: { ...frame, ...decodeFrame(frame) } } : {}) };
+    }
+    return decoded;
+  }
+  const edits: WorkbookEditSession = createWorkbookEditSession({ identity: commandIdentity,
+    onAdmit: recovery ? (input) => recovery.admit(input) : undefined,
+    normalizePayload: recovery ? (payload) => recovery.normalizePayload(payload) : undefined,
+    connection: {
+      initial: { session: commandIdentity.session, incarnation: 1, epoch: basis.epoch,
+        throughSeq: 0, version: 0, engineVersion: basis.version, outcomes: [],
+        ...(openedEditState ? { editState: openedEditState } : {}),
+        ...(openedSelection ? { selection: openedSelection } : {}),
+        ...(initialPaint ? { frame: { coversThroughSeq: 0, revision: initialPaint.frame.epoch,
+          payload: initialPaint.frame } } : {}) },
+      client: {
+        call: { edit: async (input) => {
+          const compatibility = input.payload.compatibility;
+          if (!compatibility || compatibility.kind === 'applyUpdate') return decodeAck(await client.call.edit(input));
+          const reply = await client.call.command(compatibility);
+          if (!reply.shared) throw new Error('Workbook command omitted shared acknowledgement');
+          return decodeAck(reply.shared);
+        },
+          checkpoint: () => client.call.checkpoint() },
+        get failure() { return client.failure; },
+        onFailure: (listener) => client.onFailure(listener),
+        dispose: () => client.dispose(),
+      },
+    },
+    enqueue: (callback) => { callback(); },
+    requestFullFrame: async () => {
+      const paint = await client.call.commandFrame();
+      return { session: commandIdentity.session, incarnation: 1, epoch: basis.epoch,
+        throughSeq: edits.state.throughSeq, version: edits.state.version, engineVersion: edits.engineVersion,
+        outcomes: [], ...(paint ? { frame: { ...paint, payload: { ...paint.payload, ...decodeFrame(paint.payload) } } } : {}) };
+    },
+  });
+  edits.onFailure(() => { state = { ...state, stage: 'failed' }; });
+  edits.onAck((ack) => {
+    recovery?.acknowledge(ack);
+    if (ack.selection && (selectionPublished ||
+      ack.statuses.some((status) => status.status === 'applied' || status.status === 'noop'))) selectionPublished = true;
+  });
+  edits.subscribe((current) => {
+    if (current.editState) state = { ...state,
+      ...(current.editState.activeSheet === undefined ? {} : { activeSheet: current.editState.activeSheet }),
+      ...(current.editState.sheets === undefined ? {} : { sheets: current.editState.sheets }) };
+  });
+  async function command(input: WorkbookCommand): Promise<WorkbookAck> {
+    commandMode = true;
+    if (peerSource || workbookSessionInternals.get(session)?.editPeerAttached) {
+      throw new Error('Workbook commands require a session without an edit peer');
+    }
+    return edits.command(input);
+  }
   const session: WorkbookSession = {
+    pngExport,
     get state() { return state; },
+    initialPaint,
+    commandIdentity,
+    get confirmedBasis(): CommandBasis { return Object.freeze({ epoch: edits.state.epoch, version: edits.engineVersion }); },
+    get throughSeq() { return edits.state.throughSeq; },
+    get presentedThroughSeq() { return Math.max(0, edits.state.presentedThroughSeq); },
+    get editState() { return edits.state.editState ?? {}; },
+    get selection() { return selectionPublished ? edits.state.selection : undefined; },
+    editSession: edits,
+    submit: async (input) => {
+      const ack = await command(input);
+      const status = ack.statuses.find((entry) => entry.seq === input.seq);
+      if (!status) throw new Error(`Workbook acknowledgement omitted sequence ${input.seq}`);
+      return status;
+    },
+    onAck: (listener) => edits.onAck(listener),
+    markPresented: (paint) => edits.markPresented(paint),
+    whenPresented: async (seq) => {
+      if (!Number.isSafeInteger(seq) || seq < 0) return Promise.reject(new RangeError('Invalid presentation sequence'));
+      if (client.failure || edits.failure) throw client.failure ?? edits.failure;
+      if (seq === 0 && !initialPaint) return;
+      if (await edits.whenPresented(seq) !== 'presented') {
+        throw client.failure ?? edits.failure ?? new SessionFailure('disposed', 'Presentation was dropped');
+      }
+    },
     call: {
       version, readCells, findText, validateEdits, applyEdits, sheetView, cellGeometry, cellInputs,
-      sheets, calculationStatus, save,
+      captureFormat, sheets, calculationStatus, save, command, exportStructured, exportMarkdown,
+      collaborationStateVector, collaborationStateAsUpdate,
+      renderPng: (viewport, options) => pngBytes(renderPng(viewport, options)),
+      renderRangePng: (options, frameOptions) => pngBytes(renderRangePng(options, frameOptions)),
+      printDisplayList: async (...args) => JSON.parse(new TextDecoder().decode(await printDisplayList(...args))),
       frame: async (viewport, options) => decodeFrame(await frame(viewport, options)),
     },
     save: async () => new Uint8Array(await save()),
     on: (name, listener) => client.on(name, listener),
-    onFailure: (listener) => client.onFailure(listener),
-    get failure() { return client.failure; },
+    onFailure: (listener) => edits.onFailure(listener),
+    get failure() { return edits.failure ?? client.failure; },
     dispose: () => {
       if (peerSource) peerSource.disposed = true;
-      return client.dispose();
+      recovery?.dispose();
+      return edits.dispose();
     },
   };
+  if (clientId !== undefined && !peerSource) {
+    let applyRemote: ((update: Uint8Array) => Promise<unknown>) | undefined;
+    const replica = createAsyncCollaborationReplica({ clientId,
+      encodeStateVector: () => collaborationStateVector(),
+      encodeStateAsUpdate: (remoteStateVector) => collaborationStateAsUpdate(remoteStateVector?.slice()),
+      applyUpdate: async (update) => {
+        if (applyRemote) return applyRemote(update.slice());
+        const ticket = edits.submit('applyUpdate', { payload: { update: update.slice() } }, { lane: 'collab', fence: true });
+        const ack = await ticket.ack;
+        if (ack.status !== 'applied' && ack.status !== 'noop') throw new Error(ack.reason ?? 'Remote update refused');
+        return ack;
+      },
+      onUpdate: (listener) => client.on('collaborationUpdate', ({ update, origin }) => listener(update.slice(), origin)),
+    });
+    Object.defineProperty(session, 'replica', { value: replica, enumerable: true });
+    session.bindCollaboration = (apply) => {
+      applyRemote = apply;
+      return () => { if (applyRemote === apply) applyRemote = undefined; };
+    };
+  }
   const replay = async (envelope: WorkbookReplayEnvelope) => {
     const reply = await client.call.replay(envelope).catch((error: unknown) => {
       if (error instanceof Error && error.name === 'WorkbookPeerHydrationError') {
@@ -376,5 +588,6 @@ export async function createWorkbookSession(
     get initialCalculation() { return source?.initialCalculation; },
   });
   if (peerSource) peerSources.set(session, peerSource);
+  if (recovery) workbookSessionRecovery.set(session, recovery.recovery);
   return session;
 }

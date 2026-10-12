@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import type { DisplayList } from '@betteroffice/xlsx';
+import { createPeerlessPluginGeometry } from './createPeerlessPluginDocument';
 import {
   createPluginGeometry,
   gridRectToOverlay,
@@ -64,6 +65,22 @@ describe('plugin layouts', () => {
 });
 
 describe('overlay coordinates', () => {
+  test('retained geometry refuses a new acknowledged version or painted frame', () => {
+    const frame = painted();
+    let projection = { version: 'v1', painted: frame };
+    const geometry = createPeerlessPluginGeometry(pluginLayout(frame, 'v1')!, frame,
+      element(0, 0), element(0, 0), () => projection);
+    const cell = { sheetId: 'sheet:0', row: 0, col: 0 };
+    const range = { sheetId: 'sheet:0', range: { top: 0, left: 0, bottom: 1, right: 0 } };
+    expect(geometry.getCellRect(cell)).not.toBeNull();
+    projection = { version: 'v2', painted: frame };
+    expect(geometry.getCellRect(cell)).toBeNull();
+    expect(geometry.getRangeRect(range)).toBeNull();
+    projection = { version: 'v1', painted: painted() };
+    expect(geometry.getCellRect(cell)).toBeNull();
+    expect(geometry.getRangeRect(range)).toBeNull();
+  });
+
   test('zoom viewport-local grid rects, clip them to the frame and offset them by the canvas', () => {
     const grid = { frame: { width: 300, height: 100 } as DisplayList, zoom: 1.5 };
     expect(gridRectToOverlay(grid, { x: 64, y: 20, w: 64, h: 20 }, { x: 3, y: 4 })).toEqual({

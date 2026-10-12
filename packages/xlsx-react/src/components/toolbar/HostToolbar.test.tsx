@@ -1,8 +1,9 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
-import { useRef } from 'react';
+import { useRef, useState } from 'react';
 import { createT, en } from '@betteroffice/xlsx-i18n';
 import type { ReactNode } from 'react';
+import { selectionAt, type CommandStatus, type WorkbookAck, type WorkbookEditState, type WorkbookSession } from '@betteroffice/xlsx';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -16,9 +17,13 @@ import {
   ToolbarDropdown,
   ToolbarGroup,
   ToolbarMenuItem,
+  ToolbarOverflow,
   XlsxCommandProvider,
   XlsxToolbar,
   useEditorToolbar,
+  useXlsxCommand,
+  useXlsxCommandState,
+  useXlsxCommands,
   type FormattingAction,
   type ToolbarProps,
 } from '../../index';
@@ -27,8 +32,14 @@ import {
   type XlsxCommandController,
 } from '../../commands/createXlsxCommandStore';
 import { isMacPlatform } from '../../commands/descriptors';
-import { PLAIN_FORMATTING, testBinding, testEnvironment } from '../../commands/testing';
+import { PLAIN_FORMATTING, testBinding, testEnvironment, testSessionCommands } from '../../commands/testing';
 import { useCommandShortcuts } from '../../commands/useCommandShortcuts';
+import { createPeerlessWorkerXlsxCommandBinding, type PeerlessWorkerXlsxEditorBridge } from '../../commands/usePeerlessWorkerXlsxCommands';
+import { createPeerlessWorkerInputCoordinator, type PeerlessWorkerCommand } from '../../commands/peerlessWorkerInputCoordinator';
+import type { XlsxCommandResult, XlsxCommandStore } from '../../commands/types';
+import { createAsyncEditorApi } from '../../worker/createAsyncEditorApi';
+import type { WorkerEditorApiBridge } from '../../worker/createWorkerEditorApi';
+import { PeerlessWorkbookSession } from '../../worker/usePeerlessSessionWorkbook';
 
 const { act, cleanup, fireEvent, render, within } = await import('@testing-library/react');
 
@@ -98,7 +109,221 @@ function Shortcuts({
   return <div ref={root}>{children}</div>;
 }
 
+function asyncEditor() {
+  const controller = createXlsxCommandController();
+  const listeners = new Set<(ack: WorkbookAck) => void>();
+  let state: Partial<WorkbookEditState> = { formatting: PLAIN_FORMATTING, canUndo: false, canRedo: false,
+    sheets: [{ id: 'sheet:0', index: 0, name: 'Sheet' }] };
+  let throughSeq = 0;
+  let submitted!: (command: PeerlessWorkerCommand) => void;
+  const sent: PeerlessWorkerCommand[] = [];
+  let replied!: (status: CommandStatus) => void;
+  const session = {
+    ...testSessionCommands(),
+    state: { stage: 'ready', sheets: state.sheets, activeSheet: 0 }, call: {},
+    get editState() { return state; }, get throughSeq() { return throughSeq; },
+    submit(command: PeerlessWorkerCommand) {
+      sent.push(command);
+      const result = new Promise<CommandStatus>((resolve) => { replied = resolve; });
+      submitted(command);
+      return result;
+    },
+    onAck(listener: (ack: WorkbookAck) => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
+    onFailure: () => () => {}, dispose: async () => {},
+  } as unknown as WorkbookSession;
+  const owner = new PeerlessWorkbookSession(session, 1, { isCurrent: () => true, changed() {}, onReady() {}, onError() {} });
+  owner.firstPaint();
+  const coordinator = createPeerlessWorkerInputCoordinator({ session: () => owner.session, generation: () => 1,
+    isReady: () => owner.ready, seal: () => ({}), sync() {}, onError: (error) => owner.fail(error),
+    target: () => ({ sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A1' } }),
+  });
+  const bridge: PeerlessWorkerXlsxEditorBridge = {
+    session: () => owner.session, coordinator, status: () => owner.ready ? 'ready' : 'empty',
+    readOnly: () => false, collaborative: () => false, generation: () => 1, mutation: () => throughSeq,
+    view: () => ({ sheet: 0, selection: selectionAt({ row: 0, col: 0 }), chartSelected: false, zoom: 1,
+      capturedFormat: null, borderStyle: undefined, borderColor: undefined, proposals: [],
+      proposalsAvailable: false, proposalsPanelOpen: false, pngExport: false }),
+    frame: () => undefined, selectionRevision: () => 0, formatToken: () => null, formatRevision: () => 0,
+    setFormatToken() {}, setZoom() {}, setBorderStyle() {}, setBorderColor() {}, setProposalsPanelOpen() {},
+    markStale() {}, refreshProposals() {}, deliver() {}, afterPaint: async () => true, focusGrid() {},
+    fail: (error) => owner.fail(error), i18n: () => undefined, translate: createT(en),
+  };
+  const binding = createPeerlessWorkerXlsxCommandBinding(() => bridge);
+  controller.attach(binding);
+  const unsubscribe = binding.subscribe(() => controller.refresh());
+  const api = createAsyncEditorApi(owner, controller.store, () => ({ focus() {} }) as WorkerEditorApiBridge);
+  const acknowledge = (command: PeerlessWorkerCommand, canUndo: boolean, canRedo: boolean, reason?: CommandStatus['reason']) => {
+    throughSeq = command.seq;
+    state = { ...state, canUndo, canRedo };
+    const status: CommandStatus = { seq: command.seq, status: reason ? 'refused' : 'applied', committed: !reason, reason };
+    const ack: WorkbookAck = { throughSeq, version: 'v1', statuses: [status], editState: state };
+    for (const listener of listeners) listener(ack);
+    replied(status);
+  };
+  return {
+    api, controller, bridge, sent, acknowledge,
+    nextCommand: () => new Promise<PeerlessWorkerCommand>((resolve) => { submitted = resolve; }),
+    locale(i18n: typeof en) {
+      bridge.i18n = () => i18n;
+      bridge.translate = createT(i18n);
+      controller.refresh();
+    },
+    dispose() { unsubscribe(); binding.dispose(); owner.dispose(); },
+  };
+}
+
 describe('host-composed xlsx toolbar', () => {
+  test('binds async commands, pending history and locale outside the editor', async () => {
+    const host = asyncEditor();
+    const { api, controller, bridge, acknowledge } = host;
+    let entered = host.nextCommand();
+    let formatted!: Promise<unknown>;
+    function HostControls() {
+      const commands = useXlsxCommands();
+      const bold = useXlsxCommand('bold');
+      const undo = useXlsxCommandState('undo');
+      const redo = useXlsxCommandState('redo');
+      expect(commands).toBe(api.commands);
+      return <><button onClick={() => { formatted = bold.execute(); }}>{bold.label}</button>
+        <output data-testid="history">{`${undo.enabled}:${redo.enabled}`}</output></>;
+    }
+    try {
+      render(<XlsxCommandProvider commands={api.commands}>
+        <EditorToolbar mode="commands"><HostControls /><ToolbarCommandButton id="italic" /></EditorToolbar>
+      </XlsxCommandProvider>);
+      expect(screen().getByTestId('history').textContent).toBe('false:false');
+      let command!: PeerlessWorkerCommand;
+      await act(async () => { fireEvent.click(screen().getByRole('button', { name: 'Bold' })); command = await entered; });
+      expect(command).toMatchObject({ kind: 'applyOps', payload: { toolbar: { id: 'bold', target: {
+        sheetId: 'sheet:0', range: { kind: 'rowCol', start: { row: 0, col: 0 }, end: { row: 0, col: 0 } },
+      } } } });
+      expect(screen().getByTestId('history').textContent).toBe('true:true');
+      await act(async () => { acknowledge(command, true, false); await formatted; });
+      expect(screen().getByTestId('history').textContent).toBe('true:false');
+      entered = host.nextCommand();
+      let undo!: Promise<unknown>;
+      await act(async () => { undo = api.commands.execute('undo', null); command = await entered; });
+      expect(command.kind).toBe('undo');
+      expect(screen().getByTestId('history').textContent).toBe('true:true');
+      await act(async () => { acknowledge(command, false, true); await undo; });
+      expect(screen().getByTestId('history').textContent).toBe('false:true');
+      await act(async () => {
+        bridge.i18n = () => ({ toolbar: { bold: 'Fett', italic: 'Kursiv' } });
+        controller.refresh();
+      });
+      screen().getByRole('button', { name: 'Fett' });
+      screen().getByRole('button', { name: 'Kursiv' });
+    } finally {
+      cleanup(); host.dispose();
+    }
+  });
+
+  test('binds async overflow commands, refusals and locale to the current API', async () => {
+    const first = asyncEditor();
+    const second = asyncEditor();
+    const german = { ...en, toolbar: { ...en.toolbar, bold: 'Fett', italic: 'Kursiv', more: 'Weitere Aktionen' },
+      commands: { ...en.commands, reasons: { ...en.commands.reasons, inputFailed: 'Eingabe fehlgeschlagen.' } } };
+    const french = { ...en, toolbar: { ...en.toolbar, bold: 'Gras', italic: 'Italique', more: 'Autres actions' } };
+    let formatted!: Promise<XlsxCommandResult>;
+    let settled = false;
+    function BoldControl({ onResult }: { onResult(result: XlsxCommandResult): void }) {
+      const bold = useXlsxCommand('bold');
+      const execute = () => {
+        settled = false;
+        formatted = bold.execute().then((result) => { settled = true; onResult(result); return result; });
+      };
+      return <ToolbarOverflow label={bold.label} disabled={!bold.state.enabled} onSelect={execute}>
+        <button disabled={!bold.state.enabled} onClick={execute}>{bold.label}</button>
+      </ToolbarOverflow>;
+    }
+    function HostChrome({ commands }: { commands: XlsxCommandStore }) {
+      const [message, setMessage] = useState<string | null>(null);
+      return <XlsxCommandProvider commands={commands}>
+        <EditorToolbar mode="commands"><EditorToolbar.Toolbar>
+          <BoldControl onResult={(result) => setMessage(result.ok ? null : result.failure.message)} />
+          <ToolbarCommandButton id="italic" />
+        </EditorToolbar.Toolbar></EditorToolbar>
+        {message && <output role="alert">{message}</output>}
+      </XlsxCommandProvider>;
+    }
+    const previousRect = HTMLElement.prototype.getBoundingClientRect;
+    HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement) {
+      const width = this.getAttribute('role') === 'toolbar' ? 10
+        : this.parentElement?.hasAttribute('data-toolbar-items') ? 120 : 28;
+      return { width, height: 28, top: 0, left: 0, right: width, bottom: 28, x: 0, y: 0, toJSON() {} } as DOMRect;
+    };
+    try {
+      const view = render(<HostChrome commands={first.api.commands} />);
+      const more = screen().getByRole('button', { name: en.toolbar.more });
+      fireEvent.click(more);
+      const menu = screen().getByRole('menu', { name: en.toolbar.more });
+      within(menu).getByRole('menuitemcheckbox', { name: 'Italic' });
+      let entered = first.nextCommand();
+      let command!: PeerlessWorkerCommand;
+      await act(async () => {
+        fireEvent.click(within(menu).getByRole('menuitem', { name: 'Bold' }));
+        command = await entered;
+      });
+      expect(command).toMatchObject({ kind: 'applyOps', payload: { toolbar: { id: 'bold' } } });
+      expect(settled).toBe(false);
+      await act(async () => {
+        first.acknowledge(command, true, false);
+        expect(await formatted).toMatchObject({ ok: true, status: 'executed' });
+      });
+      expect(settled).toBe(true);
+      fireEvent.click(more);
+      await act(async () => first.locale(german));
+      expect(screen().getByRole('button', { name: german.toolbar.more })).toBe(more);
+      const localized = screen().getByRole('menu', { name: german.toolbar.more });
+      within(localized).getByRole('menuitemcheckbox', { name: 'Kursiv' });
+      entered = first.nextCommand();
+      await act(async () => {
+        fireEvent.click(within(localized).getByRole('menuitem', { name: 'Fett' }));
+        command = await entered;
+      });
+      expect(settled).toBe(false);
+      await act(async () => {
+        first.acknowledge(command, true, false, 'invalid-step');
+        expect(await formatted).toMatchObject({ ok: false,
+          failure: { code: 'input-failed', message: german.commands.reasons.inputFailed } });
+      });
+      expect(screen().getByRole('alert').textContent).toBe(german.commands.reasons.inputFailed);
+      fireEvent.click(more);
+      second.locale(french);
+      view.rerender(<HostChrome commands={second.api.commands} />);
+      expect(screen().getByRole('button', { name: french.toolbar.more })).toBe(more);
+      const rebound = screen().getByRole('menu', { name: french.toolbar.more });
+      within(rebound).getByRole('menuitem', { name: 'Gras' });
+      const sent = first.sent.length;
+      entered = second.nextCommand();
+      await act(async () => {
+        fireEvent.click(within(rebound).getByRole('menuitemcheckbox', { name: 'Italique' }));
+        command = await entered;
+      });
+      expect(command).toMatchObject({ kind: 'applyOps', payload: { toolbar: { id: 'italic' } } });
+      expect(first.sent).toHaveLength(sent);
+      expect(second.sent).toHaveLength(1);
+      await act(async () => second.acknowledge(command, true, false));
+      fireEvent.click(more);
+      entered = second.nextCommand();
+      await act(async () => {
+        fireEvent.click(within(screen().getByRole('menu', { name: french.toolbar.more }))
+          .getByRole('menuitem', { name: 'Gras' }));
+        command = await entered;
+      });
+      expect(settled).toBe(false);
+      await act(async () => {
+        second.acknowledge(command, true, false);
+        expect(await formatted).toMatchObject({ ok: true, status: 'executed' });
+      });
+      expect(first.sent).toHaveLength(sent);
+      expect(second.sent).toHaveLength(2);
+    } finally {
+      cleanup(); first.dispose(); second.dispose();
+      HTMLElement.prototype.getBoundingClientRect = previousRect;
+    }
+  });
+
   test('renders built-in controls in the host order next to a host action', async () => {
     const { harness, controller } = editor();
     let hostActions = 0;

@@ -263,12 +263,13 @@ test('docx: a toolbar command issued during IME composition applies after the co
   });
   const rail = page.getByTestId('formatting-bar');
   const undo = rail.getByRole('button', { name: 'Undo' });
-  await expect(undo).not.toHaveAttribute('aria-disabled', 'true');
+  await expect(undo).toBeEnabled();
   await undo.click();
+  const redo = rail.getByRole('button', { name: 'Redo' });
   await cdp.send('Input.insertText', { text: '漢字' });
 
-  const redo = rail.getByRole('button', { name: 'Redo' });
-  await expect(redo).not.toHaveAttribute('aria-disabled', 'true');
+  await expect(input).toHaveValue('');
+  await expect(redo).toBeEnabled();
   expect(await savedText(page, info, 'undone')).not.toContain('漢字');
   await redo.click();
   expect(await savedText(page, info, 'redone')).toContain('漢字');

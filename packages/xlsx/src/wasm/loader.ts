@@ -620,6 +620,24 @@ export function openWorkbook(
 }
 
 const peerHydrationReaders = new WeakMap<WorkbookHandle, () => string>();
+const recoveryReaders = new WeakMap<WorkbookHandle, (throughSeq: number, preserveHistory: boolean) => Uint8Array>();
+
+export function workbookRecoveryCheckpoint(handle: WorkbookHandle, throughSeq: number, preserveHistory = false): Uint8Array {
+  const capture = recoveryReaders.get(handle);
+  if (!capture) throw new TypeError('Workbook does not support recovery checkpoints');
+  return capture(throughSeq, preserveHistory);
+}
+
+export function openWorkbookRecoveryCheckpoint(bytes: Uint8Array, throughSeq: number,
+  options: OpenWorkbookOptions = {}): WorkbookHandle {
+  requireInitialized();
+  try {
+    const doc = (XlsxDocument as typeof XlsxDocument & {
+      openRecoveryCheckpoint(bytes: Uint8Array, throughSeq: number): XlsxDocument;
+    }).openRecoveryCheckpoint(bytes, throughSeq);
+    return wrapWorkbookDocument(doc, options, true);
+  } catch (error) { throw toError(error); }
+}
 const peerVersionAdopters = new WeakMap<WorkbookHandle, (version: string) => void>();
 const peerSnapshotAccess = new WeakMap<WorkbookHandle, {
   begin(records: number, bytes: number): void;
@@ -1142,6 +1160,7 @@ function wrapWorkbookDocument(
     },
   };
   displayListJsonReaders.set(handle, (viewport, sheet) => wasmCall(() => displayListJson(viewport, sheet)));
+  recoveryReaders.set(handle, (throughSeq, preserveHistory) => wasmCall(() => doc.recoveryCheckpoint(throughSeq, preserveHistory)));
   peerHydrationReaders.set(handle, () => wasmCall(() => (doc as PeerDocument).peerHydrationJson()));
   peerVersionAdopters.set(handle, (version) => wasmCall(() => (doc as PeerDocument).adoptPeerVersion(version)));
   peerSnapshotAccess.set(handle, {

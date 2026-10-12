@@ -4,16 +4,569 @@ import { hydratePeer } from '../../../xlsx/src/session/client';
 import { createWorkbookEditPeer, type WorkbookEditPeer } from '../../../xlsx/src/session/editPeer';
 import { workbookEditPeerOperations } from '../../../xlsx/src/session/editPeerInternals';
 import type { WorkbookReplayOp } from '../../../xlsx/src/session/replay';
+import type { CommandStatus, WorkbookAck, WorkbookCommand, WorkbookCommandFrameRequest } from '@betteroffice/xlsx';
 import { createTestWorkbookSession, loadWorkbookSessionFixtures } from '../../../xlsx/src/session/testHelpers';
 import { openWorkbook, type WorkbookHandle } from '../../../xlsx/src/wasm/loader';
 import { XlsxCommandAdmissionError } from './createXlsxCommandStore';
 import type { InputDraft, InputSeal } from './inputCoordinator';
+import { createWorkerInputCoordinator, WorkerInputNotReadyError, WorkerInputRefusal, type WorkerInputCoordinator } from './workerInputCoordinator';
 import {
-  createWorkerInputCoordinator,
-  WorkerInputNotReadyError,
-  WorkerInputRefusal,
-  type WorkerInputCoordinator,
-} from './workerInputCoordinator';
+  createPeerlessWorkerInputCoordinator, type PeerlessWorkerCommand, type PeerlessWorkerCommandInput,
+  type PeerlessWorkerInputEvent,
+} from './peerlessWorkerInputCoordinator';
+
+function peerlessHarness(maxOutstanding = 8, maxQueued = 8) {
+  const sent: PeerlessWorkerCommand[] = [];
+  const events: PeerlessWorkerInputEvent[] = [];
+  const errors: unknown[] = [];
+  const listeners = new Set<(ack: WorkbookAck) => void>();
+  const replies = new Map<number, ReturnType<typeof deferred<CommandStatus>>>();
+  const saved: number[] = [];
+  const state = { generation: 1, navigation: 0, throughSeq: 0, version: 'v1', ready: true,
+    seal: {} as InputSeal, frame: undefined as WorkbookCommandFrameRequest | undefined };
+  const session = {
+    commandIdentity: { session: 'book', incarnation: 'worker' },
+    get confirmedBasis() { return { epoch: 1, version: state.version }; },
+    get throughSeq() { return state.throughSeq; },
+    submit(command: PeerlessWorkerCommand) {
+      sent.push(command);
+      const reply = deferred<CommandStatus>();
+      replies.set(command.seq, reply);
+      return reply.promise;
+    },
+    onAck(listener: (ack: WorkbookAck) => void) {
+      listeners.add(listener);
+      return () => { listeners.delete(listener); };
+    },
+    save: async () => { saved.push(state.throughSeq); return new Uint8Array([1]); },
+    whenPresented: async (_seq: number) => {},
+  };
+  const coordinator = createPeerlessWorkerInputCoordinator({
+    session: () => session, generation: () => state.generation,
+    isReady: () => state.ready,
+    selectionRevision: () => state.navigation,
+    frame: () => state.frame,
+    seal: () => state.seal, sync: () => {},
+    target: (sheet, row, col) => ({ sheetId: `sheet:${sheet}`, range: {
+      kind: 'rowCol', start: { row, col }, end: { row, col },
+    } }),
+    onEvent: (event) => events.push(event), onError: (error) => errors.push(error),
+    maxOutstanding, maxQueued,
+  });
+  const draft = (value: string, row = 0): InputDraft => ({
+    generation: state.generation, sheet: 0, row, col: 0, source: 'cell', value,
+  });
+  const ack = (seq: number, status: CommandStatus['status'] = 'applied') => {
+    state.throughSeq = seq;
+    state.version = `v${seq + 1}`;
+    const receipt: CommandStatus = { seq, status, ...(status === 'refused' ? { reason: 'locked-target' } : {}) };
+    for (const listener of listeners) listener({ throughSeq: seq, version: state.version, statuses: [receipt] });
+    replies.get(seq)?.resolve(receipt);
+  };
+  return { coordinator, session, state, sent, events, errors, saved, draft, ack, replies, listeners };
+}
+
+describe('peerless worker input', () => {
+  test('save skips an untouched draft awaiting prefill', async () => {
+    const { coordinator, draft, sent, saved, ack } = peerlessHarness();
+    coordinator.setDraft({ ...draft(''), modified: false } as InputDraft);
+    const saving = coordinator.save();
+    const writes = sent.filter((command) => command.kind === 'editCell');
+    for (const command of sent) ack(command.seq);
+    await saving;
+    expect(writes).toEqual([]);
+    expect(saved).toEqual([0]);
+  });
+
+  test('cut reads after a pending predecessor and reserves its clear before later input', async () => {
+    const { coordinator, sent, draft, ack } = peerlessHarness();
+    let readThrough: number | undefined;
+    const reading = deferred<string>();
+    const readPosted = deferred<void>();
+    const writing = deferred<void>();
+    const posted = deferred<void>();
+    const target = { sheetId: 'sheet:0', range: { kind: 'a1' as const, a1: 'A1' } };
+    const predecessor = coordinator.submit(draft('original'));
+    coordinator.subscribe((event) => {
+      if (event.type === 'dispatched' && event.command?.kind === 'editCell' && event.command.payload.args[1] === 1) posted.resolve();
+    });
+    const copied = coordinator.runAfterPendingInput(() => {
+      readThrough = coordinator.throughSeq;
+      readPosted.resolve();
+      return reading.promise;
+    }, true);
+    const written = copied.then(() => writing.promise);
+    const cut = coordinator.clipboard(() => written, () => ({ kind: 'applyOps', payload: {
+      toolbar: { id: 'clear', args: null, target }, selection: target,
+    } }));
+    const later = coordinator.submit(draft('later', 1));
+    expect(readThrough).toBeUndefined();
+    expect(sent).toHaveLength(1);
+    expect(cut.seq).toBeNull();
+    expect(later.seq).toBeNull();
+    ack(predecessor.seq!);
+    await readPosted.promise;
+    expect(readThrough).toBe(predecessor.seq!);
+    expect(sent).toHaveLength(1);
+    expect(cut.seq).toBeNull();
+    expect(later.seq).toBeNull();
+    reading.resolve('original');
+    await copied;
+    expect(sent).toHaveLength(1);
+    expect(cut.seq).toBeNull();
+    expect(later.seq).toBeNull();
+    writing.resolve();
+    await posted.promise;
+    expect(sent.map((command) => command.kind)).toEqual(['editCell', 'applyOps', 'editCell']);
+    expect(sent[1]).toMatchObject({ payload: { toolbar: { id: 'clear', target }, selection: target } });
+    expect(sent[2]).toMatchObject({ payload: { args: [0, 1, 0, 'later'] } });
+    expect(sent[2].seq).toBeGreaterThan(sent[1].seq);
+    ack(sent[1].seq); ack(sent[2].seq);
+    await Promise.all([predecessor.result, cut.result, later.result]);
+  });
+
+  test('copy posts its read after a pending predecessor without reserving later input', async () => {
+    const { coordinator, sent, draft, ack } = peerlessHarness();
+    let readThrough: number | undefined;
+    const reading = deferred<string>();
+    const readPosted = deferred<void>();
+    const posted = deferred<void>();
+    const predecessor = coordinator.submit(draft('original'));
+    coordinator.subscribe((event) => {
+      if (event.type === 'dispatched' && event.command?.kind === 'editCell' && event.command.payload.args[1] === 1) posted.resolve();
+    });
+    const copied = coordinator.runAfterPendingInput(() => {
+      readThrough = coordinator.throughSeq;
+      readPosted.resolve();
+      return reading.promise;
+    }, 'posted');
+    const later = coordinator.submit(draft('later', 1));
+    expect(readThrough).toBeUndefined();
+    expect(sent).toHaveLength(1);
+    expect(later.seq).toBeNull();
+    ack(predecessor.seq!);
+    await readPosted.promise;
+    expect(readThrough).toBe(predecessor.seq!);
+    await posted.promise;
+    expect(sent.map((command) => command.kind)).toEqual(['editCell', 'editCell']);
+    expect(sent[1]).toMatchObject({ payload: { args: [0, 1, 0, 'later'] } });
+    expect(later.seq).toBeGreaterThan(predecessor.seq!);
+    reading.resolve('original');
+    expect(await copied).toBe('original');
+    ack(later.seq!);
+    await Promise.all([predecessor.result, later.result]);
+  });
+
+  test('replacement cancels pending cut preparation and leaves new input intact', async () => {
+    const { coordinator, session, state, sent, draft, ack } = peerlessHarness();
+    const writing = deferred<void>();
+    const target = { sheetId: 'sheet:0', range: { kind: 'a1' as const, a1: 'A1' } };
+    const clears: string[] = [];
+    const cut = coordinator.clipboard(() => writing.promise, () => {
+      clears.push(target.sheetId);
+      return { kind: 'applyOps', payload: { toolbar: { id: 'clear', args: null, target }, selection: target } };
+    });
+    expect(sent).toEqual([]);
+    state.generation += 1;
+    session.commandIdentity = { session: 'replacement', incarnation: 'next' };
+    state.throughSeq = 0;
+    const next = coordinator.submit(draft('new'));
+    await expect(cut.result).rejects.toMatchObject({ code: 'document-replaced' });
+    writing.resolve();
+    await writing.promise;
+    expect(clears).toEqual([]);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ session: 'replacement', payload: { args: [0, 0, 0, 'new'] } });
+    ack(next.seq!);
+    await next.result;
+    expect(coordinator.error).toBeNull();
+  });
+
+  test('failure cancels pending cut preparation', async () => {
+    const { coordinator, sent } = peerlessHarness();
+    const writing = deferred<void>();
+    const target = { sheetId: 'sheet:0', range: { kind: 'a1' as const, a1: 'A1' } };
+    const clears: string[] = [];
+    const cut = coordinator.clipboard(() => writing.promise, () => {
+      clears.push(target.sheetId);
+      return { kind: 'applyOps', payload: { toolbar: { id: 'clear', args: null, target }, selection: target } };
+    });
+    const failure = new Error('Worker stopped');
+    coordinator.fail(failure);
+    await expect(cut.result).rejects.toBe(failure);
+    writing.resolve();
+    await writing.promise;
+    expect(clears).toEqual([]);
+    expect(sent).toEqual([]);
+  });
+
+  test('overlapping clipboard captures retain their admission frame and selection revision', async () => {
+    const { coordinator, state, sent, events, ack } = peerlessHarness();
+    const first = deferred<string>();
+    const second = deferred<string>();
+    const frame = { generation: 1, navigation: 0, width: 800, height: 600, sheet: 0, zoom: 1, dpr: 1,
+      viewport: { x: 0, y: 0, width: 800, height: 600 }, requestGeneration: 1 };
+    state.frame = frame;
+    const pasted = coordinator.clipboard(() => first.promise, (value) => ({
+      kind: 'editCell', payload: { args: [0, 0, 0, value] },
+    }));
+    state.navigation = 1;
+    state.frame = { ...frame, viewport: { ...frame.viewport, x: 96 }, requestGeneration: 2 };
+    const admittedFrame = structuredClone(state.frame);
+    const overlapping = coordinator.clipboard(() => second.promise, (value) => ({
+      kind: 'editCell', payload: { args: [0, 0, 1, value] },
+    }));
+    state.navigation = 2;
+    state.frame.viewport.x = 192;
+    state.frame.requestGeneration = 3;
+    const firstPosted = deferred<void>();
+    const posted = deferred<void>();
+    coordinator.subscribe((event) => {
+      if (event.type === 'dispatched' && event.seq === 1) firstPosted.resolve();
+      if (event.type === 'dispatched' && event.seq === 2) posted.resolve();
+    });
+    first.resolve('first'); second.resolve('second');
+    await firstPosted.promise;
+    ack(1);
+    await posted.promise;
+    expect(sent[1].frame).toEqual(admittedFrame);
+    expect(events.find((event) => event.type === 'dispatched' && event.seq === 2))
+      .toMatchObject({ selectionRevision: 1 });
+    ack(2);
+    await Promise.all([pasted.result, overlapping.result]);
+  });
+
+  test('command inputs match the worker protocol', () => {
+    type Input<C> = C extends WorkbookCommand ? Pick<C, 'kind' | 'payload'> : never;
+    const matches: PeerlessWorkerCommandInput extends Input<WorkbookCommand> ? true : false = true;
+    const missingTarget: { kind: 'applyOps'; payload: { toolbar: { id: 'bold'; args: null } } } extends
+      PeerlessWorkerCommandInput ? true : false = false;
+    const save: { kind: 'applyOps'; payload: { toolbar: { id: 'save'; args: null } } } extends
+      PeerlessWorkerCommandInput ? true : false = false;
+    const refreshTarget: { kind: 'applyOps'; payload: { toolbar: { id: 'refreshProposals'; args: null;
+      target: { sheetId: string; range: { kind: 'a1'; a1: string } } } } } extends
+      PeerlessWorkerCommandInput ? true : false = false;
+    expect([matches, missingTarget, save, refreshTarget]).toEqual([true, false, false, false]);
+  });
+
+  test('read-only admission permits proposal refresh and refuses formatting', async () => {
+    const { coordinator, sent, ack } = peerlessHarness();
+    const mode = coordinator.setReadOnly(true);
+    ack(1);
+    await mode.result;
+    const refresh = coordinator.command({ kind: 'applyOps', payload: {
+      toolbar: { id: 'refreshProposals', args: null },
+    } });
+    expect(sent[1]).toMatchObject({ kind: 'applyOps', payload: { toolbar: { id: 'refreshProposals' } } });
+    const formatting = coordinator.command({ kind: 'patchRangeStyle', payload: { args: [0, 'A1', { bold: true }] } });
+    await expect(formatting.result).rejects.toMatchObject({ code: 'input-failed' });
+    ack(2);
+    await refresh.result;
+    expect(sent).toHaveLength(2);
+  });
+
+  test('applied frame fence preserves the native draft and composition', async () => {
+    const { coordinator, sent, state, draft, ack } = peerlessHarness();
+    const first = coordinator.submit(draft('committed'));
+    const composing = draft('native', 1);
+    coordinator.setDraft(composing);
+    state.seal = { composition: deferred<boolean>().promise };
+    expect(coordinator.submittedThroughSeq).toBe(1);
+    let applied = false;
+    const frame = coordinator.whenApplied(1).then(() => { applied = true; });
+    await Promise.resolve();
+    expect(applied).toBe(false);
+    ack(1);
+    await Promise.all([first.result, frame]);
+    expect(sent).toHaveLength(1);
+    expect(coordinator.draft?.value).toBe('native');
+  });
+
+  test('posts rapid commits before predecessor ack', async () => {
+    const { coordinator, sent, draft, ack } = peerlessHarness();
+    const first = coordinator.submit(draft('first'));
+    const second = coordinator.submit(draft('second', 1), { after: first });
+    expect(sent.map((command) => command.seq)).toEqual([1, 2]);
+    expect(sent[1].afterSeq).toBe(1);
+    expect(sent.map((command) => command.basis.version)).toEqual(['v1', 'v1']);
+    ack(1); ack(2);
+    await Promise.all([first.result, second.result]);
+  });
+
+  test('fences clipboard mode and save', async () => {
+    const { coordinator, sent, saved, draft, ack } = peerlessHarness();
+    const capture = deferred<string>();
+    const first = coordinator.submit(draft('before'));
+    const pasted = coordinator.clipboard(() => capture.promise, (value) => ({
+      kind: 'editCell', payload: { args: [0, 1, 0, value] },
+    }));
+    const mode = coordinator.setReadOnly(true);
+    const saving = coordinator.save();
+    const modePosted = deferred<void>();
+    const unsubscribe = coordinator.subscribe((event) => {
+      if (event.type === 'dispatched' && event.command?.kind === 'setReadOnly') modePosted.resolve();
+    });
+    expect(sent).toHaveLength(1);
+    expect(saved).toEqual([]);
+    capture.resolve('paste');
+    await modePosted.promise;
+    unsubscribe();
+    expect(sent.map((command) => command.kind)).toEqual(['editCell', 'editCell', 'setReadOnly']);
+    expect(sent[1].afterSeq).toBe(1);
+    expect(sent[2].afterSeq).toBeUndefined();
+    ack(1); ack(2); ack(3);
+    await Promise.all([first.result, pasted.result, mode.result, saving]);
+    expect(saved).toEqual([3]);
+  });
+
+  test('stale acceptance refusal sends queued independent navigation and its typed edit', async () => {
+    const { coordinator, sent, ack } = peerlessHarness(1);
+    const proposal = coordinator.command({ kind: 'acceptProposal', payload: { args: ['stale', {}] } });
+    const selected = { sheetId: 'sheet:0', range: { kind: 'a1' as const, a1: 'B1' } };
+    let navigation!: ReturnType<typeof coordinator.command>;
+    const selecting = coordinator.runAfterPendingInput(() => {
+      navigation = coordinator.command({ kind: 'select', payload: { selection: selected } });
+      return navigation.result;
+    });
+    const original: InputDraft = { generation: 1, sheet: 0, row: 0, col: 1, source: 'cell', value: 'kept text' };
+    const edited = coordinator.submit(original, { after: navigation, selection: {
+      sheetId: 'sheet:0', range: { kind: 'a1', a1: 'B2' },
+    } });
+    expect(sent).toHaveLength(1);
+    ack(proposal.seq!, 'refused');
+    await expect(proposal.result).rejects.toMatchObject({ code: 'input-failed' });
+    expect(sent[1]).toMatchObject({ kind: 'select', payload: { selection: selected } });
+    expect(sent[1].afterSeq).toBeUndefined();
+    ack(sent[1].seq);
+    expect(await selecting).toMatchObject({ status: 'applied' });
+    expect(sent[2]).toMatchObject({ kind: 'editCell', payload: { args: [0, 0, 1, 'kept text'] } });
+    ack(sent[2].seq);
+    expect(await edited.result).toMatchObject({ status: 'applied' });
+    expect(coordinator.rejected).toEqual([]);
+    expect(coordinator.pending).toBe(false);
+  });
+
+  test('cancels only refused dependents', async () => {
+    const { coordinator, sent, events, draft, ack } = peerlessHarness(1);
+    const original = draft('restore me');
+    const first = coordinator.submit(original);
+    const dependent = coordinator.submit(draft('dependent', 1), { after: first });
+    const independent = coordinator.submit(draft('newer', 2));
+    coordinator.setDraft(draft('focused elsewhere', 3));
+    ack(1, 'refused');
+    await expect(first.result).rejects.toMatchObject({ code: 'input-failed' });
+    await expect(dependent.result).rejects.toMatchObject({ code: 'input-failed' });
+    expect(sent.map((command) => command.seq)).toEqual([1, 2]);
+    expect(events.find((event) => event.type === 'refused')).toMatchObject({ seq: 1, draft: original });
+    expect(coordinator.draft?.value).toBe('focused elsewhere');
+    expect(coordinator.rejected).toEqual([original]);
+    ack(2);
+    await independent.result;
+  });
+
+  test('delayed Save fences paste but excludes the later Enter commit', async () => {
+    const { coordinator, sent, saved, draft, ack } = peerlessHarness();
+    const capture = deferred<string>();
+    const pasted = coordinator.clipboard(() => capture.promise, (value) => ({
+      kind: 'editCell', payload: { args: [0, 0, 0, value] },
+    }));
+    const saving = coordinator.runAfterPendingInput(() => coordinator.save());
+    const later = coordinator.submit(draft('later', 1));
+    const posted = deferred<void>();
+    const laterPosted = deferred<void>();
+    coordinator.subscribe((event) => {
+      if (event.type === 'dispatched' && event.seq === 1) posted.resolve();
+      if (event.type === 'dispatched' && event.seq === 2) laterPosted.resolve();
+    });
+    capture.resolve('paste');
+    await posted.promise;
+    expect(sent).toHaveLength(1);
+    ack(1);
+    await saving;
+    expect(saved).toEqual([1]);
+    await pasted.result;
+    await laterPosted.promise;
+    expect(sent[1]).toMatchObject({ kind: 'editCell', payload: { args: [0, 1, 0, 'later'] } });
+    ack(2);
+    await later.result;
+  });
+
+  test('selection retains its admission revision while clipboard capture is pending', async () => {
+    const { coordinator, state, events, ack } = peerlessHarness();
+    const capture = deferred<string>();
+    const pasted = coordinator.clipboard(() => capture.promise, (value) => ({
+      kind: 'editCell', payload: { args: [0, 0, 0, value] },
+    }));
+    state.navigation = 1;
+    const selected = coordinator.command({ kind: 'select', payload: { selection: {
+      sheetId: 'sheet:0', range: { kind: 'a1', a1: 'B2' },
+    } } });
+    state.navigation = 2;
+    const posted = deferred<void>();
+    coordinator.subscribe((event) => {
+      if (event.type === 'dispatched' && event.seq === 2) posted.resolve();
+    });
+    capture.resolve('paste');
+    await posted.promise;
+    expect(events.find((event) => event.type === 'dispatched' && event.seq === 2))
+      .toMatchObject({ selectionRevision: 1 });
+    ack(1); ack(2);
+    await Promise.all([pasted.result, selected.result]);
+  });
+
+  test('discarded refusal releases independent selection formatting and Save', async () => {
+    const { coordinator, sent, saved, draft, ack } = peerlessHarness();
+    const original = draft('refused');
+    const selected = { sheetId: 'sheet:0', range: { kind: 'a1' as const, a1: 'A2' } };
+    const first = coordinator.submit(original, { selection: selected });
+    ack(1, 'refused');
+    await expect(first.result).rejects.toMatchObject({ code: 'input-failed' });
+    coordinator.discardRejected(original);
+    const navigation = coordinator.command({ kind: 'select', payload: { selection: selected } });
+    const formatting = coordinator.command({ kind: 'patchRangeStyle', payload: { args: [0, 'A2', { bold: true }] } });
+    expect(sent.map((command) => command.kind)).toEqual(['editCell', 'select', 'patchRangeStyle']);
+    expect(sent[1].afterSeq).toBeUndefined();
+    expect(sent[2].afterSeq).toBeUndefined();
+    ack(2); ack(3);
+    await Promise.all([navigation.result, formatting.result]);
+    await coordinator.save();
+    expect(saved).toEqual([3]);
+    expect(coordinator.rejected).toEqual([]);
+  });
+
+  test('replacement invalidates late replies', async () => {
+    const { coordinator, session, sent, events, state, draft, ack, replies, listeners } = peerlessHarness();
+    const old = coordinator.submit(draft('old'));
+    const oldReply = replies.get(1)!;
+    const oldListener = [...listeners][0];
+    state.generation += 1;
+    session.commandIdentity = { session: 'replacement', incarnation: 'next' };
+    state.throughSeq = 0;
+    const next = coordinator.submit(draft('new'));
+    await expect(old.result).rejects.toMatchObject({ code: 'document-replaced' });
+    const count = events.length;
+    const oldReceipt = { seq: 1, status: 'applied' as const };
+    oldListener({ throughSeq: 1, version: 'old', statuses: [oldReceipt] });
+    oldReply.resolve(oldReceipt);
+    await Promise.resolve();
+    expect(events).toHaveLength(count);
+    expect(sent[1]).toMatchObject({ session: 'replacement', seq: 1 });
+    ack(next.seq!);
+    await next.result;
+  });
+
+  test('coalesces only unsent compatible drafts and bounds storage', async () => {
+    const { coordinator, sent, draft, ack } = peerlessHarness(1, 2);
+    const first = coordinator.submit(draft('sent'));
+    const old = coordinator.submit(draft('old', 1));
+    const latest = coordinator.submit(draft('latest', 1));
+    const fence = coordinator.setReadOnly(false);
+    const overflow = coordinator.submit(draft('overflow', 2));
+    await expect(overflow.result).rejects.toMatchObject({ code: 'input-failed' });
+    ack(1);
+    expect(sent[1]).toMatchObject({ payload: { args: [0, 1, 0, 'latest'] } });
+    ack(2); ack(3);
+    await Promise.all([first.result, old.result, latest.result, fence.result]);
+  });
+
+  test('keeps composition local and commits its captured target once', async () => {
+    const { coordinator, sent, draft, ack } = peerlessHarness();
+    const composed = draft('変換', 4);
+    const first = coordinator.submit(composed, { compositionId: 'ime:1' });
+    const trailing = coordinator.submit({ ...composed }, { compositionId: 'ime:1' });
+    const cancelled = coordinator.submit(draft(''), { compositionId: 'ime:2' });
+    expect(trailing).toBe(first);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ kind: 'editCell', payload: { args: [0, 4, 0, '変換'] } });
+    ack(1);
+    await Promise.all([first.result, cancelled.result]);
+  });
+
+  test('worker failure rejects pending work without replay', async () => {
+    const { coordinator, sent, errors, draft, replies } = peerlessHarness(1);
+    const first = coordinator.submit(draft('sent'));
+    const queued = coordinator.submit(draft('queued', 1));
+    const failure = new Error('Worker stopped');
+    replies.get(1)!.reject(failure);
+    await expect(first.result).rejects.toBe(failure);
+    await expect(queued.result).rejects.toBe(failure);
+    await expect(coordinator.save()).rejects.toBe(failure);
+    expect(coordinator.readOnly).toBe(true);
+    expect(sent).toHaveLength(1);
+    expect(errors).toEqual([failure]);
+  });
+
+  test('refuses before first paint without consuming a sequence', async () => {
+    const { coordinator, state, draft, sent, ack, errors } = peerlessHarness();
+    state.ready = false;
+    const value = draft('waiting for paint');
+    coordinator.setDraft(value);
+    const refused = coordinator.submit(value);
+    await expect(refused.result).rejects.toMatchObject({ code: 'editor-unavailable' });
+    expect(refused.seq).toBeNull();
+    expect(sent).toEqual([]);
+    expect(coordinator.draft?.value).toBe(value.value);
+    state.ready = true;
+    const accepted = coordinator.submit(value);
+    expect(accepted.seq).toBe(1);
+    ack(1);
+    await accepted.result;
+    expect(errors).toEqual([]);
+  });
+
+  test('mode seals composition without waiting for its commit ack', async () => {
+    const { coordinator, state, sent, draft, ack } = peerlessHarness();
+    const composition = deferred<boolean>();
+    state.seal = { composition: composition.promise };
+    coordinator.setDraft(draft('preedit', 4));
+    const mode = coordinator.setReadOnly(true);
+    expect(coordinator.readOnly).toBe(true);
+    expect(sent).toEqual([]);
+    coordinator.setDraft(draft('変換', 9));
+    const posted = deferred<void>();
+    const unsubscribe = coordinator.subscribe((event) => {
+      if (event.type === 'dispatched' && event.command?.kind === 'setReadOnly') posted.resolve();
+    });
+    composition.resolve(true);
+    await posted.promise;
+    unsubscribe();
+    expect(sent.map((command) => command.kind)).toEqual(['editCell', 'setReadOnly']);
+    expect(sent[0]).toMatchObject({ payload: { args: [0, 4, 0, '変換'] } });
+    ack(1); ack(2);
+    await mode.result;
+  });
+
+  test('save keeps later input behind a composing draft', async () => {
+    const { coordinator, state, sent, saved, draft, ack } = peerlessHarness();
+    const composition = deferred<boolean>();
+    state.seal = { composition: composition.promise };
+    coordinator.setDraft(draft('変換', 4));
+    const saving = coordinator.save();
+    const later = coordinator.submit(draft('later', 6));
+    const posted = deferred<void>();
+    const unsubscribe = coordinator.subscribe((event) => {
+      if (event.type === 'dispatched' && event.seq === 1) posted.resolve();
+    });
+    composition.resolve(true);
+    await posted.promise;
+    unsubscribe();
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ payload: { args: [0, 4, 0, '変換'] } });
+    expect(saved).toEqual([]);
+    ack(1);
+    await saving;
+    expect(saved).toEqual([1]);
+    const laterPosted = deferred<void>();
+    if (later.seq === null) {
+      const off = coordinator.subscribe((event) => {
+        if (event.type === 'dispatched' && event.seq === 2) { off(); laterPosted.resolve(); }
+      });
+    } else laterPosted.resolve();
+    await laterPosted.promise;
+    ack(2);
+    await later.result;
+  });
+});
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;

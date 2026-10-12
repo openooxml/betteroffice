@@ -2,7 +2,7 @@ import { StrictMode } from 'react';
 import { flushSync } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import JSZip from 'jszip';
-import { XlsxEditor, defineXlsxPlugin, type XlsxPluginContext, type XlsxWorkerEditorApi } from '@betteroffice/xlsx-react';
+import { XlsxEditor, defineXlsxPlugin, type XlsxAsyncEditorApi, type XlsxPluginContext, type XlsxPluginSelection, type XlsxWorkerEditorApi } from '@betteroffice/xlsx-react';
 import { editableWorkbookSessionBackend } from '../../../packages/xlsx-react/src/worker/useEditableSessionWorkbook';
 import { cellRect, openWorkbookSession, rangeRect, type WorkbookEditPeer, type WorkbookFrame, type WorkbookSession } from '@betteroffice/xlsx';
 import { workbookSessionInternals, WORKBOOK_REPLAY_MUTATORS } from '../../../packages/xlsx/src/session/replay';
@@ -16,6 +16,9 @@ function deferred<T>() {
 
 const parameters = new URLSearchParams(location.search);
 const variant = parameters.get('variant') ?? 'plain';
+const peerless = parameters.has('asyncApi');
+let mainThreadEngines = 0;
+globalThis.__xlsxMainEngineProbe = { capture() { mainThreadEngines += 1; } };
 
 async function workbook() {
   const zip = new JSZip();
@@ -120,11 +123,13 @@ globalThis.Worker = new Proxy(NativeWorker, {
   },
 });
 let generation = 0;
+let activeSession: WorkbookSession | null = null;
 let latestFrame: WorkbookFrame | null = null;
 const backendOpen = editableWorkbookSessionBackend.open;
 editableWorkbookSessionBackend.open = async (...args) => {
   const token = ++generation;
   const session = await backendOpen(...args);
+  if (token === generation) activeSession = session;
   sessionGenerations.set(session, token);
   const internal = workbookSessionInternals.get(session)!;
   if (internal.initialVersion) initialVersions.set(token, internal.initialVersion);
@@ -181,6 +186,9 @@ const observer = new MutationObserver(() => {
 observer.observe(rootElement, { subtree: true, childList: true, characterData: true });
 let current = deferred<XlsxWorkerEditorApi>();
 let api: XlsxWorkerEditorApi | null = null;
+let peerlessCurrent = deferred<XlsxAsyncEditorApi>();
+let peerlessApi: XlsxAsyncEditorApi | null = null;
+let savedBytes: Uint8Array | null = null;
 let context: XlsxPluginContext<null> | null = null;
 const plugin = defineXlsxPlugin({ id: 'routes', createState: () => null, initialize(value) { context = value; } });
 let source: Uint8Array;
@@ -188,7 +196,12 @@ let readOnly = false;
 let readyCount = 0;
 const open = (bytes: Uint8Array) => {
   source = bytes;
-  const editor = <XlsxEditor file={bytes} experimentalWorkerOpen readOnly={readOnly} plugins={[plugin]}
+  const editor = peerless ? <XlsxEditor asyncApi file={bytes} readOnly={readOnly} plugins={[plugin]}
+    pluginGrants={{ routes: { document: 'write', editBatches: true } }} onError={(error) => errors.push(error.message)}
+    onSave={(bytes) => { savedBytes = bytes; }} onReady={(value) => {
+      readyCount += 1;
+      peerlessApi = value; peerlessCurrent.resolve(value);
+    }} /> : <XlsxEditor file={bytes} experimentalWorkerOpen readOnly={readOnly} plugins={[plugin]}
     pluginGrants={{ routes: { document: 'write', editBatches: true } }} onError={(error) => errors.push(error.message)}
     onReady={(value) => {
       readyCount += 1;
@@ -200,12 +213,48 @@ const open = (bytes: Uint8Array) => {
 const ready = (async () => {
   await document.fonts.ready;
   open(await workbook());
-  const editor = await current.promise;
+  const editor = peerless ? await peerlessCurrent.promise : await current.promise;
   if (!holdingHydration) await editor.whenHydrated();
 })();
 
+async function reopenPeerless(bytes: Uint8Array) {
+  peerlessApi = null;
+  peerlessCurrent = deferred<XlsxAsyncEditorApi>();
+  context = null;
+  open(bytes);
+  const editor = await peerlessCurrent.promise;
+  await editor.whenHydrated();
+  return bytes.byteLength;
+}
+
 window.__xlsxWorkerEditor = {
   ready, errors, previews, previewFrames, commitOrder, peerEntries, replayEntries,
+  mainThreadEngines: () => mainThreadEngines,
+  peerless: peerless ? {
+    async cells(sheet, range) {
+      const result = await activeSession!.call.cellInputs(sheet, range);
+      return result.cells.map((row) => row.map((cell) => cell.input));
+    },
+    async selection() {
+      if (!context) throw new Error('Plugin is not active');
+      let selected: XlsxPluginSelection = null;
+      await context.run((current) => { selected = structuredClone(current.snapshot.selection); });
+      return selected;
+    },
+    failure: () => peerlessApi?.failure?.message ?? null,
+    workerCount: () => workers.length,
+    async saveAndReopen() {
+      savedBytes = null;
+      const result = await peerlessApi!.commands.execute('save', null);
+      if (!result.ok || !savedBytes) throw new Error('Workbook save returned no bytes');
+      return reopenPeerless(savedBytes);
+    },
+    async recoverAndReopen() {
+      const result = await peerlessApi!.recoverySave();
+      if (!result.recovery) throw new Error('Expected recovery bytes');
+      return reopenPeerless(result.bytes);
+    },
+  } : null,
   generation: () => generation,
   readyCount: () => readyCount,
   setReadOnly(value) { readOnly = value; flushSync(() => open(source)); },
@@ -346,7 +395,7 @@ window.__xlsxWorkerEditor = {
     await current.promise;
   },
   dispose() { root.unmount(); },
-  hydrated() { return api?.hydrated ?? false; },
+  hydrated() { return (peerless ? peerlessApi : api)?.hydrated ?? false; },
   holdPreview() {
     if (!holdingHydration || !hydrationWaiting || api?.hydrated !== false) {
       throw new Error('Hydration must be held before opening the editor');

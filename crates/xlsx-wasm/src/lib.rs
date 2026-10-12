@@ -102,6 +102,33 @@ impl Default for XlsxSnapshotBuilder {
 
 #[wasm_bindgen]
 impl XlsxDocument {
+    #[wasm_bindgen(js_name = recoveryCheckpoint)]
+    pub fn recovery_checkpoint(
+        &self,
+        through_seq: f64,
+        preserve_history: Option<bool>,
+    ) -> Result<Vec<u8>, JsValue> {
+        self.session
+            .recovery_checkpoint(
+                parse_recovery_sequence(through_seq)?,
+                preserve_history.unwrap_or(false),
+            )
+            .map_err(|error| js_sys::Error::new(&error).into())
+    }
+
+    #[wasm_bindgen(js_name = openRecoveryCheckpoint)]
+    pub fn open_recovery_checkpoint(
+        bytes: &[u8],
+        through_seq: f64,
+    ) -> Result<XlsxDocument, JsValue> {
+        Session::open_recovery_checkpoint(bytes, parse_recovery_sequence(through_seq)?)
+            .map(|session| XlsxDocument {
+                session,
+                update_observer: None,
+            })
+            .map_err(|error| js_sys::Error::new(&error).into())
+    }
+
     #[wasm_bindgen(js_name = beginPeerSnapshot)]
     pub fn begin_peer_snapshot(&mut self, records: usize, bytes: usize) -> Result<(), JsValue> {
         self.session
@@ -658,6 +685,16 @@ impl XlsxDocument {
 #[wasm_bindgen(js_name = displayListCellLimit)]
 pub fn display_list_cell_limit() -> f64 {
     betteroffice_xlsx::MAX_DISPLAY_CELLS as f64
+}
+
+fn parse_recovery_sequence(value: f64) -> Result<u64, JsValue> {
+    if !value.is_finite()
+        || value.fract() != 0.0
+        || !(0.0..=9_007_199_254_740_991.0).contains(&value)
+    {
+        return Err(js_sys::TypeError::new("Invalid recovery sequence").into());
+    }
+    Ok(value as u64)
 }
 
 /// Export `.xlsx` bytes as read: stored formula results, no clock.

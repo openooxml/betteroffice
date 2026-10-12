@@ -1,5 +1,6 @@
 import { beforeAll, describe, expect, test } from 'bun:test';
 import { runInNewContext } from 'node:vm';
+import JSZip from 'jszip';
 import {
   createSessionClient, createSessionHost, isHostMessage, SESSION_SUPERSEDED, SessionFailure,
   type MethodPolicy, type SessionTransport,
@@ -87,6 +88,49 @@ async function matchingSheetView(
 }
 
 describe('workbook sessions', () => {
+  test('command reply contains the final requested frame', async () => {
+    const zip = new JSZip();
+    zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>');
+    zip.file('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>');
+    zip.file('xl/workbook.xml', '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Data" sheetId="1" r:id="rId1"/></sheets></workbook>');
+    zip.file('xl/_rels/workbook.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>');
+    zip.file('xl/worksheets/sheet1.xml', '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>1</v></c><c r="B1"><f>A1*2</f><v>2</v></c></row></sheetData></worksheet>');
+    const bytes = await zip.generateAsync({ type: 'uint8array' });
+    const worker = await session(bytes);
+    const main = openWorkbook(bytes);
+    const acks: import('./commandProtocol').WorkbookAck[] = [];
+    worker.onAck((ack) => { acks.push(ack); });
+    const request = { sheet: 0, viewport: { ...viewport, x: 30 }, zoom: 1.25, dpr: 2, generation: 7 };
+    try {
+      const input: XlsxEditRequest = { expectVersion: worker.confirmedBasis.version, steps: [
+        { op: 'setCellInputs', target: target('A1'), inputs: [['12']] },
+        { op: 'patchStyle', target: target('B1'), patch: { fontSize: 24, bold: true } },
+        { op: 'setNumberFormat', target: target('B1'), format: 'percent' },
+      ] };
+      await worker.submit({ ...worker.commandIdentity, seq: 1, basis: worker.confirmedBasis,
+        kind: 'applyEdits', payload: { args: [input] }, frame: request });
+      main.applyEdits({ ...input, expectVersion: main.version() });
+      const fused = acks[acks.length - 1]?.frame;
+      expect(fused).toBeDefined();
+      expect(fused).toMatchObject({ ...worker.commandIdentity, coversThroughSeq: 1,
+        requestGeneration: 7, zoom: 1.25, dpr: 2, sheet: 0, viewport: request.viewport });
+      expect(fused?.displayList).toEqual(main.displayList(request.viewport));
+      const fresh = await worker.call.frame(request.viewport, { sheet: 0 });
+      expect(fused?.displayList).toEqual(fresh.displayList);
+      expect(fused?.mergedRanges).toEqual(fresh.mergedRanges);
+      expect(fused?.version).toBe(fresh.version);
+      expect(fresh.sequence).toBe(1);
+      expect(worker.presentedThroughSeq).toBe(0);
+      let presented = false;
+      const painting = worker.whenPresented(1).then(() => { presented = true; });
+      await Promise.resolve();
+      expect(presented).toBe(false);
+      expect(worker.markPresented(fused!)).toBe(true);
+      await painting;
+      expect(worker.presentedThroughSeq).toBe(1);
+    } finally { main.dispose(); await worker.dispose(); }
+  });
+
   test('declares ordered methods and marks edits as user input', () => {
     expect(Object.keys(WORKBOOK_SESSION_METHODS)).toEqual(Object.keys(WORKBOOK_SESSION_POLICIES));
     expect(WORKBOOK_SESSION_POLICIES.applyEdits).toEqual({

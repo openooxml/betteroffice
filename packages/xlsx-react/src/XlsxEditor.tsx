@@ -98,7 +98,8 @@ import { ProposalsPanel } from './proposals/ProposalsPanel';
 import { deriveLimits, positionAtPoint, scaledRect } from './viewer/sessionGeometry';
 import { XlsxSessionViewer } from './viewer/XlsxSessionViewer';
 import { XlsxWorkerEditor } from './worker/XlsxWorkerEditor';
-import type { XlsxWorkerEditorApi } from './worker/createWorkerEditorApi';
+import type { XlsxAsyncEditorApi } from './worker/createAsyncEditorApi';
+import { XlsxAsyncApiUnavailableError, type XlsxWorkerEditorApi } from './worker/createWorkerEditorApi';
 import type {
   XlsxAdmission,
   XlsxPluginEditorAccess,
@@ -109,6 +110,8 @@ import { PluginOverlays } from './plugins/PluginOverlays';
 import { PluginDock, useDockArea, type DockPlacement } from './plugins/PluginPanels';
 import type { XlsxEditorPluginProps, XlsxPluginSelection } from './plugins/types';
 import { useXlsxPluginHost } from './plugins/useXlsxPluginHost';
+
+export const PEERLESS_FLAG = 'asyncApi' as const;
 
 export interface XlsxPointPosition {
   sheet: number;
@@ -279,6 +282,17 @@ export type XlsxWorkerEditorProps = Omit<XlsxEditorProps, 'onReady' | 'readOnly'
   onError?: (error: Error) => void;
   onReady?: (api: XlsxWorkerEditorApi) => void | (() => void);
 };
+
+export type XlsxAsyncEditorProps = Omit<XlsxWorkerEditorProps, 'onReady' | 'readOnly' | 'collaboration' | 'experimentalWorkerOpen'> & {
+  /** Requires Worker; otherwise onError receives XlsxAsyncApiUnavailableError. */
+  [PEERLESS_FLAG]: true;
+  experimentalWorkerOpen?: true;
+  readOnly?: boolean;
+  collaboration?: XlsxEditorCollaborationOptions;
+  onReady?: (api: XlsxAsyncEditorApi) => void | (() => void);
+};
+
+type LegacyEditorProps<P> = P & { [PEERLESS_FLAG]?: false };
 
 type WorkerSessionProps = Omit<XlsxWorkerEditorProps, 'readOnly' | 'onReady'> & {
   readOnly: boolean;
@@ -581,14 +595,45 @@ function useSyncedState<T>(initial: T) {
   return [value, set, ref] as const;
 }
 
-/**
- * The xlsx editor React component.
- */
-export function XlsxEditor(props: XlsxWorkerViewerProps): React.JSX.Element;
-export function XlsxEditor(props: XlsxWorkerEditorProps): React.JSX.Element;
-export function XlsxEditor(props: WorkerSessionProps): React.JSX.Element;
-export function XlsxEditor(props: XlsxEditorProps): React.JSX.Element;
-export function XlsxEditor(props: XlsxWorkerViewerProps | XlsxWorkerEditorProps | WorkerSessionProps | XlsxEditorProps): React.JSX.Element {
+function XlsxAsyncEditorRefusal({ failure, onError }: Pick<XlsxAsyncEditorProps, 'onError'> & { failure: Error }) {
+  const { t } = useTranslation();
+  const latest = useRef(onError);
+  latest.current = onError;
+  const reported = useRef<Error | null>(null);
+  useEffect(() => {
+    if (reported.current === failure) return;
+    reported.current = failure;
+    try { latest.current?.(failure); } catch {}
+  }, [failure]);
+  return <div role="alert">{t('editor.openError')}: {failure.message}</div>;
+}
+
+function XlsxPeerlessEditor(props: XlsxAsyncEditorProps) {
+  const inThread = (props as { experimentalWorkerOpen?: boolean }).experimentalWorkerOpen === false;
+  const choose = () => inThread || typeof Worker !== 'function' ? new XlsxAsyncApiUnavailableError()
+    : typeof OffscreenCanvas !== 'function' ? new XlsxAsyncApiUnavailableError('OffscreenCanvas') : null;
+  const [session, setSession] = useState(() => ({ file: props.file, collaboration: props.collaboration,
+    inThread, failure: choose() }));
+  if (session.file !== props.file || session.collaboration !== props.collaboration || session.inThread !== inThread) {
+    setSession({ file: props.file, collaboration: props.collaboration, inThread, failure: choose() });
+  }
+  return <LocaleProvider i18n={props.i18n}>
+    {session.failure ? <XlsxAsyncEditorRefusal failure={session.failure} onError={props.onError} />
+      : <XlsxWorkerEditor {...props} backend="peerless" />}
+  </LocaleProvider>;
+}
+
+export function XlsxEditor(props: XlsxAsyncEditorProps): React.JSX.Element;
+export function XlsxEditor(props: LegacyEditorProps<XlsxWorkerViewerProps>): React.JSX.Element;
+export function XlsxEditor(props: LegacyEditorProps<XlsxWorkerEditorProps>): React.JSX.Element;
+export function XlsxEditor(props: LegacyEditorProps<WorkerSessionProps>): React.JSX.Element;
+export function XlsxEditor(props: LegacyEditorProps<XlsxEditorProps>): React.JSX.Element;
+export function XlsxEditor(props: XlsxAsyncEditorProps | LegacyEditorProps<XlsxWorkerViewerProps | XlsxWorkerEditorProps | WorkerSessionProps | XlsxEditorProps>): React.JSX.Element {
+  return props[PEERLESS_FLAG] === true ? <XlsxPeerlessEditor {...props as XlsxAsyncEditorProps} />
+    : <LegacyXlsxEditor {...props as XlsxWorkerViewerProps | XlsxWorkerEditorProps | WorkerSessionProps | XlsxEditorProps} />;
+}
+
+function LegacyXlsxEditor(props: XlsxWorkerViewerProps | XlsxWorkerEditorProps | WorkerSessionProps | XlsxEditorProps): React.JSX.Element {
   const worker = 'experimentalWorkerOpen' in props && props.experimentalWorkerOpen;
   const collaboration = (props as XlsxEditorProps).collaboration;
   const [session, setSession] = useState(() => ({ file: props.file, collaboration, worker, editor: !props.readOnly }));

@@ -10,13 +10,18 @@ import { wasmAssetUrl } from '../wasm/asset';
 import { XlsxDocument } from '../wasm/generated/xlsx_wasm.js';
 import { openWorkbook, type WorkbookCalculationContext, type WorkbookHandle } from '../wasm/loader';
 import { createWorkbookSession, hydratePeer, type WorkbookSession } from './client';
+import { workbookPeerSources } from './clientInternals';
 import { createWorkbookEditPeer, WorkbookEditPeerFailedError, type WorkbookEditPeer } from './editPeer';
 import { workbookEditPeerOperations } from './editPeerInternals';
 import { createWorkbookSessionHost } from './host';
 import { WORKBOOK_SESSION_POLICIES } from './methods';
+import type { WorkbookSharedCommand } from './commandProtocol';
 import { WorkbookPeerHydrationError } from './peerHydrationError';
 import { workbookSessionInternals, type WorkbookReplayEnvelope, type WorkbookReplayOp } from './replay';
 import { createTestWorkbookSession, loadWorkbookSessionFixtures } from './testHelpers';
+import {
+  createWorkbookRecoverySession, workbookRecoveryBackend, workbookSessionRecovery, WorkbookRecoveryReplayError,
+} from './clientRecovery';
 
 let fixture: Uint8Array;
 let wasmBytes: Uint8Array<ArrayBuffer>;
@@ -36,6 +41,56 @@ async function volatileWorkbookBytes(): Promise<Uint8Array> {
   return zip.generateAsync({ type: 'uint8array' });
 }
 
+for (const retainPeerHydration of [false, true]) {
+  test(`${retainPeerHydration ? 'hybrid' : 'viewer'} startup works without crypto.randomUUID`, async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis.crypto, 'randomUUID');
+    Object.defineProperty(globalThis.crypto, 'randomUUID', { configurable: true, value: undefined });
+    const random = spyOn(globalThis.crypto, 'getRandomValues');
+    let session: WorkbookSession | undefined;
+    try {
+      session = await createTestWorkbookSession(fixture, undefined, {
+        calculation, wasm: wasmBytes.buffer, retainPeerHydration,
+      });
+      expect(session.state.stage).toBe('ready');
+      expect(session.commandIdentity.session).toMatch(/^[0-9a-f]{32}$/);
+      expect(session.commandIdentity.incarnation).toMatch(/^[0-9a-f]{32}$/);
+      expect(session.commandIdentity.session).not.toBe(session.commandIdentity.incarnation);
+      expect(random.mock.calls.filter(([value]) => value instanceof Uint8Array && value.length === 16).length).toBeGreaterThanOrEqual(2);
+      expect((await session.call.sheets()).length).toBeGreaterThan(0);
+      expect((await session.save()).length).toBeGreaterThan(0);
+      expect(session.failure).toBeUndefined();
+    } finally {
+      random.mockRestore();
+      if (descriptor) Object.defineProperty(globalThis.crypto, 'randomUUID', descriptor);
+      else Reflect.deleteProperty(globalThis.crypto, 'randomUUID');
+      await session?.dispose();
+    }
+  });
+}
+
+test('ack delivery skips removed listeners and defers replacements until the next ack', async () => {
+  const session = await createTestWorkbookSession(fixture);
+  const delivered: string[] = [];
+  let offCurrent = () => {};
+  let offRemoved = () => {};
+  offCurrent = session.onAck((ack) => {
+    delivered.push(`current:${ack.throughSeq}`);
+    offCurrent();
+    offRemoved();
+    offCurrent = session.onAck((next) => { delivered.push(`replacement:${next.throughSeq}`); });
+  });
+  offRemoved = session.onAck((ack) => { delivered.push(`removed:${ack.throughSeq}`); });
+  try {
+    for (const seq of [1, 2]) {
+      expect(await session.submit({ ...session.commandIdentity, seq, basis: session.confirmedBasis,
+        kind: 'editCell', payload: { args: [0, 0, 0, String(seq + 10)] } }))
+        .toMatchObject({ status: 'applied' });
+      expect(delivered).toEqual(seq === 1 ? ['current:1'] : ['current:1', 'replacement:2']);
+    }
+    expect(session.failure).toBeUndefined();
+  } finally { offCurrent(); offRemoved(); await session.dispose(); }
+});
+
 function crashableHost(): {
   wrap(transport: SessionTransport): SessionTransport;
   crash(): void;
@@ -53,16 +108,352 @@ function crashableHost(): {
   };
 }
 
+function recoveryWorker() {
+  const open = spyOn(workbookRecoveryBackend, 'open').mockImplementation((...args) => {
+    const pair = createInProcessPair();
+    createWorkbookSessionHost(pair.host);
+    return Reflect.apply(createWorkbookRecoverySession, undefined,
+      [args[0], args[1], pair.client, ...args.slice(2)]) as ReturnType<typeof createWorkbookRecoverySession>;
+  });
+  return open;
+}
+
+function recoveryCommand(session: WorkbookSession, seq: number, row: number, input: string) {
+  return { ...session.commandIdentity, seq, basis: session.confirmedBasis, kind: 'editCell' as const,
+    payload: { args: [0, row, 0, input] as [number, number, number, string],
+      target: { sheetId: session.state.sheets[0].id, range: { kind: 'a1' as const, a1: `A${row + 1}` } } } };
+}
+
+test('recovery saves acknowledged and unacknowledged commands once without a peer', async () => {
+  const host = crashableHost();
+  const opener = recoveryWorker();
+  let hold = false;
+  let held!: () => void;
+  const acknowledged = new Promise<void>((resolve) => { held = resolve; });
+  const session = await createTestWorkbookSession(await initialPaintBook(), (transport) => host.wrap({
+    ...transport, post(message, transfer) {
+      if (hold && isHostMessage(message) && message.kind === 'reply' && message.ok &&
+        message.value && typeof message.value === 'object' && 'shared' in message.value) { held(); return; }
+      transport.post(message, transfer);
+    },
+  }), { includeEditState: true, calculation });
+  try {
+    const first = recoveryCommand(session, 1, 10, 'kept');
+    expect(await session.submit(first)).toMatchObject({ status: 'applied' });
+    await session.submit(first);
+    hold = true;
+    const pending = session.submit({ ...session.commandIdentity, seq: 2, basis: session.confirmedBasis,
+      kind: 'applyOps', payload: { args: [[{ type: 'insertRows', sheet: 0, at: 10, count: 1 }]] } });
+    void pending.catch(() => {});
+    await acknowledged;
+    host.crash();
+    await expect(pending).rejects.toBeInstanceOf(SessionFailure);
+    const recovery = workbookSessionRecovery.get(session)!;
+    expect(recovery.retainedCommands).toBe(2);
+    const bytes = await recovery.save(() => {});
+    const reopened = await createTestWorkbookSession(bytes, undefined, { calculation });
+    try {
+      const cells = (await reopened.call.cellInputs(0, 'A11:A13')).cells;
+      expect(cells.map((row) => row[0]?.input ?? '')).toEqual(['', 'kept', '']);
+    } finally { await reopened.dispose(); }
+    expect(await recovery.save(() => {})).toEqual(bytes);
+    expect(opener).toHaveBeenCalledTimes(2);
+    expect(session.state.stage).toBe('failed');
+    await expect(session.submit(recoveryCommand(session, 3, 0, 'blocked'))).rejects.toBeInstanceOf(SessionFailure);
+  } finally { opener.mockRestore(); await session.dispose(); }
+});
+
+test('recovery trims a checkpoint prefix and replays later commands', async () => {
+  const host = crashableHost();
+  const opener = recoveryWorker();
+  let hold = false;
+  let held!: () => void;
+  const acknowledged = new Promise<void>((resolve) => { held = resolve; });
+  const session = await createTestWorkbookSession(await initialPaintBook(), (transport) => host.wrap({
+    ...transport, post(message, transfer) {
+      if (hold && isHostMessage(message) && message.kind === 'reply' && message.ok &&
+        message.value && typeof message.value === 'object' && 'shared' in message.value) { held(); return; }
+      transport.post(message, transfer);
+    },
+  }), { includeEditState: true, calculation });
+  try {
+    await session.submit(recoveryCommand(session, 1, 0, 'first'));
+    await session.submit(recoveryCommand(session, 2, 1, 'second'));
+    const recovery = workbookSessionRecovery.get(session)!;
+    expect(await recovery.capture(() => true)).toBe(true);
+    expect(recovery.throughSeq).toBe(2);
+    expect(recovery.retainedCommands).toBe(0);
+    await session.submit(recoveryCommand(session, 3, 2, 'third'));
+    hold = true;
+    const pending = session.submit(recoveryCommand(session, 4, 3, 'fourth'));
+    void pending.catch(() => {});
+    await acknowledged;
+    expect(recovery.retainedCommands).toBe(2);
+    host.crash();
+    await expect(pending).rejects.toBeInstanceOf(SessionFailure);
+    const bytes = await recovery.save(() => {});
+    expect(opener.mock.calls[0][2]?.throughSeq).toBe(2);
+    const reopened = await createTestWorkbookSession(bytes);
+    try {
+      expect((await reopened.call.cellInputs(0, 'A1:A4')).cells.map((row) => row[0].input))
+        .toEqual(['first', 'second', 'third', 'fourth']);
+    } finally { await reopened.dispose(); }
+  } finally { opener.mockRestore(); await session.dispose(); }
+});
+
+test.each([false, true])('recovery preserves volatile calculation context (checkpoint=%s)', async (checkpoint) => {
+  const host = crashableHost();
+  const opener = recoveryWorker();
+  const bytes = await volatileWorkbookBytes();
+  const session = await createTestWorkbookSession(bytes, host.wrap, { includeEditState: true, calculation });
+  const control = await createTestWorkbookSession(bytes, undefined, { includeEditState: true, calculation });
+  try {
+    const changed = { nowSerial: 47_000.25, randSeed: 731 };
+    for (const active of [session, control]) {
+      await active.submit(recoveryCommand(active, 1, 1, '=RAND()+NOW()'));
+      if (active === session && checkpoint) await workbookSessionRecovery.get(session)!.capture(() => true);
+      await active.submit({ ...recoveryCommand(active, 2, 2, '=RAND()+TODAY()'),
+        payload: { ...recoveryCommand(active, 2, 2, '').payload, args: [0, 2, 0, '=RAND()+TODAY()'], calculation: changed } });
+    }
+    const expected = await control.save();
+    host.crash();
+    expect(await workbookSessionRecovery.get(session)!.save(() => {})).toEqual(expected);
+  } finally { opener.mockRestore(); await session.dispose(); await control.dispose(); }
+});
+
+test('recovery refuses an unreplayable admitted command with a typed sequence', async () => {
+  const host = crashableHost();
+  const opener = recoveryWorker();
+  const session = await createTestWorkbookSession(await initialPaintBook(), host.wrap, { includeEditState: true });
+  try {
+    const pending = session.submit({ ...recoveryCommand(session, 1, 0, 'kept'),
+      payload: { args: [0, 0, 0, 'kept'], target: { sheetId: 'missing', range: { kind: 'a1', a1: 'A1' } } } });
+    void pending.catch(() => {});
+    host.crash();
+    await expect(pending).rejects.toBeInstanceOf(SessionFailure);
+    const saved = workbookSessionRecovery.get(session)!.save(() => {});
+    await expect(saved).rejects.toBeInstanceOf(WorkbookRecoveryReplayError);
+    await expect(saved).rejects.toMatchObject({ code: 'workbook-recovery-refused', seq: 1, reason: 'target-sheet-missing' });
+  } finally { opener.mockRestore(); await session.dispose(); }
+});
+
+test('recovery retains commands admitted behind a read barrier', async () => {
+  const host = crashableHost();
+  const opener = recoveryWorker();
+  const reads = new Set<number>();
+  let held!: () => void;
+  const withheld = new Promise<void>((resolve) => { held = resolve; });
+  const session = await createTestWorkbookSession(await initialPaintBook(), (transport) => host.wrap({
+    ...transport,
+    listen: (listener) => transport.listen((message) => {
+      if (isClientMessage(message) && message.kind === 'call' && message.method === 'cellInputs') reads.add(message.id);
+      listener(message);
+    }),
+    post(message, transfer) {
+      if (isHostMessage(message) && message.kind === 'reply' && reads.has(message.id)) { held(); return; }
+      transport.post(message, transfer);
+    },
+  }), { includeEditState: true });
+  try {
+    const read = session.call.cellInputs(0, 'A1');
+    const edit = session.submit(recoveryCommand(session, 1, 0, 'queued'));
+    void read.catch(() => {}); void edit.catch(() => {});
+    await withheld;
+    host.crash();
+    await Promise.allSettled([read, edit]);
+    const bytes = await workbookSessionRecovery.get(session)!.save(() => {});
+    const reopened = await createTestWorkbookSession(bytes);
+    try { expect((await reopened.call.cellInputs(0, 'A1')).cells[0][0].input).toBe('queued'); }
+    finally { await reopened.dispose(); }
+  } finally { opener.mockRestore(); await session.dispose(); }
+});
+
+test('recovery retains opening bytes and the default calculation context', async () => {
+  const host = crashableHost();
+  const opener = recoveryWorker();
+  const bytes = await volatileWorkbookBytes();
+  const session = await createTestWorkbookSession(bytes, host.wrap, { includeEditState: true });
+  try {
+    await session.submit(recoveryCommand(session, 1, 1, '=RAND()+NOW()'));
+    const expected = await session.save();
+    bytes.fill(0);
+    host.crash();
+    expect(await workbookSessionRecovery.get(session)!.save(() => {})).toEqual(expected);
+    expect(opener.mock.calls[0][1].calculation).toMatchObject({ nowSerial: expect.any(Number), randSeed: expect.any(Number) });
+  } finally { opener.mockRestore(); await session.dispose(); }
+});
+
+test('recovery bounds admission without dropping retained commands', async () => {
+  const host = crashableHost();
+  const opener = recoveryWorker();
+  const session = await createTestWorkbookSession(await initialPaintBook(), host.wrap, { includeEditState: true });
+  try {
+    for (let seq = 1; seq <= 256; seq += 1) await session.submit(recoveryCommand(session, seq, 1, String(seq)));
+    const recovery = workbookSessionRecovery.get(session)!;
+    expect(recovery.retainedCommands).toBe(256);
+    const rejected = session.submit(recoveryCommand(session, 257, 1, 'blocked'));
+    await expect(rejected).rejects.toBeInstanceOf(WorkbookRecoveryReplayError);
+    await expect(rejected).rejects.toMatchObject({ seq: 257, reason: 'log-full' });
+    const expected = await session.save();
+    host.crash();
+    expect(await recovery.save(() => {})).toEqual(expected);
+  } finally { opener.mockRestore(); await session.dispose(); }
+});
+
+async function initialPaintBook() {
+  const zip = new JSZip();
+  zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>');
+  zip.file('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>');
+  zip.file('xl/workbook.xml', '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Data" sheetId="1" r:id="rId1"/></sheets></workbook>');
+  zip.file('xl/_rels/workbook.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>');
+  zip.file('xl/worksheets/sheet1.xml', '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="0"><pane xSplit="1" ySplit="1" topLeftCell="D6" state="frozen"/></sheetView></sheetViews><sheetData><row r="1"><c r="A1"><f>NOW()</f><v>0</v></c><c r="B1"><f>RAND()</f><v>0</v></c></row><row r="20"><c r="Z20"><v>7</v></c></row></sheetData></worksheet>');
+  return zip.generateAsync({ type: 'uint8array' });
+}
+
+describe('peerless workbook open', () => {
+  test('peerless open retains no source or hydration', async () => {
+    const messages: unknown[] = [];
+    const session = await createTestWorkbookSession(await initialPaintBook(), (transport) => ({
+      ...transport, post(message, transfer) { messages.push(message); transport.post(message, transfer); },
+    }), { calculation, wasm: wasmBytes.buffer });
+    try {
+      expect(workbookPeerSources.has(session)).toBe(false);
+      expect(messages.some((message) => isHostMessage(message) && message.kind === 'event' && message.name === 'peerOpened')).toBe(false);
+      expect(messages.some((message) => isHostMessage(message) && message.kind === 'wasm-module' && message.hydration !== undefined)).toBe(false);
+      const internal = workbookSessionInternals.get(session);
+      expect(internal?.attachPeer).toBeUndefined();
+      expect(internal?.detachPeer).toBeUndefined();
+      expect(internal?.preview).toBeUndefined();
+      await expect(hydratePeer(session)).rejects.toBeInstanceOf(TypeError);
+    } finally { await session.dispose(); }
+  });
+
+  test('known viewport open carries final geometry and frame', async () => {
+    const bytes = await initialPaintBook();
+    const requests: string[] = [];
+    const session = await createTestWorkbookSession(bytes, (transport) => ({
+      ...transport, listen: (listener) => transport.listen((message) => {
+        if (isClientMessage(message) && message.kind === 'call') requests.push(message.method);
+        listener(message);
+      }),
+    }), { calculation, wasm: wasmBytes.buffer,
+      initialViewport: { sheet: 0, width: 800, height: 600, zoom: 2, dpr: 2, requestGeneration: 7 } });
+    const main = openWorkbook(bytes, { calculation });
+    try {
+      expect(requests).toEqual(['open']);
+      const initial = session.initialPaint!;
+      expect(initial).toBeDefined();
+      expect(initial.sheetView).toEqual(await session.call.sheetView(0));
+      expect(initial.sheetView).toMatchObject({ frozenRows: 1, frozenCols: 1 });
+      expect(initial.frame).toMatchObject({ ...session.commandIdentity, coversThroughSeq: 0,
+        sequence: 0, requestGeneration: 7, zoom: 2, dpr: 2, sheet: 0,
+        viewport: { x: initial.sheetView.initialScrollX, y: initial.sheetView.initialScrollY, width: 400, height: 300 } });
+      expect(initial.frame.displayList).toEqual(main.displayList(initial.frame.viewport));
+      expect(initial.editState).toMatchObject({ canUndo: false, canRedo: false, readOnly: false, activeSheet: 0 });
+      expect(session.editState).toEqual(initial.editState);
+      expect(session.markPresented(initial.frame)).toBe(true);
+      expect(session.markPresented({ ...session.commandIdentity, coversThroughSeq: 0, displayList: initial.frame.displayList })).toBe(true);
+    } finally { main.dispose(); await session.dispose(); }
+  });
+
+  test('first toolbar refusal preserves the initial selection without edit projection', async () => {
+    const session = await createTestWorkbookSession(await initialPaintBook());
+    try {
+      const selection = { sheetId: session.state.sheets[session.state.activeSheet].id,
+        range: { kind: 'a1' as const, a1: 'A1' } };
+      expect(session.selection).toBeUndefined();
+      const version = session.confirmedBasis.version;
+      const destination = { ...selection, range: { kind: 'a1' as const, a1: 'B1' } };
+      expect(await session.submit({ ...session.commandIdentity, seq: 1, basis: session.confirmedBasis,
+        kind: 'applyOps', payload: {
+          toolbar: { id: 'bold', args: { value: true }, target: destination }, selection: destination,
+        } })).toMatchObject({ status: 'refused', reason: 'invalid-command', committed: false });
+      expect(session.selection).toBeUndefined();
+      expect(session.confirmedBasis.version).toBe(version);
+      expect(session.editState).toMatchObject({ canUndo: false, canRedo: false });
+      expect(await session.submit({ ...session.commandIdentity, seq: 2, basis: session.confirmedBasis,
+        kind: 'editCell', payload: { args: [session.state.activeSheet, 0, 0, '9'] },
+      })).toMatchObject({ status: 'applied', committed: true });
+      expect(session.selection).toEqual(selection);
+    } finally { await session.dispose(); }
+  });
+
+  test('default never initializes main edit wasm', async () => {
+    const bytes = await initialPaintBook();
+    const pair = createInProcessPair();
+    createWorkbookSessionHost(pair.host, { initWasm: async () => {} });
+    const initializing = spyOn(workbookWasm, 'initWasm');
+    const snapshot = spyOn(workbookWasm, 'createWorkbookSnapshotBuilder');
+    const peer = spyOn(workbookWasm, 'openWorkbookPeer');
+    let session;
+    try {
+      session = await createWorkbookSession(bytes, { includeEditState: true }, pair.client);
+      expect(session.editState).toMatchObject({ readOnly: false, activeSheet: 0 });
+      expect(initializing).not.toHaveBeenCalled();
+      expect(snapshot).not.toHaveBeenCalled();
+      expect(peer).not.toHaveBeenCalled();
+      expect(workbookPeerSources.has(session)).toBe(false);
+    } finally {
+      initializing.mockRestore(); snapshot.mockRestore(); peer.mockRestore();
+      await session?.dispose();
+    }
+  });
+
+  test.each([false, true])('open skips unrequested edit projection (legacy=%s)', async (retainPeerHydration) => {
+    const opening = workbookWasm.openWorkbook;
+    let projections = 0;
+    let restoreHistory = () => {};
+    const opened = spyOn(workbookWasm, 'openWorkbook').mockImplementation((...args) => {
+      const worker = opening(...args);
+      const history = worker.historyState;
+      const spy = spyOn(worker, 'historyState').mockImplementation(() => {
+        projections += 1;
+        return history.call(worker);
+      });
+      restoreHistory = () => spy.mockRestore();
+      return worker;
+    });
+    const replies: unknown[] = [];
+    let session;
+    try {
+      session = await createTestWorkbookSession(await initialPaintBook(), (transport) => ({
+        ...transport, post(message, transfer) {
+          if (isHostMessage(message) && message.kind === 'reply' && message.ok) replies.push(message.value);
+          transport.post(message, transfer);
+        },
+      }), { calculation, wasm: wasmBytes.buffer, retainPeerHydration, includeEditState: retainPeerHydration });
+      expect(projections).toBe(0);
+      expect(replies[0]).not.toHaveProperty('editState');
+      expect(replies[0]).not.toHaveProperty('selection');
+      expect(replies[0]).not.toHaveProperty('initialPaint');
+      expect(session.editState).toEqual({});
+      if (!retainPeerHydration) {
+        const ack = await session.call.command({ ...session.commandIdentity, seq: 1,
+          basis: session.confirmedBasis, kind: 'select', payload: {
+            selection: { sheetId: session.state.sheets[0].id, range: { kind: 'a1', a1: 'A1' } },
+          } });
+        expect(Object.keys(ack.editState!).sort()).toEqual([
+          'activeSheet', 'calculation', 'canRedo', 'canUndo', 'formatting', 'formattingAvailable',
+          'mergedRanges', 'readOnly', 'selectionEditable', 'sheets',
+        ]);
+        expect(ack.editState).toEqual(session.editState);
+        expect(projections).toBe(1);
+      }
+    } finally { opened.mockRestore(); restoreHistory(); await session?.dispose(); }
+  });
+});
+
 describe('workbook peer hydration', () => {
   test('refuses retained public mutations before attachment and after peer disposal without changing document state', async () => {
     const pair = createInProcessPair();
     createWorkbookSessionHost(pair.host);
-    const session = await createWorkbookSession(fixture, {
+    const session = await createWorkbookSession(await initialPaintBook(), {
       calculation, wasm: wasmBytes.buffer, retainPeerHydration: true,
     }, pair.client);
     let peer: WorkbookHandle | undefined;
     let edits: WorkbookEditPeer | undefined;
     const applyEdits = session.call.applyEdits;
+    const events: string[] = [];
     try {
       for (const phase of ['before attachment', 'after peer disposal']) {
         if (phase === 'after peer disposal') {
@@ -85,22 +476,30 @@ describe('workbook peer hydration', () => {
         const mutators = Object.entries(WORKBOOK_SESSION_POLICIES)
           .filter(([, policy]) => typeof policy !== 'function' && policy.mutates)
           .map(([method]) => method);
-        expect(mutators).toEqual(['applyEdits']);
+        expect(mutators).toEqual(['applyEdits', 'edit']);
         await expect(session.call.applyEdits(input)).rejects.toBeInstanceOf(WorkbookPeerHydrationError);
         await expect(session.call.applyEdits(input)).rejects.toMatchObject({ code: 'mutation-outside-replay' });
         await expect(applyEdits(input)).rejects.toBeInstanceOf(WorkbookPeerHydrationError);
-        const reply = new Promise<unknown>((resolve) => {
-          const off = pair.client.listen((message) => {
-            if (isHostMessage(message) && message.kind === 'reply' && message.id === 10_000) {
-              off();
-              resolve(message);
-            }
+        events.push(`${phase}:public-refused`);
+        const edit: WorkbookSharedCommand = { session: session.commandIdentity.session,
+          incarnation: 1, seq: 1, basis: { epoch: session.confirmedBasis.epoch, version: 0 },
+          kind: 'editCell', payload: { payload: { args: [0, 0, 0, 'refused shared edit'] } } };
+        for (const [index, method] of mutators.entries()) {
+          const id = 10_000 + index;
+          const reply = new Promise<unknown>((resolve) => {
+            const off = pair.client.listen((message) => {
+              if (isHostMessage(message) && message.kind === 'reply' && message.id === id) {
+                off();
+                resolve(message);
+              }
+            });
           });
-        });
-        pair.client.post({ protocol: 1, kind: 'call', id: 10_000, method: 'applyEdits', args: [input] });
-        expect(await reply).toMatchObject({
-          ok: false, error: { name: 'WorkbookPeerHydrationError', refusal: { code: 'mutation-outside-replay' } },
-        });
+          pair.client.post({ protocol: 1, kind: 'call', id, method, args: [method === 'edit' ? edit : input] });
+          expect(await reply).toMatchObject({
+            ok: false, error: { name: 'WorkbookPeerHydrationError', refusal: { code: 'mutation-outside-replay' } },
+          });
+          events.push(`${phase}:${method}:refused`);
+        }
         const internal = workbookSessionInternals.get(session);
         if (!internal) throw new Error('Missing internal workbook replay helper');
         const envelope: WorkbookReplayEnvelope = {
@@ -108,13 +507,19 @@ describe('workbook peer hydration', () => {
         };
         await expect(internal.replay(envelope)).rejects.toBeInstanceOf(WorkbookPeerHydrationError);
         await expect(internal.replay(envelope)).rejects.toMatchObject({ code: 'mutation-outside-replay' });
+        events.push(`${phase}:replay-refused`);
         expect(await session.call.version()).toBe(version);
         expect(await session.save()).toEqual(saved);
         expect(session.state).toMatchObject({ version: 0, dirty: false, stage: 'ready' });
         expect(session.state).toEqual(state);
         expect((await session.call.frame({ x: 0, y: 0, width: 800, height: 800 })).sequence).toBe(0);
         expect(session.failure).toBeUndefined();
+        events.push(`${phase}:unchanged`);
       }
+      expect(events).toEqual(['before attachment:public-refused', 'before attachment:applyEdits:refused',
+        'before attachment:edit:refused', 'before attachment:replay-refused', 'before attachment:unchanged',
+        'after peer disposal:public-refused', 'after peer disposal:applyEdits:refused',
+        'after peer disposal:edit:refused', 'after peer disposal:replay-refused', 'after peer disposal:unchanged']);
     } finally {
       edits?.dispose();
       peer?.dispose();

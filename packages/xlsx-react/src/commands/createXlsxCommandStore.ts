@@ -137,6 +137,7 @@ export interface XlsxCommandController {
    * built-in commands refuse with `unsupported-policy`.
    */
   scoped(scope: XlsxCommandScope): XlsxCommandStore;
+  guarded(assertCurrent: () => void): XlsxCommandStore;
   /** Whether `store` is this editor's store or one scoped from it. */
   ownsStore(store: XlsxCommandStore): boolean;
 }
@@ -312,20 +313,24 @@ export function createXlsxCommandController(): XlsxCommandController {
     id: XlsxCommandId,
     args: unknown,
     prepared?: XlsxCommandOrigin | null,
-    scope?: XlsxCommandScope
+    scope?: XlsxCommandScope,
+    assertCurrent?: () => void
   ): Promise<XlsxCommandResult>;
   function run(
     id: AnyCommandId,
     args: unknown,
     prepared?: XlsxCommandOrigin | null,
-    scope?: XlsxCommandScope
+    scope?: XlsxCommandScope,
+    assertCurrent?: () => void
   ): Promise<XlsxPluginCommandResult>;
   async function run(
     id: AnyCommandId,
     args: unknown,
     prepared?: XlsxCommandOrigin | null,
-    scope?: XlsxCommandScope
+    scope?: XlsxCommandScope,
+    assertCurrent?: () => void
   ): Promise<XlsxPluginCommandResult> {
+    assertCurrent?.();
     const current = binding;
     if (!current) return failure('editor-unavailable', null);
     const builtIn = isPluginCommandId(id) ? null : id;
@@ -333,6 +338,7 @@ export function createXlsxCommandController(): XlsxCommandController {
     const origin =
       prepared !== undefined ? prepared : ordered && builtIn ? capture(current, builtIn) : null;
     const attempt = (readOnly?: boolean): XlsxPluginCommandResult | Promise<XlsxPluginCommandResult> => {
+      assertCurrent?.();
       if (binding !== current) return failure('editor-unavailable', null);
       if (origin && builtIn) {
         const stale = current.resume(origin, builtIn);
@@ -347,6 +353,7 @@ export function createXlsxCommandController(): XlsxCommandController {
       const state = compute(id, args, env);
       if (!state.enabled) return { ok: false, failure: state.disabledReason };
       if (scope && mutatingBuiltIn(id)) return failure('unsupported-policy', env);
+      assertCurrent?.();
       return perform(id, args, env!);
     };
     try {
@@ -356,9 +363,11 @@ export function createXlsxCommandController(): XlsxCommandController {
       const denied = builtIn === 'save' ? scope?.deny(id) : null;
       if (denied) return failure(denied, environment(false));
       const result = await (builtIn === 'save' && current.requestSave ? current.requestSave(execute) : execute());
+      assertCurrent?.();
       if (!result.ok) current.refuse?.(result.failure);
       return result;
     } catch (error) {
+      assertCurrent?.();
       if (error instanceof XlsxCommandAdmissionError) {
         const result = failure(error.code, environment(false));
         if (!result.ok) current.refuse?.(result.failure);
@@ -374,12 +383,13 @@ export function createXlsxCommandController(): XlsxCommandController {
   const dispatch = (
     id: unknown,
     args: unknown,
-    scope?: XlsxCommandScope
+    scope?: XlsxCommandScope,
+    assertCurrent?: () => void
   ): Promise<XlsxPluginCommandResult> => {
     if (!knownCommand(id)) {
       return Promise.resolve(failure('unsupported-command', environment(false)));
     }
-    return run(id, args, undefined, scope);
+    return run(id, args, undefined, scope, assertCurrent);
   };
 
   const getDescriptor = (id: AnyCommandId) =>
@@ -399,9 +409,11 @@ export function createXlsxCommandController(): XlsxCommandController {
     execute: (id: AnyCommandId, args: unknown) => dispatch(id, args),
   }) as XlsxCommandStore;
 
-  const prepareFor = (id: XlsxCommandId, scope?: XlsxCommandScope) => {
+  const prepareFor = (id: XlsxCommandId, scope?: XlsxCommandScope, assertCurrent?: () => void) => {
+    assertCurrent?.();
     const origin = binding ? capture(binding, id) : null;
-    return { execute: (args: unknown) => run(id, args, origin, scope) };
+    assertCurrent?.();
+    return { execute: (args: unknown) => run(id, args, origin, scope, assertCurrent) };
   };
 
   const createScoped = (scope: XlsxCommandScope): XlsxCommandStore => {
@@ -515,6 +527,22 @@ export function createXlsxCommandController(): XlsxCommandController {
         ownStores.add(scoped);
       }
       return scoped;
+    },
+    guarded(assertCurrent) {
+      const guarded = Object.freeze({
+        ...store,
+        execute: async (id: AnyCommandId, args: unknown) => {
+          assertCurrent();
+          return dispatch(id, args, undefined, assertCurrent);
+        },
+      }) as XlsxCommandStore;
+      ownStores.add(guarded);
+      controllers.set(guarded, {
+        ...controller,
+        store: guarded,
+        prepare: (id) => prepareFor(id, undefined, assertCurrent),
+      });
+      return guarded;
     },
     ownsStore: (candidate) => ownStores.has(candidate),
   };

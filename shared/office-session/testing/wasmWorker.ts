@@ -57,8 +57,12 @@ export async function sessionWasmFactory<Client>(clientPath: string, workerPath:
               export const presentationDisplayListJson = () => { throw new Error('presentationDisplayListJson is not stubbed'); };
               export const presentationMetadata = () => ({ slides: [], size: { width: 0, height: 0 } });
               export const workbookDisplayListJson = () => { throw new Error('workbookDisplayListJson is not stubbed'); };
+              export const isPngExportAvailable = () => false;
               export const workbookPeerHydration = () => { throw new Error('workbookPeerHydration is not stubbed'); };
               export const workbookPeerSnapshot = () => { throw new Error('workbookPeerSnapshot is not stubbed'); };
+              export const workbookRecoveryCheckpoint = () => { throw new Error('workbookRecoveryCheckpoint is not stubbed'); };
+              export const openWorkbookRecoveryCheckpoint = () => { throw new Error('openWorkbookRecoveryCheckpoint is not stubbed'); };
+              export const adoptWorkbookPeerVersion = () => { throw new Error('adoptWorkbookPeerVersion is not stubbed'); };
               export const createWorkbookSnapshotBuilder = () => { throw new Error('createWorkbookSnapshotBuilder is not stubbed'); };
             `,
             loader: 'js',

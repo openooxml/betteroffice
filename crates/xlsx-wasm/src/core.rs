@@ -298,6 +298,33 @@ struct AcceptResult {
 }
 
 impl Session {
+    pub fn recovery_checkpoint(
+        &self,
+        through_seq: u64,
+        preserve_history: bool,
+    ) -> Result<Vec<u8>, String> {
+        self.workbook
+            .recovery_checkpoint_with_history(
+                through_seq,
+                self.calculation_context,
+                preserve_history,
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn open_recovery_checkpoint(bytes: &[u8], expected_seq: u64) -> Result<Self, String> {
+        let (workbook, through_seq, calculation_context, _) =
+            Workbook::restore_recovery_checkpoint(bytes).map_err(|error| error.to_string())?;
+        if through_seq != expected_seq {
+            return Err("Recovery checkpoint sequence mismatch".into());
+        }
+        Ok(Self {
+            workbook,
+            calculation_context,
+            snapshot: None,
+        })
+    }
+
     pub fn begin_peer_snapshot(&mut self, records: usize, bytes: usize) -> Result<(), String> {
         self.snapshot = None;
         let budget = SnapshotBudget::new(records, bytes).map_err(|error| error.to_string())?;
