@@ -180,6 +180,7 @@ interface PeerlessEntry {
 interface PeerlessGate {
   run(): void | Promise<void>;
   reject(error: unknown): void;
+  recoveryInput?(): PeerlessWorkerCommandInput | null;
 }
 
 interface PeerlessInputBarrier {
@@ -236,7 +237,7 @@ export function createPeerlessWorkerInputCoordinator(
   let offAck = () => {};
   let offFailure = () => {};
   let pumping = false;
-  let blocked: object | null = null;
+  let blocked: PeerlessEntry | PeerlessGate | null = null;
   let insertion: number | null = null;
   let admittedReadOnly: boolean | null = null;
   let admittedAfter: { last: PeerlessWorkerCommandTicket | null;
@@ -325,9 +326,12 @@ export function createPeerlessWorkerInputCoordinator(
   };
   const fail = (error: unknown) => {
     if (failure || retired) return;
-    recoveryCommands = queue.filter((entry): entry is PeerlessEntry => 'ticket' in entry &&
-      !entry.ticket.failure && !dependencyFailed(entry) && entry.input !== null)
-      .map((entry) => structuredClone(entry.input!));
+    const pending = blocked && !('ticket' in blocked) ? [blocked, ...queue] : queue;
+    recoveryCommands = pending.flatMap((entry) => {
+      if ('ticket' in entry && (entry.ticket.failure || dependencyFailed(entry))) return [];
+      const input = 'ticket' in entry ? entry.input : entry.recoveryInput?.();
+      return input ? [structuredClone(input)] : [];
+    });
     failure = { error };
     localReadOnly = true;
     cycle.reject(error);
@@ -601,10 +605,14 @@ export function createPeerlessWorkerInputCoordinator(
         else clear();
       };
       const composedTarget = composition && draft ? { ...draft } : null;
+      const captureComposition = (finished: InputDraft) => composedTarget
+        ? { ...finished, generation: composedTarget.generation, sheet: composedTarget.sheet,
+          row: composedTarget.row, col: composedTarget.col, source: composedTarget.source } : finished;
       const compositionId = composition ? hooks.compositionId?.() ?? compositionIds.get(composition) ??
         `local-composition:${nextCompositionId++}` : undefined;
       if (composition && compositionId) compositionIds.set(composition, compositionId);
       let sealed: PeerlessWorkerCommandTicket | undefined;
+      let compositionSubmitted = false;
       if (reserved) {
         const ticket: PeerlessTicket = { seq: null, result: reserved.promise, lease: cycle };
         Object.defineProperty(ticket, 'seq', { get: () => sealed?.seq ?? null });
@@ -650,7 +658,19 @@ export function createPeerlessWorkerInputCoordinator(
         if (rejected.length) throw new XlsxCommandAdmissionError('input-failed');
         await invoke();
       };
-      enqueue({ reject: result.reject, run: () => {
+      enqueue({ reject: result.reject, recoveryInput: () => {
+        if (!composition || compositionSubmitted || readOnly ||
+          (input.ticket as PeerlessTicket | undefined)?.failure ||
+          (previousInput?.ticket as PeerlessTicket | undefined)?.failure) return null;
+        const finished = seal.compositionDraft?.();
+        if (!finished || finished.generation !== generation || finished.value === '' ||
+          'modified' in finished && finished.modified === false) return null;
+        const captured = captureComposition(finished);
+        const target = hooks.draftTarget?.(captured) ?? hooks.target(captured.sheet, captured.row, captured.col);
+        return { kind: 'editCell', payload: {
+          args: [captured.sheet, captured.row, captured.col, captured.value], target,
+        } };
+      }, run: () => {
         if (composition || fence) return (async () => {
           if (composition) {
             const ended = await lease.wait(composition);
@@ -665,10 +685,8 @@ export function createPeerlessWorkerInputCoordinator(
                 admittedReadOnly = readOnly;
                 try {
                   if (finished) {
-                    const captured = composedTarget ? { ...finished, generation: composedTarget.generation,
-                      sheet: composedTarget.sheet, row: composedTarget.row, col: composedTarget.col,
-                      source: composedTarget.source } : finished;
-                    sealed = submit(captured, { compositionId, after: previousInput?.ticket });
+                    compositionSubmitted = true;
+                    sealed = submit(captureComposition(finished), { compositionId, after: previousInput?.ticket });
                   }
                 }
                 finally { admittedReadOnly = previous; }
