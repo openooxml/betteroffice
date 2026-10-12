@@ -63,7 +63,7 @@ test('xlsx: a narrow toolbar keeps every control in a keyboard menu inside the v
 });
 
 for (const source of ['cell', 'formula'] as const) {
-  test(`xlsx: a toolbar command pressed during ${source} IME composition lands after the composed text`, async ({
+  test(`xlsx: a toolbar command during ${source} IME composition preserves text and keyboard focus`, async ({
     page,
   }) => {
     await open(page);
@@ -83,9 +83,18 @@ for (const source of ['cell', 'formula'] as const) {
     await bold.click();
 
     if (source === 'cell') await expect(input).toHaveCount(0);
-    else await expect(input).not.toBeFocused();
     await expect(page.getByRole('gridcell').filter({ hasText: 'abかな' })).toHaveCount(1);
     await expect(bold).toHaveAttribute('aria-pressed', wasBold === 'true' ? 'false' : 'true');
     await expect(page.getByTestId('xlsx-formula-input')).toHaveValue('abかな');
+    await expect(page.getByTestId(source === 'cell' ? 'xlsx-scroll' : 'xlsx-formula-input')).toBeFocused();
+    if (source === 'cell') {
+      await page.keyboard.press('F2');
+      await expect(input).toHaveValue('abかな');
+      await page.keyboard.press('End');
+    }
+    await page.keyboard.type('x');
+    await expect(input).toHaveValue('abかなx');
+    await page.keyboard.press('Enter');
+    await expect(page.getByRole('gridcell').filter({ hasText: 'abかなx' })).toHaveCount(1);
   });
 }

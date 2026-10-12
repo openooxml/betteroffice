@@ -864,7 +864,7 @@ function replacePrint(value: (() => void) | undefined) {
 
 describe('XlsxEditor async API', () => {
   for (const source of ['cell', 'formula'] as const) {
-    it(`blurs composing ${source} input and submits final text once before a toolbar command`, async () => {
+    it(`restores ${source} keyboard focus after submitting composed text once and running a toolbar command`, async () => {
       const host = peerlessHarness(true);
       const view = await host.mount();
       if (source === 'cell') fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'F2' });
@@ -872,11 +872,11 @@ describe('XlsxEditor async API', () => {
       act(() => input.focus());
       fireEvent.compositionStart(input);
       fireEvent.change(input, { target: { value: 'unfinished' } });
-      const blur = spyOn(input, 'blur').mockImplementation(() => {
-        fireEvent.blur(input);
+      const blur = spyOn(input, 'blur');
+      input.addEventListener('blur', () => {
         input.value = 'final composed text';
         fireEvent.compositionEnd(input);
-      });
+      }, { once: true });
       restorers.push(() => blur.mockRestore());
       const bold = view.container.querySelector<HTMLButtonElement>('button[aria-label="Bold"]')!;
       await act(async () => fireEvent.click(bold));
@@ -893,6 +893,20 @@ describe('XlsxEditor async API', () => {
       expect(host.sent.filter(({ kind }) => kind === 'editCell')).toHaveLength(1);
       expect(host.cells.get('0:0:0')).toBe('final composed text');
       expect((view.getByTestId('xlsx-formula-input') as HTMLInputElement).value).toBe('final composed text');
+      expect(view.queryByTestId('xlsx-cell-editor')).toBeNull();
+      const sink = view.getByTestId(source === 'cell' ? 'xlsx-scroll' : 'xlsx-formula-input');
+      expect(document.activeElement).toBe(sink);
+      if (source === 'cell') {
+        fireEvent.keyDown(document.activeElement!, { key: 'F2' });
+        await waitFor(() => expect((view.getByTestId('xlsx-cell-editor') as HTMLInputElement).value).toBe('final composed text'));
+      } else {
+        fireEvent.change(document.activeElement!, { target: { value: 'final composed textx' } });
+        expect((view.getByTestId('xlsx-formula-input') as HTMLInputElement).value).toBe('final composed textx');
+        fireEvent.keyDown(document.activeElement!, { key: 'Enter' });
+        await waitFor(() => expect(host.sent.filter(({ kind }) => kind === 'editCell')).toHaveLength(2));
+        const edits = host.sent.filter(({ kind }) => kind === 'editCell');
+        expect(edits[edits.length - 1]).toMatchObject({ payload: { args: [0, 0, 0, 'final composed textx'] } });
+      }
     });
   }
 
