@@ -699,10 +699,16 @@ export function registerPresentationCommandHandlers(
       return { kind: 'history', direction: command.kind };
     }
     if (command.kind === 'selectObject') {
-      const { frame: tag, x, y, scale } = command.payload;
-      if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(scale) || scale <= 0) return 'invalid-payload';
+      const { frame: tag } = command.payload;
       if (!objectFrame(tag) || command.basis.version !== version || presentation().version() !== version) return 'stale-basis';
       if (composition) return 'invalid-composition';
+      if ('shapeId' in command.payload) {
+        if (typeof command.payload.shapeId !== 'string') return 'invalid-payload';
+        const object = selectedObject(tag.slideId, command.payload.shapeId);
+        return object ? { kind: 'object', object } : 'bad-target';
+      }
+      const { x, y, scale } = command.payload;
+      if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(scale) || scale <= 0) return 'invalid-payload';
       const geometry = frames.get(frameKey(tag))!.geometry;
       const hit = hitGeometry(geometry, { x, y }, undefined, scale);
       if (hit?.kind !== 'shape') return 'bad-target';
