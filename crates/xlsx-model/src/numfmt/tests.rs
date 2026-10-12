@@ -91,6 +91,26 @@ fn display_padding_retains_character_and_fill_position() {
 }
 
 #[test]
+fn fractions_use_best_approximation() {
+    for (value, id, expected) in [
+        (2.75, 12, "2 3/4"),
+        (0.125, 12, " 1/8"),
+        (1.0 / 3.0, 12, " 1/3"),
+        (0.3, 12, " 2/7"),
+        (0.3, 13, "  3/10"),
+        (0.142857, 13, "  1/7 "),
+        (-2.75, 12, "-2 3/4"),
+        (1.999, 12, "2    "),
+    ] {
+        assert_eq!(fv(value, builtin_format_code(id).unwrap()), expected);
+    }
+    assert_eq!(fv(0.3, "?/8"), "2/8");
+    assert_eq!(fv(2.3, "# ?/8"), "2 2/8");
+    assert_eq!(fv(0.5, "??/??"), " 1/2 ");
+    assert!(!format_is_approximate(&num(0.5), "# ?/?"));
+}
+
+#[test]
 fn builtin_table_ids() {
     assert_eq!(builtin_format_code(0), Some("General"));
     assert_eq!(builtin_format_code(1), Some("0"));
@@ -402,8 +422,8 @@ fn general_edge_cases() {
 
 #[test]
 fn unsupported_constructs_degrade() {
-    assert_eq!(fv(0.5, "# ?/?"), "0.5");
-    assert_eq!(fv(2.75, "# ??/??"), "2.75");
+    assert_eq!(fv(0.5, "# ?/?"), " 1/2");
+    assert_eq!(fv(2.75, "# ??/??"), "2  3/4 ");
     assert_eq!(fv(5.0, "[$$-409]#,##0.00"), "$5.00");
     assert_eq!(fv(5.0, "[$-409]0"), "5");
     assert_eq!(fv(1234.0, "$#,##0"), "$1,234");
@@ -414,9 +434,9 @@ fn unsupported_constructs_degrade() {
 #[test]
 fn approximate_formats_are_the_ones_that_degrade() {
     let n = CellValue::Number { value: 0.5 };
-    assert!(format_is_approximate(&n, "# ?/?"));
+    assert!(!format_is_approximate(&n, "# ?/?"));
     assert!(!format_is_approximate(&n, "0.00;# ??/??"));
-    assert!(format_is_approximate(
+    assert!(!format_is_approximate(
         &CellValue::Number { value: -0.5 },
         "0.00;# ??/??"
     ));

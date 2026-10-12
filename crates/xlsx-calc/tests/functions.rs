@@ -497,6 +497,15 @@ fn text_number_formats_are_width_free() {
 }
 
 #[test]
+fn text_formats_fraction_placeholders() {
+    check(&[
+        ("TEXT(2.75, \"# ?/?\")", t("2 3/4")),
+        ("TEXT(0.3, \"# ??/??\")", t("  3/10")),
+        ("TEXT(0.3, \"?/8\")", t("2/8")),
+    ]);
+}
+
+#[test]
 fn search_preserves_contextual_lowercasing() {
     check(&[
         ("SEARCH(\"ΟΣ\", \"ΟΣ\")", n(1.0)),

@@ -203,6 +203,7 @@ struct Section {
     toks: Vec<Tok>,
     color: Option<String>,
     condition: Option<Condition>,
+    fraction: Option<FractionPattern>,
 }
 
 impl Section {
@@ -481,6 +482,7 @@ fn tokenize(input: &str) -> Section {
             }
         }
     }
+    section.fraction = fraction_pattern(&section.toks);
     section
 }
 
@@ -679,9 +681,10 @@ pub fn format_is_approximate(value: &CellValue, code: &str) -> bool {
     !section.has_date() && degrades_to_general(section)
 }
 
-/// fractions are stubbed: they degrade to a general render.
 fn degrades_to_general(sec: &Section) -> bool {
-    !sec.has(|t| matches!(t, Tok::General)) && sec.has(|t| matches!(t, Tok::Slash))
+    !sec.has(|t| matches!(t, Tok::General))
+        && sec.has(|t| matches!(t, Tok::Slash))
+        && sec.fraction.is_none()
 }
 
 fn render_number_section(sec: &Section, mag: f64) -> FormattedValue {
@@ -693,6 +696,9 @@ fn render_number_section(sec: &Section, mag: f64) -> FormattedValue {
     }
     if sec.has(|t| matches!(t, Tok::Exp(_))) {
         return render_scientific(sec, mag);
+    }
+    if let Some(pattern) = sec.fraction {
+        return render_fraction(sec, mag, pattern);
     }
     let total_ph = sec
         .toks
@@ -776,6 +782,154 @@ fn render_number_section(sec: &Section, mag: f64) -> FormattedValue {
             Tok::Literal(s) => out.push_str(s),
             Tok::Width(c) => out.padding(*c),
             Tok::Fill(c) => out.fill(*c),
+            _ => {}
+        }
+    }
+    out
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FractionPattern {
+    numerator: usize,
+    slash: usize,
+    denominator_end: usize,
+    fixed: Option<u64>,
+    limit: u64,
+}
+
+fn fraction_pattern(toks: &[Tok]) -> Option<FractionPattern> {
+    let slash = toks.iter().position(|t| matches!(t, Tok::Slash))?;
+    let mut numerator = slash;
+    while numerator > 0 && matches!(toks[numerator - 1], Tok::Digit(_)) {
+        numerator -= 1;
+    }
+    if numerator == slash {
+        return None;
+    }
+    let mut end = slash + 1;
+    let mut literal = String::new();
+    while let Some(tok) = toks.get(end) {
+        match tok {
+            Tok::Literal(s) if s.chars().all(|c| c.is_ascii_digit()) => literal.push_str(s),
+            Tok::Digit('0') => literal.push('0'),
+            _ => break,
+        }
+        end += 1;
+    }
+    let fixed = if !literal.is_empty() {
+        Some(literal.parse::<u64>().ok().filter(|value| *value > 0)?)
+    } else {
+        while matches!(toks.get(end), Some(Tok::Digit(_))) {
+            end += 1;
+        }
+        None
+    };
+    let digits = end - slash - 1;
+    if digits == 0 || digits > 9 {
+        return None;
+    }
+    Some(FractionPattern {
+        numerator,
+        slash,
+        denominator_end: end,
+        fixed,
+        limit: 10u64.pow(digits as u32) - 1,
+    })
+}
+
+fn best_fraction(value: f64, limit: u64) -> (u64, u64) {
+    let (mut p0, mut q0, mut p1, mut q1) = (0u64, 1u64, 1u64, 0u64);
+    let mut remainder = value;
+    loop {
+        let whole = remainder.floor() as u64;
+        let Some(q2) = whole.checked_mul(q1).and_then(|q| q0.checked_add(q)) else { break };
+        if q2 > limit {
+            break;
+        }
+        let Some(p2) = whole.checked_mul(p1).and_then(|p| p0.checked_add(p)) else { break };
+        (p0, q0, p1, q1) = (p1, q1, p2, q2);
+        let fraction = remainder - whole as f64;
+        if fraction <= f64::EPSILON {
+            return (p1, q1);
+        }
+        remainder = 1.0 / fraction;
+    }
+    if q1 == 0 {
+        return (value.round() as u64, 1);
+    }
+    let count = (limit - q0) / q1;
+    let (p2, q2) = (p0 + count * p1, q0 + count * q1);
+    if (p1 as f64 / q1 as f64 - value).abs() <= (p2 as f64 / q2 as f64 - value).abs() {
+        (p1, q1)
+    } else {
+        (p2, q2)
+    }
+}
+
+fn render_fraction(sec: &Section, mag: f64, pattern: FractionPattern) -> FormattedValue {
+    if !mag.is_finite() || mag >= u64::MAX as f64 {
+        return format_general(mag).into();
+    }
+    let integer_kinds = digit_kinds(&sec.toks[..pattern.numerator]);
+    let mixed = !integer_kinds.is_empty();
+    let mut whole = if mixed { mag.floor() as u64 } else { 0 };
+    let value = if mixed { mag - whole as f64 } else { mag };
+    let (mut numerator, denominator) = match pattern.fixed {
+        Some(denominator) => ((value * denominator as f64).round() as u64, denominator),
+        None => best_fraction(value, pattern.limit),
+    };
+    if mixed && numerator >= denominator {
+        whole += numerator / denominator;
+        numerator %= denominator;
+    }
+    let numerator_kinds = digit_kinds(&sec.toks[pattern.numerator..pattern.slash]);
+    let denominator_kinds = digit_kinds(&sec.toks[pattern.slash + 1..pattern.denominator_end]);
+    let hidden = mixed && numerator == 0 && !numerator_kinds.contains(&'0');
+    let mut out = FormattedValue::default();
+    let mut integer_emitted = false;
+    for tok in &sec.toks[..pattern.numerator] {
+        match tok {
+            Tok::Digit(_) if !integer_emitted => {
+                let digits = if whole == 0 { String::new() } else { whole.to_string() };
+                out.digits(&build_int_number(&integer_kinds, &digits, false));
+                integer_emitted = true;
+            }
+            Tok::Literal(s) => out.push_str(s),
+            Tok::Width(c) => out.padding(*c),
+            Tok::Fill(c) => out.fill(*c),
+            _ => {}
+        }
+    }
+    if hidden {
+        for _ in &numerator_kinds {
+            out.padding('0');
+        }
+        out.padding('/');
+        let denominator_width = if pattern.fixed.is_some() { denominator.to_string().len() } else { denominator_kinds.len() };
+        for _ in 0..denominator_width {
+            out.padding('0');
+        }
+    } else {
+        out.digits(&build_int_number(&numerator_kinds, &numerator.to_string(), false));
+        out.push('/');
+        let digits = denominator.to_string();
+        out.push_str(&digits);
+        if pattern.fixed.is_none() {
+            for kind in denominator_kinds.iter().skip(digits.len()) {
+                if *kind == '?' {
+                    out.padding('0');
+                } else if *kind == '0' {
+                    out.push('0');
+                }
+            }
+        }
+    }
+    for tok in &sec.toks[pattern.denominator_end..] {
+        match tok {
+            Tok::Literal(s) => out.push_str(s),
+            Tok::Width(c) => out.padding(*c),
+            Tok::Fill(c) => out.fill(*c),
+            Tok::Percent => out.push('%'),
             _ => {}
         }
     }
@@ -1108,7 +1262,7 @@ pub fn fit_general(
         let mut mantissa = mantissa.to_string();
         trim_trailing_zeros(&mut mantissa);
         let exponent: i32 = exponent.parse().ok()?;
-        let candidate = format!("{mantissa}E{}{:\u{0030}2}", if exponent < 0 { '-' } else { '+' }, exponent.unsigned_abs());
+        let candidate = format!("{mantissa}E{}{:02}", if exponent < 0 { '-' } else { '+' }, exponent.unsigned_abs());
         if measure(&candidate) <= width {
             return Some(candidate);
         }
