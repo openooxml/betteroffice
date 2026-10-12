@@ -136,6 +136,36 @@ function echoFrame(revision: number, coverage: number, text: string): DocxComman
   return candidate;
 }
 
+test('scaled bitmaps install atomically and partial frames retain other page pixels', () => {
+  for (const scale of [2, 3]) {
+    const { presentation, canvases, pixels, store, events } = setup(true);
+    const initial = echoFrame(1, 0, 'ab');
+    expect(present(presentation, initial, [], [])).toBe(true);
+    const canvas = canvases.get('1')!;
+    const original = pixels.get('1');
+    const scaled = echoFrame(2, 0, 'ab');
+    const staged = scaled.payload.stagedPresentation!.pages[0]!;
+    staged.bitmap = { width: 100 * scale, height: 20 * scale, close() {} } as ImageBitmap;
+    staged.backgrounds![0]!.bitmap = { width: 100 * scale, height: 20 * scale, close() {} } as ImageBitmap;
+    scaled.payload.layoutMeta = { v: 1, layoutRevision: 2, pageCount: 2, partial: false, provisional: false,
+      notesConverged: true, pageSizes: new Float64Array([100, 20, 100, 20]), layoutShell: '{}', headersFootersEpoch: 0 };
+    expect(canvas.width).toBe(100);
+    expect(pixels.get('1')).toBe(original);
+    expect(present(presentation, scaled, [], [entry(1)])).toBe(true);
+    expect([canvas.width, canvas.height]).toEqual([100 * scale, 20 * scale]);
+    expect(store.getSnapshot().geometry!.pages[0]!.bounds).toEqual({ x: 0, y: 0, width: 100, height: 20 });
+    expect(events.at(-1)).toBe('echo:abx');
+    const partial = frame(3, 0, 2);
+    partial.payload.stagedPresentation!.pages[0]!.page = secondPage;
+    partial.payload.stagedPresentation!.pages[0]!.bitmap = { width: 100 * scale, height: 20 * scale, close() {} } as ImageBitmap;
+    const installed = pixels.get('1');
+    expect(present(presentation, partial, [], [entry(1)])).toBe(true);
+    expect(pixels.get('1')).toBe(installed);
+    expect(canvas.width).toBe(100 * scale);
+    expect(canvases.get('2')!.width).toBe(100 * scale);
+  }
+});
+
 test('d2c_bare_ack_retains_echo_until_covering_frame', async () => {
   const { presentation, events, store } = setup();
   const pending = entry(1);

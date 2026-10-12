@@ -294,15 +294,15 @@ test('d2c_viewport_eviction_bounds_bitmaps_and_preserves_active_echo_on_refusal'
 });
 
 test('d2c_fractional_raster_scale_uses_page_dimensions_for_crop_and_text', () => {
-  for (const zoom of [1, 1.1]) {
+  for (const [scale, zoom] of [[1.25, 1], [1.25, 1.1], [2, 1], [3, 1]] as const) {
     const { painter, frame, canvas, bitmap, background, draws, transforms } = setup();
     const damage = { x: 40, y: 400, width: 100, height: 21 };
     const next = context();
     next.frameEpoch = 2;
     next.damage = [{ ...next.damage[0]!, rect: damage }];
     next.styleRuns = [{ ...next.styleRuns[0]!, baseline: { x: 40, y: 414 } }];
-    const raster = { width: 1000, height: 1250, close: bitmap.close } as ImageBitmap;
-    const crop = { width: 125, height: 27, close: background.close } as ImageBitmap;
+    const raster = { width: 800 * scale, height: 1000 * scale, close: bitmap.close } as ImageBitmap;
+    const crop = { width: Math.ceil(100 * scale), height: Math.ceil(21 * scale), close: background.close } as ImageBitmap;
     painter.reconcile({ ...frame, revision: 2, payload: { ...frame.payload, echoContext: next,
       layoutMeta: { v: 1, layoutRevision: 2, pageCount: 1, partial: false, provisional: false,
         notesConverged: true, pageSizes: new Float64Array([800, 1000]), layoutShell: '{}', headersFootersEpoch: 0 },
@@ -314,10 +314,10 @@ test('d2c_fractional_raster_scale_uses_page_dimensions_for_crop_and_text', () =>
     canvas.height = raster.height * zoom;
     const pending = entry(1, painter.preview({ kind: 'insertText', payload: { text: 'c' } })!);
     painter.paint([pending]);
-    expect(draws.at(-1)).toEqual([crop, 0, 0, 125, 21 * (27 / 21), 40, 400, 100, 21]);
-    expect(transforms.at(-1)).toEqual([1.25 * zoom, 0, 0, 1.25 * zoom, 0, 0]);
+    expect(draws.at(-1)).toEqual([crop, 0, 0, crop.width, crop.height, 40, 400, 100, 21]);
+    expect(transforms.at(-1)).toEqual([scale * zoom, 0, 0, scale * zoom, 0, 0]);
     expect(transforms.at(-2)).toEqual(transforms.at(-1));
-    expect(transforms.at(-1)![3]! * damage.y).toBe(500 * zoom);
+    expect(transforms.at(-1)![3]! * damage.y).toBe(400 * scale * zoom);
   }
 });
 
