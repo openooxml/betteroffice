@@ -117,7 +117,7 @@ jobs:
           PLANNED_IMAGE: ${{ needs.prepare.outputs.runner-image }}
         run: |
           if [ "$ImageVersion" != "$PLANNED_IMAGE" ]; then
-            echo "::error::Runner image $ImageVersion differs from the planned $PLANNED_IMAGE; re-run the failed jobs"
+            echo "::error::Runner image $ImageVersion differs from the planned $PLANNED_IMAGE; re-run the failed jobs, or the whole run once that image is no longer served"
             exit 1
           fi
 
@@ -357,7 +357,7 @@ jobs:
           PLANNED_IMAGE: ${{ needs.prepare.outputs.runner-image }}
         run: |
           if [ "$ImageVersion" != "$PLANNED_IMAGE" ]; then
-            echo "::error::Runner image $ImageVersion differs from the planned $PLANNED_IMAGE; re-run the failed jobs"
+            echo "::error::Runner image $ImageVersion differs from the planned $PLANNED_IMAGE; re-run the failed jobs, or the whole run once that image is no longer served"
             exit 1
           fi
 
@@ -503,7 +503,7 @@ jobs:
           PLANNED_IMAGE: ${{ needs.prepare.outputs.runner-image }}
         run: |
           if [ "$ImageVersion" != "$PLANNED_IMAGE" ]; then
-            echo "::error::Runner image $ImageVersion differs from the planned $PLANNED_IMAGE; re-run the failed jobs"
+            echo "::error::Runner image $ImageVersion differs from the planned $PLANNED_IMAGE; re-run the failed jobs, or the whole run once that image is no longer served"
             exit 1
           fi
 
@@ -617,7 +617,7 @@ jobs:
           PLANNED_IMAGE: ${{ needs.prepare.outputs.runner-image }}
         run: |
           if [ "$ImageVersion" != "$PLANNED_IMAGE" ]; then
-            echo "::error::Runner image $ImageVersion differs from the planned $PLANNED_IMAGE; re-run the failed jobs"
+            echo "::error::Runner image $ImageVersion differs from the planned $PLANNED_IMAGE; re-run the failed jobs, or the whole run once that image is no longer served"
             exit 1
           fi
 
@@ -701,7 +701,7 @@ jobs:
           PLANNED_IMAGE: ${{ needs.prepare.outputs.runner-image }}
         run: |
           if [ "$ImageVersion" != "$PLANNED_IMAGE" ]; then
-            echo "::error::Runner image $ImageVersion differs from the planned $PLANNED_IMAGE; re-run the failed jobs"
+            echo "::error::Runner image $ImageVersion differs from the planned $PLANNED_IMAGE; re-run the failed jobs, or the whole run once that image is no longer served"
             exit 1
           fi
 
@@ -815,7 +815,7 @@ jobs:
           PLANNED_IMAGE: ${{ needs.prepare.outputs.runner-image }}
         run: |
           if [ "$ImageVersion" != "$PLANNED_IMAGE" ]; then
-            echo "::error::Runner image $ImageVersion differs from the planned $PLANNED_IMAGE; re-run the failed jobs"
+            echo "::error::Runner image $ImageVersion differs from the planned $PLANNED_IMAGE; re-run the failed jobs, or the whole run once that image is no longer served"
             exit 1
           fi
 
