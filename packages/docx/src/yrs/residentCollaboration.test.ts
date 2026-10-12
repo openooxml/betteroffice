@@ -2,7 +2,7 @@ import { afterEach, expect, test } from 'bun:test';
 import { createResidentDocxCommandHooks } from './residentCommandActions';
 import { createResidentCollaboration } from './residentCollaboration';
 import { createYrsSession } from './index';
-import type { ResidentCommandInitRequest, ResidentCommandHooks } from './residentCommandProtocol';
+import type { ResidentCommandInitRequest } from './residentCommandProtocol';
 import { TIMEOUT, closeCommandEngines, command, context, openCommandEngine, selection, texts } from './residentCommandTestSupport';
 
 afterEach(closeCommandEngines);
@@ -10,7 +10,7 @@ afterEach(closeCommandEngines);
 async function replica(checkpoint?: Uint8Array, clientId = 9101) {
   const arm = await openCommandEngine(['Seed'], { checkpoint, clientId });
   const buffer = createResidentCollaboration(arm.engine);
-  const init = { session: 'd1-worker', incarnation: 1, epoch: 1, readOnly: false,
+  const init = { session: 'collaboration-worker', incarnation: 1, epoch: 1, readOnly: false,
     selection: arm.state.selection, fonts: [], layoutInput: '{}', layoutWithRegions: true,
     layoutRevision: 1, extras: '{}' } satisfies ResidentCommandInitRequest;
   const hooks = buffer.wrap(createResidentDocxCommandHooks(arm.engine, init));
@@ -29,6 +29,7 @@ test('initial state is loaded once and the replica uses its own client', async (
   const a = await replica();
   const b = await replica(a.arm.engine.encodeState(), 9102);
   expect(texts(b.arm)).toEqual(['Seed']);
+  expect(b.arm.native.client_id()).toBe(9102);
   expect(b.buffer.drain()).toBeUndefined();
   await b.run('insertText', { text: 'B' });
   const peer = await createYrsSession({ clientId: 9103 });
@@ -57,11 +58,13 @@ test('remote edits stay outside local undo and rebase the confirmed caret', asyn
   const a = await replica();
   const b = await replica(a.arm.engine.encodeState(), 9102);
   try {
+    const id = a.arm.engine.paragraphs('body')[0]!.paraId;
+    await a.run('select', { selection: selection(id, 2) });
     await a.run('insertText', { text: 'A' });
     await b.run('insertText', { text: 'B' });
     const update = b.buffer.drain()!.updates[0]!;
     const merged = await a.run('applyRemoteUpdate', { update });
-    expect(merged.selection?.focus.offset).toBe(2);
+    expect(merged.selection?.focus.offset).toBe(4);
     await a.run('undo', {});
     expect(texts(a.arm)).toEqual(['BSeed']);
     await a.run('redo', {});

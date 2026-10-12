@@ -5,6 +5,7 @@ import { residentWorkerFactory } from './__fixtures__/residentWorker';
 import { ResidentEngineWorkerClient } from './residentEngineWorkerClient';
 import { createResidentCommandConnection } from './residentCommandConnection';
 import { createDocxWorkerEditSession } from './createDocxWorkerEditSession';
+import { createYrsSession } from './index';
 import { closeCommandEngines, openCommandEngine, TIMEOUT } from './residentCommandTestSupport';
 
 let start: Awaited<ReturnType<typeof residentWorkerFactory>>;
@@ -15,7 +16,7 @@ function documentBytes() {
   return new Uint8Array(rezipPartsToArrayBuffer(new Map([
     ['[Content_Types].xml', toBytes('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')],
     ['_rels/.rels', toBytes('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="r1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>')],
-    ['word/document.xml', toBytes('<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Seed</w:t></w:r></w:p><w:sectPr/></w:body></w:document>')],
+    ['word/document.xml', toBytes('<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Seed</w:t></w:r></w:p><w:p><w:pPr><w:pageBreakBefore/></w:pPr><w:r><w:t>Second</w:t></w:r></w:p><w:sectPr/></w:body></w:document>')],
   ])));
 }
 
@@ -62,13 +63,14 @@ test('update push precedes command ack and queued typing survives a merge', asyn
   const a = await open(9201);
   const b = await open(9202, a.engine.encodeState());
   const events: string[] = [];
+  a.client.onCollabUpdates(() => { throw new Error('Listener failure'); });
   const off = a.client.onCollabUpdates(() => { events.push('update'); });
   try {
     await a.session.submit('insertText', { text: 'A' }).ack.then(() => events.push('ack'));
     expect(events).toEqual(['update', 'ack']);
     await b.session.submit('insertText', { text: 'B' }).ack;
     const merge = a.session.submit('applyRemoteUpdate', { update: b.engine.encodeStateAsUpdate(a.engine.encodeStateVector()).buffer }, { lane: 'collab', fence: true });
-    const typing = a.session.submit('insertText', { text: '!' }, { afterSeq: merge.seq });
+    const typing = a.session.submit('insertText', { text: '!' }, { after: merge });
     expect((await merge.ack).status).toBe('applied');
     expect((await typing.ack).status).toBe('applied');
     expect(a.engine.paragraphs('body')[0]!.text).toContain('!');
@@ -80,14 +82,26 @@ test('update push precedes command ack and queued typing survives a merge', asyn
 
 test('presence reads are tied to the covering frame and unresolved anchors are marked', async () => {
   const a = await open(9201);
+  const remote = await createYrsSession({ clientId: 9203 });
   try {
+    const paragraphs = a.engine.paragraphs('body');
+    const at = { story: 'body', paraId: paragraphs[1]!.paraId, offset: 3 };
+    await a.session.submit('select', { selection: { anchor: at, focus: at } }).ack;
+    const selected = await a.client.requestFullFrame();
     const cursor = a.engine.encodeSelection()!;
     const version = a.engine.proposalEngine.version();
-    const read = { kind: 'collabPresence' as const, peers: [{ clientId: 9202, clock: 1, cursor }], pages: [0, 1] as [number, number],
-      expectVersion: version, expectFrameEpoch: a.initial.frame.revision, expectLayoutRevision: 1 };
-    expect((await a.client.documentRead(read)).value?.peers[0]).toMatchObject({ status: 'ok', caret: { pageIndex: 0, pageId: '1' } });
+    const read = { kind: 'collabPresence' as const, peers: [{ clientId: 9202, clock: 1, cursor }], pages: [1, 2] as [number, number],
+      expectVersion: version, expectFrameEpoch: selected.frame!.revision, expectLayoutRevision: selected.frame!.payload.layoutRevision };
+    expect((await a.client.documentRead(read)).value?.peers[0]).toMatchObject({ status: 'ok', caret: { pageIndex: 1 } });
     expect((await a.client.documentRead({ ...read, expectFrameEpoch: 999 })).value).toBeNull();
     expect((await a.client.documentRead({ ...read, peers: [{ clientId: 9202, clock: 2,
       cursor: { ...cursor, anchor: new Uint8Array([255]) } }] })).value?.peers[0]?.status).toBe('unresolved');
-  } finally { a.session.dispose(); }
+    remote.loadState(a.engine.encodeState());
+    remote.deleteRange({ story: 'body', start: { paraId: paragraphs[0]!.paraId, offset: 4 }, end: { paraId: paragraphs[1]!.paraId, offset: 6 } });
+    await a.session.submit('applyRemoteUpdate', { update: remote.encodeStateAsUpdate(a.engine.encodeStateVector()).buffer }, { lane: 'collab', fence: true }).ack;
+    const frame = await a.client.requestFullFrame();
+    const current = a.engine.proposalEngine.version();
+    expect((await a.client.documentRead({ ...read, pages: [0, 2], expectVersion: current,
+      expectFrameEpoch: frame.frame!.revision, expectLayoutRevision: frame.frame!.payload.layoutRevision })).value?.peers[0]?.status).toBe('unresolved');
+  } finally { remote.destroy(); a.session.dispose(); }
 }, TIMEOUT);
