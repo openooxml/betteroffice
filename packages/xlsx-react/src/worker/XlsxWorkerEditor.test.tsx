@@ -594,6 +594,107 @@ it('saving while F2 prefill is pending preserves the untouched cell', async () =
   expect(host.cells.get('0:0:0')).toBe('initial');
 });
 
+describe('peerless F2 prefill keyboard replay', () => {
+  const value = 'Q3 Sales Dashboard';
+  const key = (input: HTMLInputElement, name: string, options: { ctrlKey?: boolean; shiftKey?: boolean } = {}) => {
+    const allowed = fireEvent.keyDown(input, { key: name, ...options });
+    if (allowed && options.ctrlKey && name.toLowerCase() === 'a') input.select();
+  };
+  const type = (input: HTMLInputElement, text: string) => {
+    act(() => {
+      const allowed = input.dispatchEvent(new InputEvent('beforeinput', {
+        bubbles: true, cancelable: true, inputType: 'insertText', data: text,
+      }));
+      if (allowed) {
+        const previous = input.value;
+        input.setRangeText(text, input.selectionStart ?? 0, input.selectionEnd ?? 0, 'end');
+        const value = input.value;
+        const caret = input.selectionStart ?? value.length;
+        input.value = previous;
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, value);
+        input.setSelectionRange(caret, caret);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    });
+  };
+  const setup = async () => {
+    const host = peerlessHarness();
+    host.cells.set('0:0:0', value);
+    const view = await host.mount();
+    const prefill = deferred<Awaited<ReturnType<typeof host.cellInputs>>>();
+    host.cellInputs.mockReturnValueOnce(prefill.promise);
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'F2' });
+    const input = view.getByTestId('xlsx-cell-editor') as HTMLInputElement;
+    const resolve = () => act(async () => prefill.resolve({ sheet: 0, version: 'v1',
+      cells: [[{ a1: 'A1', input: value, isFormula: false }]] }));
+    return { host, view, input, resolve };
+  };
+
+  it('selects all before prefill and replaces after prefill', async () => {
+    const { input, resolve } = await setup();
+    key(input, 'a', { ctrlKey: true });
+    await resolve();
+    type(input, 'probe');
+    expect(input.value).toBe('probe');
+  });
+
+  it('selects all and replaces before prefill', async () => {
+    const { input, resolve } = await setup();
+    key(input, 'a', { ctrlKey: true });
+    type(input, 'probe');
+    await resolve();
+    expect(input.value).toBe('probe');
+  });
+
+  it('appends at the end after prefill', async () => {
+    const { input, resolve } = await setup();
+    await resolve();
+    type(input, 'X');
+    expect(input.value).toBe(`${value}X`);
+    expect(input.selectionStart).toBe(value.length + 1);
+  });
+
+  it('appends at the end before prefill', async () => {
+    const { input, resolve } = await setup();
+    type(input, 'X');
+    await resolve();
+    expect(input.value).toBe(`${value}X`);
+    expect(input.selectionStart).toBe(value.length + 1);
+  });
+
+  it('holds Enter until replay and commits once with the selection moved down', async () => {
+    const { host, input, resolve } = await setup();
+    key(input, 'a', { ctrlKey: true });
+    type(input, 'probe');
+    key(input, 'Enter');
+    expect(host.sent.filter((command) => command.kind === 'editCell')).toEqual([]);
+    await resolve();
+    const edits = host.sent.filter((command) => command.kind === 'editCell');
+    expect(edits).toHaveLength(1);
+    expect(edits[0]).toMatchObject({ payload: { args: [0, 0, 0, 'probe'], selection: {
+      range: { kind: 'rowCol', start: { row: 1, col: 0 }, end: { row: 1, col: 0 } },
+    } } });
+  });
+
+  it('drops held keys and closes immediately on Escape', async () => {
+    const { host, view, input, resolve } = await setup();
+    type(input, 'X');
+    key(input, 'Escape');
+    expect(view.queryByTestId('xlsx-cell-editor')).toBeNull();
+    await resolve();
+    expect(host.sent.filter((command) => command.kind === 'editCell')).toEqual([]);
+    expect(host.cells.get('0:0:0')).toBe(value);
+  });
+
+  it('commits an untouched prefilled cell without an edit', async () => {
+    const { host, input, resolve } = await setup();
+    await resolve();
+    key(input, 'Enter');
+    expect(host.sent.filter((command) => command.kind === 'editCell')).toEqual([]);
+    expect(host.cells.get('0:0:0')).toBe(value);
+  });
+});
+
 for (const decision of [true, false, undefined]) {
   it(`peerless save uses the host decision (${String(decision)})`, async () => {
     const host = peerlessHarness();
