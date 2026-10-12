@@ -640,6 +640,12 @@ test('command raster scale repaints every window page in one viewport frame', as
 
 test('command raster scale preserves pixels when rounded window sizes match', async () => {
   const { client, w } = await commandWorker();
+  Object.assign(w.harness.session, {
+    buildDisplayPagesFrame(pages: number[]) {
+      w.delta(pages.map((index) => index + 1), false, 100, 1);
+      return Uint8Array.of(w.harness.delta!.frameEpoch);
+    },
+  });
   try {
     const initial = await client.commandInit({ ...COMMAND_INIT, displayWindow: [0, 1], rasterScale: 1.001 } as ResidentCommandInitRequest);
     const frames: DocxCommandFrame[] = [];
