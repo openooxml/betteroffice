@@ -10,6 +10,16 @@ export interface CollaborationReplica {
   ): () => void;
 }
 
+/** @experimental A replica whose state lives in a worker; reads and merges are asynchronous. */
+export interface AsyncCollaborationReplica {
+  readonly clientId: number;
+  encodeStateVector(): Promise<Uint8Array>;
+  encodeStateAsUpdate(remoteStateVector?: Uint8Array): Promise<Uint8Array>;
+  /** Resolves once the worker has merged the update; the value is the typing inference, if any. */
+  applyUpdate(update: Uint8Array): Promise<unknown>;
+  onUpdate(listener: (update: Uint8Array, origin: CollaborationUpdateOrigin) => void): () => void;
+}
+
 export type CollaborationTransportEvent =
   | { type: 'open' }
   | { type: 'message'; data: Uint8Array }
