@@ -31,6 +31,16 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+function concat(...parts: Uint8Array[]): Uint8Array {
+  const output = new Uint8Array(parts.reduce((bytes, part) => bytes + part.byteLength, 0));
+  let offset = 0;
+  for (const part of parts) {
+    output.set(part, offset);
+    offset += part.byteLength;
+  }
+  return output;
+}
+
 class FakeAsyncReplica implements AsyncCollaborationReplica {
   readonly clientId = 1;
   readonly vectors: ReturnType<typeof deferred<Uint8Array>>[] = [];
@@ -155,15 +165,19 @@ async function open(value: ReturnType<typeof setup>): Promise<void> {
 
 const inference = { clientId: 8, story: 'body', paraId: 'p1', endOffset: 6 };
 
-function announcePeer(transport: FakeTransport): void {
-  transport.receive(encodeAwarenessMessage([{
-    clientId: 8,
-    clock: 3,
+function peerAwareness(clock = 3, offset = 1, clientId = 8): Uint8Array {
+  return encodeAwarenessMessage([{
+    clientId,
+    clock,
     state: {
       user: { name: 'Bright Fox', color: '#137333' },
-      cursor: { story: 'body', anchor: Uint8Array.of(1), head: Uint8Array.of(1) },
+      cursor: { story: 'body', anchor: Uint8Array.of(offset), head: Uint8Array.of(offset) },
     },
-  }]));
+  }]);
+}
+
+function announcePeer(transport: FakeTransport): void {
+  transport.receive(peerAwareness());
 }
 
 describe('CollaborationProvider async replicas', () => {
@@ -465,6 +479,177 @@ describe('CollaborationProvider async replicas', () => {
     value.replica.merges[0].result.resolve(inference);
     await settle();
     expect(value.peers.at(-1)?.[0]).toMatchObject({ clientId: 8, inferredCursor: inference });
+  });
+
+  for (const phase of ['queued', 'applying', 'same-frame'] as const) {
+    it(`keeps later awareness ahead of a ${phase} typing inference`, async () => {
+      const value = setup();
+      await open(value);
+      announcePeer(value.transport);
+      if (phase === 'queued') {
+        value.transport.receive(encodeSyncStep2(Uint8Array.of(2)));
+        await settle();
+      }
+      value.transport.receive(phase === 'same-frame'
+        ? concat(encodeUpdate(Uint8Array.of(9)), peerAwareness(4, 7))
+        : encodeUpdate(Uint8Array.of(9)));
+      await settle();
+      if (phase !== 'same-frame') value.transport.receive(peerAwareness(4, 7));
+      expect(value.provider.peers[0].cursor?.head).toEqual(Uint8Array.of(7));
+      const snapshots = value.peers.length;
+
+      if (phase === 'queued') {
+        expect(value.replica.merges.map((merge) => merge.update)).toEqual([Uint8Array.of(2)]);
+        value.replica.merges[0].result.resolve(undefined);
+        await settle();
+      }
+      const merge = value.replica.merges.at(-1)!;
+      expect(merge.update).toEqual(Uint8Array.of(9));
+      merge.result.resolve(inference);
+      await settle();
+
+      expect(value.provider.peers[0]).toMatchObject({
+        clock: 4,
+        cursor: { story: 'body', anchor: Uint8Array.of(7), head: Uint8Array.of(7) },
+        inferredCursor: null,
+      });
+      expect(value.peers).toHaveLength(snapshots);
+      expect(value.errors).toEqual([]);
+    });
+  }
+
+  it('keeps a peer absent after a leave during a pending typing merge', async () => {
+    const value = setup();
+    await open(value);
+    announcePeer(value.transport);
+    value.transport.receive(encodeUpdate(Uint8Array.of(9)));
+    await settle();
+    value.transport.receive(encodeAwarenessMessage([{ clientId: 8, clock: 4, state: null }]));
+    expect(value.provider.peers).toEqual([]);
+    const snapshots = value.peers.length;
+
+    value.replica.merges[0].result.resolve(inference);
+    await settle();
+    expect(value.provider.peers).toEqual([]);
+    expect(value.peers).toHaveLength(snapshots);
+    expect(value.errors).toEqual([]);
+  });
+
+  it('keeps typing inference when another peer receives later awareness', async () => {
+    const value = setup();
+    await open(value);
+    announcePeer(value.transport);
+    value.transport.receive(encodeUpdate(Uint8Array.of(9)));
+    await settle();
+    value.transport.receive(peerAwareness(4, 7, 16));
+    value.replica.merges[0].result.resolve(inference);
+    await settle();
+    expect(value.provider.peers.find((peer) => peer.clientId === 8)?.inferredCursor).toEqual(inference);
+    expect(value.errors).toEqual([]);
+  });
+
+  it('keeps typing inference when later awareness repeats the existing clock', async () => {
+    const value = setup();
+    await open(value);
+    announcePeer(value.transport);
+    value.transport.receive(encodeUpdate(Uint8Array.of(9)));
+    await settle();
+    value.transport.receive(peerAwareness(3, 7));
+    value.replica.merges[0].result.resolve(inference);
+    await settle();
+    expect(value.provider.peers[0].inferredCursor).toEqual(inference);
+    expect(value.provider.peers[0].cursor?.head).toEqual(Uint8Array.of(1));
+    expect(value.errors).toEqual([]);
+  });
+
+  for (const callback of ['peers', 'status'] as const) {
+    it(`retires a mixed frame when a ${callback} callback reopens the transport`, async () => {
+      const value = setup();
+      await open(value);
+      value.transport.receive(encodeSyncStep2(Uint8Array.of(1)));
+      await settle();
+      let reopened = false;
+      if (callback === 'status') {
+        value.provider.onStatus(({ status }) => {
+          if (reopened && status === 'disconnected') value.transport.emit({ type: 'open' });
+        });
+      }
+      value.provider.onPeers((peers) => {
+        if (reopened || !peers.some((peer) => peer.clientId === 8)) return;
+        reopened = true;
+        value.transport.emit({ type: 'close' });
+        if (callback === 'peers') value.transport.emit({ type: 'open' });
+      });
+      value.transport.receive(concat(encodeSyncStep2(Uint8Array.of(2)), peerAwareness()));
+      await settle();
+      expect(reopened).toBe(true);
+      expect(value.replica.vectors).toHaveLength(2);
+      value.replica.vectors[1].resolve(Uint8Array.of(7));
+      await settle();
+      const frames = value.transport.sent.length;
+      const statuses = value.statuses.length;
+      const peers = value.peers.length;
+
+      for (const merge of value.replica.merges) merge.result.resolve(inference);
+      await settle();
+      expect(value.provider.synced).toBe(false);
+      expect(value.provider.status).toBe('connected');
+      expect(value.replica.merges.map((merge) => merge.update)).toEqual([Uint8Array.of(1)]);
+      expect(value.transport.sent).toHaveLength(frames);
+      expect(value.statuses).toHaveLength(statuses);
+      expect(value.peers).toHaveLength(peers);
+      expect(value.errors).toEqual([]);
+    });
+  }
+
+  it('queues replica messages at their positions before re-entrant frames', async () => {
+    const nested = encodeUpdate(Uint8Array.of(2));
+    const frame = concat(encodeUpdate(Uint8Array.of(1)), peerAwareness(), encodeUpdate(Uint8Array.of(3)));
+    const value = setup({ maxPendingBytes: frame.byteLength + nested.byteLength });
+    await open(value);
+    let received = false;
+    value.provider.onPeers((peers) => {
+      if (received || !peers.some((peer) => peer.clientId === 8)) return;
+      received = true;
+      value.transport.receive(nested);
+    });
+    value.transport.receive(frame);
+    await settle();
+    expect(value.replica.merges.map((merge) => merge.update)).toEqual([Uint8Array.of(1)]);
+    value.replica.merges[0].result.resolve(undefined);
+    await settle();
+    expect(value.replica.merges.map((merge) => merge.update)).toEqual([
+      Uint8Array.of(1), Uint8Array.of(2),
+    ]);
+    value.replica.merges[1].result.resolve(undefined);
+    await settle();
+    expect(value.replica.merges.map((merge) => merge.update)).toEqual([
+      Uint8Array.of(1), Uint8Array.of(2), Uint8Array.of(3),
+    ]);
+    value.replica.merges[2].result.resolve(undefined);
+    await settle();
+    expect(value.provider.status).toBe('connected');
+    expect(value.errors).toEqual([]);
+  });
+
+  it('holds a mixed frame byte charge until every replica message completes', async () => {
+    const frame = concat(encodeUpdate(Uint8Array.of(1)), encodeQueryAwareness(), encodeUpdate(Uint8Array.of(2)));
+    const value = setup({ maxPendingBytes: frame.byteLength });
+    await open(value);
+    value.transport.receive(frame);
+    await settle();
+    value.replica.merges[0].result.resolve(undefined);
+    await settle();
+    expect(value.replica.merges.map((merge) => merge.update)).toEqual([
+      Uint8Array.of(1), Uint8Array.of(2),
+    ]);
+    value.transport.receive(encodeUpdate(Uint8Array.of(3)));
+    expect(value.errors.map((error) => error.code)).toEqual(['backpressure']);
+    expect(value.provider.status).toBe('disconnected');
+    value.replica.merges[1].result.resolve(undefined);
+    await settle();
+    expect(value.replica.merges).toHaveLength(2);
+    expect(value.errors).toHaveLength(1);
   });
 
   it('forwards only local updates through the adapter subscription', async () => {
