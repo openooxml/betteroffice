@@ -3,6 +3,7 @@ import JSZip from 'jszip';
 import { expect, test } from 'bun:test';
 import type { PptxPluginContext, PptxPluginRefusal, PptxPluginGrant } from '../plugins/types';
 import { definePptxPlugin } from '../plugins/definePptxPlugin';
+import type { PptxAsyncEditorProps } from '../PptxEditor';
 const { act, fireEvent, waitFor } = await import('@testing-library/react');
 
 test('plugin_grants', async () => {
@@ -122,6 +123,7 @@ test('plugin_read_only_and_document_replacement_refuse_pending_edits', async () 
   await act(async () => { value.view.rerender(value.ui(true)); });
   await value.api.whenHydrated();
   expect(await context!.edits!.applyEdits(request)).toMatchObject({ ok: false, failure: { code: 'read-only' } });
+  expect(await context!.read.validateEdits(request)).toMatchObject({ ok: false, failure: { code: 'read-only' } });
   const invocation = context!;
   replyControl.hold();
   let pending!: Promise<boolean>;
@@ -132,4 +134,78 @@ test('plugin_read_only_and_document_replacement_refuse_pending_edits', async () 
   await act(async () => { value.view.rerender(<div>Closed</div>); replyControl.release(); await Promise.allSettled([pending]); });
   expect(await work).toMatchObject({ ok: false });
   expect(cleanups).toEqual(['unmounted']);
+});
+
+test('plugin_document_change_hook_can_commit_and_publish_state', async () => {
+  const signals: boolean[] = [];
+  const stateWrites: boolean[] = [];
+  let hooks = 0;
+  const plugin = definePptxPlugin({ id: 'hook', createState: () => ({ count: 0 }),
+    async onEvent(context, event) {
+      if (event.type !== 'document-change') return;
+      const read = await context.read.readContent();
+      if (!read.ok) return;
+      if (read.slides[0]!.notes === 'Hook note') return;
+      hooks++;
+      const result = await context.edits!.applyEdits({ expectVersion: read.version,
+        steps: [{ op: 'setSlideNotes', target: { slideId: read.slides[0]!.id }, text: 'Hook note' }] });
+      if (!result.ok) return;
+      signals.push(context.signal.aborted);
+      stateWrites.push(context.setState({ count: 1 }, result.version));
+    },
+    panel: { title: 'Hook', placement: 'right', render: ({ context }) => <div>Hook count {context.state.count}</div> },
+  });
+  const value = await open({ plugins: [plugin], pluginGrants: { hook: { document: 'write', editBatches: true } } });
+  const read = await value.api.readContent();
+  if (!read.ok) throw new Error(read.failure.message);
+  await act(async () => { await value.api.applyEdits({ expectVersion: read.version,
+    steps: [{ op: 'setSlideNotes', target: { slideId: read.slides[0]!.id }, text: 'Host note' }] }); });
+  await waitFor(() => expect(signals.length).toBeGreaterThan(0));
+  expect(signals).toEqual([false]);
+  expect(stateWrites).toEqual([true]);
+  expect(hooks).toBe(1);
+  expect(value.view.getByText('Hook count 1')).toBeDefined();
+});
+
+test('plugin_removal_refuses_before_pending_input_finishes', async () => {
+  let context: PptxPluginContext<null> | undefined;
+  const plugin = definePptxPlugin({ id: 'pending', createState: () => null, onEvent(next) { context = next; } });
+  const options = { plugins: [plugin], pluginGrants: { pending: { document: 'write' as const, editBatches: true as const } } };
+  const value = await open(options);
+  await waitFor(() => expect(context).toBeDefined());
+  const request = { expectVersion: await value.api.version(), steps: [{ op: 'setSlideNotes' as const,
+    target: { slideId: value.client.state.slides[0]!.id }, text: 'Removed' }] };
+  replyControl.hold();
+  let navigation!: Promise<boolean>;
+  act(() => { navigation = value.api.goToSlide(2); });
+  await waitFor(() => expect(replyControl.count()).toBeGreaterThan(0));
+  let result: unknown;
+  const work = context!.edits!.applyEdits(request).then((value) => { result = value; });
+  options.plugins = [];
+  await act(async () => { value.view.rerender(value.ui()); });
+  await waitFor(() => expect(result).toMatchObject({ ok: false, failure: { code: 'plugin-unavailable' } }));
+  expect(value.commands.filter((command) => command.kind === 'applyEdits')).toHaveLength(0);
+  await act(async () => { replyControl.release(); await Promise.allSettled([navigation, work]); });
+});
+
+test('plugin_document_replacement_starts_a_new_generation', async () => {
+  let context: PptxPluginContext<null> | undefined;
+  const cleanups: string[] = [];
+  const plugin = definePptxPlugin({ id: 'generation', createState: () => null,
+    onEvent(next, event) {
+      context = next;
+      if (event.type === 'load') next.onCleanup((reason) => { cleanups.push(reason); });
+    } });
+  const options: Partial<PptxAsyncEditorProps> = { plugins: [plugin] };
+  const value = await open(options);
+  await waitFor(() => expect(context).toBeDefined());
+  const previous = context!;
+  options.file = await deck();
+  await act(async () => { value.view.rerender(value.ui()); });
+  await waitFor(() => expect(context!.snapshot.generation).not.toBe(previous.snapshot.generation));
+  expect(previous.lifetimeSignal.aborted).toBe(true);
+  expect(await previous.read.readContent()).toMatchObject({ ok: false, failure: { code: 'document-replaced' } });
+  expect(cleanups).toEqual(['document-replaced']);
+  await act(async () => { value.view.unmount(); });
+  expect(cleanups).toEqual(['document-replaced', 'unmounted']);
 });

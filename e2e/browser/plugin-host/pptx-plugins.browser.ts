@@ -73,6 +73,18 @@ async function misalignment(page: Page): Promise<number> {
 
 for (const engine of ['legacy', 'worker'] as const) {
   test.describe(`pptx plugins (${engine})`, () => {
+    test.beforeEach(async ({ page }) => {
+      await page.addInitScript(() => {
+        const probe = { count: 0, capture() { this.count++; } };
+        (globalThis as unknown as { __pptxMainEngineProbe: typeof probe }).__pptxMainEngineProbe = probe;
+      });
+    });
+    test.afterEach(async ({ page }) => {
+      const count = await page.evaluate(() =>
+        (globalThis as unknown as { __pptxMainEngineProbe: { count: number } }).__pptxMainEngineProbe.count);
+      if (engine === 'worker') expect(count).toBe(0);
+      else expect(count).toBeGreaterThan(0);
+    });
 test('pptx: overlays land on the presented slide at every zoom and while scrolled', async ({
   page,
 }) => {
