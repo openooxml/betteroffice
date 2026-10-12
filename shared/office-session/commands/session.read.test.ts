@@ -176,6 +176,19 @@ describe('fenced session reads and holds', () => {
     await h.session.dispose();
   });
 
+  it('aborts without posting when one signal owns both the hold and the read', async () => {
+    const h = harness();
+    try {
+      const controller = new AbortController();
+      const hold = h.session.hold('draft', { signal: controller.signal });
+      const read = h.session.read('text', [], { signal: controller.signal });
+      controller.abort();
+      expect(hold.released).toBe(true);
+      expect(h.worker.reads).toHaveLength(0);
+      expect(await read).toEqual({ ok: false, refusal: { code: 'superseded', detail: 'aborted' } });
+    } finally { await h.session.dispose(); }
+  });
+
   it('waits for queued tickets at the captured watermark across capacity and cancellation', async () => {
     const h = harness({ maxInFlight: 1 });
     const first = h.session.submit('insert', 'a');
