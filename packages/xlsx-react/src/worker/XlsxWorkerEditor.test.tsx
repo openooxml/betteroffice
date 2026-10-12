@@ -6512,3 +6512,29 @@ describe('peerless composition keyboard focus', () => {
   }
 
 });
+
+describe('remote proposal freshness', () => {
+  for (const status of ['applied', 'noop'] as const) {
+    it(`keeps remote proposals ahead of a pending refresh after an ${status} update`, async () => {
+      const available = spyOn(xlsx, 'isProposalsAvailable').mockReturnValue(true);
+      restorers.push(() => available.mockRestore());
+      const host = collaborativePeerlessHarness();
+      const view = await host.mount();
+      await act(async () => { await host.commands().execute('proposalsPanel', { open: true }); });
+      const stale = await host.commandAt(0);
+      const updating = host.replica.async!.applyUpdate(Uint8Array.of(3));
+      const remote = await host.commandAt(1);
+      await act(async () => {
+        host.ack(stale, { result: { proposals: [{ id: 'old', agentId: 'agent', note: 'Old remote preview', cells: [] }] } });
+        host.ack(remote, { status, result: { remoteUpdate: true,
+          proposals: [{ id: 'fresh', agentId: 'agent', note: 'Fresh remote preview', cells: [] }] } });
+        await updating;
+      });
+      expect(view.queryByText('Old remote preview') === null).toBe(true);
+      expect(view.queryByText('Fresh remote preview') !== null).toBe(true);
+      expect(host.sent).toHaveLength(2);
+      expect(host.hydrate).not.toHaveBeenCalled();
+      expect(host.attach).not.toHaveBeenCalled();
+    });
+  }
+});

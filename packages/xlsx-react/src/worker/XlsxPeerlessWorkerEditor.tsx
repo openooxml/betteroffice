@@ -385,7 +385,12 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
         if (ownerRef.current !== owner || !owner.current || owner.retiring) throw new XlsxCommandAdmissionError('document-replaced');
         if (owner.failure) throw owner.failure;
         const sequence = ticket.seq ?? 0;
-        if (revision !== proposalsRevision.current || sequence < Math.max(proposalsMutation.current, pending.requiredSequence)) continue;
+        const requiredSequence = Math.max(proposalsMutation.current, pending.requiredSequence);
+        if (revision !== proposalsRevision.current || sequence < requiredSequence) {
+          const landed = proposalsLanded.current;
+          if (landed?.owner === owner && landed.revision === proposalsRevision.current && landed.sequence >= requiredSequence) return;
+          continue;
+        }
         const result = status.result as { proposals?: Proposal[] } | undefined;
         if (result?.proposals && JSON.stringify(result.proposals) !== JSON.stringify(proposalsRef.current)) {
           setProposals(result.proposals); commands.refresh();
@@ -506,7 +511,11 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     for (const status of ack.statuses) {
       const result = status.result as { remoteUpdate?: boolean; proposals?: Proposal[] } | undefined;
       if (!result?.remoteUpdate) continue;
-      if (result.proposals) setProposals(result.proposals);
+      proposalsMutation.current = Math.max(proposalsMutation.current, status.seq);
+      if (result.proposals) {
+        setProposals(result.proposals);
+        proposalsLanded.current = { owner: run, revision: proposalsRevision.current, sequence: status.seq };
+      }
       sourceRef.current?.schedule();
       commands.refresh();
     }
