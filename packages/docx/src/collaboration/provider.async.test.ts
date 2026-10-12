@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'bun:test';
+import { afterEach, describe, expect, it, spyOn } from 'bun:test';
 import { createAsyncCollaborationReplica } from './asyncReplica';
 import { CollaborationProvider } from './provider';
 import {
@@ -545,6 +545,60 @@ describe('CollaborationProvider async replicas', () => {
     value.replica.merges[0].result.resolve(inference);
     await settle();
     expect(value.provider.peers.find((peer) => peer.clientId === 8)?.inferredCursor).toEqual(inference);
+    expect(value.errors).toEqual([]);
+  });
+
+  it('keeps rejoined awareness when its clock matches a pending typing update', async () => {
+    const time = spyOn(performance, 'now').mockReturnValue(0);
+    const intervals = spyOn(globalThis, 'setInterval');
+    try {
+      const value = setup({ user: { name: 'Calm Otter' } });
+      await open(value);
+      announcePeer(value.transport);
+      value.transport.receive(encodeUpdate(Uint8Array.of(9)));
+      await settle();
+      const sweep = intervals.mock.calls.find(([, delay]) => delay === 5_000)?.[0];
+      if (typeof sweep !== 'function') throw new Error('expected presence expiry timer');
+      time.mockReturnValue(45_001);
+      sweep();
+      expect(value.provider.peers).toEqual([]);
+
+      value.transport.receive(peerAwareness(1, 7));
+      value.transport.receive(peerAwareness(3, 9));
+      expect(value.provider.peers[0].clock).toBe(3);
+      expect(value.provider.peers[0].cursor?.head).toEqual(Uint8Array.of(9));
+      const snapshots = value.peers.length;
+      value.replica.merges[0].result.resolve(inference);
+      await settle();
+
+      expect(value.provider.peers[0].inferredCursor).toBeNull();
+      expect(value.provider.peers[0].cursor?.head).toEqual(Uint8Array.of(9));
+      expect(value.peers).toHaveLength(snapshots);
+      expect(value.errors).toEqual([]);
+    } finally {
+      intervals.mockRestore();
+      time.mockRestore();
+    }
+  });
+
+  it('applies every pending typing inference without intervening awareness', async () => {
+    const value = setup();
+    await open(value);
+    announcePeer(value.transport);
+    for (const update of [1, 2, 3]) {
+      value.transport.receive(encodeUpdate(Uint8Array.of(update)));
+    }
+    await settle();
+    expect(value.replica.merges).toHaveLength(1);
+
+    for (let index = 0; index < 3; index++) {
+      const resolved = { ...inference, endOffset: 6 + index };
+      expect(value.replica.merges[index].update).toEqual(Uint8Array.of(index + 1));
+      value.replica.merges[index].result.resolve(resolved);
+      await settle();
+      expect(value.provider.peers[0].inferredCursor).toEqual(resolved);
+    }
+    expect(value.peers.slice(-3).map((peers) => peers[0].inferredCursor?.endOffset)).toEqual([6, 7, 8]);
     expect(value.errors).toEqual([]);
   });
 
