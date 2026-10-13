@@ -88,10 +88,10 @@ fn cascade_composition_released_fingerprint_layouts_round_trip() {
     let model = open_test_cases::matrix().remove(0).model;
     for version in 3..=6 {
         let bytes = tests::legacy_update(&model, version, version >= 4);
-        let mut authority = tests::authority_from_update(&model, &bytes, 71);
+        let authority = tests::authority_from_update(&model, &bytes, 71);
         assert_eq!(authority.materialize().unwrap(), model);
         let encoded = authority.encode_state_as_update_v1();
-        let mut peer = tests::authority_from_update(&model, &encoded, 72);
+        let peer = tests::authority_from_update(&model, &encoded, 72);
         assert_eq!(peer.materialize().unwrap(), model);
     }
 }

@@ -1402,7 +1402,7 @@ fn write_manifest(base: &WorkbookBase, w: &mut Writer) {
     date_system.write(w);
     fingerprint.write(w);
     styles.theme.write(w);
-    for count in &base_counts(base)[..manifest_counts(manifest_tag(base))] {
+    for count in &base_counts(base)[..manifest_counts(usize::from(manifest_tag(base)))] {
         count.write(w);
     }
 }

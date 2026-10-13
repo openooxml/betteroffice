@@ -1481,7 +1481,7 @@ mod tests {
             fg: None,
             bg: None,
         });
-        styled.styles.cell_xfs[0].xf_id = Some(2);
+        styled.styles.cell_xfs.push(xlsx_model::Xf { xf_id: Some(2), ..xlsx_model::Xf::default() });
         let workbook = Workbook::from_model(styled).unwrap();
         let bytes = workbook.recovery_checkpoint(0, None).unwrap();
         let old = with_authority_state(&bytes, 5, &workbook.authority.encode_released_recovery_state());
