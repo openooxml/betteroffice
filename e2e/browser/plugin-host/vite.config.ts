@@ -86,8 +86,4 @@ export default defineConfig({
   },
   server: { fs: { allow: [root] } },
   worker: { format: 'es' },
-  build: { rollupOptions: { input: {
-    docxWorkerProposals: resolve(import.meta.dirname, 'docx-worker-proposals.html'),
-    docxPeerlessCollab: resolve(import.meta.dirname, 'docx-peerless-collab.html'),
-  } } },
 });
