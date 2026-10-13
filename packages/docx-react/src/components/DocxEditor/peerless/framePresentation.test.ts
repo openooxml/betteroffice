@@ -131,7 +131,7 @@ function echoFrame(revision: number, coverage: number, text: string): DocxComman
     boundaries: Array.from({ length: text.length + 1 }, (_, utf16) => ({ utf16, grapheme: utf16,
       caret: { x: utf16 * 10, y: 0, width: 1, height: 20 } })),
     selection: { anchorGrapheme: text.length, focusGrapheme: text.length },
-    damage: [{ page, rect, backgroundId: 'background', primitiveIds: [] }],
+    damage: [{ page, rect, backgroundId: 'background', omittedPrimitiveIds: [] }],
   };
   return candidate;
 }

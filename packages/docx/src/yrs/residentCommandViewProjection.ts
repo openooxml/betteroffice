@@ -27,8 +27,7 @@ export function projectCommandEchoContext(
   const caret = snapshot.caretRect;
   if (!caret || snapshot.frameEpoch !== layout.frame.frameEpoch) return undefined;
   const activePage = layout.frame.pages[caret.pageIndex];
-  if (!activePage || activePage.pageId.toString() !== caret.pageId || activePage.page.unbuilt ||
-    activePage.page.primitives.length > DOCX_ECHO_MAX_CONTEXT_BYTES / 16) return undefined;
+  if (!activePage || activePage.pageId.toString() !== caret.pageId || activePage.page.unbuilt) return undefined;
   let length: number;
   try {
     const span = engine.geometryReader.locateParagraph('body', selection.focus.paraId);
@@ -177,14 +176,13 @@ export function projectCommandEchoContext(
     const page = { pageId: retained.pageId.toString(), pageIndex: retained.pageIndex };
     const context: DocxCommandEchoContext = {
       page, frameEpoch: layout.frame.frameEpoch, layoutRevision: layout.layoutRevision, serializedBytes: 0,
-      text, styleRuns, selection: { anchorGrapheme, focusGrapheme },
+      text, styleRuns: mergeStyleRuns(styleRuns), selection: { anchorGrapheme, focusGrapheme },
       boundaries: offsets.map((utf16, grapheme) => ({ utf16, grapheme,
         caret: { x: positions.get(utf16)!, y, width: 1, height } })),
       transform: [1, 0, 0, 1, 0, 0], shaping: 'simple-ltr',
       damage: [{ page, rect: { x, y, width: edge - x, height },
         backgroundId: `${layout.frame.frameEpoch}:${page.pageId}:echo`,
-        primitiveIds: Array.from(retained.primitiveIds, (id, index) => omitted.has(index) ? null : id.toString())
-          .filter((id): id is string => id !== null) }],
+        omittedPrimitiveIds: [...omitted].sort((a, b) => a - b).map((index) => retained.primitiveIds[index]!.toString()) }],
     };
     let bytes = new TextEncoder().encode(JSON.stringify(context)).byteLength;
     while (bytes !== context.serializedBytes) {
@@ -194,4 +192,21 @@ export function projectCommandEchoContext(
     return bytes <= DOCX_ECHO_MAX_CONTEXT_BYTES ? context : undefined;
   }
   return undefined;
+}
+
+type EchoStyleRun = DocxCommandEchoContext['styleRuns'][number];
+
+/** Cluster-positioned lines carry one primitive per cluster; the echo needs one run per style. */
+function mergeStyleRuns(runs: readonly EchoStyleRun[]): EchoStyleRun[] {
+  const merged: EchoStyleRun[] = [];
+  for (const run of runs) {
+    const previous = merged.at(-1);
+    if (previous && previous.endUtf16 === run.startUtf16 && previous.fontFamily === run.fontFamily &&
+      previous.fontSizePx === run.fontSizePx && previous.color === run.color && previous.bold === run.bold &&
+      previous.italic === run.italic && previous.underline === run.underline && previous.strike === run.strike &&
+      previous.baseline.y === run.baseline.y && previous.transform.every((value, index) => value === run.transform[index])) {
+      previous.endUtf16 = run.endUtf16;
+    } else merged.push({ ...run });
+  }
+  return merged;
 }

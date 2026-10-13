@@ -49,7 +49,7 @@ function frame(revision: number, indices: number[], caretPage = 0): DocxCommandF
     styleRuns: [{ startUtf16: 0, endUtf16: 2, fontFamily: 'Arial', fontSizePx: 12, color: '#000',
       bold: false, italic: false, underline: false, strike: false, transform: [1, 0, 0, 1, 0, 0], baseline: { x: 0, y: 14 } }],
     boundaries: [0, 1, 2].map((utf16) => ({ utf16, grapheme: utf16, caret: { x: utf16 * 10, y: 0, width: 1, height: 20 } })),
-    damage: [{ page, rect: damageRect, backgroundId: 'background', primitiveIds: [] }], shaping: 'simple-ltr',
+    damage: [{ page, rect: damageRect, backgroundId: 'background', omittedPrimitiveIds: [] }], shaping: 'simple-ltr',
   };
   const bitmap = (pixels: string) => ({ width: 200, height: 100, pixels, closes: 0,
     close(this: TestBitmap) { this.closes += 1; } }) as TestBitmap;
