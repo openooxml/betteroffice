@@ -20,7 +20,7 @@ async function collaborators() {
   await remote.api.selectText({ slide: 1, shapeId: remoteStory.shapeId, storyId: remoteStory.storyId, start: 2, end: 2 });
   const vector = await replica.encodeStateVector();
   await act(async () => {
-    type(remote.view.getByRole('textbox'), 'R');
+    type(remote.view.getByRole('textbox', { name: 'Slide text' }), 'R');
     await remote.api.flushPendingInput();
   });
   const update = await (await remote.api.handleAsync()).encodeStateAsUpdate(vector);
@@ -29,7 +29,7 @@ async function collaborators() {
 
 test('remote merge preserves IME text and permits the next composition', async () => {
   const { local, replica, update } = await collaborators();
-  const input = local.view.getByRole('textbox');
+  const input = local.view.getByRole('textbox', { name: 'Slide text' });
   await act(async () => {
     composition(input, 'compositionstart');
     composition(input, 'compositionupdate', '漢');
@@ -54,7 +54,7 @@ test('local typing chains after an unacknowledged remote merge', async () => {
   const merging = replica.applyUpdate(update);
   try {
     await waitFor(() => expect(replyControl.count()).toBe(1));
-    act(() => { type(local.view.getByRole('textbox'), 'NEXT'); });
+    act(() => { type(local.view.getByRole('textbox', { name: 'Slide text' }), 'NEXT'); });
   } finally { replyControl.release(); }
   await act(async () => { await merging; await local.api.flushPendingInput(); });
   const text = (await story(local.api)).text;
@@ -70,7 +70,7 @@ test('copy writes selected text and cut deletes it through a worker command', as
   const writeText = mock(async (_text: string) => {});
   Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
   try {
-    const input = view.getByRole('textbox');
+    const input = view.getByRole('textbox', { name: 'Slide text' });
     act(() => { fireEvent.keyDown(input, { key: 'c', ctrlKey: true }); });
     await waitFor(() => expect(writeText).toHaveBeenCalledWith('alpha'));
     expect((await story(api)).text).toBe(selected.text);
@@ -112,7 +112,7 @@ test('cut waits for an unresolved selection before reading and deleting text', a
   const selecting = api.selectText({ slide: 1, shapeId: selected.shapeId, storyId: selected.storyId, start: 0, end: 5 });
   try {
     await waitFor(() => expect(replyControl.count()).toBe(1));
-    act(() => { fireEvent.keyDown(view.getByRole('textbox'), { key: 'x', ctrlKey: true }); });
+    act(() => { fireEvent.keyDown(view.getByRole('textbox', { name: 'Slide text' }), { key: 'x', ctrlKey: true }); });
     expect(writeText).not.toHaveBeenCalled();
     const throughSeq = client.state.throughSeq;
     replyControl.release();

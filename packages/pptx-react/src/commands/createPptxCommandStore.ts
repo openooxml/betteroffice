@@ -31,6 +31,7 @@ export class PptxCommandAdmissionError extends Error {
       | 'gesture-active'
       | 'editor-unavailable'
       | 'read-only'
+      | 'invalid-arguments'
     >
   ) {
     super(code);

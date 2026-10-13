@@ -140,8 +140,8 @@ pub struct TabStop {
 impl TabStop {
     fn to_any(&self) -> Any {
         let mut map = HashMap::from([
-            ("pos".into(), Any::Number(self.pos)),
-            ("val".into(), Any::from(self.alignment.as_str())),
+            ("position".into(), Any::Number(self.pos)),
+            ("alignment".into(), Any::from(self.alignment.as_str())),
         ]);
         if let Some(leader) = &self.leader {
             map.insert("leader".into(), Any::from(leader.as_str()));
@@ -1261,7 +1261,21 @@ fn append_paragraph_property_change(
 
 fn read_tab_stops<T: ReadTxn>(map: &MapRef, txn: &T) -> Vec<Any> {
     match map.get(txn, TABS) {
-        Some(Out::Any(Any::Array(stops))) => stops.to_vec(),
+        Some(Out::Any(Any::Array(stops))) => stops
+            .iter()
+            .map(|stop| {
+                let Any::Map(values) = stop else {
+                    return stop.clone();
+                };
+                let mut values = values.as_ref().clone();
+                for (legacy, canonical) in [("pos", "position"), ("val", "alignment")] {
+                    if let Some(value) = values.remove(legacy) {
+                        values.entry(canonical.to_owned()).or_insert(value);
+                    }
+                }
+                Any::Map(Arc::new(values))
+            })
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -1270,7 +1284,7 @@ fn existing_pos(stop: &Any) -> Option<f64> {
     let Any::Map(map) = stop else {
         return None;
     };
-    match map.get("pos") {
+    match map.get("position").or_else(|| map.get("pos")) {
         Some(Any::Number(pos)) => Some(*pos),
         Some(Any::BigInt(pos)) => Some(*pos as f64),
         _ => None,

@@ -191,6 +191,21 @@ U+FFFC listed in `atoms`, tabs stay `\t`, and paragraph marks are excluded. The
 `original` does the reverse. `findText` is exact, case-sensitive and
 paragraph-local, and a `search` target must match exactly once in its scope.
 
+`listStories()` lists every story in id order with its kind (`body`, `tableCell`,
+`contentControl`, `header`, `footer`, `footnote`, `endnote` or `other`; comment bodies
+are not session stories), its `root` story, the story a cell or block control sits
+in, and a header's or footer's `part` and `uses`: the sections whose properties
+reference the part, inheritance applied, whether or not a page shows it.
+`readStories({ stories, byRoot, view, expectVersion })` reads `'all'` stories (the
+default), or listed kinds and story ids in their order without repeats, in one read.
+An entry naming a kind is a kind, matching each story's own kind, so `header` leaves
+out header table cells unless `byRoot` matches the root's kind instead (`['body']` with
+`byRoot` selects everything under the body). A story that cannot be read, such as one
+with a pending paragraph-mark revision, reports its own failure; the read limits stop
+the read with `truncated`, and a story larger than the limits on its own reports
+`limit-exceeded` (page it with `readParagraphs` and `paraIds`), and `expectVersion` refuses a changed document with
+`stale-version`.
+
 | Step | Effect |
 | --- | --- |
 | `insertText` | Inserts at the start or end of a target, formatted like typing there. |

@@ -12,7 +12,7 @@ import { createInProcessPair } from '../../../../shared/office-session/testing/i
 import { createPeerlessSession } from '../../../pptx/src/session/commandSession';
 import { registerPresentationCommandHandlers } from '../../../pptx/src/session/commandHost';
 import * as wasm from '../../../pptx/src/wasm/loader';
-import { PEERLESS_FLAG, PptxEditor } from '../PptxEditor';
+import { PptxEditor } from '../PptxEditor';
 import { peerlessSessionOpener } from './usePeerlessPresentation';
 import type { PptxAsyncEditorApi } from './createPeerlessEditorApi';
 import type { PptxAsyncEditorProps } from '../PptxEditor';
@@ -25,8 +25,10 @@ let client: PresentationCommandClient;
 let commands: PresentationCommandEnvelope[];
 let owner: PeerlessSession | undefined;
 let holding = false;
+let unknownNext = false;
 let held: unknown[] = [];
 let releaseReplies = () => {};
+let crashWorker = () => {};
 let suspensions = 0;
 const suspended = new Promise<void>(() => {});
 
@@ -42,7 +44,7 @@ function bounded<T>(promise: Promise<T>): Promise<T> {
   })]).finally(() => clearTimeout(timer));
 }
 
-async function deck(small = false): Promise<Uint8Array> {
+export async function deck(small = false): Promise<Uint8Array> {
   const zip = new JSZip();
   const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
   const ns = `xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="${rel}"`;
@@ -73,7 +75,7 @@ beforeEach(() => {
   });
   restorers.push(() => toolbarRect.mockRestore());
   commands = [];
-  holding = false; held = []; suspensions = 0;
+  holding = false; unknownNext = false; held = []; suspensions = 0;
 
   owner = undefined;
   const worker = Object.getOwnPropertyDescriptor(globalThis, 'Worker');
@@ -121,19 +123,32 @@ beforeEach(() => {
       terminate() { pair.client.close(); }
     };
     const deliver = (message: unknown) => endpoint.dispatchEvent(new MessageEvent('message', { data: message }));
+    crashWorker = () => { endpoint.dispatchEvent(Object.assign(new Event('error'), { message: 'Worker stopped' })); };
     releaseReplies = () => { holding = false; for (const message of held.splice(0)) (message as () => void)(); };
     const off = pair.client.listen((message) => {
       const reply = message as { kind: string; id: number };
+      if (unknownNext && reply.kind === 'reply' && commandIds.has(reply.id)) {
+        unknownNext = false;
+        deliver({ ...reply, ok: false, error: { name: 'CommandOutcomeUnknown', message: 'Edit outcome is unknown', refusal: { seq: client.state.throughSeq + 1 } } });
+        return;
+      }
       if (holding && reply.kind === 'reply' && commandIds.has(reply.id)) held.push(() => { deliver(message); });
       else deliver(message);
     });
     restorers.push(off);
     const font = readFile(new URL('../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url));
-    const value = font.then((font) => createPeerlessSession(bytes, { readOnly: options.readOnly,
-      activeSlideIndex: options.activeSlideIndex, collaboration: options.collaboration, clientId: options.clientId, worker: () => endpoint as unknown as Worker,
-      fonts: [{ family: 'Liberation Sans', bytes: new Uint8Array(font) }] }));
+    let actual: PeerlessSession | undefined;
+    const value = font.then((font) => createPeerlessSession(bytes, { readOnly: options.readOnly, observeChanges: options.observeChanges,
+      activeSlideIndex: options.activeSlideIndex, collaboration: options.collaboration, clientId: options.clientId, initialUpdate: options.initialUpdate, worker: () => endpoint as unknown as Worker,
+      fonts: [{ family: 'Liberation Sans', bytes: new Uint8Array(font) }] })).then((session) => { actual = session; return session; });
     owner = { ready: bounded(value.then((session) => session.ready)).then((value) => { client = value; return value; }),
-      failure: undefined, subscribeFailure: () => () => {},
+      get failure() { return actual?.failure; },
+      subscribeFailure(listener) {
+        let live = true;
+        let off: (() => void) | undefined;
+        void value.then((session) => { if (live) off = session.subscribeFailure(listener); });
+        return () => { live = false; off?.(); };
+      },
       dispose: async () => { await (await value).dispose(); registration.dispose(); } };
     return owner;
   });
@@ -155,7 +170,7 @@ export async function open(options: Partial<PptxAsyncEditorProps> = {}) {
   const ready = mock((value: PptxAsyncEditorApi) => { api = value; });
   const bytes = await bounded(deck());
   const ui = (readOnly = options.readOnly, suspend = false) => <Suspense fallback={<div>Waiting</div>}>
-    <PptxEditor fonts={[]} file={bytes} {...{ [PEERLESS_FLAG]: true as const }} onReady={ready} {...options} readOnly={readOnly} />
+    <PptxEditor fonts={[]} file={bytes} onReady={ready} {...options} readOnly={readOnly} />
     <Suspend active={suspend} />
   </Suspense>;
   const mounted = render(ui());
@@ -177,7 +192,7 @@ export async function open(options: Partial<PptxAsyncEditorProps> = {}) {
     await waitFor(() => expect(client.state.selection).toMatchObject({ kind: 'object', shapeId: box.shapeId }));
     await waitFor(() => expect(view.getAllByTestId(/pptx-resize-/)).toHaveLength(8));
   };
-  return { view, stage, canvas, box, point, select, list, bytes, api, ui, client };
+  return { view, stage, canvas, box, point, select, list, bytes, api, ui, client, commands };
 }
 
 
@@ -192,3 +207,5 @@ export function type(input: HTMLElement, text: string): void {
 }
 
 export const replyControl = { hold() { holding = true; }, count() { return held.length; }, release() { releaseReplies(); } };
+
+export const faultControl = { unknown() { unknownNext = true; }, crash() { crashWorker(); } };

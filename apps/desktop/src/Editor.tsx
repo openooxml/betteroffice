@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DocxEditor, type DocxEditorRef } from "@betteroffice/docx-react";
 import { XlsxEditor, type XlsxAsyncEditorApi } from "@betteroffice/xlsx-react";
-import { PptxEditor, type PptxEditorApi } from "@betteroffice/pptx-react";
+import { PptxEditor, type PptxAsyncEditorApi } from "@betteroffice/pptx-react";
 import { configureDefaultFonts } from "@betteroffice/docx/layout";
 import { setGoogleFontsEnabled } from "@betteroffice/docx/utils";
 import { CollaborationProvider as DocxProvider } from "@betteroffice/docx/collaboration";
@@ -9,7 +9,8 @@ import { CollaborationProvider as XlsxProvider } from "@betteroffice/xlsx/collab
 import {
   CollaborationProvider as PptxProvider,
   type PptxFontFace,
-} from "@betteroffice/pptx";
+  type AsyncCollaborationReplica,
+} from "@betteroffice/pptx/editor";
 import {
   loadBundledFontBytes,
   resolveLastResortFace,
@@ -20,6 +21,8 @@ import type { CollaborationReplica } from "../../demo/app/collab/types";
 import type { Format } from "./bridge";
 import { savedBytes } from "./session";
 import "@betteroffice/docx-react/styles.css";
+
+const PRESENTATION_READY_TIMEOUT_MS = 30_000;
 
 configureDefaultFonts({ load: () => import("@betteroffice/fonts") });
 setGoogleFontsEnabled(false);
@@ -58,8 +61,6 @@ export async function prepareFile(
     openWorkbook(bytes).dispose();
     return { bytes, format };
   }
-  const { initWasm, openPresentation } = await import("@betteroffice/pptx");
-  await initWasm();
   const fonts = await Promise.all(
     [false, true].flatMap((bold) =>
       [false, true].map(async (italic) => {
@@ -75,7 +76,15 @@ export async function prepareFile(
       })
     )
   );
-  openPresentation(bytes, { fonts }).dispose();
+  if (typeof Worker === "function" && typeof OffscreenCanvas === "function") {
+    const { openPresentationSession } = await import("@betteroffice/pptx/editor");
+    const session = await openPresentationSession(bytes, { fonts });
+    await session.dispose();
+  } else {
+    const { initWasm, openPresentation } = await import("@betteroffice/pptx/editor");
+    await initWasm();
+    openPresentation(bytes, { fonts }).dispose();
+  }
   return { bytes, format, fonts };
 }
 
@@ -114,7 +123,12 @@ export default function Editor({
   const serializations = useRef<Promise<unknown>>(Promise.resolve());
   const docx = useRef<DocxEditorRef>(null);
   const xlsx = useRef<XlsxAsyncEditorApi | null>(null);
-  const pptx = useRef<PptxEditorApi | null>(null);
+  const pptx = useRef<PptxAsyncEditorApi | null>(null);
+  const presentationWaiter = useRef<{
+    resolve(api: PptxAsyncEditorApi): void;
+    reject(error: Error): void;
+  } | null>(null);
+  const presentationFailure = useRef<Error | null>(null);
   const harness = (globalThis as typeof globalThis & { __DOCX_PEERLESS_HARNESS__?: boolean }).__DOCX_PEERLESS_HARNESS__
     && file.format === "docx" && peerlessDocx();
   const [harnessMode, setHarnessMode] = useState<"editing" | "viewing">("editing");
@@ -132,14 +146,22 @@ export default function Editor({
     crypto.getRandomValues(new Uint32Array(1))[0] & 0x7fffffff || 1
   ).current;
   const [replica, setReplica] = useState<CollaborationReplica | null>(null);
+  const [presentationReplica, setPresentationReplica] = useState<AsyncCollaborationReplica | null>(null);
   const [provider, setProvider] = useState<
     DocxProvider | XlsxProvider | PptxProvider | null
   >(null);
+  const presentationPresence = provider instanceof PptxProvider ? provider : undefined;
+  const presentationCollaboration = useMemo(() => room ? {
+    roomId: room.id,
+    clientId,
+    onReplica: setPresentationReplica,
+    presence: presentationPresence,
+  } : undefined, [room?.id, clientId, presentationPresence]);
   const callbacks = useRef({ onSave, onChange, onError, onStatus });
   callbacks.current = { onSave, onChange, onError, onStatus };
 
   useEffect(() => {
-    if (!room || !replica) return;
+    if (!room || (file.format === "pptx" ? !presentationReplica : !replica)) return;
     const transport = createRoomTransport(
       "https://betteroffice-collaboration-relay.elia7.workers.dev",
       room.id
@@ -147,10 +169,10 @@ export default function Editor({
     const options = { user: { name: room.name } };
     const next =
       file.format === "docx"
-        ? new DocxProvider(replica, transport, options)
+        ? new DocxProvider(replica!, transport, options)
         : file.format === "xlsx"
-        ? new XlsxProvider(replica, transport, options)
-        : new PptxProvider(replica, transport, options);
+        ? new XlsxProvider(replica!, transport, options)
+        : new PptxProvider(presentationReplica!, transport, options);
     setProvider(next);
     const unsubscribe = next.onStatus(({ status, synced }) =>
       callbacks.current.onStatus(synced ? "Connected" : status)
@@ -165,17 +187,23 @@ export default function Editor({
       next.destroy();
       setProvider(null);
     };
-  }, [file.format, replica, room]);
+  }, [file.format, replica, presentationReplica, room]);
 
   const changed = useCallback(() => callbacks.current.onChange(), []);
   const saveBytes = useCallback(
     (bytes: Uint8Array) => callbacks.current.onSave(bytes),
     []
   );
+  const presentationUnavailable = useCallback((failure: Error) => {
+    presentationFailure.current = failure;
+    presentationWaiter.current?.reject(failure);
+    presentationWaiter.current = null;
+  }, []);
   const error = useCallback((error: Error) => {
     if (serialization.current) serialization.current.failure = error;
+    if (file.format === "pptx" && !pptx.current) presentationUnavailable(error);
     callbacks.current.onError(error);
-  }, []);
+  }, [file.format, presentationUnavailable]);
   const workbookReady = useCallback(
     (api: XlsxAsyncEditorApi) => {
       xlsx.current = api;
@@ -185,9 +213,17 @@ export default function Editor({
     },
     []
   );
-  const presentationReady = useCallback((api: PptxEditorApi) => {
+  const presentationReady = useCallback((api: PptxAsyncEditorApi) => {
     pptx.current = api;
-  }, []);
+    presentationFailure.current = null;
+    presentationWaiter.current?.resolve(api);
+    presentationWaiter.current = null;
+    return () => {
+      if (pptx.current !== api) return;
+      pptx.current = null;
+      presentationUnavailable(new Error("The presentation editor was disposed."));
+    };
+  }, [presentationUnavailable]);
 
   const serializeWorkbook = async () => {
     const result = await xlsx.current?.commands.execute("save", null);
@@ -196,6 +232,8 @@ export default function Editor({
   };
 
   useEffect(() => {
+    let active = true;
+    const disposed = new Error("The presentation editor was disposed.");
     onReady({
       print() {
         if (file.format === "docx") docx.current?.print();
@@ -214,12 +252,31 @@ export default function Editor({
           const current: { failure: Error | null; bytes?: Uint8Array } = { failure: null };
           serialization.current = current;
           try {
+            let presentation = pptx.current;
+            if (file.format === "pptx") {
+              if (!active) throw disposed;
+              if (!presentation) {
+                if (presentationFailure.current) throw presentationFailure.current;
+                let timeout: ReturnType<typeof setTimeout> | undefined;
+                presentation = await new Promise<PptxAsyncEditorApi>((resolve, reject) => {
+                  const waiter = { resolve, reject };
+                  presentationWaiter.current = waiter;
+                  timeout = setTimeout(() => {
+                    if (presentationWaiter.current !== waiter) return;
+                    presentationUnavailable(new Error(
+                      "The editor is still opening the file. Try again in a moment."
+                    ));
+                  }, PRESENTATION_READY_TIMEOUT_MS);
+                }).finally(() => clearTimeout(timeout));
+              }
+              if (!active || pptx.current !== presentation) throw disposed;
+            }
             const bytes =
               file.format === "docx"
                 ? await docx.current?.save()
                 : file.format === "xlsx"
                 ? await serializeWorkbook()
-                : pptx.current?.save();
+                : await presentation!.saveAsync();
             return savedBytes(bytes, current.failure);
           } finally {
             serialization.current = null;
@@ -230,8 +287,12 @@ export default function Editor({
         return next;
       },
     });
-    return () => onReady(null);
-  }, [file.format, onReady]);
+    return () => {
+      active = false;
+      if (file.format === "pptx") presentationUnavailable(disposed);
+      onReady(null);
+    };
+  }, [file.format, onReady, presentationUnavailable]);
 
   if (file.format === "docx")
     return (
@@ -307,15 +368,7 @@ export default function Editor({
       onChange={changed}
       onReady={presentationReady}
       onError={error}
-      collaboration={
-        room
-          ? {
-              clientId,
-              onReplica: setReplica,
-              presence: provider instanceof PptxProvider ? provider : undefined,
-            }
-          : undefined
-      }
+      collaboration={presentationCollaboration}
     />
   );
 }

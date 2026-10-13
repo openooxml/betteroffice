@@ -5,6 +5,7 @@ import {
   PptxEditor,
   definePptxPlugin,
   type PptxEditorApi,
+  type PptxAsyncEditorApi,
   type PptxPluginContext,
   type PptxPluginNavigationResult,
   type PptxPluginSelection,
@@ -19,12 +20,13 @@ interface ProbeState {
 type ProbeContext = PptxPluginContext<ProbeState>;
 
 interface ProbeWindow {
-  editor: PptxEditorApi | null;
+  editor: PptxEditorApi | PptxAsyncEditorApi | null;
   navigation: PptxPluginNavigationResult | null;
   selection: PptxPluginSelection;
   marks: number;
 }
 
+const workerOnly = new URLSearchParams(location.search).get('engine') === 'worker';
 const probe: ProbeWindow = { editor: null, navigation: null, selection: null, marks: 0 };
 (window as unknown as { __probe: ProbeWindow }).__probe = probe;
 
@@ -173,7 +175,7 @@ function Harness() {
   if (!file || !fonts) return null;
   return (
     <div style={{ height: '100%' }}>
-      <PptxEditor
+      <PptxEditor {...(workerOnly ? {} : { legacySyncApi: true, experimentalWorkerOpen: false })}
         file={file}
         fonts={fonts}
         plugins={PLUGINS}

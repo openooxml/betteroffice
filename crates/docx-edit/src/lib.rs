@@ -78,6 +78,7 @@ mod control_source;
 mod control_values;
 mod ctx;
 mod deterministic;
+mod document_properties;
 mod fingerprint;
 mod format;
 mod geometry;
@@ -87,8 +88,11 @@ mod identity;
 mod inline_content;
 mod list_marker;
 pub mod media;
+mod resident_font;
+pub use resident_font::{ResidentFontError, decode_resident_font};
 mod op;
 mod ops;
+mod part_metadata;
 mod peer_bootstrap;
 mod policy;
 mod presence;
@@ -96,11 +100,14 @@ mod queries;
 mod raw;
 mod read_state;
 pub mod read_types;
+mod repeating_controls;
 mod script_fonts;
 mod search;
+mod section_margins;
 mod seed;
 mod segment_json;
 mod segments;
+mod stories;
 pub mod structured;
 mod target;
 mod undo;
@@ -153,10 +160,11 @@ pub use seed::{
     seed_docx_preview, seed_from_docx, seed_from_docx_with_generation,
 };
 use segments::{ParagraphIndex, SegmentIndex, build_indexes};
+pub use stories::{AllStories, ListStoriesResponse, StoryInfo, StoryInfoKind, StorySelection};
 pub use target::{
     AtomKind, EditTextView, FindTextRequest, FindTextResponse, ParagraphTarget, ParagraphText,
-    ReadParagraphsRequest, ReadParagraphsResponse, SearchScope, TextAtom, TextMatch, TextPosition,
-    TextRange, TextTarget,
+    ReadParagraphsRequest, ReadParagraphsResponse, ReadStoriesRequest, ReadStoriesResponse,
+    SearchScope, StoryText, TextAtom, TextMatch, TextPosition, TextRange, TextTarget,
 };
 pub use undo::{DocUndoManager, UNDO_CAPTURE_TIMEOUT_MS, UNDO_DEPTH, UndoCaptureMode, UndoSession};
 
@@ -616,6 +624,9 @@ impl EditingDoc {
         // explicit transactions below.
         doc.get_or_insert_map(STORIES);
         doc.get_or_insert_map(COMMENTS);
+        doc.get_or_insert_map(part_metadata::PART_METADATA);
+        doc.get_or_insert_map(document_properties::DOCUMENT_PROPERTIES);
+        doc.get_or_insert_map(section_margins::SECTION_MARGINS);
         doc.get_or_insert_map(identity::PARAGRAPH_IDS);
         doc.get_or_insert_map(identity::SOURCE_PARAGRAPH_IDS);
         doc.get_or_insert_map(identity::SESSION);

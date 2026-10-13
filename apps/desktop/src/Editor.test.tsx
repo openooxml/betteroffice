@@ -1,8 +1,9 @@
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { GlobalWindow } from "happy-dom";
-import { afterAll, afterEach, expect, mock, test } from "bun:test";
+import { afterAll, afterEach, expect, mock, spyOn, test } from "bun:test";
 import { forwardRef, useEffect, useImperativeHandle } from "react";
 import type { XlsxAsyncEditorApi, XlsxAsyncEditorProps, XlsxCommandResult } from "@betteroffice/xlsx-react";
+import type { PptxAsyncEditorApi, PptxAsyncEditorProps } from "@betteroffice/pptx-react";
 import type { EditorApi } from "./Editor";
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -20,7 +21,6 @@ interface DocxProps {
 let docxProps: DocxProps;
 let save: (props: DocxProps) => Promise<ArrayBuffer | null> = async () =>
   null;
-class Provider {}
 let workbookProps: XlsxAsyncEditorProps;
 let workbookSave: (props: XlsxAsyncEditorProps) => Promise<XlsxCommandResult>;
 mock.module("@betteroffice/xlsx-react", () => ({
@@ -37,6 +37,47 @@ const disposeWorkbook = mock(async () => {});
 const openSession = mock(async (_bytes: Uint8Array) => ({ dispose: disposeWorkbook }));
 const initWorkbook = mock(async () => {});
 mock.module("@betteroffice/xlsx", () => ({ openWorkbookSession: openSession, initWasm: initWorkbook }));
+const presentationReplica = {
+  clientId: 7,
+  encodeStateVector: async () => Uint8Array.of(1),
+  encodeStateAsUpdate: async () => Uint8Array.of(2),
+  applyUpdate: async () => {},
+  onUpdate: () => () => {},
+};
+const providerReplicas: unknown[] = [];
+let presentationProps: PptxAsyncEditorProps;
+const presentationOptions: PptxAsyncEditorProps['collaboration'][] = [];
+let savePresentation = async () => Uint8Array.of(3);
+let deferPresentationReady = false;
+let readyPresentation: (() => void) | undefined;
+let disposePresentation: (() => void) | undefined;
+mock.module("@betteroffice/pptx-react", () => ({
+  PptxEditor: (props: PptxAsyncEditorProps) => {
+    presentationProps = props;
+    presentationOptions.push(props.collaboration);
+    useEffect(() => {
+      let dispose: void | (() => void);
+      readyPresentation = () => {
+        dispose = props.onReady?.({ saveAsync: () => savePresentation(), focus() {} } as PptxAsyncEditorApi);
+        disposePresentation = typeof dispose === "function" ? dispose : undefined;
+      };
+      if (!deferPresentationReady) readyPresentation();
+      return () => { if (typeof dispose === "function") dispose(); };
+    }, [props.onReady]);
+    useEffect(() => {
+      props.collaboration?.onReplica?.(presentationReplica);
+      return () => props.collaboration?.onReplica?.(null);
+    }, [props.collaboration?.onReplica]);
+    return null;
+  },
+}));
+class Provider {
+  constructor(replica: unknown) { providerReplicas.push(replica); }
+  onStatus() { return () => {}; }
+  onError() { return () => {}; }
+  connect() {}
+  destroy() {}
+}
 mock.module("@betteroffice/docx-react", () => ({
   DocxEditor: forwardRef<unknown, DocxProps>(function DocxEditor(props, ref) {
     docxProps = props;
@@ -47,12 +88,11 @@ mock.module("@betteroffice/docx-react", () => ({
 for (const [specifier, exports] of Object.entries({
   "@betteroffice/docx-react/peerless-harness": { registerBrowserHarness: () => () => {} },
   "@betteroffice/docx-react/styles.css": {},
-  "@betteroffice/pptx-react": { PptxEditor: () => null },
   "@betteroffice/docx/layout": { configureDefaultFonts: () => {} },
   "@betteroffice/docx/utils": { setGoogleFontsEnabled: () => {} },
   "@betteroffice/docx/collaboration": { CollaborationProvider: Provider },
   "@betteroffice/xlsx/collaboration": { CollaborationProvider: Provider },
-  "@betteroffice/pptx": { CollaborationProvider: Provider },
+  "@betteroffice/pptx/editor": { CollaborationProvider: Provider },
   "@betteroffice/fonts": {
     loadBundledFontBytes: () => {},
     resolveLastResortFace: () => {},
@@ -64,7 +104,12 @@ for (const [specifier, exports] of Object.entries({
 const { act, cleanup, fireEvent, render } = await import("@testing-library/react");
 const { default: Editor, prepareFile } = await import("./Editor");
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  deferPresentationReady = false;
+  readyPresentation = undefined;
+  disposePresentation = undefined;
+});
 afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
 });
@@ -98,16 +143,17 @@ test("peerless harness mode controls commit the editor read-only prop", async ()
   }
 });
 
-async function mount(format: "docx" | "xlsx" = "docx", onChange = () => {}) {
+async function mount(format: "docx" | "xlsx" | "pptx" = "docx", collaborative = false, onChange = () => {}) {
   const ready: { api?: EditorApi } = {};
   const errors: string[] = [];
   const saved: Uint8Array[] = [];
+  let view!: ReturnType<typeof render>;
   await act(async () => {
-    render(
+    view = render(
       <Editor
         file={{ bytes: new Uint8Array(), format }}
         name="saved.docx"
-        room={null}
+        room={collaborative ? { id: "test", name: "Peer" } : null}
         onSave={(bytes) => saved.push(bytes)}
         onChange={onChange}
         onError={(error) => errors.push(error.message)}
@@ -119,7 +165,40 @@ async function mount(format: "docx" | "xlsx" = "docx", onChange = () => {}) {
       />
     );
   });
-  return { api: ready.api!, errors, saved };
+  return { api: ready.api!, errors, saved, view };
+}
+
+function presentationClock() {
+  let now = 0;
+  const timers = new Map<unknown, { at: number; run(): void }>();
+  const schedule = globalThis.setTimeout;
+  const cancel = globalThis.clearTimeout;
+  const scheduling = spyOn(globalThis, "setTimeout").mockImplementation(((...parameters: Parameters<typeof schedule>) => {
+    const [callback, delay, ...args] = parameters;
+    if (delay !== 30_000) return schedule(...parameters);
+    const timer = schedule(() => {}, 0);
+    timers.set(timer, { at: now + delay, run() {
+      if (typeof callback !== "function") throw new Error("Expected a timeout callback");
+      callback(...args);
+    } });
+    return timer;
+  }) as typeof schedule);
+  const cancelling = spyOn(globalThis, "clearTimeout").mockImplementation(((timer: Parameters<typeof cancel>[0]) => {
+    timers.delete(timer);
+    cancel(timer);
+  }) as typeof cancel);
+  return {
+    advance(milliseconds: number) {
+      now += milliseconds;
+      for (const [timer, deadline] of timers) {
+        if (deadline.at > now) continue;
+        timers.delete(timer);
+        deadline.run();
+      }
+    },
+    get pending() { return timers.size; },
+    restore() { scheduling.mockRestore(); cancelling.mockRestore(); },
+  };
 }
 
 test("peerless preview reports dirty state through worker document events", async () => {
@@ -128,7 +207,7 @@ test("peerless preview reports dirty state through worker document events", asyn
   browser.happyDOM.setURL("http://localhost/?format=docx&peerless=1");
   try {
     const changed = mock(() => {});
-    await mount("docx", changed);
+    await mount("docx", false, changed);
     expect(docxProps!.experimentalPeerless).toBe(true);
     expect(docxProps!.onChange).toBeUndefined();
     docxProps!.onDocumentChange?.();
@@ -230,4 +309,121 @@ test("overlapping serializations run in turn and keep their own failure", async 
   expect(await first).toBe("first failed");
   expect(await second).toEqual(Uint8Array.of(2));
   expect(calls).toEqual(["first", "second"]);
+});
+
+test("presentation serialization uses the async default and preserves save failures", async () => {
+  const { api, saved } = await mount("pptx");
+  expect(presentationProps.legacySyncApi).toBeUndefined();
+  savePresentation = async () => { throw new Error("Worker stopped"); };
+  await expect(api.serialize()).rejects.toThrow("Worker stopped");
+  savePresentation = async () => Uint8Array.of(4);
+  expect(await api.serialize()).toEqual(Uint8Array.of(4));
+  expect(saved).toEqual([]);
+});
+
+test("presentation serialization waits for the editor API before saving", async () => {
+  deferPresentationReady = true;
+  savePresentation = mock(async () => Uint8Array.of(5));
+  const { api, saved } = await mount("pptx");
+  const result = api.serialize().catch((cause: Error) => cause);
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  expect(savePresentation).not.toHaveBeenCalled();
+  await act(async () => { readyPresentation!(); });
+  expect(await result).toEqual(Uint8Array.of(5));
+  expect(savePresentation).toHaveBeenCalledTimes(1);
+  expect(saved).toEqual([]);
+});
+
+test("presentation readiness timeout drains queued serializations", async () => {
+  deferPresentationReady = true;
+  savePresentation = mock(async () => Uint8Array.of(9));
+  const { api } = await mount("pptx");
+  const clock = presentationClock();
+  const flush = async () => {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  };
+  const opening = "The editor is still opening the file. Try again in a moment.";
+  const results: (Uint8Array | string)[] = ["pending", "pending"];
+  try {
+    void api.serialize().then((bytes) => { results[0] = bytes; }, (cause: Error) => { results[0] = cause.message; });
+    void api.serialize().then((bytes) => { results[1] = bytes; }, (cause: Error) => { results[1] = cause.message; });
+    await flush();
+    clock.advance(29_999);
+    await flush();
+    expect(results).toEqual(["pending", "pending"]);
+    expect(savePresentation).not.toHaveBeenCalled();
+    clock.advance(1);
+    await flush();
+    expect(results).toEqual([opening, opening]);
+    expect(clock.pending).toBe(0);
+    expect(savePresentation).not.toHaveBeenCalled();
+    await act(async () => { readyPresentation!(); });
+    expect(await api.serialize()).toEqual(Uint8Array.of(9));
+  } finally {
+    clock.restore();
+  }
+});
+
+test("unmount rejects waiting, queued, and subsequent presentation saves", async () => {
+  deferPresentationReady = true;
+  savePresentation = mock(async () => Uint8Array.of(6));
+  const { api, view } = await mount("pptx");
+  const first = api.serialize().catch((cause: Error) => cause.message);
+  const second = api.serialize().catch((cause: Error) => cause.message);
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  view.unmount();
+  expect(await first).toBe("The presentation editor was disposed.");
+  expect(await second).toBe("The presentation editor was disposed.");
+  await expect(api.serialize()).rejects.toThrow("The presentation editor was disposed.");
+  expect(savePresentation).not.toHaveBeenCalled();
+});
+
+test("presentation opening errors reject waiting saves and readiness allows retry", async () => {
+  deferPresentationReady = true;
+  savePresentation = mock(async () => Uint8Array.of(7));
+  const { api, errors } = await mount("pptx");
+  const result = api.serialize().catch((cause: Error) => cause);
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  const failure = new Error("Worker failed to open");
+  presentationProps.onError?.(failure);
+  expect(await result).toBe(failure);
+  await expect(api.serialize()).rejects.toThrow("Worker failed to open");
+  expect(savePresentation).not.toHaveBeenCalled();
+  await act(async () => { readyPresentation!(); });
+  expect(await api.serialize()).toEqual(Uint8Array.of(7));
+  expect(errors).toEqual(["Worker failed to open"]);
+});
+
+test("presentation API disposal rejects saves until a replacement is ready", async () => {
+  savePresentation = mock(async () => Uint8Array.of(8));
+  const { api } = await mount("pptx");
+  disposePresentation!();
+  await expect(api.serialize()).rejects.toThrow("The presentation editor was disposed.");
+  expect(savePresentation).not.toHaveBeenCalled();
+  await act(async () => { readyPresentation!(); });
+  expect(await api.serialize()).toEqual(Uint8Array.of(8));
+});
+
+test("presentation collaboration connects the async replica and presence provider", async () => {
+  providerReplicas.length = 0;
+  presentationOptions.length = 0;
+  await mount("pptx", true);
+  expect(providerReplicas).toEqual([presentationReplica]);
+  expect(await presentationReplica.encodeStateVector()).toEqual(Uint8Array.of(1));
+  expect(presentationProps.collaboration?.presence).toBeInstanceOf(Provider);
+  const openingOptions = presentationOptions.filter((options) => options && !options.presence);
+  expect(openingOptions.length).toBeGreaterThan(1);
+  expect(new Set(openingOptions).size).toBe(1);
 });

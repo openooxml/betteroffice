@@ -1052,6 +1052,50 @@ fn indent_wrappers_default_to_720_and_clamp_to_zero() {
 }
 
 #[test]
+fn tab_stops_serialize_with_the_document_model() {
+    let (doc, para) = doc_with("tabbed");
+    let selector = ParaSelector::One(para);
+    let legacy = Any::Map(Arc::new(std::collections::HashMap::from([
+        ("pos".to_owned(), Any::Number(720.0)),
+        ("val".to_owned(), Any::from("left")),
+    ])));
+    doc.set_paragraph_attrs(
+        &ctx(),
+        &selector,
+        &ParaAttrDelta {
+            other: BTreeMap::from([("tabs".to_owned(), Some(Any::Array(Arc::from([legacy]))))]),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    doc.add_tab_stop(
+        &ctx(),
+        &selector,
+        &TabStop {
+            pos: 1440.0,
+            alignment: "right".into(),
+            leader: Some("dot".into()),
+        },
+    )
+    .unwrap();
+    let tabs = doc.paragraphs("body").unwrap()[0].properties["tabs"].clone();
+    let stops: Vec<docx_parse::TabStop> =
+        serde_json::from_value(serde_json::to_value(tabs).unwrap()).unwrap();
+    assert_eq!(stops.len(), 2);
+    assert_eq!(stops[0].position, 720.0);
+    assert_eq!(stops[0].alignment, "left");
+    assert_eq!(stops[1].position, 1440.0);
+    assert_eq!(stops[1].alignment, "right");
+    assert_eq!(stops[1].leader.as_deref(), Some("dot"));
+    doc.remove_tab_stop(&ctx(), &selector, 720.0).unwrap();
+    let tabs = doc.paragraphs("body").unwrap()[0].properties["tabs"].clone();
+    let stops: Vec<docx_parse::TabStop> =
+        serde_json::from_value(serde_json::to_value(tabs).unwrap()).unwrap();
+    assert_eq!(stops.len(), 1);
+    assert_eq!(stops[0].position, 1440.0);
+}
+
+#[test]
 fn tab_stops_add_replace_and_remove() {
     let (doc, para) = doc_with("tabbed");
     let selector = ParaSelector::One(para.clone());
@@ -1084,8 +1128,8 @@ fn tab_stops_add_replace_and_remove() {
         panic!("tabs must be an array")
     };
     assert_eq!(stops.len(), 2);
-    assert_eq!(map_get(&stops[0], "pos"), Some(&Any::Number(720.0))); // sorted by pos
-    assert_eq!(map_get(&stops[1], "pos"), Some(&Any::Number(1440.0)));
+    assert_eq!(map_get(&stops[0], "position"), Some(&Any::Number(720.0)));
+    assert_eq!(map_get(&stops[1], "position"), Some(&Any::Number(1440.0)));
     doc.remove_tab_stop(&ctx(), &selector, 720.0).unwrap();
     doc.remove_tab_stop(&ctx(), &selector, 1440.0).unwrap();
     assert_eq!(

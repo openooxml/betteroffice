@@ -1,5 +1,6 @@
-import type { DocxTextRange } from './edits';
+import type { DocxEditRequest, DocxEditResult, DocxTextRange } from './edits';
 import type { DisplayListRect } from '../layout/render/displayListQueries';
+import type { ResidentFontEnvironment, ResidentFontEnvironmentSnapshot } from './residentFontEnvironment';
 import type {
   ApplyContext,
   ApplyResult,
@@ -19,6 +20,7 @@ import type { MethodHandlers, MethodPolicies } from '../../../../shared/office-s
 import type { ColorValue } from '../types/colors';
 import type {
   YrsAuthor,
+  YrsContentControlValue,
   YrsHyperlinkAttrs,
   YrsInlineFormatDelta,
   YrsLoc,
@@ -36,6 +38,9 @@ import type { DecodedFrameDelta } from '../layout/render/frameDelta';
 import type { ResidentEngineSession } from './residentEngineSession';
 import type { DocxCommandSelectionLayout } from './residentCommandSelection';
 import type { DocxCellNavigationPlan } from './residentCommandCells';
+import type { DocxPartTarget, ResidentPartTarget, ResidentPartGeometry } from './residentParts';
+import type { SectionProperties, Watermark, FootnoteProperties, EndnoteProperties } from '../types/document';
+import type { DocxSectionMargins } from './residentSections';
 
 export type DocxCommandPosition = YrsLoc & { sticky?: Uint8Array };
 
@@ -72,6 +77,9 @@ export type DocxEffectiveFormatting = Pick<
 > & { fontSizePt: number | null };
 
 export interface DocxEditState {
+  documentVersion?: string;
+  batch?: { seq: number; result: DocxEditResult };
+  activePart?: ResidentPartTarget | null;
   readOnly: boolean;
   toolbar: YrsSelectionContext | null;
   effectiveFormatting: DocxEffectiveFormatting | null;
@@ -194,7 +202,23 @@ export interface DocxCommandStagedPresentation {
 }
 
 export interface DocxCommandPayloads {
+  applyEdits: { request: DocxEditRequest; suggesting?: YrsAuthor };
   setRenderEnvironment: { themeColors: Record<string, string>; showHiddenText: boolean };
+  setFontEnvironment: ResidentFontEnvironment;
+  setContentControlValue: { handle: string; value: YrsContentControlValue; expectVersion: string };
+  addRepeatingItem: { handle: string; expectVersion: string };
+  removeRepeatingItem: { handle: string; expectVersion: string };
+  openPart: DocxPartTarget;
+  ensurePart: DocxPartTarget;
+  removePart: DocxPartTarget;
+  setHyperlink: { selection: DocxCommandSelection; hyperlink: YrsHyperlinkAttrs | null; expectVersion: string };
+  setObjectProperties: { handle: string; patch: Record<string, unknown>; expectVersion: string };
+  setSectionProperties: { section: string; patch: Partial<SectionProperties>; expectVersion: string };
+  setNoteProperties: { section: string; footnotePr: FootnoteProperties; endnotePr: EndnoteProperties; expectVersion: string };
+  setWatermark: { watermark: Watermark | null; expectVersion: string };
+  setSectionMargins: { section: string; margins: DocxSectionMargins; expectVersion: string };
+  setTabStops: DocxSelectionIntent & { tabs: YrsParagraphAttrs['tabs']; expectVersion: string };
+  removeTabStop: DocxSelectionIntent & { positionTwips: number; expectVersion: string };
   replaceMatches: { targets: DocxTextRange[]; text: string; expectVersion: string; suggesting?: YrsAuthor };
   undo: Record<string, never>;
   redo: Record<string, never>;
@@ -224,6 +248,8 @@ export type DocxCommandIntent = {
 }[DocxCommandKind];
 
 export interface DocxCommandFramePayload {
+  fontEnvironment?: ResidentFontEnvironmentSnapshot;
+  parts?: ResidentPartGeometry[];
   frame: ArrayBuffer;
   pageFrames?: ArrayBuffer[];
   caret: YrsResidentCaretSnapshot;
@@ -297,6 +323,7 @@ export interface ResidentCommandHooks {
 
 /** @internal Worker-owned layout access for ordered selection resolution. */
 export interface ResidentCommandHooksEnvironment {
+  supportsFontEnvironment?: boolean;
   readSelectionLayout(): DocxCommandSelectionLayout;
   setRenderEnvironment?(environment: DocxCommandPayloads['setRenderEnvironment']): void;
 }
@@ -381,6 +408,7 @@ export type DocxWorkerEditSessionOptions<O, X> = Omit<WorkerEditSessionOptions<
 };
 
 export interface ResidentDocxCommandState {
+  activePart?: ResidentPartTarget | null;
   readOnly: boolean;
   selection: DocxCommandSelection | null;
   storedMarks: DocxStoredMarks | null;

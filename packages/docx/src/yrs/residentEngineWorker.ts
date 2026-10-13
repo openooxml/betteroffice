@@ -12,6 +12,11 @@ import { readCommandStickyPosition } from './residentCommandAnchors';
 import { projectCommandEchoContext } from './residentCommandViewProjection';
 import { stageCommandPresentation } from './residentCommandPresentation';
 import { registerCommandFonts } from './residentCommandFonts';
+import { residentSourceMetadata, validateResidentSource } from './residentSource';
+import { decodeDocxHostJson } from './yrsSessionFacade';
+import { buildResidentRegionLayoutRequest } from '../editor/computeLayout';
+import { residentMediaImages } from './residentMediaImages';
+import { ResidentSessionFonts, type ResidentFontEnvironment } from './residentFontEnvironment';
 import type {
   DocxCommandPageIdentity,
   DocxNavigationIntent,
@@ -19,6 +24,7 @@ import type {
   ResidentCommandHost,
   ResidentCommandInitRequest,
   ResidentCommandViewportRequest,
+  PreparedDocxCommand,
   ResidentDocxCommandEngine,
 } from './residentCommandProtocol';
 import type { CollaborationCursor } from '../collaboration/types';
@@ -40,6 +46,7 @@ import {
 import {
   computeAnchorTargetGeometry,
   computeProposalGeometryMirror,
+  hiddenRanges,
   resolveNavigationTarget,
 } from './proposalGeometry';
 import { findBodyMatches } from './findMatches';
@@ -49,6 +56,9 @@ import { proposalProjectionStories } from './dirtyProjectionStories';
 import { findParagraphs } from './findParagraphs';
 import { DisplayPositionIndex } from './displayPositionIndex';
 import { resolveYrsPointPosition } from './pointPosition';
+import { partMetadata } from './residentParts';
+import { readControlHandles } from './residentControls';
+import { readResidentProperties } from './residentProperties';
 import {
   resolveBookmarkPosition,
   resolveCommentTarget,
@@ -100,6 +110,7 @@ let hostEditModule = nextHostEditModule();
 let session: ResidentEngineSession | null = null;
 let commandHost: ResidentCommandHost | null = null;
 let commandInit: ResidentCommandInitRequest | null = null;
+let sessionFonts: ResidentSessionFonts | null = null;
 let commandHooksFactory: ResidentCommandHooksFactory | null = null;
 let commandFrameChanges: {
   pages: Set<number>; updates: Uint8Array[];
@@ -135,6 +146,10 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
   });
   if (!init.layoutWithRegions) engine.layoutDocumentJson(layoutInput);
   let layoutDirty = !init.layoutWithRegions;
+  sessionFonts?.dispose();
+  const fonts = new ResidentSessionFonts(engine, scope.fonts);
+  sessionFonts = fonts;
+  const preparedFonts = new WeakMap<PreparedDocxCommand, Awaited<ReturnType<ResidentSessionFonts['prepare']>>>();
   const relayout = () => {
     if (init.layoutWithRegions) engine.layoutDocumentWithRegionsRetained(init.layoutInput);
     else engine.layoutDocumentJson(layoutInput);
@@ -172,6 +187,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
         layoutInput = JSON.stringify(layout);
       }
     },
+    supportsFontEnvironment: true,
     readSelectionLayout() {
       const version = engine.proposalEngine.version();
       let frame: RetainedFrame;
@@ -318,7 +334,16 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
           };
         }
         try {
-          return await hooks.preflight(command, context);
+          const checked = await hooks.preflight(command, context);
+          if (command.kind === 'setFontEnvironment' && checked.status === 'ready') {
+            try {
+              preparedFonts.set(checked.prepared, await fonts.prepare(command.payload as ResidentFontEnvironment));
+            } catch (error) {
+              if (error instanceof WebAssembly.RuntimeError) throw error;
+              return { status: 'refused' as const, reason: 'invalid-font-environment', selection: hooks.selection(), editState: hooks.editState() };
+            }
+          }
+          return checked;
         } finally {
           if (queryEngine && verticalMove) queryEngine.verticalMoveJson = verticalMove;
           selectionPage = undefined;
@@ -326,8 +351,38 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
         }
       },
       async apply(command, context) {
+        if (command.command.kind === 'setFontEnvironment') {
+          const prepared = preparedFonts.get(command);
+          if (!prepared) throw new Error('Resident font environment was not prepared');
+          const snapshot = fonts.commit(prepared, (faces, chains) => {
+            engine.clearFonts();
+            glyphCache = null;
+            const registered = registerCommandFonts(engine, faces);
+            if (registered.ids.some(id => id === null)) throw new Error('Resident font registration failed');
+            const input = JSON.parse(init.layoutInput);
+            input.measurement = { ...input.measurement, fontChains: chains };
+            init.layoutInput = registered.remap(JSON.stringify(input));
+            init.extras = registered.remap(JSON.stringify({ ...JSON.parse(init.extras), fontChains: chains }));
+            if (!init.layoutWithRegions) {
+              const layout = JSON.parse(layoutInput);
+              layout.workerOwned.measurement = JSON.parse(init.layoutInput).measurement;
+              layoutInput = JSON.stringify(layout);
+            }
+          });
+          preparedFonts.delete(command);
+          reply({ id: 0, ok: true, fontEnvironmentEvent: {
+            ...snapshot, phase: 'ready', session: init.session, incarnation: init.incarnation, epoch: init.epoch,
+          } });
+          fontsRevision += 1;
+          layoutRevision += 1;
+          retainedLayoutVersion = null;
+          for (const pageId of activeOffscreenPageIds) pendingOffscreenPageIds.add(pageId);
+          intactBackBuffers.clear();
+          fontRequirements = null;
+          forgetRequirementsCache();
+        }
         const result = await hooks.apply(command, context);
-        if (result.status === 'applied' || (result.status === 'noop' && command.command.kind === 'setRenderEnvironment')) relayout();
+        if (result.status === 'applied' || (result.status === 'noop' && ['setRenderEnvironment', 'setFontEnvironment'].includes(command.command.kind))) relayout();
         return result;
       },
       async frame({ coversThroughSeq, full }) {
@@ -614,6 +669,8 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
           pageFrames: preceding, coversThroughSeq, caret: finalized.caret,
           layoutRevision, documentVersion: engine.proposalEngine.version(),
           selectionRects,
+          ...(fonts.snapshot ? { fontEnvironment: fonts.snapshot } : {}),
+          parts: engine.partGeometry(retainedFrame!),
           echoContext, stagedPresentation: presentation.value,
         });
         revision = built.value.revision;
@@ -708,6 +765,9 @@ const REQUIREMENTS_CACHE_INPUTS = 8;
 /** Set while the session holds the document `open` seeded, with the heap limit it used. */
 let openedDocument: { heapLimitBytes?: number } | null = null;
 let openedSource: { bytes: ArrayBuffer; hostJson: string } | null = null;
+let openedViaSource = false;
+let openedParsed = false;
+let sourcePreviewing = false;
 let editorSaves: ResidentSaveRecord = { full: false };
 class SaveUnavailableError extends Error {}
 let openedVersion: string | null | undefined;
@@ -859,6 +919,7 @@ function classify(request: ResidentEngineWorkerRequest): SchedulerMessage {
         ...(request.operation.kind === 'setStates' ? { userInput: true, holdsIdleTasks: true } : {}), run,
       };
     case 'open':
+    case 'openSource':
     case 'bootstrap':
     case 'sync':
     case 'destroy':
@@ -895,7 +956,7 @@ function classify(request: ResidentEngineWorkerRequest): SchedulerMessage {
 }
 
 function isUserInputCommand(kind: string): boolean {
-  return kind === 'replaceMatches' || kind === 'undo' || kind === 'redo' || kind === 'select' || kind === 'insertText' || kind === 'replaceSelection' ||
+  return kind === 'setSectionMargins' || kind === 'setTabStops' || kind === 'removeTabStop' || kind === 'setHyperlink' || kind === 'setObjectProperties' || kind === 'setSectionProperties' || kind === 'setNoteProperties' || kind === 'setWatermark' || kind === 'setContentControlValue' || kind === 'addRepeatingItem' || kind === 'removeRepeatingItem' || kind === 'openPart' || kind === 'ensurePart' || kind === 'removePart' || kind === 'replaceMatches' || kind === 'undo' || kind === 'redo' || kind === 'select' || kind === 'insertText' || kind === 'replaceSelection' ||
     kind === 'deleteBackward' || kind === 'deleteForward' || kind === 'paragraphBreak' ||
     kind === 'toggleMark' || kind === 'formatRange' || kind === 'clearFormatting' ||
     kind === 'setParagraphAttrs' || kind === 'applyParagraphStyle';
@@ -912,7 +973,7 @@ async function runRequest(request: ResidentEngineWorkerRequest): Promise<void> {
   try {
     if (trap) throw trap;
     handlingId = request.id;
-    if (commandHost && isLegacyMutation(request)) {
+    if ((commandHost || openedViaSource) && isLegacyMutation(request)) {
       throw new Error('Legacy mutations are unavailable in a resident command session');
     }
     if (commandHost && request.type !== 'edit' && request.type !== 'checkpoint' &&
@@ -1020,6 +1081,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     if (commandHost) throw new Error('Resident commands are already initialized');
     if (!commandHooksFactory) setResidentCommandHooksFactory(createResidentDocxCommandHooks);
     const init = { ...request.request };
+    if (openedViaSource) fontsRevision = -1;
     setFrameDisplayWindow(session, init.displayWindow, init.retainBuiltPages);
     hydrate({
       workerAuthoritative: true, clientId: 0, state: new Uint8Array(0), selection: null,
@@ -1027,6 +1089,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       layoutInput: init.layoutInput, layoutWithRegions: init.layoutWithRegions,
       layoutRevision: init.layoutRevision,
     }, undefined, false, false, undefined, undefined, init.fontRegistrationSlots ? init : undefined);
+    sourcePreviewing = false;
     if (init.selection) session.setSelection(init.selection.anchor, init.selection.focus);
     unsubscribe?.();
     unsubscribe = null;
@@ -1068,6 +1131,69 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       !Number.isSafeInteger(frameEpoch) || frameEpoch < 0) throw new TypeError('Invalid command viewport');
     commandFrameChanges!.viewport = request.request;
     postCommandFrame(request.id);
+    return;
+  }
+  if (request.type === 'openSource') {
+    validateResidentSource(request.source);
+    if (session) throw new Error('Resident engine worker already holds a document');
+    const started = performance.now();
+    const source = request.source;
+    const opening = await createResidentEngineSession(source.heapLimitBytes);
+    try {
+      let hostJson: string | undefined;
+      let document: import('../types/document').Document;
+      if (source.document) {
+        opening.openDocument(source.document, source);
+        document = source.document;
+      } else {
+        hostJson = opening.openSourceDocx(source.bytes!, source);
+        document = decodeDocxHostJson(hostJson, source.bytes!).document;
+      }
+      opening.setDirectBatches(true);
+      session = opening;
+      openedDocument = { heapLimitBytes: source.heapLimitBytes };
+      openedViaSource = true;
+      openedParsed = source.document !== undefined;
+      openedSource = source.bytes && hostJson ? { bytes: exactBuffer(source.bytes), hostJson } : null;
+      editorSaves = { full: false };
+      const metadata = residentSourceMetadata(document);
+      if (source.preview) {
+        sourcePreviewing = true;
+        const preview = typeof source.preview === 'object' ? source.preview : {};
+        const pages = preview.pages ?? 1;
+        const init: ResidentCommandInitRequest = {
+          session: '', incarnation: 0, epoch: 0, readOnly: true,
+          fonts: preview.fonts ?? [], fontRegistrationSlots: preview.fontRegistrationSlots,
+          layoutInput: preview.layoutInput ?? JSON.stringify(buildResidentRegionLayoutRequest(metadata, 24, {})),
+          layoutWithRegions: true, layoutRevision: 1, extras: preview.extras ?? '{}',
+          displayWindow: preview.displayWindow ?? [0, pages],
+        };
+        setFrameDisplayWindow(opening, init.displayWindow, false);
+        const layout = hydrate({
+          workerAuthoritative: true, clientId: 0, state: new Uint8Array(0), selection: null,
+          fonts: init.fonts, fontsRevision: 0, renderInputs: [], measureInputs: [],
+          layoutInput: init.layoutInput, layoutWithRegions: true, layoutRevision: 1,
+        }, pages, true, false, undefined, undefined, init.fontRegistrationSlots ? init : undefined);
+        if (layout.provisional) incompleteLayout = {
+          layoutInput: init.layoutInput, workerAuthoritative: true, extras: init.extras,
+        };
+        setFrameDisplayWindow(opening, init.displayWindow, false);
+        const extras = JSON.stringify({ ...JSON.parse(init.extras), headersFooters: JSON.parse(opening.retainedHeadersFootersJson() ?? 'null') });
+        const bytes = opening.buildDisplayListFrame(extras, 0);
+        await replyFrame(request.id, bytes, performance.now() - started, [], undefined, started,
+          false, false, layout.layoutJson ?? undefined, layout.provisional, undefined, [], null,
+          { sourceDocument: metadata, hostJson });
+      } else {
+        const stateVector = exactBuffer(opening.encodeStateVector());
+        reply({ id: request.id, ok: true, sourceDocument: metadata, hostJson, stateVector }, [stateVector]);
+      }
+    } catch (error) {
+      if (!(error instanceof WebAssembly.RuntimeError)) {
+        if (session === opening) destroySession(true);
+        else opening.destroy();
+      }
+      throw error;
+    }
     return;
   }
   if (request.type === 'open') {
@@ -1249,15 +1375,15 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   }
   if (request.type === 'save') {
     if (previewing) throw new SaveUnavailableError('Resident engine worker is still opening');
-    if (!session || !openedSource) {
+    if (!session || (!openedSource && !openedParsed)) {
       throw new SaveUnavailableError('Resident engine worker has no opened document to save');
     }
     const held = pendingUpdates;
     pendingUpdates = [];
     try {
-      const saved = await session.save(
-        new Uint8Array(openedSource.bytes),
-        openedSource.hostJson,
+      const saved = openedParsed ? await session.saveDocument(request.host, request.comments, editorSaves) : await session.save(
+        new Uint8Array(openedSource!.bytes),
+        openedSource!.hostJson,
         request.host,
         request.comments,
         editorSaves,
@@ -1435,6 +1561,22 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         value = session.selectionText({ story: anchor.story, start: anchor, end: focus });
         break;
       }
+      case 'validateEdits':
+        value = engine.validateEdits(request.read.request);
+        break;
+      case 'contentControlHandles':
+        value = readControlHandles(session);
+        break;
+      case 'partSnapshot':
+        value = { metadata: partMetadata(session.partDocument()), geometry: retainedFrame && retainedLayoutVersion === engine.version() ? session.partGeometry(retainedFrame) : [],
+          frameEpoch: retainedFrame && retainedLayoutVersion === engine.version() ? retainedFrame.frameEpoch : null, layoutRevision };
+        break;
+      case 'properties':
+        value = readResidentProperties(session, request.read.target);
+        break;
+      case 'sectionProperties':
+        value = session.sectionProperties();
+        break;
       case 'exportStructuredWithPages':
         value = session.exportStructuredWithPagesJson(request.read.options, request.read.currentRequest);
         break;
@@ -1461,6 +1603,12 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       case 'readParagraphs':
         value = engine.readParagraphs(request.read.request);
         break;
+      case 'listStories':
+        value = session.listStories();
+        break;
+      case 'readStories':
+        value = session.readStories(request.read.request);
+        break;
       case 'findText':
         value = engine.findText(request.read.request);
         break;
@@ -1479,9 +1627,13 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
           request.read.paraId
         );
         break;
-      case 'anchorTargets':
-        value = computeAnchorTargetGeometry(session.geometryReader, request.read.targets);
+      case 'anchorTargets': {
+        const reader = session.geometryReader;
+        value = computeAnchorTargetGeometry(reader, request.read.targets, () =>
+          hiddenRanges(reader, reader.version(), proposals?.snapshot() ?? null)
+        );
         break;
+      }
       case 'searchText':
         value = readResidentSearch(
           {
@@ -2427,11 +2579,16 @@ function destroySession(keepSurfaces = false): void {
   session = null;
   commandHost = null;
   commandInit = null;
+  sessionFonts?.dispose();
+  sessionFonts = null;
   commandFrameChanges = null;
   positionIndex = null;
   commandDisplayWindow = undefined;
   openedDocument = null;
   openedSource = null;
+  openedViaSource = false;
+  openedParsed = false;
+  sourcePreviewing = false;
   editorSaves = { full: false };
   openedVersion = undefined;
   previewing = false;
@@ -2539,13 +2696,14 @@ async function replyFrame(
   layoutProvisional = false,
   deletedUnits?: number,
   precedingPageFrames: Uint8Array[] = [],
-  selectionCursor: CollaborationCursor | null = null
+  selectionCursor: CollaborationCursor | null = null,
+  sourceOpened?: { sourceDocument: import('../types/document').Document; hostJson?: string }
 ): Promise<void> {
   const layoutJson = typeof layoutReply === 'string' ? layoutReply : undefined;
   const layoutMeta = typeof layoutReply === 'object' ? layoutReply : undefined;
   const documentVersion = session?.proposalEngine.version();
   if (layoutReply !== undefined) retainedLayoutVersion = documentVersion ?? null;
-  const documentPreview = previewing;
+  const documentPreview = previewing || sourcePreviewing;
   if (!previewing && openedVersion === undefined && documentVersion !== undefined) {
     openedVersion = documentVersion;
   }
@@ -2603,6 +2761,7 @@ async function replyFrame(
     {
       id,
       ok: true,
+      ...sourceOpened,
       frame,
       ...(pageFrames.length > 0 ? { pageFrames: [...pageFrames, frame] } : {}),
       updates: updateBuffers,
@@ -2674,6 +2833,7 @@ async function replayOffscreen(
       pageId: string;
     }>
   > = [];
+  const images = openedViaSource && session ? residentMediaImages(session) : undefined;
   for (let index = 0; index < retainedFrame.pages.length; index += 1) {
     const retainedPage = retainedFrame.pages[index];
     const pageIdString = retainedPage.pageId.toString();
@@ -2707,7 +2867,7 @@ async function replayOffscreen(
       rasterizeDisplayPageToBackBuffer(
         resolvedBuffer,
         page,
-        { glyphCache: glyphCache ?? undefined },
+        { glyphCache: glyphCache ?? undefined, ...(images ? { resolveImage: images.resolve } : {}) },
         offscreenDpr,
         offscreenZoom
       ).then(() => ({ canvas, buffer: resolvedBuffer, pageId }))
@@ -2716,7 +2876,7 @@ async function replayOffscreen(
   const prepared = await Promise.all(preparations).catch(async (error) => {
     await Promise.allSettled(preparations);
     throw error;
-  });
+  }).finally(() => images?.close());
   let caretPainted =
     caretTarget !== null && paintedCaretPageId === caretTarget.pageId && paintedCaretKey === caretKey;
   // Present only after the entire damaged frame is ready. This loop is

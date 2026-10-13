@@ -5,7 +5,7 @@ import { SessionFailure, type MethodHandlers, type MethodPolicies } from '../../
 import type { PptxEditRequest, PptxEditResult, PptxStoryTarget, PptxStoryText, PptxTextField } from '../edits';
 import { DEFAULT_EDITOR_TEXT_STYLE, insertionEchoRun } from '../textFormatting';
 import type { ParagraphAlignment, PptxCaretAnchor, SlideDisplayList, ShapeRect, ShapeDraft, PresetShapeDraft, PictureDraft, ShapeReceipt, ShapeSnapshot, StorySnapshot, TextStyle, TextStyleSnapshot } from '../types';
-import { canMoveShape, canResizeShape, effectiveShapeRect, findTopLevelShape, MIN_SHAPE_SIZE_EMU } from './commandShapes';
+import { canMoveShape, canResizeShape, effectiveShapeRect, findShape, findTopLevelShape, MIN_SHAPE_SIZE_EMU } from './commandShapes';
 import {
   decodeTiffImage, initWasm, openPresentation, presentationMetadata, presentationStoryFormatting, type PresentationCommandReadResult,
   type PresentationHandle, type PresentationHistoryReceipt,
@@ -59,6 +59,7 @@ export function registerPresentationCommandHandlers(
     focus: PptxCaretAnchor;
   };
   type Admission =
+    | { kind: 'observer'; enabled: boolean }
     | { kind: 'invoke'; run(): unknown; result?: unknown; method: string; receipt?: PresentationHistoryReceipt }
     | { kind: 'remote'; bytes: ArrayBuffer; receipt?: PresentationHistoryReceipt }
     | { kind: 'batch'; request: PptxEditRequest; result?: PptxEditResult; receipt?: PresentationHistoryReceipt }
@@ -105,8 +106,10 @@ export function registerPresentationCommandHandlers(
   const objectTokens = new Map<string, { signature: string; token: string }>();
   let pointerRange: { group: string; selection: AnchoredSelection } | undefined;
   let readOnly = false;
+  let observeChanges = false;
   let failedSeq: number | undefined;
   const storedMarks: TextStyle = {};
+  const draftStyles = new Map<string, TextStyleSnapshot>();
   let lastEditState: PresentationCommandEditState | undefined;
   let composition: { id: string; selection: PresentationCommandSelection; committed: boolean } | undefined;
   let typing: { target: string; group: string; time: number; kind: string; position: number } | undefined;
@@ -120,6 +123,7 @@ export function registerPresentationCommandHandlers(
   const mutations = new Map<number, Mutation>();
   const storyMutations = new Map<string, Map<number, Mutation>>();
   const stories = new Map<string, CachedStory>();
+  const notes = new Map<string, string>();
   const slideStoryKeys = new Map<string, Set<string>>();
   const selections = new Map<number, AnchoredSelection | null>();
   const revisions = new Map<string, number>();
@@ -141,6 +145,7 @@ export function registerPresentationCommandHandlers(
   }
 
   function cacheStories(content: Extract<PresentationCommandReadResult, { ok: true }>): void {
+    for (const slide of content.slides) notes.set(slide.id, slide.notes ?? '');
     const sources = new Map(content.sources.map((source) => [source.storyId, source.paragraphs]));
     for (const story of content.stories) {
       const key = storyKey(story);
@@ -222,7 +227,7 @@ export function registerPresentationCommandHandlers(
   function selectedObject(slideId: string, shapeId: string): PresentationCommandObjectSelection | null {
     const deck = presentation().snapshot();
     const slide = deck.slides.find((slide) => slide.id === slideId);
-    const shape = slide && findTopLevelShape(slide, shapeId);
+    const shape = slide && findShape(slide.shapes, shapeId);
     const geometry = authoritativeGeometry(slideId);
     if (!shape || shape.id !== shapeId || !geometry) return null;
     const ids = new Set<string>();
@@ -251,7 +256,8 @@ export function registerPresentationCommandHandlers(
     const story = shape.textStories[0];
     return { kind: 'object', slideId, shapeId, storyId: story?.id ?? '',
       anchor: 0, focus: 0, affinity: 'downstream', token: objectToken(slideId, shape), bounds, rect,
-      canMove: canMoveShape(shape), canResize: canResizeShape(shape), units };
+      canMove: slide!.shapes.includes(shape) && canMoveShape(shape),
+      canResize: slide!.shapes.includes(shape) && canResizeShape(shape), units };
   }
 
   function objectStory(object: PresentationCommandObjectSelection): PresentationCommandSelection | null {
@@ -403,6 +409,8 @@ export function registerPresentationCommandHandlers(
     const cached = stories.get(storyKey(at))!;
     const story = cached.formatting ??= presentationStoryFormatting(presentation(), at);
     const marks = marksAt(at);
+    // Boxes inserted here type at their draft style, not the inherited cascade of their empty paragraphs.
+    const draft = draftStyles.get(storyKey(at));
     const previous = cached.toolbar;
     if (previous?.story === story && previous.selection.anchor === at.anchor && previous.selection.focus === at.focus &&
       previous.selection.affinity === at.affinity && previous.selection.kind === at.kind &&
@@ -413,12 +421,14 @@ export function registerPresentationCommandHandlers(
     let offset = 0;
     let caretStyle: TextStyleSnapshot | undefined;
     let precedingStyle: TextStyleSnapshot | undefined;
+    let firstStyle: TextStyleSnapshot | undefined;
     const styles: TextStyleSnapshot[] = [];
     const emptyStyles: TextStyleSnapshot[] = [];
     const alignments = new Set<string | null>();
     for (const paragraph of story.paragraphs) {
       const paragraphStart = offset;
       for (const run of paragraph.runs) {
+        if (draft && run.text.length === 0) continue;
         const runEnd = offset + run.text.length;
         const style: TextStyleSnapshot = { ...run.style,
           bold: run.style.bold ?? DEFAULT_EDITOR_TEXT_STYLE.bold,
@@ -427,6 +437,7 @@ export function registerPresentationCommandHandlers(
           fontFamily: run.style.fontFamily ?? DEFAULT_EDITOR_TEXT_STYLE.fontFamily,
           fontSizePt: normalizeFontSize(run.style.fontSizePt ?? DEFAULT_EDITOR_TEXT_STYLE.fontSizePt),
           color: run.style.color ?? DEFAULT_EDITOR_TEXT_STYLE.color };
+        firstStyle ??= style;
         if (start >= offset && start < runEnd || start === offset && runEnd === offset) caretStyle ??= style;
         if (runEnd <= start && runEnd > offset) precedingStyle = style;
         if (runEnd > offset && start < runEnd && end > offset) styles.push(style);
@@ -438,10 +449,11 @@ export function registerPresentationCommandHandlers(
       offset += 1;
     }
     styles.push(...emptyStyles);
+    if (draft && styles.length === 0) styles.push(draft);
     let formatting: TextStyleSnapshot = { ...DEFAULT_EDITOR_TEXT_STYLE };
     if (start === end && at.kind !== 'shape') {
-      formatting = { ...formatting, ...(caretStyle ?? precedingStyle ?? story.paragraphs[0]?.runs[0]?.style),
-        ...marks };
+      formatting = { ...formatting, ...(caretStyle ?? precedingStyle ??
+        (draft ? firstStyle ?? draft : story.paragraphs[0]?.runs[0]?.style)), ...marks };
       if (formatting.fontSizePt !== null && formatting.fontSizePt !== undefined) {
         formatting.fontSizePt = normalizeFontSize(formatting.fontSizePt);
       }
@@ -471,9 +483,9 @@ export function registerPresentationCommandHandlers(
           && paragraph.editable && paragraph.fields.length === 0)) echoRun = neighbour.neighbour;
     }
     const slide = objectSelection ? opened.snapshot().slides.find((slide) => slide.id === objectSelection!.slideId) : null;
-    const shape = slide && findTopLevelShape(slide, objectSelection!.shapeId);
+    const shape = slide && slide.shapes.find((shape) => shape.id === objectSelection!.shapeId);
     const color = (value: string | null | undefined) => value && /^[#]?[0-9a-f]{6}$/i.test(value) ? `#${value.replace(/^#/, '')}` : null;
-    lastEditState = { readOnly,
+    lastEditState = { readOnly, proposals: opened.listProposals(), notes: activeSlideId ? { slideId: activeSlideId, text: notes.get(activeSlideId) ?? '' } : null,
       object: shape && slide ? { formattable: shape.kind === 'shape', geometry: shape.geometry ?? null,
         fill: shape.fill?.type === 'none' ? null : color(shape.resolvedFillColor), stroke: color(shape.resolvedOutlineColor),
         strokeWidth: shape.resolvedOutlineColor ? (shape.outline?.width ?? 12700) / 12700 : null,
@@ -553,6 +565,7 @@ export function registerPresentationCommandHandlers(
     const updates = pendingUpdates.splice(0);
     return transferable({ ...identity!, epoch: documentEpoch, throughSeq, version,
       ...(updates.length ? { updates } : {}),
+      ...(observeChanges && commandOutcomes.some((outcome) => outcome.committed) ? { change: { ...identity!, throughSeq, version, snapshot: presentation().snapshot() } } : {}),
       selection: objectSelection ?? (selection ? { ...selection } : null), editState: edit, outcomes: commandOutcomes,
       dirtySlideIds, activeSlideId, historyThroughSeq, ...(creation ? { creation } : {}), ...(editResult ? { editResult } : {}), ...(fontId !== undefined ? { fontId } : {}),
       ...(history ? { slides: metadata!.slides, size: metadata!.size } : {}),
@@ -615,6 +628,7 @@ export function registerPresentationCommandHandlers(
       return typeof slideId === 'string' && revisions.has(slideId) && slideIndices.has(slideId)
         ? { kind: 'activation', slideId } : 'bad-target';
     }
+    if (command.kind === 'setChangeObserver') return typeof command.payload.enabled === 'boolean' ? { kind: 'observer', enabled: command.payload.enabled } : 'invalid-payload';
     if (command.kind === 'invoke') {
       if (composition) return 'invalid-composition';
       if (command.basis.version !== version) return 'stale-basis';
@@ -686,10 +700,16 @@ export function registerPresentationCommandHandlers(
       return { kind: 'history', direction: command.kind };
     }
     if (command.kind === 'selectObject') {
-      const { frame: tag, x, y, scale } = command.payload;
-      if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(scale) || scale <= 0) return 'invalid-payload';
+      const { frame: tag } = command.payload;
       if (!objectFrame(tag) || command.basis.version !== version || presentation().version() !== version) return 'stale-basis';
       if (composition) return 'invalid-composition';
+      if ('shapeId' in command.payload) {
+        if (typeof command.payload.shapeId !== 'string') return 'invalid-payload';
+        const object = selectedObject(tag.slideId, command.payload.shapeId);
+        return object ? { kind: 'object', object } : 'bad-target';
+      }
+      const { x, y, scale } = command.payload;
+      if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(scale) || scale <= 0) return 'invalid-payload';
       const geometry = frames.get(frameKey(tag))!.geometry;
       const hit = hitGeometry(geometry, { x, y }, undefined, scale);
       if (hit?.kind !== 'shape') return 'bad-target';
@@ -1077,6 +1097,7 @@ export function registerPresentationCommandHandlers(
       readOnly = admitted.readOnly;
       return false;
     }
+    if (admitted.kind === 'observer') { observeChanges = admitted.enabled; return false; }
     if (admitted.kind === 'invoke') {
       const selected = selection ? anchor(selection) : null;
       const object = objectSelection;
@@ -1149,6 +1170,12 @@ export function registerPresentationCommandHandlers(
       objectSelection = command.kind === 'insertTextBox' ? null : object;
       selection = command.kind === 'insertTextBox' && object?.storyId ? { slideId: object.slideId, shapeId: object.shapeId,
         storyId: object.storyId, anchor: 0, focus: 0, affinity: 'downstream' } : object ? objectStory(object) : null;
+      if (command.kind === 'insertTextBox' && selection) {
+        const style = (admitted.draft as ShapeDraft).style;
+        draftStyles.set(storyKey(selection), { ...DEFAULT_EDITOR_TEXT_STYLE,
+          ...Object.fromEntries(Object.entries(style).filter(([, value]) => value !== undefined && value !== null)),
+          fontSizePt: normalizeFontSize(style.fontSizePt ?? DEFAULT_EDITOR_TEXT_STYLE.fontSizePt) });
+      }
       clearMarks();
       return true;
     }
@@ -1262,7 +1289,7 @@ export function registerPresentationCommandHandlers(
           fonts: input.fonts?.map((face) => ({ ...face, bytes: new Uint8Array(face.bytes) })),
           fallbackFonts: input.fallbackFonts?.map((face) => ({ ...face, bytes: new Uint8Array(face.bytes) })),
           initialUpdate: input.initialUpdate });
-        if (input.collaboration) offUpdates = handle.onUpdate((update, origin) => {
+        offUpdates = handle.onUpdate((update, origin) => {
           pendingUpdates.push({ bytes: update.slice().buffer, origin });
         });
         const openedMetadata = refreshMetadata();
@@ -1272,6 +1299,7 @@ export function registerPresentationCommandHandlers(
         }
         identity = { session: input.session, incarnation: input.incarnation };
         readOnly = input.readOnly ?? false;
+        observeChanges = input.observeChanges ?? false;
         initialUpdate = input.initialUpdate !== undefined;
         activeSlideId = openedMetadata.slides[Math.max(0, Math.min(index, openedMetadata.slides.length - 1))]?.id ?? null;
         handle.setUndoCaptureMode('manual');
@@ -1284,9 +1312,10 @@ export function registerPresentationCommandHandlers(
         cacheStories(content);
         for (const slide of openedMetadata.slides) revisions.set(slide.id, 0);
         const result = ack();
+        const recoveryUpdate = handle.encodeStateAsUpdate().slice().buffer;
         return transferable({ ...result.value, shared: projection.ack(result.value),
           slides: openedMetadata.slides, size: openedMetadata.size,
-          activeSlideId, frame: result.value.frame ?? null }, result.transfer);
+          activeSlideId, frame: result.value.frame ?? null, recoveryUpdate }, [...result.transfer, recoveryUpdate]);
       } catch (error) {
         dispose();
         throw error;
@@ -1439,6 +1468,7 @@ export function registerPresentationCommandHandlers(
         case 'encodeStateVector': return opened.encodeStateVector();
         case 'encodeStateAsUpdate': return opened.encodeStateAsUpdate(args[0] as Uint8Array | undefined);
         case 'snapshot': return opened.snapshot();
+        case 'comments': return opened.comments();
         case 'story': return opened.story(args[0] as string);
         case 'findText': return opened.findText(args[0] as Parameters<PresentationHandle['findText']>[0]);
         case 'validateEdits': return readOnly ? { ok: false as const, version,
@@ -1447,15 +1477,19 @@ export function registerPresentationCommandHandlers(
         case 'exportMarkdown': return opened.exportMarkdown(args[0] as Parameters<PresentationHandle['exportMarkdown']>[0]);
         case 'searchText': return opened.searchText(args[0] as string, args[1] as Parameters<PresentationHandle['searchText']>[1]);
         case 'listProposals': return opened.listProposals();
+        case 'previewProposal': return opened.previewProposal(args[0] as string);
+        case 'layoutSlide': return opened.layoutSlide(args[0] as number);
+        case 'layoutProposalSlide': return opened.layoutProposalSlide(args[0] as string, args[1] as number);
+        case 'layoutProposalDiffSlide': return opened.layoutProposalDiffSlide(args[0] as string, args[1] as number);
         default: throw new TypeError('Unsupported access method');
       }
     },
     checkpointCommandEditor(_, request) {
       fence(request);
       const bytes = presentation().save().slice().buffer;
-      const updates = pendingUpdates.splice(0);
-    return transferable({ ...identity!, epoch: documentEpoch, throughSeq, version,
-      ...(updates.length ? { updates } : {}), bytes }, [bytes]);
+      const recoveryUpdate = presentation().encodeStateAsUpdate().slice().buffer;
+      return transferable({ ...identity!, epoch: documentEpoch, throughSeq, version,
+        bytes, recoveryUpdate }, [bytes, recoveryUpdate]);
     },
     prepareCommandPicture(_, request, bytes) {
       fence(request);
@@ -1490,6 +1524,7 @@ export function registerPresentationCommandHandlers(
     mutations.clear();
     storyMutations.clear();
     stories.clear();
+    draftStyles.clear();
     slideStoryKeys.clear();
     objectTokens.clear();
     selections.clear();

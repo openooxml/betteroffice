@@ -10,6 +10,7 @@ import { displayPositionToYrsLoc } from './inputPositionMap';
 import { YrsPositionProjection } from './yrsPositionProjection';
 import type { YrsLoc, YrsStoryRange, YrsStorySegment } from './index';
 import { mintCommandSelection } from './residentCommandAnchors';
+import { ResidentSessionFonts } from './residentFontEnvironment';
 import { applyDocxCommand, preflightDocxCommand } from './residentCommandActions';
 import { resolveDocxSelectionIntent, type DocxSelectionCommandIntent } from './residentCommandSelection';
 import type { DocxCommandEnvelope, DocxCommandSelection, DocxNavigationIntent, ResidentCommandHooks, ResidentCommandHooksFactory, ResidentCommandHostOptions, ResidentCommandInitRequest, ResidentDocxCommandEngine } from './residentCommandProtocol';
@@ -249,6 +250,7 @@ function workerSelectionHooks(arm: CommandArm, frame: RetainedFrame, buildPages?
     init: { layoutWithRegions: true, layoutInput: '{}', extras: '{}' } as ResidentCommandInitRequest,
     retainedFrame: frame, retainedLayoutVersion: null, layoutRevision: 0, commandFrameChanges: null,
     commandInit: null, commandHost: null,
+    sessionFonts: null, ResidentSessionFonts, scope: { fonts: undefined },
     createResidentCommandHost: (options: ResidentCommandHostOptions) => options.hooks,
     displayPositionIndex: () => index, createDisplayListQueries: queryModule.createDisplayListQueries,
     loadRustDisplayListQueryEngine: async () => {}, loadedRustDisplayListQueryEngine: () => undefined,
@@ -618,6 +620,7 @@ test('d2a_worker_vertical_navigation_builds_unbuilt_neighbours_before_chained_ty
     init: { layoutWithRegions: true, layoutInput: '{}', extras: '{}' } as ResidentCommandInitRequest,
     retainedFrame: windowed, retainedLayoutVersion: null, layoutRevision: 0, commandFrameChanges: null,
     commandInit: null, commandHost: null,
+    sessionFonts: null, ResidentSessionFonts, scope: { fonts: undefined },
     createResidentCommandHost: (options: ResidentCommandHostOptions) => options.hooks,
     displayPositionIndex: () => index, createDisplayListQueries: queryModule.createDisplayListQueries,
     loadRustDisplayListQueryEngine, loadedRustDisplayListQueryEngine, applyFrameDelta, decodeFrameDelta,

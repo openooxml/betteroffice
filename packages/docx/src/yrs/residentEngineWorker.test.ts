@@ -11,6 +11,7 @@ import { isLayoutMetaV1, type LayoutMetaV1 } from './layoutMeta';
 import type { Layout } from '../layout/pagination';
 import { proposalRevisionPreview } from './proposals';
 import { createYrsSession } from './index';
+import { storiesDocx } from './__fixtures__/storiesDocx';
 import { readSidebar, readOutlineHeadings } from './sidebarReads';
 import { sidebarDocx } from './__fixtures__/sidebarDocx';
 import { readResidentSearch } from './residentSearch';
@@ -59,6 +60,7 @@ beforeAll(async () => {
   const frameDelta = resolve(import.meta.dir, '../layout/render/frameDelta.ts');
   const scheduler = resolve(import.meta.dir, 'residentScheduler.ts');
   const modules: Record<string, string> = {
+    './yrsSessionFacade': 'export const decodeDocxHostJson = () => { throw new Error("Unexpected source decode"); };',
     './residentEngineSession':
       `export const createResidentEngineSession = async (heapLimitBytes) => {
         await testHarness.preload();
@@ -242,6 +244,7 @@ function worker() {
     failPresent: null as number | null,
     memories: [{ label: 'docx-edit', bufferBytes: 65536, liveBytes: 100, peakBytes: 100, failedAllocationBytes: 0 }],
     session: {
+      partGeometry: () => [],
       proposalEngine: { version: () => 'v' },
       geometryReader: { storyIds: () => ['body'] },
       markProjectionStories(_stories: readonly string[]) {},
@@ -1784,6 +1787,45 @@ test('document reads skip stale versions and read the current version', async ()
   });
   expect(current).not.toHaveProperty('superseded');
   expect(reads).toBe(1);
+});
+
+test('story reads answer from the worker as the session would', async () => {
+  const main = await createYrsSession();
+  const engine = await createResidentEngineSession();
+  const w = worker();
+  try {
+    main.openDocx(storiesDocx(), true);
+    engine.openDocx(storiesDocx());
+    await w.bootstrap();
+    Object.assign(w.harness.session, {
+      proposalEngine: engine.proposalEngine,
+      listStories: engine.listStories,
+      readStories: engine.readStories,
+    });
+    const version = engine.proposalEngine.version();
+    const value = (reply: unknown) => (reply as { read?: { value?: Record<string, unknown> } }).read?.value;
+    const listed = await w.send({ type: 'documentRead', read: { kind: 'listStories' } });
+    expect(listed).toMatchObject({ ok: true, read: { version, value: { ok: true, version } } });
+    expect(value(listed)?.stories).toEqual(main.listStories().stories);
+    for (const stories of ['all', ['header', 'tableCell'], ['missing', 'footer']] as const) {
+      const request = { stories, view: 'accepted' as const };
+      const reply = await w.send({ type: 'documentRead', read: { kind: 'readStories', request } });
+      const local = main.readStories(request);
+      expect(reply).toMatchObject({ ok: true, read: { value: { ok: true, version } } });
+      expect(value(reply)?.stories).toEqual(local.ok ? local.stories : undefined);
+    }
+    const stale = await w.send({
+      type: 'documentRead',
+      read: { kind: 'readStories', request: { view: 'accepted', expectVersion: 'older' } },
+    });
+    expect(stale).toMatchObject({
+      ok: true,
+      read: { value: { ok: false, version, failure: { code: 'stale-version' } } },
+    });
+  } finally {
+    main.destroy();
+    engine.destroy();
+  }
 });
 
 test.each([false, true])(

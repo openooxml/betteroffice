@@ -17,6 +17,7 @@ type HeldMessage = { worker: Worker; message: ResidentEngineWorkerResponse };
 interface InputProbe {
   commands: DocxCommandEnvelope[];
   acks: DocxCommandAck[];
+  frames: DocxCommandFrame[];
   initial: DocxCommandAck | null;
   holdAcks: boolean;
   holdFrames: boolean;
@@ -70,6 +71,7 @@ async function installProbe(page: Page) {
     const probe: InputProbe = {
       commands: [],
       acks: [],
+      frames: [],
       initial: null,
       holdAcks: false,
       holdFrames: false,
@@ -120,13 +122,18 @@ async function installProbe(page: Page) {
             probe.worker = this;
             adjustContext(message.commandInitial.frame);
             probe.initial = message.commandInitial;
+            if (message.commandInitial.frame) probe.frames.push(message.commandInitial.frame);
           }
           const ack = message.commandAck;
           if (ack) {
             adjustContext(ack.frame);
             probe.acks.push(ack);
+            if (ack.frame) probe.frames.push(ack.frame);
           }
-          if (message.commandFrame) adjustContext(message.commandFrame.frame);
+          if (message.commandFrame) {
+            adjustContext(message.commandFrame.frame);
+            probe.frames.push(message.commandFrame.frame);
+          }
           if (ack && probe.holdAcks) {
             event.stopImmediatePropagation();
             probe.heldAcks.push({ worker: this, message });
@@ -226,6 +233,35 @@ async function focusHarness(page: Page) {
   await settled(page);
   return input;
 }
+
+test('font picker prepares the selected family and retains shaped glyph widths', async ({ page }) => {
+  test.skip(process.env.DOCX_PEERLESS_HARNESS !== '1', 'Font command probes require DOCX_PEERLESS_HARNESS=1');
+  const zip = await JSZip.loadAsync(await documentBytes());
+  const xml = await zip.file('word/document.xml')!.async('string');
+  zip.file('word/document.xml', xml.replace('<w:r>', '<w:r><w:rPr><w:rFonts w:ascii="Liberation Sans" w:hAnsi="Liberation Sans"/></w:rPr>'));
+  await openHarness(page, 1, await zip.generateAsync({ type: 'nodebuffer' }));
+  const input = await focusHarness(page);
+  await input.press('ControlOrMeta+End');
+  await input.press('Shift+Home');
+  await settled(page);
+  await page.getByRole('combobox', { name: 'Select font family' }).click();
+  await page.getByRole('option', { name: 'Times New Roman', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => window.__docxPeerlessInput.commands.some(command => command.kind === 'formatRange'))).toBe(true);
+  await settled(page);
+  const commands = await page.evaluate(() => window.__docxPeerlessInput.commands.map(command => ({ kind: command.kind,
+    chains: command.kind === 'setFontEnvironment' ? (command.payload as { chains: Record<string, number[]> }).chains : undefined })));
+  const formatIndex = commands.findIndex(command => command.kind === 'formatRange');
+  const environment = commands.slice(0, formatIndex).find(command => command.kind === 'setFontEnvironment');
+  expect(environment?.chains?.['times new roman|0|0']?.length).toBeGreaterThan(0);
+  const frames = await page.evaluate(() => window.__docxPeerlessInput.frames.map(frame => Array.from(new Uint8Array(frame.payload.frame))));
+  let retained = applyFrameDelta(null, decodeFrameDelta(Uint8Array.from(frames[0]!)));
+  const original = retained.pages[0]!.page.primitives.flatMap(primitive => primitive.kind === 'glyphRun' && !primitive.listMarker ? [primitive] : []);
+  for (const frame of frames.slice(1)) retained = applyFrameDelta(retained, decodeFrameDelta(Uint8Array.from(frame)));
+  const selected = retained.pages[0]!.page.primitives.flatMap(primitive => primitive.kind === 'glyphRun' && !primitive.listMarker ? [primitive] : []);
+  expect(original.map(run => run.text).join('')).toBe('abcd');
+  expect(selected.map(run => run.text).join('')).toBe('abcd');
+  expect(selected.flatMap(run => run.glyphs.map(glyph => glyph.advance))).not.toEqual(original.flatMap(run => run.glyphs.map(glyph => glyph.advance)));
+});
 
 async function harnessText(page: Page) {
   const bytes = await page.evaluate(() => window.__docxPeerlessHarness!.exportBytes());

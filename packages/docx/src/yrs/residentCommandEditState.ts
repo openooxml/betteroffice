@@ -122,7 +122,8 @@ export function projectDocxEditState(
   context?: YrsSelectionContext
 ): DocxEditState {
   const result: DocxEditState = {
-    readOnly: state.readOnly, toolbar: null, effectiveFormatting: null, storedMarks: null,
+    ...(state.activePart !== undefined ? { activePart: state.activePart } : {}),
+    documentVersion: engine.proposalEngine?.version(), readOnly: state.readOnly, toolbar: null, effectiveFormatting: null, storedMarks: null,
     canUndo: engine.canUndo?.() ?? false, canRedo: engine.canRedo?.() ?? false,
     hyperlink: null, tableContext: null,
   };

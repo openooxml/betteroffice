@@ -2614,7 +2614,7 @@ fn validate_coordinate(value: i64) -> EditResult<()> {
     Ok(())
 }
 
-fn validate_adjustments(adjustments: &BTreeMap<String, f64>) -> EditResult<()> {
+pub(crate) fn validate_adjustments(adjustments: &BTreeMap<String, f64>) -> EditResult<()> {
     if adjustments.len() > MAX_ADJUSTMENTS {
         return Err(EditError::InvalidAdjustment(format!(
             "at most {MAX_ADJUSTMENTS} values are allowed"

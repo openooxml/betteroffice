@@ -69,9 +69,9 @@ use crate::{
     FontFamilyPatch, FormatPolicy, InlineFormatDelta, Loc, LocRange, MergeDirection, OpError,
     ParaAttrDelta, ParaSelector, ParagraphAnchor, ParagraphIdDiagnostic, ParagraphIdOrigin,
     ParagraphIdRefusal, ParagraphOrigin, ParagraphRef, Patch, PersistedParagraphIds, Position,
-    RawOp, ReadParagraphsRequest, SeedParagraph, SegmentContent, SimpleFormat, SourceParagraphRef,
-    SourceStory, SourceStoryKind, SpliceAnchor, StoryRange, TabStop, TableLocator, TableRange,
-    TextTarget, TriState, UndoCaptureMode, UndoSession, story_ref,
+    RawOp, ReadParagraphsRequest, ReadStoriesRequest, SeedParagraph, SegmentContent, SimpleFormat,
+    SourceParagraphRef, SourceStory, SourceStoryKind, SpliceAnchor, StoryRange, TabStop,
+    TableLocator, TableRange, TextTarget, TriState, UndoCaptureMode, UndoSession, story_ref,
 };
 
 #[wasm_bindgen]
@@ -1754,6 +1754,10 @@ impl EditSession {
         docx_layout::register_measure_font(bytes)
     }
 
+    pub fn decode_font(&self, bytes: &[u8]) -> Result<Vec<u8>, JsValue> {
+        crate::decode_resident_font(bytes).map_err(js_err)
+    }
+
     /// Registers a measurement view of `base` carrying the vertical metrics
     /// and advance pitch Word measures `requested_family` with — for a face
     /// this host had to substitute. Returns `base` for a family whose metrics
@@ -3220,6 +3224,45 @@ impl EditSession {
         serde_json::to_string(&TableRange { anchor, head }).map_err(js_err)
     }
 
+    pub fn part_metadata_json(&self) -> String {
+        self.engine.doc().part_metadata_json()
+    }
+
+    pub fn set_part_metadata(&self, json: &str, remove_json: &str) -> Result<bool, JsValue> {
+        let remove: Vec<String> = serde_json::from_str(remove_json).map_err(js_err)?;
+        let changed = self
+            .engine
+            .doc()
+            .set_part_metadata(&EditCtx::local("", ""), json, &remove)
+            .map_err(js_err)?;
+        if changed && !remove.is_empty() {
+            self.cell_selection.borrow_mut().take();
+        }
+        Ok(changed)
+    }
+
+    pub fn document_properties_json(&self) -> String {
+        self.engine.doc().document_properties_json()
+    }
+
+    pub fn set_document_property(&self, key: &str, json: &str) -> Result<bool, JsValue> {
+        self.engine
+            .doc()
+            .set_document_property(&EditCtx::local("", ""), key, json)
+            .map_err(js_err)
+    }
+
+    pub fn section_margins_json(&self) -> String {
+        self.engine.doc().section_margins_json()
+    }
+
+    pub fn set_section_margins(&self, section: &str, json: &str) -> Result<bool, JsValue> {
+        self.engine
+            .doc()
+            .set_section_margins(&EditCtx::local("", ""), section, json)
+            .map_err(js_err)
+    }
+
     /// Adds a story holding one paragraph with `initial_text` (which must not
     /// contain paragraph breaks), `p_style` and `alignment`. Receipt:
     /// `{"paraId"}` — the paragraph ending at the story's pilcrow. Errors when
@@ -4270,6 +4313,23 @@ impl EditSession {
         outcome_json(&self.engine.doc().read_paragraphs(&request)).map_err(js_err)
     }
 
+    /// Paragraph texts of selected stories in one read:
+    /// `{"stories"?:"all"|[kind|id…],"byRoot"?,"view","expectVersion"?}` -> `{"ok":true,
+    /// "version","view","truncated","stories":[{"story","ok":true,"paragraphs"}|{"story",
+    /// "ok":false,"failure"}]}`. Listed entries keep their order; a kind expands in id order.
+    pub fn read_stories_json(&self, request: &str) -> Result<String, JsValue> {
+        let request: ReadStoriesRequest = serde_json::from_str(request).map_err(js_err)?;
+        outcome_json(&self.engine.doc().read_stories(&request)).map_err(js_err)
+    }
+
+    /// Every story: `{"ok":true,"version","stories":[{"story","kind","parent"?,"root","part"?,
+    /// "uses"?}]}`, sorted by id.
+    pub fn list_stories_json(&self) -> Result<String, JsValue> {
+        let mut listed = serde_json::to_value(self.engine.doc().list_stories()).map_err(js_err)?;
+        listed["ok"] = Value::Bool(true);
+        Ok(listed.to_string())
+    }
+
     /// Until the matching `end_shared_reads`, committed reads share story projections of each document state.
     pub fn begin_shared_reads(&self) {
         self.engine.doc().begin_shared_reads();
@@ -4328,6 +4388,73 @@ impl EditSession {
     pub fn export_markdown_json(&self, options: &str) -> Result<String, JsValue> {
         let options: ExportOptions = serde_json::from_str(options).map_err(js_err)?;
         outcome_json(&self.engine.doc().export_markdown(&options)).map_err(js_err)
+    }
+
+    pub fn content_control_targets_json(&self) -> Result<String, JsValue> {
+        let txn = self.engine.doc().yrs_doc().transact();
+        let inventory = crate::content_controls::Inventory::build(self.engine.doc(), &txn)
+            .map_err(|failure| js_err(failure.message))?;
+        let mut values = Vec::new();
+        for record in inventory
+            .records
+            .into_iter()
+            .filter(|record| record.listed && !record.alias)
+        {
+            let raw = match record.site {
+                crate::content_controls::Site::Inline { raw, .. }
+                | crate::content_controls::Site::Block { raw, .. } => raw,
+                _ => continue,
+            };
+            let story = story_ref(&txn, &record.story).map_err(js_err)?;
+            let position = story
+                .sticky_index(&txn, raw, Assoc::After)
+                .ok_or_else(|| js_err("control could not be made sticky"))?;
+            values.push(serde_json::json!({"control":record.control,"at":{"story":record.story,"index":raw,"encoded":encode_sticky(&position)}}));
+        }
+        serde_json::to_string(&values).map_err(js_err)
+    }
+
+    pub fn repeat_content_control_at(
+        &self,
+        story: &str,
+        index: u32,
+        remove: bool,
+    ) -> Result<bool, JsValue> {
+        self.engine
+            .doc()
+            .repeat_control_at(&EditCtx::local("", ""), story, index, remove)
+            .map_err(js_err)
+    }
+
+    pub fn set_content_control_value_index(
+        &self,
+        story: &str,
+        index: u32,
+        json: &str,
+    ) -> Result<(), JsValue> {
+        let value = Any::from_json(json).map_err(js_err)?;
+        if self.fill_text_control(story, index, &value)? {
+            return Ok(());
+        }
+        if !matches!(
+            self.engine
+                .doc()
+                .embed_kind(&Position::new(story, index))
+                .map_err(js_err)?
+                .as_deref(),
+            Some("sdt" | "blockSdt")
+        ) {
+            return Err(js_err("unknown-control"));
+        }
+        self.engine
+            .doc()
+            .set_embed_attrs(
+                &EditCtx::local("", ""),
+                Position::new(story, index),
+                vec![("value".to_owned(), value)],
+            )
+            .map(|_| ())
+            .map_err(js_err)
     }
 
     /// The content controls of the committed state:

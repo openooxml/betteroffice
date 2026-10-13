@@ -2,6 +2,8 @@ import { resolve } from 'node:path';
 import { encodeDisplayListFrameExtras, loadRustDisplayListQueryEngine, loadedRustDisplayListQueryEngine } from '../../layout/render/rustDisplayList';
 import { createResidentEngineSession, type ResidentEngineSession } from '../residentEngineSession';
 import { preloadEditWasm, preloadEditWasmFrom } from '../wasm/index';
+import { decodeDocxHostJson } from '../yrsSessionFacade';
+import { wasmModuleMemories } from '../../wasm/loadWasmAsset';
 import type { ResidentEngineWorkerPort } from '../residentEngineWorkerClient';
 import type {
   ResidentEngineWorkerHostModule,
@@ -14,24 +16,31 @@ export interface InProcessResidentWorker extends ResidentEngineWorkerPort {
   /** Request types posted to the worker, in order. */
   readonly requests: (ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule)['type'][];
   readonly sessions: ResidentEngineSession[];
+  readonly imageBlobs: Blob[];
+  readonly fontFaces: Set<FontFace>;
   /** Holds the worker's replies until `release`. */
   hold(): void;
   release(): void;
 }
 
 const STUBS: Record<string, string> = {
+  '../wasm/loadWasmAsset': 'export const wasmModuleMemories = () => testHarness.wasmModuleMemories();',
   './residentEngineSession':
     'export const createResidentEngineSession = (heapLimitBytes) => testHarness.createSession(heapLimitBytes);',
   './wasm/index': `
     export const preloadEditWasm = () => testHarness.preload();
     export const preloadEditWasmFrom = (source) => testHarness.preloadFrom(source);
   `,
+  './yrsSessionFacade': 'export const decodeDocxHostJson = (...args) => testHarness.decodeDocxHostJson(...args);',
   '../layout/render/glyphCache': 'export class GlyphCache {}',
   '../layout/render/canvasBackend': `
     export const rasterizeDisplayPageToBackBuffer = async (buffer, page, _options, dpr = 1, zoom = 1) => {
       const scale = dpr * zoom;
       buffer.width = Math.ceil(page.width * scale);
       buffer.height = Math.ceil(page.height * scale);
+      for (const primitive of page.primitives) {
+        if (primitive.kind === 'image' && _options.resolveImage) await _options.resolveImage(primitive.relId);
+      }
       return buffer;
     };
     export const presentOffscreenPageBackBuffer = () => {};
@@ -95,6 +104,8 @@ export async function residentWorkerFactory(): Promise<(clientId?: number) => In
     'setTimeout',
     'clearTimeout',
     'testHarness',
+    'createImageBitmap',
+    'FontFace',
     await result.outputs[0].text()
   ) as (
     scope: unknown,
@@ -102,14 +113,18 @@ export async function residentWorkerFactory(): Promise<(clientId?: number) => In
     channel: unknown,
     schedule: unknown,
     unschedule: unknown,
-    harness: unknown
+    harness: unknown,
+    decode: unknown,
+    fontFace: unknown
   ) => void;
   return (clientId) => {
     let held: ResidentEngineWorkerResponse[] | null = null;
     let terminated = false;
     const channels: MessageChannel[] = [];
     const timers = new Set<ReturnType<typeof setTimeout>>();
+    const fontFaces = new Set<FontFace>();
     const scope = {
+      fonts: { add: (face: FontFace) => fontFaces.add(face), delete: (face: FontFace) => fontFaces.delete(face) },
       onmessage: null as ((event: {
         data: ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule;
       }) => void) | null,
@@ -140,10 +155,15 @@ export async function residentWorkerFactory(): Promise<(clientId?: number) => In
       onmessageerror: null,
       requests: [],
       sessions: [],
+      imageBlobs: [],
+      fontFaces,
       postMessage(message) {
         worker.requests.push(message.type);
         if (terminated) return;
         const data = structuredClone(message);
+        if (data.type === 'attachCanvases') {
+          for (const page of data.pages) Object.setPrototypeOf(page.canvas, Canvas.prototype);
+        }
         queueMicrotask(() => {
           if (!terminated) scope.onmessage?.({ data });
         });
@@ -152,6 +172,7 @@ export async function residentWorkerFactory(): Promise<(clientId?: number) => In
         if (terminated) return;
         terminated = true;
         held = null;
+        fontFaces.clear();
         scope.onmessage = null;
         for (const timer of timers) clearTimeout(timer);
         timers.clear();
@@ -202,6 +223,13 @@ export async function residentWorkerFactory(): Promise<(clientId?: number) => In
         },
         preload: preloadEditWasm,
         preloadFrom: preloadEditWasmFrom,
+        decodeDocxHostJson,
+        wasmModuleMemories,
+      },
+      async (blob: Blob) => { worker.imageBlobs.push(blob); return new Bitmap(1, 1); },
+      class {
+        status = 'unloaded';
+        async load() { this.status = 'loaded'; return this; }
       }
     );
     return worker;

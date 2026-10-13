@@ -18,12 +18,24 @@ test('one frozen plan feeds independent format jobs at the same source revision'
     'fail-fast': false,
     matrix: { format: '${{ fromJSON(needs.prepare.outputs.formats) }}' },
   });
-  expect(measure.steps[0].with.ref).toBe('${{ needs.prepare.outputs.source-sha }}');
+  const checkout = measure.steps.find((step: any) => step.uses?.startsWith('actions/checkout@'));
+  expect(checkout.with.ref).toBe('${{ needs.prepare.outputs.source-sha }}');
   const evaluate = measure.steps.find(
     (step: any) => step.run === 'node scripts/office-quality/run.mjs'
   );
   expect(evaluate.env.QUALITY_PLAN).toBe('${{ runner.temp }}/fidelity-plan/plan.json');
   expect(evaluate.env.QUALITY_FORMAT).toBe('${{ matrix.format }}');
+});
+
+test('every job feeding the report runs on the runner image the plan recorded', () => {
+  expect(prepare['runs-on']).toBe('ubuntu-24.04');
+  expect(prepare.outputs['runner-image']).toBe('${{ steps.runner.outputs.image }}');
+  for (const name of publish.needs.filter((name: string) => name !== 'prepare')) {
+    const [guard] = workflow.jobs[name].steps;
+    expect(workflow.jobs[name]['runs-on']).toBe('ubuntu-24.04');
+    expect(guard.env.PLANNED_IMAGE).toBe('${{ needs.prepare.outputs.runner-image }}');
+    expect(guard.run).toContain('"$ImageVersion" != "$PLANNED_IMAGE"');
+  }
 });
 
 test('only the reconciler publishes reports and renders after every format succeeds', () => {

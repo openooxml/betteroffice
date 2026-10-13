@@ -1,15 +1,17 @@
-import { useEffect, useRef, useSyncExternalStore, type ReactElement } from 'react';
+import { useEffect, useRef, useSyncExternalStore, type ReactElement, type RefObject } from 'react';
 import type { PeerlessViewStore } from './peerlessViewStore';
 import type { PeerlessVisualStore } from './usePeerlessPresentation';
 import { commitComposition, peerlessInputReference } from './peerlessViewStore';
 import type { PresentationCommandAck, PresentationCommandIntent } from '@betteroffice/pptx';
 import type { PptxCommandStore } from '../commands/types';
+import { useTranslation } from '../i18n';
 import { formatPeerlessText } from './peerlessTextCommands';
 import { usePeerlessTextSelection } from './usePeerlessTextSelection';
 
 export type PeerlessInputShortcut = 'undo' | 'redo' | 'copy' | 'cut' | 'save';
 
 export interface PeerlessTextInputProps {
+  inputRef?: RefObject<HTMLTextAreaElement | null>;
   store: PeerlessViewStore;
   visual?: PeerlessVisualStore;
   viewport?: { left: number; top: number; scale: number };
@@ -19,8 +21,12 @@ export interface PeerlessTextInputProps {
 
 let nextInputGroup = 0;
 
-export function PeerlessTextInput({ store, visual = store, viewport, onShortcut, commands }: PeerlessTextInputProps): ReactElement {
-  const inputRef = useRef<HTMLTextAreaElement>(null);
+export function PeerlessTextInput({ store, visual = store, viewport, onShortcut, commands, inputRef: providedInputRef }: PeerlessTextInputProps): ReactElement {
+  const { t } = useTranslation();
+  const textInput = t('editor.textInput');
+  const selectionAnnouncement = t('editor.selectionAnnouncement');
+  const localInputRef = useRef<HTMLTextAreaElement>(null);
+  const inputRef = providedInputRef ?? localInputRef;
   const commandsRef = useRef(commands);
   commandsRef.current = commands;
   const shortcutRef = useRef(onShortcut);
@@ -207,9 +213,16 @@ export function PeerlessTextInput({ store, visual = store, viewport, onShortcut,
     input.addEventListener('compositionend', compositionEnd);
     input.addEventListener('input', inputEvent);
     input.addEventListener('paste', paste);
+    const copy = (event: ClipboardEvent) => { event.preventDefault(); shortcutRef.current?.('copy'); };
+    const cut = (event: ClipboardEvent) => { event.preventDefault(); if (!store.getSnapshot().editState.readOnly) shortcutRef.current?.('cut'); };
+    input.addEventListener('copy', copy); input.addEventListener('cut', cut);
     input.addEventListener('focus', focus);
     input.addEventListener('blur', blur);
     return () => {
+      const composition = store.getSnapshot().composition;
+      if (composition && !store.getSnapshot().editState.readOnly) {
+        void commitComposition(store, composition.text, performance.now()).catch(() => {});
+      }
       input.removeEventListener('beforeinput', beforeInput);
       input.removeEventListener('keydown', keyDown);
       input.removeEventListener('compositionstart', compositionStart);
@@ -217,17 +230,22 @@ export function PeerlessTextInput({ store, visual = store, viewport, onShortcut,
       input.removeEventListener('compositionend', compositionEnd);
       input.removeEventListener('input', inputEvent);
       input.removeEventListener('paste', paste);
+      input.removeEventListener('copy', copy); input.removeEventListener('cut', cut);
       input.removeEventListener('focus', focus);
       input.removeEventListener('blur', blur);
     };
-  }, [store, move]);
+  }, [store, move, inputRef]);
 
   const scale = viewport?.scale ?? 1;
-  return <><textarea ref={inputRef} aria-label="Slide text" autoComplete="off" autoCorrect="off"
+  const left = (viewport?.left ?? 0) + (view.caret?.x ?? 0) * scale;
+  const top = (viewport?.top ?? 0) + (view.caret?.y ?? 0) * scale;
+  const height = Math.max(1, (view.caret?.height ?? 1) * scale);
+  return <>
+    {view.composition?.text && !view.echo && view.caret && <span data-testid="pptx-peerless-preedit" aria-hidden="true" style={{ position: 'absolute', left, top, lineHeight: `${height}px`, fontSize: height * 0.8, whiteSpace: 'pre', borderBottom: '1px solid currentColor', background: '#fff', pointerEvents: 'none' }}>{view.composition.text}</span>}
+    <span role="status" aria-live="polite" style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden', clipPath: 'inset(50%)' }}>{view.selection && view.selection.anchor !== view.selection.focus ? (selectionAnnouncement === 'editor.selectionAnnouncement' ? 'Text selected' : selectionAnnouncement) : ''}</span>
+    <textarea ref={inputRef} aria-label={textInput === 'editor.textInput' ? 'Slide text' : textInput} autoComplete="off" autoCorrect="off"
     autoCapitalize="off" spellCheck={false} tabIndex={0} readOnly={view.editState.readOnly}
-    style={{ position: 'absolute', left: (viewport?.left ?? 0) + (view.caret?.x ?? 0) * scale,
-      top: (viewport?.top ?? 0) + (view.caret?.y ?? 0) * scale, width: 1,
-      height: Math.max(1, (view.caret?.height ?? 1) * scale), opacity: 0,
+    style={{ position: 'absolute', left, top, width: 1, height, opacity: 0,
       padding: 0, border: 0, resize: 'none', overflow: 'hidden', pointerEvents: 'none' }} />
     {view.inputFailure && <div role="alert">{view.inputFailure.message}</div>}
   </>;
