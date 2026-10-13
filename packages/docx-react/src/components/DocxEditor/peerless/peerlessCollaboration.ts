@@ -8,19 +8,6 @@ export function createPeerlessCollaborationReplica<X>(client: ResidentEngineWork
   const listeners = new Set<(update: Uint8Array, origin: CollaborationUpdateOrigin) => void>();
   const inferences = new Map<number, CollaborationTextInsertion>();
   const requireActive = () => { if (retired) throw new Error('Collaboration replica is retired'); };
-  const originalSubmit = session.submit;
-  let merge: ReturnType<typeof session.submit> | undefined;
-  const submit: typeof session.submit = (kind, payload, options) => {
-    const ticket = originalSubmit.call(session, kind, payload, kind !== 'applyRemoteUpdate' && merge && (!options?.after || options.after.id < merge.id)
-      ? { ...options, after: merge } : options);
-    if (kind === 'applyRemoteUpdate') {
-      merge = ticket;
-      const clear = () => { if (merge === ticket) merge = undefined; };
-      void ticket.ack.then(clear, clear);
-    }
-    return ticket;
-  };
-  session.submit = submit;
   const off = client.onCollabUpdates(event => {
     if (retired) return;
     for (const inference of event.inferences) inferences.set(inference.seq, inference.insertion);
@@ -47,7 +34,6 @@ export function createPeerlessCollaborationReplica<X>(client: ResidentEngineWork
   });
   return Object.assign(adapter, { retire() {
     if (retired) return;
-    retired = true; off(); listeners.clear(); inferences.clear(); merge = undefined;
-    if (session.submit === submit) session.submit = originalSubmit;
+    retired = true; off(); listeners.clear(); inferences.clear();
   } });
 }
