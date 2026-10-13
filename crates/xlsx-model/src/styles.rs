@@ -724,6 +724,17 @@ impl Stylesheet {
         }
     }
 
+    /// the builtin's own code when the workbook declares `id` as something else.
+    fn shadowed_builtin(&self, id: u16) -> Option<&'static str> {
+        if id >= BUILTIN_ID_LIMIT {
+            return None;
+        }
+        let builtin = crate::numfmt::builtin_format_code(id).unwrap_or("General");
+        self.declared_code(id)
+            .filter(|code| *code != builtin)
+            .map(|_| builtin)
+    }
+
     /// the first declaration for `id`.
     fn declared_code(&self, id: u16) -> Option<&str> {
         let ids = self
@@ -797,6 +808,11 @@ impl Stylesheet {
         format: &CellFormat,
     ) -> Result<Option<u32>, NumFmtTableFull> {
         self.fmt_index.heal(&self.num_fmts);
+        if let NumberFormat::Builtin { id } = format.number_format
+            && let Some(code) = self.shadowed_builtin(id)
+        {
+            return self.intern_custom_cell_format(format, code);
+        }
         if format == &CellFormat::default() {
             return Ok(None);
         }
