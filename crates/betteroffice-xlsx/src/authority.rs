@@ -1084,14 +1084,14 @@ impl WorkbookAuthority {
                     referenced.insert(restored);
                     continue;
                 };
-                let current = restored_formats
-                    .entry(restored.clone())
-                    .or_insert_with(|| match catalog.get(&txn, &restored) {
+                let current = restored_formats.entry(restored.clone()).or_insert_with(|| {
+                    match catalog.get(&txn, &restored) {
                         Some(Out::Any(Any::String(payload))) => {
                             serde_json::from_str::<CellFormat>(&payload).ok()
                         }
                         _ => None,
-                    });
+                    }
+                });
                 let keeps = current.as_ref().is_some_and(|current| {
                     xlsx_parse::keeps_source(
                         current,
