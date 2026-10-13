@@ -695,7 +695,7 @@ fn loose_extents(x1: f32, y1: f32, x2: f32, y2: f32) -> Option<Rect> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xlsx_render::{GridMeta, PathStroke};
+    use xlsx_render::{GridMeta, PathStroke, PatternType};
 
     fn display_list(commands: Vec<DrawCmd>) -> DisplayList {
         DisplayList {
@@ -716,17 +716,42 @@ mod tests {
             w: 100.0,
             h: 60.0,
         };
-        let mut commands = vec![DrawCmd::FillRect {
-            x: 0.0,
-            y: 0.0,
-            w: 100.0,
-            h: 60.0,
-            color: "#ffffff".into(),
-            clip: Some(clip),
-        }];
-        for (index, style) in [None, Some("dashed"), Some("dotted"), Some("double")]
-            .into_iter()
-            .enumerate()
+        let mut commands = vec![
+            DrawCmd::FillRect {
+                x: 0.0,
+                y: 0.0,
+                w: 100.0,
+                h: 60.0,
+                color: "#ffffff".into(),
+                clip: Some(clip),
+            },
+            DrawCmd::PatternFill {
+                x: 0.0,
+                y: 0.0,
+                w: 100.0,
+                h: 20.0,
+                pattern: PatternType::LightUp,
+                fg: "#123456".into(),
+                bg: "#fedcba".into(),
+                origin_x: -3.0,
+                origin_y: -2.0,
+                clip: Some(clip),
+            },
+        ];
+        for (index, style) in [
+            None,
+            Some("dashed"),
+            Some("dotted"),
+            Some("double"),
+            Some("mediumDashed"),
+            Some("dashDot"),
+            Some("mediumDashDot"),
+            Some("dashDotDot"),
+            Some("mediumDashDotDot"),
+            Some("slantDashDot"),
+        ]
+        .into_iter()
+        .enumerate()
         {
             commands.push(DrawCmd::Line {
                 x1: 0.0,
