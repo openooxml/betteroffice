@@ -1013,10 +1013,112 @@ impl WorkbookAuthority {
         if let Err(error) = candidate.upgrade_schema() {
             return SnapshotAdoption::Incompatible(error);
         }
+        if let Err(error) = candidate.keep_released_source_formats(self) {
+            return SnapshotAdoption::Incompatible(error);
+        }
         match candidate.strict_materialize() {
             Err(error) => SnapshotAdoption::Incompatible(error),
             Ok(_) => SnapshotAdoption::Replacement(Box::new(candidate)),
         }
+    }
+
+    /// Points each cell back at its own source format when a release before
+    /// patterned fills restored it in that format's released reading. Every writer
+    /// seeds the format catalog with its reading of each source format, so a
+    /// catalog without a source format's own entry marks that release. A released
+    /// reading no cell uses any longer leaves the catalog.
+    fn keep_released_source_formats(&self, source: &Self) -> Result<(), String> {
+        let base = &self.base.styles;
+        let mut sources = HashMap::new();
+        for index in 0..base.cell_xfs.len() {
+            let index =
+                u32::try_from(index).map_err(|_| "cell format table is too large".to_string())?;
+            let format = base.cell_format(Some(index));
+            let (key, payload) = cell_format_entry(&format)?;
+            sources.entry(key).or_insert((format, payload));
+        }
+        let mut txn = self.doc.transact_mut_with(HYDRATE_ORIGIN);
+        let catalog = txn
+            .get_map(CELL_FORMATS)
+            .ok_or_else(|| "missing cell format catalog".to_string())?;
+        let released = sources
+            .keys()
+            .filter(|key| !catalog.contains_key(&txn, key.as_str()))
+            .cloned()
+            .collect::<HashSet<_>>();
+        if released.is_empty() {
+            return Ok(());
+        }
+        let source_txn = source.doc.transact();
+        let source_sheets = source_txn
+            .get_map(SHEETS)
+            .ok_or_else(|| "missing sheet map".to_string())?;
+        let sheets = txn
+            .get_map(SHEETS)
+            .ok_or_else(|| "missing sheet map".to_string())?;
+        let mut restored_formats = HashMap::new();
+        let mut referenced = HashSet::new();
+        for key in sheets.keys(&txn).map(str::to_string).collect::<Vec<_>>() {
+            let styles = sheets
+                .get(&txn, &key)
+                .and_then(|value| value.cast::<MapRef>().ok())
+                .ok_or_else(|| format!("sheet {key} is not a map"))
+                .and_then(|sheet| nested_map(&sheet, &txn, STYLES))?;
+            let source_styles = source_sheets
+                .get(&source_txn, &key)
+                .and_then(|value| value.cast::<MapRef>().ok())
+                .and_then(|sheet| nested_map(&sheet, &source_txn, STYLES).ok());
+            let mut kept = Vec::new();
+            for (cell, value) in styles.iter(&txn) {
+                let restored = value
+                    .cast::<String>()
+                    .map_err(|_| format!("cell style {cell} is not a string"))?;
+                let own = source_styles
+                    .as_ref()
+                    .and_then(|styles| styles.get(&source_txn, cell))
+                    .and_then(|value| value.cast::<String>().ok())
+                    .filter(|own| *own != restored);
+                let Some((own, (format, _))) =
+                    own.and_then(|own| sources.get(&own).map(|source| (own, source)))
+                else {
+                    referenced.insert(restored);
+                    continue;
+                };
+                let current = restored_formats
+                    .entry(restored.clone())
+                    .or_insert_with(|| match catalog.get(&txn, &restored) {
+                        Some(Out::Any(Any::String(payload))) => {
+                            serde_json::from_str::<CellFormat>(&payload).ok()
+                        }
+                        _ => None,
+                    });
+                let keeps = current.as_ref().is_some_and(|current| {
+                    xlsx_parse::keeps_source(
+                        current,
+                        format,
+                        released.contains(&own),
+                        released_format,
+                    )
+                });
+                if keeps {
+                    kept.push((cell.to_string(), own));
+                } else {
+                    referenced.insert(restored);
+                }
+            }
+            for (cell, own) in kept {
+                catalog.try_update(&mut txn, own.clone(), sources[&own].1.clone());
+                styles.try_update(&mut txn, cell, own.clone());
+                referenced.insert(own);
+            }
+        }
+        for own in &released {
+            let (reading, _) = cell_format_entry(&released_format(&sources[own].0))?;
+            if !referenced.contains(&reading) && !sources.contains_key(&reading) {
+                catalog.remove(&mut txn, &reading);
+            }
+        }
+        Ok(())
     }
 
     /// True while the replica still holds nothing but its own bootstrap.
@@ -4106,6 +4208,15 @@ impl serde::Serialize for FingerprintStyles<'_> {
             state.serialize_field("indexed_colors", self.indexed_colors)?;
         }
         state.end()
+    }
+}
+
+/// A format as releases before patterned fills read it.
+fn released_format(format: &CellFormat) -> CellFormat {
+    CellFormat {
+        fill: released_fill(&format.fill).into_owned(),
+        border: released_border(&format.border).into_owned(),
+        ..format.clone()
     }
 }
 
