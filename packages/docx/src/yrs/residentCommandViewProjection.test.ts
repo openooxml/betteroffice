@@ -286,6 +286,16 @@ test('echo requires resolved geometry and default spacing on every run', () => {
   expect(projectCommandEchoContext(thresholds)).toBeUndefined();
 });
 
+test('echo declines substitution starters on another line of the paragraph', () => {
+  const source = glyphLine({ lines: ['ab ', 'de'], right: 130 });
+  const build = source.glyphs.glyphSet;
+  source.glyphs.glyphSet = (font, size, kern) => {
+    const set = build(font, size, kern)!;
+    return { ...set, glyphs: { ...set.glyphs, unsafe: new Set([1]) } };
+  };
+  expect(projectCommandEchoContext(source)).toBeUndefined();
+});
+
 test('echo declines fallback letters when a digits-only primary will resolve future digits', async () => {
   const { readFileSync } = await import('node:fs');
   const { preloadEditWasm } = await import('./wasm/index');

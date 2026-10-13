@@ -253,7 +253,16 @@ fn substitution_barriers(
                     continue;
                 }
                 match subtable {
-                    SubstitutionSubtable::Ligature(_) => ligatures[index] = true,
+                    SubstitutionSubtable::Ligature(table) => {
+                        if table.ligature_sets.into_iter().any(|set| {
+                            set.into_iter()
+                                .any(|ligature| ligature.components.is_empty())
+                        }) {
+                            glyph_ids[index] = 0;
+                        } else {
+                            ligatures[index] = true;
+                        }
+                    }
                     SubstitutionSubtable::Context(_)
                     | SubstitutionSubtable::ChainContext(_)
                     | SubstitutionSubtable::ReverseChainSingle(_) => {

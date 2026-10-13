@@ -299,6 +299,13 @@ function projectGlyphLine(input: GlyphLineInput): { line: DocxEchoGlyphLine; rec
   const next = after === undefined ? '' : String.fromCodePoint(after);
   const source = provider.glyphSet(first.fontId, shapingSize, kern);
   if (!source) return undefined;
+  let previous: number | undefined;
+  const count = source.glyphs.set.glyphIds.length;
+  for (const character of input.paragraphText) {
+    const index = source.glyphs.chars.get(character);
+    if (index === undefined || previous !== undefined && source.glyphs.unsafe.has(previous * count + index)) return undefined;
+    previous = index;
+  }
   const page = retained.page;
   const placement = placeEchoGlyphs(source.glyphs, text, next, facts.x);
   if (!placement || placement.glyphIds.some((id, index) => id !== glyphIds[index]) ||
