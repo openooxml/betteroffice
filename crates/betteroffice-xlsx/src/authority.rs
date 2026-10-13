@@ -4283,8 +4283,7 @@ type FingerprintKey = (usize, i64, bool, bool, bool, bool);
 struct FingerprintBuilder<'a> {
     model: &'a WorkbookModel,
     legacy_dimensions: &'a [xlsx_parse::LegacySheetDimensions],
-    has_col_styles: bool,
-    has_row_styles: bool,
+    has_style_defaults: bool,
     styles: Vec<(FingerprintStyles<'a>, usize)>,
     style_bytes: Vec<Vec<u8>>,
     hashes: BTreeMap<FingerprintKey, (String, u64)>,
@@ -4305,14 +4304,7 @@ impl<'a> FingerprintBuilder<'a> {
         Self {
             model,
             legacy_dimensions: if differs { legacy_dimensions } else { &[] },
-            has_col_styles: model
-                .sheets
-                .iter()
-                .any(|sheet| !sheet.col_styles.is_empty() || !sheet.row_styles.is_empty()),
-            has_row_styles: model
-                .sheets
-                .iter()
-                .any(|sheet| !sheet.row_styles.is_empty()),
+            has_style_defaults: has_style_defaults(model),
             styles: Vec::new(),
             style_bytes: Vec::new(),
             hashes: BTreeMap::new(),
@@ -4348,8 +4340,8 @@ impl<'a> FingerprintBuilder<'a> {
             }
         };
         let include_col_styles =
-            include_col_styles && version >= CHARTS_SCHEMA_VERSION && self.has_col_styles;
-        let include_row_styles = include_row_styles && include_col_styles && self.has_row_styles;
+            include_col_styles && version >= CHARTS_SCHEMA_VERSION && self.has_style_defaults;
+        let include_row_styles = include_row_styles && include_col_styles;
         let legacy_dimensions = legacy_dimensions && !self.legacy_dimensions.is_empty();
         let key = (
             style_index,
@@ -4437,6 +4429,30 @@ impl<'a> FingerprintBuilder<'a> {
     }
 }
 
+/// The domain of a base fingerprint that vouches for a shared state carrying
+/// row and column defaults. Releases before them hashed the same workbooks under
+/// the per-schema domains, which stay accepted for the states they persisted.
+const STYLE_DEFAULTS_FINGERPRINT_DOMAIN: &[u8] = b"betteroffice-xlsx-yrs-v6-style-defaults";
+
+fn fingerprint_domain(schema_version: i64, style_defaults: bool) -> &'static [u8] {
+    if style_defaults {
+        return STYLE_DEFAULTS_FINGERPRINT_DOMAIN;
+    }
+    match schema_version {
+        3 => b"betteroffice-xlsx-yrs-v3",
+        4 => b"betteroffice-xlsx-yrs-v4",
+        5 => b"betteroffice-xlsx-yrs-v5",
+        _ => b"betteroffice-xlsx-yrs-v6",
+    }
+}
+
+fn has_style_defaults(model: &WorkbookModel) -> bool {
+    model
+        .sheets
+        .iter()
+        .any(|sheet| !sheet.col_styles.is_empty() || !sheet.row_styles.is_empty())
+}
+
 fn append_fingerprint(fingerprints: &mut BTreeMap<i64, Vec<String>>, version: i64, hash: String) {
     let accepted = fingerprints.entry(version).or_default();
     if !accepted.contains(&hash) {
@@ -4455,13 +4471,11 @@ fn fingerprint_model_with_overrides(
 ) -> Result<(String, u64), String> {
     validate_schema_version(schema_version)?;
     let mut hasher = Sha256::new();
-    let domain = match schema_version {
-        3 => b"betteroffice-xlsx-yrs-v3".as_slice(),
-        4 => b"betteroffice-xlsx-yrs-v4".as_slice(),
-        5 => b"betteroffice-xlsx-yrs-v5".as_slice(),
-        _ => b"betteroffice-xlsx-yrs-v6".as_slice(),
-    };
-    hasher.update(domain);
+    let style_defaults = include_col_styles
+        && include_row_styles
+        && schema_version >= CHARTS_SCHEMA_VERSION
+        && has_style_defaults(model);
+    hasher.update(fingerprint_domain(schema_version, style_defaults));
     let base = if include_defined_names {
         serde_json::to_vec(&(
             model.date_system,
@@ -4481,13 +4495,8 @@ fn fingerprint_model_with_overrides(
             .sheets
             .iter()
             .any(|sheet| !sheet.col_styles.is_empty());
-    let hash_row_styles = include_col_styles
-        && include_row_styles
-        && schema_version >= CHARTS_SCHEMA_VERSION
-        && model
-            .sheets
-            .iter()
-            .any(|sheet| !sheet.row_styles.is_empty());
+    let hash_row_styles =
+        style_defaults && model.sheets.iter().any(|sheet| !sheet.row_styles.is_empty());
     for (index, sheet) in model.sheets.iter().enumerate() {
         let (col_widths, row_heights) = match legacy_dimensions.get(index) {
             Some(legacy) => (&legacy.col_widths, &legacy.row_heights),
@@ -4964,7 +4973,15 @@ fn fingerprint_model_with_row_styles_oracle(
 ) -> Result<(String, u64), String> {
     validate_schema_version(schema_version)?;
     let mut hasher = Sha256::new();
+    let style_defaults = include_col_styles
+        && include_row_styles
+        && schema_version >= CHARTS_SCHEMA_VERSION
+        && model
+            .sheets
+            .iter()
+            .any(|sheet| !sheet.col_styles.is_empty() || !sheet.row_styles.is_empty());
     let domain = match schema_version {
+        _ if style_defaults => b"betteroffice-xlsx-yrs-v6-style-defaults".as_slice(),
         3 => b"betteroffice-xlsx-yrs-v3".as_slice(),
         4 => b"betteroffice-xlsx-yrs-v4".as_slice(),
         5 => b"betteroffice-xlsx-yrs-v5".as_slice(),
@@ -4993,13 +5010,8 @@ fn fingerprint_model_with_row_styles_oracle(
             .sheets
             .iter()
             .any(|sheet| !sheet.col_styles.is_empty());
-    let hash_row_styles = include_col_styles
-        && include_row_styles
-        && schema_version >= CHARTS_SCHEMA_VERSION
-        && model
-            .sheets
-            .iter()
-            .any(|sheet| !sheet.row_styles.is_empty());
+    let hash_row_styles =
+        style_defaults && model.sheets.iter().any(|sheet| !sheet.row_styles.is_empty());
     for sheet in &model.sheets {
         hash_bytes(&mut hasher, sheet.name.as_bytes());
         hash_u64(&mut hasher, sheet.iter_cells().count() as u64);
@@ -5855,14 +5867,28 @@ mod tests {
         let mut columns_only = model.clone();
         columns_only.sheets[0].row_styles.clear();
         for version in MIN_SUPPORTED_SCHEMA_VERSION..=SCHEMA_VERSION {
-            let (released, _) = fingerprint_model_for_schema(&columns_only, version).unwrap();
+            let (released, _) = fingerprint_model_with_row_styles_oracle(
+                &columns_only,
+                version,
+                version >= 4,
+                true,
+                false,
+            )
+            .unwrap();
             assert!(
                 base.fingerprints[&version].contains(&released),
                 "schema v{version} must recognise a fingerprint hashing column styles only"
             );
         }
         let (current, _) = fingerprint_model_for_schema(&model, SCHEMA_VERSION).unwrap();
-        let (released, _) = fingerprint_model_for_schema(&columns_only, SCHEMA_VERSION).unwrap();
+        let (released, _) = fingerprint_model_with_row_styles_oracle(
+            &columns_only,
+            SCHEMA_VERSION,
+            true,
+            true,
+            false,
+        )
+        .unwrap();
         assert_ne!(current, released);
         assert_eq!(base.fingerprint, current);
         let oracle =
