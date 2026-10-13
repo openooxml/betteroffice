@@ -2147,6 +2147,69 @@ mod tests {
     }
 
     #[test]
+    fn model_rejects_unknown_chart_anchor_tags_in_bounded_decoding() {
+        let mut sheet = Sheet::new("Charts");
+        sheet.charts.push(SheetChart {
+            part: "p".repeat(2048),
+            drawing: "drawing.xml".into(),
+            anchor_index: 0,
+            anchor: ChartAnchor::TwoCell {
+                from: AnchorCell::default(),
+                to: AnchorCell::default(),
+                edit_as: AnchorEditAs::TwoCell,
+            },
+            refs: Vec::new(),
+        });
+        let model = Workbook {
+            sheets: vec![sheet],
+            ..Workbook::default()
+        };
+        let whole_budget = SnapshotBudget::new(1, 16 * 1024).unwrap();
+        let bounded_budget = SnapshotBudget::new(1, 1024).unwrap();
+        let mut chunks = encode(&model, whole_budget);
+        assert_eq!(decode(&chunks), model);
+        assert_eq!(advance_all(&chunks, bounded_budget).unwrap(), model);
+
+        let chart = chunks
+            .iter_mut()
+            .find(|chunk| {
+                let (kind, _, payload) = unframe(chunk).unwrap();
+                kind == ChunkKind::Model && payload[0] == CHART
+            })
+            .unwrap();
+        assert!(packed_record(chart, 0).unwrap().is_none());
+        let (_, _, payload) = unframe(chart).unwrap();
+        assert!(payload.len() > bounded_budget.max_bytes());
+        assert!(chart.len() <= whole_budget.max_bytes());
+        let mut reader = Reader::new(payload);
+        assert_eq!(reader.u8().unwrap(), CHART);
+        reader.str().unwrap();
+        reader.str().unwrap();
+        reader.var_usize().unwrap();
+        let anchor_offset = chart.len() - reader.clone().rest().len();
+        assert_eq!(reader.u8().unwrap(), 0);
+        chart[anchor_offset] = 20;
+
+        let mut whole = ModelSnapshotBuilder::new();
+        let error = chunks
+            .iter()
+            .try_for_each(|chunk| whole.push(chunk))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "invalid snapshot chart anchor");
+        assert_eq!(
+            advance_all(&chunks, whole_budget).unwrap_err().to_string(),
+            error
+        );
+        assert_eq!(
+            advance_all(&chunks, bounded_budget)
+                .unwrap_err()
+                .to_string(),
+            error
+        );
+    }
+
+    #[test]
     fn sparse_row_styles_roundtrip_with_small_snapshot_budgets() {
         let mut sheet = Sheet::new("Rows");
         sheet.row_styles = (0..4000).map(|row| (row * 2, row % 2)).collect();

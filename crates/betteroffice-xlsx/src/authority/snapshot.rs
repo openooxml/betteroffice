@@ -2792,6 +2792,54 @@ mod tests {
     }
 
     #[test]
+    fn authority_rejects_unknown_chart_anchor_tags_in_bounded_decoding() {
+        let charts = vec![SheetChart {
+            part: "p".repeat(2048),
+            drawing: "drawing.xml".into(),
+            anchor_index: 0,
+            anchor: ChartAnchor::TwoCell {
+                from: AnchorCell::default(),
+                to: AnchorCell::default(),
+                edit_as: AnchorEditAs::TwoCell,
+            },
+            refs: Vec::new(),
+        }];
+        let mut writer = Writer::new();
+        writer.u8(7);
+        charts.write(&mut writer);
+        let mut payload = writer.into_bytes();
+        let budget = SnapshotBudget::new(1, 1024).unwrap();
+        assert!(payload.len() > budget.max_bytes());
+        let mut bounded = builder_for_section(7, 1);
+        assert!(!bounded.push_bounded(&payload, budget).unwrap());
+        while !bounded.push_bounded(&payload, budget).unwrap() {}
+        assert_eq!(bounded.base.unwrap().charts, vec![charts]);
+
+        let mut reader = Reader::new(&payload);
+        assert_eq!(reader.u8().unwrap(), 7);
+        assert_eq!(reader.var_usize().unwrap(), 1);
+        reader.str().unwrap();
+        reader.str().unwrap();
+        reader.var_usize().unwrap();
+        let anchor_offset = payload.len() - reader.clone().rest().len();
+        assert_eq!(reader.u8().unwrap(), 0);
+        payload[anchor_offset] = 20;
+
+        let error = builder_for_section(7, 1)
+            .push(&payload)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "invalid snapshot chart anchor");
+        assert_eq!(
+            builder_for_section(7, 1)
+                .push_bounded(&payload, budget)
+                .unwrap_err()
+                .to_string(),
+            error
+        );
+    }
+
+    #[test]
     fn authority_empty_vector_records_fit_their_actual_charge() {
         let minimum = DECODE_RESERVATION + 1 + preparation_cost::<Vec<SheetChart>>() + 1;
         for section in [5, 6, 7] {
