@@ -1140,19 +1140,21 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     if (session) throw new Error('Resident engine worker already holds a document');
     const started = performance.now();
     const source = request.source;
-    const opening = await createResidentEngineSession(source.heapLimitBytes);
+    const opening = await createResidentEngineSession(source.heapLimitBytes, source.collaboration?.clientId);
     try {
       let hostJson: string | undefined;
       let document: import('../types/document').Document;
+      const options = { ...source, initialUpdate: source.collaboration?.initialUpdate };
       if (source.document) {
-        opening.openDocument(source.document, source);
+        opening.openDocument(source.document, options);
         document = source.document;
       } else {
-        hostJson = opening.openSourceDocx(source.bytes!, source);
+        hostJson = opening.openSourceDocx(source.bytes!, options);
         document = decodeDocxHostJson(hostJson, source.bytes!).document;
       }
       opening.setDirectBatches(true);
       session = opening;
+      if (source.collaboration) collaboration = createResidentCollaboration(opening);
       openedDocument = { heapLimitBytes: source.heapLimitBytes };
       openedViaSource = true;
       openedParsed = source.document !== undefined;
@@ -1208,23 +1210,18 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     if (session) destroySession(true);
     openedSource = null;
     editorSaves = { full: false };
-    if (request.collaboration && request.previewBlocks !== undefined) throw new TypeError('Collaboration previews are unavailable');
-    if (request.collaboration && (!Number.isSafeInteger(request.collaboration.clientId) || request.collaboration.clientId < 0)) {
-      throw new TypeError('Collaboration clientId must be a non-negative safe integer');
-    }
-    const opening = await createResidentEngineSession(request.heapLimitBytes, request.collaboration?.clientId);
+    const opening = await createResidentEngineSession(request.heapLimitBytes);
     let hostJson: string | null;
     try {
       if (request.previewBlocks === undefined) opening.setDirectBatches(true);
       hostJson =
         request.previewBlocks === undefined
-          ? opening.openDocx(new Uint8Array(request.bytes), request.digest, request.generation, !request.collaboration?.initialUpdate)
+          ? opening.openDocx(new Uint8Array(request.bytes), request.digest, request.generation)
           : opening.openDocxPreview(
               new Uint8Array(request.bytes),
               request.previewBlocks,
               request.previewParagraphBudget
             );
-      if (request.collaboration?.initialUpdate) opening.loadState(new Uint8Array(request.collaboration.initialUpdate));
     } catch (error) {
       if (!(error instanceof WebAssembly.RuntimeError)) opening.destroy();
       throw error;
@@ -1237,7 +1234,6 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     proposals?.destroy();
     proposals = null;
     session = opening;
-    if (request.collaboration) collaboration = createResidentCollaboration(opening);
     if (request.previewBlocks === undefined) openedVersion = undefined;
     openedDocument = { heapLimitBytes: request.heapLimitBytes };
     previewing = request.previewBlocks !== undefined;

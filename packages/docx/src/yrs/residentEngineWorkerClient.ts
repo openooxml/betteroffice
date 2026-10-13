@@ -481,7 +481,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
    */
   async open(
     bytes: Uint8Array,
-    options: { digest?: string; generation?: string; heapLimitBytes?: number; collaboration?: { clientId: number; initialUpdate?: Uint8Array } } = {}
+    options: { digest?: string; generation?: string; heapLimitBytes?: number } = {}
   ): Promise<ResidentEngineWorkerOpened> {
     if (this.openedHeapLimit || this.bootstrapped) {
       throw new ResidentWorkerFailureError('Resident engine worker already holds a document');
@@ -491,17 +491,15 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
     let response: ResidentEngineWorkerResponse & { ok: true };
     try {
       const copy = new Uint8Array(bytes);
-      const initialUpdate = options.collaboration?.initialUpdate?.slice().buffer;
       response = await this.request(
         {
           type: 'open',
           bytes: copy.buffer,
-          ...(options.collaboration ? { collaboration: { clientId: options.collaboration.clientId, initialUpdate } } : {}),
           ...(options.digest !== undefined ? { digest: options.digest } : {}),
           ...(options.generation !== undefined ? { generation: options.generation } : {}),
           ...(options.heapLimitBytes !== undefined ? { heapLimitBytes: options.heapLimitBytes } : {}),
         },
-        [copy.buffer, ...(initialUpdate ? [initialUpdate] : [])]
+        [copy.buffer]
       );
     } catch (error) {
       // The worker freed the session a failed open made, so it can open again.

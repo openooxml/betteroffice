@@ -237,7 +237,6 @@ export type ResidentEngineWorkerRequest =
   | {
       id: number;
       type: 'open';
-      collaboration?: { clientId: number; initialUpdate?: ArrayBuffer };
       /** The DOCX package, parsed and seeded in a fresh session here. */
       bytes: ArrayBuffer;
       /** The package's SHA-256, when the caller already took it. */
