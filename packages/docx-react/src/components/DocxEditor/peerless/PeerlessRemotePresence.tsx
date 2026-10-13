@@ -41,7 +41,7 @@ export function PeerlessRemotePresence({ binding, client, presence, pages }: {
   }, [binding, presence]);
   useEffect(() => {
     let disposed = false, queued = false, busy = false, dirty = false;
-    const invalid = new Set<string>();
+    const invalid = new Map<string, string>();
     const schedule = () => {
       dirty = true;
       if (disposed || queued || busy) return;
@@ -57,11 +57,11 @@ export function PeerlessRemotePresence({ binding, client, presence, pages }: {
       const selectedPeers = request.peers;
       const window = [request.pages[0], request.pages[1]] as const;
       const liveKeys = new Set(selectedPeers.map(peer => `${peer.clientId}:${peer.clock}`));
-      for (const key of invalid) if (!liveKeys.has(key)) invalid.delete(key);
+      for (const key of invalid.keys()) if (!liveKeys.has(key)) invalid.delete(key);
       busy = true;
       try {
         const result = await client.documentReadAt({ kind: 'collabPresence',
-          peers: selectedPeers.filter(peer => peer.inferredCursor || !invalid.has(`${peer.clientId}:${peer.clock}`)).slice(0, 32).map(peer => ({
+          peers: selectedPeers.filter(peer => peer.inferredCursor || invalid.get(`${peer.clientId}:${peer.clock}`) !== geometry.documentVersion).slice(0, 32).map(peer => ({
             clientId: peer.clientId, clock: peer.clock, ...(peer.cursor ? { cursor: peer.cursor } : {}),
             ...(peer.inferredCursor ? { inferred: { story: peer.inferredCursor.story, paraId: peer.inferredCursor.paraId, offset: peer.inferredCursor.endOffset } } : {}),
           })), pages: [window[0], window[1]], expectVersion: geometry.documentVersion,
@@ -70,7 +70,7 @@ export function PeerlessRemotePresence({ binding, client, presence, pages }: {
         if (disposed || geometry !== binding.viewStore.getSnapshot().geometry || view.version !== binding.viewStore.getSnapshot().version ||
           selectedPeers !== input.current.peers || request.presence !== input.current.presence || window[0] !== input.current.pages[0] || window[1] !== input.current.pages[1] || !reply || reply.version !== geometry.documentVersion || reply.frameEpoch !== geometry.frameEpoch ||
           reply.layoutRevision !== geometry.layoutRevision) return;
-        for (const peer of reply.peers) if (peer.status === 'unresolved' && !selectedPeers.find(candidate => candidate.clientId === peer.clientId)?.inferredCursor) invalid.add(`${peer.clientId}:${peer.clock}`);
+        for (const peer of reply.peers) if (peer.status === 'unresolved' && !selectedPeers.find(candidate => candidate.clientId === peer.clientId)?.inferredCursor) invalid.set(`${peer.clientId}:${peer.clock}`, reply.version);
         setPaint({ geometry, reply, peers: selectedPeers, pages: window });
       } catch {} finally { busy = false; if (dirty) schedule(); }
     };
