@@ -128,7 +128,8 @@ test('presence reads an unresolved peer again once the document version changes'
   const s = setup();
   let status: 'ok' | 'unresolved' = 'unresolved';
   const reads: number[][] = [];
-  s.client.documentReadAt = mock(async (read: Extract<Parameters<ResidentEngineWorkerClient['documentReadAt']>[0], { kind: 'collabPresence' }>) => {
+  s.client.documentReadAt = mock(async (read: { peers: Array<{ clientId: number; clock: number }>; expectVersion: string;
+    expectFrameEpoch: number; expectLayoutRevision: number }) => {
     reads.push(read.peers.map(peer => peer.clientId));
     return { status: 'ok', version: read.expectVersion, value: { version: read.expectVersion, frameEpoch: read.expectFrameEpoch,
       layoutRevision: read.expectLayoutRevision, peers: read.peers.map(peer => ({ clientId: peer.clientId, clock: peer.clock, status, rects: [],
