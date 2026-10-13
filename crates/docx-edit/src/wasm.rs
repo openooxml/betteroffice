@@ -5550,7 +5550,7 @@ mod tests {
         let doc = session.engine.doc();
         doc.create_story("body", "Seed", "Normal", "left").unwrap();
         for _ in 0..80 {
-            doc.split_paragraph(&EditCtx::local("", ""), Position::new("body", 4), None)
+            doc.split_paragraph(&EditCtx::local("", ""), Position::new("body", 0), None)
                 .unwrap();
         }
         let para_id = doc.paragraphs("body").unwrap()[80].para_id.clone();
