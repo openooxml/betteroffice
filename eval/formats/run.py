@@ -27,6 +27,10 @@ DISABLED_FEATURES = ('shell_tool', 'unified_exec_tty', 'shell_snapshot',
 FORMAT_TOOLS = {'xlsx': ('xlsx_outline', 'xlsx_read_range', 'xlsx_write_range', 'xlsx_edit_grid', 'xlsx_edit_sheets',
                          'xlsx_find_replace', 'xlsx_format', 'xlsx_sort'),
                 'pptx': ('pptx_outline', 'pptx_read_slide', 'pptx_edit')}
+SHELL_FEATURES = ('shell_tool', 'unified_exec', 'unified_exec_tty')
+ALLOWED_ITEMS = {'betteroffice': ('agent_message', 'reasoning', 'error'),
+                 'generic': ('agent_message', 'reasoning', 'error', 'command_execution', 'file_change')}
+TOOL_CALLS = {'betteroffice': 'BetterOffice MCP calls', 'generic': 'shell commands and file changes'}
 module_spec = importlib.util.spec_from_file_location('format_check', ROOT / 'check.py')
 checker = importlib.util.module_from_spec(module_spec)
 module_spec.loader.exec_module(checker)
@@ -128,7 +132,27 @@ def mcp_ready(cli, required):
     return round(elapsed, 3)
 
 
-def command_line(cli, workspace, model, prompt):
+def python_ready(python):
+    try:
+        result = subprocess.run([str(python), '-c', 'import openpyxl, pptx, docx'], stdin=subprocess.DEVNULL,
+                                capture_output=True, text=True, timeout=STARTUP_TIMEOUT_SECONDS)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise RuntimeError(f'{python} cannot import openpyxl, pptx and docx: {error}') from None
+    if result.returncode != 0:
+        raise RuntimeError(f'{python} cannot import openpyxl, pptx and docx: {result.stderr.strip()[-2000:]}')
+
+
+def command_line(cli, workspace, model, prompt, arm='betteroffice'):
+    if arm == 'generic':
+        return ['codex', 'exec', '-m', model, '--sandbox', 'workspace-write', '--skip-git-repo-check',
+                '--ignore-user-config', '--ignore-rules', '--ephemeral', '--json', '-C', str(workspace),
+                *[argument for feature in SHELL_FEATURES for argument in ('--enable', feature)],
+                *[argument for feature in DISABLED_FEATURES if feature not in SHELL_FEATURES for argument in ('--disable', feature)],
+                '-c', 'approval_policy="never"',
+                '-c', 'web_search="disabled"',
+                '-c', 'sandbox_workspace_write.network_access=false',
+                prompt + ' Use shell commands and Python with openpyxl, python-pptx and python-docx to read and edit the documents.'
+                ' There is no network access. All other tool calls disqualify the task. The documents live in the current directory.']
     return ['codex', 'exec', '-m', model, '--sandbox', 'read-only', '--skip-git-repo-check',
             '--ignore-user-config', '--ignore-rules', '--ephemeral', '--json', '-C', str(workspace),
             *[argument for feature in DISABLED_FEATURES for argument in ('--disable', feature)],
@@ -141,19 +165,29 @@ def command_line(cli, workspace, model, prompt):
             prompt + ' Use only the betteroffice MCP tools to read and edit the documents. All other tool calls disqualify the task. The documents live in the current directory.']
 
 
-def tool_calls(log):
-    identities, anonymous, available = set(), 0, False
+def events(log):
     for line in log.read_text(errors='replace').splitlines():
         try:
             event = json.loads(line)
         except ValueError:
             continue
-        if not isinstance(event, dict):
-            continue
+        if isinstance(event, dict):
+            yield event
+
+
+def counted(item, arm):
+    if arm == 'generic':
+        return item.get('type') in ('command_execution', 'file_change')
+    return item.get('type') == 'mcp_tool_call' and item.get('server') == 'betteroffice'
+
+
+def tool_calls(log, arm='betteroffice'):
+    identities, anonymous, available = set(), 0, False
+    for event in events(log):
         if event.get('type') in ('thread.started', 'turn.started', 'turn.completed'):
             available = True
         item = event.get('item', {})
-        if not isinstance(item, dict) or item.get('type') != 'mcp_tool_call' or item.get('server') != 'betteroffice':
+        if not isinstance(item, dict) or not counted(item, arm):
             continue
         available = True
         if 'id' in item:
@@ -163,22 +197,16 @@ def tool_calls(log):
     return len(identities) + anonymous if available else None
 
 
-def access_violation(log):
-    for line in log.read_text(errors='replace').splitlines():
-        try:
-            event = json.loads(line)
-        except ValueError:
-            continue
-        if not isinstance(event, dict):
-            continue
+def access_violation(log, arm='betteroffice'):
+    for event in events(log):
         item = event.get('item')
         if not isinstance(item, dict):
             continue
         kind = item.get('type')
         if kind == 'mcp_tool_call':
-            if item.get('server') != 'betteroffice':
+            if arm == 'generic' or item.get('server') != 'betteroffice':
                 return f'forbidden tool call: MCP server {item.get("server", "<missing>")}'
-        elif kind not in ('agent_message', 'reasoning', 'error'):
+        elif kind not in ALLOWED_ITEMS[arm]:
             return f'forbidden tool call: {kind}'
     return None
 
@@ -191,7 +219,8 @@ def stop_process(process):
     process.wait()
 
 
-def run_task(task, cli, model, results):
+def run_task(task, cli, model, results, arm='betteroffice', python=None):
+    environment = None if python is None else dict(os.environ, PATH=str(python.parent) + os.pathsep + os.environ.get('PATH', ''))
     directory = results / task['id']
     directory.mkdir()
     log, errors = directory / 'codex.jsonl', directory / 'codex.stderr'
@@ -204,9 +233,9 @@ def run_task(task, cli, model, results):
         original_hash = hashlib.sha256(source.read_bytes()).digest()
         with log.open('w') as stdout, errors.open('w') as stderr:
             try:
-                process = subprocess.Popen(command_line(cli, workspace, model, task['prompt']),
+                process = subprocess.Popen(command_line(cli, workspace, model, task['prompt'], arm),
                                            cwd=workspace, stdin=subprocess.DEVNULL, stdout=stdout,
-                                           stderr=stderr, start_new_session=True)
+                                           stderr=stderr, env=environment, start_new_session=True)
                 try:
                     exit_code = process.wait(timeout=TIMEOUT_SECONDS)
                 except subprocess.TimeoutExpired:
@@ -230,7 +259,7 @@ def run_task(task, cli, model, results):
         if runtime_error:
             message = runtime_error + ('; ' + message if not passed else '')
             passed = False
-        violation = access_violation(log)
+        violation = access_violation(log, arm)
         if violation:
             message = violation + ('; ' + message if not passed else '')
             passed = False
@@ -238,17 +267,17 @@ def run_task(task, cli, model, results):
         if output.is_file():
             shutil.copyfile(output, directory / task['output'])
     return {'task': task['id'], 'format': task['format'], 'pass': passed, 'check_message': message,
-            'tool_calls': tool_calls(log), 'duration_seconds': round(time.monotonic() - started, 3),
+            'tool_calls': tool_calls(log, arm), 'duration_seconds': round(time.monotonic() - started, 3),
             'agent_exit_code': exit_code, 'timed_out': timed_out}
 
 
-def write_results(results, model, records, **metadata):
-    (results / 'results.json').write_text(json.dumps({'model': model, **metadata, 'timeout_seconds': TIMEOUT_SECONDS,
+def write_results(results, model, records, arm='betteroffice', **metadata):
+    (results / 'results.json').write_text(json.dumps({'model': model, 'arm': arm, **metadata, 'timeout_seconds': TIMEOUT_SECONDS,
                                                     'results': records}, indent=2) + '\n')
     passed = sum(record['pass'] for record in records)
     idle = sum(record['tool_calls'] == 0 for record in records)
-    rows = [f'Model: `{model}`. Passed: {passed}/{len(records)}. Tasks without tool calls: {idle}. '
-            'Tool calls count BetterOffice MCP calls; n/a means unavailable.',
+    rows = [f'Model: `{model}`. Arm: `{arm}`. Passed: {passed}/{len(records)}. Tasks without tool calls: {idle}. '
+            f'Tool calls count {TOOL_CALLS[arm]}; n/a means unavailable.',
             '', '| Task | Result | Check message | Tool calls | Duration (s) |',
             '| --- | --- | --- | ---: | ---: |']
     for record in records:
@@ -259,15 +288,24 @@ def write_results(results, model, records, **metadata):
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('agents_cli_command')
-    parser.add_argument('results_dir', type=Path)
-    parser.add_argument('model', nargs='?', default='gpt-6-luna')
+    parser = argparse.ArgumentParser(usage='%(prog)s [--arm betteroffice] <agents-cli-command> <results-dir> [model]\n'
+                                           '       %(prog)s --arm generic --python <python> <results-dir> [model]')
+    parser.add_argument('--arm', choices=tuple(ALLOWED_ITEMS), default='betteroffice')
+    parser.add_argument('--python', help='generic arm: a Python that imports openpyxl, pptx and docx')
+    parser.add_argument('arguments', nargs='+', help=argparse.SUPPRESS)
     args = parser.parse_args()
-    args.model = args.model or 'gpt-6-luna'
+    generic = args.arm == 'generic'
+    names = ('results_dir', 'model') if generic else ('agents_cli_command', 'results_dir', 'model')
+    if not len(names) - 1 <= len(args.arguments) <= len(names):
+        parser.error(f'--arm {args.arm} takes ' + ' '.join(f'<{name}>' for name in names[:-1]) + ' [model]')
+    values = dict(zip(names, args.arguments))
+    model = values.get('model') or 'gpt-6-luna'
     try:
-        cli = cli_command(args.agents_cli_command)
-        results = args.results_dir.expanduser().resolve()
+        if generic != (args.python is not None):
+            raise ValueError('--python <python> is required with --arm generic and accepted only there')
+        cli = None if generic else cli_command(values['agents_cli_command'])
+        python = Path(args.python).expanduser().absolute() if generic else None
+        results = Path(values['results_dir']).expanduser().resolve()
         if results == REPO or REPO in results.parents:
             raise ValueError('results-dir must be outside the repository')
         if results.exists() and any(results.iterdir()):
@@ -278,16 +316,20 @@ def main():
         parser.error(str(error))
     tasks = checker.tasks()
     try:
-        metadata = {'mcp_startup_seconds': mcp_ready(cli, required_tools(tasks))}
+        if generic:
+            python_ready(python)
+            metadata = {'python': str(python)}
+        else:
+            metadata = {'mcp_startup_seconds': mcp_ready(cli, required_tools(tasks))}
         results.mkdir(parents=True, exist_ok=True)
     except (RuntimeError, OSError) as error:
         sys.exit(f'run.py: {error}')
     records = []
-    write_results(results, args.model, records, **metadata)
+    write_results(results, model, records, args.arm, **metadata)
     for task in tasks:
-        record = run_task(task, cli, args.model, results)
+        record = run_task(task, cli, model, results, args.arm, python)
         records.append(record)
-        write_results(results, args.model, records, **metadata)
+        write_results(results, model, records, args.arm, **metadata)
         print(f'{record["task"]}: {"PASS" if record["pass"] else "FAIL"} ({record["duration_seconds"]:.3f}s): {record["check_message"]}', flush=True)
     return 0 if all(record['pass'] for record in records) else 1
 

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -lt 2 || $# -gt 3 ]]; then
+if [[ $# -lt 2 ]]; then
   echo 'Usage: run.sh <agents-cli-command> <results-dir> [model]' >&2
+  echo '       run.sh --arm generic --python <python> <results-dir> [model]' >&2
   exit 2
 fi
 
