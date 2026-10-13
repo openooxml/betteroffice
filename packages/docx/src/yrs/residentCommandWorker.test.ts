@@ -1623,7 +1623,30 @@ test('a commanded page break and an authored column break survive comment saves'
   } finally { client.destroy(); }
 }, TIMEOUT);
 
-const sectionXml = (type: string, left: number) => `<w:sectPr><w:type w:val="${type}"/><w:pgMar w:left="${left}"/></w:sectPr>`;
+for (const comment of [true, false]) {
+  test(`an authored page break stays in its edited paragraph through worker saves${comment ? ' beside a saved comment' : ''}`, async () => {
+    const content = textRun('Left') + '<w:r><w:br w:type="page"/></w:r>' + textRun('Right');
+    const bodyXml = `<w:p w14:paraId="00000001">${comment ? commented(1, content) : content}</w:p>` + sectionParagraph(2, 'Tail');
+    const comments = comment ? commentXml(1) : undefined;
+    const { client, engine } = await openWorker({ bodyXml, comments });
+    const texts = (xml: string) => [...xml.matchAll(/<w:t\b[^>]*>([^<]*)<\/w:t>/g)].map(match => match[1]).join('');
+    try {
+      const host = comment ? await sourceComments(bodyXml, comments!) : [];
+      const at = { story: 'body', paraId: engine.paragraphs('body')[0]!.paraId, offset: 1 };
+      expect((await client.edit(intent(1, 0, 'insertText', { text: '+', selection: { anchor: at, focus: at } }))).outcomes[0]?.status).toBe('applied');
+      for (let save = 0; save < 2; save += 1) {
+        const xml = savedDocumentXml((await client.save({ comments: host })).bytes);
+        expect(savedMarks(xml)).toEqual({ page: 1, column: 0, ranges: comment ? 1 : 0 });
+        const paragraphs = xml.match(/<w:p(?:\s[^>]*[^/>])?>[\s\S]*?<\/w:p>/g) ?? [];
+        const owner = paragraphs.find(paragraph => paragraph.includes('w14:paraId="00000001"')) ?? '';
+        expect(owner.split('<w:br w:type="page"/>').map(texts)).toEqual(['L+eft', 'Right']);
+        expect(paragraphs.find(paragraph => paragraph.includes('>Tail<'))).not.toContain('<w:br');
+      }
+    } finally { client.destroy(); }
+  }, TIMEOUT);
+}
+
+const sectionXml =(type: string, left: number) => `<w:sectPr><w:type w:val="${type}"/><w:pgMar w:left="${left}"/></w:sectPr>`;
 
 function savedSectionMargins(bytes: ArrayBuffer): [string, string | null, number | null][] {
   const sectPr = /<w:sectPr\b(?:[^>]*\/>|[\s\S]*?<\/w:sectPr>)/;
