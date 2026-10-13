@@ -364,7 +364,11 @@ fn clearing_a_cell_under_a_column_style_keeps_an_explicit_default() {
             ..Default::default()
         },
     ];
-    apply(&mut wb, &clear_italic(CellRange::parse_a1("A1:B2").unwrap())).unwrap();
+    apply(
+        &mut wb,
+        &clear_italic(CellRange::parse_a1("A1:B2").unwrap()),
+    )
+    .unwrap();
     for at in ["A1", "A2"] {
         assert_eq!(wb.sheets[0].cell(r(at)).unwrap().style, Some(0));
     }

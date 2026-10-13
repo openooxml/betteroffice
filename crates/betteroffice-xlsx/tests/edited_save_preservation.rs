@@ -430,7 +430,10 @@ fn refused_grid_regeneration_preserves_source_after_undo_and_unrelated_edit() {
         panic!("expected spreadsheet UnsupportedEdit");
     };
     assert!(message.starts_with("sheet Sheet2:"), "{message}");
-    assert!(message.contains(r#"<row> attribute outlineLevel="1""#), "{message}");
+    assert!(
+        message.contains(r#"<row> attribute outlineLevel="1""#),
+        "{message}"
+    );
 
     assert!(
         workbook

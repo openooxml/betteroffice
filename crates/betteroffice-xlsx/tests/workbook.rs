@@ -36,7 +36,6 @@ fn cascade_source() -> Vec<u8> {
             bottom: Some(edge.clone()),
             left: Some(edge.clone()),
             right: Some(edge),
-            ..Default::default()
         },
         ..Default::default()
     };
@@ -68,7 +67,8 @@ fn cascade_fill(workbook: &Workbook, address: &str) -> Option<String> {
         .unwrap()
         .commands
         .into_iter()
-        .filter_map(|command| match command {
+        .rev()
+        .find_map(|command| match command {
             DrawCmd::FillRect {
                 x: left,
                 y: top,
@@ -79,7 +79,6 @@ fn cascade_fill(workbook: &Workbook, address: &str) -> Option<String> {
             } if x >= left && x < left + w && y >= top && y < top + h => Some(color.to_string()),
             _ => None,
         })
-        .last()
 }
 
 #[test]
@@ -409,9 +408,10 @@ fn cascade_bounded_snapshot_and_collaborative_replay_keep_defaults() {
     ));
     assert_eq!(*peer.model(), before);
     assert_eq!(cascade_fill(&peer, "A5").as_deref(), Some("#ff0000"));
-    let mut encoder = WorkbookSnapshotEncoder::new(&workbook, None, budget).unwrap();
+    let shifted = Workbook::from_model(workbook.model().clone()).unwrap();
+    let mut encoder = WorkbookSnapshotEncoder::new(&shifted, None, budget).unwrap();
     let mut builder = WorkbookSnapshotBuilder::new();
-    while let Some(chunk) = encoder.next(&workbook).unwrap() {
+    while let Some(chunk) = encoder.next(&shifted).unwrap() {
         builder.push(&chunk).unwrap();
     }
     while !builder.advance(budget).unwrap().is_ready() {}
@@ -424,6 +424,8 @@ fn cascade_bounded_snapshot_and_collaborative_replay_keep_defaults() {
         restored.model().sheets[0].col_styles,
         workbook.model().sheets[0].col_styles
     );
+    assert_eq!(cascade_fill(&restored, "A6").as_deref(), Some("#ff0000"));
+    assert_eq!(cascade_fill(&restored, "C2").as_deref(), Some("#00ff00"));
 }
 
 #[test]
@@ -474,7 +476,11 @@ fn cascade_inserted_columns_save_their_inherited_style_in_column_order() {
     assert_eq!(ranges, [(2, 2), (3, 4), (8, 8)], "{xml}");
     let reopened = Workbook::open(&saved).unwrap();
     for at in ["B2", "C2", "D2"] {
-        assert_eq!(cascade_fill(&reopened, at).as_deref(), Some("#00ff00"), "{at}");
+        assert_eq!(
+            cascade_fill(&reopened, at).as_deref(),
+            Some("#00ff00"),
+            "{at}"
+        );
     }
     assert_ne!(cascade_fill(&reopened, "E2").as_deref(), Some("#00ff00"));
 }

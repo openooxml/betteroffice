@@ -79,7 +79,12 @@ fn empty_cells_without_an_inherited_style_stay_sparse() {
         &[],
         false,
     );
-    assert_eq!(parse_workbook(&parts).unwrap().sheets[0].iter_cells().count(), 1);
+    assert_eq!(
+        parse_workbook(&parts).unwrap().sheets[0]
+            .iter_cells()
+            .count(),
+        1
+    );
 }
 
 /// `(min, max, element)` for each `<col>` in document order.
@@ -91,7 +96,11 @@ fn col_elements(xml: &str) -> Vec<(u32, u32, String)> {
     xml.match_indices("<col ")
         .map(|(start, _)| {
             let element = &xml[start..start + xml[start..].find('>').unwrap() + 1];
-            (number(element, "min"), number(element, "max"), element.to_owned())
+            (
+                number(element, "min"),
+                number(element, "max"),
+                element.to_owned(),
+            )
         })
         .collect()
 }
@@ -111,7 +120,9 @@ fn regenerated_cols_resolve_overlapping_style_runs_in_column_order() {
     let cols = col_elements(&xml);
     assert_ascending_and_disjoint(&cols);
     assert_eq!(
-        cols.iter().map(|(min, max, _)| (*min, *max)).collect::<Vec<_>>(),
+        cols.iter()
+            .map(|(min, max, _)| (*min, *max))
+            .collect::<Vec<_>>(),
         [(1, 1), (2, 2), (3, 3), (4, 16384)]
     );
     let reopened = parse_workbook(&saved).unwrap();
@@ -175,10 +186,15 @@ fn patched_cols_coalesce_generated_runs_between_source_columns() {
     let cols = col_elements(&xml);
     assert_ascending_and_disjoint(&cols);
     assert_eq!(
-        cols.iter().map(|(min, max, _)| (*min, *max)).collect::<Vec<_>>(),
+        cols.iter()
+            .map(|(min, max, _)| (*min, *max))
+            .collect::<Vec<_>>(),
         [(1, 1), (2, 3), (4, 4), (5, 5), (6, 6), (7, 16384)]
     );
-    assert_eq!(cols[0].2, r#"<col min="1" max="1" width="12" customWidth="1"/>"#);
+    assert_eq!(
+        cols[0].2,
+        r#"<col min="1" max="1" width="12" customWidth="1"/>"#
+    );
     assert_eq!(
         cols[4].2,
         r#"<col min="6" max="6" width="9" style="1" customWidth="1"/>"#
