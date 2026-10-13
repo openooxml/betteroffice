@@ -475,9 +475,8 @@ export class WorkerDraftController {
     const selected = this.options.selection()?.focus;
     const sheet = draft.target ? this.options.resolveSheet(draft.target.sheetId) : draft.sheet;
     const current = this.options.sheet() === sheet && selected?.row === draft.row && selected?.col === draft.col;
-    if (this.ownsFocus || !this.options.editable()) return;
-    if ((value as WorkerNativeDraft).reserved && !current) this.coordinator?.setDraft(this.draft);
-    else this.restore(record);
+    if (!this.ownsFocus && this.options.editable() && (!(value as WorkerNativeDraft).reserved || current)) this.restore(record);
+    else this.coordinator?.setDraft(this.draft);
   }
 
   restore(record = this.snapshot.refused[0]): void {
