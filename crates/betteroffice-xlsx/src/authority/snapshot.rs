@@ -851,6 +851,24 @@ struct_codec!(LegacyXf {
     alignment
 });
 
+impl From<&Xf> for LegacyXf {
+    fn from(xf: &Xf) -> Self {
+        let alignment = xf.alignment.as_ref();
+        Self {
+            font: xf.font,
+            fill: xf.fill,
+            border: xf.border,
+            num_fmt_id: xf.num_fmt_id,
+            alignment: alignment.map(|alignment| LegacyAlignment {
+                h: alignment.h,
+                v: alignment.v,
+                wrap_text: alignment.wrap_text,
+                shrink_to_fit: alignment.shrink_to_fit,
+            }),
+        }
+    }
+}
+
 impl From<LegacyXf> for Xf {
     fn from(xf: LegacyXf) -> Self {
         let LegacyXf {
@@ -1187,16 +1205,7 @@ pub(crate) fn released_base_layout(record: &[u8]) -> Vec<u8> {
     let xf = Xf::read(&mut Reader::new(&record[1..])).unwrap();
     let mut w = Writer::new();
     w.u8(XF_SECTION as u8);
-    xf.font.write(&mut w);
-    xf.fill.write(&mut w);
-    xf.border.write(&mut w);
-    xf.num_fmt_id.write(&mut w);
-    w.option(xf.alignment.as_ref(), |w, alignment| {
-        alignment.h.write(w);
-        alignment.v.write(w);
-        alignment.wrap_text.write(w);
-        alignment.shrink_to_fit.write(w);
-    });
+    LegacyXf::from(&xf).write(&mut w);
     let released = w.into_bytes();
     assert_eq!(
         Xf::from(LegacyXf::read(&mut Reader::new(&released[1..])).unwrap()),
@@ -1307,11 +1316,11 @@ impl BaseCursor {
             styles,
             tables,
         } = base;
+        let released = self.section == XF_SECTION && styles.is_released_xf(self.index);
         let mut w = Writer::new();
-        w.u8(if self.section == XF_SECTION {
-            XF_V2_TAG
-        } else {
-            self.section as u8
+        w.u8(match self.section {
+            XF_SECTION if !released => XF_V2_TAG,
+            section => section as u8,
         });
         let index = self.index;
         match self.section {
@@ -1339,6 +1348,7 @@ impl BaseCursor {
             10 => styles.fonts[index].write(&mut w),
             11 => styles.fills[index].write(&mut w),
             12 => styles.borders[index].write(&mut w),
+            13 if released => LegacyXf::from(&styles.cell_xfs[index]).write(&mut w),
             13 => styles.cell_xfs[index].write(&mut w),
             14 => styles.num_fmts[index].write(&mut w),
             15 => styles.indexed_colors[index].write(&mut w),
@@ -1604,6 +1614,7 @@ enum BaseRecord {
     Fill(Fill),
     Border(Border),
     Xf(Xf),
+    ReleasedXf(Xf),
     NumberFormat((u16, String)),
     Color(String),
     Table(Table),
@@ -1719,7 +1730,7 @@ impl BaseRecord {
             11 => Self::Fill(r.value()?),
             12 => Self::Border(r.value()?),
             XF_SECTION if tag == XF_V2_TAG => Self::Xf(r.value()?),
-            XF_SECTION => Self::Xf(r.value::<LegacyXf>()?.into()),
+            XF_SECTION => Self::ReleasedXf(r.value::<LegacyXf>()?.into()),
             14 => Self::NumberFormat(r.value()?),
             15 => Self::Color(r.value()?),
             16 => Self::Table(r.value()?),
@@ -1844,6 +1855,7 @@ impl BaseBuilder {
                     BaseRecord::Fill(value) => base.styles.fills.push(value),
                     BaseRecord::Border(value) => base.styles.borders.push(value),
                     BaseRecord::Xf(value) => base.styles.cell_xfs.push(value),
+                    BaseRecord::ReleasedXf(value) => base.styles.push_released_xf(value),
                     BaseRecord::NumberFormat(value) => base.styles.num_fmts.push(value),
                     BaseRecord::Color(value) => base.styles.indexed_colors.push(value),
                     BaseRecord::Table(value) => base.tables.push(value),
@@ -1937,7 +1949,7 @@ impl BaseBuilder {
                 11 => base.styles.fills.push(Codec::read(&mut r)?),
                 12 => base.styles.borders.push(Codec::read(&mut r)?),
                 XF_SECTION if tag == XF_V2_TAG => base.styles.cell_xfs.push(Codec::read(&mut r)?),
-                XF_SECTION => base.styles.cell_xfs.push(LegacyXf::read(&mut r)?.into()),
+                XF_SECTION => base.styles.push_released_xf(LegacyXf::read(&mut r)?.into()),
                 14 => base.styles.num_fmts.push(Codec::read(&mut r)?),
                 15 => base.styles.indexed_colors.push(Codec::read(&mut r)?),
                 16 => base.tables.push(Codec::read(&mut r)?),
