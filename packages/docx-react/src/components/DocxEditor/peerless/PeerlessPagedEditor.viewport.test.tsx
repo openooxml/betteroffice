@@ -6,6 +6,7 @@ import type { DocxCommandAck, DocxCommandEchoContext, DocxCommandEnvelope, DocxC
 import type { PeerlessEditSessionBinding, UsePeerlessEditSessionOptions } from '../hooks/usePeerlessEditSession';
 import type { PeerlessFrameGeometry } from './viewStore';
 import { PeerlessPagedEditor } from './PeerlessPagedEditor';
+import { commandPageGeometry } from './commandPageGeometry';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -161,7 +162,7 @@ test('peerless_page_offsets_are_monotonic_and_non_overlapping', () => {
     page: { width: pageIndex === 1 ? 400 : 200, height } }));
   const dependencies = { identity: { current: identity }, retained: { current: null }, prepared: { current: new WeakMap() },
     pageIndexes: { current: new Map() }, applyFrameDelta: () => ({ frameEpoch: 1, pages }), decodeFrameDelta: () => ({}),
-    residentCaretSnapshotForFrame: () => ({ caretRect: { pageIndex: 2, x: 10, y: 7, height: 20 } }), CANVAS_PAGE_GAP_PX,
+    commandPageGeometry, residentCaretSnapshotForFrame: () => ({ caretRect: { pageIndex: 2, x: 10, y: 7, height: 20 } }), CANVAS_PAGE_GAP_PX,
   };
   const body = new Bun.Transpiler({ loader: 'tsx' }).transformSync(`function prepare(frame) {${source.slice(start, end)} }`);
   const prepare = new Function(...Object.keys(dependencies), `${body}\nreturn prepare;`)(...Object.values(dependencies)) as

@@ -27,6 +27,8 @@ export interface PeerlessFrameGeometry {
   coversThroughSeq: number;
   frameEpoch: number;
   layoutRevision: number;
+  documentWidth?: number;
+  layoutProvisional?: boolean;
   pages: readonly {
     page: DocxCommandPageIdentity;
     bounds: DocxEchoRect;

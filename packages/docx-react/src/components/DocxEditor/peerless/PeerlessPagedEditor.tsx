@@ -138,7 +138,8 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
   const geometry = snapshot.geometry;
   const pages = geometry?.pages ?? emptyPages;
   const layout = useMemo(() => pageLayout(pages), [pages]);
-  const { width, height } = layout;
+  const width = Math.max(layout.width, geometry?.documentWidth ?? 0);
+  const { height } = layout;
   const column = useRef<HTMLDivElement>(null);
   const measuredWindow = useRef<{ start: number; end: number } | null>(null);
   useLayoutEffect(() => {

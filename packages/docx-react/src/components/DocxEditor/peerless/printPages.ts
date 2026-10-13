@@ -26,7 +26,7 @@ export function createWorkerPrintCapture(binding: PeerlessEditSessionBinding,
       const snapshot = binding.viewStore.getSnapshot();
       version = snapshot.version;
       const pages = snapshot.geometry?.pages;
-      if (!pages?.length) throw new Error('Worker print layout is unavailable');
+      if (!pages?.length || snapshot.geometry?.layoutProvisional) throw new Error('Worker print layout is unavailable');
       for (const { page } of pages) {
         assertCurrent();
         await buildPages([page.pageIndex], binding.viewStore.getSnapshot().geometry?.frameEpoch ?? 0);
