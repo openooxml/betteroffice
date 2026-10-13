@@ -22,29 +22,6 @@ fn time_serial(secs: f64) -> f64 {
 }
 
 #[test]
-fn declared_builtin_codes_win() {
-    use crate::styles::{FormatCode, Stylesheet, Xf};
-    let code = "_(€* #,##0.00_);_(€* (#,##0.00);_(€* \"-\"??_);_(@_)";
-    let mut styles = Stylesheet::default();
-    for id in [0, 5, 8, 14, 41, 44, 164] {
-        styles.num_fmts.push((id, code.into()));
-        styles.cell_xfs.push(Xf {
-            num_fmt_id: Some(id),
-            ..Xf::default()
-        });
-        let index = styles.cell_xfs.len() as u32 - 1;
-        assert_eq!(styles.format_code_for(index), FormatCode::Custom(code));
-        assert_eq!(
-            styles.cell_format(Some(index)).number_format,
-            crate::NumberFormat::Custom {
-                pattern: code.into()
-            }
-        );
-        assert_eq!(fv(1234.5, code), " €1,234.50 ");
-    }
-}
-
-#[test]
 fn implied_currency_and_accounting_codes() {
     let codes = [
         (5, r##""$"#,##0_);("$"#,##0)"##),
@@ -67,16 +44,6 @@ fn implied_currency_and_accounting_codes() {
     }
     assert_eq!(fv(-1234.5, codes[3].1), "($1,234.50)");
     assert_eq!(color(-1234.5, codes[3].1).as_deref(), Some("#FF0000"));
-}
-
-#[test]
-fn declared_general_code_applies_without_an_explicit_style() {
-    let mut styles = crate::Stylesheet::default();
-    styles.num_fmts.push((0, "0.00".into()));
-    assert_eq!(
-        styles.resolved_format(None).number_format,
-        crate::styles::FormatCode::Custom("0.00")
-    );
 }
 
 #[test]

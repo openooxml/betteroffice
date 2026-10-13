@@ -2831,7 +2831,7 @@ fn builtin_a1_display() -> String {
 fn schema_6_snapshot_with_a_declared_builtin_restores_its_builtin_display() {
     let model = declared_builtin_model();
     let displayed = builtin_a1_display();
-    assert_ne!(displayed, a1_display(&model));
+    assert_eq!(displayed, a1_display(&model));
     let mut worker = Workbook::from_model(model.clone()).unwrap();
     worker.authority = crate::authority::schema_6_authority(&model, 91);
     for budget in budgets() {

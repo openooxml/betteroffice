@@ -2,7 +2,7 @@
 
 use xlsx_model::{CellProvider, CellRange, CellRef, CellValue, Sheet, SheetId, Workbook};
 use xlsx_ops::{
-    BorderLineStyle, BorderPatch, BorderPreset, CapturedFormat, CellState, HorizontalAlignment,
+    BorderLineStyle, BorderPatch, BorderPreset, CellState, HorizontalAlignment,
     NumberFormatMutation, Op, Provenance, StylePatch, StyleProperty, TextWrapping, Transaction,
     UndoStack, apply,
 };
@@ -304,83 +304,4 @@ fn clearing_a_style_only_cell_restores_sparse_storage() {
     )
     .unwrap();
     assert!(wb.sheets[0].cell(r("A1")).is_none());
-}
-
-fn declared_date_workbook(code: Option<&str>) -> Workbook {
-    let mut wb = Workbook::default();
-    wb.sheets.push(Sheet::new("Sheet1"));
-    if let Some(code) = code {
-        wb.styles.num_fmts.push((14, code.into()));
-    }
-    wb
-}
-
-fn a1_number_format(wb: &Workbook) -> (u16, Option<String>) {
-    let style = wb.sheets[0].cell(r("A1")).unwrap().style.unwrap();
-    let code = match wb.styles.format_code_for(style) {
-        xlsx_model::FormatCode::Custom(code) => Some(code.to_string()),
-        xlsx_model::FormatCode::Builtin(_) => None,
-    };
-    (wb.styles.cell_xfs[style as usize].num_fmt_id.unwrap(), code)
-}
-
-fn apply_date(wb: &mut Workbook) {
-    apply(
-        wb,
-        &Op::SetRangeNumberFormat {
-            sheet: SheetId(0),
-            range: CellRange::parse_a1("A1").unwrap(),
-            format: NumberFormatMutation::Date,
-        },
-    )
-    .unwrap();
-}
-
-#[test]
-fn date_mutation_shows_the_builtin_date_over_a_differing_declaration() {
-    let mut wb = declared_date_workbook(Some("0.00"));
-    apply_date(&mut wb);
-    let (id, code) = a1_number_format(&wb);
-    assert_eq!(code.as_deref(), Some("m/d/yy"));
-    assert_eq!(
-        wb.styles.num_fmts,
-        [(14, "0.00".into()), (id, "m/d/yy".into())]
-    );
-    assert!(id >= 164);
-}
-
-#[test]
-fn replayed_builtin_captures_keep_their_builtin_meaning() {
-    let mut wb = declared_date_workbook(Some("0.00"));
-    let mut captured = serde_json::to_value(xlsx_model::CellFormat::default()).unwrap();
-    captured["numberFormat"] = serde_json::json!({"kind": "builtin", "id": 14});
-    apply(
-        &mut wb,
-        &Op::ApplyRangeFormat {
-            sheet: SheetId(0),
-            range: CellRange::parse_a1("A1").unwrap(),
-            format: CapturedFormat {
-                rows: 1,
-                columns: 1,
-                formats: vec![serde_json::from_value(captured).unwrap()],
-            },
-        },
-    )
-    .unwrap();
-    let (id, code) = a1_number_format(&wb);
-    assert_eq!(code.as_deref(), Some("m/d/yy"));
-    assert_eq!(
-        wb.styles.num_fmts,
-        [(14, "0.00".into()), (id, "m/d/yy".into())]
-    );
-}
-
-#[test]
-fn unshadowed_builtin_dates_keep_their_id() {
-    for declared in [None, Some("m/d/yy")] {
-        let mut wb = declared_date_workbook(declared);
-        apply_date(&mut wb);
-        assert_eq!(a1_number_format(&wb).0, 14);
-        assert_eq!(wb.styles.num_fmts.len(), usize::from(declared.is_some()));
-    }
 }

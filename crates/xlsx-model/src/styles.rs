@@ -3,7 +3,6 @@
 
 use std::collections::{HashMap, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
-use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
@@ -436,87 +435,6 @@ impl FmtMemo {
     }
 }
 
-/// first declaration of each id, built on first lookup and keyed to the
-/// table's allocation and length; hits re-verify their slot, and a table that
-/// moved on reads by scan until the next intern drops the index.
-#[derive(Debug, Default)]
-struct FmtIndex(OnceLock<DeclaredIds>);
-
-impl Clone for FmtIndex {
-    fn clone(&self) -> Self {
-        FmtIndex::default()
-    }
-}
-
-impl FmtIndex {
-    fn heal(&mut self, formats: &[(u16, String)]) {
-        if self
-            .0
-            .get()
-            .is_some_and(|ids| ids.table != table_key(formats))
-        {
-            self.0 = OnceLock::new();
-        }
-    }
-
-    /// follows the interner's push onto a table that was `before`.
-    fn pushed(&mut self, before: (usize, usize), formats: &[(u16, String)]) {
-        if let Some(ids) = self.0.get_mut()
-            && ids.table == before
-        {
-            let slot = formats.len() - 1;
-            ids.note(formats[slot].0, slot);
-            ids.table = table_key(formats);
-            return;
-        }
-        self.0 = OnceLock::new();
-    }
-}
-
-#[derive(Debug)]
-struct DeclaredIds {
-    table: (usize, usize),
-    builtin: [u64; 3],
-    slots: HashMap<u16, u32>,
-}
-
-impl DeclaredIds {
-    fn build(formats: &[(u16, String)]) -> Self {
-        #[cfg(test)]
-        count_format_visits(formats.len());
-        let mut ids = DeclaredIds {
-            table: table_key(formats),
-            builtin: [0; 3],
-            slots: HashMap::with_capacity(formats.len()),
-        };
-        for (slot, (id, _)) in formats.iter().enumerate() {
-            ids.note(*id, slot);
-        }
-        ids
-    }
-
-    fn note(&mut self, id: u16, slot: usize) {
-        if id < BUILTIN_ID_LIMIT {
-            self.builtin[usize::from(id / 64)] |= 1 << (id % 64);
-        }
-        self.slots.entry(id).or_insert(slot as u32);
-    }
-
-    fn slot(&self, id: u16) -> Option<usize> {
-        if id < BUILTIN_ID_LIMIT && self.builtin[usize::from(id / 64)] & (1 << (id % 64)) == 0 {
-            return None;
-        }
-        self.slots.get(&id).map(|slot| *slot as usize)
-    }
-}
-
-fn table_key(formats: &[(u16, String)]) -> (usize, usize) {
-    (formats.as_ptr() as usize, formats.len())
-}
-
-/// ids below this are builtins; custom formats start here.
-const BUILTIN_ID_LIMIT: u16 = 164;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NumFmtTableFull;
 
@@ -543,10 +461,6 @@ pub struct Stylesheet {
     /// `#rrggbb` entries; empty strings preserve omitted colors and use the default index.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub indexed_colors: Vec<String>,
-    /// declared codes for builtin ids are ignored, as shared state written
-    /// before they were honoured reads them.
-    #[serde(skip)]
-    legacy_builtin_ids: bool,
     #[serde(skip)]
     font_memo: PoolMemo,
     #[serde(skip)]
@@ -557,8 +471,6 @@ pub struct Stylesheet {
     xf_memo: PoolMemo,
     #[serde(skip)]
     fmt_memo: FmtMemo,
-    #[serde(skip)]
-    fmt_index: FmtIndex,
 }
 
 impl PartialEq for Stylesheet {
@@ -570,7 +482,6 @@ impl PartialEq for Stylesheet {
             && self.num_fmts == other.num_fmts
             && self.theme == other.theme
             && self.indexed_colors == other.indexed_colors
-            && self.legacy_builtin_ids == other.legacy_builtin_ids
     }
 }
 
@@ -649,13 +560,11 @@ impl Stylesheet {
             num_fmts,
             theme: _,
             indexed_colors,
-            legacy_builtin_ids: _,
             font_memo: _,
             fill_memo: _,
             border_memo: _,
             xf_memo: _,
             fmt_memo: _,
-            fmt_index: _,
         } = self;
         [
             fonts.len(),
@@ -718,69 +627,19 @@ impl Stylesheet {
         self.xf(style_index)?.alignment.as_ref()
     }
 
-    #[doc(hidden)]
-    pub fn legacy_builtin_ids(&self) -> bool {
-        self.legacy_builtin_ids
-    }
-
-    /// Only sticks where a builtin id is declared, the one case the readings
-    /// differ.
-    #[doc(hidden)]
-    pub fn set_legacy_builtin_ids(&mut self, legacy: bool) {
-        self.legacy_builtin_ids =
-            legacy && self.num_fmts.iter().any(|(id, _)| *id < BUILTIN_ID_LIMIT);
-    }
-
-    /// Declared codes override implied builtins for every id.
+    /// the number-format for a cell style: custom code when id >= 164, else the
+    /// builtin id. a missing/unset xf resolves to builtin `0` (General).
     pub fn format_code_for(&self, style_index: u32) -> FormatCode<'_> {
         let id = self
             .xf(style_index)
             .and_then(|xf| xf.num_fmt_id)
             .unwrap_or(0);
-        self.format_code_for_id(id)
-    }
-
-    pub fn format_code_for_id(&self, id: u16) -> FormatCode<'_> {
-        if self.legacy_builtin_ids && id < BUILTIN_ID_LIMIT {
-            return FormatCode::Builtin(id);
+        if id >= 164
+            && let Some((_, code)) = self.num_fmts.iter().find(|(k, _)| *k == id)
+        {
+            return FormatCode::Custom(code);
         }
-        match self.declared_code(id) {
-            Some(code) => FormatCode::Custom(code),
-            None => FormatCode::Builtin(id),
-        }
-    }
-
-    /// the builtin's own code when the workbook declares `id` as something else.
-    fn shadowed_builtin(&self, id: u16) -> Option<&'static str> {
-        if self.legacy_builtin_ids || id >= BUILTIN_ID_LIMIT {
-            return None;
-        }
-        let builtin = crate::numfmt::builtin_format_code(id).unwrap_or("General");
-        self.declared_code(id)
-            .filter(|code| *code != builtin)
-            .map(|_| builtin)
-    }
-
-    /// the first declaration for `id`.
-    fn declared_code(&self, id: u16) -> Option<&str> {
-        let ids = self
-            .fmt_index
-            .0
-            .get_or_init(|| DeclaredIds::build(&self.num_fmts));
-        if ids.table == table_key(&self.num_fmts) {
-            let slot = ids.slot(id)?;
-            if let Some((declared, code)) = self.num_fmts.get(slot)
-                && *declared == id
-            {
-                return Some(code.as_str());
-            }
-        }
-        #[cfg(test)]
-        count_format_visits(self.num_fmts.len());
-        self.num_fmts
-            .iter()
-            .find(|(declared, _)| *declared == id)
-            .map(|(_, code)| code.as_str())
+        FormatCode::Builtin(id)
     }
 
     /// resolved format for a cell style, cloning each facet; see
@@ -820,7 +679,7 @@ impl Stylesheet {
                 .unwrap_or(&DEFAULT_BORDER),
             number_format: match style_index {
                 Some(index) => self.format_code_for(index),
-                None => self.format_code_for_id(0),
+                None => FormatCode::Builtin(0),
             },
             alignment: xf
                 .and_then(|xf| xf.alignment.as_ref())
@@ -833,12 +692,6 @@ impl Stylesheet {
         &mut self,
         format: &CellFormat,
     ) -> Result<Option<u32>, NumFmtTableFull> {
-        self.fmt_index.heal(&self.num_fmts);
-        if let NumberFormat::Builtin { id } = format.number_format
-            && let Some(code) = self.shadowed_builtin(id)
-        {
-            return self.intern_custom_cell_format(format, code);
-        }
         if format == &CellFormat::default() {
             return Ok(None);
         }
@@ -995,7 +848,6 @@ impl Stylesheet {
         self.borders.truncate(marks.borders);
         self.cell_xfs.truncate(marks.cell_xfs);
         self.num_fmts.truncate(marks.num_fmts);
-        self.fmt_index.heal(&self.num_fmts);
     }
 
     fn intern_font(&mut self, value: &Font) -> u32 {
@@ -1025,7 +877,12 @@ impl Stylesheet {
     /// true when a cell using `id` resolves to `pattern` via `format_code_for`:
     /// the id must be custom-range and its first table entry must carry the code.
     fn id_resolves_to(&self, id: u16, pattern: &str) -> bool {
-        id >= BUILTIN_ID_LIMIT && self.declared_code(id) == Some(pattern)
+        id >= 164
+            && self
+                .num_fmts
+                .iter()
+                .find(|(used, _)| *used == id)
+                .is_some_and(|(_, code)| code == pattern)
     }
 
     fn intern_number_format(&mut self, pattern: &str) -> Option<u16> {
@@ -1063,9 +920,7 @@ impl Stylesheet {
             self.num_fmts.iter().map(|(id, _)| *id).collect();
         let candidate = (164..=u16::MAX).find(|id| !live_ids.contains(id))?;
         let slot = self.num_fmts.len();
-        let before = table_key(&self.num_fmts);
         self.num_fmts.push((candidate, pattern.to_string()));
-        self.fmt_index.pushed(before, &self.num_fmts);
         self.fmt_memo
             .patterns
             .insert(pattern.to_string(), (candidate, slot));
@@ -1075,17 +930,6 @@ impl Stylesheet {
 }
 
 const INTERN_CACHE_MIN_POOL: usize = 128;
-
-#[cfg(test)]
-thread_local! {
-    static FORMAT_VISITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
-
-/// declared formats examined while resolving codes.
-#[cfg(test)]
-fn count_format_visits(count: usize) {
-    FORMAT_VISITS.set(FORMAT_VISITS.get() + count as u64);
-}
 
 fn seed_memo(memo: &mut PoolMemo, pool_len: usize, key: Option<u64>, index: u32) {
     if let Some(key) = key {
@@ -1571,34 +1415,6 @@ mod tests {
         );
         assert_eq!(unique.font_memo.map.len(), 1);
         assert_eq!(unique.xf_memo.map.len(), 1);
-    }
-
-    #[test]
-    fn resolving_edited_cells_visits_each_declared_format_once() {
-        let mut ss = Stylesheet {
-            num_fmts: (0..200)
-                .map(|i| (164 + i, format!("0.{}", "0".repeat(usize::from(i) + 1))))
-                .collect(),
-            ..Stylesheet::default()
-        };
-        let before = FORMAT_VISITS.get();
-        for row in 0..500 {
-            let mut format = ss.cell_format(None);
-            format.number_format = if row % 2 == 0 {
-                NumberFormat::Builtin { id: 14 }
-            } else {
-                NumberFormat::Custom {
-                    pattern: "0.0%".into(),
-                }
-            };
-            let style = ss.intern_cell_format(&format).unwrap();
-            ss.resolved_format(style);
-        }
-        let visits = FORMAT_VISITS.get() - before;
-        assert!(
-            visits <= 500 + 200,
-            "{visits} visits for 500 cells and 200 formats"
-        );
     }
 
     #[test]

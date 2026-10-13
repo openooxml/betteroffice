@@ -1675,12 +1675,12 @@ impl<'a> FrameStyles<'a> {
     }
 
     fn resolve(styles: &Stylesheet, style: Option<u32>) -> ResolvedXf {
-        let format_code = match style
-            .map(|s| styles.format_code_for(s))
-            .unwrap_or_else(|| styles.format_code_for_id(0))
-        {
-            FormatCode::Custom(code) => Arc::from(code),
-            FormatCode::Builtin(id) => Arc::from(builtin_format_code(id).unwrap_or("General")),
+        let format_code = match style.map(|s| styles.format_code_for(s)) {
+            Some(FormatCode::Custom(code)) => Arc::from(code),
+            Some(FormatCode::Builtin(id)) => {
+                Arc::from(builtin_format_code(id).unwrap_or("General"))
+            }
+            None => Arc::from("General"),
         };
         let font = style
             .and_then(|s| styles.font_for(s))
@@ -1783,13 +1783,10 @@ fn cell_display_text(
 /// the number-format code a cell's xf resolves to; general when unset or when
 /// a builtin id is not modeled.
 pub fn format_code_for_cell(styles: &Stylesheet, cell: &xlsx_model::Cell) -> String {
-    match cell
-        .style
-        .map(|s| styles.format_code_for(s))
-        .unwrap_or_else(|| styles.format_code_for_id(0))
-    {
-        FormatCode::Custom(c) => c.to_string(),
-        FormatCode::Builtin(id) => builtin_format_code(id).unwrap_or("General").to_string(),
+    match cell.style.map(|s| styles.format_code_for(s)) {
+        Some(FormatCode::Custom(c)) => c.to_string(),
+        Some(FormatCode::Builtin(id)) => builtin_format_code(id).unwrap_or("General").to_string(),
+        None => "General".to_string(),
     }
 }
 
@@ -2085,27 +2082,6 @@ mod tests {
                 .iter()
                 .any(|cmd| matches!(cmd, DrawCmd::Text { .. }))
         );
-    }
-
-    #[test]
-    fn default_cells_use_declared_general_override() {
-        let mut wb = Workbook::default();
-        wb.styles.num_fmts.push((0, "0.00".into()));
-        let cell = num_cell(12.0);
-        assert_eq!(display_text(&wb.styles, wb.date_system, &cell), "12.00");
-        let mut sheet = Sheet::new("Sheet1");
-        sheet.set_cell(CellRef::new(0, 0), cell);
-        wb.sheets.push(sheet);
-        let vp = Viewport {
-            x: 0.0,
-            y: 0.0,
-            width: 200.0,
-            height: 100.0,
-        };
-        let dl = build_display_list(&wb, SheetId(0), &vp).unwrap();
-        assert!(dl.commands.iter().any(|cmd| matches!(cmd,
-            DrawCmd::Text { text, number_format: Some(layout), .. }
-                if &**text == "12.00" && layout.general.is_none())));
     }
 
     #[test]
