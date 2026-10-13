@@ -261,7 +261,7 @@ describe('prefill refusals and seals', () => {
       if (acknowledging && event.type === 'dispatched' && event.seq !== null) queueMicrotask(() => ack(event.seq!));
     });
     const dispatched = (kind: PeerlessWorkerCommand['kind'], count = 1) => new Promise<void>((resolve) => {
-      const check = () => sent.filter((command) => command.kind === kind).length >= count;
+      const check = () => harness.events.filter((event) => event.type === 'dispatched' && event.command?.kind === kind).length >= count;
       if (check()) { resolve(); return; }
       const off = coordinator.subscribe(() => { if (check()) { off(); resolve(); } });
     });
