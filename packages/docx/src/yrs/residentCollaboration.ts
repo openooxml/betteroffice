@@ -64,8 +64,10 @@ export function createResidentCollaboration(engine: ResidentEngineSession) {
         apply(prepared, context) {
           if (prepared.command.kind !== 'applyRemoteUpdate') return hooks.apply(prepared, context);
           const before = engine.proposalEngine.version();
+          const since = engine.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
           try {
             const insertion = engine.applyUpdate(new Uint8Array(prepared.command.payload.update));
+            if (engine.proposalEngine.version() !== before) engine.markProjectionStories(engine.storiesChangedSince(since).stories);
             if (insertion) {
               inferences.push({ seq: prepared.command.seq, insertion });
               const loc = { story: insertion.story, paraId: insertion.paraId, offset: insertion.endOffset };
