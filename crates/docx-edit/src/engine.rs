@@ -24,6 +24,7 @@ use docx_layout::measure_blocks::TableMeasurementFrame;
 use docx_layout::paragraph_spacing::resolve_doc_grid_pitch;
 use docx_layout::paragraph_spacing::resolve_line_unit_spacing;
 use docx_layout::place::LayoutCheckpoint;
+use docx_layout::prescan::SectionLayoutConfig;
 use docx_layout::regions::{
     DocumentRegions, RegionLayoutInput, apply_document_regions, apply_document_regions_tracked,
     apply_section_geometry, apply_section_geometry_to_blocks, effective_header_footer_refs,
@@ -864,7 +865,7 @@ fn options_through_section(
 struct BodySections {
     options: docx_layout::types::LayoutOptions,
     /// The geometry and start of each section a body break ends.
-    ended: Vec<(docx_layout::prescan::SectionLayoutConfig, Option<SectionBreakType>)>,
+    ended: Vec<(SectionLayoutConfig, Option<SectionBreakType>)>,
 }
 
 impl BodySections {
@@ -881,7 +882,7 @@ impl BodySections {
             .map(|section| {
                 size = section.page_size.clone().unwrap_or_else(|| size.clone());
                 margins = section.margins.clone().unwrap_or_else(|| margins.clone());
-                let config = docx_layout::prescan::SectionLayoutConfig {
+                let config = SectionLayoutConfig {
                     page_size: size.clone(),
                     margins: margins.clone(),
                     columns: section.columns.clone(),
@@ -21276,7 +21277,8 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             let within = |page: &usize| *page < 3;
             assert_eq!(pagination.layout.as_ref().unwrap().pages.len(), 3);
             assert!(pagination.rebuilt_page_end <= 3);
-            assert!(pagination.rebuilt_page_ranges.iter().all(|pages| pages.end <= 3));
+            let ranges = &pagination.rebuilt_page_ranges;
+            assert!(ranges.iter().all(|pages| pages.end <= 3));
             assert!(pagination.display_rebuilt_pages.iter().all(within));
             assert!(pagination.restamped_pages.iter().flatten().all(within));
             assert!(pagination.note_changed_pages.iter().all(within));
