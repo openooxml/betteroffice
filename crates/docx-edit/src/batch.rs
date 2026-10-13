@@ -703,6 +703,9 @@ fn direct_admissible<T: ReadTxn>(doc: &EditingDoc, txn: &T, steps: &[Planned]) -
         ![
             crate::STORIES,
             crate::COMMENTS,
+            crate::part_metadata::PART_METADATA,
+            crate::document_properties::DOCUMENT_PROPERTIES,
+            crate::section_margins::SECTION_MARGINS,
             crate::identity::PARAGRAPH_IDS,
             crate::identity::SOURCE_PARAGRAPH_IDS,
             crate::identity::SESSION,
@@ -3499,6 +3502,34 @@ mod direct_tests {
                 &plan.steps
             ));
         }
+    }
+
+    #[test]
+    fn direct_text_batches_preserve_document_properties() {
+        let direct = document();
+        let replica = document();
+        for doc in [&direct, &replica] {
+            doc.set_document_property(
+                &EditCtx::local("", ""),
+                "metadata",
+                r#"{"finalSectionProperties":{"marginLeft":1440}}"#,
+            )
+            .unwrap();
+        }
+        let properties = direct.document_properties_json();
+        direct.set_direct_batches(true);
+        let edit = step();
+        let steps = [BatchStep::Edit(&edit)];
+        let a = apply_text_steps(&direct, &steps, &UndoSession::new(), usize::MAX).unwrap();
+        let b = apply_text_steps(&replica, &steps, &UndoSession::new(), usize::MAX).unwrap();
+        assert_eq!(normalized(&a), normalized(&b));
+        assert_eq!(direct.direct_batches_applied(), 1);
+        assert_eq!(direct.document_properties_json(), properties);
+        assert_eq!(replica.document_properties_json(), properties);
+        assert_eq!(
+            direct.encode_state_as_update_v1(),
+            replica.encode_state_as_update_v1()
+        );
     }
 
     #[test]

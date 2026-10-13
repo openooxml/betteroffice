@@ -15,6 +15,7 @@ import {
 /** @internal */
 export interface PeerlessSessionOptions extends OpenPresentationSessionOptions {
   readOnly?: boolean;
+  observeChanges?: boolean;
   activeSlideIndex?: number;
   collaboration?: { clientId: number; initialUpdate?: Uint8Array };
   signal?: AbortSignal;
@@ -52,7 +53,7 @@ export function createPeerlessSession(
     session: crypto.randomUUID(), incarnation: crypto.randomUUID(),
     clientId: options.collaboration?.clientId ?? options.clientId, collaboration: options.collaboration != null, fonts: fonts(options.fonts), fallbackFonts: fonts(options.fallbackFonts),
     initialUpdate: options.collaboration?.initialUpdate ?? options.initialUpdate, wasm: options.wasm,
-    readOnly: options.readOnly, activeSlideIndex: options.activeSlideIndex,
+    observeChanges: options.observeChanges, readOnly: options.readOnly, activeSlideIndex: options.activeSlideIndex,
   };
   const transport = createWorkerTransport(options.worker ? options.worker() :
     new Worker(new URL('./pptxSessionWorker.mjs', import.meta.url), { type: 'module' }));

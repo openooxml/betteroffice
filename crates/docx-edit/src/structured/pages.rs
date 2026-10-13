@@ -562,7 +562,7 @@ pub(crate) fn metadata_mismatch(
     let source = doc.source_metadata();
     let read = source.as_deref().map(|source| source.read());
     sections.push(
-        read.and_then(|read| read.final_section.clone())
+        doc.final_section_properties()
             .and_then(|value| serde_json::from_value(value).ok())
             .unwrap_or_default(),
     );

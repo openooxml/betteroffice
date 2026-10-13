@@ -19,6 +19,7 @@ export interface PeerlessEchoIntent {
 /** @internal */
 export interface PeerlessEchoPainterOptions {
   canvasForPage(page: DocxCommandPageIdentity): HTMLCanvasElement | null;
+  canEchoFont?(family: string): boolean;
 }
 
 /** @internal Painter state never updates selection or command targets. */
@@ -140,6 +141,7 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
 
   function preview(intent: PeerlessTextIntent): PeerlessEchoIntent | undefined {
     if (!disposed) prunePages();
+    if (context?.styleRuns.some(run => options.canEchoFont?.(run.fontFamily) === false)) disable('worker-font');
     if (disposed || disabled || !context || staged?.pages.find((item) =>
       item.page.pageId === context!.page.pageId && item.page.pageIndex === context!.page.pageIndex
     )?.frameEpoch !== context.frameEpoch) return undefined;
@@ -164,6 +166,7 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
 
   function paint(pending: readonly EchoEntry<PeerlessEchoIntent>[]): void {
     if (!disposed) prunePages();
+    if (context?.styleRuns.some(run => options.canEchoFont?.(run.fontFamily) === false)) disable('worker-font');
     if (disposed || disabled || !context) return;
     originalIntents = Math.max(originalIntents,
       pending.reduce((sum, entry) => sum + entry.value.originalIntentCount, 0));

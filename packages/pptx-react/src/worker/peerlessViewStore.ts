@@ -158,6 +158,7 @@ export function createPeerlessViewStore(
   const resultReferences = new WeakMap<PresentationCommandSelectionReference, WaitingInput>();
   let compatibilityNextSeq = initial.throughSeq + 1;
   let lastSentSeq = initial.throughSeq;
+  let selectionTailSeq = initial.throughSeq;
   let chainTail = initial.throughSeq;
   let chainTailInput: WaitingInput | undefined;
   let unresolvedThroughSeq = initial.throughSeq;
@@ -201,7 +202,7 @@ export function createPeerlessViewStore(
   function reference(predecessorSelection = false): PresentationCommandSelectionReference | null {
     if (!known() || predecessorSelection && !localOnlySelection && localSelectionSeq > view.presentedThroughSeq) {
       const at: PresentationCommandSelectionReference = { source: 'afterSeq',
-        seq: sharedInput ? chainTailInput?.ticket?.seq ?? lastSentSeq : chainTail };
+        seq: sharedInput ? chainTailInput?.ticket?.seq ?? selectionTailSeq : chainTail };
       if (sharedInput && chainTailInput) resultReferences.set(at, chainTailInput);
       return at;
     }
@@ -307,6 +308,18 @@ export function createPeerlessViewStore(
       return;
     }
     const changedState = JSON.stringify(view.editState) !== JSON.stringify(ack.editState);
+    if (view.pending.some((record) => preservesSelection(record.intent) &&
+      ack.outcomes.some((outcome) => outcome.seq === record.seq && outcome.committed))) {
+      for (const input of waiting) {
+        const at = 'at' in input.intent.payload ? input.intent.payload.at : undefined;
+        const dependency = input.after?.ticket?.seq ?? (at?.source === 'afterSeq' ? at.seq : undefined);
+        if (input.after && input.after.ticket?.seq === undefined || dependency !== undefined && dependency > ack.throughSeq) continue;
+        if (at?.source === 'afterSeq') input.intent = chainedIntent(input.intent, ack.throughSeq);
+        input.after = undefined;
+        input.basis = { epoch: ack.epoch, version: ack.version };
+        input.basisThroughSeq = ack.throughSeq;
+      }
+    }
     const remoteHistory = view.pending.some((record) => record.seq === ack.historyThroughSeq && record.intent.kind === 'applyRemoteUpdate');
     const refusals = view.pending.flatMap((record) => {
       const outcome = ack.outcomes.find((entry) => entry.seq === record.seq);
@@ -371,9 +384,9 @@ export function createPeerlessViewStore(
         if (at?.source === 'afterSeq' && sequences.has(at.seq)) input.intent = chainedIntent(input.intent, sequences.get(at.seq)!);
       }
       compatibilityNextSeq = lastSentSeq + waiting.length + 1;
-      chainTail = Math.max(lastSentSeq, waiting[waiting.length - 1]?.seq ?? 0);
+      chainTail = Math.max(selectionTailSeq, [...waiting].reverse().find((input) => !preservesSelection(input.intent))?.seq ?? 0);
     } else if (chainTailInput && rejectedInputs.has(chainTailInput)) {
-      chainTailInput = waiting[waiting.length - 1];
+      chainTailInput = [...waiting].reverse().find((input) => !preservesSelection(input.intent));
     }
     view = { ...view, appliedThroughSeq: ack.throughSeq, editState: ack.editState,
       pending: view.pending.filter((record) => !rejected.has(record.seq)).map((record) => ({ ...record,
@@ -509,13 +522,14 @@ export function createPeerlessViewStore(
     view = { ...view, pending: [...view.pending, { seq: input.seq, basisThroughSeq: input.basisThroughSeq,
       afterSeq: at?.source === 'afterSeq' ? at.seq : undefined, intent, status: 'pending', echoed: input.echoed }] };
     lastSentSeq = input.seq;
+    if (!preservesSelection(intent)) selectionTailSeq = input.seq;
     paintLocal();
   }
 
   function send(input: WaitingInput): void {
     let intent = input.intent;
     if (intent.kind === 'undo' || intent.kind === 'redo' || intent.kind === 'activateSlide' ||
-      intent.kind === 'insertTextBox' || intent.kind === 'insertShape' || intent.kind === 'insertPicture' || intent.kind === 'applyEdits' || intent.kind === 'registerFont') {
+      intent.kind === 'insertTextBox' || intent.kind === 'insertShape' || intent.kind === 'insertPicture' || intent.kind === 'applyEdits' || intent.kind === 'registerFont' || intent.kind === 'invoke') {
       input.basis = { epoch: identity.epoch, version: client.state.version };
       input.basisThroughSeq = client.state.throughSeq;
     }
@@ -583,7 +597,7 @@ export function createPeerlessViewStore(
       if (failure) return Promise.reject(failure);
       if (view.inputFailure) view = { ...view, inputFailure: undefined };
       const wasKnown = known();
-      const predecessor = sharedInput ? chainTailInput?.ticket?.seq ?? lastSentSeq : chainTail;
+      const predecessor = sharedInput ? chainTailInput?.ticket?.seq ?? selectionTailSeq : chainTail;
       const originalReference = 'at' in intent.payload ? intent.payload.at : undefined;
       const after = sharedInput && !wasKnown &&
         ('at' in intent.payload || intent.kind === 'setSelection' || intent.kind === 'compositionEnd')
@@ -602,7 +616,7 @@ export function createPeerlessViewStore(
         return tail.operation;
       }
       const seq = sharedInput ? 0 : compatibilityNextSeq++;
-      if (!sharedInput) chainTail = seq;
+      if (!sharedInput && !preservesSelection(intent)) chainTail = seq;
       if (wasKnown && intent.kind === 'setSelection') {
         localSelectionSeq = seq;
         localOnlySelection = false;
@@ -625,7 +639,7 @@ export function createPeerlessViewStore(
       const input: WaitingInput = { seq, intent, after, basisThroughSeq: view.presentedThroughSeq,
         basis: { epoch: identity.epoch, version: view.confirmed?.frame.version ?? client.state.version },
         echoed, chunks: [], operation, resolve, reject };
-      chainTailInput = input;
+      if (!preservesSelection(intent)) chainTailInput = input;
       if (waiting.length || blocked()) {
         waiting.push(input);
         view = { ...view, waitingInputCount: waiting.length };
@@ -775,15 +789,20 @@ function chainedIntent(intent: PresentationCommandIntent, seq: number): Presenta
 
 function isTextMutation(intent: PresentationCommandIntent): boolean {
   return ['insertText', 'replaceText', 'deleteBackward', 'deleteForward', 'paragraphBreak', 'compositionCommit',
-    'formatText', 'setParagraphAlignment', 'undo', 'redo', 'moveShape', 'setShapeRect', 'insertTextBox', 'insertShape', 'insertPicture', 'applyEdits', 'registerFont', 'applyRemoteUpdate'].includes(intent.kind);
+    'formatText', 'setParagraphAlignment', 'undo', 'redo', 'moveShape', 'setShapeRect', 'insertTextBox', 'insertShape', 'insertPicture', 'applyEdits', 'registerFont', 'applyRemoteUpdate', 'invoke'].includes(intent.kind);
 }
 
 function isLocalSelection(intent: PresentationCommandIntent): boolean {
   return intent.kind === 'setSelection' && intent.payload.at?.source !== 'afterSeq';
 }
 
+function preservesSelection(intent: PresentationCommandIntent): boolean {
+  return intent.kind === 'invoke' && ['setSlideNotes', 'addComment', 'replyToComment', 'setCommentStatus',
+    'setCommentPosition', 'removeComment', 'setCommentFlavor'].includes(intent.payload.method);
+}
+
 function needsWorkerResolution(intent: PresentationCommandIntent): boolean {
-  return intent.kind === 'activateSlide' || intent.kind === 'selectObject' || isTextMutation(intent) || intent.kind === 'moveSelection' || intent.kind === 'selectAtPoint' ||
+  return intent.kind === 'activateSlide' || intent.kind === 'selectObject' || isTextMutation(intent) && !preservesSelection(intent) || intent.kind === 'moveSelection' || intent.kind === 'selectAtPoint' ||
     intent.kind === 'compositionStart' || intent.kind === 'setSelection' && intent.payload.at?.source === 'afterSeq';
 }
 

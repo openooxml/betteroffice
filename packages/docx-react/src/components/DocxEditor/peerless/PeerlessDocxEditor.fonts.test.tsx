@@ -10,6 +10,7 @@ import { registerCommandFonts } from '../../../../../docx/src/yrs/residentComman
 import { stageCommandPresentation } from '../../../../../docx/src/yrs/residentCommandPresentation';
 import { openCommandEngine, closeCommandEngines } from '../../../../../docx/src/yrs/residentCommandTestSupport';
 import { projectCommandEchoContext } from '../../../../../docx/src/yrs/residentCommandViewProjection';
+import { fontEnvironmentForRegistrations } from './workerFonts';
 import { createEchoPainter, type PeerlessEchoIntent } from './echoPainter';
 import { createFramePresentation } from './framePresentation';
 import { admitInputIntents, createInputAdmission } from './inputAdmission';
@@ -23,7 +24,7 @@ async function openFontConnection(hold = false, fontKeys: readonly string[] = ['
   const start = source.indexOf('    signal.throwIfAborted();', source.indexOf('const openConnection ='));
   const end = source.indexOf('\n  }, [', start);
   const transpiler = new Bun.Transpiler({ loader: 'tsx' });
-  const body = transpiler.transformSync(`async function open(bytes, signal) {${source.slice(start, end).replace(
+  const body = transpiler.transformSync(`async function open(input, signal) {${source.slice(start, end).replace(
     'const fonts: YrsResidentFontRegistration[] = [];',
     'const fonts: YrsResidentFontRegistration[] = []; observeFonts(fonts);',
   )} }`);
@@ -44,7 +45,8 @@ async function openFontConnection(hold = false, fontKeys: readonly string[] = ['
     if (hold) await new Promise((_, reject) => controller.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true }));
   };
   const client = {
-    open: async () => ({ hostJson: '{}' }), fontRequirements: async () => '[]',
+    onFontEnvironment: () => () => {}, onMemory: () => () => {},
+    prewarm: async () => {}, openSource: async () => ({ document: { package: { document: { comments: [] }, settings: {} } } }), fontRequirements: async () => '[]',
     async commandInit(value: ResidentCommandInitRequest) {
       await initialize(value);
       return { session: 'fonts', incarnation: 1, epoch: 1 };
@@ -59,6 +61,9 @@ async function openFontConnection(hold = false, fontKeys: readonly string[] = ['
   const dependencies = {
     collaborationBinding: { retire() {}, begin() {}, openOptions: undefined },
     active: { current: null },
+    takePreloadedResidentEngineWorker: () => null,
+    controller: { fontChoices() {} }, fontSource: { current: null }, fontAbort: { current: null }, fontJob: { current: null },
+    fontEnvironmentForRegistrations,
     worker: { current: null },
     sourceComments: { current: [] },
     renderEnvironment: { current: { theme: null, requested: '' } },

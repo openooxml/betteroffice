@@ -1,7 +1,12 @@
 import { createT, deepMerge, en, type LocaleStrings } from '@betteroffice/docx-i18n';
-import type { ResidentEngineWorkerClient } from '@betteroffice/docx/yrs';
+import { WASM32_MEMORY_LIMIT_BYTES, type ResidentEngineWorkerClient, type ResidentEngineWorkerFrame,
+  type ResidentFontEnvironment, type ResidentFontEnvironmentEvent, type WasmModuleMemory } from '@betteroffice/docx/yrs';
+import { normalizeFontFamilies } from '@betteroffice/docx/utils/fontOptions';
+import { DEFAULT_FONTS } from '../../ui/FontPicker';
+import { getPrimaryFontFamily } from '../../ui/fontPickerValue';
+import { memoryPressureLevel, type DocxMemoryPressureLevel, type DocxMemoryStats } from '../memoryStats';
 import type { DocxInput } from '@betteroffice/docx/utils';
-import type { ResidentDocumentRead, ResidentDocumentReadValues } from '@betteroffice/docx/yrs';
+import type { DocxCommandSelection, ResidentDocumentRead, ResidentDocumentReadValues } from '@betteroffice/docx/yrs';
 import { createDocxCommandController, type DocxCommandBinding } from '../../../commands/createDocxCommandStore';
 import type { DocxCommandEnvironment } from '../../../commands/evaluate';
 import type { DocxCommandId, DocxCommandResult } from '../../../commands/types';
@@ -18,7 +23,13 @@ import { yrsSelectionState } from '../hooks/useSelectionTracker';
 import { PeerlessSyncApiError } from './contracts';
 export { LEGACY_SYNC_API_PROP, PeerlessSyncApiError } from './contracts';
 
-interface Options extends Pick<DocxEditorProps, 'i18n' | 'theme' | 'mode' | 'readOnly' | 'onDocumentChange' | 'onSelectionChange' | 'onError' | 'onSave' | 'showFileOpen' | 'author' | 'onModeChange'> {
+export interface PeerlessWorkerQuery<K extends ResidentDocumentRead['kind'] = ResidentDocumentRead['kind']> {
+  version: string;
+  value: ResidentDocumentReadValues[K];
+  selection: DocxCommandSelection | null | undefined;
+}
+
+interface Options extends Pick<DocxEditorProps, 'i18n' | 'theme' | 'mode' | 'readOnly' | 'onDocumentChange' | 'onSelectionChange' | 'onError' | 'onSave' | 'showFileOpen' | 'author' | 'onModeChange' | 'fontFamilies' | 'onFontsLoaded' | 'onFirstPagePainted' | 'onMemoryPressure' | 'memoryBudget'> {
   zoom: number;
   isDark?: boolean;
   focus(): void;
@@ -33,20 +44,28 @@ interface Options extends Pick<DocxEditorProps, 'i18n' | 'theme' | 'mode' | 'rea
   scrollToPage?(number: number): void;
   scrollToParagraph?(paraId: string): Promise<boolean>;
   perform?(id: DocxCommandId, args: unknown): Promise<DocxCommandResult>;
+  prepareFontFamily?(family: string): Promise<ResidentFontEnvironment | void>;
 }
 
 export function createPeerlessShellController(initial: Options) {
   let options = initial;
   let binding: PeerlessEditSessionBinding | null = null;
   let unsubscribe: (() => void) | undefined;
-  let snapshot: { status: 'empty' | 'opening' | 'ready' | 'failed'; view: PeerlessViewSnapshot | null; error: Error | null; mode: NonNullable<DocxEditorProps['mode']> } =
-    { status: 'empty', view: null, error: null, mode: initial.mode ?? 'editing' };
+  let snapshot: { status: 'empty' | 'opening' | 'ready' | 'failed'; view: PeerlessViewSnapshot | null; error: Error | null; mode: NonNullable<DocxEditorProps['mode']>; preview: ResidentEngineWorkerFrame | null; previewPainted: boolean } =
+    { status: 'empty', view: null, error: null, mode: initial.mode ?? 'editing', preview: null, previewPainted: false };
   const listeners = new Set<() => void>();
   const changes = new Set<(change: DocxDocumentChange) => void>();
   const selections = new Set<(selection: SelectionState | null) => void>();
   const commands = createDocxCommandController();
   let translate = translation(options);
   let internalMode: NonNullable<DocxEditorProps['mode']> = 'editing';
+  let fontRevision = 0;
+  let fontFamilies: string[] = [];
+  let firstPainted = false;
+  let workerMemory: WasmModuleMemory[] | null = null;
+  let pressure: DocxMemoryPressureLevel = 'normal';
+  const memoryStats = (): DocxMemoryStats => ({ limitBytes: WASM32_MEMORY_LIMIT_BYTES, main: [],
+    worker: workerMemory?.map(sample => ({ ...sample })) ?? null });
   const mode = () => options.mode ?? internalMode;
   const updateAuthor = () => binding?.admission.setSuggesting?.(mode() === 'suggesting' ? options.author ?? 'User' : null);
   const emit = <T>(listener: ((value: T) => void) | undefined, value: T) => {
@@ -67,27 +86,43 @@ export function createPeerlessShellController(initial: Options) {
   };
   const reset = (status: typeof snapshot.status, error: Error | null = null) => {
     const selected = snapshot.view?.workerSelection;
-    unsubscribe?.(); binding = null; snapshot = { status, view: null, error, mode: mode() }; publish();
+    fontRevision = 0; fontFamilies = []; firstPainted = false; workerMemory = null;
+    unsubscribe?.(); binding = null; snapshot = { status, view: null, error, mode: mode(), preview: null, previewPainted: false }; publish();
     if (selected) selectionChanged(null);
   };
   const publish = () => { snapshot = { ...snapshot, mode: mode() }; updateAuthor(); commands.refresh(); for (const listener of listeners) listener(); };
+  const painted = () => { if (firstPainted) return; firstPainted = true; emit(options.onFirstPagePainted, undefined); };
+  const reportMemory = () => {
+    const stats = memoryStats();
+    const next = memoryPressureLevel(stats, options.memoryBudget);
+    if (next === pressure) return;
+    pressure = next; emit(options.onMemoryPressure, { level: next, stats });
+  };
   const environment = (): DocxCommandEnvironment => {
     const view = snapshot.view;
     const toolbar = view?.editState?.toolbar;
+    const choices = normalizeFontFamilies(options.fontFamilies) ?? DEFAULT_FONTS;
     return {
       status: snapshot.status === 'failed' ? 'unavailable' : snapshot.status === 'opening' ? 'loading' : snapshot.status,
       readOnly: options.readOnly === true || (mode() !== 'viewing' && view?.editState?.readOnly === true),
       mode: mode(), modeControl: options.mode ? options.onModeChange ? 'host' : 'fixed' : 'internal',
       sidebarOpen: false, sidebarControl: 'fixed', zoom: options.zoom, zoomWhileOpening: true, canOpen: options.showFileOpen !== false, canReportIssue: false,
       bodyStory: (view?.workerSelection?.focus.story ?? 'body') === 'body', pendingInput: false,
-      supportedCommands: new Set(['zoom', 'open', 'save', 'print', 'undo', 'redo', 'find', 'replace', 'editingMode', 'bold', 'italic', 'underline']),
+      supportedCommands: new Set(['zoom', 'open', 'save', 'print', 'undo', 'redo', 'find', 'replace', 'editingMode', 'bold', 'italic', 'underline', 'pageSetup', 'watermark',
+        'fontFamily', 'fontSize', ...(view?.workerSelection && (view.workerSelection.anchor.paraId !== view.workerSelection.focus.paraId || view.workerSelection.anchor.offset !== view.workerSelection.focus.offset) ? ['insertLink' as const] : [])]),
       canUndo: view?.editState?.canUndo ?? false, canRedo: view?.editState?.canRedo ?? false,
       selection: toolbar ? { context: toolbar, fontFamily: toolbar.fontFamily ?? null,
         fontSize: view?.editState?.effectiveFormatting?.fontSizePt ?? null } : null,
       table: view?.editState?.tableContext ? { isInTable: true, ...view.editState.tableContext } : null,
-      image: null, revisions: [], revisionIds: new Set(), currentRevisionId: null, styles: [], fonts: [], translate,
+      image: null, revisions: [], revisionIds: new Set(), currentRevisionId: null, styles: [], fonts: [
+        ...choices.map(font => ({ args: { family: getPrimaryFontFamily(font.fontFamily) || font.name }, label: font.name,
+          preview: { fontFamily: font.fontFamily, group: font.category ?? 'other' } })),
+        ...fontFamilies.filter(family => !choices.some(font => font.name.toLowerCase() === family.toLowerCase()))
+          .map(family => ({ args: { family }, label: family, preview: { group: 'document' } })),
+      ], translate,
     };
   };
+  const queryOrigins = new WeakMap<object, { binding: PeerlessEditSessionBinding; identity: PeerlessViewSnapshot['identity'] }>();
   const capture = () => binding;
   const ready = () => {
     if (!binding || snapshot.status !== 'ready') throw new Error('Peer-less editor is not ready');
@@ -128,6 +163,24 @@ export function createPeerlessShellController(initial: Options) {
     const current = ready();
     return settleCommand(current, current.commands.submit(intent, { fence: true }));
   };
+  const query = async <K extends ResidentDocumentRead['kind']>(request: ResidentDocumentRead & { kind: K }): Promise<PeerlessWorkerQuery<K>> => {
+    const current = await flush();
+    const view = current.viewStore.getSnapshot();
+    const native = await options.read({ kind: 'readParagraphs', request: { view: 'accepted', paraIds: [] } });
+    if (current !== binding || view.identity !== current.viewStore.getSnapshot().identity || view.throughSeq !== current.viewStore.getSnapshot().throughSeq) throw new Error('Worker read was superseded');
+    const value = await readAt<K>(request, native.version);
+    if (view.throughSeq !== current.viewStore.getSnapshot().throughSeq) throw new Error('Worker read was superseded');
+    const result = { version: native.version, value, selection: structuredClone(view.workerSelection) };
+    queryOrigins.set(result, { binding: current, identity: view.identity });
+    return result;
+  };
+  const applyQuery = async (origin: PeerlessWorkerQuery, intent: PeerlessInputIntent): Promise<DocxCommandResult> => {
+    const issued = queryOrigins.get(origin);
+    if (!issued || issued.binding !== binding || JSON.stringify(issued.identity) !== JSON.stringify(binding.viewStore.getSnapshot().identity)) return { ok: false, failure: { code: 'document-replaced', message: 'Document was replaced.' } };
+    const current = await flush();
+    if (issued.binding !== current || JSON.stringify(issued.identity) !== JSON.stringify(current.viewStore.getSnapshot().identity)) return { ok: false, failure: { code: 'document-replaced', message: 'Document was replaced.' } };
+    return submit(intent);
+  };
   const navigateCell = (direction: 'forward' | 'backward') => {
     const current = ready();
     const env = environment();
@@ -137,7 +190,7 @@ export function createPeerlessShellController(initial: Options) {
   };
   const commandBinding: DocxCommandBinding = {
     environment,
-    ordered: (id) => !['zoom', 'open', 'print', 'bold', 'italic', 'underline'].includes(id),
+    ordered: (id) => !['zoom', 'open', 'print', 'bold', 'italic', 'underline', 'fontFamily', 'fontSize'].includes(id),
     admit: async (operation) => { await flush(); return operation(); },
     async perform(id, args) {
       if (id === 'editingMode') {
@@ -150,6 +203,22 @@ export function createPeerlessShellController(initial: Options) {
       if (id === 'bold' || id === 'italic' || id === 'underline') {
         const current = ready();
         return settleCommand(current, current.commands.format({ kind: 'toggleMark', payload: { mark: { type: id } } }, { fence: true }));
+      }
+      if (id === 'fontFamily' || id === 'fontSize') {
+        const current = ready();
+        if (id === 'fontFamily') {
+          const fonts = await options.prepareFontFamily?.((args as { family: string }).family);
+          if (current !== binding) return { ok: false, failure: { code: 'document-replaced', message: 'Document was replaced.' } };
+          if (fonts) {
+            try {
+              const prepared = await settleCommand(current, current.commands.submit({ kind: 'setFontEnvironment', payload: fonts }, { fence: true }));
+              if (!prepared.ok) return prepared;
+            } finally { fonts.faces.length = 0; }
+          }
+        }
+        const delta = id === 'fontFamily' ? { fontFamily: { ascii: (args as { family: string }).family, hAnsi: (args as { family: string }).family } } :
+          { fontSize: (args as { points: number }).points };
+        return settleCommand(current, current.commands.format({ kind: 'formatRange', payload: { delta } }, { fence: true }));
       }
       if (id === 'zoom') {
         options = { ...options, zoom: (args as { scale: number }).scale };
@@ -206,6 +275,7 @@ export function createPeerlessShellController(initial: Options) {
     setZoom: (zoom) => { if (!Number.isFinite(zoom) || zoom <= 0) return;
       options = { ...options, zoom }; options.onZoom?.(zoom); publish(); },
     getZoom: () => options.zoom,
+    getMemoryStats: memoryStats,
     onDocumentChange: (listener) => { changes.add(listener); return () => { changes.delete(listener); }; },
     onSelectionChange: (listener) => { selections.add(listener); return () => { selections.delete(listener); }; },
   } satisfies Partial<DocxEditorRef>;
@@ -216,13 +286,29 @@ export function createPeerlessShellController(initial: Options) {
     },
   });
   return {
-    commands, ref, read, readAt, submit, navigateCell, environment,
+    commands, ref, read, readAt, query, applyQuery, submit, navigateCell, environment,
     getSnapshot: () => snapshot,
     subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
     update(next: Options) { options = next; translate = translation(next);
       if (snapshot.mode !== mode()) publish(); else { updateAuthor(); commands.refresh(); }
+      reportMemory();
     },
     opening() { reset('opening'); },
+    preview(frame: ResidentEngineWorkerFrame) {
+      if (snapshot.status !== 'opening') return;
+      snapshot = { ...snapshot, preview: frame, previewPainted: false }; publish();
+    },
+    previewPresented(frame: ResidentEngineWorkerFrame) {
+      if (snapshot.preview !== frame || snapshot.status !== 'opening') return;
+      snapshot = { ...snapshot, previewPainted: true }; publish();
+    },
+    painted,
+    fontChoices(families: string[]) { fontFamilies = [...families]; publish(); },
+    fontEnvironment(event: ResidentFontEnvironmentEvent) {
+      if (event.phase !== 'ready' || event.revision <= fontRevision || snapshot.status === 'empty' || snapshot.status === 'failed') return;
+      fontRevision = event.revision; fontFamilies = [...event.families]; publish(); emit(options.onFontsLoaded, undefined);
+    },
+    memory(samples: WasmModuleMemory[]) { workerMemory = samples.map(sample => ({ ...sample })); reportMemory(); },
     empty() { reset('empty'); },
     fail(error: Error) { reset('failed', error); },
     attach(next: PeerlessEditSessionBinding) {
@@ -232,8 +318,11 @@ export function createPeerlessShellController(initial: Options) {
         if (binding !== next) return;
         const view = next.viewStore.getSnapshot();
         const previous = snapshot.view;
-        snapshot = { status: view.presentedThroughSeq >= 0 ? 'ready' : 'opening', view, error: null, mode: mode() };
+        const ready = view.presentedThroughSeq >= 0;
+        snapshot = { ...snapshot, status: ready ? 'ready' : 'opening', view, error: null, mode: mode(),
+          preview: ready ? null : snapshot.preview };
         publish();
+        if (ready && view.geometry?.pages.some(page => page.displayPage?.unbuilt !== true)) painted();
         if (previous && view.version !== previous.version) {
           const change = { version: String(view.version) };
           emit(options.onDocumentChange, change);

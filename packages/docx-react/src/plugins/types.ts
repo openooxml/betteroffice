@@ -8,6 +8,9 @@ import type {
   DocxParagraphAnchor,
   DocxReadParagraphsRequest,
   DocxReadParagraphsResult,
+  DocxListStoriesResult,
+  DocxReadStoriesRequest,
+  DocxReadStoriesResult,
   DocxTextRange,
   DocxValidationResult,
 } from '@betteroffice/docx/yrs';
@@ -73,6 +76,15 @@ export interface DocxPluginReadClient {
   readParagraphs(
     request: DocxReadParagraphsRequest
   ): Promise<DocxReadParagraphsResult | DocxPluginRefusal>;
+  /** Every story with its kind, container and, for a header or footer, its part and uses. */
+  listStories(): Promise<DocxListStoriesResult | DocxPluginRefusal>;
+  /**
+   * The paragraphs of the selected stories in one read; a story that cannot be read reports
+   * why, and the read stops at its limits with `truncated`.
+   */
+  readStories(
+    request: DocxReadStoriesRequest
+  ): Promise<DocxReadStoriesResult | DocxPluginRefusal>;
   findText(request: DocxFindTextRequest): Promise<DocxFindTextResult | DocxPluginRefusal>;
   /** Checks a batch without granting anything; a later apply is checked again. */
   validateEdits(request: DocxEditRequest): Promise<DocxValidationResult | DocxPluginRefusal>;

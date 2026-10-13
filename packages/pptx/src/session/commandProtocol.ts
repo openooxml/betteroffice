@@ -1,21 +1,21 @@
 import type { SessionFailure } from '../../../../shared/office-session/types';
 import type { PresentationHandle } from '../wasm/loader';
 import type { PptxEditRequest, PptxEditResult, PptxReadRequest, PptxReadResult, PptxStoryTarget } from '../edits';
-import type { ParagraphAlignment, ShapeRect, ShapeDraft, PresetShapeDraft, ShapeReceipt, TextStyle, TextStyleSnapshot } from '../types';
+import type { DeckSnapshot, ParagraphAlignment, ShapeRect, ShapeDraft, PresetShapeDraft, ShapeReceipt, TextStyle, TextStyleSnapshot } from '../types';
 import type {
   PresentationSessionOpenOptions, PresentationSlideSummary, PresentationWireFrame,
 } from './methods';
 
 export type PresentationCommandAccessMethods = Pick<PresentationHandle,
-  'snapshot' | 'story' | 'findText' | 'validateEdits' | 'exportStructured' | 'exportMarkdown' | 'searchText' | 'listProposals' | 'encodeStateVector' | 'encodeStateAsUpdate'>;
+  'snapshot' | 'story' | 'findText' | 'validateEdits' | 'exportStructured' | 'exportMarkdown' | 'searchText' | 'listProposals' | 'comments' | 'previewProposal' | 'layoutProposalSlide' | 'layoutProposalDiffSlide' | 'layoutSlide' | 'encodeStateVector' | 'encodeStateAsUpdate'>;
 export type PresentationCommandAccessMethod = keyof PresentationCommandAccessMethods;
 export type PresentationCommandAccessResult = ReturnType<PresentationCommandAccessMethods[PresentationCommandAccessMethod]>;
 
 export type PresentationCommandMutationMethods = Pick<PresentationHandle,
   'setShapeFill' | 'setShapeStroke' | 'setShapeAdjust' | 'removeShape' | 'bringShapeToFront' |
-  'sendShapeToBack' | 'bringShapeForward' | 'sendShapeBackward' | 'insertSlide' | 'deleteSlide' | 'moveSlide'>;
+  'sendShapeToBack' | 'bringShapeForward' | 'sendShapeBackward' | 'insertSlide' | 'deleteSlide' | 'moveSlide' | 'setSlideNotes' | 'addComment' | 'replyToComment' | 'setCommentStatus' | 'setCommentPosition' | 'removeComment' | 'setCommentFlavor' | 'propose' | 'acceptProposal' | 'rejectProposal'>;
 export const PRESENTATION_COMMAND_MUTATIONS = ['setShapeFill', 'setShapeStroke', 'setShapeAdjust', 'removeShape',
-  'bringShapeToFront', 'sendShapeToBack', 'bringShapeForward', 'sendShapeBackward', 'insertSlide', 'deleteSlide', 'moveSlide'] as const satisfies readonly (keyof PresentationCommandMutationMethods)[];
+  'bringShapeToFront', 'sendShapeToBack', 'bringShapeForward', 'sendShapeBackward', 'insertSlide', 'deleteSlide', 'moveSlide', 'setSlideNotes', 'addComment', 'replyToComment', 'setCommentStatus', 'setCommentPosition', 'removeComment', 'setCommentFlavor', 'propose', 'acceptProposal', 'rejectProposal'] as const satisfies readonly (keyof PresentationCommandMutationMethods)[];
 
 export type PresentationCommandMutation = { [K in keyof PresentationCommandMutationMethods]: {
   method: K; args: Parameters<PresentationCommandMutationMethods[K]>;
@@ -77,6 +77,7 @@ export interface PresentationCommandTextInput extends PresentationCommandInput {
 }
 
 export type PresentationCommandPayloads = {
+  setChangeObserver: PresentationCommandInput & { enabled: boolean };
   invoke: PresentationCommandInput & PresentationCommandMutation;
   applyRemoteUpdate: PresentationCommandInput & { bytes: ArrayBuffer };
   applyEdits: PresentationCommandInput & { request: PptxEditRequest };
@@ -129,7 +130,7 @@ export type PresentationCommandKind = keyof PresentationCommandPayloads;
 export type PresentationCommandAdmission = 'view' | 'read' | 'local-write' | 'remote-update' | 'mode';
 
 export const PRESENTATION_COMMAND_ADMISSION = Object.freeze({
-  invoke: 'local-write',
+  setChangeObserver: 'mode', invoke: 'local-write',
   applyRemoteUpdate: 'remote-update',
   applyEdits: 'local-write', registerFont: 'local-write',
   insertTextBox: 'local-write', insertShape: 'local-write', insertPicture: 'local-write',
@@ -195,6 +196,8 @@ export interface PresentationCommandToolbarContext {
 
 export interface PresentationCommandEditState {
   readOnly: boolean;
+  notes?: { slideId: string; text: string } | null;
+  proposals?: import('../proposals').Proposal[];
   object?: { formattable: boolean; geometry: string | null; fill: string | null; stroke: string | null;
     strokeWidth: number | null; adjustments: Record<string, number>; order: { index: number; count: number } | null } | null;
   canUndo: boolean;
@@ -219,6 +222,7 @@ export interface PresentationCommandAck extends PresentationCommandIdentity {
   outcomes: PresentationCommandOutcome[];
   dirtySlideIds: string[];
   mutationResult?: unknown;
+  change?: PresentationCommandIdentity & { throughSeq: number; version: string; snapshot: DeckSnapshot };
   updates?: { bytes: ArrayBuffer; origin: 'local' | 'remote' }[];
   creation?: ShapeReceipt;
   editResult?: PptxEditResult;
@@ -235,9 +239,11 @@ export interface PresentationCommandOpenOptions
   readOnly?: boolean;
   activeSlideIndex?: number;
   collaboration?: boolean;
+  observeChanges?: boolean;
 }
 
 export interface PresentationCommandOpenResult extends PresentationCommandAck {
+  recoveryUpdate?: ArrayBuffer;
   slides: PresentationSlideSummary[];
   size: { width: number; height: number };
   activeSlideId: string | null;
@@ -268,6 +274,7 @@ export interface PresentationCommandSaveResult extends PresentationCommandIdenti
   throughSeq: number;
   version: string;
   bytes: ArrayBuffer;
+  recoveryUpdate?: ArrayBuffer;
 }
 
 export interface PresentationCommandReadResult extends PresentationCommandAck {

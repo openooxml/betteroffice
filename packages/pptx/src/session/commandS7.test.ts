@@ -37,6 +37,33 @@ test('command_host_does_not_import_react_source', async () => {
   expect(source).not.toMatch(/from ['"][^'"]*pptx-react/);
 });
 
+test('comment payload validation refuses without poisoning the session', async () => {
+  const session = await open();
+  try {
+    let state: PresentationCommandAck = session.state;
+    let seq = 0;
+    const draft = { author: 'Writer', text: 'Discuss', created: '2026-01-01T00:00:00Z' };
+    for (const fields of [{ text: '' }, { text: '\u0000' }, { author: '\u0001' }, { initials: '\ud800' }]) {
+      state = await session.command(state, ++seq, { kind: 'invoke', payload: {
+        ...input, method: 'addComment', args: [session.story.slideId, { ...draft, ...fields }] } });
+      expect(state.outcomes[0]).toMatchObject({ status: 'refused', reason: 'invalid-payload', committed: false });
+      expect(state.version).toBe(session.state.version);
+    }
+    state = await session.command(state, ++seq, { kind: 'invoke', payload: {
+      ...input, method: 'setCommentFlavor', args: ['modern'] } });
+    state = await session.command(state, ++seq, { kind: 'invoke', payload: {
+      ...input, method: 'addComment', args: [session.story.slideId, draft] } });
+    expect(state.outcomes[0]).toMatchObject({ status: 'applied', committed: true });
+    const commentId = (state.mutationResult as { commentId: string }).commentId;
+    state = await session.command(state, ++seq, { kind: 'invoke', payload: {
+      ...input, method: 'replyToComment', args: [commentId, { ...draft, text: '' }] } });
+    expect(state.outcomes[0]).toMatchObject({ status: 'refused', reason: 'invalid-payload', committed: false });
+    state = await session.command(state, ++seq, { kind: 'invoke', payload: {
+      ...input, method: 'replyToComment', args: [commentId, draft] } });
+    expect(state.outcomes[0]).toMatchObject({ status: 'applied', committed: true });
+  } finally { await session.dispose(); }
+});
+
 async function open() {
   const pair = createInProcessPair();
   const registration = registerPresentationCommandHandlers({ initWasm: async () => {

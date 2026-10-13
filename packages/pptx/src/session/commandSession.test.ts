@@ -1135,30 +1135,33 @@ test('p1_fixed_basis_noops_and_refusals_cap_results_and_outcomes', async () => {
   }
 }, 30_000);
 
-test('p1_long_session_expires_old_bases_results_and_duplicate_outcomes', async () => {
-  const session = await open(['alpha', 'beta']);
-  try {
-    const [story, other] = (await session.read()).stories;
-    if (!story || !other) throw new Error('Missing stories');
-    const original = envelope(session.state, 1, insert(selection(story), 'x'));
-    let state: PresentationCommandAck = session.state;
-    for (let seq = 1; seq <= 1001; seq += 1) {
-      state = await session.rpc.call.command(envelope(state, seq, insert(selection(story), 'x')));
-      expect(state.outcomes).toEqual([{ seq, status: 'applied', committed: true }]);
-    }
-    const expected = 'x'.repeat(1001) + 'alpha';
-    expect((await session.read(1001)).stories[0]!.text).toBe(expected);
-    const expiredBasis = await session.rpc.call.command(envelope(session.state, 1002, insert(selection(other), 'bad')));
-    const expiredResult = await session.rpc.call.command(envelope(state, 1003, { kind: 'insertText', payload: {
-      ...input, at: { source: 'afterSeq', seq: 1 }, text: 'bad',
-    } }, undefined, 1));
-    const duplicate = await session.rpc.call.command(original);
-    expect(expiredBasis.outcomes).toEqual([{ seq: 1002, status: 'refused', reason: 'stale-basis', committed: false }]);
-    expect(expiredResult.outcomes).toEqual([{ seq: 1003, status: 'refused', reason: 'stale-basis', committed: false }]);
-    expect(duplicate.outcomes).toEqual([{ seq: 1, status: 'refused', reason: 'stale-basis', committed: false }]);
-    expect((await session.read(1003)).stories.map((value) => value.text)).toEqual([expected, 'beta']);
-  } finally { await session.dispose(); }
-}, 30_000);
+for (const expiry of ['basis', 'result', 'duplicate'] as const) {
+  test(`session_expires_old_${expiry}`, async () => {
+    const session = await open(['alpha', 'beta']);
+    try {
+      const [story, other] = (await session.read()).stories;
+      if (!story || !other) throw new Error('Missing stories');
+      const replacement = (seq: number): PresentationCommandIntent => ({ kind: 'replaceText', payload: {
+        ...input, at: { source: 'confirmed', selection: selection(story, 0, 1) }, text: seq % 2 ? 'x' : 'y',
+      } });
+      const original = envelope(session.state, 1, replacement(1));
+      let state: PresentationCommandAck = session.state;
+      for (let seq = 1; seq <= 513; seq += 1) {
+        state = await session.rpc.call.command(envelope(state, seq, replacement(seq)));
+        expect(state.outcomes).toEqual([{ seq, status: 'applied', committed: true }]);
+      }
+      expect((await session.read(513)).stories[0]!.text).toBe('xlpha');
+      const refused = await session.rpc.call.command(expiry === 'basis'
+        ? envelope(session.state, 514, insert(selection(other), 'bad'))
+        : expiry === 'result' ? envelope(state, 514, { kind: 'insertText', payload: {
+          ...input, at: { source: 'afterSeq', seq: 1 }, text: 'bad',
+        } }, undefined, 1) : original);
+      expect(refused.outcomes).toEqual([{ seq: expiry === 'duplicate' ? 1 : 514,
+        status: 'refused', reason: 'stale-basis', committed: false }]);
+      expect((await session.read(expiry === 'duplicate' ? 513 : 514)).stories.map((value) => value.text)).toEqual(['xlpha', 'beta']);
+    } finally { await session.dispose(); }
+  }, 30_000);
+}
 
 test('p1_pending_refusal_cancels_only_explicit_result_dependencies', async () => {
   const host = await engineHost();

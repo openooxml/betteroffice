@@ -21,7 +21,8 @@ async function initializeFonts(
       let fontsRevision = -1;
       let glyphCache;
       const activeOffscreenPageIds = [], pendingOffscreenPageIds = new Set(), intactBackBuffers = new Map();
-      const openedDocument = true, previewing = false, commandHost = null, commandHooksFactory = true;
+    const openedDocument = true, previewing = false, commandHost = null, commandHooksFactory = true, openedViaSource = false;
+    let sourcePreviewing = false;
       const setFrameDisplayWindow = () => {}, replyCommand = () => {};
       let unsubscribe = null, pendingUpdates = [];
       ${hydrateSignature}): void {

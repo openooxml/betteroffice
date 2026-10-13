@@ -7,6 +7,7 @@ import { FRAME_DELTA_VERSION, retainedFramePageById, type RetainedFrame } from '
 import { loadRustDisplayListQueryEngine, type RustDisplayListQueryEngine } from '../layout/render/rustDisplayList';
 import type { YrsLoc, YrsStorySegment } from './index';
 import { createResidentDocxCommandHooks } from './residentCommandActions';
+import { ResidentSessionFonts } from './residentFontEnvironment';
 import type { DocxCommandApplyContext, DocxCommandEnvelope, DocxCommandIntent, ResidentCommandHooks, ResidentCommandHooksFactory, ResidentCommandHostOptions, ResidentCommandInitRequest } from './residentCommandProtocol';
 
 function splitRowWorker(direction: 'up' | 'down', queryEngine?: RustDisplayListQueryEngine, boundary?: 'cold' | 'warm', malformedTable: boolean | 'anonymous' = false, options: { caretPage?: number; malformedNeighbour?: boolean; warmCaret?: boolean; trailingEnd?: number; caretHint?: 'missing' | 'misleading'; productionHooks?: boolean } = {}) {
@@ -77,6 +78,7 @@ function splitRowWorker(direction: 'up' | 'down', queryEngine?: RustDisplayListQ
   const binding = source.slice(parseFailures < 0 ? source.indexOf('function bindResidentCommands(') : parseFailures,
     source.indexOf('function replacementCommandInit('));
   const dependencies = {
+    sessionFonts: null, ResidentSessionFonts, scope: {},
     session: {
       proposalEngine: { version: () => '0' }, selection: () => ({ anchor: focus, head: focus }),
       setSelection: () => {},
