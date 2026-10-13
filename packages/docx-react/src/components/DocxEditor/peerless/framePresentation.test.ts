@@ -121,7 +121,7 @@ function setup(realPainter = false, makeCanvas?: (item: typeof page) => HTMLCanv
 test('d2c_runtime_docx_imports_use_package_exports', async () => {
   const exported = new Set(Object.keys(docxPackage.exports));
   const imports: string[] = [];
-  for (const name of ['framePresentation.ts', 'framePresentation.test.ts', 'echoPainter.ts', 'echoPainter.test.ts']) {
+  for (const name of ['framePresentation.ts', 'framePresentation.test.ts', 'echoPainter.ts', 'echoPainter.test.ts', 'bitmapOwnership.ts']) {
     const source = await Bun.file(new URL(`./${name}`, import.meta.url)).text();
     for (const match of source.matchAll(/import\s+(?!type\b)[^;]*?\bfrom\s*['"](@betteroffice\/docx(?:\/[^'"]*)?)['"]/g)) {
       imports.push(match[1]!);
