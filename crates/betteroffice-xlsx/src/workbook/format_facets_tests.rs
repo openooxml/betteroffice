@@ -343,6 +343,7 @@ fn format_facets_clear_format_keeps_cell_contents() {
                 rows: 1,
                 columns: 1,
                 formats: vec![CellFormat::default()],
+                kept: Vec::new(),
             },
             options(),
         )

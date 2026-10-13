@@ -1534,6 +1534,7 @@ impl Workbook {
                 .into_iter()
                 .map(|(_, format)| format)
                 .collect(),
+            kept: Vec::new(),
         })
     }
 
