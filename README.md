@@ -108,12 +108,12 @@ What to install for which language, with a first example each:
 Page agreement is reported separately from SSIM.
 
 <table>
-<tr><th width="180"></th><th width="230" align="right">BetterOffice (<a href="https://www.npmjs.com/package/@betteroffice/docx/v/0.4.3">0.4.3</a>)</th><th width="230" align="right">BetterOffice (<a href="https://github.com/openooxml/betteroffice/commit/e46a292d672112db772ace73062e1103d6063276">e46a292d</a>)</th><th width="230" align="right">LibreOffice (26.2.3.2)</th></tr>
-<tr><td>Exact page counts</td><td align="right">61/63</td><td align="right">60/61</td><td align="right">44/63</td></tr>
-<tr><td>Absolute page error</td><td align="right">2</td><td align="right">1</td><td align="right">57</td></tr>
-<tr><td>SSIM</td><td align="right">0.8462</td><td align="right">0.8508</td><td align="right">0.7694</td></tr>
-<tr><td>Scored/total</td><td align="right">63/63</td><td align="right">61/63</td><td align="right">63/63</td></tr>
-<tr><td>Render time (avg)</td><td align="right">402 ms</td><td align="right">401 ms</td><td align="right">710 ms</td></tr>
+<tr><th width="180"></th><th width="230" align="right">BetterOffice (<a href="https://www.npmjs.com/package/@betteroffice/docx/v/0.4.3">0.4.3</a>)</th><th width="230" align="right">BetterOffice (<a href="https://github.com/openooxml/betteroffice/commit/3a49caad7db3114258669913e6eda9a066c50dd8">3a49caad</a>)</th><th width="230" align="right">LibreOffice (26.2.3.2)</th></tr>
+<tr><td>Exact page counts</td><td align="right">61/63</td><td align="right">62/62</td><td align="right">44/63</td></tr>
+<tr><td>Absolute page error</td><td align="right">2</td><td align="right">0</td><td align="right">57</td></tr>
+<tr><td>SSIM</td><td align="right">0.8462</td><td align="right">0.8571</td><td align="right">0.7694</td></tr>
+<tr><td>Scored/total</td><td align="right">63/63</td><td align="right">62/63</td><td align="right">63/63</td></tr>
+<tr><td>Render time (avg)</td><td align="right">421 ms</td><td align="right">419 ms</td><td align="right">763 ms</td></tr>
 <tr><td>Parse success</td><td align="right">100.00%</td><td align="right">100.00%</td><td align="right">100.00%</td></tr>
 </table>
 
@@ -121,21 +121,21 @@ Page agreement is reported separately from SSIM.
 ### PPTX
 
 <table>
-<tr><th width="180"></th><th width="230" align="right">BetterOffice (<a href="https://www.npmjs.com/package/@betteroffice/pptx/v/0.2.0">0.2.0</a>)</th><th width="230" align="right">BetterOffice (<a href="https://github.com/openooxml/betteroffice/commit/e46a292d672112db772ace73062e1103d6063276">e46a292d</a>)</th><th width="230" align="right">LibreOffice (26.2.3.2)</th></tr>
+<tr><th width="180"></th><th width="230" align="right">BetterOffice (<a href="https://www.npmjs.com/package/@betteroffice/pptx/v/0.2.0">0.2.0</a>)</th><th width="230" align="right">BetterOffice (<a href="https://github.com/openooxml/betteroffice/commit/3a49caad7db3114258669913e6eda9a066c50dd8">3a49caad</a>)</th><th width="230" align="right">LibreOffice (26.2.3.2)</th></tr>
 <tr><td>SSIM</td><td align="right">0.9169</td><td align="right">0.9170</td><td align="right">0.9030</td></tr>
 <tr><td>Scored/total</td><td align="right">103/103</td><td align="right">103/103</td><td align="right">103/103</td></tr>
-<tr><td>Render time (avg)</td><td align="right">133 ms</td><td align="right">133 ms</td><td align="right">926 ms</td></tr>
+<tr><td>Render time (avg)</td><td align="right">107 ms</td><td align="right">108 ms</td><td align="right">900 ms</td></tr>
 <tr><td>Parse success</td><td align="right">100.00%</td><td align="right">100.00%</td><td align="right">100.00%</td></tr>
 </table>
 
 ### XLSX
 
 <table>
-<tr><th width="180"></th><th width="230" align="right">BetterOffice (<a href="https://www.npmjs.com/package/@betteroffice/xlsx/v/0.3.0">0.3.0</a>)</th><th width="230" align="right">BetterOffice (<a href="https://github.com/openooxml/betteroffice/commit/e46a292d672112db772ace73062e1103d6063276">e46a292d</a>)</th><th width="230" align="right">LibreOffice (26.2.3.2)</th></tr>
+<tr><th width="180"></th><th width="230" align="right">BetterOffice (<a href="https://www.npmjs.com/package/@betteroffice/xlsx/v/0.3.0">0.3.0</a>)</th><th width="230" align="right">BetterOffice (<a href="https://github.com/openooxml/betteroffice/commit/3a49caad7db3114258669913e6eda9a066c50dd8">3a49caad</a>)</th><th width="230" align="right">LibreOffice (26.2.3.2)</th></tr>
 <tr><td>SSIM</td><td align="right">0.7661</td><td align="right">0.7661</td><td align="right">0.6892</td></tr>
 <tr><td>Scored/total</td><td align="right">207/208</td><td align="right">207/208</td><td align="right">195/208</td></tr>
-<tr><td>Recalc accuracy</td><td align="right">99.60%</td><td align="right">0.00%</td><td align="right">85.87%</td></tr>
-<tr><td>Recalc time (avg)</td><td align="right">—</td><td align="right">—</td><td align="right">—</td></tr>
+<tr><td>Recalc accuracy</td><td align="right">99.60%</td><td align="right">99.60%</td><td align="right">85.87%</td></tr>
+<tr><td>Recalc time (avg)</td><td align="right">96 ms</td><td align="right">72 ms</td><td align="right">448 ms</td></tr>
 <tr><td>Parse success</td><td align="right">100.00%</td><td align="right">100.00%</td><td align="right">100.00%</td></tr>
 </table>
 
