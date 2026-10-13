@@ -1,4 +1,4 @@
-import type { DisplayList, WorkbookCommandFrame } from '@betteroffice/xlsx';
+import type { DisplayList, TextCmd, WorkbookCommandFrame } from '@betteroffice/xlsx';
 import { describe, expect, test } from 'bun:test';
 import { WorkerCellEcho } from './WorkerCellEcho';
 import { PeerlessWorkerPaintSource as WorkerPaintSource, type WorkerPaintRequest } from './PeerlessWorkerPaintSource';
@@ -25,13 +25,13 @@ function harness(maxPatches = 8) {
     onError: (error) => { errors.push(error); },
   });
   const echo = new WorkerCellEcho({ source, context: () => context, maxPatches });
-  const install = (coversThroughSeq: number, value = 'final', startRow = 0) => {
+  const install = (coversThroughSeq: number, value = 'final', startRow = 0, cell: Partial<TextCmd> = {}) => {
     const captured = source.captureCommandFrame()!;
     const displayList: DisplayList = {
       width: 192, height: 48,
       commands: [{ op: 'fillRect', x: 0, y: 0, w: 192, h: 48, color: '#ffffff' },
         { op: 'text', text: value, x: 8, y: 18, fontSize: 11, color: '#123456', bold: true,
-          clip: { x: 0, y: 0, w: 96, h: 24 } }],
+          clip: { x: 0, y: 0, w: 96, h: 24 }, ...cell }],
       grid: { startRow, startCol: 0, rowOffsets: [0, 24, 48], colOffsets: [0, 96, 192, 288] },
     };
     const frame: WorkbookCommandFrame = {
@@ -78,6 +78,17 @@ describe('WorkerCellEcho', () => {
     expect(echo.size).toBe(0);
     expect(text).toEqual(['frame:3']);
     expect(source.painted?.displayList.commands[1]).toMatchObject({ text: '3' });
+  });
+
+  test('echoes typed text over a formatted number as typed', () => {
+    const { echo, context, text, install } = harness();
+    context.measureText = ((value: string) => ({ width: value.length * 6 })) as unknown as CanvasRenderingContext2D['measureText'];
+    expect(install(0, ' 1 ', 0, { x: 94, align: 'right', numberFormat: { left: 2, width: 92,
+      parts: [{ offset: 0, kind: 'padding', character: '(' }, { offset: 2, kind: 'padding', character: ')' }],
+      general: 1, overflow: true } })).toBe(true);
+    text.length = 0;
+    echo.patch(1, [{ sheet: 0, row: 0, col: 0, text: 'typed wider than the cell' }]);
+    expect(text).toEqual(['typed wider than the cell']);
   });
 
   test('reuses cached appearance without changing authoritative geometry', () => {
