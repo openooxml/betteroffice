@@ -3099,7 +3099,7 @@ mod tests {
             tags.iter().filter(|&&tag| tag == 12).count(),
             model.sheets.len() - 1
         );
-        assert_eq!(tags.iter().filter(|&&tag| tag > 20).count(), 2);
+        assert_eq!(tags.iter().filter(|&&tag| matches!(tag, ROW_STYLE | STYLED_SHEET)).count(), 2);
     }
 
     #[test]

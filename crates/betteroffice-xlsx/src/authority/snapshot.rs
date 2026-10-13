@@ -3939,7 +3939,7 @@ mod tests {
         let base = WorkbookBase::from_model(&styled_defaults_model(BTreeMap::new())).unwrap();
         let records = base_records(&base);
         assert_eq!(records[0], released_manifest(&base));
-        assert!(records.iter().all(|record| record[0] <= 16));
+        assert!(records.iter().all(|record| base_section(usize::from(record[0])) <= RELEASED_BASE_SECTIONS));
         for decoded in decoded_bases(&records) {
             assert!(decoded.row_styles.is_empty());
             assert_eq!(base_records(&decoded), records);
