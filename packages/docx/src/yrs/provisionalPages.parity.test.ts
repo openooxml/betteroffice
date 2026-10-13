@@ -15,7 +15,7 @@ import { preloadEditWasm } from '../wasm/edit';
 import { decodeDocxHostJson, type YrsResidentWorkerSnapshot } from './index';
 import { createResidentEngineSession, type ResidentEngineSession } from './residentEngineSession';
 import type { DocxCommandFrame, ResidentCommandInitRequest } from './residentCommandProtocol';
-import type { DocxPageExportOptions } from './pagedExport';
+import type { DocxPageExportOptions, DocxPageFragment } from './pagedExport';
 import type {
   ResidentEngineWorkerRequest,
   ResidentEngineWorkerRequestWithoutId,
@@ -711,12 +711,21 @@ for (const request of ['export', 'completeLayout', 'sliced completeLayout'] as c
         });
       if (!reply.ok) throw new Error(JSON.stringify(reply));
       if (request === 'export') {
-        type Exported = { ok: boolean; content?: { layout: { pages: unknown[] } }; failure?: { code: string } };
-        const outcome = ({ ok, content, failure }: Exported) =>
-          ({ ok, pages: content?.layout.pages.length, code: failure?.code });
+        type Exported = { ok: boolean; content?: { layout: { pages: unknown[]; fragments: DocxPageFragment[] } } };
+        const placed = ({ content }: Exported) => ({
+          pages: content?.layout.pages,
+          fragments: content?.layout.fragments.map(({ pageIndex, nodeId, blockId, slice, continuedFromPrevious,
+            continuedOnNext, repeatedTableHeader }) =>
+            ({ pageIndex, nodeId, blockId, slice, continuedFromPrevious, continuedOnNext, repeatedTableHeader })),
+        });
         const exported = JSON.parse((reply as { read?: { value?: string } }).read!.value!) as Exported;
+        f.cold.layoutDocumentWithRegionsRetainedJson(f.init.layoutInput);
         const cold = JSON.parse(f.cold.exportStructuredWithPagesJson(EXPORT_OPTIONS, f.init.layoutInput)) as Exported;
-        expect(outcome(exported)).toEqual(outcome(cold));
+        expect(exported).toMatchObject({ ok: true });
+        expect(cold).toMatchObject({ ok: true });
+        expect(placed(exported).pages).toHaveLength(f.full.displayList.pages.length);
+        expect(placed(exported).fragments!.length).toBeGreaterThan(f.full.displayList.pages.length);
+        expect(placed(exported)).toEqual(placed(cold));
       }
       await f.w.drain();
       expect(f.w.frames.length).toBeGreaterThan(count);

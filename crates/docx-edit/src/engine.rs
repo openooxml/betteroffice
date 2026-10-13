@@ -21336,9 +21336,11 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         assert!(pages > 4);
         assert!(!cut_exact_prefix(&mut pagination, pages - 1));
         assert_eq!(pagination.layout.as_ref().unwrap().pages.len(), pages);
-        assert!(cut_exact_prefix(&mut pagination, pages - 2));
-        assert_eq!(pagination.layout.as_ref().unwrap().pages.len(), pages - 2);
-        assert!(pagination.rebuilt_page_end <= pages - 2);
+        pagination.restamped_pages = Some(BTreeSet::from([0, 2, 5]));
+        assert!(cut_exact_prefix(&mut pagination, 3));
+        assert_eq!(pagination.layout.as_ref().unwrap().pages.len(), 3);
+        assert!(pagination.rebuilt_page_end <= 3);
+        assert_eq!(pagination.restamped_pages, Some(BTreeSet::from([0, 2])));
     }
 
     /// A Letter section break with `margin` twips above and below its body, and the header.
@@ -21420,6 +21422,45 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         assert_eq!(pages[2]["size"]["w"].as_f64(), Some(384.0));
         assert_eq!(pages[3]["size"]["w"].as_f64(), Some(576.0));
         assert_eq!(laid.document_width, Some(816.0));
+    }
+
+    #[test]
+    fn an_exact_prefix_extends_margins_as_a_later_section_header_does_for_the_full_pass() {
+        docx_layout::clear_measure_fonts();
+        let font = docx_layout::register_measure_font(LIBERATION).unwrap();
+        let first = r#"<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="360" w:right="1440" w:bottom="360" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>"#;
+        let page = |index: u32, section: &str| {
+            preview_fixture::paragraph(
+                index + 1,
+                &format!(
+                    "<w:pPr><w:pageBreakBefore/>{section}</w:pPr>{}",
+                    preview_fixture::run("Page")
+                ),
+            )
+        };
+        let body = format!(
+            "{}{}{}{}",
+            (0..79).map(|index| page(index, "")).collect::<String>(),
+            page(79, first),
+            (80..100).map(|index| page(index, "")).collect::<String>(),
+            header_section(1440)
+        );
+        let header = preview_pagination_paragraph(300, &preview_fixture::run("Head"));
+        let bytes = preview_pagination_story_document(&body, "header", &header);
+        let mut request = header_request(font, 96.0);
+        let mut plain = request["regions"]["sections"][0].clone();
+        plain["sectionId"] = serde_json::json!("first");
+        plain["margins"]["top"] = serde_json::json!(24);
+        plain["margins"]["bottom"] = serde_json::json!(24);
+        plain.as_object_mut().unwrap().remove("headerFooterRefs");
+        let headed = request["regions"]["sections"][0].clone();
+        request["regions"]["sections"] = serde_json::json!([plain, headed]);
+        let (full, laid, prefix) = full_and_exact_prefix(&bytes, &request.to_string(), 3, &|_| {});
+        let top = &full["layout"]["pages"][0]["margins"]["top"];
+        assert_eq!(top.as_f64(), Some(48.0));
+        assert!(laid.provisional);
+        assert_eq!(first_pages(&prefix), first_pages(&full));
+        docx_layout::clear_measure_fonts();
     }
 
     #[test]
