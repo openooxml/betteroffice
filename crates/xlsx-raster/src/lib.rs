@@ -154,19 +154,19 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
                 chart: _,
             } => {
                 let run = font::TextRun {
-                        x: *x,
-                        y: *y,
-                        text,
-                        font_size_pt: *font_size,
-                        color: parse_color(color)?,
-                        align: *align,
-                        clip,
-                        bold: *bold,
-                        italic: *italic,
-                        underline: *underline,
-                        strike: *strike,
-                        highlight: highlight.as_deref().map(parse_color).transpose()?,
-                        dashed_underline: *dashed_underline,
+                    x: *x,
+                    y: *y,
+                    text,
+                    font_size_pt: *font_size,
+                    color: parse_color(color)?,
+                    align: *align,
+                    clip,
+                    bold: *bold,
+                    italic: *italic,
+                    underline: *underline,
+                    strike: *strike,
+                    highlight: highlight.as_deref().map(parse_color).transpose()?,
+                    dashed_underline: *dashed_underline,
                 };
                 if let Some(layout) = number_format {
                     xlsx_render::paint_number_format(
@@ -174,12 +174,17 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
                         layout,
                         *align,
                         |literal| font::measure_text(literal, *font_size),
-                        |literal, x| font::paint_text(&mut pixmap, &font::TextRun {
-                            x,
-                            text: literal,
-                            align: Align::Left,
-                            ..run
-                        }),
+                        |literal, x| {
+                            font::paint_text(
+                                &mut pixmap,
+                                &font::TextRun {
+                                    x,
+                                    text: literal,
+                                    align: Align::Left,
+                                    ..run
+                                },
+                            )
+                        },
                     );
                 } else {
                     font::paint_text(&mut pixmap, &run);

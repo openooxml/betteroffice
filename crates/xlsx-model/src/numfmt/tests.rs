@@ -54,7 +54,10 @@ fn implied_currency_and_accounting_codes() {
         (41, r##"_(* #,##0_);_(* (#,##0);_(* "-"_);_(@_)"##),
         (42, r##"_("$"* #,##0_);_("$"* (#,##0);_("$"* "-"_);_(@_)"##),
         (43, r##"_(* #,##0.00_);_(* (#,##0.00);_(* "-"??_);_(@_)"##),
-        (44, r##"_("$"* #,##0.00_);_("$"* (#,##0.00);_("$"* "-"??_);_(@_)"##),
+        (
+            44,
+            r##"_("$"* #,##0.00_);_("$"* (#,##0.00);_("$"* "-"??_);_(@_)"##,
+        ),
     ];
     for (id, code) in codes {
         assert_eq!(builtin_format_code(id), Some(code), "id {id}");
@@ -71,21 +74,32 @@ fn display_padding_retains_character_and_fill_position() {
     let formatted = format_value(&num(12.0), "_(€* #,##0_)", DateSystem::V1900);
     let json = serde_json::to_value(&formatted).unwrap();
     assert_eq!(formatted.text, " €12 ");
-    assert_eq!(json["layout"], serde_json::json!([
-        {"offset": 0, "kind": "padding", "character": "("},
-        {"offset": 4, "kind": "fill", "character": " "},
-        {"offset": 6, "kind": "padding", "character": ")"}
-    ]));
-    let question = serde_json::to_value(format_value(&num(1.2), "??0.??", DateSystem::V1900)).unwrap();
-    assert_eq!(question["layout"], serde_json::json!([
-        {"offset": 0, "kind": "padding", "character": "0"},
-        {"offset": 1, "kind": "padding", "character": "0"},
-        {"offset": 5, "kind": "padding", "character": "0"}
-    ]));
-    let between = serde_json::to_value(format_value(&num(12.0), "0*x0", DateSystem::V1900)).unwrap();
-    assert_eq!(between["layout"], serde_json::json!([
-        {"offset": 1, "kind": "fill", "character": "x"}
-    ]));
+    assert_eq!(
+        json["layout"],
+        serde_json::json!([
+            {"offset": 0, "kind": "padding", "character": "("},
+            {"offset": 4, "kind": "fill", "character": " "},
+            {"offset": 6, "kind": "padding", "character": ")"}
+        ])
+    );
+    let question =
+        serde_json::to_value(format_value(&num(1.2), "??0.??", DateSystem::V1900)).unwrap();
+    assert_eq!(
+        question["layout"],
+        serde_json::json!([
+            {"offset": 0, "kind": "padding", "character": "0"},
+            {"offset": 1, "kind": "padding", "character": "0"},
+            {"offset": 5, "kind": "padding", "character": "0"}
+        ])
+    );
+    let between =
+        serde_json::to_value(format_value(&num(12.0), "0*x0", DateSystem::V1900)).unwrap();
+    assert_eq!(
+        between["layout"],
+        serde_json::json!([
+            {"offset": 1, "kind": "fill", "character": "x"}
+        ])
+    );
     let repeated = format_value(&num(12.0), "*x0*y", DateSystem::V1900);
     assert_eq!(repeated.layout.len(), 1);
 }
@@ -140,10 +154,16 @@ fn builtin_table_ids() {
     assert_eq!(builtin_format_code(47), Some("mmss.0"));
     assert_eq!(builtin_format_code(48), Some("##0.0E+0"));
     assert_eq!(builtin_format_code(49), Some("@"));
-    assert!(builtin_format_code(5).is_some());
-    assert!(builtin_format_code(8).is_some());
+    assert_eq!(builtin_format_code(5), Some(r##""$"#,##0_);("$"#,##0)"##));
+    assert_eq!(
+        builtin_format_code(8),
+        Some(r##""$"#,##0.00_);[Red]("$"#,##0.00)"##)
+    );
     assert_eq!(builtin_format_code(23), None);
-    assert!(builtin_format_code(44).is_some());
+    assert_eq!(
+        builtin_format_code(44),
+        Some(r##"_("$"* #,##0.00_);_("$"* (#,##0.00);_("$"* "-"??_);_(@_)"##)
+    );
     assert_eq!(builtin_format_code(163), None);
     assert_eq!(builtin_format_code(164), None);
 }

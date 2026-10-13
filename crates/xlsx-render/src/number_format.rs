@@ -31,11 +31,30 @@ mod tests {
             DateSystem::V1900,
         );
         for width in [96.0, 156.0] {
-            let layout = NumberFormatLayout { left: 2.0, width, parts: formatted.layout.clone(), general: None, overflow: true };
+            let layout = NumberFormatLayout {
+                left: 2.0,
+                width,
+                parts: formatted.layout.clone(),
+                general: None,
+                overflow: true,
+            };
             let mut runs = Vec::new();
-            paint_number_format(&formatted.text, &layout, Align::Right,
-                |text| text.chars().map(|c| match c { '(' => 5.0, ')' => 7.0, ' ' => 3.0, _ => 10.0 }).sum(),
-                |text, x| runs.push((text.to_string(), x)));
+            paint_number_format(
+                &formatted.text,
+                &layout,
+                Align::Right,
+                |text| {
+                    text.chars()
+                        .map(|c| match c {
+                            '(' => 5.0,
+                            ')' => 7.0,
+                            ' ' => 3.0,
+                            _ => 10.0,
+                        })
+                        .sum()
+                },
+                |text, x| runs.push((text.to_string(), x)),
+            );
             assert_eq!(runs[0], ("€".into(), 7.0));
             assert_eq!(runs.last().unwrap(), &("12".into(), width - 25.0));
         }
@@ -50,12 +69,28 @@ mod tests {
             ("123456789", Some(123456789.0), 26.0, "##"),
             ("1234.50", None, 26.0, "##"),
         ] {
-            let layout = NumberFormatLayout { left: 2.0, width, parts: Vec::new(), general, overflow: true };
+            let layout = NumberFormatLayout {
+                left: 2.0,
+                width,
+                parts: Vec::new(),
+                general,
+                overflow: true,
+            };
             let mut runs = Vec::new();
-            paint_number_format(text, &layout, Align::Right,
+            paint_number_format(
+                text,
+                &layout,
+                Align::Right,
                 |s| s.len() as f32 * 10.0,
-                |text, x| runs.push((text.to_string(), x)));
-            assert_eq!(runs, [(expected.to_string(), 2.0 + width - expected.len() as f32 * 10.0)]);
+                |text, x| runs.push((text.to_string(), x)),
+            );
+            assert_eq!(
+                runs,
+                [(
+                    expected.to_string(),
+                    2.0 + width - expected.len() as f32 * 10.0
+                )]
+            );
         }
     }
 }
@@ -82,28 +117,40 @@ pub fn paint_number_format(
     }
     fixed += measure(&text[cursor..]);
     if layout.overflow && fixed > layout.width {
-        let fitted = layout.general.and_then(|value| xlsx_model::numfmt::fit_general(value, layout.width, &mut measure));
+        let fitted = layout
+            .general
+            .and_then(|value| xlsx_model::numfmt::fit_general(value, layout.width, &mut measure));
         let fitted = fitted.unwrap_or_else(|| {
             let advance = measure("#");
-            let count = if advance > 0.0 && layout.width > 0.0 { (layout.width / advance).floor().max(1.0) as usize } else { 0 };
+            let count = if advance > 0.0 && layout.width > 0.0 {
+                (layout.width / advance).floor().max(1.0) as usize
+            } else {
+                0
+            };
             "#".repeat(count)
         });
         let width = measure(&fitted);
-        let x = layout.left + match align {
+        let x = layout.left
+            + match align {
+                Align::Left => 0.0,
+                Align::Center => (layout.width - width) / 2.0,
+                Align::Right => layout.width - width,
+            };
+        paint(&fitted, x);
+        return;
+    }
+    let extra = if has_fill {
+        (layout.width - fixed).max(0.0)
+    } else {
+        0.0
+    };
+    let width = fixed + extra;
+    let mut x = layout.left
+        + match align {
             Align::Left => 0.0,
             Align::Center => (layout.width - width) / 2.0,
             Align::Right => layout.width - width,
         };
-        paint(&fitted, x);
-        return;
-    }
-    let extra = if has_fill { (layout.width - fixed).max(0.0) } else { 0.0 };
-    let width = fixed + extra;
-    let mut x = layout.left + match align {
-        Align::Left => 0.0,
-        Align::Center => (layout.width - width) / 2.0,
-        Align::Right => layout.width - width,
-    };
     cursor = 0;
     for part in &layout.parts {
         let literal = &text[cursor..part.offset];

@@ -91,14 +91,6 @@ export interface PathCmd {
  * clipped to the cell box, so `clip` is the cell rect and `align` places the
  * run within it. Text metrics are owned upstream in Rust.
  */
-export interface NumberFormatLayout {
-  left: number;
-  width: number;
-  parts: { offset: number; kind: 'padding' | 'fill'; character: string }[];
-  general?: number;
-  overflow?: boolean;
-}
-
 export interface TextCmd {
   op: 'text';
   x: number;
@@ -130,6 +122,14 @@ export interface TextCmd {
    */
   ghost?: boolean;
   chart?: boolean;
+}
+
+export interface NumberFormatLayout {
+  left: number;
+  width: number;
+  parts: { offset: number; kind: 'padding' | 'fill'; character: string }[];
+  general?: number;
+  overflow?: boolean;
 }
 
 /**
