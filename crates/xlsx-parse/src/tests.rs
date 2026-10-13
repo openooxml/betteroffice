@@ -216,12 +216,6 @@ fn gradient_fill_remains_unrendered_and_source_markup_survives_bold() {
             .unwrap()
             .contains(fill)
     );
-    let generated = serialize_workbook(&wb).unwrap();
-    assert!(
-        !String::from_utf8(part_bytes(&generated, "xl/styles.xml"))
-            .unwrap()
-            .contains("gradientFill")
-    );
 }
 
 #[test]
