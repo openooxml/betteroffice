@@ -7,7 +7,10 @@ use sha2::{Digest, Sha256};
 use super::*;
 
 const MAGIC: &[u8; 8] = b"XLSXRECV";
-const CODEC_VERSION: u8 = 3;
+const CODEC_VERSION: u8 = 5;
+/// Checkpoints before patterned fills, whose styles hold only the fills and
+/// border styles those releases read.
+const RELEASED_CODEC_VERSION: u8 = 3;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -527,7 +530,10 @@ impl Workbook {
     pub fn restore_recovery_checkpoint(
         bytes: &[u8],
     ) -> Result<(Self, u64, Option<CalculationOptions>, bool)> {
-        if bytes.len() < 41 || &bytes[..8] != MAGIC || bytes[8] != CODEC_VERSION {
+        if bytes.len() < 41
+            || &bytes[..8] != MAGIC
+            || !matches!(bytes[8], RELEASED_CODEC_VERSION | CODEC_VERSION)
+        {
             return Err(invalid("Unsupported workbook recovery codec"));
         }
         let payload = &bytes[41..];
@@ -554,6 +560,11 @@ impl Workbook {
         )
         .map_err(invalid)?;
         let projection = authority.materialize().map_err(authority_error)?;
+        if bytes[8] == RELEASED_CODEC_VERSION
+            && !crate::authority::released_styles(&projection.styles)
+        {
+            return Err(invalid("Unsupported workbook recovery codec"));
+        }
         let model = checkpoint.calculation.apply(projection)?;
         authority.set_snapshot_projection_valid(true);
         let mut preserved = PreservedSnapshotBuilder::new();
