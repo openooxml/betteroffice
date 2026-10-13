@@ -463,10 +463,16 @@ fn apply_range_formats(
     Ok(InvertedOp(inverse))
 }
 
-/// An xf resolving to the plain format, for workbooks whose xf 0 does not. A saved xf reads an
-/// unset facet as pool entry 0, so each facet whose entry 0 is not the default names a default
-/// entry.
+/// An xf resolving to the plain format, for workbooks whose xf 0 does not: the first that
+/// already does, else a new one. A saved xf reads an unset facet as pool entry 0, so each facet
+/// whose entry 0 is not the default names a default entry.
 pub fn plain_xf(styles: &mut xlsx_model::Stylesheet) -> u32 {
+    let format = xlsx_model::CellFormat::default();
+    if let Some(index) =
+        (0..styles.cell_xfs.len() as u32).find(|&index| styles.cell_format(Some(index)) == format)
+    {
+        return index;
+    }
     let plain = xlsx_model::Xf {
         font: default_entry(&mut styles.fonts),
         fill: default_entry(&mut styles.fills),
