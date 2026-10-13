@@ -1376,37 +1376,98 @@ function boundaryContent(boundary: OriginalRunBoundary, formatting: TextFormatti
   return content;
 }
 
+function restoreRecordedBreaks(
+  content: ParagraphContent[],
+  items: InlineItem[],
+  boundaries: OriginalRunBoundary[]
+): ParagraphContent[] {
+  const breaks: { offset: number; type: BlockBreakKind }[] = [];
+  let start = 0;
+  for (const boundary of boundaries) {
+    let cursor = 0;
+    for (const entry of noteMarkContent(boundary) ? [] : (boundary.breaks ?? [])) {
+      cursor = Math.min(Math.max(entry.offset, cursor), boundary.text.length);
+      breaks.push({ offset: start + cursor, type: entry.type });
+    }
+    start += boundary.text.length;
+  }
+  if (breaks.length === 0) return content;
+  const source = boundaries.map((boundary): ParagraphContent => ({
+    type: 'run',
+    content: boundaryContent(boundary, {}),
+  }));
+  const trailing = trailingBlockBreaks({ type: 'paragraph', content: source });
+  const hoisted = breaks.length - trailing.length;
+  const visible = flowTokens(source).includes('visible');
+  const kept = breaks.filter(
+    (entry, index) => index >= hoisted || (visible && entry.type === 'page')
+  );
+  const recorded = boundaries.map((boundary) => boundary.text).join('');
+  const live = items
+    .map((item) => (item.kind === 'text' ? item.text : isBlockBreak(item) ? '' : '\uFFFC'))
+    .join('');
+  let prefix = 0;
+  const shared = Math.min(recorded.length, live.length);
+  while (prefix < shared && recorded[prefix] === live[prefix]) prefix += 1;
+  let suffix = 0;
+  while (
+    suffix < shared - prefix &&
+    recorded[recorded.length - 1 - suffix] === live[live.length - 1 - suffix]
+  ) {
+    suffix += 1;
+  }
+  const length = content.reduce((sum, child) => sum + paragraphContentLength(child), 0);
+  const placed = insertBoundaries(
+    content,
+    kept.map(({ offset }, id) => {
+      const mapped = offset <= prefix
+        ? offset
+        : offset >= recorded.length - suffix
+          ? offset + live.length - recorded.length
+          : Math.min(offset, live.length - suffix);
+      return { id, kind: 'start', offset: Math.min(Math.max(mapped, 0), length) };
+    }),
+    (boundary) => ({ type: 'run', content: [{ type: 'break', breakType: kept[boundary.id]!.type }] })
+  );
+  const placedTrailing = trailingBlockBreaks({ type: 'paragraph', content: placed });
+  return placedTrailing.length === trailing.length &&
+    placedTrailing.every((kind, index) => kind === trailing[index])
+    ? placed
+    : content;
+}
+
 function restoreOriginalRuns(
   content: ParagraphContent[],
   items: InlineItem[],
   boundaries: OriginalRunBoundary[] | undefined
 ): ParagraphContent[] {
+  if (!boundaries?.length) return content;
+  const fallback = (): ParagraphContent[] => restoreRecordedBreaks(content, items, boundaries);
   if (
-    !boundaries?.length ||
     !content.every(
       (child) => child.type === 'run' && child.content.every((entry) => entry.type === 'text')
     ) ||
     items.some((item) => item.kind !== 'text' || item.attributes.hyperlink) ||
     boundaries.some((boundary) => boundary.noteMarks?.length && boundary.text.length > 0)
   ) {
-    return content;
+    return fallback();
   }
   const fullText = items.map((item) => (item.kind === 'text' ? item.text : '')).join('');
-  if (fullText !== boundaries.map((boundary) => boundary.text).join('')) return content;
+  if (fullText !== boundaries.map((boundary) => boundary.text).join('')) return fallback();
 
   let itemIndex = 0;
   let itemOffset = 0;
   const restoredAttrs: Attrs[] = [];
   for (const boundary of boundaries) {
     const expected = marksKeyToYrsAttrs(boundary.marksKey);
-    if (!expected) return content;
+    if (!expected) return fallback();
     restoredAttrs.push(expected);
     let remaining = boundary.text.length;
     while (remaining > 0) {
       const item = items[itemIndex];
-      if (item?.kind !== 'text') return content;
+      if (item?.kind !== 'text') return fallback();
       if (stableStringify(formattingAttrs(item.attributes)) !== stableStringify(expected)) {
-        return content;
+        return fallback();
       }
       const available = item.text.length - itemOffset;
       const consumed = Math.min(remaining, available);
@@ -1419,7 +1480,7 @@ function restoreOriginalRuns(
     }
   }
 
-  if (itemIndex !== items.length || itemOffset !== 0) return content;
+  if (itemIndex !== items.length || itemOffset !== 0) return fallback();
 
   return boundaries.map((boundary, index) => {
     // restoreOriginalRuns restores the original segmentation/property-change
