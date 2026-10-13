@@ -42,6 +42,27 @@ fn echo_facts_keep_resolved_indents_and_character_spacing() {
     assert!(!facts.can_empty);
 }
 
+#[test]
+fn echo_facts_decline_conflicting_font_slots() {
+    let store = store_with_liberation();
+    let mut input: serde_json::Value =
+        serde_json::from_str(&build_input("a", 10.0, None, false, Some(&[0]))).unwrap();
+    input["measured"][0]["block"]["runs"][0]["fontSlots"] = serde_json::json!({
+        "ascii": "Liberation Sans", "hAnsi": "Other"
+    });
+    let json = build_display_list_json_with_fonts(&input.to_string(), &store).unwrap();
+    let list: DisplayList = serde_json::from_str(&json).unwrap();
+    let facts = list.pages[0]
+        .primitives
+        .iter()
+        .find_map(|primitive| match primitive {
+            Primitive::GlyphRun(run) => run.echo.as_ref(),
+            _ => None,
+        })
+        .unwrap();
+    assert!(!facts.primary_font);
+}
+
 /// Build a one-paragraph, one-line display-list input. `chain` is the
 /// `fontChains` value for `"liberation sans|0|0"` (None ⇒ no fontChains at all,
 /// the browser-measured shape). `trailing_break` appends a `<w:br>` run so a

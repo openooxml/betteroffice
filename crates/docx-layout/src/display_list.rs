@@ -7196,6 +7196,16 @@ fn try_emit_glyph_runs(
     if chain.is_empty() {
         return false;
     }
+    let echo_font_route = fmt.complex_script != Some(true)
+        && fmt.font_slots.as_ref().is_none_or(|slots| {
+            slots.ascii == slots.h_ansi
+                && slots.ascii_theme == slots.h_ansi_theme
+                && slots
+                    .ascii
+                    .as_deref()
+                    .is_none_or(|name| name.eq_ignore_ascii_case(family))
+                && slots.hint.as_deref().is_none_or(|hint| hint == "default")
+        });
 
     let size_px = effective_font_px_of(fmt);
     let features = kern_features_of(fmt, size_px);
@@ -7406,7 +7416,7 @@ fn try_emit_glyph_runs(
                 right: 0.0,
                 kern: features.is_empty(),
                 kerning: fmt.kerning_min_pt.unwrap_or(0.0),
-                primary_font: chain.first() == Some(&font),
+                primary_font: echo_font_route && chain.first() == Some(&font),
                 letter_spacing: fmt.letter_spacing.unwrap_or(0.0),
                 position: fmt.position_px.unwrap_or(0.0),
                 scale: fmt.horizontal_scale.unwrap_or(100.0),

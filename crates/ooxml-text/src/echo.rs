@@ -61,6 +61,9 @@ pub fn echo_glyph_set(
     let mut glyph_ids = vec![0; alphabet.len()];
     let mut advances = vec![0; alphabet.len()];
     for (index, ch) in alphabet.iter().enumerate() {
+        if !store.covers(font, *ch)? {
+            continue;
+        }
         let glyphs = shape(&ch.to_string())?;
         if let [glyph] = glyphs.as_slice()
             && glyph.glyph_id != 0
