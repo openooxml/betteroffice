@@ -177,6 +177,8 @@ import {
   resolveBundledFamilyFace, // ("Gelasio" or a Word family, bold, italic) -> exact face or undefined
   resolveScriptFallbackFace, // ('cjk-sc' | 'arabic' | ..., bold, italic) -> coverage face
   resolveLastResortFace, // always-available base face for any (family, bold, italic)
+  resolveDigitAdvance, // "Verdana" -> 0.636: the family's widest digit (em) where its substitute's digits differ
+  maxDigitWidth, // (family, sizePx, measure) -> the max digit width spreadsheet columns are counted in
   loadBundledFontBytes, // (face, { baseUrl }?) -> Promise<ArrayBuffer> (cached per face + base)
   registerBundledFontFace, // face -> FontFace registration (no-op outside the DOM)
 } from '@betteroffice/fonts';

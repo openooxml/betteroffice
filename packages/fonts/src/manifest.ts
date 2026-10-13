@@ -520,10 +520,13 @@ function looksSerif(family: string): boolean {
  * breaks the deck was written against. Measured the same way, Trebuchet MS,
  * Tahoma, Century Gothic, Tw Cen MT and Lucida Grande all scored worse on the
  * corpus than plain Calibri does, so they are deliberately left out — a closer
- * advance is not worth a letterform that far off (#797).
+ * advance is not worth a letterform that far off (#797). The match holds over
+ * a sentence, not per glyph, so each entry also keeps the family's own widest
+ * digit in em: Montserrat's zero is 0.662 em where every Verdana digit is
+ * 0.636, and a spreadsheet counts its column widths in that digit.
  */
-const WIDTH_MATCHED_SUBSTITUTES: Record<string, string> = {
-  verdana: 'Montserrat',
+const WIDTH_MATCHED_SUBSTITUTES: Record<string, { family: string; digitAdvance: number }> = {
+  verdana: { family: 'Montserrat', digitAdvance: 0.636 },
 };
 
 /**
@@ -621,10 +624,35 @@ export function resolveLastResortFace(
   }
   const matched = WIDTH_MATCHED_SUBSTITUTES[family.trim().toLowerCase()];
   if (matched) {
-    const face = resolveMetricCompatFace(matched, bold, italic);
+    const face = resolveMetricCompatFace(matched.family, bold, italic);
     if (face) return face;
   }
   const sans = office === 'word' ? 'Arial' : 'Calibri';
   const base = looksSerif(family) ? 'Times New Roman' : sans;
   return resolveMetricCompatFace(base, bold, italic)!;
+}
+
+/**
+ * The widest digit of `family` in em, where the face drawing it is a
+ * width-matched substitute whose digits differ from the family's; `undefined`
+ * for every other family, whose digits are read off the face itself.
+ */
+export function resolveDigitAdvance(family: string): number | undefined {
+  return WIDTH_MATCHED_SUBSTITUTES[family.trim().toLowerCase()]?.digitAdvance;
+}
+
+/**
+ * The maximum digit width spreadsheet column widths are counted in: the
+ * widest digit of `family` at `sizePx`, in whole pixels. `measure` reads one
+ * digit's advance off the face that draws the family, unless that face is a
+ * substitute with digits of its own.
+ */
+export function maxDigitWidth(
+  family: string,
+  sizePx: number,
+  measure: (digit: string) => number,
+): number {
+  const advance = resolveDigitAdvance(family);
+  if (advance !== undefined) return Math.round(advance * sizePx);
+  return Math.max(...[...'0123456789'].map((digit) => Math.round(measure(digit))));
 }

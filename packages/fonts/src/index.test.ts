@@ -6,7 +6,9 @@ import {
   BUNDLED_FONTS,
   createFontProvider,
   loadBundledFontBytes,
+  maxDigitWidth,
   resolveBundledFamilyFace,
+  resolveDigitAdvance,
   resolveLastResortFace,
   resolveMetricCompatFace,
   resolveMetricCompatFamily,
@@ -70,6 +72,26 @@ describe('resolution', () => {
     expect(resolveLastResortFace('Verdana', true, false).file).toBe('Montserrat-Bold.ttf');
     expect(resolveLastResortFace('Trebuchet MS', false, false).file).toBe('Carlito-Regular.ttf');
     expect(resolveLastResortFace('Gill Sans MT', false, false).file).toBe('Carlito-Regular.ttf');
+  });
+
+  test('a width-matched substitute keeps the digit advance of the family it draws', () => {
+    expect(resolveDigitAdvance('Verdana')).toBe(0.636);
+    expect(resolveDigitAdvance(' VERDANA ')).toBe(0.636);
+    expect(resolveDigitAdvance('Calibri')).toBeUndefined();
+    expect(resolveDigitAdvance('Trebuchet MS')).toBeUndefined();
+  });
+
+  test('the max digit width counts a substituted family in its own digits', () => {
+    const montserrat: Record<string, number> = {
+      0: 0.662, 1: 0.361, 2: 0.568, 3: 0.564, 4: 0.661,
+      5: 0.566, 6: 0.609, 7: 0.589, 8: 0.638, 9: 0.609,
+    };
+    const drawn = (em: Record<string, number>, sizePx: number) => (digit: string) =>
+      em[digit] * sizePx;
+    expect(maxDigitWidth('Verdana', 10, drawn(montserrat, 10))).toBe(6);
+    expect(maxDigitWidth('Verdana', 40 / 3, drawn(montserrat, 40 / 3))).toBe(8);
+    expect(maxDigitWidth('Calibri', 11, () => 0.507 * 11)).toBe(6);
+    expect(maxDigitWidth('Calibri', 44 / 3, () => (0.507 * 44) / 3)).toBe(7);
   });
 
   test('a trailing light weight on a known family outranks the bold flag', () => {
