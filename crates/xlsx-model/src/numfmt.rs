@@ -682,7 +682,8 @@ fn format_number_value(n: f64, code: &str, ds: DateSystem) -> FormattedValue {
 }
 
 /// whether formatting `value` with `code` degrades to a general render
-/// because the code asks for something the interpreter stubs.
+/// because the code asks for something the interpreter stubs or a fraction
+/// does not fit.
 pub fn format_is_approximate(value: &CellValue, code: &str) -> bool {
     let CellValue::Number { value } = value else {
         return false;
@@ -693,7 +694,15 @@ pub fn format_is_approximate(value: &CellValue, code: &str) -> bool {
     }
     let parsed = parsed_sections(code);
     let section = &parsed[select(&parsed, *value).0];
-    !section.has_date() && degrades_to_general(section)
+    !section.has_date()
+        && (degrades_to_general(section) || fraction_falls_back(section, value.abs()))
+}
+
+fn fraction_falls_back(sec: &Section, mag: f64) -> bool {
+    let Some(pattern) = sec.fraction else {
+        return false;
+    };
+    !sec.has(|t| matches!(t, Tok::General | Tok::Exp(_))) && fraction_parts(mag, pattern).is_none()
 }
 
 fn degrades_to_general(sec: &Section) -> bool {
