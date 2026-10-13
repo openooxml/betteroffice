@@ -1101,10 +1101,11 @@ impl WorkbookAuthority {
         }
     }
 
-    /// Whether `update` holds a whole workbook seeded by another bootstrap,
-    /// which only `snapshot_replacement` may take into a pristine replica.
-    /// Merged into an edited one, its seed would race this replica's seed for
-    /// every shared key.
+    /// Whether `update` holds a whole workbook seeded by another bootstrap
+    /// than the one this replica's document grew from, which only
+    /// `snapshot_replacement` may take into a pristine replica. Merged into an
+    /// edited one, its seed would race this replica's seed for every shared
+    /// key.
     pub(crate) fn seeds_another_bootstrap(&self, update: &[u8]) -> bool {
         let Ok(incoming) = decode_update_v1(update) else {
             return false;
@@ -1117,6 +1118,7 @@ impl WorkbookAuthority {
         {
             return false;
         }
+        let seeds = self.seed_clients(&known);
         let doc = Doc::with_client_id(self.client_id());
         if hydrate_doc(&doc, update).is_err() {
             return false;
@@ -1128,7 +1130,26 @@ impl WorkbookAuthority {
                 .transact()
                 .state_vector()
                 .iter()
-                .any(|(client, _)| client.get() == self.base.bootstrap_client_id)
+                .any(|(client, _)| seeds.contains(&client.get()))
+    }
+
+    /// The bootstraps `state_vector` holds: this replica's own, or the one
+    /// that seeded a snapshot it adopted, under any reading of the base it
+    /// accepts.
+    fn seed_clients(&self, state_vector: &StateVector) -> Vec<u64> {
+        let bootstraps = self
+            .base
+            .fingerprints
+            .values()
+            .flatten()
+            .filter_map(|fingerprint| fingerprint_client_id(fingerprint.as_str()))
+            .chain([self.base.bootstrap_client_id])
+            .collect::<HashSet<_>>();
+        state_vector
+            .iter()
+            .map(|(client, _)| client.get())
+            .filter(|client| bootstraps.contains(client))
+            .collect()
     }
 
     /// True while the replica still holds nothing but its own bootstrap.
@@ -4801,13 +4822,23 @@ fn fingerprint_model(
             let fingerprint = format!("{digest:x}");
             let mut client_bytes = [0_u8; 8];
             client_bytes.copy_from_slice(&digest[..8]);
-            let mut bootstrap_client_id = u64::from_be_bytes(client_bytes) & MAX_SAFE_CLIENT_ID;
-            if bootstrap_client_id == 0 {
-                bootstrap_client_id = 1;
-            }
-            (fingerprint, bootstrap_client_id)
+            let client = client_id_of_digest(u64::from_be_bytes(client_bytes));
+            (fingerprint, client)
         })
         .collect())
+}
+
+fn client_id_of_digest(head: u64) -> u64 {
+    match head & MAX_SAFE_CLIENT_ID {
+        0 => 1,
+        client => client,
+    }
+}
+
+/// The bootstrap client a base fingerprint seeds: the head of its digest.
+fn fingerprint_client_id(fingerprint: &str) -> Option<u64> {
+    let head = u64::from_str_radix(fingerprint.get(..16)?, 16).ok()?;
+    Some(client_id_of_digest(head))
 }
 
 fn sheet_json<T: Serialize>(
