@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
 
 use quick_xml::events::{BytesCData, BytesStart, BytesText, Event};
-use quick_xml::name::ResolveResult;
+use quick_xml::name::{Namespace, ResolveResult};
 use quick_xml::{NsReader, Reader, Writer, XmlVersion};
 
 use crate::{rezip_parts_preserving, unzip_parts};
@@ -304,8 +304,7 @@ fn parse_content_types_with_budget(
     let mut depth = 0_usize;
     let mut root_seen = false;
     loop {
-        match reader
-            .read_resolved_event()
+        match read_decoded_namespace_event(&mut reader)
             .map_err(|error| DocumentKindError::InvalidContentTypes(error.to_string()))?
         {
             (namespace, Event::Start(start)) => {
@@ -409,6 +408,31 @@ fn record_dangerous_override(
         dangerous.insert(normalize_part_name(part_name).into_owned());
     }
     Ok(())
+}
+
+// Namespace names are attribute values, so references in them spell the same URI. Each
+// declaration holding one is decoded once, into a binding that shadows the raw one; a value
+// that does not decode or bind keeps the raw binding.
+fn read_decoded_namespace_event<'r, 'i>(
+    reader: &'r mut NsReader<&'i [u8]>,
+) -> quick_xml::Result<(ResolveResult<'r>, Event<'i>)> {
+    let event = reader.read_event()?;
+    if let Event::Start(start) | Event::Empty(start) = &event {
+        let decoder = reader.decoder();
+        for attribute in start.attributes().with_checks(false) {
+            let Ok(attribute) = attribute else { break };
+            if let Some(prefix) = attribute.key.as_namespace_binding()
+                && attribute.value.contains(&b'&')
+                && let Ok(value) =
+                    attribute.decoded_and_normalized_value(XmlVersion::Implicit1_0, decoder)
+            {
+                let _ = reader
+                    .resolver_mut()
+                    .add(prefix, Namespace(value.as_bytes()));
+            }
+        }
+    }
+    Ok(reader.resolver().resolve_event(event))
 }
 
 fn is_content_types_namespace(namespace: &ResolveResult<'_>) -> bool {
@@ -549,8 +573,7 @@ fn main_document_part(
     let mut depth = 0_usize;
     let mut root_seen = false;
     loop {
-        match reader
-            .read_resolved_event()
+        match read_decoded_namespace_event(&mut reader)
             .map_err(|error| DocumentKindError::InvalidPackageRelationships(error.to_string()))?
         {
             (namespace, Event::Start(start)) => {
@@ -1015,8 +1038,7 @@ fn sanitize_workbook_sheets(
     let mut root_valid = false;
     let mut depth = 0;
     loop {
-        let (namespace, event) = reader
-            .read_resolved_event()
+        let (namespace, event) = read_decoded_namespace_event(&mut reader)
             .map_err(|error| format!("invalid XML in {path}: {error}"))?;
         match &event {
             Event::Start(start) | Event::Empty(start) => {
@@ -1149,9 +1171,7 @@ impl<'a> WorkbookReader<'a> {
     }
 
     fn read_event(&mut self, path: &str) -> Result<(Event<'a>, WorkbookElement), String> {
-        let (namespace, event) = self
-            .reader
-            .read_resolved_event()
+        let (namespace, event) = read_decoded_namespace_event(&mut self.reader)
             .map_err(|error| format!("invalid XML in {path}: {error}"))?;
         let mut element = WorkbookElement::Other;
         match &event {
@@ -1263,8 +1283,7 @@ fn rewrites_sheet_entries(
     let mut compatibility_depth = None;
     let mut names_removed = false;
     loop {
-        let (namespace, event) = reader
-            .read_resolved_event()
+        let (namespace, event) = read_decoded_namespace_event(&mut reader)
             .map_err(|error| format!("invalid XML in {path}: {error}"))?;
         match &event {
             Event::Start(start) | Event::Empty(start) => {
