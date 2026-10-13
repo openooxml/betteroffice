@@ -85,7 +85,9 @@ fn cascade_composition_tags_preserve_predicates_and_bootstrap_guards() {
 
 #[test]
 fn cascade_composition_released_fingerprint_layouts_round_trip() {
-    let model = open_test_cases::matrix().remove(0).model;
+    let mut model = open_test_cases::matrix().remove(0).model;
+    model.sheets = vec![Sheet::new("Data")];
+    model.sheets[0].set_cell(CellRef::new(0, 0), Cell { value: CellValue::Number { value: 42.0 }, style: Some(1), ..Cell::default() });
     for version in 3..=6 {
         let bytes = tests::legacy_update(&model, version, version >= 4);
         let authority = tests::authority_from_update(&model, &bytes, 71);
