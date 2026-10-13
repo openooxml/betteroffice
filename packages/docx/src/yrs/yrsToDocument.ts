@@ -430,21 +430,25 @@ const directFormatting: RunFormatter = (attributes) =>
   attrsToTextFormatting(formattingAttrs(attributes));
 
 const ON_OFF_RUN_PROPERTIES = new Set<string>([
-  'bold', 'boldCs', 'italic', 'italicCs', 'allCaps', 'smallCaps', 'strike', 'doubleStrike',
+  'bold', 'italic', 'allCaps', 'smallCaps', 'strike', 'doubleStrike',
   'outline', 'shadow', 'emboss', 'imprint', 'hidden', 'rtl',
 ]);
+
+const COMPLEX_SCRIPT = [['boldCs', 'bold'], ['italicCs', 'italic']] as const;
 
 const lentByLinkStyle = (mark: unknown): boolean => asObject(mark)?.inheritedHyperlink === true;
 
 /**
  * What a run with `attributes` that inherits `inherited` writes: the values
  * that differ, and an explicit off for an inherited switch, color or
- * underline it clears.
+ * underline it clears. Complex-script bold and italic follow bold and italic
+ * unless the session states them as the run's own.
  */
 function relativeFormatting(attributes: Attrs, inherited: TextFormatting): TextFormatting {
   const formatting = directFormatting(attributes);
   const result: Attrs = {};
   for (const key of new Set([...Object.keys(formatting), ...Object.keys(inherited)])) {
+    if (key === 'boldCs' || key === 'italicCs') continue;
     const value = formatting[key as keyof TextFormatting];
     if (sameJson(value, inherited[key as keyof TextFormatting])) continue;
     if (value !== undefined) result[key] = value;
@@ -453,6 +457,11 @@ function relativeFormatting(attributes: Attrs, inherited: TextFormatting): TextF
     else if (key === 'underline' && !lentByLinkStyle(attributes.underline)) {
       result[key] = { style: 'none' };
     }
+  }
+  for (const [script, key] of COMPLEX_SCRIPT) {
+    const stated = attributes[script];
+    const value = typeof stated === 'boolean' ? stated || undefined : result[key];
+    if (value !== undefined) result[script] = value;
   }
   return result as TextFormatting;
 }
