@@ -482,7 +482,7 @@ FLOW_STRADDLES['flow-landscape-bare'] = (pages) => {
 
 const MEASUREMENT = {
   defaults: { fontSize: 11, fontFamily: 'Liberation Sans' },
-  compat: { noLeading: false, doNotExpandShiftReturn: false }, authoritativeShaping: true,
+  compat: { noLeading: false, doNotExpandShiftReturn: false }, authoritativeShaping: true as const,
 };
 
 /** `exportable` registers the font for the default family too, as an export requires. */
