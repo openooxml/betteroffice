@@ -41,10 +41,14 @@ export interface WorkbookRecovery extends RecoveryMetadata {
 const MAGIC = new Uint8Array([88, 76, 83, 88, 82, 69, 67, 86]);
 const CODEC_VERSION = 3;
 const HEADER_BYTES = 21;
+// The engine writes codec 4; codec 3 checkpoints from released builds still restore.
+const ENGINE_CODECS = new Set([3, 4]);
 
 export function isCollaborativeWorkbookRecovery(engine: Uint8Array): boolean {
   const unsupported = (): never => { throw new TypeError('Unsupported workbook recovery checkpoint'); };
-  if (engine.length < 42 || !MAGIC.every((byte, index) => engine[index] === byte) || engine[8] !== 3) return unsupported();
+  if (engine.length < 42 || !MAGIC.every((byte, index) => engine[index] === byte) || !ENGINE_CODECS.has(engine[8])) {
+    return unsupported();
+  }
   // Engine metadata follows the codec header and SHA-256 digest.
   let offset = 41;
   let length = 0;
