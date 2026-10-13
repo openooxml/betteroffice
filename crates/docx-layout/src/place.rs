@@ -42,7 +42,7 @@ use crate::paragraph_spacing::{
     apply_contextual_spacing_measured, get_spacing_after, get_spacing_before,
 };
 use crate::prescan::{LayoutPlan, SectionLayoutConfig, default_columns, prescan};
-use crate::resolve_lines::{ResolvedLine, resolve_line_segments, utf16_len};
+use crate::resolve_lines::{ResolvedLine, ResolvedSegment, resolve_line_segments, utf16_len};
 use crate::section_breaks::resolve_page_margins;
 use crate::types::{
     BlockExtent, ChartBlock, ChartExtent, ChartFragment, Fragment, ImageBlock, ImageExtent,
@@ -1372,9 +1372,9 @@ fn moved_position(value: Option<f64>, delta: f64) -> Option<Option<f64>> {
 }
 
 /// Moves a retained fragment's resolved lines by the delta its document range
-/// moved by, when both ends moved alike and every run slice, moved, starts
-/// where the new block's run puts it. False leaves the lines to be resolved
-/// again; the lines may then be partly moved.
+/// moved by, when both ends moved alike and every run slice, moved, takes the
+/// positions the resolver gives it from the new block. False leaves the lines
+/// to be resolved again; the lines may then be partly moved.
 fn move_resolved_lines(
     fragment: &mut ParagraphFragment,
     block: &ParagraphBlock,
@@ -1410,47 +1410,58 @@ fn move_resolved_lines(
                 } else {
                     0
                 };
+                let tail = (index == line.tail_run).then_some(line.tail_char);
                 segments
                     .next()
-                    .is_some_and(|segment| move_run_slice(&mut segment.run, run, head, delta))
+                    .is_some_and(|segment| move_run_slice(segment, run, head, tail, delta))
             })
             && segments.next().is_none()
     })
 }
 
-/// Moves one resolved run slice by `delta` when it is a slice of `run` from
-/// UTF-16 offset `head`: its start, and a non-text run's end, must land on the
-/// new run's. Runs holding positions of their own (an inline shape, an inline
-/// control widget) are never moved.
-fn move_run_slice(slice: &mut Run, run: &Run, head: usize, delta: f64) -> bool {
-    let (start, end, expected_start, expected_end) = match (slice, run) {
+/// Moves one resolved run slice by `delta` when it is the slice of `run` the
+/// resolver takes from UTF-16 offset `head` to the line's `tail` offset, or to
+/// the run's end off the line's tail: both its positions, moved, must be the
+/// ones that slice takes from the new run. Runs holding positions of their own
+/// (an inline shape, an inline control widget) are never moved.
+fn move_run_slice(
+    segment: &mut ResolvedSegment,
+    run: &Run,
+    head: usize,
+    tail: Option<usize>,
+    delta: f64,
+) -> bool {
+    let ResolvedSegment { run: slice, text } = segment;
+    let (start, end, expected) = match (slice, run) {
         (Run::Text(slice), Run::Text(run))
             if slice.inline_sdt_widget.is_none() && run.inline_sdt_widget.is_none() =>
         {
-            (
-                &mut slice.pm_start,
-                &mut slice.pm_end,
-                run.pm_start.map(|start| start + head as f64),
-                None,
-            )
+            // A strict slice of a run's text is always shorter than the text.
+            let expected = if head == 0 && text.len() == run.text.len() {
+                (run.pm_start, run.pm_end)
+            } else {
+                let end = tail.unwrap_or_else(|| utf16_len(&run.text));
+                (
+                    run.pm_start.map(|start| start + head as f64),
+                    run.pm_start.map(|start| start + end as f64),
+                )
+            };
+            (&mut slice.pm_start, &mut slice.pm_end, expected)
         }
         (Run::Tab(slice), Run::Tab(run)) => (
             &mut slice.pm_start,
             &mut slice.pm_end,
-            run.pm_start,
-            Some(run.pm_end),
+            (run.pm_start, run.pm_end),
         ),
         (Run::LineBreak(slice), Run::LineBreak(run)) => (
             &mut slice.pm_start,
             &mut slice.pm_end,
-            run.pm_start,
-            Some(run.pm_end),
+            (run.pm_start, run.pm_end),
         ),
         (Run::Field(slice), Run::Field(run)) => (
             &mut slice.pm_start,
             &mut slice.pm_end,
-            run.pm_start,
-            Some(run.pm_end),
+            (run.pm_start, run.pm_end),
         ),
         (Run::Image(slice), Run::Image(run))
             if slice.inline_shape.is_none() && run.inline_shape.is_none() =>
@@ -1458,8 +1469,7 @@ fn move_run_slice(slice: &mut Run, run: &Run, head: usize, delta: f64) -> bool {
             (
                 &mut slice.pm_start,
                 &mut slice.pm_end,
-                run.pm_start,
-                Some(run.pm_end),
+                (run.pm_start, run.pm_end),
             )
         }
         _ => return false,
@@ -1469,7 +1479,7 @@ fn move_run_slice(slice: &mut Run, run: &Run, head: usize, delta: f64) -> bool {
     else {
         return false;
     };
-    if moved_start != expected_start || expected_end.is_some_and(|expected| moved_end != expected) {
+    if (moved_start, moved_end) != expected {
         return false;
     }
     (*start, *end) = (moved_start, moved_end);
