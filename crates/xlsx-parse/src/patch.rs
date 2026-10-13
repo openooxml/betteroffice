@@ -1020,7 +1020,9 @@ fn set_row_height(attributes: &mut Vec<XmlAttribute>, height: Option<f64>) {
 /// The style ascending, disjoint `runs` give `col`.
 fn run_style(runs: &[ColStyle], col: ColId) -> Option<u32> {
     let at = runs.partition_point(|run| run.last < col);
-    runs.get(at).filter(|run| run.first <= col).map(|run| run.xf)
+    runs.get(at)
+        .filter(|run| run.first <= col)
+        .map(|run| run.xf)
 }
 
 fn set_col_width(attributes: &mut Vec<XmlAttribute>, width: Option<f64>) {
