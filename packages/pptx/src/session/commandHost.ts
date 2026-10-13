@@ -109,6 +109,7 @@ export function registerPresentationCommandHandlers(
   let observeChanges = false;
   let failedSeq: number | undefined;
   const storedMarks: TextStyle = {};
+  const draftStyles = new Map<string, TextStyleSnapshot>();
   let lastEditState: PresentationCommandEditState | undefined;
   let composition: { id: string; selection: PresentationCommandSelection; committed: boolean } | undefined;
   let typing: { target: string; group: string; time: number; kind: string; position: number } | undefined;
@@ -407,6 +408,8 @@ export function registerPresentationCommandHandlers(
     const cached = stories.get(storyKey(at))!;
     const story = cached.formatting ??= presentationStoryFormatting(presentation(), at);
     const marks = marksAt(at);
+    // Boxes inserted here type at their draft style, not the inherited cascade of their empty paragraphs.
+    const draft = draftStyles.get(storyKey(at));
     const previous = cached.toolbar;
     if (previous?.story === story && previous.selection.anchor === at.anchor && previous.selection.focus === at.focus &&
       previous.selection.affinity === at.affinity && previous.selection.kind === at.kind &&
@@ -417,12 +420,14 @@ export function registerPresentationCommandHandlers(
     let offset = 0;
     let caretStyle: TextStyleSnapshot | undefined;
     let precedingStyle: TextStyleSnapshot | undefined;
+    let firstStyle: TextStyleSnapshot | undefined;
     const styles: TextStyleSnapshot[] = [];
     const emptyStyles: TextStyleSnapshot[] = [];
     const alignments = new Set<string | null>();
     for (const paragraph of story.paragraphs) {
       const paragraphStart = offset;
       for (const run of paragraph.runs) {
+        if (draft && run.text.length === 0) continue;
         const runEnd = offset + run.text.length;
         const style: TextStyleSnapshot = { ...run.style,
           bold: run.style.bold ?? DEFAULT_EDITOR_TEXT_STYLE.bold,
@@ -431,6 +436,7 @@ export function registerPresentationCommandHandlers(
           fontFamily: run.style.fontFamily ?? DEFAULT_EDITOR_TEXT_STYLE.fontFamily,
           fontSizePt: normalizeFontSize(run.style.fontSizePt ?? DEFAULT_EDITOR_TEXT_STYLE.fontSizePt),
           color: run.style.color ?? DEFAULT_EDITOR_TEXT_STYLE.color };
+        firstStyle ??= style;
         if (start >= offset && start < runEnd || start === offset && runEnd === offset) caretStyle ??= style;
         if (runEnd <= start && runEnd > offset) precedingStyle = style;
         if (runEnd > offset && start < runEnd && end > offset) styles.push(style);
@@ -442,10 +448,11 @@ export function registerPresentationCommandHandlers(
       offset += 1;
     }
     styles.push(...emptyStyles);
+    if (draft && styles.length === 0) styles.push(draft);
     let formatting: TextStyleSnapshot = { ...DEFAULT_EDITOR_TEXT_STYLE };
     if (start === end && at.kind !== 'shape') {
-      formatting = { ...formatting, ...(caretStyle ?? precedingStyle ?? story.paragraphs[0]?.runs[0]?.style),
-        ...marks };
+      formatting = { ...formatting, ...(caretStyle ?? precedingStyle ??
+        (draft ? firstStyle ?? draft : story.paragraphs[0]?.runs[0]?.style)), ...marks };
       if (formatting.fontSizePt !== null && formatting.fontSizePt !== undefined) {
         formatting.fontSizePt = normalizeFontSize(formatting.fontSizePt);
       }
@@ -1156,6 +1163,12 @@ export function registerPresentationCommandHandlers(
       objectSelection = command.kind === 'insertTextBox' ? null : object;
       selection = command.kind === 'insertTextBox' && object?.storyId ? { slideId: object.slideId, shapeId: object.shapeId,
         storyId: object.storyId, anchor: 0, focus: 0, affinity: 'downstream' } : object ? objectStory(object) : null;
+      if (command.kind === 'insertTextBox' && selection) {
+        const style = (admitted.draft as ShapeDraft).style;
+        draftStyles.set(storyKey(selection), { ...DEFAULT_EDITOR_TEXT_STYLE,
+          ...Object.fromEntries(Object.entries(style).filter(([, value]) => value !== undefined && value !== null)),
+          fontSizePt: normalizeFontSize(style.fontSizePt ?? DEFAULT_EDITOR_TEXT_STYLE.fontSizePt) });
+      }
       clearMarks();
       return true;
     }
@@ -1504,6 +1517,7 @@ export function registerPresentationCommandHandlers(
     mutations.clear();
     storyMutations.clear();
     stories.clear();
+    draftStyles.clear();
     slideStoryKeys.clear();
     objectTokens.clear();
     selections.clear();
