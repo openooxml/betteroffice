@@ -4544,6 +4544,7 @@ impl CalculationScope {
             | Op::SetFreezePane { .. }
             | Op::SetHyperlinks { .. }
             | Op::RestoreColStyles { .. }
+            | Op::RestoreRowStyles { .. }
             | Op::SetCharts { .. }
             | Op::SetChartAnchor { .. } => Self::Kept,
             Op::SetCell { sheet, at, cell } => {
