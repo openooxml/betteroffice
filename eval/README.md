@@ -48,12 +48,34 @@ directory that contains only the input file. It starts `codex exec` with:
   access, and each tool call it makes is logged and checked like a direct call;
 - the BetterOffice MCP server as the only configured tool server, rooted at the
   task directory; the server runs outside the sandbox and is the only process
-  that can write the output;
+  that can write the output. It is marked `required` with a 60 second
+  `startup_timeout_sec`: codex otherwise waits only
+  `mcp_optional_startup_grace_ms` (1 second) for a server before the first
+  turn and starts without its tools, while a required server is waited for and
+  a server that cannot start ends the agent with an error;
 - `--ignore-user-config`, `--ignore-rules` and `--ephemeral`, to skip user
   configuration, execution rules and persisted session state;
 - no approval prompts and a 600 second timeout per task.
 
-The prompt requires BetterOffice MCP tools for all document access.
+The prompt requires BetterOffice MCP tools for all document access. Before the
+first task the runner starts the server once with an empty root, completes the
+MCP handshake and `tools/list`, and stops with an error unless every tool the
+tasks need is listed within 60 seconds; `results.json` records the measured
+startup time as `mcp_startup_seconds`.
+
+### Generic arm
+
+`--arm generic --python <python>` runs the same tasks, prompts and checker with
+the same model but without the BetterOffice MCP server: the agent reads and
+edits the documents with shell commands and Python with openpyxl, python-pptx
+and python-docx. The runner first checks that `<python>` imports the three
+libraries and puts its directory first on `PATH`. codex runs with
+`--sandbox workspace-write` in the task directory, network access off, no
+additional writable roots and no MCP servers. `shell_tool`, `unified_exec` and
+`unified_exec_tty` are enabled; every other feature listed in `run.py` stays
+disabled, including `shell_snapshot`, so commands inherit the runner's
+environment. Shell commands and file changes are allowed and counted as tool
+calls; an MCP call, a web search or any other tool item fails the task.
 
 ### Scoring
 
@@ -62,7 +84,8 @@ A task passes only if all of these hold:
 - the agent exits with code 0 within the timeout;
 - the JSON event log contains no `command_execution`, MCP call to a server
   other than `betteroffice`, or other tool-call item; only BetterOffice MCP
-  items, agent messages, reasoning and errors are allowed, and an unknown
+  items, agent messages, reasoning and errors are allowed (the generic arm
+  allows shell commands and file changes instead of MCP items), and an unknown
   item type fails the task with its reason in both reports;
 - the output file exists and is a valid package: intact ZIP, well-formed XML,
   and every relationship target and content type override present;
@@ -80,13 +103,17 @@ A task passes only if all of these hold:
   attribute and child of each existing shape (geometry, properties, style and
   text body), paragraph, run, field and end paragraph properties, bullets, text
   and speaker notes, plus every presentation attribute and child, presentation
-  properties, view properties, notes masters and table styles. Both formats
+  properties, view properties, notes masters and table styles. Every run
+  counts, including an empty run and its formatting, and only paragraphs whose
+  text the task changes differ from the input. Both formats
   compare all remaining package parts, including document properties and
   relationships;
 - the input file is byte-identical to the original.
 
 The score is the number of passing tasks out of 20. The runner also records
-the number of BetterOffice MCP calls and the duration per task.
+the duration and the number of tool calls per task (BetterOffice MCP calls, or
+shell commands and file changes in the generic arm), and `results.md` counts
+the tasks that made no tool call.
 
 ZIP metadata, XML serialization, relationship IDs, style and string table
 indexes, worksheet `dimension` and row `spans` are normalized because saves
@@ -110,10 +137,11 @@ A referenced notes slide is compared with its slide by content type,
 relationships (including the link back to that slide), shapes, text, and
 paragraph, run, field and end paragraph properties, but not by part name.
 Replaced notes must keep the paragraph, run and end paragraph properties of
-the source notes paragraphs, which must be uniform; the formatting of created
-notes is not predicted. Unreferenced slide and note payloads are excluded
-because a slide deletion can retain or remove those detached parts without
-changing the presentation.
+the source notes paragraphs, which must be uniform, and a blank line keeps one
+empty run with those properties; the formatting of created notes is not
+predicted. Unreferenced slide and note payloads are excluded because a slide
+deletion can retain or remove those detached parts without changing the
+presentation.
 
 The checkers are validated against known answers:
 [`formats/validate-checkers.py`](formats/validate-checkers.py) builds a correct
@@ -122,8 +150,8 @@ an output with an unrelated edit, and an output with a damaged requested change
 all fail, plus unrelated workbook- and presentation-level edits; two enriched
 fixtures also check view and defined-name remapping and metadata preservation,
 and targeted variants check tab selection, notes parts, slide shape elements,
-paragraph end properties and fields, and cell, row, column and named style
-formats (43 accepted, 113 rejected).
+paragraph end properties, fields and empty formatted runs, and cell, row,
+column and named style formats (45 accepted, 115 rejected).
 [`formats/test-runner.py`](formats/test-runner.py) tests the runner itself with
 a stand-in agent.
 
@@ -155,8 +183,14 @@ for p in fonts docx xlsx pptx agents; do bun run --filter "@betteroffice/$p" bui
 eval/formats/run.sh "node packages/agents/dist/cli.js" /tmp/format-eval gpt-6-luna
 ```
 
+The generic arm takes no MCP command:
+
+```sh
+eval/formats/run.sh --arm generic --python /path/to/venv/bin/python /tmp/format-eval-generic gpt-6-luna
+```
+
 The results directory must be new or empty and outside the repository. It
-receives `results.md`, `results.json`, and per task the agent's JSON event log,
+receives `results.md`, `results.json` (with the arm), and per task the agent's JSON event log,
 its stderr and the output file. Check a single output or the checkers alone
 with:
 
