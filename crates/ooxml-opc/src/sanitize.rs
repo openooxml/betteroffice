@@ -3059,22 +3059,112 @@ mod tests {
     }
 
     #[test]
-    fn macro_sheet_rewrites_reject_alternate_content_sheets() {
-        for sheet in [
+    fn regression_alternate_content_sheet_metadata_keeps_the_workbook() {
+        for element in [
             "<sheet name='Macro' sheetId='2' r:id='macro'></sheet>",
             "<sheet name='First' sheetId='1' r:id='first'/>",
+            "<definedName name='last' localSheetId='2'>Last!$A$1</definedName>",
+            "<workbookView activeTab='1' firstSheet='1'></workbookView>",
         ] {
-            let workbook = wrap_alternate_content(MACRO_WORKBOOK, sheet);
-            let parts = macro_sheet_parts(XLSM_MAIN_TYPE, workbook.as_bytes());
-            let package = rezip_parts(&parts).unwrap();
-            for result in [
-                sanitize_package(&package),
-                sanitize_package_for_format(&package, "xlsx"),
-            ] {
-                let error = result.unwrap_err();
-                assert!(
-                    error.contains("unexpected workbook element in xl/workbook.xml"),
-                    "{error}"
+            let workbook = wrap_alternate_content(MACRO_WORKBOOK, element);
+            let mut parts = macro_sheet_parts(XLSM_MAIN_TYPE, workbook.as_bytes());
+            add_calc_chain(
+                &mut parts,
+                "http://schemas.openxmlformats.org/officeDocument/2006/relationships/calcChain",
+            );
+            for output in sanitize_both(&parts) {
+                assert_eq!(part_bytes(&output, "xl/workbook.xml"), workbook.as_bytes());
+                assert_eq!(part_bytes(&output, "xl/calcChain.xml"), CALC_CHAIN);
+                let relationships =
+                    String::from_utf8_lossy(part_bytes(&output, "xl/_rels/workbook.xml.rels"));
+                for kept in ["worksheets/first.xml", "worksheets/last.xml", "Id='calc'"] {
+                    assert!(relationships.contains(kept), "{relationships}");
+                }
+                assert!(!relationships.contains("macro"), "{relationships}");
+                assert!(!has_part(&output, "xl/custom/sheet.data"));
+                assert_all_parts_declared(&output);
+            }
+        }
+    }
+
+    #[test]
+    fn regression_remaps_views_across_many_removed_sheets() {
+        const SHEETS: usize = 3_000;
+        let removed = |index: usize| index % 3 == 0 || index >= SHEETS - 3;
+        let mut sheets = String::new();
+        let mut views = String::new();
+        let mut relationships = String::new();
+        for index in 0..SHEETS {
+            let (id, relationship) = if removed(index) {
+                (
+                    format!("m{index}"),
+                    "Type='http://schemas.microsoft.com/office/2006/relationships/xlMacrosheet' Target='/xl/custom/sheet.data'",
+                )
+            } else {
+                (
+                    format!("k{index}"),
+                    "Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet' Target='worksheets/first.xml'",
+                )
+            };
+            sheets.push_str(&format!(
+                "<sheet name='S{index}' sheetId='{}' r:id='{id}'/>",
+                index + 1
+            ));
+            views.push_str(&format!(
+                "<workbookView activeTab='{index}' firstSheet='{}'/>",
+                SHEETS - 1 - index
+            ));
+            relationships.push_str(&format!("<Relationship Id='{id}' {relationship}/>"));
+        }
+        let workbook = format!(
+            "<workbook xmlns='http://schemas.openxmlformats.org/spreadsheetml/2006/main' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'><bookViews>{views}</bookViews><sheets>{sheets}</sheets></workbook>"
+        );
+        let mut parts = macro_sheet_parts(XLSM_MAIN_TYPE, workbook.as_bytes());
+        let (_, rels) = parts
+            .iter_mut()
+            .find(|(name, _)| name == "xl/_rels/workbook.xml.rels")
+            .unwrap();
+        *rels = relationships_xml(&relationships);
+        let kept = (0..SHEETS)
+            .filter(|index| !removed(*index))
+            .map(|index| format!("S{index}"))
+            .collect::<Vec<_>>();
+        // A view on a removed sheet moves to the next kept sheet, or the last one.
+        let mut next_kept = kept.last().unwrap().clone();
+        let mut selected = (0..SHEETS)
+            .rev()
+            .map(|index| {
+                if !removed(index) {
+                    next_kept = format!("S{index}");
+                }
+                next_kept.clone()
+            })
+            .collect::<Vec<_>>();
+        selected.reverse();
+        for output in sanitize_both(&parts) {
+            let workbook = part_bytes(&output, "xl/workbook.xml");
+            let names = element_attributes(workbook, b"sheet")
+                .iter()
+                .map(|values| attribute_value(values, "name").unwrap().to_owned())
+                .collect::<Vec<_>>();
+            assert_eq!(names, kept);
+            let position = names
+                .iter()
+                .enumerate()
+                .map(|(position, name)| (name.as_str(), position.to_string()))
+                .collect::<std::collections::HashMap<_, _>>();
+            let views = element_attributes(workbook, b"workbookView");
+            assert_eq!(views.len(), SHEETS);
+            for (index, values) in views.iter().enumerate() {
+                assert_eq!(
+                    attribute_value(values, "activeTab"),
+                    Some(position[selected[index].as_str()].as_str()),
+                    "{index}"
+                );
+                assert_eq!(
+                    attribute_value(values, "firstSheet"),
+                    Some(position[selected[SHEETS - 1 - index].as_str()].as_str()),
+                    "{index}"
                 );
             }
         }
