@@ -13,13 +13,13 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function harness() {
+function harness(readOnly = false) {
   const sent: WorkbookCommand[] = [];
   const rawCalls: PropertyKey[] = [];
   const replies = new Map<number, ReturnType<typeof deferred<CommandStatus>>>();
   const posted = new Map<WorkbookCommand['kind'], ReturnType<typeof deferred<WorkbookCommand>>>();
   const listeners = new Set<(ack: WorkbookAck) => void>();
-  const state = { throughSeq: 0, seal: {} as PeerlessWorkerInputSeal, readOnly: false };
+  const state = { throughSeq: 0, seal: {} as PeerlessWorkerInputSeal, readOnly };
   const session = {
     commandIdentity: { session: 'book', incarnation: 'worker' },
     get confirmedBasis() { return { epoch: 1, version: `v${state.throughSeq}` }; },
@@ -152,8 +152,7 @@ describe('async worker proposals', () => {
   });
 
   test('returns read-only without submitting a proposal', async () => {
-    const h = harness();
-    h.state.readOnly = true;
+    const h = harness(true);
     await expect(h.api.proposeChanges!(request())).resolves.toMatchObject({ ok: false, failure: { code: 'read-only' } });
     expect(h.sent).toEqual([]);
   });
