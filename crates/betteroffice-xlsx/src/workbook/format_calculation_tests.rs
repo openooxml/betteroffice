@@ -1,5 +1,6 @@
 use super::edit_tests::{options, r, workbook_bytes};
 use super::*;
+use crate::{XlsxAnchor, XlsxExportOptions, XlsxFormulaResult};
 use xlsx_calc::engine::{take_evaluated_formulas, track_formula_evaluations};
 use xlsx_model::ErrorValue;
 use xlsx_ops::BorderPatch;
@@ -47,6 +48,15 @@ fn source(formulas: &str) -> Vec<u8> {
 /// A package whose three sheets hold `rows` in their first row and whose
 /// workbook defines `names`.
 fn package(rows: [&str; 3], names: &str) -> Vec<u8> {
+    let rows = rows.map(|cells| match cells {
+        "" => String::new(),
+        cells => format!(r#"<row r="1">{cells}</row>"#),
+    });
+    sheets_package(rows, names)
+}
+
+/// A package whose three sheets hold the `sheet_data` rows.
+fn sheets_package(sheet_data: [String; 3], names: &str) -> Vec<u8> {
     let mut parts = ooxml_opc::unzip_parts(&workbook_bytes()).unwrap();
     for (name, bytes) in &mut parts {
         if name == "xl/workbook.xml" {
@@ -63,10 +73,7 @@ fn package(rows: [&str; 3], names: &str) -> Vec<u8> {
         else {
             continue;
         };
-        let row = match rows[index.parse::<usize>().unwrap() - 1] {
-            "" => String::new(),
-            cells => format!(r#"<row r="1">{cells}</row>"#),
-        };
+        let row = &sheet_data[index.parse::<usize>().unwrap() - 1];
         *bytes = format!(
             r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>{row}</sheetData></worksheet>"#
         )
@@ -171,15 +178,54 @@ fn text(value: &str) -> CellValue {
     }
 }
 
-fn cycle_cells(workbook: &Workbook) -> Vec<(SheetId, CellRef)> {
-    let calculation = workbook.last_calculation();
-    let mut cells: Vec<_> = calculation
-        .cycle_cells
+fn sorted(addresses: &[CellAddress]) -> Vec<(SheetId, CellRef)> {
+    let mut cells: Vec<_> = addresses
         .iter()
         .map(|address| (address.sheet, address.cell))
         .collect();
     cells.sort_by_key(|(sheet, at)| (sheet.0, at.row, at.col));
     cells
+}
+
+fn cycle_cells(workbook: &Workbook) -> Vec<(SheetId, CellRef)> {
+    sorted(&workbook.last_calculation().cycle_cells)
+}
+
+/// Cycle cells, then limited cells.
+type Status = [Vec<(SheetId, CellRef)>; 2];
+
+fn status(cycle_cells: &[CellAddress], limited_cells: &[CellAddress]) -> Status {
+    [sorted(cycle_cells), sorted(limited_cells)]
+}
+
+fn last_status(workbook: &Workbook) -> Status {
+    let calculation = workbook.last_calculation();
+    status(&calculation.cycle_cells, &calculation.limited_cells)
+}
+
+/// The cells a structured export marks as cycle and as limited.
+fn exported_status(workbook: &Workbook) -> Status {
+    let export = workbook
+        .export_structured(&XlsxExportOptions::default())
+        .unwrap()
+        .unwrap();
+    let mut marked: [Vec<CellAddress>; 2] = Default::default();
+    for (index, sheet) in export.content.sheets.iter().enumerate() {
+        for cell in &sheet.cells {
+            let slot = match cell.formula_result {
+                Some(XlsxFormulaResult::Cycle) => 0,
+                Some(XlsxFormulaResult::Limited) => 1,
+                _ => continue,
+            };
+            if let XlsxAnchor::Cell { a1, .. } = &cell.anchor {
+                marked[slot].push(CellAddress {
+                    sheet: SheetId(index as u32),
+                    cell: r(a1),
+                });
+            }
+        }
+    }
+    status(&marked[0], &marked[1])
 }
 
 /// A full recalculation finds nothing the scoped one left behind.
@@ -363,7 +409,11 @@ fn assert_rename_reevaluates_formula_text(formula: &str) {
     let first = format!(
         r#"<c r="A1"><v>2</v></c><c r="C1"><f>{formula}</f><v>2</v></c><c r="D1" t="str"><f>FORMULATEXT(C1)</f><v>={formula}</v></c>"#
     );
-    let rows = [first.as_str(), "", r#"<c r="A1"><f>Sheet2!A1+1</f><v>1</v></c>"#];
+    let rows = [
+        first.as_str(),
+        "",
+        r#"<c r="A1"><f>Sheet2!A1+1</f><v>1</v></c>"#,
+    ];
     let mut workbook = Workbook::open(&package(rows, "")).unwrap();
     track_formula_evaluations();
     workbook.apply_ops(vec![rename()], options()).unwrap();
@@ -432,25 +482,44 @@ fn rename_reevaluates_a_missing_name_qualified_by_the_new_sheet_name() {
     assert_fully_calculated(&mut workbook);
 }
 
+/// Two cycles and two limited cells. The G1 cycle and K1 are volatile, and
+/// Sheet3's far corner puts what J1 and K1 sum past the evaluation budget.
+fn status_package() -> Vec<u8> {
+    let first = concat!(
+        r#"<row r="1"><c r="C1"><f>D1+1</f><v>0</v></c><c r="D1"><f>C1+1</f><v>0</v></c>"#,
+        r#"<c r="G1"><f>IF(INDIRECT("Sheet3!A1")=1,H1,0)</f><v>0</v></c>"#,
+        r#"<c r="H1"><f>G1+1</f><v>0</v></c>"#,
+        r#"<c r="J1"><f>SUM(Sheet3!A1:XFD1048576)</f><v>2</v></c>"#,
+        r#"<c r="K1"><f>NOW()*0+SUM(Sheet3!A1:XFD1048576)</f><v>2</v></c></row>"#,
+    );
+    let third = concat!(
+        r#"<row r="1"><c r="A1"><v>1</v></c></row>"#,
+        r#"<row r="1048576"><c r="XFD1048576"><v>1</v></c></row>"#,
+    );
+    sheets_package([first.into(), String::new(), third.into()], "")
+}
+
 #[test]
 fn rename_keeps_the_status_of_formulas_it_does_not_reach() {
-    let rows = [
-        concat!(
-            r#"<c r="C1"><f>D1+1</f><v>0</v></c><c r="D1"><f>C1+1</f><v>0</v></c>"#,
-            r#"<c r="G1"><f>IF(INDIRECT("Sheet3!A1")=1,H1,0)</f><v>0</v></c>"#,
-            r#"<c r="H1"><f>G1+1</f><v>0</v></c>"#,
-        ),
-        "",
-        r#"<c r="A1"><v>1</v></c>"#,
-    ];
-    let mut workbook = Workbook::open(&package(rows, "")).unwrap();
+    let mut workbook = Workbook::open(&status_package()).unwrap();
     workbook.recalculate_all(options());
     let cycles = cells(&["C1", "D1", "G1", "H1"]);
+    let limited = cells(&["J1", "K1"]);
+    let expected = [cycles.clone(), limited.clone()];
     assert_eq!(cycle_cells(&workbook), cycles);
-    workbook
+    assert_eq!(last_status(&workbook), expected);
+    track_formula_evaluations();
+    let result = workbook
         .apply_ops(vec![rename_sheet(1, "Other")], options())
         .unwrap();
+    assert_eq!(evaluated(), cells(&["G1", "H1", "K1"]));
     assert_eq!(cycle_cells(&workbook), cycles);
+    assert_eq!(last_status(&workbook), expected);
+    assert_eq!(status(&result.cycle_cells, &result.limited_cells), expected);
+    assert_eq!(exported_status(&workbook), expected);
+    let checkpoint = workbook.recovery_checkpoint(1, None).unwrap();
+    let (restored, ..) = Workbook::restore_recovery_checkpoint(&checkpoint).unwrap();
+    assert_eq!(last_status(&restored), expected);
     let read = workbook
         .read_cells(&super::target::ReadRequest::default())
         .unwrap()
@@ -463,11 +532,50 @@ fn rename_keeps_the_status_of_formulas_it_does_not_reach() {
         .collect();
     shown.sort_unstable();
     assert_eq!(shown, ["C1", "D1", "G1", "H1"]);
+    let mut shown: Vec<_> = read
+        .calculation
+        .limited_cells
+        .iter()
+        .map(|cell| cell.a1.as_str())
+        .collect();
+    shown.sort_unstable();
+    assert_eq!(shown, ["J1", "K1"]);
+    track_formula_evaluations();
     workbook
         .apply_ops(vec![rename_sheet(2, "Gone")], options())
         .unwrap();
+    assert_eq!(evaluated(), cells(&["G1", "H1", "K1"]));
     assert_eq!(cycle_cells(&workbook), cells(&["C1", "D1"]));
+    assert_eq!(last_status(&workbook), [cells(&["C1", "D1"]), limited]);
     assert_fully_calculated(&mut workbook);
+}
+
+/// A value edit after a rename reports what it reports after a full
+/// recalculation of that rename, the volatile cycle and limit included.
+#[test]
+fn a_value_edit_after_a_rename_reports_the_status_a_full_rename_leads_to() {
+    let bytes = status_package();
+    let mut scoped = Workbook::open(&bytes).unwrap();
+    let mut full = Workbook::open(&bytes).unwrap();
+    for workbook in [&mut scoped, &mut full] {
+        workbook.recalculate_all(options());
+        workbook
+            .apply_ops(vec![rename_sheet(1, "Other")], options())
+            .unwrap();
+    }
+    full.recalculate_all(options());
+    let edited = [&mut scoped, &mut full].map(|workbook| {
+        let result = workbook
+            .edit_cell(SheetId(1), r("A1"), "5", options())
+            .unwrap();
+        status(&result.cycle_cells, &result.limited_cells)
+    });
+    assert_eq!(edited[0], edited[1]);
+    assert_eq!(last_status(&scoped), last_status(&full));
+    assert_eq!(values(&scoped), values(&full));
+    let [cycles, limited] = last_status(&scoped);
+    assert!(cells(&["G1", "H1"]).iter().all(|cell| cycles.contains(cell)));
+    assert!(limited.contains(&(SheetId(0), r("K1"))));
 }
 
 #[test]
