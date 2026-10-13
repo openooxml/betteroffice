@@ -201,7 +201,7 @@ test('a merge relayouts on the command path and its ack frame holds the merged t
     remote.loadState(a.engine.encodeState());
     const paraId = a.engine.paragraphs('body')[0]!.paraId;
     remote.insertText({ story: 'body', paraId, offset: 4 }, ' merged');
-    const ack = await a.client.edit({ session: a.initial.session, incarnation: 1, epoch: 1, seq: 1,
+    const ack = await a.client.edit({ session: a.initial.session, incarnation: 1, seq: 1,
       basis: { epoch: 1, version: 0 }, kind: 'applyRemoteUpdate', payload: { update: remoteUpdate(a, remote) } });
     expect(ack).toMatchObject({ version: 1, throughSeq: 1, outcomes: [{ seq: 1, status: 'applied' }] });
     const version = a.engine.proposalEngine.version();
@@ -250,4 +250,4 @@ test('a collaborating session refuses the unordered remote update request', asyn
   } finally { remote.destroy(); a.session.dispose(); }
 }, TIMEOUT);
 
-test.todo('a merge that deletes the story holding the local selection repairs the confirmed selection');
+test.todo('a merge that deletes the story holding the local selection repairs the confirmed selection', () => {});
