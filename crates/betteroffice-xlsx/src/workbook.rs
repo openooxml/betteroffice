@@ -1,6 +1,8 @@
 pub(crate) mod batch;
 #[cfg(test)]
 mod edit_tests;
+#[cfg(test)]
+mod format_calculation_tests;
 mod geometry;
 mod recovery;
 #[cfg(test)]

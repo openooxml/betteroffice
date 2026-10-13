@@ -15,6 +15,26 @@ use crate::array::{Spill, charged_spill, evaluate_spill};
 use crate::eval::{EvalContext, EvaluationBudget, MAX_RECALCULATION_CELL_VISITS, evaluate};
 use crate::graph::DepGraph;
 
+#[cfg(feature = "test-counters")]
+thread_local! {
+    static EVALUATED_FORMULAS: std::cell::RefCell<Option<Vec<(SheetId, CellRef)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// start recording the formula cells recalculation evaluates on this thread.
+#[cfg(feature = "test-counters")]
+#[doc(hidden)]
+pub fn track_formula_evaluations() {
+    EVALUATED_FORMULAS.with(|cells| *cells.borrow_mut() = Some(Vec::new()));
+}
+
+/// the cells evaluated since [`track_formula_evaluations`]; stops recording.
+#[cfg(feature = "test-counters")]
+#[doc(hidden)]
+pub fn take_evaluated_formulas() -> Vec<(SheetId, CellRef)> {
+    EVALUATED_FORMULAS.with(|cells| cells.borrow_mut().take().unwrap_or_default())
+}
+
 /// the outcome of a recalc: cells whose displayed value changed, and cells
 /// settled by cycle participation rather than by their own formula.
 pub struct RecalcResult {
@@ -483,6 +503,12 @@ fn eval_node_with(
     let Some(expr) = graph.ast(u.0, cell_of(u)) else {
         return (None, false);
     };
+    #[cfg(feature = "test-counters")]
+    EVALUATED_FORMULAS.with(|cells| {
+        if let Some(cells) = &mut *cells.borrow_mut() {
+            cells.push((u.0, cell_of(u)));
+        }
+    });
     let cell = cell_of(u);
     let authored = wb.sheet(u.0).and_then(|sheet| sheet.array_formula(cell));
     let mut ctx = EvalContext::with_budget(provider, u.0, budget);
