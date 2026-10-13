@@ -1791,6 +1791,7 @@ impl Workbook {
         for chunk in per_op.into_iter().rev() {
             inverse.extend(chunk);
         }
+        let rewritten = rewritten_formulas(&inverse);
         let active_name = self.active_sheet_name();
         let prepared = self.prepare_commit(
             ops,
@@ -1807,7 +1808,7 @@ impl Workbook {
             self.proposals.clear();
         }
         mark(EditStage::Applied);
-        let result = self.recalculate_scope(scope, options);
+        let result = self.recalculate_scope(scope, &rewritten, options);
         mark(EditStage::Recalculated);
         self.publish(update);
         Ok(MutationResult {
@@ -1922,7 +1923,8 @@ impl Workbook {
             Some(before) => scope.confirmed(&before, &self.model),
             None => CalculationScope::Full,
         };
-        let result = self.recalculate_scope(scope, options);
+        let rewritten = rewritten_formulas(self.undo.next_redo().unwrap_or_default());
+        let result = self.recalculate_scope(scope, &rewritten, options);
         self.publish(update);
         Ok(MutationResult {
             applied: true,
@@ -1975,7 +1977,8 @@ impl Workbook {
             Some(before) => scope.confirmed(&before, &self.model),
             None => CalculationScope::Full,
         };
-        let result = self.recalculate_scope(scope, options);
+        let rewritten = rewritten_formulas(self.undo.next_undo().unwrap_or_default());
+        let result = self.recalculate_scope(scope, &rewritten, options);
         self.publish(update);
         Ok(MutationResult {
             applied: true,
@@ -2871,10 +2874,12 @@ impl Workbook {
     }
 
     /// A kept batch moves no value, so the last calculation keeps its cycle and
-    /// limited cells and reports nothing changed.
+    /// limited cells and reports nothing changed. `rewritten` are the formula
+    /// cells the batch's renames rewrote.
     fn recalculate_scope(
         &mut self,
         scope: CalculationScope,
+        rewritten: &[(SheetId, CellRef)],
         options: CalculationOptions,
     ) -> CalculationResult {
         match scope {
@@ -2883,17 +2888,23 @@ impl Workbook {
                 self.last_calculation.changed.clear();
                 CalculationResult::default()
             }
-            CalculationScope::Renamed if self.graph.is_some() => self.recalculate_renamed(options),
+            CalculationScope::Renamed if self.graph.is_some() => {
+                self.recalculate_renamed(rewritten, options)
+            }
             _ => self.rebuild_and_recalculate(options),
         }
     }
 
     /// The run re-evaluates only what the rename reaches, so every formula
     /// outside it keeps the cycle or limited status it last had.
-    fn recalculate_renamed(&mut self, options: CalculationOptions) -> CalculationResult {
+    fn recalculate_renamed(
+        &mut self,
+        rewritten: &[(SheetId, CellRef)],
+        options: CalculationOptions,
+    ) -> CalculationResult {
         self.bump_model_epoch();
         let graph = self.graph.as_mut().expect("graph initialized");
-        let seeds = graph.rename_sheets(&self.model);
+        let seeds = graph.rename_sheets(&self.model, rewritten);
         let (result, recomputed) = recalc_after_with_recomputed(
             &mut self.model,
             graph,
@@ -4580,6 +4591,20 @@ fn reached_sheets(ops: &[Op]) -> BTreeSet<SheetId> {
         }
     }
     sheets
+}
+
+/// The formula cells whose text a batch's renames rewrote: its inverse
+/// restores each of them.
+fn rewritten_formulas(inverse: &[Op]) -> Vec<(SheetId, CellRef)> {
+    inverse
+        .iter()
+        .filter_map(|op| match op {
+            Op::RestoreSheet { formulas, .. } => Some(formulas),
+            _ => None,
+        })
+        .flatten()
+        .map(|(sheet, at, _)| (*sheet, *at))
+        .collect()
 }
 
 /// What the engine reads that a batch can reach: the workbook-level inputs

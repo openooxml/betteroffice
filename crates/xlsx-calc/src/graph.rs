@@ -155,16 +155,20 @@ impl DepGraph {
     }
 
     /// re-resolve every reference after sheets were renamed, reusing the asts of
-    /// formula text the rename left alone. returns, in address order, the
-    /// formula cells whose result the rename can change: those whose
-    /// references or defined names now resolve elsewhere, and those showing
-    /// the text of a formula the rename rewrote.
-    pub fn rename_sheets(&mut self, wb: &Workbook) -> Vec<(SheetId, CellRef)> {
+    /// formula text the rename left alone. `rewritten` are the cells whose
+    /// formula text the rename rewrote, whether or not it parses. returns, in
+    /// address order, the formula cells whose result the rename can change:
+    /// those whose references or defined names now resolve elsewhere, and
+    /// those showing the text of a rewritten formula.
+    pub fn rename_sheets(
+        &mut self,
+        wb: &Workbook,
+        rewritten: &[(SheetId, CellRef)],
+    ) -> Vec<(SheetId, CellRef)> {
         let asts = std::mem::take(&mut self.asts);
         let previous = std::mem::replace(self, Self::build_with(wb, asts));
         let mut seeds = BTreeSet::new();
         let mut text_readers = HashSet::new();
-        let mut rewritten = Vec::new();
         for (key, node) in &self.deps {
             let resolution = self.sheet_resolution(&self.asts, key.sheet, &node.ast);
             if resolution.shows_formula_text {
@@ -174,19 +178,15 @@ impl DepGraph {
                 seeds.insert(*key);
                 continue;
             };
-            // the cache holds one ast per text, so another ast is rewritten text
-            if !Arc::ptr_eq(&old.ast, &node.ast) {
-                rewritten.push(*key);
-            }
             let resolved = previous.sheet_resolution(&self.asts, key.sheet, &old.ast);
             if old.edges != node.edges || resolved.bindings != resolution.bindings {
                 seeds.insert(*key);
             }
         }
         drop(previous);
-        for key in rewritten {
+        for &(sheet, cell) in rewritten {
             let readers = self
-                .dependents_of(key.sheet, key.cell())
+                .dependents_of(sheet, cell)
                 .map(|(sheet, cell)| NodeKey::new(sheet, cell))
                 .filter(|reader| text_readers.contains(reader));
             seeds.extend(readers);
@@ -905,7 +905,8 @@ mod tests {
         wb.sheet_mut(SheetId(1))
             .unwrap()
             .set_cell(a1("A1"), formula_cell("Other!A1+1"));
-        assert_eq!(g.rename_sheets(&wb), vec![(SheetId(1), a1("B1"))]);
+        let rewritten = [(SheetId(1), a1("A1"))];
+        assert_eq!(g.rename_sheets(&wb, &rewritten), vec![(SheetId(1), a1("B1"))]);
         assert_eq!(deps_a1(&g, "Other", "A1", &wb), vec!["Data!A1", "Data!B1"]);
     }
 
@@ -924,7 +925,7 @@ mod tests {
         let mut g = DepGraph::build(&wb);
         let body = Arc::downgrade(&g.asts.lock().unwrap()["TODAY()"]);
         wb.sheets[1].name = "Other".into();
-        g.rename_sheets(&wb);
+        g.rename_sheets(&wb, &[]);
         let cached = g.asts.lock().unwrap().get("TODAY()").cloned();
         let body = body.upgrade().expect("the body's ast was dropped");
         assert!(cached.is_some_and(|cached| Arc::ptr_eq(&cached, &body)));
