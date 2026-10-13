@@ -347,10 +347,10 @@ impl MetadataCursor {
                 _ => return Ok(false),
             };
             if self.index == length {
-                self.sheet_phase = if self.sheet_phase == CHART {
-                    ARRAY
-                } else {
-                    self.sheet_phase + 1
+                self.sheet_phase = match self.sheet_phase {
+                    CHART => ARRAY,
+                    ARRAY => ROW_STYLE,
+                    phase => phase + 1,
                 };
                 self.index = 0;
                 self.map_key = None;
