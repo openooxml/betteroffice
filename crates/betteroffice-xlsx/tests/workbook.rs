@@ -828,7 +828,10 @@ fn cascade_plain_clear_names_no_source_font_whose_markup_the_model_drops() {
     let xf = saved_cell_xf(&saved, "A1");
     let styles = String::from_utf8(package_map(&saved)["xl/styles.xml"].clone()).unwrap();
     let font = &style_entries(&styles, "fonts", "font")[index_attribute(&xf, "fontId")];
-    assert!(!font.contains("vertAlign"), "A1 saved on {xf} naming {font}");
+    assert!(
+        !font.contains("vertAlign"),
+        "A1 saved on {xf} naming {font}"
+    );
     assert_eq!(
         resolved_format(&Workbook::open(&saved).unwrap(), "A1"),
         xlsx_model::CellFormat::default()
