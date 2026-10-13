@@ -4495,8 +4495,11 @@ fn fingerprint_model_with_overrides(
             .sheets
             .iter()
             .any(|sheet| !sheet.col_styles.is_empty());
-    let hash_row_styles =
-        style_defaults && model.sheets.iter().any(|sheet| !sheet.row_styles.is_empty());
+    let hash_row_styles = style_defaults
+        && model
+            .sheets
+            .iter()
+            .any(|sheet| !sheet.row_styles.is_empty());
     for (index, sheet) in model.sheets.iter().enumerate() {
         let (col_widths, row_heights) = match legacy_dimensions.get(index) {
             Some(legacy) => (&legacy.col_widths, &legacy.row_heights),
@@ -5010,8 +5013,11 @@ fn fingerprint_model_with_row_styles_oracle(
             .sheets
             .iter()
             .any(|sheet| !sheet.col_styles.is_empty());
-    let hash_row_styles =
-        style_defaults && model.sheets.iter().any(|sheet| !sheet.row_styles.is_empty());
+    let hash_row_styles = style_defaults
+        && model
+            .sheets
+            .iter()
+            .any(|sheet| !sheet.row_styles.is_empty());
     for sheet in &model.sheets {
         hash_bytes(&mut hasher, sheet.name.as_bytes());
         hash_u64(&mut hasher, sheet.iter_cells().count() as u64);
