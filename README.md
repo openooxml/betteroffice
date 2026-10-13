@@ -86,9 +86,11 @@ VSDX packages build from this repository; see the [VSDX guide](https://docs.bett
 
 ### Agent tools
 
-[`@betteroffice/agents`](packages/agents) lets agents find, read and edit DOCX, with tracked
-changes and previews, through a TypeScript SDK or the `betteroffice-mcp` server.
-XLSX cells and PPTX slide text are early prototypes.
+[`@betteroffice/agents`](packages/agents) lets agents find, read and edit DOCX text with tracked
+changes; edit XLSX values, formulas and formatting, sort ranges and manage rows, columns and
+sheets; and edit PPTX text, bullets and speaker notes, manage slides and add text boxes, shapes
+and images, with previews for all three, through a TypeScript SDK or the `betteroffice-mcp`
+server. XLSX and PPTX charts and table structures are not editable yet.
 
 What to install for which language, with a first example each:
 [npm](https://docs.betteroffice.dev/docs/javascript),
