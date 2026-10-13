@@ -4095,8 +4095,10 @@ impl serde::Serialize for FingerprintStyles<'_> {
             if self.indexed_colors.is_empty() { 6 } else { 7 },
         )?;
         state.serialize_field("fonts", &self.styles.fonts)?;
-        state.serialize_field("fills", &self.styles.fills)?;
-        state.serialize_field("borders", &self.styles.borders)?;
+        let fills: Vec<_> = self.styles.fills.iter().map(released_fill).collect();
+        state.serialize_field("fills", &fills)?;
+        let borders: Vec<_> = self.styles.borders.iter().map(released_border).collect();
+        state.serialize_field("borders", &borders)?;
         state.serialize_field("cell_xfs", &self.styles.cell_xfs)?;
         state.serialize_field("num_fmts", &self.styles.num_fmts)?;
         state.serialize_field("theme", &self.styles.theme)?;
@@ -4104,6 +4106,51 @@ impl serde::Serialize for FingerprintStyles<'_> {
             state.serialize_field("indexed_colors", self.indexed_colors)?;
         }
         state.end()
+    }
+}
+
+/// A fill as releases before patterned fills read it: a pattern as its solid
+/// foreground. Base fingerprints hash fills this way, so a source keeps the
+/// fingerprint and bootstrap client that those releases persisted.
+fn released_fill(fill: &xlsx_model::Fill) -> Cow<'_, xlsx_model::Fill> {
+    match fill {
+        xlsx_model::Fill::Pattern { fg, .. } => Cow::Owned(xlsx_model::Fill::Solid(
+            fg.clone().unwrap_or(xlsx_model::Color::Auto),
+        )),
+        fill => Cow::Borrowed(fill),
+    }
+}
+
+/// A border as releases before the extended dash styles read it.
+fn released_border(border: &xlsx_model::Border) -> Cow<'_, xlsx_model::Border> {
+    let edges = [&border.left, &border.right, &border.top, &border.bottom];
+    if edges.into_iter().flatten().all(|edge| released_border_style(edge.style) == edge.style) {
+        return Cow::Borrowed(border);
+    }
+    let edge = |edge: &Option<xlsx_model::BorderEdge>| {
+        edge.as_ref().map(|edge| xlsx_model::BorderEdge {
+            style: released_border_style(edge.style),
+            color: edge.color.clone(),
+        })
+    };
+    Cow::Owned(xlsx_model::Border {
+        left: edge(&border.left),
+        right: edge(&border.right),
+        top: edge(&border.top),
+        bottom: edge(&border.bottom),
+    })
+}
+
+fn released_border_style(style: xlsx_model::BorderStyle) -> xlsx_model::BorderStyle {
+    use xlsx_model::BorderStyle;
+    match style {
+        BorderStyle::MediumDashed | BorderStyle::MediumDashDot | BorderStyle::MediumDashDotDot => {
+            BorderStyle::Medium
+        }
+        BorderStyle::DashDot | BorderStyle::DashDotDot | BorderStyle::SlantDashDot => {
+            BorderStyle::Dashed
+        }
+        style => style,
     }
 }
 
@@ -4743,15 +4790,26 @@ fn fingerprint_model_with_schema_oracle(
         _ => b"betteroffice-xlsx-yrs-v6".as_slice(),
     };
     hasher.update(domain);
+    let mut styles = model.styles.clone();
+    styles.fills = styles
+        .fills
+        .iter()
+        .map(|fill| released_fill(fill).into_owned())
+        .collect();
+    styles.borders = styles
+        .borders
+        .iter()
+        .map(|border| released_border(border).into_owned())
+        .collect();
     let base = if include_defined_names {
         serde_json::to_vec(&(
             model.date_system,
             &model.defined_names,
             &model.shared_strings,
-            &model.styles,
+            &styles,
         ))
     } else {
-        serde_json::to_vec(&(model.date_system, &model.shared_strings, &model.styles))
+        serde_json::to_vec(&(model.date_system, &model.shared_strings, &styles))
     }
     .map_err(|error| format!("cannot fingerprint workbook base: {error}"))?;
     hash_bytes(&mut hasher, &base);
