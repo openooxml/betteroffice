@@ -101,16 +101,20 @@ fn fractions_use_best_approximation() {
     assert!(!format_is_approximate(&num(0.5), "# ?/?"));
 }
 
+fn assert_general_fallback(value: f64, code: &str, expected: &str) {
+    assert_eq!(fv(value, code), expected);
+    assert_eq!(fv(-value, code), format!("-{expected}"));
+    assert!(format_is_approximate(&num(value), code));
+}
+
 #[test]
-fn fractions_beyond_integer_range_fall_back_to_general() {
-    for (value, code, expected) in [
-        (1e18, "?/32", "1E+18"),
-        (1_000_000_000_000.75, "?/?????????", "1E+12"),
-    ] {
-        assert_eq!(fv(value, code), expected);
-        assert_eq!(fv(-value, code), format!("-{expected}"));
-        assert!(format_is_approximate(&num(value), code));
-    }
+fn fixed_denominator_numerators_beyond_u64_fall_back_to_general() {
+    assert_general_fallback(1e18, "?/32", "1E+18");
+}
+
+#[test]
+fn fraction_convergents_beyond_u64_fall_back_to_general() {
+    assert_general_fallback(1_000_000_000_000.75, "?/?????????", "1E+12");
 }
 
 #[test]
