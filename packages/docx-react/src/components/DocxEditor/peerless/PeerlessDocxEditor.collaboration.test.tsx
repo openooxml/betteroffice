@@ -16,6 +16,7 @@ import type { DocxWorkerEditSession } from '@betteroffice/docx/peerless';
 import type { CollaborationPresence, CollaborationReplica } from '@betteroffice/docx/collaboration';
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
 import type { DocxEditorCollaborationOptions } from '../types';
+import type { Document } from '@betteroffice/docx/types/document';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -123,18 +124,45 @@ test('presence overlay ignores a reply from an older installed geometry', async 
   expect(view.queryByTestId('remote-presence-caret')).toBeNull();
 });
 
-test('editor opens the requested room, reopens on room and document changes, and only rebinds callbacks', async () => {
+test('presence reads an unresolved peer again once the document version changes', async () => {
+  const s = setup();
+  let status: 'ok' | 'unresolved' = 'unresolved';
+  const reads: number[][] = [];
+  s.client.documentReadAt = mock(async (read: Extract<Parameters<ResidentEngineWorkerClient['documentReadAt']>[0], { kind: 'collabPresence' }>) => {
+    reads.push(read.peers.map(peer => peer.clientId));
+    return { status: 'ok', version: read.expectVersion, value: { version: read.expectVersion, frameEpoch: read.expectFrameEpoch,
+      layoutRevision: read.expectLayoutRevision, peers: read.peers.map(peer => ({ clientId: peer.clientId, clock: peer.clock, status, rects: [],
+        caret: status === 'ok' ? { pageId: '1', pageIndex: 0, x: 12, y: 10, width: 0, height: 14 } : null })) } };
+  }) as unknown as ResidentEngineWorkerClient['documentReadAt'];
+  const identity = s.viewStore.getSnapshot().identity;
+  const geometry = { identity, coversThroughSeq: 0, frameEpoch: 1, layoutRevision: 1, documentVersion: 'native-1',
+    pages: [{ page: { pageId: '1', pageIndex: 0 }, bounds: { x: 0, y: 0, width: 200, height: 300 }, transform: [1, 0, 0, 1, 0, 0] as const }], caret: null, selectionRects: [] };
+  s.viewStore.installFrameGeometry(geometry);
+  const presence: CollaborationPresence = { peers: [{ clientId: 42, clock: 1, user: { name: 'Writer', color: '#f00' }, cursor: { story: 'body', anchor: new Uint8Array([9]), head: new Uint8Array([9]) },
+    inferredCursor: null, cursorMovedAt: 1, lastSeenAt: 1 }], setCursor() {}, onPeers: () => () => {} };
+  const view = render(<PeerlessRemotePresence binding={s.binding} client={s.client} presence={presence} pages={[0, 1]} />);
+  await waitFor(() => expect(reads).toEqual([[42]]));
+  await act(async () => s.viewStore.installFrameGeometry({ ...geometry, frameEpoch: 2 }));
+  await waitFor(() => expect(reads.at(-1)).toEqual([]));
+  status = 'ok';
+  await act(async () => s.viewStore.installFrameGeometry({ ...geometry, frameEpoch: 3, documentVersion: 'native-2' }));
+  await waitFor(() => expect(reads.at(-1)).toEqual([42]));
+  await waitFor(() => expect(view.getByTestId('remote-presence-caret').dataset.clientId).toBe('42'));
+});
+
+const hostDocument = () => ({ package: {
+  document: { content: [], sections: [] }, theme: {}, numbering: {}, settings: {}, fontTable: { fonts: [] },
+  relationshipEntries: [], mediaEntries: [], chartEntries: [],
+} }) as unknown as Document;
+
+function mockWorkerEditor() {
   setMissingWorkerCapabilitiesForTests([]);
   const worker = Object.getOwnPropertyDescriptor(globalThis, 'Worker');
   Object.defineProperty(globalThis, 'Worker', { configurable: true, value: class {
     postMessage() {} terminate() {}
   } });
   restores.push(() => { if (worker) Object.defineProperty(globalThis, 'Worker', worker); else Reflect.deleteProperty(globalThis, 'Worker'); });
-  const hostJson = JSON.stringify({ referencedFonts: [], envelope: { wireVersion: 1, document: { package: {
-    document: { content: [], sections: [] }, theme: {}, numbering: {}, settings: {}, fontTable: { fonts: [] },
-    relationshipEntries: [], mediaEntries: [], chartEntries: [],
-  } }, embeddedFontParts: [] } });
-  const open = spyOn(peerless.ResidentSourceWorkerClient.prototype, 'openSource').mockResolvedValue({ document: JSON.parse(hostJson).envelope.document, stateVector: source });
+  const open = spyOn(peerless.ResidentSourceWorkerClient.prototype, 'openSource').mockResolvedValue({ document: hostDocument(), stateVector: source });
   const prewarm = spyOn(peerless.ResidentSourceWorkerClient.prototype, 'prewarm').mockResolvedValue();
   const requirements = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'fontRequirements').mockResolvedValue('[]');
   const textEngine = spyOn(measurement, 'getRustTextEngine').mockResolvedValue({ registerFont: () => 0,
@@ -166,6 +194,11 @@ test('editor opens the requested room, reopens on room and document changes, and
   });
   restores.push(() => open.mockRestore(), () => prewarm.mockRestore(), () => requirements.mockRestore(), () => textEngine.mockRestore(),
     () => init.mockRestore(), () => connection.mockRestore(), () => surface.mockRestore());
+  return open;
+}
+
+test('editor opens the requested room, reopens on room and document changes, and only rebinds callbacks', async () => {
+  const open = mockWorkerEditor();
   const first = mock<(replica: CollaborationReplica | null) => void>(() => {});
   const next = mock<(replica: CollaborationReplica | null) => void>(() => {});
   const initialUpdate = new Uint8Array([2]);
@@ -197,4 +230,18 @@ test('editor opens the requested room, reopens on room and document changes, and
   await waitFor(() => expect(next.mock.calls.at(-1)![0]?.clientId).toBe(42));
   view.unmount();
   expect(next.mock.calls.at(-1)![0]).toBeNull();
+});
+
+test('a parsed document reopens its worker on a room change', async () => {
+  const open = mockWorkerEditor();
+  const document = hostDocument();
+  const onReplica = mock<(replica: CollaborationReplica | null) => void>(() => {});
+  const view = render(<DocxEditor experimentalPeerless document={document} showToolbar={false} collaboration={{ clientId: 41, onReplica }} />);
+  await waitFor(() => expect(onReplica).toHaveBeenCalledTimes(1));
+  view.rerender(<DocxEditor experimentalPeerless document={document} showToolbar={false} collaboration={{ clientId: 42, onReplica }} />);
+  await waitFor(() => expect(onReplica.mock.calls.at(-1)![0]?.clientId).toBe(42));
+  expect(open).toHaveBeenCalledTimes(2);
+  expect(open.mock.calls[1]![0]?.collaboration?.clientId).toBe(42);
+  view.unmount();
+  expect(onReplica.mock.calls.at(-1)![0]).toBeNull();
 });

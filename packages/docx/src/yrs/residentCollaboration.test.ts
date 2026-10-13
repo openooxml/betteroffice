@@ -1,7 +1,8 @@
 import { afterEach, expect, test } from 'bun:test';
 import { createResidentDocxCommandHooks } from './residentCommandActions';
-import { createResidentCollaboration } from './residentCollaboration';
+import { createResidentCollaboration, readResidentPresence } from './residentCollaboration';
 import { createYrsSession } from './index';
+import { applyFrameDelta, decodeFrameDelta } from '../layout/render/frameDelta';
 import type { ResidentCommandInitRequest } from './residentCommandProtocol';
 import { TIMEOUT, closeCommandEngines, command, context, openCommandEngine, selection, texts } from './residentCommandTestSupport';
 
@@ -102,4 +103,43 @@ test('worker sticky selections and main-thread encoded selections resolve both w
     peer.setSelection({ story: 'body', paraId: id, offset: 3 });
     expect(a.arm.engine.resolveStickyPosition({ story: 'body', encoded: peer.encodeSelection()!.head })?.offset).toBe(3);
   } finally { peer.destroy(); a.buffer.dispose(); }
+}, TIMEOUT);
+
+test('a session without collaboration refuses remote merges as unsupported', async () => {
+  const a = await replica();
+  try {
+    const plain = createResidentDocxCommandHooks(a.arm.engine, { session: 'plain', incarnation: 1, epoch: 1, readOnly: false,
+      selection: a.arm.state.selection, fonts: [], layoutInput: '{}', layoutWithRegions: true, layoutRevision: 1, extras: '{}' });
+    const intent = command(a.arm, 'applyRemoteUpdate', { update: new Uint8Array([1]).buffer });
+    expect(await plain.preflight(intent, context(a.arm, intent))).toMatchObject({ status: 'refused', reason: 'unsupported-command' });
+    expect(texts(a.arm)).toEqual(['Seed']);
+  } finally { a.buffer.dispose(); }
+}, TIMEOUT);
+
+test('presence skips carets and rects on pages the retained frame does not hold', async () => {
+  const a = await replica();
+  try {
+    const frame = applyFrameDelta(null, decodeFrameDelta(a.arm.engine.buildDisplayListFrame('{}', 0)));
+    const paraId = a.arm.engine.paragraphs('body')[0]!.paraId;
+    const sticky = (offset: number) => a.arm.engine.encodeStickyPosition({ story: 'body', paraId, offset }).encoded;
+    const peers = [{ clientId: 9103, clock: 1, cursor: { story: 'body', anchor: sticky(1), head: sticky(3) } }];
+    const held = await readResidentPresence(a.arm.engine, frame, peers, [0, 1], 1);
+    expect(held.peers[0]!.caret).toMatchObject({ pageIndex: 0 });
+    expect(held.peers[0]!.rects.length).toBeGreaterThan(0);
+    const missing = await readResidentPresence(a.arm.engine, { ...frame, pages: [] }, peers, [0, 1], 1);
+    expect(missing.peers[0]).toMatchObject({ status: 'ok', caret: null, rects: [] });
+  } finally { a.buffer.dispose(); }
+}, TIMEOUT);
+
+test('remote merges mark their stories for the next save projection', async () => {
+  const a = await replica();
+  const b = await replica(a.arm.engine.encodeState(), 9102);
+  try {
+    const marked: string[] = [];
+    const mark = a.arm.engine.markProjectionStories;
+    a.arm.engine.markProjectionStories = (stories) => { marked.push(...stories); mark(stories); };
+    await b.run('insertText', { text: 'B' });
+    expect(await a.run('applyRemoteUpdate', { update: b.buffer.drain()!.updates[0]! })).toMatchObject({ status: 'applied' });
+    expect(marked).toContain('body');
+  } finally { a.buffer.dispose(); b.buffer.dispose(); }
 }, TIMEOUT);

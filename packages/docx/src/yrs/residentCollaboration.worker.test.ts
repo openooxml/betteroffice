@@ -35,7 +35,7 @@ async function parsedDocument(): Promise<Document> {
   } finally { parser.destroy(); }
 }
 
-async function open(clientId: number, initialUpdate?: Uint8Array, document?: Document) {
+async function openCommands(clientId: number, initialUpdate?: Uint8Array, document?: Document) {
   const worker = start(clientId);
   const client = new ResidentSourceWorkerClient(worker);
   await client.openSource({ ...(document ? { document } : { bytes: documentBytes() }), collaboration: { clientId, initialUpdate } });
@@ -48,6 +48,11 @@ async function open(clientId: number, initialUpdate?: Uint8Array, document?: Doc
       measurement: { defaults: { fontSize: 11, fontFamily: 'Liberation Sans' }, fontChains: { 'liberation sans|0|0': [0] } }, renderEnv: {} }),
     layoutWithRegions: true, layoutRevision: 1, extras: '{}',
   });
+  return { worker, client, engine, initial };
+}
+
+async function open(clientId: number, initialUpdate?: Uint8Array, document?: Document) {
+  const { worker, client, engine, initial } = await openCommands(clientId, initialUpdate, document);
   const session = createDocxWorkerEditSession({ source: documentBytes(),
     connection: await createResidentCommandConnection(client, initial),
     echo: { paint() {}, drop() {}, present() {} }, maxRecoveryAttempts: 0,
@@ -55,6 +60,10 @@ async function open(clientId: number, initialUpdate?: Uint8Array, document?: Doc
   });
   return { worker, client, engine, initial, session };
 }
+
+const remoteUpdate = (target: { engine: { encodeStateVector(): Uint8Array } }, source: { encodeStateAsUpdate(vector?: Uint8Array): Uint8Array }) =>
+  source.encodeStateAsUpdate(target.engine.encodeStateVector()).slice().buffer;
+const merge = { lane: 'collab', fence: true } as const;
 
 for (const input of ['bytes', 'document'] as const) {
   test(`a ${input} source joins a room from the shared state without seeding its own stories`, async () => {
@@ -165,5 +174,77 @@ test('inferred remote carets rebase through a later local insert', async () => {
     const after = await presence();
     expect(before).not.toBeNull();
     expect(after!.x).toBeGreaterThan(before!.x);
+  } finally { remote.destroy(); a.session.dispose(); }
+}, TIMEOUT);
+
+test('a read-only replica merges remote edits and still refuses local ones', async () => {
+  const a = await open(9201);
+  const remote = await createYrsSession({ clientId: 9203 });
+  try {
+    expect((await a.session.submit('setReadOnly', { readOnly: true }).ack).status).toBe('applied');
+    const version = a.session.state.version;
+    remote.loadState(a.engine.encodeState());
+    remote.insertText({ story: 'body', paraId: a.engine.paragraphs('body')[0]!.paraId, offset: 4 }, ' remote');
+    expect((await a.session.submit('applyRemoteUpdate', { update: remoteUpdate(a, remote) }, merge).ack).status).toBe('applied');
+    expect(a.session.state.version).toBe(version + 1);
+    expect(a.engine.paragraphs('body')[0]!.text).toBe('Seed remote');
+    expect(await a.session.submit('insertText', { text: 'local' }).ack).toMatchObject({ status: 'refused', reason: 'read-only' });
+    expect(a.engine.paragraphs('body')[0]!.text).toBe('Seed remote');
+  } finally { remote.destroy(); a.session.dispose(); }
+}, TIMEOUT);
+
+test('a merge relayouts on the command path and its ack frame holds the merged text', async () => {
+  const a = await openCommands(9201);
+  const remote = await createYrsSession({ clientId: 9203 });
+  try {
+    remote.loadState(a.engine.encodeState());
+    const paraId = a.engine.paragraphs('body')[0]!.paraId;
+    remote.insertText({ story: 'body', paraId, offset: 4 }, ' merged');
+    const ack = await a.client.edit({ session: a.initial.session, incarnation: 1, epoch: 1, seq: 1,
+      basis: { epoch: 1, version: 0 }, kind: 'applyRemoteUpdate', payload: { update: remoteUpdate(a, remote) } });
+    expect(ack).toMatchObject({ version: 1, throughSeq: 1, outcomes: [{ seq: 1, status: 'applied' }] });
+    const version = a.engine.proposalEngine.version();
+    expect(ack.frame!.payload.documentVersion).toBe(version);
+    const cursor = (offset: number) => {
+      remote.setSelection({ story: 'body', paraId, offset });
+      return remote.encodeSelection()!;
+    };
+    const read = await a.client.documentRead({ kind: 'collabPresence', pages: [0, 1], expectVersion: version,
+      expectFrameEpoch: ack.frame!.revision, expectLayoutRevision: ack.frame!.payload.layoutRevision,
+      peers: [{ clientId: 9203, clock: 1, cursor: cursor(4) }, { clientId: 9204, clock: 1, cursor: cursor(11) }] });
+    const [before, after] = read.value!.peers;
+    expect(before).toMatchObject({ status: 'ok', caret: { pageIndex: 0 } });
+    expect(after).toMatchObject({ status: 'ok', caret: { pageIndex: 0 } });
+    expect(after!.caret!.x).toBeGreaterThan(before!.caret!.x);
+  } finally { remote.destroy(); a.client.destroy(); }
+}, TIMEOUT);
+
+test('host proposal mutations are refused in a collaborating command session and push nothing', async () => {
+  const a = await open(9201);
+  const pushed: Uint8Array[] = [];
+  const off = a.client.onCollabUpdates(event => pushed.push(...event.updates));
+  try {
+    const before = a.engine.encodeStateVector();
+    await expect(a.client.proposal({ kind: 'propose', request: { expectVersion: a.engine.proposalEngine.version(), proposals: [{
+      id: 'proposal', paragraph: { kind: 'persisted', story: { kind: 'body', partUri: '/word/document.xml' }, paraId: a.engine.paragraphs('body')[0]!.paraId },
+      suggest: { author: 'Host', date: '2026-10-13T00:00:00Z' }, op: 'insertText', at: 'end', text: ' proposed',
+    }] } })).rejects.toThrow(/has not laid out its document|Legacy mutations are unavailable/);
+    expect(pushed).toEqual([]);
+    expect(a.engine.encodeStateVector()).toEqual(before);
+    expect(a.engine.paragraphs('body')[0]!.text).toBe('Seed');
+  } finally { off(); a.session.dispose(); }
+}, TIMEOUT);
+
+test('a collaborating session refuses the unordered remote update request', async () => {
+  const a = await open(9201);
+  const remote = await createYrsSession({ clientId: 9203 });
+  try {
+    remote.loadState(a.engine.encodeState());
+    remote.insertText({ story: 'body', paraId: a.engine.paragraphs('body')[0]!.paraId, offset: 4 }, ' remote');
+    await expect(a.client.applyRemoteUpdate(new Uint8Array(remoteUpdate(a, remote)))).rejects.toThrow('applyRemoteUpdate command');
+    expect(a.client.hasFailed()).toBe(false);
+    expect(a.engine.paragraphs('body')[0]!.text).toBe('Seed');
+    expect((await a.session.submit('applyRemoteUpdate', { update: remoteUpdate(a, remote) }, merge).ack).status).toBe('applied');
+    expect(a.engine.paragraphs('body')[0]!.text).toBe('Seed remote');
   } finally { remote.destroy(); a.session.dispose(); }
 }, TIMEOUT);
