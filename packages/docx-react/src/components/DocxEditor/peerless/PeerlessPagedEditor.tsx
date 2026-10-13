@@ -291,7 +291,8 @@ export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoF
     change();
     return () => media.removeEventListener('change', change);
   }, []);
-  const rasterScale = devicePixelRatio * zoom;
+  const pageZoom = Number.isFinite(zoom) && zoom > 0 ? zoom : 1;
+  const rasterScale = devicePixelRatio * pageZoom;
   const canvases = useRef(new Map<string, HTMLCanvasElement>());
   const [measuredWindow, setMeasuredWindow] = useState<readonly [number, number]>([0, 3]);
   const pageWindow = displayWindow ?? measuredWindow;
@@ -372,7 +373,7 @@ export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoF
     canvases.current.clear();
   }, [sessionOptions.source, session.status === 'failed']);
   return <div className={className} data-peerless-docx="true" aria-busy={session.status === 'opening'}>
-    {session.status === 'ready' && <PeerlessReady binding={session.binding} canvasForPage={canvasForPage} zoom={zoom > 0 ? zoom : 1} autoFocus={autoFocus}
+    {session.status === 'ready' && <PeerlessReady binding={session.binding} canvasForPage={canvasForPage} zoom={pageZoom} autoFocus={autoFocus}
       onRecoverableText={retainText} displayWindow={pageWindow} onDisplayWindowChange={changeWindow} onClipboard={onClipboard} highlights={highlights} onNavigateCell={onNavigateCell} />}
     {session.status === 'failed' && <div role="alert">Unable to open document.</div>}
     {recoverableText.map((text, index) => <div key={index} role="status">
