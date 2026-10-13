@@ -2898,12 +2898,29 @@ class SaveContext {
       if (items.every(isBlockBreak)) inlineStart = storyOffset;
     }
 
+    const pendingBreaks = breaks.map((breakType): ParagraphContent => ({
+      type: 'run', content: [{ type: 'break', breakType }],
+    }));
     // Defensive recovery for malformed/legacy stories without a final pilcrow.
-    // A story ending in a flow-break embed is well-formed, not a lost
-    // paragraph, so only content the projection can carry opens one.
     if (items.length > 0) {
       const trailing = buildParagraphContent(items, this.recovery(storyId), this.revisionIds);
-      if (trailing.length > 0) blocks.push({ type: 'paragraph', content: trailing });
+      if (trailing.length > 0) {
+        blocks.push({ type: 'paragraph', content: breaks.length ? [...pendingBreaks, ...trailing] : trailing });
+        breaks = [];
+      }
+    }
+    if (breaks.length > 0) {
+      let index = blocks.length - 1;
+      while (index >= 0 && blocks[index]!.type !== 'paragraph') index -= 1;
+      const previous = blocks[index];
+      if (previous?.type === 'paragraph') {
+        const paragraph: Paragraph = { ...previous, content: [...previous.content, ...pendingBreaks] };
+        const sessionKey = projectedBlocks.get(previous)?.sessionKey;
+        if (sessionKey) projectedBlocks.set(paragraph, { sessionKey });
+        blocks[index] = paragraph;
+      } else {
+        blocks.push({ type: 'paragraph', content: pendingBreaks });
+      }
     }
     const projected = restoreRawBlocks(blocks, baseBlocks ?? []);
     this.memo.stories.set(storyId, { commentsKey, blocks: projected });
