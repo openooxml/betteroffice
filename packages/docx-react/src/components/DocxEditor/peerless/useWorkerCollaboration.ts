@@ -36,7 +36,7 @@ export function useWorkerCollaboration(options: DocxEditorCollaborationOptions |
   const ready = useCallback((client: ResidentEngineWorkerClient | null, binding: PeerlessEditSessionBinding) => {
     if (!client || !openOptions || opening.current?.client !== client || opening.current.room !== reopenKey ||
       current.current?.binding === binding) return;
-    const next = { client, binding, replica: createPeerlessCollaborationReplica(client, binding.session, openOptions.clientId) };
+    const next = { client, binding, replica: createPeerlessCollaborationReplica(client, binding, openOptions.clientId) };
     current.current = next; setConnection(next);
   }, [openOptions, reopenKey]);
   const overlay = (pages: readonly [number, number]) => connection && options?.presence

@@ -11,9 +11,11 @@ import { createPeerlessCollaborationReplica } from './peerlessCollaboration';
 import { useWorkerCollaboration } from './useWorkerCollaboration';
 import { PeerlessRemotePresence } from './PeerlessRemotePresence';
 import { createPeerlessViewStore } from './viewStore';
+import { admitInputIntents, createInputAdmission } from './inputAdmission';
+import type { PeerlessEchoIntent, PeerlessEchoPainter } from './echoPainter';
 import type { ResidentEngineWorkerClient } from '@betteroffice/docx/yrs';
 import type { DocxWorkerEditSession } from '@betteroffice/docx/peerless';
-import type { CollaborationPresence, CollaborationReplica } from '@betteroffice/docx/collaboration';
+import type { AsyncReplicaAdapter, CollaborationPresence, CollaborationReplica } from '@betteroffice/docx/collaboration';
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
 import type { DocxEditorCollaborationOptions } from '../types';
 import type { Document } from '@betteroffice/docx/types/document';
@@ -77,7 +79,7 @@ test('replica is published only after ready, rebinds handlers, and retires befor
 test('async replica uses the edit session fence and forwards local updates', async () => {
   const s = setup();
   const submit = s.session.submit;
-  const replica = createPeerlessCollaborationReplica(s.client, s.session, 41);
+  const replica = createPeerlessCollaborationReplica(s.client, s.binding, 41);
   const listener = mock(() => {});
   replica.onUpdate(listener);
   for (const receive of s.listeners) receive({ updates: [source], inferences: [] });
@@ -87,6 +89,52 @@ test('async replica uses the edit session fence and forwards local updates', asy
   replica.retire();
   expect(s.listeners.size).toBe(0);
   await expect(replica.async.encodeStateVector()).rejects.toThrow('retired');
+});
+
+test('collaboration reads wait for input admission holds behind pending geometry', async () => {
+  const s = setup();
+  const submitted: string[] = [];
+  const acks: Array<() => void> = [];
+  const session = {
+    state: { epoch: 1, version: 0, throughSeq: 0, presentedThroughSeq: 0, selection: undefined, editState: undefined },
+    submit: mock((kind: string) => {
+      const seq = submitted.push(kind);
+      let settle!: (outcome: { seq: number; status: 'applied' }) => void;
+      acks.push(() => settle({ seq, status: 'applied' }));
+      return { id: seq, seq, ack: new Promise(resolve => { settle = resolve; }), presented: Promise.resolve('presented') };
+    }),
+    flush: async () => {},
+  } as unknown as DocxWorkerEditSession<PeerlessEchoIntent>;
+  const echoPainter: PeerlessEchoPainter = { installContext() {}, restoreBackground: () => true, preview: () => undefined,
+    paint() {}, drop() {}, reconcile() {}, disable() {}, dispose() {} };
+  const admission = createInputAdmission({ session, viewStore: s.viewStore, echoPainter });
+  const binding = { session, viewStore: s.viewStore, admission } as PeerlessEditSessionBinding;
+  const reads: string[][] = [];
+  s.client.documentRead = mock(async () => { reads.push([...submitted]); return { value: new Uint8Array([0]) }; }) as unknown as ResidentEngineWorkerClient['documentRead'];
+  const published = mock<(replica: CollaborationReplica | null) => void>(() => {});
+  let lifecycle: ReturnType<typeof useWorkerCollaboration>;
+  function Harness() {
+    lifecycle = useWorkerCollaboration({ clientId: 41, onReplica: published }, source);
+    return null;
+  }
+  const view = render(<Harness />);
+  await act(async () => { lifecycle!.begin(s.client); lifecycle!.ready(s.client, binding); });
+  const replica = published.mock.calls[0]![0] as AsyncReplicaAdapter;
+  admitInputIntents(admission, [{ kind: 'navigate', payload: { unit: 'line', direction: 'down', extend: false, goalX: 0 } },
+    { kind: 'insertText', payload: { text: 'typed' } }], {});
+  const diff = replica.async.encodeStateAsUpdate();
+  await act(async () => { await Promise.resolve(); });
+  expect(submitted).toEqual([]);
+  const identity = s.viewStore.getSnapshot().identity;
+  await act(async () => s.viewStore.installFrameGeometry({ identity, coversThroughSeq: 0, frameEpoch: 1, layoutRevision: 1, documentVersion: 'native-1',
+    pages: [{ page: { pageId: '1', pageIndex: 0 }, bounds: { x: 0, y: 0, width: 200, height: 300 }, transform: [1, 0, 0, 1, 0, 0] as const }],
+    caret: null, selectionRects: [] }));
+  await waitFor(() => expect(submitted).toEqual(['navigate', 'insertText']));
+  for (const ack of acks) ack();
+  await diff;
+  expect(reads).toEqual([['navigate', 'insertText']]);
+  admission.dispose();
+  view.unmount();
 });
 
 test('local cursor publication suppresses broadcast on document changes and clears on unmount', async () => {

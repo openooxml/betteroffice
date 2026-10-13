@@ -11,7 +11,7 @@ test('local submits pass through unchanged and the adapter returns the merge inf
     presented: Promise.resolve('presented' as const) };
   const submit = mock((..._args: Parameters<DocxWorkerEditSession['submit']>) => ticket as ReturnType<DocxWorkerEditSession['submit']>);
   const session = { submit } as unknown as DocxWorkerEditSession;
-  const replica = createPeerlessCollaborationReplica(client, session, 41);
+  const replica = createPeerlessCollaborationReplica(client, { session }, 41);
   expect(session.submit).toBe(submit);
   const merged = replica.async.applyUpdate(new Uint8Array([1]));
   session.submit('insertText', { text: 'queued' });

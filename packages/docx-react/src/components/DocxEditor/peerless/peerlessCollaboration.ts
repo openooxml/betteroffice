@@ -2,14 +2,17 @@ import { createAsyncCollaborationReplica, type AsyncReplicaAdapter, type Collabo
   type CollaborationUpdateOrigin } from '@betteroffice/docx/collaboration';
 import type { ResidentEngineWorkerClient } from '@betteroffice/docx/yrs';
 import type { DocxWorkerEditSession } from '@betteroffice/docx/peerless';
+import { flushAdmittedInput, type PeerlessInputAdmission } from './inputAdmission';
 
-export function createPeerlessCollaborationReplica<X>(client: ResidentEngineWorkerClient, session: DocxWorkerEditSession<X>, clientId: number): AsyncReplicaAdapter & { retire(): void } {
+export function createPeerlessCollaborationReplica<X>(client: ResidentEngineWorkerClient,
+  binding: { admission?: PeerlessInputAdmission; session: DocxWorkerEditSession<X> }, clientId: number): AsyncReplicaAdapter & { retire(): void } {
+  const { session } = binding;
   let retired = false;
   const listeners = new Set<(update: Uint8Array, origin: CollaborationUpdateOrigin) => void>();
   const inferences = new Map<number, CollaborationTextInsertion>();
   const requireActive = () => { if (retired) throw new Error('Collaboration replica is retired'); };
   const fenced = async <T>(read: () => Promise<{ value: T }>): Promise<T> => {
-    requireActive(); await session.flush(); requireActive();
+    requireActive(); await flushAdmittedInput(binding); requireActive();
     const reply = await read(); requireActive(); return reply.value;
   };
   const off = client.onCollabUpdates(event => {

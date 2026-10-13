@@ -42,7 +42,7 @@ async function open(clientId: number) {
     echo: { paint() {}, drop() {}, present() {} }, maxRecoveryAttempts: 0,
     recovery: { reopen: () => Promise.reject(new Error('Unexpected reopen')) },
   });
-  const replica = createPeerlessCollaborationReplica(client, session, clientId);
+  const replica = createPeerlessCollaborationReplica(client, { session }, clientId);
   return { engine, session, replica };
 }
 
