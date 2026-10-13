@@ -107,7 +107,7 @@ function engineHeader(metadata = '{"collaborative":false}', version = 3) {
 }
 
 test.each([
-  ['unsupported codec', engineHeader(undefined, 4)],
+  ['unsupported codec', engineHeader(undefined, 5)],
   ['invalid header', new Uint8Array(42)],
   ['truncated header', engineHeader().slice(0, 41)],
   ['truncated metadata', engineHeader().slice(0, -1)],
