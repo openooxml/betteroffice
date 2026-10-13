@@ -34,8 +34,10 @@ const COL_STYLE: u8 = 17;
 const CHART: u8 = 18;
 const CHART_REF: u8 = 19;
 const ARRAY: u8 = 20;
-const ROW_STYLE: u8 = 21;
-const STYLED_SHEET: u8 = 22;
+const ROW_STYLE: u8 = 24;
+/// A sheet record that also counts its row defaults; a sheet without any keeps
+/// the `SHEET` layout.
+const STYLED_SHEET: u8 = 25;
 
 #[cfg(test)]
 thread_local! {
