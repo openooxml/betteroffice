@@ -2854,6 +2854,166 @@ mod tests {
         }
     }
 
+    const VBA_PROJECT_TYPE: &str = "application/vnd.ms-office.vbaProject";
+    const NESTED_NAMES_WORKBOOK: &[u8] = br#"<workbook xmlns='http://schemas.openxmlformats.org/spreadsheetml/2006/main' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships' xmlns:mc='http://schemas.openxmlformats.org/markup-compatibility/2006'><sheets><sheet name='First' sheetId='1' r:id='first'/><sheet name='Last' sheetId='3' r:id='last'/></sheets><definedNames><mc:AlternateContent><mc:Choice Requires='r'><definedName name='choice'>First!$A$1</definedName></mc:Choice><mc:Fallback><definedName name='fallback'>Last!$A$1</definedName></mc:Fallback></mc:AlternateContent></definedNames></workbook>"#;
+
+    fn replace_part_text(parts: &mut [(String, Vec<u8>)], path: &str, from: &str, to: &str) {
+        let (_, bytes) = parts.iter_mut().find(|(name, _)| name == path).unwrap();
+        let text = String::from_utf8(bytes.clone()).unwrap();
+        assert!(text.contains(from), "{path}: {from}");
+        *bytes = text.replace(from, to).into_bytes();
+    }
+
+    fn sanitize_both(parts: &[(String, Vec<u8>)]) -> [Vec<(String, Vec<u8>)>; 2] {
+        let package = rezip_parts(parts).unwrap();
+        [
+            sanitize_package(&package).unwrap(),
+            sanitize_package_for_format(&package, "xlsx").unwrap(),
+        ]
+        .map(|sanitized| unzip_parts(&sanitized).unwrap())
+    }
+
+    #[test]
+    fn regression_unreferenced_macro_sheets_leave_the_workbook_untouched() {
+        for root in ["Relationships", "Rels"] {
+            let mut parts = macro_sheet_parts(XLSM_MAIN_TYPE, NESTED_NAMES_WORKBOOK);
+            replace_part_text(
+                &mut parts,
+                "xl/_rels/workbook.xml.rels",
+                "Relationships",
+                root,
+            );
+            for output in sanitize_both(&parts) {
+                assert_eq!(
+                    part_bytes(&output, "xl/workbook.xml"),
+                    NESTED_NAMES_WORKBOOK
+                );
+                let relationships =
+                    String::from_utf8_lossy(part_bytes(&output, "xl/_rels/workbook.xml.rels"));
+                assert!(
+                    relationships.contains("worksheets/last.xml"),
+                    "{relationships}"
+                );
+                assert!(!relationships.contains("macro"), "{relationships}");
+                assert!(!has_part(&output, "xl/custom/sheet.data"));
+                assert_all_parts_declared(&output);
+            }
+        }
+    }
+
+    #[test]
+    fn regression_targets_climbing_above_the_root_resolve_at_the_root() {
+        let mut parts = root_sheet_parts(
+            VBA_PROJECT_TYPE,
+            "vbaProject.bin",
+            VBA_PROJECT_TYPE,
+            b"<worksheet/>",
+        );
+        replace_part_text(
+            &mut parts,
+            "[Content_Types].xml",
+            &format!("<Override PartName='/vbaProject.bin' ContentType='{VBA_PROJECT_TYPE}'/>"),
+            "",
+        );
+        replace_part_text(
+            &mut parts,
+            "_rels/sheet1.xml.rels",
+            "Target='vbaProject.bin'",
+            "Target='../vbaProject.bin'",
+        );
+        for output in sanitize_both(&parts) {
+            assert!(!has_part(&output, "vbaProject.bin"));
+            let relationships =
+                String::from_utf8_lossy(part_bytes(&output, "_rels/sheet1.xml.rels"));
+            assert!(!relationships.contains("vbaProject"), "{relationships}");
+            assert_all_parts_declared(&output);
+        }
+
+        let worksheet = br#"<worksheet xmlns='http://schemas.openxmlformats.org/spreadsheetml/2006/main' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'><pageSetup r:id='printer'/></worksheet>"#;
+        let mut parts = root_sheet_parts(
+            VBA_PROJECT_TYPE,
+            "printer.bin",
+            PRINTER_SETTINGS_TYPE,
+            worksheet,
+        );
+        replace_part_text(
+            &mut parts,
+            "_rels/sheet1.xml.rels",
+            "Target='printer.bin'",
+            "Target='../printer.bin'",
+        );
+        for output in sanitize_both(&parts) {
+            assert_eq!(part_bytes(&output, "printer.bin"), b"printer settings");
+            assert_eq!(
+                parse_content_types(&output)
+                    .unwrap()
+                    .content_type_for("printer.bin"),
+                Some(PRINTER_SETTINGS_TYPE)
+            );
+            let relationships =
+                String::from_utf8_lossy(part_bytes(&output, "_rels/sheet1.xml.rels"));
+            assert!(
+                relationships.contains("Target='../printer.bin'"),
+                "{relationships}"
+            );
+            assert_eq!(part_bytes(&output, "sheet1.xml"), worksheet);
+            assert_all_parts_declared(&output);
+        }
+    }
+
+    #[test]
+    fn main_relationship_climbing_above_the_root_stays_invalid() {
+        let mut parts = ordinary_workbook_parts(WORKSHEET_RELATIONSHIPS);
+        replace_part_text(
+            &mut parts,
+            "_rels/.rels",
+            "Target='xl/workbook.xml'",
+            "Target='../xl/workbook.xml'",
+        );
+        assert_eq!(
+            detect_package_kind(&parts),
+            Err(invalid_relationships("invalid main document target"))
+        );
+        let package = rezip_parts(&parts).unwrap();
+        for result in [
+            sanitize_package(&package),
+            sanitize_package_for_format(&package, "xlsx"),
+        ] {
+            let error = result.unwrap_err();
+            assert!(error.contains("invalid main document target"), "{error}");
+        }
+    }
+
+    #[test]
+    fn regression_backslash_rooted_targets_resolve_from_the_root() {
+        let mut parts = ordinary_workbook_parts(
+            &WORKSHEET_RELATIONSHIPS.replace("worksheets/first.xml", "sheet1.xml"),
+        );
+        parts.retain(|(path, _)| path != "xl/worksheets/first.xml");
+        declare(
+            &mut parts,
+            &format!(
+                "<Default Extension='bin' ContentType='{PRINTER_SETTINGS_TYPE}'/><Override PartName='/vbaProject.bin' ContentType='{VBA_PROJECT_TYPE}'/>"
+            ),
+        );
+        let printer = r"<Relationship Id='printer' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/printerSettings' Target='\vbaProject.bin'/>";
+        parts.extend([
+            ("xl/sheet1.xml".to_owned(), b"<worksheet/>".to_vec()),
+            (
+                "xl/_rels/sheet1.xml.rels".to_owned(),
+                relationships_xml(printer),
+            ),
+            ("vbaProject.bin".to_owned(), b"vba payload".to_vec()),
+        ]);
+        for output in sanitize_both(&parts) {
+            assert!(!has_part(&output, "vbaProject.bin"));
+            let relationships =
+                String::from_utf8_lossy(part_bytes(&output, "xl/_rels/sheet1.xml.rels"));
+            assert!(!relationships.contains("vbaProject"), "{relationships}");
+            assert_all_parts_declared(&output);
+        }
+    }
+
     #[test]
     fn accepts_and_rezips_all_three_formats() {
         let cases = [
