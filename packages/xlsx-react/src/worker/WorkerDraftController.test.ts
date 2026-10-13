@@ -1,6 +1,6 @@
 import { describe, expect, mock, test } from 'bun:test';
 import type { Direction, Selection } from '@betteroffice/xlsx';
-import type { PeerlessWorkerInputCoordinator } from '../commands/peerlessWorkerInputCoordinator';
+import type { PeerlessWorkerInputCoordinator, PeerlessWorkerPendingInput } from '../commands/peerlessWorkerInputCoordinator';
 import { WorkerDraftController, type WorkerNativeDraft } from './WorkerDraftController';
 
 function setup() {
@@ -20,12 +20,18 @@ function setup() {
   });
   controller.attach({
     setDraft: () => {},
+    runAfterPendingInput: (operation: () => Promise<string>) => operation(),
+    reserveInput: (input: PeerlessWorkerPendingInput) => ({ seq: null, result: input.ready.then((ready) => {
+      const draft = input.draft() as WorkerNativeDraft | null;
+      if (ready && draft?.modified) edits.push(draft);
+      return { seq: edits.length, status: 'applied' as const, committed: true };
+    }) }),
     submit: (draft: WorkerNativeDraft) => {
       edits.push(draft);
       return { seq: edits.length, result: Promise.resolve({ seq: edits.length, status: 'applied', committed: true }) };
     },
   } as unknown as PeerlessWorkerInputCoordinator);
-  const complete = async (value = 'Q3 Sales Dashboard') => { resolve(value); await Promise.resolve(); };
+  const complete = async (value = 'Q3 Sales Dashboard') => { resolve(value); await Promise.resolve(); await Promise.resolve(); };
   const beforeInput = (inputType: string, data: string | null = null, dataTransfer: DataTransfer | null = null) =>
     controller.holdCellBeforeInput({ inputType, data, dataTransfer, isComposing: false });
   return { controller, prefill, edits, state, select, focus, complete, beforeInput };

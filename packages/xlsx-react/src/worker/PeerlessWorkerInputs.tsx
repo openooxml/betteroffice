@@ -117,7 +117,8 @@ export const PeerlessWorkerCellInput = memo(function PeerlessWorkerCellInput({ c
   return <input ref={inputRef} data-testid="xlsx-cell-editor"
     defaultValue={draft.value} disabled={disabled} style={style}
     onChange={(event) => controller.change('cell', event.target.value, event.currentTarget)}
-    onCompositionStart={() => controller.start('cell')} onCompositionEnd={() => controller.end()}
+    onCompositionStart={() => controller.start('cell')}
+    onCompositionEnd={(event) => controller.end(event.nativeEvent.data)}
     onKeyDown={(event) => {
       if (!commandForEvent(event)) event.stopPropagation();
       if (controller.key('cell', event)) return;

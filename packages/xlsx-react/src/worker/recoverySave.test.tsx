@@ -83,7 +83,7 @@ async function recoveredInputs(bytes: Uint8Array, range: string) {
   finally { await reopened.dispose(); }
 }
 
-test('public recovery includes a completed held prefill behind a read', async () => {
+test('public recovery includes a completed held prefill before the read hold releases', async () => {
   const zip = await JSZip.loadAsync(await initialPaintBook());
   const xml = await zip.file('xl/worksheets/sheet1.xml')!.async('string');
   zip.file('xl/worksheets/sheet1.xml', xml.replace('<row r="20">',
@@ -95,11 +95,13 @@ test('public recovery includes a completed held prefill behind a read', async ()
   const { run, api } = recoveryEditor(session);
   let resolve!: (value: string) => void;
   const prefill = new Promise<string>((done) => { resolve = done; });
+  let readingStarted!: () => void;
+  const entered = new Promise<void>((done) => { readingStarted = done; });
   const controller = new WorkerDraftController({
     generation: () => 1, identity: () => 'book', navigation: () => 0,
     selection: () => ({ anchor: { row: 10, col: 0 }, focus: { row: 10, col: 0 } }), sheet: () => 0,
     target: () => ({ sheetId: session.state.sheets[0].id, range: { kind: 'a1', a1: 'A11' } }),
-    resolveSheet: () => 0, editable: () => true, prefill: () => prefill,
+    resolveSheet: () => 0, editable: () => true, prefill: () => { readingStarted(); return prefill; },
     select: () => {}, selectionTarget: () => undefined, dependency: () => null,
     navigate: () => {}, committed: () => {}, fail: () => {}, focus: () => {},
   });
@@ -110,21 +112,20 @@ test('public recovery includes a completed held prefill behind a read', async ()
   });
   controller.attach(coordinator);
   run.connectRecoveryInput(coordinator, controller);
-  const entered = new Promise<void>((done) => {
-    void coordinator.runAfterPendingInput(() => { done(); return new Promise<void>(() => {}); }, true).catch(() => {});
-  });
   try {
-    await entered;
     controller.open();
     controller.holdCellEdit({ kind: 'insert', text: 'X' });
-    controller.commit('cell');
+    const pending = controller.seal().pendingInput!;
+    const failed = pending.ready.then(() => crashAndWait(session, host));
+    coordinator.reserveInput(pending);
     const saving = coordinator.save();
     void saving.catch(() => {});
+    await entered;
     resolve('Q3 Sales Dashboard');
-    await Promise.resolve();
-    await crashAndWait(session, host);
+    await failed;
     await saving.catch(() => {});
-    expect(coordinator.recoveryCommands.filter((command) => command.kind === 'editCell')).toHaveLength(1);
+    expect(coordinator.recoveryCommands.filter((command) => command.kind === 'editCell').length +
+      workbookSessionRecovery.get(session)!.retainedCommands).toBe(1);
     expect(await recoveredInputs((await api.recoverySave()).bytes, 'A11')).toEqual(['Q3 Sales DashboardX']);
   } finally { controller.dispose(); coordinator.retire(); opener.mockRestore(); await run.dispose(); }
 });

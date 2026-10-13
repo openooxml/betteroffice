@@ -1,11 +1,38 @@
 export type CellInputOperation = { kind: 'insert'; text: string } | { kind: 'selectAll' } |
-  { kind: 'move'; direction: 'start' | 'end' | 'left' | 'right'; extend?: boolean } |
+  { kind: 'move'; direction: 'start' | 'end' | 'left' | 'right'; extend?: boolean; unit?: 'word' } |
   { kind: 'delete'; direction: 'backward' | 'forward'; unit: 'character' | 'word' | 'line' };
 
 export interface CellInputState {
   value: string;
   anchor: number;
   focus: number;
+}
+
+type CellInputEvent = Pick<InputEvent, 'inputType' | 'data' | 'dataTransfer' | 'isComposing'> |
+  { key: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean; shiftKey: boolean };
+
+export function cellInputOperation(event: CellInputEvent, mac: boolean): CellInputOperation | null {
+  if ('inputType' in event) {
+    if (event.isComposing || event.inputType === 'insertCompositionText') return null;
+    if (['insertText', 'insertReplacementText', 'insertFromPaste', 'insertFromDrop'].includes(event.inputType)) {
+      return { kind: 'insert', text: event.data ?? event.dataTransfer?.getData('text/plain') ?? '' };
+    }
+    const match = /^delete(Content|Word|SoftLine|HardLine)(Backward|Forward)$/.exec(event.inputType);
+    return match ? { kind: 'delete', direction: match[2] === 'Backward' ? 'backward' : 'forward',
+      unit: match[1] === 'Content' ? 'character' : match[1] === 'Word' ? 'word' : 'line' } : null;
+  }
+  const mod = event.ctrlKey || event.metaKey;
+  const word = mac ? event.altKey && !event.metaKey : event.ctrlKey && !event.altKey;
+  const line = mac && event.metaKey && !event.altKey;
+  if (mod && !event.altKey && event.key.toLowerCase() === 'a') return { kind: 'selectAll' };
+  if (!mac && event.altKey) return null;
+  const direction = event.key === 'Home' || line && event.key === 'ArrowLeft' ? 'start' :
+    event.key === 'End' || line && event.key === 'ArrowRight' ? 'end' :
+    event.key === 'ArrowLeft' ? 'left' : event.key === 'ArrowRight' ? 'right' : null;
+  if (direction) return { kind: 'move', direction, extend: event.shiftKey, ...(word ? { unit: 'word' } : {}) };
+  if (event.key === 'Backspace' || event.key === 'Delete') return { kind: 'delete',
+    direction: event.key === 'Backspace' ? 'backward' : 'forward', unit: line ? 'line' : word ? 'word' : 'character' };
+  return !mod && !event.altKey && event.key.length === 1 ? { kind: 'insert', text: event.key } : null;
 }
 
 function characterOffset(value: string, at: number, backward: boolean): number {
@@ -24,9 +51,10 @@ function wordOffset(value: string, at: number, backward: boolean): number {
   return at;
 }
 
-export function replayCellInput(value: string, operations: readonly CellInputOperation[]): CellInputState {
-  let anchor = value.length;
-  let focus = anchor;
+export function replayCellInput(value: string, operations: readonly CellInputOperation[],
+  selection?: Pick<CellInputState, 'anchor' | 'focus'>): CellInputState {
+  let anchor = Math.max(0, Math.min(value.length, selection?.anchor ?? value.length));
+  let focus = Math.max(0, Math.min(value.length, selection?.focus ?? value.length));
   for (const operation of operations) {
     let start = Math.min(anchor, focus);
     let end = Math.max(anchor, focus);
@@ -34,7 +62,8 @@ export function replayCellInput(value: string, operations: readonly CellInputOpe
     if (operation.kind === 'move') {
       const backward = operation.direction === 'left';
       const position = operation.direction === 'start' ? 0 : operation.direction === 'end' ? value.length :
-        start !== end && !operation.extend ? backward ? start : end : characterOffset(value, focus, backward);
+        start !== end && !operation.extend ? backward ? start : end :
+          operation.unit === 'word' ? wordOffset(value, focus, backward) : characterOffset(value, focus, backward);
       if (!operation.extend) anchor = position;
       focus = position;
       continue;

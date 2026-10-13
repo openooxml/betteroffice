@@ -20,6 +20,7 @@ import { useCommandShortcuts } from '../commands/useCommandShortcuts';
 import { useSaveRequest } from '../commands/useSaveRequest';
 import { usePeerlessWorkerXlsxCommands } from '../commands/usePeerlessWorkerXlsxCommands';
 import { WorkerInputRefusal } from '../commands/workerInputCoordinator';
+import { readWorkerCellInput } from './WorkerCellInputReader';
 import {
   createPeerlessWorkerInputCoordinator, PeerlessWorkerCommandRefusal, type PeerlessWorkerCommandInput,
   type PeerlessWorkerCommandTicket, type PeerlessWorkerInputEvent,
@@ -267,7 +268,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     target: (sheet, row, col) => rangeTarget(sheet, selectionAt({ row, col })),
     resolveSheet: (sheetId) => (run?.session.editState.sheets ?? run?.session.state.sheets)?.find((sheet) => sheet.id === sheetId)?.index,
     editable,
-    prefill: async (sheet, cell) => (await run!.session.call.cellInputs(sheet, address(cell))).cells[0]?.[0]?.input ?? '',
+    prefill: (sheet, cell) => readWorkerCellInput(run!.session, sheet, address(cell)),
     select: (sheet, cell, move) => {
       const base = selectionAt(cell);
       predict(sheet, move ? moveFocus(base, move, { limits: limits() }) : base);
@@ -946,10 +947,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     onSaveRequest: props.onSaveRequest, fail: report,
   });
   usePeerlessWorkerXlsxCommands(commands, {
-    requestSave: (save) => requestSave(() => {
-      if (draftController.loadingCell) draftController.finish();
-      return save();
-    }),
+    requestSave,
     session: () => run?.session ?? null, coordinator,
     status: () => run?.ready ? 'ready' : run && !run.failure || loading ? 'loading' : 'empty',
     readOnly: () => propsRef.current.readOnly ?? false, collaborative: () => propsRef.current.collaboration !== undefined,
@@ -1091,17 +1089,10 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     const draft = draftController.getSnapshot().cell;
     if (draft) {
       if (draftController.cellInput || draftController.key('cell', event)) return;
-      if (draftController.holdCellKey(event)) { event.preventDefault(); return; }
+      if (draftController.cellKey(event)) { event.preventDefault(); return; }
       if (event.key === 'Enter') draftController.commit('cell', event.shiftKey ? 'up' : 'down');
       else if (event.key === 'Tab') draftController.commit('cell', event.shiftKey ? 'left' : 'right');
       else if (event.key === 'Escape') draftController.cancel();
-      else if (!mod && event.key === 'Backspace') {
-        if (!draftController.holdCellEdit({ kind: 'delete', direction: 'backward', unit: 'character' })) {
-          draftController.change('cell', draft.value.slice(0, -1), null);
-        }
-      } else if (!mod && event.key.length === 1) {
-        if (!draftController.holdCellEdit({ kind: 'insert', text: event.key })) draftController.change('cell', draft.value + event.key, null);
-      }
       else return;
       event.preventDefault(); return;
     }

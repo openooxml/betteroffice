@@ -577,8 +577,10 @@ it('saving while F2 prefill is pending preserves the untouched cell', async () =
   await opened();
   await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
   const prefill = deferred<Awaited<ReturnType<WorkbookSession['call']['cellInputs']>>>();
+  const requested = host.cellInputs.mock.calls.length;
   host.cellInputs.mockImplementationOnce(() => prefill.promise);
   fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'F2' });
+  await waitFor(() => expect(host.cellInputs.mock.calls.length).toBeGreaterThan(requested));
   expect((view.getByTestId('xlsx-cell-editor') as HTMLInputElement).value).toBe('');
   let saving!: Promise<unknown>;
   await act(async () => {
@@ -621,13 +623,20 @@ describe('peerless F2 prefill keyboard replay', () => {
       }
     });
   };
+  const end = (input: HTMLInputElement, data: string) => {
+    const event = new Event('compositionend', { bubbles: true });
+    Object.defineProperty(event, 'data', { value: data });
+    fireEvent(input, event);
+  };
   const setup = async (onSave: (bytes: Uint8Array) => void = () => {}) => {
     const host = peerlessHarness();
     host.cells.set('0:0:0', value);
     const view = await host.mount(onSave);
     const prefill = deferred<Awaited<ReturnType<typeof host.cellInputs>>>();
+    const requested = host.cellInputs.mock.calls.length;
     host.cellInputs.mockReturnValueOnce(prefill.promise);
     fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'F2' });
+    await waitFor(() => expect(host.cellInputs.mock.calls.length).toBeGreaterThan(requested));
     const input = view.getByTestId('xlsx-cell-editor') as HTMLInputElement;
     const resolve = () => act(async () => prefill.resolve({ sheet: 0, version: 'v1',
       cells: [[{ a1: 'A1', input: value, isFormula: false }]] }));
@@ -755,6 +764,20 @@ describe('peerless F2 prefill keyboard replay', () => {
       expect(host.sent.filter((command) => command.kind === 'editCell')).toHaveLength(1);
     });
 
+    it('retains a refused reserved edit without refocusing the previous cell', async () => {
+      const { host, view, input, resolve } = await setup();
+      type(input, 'X');
+      key(input, 'Enter');
+      await resolve();
+      const edit = host.sent.find((command) => command.kind === 'editCell')!;
+      await act(async () => host.ack(edit, { status: 'refused' }));
+      expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('A2');
+      expect(view.queryByTestId('xlsx-cell-editor')).toBeNull();
+      expect(document.activeElement).toBe(view.getByTestId('xlsx-scroll'));
+      expect(view.getByTestId('xlsx-refused-draft').textContent).toBe(`${value}X`);
+      expect(host.cells.get('0:0:0')).toBe(value);
+    });
+
     it('reads the reserved edit when F2 reopens the same cell', async () => {
       const { host, view, input, resolve } = await setup();
       acknowledge(host);
@@ -795,7 +818,7 @@ describe('peerless F2 prefill keyboard replay', () => {
       type(input, 'X');
       fireEvent.compositionStart(input);
       fireEvent.change(input, { target: { value: '変' } });
-      fireEvent.compositionEnd(input, { data: '変' });
+      end(input, '変');
       await act(async () => { await Promise.resolve(); });
       fireEvent.keyUp(input, { key: 'Enter' });
       key(input, 'Enter');
@@ -811,11 +834,92 @@ describe('peerless F2 prefill keyboard replay', () => {
       fireEvent.change(input, { target: { value: '変' } });
       await resolve();
       expect(input.value).toBe('変');
-      fireEvent.compositionEnd(input, { data: '変' });
+      end(input, '変');
       await act(async () => { await Promise.resolve(); });
       fireEvent.keyUp(input, { key: 'Enter' });
       key(input, 'Enter');
       await waitFor(() => expect(host.cells.get('0:0:0')).toBe(`${value}X変`));
+    });
+
+    it('keeps one IME insert when trailing native input follows the replay', async () => {
+      const { host, input, resolve } = await setup();
+      acknowledge(host);
+      type(input, 'X');
+      fireEvent.compositionStart(input);
+      fireEvent.change(input, { target: { value: '仮' } });
+      end(input, '変');
+      await act(async () => { await Promise.resolve(); });
+      await resolve();
+      expect(input.value).toBe(`${value}X変`);
+      fireEvent.change(input, { target: { value: '変' } });
+      expect(input.value).toBe(`${value}X変`);
+      type(input, '変');
+      expect(input.value).toBe(`${value}X変`);
+      fireEvent.keyUp(input, { key: 'Enter' });
+      key(input, 'Enter');
+      await waitFor(() => expect(host.cells.get('0:0:0')).toBe(`${value}X変`));
+      expect(host.sent.filter((command) => command.kind === 'editCell')).toHaveLength(1);
+    });
+
+    it('captures the final loading IME value on toolbar blur and restores keyboard focus', async () => {
+      const { host, view, input, resolve } = await setup();
+      acknowledge(host);
+      type(input, 'X');
+      fireEvent.compositionStart(input);
+      fireEvent.change(input, { target: { value: '仮' } });
+      input.addEventListener('blur', () => {
+        input.value = '変';
+        end(input, '変');
+      }, { once: true });
+      let bold!: Promise<unknown>;
+      await act(async () => { bold = host.commands().execute('bold', null); });
+      await resolve();
+      await act(async () => { await bold; });
+      expect(host.sent.filter((command) => command.kind === 'editCell').map((command) => command.payload.args))
+        .toEqual([[0, 0, 0, `${value}X変`]]);
+      expect(document.activeElement).toBe(view.getByTestId('xlsx-scroll'));
+    });
+
+    it('holds successive IME results once and preserves them when a later composition cancels', async () => {
+      const { host, input, resolve } = await setup();
+      acknowledge(host);
+      type(input, 'X');
+      fireEvent.compositionStart(input);
+      fireEvent.change(input, { target: { value: '変' } });
+      end(input, '変');
+      await act(async () => {});
+      input.setSelectionRange(1, 1);
+      fireEvent.compositionStart(input);
+      fireEvent.change(input, { target: { value: '変仮' } });
+      end(input, '数');
+      await act(async () => {});
+      fireEvent.change(input, { target: { value: '変数' } });
+      input.setSelectionRange(2, 2);
+      fireEvent.compositionStart(input);
+      fireEvent.change(input, { target: { value: '変数仮' } });
+      end(input, '');
+      await act(async () => {});
+      fireEvent.change(input, { target: { value: '変数' } });
+      await resolve();
+      expect(input.value).toBe(`${value}X変数`);
+      fireEvent.keyUp(input, { key: 'Enter' });
+      key(input, 'Enter');
+      await waitFor(() => expect(host.cells.get('0:0:0')).toBe(`${value}X変数`));
+      expect(host.sent.filter((command) => command.kind === 'editCell')).toHaveLength(1);
+    });
+
+    it('reserves a loading IME commit when blur follows compositionend in the same task', async () => {
+      const { host, view, input, resolve } = await setup();
+      acknowledge(host);
+      type(input, 'X');
+      fireEvent.compositionStart(input);
+      fireEvent.change(input, { target: { value: '変' } });
+      end(input, '変');
+      fireEvent.blur(input);
+      await resolve();
+      await waitFor(() => expect(host.cells.get('0:0:0')).toBe(`${value}X変`));
+      expect(view.queryByTestId('xlsx-cell-editor')).toBeNull();
+      expect(host.sent.filter((command) => command.kind === 'editCell')).toHaveLength(1);
     });
 
     it('includes a detached held commit in Save', async () => {
@@ -824,7 +928,7 @@ describe('peerless F2 prefill keyboard replay', () => {
       const saved: string[] = [];
       const save = spyOn(host.session, 'save').mockImplementation(async () => {
         saved.push(host.cells.get('0:0:0')!);
-        return new TextEncoder().encode(saved.at(-1));
+        return new TextEncoder().encode(saved[saved.length - 1]);
       });
       restorers.push(() => save.mockRestore());
       type(input, 'X');
@@ -894,7 +998,8 @@ describe('peerless F2 prefill keyboard replay', () => {
       act(() => host.ack(host.sent[0]!, { paint: true }));
       acknowledge(host);
       const prefill = deferred<Awaited<ReturnType<typeof host.cellInputs>>>();
-      host.cellInputs.mockReturnValueOnce(prefill.promise);
+      const inputs = host.cellInputs.getMockImplementation()!;
+      host.cellInputs.mockImplementation((sheet, a1) => a1 === 'A251' ? prefill.promise : inputs(sheet, a1));
       fireEvent.keyDown(scroll, { key: 'F2' });
       expect(view.queryByTestId('xlsx-cell-editor')).toBeNull();
       for (const event of scenario.keys) fireEvent.keyDown(scroll, event);
@@ -1198,6 +1303,7 @@ describe('XlsxEditor async API', () => {
       const view = await host.mount();
       if (source === 'cell') fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'F2' });
       const input = view.getByTestId(source === 'cell' ? 'xlsx-cell-editor' : 'xlsx-formula-input') as HTMLInputElement;
+      if (source === 'cell') await waitFor(() => expect(input.value).toBe('initial'));
       act(() => input.focus());
       fireEvent.compositionStart(input);
       fireEvent.change(input, { target: { value: 'unfinished' } });
@@ -1246,6 +1352,7 @@ describe('XlsxEditor async API', () => {
       const view = await host.mount(saved);
       if (source === 'cell') fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'F2' });
       const input = view.getByTestId(source === 'cell' ? 'xlsx-cell-editor' : 'xlsx-formula-input') as HTMLInputElement;
+      if (source === 'cell') await waitFor(() => expect(input.value).toBe('initial'));
       act(() => input.focus());
       fireEvent.compositionStart(input);
       fireEvent.change(input, { target: { value: 'unfinished' } });
@@ -1338,6 +1445,7 @@ describe('XlsxEditor async API', () => {
         const api = ready.mock.calls[0]![0];
         fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'F2' });
         const input = view.getByTestId('xlsx-cell-editor');
+        await waitFor(() => expect((input as HTMLInputElement).value).toBe('initial'));
         fireEvent.compositionStart(input);
         fireEvent.change(input, { target: { value: 'composed' } });
         const invoke = (): Promise<unknown> => {
@@ -2241,6 +2349,7 @@ describe('peerless workbook worker editor', () => {
     const view = await host.mount();
     fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'F2' });
     const input = view.getByTestId('xlsx-cell-editor');
+    await waitFor(() => expect((input as HTMLInputElement).value).toBe('initial'));
     fireEvent.compositionStart(input);
     fireEvent.change(input, { target: { value: '確定' } });
     fireEvent.compositionEnd(input);
@@ -2928,9 +3037,11 @@ describe('peerless workbook worker editor', () => {
     const host = peerlessHarness();
     const view = await host.mount();
     const prefill = deferred<Awaited<ReturnType<typeof host.cellInputs>>>();
+    const requested = host.cellInputs.mock.calls.length;
     host.cellInputs.mockReturnValueOnce(prefill.promise);
     fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'F2' });
     const input = view.getByTestId('xlsx-cell-editor') as HTMLInputElement;
+    await waitFor(() => expect(host.cellInputs.mock.calls.length).toBeGreaterThan(requested));
     fireEvent.change(input, { target: { value: 'newer' } });
     await act(async () => prefill.resolve({ sheet: 0, version: 'v1', cells: [[{ a1: 'A1', input: 'stale', isFormula: false }]] }));
     expect(input.value).toBe('newer');
@@ -2957,6 +3068,7 @@ describe('peerless workbook worker editor', () => {
       const view = await host.mount();
       if (source === 'cell') fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'F2' });
       const input = view.getByTestId(source === 'cell' ? 'xlsx-cell-editor' : 'xlsx-formula-input') as HTMLInputElement;
+      if (source === 'cell') await waitFor(() => expect(input.value).toBe('initial'));
       fireEvent.focus(input);
       fireEvent.compositionStart(input);
       fireEvent.change(input, { target: { value: '変換' } });
@@ -3031,6 +3143,7 @@ describe('peerless workbook worker editor', () => {
     const view = await host.mount();
     fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'F2' });
     const input = view.getByTestId('xlsx-cell-editor');
+    await waitFor(() => expect((input as HTMLInputElement).value).toBe('initial'));
     fireEvent.compositionStart(input);
     fireEvent.change(input, { target: { value: '確定' } });
     fireEvent.keyDown(input, { key: 'Enter', isComposing: true });
@@ -6819,6 +6932,9 @@ describe('peerless composition keyboard focus', () => {
     const view = await host.mount();
     const dialog = render(<input aria-label="Pending save dialog" />);
     const hostInput = dialog.getByRole('textbox', { name: 'Pending save dialog' });
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'F2' });
+    const input = view.getByTestId('xlsx-cell-editor') as HTMLInputElement;
+    await waitFor(() => expect((input as HTMLInputElement).value).toBe('initial'));
     const entered = deferred<void>();
     const reply = deferred<void>();
     let reading!: Promise<void>;
@@ -6826,8 +6942,6 @@ describe('peerless composition keyboard focus', () => {
       reading = coordinator!.runAfterPendingInput(() => { entered.resolve(); return reply.promise; }, true);
     });
     await entered.promise;
-    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'F2' });
-    const input = view.getByTestId('xlsx-cell-editor') as HTMLInputElement;
     act(() => input.focus());
     fireEvent.compositionStart(input);
     fireEvent.change(input, { target: { value: 'composed' } });
@@ -6859,6 +6973,7 @@ describe('peerless composition keyboard focus', () => {
       const view = await host.mount();
       if (source === 'cell') fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'F2' });
       const input = view.getByTestId(source === 'cell' ? 'xlsx-cell-editor' : 'xlsx-formula-input') as HTMLInputElement;
+      if (source === 'cell') await waitFor(() => expect(input.value).toBe('initial'));
       act(() => input.focus());
       fireEvent.compositionStart(input);
       fireEvent.change(input, { target: { value: 'unfinished' } });
@@ -6907,6 +7022,7 @@ describe('peerless composition keyboard focus', () => {
       const view = await host.mount(saved);
       if (source === 'cell') fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'F2' });
       const input = view.getByTestId(source === 'cell' ? 'xlsx-cell-editor' : 'xlsx-formula-input') as HTMLInputElement;
+      if (source === 'cell') await waitFor(() => expect(input.value).toBe('initial'));
       act(() => input.focus());
       fireEvent.compositionStart(input);
       fireEvent.change(input, { target: { value: 'unfinished' } });
