@@ -768,7 +768,7 @@ impl Stylesheet {
             if let Some((declared, code)) = self.num_fmts.get(slot)
                 && *declared == id
             {
-                return Some(code);
+                return Some(code.as_str());
             }
         }
         #[cfg(test)]
