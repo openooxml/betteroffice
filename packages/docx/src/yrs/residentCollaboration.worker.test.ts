@@ -1,15 +1,22 @@
 import { afterEach, beforeAll, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { rezipPartsToArrayBuffer, toBytes } from '../docx/rezip/parts';
+import { preloadOpcWasm } from '../wasm/opc';
 import { residentWorkerFactory } from './__fixtures__/residentWorker';
-import { ResidentEngineWorkerClient } from './residentEngineWorkerClient';
+import { ResidentSourceWorkerClient } from './residentSourceWorkerClient';
 import { createResidentCommandConnection } from './residentCommandConnection';
 import { createDocxWorkerEditSession } from './createDocxWorkerEditSession';
 import { createYrsSession } from './index';
 import { closeCommandEngines, openCommandEngine, TIMEOUT } from './residentCommandTestSupport';
+import type { Document } from '../types/document';
 
 let start: Awaited<ReturnType<typeof residentWorkerFactory>>;
-beforeAll(async () => { await openCommandEngine(); start = await residentWorkerFactory(); });
+beforeAll(async () => {
+  await openCommandEngine();
+  await preloadOpcWasm(new Uint8Array(readFileSync(resolve(process.cwd(), 'packages/docx/src/wasm/generated/opc/ooxml_opc_bg.wasm'))));
+  start = await residentWorkerFactory();
+});
 afterEach(closeCommandEngines);
 
 function documentBytes() {
@@ -20,10 +27,18 @@ function documentBytes() {
   ])));
 }
 
-async function open(clientId: number, initialUpdate?: Uint8Array) {
+async function parsedDocument(): Promise<Document> {
+  const parser = await createYrsSession({ clientId: 9299 });
+  try {
+    parser.openDocx(documentBytes(), true);
+    return parser.materializeDocx()!;
+  } finally { parser.destroy(); }
+}
+
+async function open(clientId: number, initialUpdate?: Uint8Array, document?: Document) {
   const worker = start(clientId);
-  const client = new ResidentEngineWorkerClient(worker);
-  await client.open(documentBytes(), { collaboration: { clientId, initialUpdate } });
+  const client = new ResidentSourceWorkerClient(worker);
+  await client.openSource({ ...(document ? { document } : { bytes: documentBytes() }), collaboration: { clientId, initialUpdate } });
   const engine = worker.sessions[0]!;
   const at = { story: 'body', paraId: engine.paragraphs('body')[0]!.paraId, offset: 4 };
   const initial = await client.commandInit({ session: `replica-${clientId}`, incarnation: 1, epoch: 1,
@@ -39,6 +54,23 @@ async function open(clientId: number, initialUpdate?: Uint8Array) {
     recovery: { reopen: () => Promise.reject(new Error('Unexpected reopen')) },
   });
   return { worker, client, engine, initial, session };
+}
+
+for (const input of ['bytes', 'document'] as const) {
+  test(`a ${input} source joins a room from the shared state without seeding its own stories`, async () => {
+    const a = await open(9201);
+    const b = await open(9202, a.engine.encodeState(), input === 'document' ? await parsedDocument() : undefined);
+    const pushed: Uint8Array[] = [];
+    const off = b.client.onCollabUpdates(event => pushed.push(...event.updates));
+    try {
+      expect(b.engine.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['Seed', 'Second']);
+      expect(b.engine.paragraphs('body')).toEqual(a.engine.paragraphs('body'));
+      expect((await b.session.submit('insertText', { text: 'B' }).ack).status).toBe('applied');
+      expect(pushed.length).toBeGreaterThan(0);
+      for (const update of pushed) await a.session.submit('applyRemoteUpdate', { update: update.slice().buffer }, { lane: 'collab', fence: true }).ack;
+      expect(a.engine.paragraphs('body')).toEqual(b.engine.paragraphs('body'));
+    } finally { off(); a.session.dispose(); b.session.dispose(); }
+  }, TIMEOUT);
 }
 
 test('two worker command sessions converge with reordered and duplicated updates', async () => {
