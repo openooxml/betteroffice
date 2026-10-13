@@ -261,14 +261,7 @@ impl Pass<'_> {
     /// the first of them runs again with that value.
     fn settle(&mut self, wb: &mut Workbook, members: &[Key]) {
         let ids: HashMap<Key, usize> = members.iter().enumerate().map(|(id, &u)| (u, id)).collect();
-        let spills: Vec<(usize, SheetId, CellRange)> = members
-            .iter()
-            .enumerate()
-            .filter_map(|(id, &u)| {
-                let range = wb.sheet(u.0)?.array_formula(cell_of(u))?;
-                (range.start != range.end).then_some((id, u.0, range))
-            })
-            .collect();
+        let spills = Spills::new(wb, members);
         let mut settled = vec![false; members.len()];
         let mut on_chain: Vec<Option<usize>> = vec![None; members.len()];
         let mut chain: Vec<usize> = Vec::new();
@@ -361,7 +354,7 @@ impl Pass<'_> {
 struct ReadLog<'a> {
     inner: &'a Workbook,
     ids: &'a HashMap<Key, usize>,
-    spills: &'a [(usize, SheetId, CellRange)],
+    spills: &'a Spills,
     settled: &'a [bool],
     first: Flag<Option<usize>>,
 }
@@ -373,24 +366,97 @@ impl ReadLog<'_> {
         if self.first.get().is_some() {
             return;
         }
-        let unsettled = |id: &usize| !self.settled[*id];
         let read = self
             .ids
             .get(&key(sheet, at))
             .copied()
-            .filter(unsettled)
-            .or_else(|| {
-                self.spills
-                    .iter()
-                    .find(|(id, on, range)| {
-                        #[cfg(test)]
-                        SPILL_CHECKS.with(|count| count.set(count.get() + 1));
-                        *on == sheet && range.contains(at) && unsettled(id)
-                    })
-                    .map(|&(id, ..)| id)
-            });
+            .filter(|&id| !self.settled[id])
+            .or_else(|| self.spills.holding(sheet, at, self.settled));
         self.first.set(read);
     }
+}
+
+/// a grid block of one size class: sheet, size class, row block, column block.
+type Block = (SheetId, u32, u32, u32, u32);
+
+/// the rectangles the members of a component spill over. one between `2^j`
+/// and `2^(j+1)` rows high and between `2^k` and `2^(k+1)` columns wide is
+/// filed under the block of a `2^j` by `2^k` grid that holds its top-left
+/// cell, so a cell lies in at most nine blocks a rectangle of that size can
+/// start in, and two rectangles in one block overlap.
+struct Spills {
+    sizes: Vec<(u32, u32)>,
+    blocks: HashMap<Block, Vec<(usize, CellRange)>>,
+}
+
+impl Spills {
+    fn new(wb: &Workbook, members: &[Key]) -> Self {
+        let mut spills = Self {
+            sizes: Vec::new(),
+            blocks: HashMap::new(),
+        };
+        for (id, &u) in members.iter().enumerate() {
+            let Some(range) = wb
+                .sheet(u.0)
+                .and_then(|sheet| sheet.array_formula(cell_of(u)))
+            else {
+                continue;
+            };
+            if range.start == range.end {
+                continue;
+            }
+            let size = (
+                (range.end.row - range.start.row).saturating_add(1).ilog2(),
+                (range.end.col - range.start.col).saturating_add(1).ilog2(),
+            );
+            if !spills.sizes.contains(&size) {
+                spills.sizes.push(size);
+            }
+            let block = (
+                u.0,
+                size.0,
+                size.1,
+                range.start.row >> size.0,
+                range.start.col >> size.1,
+            );
+            spills.blocks.entry(block).or_default().push((id, range));
+        }
+        spills
+    }
+
+    /// the first member, in key order, not settled yet whose rectangle holds
+    /// `at`.
+    fn holding(&self, sheet: SheetId, at: CellRef, settled: &[bool]) -> Option<usize> {
+        let mut first: Option<usize> = None;
+        for &(rows, cols) in &self.sizes {
+            for row in starts(at.row, rows) {
+                for col in starts(at.col, cols) {
+                    let Some(spills) = self.blocks.get(&(sheet, rows, cols, row, col)) else {
+                        continue;
+                    };
+                    for &(id, range) in spills {
+                        #[cfg(test)]
+                        SPILL_CHECKS.with(|count| count.set(count.get() + 1));
+                        if range.contains(at)
+                            && !settled[id]
+                            && first.is_none_or(|found| id < found)
+                        {
+                            first = Some(id);
+                        }
+                    }
+                }
+            }
+        }
+        first
+    }
+}
+
+/// the blocks of a `2^size` grid where a span shorter than `2^(size+1)` that
+/// holds `at` can start.
+fn starts(at: u32, size: u32) -> std::ops::RangeInclusive<u32> {
+    let reach = (2u64 << size) - 2;
+    let first = u64::from(at).saturating_sub(reach) >> size;
+    first as u32..=at >> size
 }
 
 impl CellProvider for ReadLog<'_> {
