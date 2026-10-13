@@ -3360,7 +3360,7 @@ pub(crate) fn cell_format_fits(format: &CellFormat) -> bool {
 }
 
 fn style_key(stylesheet: &Stylesheet, style: u32) -> Result<String, String> {
-    if stylesheet.xf(style).is_none() {
+    if style != 0 && stylesheet.xf(style).is_none() {
         return Err(format!("cell style index {style} is out of range"));
     }
     cell_format_entry(&stylesheet.cell_format(Some(style))).map(|(key, _)| key)

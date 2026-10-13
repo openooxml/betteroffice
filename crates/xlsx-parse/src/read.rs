@@ -919,7 +919,7 @@ fn finalize_cell(
         formula: c.formula,
         style: c.style,
     };
-    if cell == Cell::default() {
+    if cell == Cell::default() && sheet.inherited_style(addr).is_some_and(|style| style != 0) {
         cell.style = Some(0);
     }
     if cell != Cell::default() {

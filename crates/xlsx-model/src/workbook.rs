@@ -224,15 +224,19 @@ impl Sheet {
             .map(|run| run.xf)
     }
 
-    /// Existing cells use their own xf; missing cells inherit row, then column.
+    /// The default a missing cell takes: its row's, then its column's.
+    pub fn inherited_style(&self, at: CellRef) -> Option<u32> {
+        self.row_styles
+            .get(&at.row)
+            .copied()
+            .or_else(|| self.col_style(at.col))
+    }
+
+    /// Existing cells use their own xf; missing cells inherit.
     pub fn effective_style(&self, at: CellRef) -> Option<u32> {
         match self.cell(at) {
             Some(cell) => cell.style,
-            None => self
-                .row_styles
-                .get(&at.row)
-                .copied()
-                .or_else(|| self.col_style(at.col)),
+            None => self.inherited_style(at),
         }
     }
 

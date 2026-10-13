@@ -3985,9 +3985,10 @@ fn edit_cell_state(
     cell: CellRef,
     input: &str,
 ) -> CellState {
-    let style = workbook
-        .sheet(sheet)
-        .and_then(|sheet| sheet.effective_style(cell));
+    let sheet = workbook.sheet(sheet);
+    let existing = sheet.and_then(|sheet| sheet.cell(cell));
+    let inherited = sheet.and_then(|sheet| sheet.inherited_style(cell));
+    let style = existing.map_or(inherited, |existing| existing.style);
     let number_format = workbook
         .styles
         .resolved_format(Some(style.unwrap_or(0)))
@@ -4006,13 +4007,13 @@ fn edit_cell_state(
     } else {
         cell_state_for_input_no_eval(input)
     };
-    state.style = style.or_else(|| {
-        (input.is_empty()
-            && workbook
-                .sheet(sheet)
-                .is_some_and(|sheet| sheet.cell(cell).is_some()))
-        .then_some(0)
-    });
+    state.style = match existing {
+        None if input.is_empty() => None,
+        Some(_) if input.is_empty() && style.is_none() => inherited
+            .is_some_and(|inherited| inherited != 0)
+            .then_some(0),
+        _ => style,
+    };
     state
 }
 

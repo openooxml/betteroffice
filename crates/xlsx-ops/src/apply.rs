@@ -395,11 +395,10 @@ fn apply_range_formats(
                 }
                 match styles.intern_cell_format(&format) {
                     Ok(style) => staged.push(style.or_else(|| {
-                        (sheet_ref.cell(at).is_some()
-                            || old_style.is_some()
-                            || sheet_ref.row_styles.contains_key(&at.row)
-                            || sheet_ref.col_style(at.col).is_some())
-                        .then_some(0)
+                        sheet_ref
+                            .inherited_style(at)
+                            .is_some_and(|inherited| inherited != 0)
+                            .then_some(0)
                     })),
                     Err(_) => {
                         styles.restore_pools(marks);
