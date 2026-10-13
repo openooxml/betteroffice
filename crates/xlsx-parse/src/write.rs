@@ -7,6 +7,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque, btree_map};
 use std::io;
 use std::iter::Peekable;
+use std::ops::Range;
 
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::{Reader, Writer};
@@ -2668,7 +2669,7 @@ fn worksheet_xml_with_template(
     let (columns, sheet_data) = match patched {
         Some((columns, sheet_data)) => (columns, Some(sheet_data)),
         None => (
-            (!sheet.col_widths.is_empty())
+            (!sheet.col_widths.is_empty() || !sheet.col_styles.is_empty())
                 .then(|| fragment(|writer| write_cols(writer, sheet)))
                 .transpose()?,
             Some(fragment(|writer| {
@@ -2976,46 +2977,105 @@ fn active_pane(rows: u32, cols: u32) -> &'static str {
 }
 
 pub(crate) fn write_cols(w: &mut Writer<Vec<u8>>, sheet: &Sheet) -> io::Result<()> {
-    if sheet.col_widths.is_empty() && sheet.col_styles.is_empty() {
+    let runs = col_runs(sheet, &[]);
+    if runs.is_empty() {
         return Ok(());
     }
     w.create_element("cols").write_inner_content(|w| {
-        for run in &sheet.col_styles {
-            let first = (u64::from(run.first) + 1).to_string();
-            let last = (u64::from(run.last) + 1).to_string();
-            let style = run.xf.to_string();
-            let mut element = BytesStart::new("col");
-            element.push_attribute(("min", first.as_str()));
-            element.push_attribute(("max", last.as_str()));
-            element.push_attribute(("style", style.as_str()));
-            w.write_event(Event::Empty(element))?;
-        }
-        for (&col, &width) in &sheet.col_widths {
-            write_col(w, col, width, sheet.col_style(col))?;
+        for run in &runs {
+            write_col_run(w, run)?;
         }
         Ok(())
     })?;
     Ok(())
 }
 
-pub(crate) fn write_col(
-    w: &mut Writer<Vec<u8>>,
-    col: ColId,
-    width: f64,
+/// One `<col>` element: columns sharing a width and a style.
+pub(crate) struct ColRun {
+    pub(crate) first: ColId,
+    last: ColId,
+    width: Option<f64>,
     style: Option<u32>,
-) -> io::Result<()> {
-    let n = (u64::from(col) + 1).to_string();
-    let width = fmt_num(width);
+}
+
+/// The model's widths and column styles as ascending, disjoint runs outside
+/// `covered`. Widths stay one column per run.
+pub(crate) fn col_runs(sheet: &Sheet, covered: &[Range<ColId>]) -> Vec<ColRun> {
+    let mut sorted = covered.to_vec();
+    sorted.sort_unstable_by_key(|range| range.start);
+    let mut covered: Vec<Range<ColId>> = Vec::with_capacity(sorted.len());
+    for range in sorted {
+        match covered.last_mut() {
+            Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+            _ => covered.push(range),
+        }
+    }
+    let styles = sheet.col_style_runs();
+    let mut bounds =
+        Vec::with_capacity(2 * (styles.len() + sheet.col_widths.len() + covered.len()));
+    for run in &styles {
+        bounds.extend([run.first, run.last.saturating_add(1)]);
+    }
+    for &col in sheet.col_widths.keys() {
+        bounds.extend([col, col.saturating_add(1)]);
+    }
+    for range in &covered {
+        bounds.extend([range.start, range.end]);
+    }
+    bounds.sort_unstable();
+    bounds.dedup();
+    let mut runs: Vec<ColRun> = Vec::new();
+    for pair in bounds.windows(2) {
+        let (first, last) = (pair[0], pair[1] - 1);
+        let at = covered.partition_point(|range| range.end <= first);
+        if covered.get(at).is_some_and(|range| range.start <= first) {
+            continue;
+        }
+        let at = styles.partition_point(|run| run.last < first);
+        let style = styles
+            .get(at)
+            .filter(|run| run.first <= first)
+            .map(|run| run.xf);
+        let width = sheet.col_widths.get(&first).copied();
+        if width.is_none() && style.is_none() {
+            continue;
+        }
+        match runs.last_mut() {
+            Some(run)
+                if width.is_none()
+                    && run.width.is_none()
+                    && run.style == style
+                    && run.last.saturating_add(1) == first =>
+            {
+                run.last = last;
+            }
+            _ => runs.push(ColRun {
+                first,
+                last,
+                width,
+                style,
+            }),
+        }
+    }
+    runs
+}
+
+pub(crate) fn write_col_run<W: io::Write>(w: &mut Writer<W>, run: &ColRun) -> io::Result<()> {
+    let first = (u64::from(run.first) + 1).to_string();
+    let last = (u64::from(run.last) + 1).to_string();
+    let width = run.width.map(fmt_num);
+    let style = run.style.map(|style| style.to_string());
     let mut element = BytesStart::new("col");
-    element.push_attribute(("min", n.as_str()));
-    element.push_attribute(("max", n.as_str()));
-    element.push_attribute(("width", width.as_str()));
-    element.push_attribute(("customWidth", "1"));
-    let style = style.map(|style| style.to_string());
+    element.push_attribute(("min", first.as_str()));
+    element.push_attribute(("max", last.as_str()));
+    if let Some(width) = &width {
+        element.push_attribute(("width", width.as_str()));
+        element.push_attribute(("customWidth", "1"));
+    }
     if let Some(style) = &style {
         element.push_attribute(("style", style.as_str()));
     }
-    if width == "0" {
+    if width.as_deref() == Some("0") {
         element.push_attribute(("hidden", "1"));
     }
     w.write_event(Event::Empty(element))?;

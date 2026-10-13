@@ -13,8 +13,8 @@ use crate::axis::SheetAxes;
 use crate::package::{XmlAttribute, attributes, remove_attribute, set_attribute};
 use crate::read::SharedStringCells;
 use crate::write::{
-    SharedStringPlan, cell_value_markup, fmt_num, fragment, shared_string_index, write_cell,
-    write_col, write_cols, write_row,
+    SharedStringPlan, cell_value_markup, col_runs, fmt_num, fragment, shared_string_index,
+    write_cell, write_col_run, write_cols, write_row,
 };
 use crate::xml::{attr, xml_err};
 use crate::{MAX_DEPTH, ParseError};
@@ -239,8 +239,8 @@ impl SheetPatch<'_> {
         let Some((element, cols)) = scan_cols(source)? else {
             return self.generated_cols();
         };
-        let mut entries: Vec<(u32, Vec<u8>, bool)> = Vec::new();
-        let mut covered = BTreeSet::new();
+        let mut entries: Vec<(u32, Vec<u8>)> = Vec::new();
+        let mut covered = Vec::new();
         for col in &cols {
             let (name, attributes) = start_tag(&source[col.tag.clone()])?;
             let pieces = self
@@ -276,53 +276,23 @@ impl SheetPatch<'_> {
                         bytes.extend_from_slice(&source[col.tag.end..col.span.end]);
                     }
                 }
-                covered.extend(piece.range.clone());
-                entries.push((piece.range.start, bytes, false));
+                covered.push(piece.range.clone());
+                entries.push((piece.range.start, bytes));
             }
         }
-        for (&col, &width) in &self.sheet.col_widths {
-            if covered.contains(&col) {
-                continue;
-            }
-            let mut writer = Writer::new(Vec::new());
-            write_col(&mut writer, col, width, self.sheet.col_style(col)).map_err(xml_err)?;
-            covered.insert(col);
-            let at = entries
-                .iter()
-                .position(|(min, _, generated)| !generated && *min > col)
-                .unwrap_or(entries.len());
-            entries.insert(at, (col, writer.into_inner(), true));
-        }
-        let col_limit = if self.sheet.col_styles.is_empty() {
-            0
-        } else {
-            xlsx_model::MAX_COLS
-        };
-        for col in 0..col_limit {
-            if covered.contains(&col) {
-                continue;
-            }
-            let Some(style) = self.sheet.col_style(col) else {
-                continue;
-            };
-            let number = (col + 1).to_string();
-            let style = style.to_string();
-            let mut writer = Writer::new(Vec::new());
-            let mut element = quick_xml::events::BytesStart::new("col");
-            element.push_attribute(("min", number.as_str()));
-            element.push_attribute(("max", number.as_str()));
-            element.push_attribute(("style", style.as_str()));
-            writer
-                .write_event(quick_xml::events::Event::Empty(element))
-                .map_err(xml_err)?;
-            entries.push((col, writer.into_inner(), true));
-        }
-        if entries.is_empty() {
+        let mut generated = col_runs(self.sheet, &covered).into_iter().peekable();
+        if entries.is_empty() && generated.peek().is_none() {
             return Ok(None);
         }
         let mut out = element.prefix;
-        for (_, bytes, _) in entries {
+        for (start, bytes) in entries {
+            while let Some(run) = generated.next_if(|run| run.first < start) {
+                write_col_run(&mut Writer::new(&mut out), &run).map_err(xml_err)?;
+            }
             out.extend_from_slice(&bytes);
+        }
+        for run in generated {
+            write_col_run(&mut Writer::new(&mut out), &run).map_err(xml_err)?;
         }
         let tail = cols
             .last()

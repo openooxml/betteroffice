@@ -224,6 +224,67 @@ impl Sheet {
             .map(|run| run.xf)
     }
 
+    /// Column defaults as ascending, disjoint runs; later runs win.
+    pub fn col_style_runs(&self) -> Vec<ColStyle> {
+        let mut runs: BTreeMap<ColId, ColStyle> = BTreeMap::new();
+        for &run in &self.col_styles {
+            if run.first > run.last {
+                continue;
+            }
+            let after = run.last.saturating_add(1);
+            let before = runs.range(..run.first).next_back().map(|(_, &prior)| prior);
+            if let Some(before) = before
+                && before.last >= run.first
+            {
+                runs.insert(
+                    before.first,
+                    ColStyle {
+                        last: run.first - 1,
+                        ..before
+                    },
+                );
+                if before.last > run.last {
+                    runs.insert(
+                        after,
+                        ColStyle {
+                            first: after,
+                            ..before
+                        },
+                    );
+                }
+            }
+            let inside = runs
+                .range(run.first..=run.last)
+                .map(|(&first, _)| first)
+                .collect::<Vec<_>>();
+            for first in inside {
+                let Some(old) = runs.remove(&first) else {
+                    continue;
+                };
+                if old.last > run.last {
+                    runs.insert(
+                        after,
+                        ColStyle {
+                            first: after,
+                            ..old
+                        },
+                    );
+                }
+            }
+            runs.insert(run.first, run);
+        }
+        let mut out: Vec<ColStyle> = Vec::with_capacity(runs.len());
+        for run in runs.into_values() {
+            match out.last_mut() {
+                Some(last) if last.xf == run.xf && last.last.saturating_add(1) == run.first => {
+                    last.last = run.last;
+                }
+                _ => out.push(run),
+            }
+        }
+        out
+    }
+
     /// The default a missing cell takes: its row's, then its column's.
     pub fn inherited_style(&self, at: CellRef) -> Option<u32> {
         self.row_styles
