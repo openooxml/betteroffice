@@ -185,7 +185,7 @@ function glyphLine(options: GlyphLineOptions = {}) {
     const set = { key: kern ? 'kern' : 'set', fontId: 1, alphabet, horizontal: 0.01,
       glyphIds: [...alphabet].map((char) => char.charCodeAt(0)), advances: [...alphabet].map(() => 1000),
       kerning: kern ? [[5, 6, -200] as const] : [], unsafePairs: [], outlines: {} };
-    return { key: set.key, ink: { upem: 1000, xMin: 0, yMin: -200, yMax: 700, overhang: 0 }, glyphs: { set, horizontal: 0.01,
+    return { key: set.key, ink: { upem: 1000, xMin: 0, yMin: -200, yMax: 700, overhang: 0 }, glyphs: { set, horizontal: 0.01, advance: (units: number) => units * 0.01,
       chars: new Map([...alphabet].map((char, index) => [char, index])),
       kerning: new Map(set.kerning.map(([left, right, units]) => [left * alphabet.length + right, units])),
       unsafe: new Set<number>() } };

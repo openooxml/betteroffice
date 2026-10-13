@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import type { DocxEchoGlyphSet } from './residentCommandProtocol';
-import { echoRound3, indexEchoGlyphSet, leadingWordWidth, outlineBounds, placeEchoGlyphs } from './residentEchoGlyphs';
+import { echoRound3, indexEchoGlyphSet, leadingWordWidth, outlineBounds, placeEchoGlyphs, widenF32 } from './residentEchoGlyphs';
 
 function glyphSet(overrides: Partial<DocxEchoGlyphSet> = {}): DocxEchoGlyphSet {
   const alphabet = 'AVabx ';
@@ -13,7 +13,7 @@ test('echo placement sums f32 advances in f64 and rounds pens as the engine does
   const glyphs = indexEchoGlyphSet(glyphSet());
   const origin = 1417 / 15;
   const h = glyphs.set.horizontal;
-  const advances = [Math.fround((1366 - 152) * h), Math.fround(1366 * h), Math.fround(1139 * h)];
+  const advances = [Math.fround((1366 - 152) * h), Math.fround(1366 * h), Math.fround(1139 * h)].map(widenF32);
   const placed = placeEchoGlyphs(glyphs, 'AVa', '', origin)!;
   expect(placed.advances).toEqual(advances);
   expect(placed.glyphIds).toEqual([65, 86, 97]);
@@ -26,13 +26,13 @@ test('echo placement scales by the exact f32 the shortest JSON decimal stands fo
   const glyphs = indexEchoGlyphSet(glyphSet({ horizontal: 0.0065104165 }));
   expect(glyphs.horizontal).toBe(Math.fround(0.0065104165));
   expect(glyphs.horizontal).not.toBe(0.0065104165);
-  expect(placeEchoGlyphs(glyphs, 'a', '', 0)!.advances).toEqual([Math.fround(1139 * Math.fround(0.0065104165))]);
+  expect(placeEchoGlyphs(glyphs, 'a', '', 0)!.advances).toEqual([widenF32(Math.fround(1139 * Math.fround(0.0065104165)))]);
 });
 
 test('echo placement kerns the line end with the character after the line', () => {
   const glyphs = indexEchoGlyphSet(glyphSet());
-  expect(placeEchoGlyphs(glyphs, 'A', 'V', 0)!.advances).toEqual([Math.fround(1214 * glyphs.set.horizontal)]);
-  expect(placeEchoGlyphs(glyphs, 'A', '', 0)!.advances).toEqual([Math.fround(1366 * glyphs.set.horizontal)]);
+  expect(placeEchoGlyphs(glyphs, 'A', 'V', 0)!.advances).toEqual([widenF32(Math.fround(1214 * glyphs.horizontal))]);
+  expect(placeEchoGlyphs(glyphs, 'A', '', 0)!.advances).toEqual([widenF32(Math.fround(1366 * glyphs.horizontal))]);
 });
 
 test('echo placement declines characters and pairs the glyph set cannot place', () => {
@@ -43,6 +43,16 @@ test('echo placement declines characters and pairs the glyph set cannot place', 
   expect(placeEchoGlyphs(glyphs, 'a', 'x', 0)).toBeUndefined();
   expect(placeEchoGlyphs(glyphs, 'a', 'é', 0)).toBeUndefined();
   expect(placeEchoGlyphs(indexEchoGlyphSet(glyphSet({ glyphIds: [65, 86, 0, 98, 120, 32] })), 'a', '', 0)).toBeUndefined();
+});
+
+test('f32 widths widen to the shortest decimal that names them, as layout widens them', () => {
+  expect(widenF32(Math.fround(0.1))).toBe(0.1);
+  expect(widenF32(Math.fround(7.415365))).toBe(7.415365);
+  expect(widenF32(10)).toBe(10);
+  for (const units of [569, 1024, 1139, 1479]) {
+    const value = Math.fround(units * Math.fround(Math.fround(960 / 72) / 2048));
+    expect(Math.fround(widenF32(value))).toBe(value);
+  }
 });
 
 test('echo rounding rounds halves away from zero and never yields negative zero', () => {

@@ -9,6 +9,8 @@ export interface EchoGlyphIndex {
   set: DocxEchoGlyphSet;
   /** The f32 scale exactly; JSON carries its shortest decimal. */
   horizontal: number;
+  /** Pixel advance of a unit count, widened from f32 as layout widens it. */
+  advance(units: number): number;
   chars: ReadonlyMap<string, number>;
   kerning: ReadonlyMap<number, number>;
   unsafe: ReadonlySet<number>;
@@ -27,11 +29,27 @@ export function indexEchoGlyphSet(set: DocxEchoGlyphSet): EchoGlyphIndex {
   const count = set.glyphIds.length;
   const chars = new Map<string, number>();
   [...set.alphabet].forEach((char, index) => { if (set.glyphIds[index]) chars.set(char, index); });
+  const horizontal = Math.fround(set.horizontal);
+  const advances = new Map<number, number>();
   return {
-    set, chars, horizontal: Math.fround(set.horizontal),
+    set, chars, horizontal,
+    advance(units) {
+      let value = advances.get(units);
+      if (value === undefined) advances.set(units, value = widenF32(Math.fround(units * horizontal)));
+      return value;
+    },
     kerning: new Map(set.kerning.map(([left, right, units]) => [left * count + right, units])),
     unsafe: new Set(set.unsafePairs.map(([left, right]) => left * count + right)),
   };
+}
+
+/** The f64 layout widens an f32 width to: the shortest decimal that still names the f32. */
+export function widenF32(value: number): number {
+  for (let digits = 1; digits <= 9; digits += 1) {
+    const widened = Number(value.toPrecision(digits));
+    if (Math.fround(widened) === value) return widened;
+  }
+  return value;
 }
 
 /** The engine's display-list rounding of pen positions (Rust `round3`). */
@@ -63,7 +81,7 @@ export function placeEchoGlyphs(glyphs: EchoGlyphIndex, text: string, next: stri
     const right = position + 1 < indices.length ? indices[position + 1] : following;
     if (right !== undefined && glyphs.unsafe.has(left * count + right)) return undefined;
     const units = glyphs.set.advances[left]! + (right === undefined ? 0 : glyphs.kerning.get(left * count + right) ?? 0);
-    const advance = Math.fround(units * glyphs.horizontal);
+    const advance = glyphs.advance(units);
     placement.glyphIds.push(glyphs.set.glyphIds[left]!);
     placement.xs.push(echoRound3(pen));
     placement.advances.push(advance);
