@@ -1085,6 +1085,39 @@ impl Codec for ChartAnchor {
 }
 
 const BASE_SECTIONS: usize = 17;
+/// The sections a manifest tagged with section 0 counts: those before row
+/// defaults.
+const RELEASED_BASE_SECTIONS: usize = 16;
+const ROW_STYLE_SECTION: usize = 17;
+/// Tags the manifest of a base with row defaults, which also counts their
+/// section.
+const ROW_STYLE_MANIFEST_TAG: u8 = 20;
+const ROW_STYLE_TAG: u8 = 21;
+
+fn base_section(tag: u8) -> SnapshotResult<usize> {
+    match tag {
+        ROW_STYLE_MANIFEST_TAG => Ok(0),
+        ROW_STYLE_TAG => Ok(ROW_STYLE_SECTION),
+        tag if usize::from(tag) <= RELEASED_BASE_SECTIONS => Ok(usize::from(tag)),
+        _ => Err(SnapshotError::new("unexpected authority base record")),
+    }
+}
+
+fn manifest_tag(base: &WorkbookBase) -> u8 {
+    if base.row_styles.is_empty() {
+        0
+    } else {
+        ROW_STYLE_MANIFEST_TAG
+    }
+}
+
+fn manifest_counts(tag: u8) -> usize {
+    if tag == ROW_STYLE_MANIFEST_TAG {
+        BASE_SECTIONS
+    } else {
+        RELEASED_BASE_SECTIONS
+    }
+}
 
 fn base_counts(base: &WorkbookBase) -> [usize; BASE_SECTIONS] {
     let WorkbookBase {
@@ -1147,7 +1180,7 @@ fn write_manifest(base: &WorkbookBase, w: &mut Writer) {
     date_system.write(w);
     fingerprint.write(w);
     styles.theme.write(w);
-    for count in base_counts(base) {
+    for count in &base_counts(base)[..manifest_counts(manifest_tag(base))] {
         count.write(w);
     }
 }
@@ -1193,7 +1226,11 @@ impl BaseCursor {
             tables,
         } = base;
         let mut w = Writer::new();
-        w.u8(self.section as u8);
+        w.u8(match self.section {
+            0 => manifest_tag(base),
+            ROW_STYLE_SECTION => ROW_STYLE_TAG,
+            section => section as u8,
+        });
         let index = self.index;
         match self.section {
             0 => write_manifest(base, &mut w),
@@ -1493,17 +1530,14 @@ enum BaseRecord {
 }
 
 impl BaseRecord {
-    fn preflight_cost(section: usize, r: &mut DecodePreflight<'_>) -> SnapshotResult<usize> {
-        match section {
+    fn preflight_cost(tag: u8, r: &mut DecodePreflight<'_>) -> SnapshotResult<usize> {
+        match base_section(tag)? {
             0 => {
                 r.value::<u64>()?;
                 r.value::<DateSystem>()?;
                 r.value::<String>()?;
                 r.value::<Theme>()?;
-                for index in 0..BASE_SECTIONS {
-                    if index == BASE_SECTIONS - 1 && r.complete && r.position == r.payload.len() {
-                        break;
-                    }
+                for _ in 0..manifest_counts(tag) {
                     r.value::<usize>()?;
                 }
                 r.cost = r.cost.max(std::mem::size_of::<BaseManifest>());
@@ -1558,18 +1592,15 @@ impl BaseRecord {
         })
     }
 
-    fn read(r: &mut BoundedReader<'_>, section: usize) -> SnapshotResult<Self> {
-        Ok(match section {
+    fn read(r: &mut BoundedReader<'_>, tag: u8) -> SnapshotResult<Self> {
+        Ok(match base_section(tag)? {
             0 => {
                 let start = r.position;
                 r.prepare::<u64>()?;
                 r.prepare::<DateSystem>()?;
                 r.prepare::<String>()?;
                 r.prepare::<Theme>()?;
-                for index in 0..BASE_SECTIONS {
-                    if index == BASE_SECTIONS - 1 && r.position == r.payload.len() {
-                        break;
-                    }
+                for _ in 0..manifest_counts(tag) {
                     r.prepare::<usize>()?;
                 }
                 let cost = std::mem::size_of::<BaseManifest>();
@@ -1585,10 +1616,7 @@ impl BaseRecord {
                 let fingerprint = r.take()?;
                 let theme = r.take()?;
                 let mut counts = [0; BASE_SECTIONS];
-                for (index, count) in counts.iter_mut().enumerate() {
-                    if index == BASE_SECTIONS - 1 && r.position == r.payload.len() {
-                        break;
-                    }
+                for count in counts.iter_mut().take(manifest_counts(tag)) {
                     *count = r.take()?;
                 }
                 Self::Manifest(Box::new(BaseManifest {
@@ -1641,14 +1669,14 @@ impl BaseBuilder {
         }
         let mut cursor = self.cursor.clone();
         cursor.normalize(&self.counts);
-        let section = usize::from(Reader::new(payload).u8()?);
-        if section != cursor.section || section > BASE_SECTIONS {
+        let tag = Reader::new(payload).u8()?;
+        if base_section(tag)? != cursor.section {
             return Err(SnapshotError::new("unexpected authority base record"));
         }
         let cost = DECODE_RESERVATION
             .saturating_add(1)
             .saturating_add(BaseRecord::preflight_cost(
-                section,
+                tag,
                 &mut DecodePreflight::new(payload, 1, &self.decode),
             )?);
         if cost > budget.max_bytes() {
@@ -1670,11 +1698,11 @@ impl BaseBuilder {
             max_elements: budget.max_records(),
             state: &mut self.decode,
         };
-        let section = usize::from(reader.atomic::<u8>()?);
-        if section != self.cursor.section || section > BASE_SECTIONS {
+        let tag = reader.atomic::<u8>()?;
+        if base_section(tag)? != self.cursor.section {
             return Err(SnapshotError::new("unexpected authority base record"));
         }
-        let record = BaseRecord::read(&mut reader, section);
+        let record = BaseRecord::read(&mut reader, tag);
         crate::snapshot::step::record(1, budget.max_bytes() - reader.remaining);
         let record = match record {
             Ok(record) => record,
@@ -1766,8 +1794,9 @@ impl BaseBuilder {
     fn push(&mut self, payload: &[u8]) -> SnapshotResult<()> {
         let mut r = Reader::new(payload);
         self.cursor.normalize(&self.counts);
-        let section = usize::from(r.u8()?);
-        if section != self.cursor.section || section > BASE_SECTIONS {
+        let tag = r.u8()?;
+        let section = base_section(tag)?;
+        if section != self.cursor.section {
             return Err(SnapshotError::new("unexpected authority base record"));
         }
         if section == 0 {
@@ -1776,10 +1805,7 @@ impl BaseBuilder {
             let fingerprint = Codec::read(&mut r)?;
             let theme = Codec::read(&mut r)?;
             let mut styles = Stylesheet::default();
-            for (index, count) in self.counts.iter_mut().enumerate() {
-                if index == BASE_SECTIONS - 1 && r.clone().rest().is_empty() {
-                    break;
-                }
+            for count in self.counts.iter_mut().take(manifest_counts(tag)) {
                 *count = r.var_usize()?;
             }
             styles.theme = theme;
@@ -1846,8 +1872,8 @@ impl BaseBuilder {
 
     fn advance_capacity(&mut self, record: &[u8], budget: SnapshotBudget) -> SnapshotResult<bool> {
         self.cursor.normalize(&self.counts);
-        let section = usize::from(Reader::new(record).u8()?);
-        if section != self.cursor.section || section > BASE_SECTIONS {
+        let section = base_section(Reader::new(record).u8()?)?;
+        if section != self.cursor.section {
             return Err(SnapshotError::new("unexpected authority base record"));
         }
         if section == 0 {
@@ -2375,7 +2401,7 @@ mod tests {
         authority.base.date_system.write(&mut writer);
         authority.base.fingerprint.write(&mut writer);
         authority.base.styles.theme.write(&mut writer);
-        for index in 1..=BASE_SECTIONS {
+        for index in 1..=RELEASED_BASE_SECTIONS {
             writer.var_usize(if index == section { count } else { 0 });
         }
         let payload = writer.into_bytes();
@@ -2628,7 +2654,7 @@ mod tests {
         a.base.date_system.write(&mut manifest);
         a.base.fingerprint.write(&mut manifest);
         a.base.styles.theme.write(&mut manifest);
-        for section in 0..BASE_SECTIONS {
+        for section in 0..RELEASED_BASE_SECTIONS {
             manifest.var_usize(if section == 8 { 50_000_000 } else { 0 });
         }
         let mut payload = Writer::new();
@@ -2686,7 +2712,11 @@ mod tests {
         base.date_system.write(&mut hostile);
         base.fingerprint.write(&mut hostile);
         base.styles.theme.write(&mut hostile);
-        for (section, count) in base_counts(&base).into_iter().enumerate() {
+        for (section, count) in base_counts(&base)
+            .into_iter()
+            .take(RELEASED_BASE_SECTIONS)
+            .enumerate()
+        {
             hostile.var_usize(if section == 4 { 50_000_000 } else { count });
         }
         builder.push(&hostile.into_bytes()).unwrap();

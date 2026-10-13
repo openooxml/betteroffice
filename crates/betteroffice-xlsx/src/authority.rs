@@ -189,11 +189,7 @@ impl WorkbookBase {
                 .iter()
                 .map(|sheet| sheet.col_styles.clone())
                 .collect(),
-            row_styles: model
-                .sheets
-                .iter()
-                .map(|sheet| sheet.row_styles.clone())
-                .collect(),
+            row_styles: base_row_styles(model),
             hyperlinks: model
                 .sheets
                 .iter()
@@ -315,11 +311,7 @@ impl WorkbookBase {
                 .iter()
                 .map(|sheet| sheet.col_styles.clone())
                 .collect(),
-            row_styles: model
-                .sheets
-                .iter()
-                .map(|sheet| sheet.row_styles.clone())
-                .collect(),
+            row_styles: base_row_styles(model),
             hyperlinks: model
                 .sheets
                 .iter()
@@ -4078,6 +4070,19 @@ struct HiddenDimensions {
 }
 
 static EMPTY_ROW_STYLES: BTreeMap<u32, u32> = BTreeMap::new();
+
+/// Each sheet's row defaults, or none at all when no sheet has any, as a base
+/// releases before them recorded.
+fn base_row_styles(model: &WorkbookModel) -> Vec<BTreeMap<u32, u32>> {
+    if model.sheets.iter().all(|sheet| sheet.row_styles.is_empty()) {
+        return Vec::new();
+    }
+    model
+        .sheets
+        .iter()
+        .map(|sheet| sheet.row_styles.clone())
+        .collect()
+}
 
 fn materialize_style_defaults<T: ReadTxn>(
     sheet: &mut Sheet,
