@@ -1,4 +1,4 @@
-import { open, story } from './peerlessTestHarness';
+import { open, replyControl, story, type } from './peerlessTestHarness';
 import { expect, mock, test } from 'bun:test';
 const { act, fireEvent, waitFor } = await import('@testing-library/react');
 
@@ -7,6 +7,52 @@ function compose(input: HTMLElement, type: string, data = '') {
   Object.defineProperty(event, 'data', { value: data });
   fireEvent(input, event);
 }
+
+test('text box insertion accepts typing before the worker acknowledges it', async () => {
+  const value = await open();
+  await act(async () => {
+    await value.api.commands!.execute('tool', { value: 'textBox' });
+  });
+  const input = value.view.getByLabelText('Slide text');
+  act(() => value.stage.focus());
+  replyControl.hold();
+  act(() => {
+    fireEvent.pointerDown(value.canvas, value.point(320, 300));
+    fireEvent.pointerMove(value.stage, value.point(600, 400));
+    fireEvent.pointerUp(value.stage, value.point(600, 400));
+  });
+  expect(document.activeElement === input).toBe(true);
+  act(() => {
+    for (const letter of 'BrowserE2Eprobe') type(input, letter);
+  });
+  await waitFor(() => expect(replyControl.count()).toBeGreaterThan(0));
+  await act(async () => {
+    replyControl.release();
+    await value.api.flushPendingInput();
+  });
+  const result = await value.api.readContent();
+  if (!result.ok) throw new Error(result.failure.message);
+  expect(result.stories.map((story) => story.text)).toEqual([
+    'alpha beta\nx\nalpha beta', 'BrowserE2Eprobe', 'alpha beta\nx\nalpha beta',
+  ]);
+});
+
+test('zoom preserves focus in a keyboard control', async () => {
+  const value = await open();
+  const zoom = document.createElement('button');
+  zoom.textContent = 'Zoom';
+  value.view.container.append(zoom);
+  act(() => {
+    fireEvent.keyDown(document, { key: 'Tab' });
+    zoom.focus();
+  });
+  expect(document.activeElement === zoom).toBe(true);
+  await act(async () => {
+    expect(await value.api.commands!.execute('zoom', { scale: 0.5 })).toMatchObject({ ok: true });
+  });
+  expect(document.activeElement === zoom).toBe(true);
+  expect(value.api.commands!.getState('zoom').value).toBe(0.5);
+});
 
 test('scaled_localized_preedit', async () => {
   const value = await open({ i18n: { editor: { textInput: 'Folientext' } } });

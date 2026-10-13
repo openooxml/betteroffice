@@ -48,10 +48,12 @@ import type {
 import { decodeS9Envelope, decodeS9EnvelopeValue } from '../docx/rustParseFacade';
 import { decodeEncodedSelection } from './encodedSelection';
 import type { CollaborationTextInsertion, CollaborationUpdateOrigin } from '../collaboration/types';
+import type { DocxListStoriesResult } from './stories';
 import type {
   DocxEditResult,
   DocxFindTextResult,
   DocxReadParagraphsResult,
+  DocxReadStoriesResult,
   DocxTextTarget,
   DocxValidationResult,
 } from './edits';
@@ -1405,6 +1407,9 @@ export function wrapSession(
     version: () => workerDocumentVersion ?? session.version(),
     readParagraphs: (request) =>
       JSON.parse(session.read_paragraphs_json(JSON.stringify(request))) as DocxReadParagraphsResult,
+    readStories: (request) =>
+      JSON.parse(session.read_stories_json(JSON.stringify(request))) as DocxReadStoriesResult,
+    listStories: () => JSON.parse(session.list_stories_json()) as DocxListStoriesResult,
     findText: (request) =>
       JSON.parse(session.find_text_json(JSON.stringify(request))) as DocxFindTextResult,
     validateEdits: (request) =>

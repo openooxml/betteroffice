@@ -170,6 +170,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       version: async () => { const result = await controller.ref.readParagraphs({ view: 'accepted', paraIds: [] });
         return 'version' in result ? { ok: true, version: result.version } : result; },
       readParagraphs: controller.ref.readParagraphs, findText: controller.ref.findText,
+      listStories: () => controller.read({ kind: 'listStories' }),
+      readStories: (request) => controller.read({ kind: 'readStories', request }),
     },
   }));
   const activations = useSyncExternalStore(pluginHost.subscribe, pluginHost.activations, pluginHost.activations);

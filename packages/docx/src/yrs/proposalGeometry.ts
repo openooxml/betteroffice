@@ -10,6 +10,7 @@ import {
   type YrsLocProjection,
   type YrsPositionOutline,
 } from './yrsPositionProjection';
+import { routedHeaderFooterRIds } from './sessionInternals';
 import { createYrsInputPositionMap, type YrsInputPositionMap } from './inputPositionMap';
 
 /** @internal */
@@ -46,6 +47,8 @@ export type ProposalGeometryReader = AnchorReader &
   > & {
     proposalRevisions?(ids: readonly string[]): readonly ProposalGeometryRevision[];
     positionOutline?(root: string): YrsPositionOutline | null;
+    /** Header and footer alias relationship ids, each mapped to its canonical one. */
+    headerFooterAliases?(): ReadonlyMap<string, string>;
   };
 
 /** @internal */
@@ -68,7 +71,8 @@ export interface RawAnchorRange {
   end: YrsLoc;
 }
 
-type AnchorResolution =
+/** @internal */
+export type AnchorResolution =
   | { ok: true; ranges: RawAnchorRange[]; paragraph: YrsLoc }
   | AnchorResolutionFailure;
 
@@ -120,6 +124,14 @@ export function anchorFailure(
 /** @internal */
 export function isBodyStory(story: string): boolean {
   return story === 'body' || story.startsWith('body:');
+}
+
+/**
+ * The story whose display positions `story` uses: `body` for the body and its cells, `hf:<rId>`
+ * for a header or footer and its cells, else null. @internal
+ */
+export function anchorDisplayRoot(story: string): string | null {
+  return isBodyStory(story) ? 'body' : (/^hf:[^:]+/.exec(story)?.[0] ?? null);
 }
 
 interface ViewSpan {
@@ -253,9 +265,9 @@ function resolveParagraph(
   if (
     resolved.status === 'unsupported' ||
     resolved.anchor.kind !== 'session' ||
-    !isBodyStory(resolved.anchor.story)
+    anchorDisplayRoot(resolved.anchor.story) === null
   ) {
-    return anchorFailure('unsupported', 'The paragraph has no body display position');
+    return anchorFailure('unsupported', 'The paragraph has no display position');
   }
   const { story, paraId } = resolved.anchor;
   const spans = once(reads.spans, story, () => session.paragraphSpans(story)).filter(
@@ -311,8 +323,8 @@ export function resolveAnchorTarget(
     if (target.version !== version) {
       return anchorFailure('stale-version', 'The document changed after that version');
     }
-    if (!isBodyStory(target.range.story)) {
-      return anchorFailure('unsupported', 'The range has no body display position');
+    if (anchorDisplayRoot(target.range.story) === null) {
+      return anchorFailure('unsupported', 'The range has no display position');
     }
     if (!session.hasStory(target.range.story)) {
       return anchorFailure('missing-target', 'The story no longer exists');
@@ -347,11 +359,18 @@ export function resolveAnchorTarget(
       start: { story, ...range.start },
       end: { story, ...range.end },
     }));
-    if (ranges.some((range) => !isBodyStory(range.start.story))) {
-      return anchorFailure('unsupported', 'The revision has no body display position');
+    if (
+      ranges.some(({ start }) =>
+        proposal ? !isBodyStory(start.story) : anchorDisplayRoot(start.story) === null
+      )
+    ) {
+      return anchorFailure('unsupported', 'The revision has no display position');
     }
     if (proposal) {
       const paragraph = resolveParagraph(session, proposal.paragraph, version);
+      if (paragraph.ok && !isBodyStory(paragraph.loc.story)) {
+        return anchorFailure('unsupported', 'The paragraph has no display position');
+      }
       return paragraph.ok ? { ok: true, ranges, paragraph: paragraph.loc } : paragraph;
     }
     return { ok: true, ranges, paragraph: { ...ranges[0]!.start, offset: 0 } };
@@ -432,6 +451,12 @@ export function resolveAnchorTarget(
 export interface ProposalDisplayTarget {
   ranges: { from: number; to: number }[];
   paragraph: number | null;
+  /** A header or footer target's story, whose positions these are; absent for the body. */
+  root?: string;
+  /** With `root`, that story's hidden ranges. */
+  hidden?: { from: number; to: number }[];
+  /** With `root`, the relationship ids whose bands show it, when the reader knows its aliases. */
+  rIds?: string[];
 }
 
 /** @internal */
@@ -461,7 +486,7 @@ export function proposalSetIdentity(snapshot: DocxProposalSnapshot): string {
   return identity;
 }
 
-function displayMapping(reader: ProposalGeometryReader, version: string) {
+function displayMapping(reader: ProposalGeometryReader, version: string, root = 'body') {
   const projections = new Map<string, YrsLocProjection | null>();
   const inputMaps = new Map<string, YrsInputPositionMap | null>();
   const projectionFor = (rootStory: string): YrsLocProjection | null =>
@@ -483,7 +508,9 @@ function displayMapping(reader: ProposalGeometryReader, version: string) {
         : null
     );
   const positionFor = (loc: YrsLoc): number | null =>
-    yrsLocToProjectedDisplayPosition(reader, projectionFor, loc, 'body', inputMap);
+    anchorDisplayRoot(loc.story) === root
+      ? yrsLocToProjectedDisplayPosition(reader, projectionFor, loc, root, inputMap)
+      : null;
   const display = (range: RawAnchorRange): { from: number; to: number } | null => {
     const from = positionFor(range.start);
     const to = positionFor(range.end);
@@ -494,7 +521,7 @@ function displayMapping(reader: ProposalGeometryReader, version: string) {
     const ranges: { from: number; to: number }[] = [];
     for (const range of resolved.ranges) {
       const mapped = display(range);
-      if (!mapped) return anchorFailure('unsupported', 'The target has no body display position');
+      if (!mapped) return anchorFailure('unsupported', 'The target has no display position');
       ranges.push(mapped);
     }
     ranges.sort((a, b) => a.from - b.from || a.to - b.to);
@@ -544,21 +571,53 @@ export function computeProposalGeometryMirror(
   };
 }
 
-/** @internal Display geometry of non-proposal targets. */
+/**
+ * @internal Display geometry of non-proposal targets, each in the story it is painted from;
+ * `hidden` gives the raw hidden ranges a header or footer answer carries for its story.
+ */
 export function computeAnchorTargetGeometry(
   reader: ProposalGeometryReader,
-  targets: readonly Exclude<AnchorGeometryTarget, { kind: 'proposal' }>[]
+  targets: readonly Exclude<AnchorGeometryTarget, { kind: 'proposal' }>[],
+  hidden: () => readonly RawAnchorRange[] = () => []
 ): ProposalGeometryTarget[] {
   const version = reader.version();
-  const { displayTarget } = displayMapping(reader, version);
+  const geometry = resolvedTargetGeometry(reader, version, hidden);
   return targets.map((target) => {
     try {
-      return displayTarget(resolveAnchorTarget(reader, target, version));
+      return geometry(resolveAnchorTarget(reader, target, version));
     } catch (error) {
       if (error instanceof WebAssembly.RuntimeError) throw error;
       return anchorFailure('unsupported', error instanceof Error ? error.message : String(error));
     }
   });
+}
+
+/** @internal {@link computeAnchorTargetGeometry} of targets already resolved at `version`. */
+export function resolvedTargetGeometry(
+  reader: ProposalGeometryReader,
+  version: string,
+  hidden: () => readonly RawAnchorRange[] = () => []
+): (resolved: AnchorResolution) => ProposalGeometryTarget {
+  const roots = new Map<
+    string,
+    { mapping: ReturnType<typeof displayMapping>; hidden?: { from: number; to: number }[] }
+  >();
+  return (resolved) => {
+    if (!resolved.ok) return resolved;
+    const root = anchorDisplayRoot(resolved.paragraph.story) ?? 'body';
+    let entry = roots.get(root);
+    if (!entry) roots.set(root, (entry = { mapping: displayMapping(reader, version, root) }));
+    const mapped = entry.mapping.displayTarget(resolved);
+    if (!mapped.ok || root === 'body') return mapped;
+    const { display } = entry.mapping;
+    entry.hidden ??= hidden()
+      .map(display)
+      .filter((range): range is { from: number; to: number } => range !== null);
+    const rIds = reader.headerFooterAliases
+      ? routedHeaderFooterRIds(reader.headerFooterAliases(), root.slice('hf:'.length))
+      : undefined;
+    return { ...mapped, root, hidden: entry.hidden, ...(rIds ? { rIds } : {}) };
+  };
 }
 
 /** @internal */

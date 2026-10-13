@@ -202,6 +202,7 @@ export interface OpaqueDrawingContent {
   kind: string;
   /** Original markup, written back verbatim at the run position. */
   xml: string;
+  preview?: Image;
 }
 
 /**

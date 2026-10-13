@@ -32,10 +32,12 @@ function isTextField(target: EventTarget | null): boolean {
 export function useCommandShortcuts({
   commands,
   containerRef,
+  editorInput,
   suspended,
 }: {
   commands: PptxCommandController;
   containerRef: RefObject<HTMLElement | null>;
+  editorInput?: RefObject<HTMLElement | null>;
   suspended: () => boolean;
 }) {
   const suspendedRef = useRef(suspended);
@@ -60,7 +62,7 @@ export function useCommandShortcuts({
         const contributed = commands
           .pluginShortcuts()
           .find(({ chord }) => matchesChord(chord, event));
-        if (!contributed || isTextField(event.target)) return;
+        if (!contributed || isTextField(event.target) && event.target !== editorInput?.current) return;
         event.preventDefault();
         if (!event.repeat) void commands.store.execute(contributed.id, null);
         return;
@@ -78,5 +80,5 @@ export function useCommandShortcuts({
     return () => {
       document.removeEventListener('keydown', handleKeyDown);
     };
-  }, [commands, containerRef]);
+  }, [commands, containerRef, editorInput]);
 }

@@ -16,6 +16,7 @@ import type {
 import docxPackage from '../../../../../docx/package.json';
 import { DocxEditor, type DocxEditorProps, type DocxEditorRef } from '../../DocxEditor';
 import { defineDocxPlugin } from '../../../plugins/defineDocxPlugin';
+import type { DocxPluginContext } from '../../../plugins/types';
 import * as core from '../hooks/useYrsCoreSession';
 import * as display from '../hooks/useDisplayList';
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
@@ -105,6 +106,8 @@ class FakeWorker {
         : message.read.kind === 'searchText' ? { matches: [], carried: -1 }
         : message.read.kind === 'rangeHighlights' ? null
         : message.read.kind === 'navigationTarget' ? { loc: { story: 'body', paraId: 'heading', offset: 0 }, position: 1 }
+        : message.read.kind === 'listStories' ? { ok: true, version: 'worker-version', stories: [{ story: 'hf:rId3', kind: 'header', root: 'hf:rId3' }] }
+        : message.read.kind === 'readStories' ? { ok: true, version: 'worker-version', view: 'accepted', stories: [{ story: 'hf:rId3', ok: true, paragraphs: [] }], truncated: false }
         : { ok: true, view: 'accepted', version: 'worker-version', paragraphs: [] } } };
     } else if (message.type === 'commandInit') {
       const { session, incarnation, epoch, readOnly, layoutRevision } = message.request;
@@ -429,6 +432,23 @@ test('peerless shell ref and plugin readiness use worker state', async () => {
   expect(() => ref.current!.getDocument()).toThrow('legacySyncApi');
   expect(() => ref.current!.onContentChange(() => {})).toThrow('legacySyncApi');
   await waitFor(() => expect(setup).toHaveBeenCalledTimes(1));
+  expect(coreSession).not.toHaveBeenCalled();
+});
+
+test('peerless plugin story reads go to the worker', async () => {
+  let context: DocxPluginContext<null> | undefined;
+  const plugin = defineDocxPlugin({ id: 'stories', createState: () => null, initialize: (value) => { context = value; } });
+  const view = render(<DocxEditor {...peerlessProps} plugins={[plugin]} />);
+  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await waitFor(() => expect(context).toBeDefined());
+  expect(await context!.read.listStories()).toEqual({
+    ok: true, version: 'worker-version', stories: [{ story: 'hf:rId3', kind: 'header', root: 'hf:rId3' }],
+  });
+  const request = { stories: ['header'], view: 'accepted' } as const;
+  expect(await context!.read.readStories(request)).toMatchObject({ ok: true, stories: [{ story: 'hf:rId3', ok: true }] });
+  const reads = requests.flatMap((entry) => entry.type === 'documentRead' ? [entry.read] : []);
+  expect(reads).toContainEqual({ kind: 'listStories' });
+  expect(reads).toContainEqual({ kind: 'readStories', request });
   expect(coreSession).not.toHaveBeenCalled();
 });
 

@@ -105,6 +105,7 @@ export const editsession_layout_font_requirements_json: (a: number, b: number, c
 export const editsession_list_comments: (a: number) => [number, number, number, number];
 export const editsession_list_content_controls_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_list_revisions: (a: number) => [number, number, number, number];
+export const editsession_list_stories_json: (a: number) => [number, number, number, number];
 export const editsession_load: (a: number, b: number, c: number) => [number, number];
 export const editsession_load_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_load_media_sources: (a: number, b: number, c: number) => [number, number];
@@ -133,6 +134,7 @@ export const editsession_part_metadata_json: (a: number) => [number, number];
 export const editsession_persist_paragraph_ids: (a: number) => [number, number, number, number];
 export const editsession_proposal_revision_ranges_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_read_paragraphs_json: (a: number, b: number, c: number) => [number, number, number, number];
+export const editsession_read_stories_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_record_saved_paragraph_ids: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_redo: (a: number) => number;
 export const editsession_register_measure_font: (a: number, b: number, c: number) => [number, number, number];

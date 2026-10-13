@@ -3,7 +3,6 @@ import type { Root } from 'react-dom/client';
 import JSZip from 'jszip';
 import { PptxEditor, type PptxAsyncEditorApi, type PptxAsyncEditorProps, type PptxAsyncCollaborationOptions } from '@betteroffice/pptx-react';
 import type { AsyncCollaborationReplica, PptxFontFace, PresentationCommandClient } from '@betteroffice/pptx';
-import { PEERLESS_FLAG } from '../../../packages/pptx-react/src/PptxEditor';
 import { peerlessPainterFactories, peerlessSessionOpener } from '../../../packages/pptx-react/src/worker/usePeerlessPresentation';
 import type { PeerlessConfirmedFrame } from '../../../packages/pptx-react/src/worker/peerlessViewStore';
 import type { PeerlessEditorProbe } from './pptx-peerless-editor-probe';
@@ -94,7 +93,6 @@ export async function mountPeerlessEditor(root: Root, bytes: Uint8Array, fonts: 
     slots.map((slot, index) => createElement('div', { key: index, 'data-editor': true, 'data-peerless-editor': index,
       style: { width: `${100 / count}%`, height: '100%', minWidth: 0 } },
     createElement<PptxAsyncEditorProps>(PptxEditor, { file: slot.file, fonts, clientId: 4200 + index, collaboration: slot.collaboration,
-      [PEERLESS_FLAG]: true as const,
       onError: (error: Error) => errors.push(error.message), onSave: (saved: Uint8Array) => { slot.saved = saved; },
       onReady: (api: PptxAsyncEditorApi) => { slot.api = api; slot.ready.resolve(api); },
     })))));

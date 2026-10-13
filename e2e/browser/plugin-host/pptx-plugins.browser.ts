@@ -15,7 +15,7 @@ interface Probe {
       storyId: string;
       start: number;
       end: number;
-    }): boolean;
+    }): Promise<boolean>;
   } | null;
   navigation: unknown;
   selection: { target: { kind: string } } | null;
@@ -28,8 +28,8 @@ const probe = (page: Page) =>
     return { navigation: value.navigation, selection: value.selection, marks: value.marks };
   });
 
-async function open(page: Page) {
-  await page.goto('/pptx.html');
+async function open(page: Page, engine: 'legacy' | 'worker') {
+  await page.goto(`/pptx.html?engine=${engine}`);
   await expect(page.getByTestId('pptx-slide-canvas')).toBeVisible({ timeout: 120_000 });
   await expect(page.locator('[data-probe-slide="1"]')).toBeAttached({ timeout: 60_000 });
 }
@@ -71,10 +71,24 @@ async function misalignment(page: Page): Promise<number> {
   });
 }
 
+for (const engine of ['legacy', 'worker'] as const) {
+  test.describe(`pptx plugins (${engine})`, () => {
+    test.beforeEach(async ({ page }) => {
+      await page.addInitScript(() => {
+        const probe = { count: 0, capture() { this.count++; } };
+        (globalThis as unknown as { __pptxMainEngineProbe: typeof probe }).__pptxMainEngineProbe = probe;
+      });
+    });
+    test.afterEach(async ({ page }) => {
+      const count = await page.evaluate(() =>
+        (globalThis as unknown as { __pptxMainEngineProbe: { count: number } }).__pptxMainEngineProbe.count);
+      if (engine === 'worker') expect(count).toBe(0);
+      else expect(count).toBeGreaterThan(0);
+    });
 test('pptx: overlays land on the presented slide at every zoom and while scrolled', async ({
   page,
 }) => {
-  await open(page);
+  await open(page, engine);
   for (const scale of [0.5, 1, 2] as const) {
     await zoom(page, scale);
     await expect(page.locator(`[data-probe-slide][data-zoom="${scale}"]`)).toBeAttached();
@@ -89,7 +103,7 @@ test('pptx: overlays land on the presented slide at every zoom and while scrolle
 });
 
 test('pptx: overlays leave the pointer to the slide beneath them', async ({ page }) => {
-  await open(page);
+  await open(page, engine);
   const shape = page.locator('[data-probe-shape]');
   await expect(shape).toBeAttached();
   const box = (await shape.boundingBox())!;
@@ -98,7 +112,7 @@ test('pptx: overlays leave the pointer to the slide beneath them', async ({ page
 });
 
 test('pptx: navigation shows the slide and keeps focus in the panel', async ({ page }) => {
-  await open(page);
+  await open(page, engine);
   const input = page.getByTestId('probe-input');
   await input.focus();
   await page.getByTestId('probe-navigate').focus();
@@ -118,7 +132,7 @@ test('pptx: navigation shows the slide and keeps focus in the panel', async ({ p
 test('pptx: dock tabs work by keyboard, and narrow docks open panels as drawers', async ({
   page,
 }) => {
-  await open(page);
+  await open(page, engine);
   const dock = page.getByTestId('plugin-dock-right');
   const probeTab = dock.getByRole('tab', { name: 'Probe' });
   const secondTab = dock.getByRole('tab', { name: 'Second' });
@@ -153,7 +167,7 @@ test('pptx: plugin toolbar commands work by pointer, shortcut and the overflow m
   page,
 }) => {
   await page.setViewportSize({ width: 1920, height: 1000 });
-  await open(page);
+  await open(page, engine);
   const marks = async () => (await probe(page)).marks;
   const rail = page.getByTestId('pptx-formatting-toolbar');
   await rail.getByRole('button', { name: 'Probe mark' }).click();
@@ -181,7 +195,7 @@ test('pptx: plugin text fields keep their keys; built-in shortcuts in plugin chr
   page,
 }) => {
   await page.setViewportSize({ width: 1920, height: 1000 });
-  await open(page);
+  await open(page, engine);
   const state = () =>
     page.evaluate(async () => {
       const editor = (window as unknown as { __probe: Probe }).__probe.editor!;
@@ -196,7 +210,7 @@ test('pptx: plugin text fields keep their keys; built-in shortcuts in plugin chr
       steps: [{ op: 'setSlideNotes', target: { slideId: read.slides[0].id }, text: 'Edited' }],
     });
     const story = read.stories[0];
-    editor.selectText({
+    await editor.selectText({
       slide: 1,
       shapeId: story.shapeId,
       storyId: story.storyId,
@@ -239,3 +253,6 @@ test('pptx: plugin text fields keep their keys; built-in shortcuts in plugin chr
   await page.keyboard.press('ControlOrMeta+Shift+K');
   await expect.poll(async () => (await probe(page)).marks).toBe(1);
 });
+
+  });
+}

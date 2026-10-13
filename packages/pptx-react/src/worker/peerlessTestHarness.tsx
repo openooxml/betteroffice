@@ -12,7 +12,7 @@ import { createInProcessPair } from '../../../../shared/office-session/testing/i
 import { createPeerlessSession } from '../../../pptx/src/session/commandSession';
 import { registerPresentationCommandHandlers } from '../../../pptx/src/session/commandHost';
 import * as wasm from '../../../pptx/src/wasm/loader';
-import { PEERLESS_FLAG, PptxEditor } from '../PptxEditor';
+import { PptxEditor } from '../PptxEditor';
 import { peerlessSessionOpener } from './usePeerlessPresentation';
 import type { PptxAsyncEditorApi } from './createPeerlessEditorApi';
 import type { PptxAsyncEditorProps } from '../PptxEditor';
@@ -44,7 +44,7 @@ function bounded<T>(promise: Promise<T>): Promise<T> {
   })]).finally(() => clearTimeout(timer));
 }
 
-async function deck(small = false): Promise<Uint8Array> {
+export async function deck(small = false): Promise<Uint8Array> {
   const zip = new JSZip();
   const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
   const ns = `xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="${rel}"`;
@@ -170,7 +170,7 @@ export async function open(options: Partial<PptxAsyncEditorProps> = {}) {
   const ready = mock((value: PptxAsyncEditorApi) => { api = value; });
   const bytes = await bounded(deck());
   const ui = (readOnly = options.readOnly, suspend = false) => <Suspense fallback={<div>Waiting</div>}>
-    <PptxEditor fonts={[]} file={bytes} {...{ [PEERLESS_FLAG]: true as const }} onReady={ready} {...options} readOnly={readOnly} />
+    <PptxEditor fonts={[]} file={bytes} onReady={ready} {...options} readOnly={readOnly} />
     <Suspend active={suspend} />
   </Suspense>;
   const mounted = render(ui());
@@ -192,7 +192,7 @@ export async function open(options: Partial<PptxAsyncEditorProps> = {}) {
     await waitFor(() => expect(client.state.selection).toMatchObject({ kind: 'object', shapeId: box.shapeId }));
     await waitFor(() => expect(view.getAllByTestId(/pptx-resize-/)).toHaveLength(8));
   };
-  return { view, stage, canvas, box, point, select, list, bytes, api, ui, client };
+  return { view, stage, canvas, box, point, select, list, bytes, api, ui, client, commands };
 }
 
 

@@ -7,6 +7,7 @@ import { preloadEditWasm } from '../wasm/edit';
 import {
   OPAQUE_SEED_BUDGET_BYTES,
   OpaqueSeedBudgetError,
+  assertOpaqueSeedBudget,
   documentToYrs,
 } from './documentToYrs';
 import { createYrsSession } from './index';
@@ -14,7 +15,7 @@ import { createYrsSession } from './index';
 const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
 const OFFICE_DOC = 'application/vnd.openxmlformats-officedocument';
 
-function opaqueDocument(xmlBytes: number): Document {
+function opaqueDocument(xmlBytes: number, previewSrc?: string): Document {
   const xml = `<w:object><o:OLEObject Type="Embed" ProgID="Eq"/>${'x'.repeat(xmlBytes)}</w:object>`;
   return {
     package: {
@@ -23,7 +24,16 @@ function opaqueDocument(xmlBytes: number): Document {
           {
             type: 'paragraph',
             paraId: '00000001',
-            content: [{ type: 'run', content: [{ type: 'opaqueDrawing', kind: 'object', xml }] }],
+            content: [{ type: 'run', content: [{
+              type: 'opaqueDrawing', kind: 'object', xml,
+              ...(previewSrc === undefined ? {} : { preview: {
+                type: 'image' as const,
+                rId: 'rIdImage',
+                src: previewSrc,
+                size: { width: 914400, height: 457200 },
+                wrap: { type: 'inline' as const },
+              } }),
+            }] }],
           },
         ],
       },
@@ -42,6 +52,14 @@ function opaqueBytes(xmlBytes: number): Uint8Array<ArrayBuffer> {
 }
 
 beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm')))));
+
+it('preview media does not count toward the opaque XML seed budget', () => {
+  const src = 'x'.repeat(OPAQUE_SEED_BUDGET_BYTES + 1);
+  expect(() => assertOpaqueSeedBudget(opaqueDocument(16, src))).not.toThrow();
+  expect(() => assertOpaqueSeedBudget(opaqueDocument(OPAQUE_SEED_BUDGET_BYTES + 1, src))).toThrow(
+    OpaqueSeedBudgetError
+  );
+});
 
 it('projected seeder refuses an opaque payload over the aggregate budget', async () => {
   const session = await createYrsSession({ clientId: 74610 });
