@@ -700,6 +700,29 @@ describe('peerless F2 prefill keyboard replay', () => {
     } } });
   });
 
+  for (const [platform, modifier] of [['Linux', { ctrlKey: true }], ['MacIntel', { metaKey: true }]] as const) {
+    it(`replaces a held seed with select all, Delete and typed keys on ${platform}`, async () => {
+      const previous = Object.getOwnPropertyDescriptor(navigator, 'platform');
+      Object.defineProperty(navigator, 'platform', { configurable: true, value: platform });
+      restorers.push(() => { if (previous) Object.defineProperty(navigator, 'platform', previous); else Reflect.deleteProperty(navigator, 'platform'); });
+      const { host, view, input, resolve } = await setup();
+      const text = 'saved edit';
+      key(input, 'a', modifier);
+      key(input, 'Delete');
+      for (const character of text) { key(input, character); type(input, character); }
+      expect(host.sent.filter((command) => command.kind === 'editCell')).toEqual([]);
+      await resolve();
+      expect(input.value).toBe(text);
+      expect(input.selectionStart).toBe(text.length);
+      key(input, 'Enter');
+      expect(view.queryByTestId('xlsx-cell-editor')).toBeNull();
+      await waitFor(() => expect(host.sent.some((command) => command.kind === 'editCell')).toBe(true));
+      const edits = host.sent.filter((command) => command.kind === 'editCell');
+      expect(edits).toHaveLength(1);
+      expect(edits[0]).toMatchObject({ payload: { args: [0, 0, 0, text] } });
+    });
+  }
+
   it('drops held keys and closes immediately on Escape', async () => {
     const { host, view, input, resolve } = await setup();
     type(input, 'X');

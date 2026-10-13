@@ -235,6 +235,124 @@ describe('prefill reservation recovery', () => {
   });
 });
 
+describe('prefill refusals and seals', () => {
+  function setup() {
+    const prefill = deferred<string>();
+    const view = { editable: true, navigation: 0, row: 0 };
+    let readOnly = () => false;
+    const controller = new WorkerDraftController({
+      generation: () => 1, identity: () => 'book', navigation: () => view.navigation,
+      selection: () => ({ anchor: { row: view.row, col: 0 }, focus: { row: view.row, col: 0 } }), sheet: () => 0,
+      target: (_sheet, row, col) => ({ sheetId: 'sheet:0', range: { kind: 'rowCol', start: { row, col }, end: { row, col } } }),
+      resolveSheet: () => 0, editable: () => view.editable && !readOnly(), prefill: () => prefill.promise,
+      select: (_sheet, cell, move) => { view.row = cell.row + (move === 'down' ? 1 : 0); view.navigation += 1; },
+      selectionTarget: () => undefined, dependency: () => null, navigate: () => {},
+      committed: (ticket) => { void ticket.result.catch(() => {}); },
+      fail: (error) => { throw error; }, report: () => {}, focus: () => {},
+    });
+    const harness = peerlessHarness(8, 8, controller);
+    const { coordinator, sent, ack } = harness;
+    readOnly = () => coordinator.readOnly;
+    controller.attach(coordinator);
+    let acknowledging = false;
+    coordinator.subscribe((event) => {
+      if (event.type === 'dispatched' && event.draft && event.seq !== null) controller.submitted(event.draft, event.seq);
+      if (event.type === 'refused' && event.draft) controller.refused(event.seq, event.draft);
+      if (acknowledging && event.type === 'dispatched' && event.seq !== null) queueMicrotask(() => ack(event.seq!));
+    });
+    const dispatched = (kind: PeerlessWorkerCommand['kind'], count = 1) => new Promise<void>((resolve) => {
+      const check = () => sent.filter((command) => command.kind === kind).length >= count;
+      if (check()) { resolve(); return; }
+      const off = coordinator.subscribe(() => { if (check()) { off(); resolve(); } });
+    });
+    const edits = () => sent.flatMap((command) => command.kind === 'editCell' ? [command.payload.args[3]] : []);
+    const seq = (match: (command: PeerlessWorkerCommand) => boolean) => sent.find(match)!.seq;
+    const reserveTypedF2 = async () => {
+      controller.open();
+      controller.holdCellEdit({ kind: 'insert', text: 'X' });
+      controller.commit('cell', 'down');
+      prefill.resolve('initial');
+      await dispatched('editCell');
+    };
+    return { ...harness, controller, prefill, view, dispatched, edits, seq, reserveTypedF2,
+      acknowledgeLater: () => { acknowledging = true; } };
+  }
+  const edit = (value: string) => (command: PeerlessWorkerCommand) => command.kind === 'editCell' && command.payload.args[3] === value;
+  const mode = (readOnly: boolean) => (command: PeerlessWorkerCommand) => command.kind === 'setReadOnly' && command.payload.readOnly === readOnly;
+
+  test('a reserved refusal while a completed next-cell composition owns focus is not resubmitted by Save', async () => {
+    const { coordinator, controller, prefill, ack, dispatched, edits, seq, acknowledgeLater } = setup();
+    controller.open();
+    controller.holdCellEdit({ kind: 'insert', text: 'X' });
+    controller.commit('cell', 'down');
+    controller.open('Y');
+    const input = { value: 'Y', selectionStart: 1, selectionEnd: 1, setSelectionRange() {} } as unknown as HTMLInputElement;
+    controller.cellInput = input;
+    controller.start('cell');
+    input.value = 'Y変';
+    controller.change('cell', 'Y変', input);
+    controller.end('変');
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    prefill.resolve('initial');
+    await dispatched('editCell', 2);
+    expect(edits()).toEqual(['initialX', 'Y変']);
+    ack(seq(edit('initialX')), 'refused');
+    ack(seq(edit('Y変')), 'cancelled');
+    expect(controller.getSnapshot().cell?.value).toBe('Y変');
+    expect(controller.getSnapshot().refused.map((record) => record.draft.value)).toEqual(['initialX']);
+    acknowledgeLater();
+    await expect(coordinator.save()).rejects.toMatchObject({ code: 'input-failed' });
+    expect(edits()).toEqual(['initialX', 'Y変']);
+  });
+
+  test('a reserved refusal while editing is disabled is not resubmitted after editing resumes', async () => {
+    const { coordinator, controller, view, ack, edits, seq, acknowledgeLater, reserveTypedF2 } = setup();
+    await reserveTypedF2();
+    view.editable = false;
+    ack(seq(edit('initialX')), 'refused');
+    view.editable = true;
+    acknowledgeLater();
+    await expect(coordinator.save()).rejects.toMatchObject({ code: 'input-failed' });
+    expect(edits()).toEqual(['initialX']);
+    expect(controller.getSnapshot().refused.map((record) => record.draft.value)).toEqual(['initialX']);
+  });
+
+  test('a reserved refusal during a read-only toggle needs a visible restore before Save sends it', async () => {
+    const { coordinator, controller, ack, dispatched, edits, seq, acknowledgeLater, reserveTypedF2 } = setup();
+    await reserveTypedF2();
+    const locking = coordinator.setReadOnly(true);
+    await dispatched('setReadOnly');
+    ack(seq(edit('initialX')), 'refused');
+    ack(seq(mode(true)));
+    await locking.result;
+    const unlocking = coordinator.setReadOnly(false);
+    await dispatched('setReadOnly', 2);
+    ack(seq(mode(false)));
+    await unlocking.result;
+    acknowledgeLater();
+    await expect(coordinator.save()).rejects.toMatchObject({ code: 'input-failed' });
+    expect(edits()).toEqual(['initialX']);
+    expect(controller.getSnapshot().refused.map((record) => record.draft.value)).toEqual(['initialX']);
+    controller.restore();
+    expect(controller.getSnapshot().cell?.value).toBe('initialX');
+    controller.commit('cell');
+    await dispatched('editCell', 2);
+    expect(edits()).toEqual(['initialX', 'initialX']);
+  });
+
+  test('an untouched F2 stays open across a plugin read that waits for its seed', async () => {
+    const { coordinator, controller, prefill, sent } = setup();
+    controller.open();
+    const reading = coordinator.runAfterPendingInput(() => controller.getSnapshot().cell?.value);
+    expect(controller.getSnapshot().cell).not.toBeNull();
+    prefill.resolve('initial');
+    expect(await reading).toBe('initial');
+    expect(controller.getSnapshot().cell?.value).toBe('initial');
+    expect(controller.loadingCell).toBe(false);
+    expect(sent).toEqual([]);
+  });
+});
+
 describe('completed composition recovery', () => {
   function setup() {
     const selected = { anchor: { row: 0, col: 0 }, focus: { row: 0, col: 0 } };
