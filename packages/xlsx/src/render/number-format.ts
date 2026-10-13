@@ -9,7 +9,7 @@ export type PaintRun = (
   align: TextAlign
 ) => void;
 
-/** Lays out `cmd.text` by its parts, painting each run left-aligned. */
+/** Lays out `cmd.text` by its parts, measuring only when padding, fill or an overflow check needs widths. */
 export function paintNumberFormat(
   ctx: CanvasRenderingContext2D,
   cmd: TextCmd,
@@ -19,6 +19,12 @@ export function paintNumberFormat(
   const text = cmd.text;
   const align = cmd.align ?? 'left';
   const parts = layout.parts;
+  if (parts.length === 0 && !layout.overflow) {
+    ctx.textAlign = align;
+    paintRun(ctx, cmd, text, layout.left + offset(align, layout.width, 0), align);
+    return;
+  }
+  ctx.textAlign = 'left';
   let cursor = 0;
   let fixed = 0;
   let hasFill = false;

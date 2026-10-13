@@ -178,7 +178,6 @@ function paintText(ctx: CanvasRenderingContext2D, cmd: TextCmd): void {
   ctx.font = fontString(cmd);
   ctx.textBaseline = 'alphabetic';
   if (cmd.numberFormat) {
-    ctx.textAlign = 'left';
     paintNumberFormat(ctx, cmd, cmd.numberFormat, paintRun);
   } else {
     const align = cmd.align ?? 'left';
