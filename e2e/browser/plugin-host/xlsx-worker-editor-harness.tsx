@@ -244,6 +244,23 @@ window.__xlsxWorkerEditor = {
       return selected;
     },
     failure: () => peerlessApi?.failure?.message ?? null,
+    async cellRects(cells) {
+      if (!context) throw new Error('Plugin is not active');
+      let placed: Awaited<ReturnType<NonNullable<WorkerEditorProbe['peerless']>['cellRects']>> = null;
+      await context.run(({ geometry }) => {
+        const canvas = rootElement.querySelector<HTMLCanvasElement>('[data-paint-source="worker"]');
+        const layer = rootElement.querySelector<HTMLElement>('[data-testid="plugin-overlays"]');
+        if (!geometry || !canvas || !layer) return;
+        const canvasBounds = canvas.getBoundingClientRect();
+        const layerBounds = layer.getBoundingClientRect();
+        const dx = layerBounds.left + layer.clientLeft - layer.scrollLeft - canvasBounds.left;
+        const dy = layerBounds.top + layer.clientTop - layer.scrollTop - canvasBounds.top;
+        const rects = cells.map(([row, col]) => geometry.getCellRect({ sheetId: geometry.layout.sheetId, row, col }));
+        if (rects.some((rect) => !rect)) return;
+        placed = { zoom: geometry.layout.zoom, rects: rects.map((rect) => ({ ...rect!, x: rect!.x + dx, y: rect!.y + dy })) };
+      });
+      return placed;
+    },
     workerCount: () => workers.length,
     async saveAndReopen() {
       savedBytes = null;
