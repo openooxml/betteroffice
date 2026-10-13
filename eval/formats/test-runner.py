@@ -108,6 +108,44 @@ for line in sys.stdin:
             result['nextCursor'] = str(start + 10)
     print(json.dumps({'jsonrpc': '2.0', 'id': message['id'], 'result': result}), flush=True)
 '''
+GENERIC_SUFFIX = (' Use shell commands and Python with openpyxl, python-pptx and python-docx to read and edit the documents.'
+                  ' There is no network access. All other tool calls disqualify the task. The documents live in the current directory.')
+FAKE_GENERIC_CODEX = '''#!/usr/bin/env python3
+import json
+import os
+import shutil
+import sys
+from pathlib import Path
+args = sys.argv[1:]
+assert args[:3] == ['exec', '-m', os.environ['FAKE_MODEL']]
+assert args[args.index('--sandbox') + 1] == 'workspace-write'
+workspace = Path(args[args.index('-C') + 1])
+assert Path.cwd() == workspace and len(list(workspace.iterdir())) == 1
+assert os.environ['PATH'].split(os.pathsep)[0] == os.environ['FAKE_PYTHON_BIN']
+overrides = [args[i + 1] for i, arg in enumerate(args) if arg == '-c']
+assert 'sandbox_workspace_write.network_access=false' in overrides
+assert not any(value.startswith(('mcp_servers', 'sandbox_workspace_write.writable_roots')) for value in overrides)
+assert args[-1].endswith(os.environ['FAKE_GENERIC_SUFFIX'])
+task = next(task for task in json.loads(Path(os.environ['FAKE_TASKS']).read_text()) if args[-1].startswith(task['prompt']))
+shutil.copyfile(Path(os.environ['FAKE_CORRECT']) / (task['id'] + '.' + task['format']), workspace / task['output'])
+print(json.dumps({'type': 'thread.started'}))
+for item in [{'id': 'shell-1', 'type': 'command_execution', 'command': 'python3 edit.py'},
+             {'id': 'patch-1', 'type': 'file_change', 'changes': [{'path': 'edit.py', 'kind': 'add'}]}]:
+    for event in ['item.started', 'item.completed']:
+        print(json.dumps({'type': event, 'item': item}))
+mode = os.environ.get('FAKE_MODE')
+if mode == 'mcp':
+    print(json.dumps({'type': 'item.completed', 'item': {'id': 'tool-1', 'type': 'mcp_tool_call', 'server': 'betteroffice'}}))
+elif mode == 'web':
+    print(json.dumps({'type': 'item.completed', 'item': {'id': 'web-1', 'type': 'web_search', 'query': 'openpyxl docs'}}))
+'''
+
+
+def executable(path, text):
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(text)
+    path.chmod(0o755)
+    return path
 
 
 class RunnerTests(unittest.TestCase):
@@ -136,6 +174,16 @@ class RunnerTests(unittest.TestCase):
             'FAKE_MCP_TOOLS': json.dumps(SERVER_TOOLS),
         })
         self.environment.start()
+        self.generic_bin = self.root / 'generic bin'
+        executable(self.generic_bin / 'codex', FAKE_GENERIC_CODEX)
+        self.python = executable(self.root / 'python bin' / 'python',
+                                 '#!/bin/sh\n[ "$1" = -c ] && [ "$2" = "import openpyxl, pptx, docx" ] || exit 7\n')
+        self.broken_python = executable(self.root / 'broken python' / 'python',
+                                        "#!/bin/sh\necho \"ModuleNotFoundError: No module named 'docx'\" >&2\nexit 1\n")
+
+    def generic_environment(self, **values):
+        return patch.dict(os.environ, {'PATH': str(self.generic_bin) + os.pathsep + os.environ['PATH'],
+                                       'FAKE_PYTHON_BIN': str(self.python.parent), 'FAKE_GENERIC_SUFFIX': GENERIC_SUFFIX, **values})
 
     def tearDown(self):
         self.environment.stop()
@@ -157,6 +205,7 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(len(report['results']), 20)
         self.assertEqual(report['timeout_seconds'], 600)
         self.assertGreater(report['mcp_startup_seconds'], 0)
+        self.assertEqual(report['arm'], 'betteroffice')
         self.assertTrue(all(item['pass'] and item['tool_calls'] == 1 and item['duration_seconds'] > 0 for item in report['results']))
         self.assertEqual((results / 'results.md').read_text().count('| PASS |'), 20)
         repeat = subprocess.run([str(ROOT / 'run.sh'), command, str(results), 'test-model'], capture_output=True)
@@ -252,6 +301,57 @@ class RunnerTests(unittest.TestCase):
         log = self.root / 'plain.log'
         log.write_text('Not a structured Codex event\n[]\nnull\n')
         self.assertIsNone(runner.tool_calls(log))
+
+    def test_generic_arm_command_allows_only_the_sandboxed_shell(self):
+        command = runner.command_line(None, self.root, 'test-model', 'Do the task.', arm='generic')
+        self.assertEqual(command[command.index('--sandbox') + 1], 'workspace-write')
+        self.assertEqual(command[command.index('-C') + 1], str(self.root))
+        self.assertFalse({'danger-full-access', '--add-dir', '--dangerously-bypass-approvals-and-sandbox'} & set(command))
+        self.assertTrue({'--skip-git-repo-check', '--ignore-user-config', '--ignore-rules', '--ephemeral', '--json'} <= set(command))
+        overrides = [command[i + 1] for i, arg in enumerate(command) if arg == '-c']
+        self.assertEqual(sorted(overrides), ['approval_policy="never"', 'sandbox_workspace_write.network_access=false',
+                                             'web_search="disabled"'])
+        enabled = {command[i + 1] for i, arg in enumerate(command) if arg == '--enable'}
+        disabled = {command[i + 1] for i, arg in enumerate(command) if arg == '--disable'}
+        self.assertEqual(enabled, {'shell_tool', 'unified_exec', 'unified_exec_tty'})
+        self.assertEqual(disabled, {'shell_snapshot', 'browser_use', 'browser_use_external', 'browser_use_full_cdp_access',
+                                    'in_app_browser', 'computer_use', 'apps', 'view_image', 'in_app_local_automation',
+                                    'plugins', 'remote_plugin', 'multi_agent', 'hooks', 'skill_search',
+                                    'skill_mcp_dependency_install', 'image_generation', 'workspace_dependencies', 'worktrees'})
+        self.assertEqual(command[-1], 'Do the task.' + GENERIC_SUFFIX)
+
+    def test_generic_arm_counts_shell_work_and_fails_mcp_and_web_search(self):
+        for mode, reason in [('', None), ('mcp', 'forbidden tool call: MCP server betteroffice'),
+                             ('web', 'forbidden tool call: web_search')]:
+            results = self.root / f'generic-{mode or "shell"}'
+            results.mkdir()
+            with self.subTest(mode=mode), self.generic_environment(FAKE_MODE=mode):
+                record = runner.run_task(runner.checker.tasks()[0], None, 'test-model', results, arm='generic', python=self.python)
+                self.assertEqual(record['tool_calls'], 2)
+                self.assertEqual(record['pass'], reason is None, record['check_message'])
+                if reason:
+                    self.assertIn(reason, record['check_message'])
+
+    def test_generic_shell_run_checks_its_python(self):
+        results = self.root / 'generic results'
+        with self.generic_environment():
+            result = subprocess.run([str(ROOT / 'run.sh'), '--arm', 'generic', '--python', str(self.python), str(results), 'test-model'],
+                                    stdin=subprocess.DEVNULL, capture_output=True, text=True)
+            broken = subprocess.run([str(ROOT / 'run.sh'), '--arm', 'generic', '--python', str(self.broken_python),
+                                     str(self.root / 'broken'), 'test-model'], stdin=subprocess.DEVNULL, capture_output=True, text=True)
+            usage = subprocess.run([str(ROOT / 'run.sh'), '--arm', 'generic', str(self.root / 'usage')],
+                                   stdin=subprocess.DEVNULL, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = json.loads((results / 'results.json').read_text())
+        self.assertEqual((report['arm'], report['python']), ('generic', str(self.python)))
+        self.assertNotIn('mcp_startup_seconds', report)
+        self.assertTrue(all(item['pass'] and item['tool_calls'] == 2 for item in report['results']))
+        self.assertIn('Arm: `generic`', (results / 'results.md').read_text())
+        self.assertEqual(broken.returncode, 1)
+        self.assertIn('cannot import openpyxl, pptx and docx', broken.stderr)
+        self.assertFalse((self.root / 'broken').exists())
+        self.assertEqual(usage.returncode, 2)
+        self.assertIn('--python', usage.stderr)
 
 
 if __name__ == '__main__':
