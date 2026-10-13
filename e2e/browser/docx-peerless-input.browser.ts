@@ -1015,15 +1015,19 @@ test(`viewport-first ${feature} open preserves pixels and page position as certi
     const rect = element.getBoundingClientRect();
     return { pixels: (element as HTMLCanvasElement).toDataURL(), x: rect.x, y: rect.y };
   });
+  const scroller = page.locator('.editor-stage .docx-editor__scroll-container');
+  const prefixHeight = await scroller.evaluate((element) => element.scrollHeight);
   await expect.poll(() => page.evaluate(() => window.__docxPeerlessInput.heldFrames.some(({ message }) =>
     message.ok && message.commandFrame?.frame.payload.layoutProvisional !== true))).toBe(true);
   await page.evaluate(() => window.__docxPeerlessInput.releaseFrames());
-  await expect.poll(() => page.locator('[data-peerless-docx] [data-page-id]').count()).toBeGreaterThan(3);
+  await expect.poll(() => scroller.evaluate((element) => element.scrollHeight)).toBeGreaterThan(prefixHeight);
   const after = await canvas.evaluate((element) => {
     const rect = element.getBoundingClientRect();
     return { pixels: (element as HTMLCanvasElement).toDataURL(), x: rect.x, y: rect.y };
   });
   expect(after).toEqual(before);
+  await expect.poll(() => page.evaluate(() => window.__docxPeerlessHarness?.capabilities)).toMatchObject({ presentation: true });
+  await page.evaluate(() => window.__docxPeerlessHarness!.registerWorker(window.__docxPeerlessInput.worker!));
   await page.evaluate(async () => { await window.__docxPeerlessHarness!.setViewport!([40, 41, 42]); });
   const later = page.locator('[data-peerless-docx] [data-page-index="40"] canvas');
   await expect(later).toBeAttached();
