@@ -5510,9 +5510,7 @@ mod tests {
     }
 
     /// The accepted fingerprints hashed over the released reading of the styles.
-    fn released_readings(
-        fingerprints: &BTreeMap<i64, Vec<String>>,
-    ) -> BTreeMap<i64, Vec<String>> {
+    fn released_readings(fingerprints: &BTreeMap<i64, Vec<String>>) -> BTreeMap<i64, Vec<String>> {
         let mut released = fingerprints.clone();
         for accepted in released.values_mut() {
             accepted.retain(|fingerprint| !fingerprint.starts_with(PATTERN_FILLS_FINGERPRINT_TAG));
