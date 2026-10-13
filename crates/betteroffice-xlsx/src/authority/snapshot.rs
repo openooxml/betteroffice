@@ -3541,4 +3541,96 @@ mod ceiling_tests {
             "authority base record exceeds byte limit"
         );
     }
+
+    fn styled_defaults_model(rows: BTreeMap<u32, u32>) -> WorkbookModel {
+        let mut model = model();
+        model.styles.cell_xfs = vec![Xf::default(); 2];
+        model.sheets[0].col_styles = vec![ColStyle {
+            first: 1,
+            last: 3,
+            xf: 1,
+        }];
+        model.sheets[0].row_styles = rows;
+        model
+    }
+
+    /// The manifest as releases before row defaults wrote it.
+    fn released_manifest(base: &WorkbookBase) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u8(0);
+        base.bootstrap_client_id.write(&mut w);
+        base.date_system.write(&mut w);
+        base.fingerprint.write(&mut w);
+        base.styles.theme.write(&mut w);
+        for count in [
+            base.defined_names.len(),
+            base.fingerprints.len(),
+            base.freeze_panes.len(),
+            base.formats.len(),
+            base.col_styles.len(),
+            base.hyperlinks.len(),
+            base.charts.len(),
+            base.hidden_dimensions.len(),
+            base.shared_strings.len(),
+            base.styles.fonts.len(),
+            base.styles.fills.len(),
+            base.styles.borders.len(),
+            base.styles.cell_xfs.len(),
+            base.styles.num_fmts.len(),
+            base.styles.indexed_colors.len(),
+            base.tables.len(),
+        ] {
+            count.write(&mut w);
+        }
+        w.into_bytes()
+    }
+
+    fn decoded_bases(records: &[Vec<u8>]) -> [WorkbookBase; 2] {
+        let budget = SnapshotBudget::new(1, 4096).unwrap();
+        let mut bounded = BaseBuilder::default();
+        let mut whole = BaseBuilder::default();
+        for record in records {
+            while !bounded.push_bounded(record, budget).unwrap() {}
+            whole.push(record).unwrap();
+        }
+        [bounded.finish().unwrap(), whole.finish().unwrap()]
+    }
+
+    #[test]
+    fn base_records_without_row_defaults_keep_the_released_layout() {
+        let base = WorkbookBase::from_model(&styled_defaults_model(BTreeMap::new())).unwrap();
+        let records = base_records(&base);
+        assert_eq!(records[0], released_manifest(&base));
+        assert!(records.iter().all(|record| record[0] <= 16));
+        for decoded in decoded_bases(&records) {
+            assert!(decoded.row_styles.is_empty());
+            assert_eq!(base_records(&decoded), records);
+        }
+    }
+
+    #[test]
+    fn row_default_base_records_carry_their_own_tags() {
+        let rows = BTreeMap::from([(2, 1), (5, 0)]);
+        let base = WorkbookBase::from_model(&styled_defaults_model(rows.clone())).unwrap();
+        let records = base_records(&base);
+        assert!(
+            records[0][0] > 16,
+            "a manifest counting row defaults must not carry a released tag"
+        );
+        let row_records = &records[records.len() - base.row_styles.len()..];
+        assert!(row_records.iter().all(|record| record[0] > 16));
+        for decoded in decoded_bases(&records) {
+            assert_eq!(decoded.row_styles[0], rows);
+            assert_eq!(base_records(&decoded), records);
+        }
+        let mut released_tag = records[0].clone();
+        released_tag[0] = 0;
+        let budget = SnapshotBudget::new(1, 4096).unwrap();
+        assert!(BaseBuilder::default().push(&released_tag).is_err());
+        assert!(
+            BaseBuilder::default()
+                .push_bounded(&released_tag, budget)
+                .is_err()
+        );
+    }
 }

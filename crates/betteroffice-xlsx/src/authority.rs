@@ -598,6 +598,31 @@ impl WorkbookAuthority {
         Ok(writer.into_bytes())
     }
 
+    /// The recovery state as releases before row defaults encoded it.
+    #[cfg(test)]
+    pub(crate) fn encode_released_recovery_state(&self) -> Vec<u8> {
+        use crate::snapshot::wire::Writer;
+        use snapshot::Codec;
+        let mut writer = Writer::new();
+        let base = &self.base;
+        base.bootstrap_client_id.write(&mut writer);
+        base.date_system.write(&mut writer);
+        base.defined_names.write(&mut writer);
+        base.fingerprint.write(&mut writer);
+        base.fingerprints.write(&mut writer);
+        base.freeze_panes.write(&mut writer);
+        base.formats.write(&mut writer);
+        base.col_styles.write(&mut writer);
+        base.hyperlinks.write(&mut writer);
+        base.charts.write(&mut writer);
+        base.hidden_dimensions.write(&mut writer);
+        base.shared_strings.write(&mut writer);
+        base.tables.write(&mut writer);
+        writer.bytes(&serde_json::to_vec(&base.styles).unwrap());
+        writer.bytes(&self.encode_state_as_update_v1());
+        writer.into_bytes()
+    }
+
     pub(crate) fn restore_recovery_state(
         bytes: &[u8],
         client_id: u64,
@@ -5835,6 +5860,42 @@ mod tests {
         let oracle =
             WorkbookBase::from_model_with_legacy_dimensions_oracle(&model, &[], None).unwrap();
         assert_eq!(base.fingerprints, oracle.fingerprints);
+    }
+
+    #[test]
+    fn style_default_fingerprints_take_their_own_domain_and_accept_released_readings() {
+        let mut columns = rich_model();
+        columns.sheets[0].col_styles = vec![ColStyle {
+            first: 0,
+            last: 3,
+            xf: 1,
+        }];
+        let mut rows = rich_model();
+        rows.sheets[0].row_styles = BTreeMap::from([(4, 1)]);
+        for model in [&columns, &rows] {
+            let base = WorkbookBase::from_model(model).unwrap();
+            let (released, released_client) = fingerprint_model_with_row_styles_oracle(
+                model,
+                SCHEMA_VERSION,
+                true,
+                true,
+                false,
+            )
+            .unwrap();
+            assert!(base.fingerprints[&SCHEMA_VERSION].contains(&released));
+            assert_ne!(
+                base.fingerprint, released,
+                "a state that may carry row and column defaults must not pass for a released one"
+            );
+            assert_ne!(base.bootstrap_client_id, released_client);
+        }
+        let plain = rich_model();
+        let base = WorkbookBase::from_model(&plain).unwrap();
+        let (released, released_client) =
+            fingerprint_model_with_row_styles_oracle(&plain, SCHEMA_VERSION, true, true, false)
+                .unwrap();
+        assert_eq!(base.fingerprint, released);
+        assert_eq!(base.bootstrap_client_id, released_client);
     }
 
     #[test]

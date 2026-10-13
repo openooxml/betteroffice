@@ -2714,4 +2714,55 @@ mod tests {
         assert_eq!(&decoded, opened.model());
         assert_eq!(encode(&decoded, budget), chunks);
     }
+
+    #[test]
+    fn sheet_records_without_row_defaults_keep_the_released_layout() {
+        let model = sample_model();
+        assert!(model.sheets.iter().all(|sheet| sheet.row_styles.is_empty()));
+        let budget = SnapshotBudget::new(1, 64 * 1024).unwrap();
+        let chunks = encode(&model, budget);
+        let mut sheets = model.sheets.iter();
+        for chunk in &chunks {
+            let (kind, _, payload) = unframe(chunk).unwrap();
+            if kind != ChunkKind::Model || payload[0] != 12 {
+                continue;
+            }
+            let sheet = sheets.next().unwrap();
+            let mut w = Writer::new();
+            w.u8(12);
+            w.str(&sheet.name);
+            w.option(sheet.freeze_pane.as_ref(), write_pane);
+            write_format(&mut w, &sheet.format);
+            for count in [
+                sheet.hyperlinks.len(),
+                sheet.merges.len(),
+                sheet.col_widths.len(),
+                sheet.row_heights.len(),
+                sheet.col_styles.len(),
+                sheet.charts.len(),
+                sheet.array_formulas().count(),
+                sheet.iter_cells().count(),
+            ] {
+                w.var_usize(count);
+            }
+            assert_eq!(payload, w.into_bytes().as_slice());
+        }
+        assert!(sheets.next().is_none());
+        assert_eq!(decode(&chunks), model);
+
+        let mut styled = model.clone();
+        styled.sheets[0].row_styles = std::collections::BTreeMap::from([(1, 0)]);
+        let tags = encode(&styled, budget)
+            .iter()
+            .filter_map(|chunk| {
+                let (kind, _, payload) = unframe(chunk).unwrap();
+                (kind == ChunkKind::Model).then(|| payload[0])
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tags.iter().filter(|&&tag| tag == 12).count(),
+            model.sheets.len() - 1
+        );
+        assert_eq!(tags.iter().filter(|&&tag| tag > 20).count(), 2);
+    }
 }

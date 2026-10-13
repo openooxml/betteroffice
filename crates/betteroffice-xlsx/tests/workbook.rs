@@ -509,6 +509,46 @@ fn cascade_missing_cells_resolve_each_column_default_once_per_frame() {
     );
 }
 
+#[test]
+fn cascade_open_resolves_column_defaults_without_a_scan_per_empty_cell() {
+    let runs = 4_096_u32;
+    let rows = 2_000_u32;
+    let cols = (0..runs)
+        .map(|index| {
+            format!(
+                r#"<col min="{column}" max="{column}" style="{style}"/>"#,
+                column = index + 2,
+                style = 1 + index % 2
+            )
+        })
+        .collect::<String>();
+    let sheet_data = (1..=rows)
+        .map(|row| format!(r#"<row r="{row}"><c r="A{row}"/><c r="B{row}"/></row>"#))
+        .collect::<String>();
+    let mut model = WorkbookModel::default();
+    model.sheets.push(Sheet::new("Data"));
+    model.styles.cell_xfs = vec![xlsx_model::Xf::default(); 3];
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    set_test_part(&mut parts, "xl/worksheets/sheet1.xml", format!(
+        r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cols>{cols}</cols><sheetData>{sheet_data}</sheetData></worksheet>"#
+    ).into_bytes());
+    xlsx_model::workbook::reset_col_style_scans();
+    let parsed = xlsx_parse::parse_workbook(&parts).unwrap();
+    let scans = xlsx_model::workbook::col_style_scans();
+    assert!(
+        scans <= 2,
+        "{scans} column run scans for {rows} empty cells in two columns under {runs} runs"
+    );
+    let sheet = &parsed.sheets[0];
+    for row in 0..rows {
+        assert!(sheet.cell(CellRef::new(row, 0)).is_none());
+        assert_eq!(
+            sheet.cell(CellRef::new(row, 1)).map(|cell| cell.style),
+            Some(Some(0))
+        );
+    }
+}
+
 fn styled_xf_zero_source(
     fonts: Vec<xlsx_model::Font>,
     cell_xfs: Vec<xlsx_model::Xf>,
@@ -603,6 +643,51 @@ fn cascade_collaborative_clear_over_an_italic_xf_zero_stays_plain_on_peers_and_a
         assert!(resolved_format(&reopened, "B1").font.italic);
     }
     assert_eq!(left.model(), right.model());
+}
+
+#[test]
+fn cascade_plain_clears_reuse_one_plain_xf_across_save_and_reopen_cycles() {
+    let addresses = ["A1", "B1", "C1", "D1", "E1"];
+    let mut bytes = styled_xf_zero_source(
+        vec![xlsx_model::Font {
+            italic: true,
+            ..Default::default()
+        }],
+        vec![xlsx_model::Xf {
+            font: Some(0),
+            ..Default::default()
+        }],
+        r#"<row r="1"><c r="A1" s="0"><v>1</v></c><c r="B1" s="0"><v>2</v></c><c r="C1" s="0"><v>3</v></c><c r="D1" s="0"><v>4</v></c><c r="E1" s="0"><v>5</v></c></row>"#,
+    );
+    let initial = Workbook::open(&bytes).unwrap().model().styles.cell_xfs.len();
+    for address in addresses {
+        let mut workbook = Workbook::open(&bytes).unwrap();
+        clear_style(
+            &mut workbook,
+            address,
+            betteroffice_xlsx::StyleProperty::Italic,
+        );
+        assert_eq!(
+            resolved_format(&workbook, address),
+            xlsx_model::CellFormat::default()
+        );
+        bytes = workbook.save().unwrap();
+    }
+    let reopened = Workbook::open(&bytes).unwrap();
+    for address in addresses {
+        assert_eq!(
+            resolved_format(&reopened, address),
+            xlsx_model::CellFormat::default(),
+            "{address}"
+        );
+    }
+    assert!(resolved_format(&reopened, "F1").font.italic);
+    let added = reopened.model().styles.cell_xfs.len() - initial;
+    assert!(
+        added <= 1,
+        "{added} plain xfs added over {} save and reopen cycles",
+        addresses.len()
+    );
 }
 
 #[test]

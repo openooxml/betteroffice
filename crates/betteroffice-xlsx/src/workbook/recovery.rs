@@ -1360,4 +1360,49 @@ mod tests {
         wrong_engine.extend_from_slice(&payload);
         assert!(Workbook::restore_recovery_checkpoint(&wrong_engine).is_err());
     }
+
+    fn with_authority_state(bytes: &[u8], version: u8, state: &[u8]) -> Vec<u8> {
+        let mut reader = Reader::new(&bytes[41..]);
+        let checkpoint = reader.bytes().unwrap();
+        reader.bytes().unwrap();
+        let mut writer = Writer::new();
+        writer.bytes(checkpoint);
+        writer.bytes(state);
+        writer.raw(reader.rest());
+        let payload = writer.into_bytes();
+        let mut framed = bytes[..8].to_vec();
+        framed.push(version);
+        framed.extend_from_slice(&Sha256::digest(&payload));
+        framed.extend_from_slice(&payload);
+        framed
+    }
+
+    #[test]
+    fn recovery_checkpoints_version_row_defaults_and_restore_the_released_layout() {
+        let mut styled = model();
+        styled.styles.cell_xfs = vec![xlsx_model::Xf::default(); 2];
+        styled.sheets[0].row_styles = BTreeMap::from([(3, 1)]);
+        let workbook = Workbook::from_model(styled.clone()).unwrap();
+        let bytes = workbook.recovery_checkpoint(0, None).unwrap();
+        assert_ne!(
+            bytes[8], 3,
+            "a checkpoint whose authority state holds row defaults needs its own codec version"
+        );
+        let (restored, ..) = Workbook::restore_recovery_checkpoint(&bytes).unwrap();
+        assert_eq!(restored.model.sheets[0].row_styles, styled.sheets[0].row_styles);
+
+        let plain = Workbook::from_model(model()).unwrap();
+        let bytes = plain.recovery_checkpoint(0, None).unwrap();
+        let released = with_authority_state(
+            &bytes,
+            3,
+            &plain.authority.encode_released_recovery_state(),
+        );
+        let (restored, ..) = Workbook::restore_recovery_checkpoint(&released).unwrap();
+        assert_eq!(restored.model, plain.model);
+        assert!(restored.model.sheets[0].row_styles.is_empty());
+        let current_state =
+            with_authority_state(&bytes, 3, &plain.authority.encode_recovery_state().unwrap());
+        assert!(Workbook::restore_recovery_checkpoint(&current_state).is_err());
+    }
 }
