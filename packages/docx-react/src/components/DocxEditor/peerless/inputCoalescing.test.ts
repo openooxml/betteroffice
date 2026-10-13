@@ -54,13 +54,18 @@ test('d2b_coalescing_preserves_aliases_and_fences', () => {
 
 function typingSession() {
   type Ack = CommandAck<DocxCommandSelection | null, DocxEditState, DocxCommandFramePayload>;
-  const calls: { envelope: CommandEnvelope<DocxCommandPayload>; resolve(value: Ack): void }[] = [];
+  const calls: { envelope: CommandEnvelope<DocxCommandPayload>; ack: Promise<Ack>; resolve(value: Ack): void }[] = [];
   const queued: (() => void)[] = [];
   const connection: CommandConnection<DocxCommandPayload, DocxCommandSelection | null, DocxEditState, DocxCommandFramePayload> = {
     initial: { session: 'test', incarnation: 1, epoch: 1, version: 0, throughSeq: 0, outcomes: [] },
     client: {
       call: {
-        edit: (envelope) => new Promise<Ack>((resolve) => { calls.push({ envelope, resolve }); }),
+        edit(envelope) {
+          let resolve!: (value: Ack) => void;
+          const ack = new Promise<Ack>((settle) => { resolve = settle; });
+          calls.push({ envelope, ack, resolve });
+          return ack;
+        },
         checkpoint: async () => ({ state: new Uint8Array(), epoch: 1, version: 0, throughSeq: 0 }),
       },
       failure: undefined, onFailure: () => () => {}, dispose: async () => {},
@@ -101,12 +106,13 @@ function typingSession() {
     },
     async acknowledge(count: number) {
       const batch = calls.slice(acknowledged, acknowledged + count);
+      expect(batch).toHaveLength(count);
       acknowledged += count;
       for (const { envelope, resolve } of batch) {
         resolve({ ...connection.initial, version: envelope.seq, throughSeq: envelope.seq,
           outcomes: [{ seq: envelope.seq, status: 'applied' }] });
       }
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await Promise.all(batch.map(({ ack }) => ack));
       pump();
     },
   };
@@ -150,4 +156,49 @@ test('chained typing never coalesces across a selection or format change', async
     .toEqual([['insertText', 'ef'], ['navigate', null], ['insertText', 'gh'], ['toggleMark', null], ['insertText', 'ij']]);
   h.admission.dispose();
   await h.session.dispose();
+});
+
+test.each([
+  { name: 'cancelled empty', text: null },
+  { name: 'committed empty', text: '' },
+  { name: 'committed nonempty', text: '文' },
+])('chained typing stays in separate transactions across a $name composition with echo disabled', async ({ text }) => {
+  const h = typingSession();
+  try {
+    h.type('wxyz');
+    expect(h.calls).toHaveLength(4);
+    const navigation = admitIntent(h.admission, {
+      kind: 'navigate', payload: { unit: 'character', direction: 'backward', extend: false },
+    });
+    h.pump();
+    expect(navigation.status).toBe('submitted');
+    expect(h.admission.getSnapshot().echoEnabled).toBe(false);
+    const [a] = h.type('a');
+    const reservation = h.admission.reserveComposition();
+    const composition = h.admission.settleComposition(reservation.slot,
+      text === null ? null : { text, target: reservation.target });
+    expect(composition.status).toBe(text ? 'submitted' : 'ignored');
+    h.pump();
+    const [b] = h.type('b');
+    expect(h.calls).toHaveLength(4);
+
+    await h.acknowledge(4);
+    const expected = [
+      ['navigate', null], ['insertText', 'a'],
+      ...(text ? [['replaceSelection', text]] : []),
+      ['insertText', 'b'],
+    ];
+    expect(h.calls.slice(4).map(({ envelope }) =>
+      [envelope.kind, 'text' in envelope.payload ? envelope.payload.text : null])).toEqual(expected);
+    expect(a!.seq).not.toBe(b!.seq);
+    expect(h.calls.slice(4).map(({ envelope }) => envelope.afterSeq))
+      .toEqual(expected.map((_, index) => index + 4));
+    await h.acknowledge(expected.length);
+    const outcomes = await Promise.all([a!.ack, b!.ack]);
+    expect(outcomes.every((outcome) => outcome.status === 'applied')).toBe(true);
+    expect(outcomes[0]!.seq).not.toBe(outcomes[1]!.seq);
+  } finally {
+    h.admission.dispose();
+    await h.session.dispose();
+  }
 });
