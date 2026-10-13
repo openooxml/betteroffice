@@ -883,9 +883,8 @@ fn cascade_collaborative_plain_clear_without_a_proven_plain_xf_clears_italic_and
     }
 }
 
-/// A standalone workbook clears italic on A1 beside B1's unlocked xf 1, runs `edit`, then takes a
-/// recovery round trip, which rebuilds the workbook from its shared state.
-fn saved_after_recovery(edit: impl FnOnce(&mut Workbook)) -> Vec<u8> {
+/// A standalone workbook that cleared italic on A1 beside B1's unlocked xf 1, then ran `edit`.
+fn standalone_after_plain_clear(edit: impl FnOnce(&mut Workbook)) -> Workbook {
     let mut workbook = Workbook::open(&plain_reading_xf_source("", UNLOCKED_XF)).unwrap();
     clear_style(
         &mut workbook,
@@ -893,32 +892,51 @@ fn saved_after_recovery(edit: impl FnOnce(&mut Workbook)) -> Vec<u8> {
         betteroffice_xlsx::StyleProperty::Italic,
     );
     edit(&mut workbook);
-    let checkpoint = workbook.recovery_checkpoint(1, None).unwrap();
-    let (restored, _, _, _) = Workbook::restore_recovery_checkpoint(&checkpoint).unwrap();
-    restored.save().unwrap()
+    workbook
 }
 
-/// A1 and C1 come back on their source xf 0, locked, as on main; B1 keeps xf 1.
-fn assert_recovered_on_source_markup(saved: &[u8]) {
+/// The shared state, applied to a collaborative peer of the same source, keeps A1 and C1 on
+/// their source xf 0 and B1 on xf 1, as on main: it never puts the plain format on an xf not
+/// known to save plain. A recovery round trip saves what the workbook saved, with no cleared
+/// cell unlocked.
+fn assert_plain_edits_share_and_recover_faithfully(workbook: &Workbook) {
     let source = plain_reading_xf_source("", UNLOCKED_XF);
+    let mut peer = Workbook::open_collaborative(&source, 863).unwrap();
+    let update = workbook
+        .encode_diff_v1(&peer.encode_state_vector_v1())
+        .unwrap();
+    peer.apply_update_v1(&update, CalculationOptions::default())
+        .unwrap();
+    let shared = peer.save().unwrap();
     for address in ["A1", "C1"] {
         assert_eq!(
-            saved_cell_xf(saved, address),
+            saved_cell_xf(&shared, address),
             saved_cell_xf(&source, address),
             "{address}"
         );
     }
-    assert!(saved_cell_xf(saved, "B1").contains(r#"locked="0""#));
+    assert!(saved_cell_xf(&shared, "B1").contains(r#"locked="0""#));
+    let saved = workbook.save().unwrap();
+    let checkpoint = workbook.recovery_checkpoint(1, None).unwrap();
+    let (restored, _, _, _) = Workbook::restore_recovery_checkpoint(&checkpoint).unwrap();
+    assert_eq!(restored.save().unwrap(), saved);
+    for address in ["A1", "C1"] {
+        let markup = saved_cell_xf(&saved, address);
+        assert!(
+            !markup.contains(r#"locked="0""#),
+            "{address} saved on {markup}"
+        );
+    }
 }
 
 #[test]
-fn cascade_recovery_after_a_plain_clear_keeps_the_cleared_cell_locked() {
-    assert_recovered_on_source_markup(&saved_after_recovery(|_| {}));
+fn cascade_standalone_plain_clear_shares_and_recovers_faithfully() {
+    assert_plain_edits_share_and_recover_faithfully(&standalone_after_plain_clear(|_| {}));
 }
 
 #[test]
-fn cascade_recovery_after_a_plain_clear_and_a_value_edit_keeps_the_cell_locked() {
-    assert_recovered_on_source_markup(&saved_after_recovery(|workbook| {
+fn cascade_standalone_value_edit_after_a_plain_clear_shares_and_recovers_faithfully() {
+    assert_plain_edits_share_and_recover_faithfully(&standalone_after_plain_clear(|workbook| {
         workbook
             .edit_cell(SheetId(0), cell("A1"), "5", CalculationOptions::default())
             .unwrap();
@@ -926,16 +944,16 @@ fn cascade_recovery_after_a_plain_clear_and_a_value_edit_keeps_the_cell_locked()
 }
 
 #[test]
-fn cascade_recovery_after_a_plain_clear_undone_and_redone_keeps_the_cell_locked() {
-    assert_recovered_on_source_markup(&saved_after_recovery(|workbook| {
+fn cascade_standalone_undo_and_redo_of_a_plain_clear_share_and_recover_faithfully() {
+    assert_plain_edits_share_and_recover_faithfully(&standalone_after_plain_clear(|workbook| {
         workbook.undo(CalculationOptions::default()).unwrap();
         workbook.redo(CalculationOptions::default()).unwrap();
     }));
 }
 
 #[test]
-fn cascade_recovery_after_pasting_a_cleared_cell_keeps_the_target_locked() {
-    assert_recovered_on_source_markup(&saved_after_recovery(|workbook| {
+fn cascade_standalone_paste_of_a_cleared_cell_shares_and_recovers_faithfully() {
+    assert_plain_edits_share_and_recover_faithfully(&standalone_after_plain_clear(|workbook| {
         let style = workbook.model().sheets[0].cell(cell("A1")).unwrap().style;
         workbook
             .apply_ops(
@@ -955,8 +973,8 @@ fn cascade_recovery_after_pasting_a_cleared_cell_keeps_the_target_locked() {
 }
 
 #[test]
-fn cascade_recovery_after_copying_a_plain_format_keeps_the_target_locked() {
-    assert_recovered_on_source_markup(&saved_after_recovery(|workbook| {
+fn cascade_standalone_copied_plain_format_shares_and_recovers_faithfully() {
+    assert_plain_edits_share_and_recover_faithfully(&standalone_after_plain_clear(|workbook| {
         workbook
             .apply_ops(
                 vec![Op::ApplyRangeFormat {
