@@ -1678,13 +1678,16 @@ fn resolve_target(relationship_path: &str, target: &str) -> Option<(String, bool
     if target.is_empty() || external_target(target) {
         return None;
     }
-    let clean_target = target.split(['?', '#']).next().unwrap_or_default();
+    let clean_target = target
+        .split(['?', '#'])
+        .next()
+        .unwrap_or_default()
+        .replace('\\', "/");
     let mut segments = if clean_target.starts_with('/') {
         Vec::new()
     } else {
         relationship_base(relationship_path)
     };
-    let clean_target = clean_target.trim_start_matches('/').replace('\\', "/");
     let mut climbed = false;
     for segment in clean_target
         .split('/')
