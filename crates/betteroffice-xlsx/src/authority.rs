@@ -4653,6 +4653,19 @@ impl<'a> FingerprintBuilder<'a> {
 /// read the way they read styles can only ever match one they wrote.
 const FACETS_FINGERPRINT_DOMAIN: &[u8] = b"betteroffice-xlsx-yrs-v6-xf-facets";
 
+/// Heads the text of a fingerprint hashed under the current domain. Releases
+/// before format facets wrote bare hex, so a state's fingerprint says which
+/// reading of the styles its cell formats were keyed by.
+const FACETS_FINGERPRINT_TAG: &str = "xf-facets:";
+
+fn fingerprint_text(current: bool, digest: String) -> String {
+    if current {
+        format!("{FACETS_FINGERPRINT_TAG}{digest}")
+    } else {
+        digest
+    }
+}
+
 fn fingerprint_domain(schema_version: i64, current: bool) -> &'static [u8] {
     if current {
         return FACETS_FINGERPRINT_DOMAIN;
@@ -4817,9 +4830,10 @@ fn fingerprint_model(
     }
     Ok(hashers
         .into_iter()
-        .map(|hasher| {
+        .zip(specs)
+        .map(|(hasher, spec)| {
             let digest = hasher.finalize();
-            let fingerprint = format!("{digest:x}");
+            let fingerprint = fingerprint_text(spec.current, format!("{digest:x}"));
             let mut client_bytes = [0_u8; 8];
             client_bytes.copy_from_slice(&digest[..8]);
             let client = client_id_of_digest(u64::from_be_bytes(client_bytes));
@@ -4837,7 +4851,10 @@ fn client_id_of_digest(head: u64) -> u64 {
 
 /// The bootstrap client a base fingerprint seeds: the head of its digest.
 fn fingerprint_client_id(fingerprint: &str) -> Option<u64> {
-    let head = u64::from_str_radix(fingerprint.get(..16)?, 16).ok()?;
+    let digest = fingerprint
+        .strip_prefix(FACETS_FINGERPRINT_TAG)
+        .unwrap_or(fingerprint);
+    let head = u64::from_str_radix(digest.get(..16)?, 16).ok()?;
     Some(client_id_of_digest(head))
 }
 
@@ -5359,7 +5376,7 @@ fn fingerprint_model_with_domain_oracle(
         }
     }
     let digest = hasher.finalize();
-    let fingerprint = format!("{digest:x}");
+    let fingerprint = fingerprint_text(domain == FACETS_FINGERPRINT_DOMAIN, format!("{digest:x}"));
     let mut client_bytes = [0_u8; 8];
     client_bytes.copy_from_slice(&digest[..8]);
     let mut bootstrap_client_id = u64::from_be_bytes(client_bytes) & MAX_SAFE_CLIENT_ID;
