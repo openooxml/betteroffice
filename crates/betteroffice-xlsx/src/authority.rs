@@ -296,8 +296,7 @@ impl WorkbookBase {
         if let Some(styles) = legacy_styles.filter(|styles| **styles != model.styles) {
             let mut legacy_model = model.clone();
             legacy_model.styles = styles.clone();
-            let legacy_base =
-                Self::released_base_oracle(&legacy_model, legacy_dimensions, None)?;
+            let legacy_base = Self::released_base_oracle(&legacy_model, legacy_dimensions, None)?;
             for (version, legacy_fingerprints) in legacy_base.fingerprints {
                 let accepted = fingerprints.entry(version).or_default();
                 for fingerprint in legacy_fingerprints {

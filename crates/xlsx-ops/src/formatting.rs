@@ -215,9 +215,17 @@ struct CapturedCellFormat {
     border: Border,
     number_format: NumberFormat,
     alignment: CapturedAlignment,
-    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
     protection: Option<Option<Protection>>,
-    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
     xf_id: Option<Option<u32>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     quote_prefix: Option<bool>,
@@ -231,15 +239,35 @@ struct CapturedAlignment {
     v: Option<VAlign>,
     wrap_text: bool,
     shrink_to_fit: bool,
-    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
     text_rotation: Option<Option<u16>>,
-    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
     indent: Option<Option<u32>>,
-    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
     relative_indent: Option<Option<i32>>,
-    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
     justify_last_line: Option<Option<bool>>,
-    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
     reading_order: Option<Option<u32>>,
 }
 
