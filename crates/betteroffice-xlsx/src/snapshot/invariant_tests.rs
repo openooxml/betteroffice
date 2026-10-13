@@ -836,19 +836,6 @@ fn snapshot_initial_catalog_rejects_changed_and_unlisted_authority_formats() {
 }
 
 #[test]
-fn current_schema_snapshot_refuses_builtin_ids_read_as_builtins() {
-    let model = declared_builtin_model();
-    let mut worker = Workbook::from_model(model.clone()).unwrap();
-    worker.authority = crate::authority::current_authority_reading_builtins(&model, 92);
-    for budget in budgets() {
-        assert_eq!(
-            assert_refuses_before_ready(&encode(&worker, budget), budget),
-            "snapshot authority and model disagree"
-        );
-    }
-}
-
-#[test]
 fn snapshot_authority_schema_and_authored_model_agree_before_ready() {
     let budget = budgets()[0];
     let worker = empty_worker();

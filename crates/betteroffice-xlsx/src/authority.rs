@@ -45,11 +45,7 @@ const MIN_SUPPORTED_SCHEMA_VERSION: i64 = 3;
 const FREEZE_PANE_SCHEMA_VERSION: i64 = 4;
 const HYPERLINK_SCHEMA_VERSION: i64 = 5;
 const CHARTS_SCHEMA_VERSION: i64 = 6;
-const HIDDEN_DIMENSIONS_SCHEMA_VERSION: i64 = 6;
-/// Earlier states key their cell formats with builtin ids read as builtins,
-/// whatever the workbook declares for them.
-const NUMBER_FORMAT_SCHEMA_VERSION: i64 = 7;
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 6;
 const BASE_FINGERPRINT: &str = "baseFingerprint";
 const STRUCTURE_GENERATION: &str = "structureGeneration";
 const CHARTS: &str = "charts";
@@ -235,7 +231,7 @@ impl WorkbookBase {
             }
         }
         if let Some(legacy) = model_with_legacy_dimensions(model, legacy_dimensions) {
-            for version in MIN_SUPPORTED_SCHEMA_VERSION..HIDDEN_DIMENSIONS_SCHEMA_VERSION {
+            for version in MIN_SUPPORTED_SCHEMA_VERSION..SCHEMA_VERSION {
                 let (legacy_fingerprint, _) =
                     fingerprint_model_for_schema_oracle(&legacy, version)?;
                 let (without_col_styles, _) =
@@ -725,11 +721,6 @@ impl WorkbookAuthority {
         self.doc.client_id().get()
     }
 
-    pub(crate) fn legacy_builtin_ids(&self) -> bool {
-        self.schema_version()
-            .is_ok_and(|version| version < NUMBER_FORMAT_SCHEMA_VERSION)
-    }
-
     pub(crate) fn snapshot_revision(&self) -> u64 {
         self.snapshot_revision.load(Ordering::Relaxed)
     }
@@ -918,8 +909,7 @@ impl WorkbookAuthority {
         let txn = self.doc.transact();
         let cell_formats = txn.get_map(CELL_FORMATS)?;
         let (mut styles, indices) =
-            materialize_cell_formats(&cell_formats, &txn, &self.base.styles, SCHEMA_VERSION)
-                .ok()?;
+            materialize_cell_formats(&cell_formats, &txn, &self.base.styles).ok()?;
         let order = txn.get_array(SHEET_ORDER)?;
         let keys = sheet_keys(&order, &txn).ok()?;
         let key = keys.get(sheet.0 as usize)?;
@@ -1465,10 +1455,6 @@ impl WorkbookAuthority {
         if version == SCHEMA_VERSION && self.has_current_base_fingerprint() {
             return Ok(false);
         }
-        // a base an earlier release recorded cannot vouch for this schema
-        if !self.base.fingerprints.contains_key(&SCHEMA_VERSION) {
-            return Ok(false);
-        }
         let (model, structure) = self.materialize_internal(false)?;
         let features = structure
             .sheet_keys
@@ -1601,7 +1587,7 @@ impl WorkbookAuthority {
             .get_map(CELL_FORMATS)
             .ok_or_else(|| "missing cell format catalog".to_string())?;
         let (styles, style_indices) =
-            materialize_cell_formats(&cell_formats, &txn, &self.base.styles, version)?;
+            materialize_cell_formats(&cell_formats, &txn, &self.base.styles)?;
 
         let order = txn
             .get_array(SHEET_ORDER)
@@ -3190,7 +3176,6 @@ fn materialize_cell_formats<T: ReadTxn>(
     map: &MapRef,
     txn: &T,
     base: &Stylesheet,
-    version: i64,
 ) -> Result<(Stylesheet, BTreeMap<String, Option<u32>>), String> {
     let mut catalog = BTreeMap::new();
     for (key, value) in map.iter(txn) {
@@ -3210,14 +3195,11 @@ fn materialize_cell_formats<T: ReadTxn>(
     }
 
     let mut styles = base.clone();
-    styles.set_legacy_builtin_ids(version < NUMBER_FORMAT_SCHEMA_VERSION);
     let mut known = BTreeMap::new();
-    for index in 0..styles.cell_xfs.len() {
+    for index in 0..base.cell_xfs.len() {
         let index =
             u32::try_from(index).map_err(|_| "cell format table is too large".to_string())?;
-        known
-            .entry(style_key(&styles, index)?)
-            .or_insert(Some(index));
+        known.entry(style_key(base, index)?).or_insert(Some(index));
     }
     let mut indices = BTreeMap::new();
     for (key, format) in catalog {
@@ -3463,7 +3445,7 @@ fn materialize_sheet<T: ReadTxn>(
         MAX_ROWS,
         "row height",
     )?;
-    if version < HIDDEN_DIMENSIONS_SCHEMA_VERSION {
+    if version < SCHEMA_VERSION {
         for (&at, &size) in &fallbacks.hidden_dimensions.col_widths {
             sheet.col_widths.entry(at).or_insert(size);
         }
@@ -4074,30 +4056,13 @@ fn fingerprint_model_with_schema(
 /// as their builtins whatever the workbook declared for them.
 #[cfg(test)]
 pub(crate) fn schema_6_authority(model: &WorkbookModel, client_id: u64) -> WorkbookAuthority {
-    authority_reading_builtins(model, 6, client_id)
-}
-
-/// A current replica whose catalog reads builtin ids the schema 6 way.
-#[cfg(test)]
-pub(crate) fn current_authority_reading_builtins(
-    model: &WorkbookModel,
-    client_id: u64,
-) -> WorkbookAuthority {
-    authority_reading_builtins(model, SCHEMA_VERSION, client_id)
-}
-
-#[cfg(test)]
-fn authority_reading_builtins(
-    model: &WorkbookModel,
-    version: i64,
-    client_id: u64,
-) -> WorkbookAuthority {
+    const VERSION: i64 = 6;
     let (fingerprint, bootstrap_client_id) =
-        fingerprint_model_with_schema(model, version, true, true).unwrap();
+        fingerprint_model_with_schema(model, VERSION, true, true).unwrap();
     let mut base = WorkbookBase::from_model(model).unwrap();
     base.fingerprint = fingerprint;
     base.bootstrap_client_id = bootstrap_client_id;
-    base.fingerprints.retain(|accepted, _| *accepted <= version);
+    base.fingerprints.retain(|version, _| *version <= VERSION);
     let mut builtin = model.clone();
     builtin.styles.num_fmts.retain(|(id, _)| *id >= 164);
     let doc = Doc::with_client_id(bootstrap_client_id);
@@ -4106,9 +4071,9 @@ fn authority_reading_builtins(
         .collect::<Vec<_>>();
     seed(&doc, &base, &builtin, &keys).unwrap();
     {
-        let mut txn = doc.transact_mut_with("test:builtin-reading");
+        let mut txn = doc.transact_mut_with("test:schema-6");
         let meta = txn.get_map(META).unwrap();
-        meta.try_update(&mut txn, "schemaVersion", version);
+        meta.try_update(&mut txn, "schemaVersion", VERSION);
     }
     let update = doc
         .transact()
@@ -4285,7 +4250,7 @@ impl<'a> FingerprintBuilder<'a> {
             append_fingerprint(&mut fingerprints, version, without_col_styles);
         }
         if !self.legacy_dimensions.is_empty() {
-            for version in MIN_SUPPORTED_SCHEMA_VERSION..HIDDEN_DIMENSIONS_SCHEMA_VERSION {
+            for version in MIN_SUPPORTED_SCHEMA_VERSION..SCHEMA_VERSION {
                 let (legacy_fingerprint, _) =
                     self.fingerprint(styles, version, version >= 4, true, true)?;
                 let (without_col_styles, _) =
@@ -4573,7 +4538,7 @@ impl WorkbookAuthority {
             .get_map(CELL_FORMATS)
             .ok_or_else(|| "missing cell format catalog".to_string())?;
         let (styles, style_indices) =
-            materialize_cell_formats(&cell_formats, &txn, &self.base.styles, version)?;
+            materialize_cell_formats(&cell_formats, &txn, &self.base.styles)?;
 
         let order = txn
             .get_array(SHEET_ORDER)
@@ -4752,7 +4717,7 @@ fn materialize_sheet_oracle<T: ReadTxn>(
         MAX_ROWS,
         "row height",
     )?;
-    if version < HIDDEN_DIMENSIONS_SCHEMA_VERSION {
+    if version < SCHEMA_VERSION {
         for (&at, &size) in &fallbacks.hidden_dimensions.col_widths {
             sheet.col_widths.entry(at).or_insert(size);
         }
@@ -6029,7 +5994,7 @@ mod tests {
         };
         assert_eq!(
             error,
-            "unsupported schema version 8; supported versions are 3 through 7"
+            "unsupported schema version 7; supported versions are 3 through 6"
         );
     }
 
