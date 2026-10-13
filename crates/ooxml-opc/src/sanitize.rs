@@ -3101,20 +3101,27 @@ mod tests {
         }
     }
 
+    const ALTERNATE_CONTENT_ELEMENTS: [&str; 4] = [
+        "<sheet name='Macro' sheetId='2' r:id='macro'></sheet>",
+        "<sheet name='First' sheetId='1' r:id='first'/>",
+        "<definedName name='last' localSheetId='2'>Last!$A$1</definedName>",
+        "<workbookView activeTab='1' firstSheet='1'></workbookView>",
+    ];
+
+    fn alternate_content_parts(element: &str) -> (String, Vec<(String, Vec<u8>)>) {
+        let workbook = wrap_alternate_content(MACRO_WORKBOOK, element);
+        let mut parts = macro_sheet_parts(XLSM_MAIN_TYPE, workbook.as_bytes());
+        add_calc_chain(
+            &mut parts,
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships/calcChain",
+        );
+        (workbook, parts)
+    }
+
     #[test]
     fn regression_alternate_content_sheet_metadata_keeps_the_workbook() {
-        for element in [
-            "<sheet name='Macro' sheetId='2' r:id='macro'></sheet>",
-            "<sheet name='First' sheetId='1' r:id='first'/>",
-            "<definedName name='last' localSheetId='2'>Last!$A$1</definedName>",
-            "<workbookView activeTab='1' firstSheet='1'></workbookView>",
-        ] {
-            let workbook = wrap_alternate_content(MACRO_WORKBOOK, element);
-            let mut parts = macro_sheet_parts(XLSM_MAIN_TYPE, workbook.as_bytes());
-            add_calc_chain(
-                &mut parts,
-                "http://schemas.openxmlformats.org/officeDocument/2006/relationships/calcChain",
-            );
+        for element in ALTERNATE_CONTENT_ELEMENTS {
+            let (workbook, parts) = alternate_content_parts(element);
             for output in sanitize_both(&parts) {
                 assert_eq!(part_bytes(&output, "xl/workbook.xml"), workbook.as_bytes());
                 assert_eq!(part_bytes(&output, "xl/calcChain.xml"), CALC_CHAIN);
@@ -3128,6 +3135,121 @@ mod tests {
                 assert_all_parts_declared(&output);
             }
         }
+    }
+
+    // Escaping whole single-quoted declarations must not change what either entry point does;
+    // re-serialized declarations come out double-quoted, so only those kept as written differ.
+    fn assert_escaped_namespaces_match_literal(
+        parts: &[(String, Vec<u8>)],
+        escapes: &[(&str, &str)],
+    ) -> [Vec<(String, Vec<u8>)>; 2] {
+        let escape = |parts: &[(String, Vec<u8>)]| {
+            parts
+                .iter()
+                .map(|(name, bytes)| {
+                    let text = escapes.iter().fold(
+                        String::from_utf8_lossy(bytes).into_owned(),
+                        |text, (literal, escaped)| text.replace(literal, escaped),
+                    );
+                    (name.clone(), text)
+                })
+                .collect::<Vec<_>>()
+        };
+        for (literal, _) in escapes {
+            assert!(
+                parts
+                    .iter()
+                    .any(|(_, bytes)| String::from_utf8_lossy(bytes).contains(literal)),
+                "{literal}"
+            );
+        }
+        let escaped_parts = escape(parts)
+            .into_iter()
+            .map(|(name, text)| (name, text.into_bytes()))
+            .collect::<Vec<_>>();
+        let literal = sanitize_both(parts);
+        let escaped = sanitize_both(&escaped_parts);
+        for (literal, escaped) in literal.iter().zip(&escaped) {
+            let escaped = escaped
+                .iter()
+                .map(|(name, bytes)| (name.clone(), String::from_utf8_lossy(bytes).into_owned()))
+                .collect::<Vec<_>>();
+            assert_eq!(escaped, escape(literal));
+        }
+        escaped
+    }
+
+    #[test]
+    fn regression_escaped_compatibility_namespace_keeps_the_workbook() {
+        for element in ALTERNATE_CONTENT_ELEMENTS {
+            assert_escaped_namespaces_match_literal(
+                &alternate_content_parts(element).1,
+                &[(
+                    "xmlns:mc='http://schemas.openxmlformats.org/markup-compatibility/2006'",
+                    "xmlns:mc='http://schemas.openxmlformats.org/markup-compatibility/200&#54;'",
+                )],
+            );
+        }
+    }
+
+    #[test]
+    fn regression_escaped_workbook_namespaces_match_the_literal_spelling() {
+        let prefixed = "<s:definedName xmlns:s='http://schemas.openxmlformats.org/spreadsheetml/2006/main' name='last' localSheetId='2'>Last!$A$1</s:definedName>";
+        let direct = String::from_utf8_lossy(MACRO_WORKBOOK).replace(
+            "<definedName name='last' localSheetId='2'>Last!$A$1</definedName>",
+            prefixed,
+        );
+        let plain = String::from_utf8_lossy(MACRO_WORKBOOK).into_owned();
+        let prefix = (
+            "xmlns:s='http://schemas.openxmlformats.org/spreadsheetml/2006/main'",
+            "xmlns:s='http://schemas.openxmlformats.org/spreadsheetml/2006/mai&#110;'",
+        );
+        for (workbook, escape) in [
+            (wrap_alternate_content(direct.as_bytes(), prefixed), prefix),
+            (direct, prefix),
+            (
+                plain.clone(),
+                (
+                    "xmlns='http://schemas.openxmlformats.org/spreadsheetml/2006/main'",
+                    "xmlns='http://schemas.openxmlformats.org/spreadsheetml/2006/mai&#110;'",
+                ),
+            ),
+            (
+                plain,
+                (
+                    "xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'",
+                    "xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationship&#115;'",
+                ),
+            ),
+        ] {
+            let parts = macro_sheet_parts(XLSM_MAIN_TYPE, workbook.as_bytes());
+            for output in assert_escaped_namespaces_match_literal(&parts, &[escape]) {
+                let workbook = part_bytes(&output, "xl/workbook.xml");
+                let sheets = element_attributes(workbook, b"sheet").len();
+                for values in element_attributes(workbook, b"definedName") {
+                    if let Some(index) = attribute_value(&values, "localSheetId") {
+                        assert!(index.parse::<usize>().unwrap() < sheets, "{index}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn regression_escaped_package_namespaces_match_the_literal_spelling() {
+        assert_escaped_namespaces_match_literal(
+            &macro_sheet_parts(XLSM_MAIN_TYPE, MACRO_WORKBOOK),
+            &[
+                (
+                    "xmlns='http://schemas.openxmlformats.org/package/2006/content-types'",
+                    "xmlns='http://schemas.openxmlformats.org/package/2006/content-type&#115;'",
+                ),
+                (
+                    "xmlns='http://schemas.openxmlformats.org/package/2006/relationships'",
+                    "xmlns='http://schemas.openxmlformats.org/package/2006/relationship&#115;'",
+                ),
+            ],
+        );
     }
 
     #[test]
