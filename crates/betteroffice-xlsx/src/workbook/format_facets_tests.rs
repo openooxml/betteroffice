@@ -115,6 +115,9 @@ fn preserved(attributes: &str, children: &str, key: &str, expected: Value) {
             }
             let edited_index = workbook.model().sheets[0].cell(r("A1")).unwrap().style;
             let saved = workbook.save().unwrap();
+            let saved_parts = ooxml_opc::unzip_parts(&saved).unwrap();
+            let parsed = xlsx_parse::parse_workbook(&saved_parts).unwrap();
+            assert_eq!(parsed.sheets[0].cell(r("B1")).unwrap().style, Some(1));
             let reopened = Workbook::open(&saved).unwrap();
             let after = format_value(&reopened, "A1");
             assert_eq!(
@@ -182,6 +185,20 @@ facet_test!(
     "<alignment textRotation=\"135\"/>",
     "/alignment/text_rotation",
     135
+);
+facet_test!(
+    format_facets_zero_rotation,
+    "",
+    "<alignment textRotation=\"0\"/>",
+    "/alignment/text_rotation",
+    0
+);
+facet_test!(
+    format_facets_max_rotation,
+    "",
+    "<alignment textRotation=\"180\"/>",
+    "/alignment/text_rotation",
+    180
 );
 facet_test!(
     format_facets_stacked,
@@ -302,6 +319,8 @@ fn format_facets_clear_format_keeps_cell_contents() {
         false,
     );
     let mut workbook = Workbook::open(&bytes).unwrap();
+    let before = workbook.model().sheets[0].cell(r("A1")).unwrap().clone();
+    let original_format = workbook.model().styles.cell_format(before.style);
     assert_eq!(
         format_value(&workbook, "A1")["protection"],
         json!({"locked": false, "hidden": true})
@@ -329,5 +348,15 @@ fn format_facets_clear_format_keeps_cell_contents() {
     assert_eq!(
         reopened.model().sheets[0].cell(r("A1")).unwrap().value,
         CellValue::Number { value: 7.0 }
+    );
+    assert_eq!(
+        format_value(&reopened, "B1"),
+        serde_json::to_value(&original_format).unwrap()
+    );
+    workbook.undo(options()).unwrap();
+    assert_eq!(workbook.model().sheets[0].cell(r("A1")), Some(&before));
+    assert_eq!(
+        workbook.model().styles.cell_format(before.style),
+        original_format
     );
 }

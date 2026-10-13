@@ -3566,6 +3566,17 @@ fn write_xf(w: &mut Writer<Vec<u8>>, xf: &Xf) -> io::Result<()> {
     el.push_attribute(("fontId", font_id.as_str()));
     el.push_attribute(("fillId", fill_id.as_str()));
     el.push_attribute(("borderId", border_id.as_str()));
+    let xf_id;
+    if let Some(id) = xf.xf_id {
+        xf_id = id.to_string();
+        el.push_attribute(("xfId", xf_id.as_str()));
+    }
+    if xf.quote_prefix {
+        el.push_attribute(("quotePrefix", "1"));
+    }
+    if xf.pivot_button {
+        el.push_attribute(("pivotButton", "1"));
+    }
     if xf.num_fmt_id.is_some() {
         el.push_attribute(("applyNumberFormat", "1"));
     }
@@ -3581,14 +3592,24 @@ fn write_xf(w: &mut Writer<Vec<u8>>, xf: &Xf) -> io::Result<()> {
     if xf.alignment.is_some() {
         el.push_attribute(("applyAlignment", "1"));
     }
+    if xf.protection.is_some() {
+        el.push_attribute(("applyProtection", "1"));
+    }
 
-    match &xf.alignment {
-        None => w.write_event(Event::Empty(el))?,
-        Some(a) => {
-            w.write_event(Event::Start(el))?;
+    if xf.alignment.is_none() && xf.protection.is_none() {
+        w.write_event(Event::Empty(el))?;
+    } else {
+        w.write_event(Event::Start(el))?;
+        if let Some(a) = &xf.alignment {
             write_alignment(w, a)?;
-            w.write_event(Event::End(BytesEnd::new("xf")))?;
         }
+        if let Some(protection) = &xf.protection {
+            w.create_element("protection")
+                .with_attribute(("locked", if protection.locked { "1" } else { "0" }))
+                .with_attribute(("hidden", if protection.hidden { "1" } else { "0" }))
+                .write_empty()?;
+        }
+        w.write_event(Event::End(BytesEnd::new("xf")))?;
     }
     Ok(())
 }
@@ -3601,11 +3622,34 @@ fn write_alignment(w: &mut Writer<Vec<u8>>, a: &Alignment) -> io::Result<()> {
     if let Some(v) = a.v {
         el.push_attribute(("vertical", v.as_sml()));
     }
+    let rotation;
+    if let Some(value) = a.text_rotation {
+        rotation = value.to_string();
+        el.push_attribute(("textRotation", rotation.as_str()));
+    }
     if a.wrap_text {
         el.push_attribute(("wrapText", "1"));
     }
     if a.shrink_to_fit {
         el.push_attribute(("shrinkToFit", "1"));
+    }
+    let indent;
+    if let Some(value) = a.indent {
+        indent = value.to_string();
+        el.push_attribute(("indent", indent.as_str()));
+    }
+    let relative_indent;
+    if let Some(value) = a.relative_indent {
+        relative_indent = value.to_string();
+        el.push_attribute(("relativeIndent", relative_indent.as_str()));
+    }
+    if let Some(value) = a.justify_last_line {
+        el.push_attribute(("justifyLastLine", if value { "1" } else { "0" }));
+    }
+    let reading_order;
+    if let Some(value) = a.reading_order {
+        reading_order = value.to_string();
+        el.push_attribute(("readingOrder", reading_order.as_str()));
     }
     w.write_event(Event::Empty(el))?;
     Ok(())

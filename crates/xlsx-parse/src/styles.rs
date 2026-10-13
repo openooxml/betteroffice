@@ -3,8 +3,8 @@
 
 use quick_xml::events::{BytesStart, Event};
 use xlsx_model::styles::{
-    Alignment, Border, BorderEdge, BorderStyle, Color, Fill, Font, HAlign, Stylesheet, Theme,
-    VAlign, Xf,
+    Alignment, Border, BorderEdge, BorderStyle, Color, Fill, Font, HAlign, Protection, Stylesheet,
+    Theme, VAlign, Xf,
 };
 
 use crate::xml::{attr, local_name, next_event, reader};
@@ -60,6 +60,7 @@ fn parse_styles(data: &[u8]) -> Result<(Stylesheet, Vec<Xf>), ParseError> {
     let mut edge: Option<(u8, BorderEdge)> = None;
     let mut xf: Option<Xf> = None;
     let mut explicit = [false; 4];
+    let mut child_applied = [true; 2];
     let mut legacy_cell_xfs: Vec<Xf> = Vec::new();
     let mut colors_depth = None;
     let mut indexed_colors_depth = None;
@@ -140,12 +141,24 @@ fn parse_styles(data: &[u8]) -> Result<(Stylesheet, Vec<Xf>), ParseError> {
                     let (parsed, flags) = parse_xf(&e)?;
                     xf = Some(parsed);
                     explicit = flags;
+                    child_applied = [
+                        applied(&e, b"applyAlignment")?.0,
+                        applied(&e, b"applyProtection")?.0,
+                    ];
                 }
-                b"alignment" if xf.is_some() && section == Section::CellXfs => {
+                b"alignment" if xf.is_some() && section == Section::CellXfs && child_applied[0] => {
                     let a = parse_alignment(&e)?;
                     if !a.is_empty() {
                         xf.as_mut().unwrap().alignment = Some(a);
                     }
+                }
+                b"protection"
+                    if xf.is_some() && section == Section::CellXfs && child_applied[1] =>
+                {
+                    xf.as_mut().unwrap().protection = Some(Protection {
+                        locked: attr(&e, b"locked")?.map(|v| is_truthy(&v)).unwrap_or(true),
+                        hidden: attr(&e, b"hidden")?.is_some_and(|v| is_truthy(&v)),
+                    });
                 }
                 _ => {}
             },
@@ -257,6 +270,10 @@ fn parse_xf(e: &BytesStart) -> Result<(Xf, [bool; 4]), ParseError> {
             border: border_on.then_some(border).flatten(),
             num_fmt_id: num_fmt_on.then_some(num_fmt).flatten(),
             alignment: None,
+            protection: None,
+            xf_id: index_u32(e, b"xfId")?,
+            quote_prefix: attr(e, b"quotePrefix")?.is_some_and(|v| is_truthy(&v)),
+            pivot_button: attr(e, b"pivotButton")?.is_some_and(|v| is_truthy(&v)),
         },
         [font_set, fill_set, border_set, num_fmt_set],
     ))
@@ -279,7 +296,7 @@ fn held_back(xf: &Xf, explicit: [bool; 4]) -> Xf {
         fill: explicit[1].then_some(xf.fill).flatten(),
         border: explicit[2].then_some(xf.border).flatten(),
         num_fmt_id: explicit[3].then_some(xf.num_fmt_id).flatten(),
-        alignment: xf.alignment.clone(),
+        ..xf.clone()
     }
 }
 
@@ -302,6 +319,11 @@ fn parse_alignment(e: &BytesStart) -> Result<Alignment, ParseError> {
         shrink_to_fit: attr(e, b"shrinkToFit")?
             .map(|v| is_truthy(&v))
             .unwrap_or(false),
+        text_rotation: index_u16(e, b"textRotation")?,
+        indent: index_u32(e, b"indent")?,
+        relative_indent: attr(e, b"relativeIndent")?.and_then(|v| v.parse::<i32>().ok()),
+        justify_last_line: attr(e, b"justifyLastLine")?.map(|v| is_truthy(&v)),
+        reading_order: index_u32(e, b"readingOrder")?,
     })
 }
 
@@ -418,4 +440,52 @@ fn slot_index(name: &[u8]) -> Option<usize> {
 
 fn is_truthy(v: &str) -> bool {
     matches!(v, "1" | "true" | "on")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_facets_child_apply_flags_and_defaults() {
+        for (flags, applied) in [
+            ("", true),
+            (r#"applyAlignment="1" applyProtection="true""#, true),
+            (r#"applyAlignment="0" applyProtection="false""#, false),
+        ] {
+            let xml = format!(
+                r#"<styleSheet><cellXfs><xf xfId="1" quotePrefix="true" pivotButton="1" {flags}>
+<alignment textRotation="0" indent="0" relativeIndent="0" justifyLastLine="0" readingOrder="0"/>
+<protection hidden="1"/></xf></cellXfs></styleSheet>"#
+            );
+            let (styles, _) = parse_styles(xml.as_bytes()).unwrap();
+            let xf = &styles.cell_xfs[0];
+            assert_eq!(xf.xf_id, Some(1));
+            assert!(xf.quote_prefix);
+            assert!(xf.pivot_button);
+            if applied {
+                assert_eq!(
+                    xf.protection,
+                    Some(Protection {
+                        locked: true,
+                        hidden: true
+                    })
+                );
+                assert_eq!(
+                    xf.alignment,
+                    Some(Alignment {
+                        text_rotation: Some(0),
+                        indent: Some(0),
+                        relative_indent: Some(0),
+                        justify_last_line: Some(false),
+                        reading_order: Some(0),
+                        ..Default::default()
+                    })
+                );
+            } else {
+                assert!(xf.protection.is_none());
+                assert!(xf.alignment.is_none());
+            }
+        }
+    }
 }

@@ -290,10 +290,7 @@ fn format_facets_bounded_snapshot_and_replay() {
         },
     );
     let mut workbook = Workbook::from_model(model).unwrap();
-    for budget in [
-        SnapshotBudget::new(1, 128).unwrap(),
-        SnapshotBudget::new(7, 1024).unwrap(),
-    ] {
+    for budget in budgets() {
         let peer = hydrate(&workbook, budget);
         assert_eq!(
             serde_json::to_value(&peer.model().styles.cell_xfs[0]).unwrap(),
@@ -311,7 +308,7 @@ fn format_facets_bounded_snapshot_and_replay() {
             context(),
         )
         .unwrap();
-    let mut peer = hydrate(&workbook, SnapshotBudget::new(1, 128).unwrap());
+    let mut peer = hydrate(&workbook, budgets()[0]);
     assert_eq!(peer.model().styles, workbook.model().styles);
     peer.patch_range_style(
         SheetId(0),

@@ -267,7 +267,7 @@ fn inserted_row_remaps_shared_ref_with_and_without_cache_edit() {
 }
 
 #[test]
-fn equivalent_styles_keep_shared_group_and_source_index() {
+fn protection_change_keeps_shared_group_and_writes_new_index() {
     let source = SHARED.replace(r#"r="B2""#, r#"r="B2" s="2""#);
     let mut parts = package(&source, &[], false);
     parts.push(("xl/styles.xml".to_owned(), concat!(
@@ -291,6 +291,7 @@ fn equivalent_styles_keep_shared_group_and_source_index() {
         } else {
             original["B2"].clone()
         };
+        let expected = expected.replace(r#"s="2""#, r#"s="1""#);
         assert_eq!(saved["B2"], expected);
         assert_eq!(saved["B1"], original["B1"]);
         assert_eq!(saved["B3"], original["B3"]);

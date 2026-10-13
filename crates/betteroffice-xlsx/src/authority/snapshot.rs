@@ -1,7 +1,8 @@
 use std::collections::LinkedList;
 
 use xlsx_model::styles::{
-    Alignment, Border, BorderEdge, BorderStyle, Color, Fill, Font, HAlign, Theme, VAlign, Xf,
+    Alignment, Border, BorderEdge, BorderStyle, Color, Fill, Font, HAlign, Protection, Theme,
+    VAlign, Xf,
 };
 use xlsx_model::{AnchorCell, ChartRefKind};
 
@@ -337,6 +338,17 @@ impl Codec for u16 {
     fn read(r: &mut Reader<'_>) -> SnapshotResult<Self> {
         u16::try_from(r.var_u32()?)
             .map_err(|_| SnapshotError::new("snapshot integer overflows u16"))
+    }
+}
+
+impl Codec for i32 {
+    fn write(&self, w: &mut Writer) {
+        w.var_i64(i64::from(*self));
+    }
+
+    fn read(r: &mut Reader<'_>) -> SnapshotResult<Self> {
+        i32::try_from(r.var_i64()?)
+            .map_err(|_| SnapshotError::new("snapshot integer overflows i32"))
     }
 }
 
@@ -800,14 +812,24 @@ struct_codec!(Alignment {
     h,
     v,
     wrap_text,
-    shrink_to_fit
+    shrink_to_fit,
+    text_rotation,
+    indent,
+    relative_indent,
+    justify_last_line,
+    reading_order
 });
+struct_codec!(Protection { locked, hidden });
 struct_codec!(Xf {
     font,
     fill,
     border,
     num_fmt_id,
-    alignment
+    alignment,
+    protection,
+    xf_id,
+    quote_prefix,
+    pivot_button
 });
 struct_codec!(AnchorCell {
     col,
@@ -3020,7 +3042,19 @@ mod tests {
                     v: Some(VAlign::Top),
                     wrap_text: true,
                     shrink_to_fit: false,
+                    text_rotation: Some(255),
+                    indent: Some(4),
+                    relative_indent: Some(-2),
+                    justify_last_line: Some(true),
+                    reading_order: Some(2),
                 }),
+                protection: Some(Protection {
+                    locked: false,
+                    hidden: true,
+                }),
+                xf_id: Some(1),
+                quote_prefix: true,
+                pivot_button: true,
             },
             Xf::default(),
         ];

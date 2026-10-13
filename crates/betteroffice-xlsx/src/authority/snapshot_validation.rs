@@ -259,6 +259,20 @@ impl JsonWindow<'_> {
             xf.and_then(|xf| xf.alignment.as_ref())
                 .unwrap_or(&default.alignment),
         )?;
+        if let Some(protection) = xf.and_then(|xf| xf.protection.as_ref()) {
+            self.raw(b",\"protection\":")?;
+            self.small(protection)?;
+        }
+        if let Some(id) = xf.and_then(|xf| xf.xf_id) {
+            self.raw(b",\"xfId\":")?;
+            self.small(&id)?;
+        }
+        if xf.is_some_and(|xf| xf.quote_prefix) {
+            self.raw(b",\"quotePrefix\":true")?;
+        }
+        if xf.is_some_and(|xf| xf.pivot_button) {
+            self.raw(b",\"pivotButton\":true")?;
+        }
         self.raw(b"}")
     }
 
@@ -1736,5 +1750,64 @@ impl SnapshotValidation {
         self.base_index = 0;
         self.base_child = 0;
         Ok(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_facets_json_windows_match_cell_format_serde() {
+        let mut model = WorkbookModel::default();
+        model.styles.cell_xfs = vec![
+            xlsx_model::Xf {
+                protection: Some(xlsx_model::Protection {
+                    locked: false,
+                    hidden: true,
+                }),
+                xf_id: Some(1),
+                quote_prefix: true,
+                pivot_button: true,
+                alignment: Some(xlsx_model::Alignment {
+                    text_rotation: Some(255),
+                    indent: Some(4),
+                    relative_indent: Some(-2),
+                    justify_last_line: Some(true),
+                    reading_order: Some(2),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            xlsx_model::Xf {
+                protection: Some(xlsx_model::Protection::default()),
+                xf_id: Some(0),
+                ..Default::default()
+            },
+        ];
+        for style in [None, Some(0), Some(1)] {
+            let expected = serde_json::to_vec(&model.styles.cell_format(style)).unwrap();
+            let mut position = JsonPosition::default();
+            let mut actual = Vec::new();
+            let xf = style.and_then(|index| model.styles.xf(index));
+            let formats = BTreeMap::new();
+            let mut windows = 0;
+            let budget = SnapshotBudget::new(1, 1024).unwrap();
+            for _ in 0..=expected.len() {
+                let mut meter = 0;
+                let (done, bytes) = json_window(&mut position, budget, &mut meter, |window| {
+                    window.format(&model, xf, &formats)
+                })
+                .unwrap();
+                assert!(meter <= budget.max_bytes());
+                actual.extend(bytes);
+                windows += 1;
+                if done {
+                    break;
+                }
+            }
+            assert_eq!(actual, expected);
+            assert!(windows > 1);
+        }
     }
 }

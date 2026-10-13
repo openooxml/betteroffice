@@ -1777,6 +1777,9 @@ mod tests {
             sheets: vec![Sheet::new("Data")],
             ..Default::default()
         };
+        model.styles.fonts.push(xlsx_model::Font::default());
+        model.styles.fills.push(xlsx_model::Fill::None);
+        model.styles.borders.push(xlsx_model::Border::default());
         model
             .styles
             .cell_xfs
@@ -1789,8 +1792,22 @@ mod tests {
                 ..Default::default()
             },
         );
-        let bytes =
-            ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap();
+        let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+        let (_, styles) = parts
+            .iter_mut()
+            .find(|(name, _)| name == "xl/styles.xml")
+            .unwrap();
+        let xml = std::str::from_utf8(styles).unwrap()
+            .replace("<cellXfs", concat!(
+                r#"<cellStyleXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>"#,
+                r#"<xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs"#,
+            ))
+            .replace("</styleSheet>", concat!(
+                r#"<cellStyles count="2"><cellStyle name="Normal" xfId="0" builtinId="0"/>"#,
+                r#"<cellStyle name="Custom" xfId="1"/></cellStyles></styleSheet>"#,
+            ));
+        *styles = xml.into_bytes();
+        let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
         let mut session = Session::open(&bytes, None).unwrap();
         session
             .patch_range_style_json(r#"{"sheet":0,"range":"A1","patch":{"bold":true}}"#, None)
@@ -1810,7 +1827,19 @@ mod tests {
                 None,
             )
             .unwrap();
-        let reopened = Session::open(&session.save().unwrap(), None).unwrap();
+        let saved = session.save().unwrap();
+        let parts = ooxml_opc::unzip_parts(&saved).unwrap();
+        let styles = std::str::from_utf8(
+            &parts
+                .iter()
+                .find(|(name, _)| name == "xl/styles.xml")
+                .unwrap()
+                .1,
+        )
+        .unwrap();
+        assert!(styles.contains(r#"applyProtection="1""#));
+        assert!(styles.find("<alignment").unwrap() < styles.find("<protection").unwrap());
+        let reopened = Session::open(&saved, None).unwrap();
         assert_eq!(
             reopened
                 .capture_format_json(r#"{"sheet":0,"range":"B1"}"#)

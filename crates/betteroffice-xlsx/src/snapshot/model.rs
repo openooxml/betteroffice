@@ -4,8 +4,8 @@ use std::ops::Bound::{Excluded, Unbounded};
 use xlsx_model::{
     Alignment, AnchorCell, AnchorEditAs, AnchorExtent, AnchorPos, Border, BorderEdge, BorderStyle,
     Cell, CellRef, ChartAnchor, ChartRef, ChartRefKind, ColStyle, Color, DateSystem, DefinedName,
-    Fill, Font, FreezePane, HAlign, Hyperlink, Sheet, SheetChart, SheetFormat, SheetId, Table,
-    Theme, VAlign, Workbook, Xf,
+    Fill, Font, FreezePane, HAlign, Hyperlink, Protection, Sheet, SheetChart, SheetFormat, SheetId,
+    Table, Theme, VAlign, Workbook, Xf,
 };
 
 use super::cells::{CellCursor, read_cell, read_range, read_ref, write_range, write_ref};
@@ -1294,6 +1294,10 @@ fn read_u16(r: &mut Reader<'_>) -> SnapshotResult<u16> {
     u16::try_from(r.var_u32()?).map_err(|_| SnapshotError::new("snapshot integer overflows u16"))
 }
 
+fn read_i32(r: &mut Reader<'_>) -> SnapshotResult<i32> {
+    i32::try_from(r.var_i64()?).map_err(|_| SnapshotError::new("snapshot integer overflows i32"))
+}
+
 fn write_name(w: &mut Writer, value: &DefinedName) {
     let DefinedName {
         name,
@@ -1594,11 +1598,21 @@ fn write_alignment(w: &mut Writer, value: &Alignment) {
         v,
         wrap_text,
         shrink_to_fit,
+        text_rotation,
+        indent,
+        relative_indent,
+        justify_last_line,
+        reading_order,
     } = value;
     w.option(h.as_ref(), write_halign);
     w.option(v.as_ref(), write_valign);
     w.bool(*wrap_text);
     w.bool(*shrink_to_fit);
+    w.option(*text_rotation, |w, value| w.var_u32(u32::from(value)));
+    w.option(*indent, Writer::var_u32);
+    w.option(*relative_indent, |w, value| w.var_i64(i64::from(value)));
+    w.option(*justify_last_line, Writer::bool);
+    w.option(*reading_order, Writer::var_u32);
 }
 
 fn read_alignment(r: &mut Reader<'_>) -> SnapshotResult<Alignment> {
@@ -1607,6 +1621,11 @@ fn read_alignment(r: &mut Reader<'_>) -> SnapshotResult<Alignment> {
         v: r.option(read_valign)?,
         wrap_text: r.bool()?,
         shrink_to_fit: r.bool()?,
+        text_rotation: r.option(read_u16)?,
+        indent: r.option(Reader::var_u32)?,
+        relative_indent: r.option(read_i32)?,
+        justify_last_line: r.option(Reader::bool)?,
+        reading_order: r.option(Reader::var_u32)?,
     })
 }
 
@@ -1617,12 +1636,23 @@ fn write_xf(w: &mut Writer, value: &Xf) {
         border,
         num_fmt_id,
         alignment,
+        protection,
+        xf_id,
+        quote_prefix,
+        pivot_button,
     } = value;
     w.option(*font, Writer::var_u32);
     w.option(*fill, Writer::var_u32);
     w.option(*border, Writer::var_u32);
     w.option(*num_fmt_id, |w, id| w.var_u32(u32::from(id)));
     w.option(alignment.as_ref(), write_alignment);
+    w.option(protection.as_ref(), |w, value| {
+        w.bool(value.locked);
+        w.bool(value.hidden);
+    });
+    w.option(*xf_id, Writer::var_u32);
+    w.bool(*quote_prefix);
+    w.bool(*pivot_button);
 }
 
 fn read_xf(r: &mut Reader<'_>) -> SnapshotResult<Xf> {
@@ -1632,6 +1662,15 @@ fn read_xf(r: &mut Reader<'_>) -> SnapshotResult<Xf> {
         border: r.option(Reader::var_u32)?,
         num_fmt_id: r.option(read_u16)?,
         alignment: r.option(read_alignment)?,
+        protection: r.option(|r| {
+            Ok(Protection {
+                locked: r.bool()?,
+                hidden: r.bool()?,
+            })
+        })?,
+        xf_id: r.option(Reader::var_u32)?,
+        quote_prefix: r.bool()?,
+        pivot_button: r.bool()?,
     })
 }
 
@@ -2065,7 +2104,9 @@ mod tests {
                         v: Some(v),
                         wrap_text: true,
                         shrink_to_fit: true,
+                        ..Alignment::default()
                     }),
+                    ..Xf::default()
                 });
             }
         }
@@ -2075,6 +2116,7 @@ mod tests {
             border: None,
             num_fmt_id: Some(u16::MAX),
             alignment: Some(Alignment::default()),
+            ..Xf::default()
         });
         styles.num_fmts = vec![
             (165, "code".into()),

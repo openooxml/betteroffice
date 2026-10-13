@@ -193,13 +193,51 @@ pub struct Alignment {
     pub v: Option<VAlign>,
     pub wrap_text: bool,
     pub shrink_to_fit: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_rotation: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indent: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relative_indent: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub justify_last_line: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reading_order: Option<u32>,
 }
 
 impl Alignment {
     /// true when the element carries no meaningful alignment.
     pub fn is_empty(&self) -> bool {
-        self.h.is_none() && self.v.is_none() && !self.wrap_text && !self.shrink_to_fit
+        self.h.is_none()
+            && self.v.is_none()
+            && !self.wrap_text
+            && !self.shrink_to_fit
+            && self.text_rotation.is_none()
+            && self.indent.is_none()
+            && self.relative_indent.is_none()
+            && self.justify_last_line.is_none()
+            && self.reading_order.is_none()
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Protection {
+    pub locked: bool,
+    pub hidden: bool,
+}
+
+impl Default for Protection {
+    fn default() -> Self {
+        Self {
+            locked: true,
+            hidden: false,
+        }
+    }
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 /// a cell format record (`CT_Xf` in cellXfs). a `None` pool index means
@@ -211,6 +249,14 @@ pub struct Xf {
     pub border: Option<u32>,
     pub num_fmt_id: Option<u16>,
     pub alignment: Option<Alignment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protection: Option<Protection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xf_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub quote_prefix: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pivot_button: bool,
 }
 
 /// the workbook theme colors in clrScheme declaration order
@@ -513,6 +559,14 @@ pub struct CellFormat {
     pub border: Border,
     pub number_format: NumberFormat,
     pub alignment: Alignment,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protection: Option<Protection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xf_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub quote_prefix: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pivot_button: bool,
 }
 
 /// borrowed view of a resolved cell format; defaults mirror [`CellFormat::default`].
@@ -523,6 +577,10 @@ pub struct ResolvedFormat<'a> {
     pub border: &'a Border,
     pub number_format: FormatCode<'a>,
     pub alignment: &'a Alignment,
+    pub protection: Option<&'a Protection>,
+    pub xf_id: Option<u32>,
+    pub quote_prefix: bool,
+    pub pivot_button: bool,
 }
 
 const DEFAULT_FONT: Font = Font {
@@ -547,6 +605,11 @@ const DEFAULT_ALIGNMENT: Alignment = Alignment {
     v: None,
     wrap_text: false,
     shrink_to_fit: false,
+    text_rotation: None,
+    indent: None,
+    relative_indent: None,
+    justify_last_line: None,
+    reading_order: None,
 };
 
 impl Stylesheet {
@@ -657,6 +720,10 @@ impl Stylesheet {
                 },
             },
             alignment: resolved.alignment.clone(),
+            protection: resolved.protection.copied(),
+            xf_id: resolved.xf_id,
+            quote_prefix: resolved.quote_prefix,
+            pivot_button: resolved.pivot_button,
         }
     }
 
@@ -684,6 +751,10 @@ impl Stylesheet {
             alignment: xf
                 .and_then(|xf| xf.alignment.as_ref())
                 .unwrap_or(&DEFAULT_ALIGNMENT),
+            protection: xf.and_then(|xf| xf.protection.as_ref()),
+            xf_id: xf.and_then(|xf| xf.xf_id),
+            quote_prefix: xf.is_some_and(|xf| xf.quote_prefix),
+            pivot_button: xf.is_some_and(|xf| xf.pivot_button),
         }
     }
 
@@ -715,6 +786,10 @@ impl Stylesheet {
                 border: (format.border != Border::default()).then_some(border),
                 num_fmt_id,
                 alignment,
+                protection: format.protection,
+                xf_id: format.xf_id,
+                quote_prefix: format.quote_prefix,
+                pivot_button: format.pivot_button,
             };
             if let Some(index) = xf.font
                 && xf.fill.is_none()
@@ -751,6 +826,10 @@ impl Stylesheet {
                 border: (format.border != Border::default()).then_some(border),
                 num_fmt_id,
                 alignment,
+                protection: format.protection,
+                xf_id: format.xf_id,
+                quote_prefix: format.quote_prefix,
+                pivot_button: format.pivot_button,
             };
             return Ok(Some(intern_linear(&mut self.cell_xfs, &xf)));
         }
@@ -776,6 +855,10 @@ impl Stylesheet {
                 border: has_border.then_some(border),
                 num_fmt_id,
                 alignment,
+                protection: format.protection,
+                xf_id: format.xf_id,
+                quote_prefix: format.quote_prefix,
+                pivot_button: format.pivot_button,
             };
             let has_new_facet = (self.fonts.len() != font_len && has_font)
                 || (self.fills.len() != fill_len && has_fill)
@@ -825,6 +908,10 @@ impl Stylesheet {
             border: (format.border != Border::default()).then_some(border),
             num_fmt_id,
             alignment,
+            protection: format.protection,
+            xf_id: format.xf_id,
+            quote_prefix: format.quote_prefix,
+            pivot_button: format.pivot_button,
         };
         self.intern_xf(&xf)
     }
@@ -1287,7 +1374,9 @@ mod tests {
                         v: Some(VAlign::Center),
                         wrap_text: true,
                         shrink_to_fit: false,
+                        ..Alignment::default()
                     }),
+                    ..Xf::default()
                 },
             ],
             num_fmts: vec![(164, "0.0\"%\"".into())],
