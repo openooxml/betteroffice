@@ -342,7 +342,10 @@ fn date_mutation_shows_the_builtin_date_over_a_differing_declaration() {
     apply_date(&mut wb);
     let (id, code) = a1_number_format(&wb);
     assert_eq!(code.as_deref(), Some("m/d/yy"));
-    assert_eq!(wb.styles.num_fmts, [(14, "0.00".into()), (id, "m/d/yy".into())]);
+    assert_eq!(
+        wb.styles.num_fmts,
+        [(14, "0.00".into()), (id, "m/d/yy".into())]
+    );
     assert!(id >= 164);
 }
 
@@ -366,7 +369,10 @@ fn replayed_builtin_captures_keep_their_builtin_meaning() {
     .unwrap();
     let (id, code) = a1_number_format(&wb);
     assert_eq!(code.as_deref(), Some("m/d/yy"));
-    assert_eq!(wb.styles.num_fmts, [(14, "0.00".into()), (id, "m/d/yy".into())]);
+    assert_eq!(
+        wb.styles.num_fmts,
+        [(14, "0.00".into()), (id, "m/d/yy".into())]
+    );
 }
 
 #[test]

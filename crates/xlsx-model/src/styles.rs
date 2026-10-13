@@ -1589,7 +1589,10 @@ mod tests {
             ss.resolved_format(style);
         }
         let visits = FORMAT_VISITS.get() - before;
-        assert!(visits <= 500 + 200, "{visits} visits for 500 cells and 200 formats");
+        assert!(
+            visits <= 500 + 200,
+            "{visits} visits for 500 cells and 200 formats"
+        );
     }
 
     #[test]
