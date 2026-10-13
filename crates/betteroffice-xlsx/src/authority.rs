@@ -3275,17 +3275,11 @@ fn materialize_cell_formats<T: ReadTxn>(
     }
 
     let mut styles = base.clone();
-    let (plain, _) = cell_format_entry(&CellFormat::default())?;
-    let plain_xf = base.known_plain_xf();
     let mut known = BTreeMap::new();
     for index in 0..base.cell_xfs.len() {
         let index =
             u32::try_from(index).map_err(|_| "cell format table is too large".to_string())?;
-        let key = style_key(base, index)?;
-        // an xf reading plain stands for the plain format only when known to save plain
-        if key != plain || Some(index) == plain_xf {
-            known.entry(key).or_insert(Some(index));
-        }
+        known.entry(style_key(base, index)?).or_insert(Some(index));
     }
     let mut indices = BTreeMap::new();
     for (key, format) in catalog {
@@ -3326,8 +3320,6 @@ fn remap_styles<'a>(
         let format = source.cell_format(Some(index));
         let resolved = if target.xf(index).is_some() && target.cell_format(Some(index)) == format {
             Some(index)
-        } else if format == CellFormat::default() {
-            Some(target.plain_xf())
         } else {
             match (0..target.cell_xfs.len() as u32)
                 .find(|&candidate| target.cell_format(Some(candidate)) == format)
@@ -3338,6 +3330,7 @@ fn remap_styles<'a>(
                     .map_err(|_| "number format table is full".to_string())?,
             }
         };
+        let resolved = Some(resolved.unwrap_or_else(|| target.plain_xf()));
         mapped.insert(index, resolved);
         Ok(resolved)
     };
