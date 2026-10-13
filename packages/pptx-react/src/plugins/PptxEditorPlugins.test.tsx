@@ -16,6 +16,7 @@ import {
 } from '@betteroffice/pptx';
 import { pptxCommandController } from '../commands/createPptxCommandStore';
 import { isMacPlatform } from '../commands/descriptors';
+import type { PptxInThreadEditorProps } from '../PptxEditor';
 import * as publicApi from '../index';
 import {
   EditorToolbar,
@@ -28,7 +29,6 @@ import {
   type PptxCommandResult,
   type PptxCommandStore,
   type PptxEditorApi,
-  type PptxEditorProps,
   type PptxPlugin,
   type PptxPluginCommandResult,
   type PptxPluginContext,
@@ -178,11 +178,11 @@ function recorder(id = 'acme.review', extra: Partial<PptxPluginDefinition<State>
   return { plugin, log, events, contexts };
 }
 
-async function mount(props: Partial<PptxEditorProps> = {}, strict = false) {
+async function mount(props: Partial<PptxInThreadEditorProps> = {}, strict = false) {
   const ready: PptxEditorApi[] = [];
-  const element = (next: Partial<PptxEditorProps>) => {
+  const element = (next: Partial<PptxInThreadEditorProps>) => {
     const editor = (
-      <PptxEditor file={fixture} fonts={faces} onReady={(api) => ready.push(api)} {...next} />
+      <PptxEditor legacySyncApi experimentalWorkerOpen={false} file={fixture} fonts={faces} onReady={(api) => ready.push(api)} {...next} />
     );
     return strict ? <StrictMode>{editor}</StrictMode> : editor;
   };
@@ -192,7 +192,7 @@ async function mount(props: Partial<PptxEditorProps> = {}, strict = false) {
     api: () => last(ready),
     ready,
     view,
-    rerender: (next: Partial<PptxEditorProps>) => view.rerender(element(next)),
+    rerender: (next: Partial<PptxInThreadEditorProps>) => view.rerender(element(next)),
   };
 }
 
@@ -768,7 +768,7 @@ describe('PptxEditor plugins', () => {
     function Host() {
       const [file, setFile] = useState(fixture);
       return (
-        <PptxEditor
+        <PptxEditor legacySyncApi experimentalWorkerOpen={false}
           file={file}
           fonts={faces}
           plugins={plugins}

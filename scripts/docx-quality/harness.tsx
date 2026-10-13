@@ -138,14 +138,7 @@ api.oraclePage = async (index: number) => {
       `canvas[data-page-index="${index}"]`
     );
     if (canvas?.width && canvas?.height) {
-      // local captures keep a page whose size differs from Word's page at that index
-      const extent = capturePageExtent(
-        captureProfile,
-        index,
-        canvas.width,
-        canvas.height,
-        maxPages !== undefined
-      );
+      const extent = capturePageExtent(captureProfile, index, canvas.width, canvas.height, true);
       const output = document.createElement('canvas');
       output.width = extent.output.width_px;
       output.height = extent.output.height_px;
@@ -158,7 +151,14 @@ api.oraclePage = async (index: number) => {
       output.height = 0;
       equal = value === previous ? equal + 1 : 0;
       if (equal >= 2) {
-        pageExtents[index] = extent;
+        // local captures keep a page whose size differs from Word's page at that index
+        pageExtents[index] = capturePageExtent(
+          captureProfile,
+          index,
+          canvas.width,
+          canvas.height,
+          maxPages !== undefined
+        );
         return value;
       }
       previous = value;

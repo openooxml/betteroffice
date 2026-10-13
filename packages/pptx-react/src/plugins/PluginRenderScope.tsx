@@ -1,4 +1,4 @@
-import { Component, type ReactNode } from 'react';
+import { Component, type PointerEvent, type ReactNode } from 'react';
 import { claimPluginEvent } from '../commands/pluginEvents';
 import { PptxCommandContext } from '../commands/PptxCommandProvider';
 import type { PptxPluginActivation, PptxPluginHost } from './createPptxPluginHost';
@@ -36,20 +36,30 @@ export function PluginRenderScope({
   host,
   activation,
   phase = 'render',
+  claimPointerEvents = false,
   children,
 }: {
   host: PptxPluginHost;
   activation: PptxPluginActivation;
   phase?: PptxPluginErrorPhase;
+  claimPointerEvents?: boolean;
   children: ReactNode;
 }) {
   const store = host.commandStore(activation);
+  const claimPointer = claimPointerEvents
+    ? (event: PointerEvent<HTMLDivElement>) => claimPluginEvent(event.nativeEvent, store)
+    : undefined;
   return (
     <PluginContributionBoundary onError={(error) => host.fail(activation.pluginId, phase, error)}>
       <PptxCommandContext.Provider value={store}>
         <div
           style={{ display: 'contents' }}
           onKeyDownCapture={(event) => claimPluginEvent(event.nativeEvent, store)}
+          onPointerDownCapture={claimPointer}
+          onPointerMoveCapture={claimPointer}
+          onPointerUpCapture={claimPointer}
+          onPointerCancelCapture={claimPointer}
+          onLostPointerCaptureCapture={claimPointer}
         >
           {children}
         </div>

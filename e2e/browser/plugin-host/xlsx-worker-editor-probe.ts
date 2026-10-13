@@ -20,6 +20,9 @@ export interface WorkerEditorProbe {
   readOnlyEditRefusal(): string;
   savedInputs(): Promise<string[]>;
   releaseHydration(): void;
+  holdCellInputs(): void;
+  heldCellInputs(): number;
+  releaseCellInputs(): void;
   flush(): Promise<void>;
   zoom(scale: number): Promise<void>;
   cellClip(): { x: number; y: number; width: number; height: number };

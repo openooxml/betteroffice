@@ -88,8 +88,8 @@ export type PresentationCommandPayloads = {
     slideId: string; name: string; rect: ShapeRect; contentType: string; bytes: ArrayBuffer;
   };
   selectObject: PresentationCommandInput & {
-    frame: PresentationCommandFrameTag; x: number; y: number; scale: number;
-  };
+    frame: PresentationCommandFrameTag;
+  } & ({ x: number; y: number; scale: number } | { shapeId: string });
   moveShape: PresentationCommandInput & {
     frame: PresentationCommandFrameTag;
   } & ({ target: PresentationCommandObjectTarget; x: number; y: number }

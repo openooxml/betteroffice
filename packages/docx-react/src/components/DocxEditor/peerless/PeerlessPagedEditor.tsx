@@ -1,4 +1,4 @@
-import { memo, useCallback, useInsertionEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type PointerEvent, type ReactElement } from 'react';
+import { memo, useCallback, useEffect, useInsertionEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type PointerEvent, type ReactElement } from 'react';
 import type { DocxEchoRect } from '@betteroffice/docx/peerless';
 import type { DocxCommandPageIdentity } from '@betteroffice/docx/peerless';
 import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVerticalScrollParent';
@@ -276,11 +276,29 @@ export interface PeerlessPagedEditorProps {
 
 /** @internal */
 export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoFocus, onReady, displayWindow, onDisplayWindowChange, onClipboard, highlights, onNavigateCell }: PeerlessPagedEditorProps): ReactElement | null {
+  const [devicePixelRatio, setDevicePixelRatio] = useState(() => typeof window === 'undefined' ? 1 : window.devicePixelRatio || 1);
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return;
+    let media: MediaQueryList;
+    const arm = () => {
+      media?.removeEventListener('change', change);
+      media = window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
+      media.addEventListener('change', change);
+    };
+    const change = () => {
+      setDevicePixelRatio(window.devicePixelRatio || 1);
+      arm();
+    };
+    change();
+    return () => media.removeEventListener('change', change);
+  }, []);
+  const pageZoom = Number.isFinite(zoom) && zoom > 0 ? zoom : 1;
+  const rasterScale = devicePixelRatio * pageZoom;
   const canvases = useRef(new Map<string, HTMLCanvasElement>());
   const [measuredWindow, setMeasuredWindow] = useState<readonly [number, number]>([0, 3]);
-  const window = displayWindow ?? measuredWindow;
-  const canvasWindow = useRef(window);
-  useInsertionEffect(() => { canvasWindow.current = window; }, [window]);
+  const pageWindow = displayWindow ?? measuredWindow;
+  const canvasWindow = useRef(pageWindow);
+  useInsertionEffect(() => { canvasWindow.current = pageWindow; }, [pageWindow]);
   const changeWindow = useCallback((start: number, end: number) => {
     setMeasuredWindow((previous) => previous[0] === start && previous[1] === end ? previous : [start, end]);
     if (!displayWindow || displayWindow[0] !== start || displayWindow[1] !== end) onDisplayWindowChange?.([start, end]);
@@ -324,8 +342,8 @@ export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoF
     }
     return geometry;
   }, [options.prepareGeometry, canvasForPage]);
-  const session = usePeerlessEditSession(useMemo(() => ({ ...options, canvasForPage: residentCanvasForPage, prepareGeometry }), [
-    options.source, options.openConnection, options.recovery, prepareGeometry, options.onError, residentCanvasForPage,
+  const session = usePeerlessEditSession(useMemo(() => ({ ...options, rasterScale, canvasForPage: residentCanvasForPage, prepareGeometry }), [
+    options.source, options.openConnection, options.recovery, prepareGeometry, options.onError, residentCanvasForPage, rasterScale,
   ]));
   useLayoutEffect(() => {
     if (session.status === 'ready') onReady?.(session.binding);
@@ -346,7 +364,7 @@ export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoF
     if (session.status !== 'ready') return;
     const geometry = session.binding.viewStore.getSnapshot().geometry;
     if (geometry) evictCanvases(geometry);
-  }, [session, window, evictCanvases]);
+  }, [session, pageWindow, evictCanvases]);
   useLayoutEffect(() => () => {
     for (const canvas of canvases.current.values()) {
       canvas.remove();
@@ -356,8 +374,8 @@ export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoF
     canvases.current.clear();
   }, [sessionOptions.source, session.status === 'failed']);
   return <div className={className} data-peerless-docx="true" aria-busy={session.status === 'opening'}>
-    {session.status === 'ready' && <PeerlessReady binding={session.binding} canvasForPage={canvasForPage} zoom={zoom > 0 ? zoom : 1} autoFocus={autoFocus}
-      onRecoverableText={retainText} displayWindow={window} onDisplayWindowChange={changeWindow} onClipboard={onClipboard} highlights={highlights} onNavigateCell={onNavigateCell} />}
+    {session.status === 'ready' && <PeerlessReady binding={session.binding} canvasForPage={canvasForPage} zoom={pageZoom} autoFocus={autoFocus}
+      onRecoverableText={retainText} displayWindow={pageWindow} onDisplayWindowChange={changeWindow} onClipboard={onClipboard} highlights={highlights} onNavigateCell={onNavigateCell} />}
     {session.status === 'failed' && <div role="alert">Unable to open document.</div>}
     {recoverableText.map((text, index) => <div key={index} role="status">
       This text could not be applied. Copy it to keep your draft, then dismiss it.

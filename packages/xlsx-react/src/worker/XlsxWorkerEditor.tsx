@@ -9,7 +9,7 @@ import type {
   CapturedFormat, CellAddr, CellEdit, CellInputEdit, Direction, EditResult, Proposal, Selection,
   WorkbookFrame, WorkbookHandle, WorkbookReplayOp, WorkbookSheetView, XlsxEditResult,
 } from '@betteroffice/xlsx';
-import { Component, lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Component, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, KeyboardEvent, MouseEvent, ReactNode, SetStateAction, SyntheticEvent } from 'react';
 import { flushSync } from 'react-dom';
 import { createXlsxCommandController, XlsxCommandAdmissionError } from '../commands/createXlsxCommandStore';
@@ -42,6 +42,7 @@ import type { WorkerEditorApiBridge } from './createWorkerEditorApi';
 
 import { asError, useLegacySessionWorkbook, EditableWorkbookSession, type EditableSessionWorkbookProps } from './useEditableSessionWorkbook';
 import type { PeerlessSessionWorkbookProps } from './usePeerlessSessionWorkbook';
+import { PeerlessXlsxEditorLoader } from './PeerlessXlsxEditorLoader';
 import type { WorkerPaintRequest, WorkerPaintResult } from './WorkerPaintSource';
 import { WorkerPaintSource } from './WorkerPaintSource';
 
@@ -148,12 +149,10 @@ type XlsxWorkerEditorProps = (EditableSessionWorkbookProps & { backend?: 'legacy
 
 export function XlsxWorkerEditor(props: XlsxWorkerEditorProps) {
   const backend = useRef(props.backend ?? 'legacy').current;
-  const [XlsxPeerlessWorkerEditor] = useState(() => lazy(() => xlsxPeerlessEditorLoader.load()
-    .then((module) => ({ default: module.XlsxPeerlessWorkerEditor }))
-    .catch((cause: unknown) => { throw new XlsxWorkerEditorChunkLoadError(cause); })));
   return backend === 'peerless' ? <LocaleProvider i18n={props.i18n}>
     <PeerlessEditorBoundary onError={props.onError} className={props.className}>
-      <Suspense fallback={null}><XlsxPeerlessWorkerEditor {...(props as PeerlessSessionWorkbookProps)} /></Suspense>
+      <PeerlessXlsxEditorLoader load={xlsxPeerlessEditorLoader.load} ErrorType={XlsxWorkerEditorChunkLoadError}
+        editorProps={props as PeerlessSessionWorkbookProps} />
     </PeerlessEditorBoundary>
   </LocaleProvider> :
     <LegacyXlsxWorkerEditor {...(props as EditableSessionWorkbookProps)} />;

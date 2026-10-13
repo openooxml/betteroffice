@@ -32,7 +32,7 @@ const fits = (locator: Locator) =>
 test('pptx: a narrow toolbar keeps every control in a keyboard menu inside the viewport', async ({
   page,
 }) => {
-  await page.setViewportSize({ width: 360, height: 800 });
+  await page.setViewportSize({ width: 320, height: 800 });
   await open(page);
   const scrollWidth = () =>
     page.evaluate(() => document.documentElement.scrollWidth);
@@ -164,7 +164,7 @@ test('pptx: long translations keep every toolbar action reachable through More',
   ) as Strings;
   const long = (key: string) => lookup(strings, key) + LONGER;
   await lengthenStrings(page, strings);
-  await page.setViewportSize({ width: 360, height: 800 });
+  await page.setViewportSize({ width: 320, height: 800 });
   await open(page);
 
   const rail = page.getByTestId('pptx-formatting-toolbar');

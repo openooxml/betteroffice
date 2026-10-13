@@ -74,13 +74,21 @@ async function mount(zoom = 1, caretPage = 0, prefix = false) {
       left: 0, right: 200 * zoom, width: 200 * zoom, height: 60, toJSON() {} };
   });
   const pixels = new Map<HTMLCanvasElement, string>();
+  const readbacks = { count: 0 };
+  const drawnAfterClose: TestBitmap[] = [];
   const context = spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(function (this: HTMLCanvasElement) {
     const canvas = this;
     return { save() {}, restore() {}, setTransform() {}, transform() {}, beginPath() {}, rect() {}, clip() {}, fillRect() {},
       clearRect() { pixels.set(canvas, ''); },
-      drawImage(bitmap: TestBitmap) { pixels.set(canvas, bitmap.pixels); },
+      drawImage(bitmap: TestBitmap) {
+        if (bitmap.closes > 0) drawnAfterClose.push(bitmap);
+        pixels.set(canvas, bitmap.pixels);
+      },
       fillText(text: string) { pixels.set(canvas, text); }, measureText: (text: string) => ({ width: text.length * 10 }),
-      getImageData: () => ({ width: canvas.width, height: canvas.height, pixels: pixels.get(canvas) ?? '' }),
+      getImageData: () => {
+        readbacks.count += 1;
+        return { width: canvas.width, height: canvas.height, pixels: pixels.get(canvas) ?? '' };
+      },
       putImageData(image: ImageData & { pixels: string }) { pixels.set(canvas, image.pixels); },
     } as unknown as CanvasRenderingContext2D;
   } as unknown as typeof HTMLCanvasElement.prototype.getContext);
@@ -96,7 +104,8 @@ async function mount(zoom = 1, caretPage = 0, prefix = false) {
     frames.push(candidate);
     return candidate;
   };
-  const requests: { start: number; end: number; built: number[]; released: number[] }[] = [];
+  const requests: { start: number; end: number; built: number[]; released: number[]; rasterScale?: number }[] = [];
+  const initialScales: (number | undefined)[] = [];
   const edits: DocxCommandEnvelope[] = [];
   const initial: ResidentCommandConnection['initial'] = { ...identity, version: 0, throughSeq: 0,
     outcomes: [], selection: null,
@@ -105,15 +114,15 @@ async function mount(zoom = 1, caretPage = 0, prefix = false) {
     frame: nextFrame([...built]),
   };
   const connection: ResidentCommandConnection & {
-    requestViewport(request: { start: number; end: number; frameEpoch: number }): Promise<void>;
+    requestViewport(request: { start: number; end: number; frameEpoch: number; rasterScale?: number }): Promise<void>;
   } = {
     initial, requestFullFrame: async () => initial,
-    async requestViewport({ start, end }) {
+    async requestViewport({ start, end, rasterScale }) {
       const entering = Array.from({ length: end - start }, (_, index) => start + index);
       const released = [...built].filter((index) => index !== caretPage && (index < start || index >= end));
       for (const index of released) built.delete(index);
       for (const index of entering) built.add(index);
-      requests.push({ start, end, built: entering, released });
+      requests.push({ start, end, built: entering, released, rasterScale });
       revision += 1;
       receive?.(nextFrame([...new Set([caretPage, ...entering])]));
     },
@@ -123,7 +132,10 @@ async function mount(zoom = 1, caretPage = 0, prefix = false) {
         edit(command) { edits.push(command); return new Promise<DocxCommandAck>(() => {}); } },
     },
   };
-  const options: UsePeerlessEditSessionOptions = { source: Uint8Array.of(1), openConnection: async () => connection,
+  const options: UsePeerlessEditSessionOptions = { source: Uint8Array.of(1), openConnection: async (...args: unknown[]) => {
+    initialScales.push(typeof args[2] === 'function' ? (args[2] as () => number)() : undefined);
+    return connection;
+  },
     canvasForPage: () => null,
     prepareGeometry(candidate) {
       return { identity, coversThroughSeq: candidate.coversThroughSeq, frameEpoch: candidate.revision, layoutRevision: 1,
@@ -139,12 +151,15 @@ async function mount(zoom = 1, caretPage = 0, prefix = false) {
   let binding: PeerlessEditSessionBinding | undefined;
   const view = render(<PeerlessPagedEditor sessionOptions={options} zoom={zoom} onReady={(ready) => { binding = ready; }} />, { container: scroller });
   await waitFor(() => expect(binding).toBeDefined());
-  return { ...view, scroller, requests, edits, frames, pixels, binding: binding!,
+  return { ...view, scroller, requests, edits, frames, pixels, readbacks, drawnAfterClose, initialScales, binding: binding!,
     async complete() {
       complete = true;
       revision += 1;
       act(() => receive?.(nextFrame([0, 1, 2])));
       await waitFor(() => expect(binding!.viewStore.getSnapshot().geometry?.pages).toHaveLength(20));
+    },
+    setZoom(value: number) {
+      view.rerender(<PeerlessPagedEditor sessionOptions={options} zoom={value} />);
     },
     async scrollTo(pageIndex: number) {
       const before = requests.length;
@@ -152,6 +167,89 @@ async function mount(zoom = 1, caretPage = 0, prefix = false) {
       await waitFor(() => expect(requests.slice(before).some(({ built }) => built.includes(pageIndex))).toBe(true));
     },
   };
+}
+
+test('raster scale starts at device pixels and settles zoom and rearmed DPR changes', async () => {
+  const originalDpr = Object.getOwnPropertyDescriptor(window, 'devicePixelRatio');
+  Object.defineProperty(window, 'devicePixelRatio', { configurable: true, value: 2 });
+  restorers.push(() => {
+    if (originalDpr) Object.defineProperty(window, 'devicePixelRatio', originalDpr);
+    else Reflect.deleteProperty(window, 'devicePixelRatio');
+  });
+  const media: { query: string; listener?: () => void }[] = [];
+  const matchMedia = spyOn(window, 'matchMedia').mockImplementation((query) => {
+    const item: typeof media[number] = { query };
+    media.push(item);
+    return { matches: true, media: query,
+      addEventListener(_type: string, listener: () => void) { item.listener = listener; },
+      removeEventListener() { item.listener = undefined; },
+    } as unknown as MediaQueryList;
+  });
+  restorers.push(() => matchMedia.mockRestore());
+  const editor = await mount(1.5);
+  expect(editor.initialScales).toEqual([3]);
+  expect(media.at(-1)?.query).toBe('(resolution: 2dppx)');
+  let now = 0;
+  let timerId = 0;
+  const pending = new Map<number, { at: number; run: () => void }>();
+  const timeout = spyOn(globalThis, 'setTimeout').mockImplementation(((run: () => void, delay: number) => {
+    const id = ++timerId;
+    pending.set(id, { at: now + delay, run });
+    return id as unknown as ReturnType<typeof setTimeout>;
+  }) as typeof setTimeout);
+  const cancel = spyOn(globalThis, 'clearTimeout').mockImplementation(((id: number) => { pending.delete(id); }) as typeof clearTimeout);
+  restorers.push(() => timeout.mockRestore(), () => cancel.mockRestore());
+  const advance = async (ms: number) => {
+    now += ms;
+    await act(async () => {
+      for (const [id, timer] of [...pending]) if (timer.at <= now) { pending.delete(id); timer.run(); }
+    });
+  };
+  const scales = () => editor.requests.filter(({ rasterScale }) => rasterScale !== undefined).map(({ rasterScale }) => rasterScale);
+  const before = scales().length;
+  const canvas = editor.container.querySelector<HTMLCanvasElement>('[data-page-id="1"] canvas')!;
+  const pixels = editor.pixels.get(canvas);
+  const caret = editor.binding.viewStore.getSnapshot().geometry!.caret;
+  act(() => editor.setZoom(1.25));
+  await advance(100);
+  act(() => editor.setZoom(2));
+  expect(editor.container.querySelector('div[style*="transform: scale"]')?.parentElement?.style.width).toBe('400px');
+  await advance(149);
+  expect(scales().slice(before)).toEqual([]);
+  expect(canvas.width).toBe(200);
+  expect(editor.pixels.get(canvas)).toBe(pixels);
+  expect(editor.binding.viewStore.getSnapshot().geometry!.caret).toEqual(caret);
+  await advance(1);
+  expect(scales().slice(before)).toEqual([4]);
+  Object.defineProperty(window, 'devicePixelRatio', { configurable: true, value: 1 });
+  act(() => media.at(-1)?.listener?.());
+  expect(media.at(-1)?.query).toBe('(resolution: 1dppx)');
+  await advance(100);
+  Object.defineProperty(window, 'devicePixelRatio', { configurable: true, value: 1.5 });
+  act(() => media.at(-1)?.listener?.());
+  expect(media.at(-1)?.query).toBe('(resolution: 1.5dppx)');
+  await advance(149);
+  expect(scales().slice(before)).toEqual([4]);
+  await advance(1);
+  expect(scales().slice(before)).toEqual([4, 3]);
+  act(() => editor.setZoom(1.75));
+  editor.unmount();
+  await advance(150);
+  expect(scales().slice(before)).toEqual([4, 3]);
+  expect(media.every(({ listener }) => listener === undefined)).toBe(true);
+});
+
+for (const zoom of [0, -1, Number.NaN]) {
+  test(`raster scale falls back to device pixels for zoom ${zoom}`, async () => {
+    const originalDpr = Object.getOwnPropertyDescriptor(window, 'devicePixelRatio');
+    Object.defineProperty(window, 'devicePixelRatio', { configurable: true, value: 2 });
+    restorers.push(() => {
+      if (originalDpr) Object.defineProperty(window, 'devicePixelRatio', originalDpr);
+      else Reflect.deleteProperty(window, 'devicePixelRatio');
+    });
+    const editor = await mount(zoom);
+    expect(editor.initialScales).toEqual([2]);
+  });
 }
 
 test('peerless_page_offsets_are_monotonic_and_non_overlapping', () => {
@@ -229,6 +327,8 @@ test('evicted_pages_are_not_recreated_by_pruning_and_bitmaps_are_closed', async 
   await editor.scrollTo(2);
   expect(editor.container.querySelector('[data-page-id="3"] canvas')).not.toBe(evicted);
   expect((staged.bitmap as TestBitmap).closes).toBe(1);
+  expect(editor.drawnAfterClose).toEqual([]);
+  expect(editor.readbacks.count).toBe(0);
 });
 
 test('worker page column centers at the scaled width', async () => {

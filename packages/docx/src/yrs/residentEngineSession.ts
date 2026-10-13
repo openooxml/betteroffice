@@ -22,7 +22,12 @@ import type {
   CollaborationTextInsertion,
   CollaborationUpdateOrigin,
 } from '../collaboration/types';
-import type { DocxEditResult, DocxFindTextResult, DocxReadParagraphsResult } from './edits';
+import type {
+  DocxEditResult,
+  DocxFindTextResult,
+  DocxReadParagraphsResult,
+  DocxReadStoriesResult,
+} from './edits';
 import type {
   DocxParagraphAnchorResult,
   DocxParagraphIdentitySnapshot,
@@ -36,6 +41,7 @@ import type { YrsPositionOutline } from './yrsPositionProjection';
 import type { ResidentSaveRecord } from './residentSave';
 import type { Comment } from '../types/content';
 import type { Document } from '../types/document';
+import type { DocxListStoriesResult } from './stories';
 import { DirtyProjectionStories } from './dirtyProjectionStories';
 import { resolveHostJsonCommentMedia } from './hostMedia';
 import { createEditSession, preloadEditWasm, setEditWasmHeapLimit } from './wasm/index';
@@ -127,6 +133,8 @@ export type ResidentEngineSession = Pick<
   | 'setDisplayRetainBuiltPages'
   | 'setDisplayWindow'
   | 'setSelection'
+  | 'readStories'
+  | 'listStories'
   | 'storiesChangedSince'
   | 'yrsBlocksForStory'
 > & {
@@ -400,6 +408,12 @@ export async function createResidentEngineSession(
   };
 
   const geometryReader: ProposalGeometryReader & DocxSidebarReader = {
+    headerFooterAliases: () => {
+      const value: unknown = JSON.parse(session.header_footer_aliases_json());
+      return value !== null && typeof value === 'object' && !Array.isArray(value)
+        ? new Map(Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === 'string'))
+        : new Map();
+    },
     resolveComment: (id) => JSON.parse(session.resolve_comment(id)),
     headings: (story) => JSON.parse(session.headings_json(story)),
     version: () => session.version(),
@@ -578,6 +592,9 @@ export async function createResidentEngineSession(
     },
     paragraphIdentities: () =>
       JSON.parse(session.paragraph_identities()) as DocxParagraphIdentitySnapshot,
+    readStories: (request) =>
+      JSON.parse(session.read_stories_json(JSON.stringify(request))) as DocxReadStoriesResult,
+    listStories: () => JSON.parse(session.list_stories_json()) as DocxListStoriesResult,
     exportStructuredWithPagesJson: (options, currentRequest) =>
       session.export_structured_with_pages_json(JSON.stringify(options), currentRequest),
     listContentControls: (options = {}) =>
