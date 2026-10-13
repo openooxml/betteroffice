@@ -956,7 +956,8 @@ impl WorkbookAuthority {
         }
         let txn = self.doc.transact();
         let cell_formats = txn.get_map(CELL_FORMATS)?;
-        let (mut styles, _) = materialize_cell_formats(&cell_formats, &txn, &self.base.styles).ok()?;
+        let (mut styles, _) =
+            materialize_cell_formats(&cell_formats, &txn, &self.base.styles).ok()?;
         styles.bind_plain_xf();
         let order = txn.get_array(SHEET_ORDER)?;
         let keys = sheet_keys(&order, &txn).ok()?;
