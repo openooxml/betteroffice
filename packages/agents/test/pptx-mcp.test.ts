@@ -71,6 +71,25 @@ test('PPTX MCP read-only mode excludes writes and rejects oversized read inputs'
   } finally { await context.dispose(); }
 });
 
+test('PPTX MCP set_notes text describes its paragraph lines', async () => {
+  const context = await connect();
+  try {
+    const edit = (await context.client.listTools()).tools.find(tool => tool.name === 'pptx_edit');
+    const variants: Record<string, any>[] = [];
+    const visit = (node: unknown): void => {
+      if (Array.isArray(node)) node.forEach(visit);
+      else if (node && typeof node === 'object') {
+        const schema = node as Record<string, any>;
+        if (schema.properties?.op?.const !== undefined) variants.push(schema);
+        Object.values(schema).forEach(visit);
+      }
+    };
+    visit(edit?.inputSchema);
+    expect(variants.find(variant => variant.properties.op.const === 'set_notes')?.properties.text.description)
+      .toBe('One paragraph per line; a blank line adds an empty paragraph.');
+  } finally { await context.dispose(); }
+});
+
 test('PPTX MCP adds workspace images and refuses traversal and symlink escapes atomically', async () => {
   const context = await connect();
   const outside = await mkdtemp(join(tmpdir(), 'pptx-image-outside-'));
