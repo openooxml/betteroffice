@@ -112,6 +112,7 @@ function validCommandIntent(command: DocxCommandEnvelope, error: { reason: strin
   const refuse = (reason: string): false => { error.reason = reason; return false; };
   const payload: unknown = command.payload;
   if (!object(payload)) return refuse('invalid-payload');
+  if (command.kind === 'applyRemoteUpdate') return refuse('unsupported-command');
   if (['setContentControlValue', 'addRepeatingItem', 'removeRepeatingItem'].includes(command.kind)) {
     const keys = command.kind === 'setContentControlValue' ? ['handle', 'value', 'expectVersion'] : ['handle', 'expectVersion'];
     return Object.keys(payload).every(key => keys.includes(key)) && string(payload.handle) && string(payload.expectVersion) &&
