@@ -363,7 +363,7 @@ function projectGlyphLine(input: GlyphLineInput): { line: DocxEchoGlyphLine; rec
   return {
     line: { glyphSet: source.key, fontId: first.fontId, size: first.size,
       color: first.color, x: chosen.x, y: baseline, next, right,
-      canEmpty: facts.canEmpty ?? false,
+      ...(facts.canEmpty === undefined ? {} : { canEmpty: facts.canEmpty }),
       ...(previousSlack === undefined ? {} : { previousSlack }), ...(nextWord === undefined ? {} : { nextWord }),
       device, pixelRatio: ratio },
     rect: { x: band.x, y: band.y, width: band.w, height: band.h },

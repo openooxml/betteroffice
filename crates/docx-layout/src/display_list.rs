@@ -841,7 +841,9 @@ pub struct GlyphRunPrimitive {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct EchoRunFacts {
+    #[serde(serialize_with = "echo_coordinate")]
     pub x: f64,
+    #[serde(serialize_with = "echo_coordinate")]
     pub right: f64,
     #[serde(default, skip_serializing_if = "is_false")]
     pub kern: bool,
@@ -855,8 +857,16 @@ pub struct EchoRunFacts {
     pub position: f64,
     #[serde(default = "echo_scale", skip_serializing_if = "echo_default_scale")]
     pub scale: f64,
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default)]
     pub can_empty: bool,
+}
+
+fn echo_coordinate<S: serde::Serializer>(value: &f64, serializer: S) -> Result<S::Ok, S::Error> {
+    if value.fract() == 0.0 && value.abs() <= 9_007_199_254_740_991.0 {
+        serializer.serialize_i64(*value as i64)
+    } else {
+        serializer.serialize_f64(*value)
+    }
 }
 
 fn echo_zero(value: &f64) -> bool {
