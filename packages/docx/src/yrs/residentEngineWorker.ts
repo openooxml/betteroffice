@@ -1119,6 +1119,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   if (request.type === 'commandUpdate') {
     requireCommandHost();
     if (!session) throw new Error('Resident engine worker is not initialized');
+    if (collaboration) throw new Error('Collaboration merges use the ordered applyRemoteUpdate command');
     noteDocumentChange();
     fontRequirements = null;
     completedLayout = null;
