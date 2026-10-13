@@ -448,6 +448,18 @@ pub struct PoolMarks {
     num_fmts: usize,
 }
 
+/// Entries known to save as the plain format (an xf) or as the default entry (a font, fill or
+/// border): source entries whose markup carries nothing the model drops, and entries
+/// [`Stylesheet::plain_xf`] appended, which a save writes from the model. A save keeps any
+/// other source entry's markup, protection, parent style or rotation included.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SavedPlain {
+    pub xf: Option<u32>,
+    pub font: Option<u32>,
+    pub fill: Option<u32>,
+    pub border: Option<u32>,
+}
+
 /// parsed style tables plus theme; private memos accelerate interning and
 /// are invalidated by any pool length change.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -461,6 +473,9 @@ pub struct Stylesheet {
     /// `#rrggbb` entries; empty strings preserve omitted colors and use the default index.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub indexed_colors: Vec<String>,
+    /// not snapshotted: a restored stylesheet knows none and appends its own.
+    #[serde(skip)]
+    saved_plain: SavedPlain,
     #[serde(skip)]
     font_memo: PoolMemo,
     #[serde(skip)]
@@ -560,6 +575,7 @@ impl Stylesheet {
             num_fmts,
             theme: _,
             indexed_colors,
+            saved_plain: _,
             font_memo: _,
             fill_memo: _,
             border_memo: _,
@@ -867,6 +883,45 @@ impl Stylesheet {
         self.num_fmts.truncate(marks.num_fmts);
     }
 
+    /// records the entries a parser found to save plain.
+    pub fn set_saved_plain(&mut self, saved: SavedPlain) {
+        self.saved_plain = saved;
+    }
+
+    /// the xf the plain format takes without adding one: xf 0 when it reads plain, else an xf
+    /// known to save plain.
+    pub fn known_plain_xf(&self) -> Option<u32> {
+        if self.reads_plain(0) {
+            return Some(0);
+        }
+        let index = self.saved_plain.xf?;
+        (self.xf(index).is_some() && self.reads_plain(index)).then_some(index)
+    }
+
+    /// the xf the plain format takes, appending one when none is known. A source entry the
+    /// model reads as plain or default may carry markup a save keeps, so the new xf names only
+    /// pool entries known to save as defaults.
+    pub fn plain_xf(&mut self) -> u32 {
+        if let Some(index) = self.known_plain_xf() {
+            return index;
+        }
+        let xf = Xf {
+            font: saved_default(&mut self.fonts, &mut self.saved_plain.font),
+            fill: saved_default(&mut self.fills, &mut self.saved_plain.fill),
+            border: saved_default(&mut self.borders, &mut self.saved_plain.border),
+            num_fmt_id: None,
+            alignment: None,
+        };
+        self.cell_xfs.push(xf);
+        let index = (self.cell_xfs.len() - 1) as u32;
+        self.saved_plain.xf = Some(index);
+        index
+    }
+
+    fn reads_plain(&self, index: u32) -> bool {
+        self.resolved_format(Some(index)) == self.resolved_format(None)
+    }
+
     fn intern_font(&mut self, value: &Font) -> u32 {
         intern(&mut self.fonts, &mut self.font_memo, value, |value| {
             FontKey::new(value).map(|key| fingerprint(&key))
@@ -1012,6 +1067,28 @@ where
     }
     memo.pool_len = values.len();
     index
+}
+
+/// a pool entry known to save as the default, appended when none is. `None` leaves the facet
+/// unset, which saves as entry 0, so only when entry 0 is that entry or the pool is empty.
+fn saved_default<T: Default + PartialEq>(
+    pool: &mut Vec<T>,
+    saved: &mut Option<u32>,
+) -> Option<u32> {
+    if pool.is_empty() {
+        return None;
+    }
+    let default = T::default();
+    match saved.filter(|&index| pool.get(index as usize) == Some(&default)) {
+        Some(0) => None,
+        Some(index) => Some(index),
+        None => {
+            pool.push(default);
+            let index = (pool.len() - 1) as u32;
+            *saved = Some(index);
+            Some(index)
+        }
+    }
 }
 
 #[inline(always)]
