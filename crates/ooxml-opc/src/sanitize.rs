@@ -84,7 +84,7 @@ fn sanitize_package_inner(data: &[u8], expected_format: Option<&str>) -> Result<
     ) {
         sanitize_workbook_sheets(
             &mut parts,
-            &removed,
+            &mut removed,
             content_types.as_ref(),
             &mut xml_budget,
         )?;
@@ -976,7 +976,7 @@ fn dangerous_part(path: &str, content_types: Option<&ContentTypes>) -> bool {
 
 fn sanitize_workbook_sheets(
     parts: &mut [(String, Vec<u8>)],
-    removed: &HashSet<String>,
+    removed: &mut HashSet<String>,
     content_types: Option<&ContentTypes>,
     xml_budget: &mut XmlBudget,
 ) -> Result<(), String> {
@@ -1005,6 +1005,7 @@ fn sanitize_workbook_sheets(
     let mut reader = NsReader::from_reader(bytes.as_slice());
     let mut kept_by_id = BTreeMap::new();
     let mut removed_macro_sheets = Vec::new();
+    let mut calc_chains = Vec::new();
     let mut root_seen = false;
     let mut root_valid = false;
     let mut depth = 0;
@@ -1040,6 +1041,9 @@ fn sanitize_workbook_sheets(
                                         value.to_ascii_lowercase().contains("macrosheet")
                                     })
                         });
+                    if !is_removed && relationship_type.ends_with("/calcchain") {
+                        calc_chains.extend(target);
+                    }
                     // Id-less relationships cannot be referenced by a sheet.
                     if let Some(id) = attribute_value(&values, "Id") {
                         let kept = kept_by_id.entry(id.to_owned()).or_insert(0_usize);
@@ -1085,6 +1089,8 @@ fn sanitize_workbook_sheets(
         .ok_or_else(|| format!("missing workbook part: {workbook_path}"))?;
     if let Some(workbook) = rewrite_workbook_sheets(bytes, path, &relationships, xml_budget)? {
         *bytes = workbook;
+        // Calc chain entries name sheet ids; spreadsheet apps rebuild a missing chain.
+        removed.extend(calc_chains);
     }
     Ok(())
 }
