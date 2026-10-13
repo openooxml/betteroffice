@@ -5908,14 +5908,9 @@ mod tests {
         rows.sheets[0].row_styles = BTreeMap::from([(4, 1)]);
         for model in [&columns, &rows] {
             let base = WorkbookBase::from_model(model).unwrap();
-            let (released, released_client) = fingerprint_model_with_row_styles_oracle(
-                model,
-                SCHEMA_VERSION,
-                true,
-                true,
-                false,
-            )
-            .unwrap();
+            let (released, released_client) =
+                fingerprint_model_with_row_styles_oracle(model, SCHEMA_VERSION, true, true, false)
+                    .unwrap();
             assert!(base.fingerprints[&SCHEMA_VERSION].contains(&released));
             assert_ne!(
                 base.fingerprint, released,

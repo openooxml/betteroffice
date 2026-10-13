@@ -1396,15 +1396,15 @@ mod tests {
             "a checkpoint whose authority state holds row defaults needs its own codec version"
         );
         let (restored, ..) = Workbook::restore_recovery_checkpoint(&bytes).unwrap();
-        assert_eq!(restored.model.sheets[0].row_styles, styled.sheets[0].row_styles);
+        assert_eq!(
+            restored.model.sheets[0].row_styles,
+            styled.sheets[0].row_styles
+        );
 
         let plain = Workbook::from_model(model()).unwrap();
         let bytes = plain.recovery_checkpoint(0, None).unwrap();
-        let released = with_authority_state(
-            &bytes,
-            3,
-            &plain.authority.encode_released_recovery_state(),
-        );
+        let released =
+            with_authority_state(&bytes, 3, &plain.authority.encode_released_recovery_state());
         let (restored, ..) = Workbook::restore_recovery_checkpoint(&released).unwrap();
         assert_eq!(restored.model, plain.model);
         assert!(restored.model.sheets[0].row_styles.is_empty());

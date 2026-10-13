@@ -3507,70 +3507,6 @@ mod tests {
             );
         }
     }
-}
-
-impl WorkbookAuthority {
-    pub(crate) fn validate_snapshot_model(
-        &self,
-        model: &WorkbookModel,
-        validation: &mut super::snapshot_validation::SnapshotValidation,
-        keys: &mut crate::snapshot::yrs_split::SnapshotKeys,
-        budget: SnapshotBudget,
-    ) -> SnapshotResult<bool> {
-        validation.advance(self, model, keys, budget)
-    }
-}
-
-#[cfg(test)]
-impl AuthorityHydrator {
-    pub(crate) fn snapshot_vector_for_test(&self) -> StateVector {
-        self.doc.transact().state_vector()
-    }
-}
-
-#[cfg(test)]
-mod ceiling_tests {
-    use super::*;
-
-    #[test]
-    fn base_stream_refuses_oversized_declared_record_before_allocation() {
-        let mut decoder = BaseStreamDecoder::default();
-        let mut records = LinkedList::new();
-        let mut payload = Writer::new();
-        payload.var_usize(xlsx_parse::SNAPSHOT_RECORD_MAX_BYTES + 1);
-        assert_eq!(
-            decoder
-                .push(&payload.into_bytes(), &mut records)
-                .unwrap_err()
-                .to_string(),
-            "authority base record exceeds byte limit"
-        );
-        assert_eq!(decoder.record.capacity(), 0);
-        assert!(decoder.length.is_none());
-        assert!(records.is_empty());
-    }
-
-    #[test]
-    fn snapshot_oversized_base_record_refuses_capture_before_chunks() {
-        let model = WorkbookModel {
-            sheets: vec![Sheet::new("Data")],
-            ..WorkbookModel::default()
-        };
-        let mut authority = WorkbookAuthority::from_source_with_projection(&model, None, &[], None)
-            .unwrap()
-            .0;
-        Arc::make_mut(&mut authority.base)
-            .shared_strings
-            .push("a".repeat(xlsx_parse::SNAPSHOT_RECORD_MAX_BYTES + 1));
-        let failure =
-            AuthoritySnapshotEncoder::new(&authority, SnapshotBudget::new(1, 16_384).unwrap())
-                .err()
-                .unwrap();
-        assert_eq!(
-            failure.to_string(),
-            "authority base record exceeds byte limit"
-        );
-    }
 
     fn styled_defaults_model(rows: BTreeMap<u32, u32>) -> WorkbookModel {
         let mut model = model();
@@ -3661,6 +3597,70 @@ mod ceiling_tests {
             BaseBuilder::default()
                 .push_bounded(&released_tag, budget)
                 .is_err()
+        );
+    }
+}
+
+impl WorkbookAuthority {
+    pub(crate) fn validate_snapshot_model(
+        &self,
+        model: &WorkbookModel,
+        validation: &mut super::snapshot_validation::SnapshotValidation,
+        keys: &mut crate::snapshot::yrs_split::SnapshotKeys,
+        budget: SnapshotBudget,
+    ) -> SnapshotResult<bool> {
+        validation.advance(self, model, keys, budget)
+    }
+}
+
+#[cfg(test)]
+impl AuthorityHydrator {
+    pub(crate) fn snapshot_vector_for_test(&self) -> StateVector {
+        self.doc.transact().state_vector()
+    }
+}
+
+#[cfg(test)]
+mod ceiling_tests {
+    use super::*;
+
+    #[test]
+    fn base_stream_refuses_oversized_declared_record_before_allocation() {
+        let mut decoder = BaseStreamDecoder::default();
+        let mut records = LinkedList::new();
+        let mut payload = Writer::new();
+        payload.var_usize(xlsx_parse::SNAPSHOT_RECORD_MAX_BYTES + 1);
+        assert_eq!(
+            decoder
+                .push(&payload.into_bytes(), &mut records)
+                .unwrap_err()
+                .to_string(),
+            "authority base record exceeds byte limit"
+        );
+        assert_eq!(decoder.record.capacity(), 0);
+        assert!(decoder.length.is_none());
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn snapshot_oversized_base_record_refuses_capture_before_chunks() {
+        let model = WorkbookModel {
+            sheets: vec![Sheet::new("Data")],
+            ..WorkbookModel::default()
+        };
+        let mut authority = WorkbookAuthority::from_source_with_projection(&model, None, &[], None)
+            .unwrap()
+            .0;
+        Arc::make_mut(&mut authority.base)
+            .shared_strings
+            .push("a".repeat(xlsx_parse::SNAPSHOT_RECORD_MAX_BYTES + 1));
+        let failure =
+            AuthoritySnapshotEncoder::new(&authority, SnapshotBudget::new(1, 16_384).unwrap())
+                .err()
+                .unwrap();
+        assert_eq!(
+            failure.to_string(),
+            "authority base record exceeds byte limit"
         );
     }
 }

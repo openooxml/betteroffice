@@ -659,7 +659,12 @@ fn cascade_plain_clears_reuse_one_plain_xf_across_save_and_reopen_cycles() {
         }],
         r#"<row r="1"><c r="A1" s="0"><v>1</v></c><c r="B1" s="0"><v>2</v></c><c r="C1" s="0"><v>3</v></c><c r="D1" s="0"><v>4</v></c><c r="E1" s="0"><v>5</v></c></row>"#,
     );
-    let initial = Workbook::open(&bytes).unwrap().model().styles.cell_xfs.len();
+    let initial = Workbook::open(&bytes)
+        .unwrap()
+        .model()
+        .styles
+        .cell_xfs
+        .len();
     for address in addresses {
         let mut workbook = Workbook::open(&bytes).unwrap();
         clear_style(
