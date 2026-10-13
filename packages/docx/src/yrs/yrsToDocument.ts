@@ -667,7 +667,7 @@ function resolveMediaSrcs(value: unknown): void {
   }
 }
 
-function imageRunFromPayload(payload: Attrs): Run {
+function imageFromPayload(payload: Attrs): Image {
   const attrs = payload as YrsImageAttrs & Attrs;
   const wrap: Image['wrap'] = {
     type: (asString(attrs.wrapType) || 'inline') as Image['wrap']['type'],
@@ -761,7 +761,11 @@ function imageRunFromPayload(payload: Attrs): Run {
   if (attrs.effectExtentRight != null) padding.right = pixelsToEmu(attrs.effectExtentRight);
   if (Object.keys(padding).length > 0) image.padding = padding;
 
-  return { type: 'run', content: [{ type: 'drawing', image }] };
+  return image;
+}
+
+function imageRunFromPayload(payload: Attrs): Run {
+  return { type: 'run', content: [{ type: 'drawing', image: imageFromPayload(payload) }] };
 }
 
 /** The seeded shape, carrying the text body and everything else no payload field describes. */
@@ -807,11 +811,20 @@ function chartRunFromPayload(payload: Attrs, recovery: ChartRecovery): Run | nul
   }
 }
 
-function opaqueDrawingRunFromPayload(payload: Attrs): Run | null {
+function opaqueDrawingRunFromPayload(payload: Attrs, attributes: Attrs): Run | null {
   const kind = asString(payload.kind);
   const xml = asString(payload.xml);
   if (!kind || !xml) return null;
-  return { type: 'run', content: [{ type: 'opaqueDrawing', kind, xml }] };
+  const preview = asObject(payload.preview);
+  const formatting = attrsToTextFormatting(formattingAttrs(attributes));
+  return {
+    type: 'run',
+    content: [{
+      type: 'opaqueDrawing', kind, xml,
+      ...(preview ? { preview: imageFromPayload(preview) } : {}),
+    }],
+    ...(Object.keys(formatting).length > 0 ? { formatting } : {}),
+  };
 }
 
 function shapeRunFromPayload(payload: Attrs): Run {
@@ -1011,7 +1024,7 @@ function ordinaryContentForItem(item: InlineItem, recovery: ChartRecovery): Para
     case 'chart':
       return chartRunFromPayload(item.payload, recovery);
     case 'opaqueDrawing':
-      return opaqueDrawingRunFromPayload(item.payload);
+      return opaqueDrawingRunFromPayload(item.payload, item.attributes);
     case 'field':
       return (
         commentReferenceFromPayload(item.payload) ?? fieldFromPayload(item.payload, item.attributes)
@@ -1061,7 +1074,7 @@ function trackedContentForItem(item: InlineItem, info: TrackedChangeInfo, inCont
   else if (item.kind === 'embed' && item.embedKind === 'chart')
     child = chartRunFromPayload(item.payload, recovery) ?? { type: 'run', content: [] };
   else if (item.kind === 'embed' && item.embedKind === 'opaqueDrawing')
-    child = opaqueDrawingRunFromPayload(item.payload) ?? { type: 'run', content: [] };
+    child = opaqueDrawingRunFromPayload(item.payload, item.attributes) ?? { type: 'run', content: [] };
   else if (item.kind === 'text') child = createTextRun(item.text, item.attributes);
   else child = { type: 'run', content: [] };
 
@@ -1100,7 +1113,7 @@ function addToHyperlink(hyperlink: Hyperlink, item: InlineItem, recovery: ChartR
   } else if (item.embedKind === 'image') child = imageRunFromPayload(item.payload);
   else if (item.embedKind === 'shape') child = shapeRunFromPayload(item.payload);
   else if (item.embedKind === 'chart') child = chartRunFromPayload(item.payload, recovery) ?? undefined;
-  else if (item.embedKind === 'opaqueDrawing') child = opaqueDrawingRunFromPayload(item.payload) ?? undefined;
+  else if (item.embedKind === 'opaqueDrawing') child = opaqueDrawingRunFromPayload(item.payload, item.attributes) ?? undefined;
   else if (item.embedKind === 'field') {
     child =
       commentReferenceFromPayload(item.payload) ?? fieldFromPayload(item.payload, item.attributes);
