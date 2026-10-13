@@ -185,7 +185,7 @@ BetterOffice engine. They are not stored in the repository. They are published
 in the public corpus bucket under
 `https://corpus.betteroffice.dev/eval/formats/v1/`, and
 [`formats/fixtures.json`](formats/fixtures.json) pins each file's size and
-SHA-256.
+SHA-256, and its `provenance` note states this origin and how to regenerate.
 
 The checkers download a fixture on first use, verify it, and keep it in the
 asset cache (`QUALITY_ASSET_CACHE`, default
