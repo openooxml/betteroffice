@@ -8,6 +8,10 @@ export function createPeerlessCollaborationReplica<X>(client: ResidentEngineWork
   const listeners = new Set<(update: Uint8Array, origin: CollaborationUpdateOrigin) => void>();
   const inferences = new Map<number, CollaborationTextInsertion>();
   const requireActive = () => { if (retired) throw new Error('Collaboration replica is retired'); };
+  const fenced = async <T>(read: () => Promise<{ value: T }>): Promise<T> => {
+    requireActive(); await session.flush(); requireActive();
+    const reply = await read(); requireActive(); return reply.value;
+  };
   const off = client.onCollabUpdates(event => {
     if (retired) return;
     for (const inference of event.inferences) inferences.set(inference.seq, inference.insertion);
@@ -18,8 +22,8 @@ export function createPeerlessCollaborationReplica<X>(client: ResidentEngineWork
   });
   const adapter = createAsyncCollaborationReplica({
     clientId,
-    async encodeStateVector() { requireActive(); const reply = await client.documentRead({ kind: 'collabStateVector' }); requireActive(); return reply.value; },
-    async encodeStateAsUpdate(stateVector) { requireActive(); const reply = await client.documentRead({ kind: 'collabDiff', stateVector: stateVector?.slice() }); requireActive(); return reply.value; },
+    encodeStateVector: () => fenced(() => client.documentRead({ kind: 'collabStateVector' })),
+    encodeStateAsUpdate: (stateVector) => fenced(() => client.documentRead({ kind: 'collabDiff', stateVector: stateVector?.slice() })),
     async applyUpdate(update) {
       requireActive();
       const ticket = session.submit('applyRemoteUpdate', { update: update.slice().buffer }, { lane: 'collab', fence: true });
