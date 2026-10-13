@@ -5739,6 +5739,34 @@ mod tests {
     }
 
     #[test]
+    fn a_row_and_column_styled_workbook_accepts_its_column_only_fingerprint() {
+        let mut model = rich_model();
+        model.sheets[0].col_styles = vec![ColStyle {
+            first: 0,
+            last: 3,
+            xf: 1,
+        }];
+        model.sheets[0].row_styles = BTreeMap::from([(4, 1)]);
+        let base = WorkbookBase::from_model(&model).unwrap();
+        let mut columns_only = model.clone();
+        columns_only.sheets[0].row_styles.clear();
+        for version in MIN_SUPPORTED_SCHEMA_VERSION..=SCHEMA_VERSION {
+            let (released, _) = fingerprint_model_for_schema(&columns_only, version).unwrap();
+            assert!(
+                base.fingerprints[&version].contains(&released),
+                "schema v{version} must recognise a fingerprint hashing column styles only"
+            );
+        }
+        let (current, _) = fingerprint_model_for_schema(&model, SCHEMA_VERSION).unwrap();
+        let (released, _) = fingerprint_model_for_schema(&columns_only, SCHEMA_VERSION).unwrap();
+        assert_ne!(current, released);
+        assert_eq!(base.fingerprint, current);
+        let oracle =
+            WorkbookBase::from_model_with_legacy_dimensions_oracle(&model, &[], None).unwrap();
+        assert_eq!(base.fingerprints, oracle.fingerprints);
+    }
+
+    #[test]
     fn deterministic_bootstrap_round_trips_formula_fallbacks() {
         let model = rich_model();
         let left = WorkbookAuthority::from_model_with_client_id(&model, 11).unwrap();

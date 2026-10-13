@@ -486,6 +486,30 @@ fn cascade_inserted_columns_save_their_inherited_style_in_column_order() {
 }
 
 #[test]
+fn cascade_missing_cells_resolve_each_column_default_once_per_frame() {
+    let mut sheet = Sheet::new("Data");
+    sheet.col_styles = (0..xlsx_parse::MAX_COL_STYLES as u32)
+        .map(|index| ColStyle {
+            first: 100 + index % 2,
+            last: 100 + index % 2,
+            xf: 1 + index % 2,
+        })
+        .collect();
+    let mut model = WorkbookModel::default();
+    model.styles.cell_xfs = vec![xlsx_model::Xf::default(); 3];
+    model.sheets.push(sheet);
+    xlsx_model::workbook::reset_col_style_scans();
+    let list = xlsx_render::build_display_list(&model, SheetId(0), &chart_viewport()).unwrap();
+    let columns = list.grid.col_offsets.len().saturating_sub(1) as u64;
+    let scans = xlsx_model::workbook::col_style_scans();
+    assert!(columns > 1);
+    assert!(
+        scans <= columns + 2,
+        "{scans} column-default scans for {columns} visible columns"
+    );
+}
+
+#[test]
 fn text_search_uses_formatted_values_and_stable_cell_order() {
     let mut first = Sheet::new("Data");
     first.set_cell(

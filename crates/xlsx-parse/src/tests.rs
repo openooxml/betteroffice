@@ -208,6 +208,53 @@ fn patched_cols_coalesce_generated_runs_between_source_columns() {
     assert_eq!(sheet.col_widths, wb.sheets[0].col_widths);
 }
 
+#[test]
+fn patched_cols_write_changed_and_cleared_source_column_styles() {
+    let body = concat!(
+        r#"<cols><col min="2" max="4" width="15" style="1" customWidth="1"/></cols>"#,
+        r#"<sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>"#,
+    );
+    let parsed = parse_workbook_with_package(&package(body, &[], false)).unwrap();
+    let save = |styles: Vec<ColStyle>| {
+        let mut wb = parsed.workbook.clone();
+        wb.sheets[0].col_styles = styles;
+        let saved = serialize_workbook_with_package(&wb, &parsed.package).unwrap();
+        let xml = String::from_utf8(part_bytes(&saved, "xl/worksheets/sheet1.xml")).unwrap();
+        let cols = col_elements(&xml);
+        assert_ascending_and_disjoint(&cols);
+        let reopened = parse_workbook(&saved).unwrap();
+        assert_eq!(
+            reopened.sheets[0].col_widths,
+            wb.sheets[0].col_widths,
+            "{xml}"
+        );
+        let styles = (1..=3)
+            .map(|col| reopened.sheets[0].col_style(col))
+            .collect::<Vec<_>>();
+        (cols.len(), styles)
+    };
+    let run = |first, last, xf| ColStyle { first, last, xf };
+    assert_eq!(save(vec![run(1, 3, 2)]), (1, vec![Some(2); 3]));
+    assert_eq!(save(Vec::new()), (1, vec![None; 3]));
+    assert_eq!(
+        save(vec![run(1, 3, 1), run(2, 2, 2)]),
+        (3, vec![Some(1), Some(2), Some(1)])
+    );
+}
+
+#[test]
+fn a_row_default_change_alone_is_saved() {
+    let body = r#"<sheetData><row r="1"><c r="A1"><v>1</v></c></row><row r="3" s="1" customFormat="1"/></sheetData>"#;
+    let parsed = parse_workbook_with_package(&package(body, &[], false)).unwrap();
+    let mut wb = parsed.workbook.clone();
+    wb.sheets[0].row_styles.insert(2, 2);
+    let saved = serialize_workbook_with_package(&wb, &parsed.package).unwrap();
+    assert_eq!(
+        parse_workbook(&saved).unwrap().sheets[0].row_styles,
+        wb.sheets[0].row_styles
+    );
+}
+
 /// assemble a one-sheet package around a worksheet body and optional shared
 /// strings, so each test only spells out the part under exercise.
 pub(super) fn package(

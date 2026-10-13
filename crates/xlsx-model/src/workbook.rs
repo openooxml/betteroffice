@@ -15,6 +15,7 @@ use crate::value::CellValue;
 #[cfg(feature = "test-counters")]
 thread_local! {
     static USED_RANGE_SCANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static COL_STYLE_SCANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(feature = "test-counters")]
@@ -27,6 +28,18 @@ pub fn used_range_scans() -> u64 {
 #[doc(hidden)]
 pub fn reset_used_range_scans() {
     USED_RANGE_SCANS.set(0);
+}
+
+#[cfg(feature = "test-counters")]
+#[doc(hidden)]
+pub fn col_style_scans() -> u64 {
+    COL_STYLE_SCANS.get()
+}
+
+#[cfg(feature = "test-counters")]
+#[doc(hidden)]
+pub fn reset_col_style_scans() {
+    COL_STYLE_SCANS.set(0);
 }
 
 /// upper bound on the cells one array formula may fill. a malformed or hostile
@@ -217,6 +230,8 @@ impl Sheet {
 
     /// Column default; later runs win.
     pub fn col_style(&self, col: ColId) -> Option<u32> {
+        #[cfg(feature = "test-counters")]
+        COL_STYLE_SCANS.set(COL_STYLE_SCANS.get().wrapping_add(1));
         self.col_styles
             .iter()
             .rev()
