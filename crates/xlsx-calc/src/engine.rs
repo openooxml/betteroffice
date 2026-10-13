@@ -3,6 +3,8 @@
 
 mod order;
 
+use order::{Step, topo_order};
+
 use std::borrow::Cow;
 use std::cell::Cell as Flag;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -16,7 +18,6 @@ use xlsx_model::{
 use crate::array::{Spill, charged_spill, evaluate_spill};
 use crate::eval::{EvalContext, EvaluationBudget, MAX_RECALCULATION_CELL_VISITS, evaluate};
 use crate::graph::DepGraph;
-use order::{Step, topo_order};
 
 /// the outcome of a recalc: cells whose displayed value changed, and cells
 /// settled by cycle participation rather than by their own formula.
@@ -133,9 +134,8 @@ fn collect_recompute(graph: &DepGraph, seeds: &[(SheetId, CellRef)]) -> HashSet<
 /// workbook can loop here.
 const MAX_SPILL_ROUNDS: usize = 4;
 
-/// order `recompute` and evaluate it, writing changed values into `wb`. the
-/// members of a cycle in the range graph settle by what they actually read, so
-/// only the cells on a cycle of reads are reported as circular.
+/// topologically order `recompute` and evaluate it, writing changed values into
+/// `wb`. cells caught in a cycle are settled and reported separately.
 fn run_recalc(
     wb: &mut Workbook,
     graph: &DepGraph,
