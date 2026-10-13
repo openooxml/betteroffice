@@ -1087,6 +1087,9 @@ fn sanitize_workbook_sheets(
         .position(|(path, _)| normalize_part_name(path).as_ref() == workbook_path)
         .ok_or_else(|| format!("missing workbook part: {workbook_path}"))?;
     let (workbook_name, xml) = &parts[workbook];
+    if !names_removed_sheet(xml, workbook_name, &relationships, xml_budget)? {
+        return Ok(());
+    }
     let Some(sheets) = workbook_sheet_map(xml, workbook_name, &relationships, xml_budget)? else {
         return Ok(());
     };
@@ -1196,25 +1199,68 @@ impl<'a> WorkbookReader<'a> {
     }
 }
 
-fn workbook_sheet_id(
+fn sheet_relationship_ids(
     reader: &NsReader<&[u8]>,
     start: &BytesStart<'_>,
     path: &str,
-) -> Result<String, String> {
-    let values = attributes(reader, start, path)?;
-    let mut id = None;
-    for (key, value) in values {
+) -> Result<Vec<String>, String> {
+    let mut ids = Vec::new();
+    for (key, value) in attributes(reader, start, path)? {
         let (namespace, local) = reader
             .resolver()
             .resolve_attribute(quick_xml::name::QName(key.as_bytes()));
         if local.as_ref() == b"id"
             && matches!(namespace, ResolveResult::Bound(namespace) if matches!(namespace.0, b"http://schemas.openxmlformats.org/officeDocument/2006/relationships" | b"http://purl.oclc.org/ooxml/officeDocument/relationships"))
-            && id.replace(value).is_some()
         {
-            return Err(format!("duplicate sheet relationship in {path}"));
+            ids.push(value);
         }
     }
-    id.ok_or_else(|| format!("sheet missing relationship id in {path}"))
+    Ok(ids)
+}
+
+fn workbook_sheet_id(
+    reader: &NsReader<&[u8]>,
+    start: &BytesStart<'_>,
+    path: &str,
+) -> Result<String, String> {
+    let mut ids = sheet_relationship_ids(reader, start, path)?.into_iter();
+    let id = ids
+        .next()
+        .ok_or_else(|| format!("sheet missing relationship id in {path}"))?;
+    if ids.next().is_some() {
+        return Err(format!("duplicate sheet relationship in {path}"));
+    }
+    Ok(id)
+}
+
+// Lenient: any `<sheet>` at any depth or namespace (e.g. under mc:AlternateContent) counts.
+fn names_removed_sheet(
+    xml: &[u8],
+    path: &str,
+    relationships: &BTreeMap<String, SheetRelationship>,
+    xml_budget: &mut XmlBudget,
+) -> Result<bool, String> {
+    validate_xml_limits(xml, path, xml_budget)?;
+    let mut reader = NsReader::from_reader(xml);
+    loop {
+        let (_, event) = reader
+            .read_resolved_event()
+            .map_err(|error| format!("invalid XML in {path}: {error}"))?;
+        match event {
+            Event::Start(start) | Event::Empty(start)
+                if start.local_name().as_ref() == b"sheet" =>
+            {
+                let removed = sheet_relationship_ids(&reader, &start, path)?
+                    .iter()
+                    .any(|id| matches!(relationships.get(id), Some(SheetRelationship::Removed)));
+                if removed {
+                    return Ok(true);
+                }
+            }
+            Event::Eof => return Ok(false),
+            _ => {}
+        }
+    }
 }
 
 // Each `<sheet>` mapped to its index after removal; None when no sheet is removed.
