@@ -294,9 +294,9 @@ export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoF
   const rasterScale = devicePixelRatio * zoom;
   const canvases = useRef(new Map<string, HTMLCanvasElement>());
   const [measuredWindow, setMeasuredWindow] = useState<readonly [number, number]>([0, 3]);
-  const window = displayWindow ?? measuredWindow;
-  const canvasWindow = useRef(window);
-  useInsertionEffect(() => { canvasWindow.current = window; }, [window]);
+  const pageWindow = displayWindow ?? measuredWindow;
+  const canvasWindow = useRef(pageWindow);
+  useInsertionEffect(() => { canvasWindow.current = pageWindow; }, [pageWindow]);
   const changeWindow = useCallback((start: number, end: number) => {
     setMeasuredWindow((previous) => previous[0] === start && previous[1] === end ? previous : [start, end]);
     if (!displayWindow || displayWindow[0] !== start || displayWindow[1] !== end) onDisplayWindowChange?.([start, end]);
@@ -362,7 +362,7 @@ export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoF
     if (session.status !== 'ready') return;
     const geometry = session.binding.viewStore.getSnapshot().geometry;
     if (geometry) evictCanvases(geometry);
-  }, [session, window, evictCanvases]);
+  }, [session, pageWindow, evictCanvases]);
   useLayoutEffect(() => () => {
     for (const canvas of canvases.current.values()) {
       canvas.remove();
@@ -373,7 +373,7 @@ export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoF
   }, [sessionOptions.source, session.status === 'failed']);
   return <div className={className} data-peerless-docx="true" aria-busy={session.status === 'opening'}>
     {session.status === 'ready' && <PeerlessReady binding={session.binding} canvasForPage={canvasForPage} zoom={zoom > 0 ? zoom : 1} autoFocus={autoFocus}
-      onRecoverableText={retainText} displayWindow={window} onDisplayWindowChange={changeWindow} onClipboard={onClipboard} highlights={highlights} onNavigateCell={onNavigateCell} />}
+      onRecoverableText={retainText} displayWindow={pageWindow} onDisplayWindowChange={changeWindow} onClipboard={onClipboard} highlights={highlights} onNavigateCell={onNavigateCell} />}
     {session.status === 'failed' && <div role="alert">Unable to open document.</div>}
     {recoverableText.map((text, index) => <div key={index} role="status">
       This text could not be applied. Copy it to keep your draft, then dismiss it.
