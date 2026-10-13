@@ -662,12 +662,13 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
           async rasterizeBackground(dependency) {
             const retained = retainedPageByKey(layout.frame, dependency.page.pageId);
             if (!retained) throw new Error('Command background is unavailable');
-            const keep = new Set(dependency.primitiveIds);
+            const omitted = new Set(dependency.omittedPrimitiveIds);
+            const kept = (_primitive: unknown, index: number) => !omitted.has(retained.primitiveIds[index]!.toString());
             const buffer = new OffscreenCanvas(1, 1);
             await rasterizeDisplayPageToBackBuffer(buffer, { ...retained.page,
               watermarkPrimitiveCount: retained.page.primitives.slice(0, retained.page.watermarkPrimitiveCount ?? 0)
-                .filter((_primitive, index) => keep.has(retained.primitiveIds[index]!.toString())).length,
-              primitives: retained.page.primitives.filter((_primitive, index) => keep.has(retained.primitiveIds[index]!.toString())),
+                .filter(kept).length,
+              primitives: retained.page.primitives.filter(kept),
             }, rasterOptions, pixelRatio);
             const { rect } = dependency;
             const crop = new OffscreenCanvas(Math.ceil(rect.width * pixelRatio), Math.ceil(rect.height * pixelRatio));

@@ -3,6 +3,10 @@ import { afterAll, afterEach, expect, mock, spyOn, test } from 'bun:test';
 import type {
   DocxCommandAck, DocxCommandEnvelope, DocxCommandFrame, ResidentCommandConnection,
 } from '@betteroffice/docx/peerless';
+import {
+  applyFrameDeltaOwned, displayPageRevision, FRAME_DELTA_VERSION,
+  type DecodedFrameDelta, type DisplayPage, type FramePageOperation,
+} from '@betteroffice/docx/layout/render';
 import type { PeerlessEditSessionBinding, UsePeerlessEditSessionOptions } from '../hooks/usePeerlessEditSession';
 import * as composition from './composition';
 import { installCompositionEventPolyfill } from './compositionEventPolyfill.testing';
@@ -56,12 +60,13 @@ function frame(revision: number, coverage: number, text = ''): DocxCommandFrame 
       boundaries: Array.from({ length: text.length + 1 }, (_, utf16) => ({ utf16, grapheme: utf16,
         caret: { x: utf16 * 10, y: 0, width: 1, height: 40 } })),
       selection: { anchorGrapheme: text.length, focusGrapheme: text.length },
-      damage: [{ page, rect, backgroundId: 'background', primitiveIds: [] }],
+      damage: [{ page, rect, backgroundId: 'background', omittedPrimitiveIds: [] }],
     },
   } };
 }
 
-async function mount(selection = false, accessible = false, table = false) {
+async function mount(selection = false, accessible = false, table = false,
+  prepare?: UsePeerlessEditSessionOptions['prepareGeometry']) {
   const events: string[] = [];
   const canvas = document.createElement('canvas');
   const ctx = {
@@ -102,7 +107,7 @@ async function mount(selection = false, accessible = false, table = false) {
   };
   const sessionOptions: UsePeerlessEditSessionOptions = {
     source: Uint8Array.of(1), openConnection: async () => connection, canvasForPage: () => canvas,
-    prepareGeometry(candidate) {
+    prepareGeometry: prepare ?? function (candidate) {
       return { identity, coversThroughSeq: candidate.coversThroughSeq, frameEpoch: candidate.revision,
         layoutRevision: candidate.payload.layoutRevision,
         pages: accessible ? Array.from({ length: 20 }, (_, pageIndex) => ({
@@ -140,6 +145,34 @@ test('peerless accessibility exposes retained offscreen pages without allocating
   expect(editor.container.querySelector('[data-page-id="13"] canvas')).toBeNull();
   expect(editor.getByRole('status').getAttribute('aria-live')).toBe('polite');
 });
+
+test('a page whose positions changed in place rebuilds its accessibility mirror', async () => {
+  const displayPage: DisplayPage = { pageIndex: 0, width: 200, height: 40, positionSpan: [1, 9], primitives: [{
+    kind: 'text', text: 'Shifted page', x: 0, baselineY: 14, width: 100, font: '12px Arial', color: '#000', docStart: 1, docEnd: 9,
+  }] };
+  const delta = (frameEpoch: number, operations: FramePageOperation[]): DecodedFrameDelta => ({
+    protocolVersion: FRAME_DELTA_VERSION, full: frameEpoch === 1, docEpoch: frameEpoch, layoutEpoch: frameEpoch, frameEpoch,
+    baseFrameEpoch: frameEpoch - 1, pageCount: 1, bytes: new Uint8Array(), operations });
+  let retained = applyFrameDeltaOwned(null, delta(1, [{ kind: 'upsert', pageId: 1n, pageIndex: 0, fingerprint: 1n,
+    primitiveIds: new BigUint64Array([1n]), page: displayPage }]));
+  const editor = await mount(false, false, false, (candidate) => {
+    if (candidate.revision > retained.frameEpoch) {
+      retained = applyFrameDeltaOwned(retained, delta(candidate.revision,
+        [{ kind: 'shift-range', pageIndex: 0, pageId: 1n, count: 1, delta: 2, salt: 3n }]));
+    }
+    return { identity, coversThroughSeq: candidate.coversThroughSeq, frameEpoch: candidate.revision,
+      layoutRevision: candidate.payload.layoutRevision, caret: null, selectionRects: [],
+      pages: [{ page, bounds: { x: 0, y: 0, width: 200, height: 40 }, transform: [1, 0, 0, 1, 0, 0],
+        displayPage: retained.pages[0]!.page }] };
+  });
+  const mirror = () => editor.container.querySelector('[data-page-id="1"] .canvas-page-mirror')?.firstElementChild;
+  await waitFor(() => expect(mirror()).toBeTruthy());
+  const before = mirror();
+  editor.present(frame(2, 0));
+  expect(retained.pages[0]!.page).toBe(displayPage);
+  expect(displayPageRevision(displayPage)).toBe(1);
+  await waitFor(() => expect(mirror()).not.toBe(before), { timeout: 5_000 });
+}, 15_000);
 
 function preedit(textarea: HTMLTextAreaElement, type: 'compositionstart' | 'compositionupdate' | 'compositionend', data = '') {
   const event = type === 'compositionstart' ? fireEvent.compositionStart

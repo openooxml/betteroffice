@@ -173,7 +173,8 @@ export interface DocxEchoDamageDependency {
   page: DocxCommandPageIdentity;
   rect: DocxEchoRect;
   backgroundId: string;
-  primitiveIds: readonly string[];
+  /** The echoed line's runs and decorations, which the background leaves out. */
+  omittedPrimitiveIds: readonly string[];
 }
 
 /** @internal Bounded, display-only active context; never a command target. */

@@ -1,7 +1,10 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { CANVAS_PAGE_GAP_PX } from '@betteroffice/docx/layout/render';
+import {
+  applyFrameDelta, applyFrameDeltaOwned, CANVAS_PAGE_GAP_PX, displayPageRevision, FRAME_DELTA_VERSION,
+  type DecodedFrameDelta, type DisplayPage, type FramePageOperation,
+} from '@betteroffice/docx/layout/render';
 import type { DocxCommandAck, DocxCommandEchoContext, DocxCommandEnvelope, DocxCommandFrame, ResidentCommandConnection } from '@betteroffice/docx/peerless';
 import type { PeerlessEditSessionBinding, UsePeerlessEditSessionOptions } from '../hooks/usePeerlessEditSession';
 import type { PeerlessFrameGeometry } from './viewStore';
@@ -46,7 +49,7 @@ function frame(revision: number, indices: number[], caretPage = 0): DocxCommandF
     styleRuns: [{ startUtf16: 0, endUtf16: 2, fontFamily: 'Arial', fontSizePx: 12, color: '#000',
       bold: false, italic: false, underline: false, strike: false, transform: [1, 0, 0, 1, 0, 0], baseline: { x: 0, y: 14 } }],
     boundaries: [0, 1, 2].map((utf16) => ({ utf16, grapheme: utf16, caret: { x: utf16 * 10, y: 0, width: 1, height: 20 } })),
-    damage: [{ page, rect: damageRect, backgroundId: 'background', primitiveIds: [] }], shaping: 'simple-ltr',
+    damage: [{ page, rect: damageRect, backgroundId: 'background', omittedPrimitiveIds: [] }], shaping: 'simple-ltr',
   };
   const bitmap = (pixels: string) => ({ width: 200, height: 100, pixels, closes: 0,
     close(this: TestBitmap) { this.closes += 1; } }) as TestBitmap;
@@ -143,19 +146,23 @@ async function mount(zoom = 1, caretPage = 0) {
   };
 }
 
-test('peerless_page_offsets_are_monotonic_and_non_overlapping', () => {
+function scrapedPrepareGeometry(dependencies: Record<string, unknown>) {
   const source = readFileSync(`${import.meta.dir}/PeerlessDocxEditor.tsx`, 'utf8');
   const start = source.indexOf('    if (!identity.current)', source.indexOf('const prepareGeometry ='));
   const end = source.indexOf('\n  }, []);', start);
+  const body = new Bun.Transpiler({ loader: 'tsx' }).transformSync(`function prepare(frame) {${source.slice(start, end)} }`);
+  const all = { identity: { current: identity }, retained: { current: null }, prepared: { current: new WeakMap() },
+    pageIndexes: { current: new Map() }, CANVAS_PAGE_GAP_PX, ...dependencies };
+  return new Function(...Object.keys(all), `${body}\nreturn prepare;`)(...Object.values(all)) as
+    (candidate: DocxCommandFrame) => PeerlessFrameGeometry;
+}
+
+test('peerless_page_offsets_are_monotonic_and_non_overlapping', () => {
   const pages = [100, 220, 80].map((height, pageIndex) => ({ pageId: BigInt(pageIndex + 1), pageIndex,
     page: { width: pageIndex === 1 ? 400 : 200, height } }));
-  const dependencies = { identity: { current: identity }, retained: { current: null }, prepared: { current: new WeakMap() },
-    pageIndexes: { current: new Map() }, applyFrameDelta: () => ({ frameEpoch: 1, pages }), decodeFrameDelta: () => ({}),
-    residentCaretSnapshotForFrame: () => ({ caretRect: { pageIndex: 2, x: 10, y: 7, height: 20 } }), CANVAS_PAGE_GAP_PX,
-  };
-  const body = new Bun.Transpiler({ loader: 'tsx' }).transformSync(`function prepare(frame) {${source.slice(start, end)} }`);
-  const prepare = new Function(...Object.keys(dependencies), `${body}\nreturn prepare;`)(...Object.values(dependencies)) as
-    (candidate: DocxCommandFrame) => PeerlessFrameGeometry;
+  const applied = () => ({ frameEpoch: 1, pages });
+  const prepare = scrapedPrepareGeometry({ applyFrameDelta: applied, applyFrameDeltaOwned: applied, decodeFrameDelta: () => ({}),
+    residentCaretSnapshotForFrame: () => ({ caretRect: { pageIndex: 2, x: 10, y: 7, height: 20 } }) });
   const geometry = prepare(frame(1, []));
   expect(geometry.pages.map(({ bounds }) => bounds.y)).toEqual([0, 100 + CANVAS_PAGE_GAP_PX, 320 + 2 * CANVAS_PAGE_GAP_PX]);
   for (let index = 1; index < geometry.pages.length; index += 1) {
@@ -165,6 +172,30 @@ test('peerless_page_offsets_are_monotonic_and_non_overlapping', () => {
   expect(geometry.caret?.y).toBe(327 + 2 * CANVAS_PAGE_GAP_PX);
   expect(geometry.pages.map(({ bounds }) => bounds.x)).toEqual([100, 0, 100]);
   expect(geometry.caret?.x).toBe(110);
+});
+
+test('prepared geometry keeps a shifted page and counts the shift as an in-place revision', () => {
+  const displayPage = (pageIndex: number, docStart: number): DisplayPage => ({ pageIndex, width: 200, height: 100,
+    positionSpan: [docStart, docStart + 4], primitives: [{ kind: 'text', text: 'abcd', x: 0, baselineY: 14, width: 40,
+      font: '12px Arial', color: '#000', docStart, docEnd: docStart + 4 }] });
+  const upsert = (pageId: bigint, pageIndex: number, fingerprint: bigint, page: DisplayPage): FramePageOperation =>
+    ({ kind: 'upsert', pageId, pageIndex, fingerprint, primitiveIds: new BigUint64Array([pageId]), page });
+  const delta = (frameEpoch: number, operations: FramePageOperation[]): DecodedFrameDelta => ({
+    protocolVersion: FRAME_DELTA_VERSION, full: frameEpoch === 1, docEpoch: frameEpoch, layoutEpoch: frameEpoch, frameEpoch,
+    baseFrameEpoch: frameEpoch - 1, pageCount: 2, bytes: new Uint8Array(), operations });
+  const command = (revision: number, operations: FramePageOperation[]) => ({ revision, coversThroughSeq: 0, payload: {
+    frame: delta(revision, operations), layoutRevision: revision, caret: { frameEpoch: revision, caretRect: null },
+  } }) as unknown as DocxCommandFrame;
+  const prepare = scrapedPrepareGeometry({ applyFrameDelta, applyFrameDeltaOwned, decodeFrameDelta: (decoded: unknown) => decoded,
+    residentCaretSnapshotForFrame: () => ({ caretRect: null }) });
+  const first = prepare(command(1, [upsert(1n, 0, 1n, displayPage(0, 1)), upsert(2n, 1, 2n, displayPage(1, 10))]));
+  const shifted = first.pages[1]!.displayPage!;
+  const second = prepare(command(2, [upsert(1n, 0, 3n, displayPage(0, 2)),
+    { kind: 'shift-range', pageIndex: 1, pageId: 2n, count: 1, delta: 1, salt: 5n }]));
+  expect(second.pages[0]!.displayPage).not.toBe(first.pages[0]!.displayPage);
+  expect(second.pages[1]!.displayPage).toBe(shifted);
+  expect(shifted.positionSpan).toEqual([11, 15]);
+  expect(displayPageRevision(shifted)).toBe(1);
 });
 
 test('scrolling_to_page_n_builds_n_and_releases_far_pages', async () => {

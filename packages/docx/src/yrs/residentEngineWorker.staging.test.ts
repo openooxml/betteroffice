@@ -129,7 +129,7 @@ test('remount_request_with_pending_echo_restages_context_and_background', async 
     boundaries: [0, 1, 2].map((utf16) => ({ utf16, grapheme: utf16,
       caret: { x: utf16 * 10, y: 0, width: 1, height: 20 } })),
     selection: { anchorGrapheme: 2, focusGrapheme: 2 }, transform: [1, 0, 0, 1, 0, 0],
-    damage: [{ page, rect, backgroundId: 'background', primitiveIds: [] }], shaping: 'simple-ltr',
+    damage: [{ page, rect, backgroundId: 'background', omittedPrimitiveIds: [] }], shaping: 'simple-ltr',
   };
   const result = await stageRequestedPages([2], [], echoContext);
   expect(result.delta.operations).toEqual([]);

@@ -19,7 +19,7 @@ function context(): DocxCommandEchoContext {
     boundaries: [0, 1, 2].map((utf16) => ({ utf16, grapheme: utf16,
       caret: { x: utf16 * 10, y: 0, width: 1, height: 20 } })),
     selection: { anchorGrapheme: 2, focusGrapheme: 2 }, transform: [1, 0, 0, 1, 0, 0],
-    damage: [{ page, rect, backgroundId: 'background', primitiveIds: ['shading', 'media'] }],
+    damage: [{ page, rect, backgroundId: 'background', omittedPrimitiveIds: ['shading', 'media'] }],
     shaping: 'simple-ltr',
   };
 }

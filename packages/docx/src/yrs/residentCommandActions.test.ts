@@ -341,7 +341,9 @@ test('d1a_postmutation_failure_is_unknown_outcome_without_retry', async () => {
   const replace = arm.native.replace_range.bind(arm.native);
   const input = arm.native.apply_input.bind(arm.native);
   const inputProfiled = arm.native.apply_input_profiled.bind(arm.native);
+  const resident = arm.native.edit_text_resident.bind(arm.native);
   const inserted = spyOn(arm.native, 'insert_text').mockImplementation(afterMutation(insert));
+  const residentEdited = spyOn(arm.native, 'edit_text_resident').mockImplementation(afterMutation(resident));
   const replaced = spyOn(arm.native, 'replace_range').mockImplementation(afterMutation(replace));
   const fast = spyOn(arm.native, 'apply_input').mockImplementation(afterMutation(input));
   const fastProfiled = spyOn(arm.native, 'apply_input_profiled').mockImplementation(afterMutation(inputProfiled));
@@ -365,7 +367,8 @@ test('d1a_postmutation_failure_is_unknown_outcome_without_retry', async () => {
     catch (error) { failure = error; }
     expect(isCommandOutcomeUnknownError(failure)).toBe(true);
     expect(failure).toMatchObject({ name: 'CommandOutcomeUnknown', refusal: { seq: intent.seq } });
-    expect(inserted.mock.calls.length + replaced.mock.calls.length + fast.mock.calls.length + fastProfiled.mock.calls.length).toBe(1);
+    expect(inserted.mock.calls.length + residentEdited.mock.calls.length + replaced.mock.calls.length +
+      fast.mock.calls.length + fastProfiled.mock.calls.length).toBe(1);
     expect(texts(arm)).toEqual(['Xabc']);
     expect(arm.native.can_undo()).toBe(true);
     expect(arm.version).toBe(0);
@@ -374,10 +377,11 @@ test('d1a_postmutation_failure_is_unknown_outcome_without_retry', async () => {
     await expect(host.handler(undefined, later)).rejects.toMatchObject({
       name: 'CommandOutcomeUnknown', refusal: { seq: intent.seq },
     });
-    expect(inserted.mock.calls.length + replaced.mock.calls.length + fast.mock.calls.length + fastProfiled.mock.calls.length).toBe(1);
+    expect(inserted.mock.calls.length + residentEdited.mock.calls.length + replaced.mock.calls.length +
+      fast.mock.calls.length + fastProfiled.mock.calls.length).toBe(1);
     expect(texts(arm)).toEqual(['Xabc']);
   } finally {
-    fastProfiled.mockRestore(); fast.mockRestore(); replaced.mockRestore(); inserted.mockRestore();
+    fastProfiled.mockRestore(); fast.mockRestore(); replaced.mockRestore(); residentEdited.mockRestore(); inserted.mockRestore();
   }
 }, TIMEOUT);
 
