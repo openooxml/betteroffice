@@ -1,6 +1,8 @@
 /// <reference lib="webworker" />
 
+import { readResidentToolbarMetadata } from './residentToolbarMetadata';
 import { readResidentRangeHighlights } from './residentRangeHighlights';
+import { readResidentReviewSnapshot } from './residentReview';
 import { LAYOUT_META_VERSION, type LayoutMetaV1, type RetainedLayoutMeta } from './layoutMeta';
 import { isCommandOutcomeUnknownError } from '../../../../shared/office-session/commands/types';
 import { isTransferResult, type TransferResult } from '../../../../shared/office-session/protocol';
@@ -59,6 +61,7 @@ import { resolveYrsPointPosition } from './pointPosition';
 import { partMetadata } from './residentParts';
 import { readControlHandles } from './residentControls';
 import { readResidentProperties } from './residentProperties';
+import { readResidentFrameGeometry, resetResidentObjectHandles } from './residentObjectGeometry';
 import {
   resolveBookmarkPosition,
   resolveCommentTarget,
@@ -116,6 +119,8 @@ let commandFrameChanges: {
   pages: Set<number>; updates: Uint8Array[];
   viewport?: ResidentCommandViewportRequest;
   window?: [number, number];
+  reviewFrame?: { frameEpoch: number; previewVersion: number };
+  layoutPreviewVersion?: number;
 } | null = null;
 
 export function setResidentCommandHooksFactory(factory: ResidentCommandHooksFactory): void {
@@ -150,10 +155,23 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
   const fonts = new ResidentSessionFonts(engine, scope.fonts);
   sessionFonts = fonts;
   const preparedFonts = new WeakMap<PreparedDocxCommand, Awaited<ReturnType<ResidentSessionFonts['prepare']>>>();
+  const registry = proposals ??= createProposalRegistry(engine.proposalEngine);
+  let layoutPreviewVersion = registry.snapshot().previewVersion;
   const relayout = () => {
-    if (init.layoutWithRegions) engine.layoutDocumentWithRegionsRetained(init.layoutInput);
-    else engine.layoutDocumentJson(layoutInput);
+    const input = JSON.parse(init.layoutWithRegions ? init.layoutInput : layoutInput);
+    const snapshot = registry.snapshot();
+    const preview = proposalRevisionPreview(snapshot);
+    if (preview !== undefined || input.renderEnv?.revisionPreview !== undefined) {
+      input.renderEnv = { ...input.renderEnv };
+      if (preview) input.renderEnv.revisionPreview = preview;
+      else delete input.renderEnv.revisionPreview;
+      if (!init.layoutWithRegions) input.workerOwned = { ...input.workerOwned, renderEnv: input.renderEnv };
+    }
+    if (init.layoutWithRegions) engine.layoutDocumentWithRegionsRetained(JSON.stringify(input));
+    else engine.layoutDocumentJson(JSON.stringify(input));
     retainedLayoutVersion = engine.proposalEngine.version();
+    layoutPreviewVersion = snapshot.previewVersion;
+    if (commandFrameChanges) commandFrameChanges.layoutPreviewVersion = layoutPreviewVersion;
     layoutDirty = true;
   };
   let selectionLayout: { version: string; frame: RetainedFrame } | undefined;
@@ -176,6 +194,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
     }
     return selectionQueries.queries;
   };
+  resetResidentObjectHandles(engine);
   const hooks = commandHooksFactory(engine, init, {
     setRenderEnvironment(environment) {
       const input = JSON.parse(init.layoutInput);
@@ -188,6 +207,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
       }
     },
     supportsFontEnvironment: true,
+    proposals: registry,
     readSelectionLayout() {
       const version = engine.proposalEngine.version();
       let frame: RetainedFrame;
@@ -207,7 +227,10 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
       const installSelectionFrame = (bytes: Uint8Array) => {
         frame = applyFrameDelta(frame, decodeFrameDelta(bytes));
         if (layoutDirty || !retainedFrame) selectionLayout = { version, frame };
-        else retainedFrame = frame;
+        else {
+          retainedFrame = frame;
+          if (commandFrameChanges) commandFrameChanges.reviewFrame = { frameEpoch: frame.frameEpoch, previewVersion: layoutPreviewVersion };
+        }
       };
       const buildPages = () => {
         if (!pages.size) return;
@@ -298,7 +321,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
       return { frame, layoutRevision };
     },
   });
-  const changes: NonNullable<typeof commandFrameChanges> = { pages: new Set<number>(), updates: [] };
+  const changes: NonNullable<typeof commandFrameChanges> = { pages: new Set<number>(), updates: [], layoutPreviewVersion };
   commandFrameChanges = changes;
   let revision = 0;
   const host = createResidentCommandHost({
@@ -402,6 +425,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
         const updates = changes.updates.splice(0);
         for (const update of updates) engine.applyUpdate(update);
         if (updates.length) relayout();
+        const framePreviewVersion = layoutPreviewVersion;
         const relaid = layoutDirty;
         layoutDirty = false;
         const extras = JSON.stringify({
@@ -440,12 +464,12 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
           : engine.buildDisplayListFrame(extras, full ? 0 : revision);
         let first: ReturnType<typeof decodeFrameDelta> | undefined;
         if (pages.length && relaid) {
-          first = applyWorkerFrame(bytes);
+          first = applyWorkerFrame(bytes, framePreviewVersion);
           trackBuilt(first);
           preceding.push(bytes);
           bytes = engine.buildDisplayPagesFrame(pages, first.frameEpoch);
         }
-        let finalized = await finalizeResidentFrame(bytes, false, true, true);
+        let finalized = await finalizeResidentFrame(bytes, false, true, true, framePreviewVersion);
         trackBuilt(finalized.delta);
         if (!retainedFrame) throw new Error('Command frame is unavailable');
         let caretPage = finalized.caret.caretRect?.pageIndex;
@@ -490,7 +514,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
               const install = async (bytes: Uint8Array) => {
                 first ??= finalized.delta;
                 preceding.push(finalized.bytes);
-                finalized = await finalizeResidentFrame(bytes, false, true, true);
+                finalized = await finalizeResidentFrame(bytes, false, true, true, framePreviewVersion);
                 trackBuilt(finalized.delta);
                 probed = true;
               };
@@ -542,7 +566,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
           if (entering.length) {
             first ??= finalized.delta;
             preceding.push(finalized.bytes);
-            finalized = await finalizeResidentFrame(engine.buildDisplayPagesFrame(entering, retainedFrame!.frameEpoch), false, true, true);
+            finalized = await finalizeResidentFrame(engine.buildDisplayPagesFrame(entering, retainedFrame!.frameEpoch), false, true, true, framePreviewVersion);
             trackBuilt(finalized.delta);
           }
           const distant = [...builtPages!].flatMap(([pageId, index]) => {
@@ -554,7 +578,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
             if (released === null) throw new Error('Viewport display pages could not be released');
             first ??= finalized.delta;
             preceding.push(finalized.bytes);
-            finalized = await finalizeResidentFrame(released, false, true, true);
+            finalized = await finalizeResidentFrame(released, false, true, true, framePreviewVersion);
             trackBuilt(finalized.delta);
           }
           residency.caretPage = caretPage;
@@ -671,9 +695,12 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
           selectionRects,
           ...(fonts.snapshot ? { fontEnvironment: fonts.snapshot } : {}),
           parts: engine.partGeometry(retainedFrame!),
+          geometry: hooks.editState().readOnly ? undefined
+            : await readResidentFrameGeometry(engine, retainedFrame!, hooks.selection(), layoutRevision),
           echoContext, stagedPresentation: presentation.value,
         });
         revision = built.value.revision;
+        changes.reviewFrame = { frameEpoch: retainedFrame!.frameEpoch, previewVersion: framePreviewVersion };
         pendingUpdates = [];
         return built;
       },
@@ -956,10 +983,12 @@ function classify(request: ResidentEngineWorkerRequest): SchedulerMessage {
 }
 
 function isUserInputCommand(kind: string): boolean {
-  return kind === 'setSectionMargins' || kind === 'setTabStops' || kind === 'removeTabStop' || kind === 'setHyperlink' || kind === 'setObjectProperties' || kind === 'setSectionProperties' || kind === 'setNoteProperties' || kind === 'setWatermark' || kind === 'setContentControlValue' || kind === 'addRepeatingItem' || kind === 'removeRepeatingItem' || kind === 'openPart' || kind === 'ensurePart' || kind === 'removePart' || kind === 'replaceMatches' || kind === 'undo' || kind === 'redo' || kind === 'select' || kind === 'insertText' || kind === 'replaceSelection' ||
+  return kind === 'resizeObject' || kind === 'moveObject' || kind === 'setSectionMargins' || kind === 'setTabStops' || kind === 'removeTabStop' || kind === 'setHyperlink' || kind === 'setObjectProperties' || kind === 'setSectionProperties' || kind === 'setNoteProperties' || kind === 'setWatermark' || kind === 'setContentControlValue' || kind === 'addRepeatingItem' || kind === 'removeRepeatingItem' || kind === 'openPart' || kind === 'ensurePart' || kind === 'removePart' || kind === 'replaceMatches' || kind === 'undo' || kind === 'redo' || kind === 'select' || kind === 'insertText' || kind === 'replaceSelection' ||
     kind === 'deleteBackward' || kind === 'deleteForward' || kind === 'paragraphBreak' ||
     kind === 'toggleMark' || kind === 'formatRange' || kind === 'clearFormatting' ||
-    kind === 'setParagraphAttrs' || kind === 'applyParagraphStyle';
+    kind === 'setParagraphAttrs' || kind === 'applyParagraphStyle' || kind === 'formatSelection' || kind === 'toggleStrike' ||
+    kind === 'toggleList' || kind === 'changeIndent' || kind === 'insertImage' || kind === 'insertTable' ||
+    kind === 'insertPageBreak' || kind === 'insertSectionBreak';
 }
 
 function isLegacyMutation(request: ResidentEngineWorkerRequest): boolean {
@@ -1591,6 +1620,24 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
           (request.read.expectFrameEpoch !== undefined && request.read.expectFrameEpoch !== retainedFrame.frameEpoch) ||
           (request.read.expectLayoutRevision !== undefined && request.read.expectLayoutRevision !== layoutRevision)
           ? null : await readResidentRangeHighlights(session, retainedFrame, request.read.ranges, layoutRevision);
+        break;
+      case 'reviewSnapshot': {
+        const registry = proposals ??= createProposalRegistry(engine);
+        const frame = retainedFrame;
+        const layoutVersion = retainedLayoutVersion;
+        const previewVersion = registry.snapshot().previewVersion;
+        const published = commandFrameChanges?.reviewFrame;
+        const review = !frame || layoutVersion !== engine.version() ||
+          (commandHost && (published?.frameEpoch !== frame.frameEpoch || published?.previewVersion !== previewVersion)) ||
+          (request.read.expectPreviewVersion !== undefined && request.read.expectPreviewVersion !== previewVersion)
+          ? null : await readResidentReviewSnapshot(session, registry, frame, layoutRevision);
+        value = commandHost && review && (review.previewVersion !== previewVersion || review.version !== layoutVersion ||
+          registry.snapshot().previewVersion !== previewVersion || engine.version() !== layoutVersion || retainedFrame?.frameEpoch !== frame?.frameEpoch)
+          ? null : review;
+        break;
+      }
+      case 'toolbarMetadata':
+        value = openedSource ? readResidentToolbarMetadata(openedSource.hostJson) : { styles: [], fontFamilies: [] };
         break;
       case 'paragraphIdentities':
         value = session.paragraphIdentities();
@@ -2630,9 +2677,15 @@ function retainedPageByKey(frame: RetainedFrame, pageId: string) {
   return /^\d+$/.test(pageId) ? retainedFramePageById(frame, BigInt(pageId)) : undefined;
 }
 
-function applyWorkerFrame(bytes: Uint8Array) {
+function applyWorkerFrame(bytes: Uint8Array, previewVersion?: number) {
   const delta = decodeFrameDelta(bytes);
+  const published = commandFrameChanges?.reviewFrame;
+  const inherited = published?.frameEpoch === retainedFrame?.frameEpoch && delta.baseFrameEpoch === retainedFrame?.frameEpoch
+    ? published?.previewVersion : commandFrameChanges?.layoutPreviewVersion;
   retainedFrame = applyFrameDeltaOwned(retainedFrame, delta);
+  if (commandHost && commandFrameChanges && (previewVersion ?? inherited) !== undefined) {
+    commandFrameChanges.reviewFrame = { frameEpoch: retainedFrame.frameEpoch, previewVersion: (previewVersion ?? inherited)! };
+  }
   for (const pageId of retainedFrame.damagedPageIds) pendingOffscreenPageIds.add(pageId.toString());
   return delta;
 }
@@ -2641,9 +2694,10 @@ async function finalizeResidentFrame(
   bytes: Uint8Array,
   requireCaret = false,
   paintCaret = false,
-  stageCommand = false
+  stageCommand = false,
+  previewVersion?: number
 ) {
-  let delta = applyWorkerFrame(bytes);
+  let delta = applyWorkerFrame(bytes, previewVersion);
   const limit = provisionalFinalPages;
   if (session && limit !== null && retainedFrame) {
     const pages = retainedFrame.displayList.pages
@@ -2653,7 +2707,7 @@ async function finalizeResidentFrame(
       const released = session.releaseDisplayPagesFrame(pages, retainedFrame.frameEpoch);
       if (released === null) throw new Error('Provisional display pages could not be released');
       bytes = session.buildDisplayPagesFrame([], 0);
-      delta = applyWorkerFrame(bytes);
+      delta = applyWorkerFrame(bytes, previewVersion);
     }
   }
   const caret = session?.residentCaretSnapshot();

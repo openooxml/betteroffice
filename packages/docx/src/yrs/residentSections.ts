@@ -1,6 +1,6 @@
 import type { Document, SectionProperties } from '../types/document';
 import type { ResidentEngineSession } from './residentEngineSession';
-import type { YrsParagraphAttrs, YrsParagraphTabStop } from './index';
+import type { YrsLoc, YrsParagraphAttrs, YrsParagraphTabStop } from './index';
 import { resolvedFinalSectionProperties } from '../editor/finalSection';
 
 export type DocxSectionMargins = Partial<Pick<SectionProperties,
@@ -37,7 +37,17 @@ export function validSectionMargins(value: unknown): value is DocxSectionMargins
       typeof entry === 'number' && Number.isFinite(entry) && entry >= 0);
 }
 
-export function readSectionSnapshot(engine: ResidentEngineSession, base: Document, margins: Record<string, DocxSectionMargins>): ResidentSectionSnapshot {
+export function residentSectionPropertiesAt(engine: ResidentEngineSession, at: YrsLoc): SectionProperties | null {
+  if (at.story !== 'body') return null;
+  const snapshot = engine.sectionProperties();
+  const paragraphs = snapshot.paragraphs.filter(paragraph => paragraph.story === 'body');
+  const ordinal = paragraphs.findIndex(paragraph => paragraph.paraId === at.paraId);
+  if (ordinal < 0) return null;
+  return snapshot.sections.find(section => section.section === 'final' ||
+    paragraphs.findIndex(paragraph => paragraph.paraId === section.section) >= ordinal)?.properties ?? null;
+}
+
+export function readSectionSnapshot(engine: ResidentEngineSession, base: Document, margins: Record<string, DocxSectionMargins>, nativeSections = false): ResidentSectionSnapshot {
   const sections: ResidentSectionSnapshot['sections'] = [];
   const paragraphs: ResidentSectionSnapshot['paragraphs'] = [];
   for (const story of engine.geometryReader.storyIds()) {
@@ -45,7 +55,8 @@ export function readSectionSnapshot(engine: ResidentEngineSession, base: Documen
       paragraphs.push({ story, paraId: paragraph.paraId, tabs: nativeTabStops(paragraph.properties.tabs) });
       const properties = (paragraph.properties.sectPr ?? paragraph.properties._sectionProperties) as SectionProperties | undefined;
       if (story === 'body' && properties) sections.push({ section: paragraph.paraId,
-        properties: { ...properties, ...base.package.document.sections?.[sections.length]?.properties, ...margins[paragraph.paraId] } });
+        properties: { ...properties, ...base.package.document.sections?.[sections.length]?.properties,
+          ...(nativeSections ? properties : {}), ...margins[paragraph.paraId] } });
     }
   }
   sections.push({ section: 'final', properties: { ...resolvedFinalSectionProperties(base.package.document), ...margins.final } });

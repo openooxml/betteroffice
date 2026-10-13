@@ -3224,6 +3224,24 @@ impl EditSession {
         serde_json::to_string(&TableRange { anchor, head }).map_err(js_err)
     }
 
+    pub fn clear_cell_selection(&self) -> Option<String> {
+        let selection = self.cell_selection.borrow_mut().take()?;
+        let txn = self.engine.doc().yrs_doc().transact();
+        story_ref(&txn, &selection.parent_story).ok()?;
+        let index = selection.table.get_offset(&txn)?.index;
+        drop(txn);
+        let paragraphs = self
+            .engine
+            .doc()
+            .paragraph_index(&selection.parent_story)
+            .ok()?;
+        let paragraph = paragraphs.para_at(index)?;
+        Some(
+            json!({ "story": selection.parent_story, "paraId": paragraph.para_id,
+                "offset": index.saturating_sub(paragraph.start).min(paragraph.pilcrow - paragraph.start) }).to_string(),
+        )
+    }
+
     pub fn part_metadata_json(&self) -> String {
         self.engine.doc().part_metadata_json()
     }
@@ -4186,6 +4204,25 @@ impl EditSession {
             .map_err(js_err)
     }
 
+    pub fn update_comment_metadata_json(
+        &self,
+        comment_id: &str,
+        patch_json: &str,
+    ) -> Result<(), JsValue> {
+        let patch: Value = serde_json::from_str(patch_json).map_err(js_err)?;
+        let fields = patch
+            .as_object()
+            .ok_or_else(|| js_err("comment metadata must be an object"))?;
+        let patch = fields
+            .iter()
+            .map(|(key, value)| Ok((key.clone(), json_to_any(value)?)))
+            .collect::<Result<_, JsValue>>()?;
+        self.engine
+            .doc()
+            .update_comment_metadata(comment_id, patch)
+            .map_err(js_err)
+    }
+
     /// Accepts tracked changes: pending insertions become plain content,
     /// pending deletions are carried out; `pPrIns` marks clear so the split
     /// stays, `pPrDel` marks join with the following paragraph, whose own
@@ -4763,6 +4800,21 @@ impl EditSession {
 
     pub fn geometry_position_outline_json(&self, root: &str) -> Result<String, JsValue> {
         serde_json::to_string(&self.engine.doc().geometry_position_outline(root)).map_err(js_err)
+    }
+
+    pub fn resident_geometry_json(&self, root: &str, request: &str) -> Result<String, JsValue> {
+        let request = serde_json::from_str(request).map_err(js_err)?;
+        let geometry = self
+            .engine
+            .doc()
+            .resident_geometry(root, &request)
+            .map_err(js_err)?;
+        serde_json::to_string(&geometry).map_err(js_err)
+    }
+
+    pub fn resident_section_revision(&self) -> String {
+        let revisions = self.engine.doc().story_revisions.lock().unwrap();
+        format!("{}:{}", revisions.structure, revisions.sections)
     }
 
     pub fn proposal_revision_ranges_json(&self, ids_json: &str) -> Result<String, JsValue> {
@@ -5498,7 +5550,7 @@ mod tests {
         let doc = session.engine.doc();
         doc.create_story("body", "Seed", "Normal", "left").unwrap();
         for _ in 0..80 {
-            doc.split_paragraph(&EditCtx::local("", ""), Position::new("body", 0), None)
+            doc.split_paragraph(&EditCtx::local("", ""), Position::new("body", 4), None)
                 .unwrap();
         }
         let para_id = doc.paragraphs("body").unwrap()[80].para_id.clone();

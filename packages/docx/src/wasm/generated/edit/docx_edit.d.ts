@@ -208,6 +208,7 @@ export class EditSession {
      * surviving nearby cell. Errors when the table itself no longer resolves.
      */
     cell_selection(): string;
+    clear_cell_selection(): string | undefined;
     /**
      * Removes the authored `value` from the content-control embed carrying
      * `embed_id`, leaving the control and its content in place: it never
@@ -856,6 +857,8 @@ export class EditSession {
      * Characters the last [`EditSession::apply_delete`] removed.
      */
     resident_deleted_units(): number;
+    resident_geometry_json(root: string, request: string): string;
+    resident_section_revision(): string;
     /**
      * Where a comment's sticky anchors currently sit:
      * `[{"story","start","end"}, …]`, one entry per anchored range, in
@@ -1245,6 +1248,7 @@ export class EditSession {
      * Current undo grouping policy.
      */
     undo_capture_mode(): string;
+    update_comment_metadata_json(comment_id: string, patch_json: string): void;
     /**
      * Runs every check of [`EditSession::apply_edits_json`], staging included,
      * without changing anything: `{"ok":true,"baseVersion","wouldApply","previews"}`.
@@ -1629,6 +1633,7 @@ export interface InitOutput {
     readonly editsession_can_redo: (a: number) => number;
     readonly editsession_can_undo: (a: number) => number;
     readonly editsession_cell_selection: (a: number) => [number, number, number, number];
+    readonly editsession_clear_cell_selection: (a: number) => [number, number];
     readonly editsession_clear_content_control_value: (a: number, b: number, c: number) => [number, number];
     readonly editsession_clear_formatting: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];
     readonly editsession_clear_measure_fonts: (a: number) => void;
@@ -1734,6 +1739,8 @@ export interface InitOutput {
     readonly editsession_reset_frame_base: (a: number) => void;
     readonly editsession_resident_caret_snapshot_json: (a: number) => [number, number, number, number];
     readonly editsession_resident_deleted_units: (a: number) => number;
+    readonly editsession_resident_geometry_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly editsession_resident_section_revision: (a: number) => [number, number];
     readonly editsession_resolve_comment: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_resolve_encoded_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly editsession_resolve_paragraph_anchor: (a: number, b: number, c: number) => [number, number, number, number];
@@ -1797,6 +1804,7 @@ export interface InitOutput {
     readonly editsession_track_undo: (a: number) => void;
     readonly editsession_undo: (a: number) => number;
     readonly editsession_undo_capture_mode: (a: number) => [number, number];
+    readonly editsession_update_comment_metadata_json: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly editsession_validate_edits_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_version: (a: number) => [number, number];
     readonly editsession_written_paragraph_ids: (a: number, b: number, c: number) => [number, number, number, number];

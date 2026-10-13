@@ -25,7 +25,8 @@ export async function saveResidentDocument(
   comments: Comment[],
   record: ResidentSaveRecord,
   dirty: DirtyProjectionStories,
-  stories?: readonly string[]
+  stories?: readonly string[],
+  nativeBlockBreaks = false
 ): Promise<ArrayBuffer> {
   const opened = wrapOpenedEditSession(raw, clientId, source, hostJson);
   const base = record.base ?? opened.session.materializeDocx();
@@ -36,7 +37,7 @@ export async function saveResidentDocument(
   const projected = yrsToDocument(
     opened.session,
     mergeDocxHostMetadata(base, host ?? opened.host.document),
-    selected.projectionOptions()
+    nativeBlockBreaks ? { ...selected.projectionOptions(), nativeBlockBreaks } : selected.projectionOptions()
   );
   const buffer = await saveEditorDocument(opened.session, projected, comments, record);
   projected.originalBuffer = buffer;

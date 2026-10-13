@@ -346,9 +346,8 @@ function attrsToTextFormatting(attributes: Attrs): TextFormatting {
     };
   }
 
-  if (typeof attributes.highlight === 'string') {
-    formatting.highlight = attributes.highlight as TextFormatting['highlight'];
-  }
+  const highlight = asString(attributes.highlight) ?? asString(asObject(attributes.highlight)?.color);
+  if (highlight !== undefined) formatting.highlight = highlight as TextFormatting['highlight'];
 
   const fontSize = asObject(attributes.fontSize);
   if (fontSize) {
@@ -2412,7 +2411,8 @@ class SaveContext {
     private readonly session: YrsSession,
     base: Document,
     commentIds?: ReadonlyMap<number, string>,
-    private readonly revisionIds?: RevisionIds
+    private readonly revisionIds?: RevisionIds,
+    private readonly nativeBlockBreaks = false
   ) {
     this.storyIds = new Set(session.storyIds());
     this.baseStories = collectBaseStories(session, base);
@@ -2636,6 +2636,12 @@ class SaveContext {
             this.revisionIds,
             this.inheritedFormatting(storyId, segment.properties)
           );
+          if (this.nativeBlockBreaks) {
+            const breaks: ParagraphContent[] = items.filter(isBlockBreak).map(item => ({ type: 'run', content: [{
+              type: 'break', breakType: item.kind === 'embed' && item.embedKind === 'pageBreak' ? 'page' : 'column',
+            }] }));
+            if (breaks.length) paragraph = { ...paragraph, content: [...breaks, ...paragraph.content] };
+          }
           projectedBlocks.set(paragraph, { inputs: snapshot, sessionKey: segment.paraId });
         }
         blocks.push(paragraph);
@@ -2751,6 +2757,7 @@ class SaveContext {
  * while preserving every package part the editor does not own.
  */
 export interface YrsToDocumentOptions {
+  nativeBlockBreaks?: boolean;
   /**
    * Root stories to project. Omit to rebuild every editable story. A `body`
    * projection includes its nested table/content-control stories.
@@ -2804,7 +2811,7 @@ function projectStories(
   options: YrsToDocumentOptions,
   revisionIds?: RevisionIds
 ): Document {
-  const context = new SaveContext(session, base, options.commentIds, revisionIds);
+  const context = new SaveContext(session, base, options.commentIds, revisionIds, options.nativeBlockBreaks);
   const shouldProject = (storyId: string): boolean =>
     options.storyIds === undefined || options.storyIds.has(storyId);
   const bodyContent = context.storyIds.has('body') && shouldProject('body')

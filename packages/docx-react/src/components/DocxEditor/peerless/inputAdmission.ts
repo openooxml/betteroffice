@@ -14,9 +14,9 @@ export const DOCX_ECHO_MAX_UNACKED_INTENTS = 256;
 
 /** @internal Formatting operations that resolve from the causal predecessor selection. */
 export type PeerlessFormattingIntent = {
-  [K in 'toggleMark' | 'formatRange' | 'clearFormatting' | 'setParagraphAttrs' | 'applyParagraphStyle']:
+  [K in 'toggleMark' | 'formatRange' | 'clearFormatting' | 'setParagraphAttrs' | 'applyParagraphStyle' | 'formatSelection' | 'toggleStrike' | 'toggleList' | 'changeIndent']:
     { kind: K; payload: Omit<DocxCommandPayloads[K], 'selection'> };
-}['toggleMark' | 'formatRange' | 'clearFormatting' | 'setParagraphAttrs' | 'applyParagraphStyle'];
+}['toggleMark' | 'formatRange' | 'clearFormatting' | 'setParagraphAttrs' | 'applyParagraphStyle' | 'formatSelection' | 'toggleStrike' | 'toggleList' | 'changeIndent'];
 
 /** @internal Original-intent accounting happens before the shared coalescing hook. */
 export interface PeerlessAdmissionSnapshot {

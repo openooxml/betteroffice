@@ -164,6 +164,10 @@ export class YrsPositionProjection {
     return this.nodes.get(position) ?? null;
   }
 
+  allTables(): readonly YrsProjectedTable[] {
+    return this.tables;
+  }
+
   tableAtPosition(position: number): YrsProjectedTable | null {
     let result: YrsProjectedTable | null = null;
     for (const table of this.tables) {

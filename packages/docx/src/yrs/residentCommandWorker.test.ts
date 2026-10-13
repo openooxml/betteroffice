@@ -43,7 +43,7 @@ function syntheticDocument(headersFooters = false, notes = false, controls = fal
     (bodyXml ?? '<w:p w14:paraId="00000001"><w:r><w:t>Seed</w:t></w:r>' +
     (notes ? '<w:r><w:footnoteReference w:id="1"/></w:r>' : '') + '</w:p>') +
     (controls ? '<w:p><w:sdt><w:sdtPr><w:id w:val="7"/><w:tag w:val="check"/><w14:checkbox><w14:checked w14:val="0"/></w14:checkbox></w:sdtPr><w:sdtContent><w:r><w:t>☐</w:t></w:r></w:sdtContent></w:sdt></w:p>' +
-      '<w:sdt><w:sdtPr><w:id w:val="8"/><w15:repeatingSection xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"/></w:sdtPr><w:sdtContent><w:sdt><w:sdtPr><w:id w:val="9"/><w:tag w:val="item"/><w15:repeatingSectionItem xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>Item text</w:t></w:r></w:p></w:sdtContent></w:sdt></w:sdtContent></w:sdt>' : '') +
+      '<w:sdt><w:sdtPr><w:id w:val="8"/><w15:repeatingSection xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"/></w:sdtPr><w:sdtContent><w:sdt><w:sdtPr><w:id w:val="9"/><w:tag w:val="item"/><w15:repeatingSectionItem xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>Item text</w:t></w:r></w:p></w:sdtContent></w:sdt></w:sdtContent></w:sdt>' : '')) +
     (headersFooters ? '<w:sectPr><w:headerReference w:type="default" r:id="rIdHeader"/><w:footerReference w:type="default" r:id="rIdFooter"/></w:sectPr>' : '<w:sectPr/>') +
     '</w:body></w:document>'
   ));
@@ -61,26 +61,29 @@ function syntheticDocument(headersFooters = false, notes = false, controls = fal
   if (notes) {
     parts.set('[Content_Types].xml', toBytes(new TextDecoder().decode(parts.get('[Content_Types].xml')!).replace('</Types>',
       '<Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/></Types>')));
-    parts.set('word/_rels/document.xml.rels', toBytes('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdNotes" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes" Target="footnotes.xml"/></Relationships>'));
+    const relationships = parts.get('word/_rels/document.xml.rels');
+    const xml = relationships ? new TextDecoder().decode(relationships) : '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>';
+    parts.set('word/_rels/document.xml.rels', toBytes(xml.replace('</Relationships>', '<Relationship Id="rIdNotes" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes" Target="footnotes.xml"/></Relationships>')));
     parts.set('word/footnotes.xml', toBytes('<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:footnote w:id="1"><w:p><w:r><w:t>Note</w:t></w:r></w:p></w:footnote></w:footnotes>'));
   }
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
-async function openWorker(options: { headersFooters?: boolean; layoutWithRegions?: boolean; notes?: boolean; controls?: boolean; propertyImages?: boolean; bodyXml?: string } = {}) {
-  const worker = startWorker(8301);
+export async function openWorker(options: { headersFooters?: boolean; layoutWithRegions?: boolean; notes?: boolean; controls?: boolean; propertyImages?: boolean; objects?: boolean; bodyXml?: string; displayWindow?: [number, number]; factory?: typeof startWorker; prepare?: (engine: Awaited<ReturnType<typeof createResidentEngineSession>>) => { story: string; paraId: string; offset: number } } = {}) {
+  const worker = (options.factory ?? startWorker)(8301);
   const client = new ResidentEngineWorkerClient(worker);
   try {
     await client.open(syntheticDocument(options.headersFooters, options.notes, options.controls, options.bodyXml), { generation: 'd1-command-worker' });
     const engine = worker.sessions[0]!;
-    if (options.propertyImages) engine.applyRawOps('body', [1, 2].map(index => ({
+    if (options.propertyImages || options.objects) engine.applyRawOps('body', [1, 2].map(index => ({
       op: 'insertEmbed', index, kind: 'image', payload: {
-        id: 'shared-image', src: 'data:image/png;base64,', widthEmu: 381000, heightEmu: 190500,
+        id: 'shared-image', src: 'data:image/png;base64,', ...(options.objects ? { width: 40, height: 20 } : { widthEmu: 381000, heightEmu: 190500 }),
       },
     })));
+    const prepared = options.prepare?.(engine);
     const read = engine.proposalEngine.readParagraphs({ view: 'accepted' });
     if (!read.ok) throw new Error(read.failure.message);
-    const point = { story: 'body', paraId: read.paragraphs[0]!.paraId, offset: 4 };
+    const point = prepared ?? { story: 'body', paraId: read.paragraphs[0]!.paraId, offset: Math.min(4, engine.geometryReader.paragraphSpans('body')[0]!.length) };
     const fonts = [new Uint8Array(readFileSync(resolve(
       process.cwd(), 'crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'
     )))];
@@ -112,6 +115,7 @@ async function openWorker(options: { headersFooters?: boolean; layoutWithRegions
       session: 'd1-command-worker', incarnation: 1, epoch: 1, readOnly: false,
       selection: { anchor: point, focus: point },
       fonts, layoutInput, layoutWithRegions: options.layoutWithRegions ?? true, layoutRevision: 1, extras,
+      ...(options.displayWindow ? { displayWindow: options.displayWindow, retainBuiltPages: false } : {}),
     };
     const initial = await client.commandInit(init);
     return { worker, client, engine, init, initial, point };
@@ -121,7 +125,7 @@ async function openWorker(options: { headersFooters?: boolean; layoutWithRegions
   }
 }
 
-function intent(seq: number, version: number, kind: string, payload: DocxCommandEnvelope['payload']): DocxCommandEnvelope {
+export function intent(seq: number, version: number, kind: string, payload: DocxCommandEnvelope['payload']): DocxCommandEnvelope {
   return { session: 'd1-command-worker', incarnation: 1, seq, basis: { epoch: 1, version }, kind, payload };
 }
 
@@ -835,5 +839,620 @@ test('worker ruler commands refuse stale invalid and unknown targets without cha
     await client.edit(intent(6, 1, 'setReadOnly', { readOnly: true }));
     expect((await client.edit(intent(7, 1, 'setTabStops', { tabs: [], expectVersion: changed.frame!.payload.documentVersion! }))).outcomes[0])
       .toMatchObject({ status: 'refused', reason: 'read-only' });
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('review_commands_own_comment_crud_and_versioned_snapshots', async () => {
+  const { client, engine, point } = await openWorker();
+  try {
+    const range = { story: 'body', start: { paraId: point.paraId, offset: 0 }, end: { paraId: point.paraId, offset: 4 } };
+    const version = engine.proposalEngine.version();
+    const added = await client.edit(intent(1, 0, 'addComment', { ranges: [range], author: 'Ada', date: '2026-01-01', body: 'Before', expectVersion: version }));
+    expect(added.outcomes[0]?.status).toBe('applied');
+    const duplicate = await client.edit(intent(1, 0, 'addComment', { ranges: [range], author: 'Ada', date: '2026-01-01', body: 'Before', expectVersion: version }));
+    expect(duplicate.outcomes).toEqual(added.outcomes);
+    const read = await client.documentRead({ kind: 'reviewSnapshot' });
+    const review = read.value!;
+    expect(review.comments).toHaveLength(1);
+    const id = review.comments[0].id;
+    expect(review.comments[0].body).toBe('Before');
+    expect(review.commentGeometry[id].length).toBeGreaterThan(0);
+    await expect(client.proposal({ kind: 'removeComment', id })).rejects.toThrow('Legacy mutations');
+    const updated = await client.edit(intent(2, 1, 'updateComment', { id, patch: { body: 'After', done: true }, expectVersion: read.version }));
+    expect(updated.outcomes[0]?.status).toBe('applied');
+    expect(await client.documentReadAt({ kind: 'reviewSnapshot' }, read.version)).toEqual({ status: 'superseded' });
+    const current = await client.documentRead({ kind: 'reviewSnapshot' });
+    expect(current.value!.comments[0]).toMatchObject({ body: 'After', done: true });
+    const removed = await client.edit(intent(3, 2, 'removeComment', { id, expectVersion: current.version }));
+    expect(removed.outcomes[0]?.status).toBe('applied');
+    expect((await client.documentRead({ kind: 'reviewSnapshot' })).value).toMatchObject({ comments: [] });
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('review_commands_order_proposals_preview_withdrawal_and_revision_resolution', async () => {
+  const { client, engine, point } = await openWorker();
+  try {
+    const ids = await client.documentRead({ kind: 'paragraphIdentities' });
+    const paragraph = ids.value.paragraphs[0]!.session!;
+    const proposed = await client.edit(intent(1, 0, 'propose', { expectVersion: ids.version, proposals: [{ id: 'one', op: 'replaceText', paragraph, search: 'Seed', replaceWith: 'Bud', suggest: { author: 'Ada', date: '2026-01-01' } }] }));
+    expect(proposed.outcomes[0]?.status).toBe('applied');
+    const read = await client.documentRead({ kind: 'reviewSnapshot' });
+    const review = read.value!;
+    expect(review.proposals.proposals).toHaveLength(1);
+    expect(review.proposalHighlights.one.length).toBeGreaterThan(0);
+    const decided = await client.edit(intent(2, 1, 'setProposalStates', { expectVersion: read.version, expectPreviewVersion: review.proposals.previewVersion, changes: [{ id: 'one', state: 'accepted' }] }));
+    expect(decided.outcomes[0]?.status).toBe('applied');
+    expect(engine.proposalEngine.version()).toBe(read.version);
+    expect((await client.documentReadAt({ kind: 'reviewSnapshot', expectPreviewVersion: review.previewVersion }, read.version))).toMatchObject({ status: 'ok', value: null });
+    expect((await client.documentRead({ kind: 'reviewSnapshot' })).value?.previewVersion).toBe(review.previewVersion + 1);
+    const frame = applyFrameDeltaOwned(null, decodeFrameDelta((await client.requestFullFrame()).frame!.payload.frame));
+    expect(frameText(frame)).toBe('Bud');
+    const withdrawn = await client.edit(intent(3, 2, 'withdrawProposals', { expectVersion: read.version, ids: ['one'] }));
+    expect(withdrawn.outcomes[0]?.status).toBe('applied');
+    expect(engine.paragraphs('body')[0]?.text).toBe('Bud');
+    const inserted = await client.edit(intent(4, 3, 'insertText', { text: '!', selection: { anchor: { ...point, offset: 0 }, focus: { ...point, offset: 0 } }, suggesting: { name: 'Ada', date: '2026-01-01' } }));
+    expect(inserted.outcomes[0]?.status).toBe('applied');
+    const revision = engine.geometryReader.listRevisions()[0]!.revisionId;
+    expect((await client.documentRead({ kind: 'reviewSnapshot' })).value!.revisionGeometry[revision].length).toBeGreaterThan(0);
+    const rejected = await client.edit(intent(5, 4, 'rejectRevision', { revisionId: revision, expectVersion: engine.proposalEngine.version() }));
+    expect(rejected.outcomes[0]?.status).toBe('applied');
+    expect(engine.paragraphs('body')[0]?.text).toBe('Bud');
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('toolbar_metadata_and_insertion_commands_are_versioned_worker_services', async () => {
+  const { client, engine, point } = await openWorker();
+  try {
+    const metadata = await client.documentRead({ kind: 'toolbarMetadata' });
+    expect(metadata.value).toMatchObject({ styles: [], fontFamilies: expect.any(Array) });
+    const selected = { anchor: { ...point, offset: 0 }, focus: { ...point, offset: 4 } };
+    const format = await client.edit(intent(1, 0, 'formatSelection', { selection: selected, delta: { bold: true, fontSize: 14 } }));
+    expect(format.outcomes[0]?.status).toBe('applied');
+    expect(format.editState?.toolbar).toMatchObject({ bold: true, fontSize: 28 });
+    const list = await client.edit(intent(2, 1, 'toggleList', { kind: 'numbered' }));
+    expect(list.outcomes[0]?.status).toBe('applied');
+    expect(list.editState?.toolbar?.paragraphProperties.numPr).toMatchObject({ numId: 2, ilvl: 0 });
+    const listedText = frameText(applyFrameDeltaOwned(null, decodeFrameDelta((await client.requestFullFrame()).frame!.payload.frame)));
+    const table = await client.edit(intent(3, 2, 'insertTable', { selection: { anchor: point, focus: point }, rows: 2, columns: 2 }));
+    expect(table.outcomes[0]?.status).toBe('applied');
+    expect(table.editState?.tableContext).toMatchObject({ rowCount: 2, columnCount: 2 });
+    expect(table.selection?.focus.story).toMatch(/:t\d+:r0c0$/);
+    expect(engine.geometryReader.storyIds().length).toBe(5);
+    expect(await client.documentReadAt({ kind: 'toolbarMetadata' }, metadata.version)).toEqual({ status: 'superseded' });
+    const undone = await client.edit(intent(4, 3, 'undo', {}));
+    expect(undone.outcomes[0]?.status).toBe('applied');
+    expect(undone).toMatchObject({ version: 4, selection: { focus: { story: 'body' } }, editState: { canRedo: true } });
+    expect((await client.edit(intent(4, 3, 'undo', {}))).outcomes).toEqual(undone.outcomes);
+    expect(engine.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['Seed']);
+    expect(engine.geometryReader.storyIds()).toEqual(['body']);
+    expect(frameText(applyFrameDeltaOwned(null, decodeFrameDelta((await client.requestFullFrame()).frame!.payload.frame)))).toBe(listedText);
+    const staleCell = await client.edit(intent(5, 4, 'insertText', { text: '?', selection: table.selection! }));
+    expect(staleCell).toMatchObject({ version: 4, outcomes: [{ status: 'refused', reason: 'stale-anchor' }] });
+    const redone = await client.edit(intent(6, 4, 'redo', {}));
+    expect(redone.outcomes[0]?.status).toBe('applied');
+    expect(engine.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['Seed', '']);
+    expect(engine.geometryReader.storyIds().length).toBe(5);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker frames publish selection and distinct stable image handles', async () => {
+  const { client, initial, point } = await openWorker({ objects: true });
+  try {
+    const geometry = initial.frame.payload.geometry!;
+    expect(geometry).toMatchObject({ version: initial.frame.payload.documentVersion, frameEpoch: initial.frame.revision });
+    const images = geometry.objects.filter(object => object.kind === 'image');
+    expect(images).toHaveLength(2);
+    expect(new Set(images.map(object => object.handle)).size).toBe(2);
+    expect(images.every(object => object.rects.length > 0)).toBe(true);
+    const selected = await client.edit(intent(1, 0, 'select', { selection: {
+      anchor: { ...point, offset: 0 }, focus: { ...point, offset: 1 },
+    } }));
+    expect(selected.frame!.payload.geometry!.selection.length).toBeGreaterThan(0);
+    const typed = await client.edit(intent(2, 0, 'insertText', {
+      text: '+', selection: { anchor: { ...point, offset: 0 }, focus: { ...point, offset: 0 } },
+    }));
+    expect(typed.frame!.payload.geometry!.objects.filter(object => object.kind === 'image').map(object => object.handle))
+      .toEqual(images.map(object => object.handle));
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker orders versioned image resize and move with undo and stale-handle refusal', async () => {
+  const { client, engine, initial, point } = await openWorker({ objects: true });
+  try {
+    const handle = initial.frame.payload.geometry!.objects.find(object => object.kind === 'image')!.handle;
+    const expectVersion = initial.frame.payload.documentVersion!;
+    const request = intent(1, 0, 'resizeObject', { handle, widthEmu: 762000, heightEmu: 381000, expectVersion });
+    const resized = await client.edit(request);
+    expect(resized).toMatchObject({ version: 1, outcomes: [{ status: 'applied' }] });
+    expect((await client.edit(request)).version).toBe(1);
+    const imageRects = (response: typeof resized) => response.frame!.payload.geometry!.objects
+      .filter(object => object.kind === 'image').map(object => object.rects[0]!);
+    expect(imageRects(resized).map(rect => [rect.width, rect.height])).toEqual([[80, 40], [40, 20]]);
+    const stale = await client.edit(intent(2, 0, 'moveObject', { handle, hOffsetEmu: 95250, vOffsetEmu: 190500, expectVersion }));
+    expect(stale.outcomes[0]).toMatchObject({ status: 'refused', reason: 'stale-version' });
+    const moved = await client.edit(intent(3, 1, 'moveObject', {
+      handle, hOffsetEmu: 95250, vOffsetEmu: 190500, expectVersion: resized.frame!.payload.documentVersion!,
+    }));
+    expect(moved.outcomes[0]?.status).toBe('applied');
+    expect(imageRects(moved)[0]).toMatchObject({ x: 10, y: 20, width: 80, height: 40 });
+    const undone = await client.edit(intent(4, 2, 'undo', {}));
+    expect(undone.outcomes[0]?.status).toBe('applied');
+    expect(imageRects(undone)).toEqual(imageRects(resized));
+    const deleted = await client.edit(intent(5, 3, 'deleteForward', { selection: {
+      anchor: { ...point, offset: 1 }, focus: { ...point, offset: 1 },
+    } }));
+    const refused = await client.edit(intent(6, 4, 'resizeObject', {
+      handle, widthEmu: 381000, heightEmu: 190500, expectVersion: deleted.frame!.payload.documentVersion!,
+    }));
+    expect(refused.outcomes[0]).toMatchObject({ status: 'refused', reason: 'stale-object' });
+    expect(engine.storySegments('body').filter(segment => segment.kind === 'embed')).toHaveLength(1);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker cell and text handles survive input and resize the issued cell column', async () => {
+  const { client, engine, initial, point } = await openWorker({ bodyXml:
+    '<w:p w14:paraId="00000001"><w:r><w:t>Seed</w:t></w:r></w:p>' +
+    '<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="1440"/><w:gridCol w:w="1440"/></w:tblGrid>' +
+    '<w:tr><w:tc><w:p><w:r><w:t>A</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>B</w:t></w:r></w:p></w:tc></w:tr></w:tbl>',
+  });
+  try {
+    const objects = initial.frame.payload.geometry!.objects;
+    const cells = objects.filter(object => object.kind === 'cell');
+    expect(cells).toHaveLength(2);
+    expect(cells.every(cell => cell.rects.length > 0)).toBe(true);
+    const text = objects.find(object => object.kind === 'text' && object.story === 'body')!;
+    const typed = await client.edit(intent(1, 0, 'insertText', { text: '+', selection: {
+      anchor: { ...point, offset: 0 }, focus: { ...point, offset: 0 },
+    } }));
+    expect(typed.frame!.payload.geometry!.objects.find(object => object.kind === 'text' && object.story === 'body')!.handle).toBe(text.handle);
+    expect(typed.frame!.payload.geometry!.objects.filter(object => object.kind === 'cell').map(object => object.handle))
+      .toEqual(cells.map(object => object.handle));
+    const resized = await client.edit(intent(2, 1, 'resizeObject', {
+      handle: cells[1]!.handle, widthTwips: 2160, expectVersion: typed.frame!.payload.documentVersion!,
+    }));
+    expect(resized.outcomes[0]?.status).toBe('applied');
+    expect(engine.tablePayload('body', 0)).toHaveProperty('grid', [1440, 2160]);
+    expect(resized.frame!.payload.geometry!.objects.find(object => object.handle === cells[1]!.handle)!.rects[0]!.width)
+      .toBeGreaterThan(cells[1]!.rects[0]!.width);
+    const denied = await client.edit(intent(3, 2, 'moveObject', {
+      handle: text.handle, hOffsetEmu: 0, vOffsetEmu: 0, expectVersion: resized.frame!.payload.documentVersion!,
+    }));
+    expect(denied.outcomes[0]).toMatchObject({ status: 'refused', reason: 'unsupported-object' });
+    const cellRects = (response: typeof resized) => response.frame!.payload.geometry!.objects
+      .find(object => object.handle === cells[1]!.handle)!.rects;
+    const undone = await client.edit(intent(4, 2, 'undo', {}));
+    expect(undone.outcomes[0]?.status).toBe('applied');
+    expect(cellRects(undone)).toEqual(cellRects(typed));
+    const redone = await client.edit(intent(5, 3, 'redo', {}));
+    expect(redone.outcomes[0]?.status).toBe('applied');
+    expect(cellRects(redone)).toEqual(cellRects(resized));
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+for (const kind of ['insertPageBreak', 'insertSectionBreak'] as const) {
+  test(`worker safety refuses ${kind} in a cell before mutation and keeps commands usable`, async () => {
+    const { client, engine, point } = await openWorker({ bodyXml: '<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="1440"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/>', prepare(engine) {
+      const story = 'body:t0:r0c0';
+      return { story, paraId: engine.geometryReader.paragraphSpans(story)[0]!.paraId, offset: 4 };
+    } });
+    try {
+      const version = engine.proposalEngine.version();
+      const vector = engine.encodeStateVector();
+      const at = { ...point, offset: kind === 'insertPageBreak' ? 4 : 0 };
+      const refused = await client.edit(intent(1, 0, kind, {
+        ...(kind === 'insertSectionBreak' ? { type: 'nextPage' } : {}),
+        selection: { anchor: at, focus: at },
+      }));
+      expect(refused.outcomes[0]).toMatchObject({ status: 'refused', reason: 'invalid-selection' });
+      expect(refused.version).toBe(0);
+      expect(engine.proposalEngine.version()).toBe(version);
+      expect(engine.encodeStateVector()).toEqual(vector);
+      const selected = await client.edit(intent(2, 0, kind, {
+        ...(kind === 'insertSectionBreak' ? { type: 'continuous' } : {}),
+        selection: { anchor: { ...point, offset: 0 }, focus: point },
+      }));
+      expect(selected.outcomes[0]?.status).toBe('refused');
+      expect(engine.paragraphs(point.story)[0]!.text).toBe('Cell');
+      expect((await client.edit(intent(3, 0, 'insertText', { text: '!' }))).outcomes[0]?.status).toBe('applied');
+    } finally { client.destroy(); }
+  }, TIMEOUT);
+}
+
+test('worker safety resizes the issued cell rather than the table story suffix ordinal', async () => {
+  const { client, engine, point } = await openWorker({ bodyXml:
+    '<w:p w14:paraId="00000001"><w:r><w:t>Seed</w:t></w:r></w:p>' +
+    '<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="1440"/><w:gridCol w:w="1440"/></w:tblGrid>' +
+    '<w:tr><w:tc><w:p><w:r><w:t>A</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>B</w:t></w:r></w:p></w:tc></w:tr></w:tbl>',
+  });
+  try {
+    const inserted = await client.edit(intent(1, 0, 'insertTable', { rows: 1, columns: 1, selection: { anchor: point, focus: point } }));
+    const cell = inserted.frame!.payload.geometry!.objects.find(object => object.kind === 'cell' && object.story === inserted.selection!.focus.story)!;
+    expect(cell.story).toBe('body:t1:r0c0');
+    const resized = await client.edit(intent(2, 1, 'resizeObject', { handle: cell.handle, widthTwips: 1234, expectVersion: inserted.frame!.payload.documentVersion! }));
+    expect(resized.outcomes[0]?.status).toBe('applied');
+    expect(engine.tablePayload('body', 0)).toHaveProperty('grid', [1234]);
+    expect(engine.tablePayload('body', 1)).toHaveProperty('grid', [1440, 1440]);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker safety refuses removed cell handles when a new table reuses the story', async () => {
+  const { client, engine } = await openWorker();
+  try {
+    const inserted = await client.edit(intent(1, 0, 'insertTable', { rows: 1, columns: 1 }));
+    const old = inserted.frame!.payload.geometry!.objects.find(object => object.kind === 'cell')!;
+    await client.edit(intent(2, 1, 'undo', {}));
+    const replacement = await client.edit(intent(3, 2, 'insertTable', { rows: 1, columns: 1 }));
+    const current = replacement.frame!.payload.geometry!.objects.find(object => object.kind === 'cell')!;
+    expect(current.story).toBe(old.story);
+    const before = engine.tablePayload('body', 0);
+    const refused = await client.edit(intent(4, 3, 'resizeObject', { handle: old.handle, widthTwips: 1234, expectVersion: replacement.frame!.payload.documentVersion! }));
+    expect(refused.outcomes[0]).toMatchObject({ status: 'refused', reason: 'stale-object' });
+    expect(current.handle).not.toBe(old.handle);
+    expect(engine.tablePayload('body', 0)).toEqual(before);
+    expect((await client.edit(intent(5, 3, 'resizeObject', { handle: current.handle, widthTwips: 1234, expectVersion: replacement.frame!.payload.documentVersion! }))).outcomes[0]?.status).toBe('applied');
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker safety refuses malformed proposal anchors atomically without poisoning commands', async () => {
+  const { client, engine } = await openWorker();
+  try {
+    const identities = await client.documentRead({ kind: 'paragraphIdentities' });
+    const paragraph = identities.value.paragraphs[0]!.session!;
+    const suggest = { author: 'Ada', date: '2026-01-01' };
+    const refused = await client.edit(intent(1, 0, 'propose', { expectVersion: identities.version, proposals: [
+      { id: 'valid', op: 'insertText', at: 'end', paragraph, text: '!', suggest },
+      { id: 'invalid', op: 'insertText', at: 'end', paragraph: {} as typeof paragraph, text: '!', suggest },
+    ] }));
+    expect(refused.outcomes[0]).toMatchObject({ status: 'refused', reason: 'invalid-payload' });
+    expect(engine.proposalEngine.version()).toBe(identities.version);
+    expect((await client.documentRead({ kind: 'reviewSnapshot' })).value!.proposals.proposals).toEqual([]);
+    expect((await client.edit(intent(2, 0, 'insertText', { text: '!' }))).outcomes[0]?.status).toBe('applied');
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker safety never labels an old frame with a queued proposal preview version', async () => {
+  const { client, point } = await openWorker();
+  try {
+    const identities = await client.documentRead({ kind: 'paragraphIdentities' });
+    await client.edit(intent(1, 0, 'propose', { expectVersion: identities.version, proposals: [{
+      id: 'one', op: 'replaceText', paragraph: identities.value.paragraphs[0]!.session!,
+      search: 'Seed', replaceWith: 'Bud', suggest: { author: 'Ada', date: '2026-01-01' },
+    }] }));
+    const before = (await client.documentRead({ kind: 'reviewSnapshot' })).value!;
+    const decided = client.edit(intent(2, 1, 'setProposalStates', { expectVersion: before.version, expectPreviewVersion: before.previewVersion, changes: [{ id: 'one', state: 'accepted' }] }));
+    const read = client.documentRead({ kind: 'reviewSnapshot', expectPreviewVersion: before.previewVersion + 1 });
+    const selected = client.edit({ ...intent(3, 2, 'select', { selection: { anchor: point, focus: point } }), afterSeq: 2 });
+    const [decision, snapshot, selection] = await Promise.all([decided, read, selected]);
+    expect(decision.outcomes[0]?.status).toBe('applied');
+    expect(snapshot.value === null || snapshot.value.frameEpoch > before.frameEpoch).toBe(true);
+    const current = (await client.documentRead({ kind: 'reviewSnapshot', expectPreviewVersion: before.previewVersion + 1 })).value!;
+    expect(current.frameEpoch).toBe(selection.frame!.revision);
+    expect(current.previewVersion).toBe(before.previewVersion + 1);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker safety repairs selection after rejecting a suggested table before ordered typing', async () => {
+  const { client, engine } = await openWorker();
+  try {
+    const inserted = await client.edit(intent(1, 0, 'insertTable', { rows: 1, columns: 1, suggesting: { name: 'Ada', date: '2026-01-01' } }));
+    expect(inserted.selection!.focus.story).toBe('body:t0:r0c0');
+    const revisionId = engine.geometryReader.listRevisions()[0]!.revisionId;
+    const rejected = await client.edit(intent(2, 1, 'rejectRevision', { revisionId, expectVersion: engine.proposalEngine.version() }));
+    expect(rejected.outcomes[0]?.status).toBe('applied');
+    expect(rejected.selection).toMatchObject({ focus: { story: 'body' } });
+    expect((await client.edit({ ...intent(3, 2, 'insertText', { text: '!' }), afterSeq: 2 })).outcomes[0]?.status).toBe('applied');
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker safety refuses unknown withdrawal targets before settling any proposal', async () => {
+  const { client, engine } = await openWorker();
+  try {
+    const identities = await client.documentRead({ kind: 'paragraphIdentities' });
+    await client.edit(intent(1, 0, 'propose', { expectVersion: identities.version, proposals: [{
+      id: 'one', op: 'insertText', at: 'end', paragraph: identities.value.paragraphs[0]!.session!,
+      text: '!', suggest: { author: 'Ada', date: '2026-01-01' },
+    }] }));
+    const before = (await client.documentRead({ kind: 'reviewSnapshot' })).value!;
+    const refused = await client.edit(intent(2, 1, 'withdrawProposals', { ids: ['one', 'missing'], expectVersion: before.version }));
+    expect(refused.outcomes[0]).toMatchObject({ status: 'refused', reason: 'unknown-proposal' });
+    expect(engine.proposalEngine.version()).toBe(before.version);
+    const after = (await client.documentRead({ kind: 'reviewSnapshot' })).value!;
+    expect(after.proposals).toEqual(before.proposals);
+    expect(after.revisions).toEqual(before.revisions);
+    expect((await client.edit(intent(3, 1, 'withdrawProposals', { ids: ['one'], expectVersion: before.version }))).outcomes[0]?.status).toBe('applied');
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+const OUTER_TABLE = '<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="1440"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/>';
+const syntheticParagraphs = (count: number) => Array.from({ length: count }, (_, index) =>
+  '<w:p w14:paraId="' + (index + 1).toString(16).padStart(8, '0') + '"><w:r><w:t>Seed paragraph ' + index + '</w:t></w:r></w:p>').join('');
+
+test('round two page release retains a matching review preview frame', async () => {
+  const { client } = await openWorker({ bodyXml: syntheticParagraphs(120), displayWindow: [0, 2] });
+  try {
+    const full = await client.requestFullFrame();
+    const frame = applyFrameDeltaOwned(null, decodeFrameDelta(full.frame!.payload.frame));
+    expect(frame.pages[1]!.page.unbuilt).not.toBe(true);
+    const before = (await client.documentRead({ kind: 'reviewSnapshot' })).value!;
+    const released = await client.releasePages([{ index: 1, pageId: frame.pages[1]!.pageId.toString() }], frame.frameEpoch);
+    expect('superseded' in released).toBe(false);
+    const review = (await client.documentRead({ kind: 'reviewSnapshot', expectPreviewVersion: before.previewVersion })).value;
+    expect(review).not.toBeNull();
+    expect(review!.previewVersion).toBe(before.previewVersion);
+    expect(review!.frameEpoch).toBeGreaterThan(before.frameEpoch);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('round two rejected inner table repairs to the nearest live cell story', async () => {
+  const { client, engine } = await openWorker({ bodyXml: OUTER_TABLE, prepare(engine) {
+    const story = 'body:t0:r0c0';
+    return { story, paraId: engine.geometryReader.paragraphSpans(story)[0]!.paraId, offset: 4 };
+  } });
+  try {
+    await client.edit(intent(1, 0, 'insertTable', { rows: 1, columns: 1, suggesting: { name: 'Ada', date: '2026-01-01' } }));
+    const revisionId = engine.geometryReader.listRevisions()[0]!.revisionId;
+    const rejected = await client.edit(intent(2, 1, 'rejectRevision', { revisionId, expectVersion: engine.proposalEngine.version() }));
+    expect(rejected.selection!.focus.story).toBe('body:t0:r0c0');
+    expect((await client.edit({ ...intent(3, 2, 'insertText', { text: '!' }), afterSeq: 2 })).outcomes[0]?.status).toBe('applied');
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+for (const kind of ['header', 'footer', 'footnote', 'nested'] as const) {
+  test('round two accepted table deletion repairs text and cell selection in ' + kind, async () => {
+    const parent = kind === 'nested' ? 'body:t0:r0c0' : kind === 'footnote' ? 'fn:1' : kind === 'header' ? 'hf:rIdHeader' : 'hf:rIdFooter';
+    const { client, engine } = await openWorker({ headersFooters: kind === 'header' || kind === 'footer', notes: kind === 'footnote',
+      ...(kind === 'nested' ? { bodyXml: OUTER_TABLE } : {}), prepare(engine) {
+        const paraId = engine.geometryReader.paragraphSpans(parent)[0]!.paraId;
+        const inserted = engine.insertTable({ story: parent, paraId, offset: 0 }, 1, 1);
+        const spans = engine.geometryReader.paragraphSpans(parent);
+        const owner = spans.find((_, index) => engine.paragraphSegments(parent, [index])[0]!.some(segment => segment.kind === 'embed' && segment.embedKind === 'table'))!;
+        engine.deleteRange({ story: parent, start: { paraId: owner.paraId, offset: 0 }, end: { paraId: owner.paraId, offset: 1 } }, { name: 'Ada', date: '2026-01-01' });
+        const cell = { ...inserted.table, row: 0, column: 0 };
+        engine.setCellSelection({ anchor: cell, head: cell });
+        const story = inserted.createdStoryIds[0]!;
+        return { story, paraId: engine.geometryReader.paragraphSpans(story)[0]!.paraId, offset: 0 };
+      } });
+    try {
+      const revisionId = engine.geometryReader.listRevisions()[0]!.revisionId;
+      const accepted = await client.edit(intent(1, 0, 'acceptRevision', { revisionId, expectVersion: engine.proposalEngine.version() }));
+      expect(accepted.outcomes[0]?.status).toBe('applied');
+      expect(accepted.selection!.focus.story).toBe(parent);
+      expect(() => engine.cellSelection()).not.toThrow();
+      expect((await client.edit({ ...intent(2, 1, 'insertText', { text: '!' }), afterSeq: 1 })).outcomes[0]?.status).toBe('applied');
+    } finally { client.destroy(); }
+  }, TIMEOUT);
+}
+
+test('round two repair helper works after an external story removal', async () => {
+  const actions = await import('./residentCommandActions');
+  const repair = (actions as unknown as { repairCommandSelection: (engine: unknown, state: unknown) => boolean }).repairCommandSelection;
+  expect(typeof repair).toBe('function');
+  const { client, engine, initial } = await openWorker({ bodyXml: OUTER_TABLE, prepare(engine) {
+    return { story: 'body:t0:r0c0', paraId: engine.geometryReader.paragraphSpans('body:t0:r0c0')[0]!.paraId, offset: 4 };
+  } });
+  try {
+    const inserted = await client.edit(intent(1, 0, 'insertTable', { rows: 1, columns: 1, suggesting: { name: 'Ada', date: '2026-01-01' } }));
+    const state = { readOnly: false, selection: inserted.selection, storedMarks: null, stickyPositions: new Map() };
+    engine.rejectChange({ revisionId: engine.geometryReader.listRevisions()[0]!.revisionId });
+    expect(repair(engine, state)).toBe(true);
+    expect(state.selection!.focus.story).toBe('body:t0:r0c0');
+    expect(() => engine.cellSelection()).not.toThrow();
+    expect(initial.selection).not.toBeNull();
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('round two object geometry reads only paragraphs on resident pages', async () => {
+  const { readResidentFrameGeometry } = await import('./residentObjectGeometry');
+  const { client, engine, initial } = await openWorker({ bodyXml: syntheticParagraphs(1000), displayWindow: [0, 1] });
+  try {
+    const frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
+    const read = spyOn(engine, 'paragraphSegments');
+    try {
+      await readResidentFrameGeometry(engine, frame, initial.selection ?? null, 1);
+      expect(read.mock.calls.reduce((total, [, indices]) => total + indices.length, 0)).toBeLessThan(100);
+    } finally { read.mockRestore(); }
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+for (const offset of [0, 4]) {
+  test('round two break page insertion persists and undoes at offset ' + offset, async () => {
+    const { client, engine, point } = await openWorker();
+    try {
+      const at = { ...point, offset };
+      const inserted = await client.edit(intent(1, 0, 'insertPageBreak', { selection: { anchor: at, focus: at } }));
+      expect(inserted.outcomes[0]?.status).toBe('applied');
+      expect(inserted.version).toBe(1);
+      expect(inserted.selection!.focus.offset).toBe(1);
+      expect(engine.paragraphs('body').map(paragraph => paragraph.text)).toEqual(offset ? ['Seed', ''] : ['Seed']);
+      const { parseDocx } = await import('../docx/parser');
+      const reopened = await parseDocx((await client.save({ comments: [] })).bytes);
+      expect(JSON.stringify(reopened.package.document)).toContain('"breakType":"page"');
+      expect((await client.edit(intent(2, 1, 'undo', {}))).outcomes[0]?.status).toBe('applied');
+      expect(engine.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['Seed']);
+      expect((await client.edit(intent(3, 2, 'insertText', { text: '!' }))).outcomes[0]?.status).toBe('applied');
+    } finally { client.destroy(); }
+  }, TIMEOUT);
+}
+
+test('round two break commands refuse a cell before mutation', async () => {
+  const { client, engine } = await openWorker({ bodyXml: OUTER_TABLE, prepare(engine) {
+    const story = 'body:t0:r0c0';
+    return { story, paraId: engine.geometryReader.paragraphSpans(story)[0]!.paraId, offset: 4 };
+  } });
+  try {
+    const before = engine.proposalEngine.version();
+    for (const [index, kind] of ['insertPageBreak', 'insertSectionBreak'].entries()) {
+      const result = await client.edit(intent(index + 1, 0, kind!, kind === 'insertSectionBreak' ? { type: 'nextPage' } : {}));
+      expect(result.outcomes[0]).toMatchObject({ status: 'refused', reason: 'invalid-selection' });
+      expect(engine.proposalEngine.version()).toBe(before);
+    }
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+for (const type of ['nextPage', 'continuous'] as const) {
+  test('round two break section insertion persists and undoes for ' + type, async () => {
+    const { client, engine } = await openWorker();
+    try {
+      const inserted = await client.edit(intent(1, 0, 'insertSectionBreak', { type }));
+      expect(inserted.outcomes[0]?.status).toBe('applied');
+      expect(inserted.version).toBe(1);
+      expect(inserted.selection!.focus.offset).toBe(0);
+      expect(engine.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['Seed', '']);
+      const sections = (await client.documentRead({ kind: 'sectionProperties' })).value.sections;
+      expect(sections).toHaveLength(2);
+      expect(sections[0]!.properties.sectionStart).toBe(type);
+      const { parseDocx } = await import('../docx/parser');
+      const reopened = await parseDocx((await client.save({ comments: [] })).bytes);
+      expect(reopened.package.document.sections).toHaveLength(2);
+      expect(reopened.package.document.sections![0]!.properties.sectionStart).toBe(type);
+      const undo = await client.edit(intent(2, 1, 'undo', {}));
+      expect(undo.outcomes[0]?.status).toBe('applied');
+      expect(engine.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['Seed']);
+      expect(engine.sectionProperties().sections).toHaveLength(1);
+      expect((await client.edit(intent(3, 2, 'insertText', { text: '!' }))).outcomes[0]?.status).toBe('applied');
+    } finally { client.destroy(); }
+  }, TIMEOUT);
+}
+
+test('round two break sections preserve current and existing closing properties', async () => {
+  const { client, engine } = await openWorker({ bodyXml: '<w:p w14:paraId="00000001"><w:pPr><w:sectPr><w:type w:val="continuous"/><w:pgMar w:left="1800"/></w:sectPr></w:pPr><w:r><w:t>Seed</w:t></w:r></w:p><w:p><w:r><w:t>Tail</w:t></w:r></w:p>', prepare(engine) {
+    const paraId = engine.geometryReader.paragraphSpans('body')[0]!.paraId;
+    engine.setSectionMargins(paraId, { marginLeft: 1800 });
+    return { story: 'body', paraId, offset: 4 };
+  } });
+  try {
+    const inserted = await client.edit(intent(1, 0, 'insertSectionBreak', { type: 'nextPage' }));
+    expect(inserted.outcomes[0]?.status).toBe('applied');
+    const sections = engine.sectionProperties().sections;
+    expect(sections).toHaveLength(3);
+    expect(sections[0]!.properties).toMatchObject({ sectionStart: 'nextPage', marginLeft: 1800 });
+    expect(sections[1]!.properties).toMatchObject({ sectionStart: 'continuous', marginLeft: 1800 });
+    const { parseDocx } = await import('../docx/parser');
+    expect((await parseDocx((await client.save({ comments: [] })).bytes)).package.document.sections).toHaveLength(3);
+    expect((await client.edit(intent(2, 1, 'undo', {}))).outcomes[0]?.status).toBe('applied');
+    expect(engine.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['Seed', 'Tail']);
+    expect(engine.sectionProperties().sections).toHaveLength(2);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('round two break sections remain editable through section property commands', async () => {
+  const { client, engine } = await openWorker();
+  try {
+    expect((await client.edit(intent(1, 0, 'insertSectionBreak', { type: 'nextPage' }))).outcomes[0]?.status).toBe('applied');
+    const snapshot = (await client.documentRead({ kind: 'sectionProperties' })).value;
+    const properties = await client.edit(intent(2, 1, 'setSectionProperties', {
+      section: snapshot.sections[0]!.section, patch: { marginLeft: 1800, sectionStart: 'continuous' }, expectVersion: snapshot.version,
+    }));
+    if (properties.outcomes[0]?.status !== 'applied') throw new Error(JSON.stringify(properties.outcomes[0]));
+    expect(properties.outcomes[0]?.status).toBe('applied');
+    expect(engine.sectionProperties().sections[0]!.properties).toMatchObject({ marginLeft: 1800, sectionStart: 'continuous' });
+    const { parseDocx } = await import('../docx/parser');
+    const saved = await parseDocx((await client.save({ comments: [] })).bytes);
+    expect(saved.package.document.sections![0]!.properties).toMatchObject({ marginLeft: 1800, sectionStart: 'continuous' });
+    expect((await client.edit(intent(3, 2, 'undo', {}))).outcomes[0]?.status).toBe('applied');
+    expect(engine.sectionProperties().sections[0]!.properties.sectionStart).toBe('nextPage');
+    expect((await client.edit(intent(4, 3, 'undo', {}))).outcomes[0]?.status).toBe('applied');
+    expect(engine.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['Seed']);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('section break typing reuses unchanged section projections', async () => {
+  const { client, engine } = await openWorker({ bodyXml: syntheticParagraphs(1000), displayWindow: [0, 1] });
+  try {
+    expect((await client.edit(intent(1, 0, 'insertSectionBreak', { type: 'continuous' }))).outcomes[0]?.status).toBe('applied');
+    expect((await client.edit(intent(2, 1, 'insertText', { text: '+' }))).outcomes[0]?.status).toBe('applied');
+    const paragraphs = spyOn(engine, 'paragraphs');
+    try {
+      expect((await client.edit(intent(3, 2, 'insertText', { text: '+' }))).outcomes[0]?.status).toBe('applied');
+      expect(paragraphs.mock.calls).toHaveLength(0);
+    } finally { paragraphs.mockRestore(); }
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+for (const part of ['header', 'footer', 'footnote'] as const) {
+  test('round two break commands refuse non-body ' + part + ' stories', async () => {
+    const story = part === 'footnote' ? 'fn:1' : part === 'header' ? 'hf:rIdHeader' : 'hf:rIdFooter';
+    const { client, engine } = await openWorker({ headersFooters: part !== 'footnote', notes: part === 'footnote', prepare(engine) {
+      return { story, paraId: engine.geometryReader.paragraphSpans(story)[0]!.paraId, offset: 0 };
+    } });
+    try {
+      const before = engine.proposalEngine.version();
+      for (const [index, kind] of ['insertPageBreak', 'insertSectionBreak'].entries()) {
+        const refused = await client.edit(intent(index + 1, 0, kind!, kind === 'insertSectionBreak' ? { type: 'continuous' } : {}));
+        expect(refused.outcomes[0]).toMatchObject({ status: 'refused', reason: 'invalid-selection' });
+        expect(engine.proposalEngine.version()).toBe(before);
+      }
+      expect((await client.edit(intent(3, 0, 'insertText', { text: '!' }))).outcomes[0]?.status).toBe('applied');
+    } finally { client.destroy(); }
+  }, TIMEOUT);
+}
+
+test.skipIf(process.env.NATIVE_BREAK_PROBE !== '1')('round two native section insertion probe mirrors the hybrid call', async () => {
+  const { client, engine, point, init } = await openWorker();
+  try {
+    engine.insertSectionBreak(point, 'nextPage');
+    const { parseDocx } = await import('../docx/parser');
+    try {
+      engine.layoutDocumentWithRegionsRetained(init.layoutInput);
+      const reopened = await parseDocx((await client.save({ comments: [] })).bytes);
+      console.log('NATIVE_SECTION_PROBE', JSON.stringify({ lowers: true, sections: reopened.package.document.sections?.length }));
+    } catch (error) {
+      console.log('NATIVE_SECTION_PROBE', JSON.stringify({ lowers: false, error: String(error) }));
+    }
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('round two highlight formatting persists through worker save and reopen', async () => {
+  const { client, point } = await openWorker();
+  try {
+    const selected = { anchor: { ...point, offset: 0 }, focus: point };
+    expect((await client.edit(intent(1, 0, 'formatSelection', { selection: selected, delta: { highlight: 'yellow' } }))).outcomes[0]?.status).toBe('applied');
+    const { parseDocx } = await import('../docx/parser');
+    const reopened = await parseDocx((await client.save({ comments: [] })).bytes);
+    expect(JSON.stringify(reopened.package.document)).toContain('"highlight":"yellow"');
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('round two highlight save projection retains existing string attributes', async () => {
+  const { client } = await openWorker({ prepare(engine) {
+    engine.applyRawOps('body', [{ op: 'format', index: 0, len: 4, attrs: { highlight: 'yellow' } }]);
+    return { story: 'body', paraId: engine.geometryReader.paragraphSpans('body')[0]!.paraId, offset: 4 };
+  } });
+  try {
+    const { parseDocx } = await import('../docx/parser');
+    const reopened = await parseDocx((await client.save({ comments: [] })).bytes);
+    expect(JSON.stringify(reopened.package.document)).toContain('"highlight":"yellow"');
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('round two resident geometry matches the reference walk on built pages', async () => {
+  const { readResidentFrameGeometry } = await import('./residentObjectGeometry');
+  const { readResidentFrameGeometry: reference } = await import('./residentObjectGeometry.reference');
+  const inner = OUTER_TABLE.slice(0, -6);
+  const table = OUTER_TABLE.replace('<w:tc>', '<w:tc>' + inner);
+  const bodyXml = syntheticParagraphs(100).replace('</w:p>', '<w:r><w:footnoteReference w:id="1"/></w:r></w:p>' + table);
+  const { client, engine, initial } = await openWorker({ headersFooters: true, notes: true, objects: true,
+    bodyXml, displayWindow: [0, 2] });
+  try {
+    const frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
+    const before = await reference(engine, frame, initial.selection ?? null, 1);
+    const after = await readResidentFrameGeometry(engine, frame, initial.selection ?? null, 1);
+    const normalize = (value: typeof before) => ({ ...value,
+      objects: value.objects.map(({ handle, ...object }) => object),
+    });
+    expect(normalize(after)).toEqual(normalize(before));
+    expect(after.objects.some(object => object.kind === 'image')).toBe(true);
+    expect(after.objects.some(object => object.kind === 'cell')).toBe(true);
+    expect(after.objects.some(object => object.story === 'fn:1')).toBe(true);
+    const at = initial.selection!.focus;
+    const range = { anchor: { ...at, offset: 0 }, focus: at };
+    expect(normalize(await readResidentFrameGeometry(engine, frame, range, 1))).toEqual(normalize(await reference(engine, frame, range, 1)));
+    const unresolved = { ...frame, displayList: { ...frame.displayList,
+      pages: frame.displayList.pages.map(page => ({ ...page,
+        header: page.header ? { ...page.header, rId: 'missing' } : undefined,
+      })),
+    } };
+    expect(normalize(await readResidentFrameGeometry(engine, unresolved, range, 1)))
+      .toEqual(normalize(await reference(engine, unresolved, range, 1)));
   } finally { client.destroy(); }
 }, TIMEOUT);

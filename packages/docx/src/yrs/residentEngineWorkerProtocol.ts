@@ -4,6 +4,8 @@ import type { ResidentControlSnapshot } from './residentControls';
 import type { ResidentPropertyTarget, ResidentPropertySnapshot } from './residentProperties';
 import type { ResidentSectionSnapshot } from './residentSections';
 import type { YrsStoryRange } from './index';
+import type { ResidentReviewSnapshot } from './residentReview';
+import type { ResidentToolbarMetadata } from './residentToolbarMetadata';
 import type { LayoutMetaV1 } from './layoutMeta';
 import type { Checkpoint } from '../../../../shared/office-session/commands/types';
 import type { ReplyError } from '../../../../shared/office-session/protocol';
@@ -115,6 +117,8 @@ export type ResidentDocumentRead =
   | { kind: 'listContentControls'; options: DocxContentControlsOptions }
   | { kind: 'findContentControls'; query: DocxContentControlQuery; options: DocxContentControlsOptions }
   | { kind: 'rangeHighlights'; ranges: YrsStoryRange[]; expectVersion: string; expectFrameEpoch?: number; expectLayoutRevision?: number }
+  | { kind: 'reviewSnapshot'; expectPreviewVersion?: number }
+  | { kind: 'toolbarMetadata' }
   | { kind: 'paragraphIdentities' }
   | { kind: 'resolveParagraphAnchors'; anchors: DocxParagraphAnchor[] }
   | { kind: 'readParagraphs'; request: DocxReadParagraphsRequest }
@@ -156,6 +160,8 @@ export interface ResidentDocumentReadValues {
   listContentControls: DocxContentControlsResult;
   findContentControls: DocxContentControlsResult;
   rangeHighlights: ResidentRangeHighlights | null;
+  reviewSnapshot: ResidentReviewSnapshot | null;
+  toolbarMetadata: ResidentToolbarMetadata;
   paragraphIdentities: DocxParagraphIdentitySnapshot;
   resolveParagraphAnchors: { results: DocxParagraphAnchorResult[] };
   readParagraphs: DocxReadParagraphsResult;

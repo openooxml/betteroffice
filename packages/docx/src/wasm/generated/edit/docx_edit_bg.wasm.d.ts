@@ -41,6 +41,7 @@ export const editsession_build_display_pages_frame: (a: number, b: number, c: nu
 export const editsession_can_redo: (a: number) => number;
 export const editsession_can_undo: (a: number) => number;
 export const editsession_cell_selection: (a: number) => [number, number, number, number];
+export const editsession_clear_cell_selection: (a: number) => [number, number];
 export const editsession_clear_content_control_value: (a: number, b: number, c: number) => [number, number];
 export const editsession_clear_formatting: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];
 export const editsession_clear_measure_fonts: (a: number) => void;
@@ -146,6 +147,8 @@ export const editsession_replace_range: (a: number, b: number, c: number, d: num
 export const editsession_reset_frame_base: (a: number) => void;
 export const editsession_resident_caret_snapshot_json: (a: number) => [number, number, number, number];
 export const editsession_resident_deleted_units: (a: number) => number;
+export const editsession_resident_geometry_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+export const editsession_resident_section_revision: (a: number) => [number, number];
 export const editsession_resolve_comment: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_resolve_encoded_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
 export const editsession_resolve_paragraph_anchor: (a: number, b: number, c: number) => [number, number, number, number];
@@ -209,6 +212,7 @@ export const editsession_toggle_mark: (a: number, b: number, c: number, d: numbe
 export const editsession_track_undo: (a: number) => void;
 export const editsession_undo: (a: number) => number;
 export const editsession_undo_capture_mode: (a: number) => [number, number];
+export const editsession_update_comment_metadata_json: (a: number, b: number, c: number, d: number, e: number) => [number, number];
 export const editsession_validate_edits_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_version: (a: number) => [number, number];
 export const editsession_written_paragraph_ids: (a: number, b: number, c: number) => [number, number, number, number];
