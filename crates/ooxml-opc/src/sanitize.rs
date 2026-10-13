@@ -1815,6 +1815,214 @@ mod tests {
     }
 
     #[test]
+    fn regression_preserves_manifest_with_vba_xml_default() {
+        let parts = vec![
+            (
+                "[Content_Types].xml".to_owned(),
+                br#"<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'><Default Extension='xml' ContentType='application/vnd.ms-word.vbaData+xml'/><Default Extension='rels' ContentType='application/vnd.openxmlformats-package.relationships+xml'/><Override PartName='/word/document.xml' ContentType='application/vnd.ms-word.document.macroEnabled.main+xml'/><Override PartName='/word/settings.xml' ContentType='application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml'/><Override PartName='/word/custom/data.xml' ContentType='application/vnd.ms-word.vbaData+xml'/></Types>"#.to_vec(),
+            ),
+            main_relationship("word/document.xml", OFFICE_DOCUMENT_RELATIONSHIP),
+            ("word/document.xml".to_owned(), b"<document/>".to_vec()),
+            ("word/settings.xml".to_owned(), b"<settings/>".to_vec()),
+            ("word/custom/data.xml".to_owned(), b"<vbaData/>".to_vec()),
+            ("word/custom/default.xml".to_owned(), b"<vbaData/>".to_vec()),
+            (
+                "word/_rels/document.xml.rels".to_owned(),
+                br#"<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='safe' Type='settings' Target='settings.xml'/><Relationship Id='vba' Type='vbaData' Target='custom/data.xml'/><Relationship Id='default' Type='vbaData' Target='custom/default.xml'/></Relationships>"#.to_vec(),
+            ),
+        ];
+        let package = rezip_parts(&parts).unwrap();
+        for sanitized in [
+            sanitize_package(&package).unwrap(),
+            sanitize_package_for_format(&package, "docx").unwrap(),
+        ] {
+            let output = unzip_parts(&sanitized).unwrap();
+            assert!(has_part(&output, "[Content_Types].xml"));
+            assert_eq!(output.len(), parts.len() - 2);
+            assert_all_parts_declared(&output);
+            assert_eq!(detect_package_kind(&output), Ok(DocumentKind::Docx));
+            assert_eq!(part_bytes(&output, "word/settings.xml"), b"<settings/>");
+            let all = output.iter().map(|(_, bytes)| String::from_utf8_lossy(bytes)).collect::<String>();
+            assert!(!all.contains("vbaData"));
+            assert!(!all.contains("custom/data.xml"));
+            assert!(!all.contains("custom/default.xml"));
+            assert!(String::from_utf8_lossy(part_bytes(&output, "word/_rels/document.xml.rels")).contains("Id='safe'"));
+        }
+    }
+
+    fn part_bytes<'a>(parts: &'a [(String, Vec<u8>)], name: &str) -> &'a [u8] {
+        &parts.iter().find(|(path, _)| path == name).unwrap().1
+    }
+
+    #[test]
+    fn regression_preserves_safely_typed_signature_names() {
+        let safe_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.printerSettings";
+        for signature in ["vbaProjectSignature", "vbaProjectSignatureAgile", "vbaProjectSignatureV3"] {
+            let part = format!("xl/printerSettings/{signature}.bin");
+            for use_override in [false, true] {
+                let mut parts = default_payload_parts(if use_override { "application/vnd.ms-office.vbaProject" } else { safe_type }, &part);
+                parts[3].1 = b"printer settings".to_vec();
+                if use_override {
+                    parts[0].1 = String::from_utf8(parts[0].1.clone()).unwrap().replace("</Types>", &format!("<Override PartName='/{part}' ContentType='{safe_type}'/></Types>")).into_bytes();
+                }
+                let package = rezip_parts(&parts).unwrap();
+                let output = unzip_parts(&sanitize_package_for_format(&package, "xlsx").unwrap()).unwrap();
+                assert!(has_part(&output, &part), "{signature}, override={use_override}");
+                assert_eq!(part_bytes(&output, &part), b"printer settings");
+                assert_eq!(parse_content_types(&output).unwrap().content_type_for(&part), Some(safe_type));
+                let relationships = String::from_utf8_lossy(part_bytes(&output, "xl/_rels/workbook.xml.rels"));
+                assert!(relationships.contains("Id='payload'"));
+                assert!(relationships.contains(&part));
+                assert_all_parts_declared(&output);
+            }
+        }
+    }
+
+    const MACRO_WORKBOOK: &[u8] = br#"<workbook xmlns='http://schemas.openxmlformats.org/spreadsheetml/2006/main' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'><bookViews><workbookView activeTab='2' firstSheet='0'/><workbookView activeTab='1' firstSheet='1'></workbookView><workbookView activeTab='0' firstSheet='2'/></bookViews><sheets><sheet name='First' sheetId='1' r:id='first'/><sheet name='Macro' sheetId='2' r:id='macro'></sheet><sheet name='Last' sheetId='3' r:id='last'/></sheets><definedNames><definedName name='first' localSheetId='0'>First!$A$1</definedName><definedName name='macro' localSheetId='1'>Macro!$A$1</definedName><definedName name='last' localSheetId='2'>Last!$A$1</definedName><definedName name='global'>First!$A$1</definedName><definedName name='empty' localSheetId='1'/></definedNames></workbook>"#;
+
+    fn macro_sheet_parts(content_type: &str, workbook: &[u8]) -> Vec<(String, Vec<u8>)> {
+        let mut parts = package_parts("xl/workbook.xml", content_type, workbook);
+        parts[0].1 = String::from_utf8(parts[0].1.clone()).unwrap().replace("</Types>", "<Default Extension='xml' ContentType='application/xml'/><Default Extension='rels' ContentType='application/vnd.openxmlformats-package.relationships+xml'/><Override PartName='/xl/custom/sheet.data' ContentType='application/vnd.ms-excel.macrosheet+xml'/></Types>").into_bytes();
+        parts.extend([
+            ("xl/worksheets/first.xml".to_owned(), b"<worksheet/>".to_vec()),
+            ("xl/custom/sheet.data".to_owned(), b"<macrosheet/>".to_vec()),
+            ("xl/worksheets/last.xml".to_owned(), b"<worksheet/>".to_vec()),
+            ("xl/_rels/workbook.xml.rels".to_owned(), br#"<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='first' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet' Target='worksheets/first.xml'/><Relationship Id='macro' Type='http://schemas.microsoft.com/office/2006/relationships/xlMacrosheet' Target='/xl/custom/sheet.data'/><Relationship Id='last' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet' Target='worksheets/last.xml'/></Relationships>"#.to_vec()),
+        ]);
+        parts
+    }
+
+    fn element_attributes(xml: &[u8], element: &[u8]) -> Vec<Vec<(String, String)>> {
+        let mut reader = Reader::from_reader(xml);
+        let mut output = Vec::new();
+        loop {
+            match reader.read_event().unwrap() {
+                Event::Start(start) | Event::Empty(start) if start.local_name().as_ref() == element => output.push(attributes(&reader, &start, "test.xml").unwrap()),
+                Event::Eof => return output,
+                _ => {}
+            }
+        }
+    }
+
+    fn assert_macro_sheet_metadata(content_type: &str, format: &str) {
+        for strict in [false, true] {
+            let workbook = if strict {
+                String::from_utf8_lossy(MACRO_WORKBOOK).replace("http://schemas.openxmlformats.org/spreadsheetml/2006/main", "http://purl.oclc.org/ooxml/spreadsheetml/main").replace("http://schemas.openxmlformats.org/officeDocument/2006/relationships", "http://purl.oclc.org/ooxml/officeDocument/relationships").into_bytes()
+            } else { MACRO_WORKBOOK.to_vec() };
+            let parts = macro_sheet_parts(content_type, &workbook);
+            let package = rezip_parts(&parts).unwrap();
+            for sanitized in [sanitize_package(&package).unwrap(), sanitize_package_for_format(&package, format).unwrap()] {
+                let output = unzip_parts(&sanitized).unwrap();
+                let workbook = part_bytes(&output, "xl/workbook.xml");
+                let sheets = element_attributes(workbook, b"sheet");
+                assert_eq!(sheets.len(), 2);
+                assert_eq!(attribute_value(&sheets[0], "r:id"), Some("first"));
+                assert_eq!(attribute_value(&sheets[1], "r:id"), Some("last"));
+                assert_eq!(attribute_value(&sheets[1], "sheetId"), Some("3"));
+                let names = element_attributes(workbook, b"definedName");
+                assert_eq!(names.len(), 3);
+                assert_eq!(attribute_value(&names[0], "localSheetId"), Some("0"));
+                assert_eq!(attribute_value(&names[1], "localSheetId"), Some("1"));
+                assert_eq!(attribute_value(&names[1], "name"), Some("last"));
+                assert_eq!(attribute_value(&names[2], "localSheetId"), None);
+                let views = element_attributes(workbook, b"workbookView");
+                let indices = views.iter().map(|values| (attribute_value(values, "activeTab"), attribute_value(values, "firstSheet"))).collect::<Vec<_>>();
+                assert_eq!(indices, [(Some("1"), Some("0")), (Some("1"), Some("1")), (Some("0"), Some("1"))]);
+                assert!(!String::from_utf8_lossy(workbook).contains("macro"));
+                assert!(!String::from_utf8_lossy(part_bytes(&output, "xl/_rels/workbook.xml.rels")).contains("macro"));
+                assert!(!has_part(&output, "xl/custom/sheet.data"));
+                assert_all_parts_declared(&output);
+            }
+        }
+    }
+
+    #[test]
+    fn regression_removes_xltm_macro_sheet_metadata() {
+        assert_macro_sheet_metadata("application/vnd.ms-excel.template.macroEnabled.main+xml", "xltx");
+    }
+
+    #[test]
+    fn regression_removes_xlam_macro_sheet_metadata() {
+        assert_macro_sheet_metadata("application/vnd.ms-excel.addin.macroEnabled.main+xml", "xlsx");
+    }
+
+    #[test]
+    fn regression_removes_xlsm_macro_sheet_metadata() {
+        assert_macro_sheet_metadata("application/vnd.ms-excel.sheet.macroEnabled.main+xml", "xlsx");
+    }
+
+    #[test]
+    fn regression_rejects_unsafe_macro_sheet_workbook_rewrites() {
+        for workbook in [
+            "<root/>".to_owned(),
+            String::from_utf8_lossy(MACRO_WORKBOOK).replace("http://schemas.openxmlformats.org/spreadsheetml/2006/main", "urn:foreign"),
+            String::from_utf8_lossy(MACRO_WORKBOOK).replace("r:id='macro'", "r:id='first'"),
+            String::from_utf8_lossy(MACRO_WORKBOOK).replace("r:id='macro'", "r:id='unknown'"),
+            String::from_utf8_lossy(MACRO_WORKBOOK).replace("localSheetId='2'", "localSheetId='invalid'"),
+        ] {
+            let parts = macro_sheet_parts("application/vnd.ms-excel.sheet.macroEnabled.main+xml", workbook.as_bytes());
+            let package = rezip_parts(&parts).unwrap();
+            for result in [sanitize_package(&package), sanitize_package_for_format(&package, "xlsx")] {
+                let error = result.unwrap_err();
+                assert!(error.contains("xl/workbook.xml"), "{error}");
+            }
+        }
+    }
+
+    #[test]
+    fn regression_clamps_views_when_last_macro_sheet_is_removed() {
+        let workbook = String::from_utf8_lossy(MACRO_WORKBOOK).replace("sheetId='2' r:id='macro'", "sheetId='2' r:id='last'").replace("sheetId='3' r:id='last'", "sheetId='3' r:id='macro'");
+        let parts = macro_sheet_parts("application/vnd.ms-excel.sheet.macroEnabled.main+xml", workbook.as_bytes());
+        let package = rezip_parts(&parts).unwrap();
+        let output = unzip_parts(&sanitize_package_for_format(&package, "xlsx").unwrap()).unwrap();
+        let workbook = part_bytes(&output, "xl/workbook.xml");
+        assert_eq!(element_attributes(workbook, b"sheet").len(), 2);
+        for values in element_attributes(workbook, b"workbookView") {
+            for key in ["activeTab", "firstSheet"] {
+                let index = attribute_value(&values, key).unwrap().parse::<usize>().unwrap();
+                assert!(index < 2);
+            }
+        }
+    }
+
+    #[test]
+    fn regression_default_main_types_preserve_typed_payloads() {
+        for [format, content_type, sanitized_format, sanitized_type] in TEMPLATE_AND_ADDIN_KINDS {
+            let (part_name, _) = office_main_part(format);
+            let mut parts = package_parts(part_name, content_type, b"<root/>");
+            parts[0].1 = format!("<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'><Default Extension='XML' ContentType='{content_type}'/><Default Extension='bin' ContentType='application/vnd.openxmlformats-officedocument.spreadsheetml.printerSettings'/><Default Extension='rels' ContentType='application/vnd.openxmlformats-package.relationships+xml'/></Types>").into_bytes();
+            let safe_part = "custom/vbaProjectSignature.bin";
+            parts.push((safe_part.to_owned(), b"printer settings".to_vec()));
+            assert_eq!(detect_package_kind(&parts).unwrap().format(), format);
+            let package = rezip_parts(&parts).unwrap();
+            for sanitized in [sanitize_package(&package).unwrap(), sanitize_package_for_format(&package, sanitized_format).unwrap()] {
+                let output = unzip_parts(&sanitized).unwrap();
+                assert_eq!(detect_package_kind(&output).unwrap().format(), sanitized_format);
+                assert_eq!(parse_content_types(&output).unwrap().content_type_for(part_name), Some(sanitized_type));
+                assert!(has_part(&output, safe_part), "{format}");
+                assert_all_parts_declared(&output);
+            }
+        }
+    }
+
+    #[test]
+    fn regression_conflicting_main_override_wins_and_preserves_typed_payloads() {
+        let mut parts = default_payload_parts("application/vnd.openxmlformats-officedocument.spreadsheetml.printerSettings", "xl/printerSettings/vbaProjectSignature.bin");
+        parts[0].1 = String::from_utf8(parts[0].1.clone()).unwrap().replace("</Types>", "<Default Extension='xml' ContentType='application/vnd.ms-excel.template.macroEnabled.main+xml'/></Types>").replace("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml", "application/vnd.ms-excel.addin.macroEnabled.main+xml").into_bytes();
+        assert_eq!(detect_package_kind(&parts), Ok(DocumentKind::Xlam));
+        let package = rezip_parts(&parts).unwrap();
+        assert!(sanitize_package_for_format(&package, "xltx").is_err());
+        let output = unzip_parts(&sanitize_package_for_format(&package, "xlsx").unwrap()).unwrap();
+        assert_eq!(detect_package_kind(&output), Ok(DocumentKind::Xlsx));
+        let types = parse_content_types(&output).unwrap();
+        assert_eq!(types.content_type_for("xl/workbook.xml"), Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"));
+        assert_eq!(types.content_type_for("custom/main.xml"), Some("application/vnd.openxmlformats-officedocument.spreadsheetml.template.main+xml"));
+        assert!(has_part(&output, "xl/printerSettings/vbaProjectSignature.bin"));
+        assert!(String::from_utf8_lossy(part_bytes(&output, "xl/_rels/workbook.xml.rels")).contains("Id='payload'"));
+        assert_all_parts_declared(&output);
+    }
+
+    #[test]
     fn accepts_and_rezips_all_three_formats() {
         let cases = [
             (
