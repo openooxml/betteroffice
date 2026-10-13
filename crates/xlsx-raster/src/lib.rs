@@ -662,6 +662,125 @@ mod tests {
         assert_eq!(pixmap.pixel(8, 4).unwrap().red(), 255);
         assert_eq!(pixmap.pixel(8, 5).unwrap().red(), 0);
     }
+
+    #[test]
+    fn double_line_without_rail_keeps_released_rails() {
+        let black = parse_color("#000000").unwrap();
+        for width in [0.5_f32, 1.0, 2.0] {
+            for (x1, y1, x2, y2) in [(0.0, 8.0, 24.0, 8.0), (12.0, 0.0, 12.0, 16.0)] {
+                let blank = || {
+                    let mut pixmap = Pixmap::new(24, 16).unwrap();
+                    pixmap.fill(Color::WHITE);
+                    pixmap
+                };
+                let mut actual = blank();
+                paint_line(
+                    &mut actual,
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    width,
+                    "#000000",
+                    &Some("double".into()),
+                    Transform::identity(),
+                    None,
+                )
+                .unwrap();
+                let mut expected = blank();
+                let (rail, offset) = ((width * 0.6).max(0.5), (width * 0.8).max(0.8));
+                let (dx, dy) = if y1 == y2 { (0.0, offset) } else { (offset, 0.0) };
+                for sign in [-1.0, 1.0] {
+                    stroke_seg(
+                        &mut expected,
+                        x1 + sign * dx,
+                        y1 + sign * dy,
+                        x2 + sign * dx,
+                        y2 + sign * dy,
+                        rail,
+                        black,
+                        None,
+                        Transform::identity(),
+                        None,
+                    );
+                }
+                assert!(actual.data() == expected.data(), "{width} {x1},{y1}");
+            }
+        }
+    }
+
+    #[test]
+    fn produced_double_border_paints_rail_gap_rail() {
+        let mut workbook = xlsx_model::Workbook::default();
+        let mut sheet = xlsx_model::Sheet::new("Sheet1");
+        let mut format = workbook.styles.cell_format(None);
+        format.border.bottom = Some(xlsx_model::BorderEdge {
+            style: xlsx_model::BorderStyle::Double,
+            color: Some(xlsx_model::Color::Rgb("#ff0000".into())),
+        });
+        let style = workbook.styles.intern_cell_format(&format).unwrap();
+        sheet.set_cell(
+            xlsx_model::CellRef::new(0, 0),
+            xlsx_model::Cell {
+                style,
+                ..Default::default()
+            },
+        );
+        workbook.sheets.push(sheet);
+        let dl = xlsx_render::build_display_list(
+            &workbook,
+            xlsx_model::SheetId(0),
+            &xlsx_render::Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: 48.0,
+                height: 40.0,
+            },
+        )
+        .unwrap();
+        for factor in [1.0, 2.0] {
+            let pixels =
+                Pixmap::decode_png(&render_png(&xlsx_render::scaled(dl.clone(), factor)).unwrap())
+                    .unwrap();
+            let ink: Vec<u32> = (0..pixels.height())
+                .filter(|&y| {
+                    let pixel = pixels.pixel(16, y).unwrap();
+                    pixel.red() == 255 && pixel.green() == 0
+                })
+                .collect();
+            let rail = factor as u32;
+            assert_eq!(ink.len() as u32, 2 * rail, "{factor}: {ink:?}");
+            assert_eq!(ink[rail as usize] - ink[0], 2 * rail, "{factor}: {ink:?}");
+            for y in ink[0]..ink[0] + 3 * rail {
+                let pixel = pixels.pixel(16, y).unwrap();
+                assert!(ink.contains(&y) || pixel.green() > 128, "{factor}: gap at {y}");
+            }
+        }
+    }
+
+    #[test]
+    fn dashed_line_below_one_pixel_is_centred_on_its_clamped_width() {
+        let mut pixmap = Pixmap::new(32, 8).unwrap();
+        pixmap.fill(Color::WHITE);
+        paint_line(
+            &mut pixmap,
+            0.0,
+            4.0,
+            32.0,
+            4.0,
+            0.25,
+            "#000000",
+            &Some("dashed".into()),
+            Transform::identity(),
+            None,
+        )
+        .unwrap();
+        for x in 0..32 {
+            assert_eq!(pixmap.pixel(x, 3).unwrap().red(), 255, "above at {x}");
+            assert_eq!(pixmap.pixel(x, 5).unwrap().red(), 255, "below at {x}");
+        }
+        assert_eq!(pixmap.pixel(0, 4).unwrap().red(), 0);
+    }
     use super::*;
     use serde::Deserialize;
     use tiny_skia::PathSegment;

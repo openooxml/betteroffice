@@ -256,6 +256,36 @@ mod pattern_border_tests {
         .unwrap();
         assert_ne!(ss.intern_cell_format(&format).unwrap(), first);
     }
+
+    #[test]
+    fn pattern_masks_cover_the_specified_share_of_each_tile() {
+        // gray shares are the spec's percentages of 64 pixels; hatches are 1-px (light) or
+        // 2-px (dark) lines every 4 px, and grids and trellises count each crossing once
+        let expected = [
+            (PatternType::Gray0625, 64 / 16),
+            (PatternType::Gray125, 64 / 8),
+            (PatternType::LightGray, 64 / 4),
+            (PatternType::MediumGray, 64 / 2),
+            (PatternType::DarkGray, 64 * 3 / 4),
+            (PatternType::LightHorizontal, 16),
+            (PatternType::LightVertical, 16),
+            (PatternType::LightDown, 16),
+            (PatternType::LightUp, 16),
+            (PatternType::LightGrid, 16 + 16 - 4),
+            (PatternType::LightTrellis, 16 + 16 - 8),
+            (PatternType::DarkHorizontal, 32),
+            (PatternType::DarkVertical, 32),
+            (PatternType::DarkDown, 32),
+            (PatternType::DarkUp, 32),
+            (PatternType::DarkGrid, 32 + 32 - 16),
+            (PatternType::DarkTrellis, 32 + 32 - 16),
+        ];
+        assert_eq!(expected.len(), PatternType::ALL.len());
+        for (pattern, pixels) in expected {
+            let set: u32 = pattern.mask().iter().map(|row| row.count_ones()).sum();
+            assert_eq!(set, pixels, "{}", pattern.as_sml());
+        }
+    }
 }
 
 /// one edge of a cell border.

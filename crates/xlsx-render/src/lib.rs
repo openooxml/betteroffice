@@ -2114,6 +2114,50 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn double_border_carries_its_rail_width() {
+        let mut wb = Workbook::default();
+        let mut sheet = Sheet::new("Sheet1");
+        let mut format = wb.styles.cell_format(None);
+        format.border.bottom = Some(xlsx_model::BorderEdge {
+            style: BorderStyle::Double,
+            color: Some(xlsx_model::Color::Rgb("#654321".into())),
+        });
+        let style = wb.styles.intern_cell_format(&format).unwrap();
+        sheet.set_cell(
+            CellRef::new(0, 0),
+            Cell {
+                style,
+                ..Cell::default()
+            },
+        );
+        wb.sheets.push(sheet);
+        let dl = build_display_list(
+            &wb,
+            SheetId(0),
+            &Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 60.0,
+            },
+        )
+        .unwrap();
+        for (factor, width, rail) in [(1.0, 3.0, 1.0), (2.0, 6.0, 2.0)] {
+            let json = serde_json::to_value(scaled(dl.clone(), factor)).unwrap();
+            let line = json["commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|cmd| cmd["style"] == "double")
+                .unwrap();
+            assert_eq!(
+                (line["width"].as_f64(), line["rail"].as_f64()),
+                (Some(width), Some(rail))
+            );
+        }
+    }
     use super::*;
     use xlsx_model::Hyperlink;
     use xlsx_model::styles::{Alignment, HAlign, Xf};

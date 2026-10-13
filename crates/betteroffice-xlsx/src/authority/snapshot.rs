@@ -2313,6 +2313,85 @@ mod tests {
     }
 
     #[test]
+    fn fill_and_border_records_keep_their_released_layout() {
+        let pattern = Fill::Pattern {
+            pattern: PatternType::LightUp,
+            fg: Some(Color::Rgb("#123456".into())),
+            bg: None,
+        };
+        let edge = |style| Border {
+            bottom: Some(BorderEdge {
+                style,
+                color: Some(Color::Indexed(5)),
+            }),
+            ..Border::default()
+        };
+        let push = |section: usize, payload: Vec<u8>| {
+            let mut builder = builder_for_section(section, 1);
+            builder
+                .push_bounded(&payload, SnapshotBudget::new(1, 1024).unwrap())
+                .map(|_| builder.base.unwrap().styles)
+        };
+        let current = |tag: u8, value: &dyn Fn(&mut Writer)| {
+            let mut writer = Writer::new();
+            writer.u8(tag);
+            value(&mut writer);
+            writer.into_bytes()
+        };
+
+        let mut solid = Writer::new();
+        solid.u8(11);
+        solid.u8(1);
+        solid.u8(0);
+        solid.str("#123456");
+        assert_eq!(
+            push(11, solid.into_bytes()).unwrap().fills,
+            vec![Fill::Solid(Color::Rgb("#123456".into()))]
+        );
+        assert_eq!(
+            push(12, vec![12, 0, 0, 0, 1, 5, 1, 2, 5]).unwrap().borders,
+            vec![edge(BorderStyle::Double)]
+        );
+        assert!(push(11, current(11, &|w: &mut Writer| pattern.write(w))).is_err());
+        assert!(
+            push(
+                12,
+                current(12, &|w: &mut Writer| edge(BorderStyle::MediumDashDot).write(w))
+            )
+            .is_err()
+        );
+        assert_eq!(
+            push(11, current(18, &|w: &mut Writer| pattern.write(w)))
+                .unwrap()
+                .fills,
+            vec![pattern.clone()]
+        );
+        assert_eq!(
+            push(
+                12,
+                current(19, &|w: &mut Writer| edge(BorderStyle::MediumDashDot).write(w))
+            )
+            .unwrap()
+            .borders,
+            vec![edge(BorderStyle::MediumDashDot)]
+        );
+
+        let mut base = (*source().base).clone();
+        base.styles.fills = vec![pattern.clone()];
+        base.styles.borders = vec![edge(BorderStyle::MediumDashDot)];
+        let mut tags = Vec::new();
+        for section in [11, 12] {
+            let mut cursor = BaseCursor {
+                section,
+                index: 0,
+                fingerprint_key: None,
+            };
+            tags.push(cursor.next(&base).unwrap()[0]);
+        }
+        assert_eq!(tags, [18, 19]);
+    }
+
+    #[test]
     fn bounded_decoder_refuses_a_different_record_and_clears_completed_state() {
         let text = "a".repeat(2_048);
         let mut writer = Writer::new();

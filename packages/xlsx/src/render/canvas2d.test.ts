@@ -1,7 +1,56 @@
 import { describe, expect, it } from 'bun:test';
 import fixture from '../../test-fixtures/path-backend-agreement.json';
-import type { DisplayList, GeometryPathCommand } from '../display-list/types';
+import type { DisplayList, GeometryPathCommand, PatternType } from '../display-list/types';
 import { paintDisplayList } from './canvas2d';
+import { PATTERN_MASKS } from './patterns';
+
+describe('Canvas2D pattern masks', () => {
+  it('cover the specified share of each 8x8 tile', () => {
+    // gray shares are the spec's percentages of 64 pixels; hatches are 1-px (light) or
+    // 2-px (dark) lines every 4 px, and grids and trellises count each crossing once
+    const expected: Record<PatternType, number> = {
+      gray0625: 64 / 16, gray125: 64 / 8, lightGray: 64 / 4, mediumGray: 64 / 2, darkGray: 64 * 3 / 4,
+      lightHorizontal: 16, lightVertical: 16, lightDown: 16, lightUp: 16,
+      lightGrid: 16 + 16 - 4, lightTrellis: 16 + 16 - 8,
+      darkHorizontal: 32, darkVertical: 32, darkDown: 32, darkUp: 32,
+      darkGrid: 32 + 32 - 16, darkTrellis: 32 + 32 - 16,
+    };
+    const set = (rows: readonly number[]) =>
+      rows.reduce((sum, row) => sum + row.toString(2).split('').filter((bit) => bit === '1').length, 0);
+    expect(Object.fromEntries(Object.entries(PATTERN_MASKS).map(([pattern, rows]) => [pattern, set(rows)])))
+      .toEqual(expected);
+  });
+});
+
+describe('Canvas2D double lines', () => {
+  it('keep the released rails and gap when the command carries no rail width', () => {
+    for (const dpr of [1, 2]) for (const width of [0.5, 1, 2]) {
+      const strokes: number[][] = [];
+      let points: number[] = [];
+      const context = {
+        lineWidth: 0, strokeStyle: '', lineCap: '',
+        save() {}, restore() {}, setTransform() {}, clearRect() {}, rect() {}, clip() {}, setLineDash() {},
+        beginPath() { points = []; },
+        moveTo(x: number, y: number) { points.push(x, y); },
+        lineTo(x: number, y: number) { points.push(x, y); },
+        stroke() { strokes.push([this.lineWidth, ...points]); },
+      };
+      const dl = { width: 100, height: 40, commands: [
+        { op: 'line', x1: 0, y1: 10, x2: 100, y2: 10, width, color: '#000000', style: 'double' },
+        { op: 'line', x1: 20, y1: 0, x2: 20, y2: 40, width, color: '#000000', style: 'double' },
+      ] } as DisplayList;
+      paintDisplayList(context as unknown as CanvasRenderingContext2D, dl, dpr);
+      const rail = Math.max(width * 0.6, 0.5);
+      const offset = Math.max(width * 0.8, 0.8);
+      expect(strokes).toEqual([
+        [rail, 0, 10 - offset, 100, 10 - offset],
+        [rail, 0, 10 + offset, 100, 10 + offset],
+        [rail, 20 - offset, 0, 20 - offset, 40],
+        [rail, 20 + offset, 0, 20 + offset, 40],
+      ]);
+    }
+  });
+});
 
 describe('Canvas2D pattern borders', () => {
   it('paints all six dash styles and a three-pixel double border', () => {

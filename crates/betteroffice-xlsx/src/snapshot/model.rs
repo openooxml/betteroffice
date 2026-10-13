@@ -1836,6 +1836,116 @@ mod tests {
         assert_eq!(restored.styles, model.styles);
     }
 
+    fn style_stream(fills: &[Vec<u8>], borders: &[Vec<u8>]) -> Vec<Vec<u8>> {
+        let mut counts = [0; 10];
+        counts[3] = fills.len();
+        counts[4] = borders.len();
+        let theme = (0..12).map(|_| {
+            let mut record = Writer::new();
+            record.u8(THEME);
+            record.str("");
+            record.into_bytes()
+        });
+        let mut chunks = vec![declared_header(13 + fills.len() + borders.len(), counts)];
+        for (ordinal, record) in fills.iter().chain(borders).cloned().chain(theme).enumerate() {
+            chunks.push(frame(ChunkKind::Model, ordinal as u64 + 1, &record));
+        }
+        chunks
+    }
+
+    fn advance_all(chunks: &[Vec<u8>], budget: SnapshotBudget) -> SnapshotResult<Workbook> {
+        let mut builder = ModelSnapshotBuilder::new();
+        for chunk in chunks {
+            while !builder.advance_bounded(chunk, budget)?.is_ready() {}
+        }
+        builder.finish()
+    }
+
+    #[test]
+    fn fill_and_border_records_keep_their_released_layout() {
+        let long = format!("#{}", "a".repeat(600));
+        let solid = {
+            let mut record = Writer::new();
+            record.u8(FILL);
+            record.u8(1);
+            record.u8(0);
+            record.str(&long);
+            record.into_bytes()
+        };
+        let double = vec![BORDER, 0, 0, 0, 1, 5, 1, 2, 5];
+        let pattern = Fill::Pattern {
+            pattern: PatternType::LightUp,
+            fg: Some(Color::Rgb(long.clone())),
+            bg: None,
+        };
+        let dash_dot = Border {
+            bottom: Some(BorderEdge {
+                style: BorderStyle::MediumDashDot,
+                color: Some(Color::Indexed(5)),
+            }),
+            ..Border::default()
+        };
+        let current = |tag: u8, write: &dyn Fn(&mut Writer)| {
+            let mut record = Writer::new();
+            record.u8(tag);
+            write(&mut record);
+            record.into_bytes()
+        };
+        let pattern_as = |tag: u8| current(tag, &|w: &mut Writer| write_fill(w, &pattern));
+        let dash_dot_as = |tag: u8| current(tag, &|w: &mut Writer| write_border(w, &dash_dot));
+        let budget = SnapshotBudget::new(16, 512).unwrap();
+        let unbounded = |chunks: &[Vec<u8>]| -> SnapshotResult<Workbook> {
+            let mut builder = ModelSnapshotBuilder::new();
+            for chunk in chunks {
+                builder.push(chunk)?;
+            }
+            builder.finish()
+        };
+
+        let released = style_stream(&[vec![FILL, 0], solid], &[double]);
+        let expected_double = Border {
+            bottom: Some(BorderEdge {
+                style: BorderStyle::Double,
+                color: Some(Color::Indexed(5)),
+            }),
+            ..Border::default()
+        };
+        for restored in [unbounded(&released), advance_all(&released, budget)] {
+            let restored = restored.unwrap();
+            assert_eq!(
+                restored.styles.fills,
+                vec![Fill::None, Fill::Solid(Color::Rgb(long.clone()))]
+            );
+            assert_eq!(restored.styles.borders, vec![expected_double.clone()]);
+        }
+        for stream in [
+            style_stream(&[pattern_as(FILL)], &[]),
+            style_stream(&[], &[dash_dot_as(BORDER)]),
+        ] {
+            assert!(unbounded(&stream).is_err());
+            assert!(advance_all(&stream, budget).is_err());
+        }
+        let current_stream = style_stream(&[pattern_as(22)], &[dash_dot_as(23)]);
+        for restored in [unbounded(&current_stream), advance_all(&current_stream, budget)] {
+            let restored = restored.unwrap();
+            assert_eq!(restored.styles.fills, vec![pattern.clone()]);
+            assert_eq!(restored.styles.borders, vec![dash_dot.clone()]);
+        }
+
+        let mut model = Workbook::default();
+        model.styles.fonts.clear();
+        model.styles.fills = vec![Fill::None];
+        model.styles.borders = vec![Border::default()];
+        let mut cursor = MetadataCursor::default();
+        let mut tags = Vec::new();
+        for _ in 0..2 {
+            let mut record = Writer::new();
+            assert!(cursor.write_next(&mut record, &model).unwrap());
+            tags.push(record.into_bytes()[0]);
+        }
+        assert_eq!(tags, [22, 23]);
+    }
+
     fn encode(model: &Workbook, budget: SnapshotBudget) -> Vec<Vec<u8>> {
         let mut encoder = ModelSnapshotEncoder::new();
         let mut chunks = Vec::new();

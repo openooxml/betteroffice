@@ -5309,6 +5309,79 @@ mod tests {
     }
 
     #[test]
+    fn released_reader_hashes_follow_the_released_collapse_rule() {
+        use xlsx_model::{Border, BorderEdge, BorderStyle, Color, Fill, PatternType};
+        // released parsers read a pattern as a solid of its foreground (auto without one)
+        // and the six extended border styles as medium or dashed
+        let collapse = |style: BorderStyle| match style.as_sml() {
+            "mediumDashed" | "mediumDashDot" | "mediumDashDotDot" => BorderStyle::Medium,
+            "dashDot" | "dashDotDot" | "slantDashDot" => BorderStyle::Dashed,
+            _ => style,
+        };
+        let border = |style, color: &str| Border {
+            top: Some(BorderEdge {
+                style,
+                color: Some(Color::Rgb(color.into())),
+            }),
+            ..Border::default()
+        };
+        let mut patterned = open_test_cases::matrix().remove(0).model;
+        let mut released = patterned.clone();
+        let first_pattern = patterned.styles.fills.len();
+        for (index, pattern) in PatternType::ALL.into_iter().enumerate() {
+            let fg = (index % 2 == 0).then(|| Color::Rgb(format!("#1234{index:02}")));
+            patterned.styles.fills.push(Fill::Pattern {
+                pattern,
+                fg: fg.clone(),
+                bg: Some(Color::Indexed(9)),
+            });
+            released
+                .styles
+                .fills
+                .push(Fill::Solid(fg.unwrap_or(Color::Auto)));
+        }
+        for token in [
+            "mediumDashed",
+            "dashDot",
+            "mediumDashDot",
+            "dashDotDot",
+            "mediumDashDotDot",
+            "slantDashDot",
+        ] {
+            let style = BorderStyle::from_sml(token);
+            patterned.styles.borders.push(border(style, "#654321"));
+            released
+                .styles
+                .borders
+                .push(border(collapse(style), "#654321"));
+        }
+        let hashes = |model: &WorkbookModel| {
+            let base = WorkbookBase::from_model(model).unwrap();
+            let oracle =
+                WorkbookBase::from_model_with_legacy_dimensions_oracle(model, &[], None).unwrap();
+            (base.fingerprint, base.fingerprints, oracle.fingerprints)
+        };
+        let expected = hashes(&released);
+        assert_eq!(hashes(&patterned), expected);
+
+        let mut foreground = patterned.clone();
+        foreground.styles.fills[first_pattern] = Fill::Pattern {
+            pattern: PatternType::ALL[0],
+            fg: Some(Color::Rgb("#000001".into())),
+            bg: Some(Color::Indexed(9)),
+        };
+        let mut edge_color = patterned.clone();
+        *edge_color.styles.borders.last_mut().unwrap() =
+            border(BorderStyle::SlantDashDot, "#000002");
+        for changed in [foreground, edge_color] {
+            let (fingerprint, fingerprints, oracle) = hashes(&changed);
+            assert_ne!(fingerprint, expected.0);
+            assert_ne!(fingerprints, expected.1);
+            assert_ne!(oracle, expected.2);
+        }
+    }
+
+    #[test]
     fn fingerprint_style_overrides_preserve_signed_zero() {
         let mut case = open_test_cases::matrix().remove(0);
         case.model.styles.fonts[0].size_pt = Some(-0.0);
