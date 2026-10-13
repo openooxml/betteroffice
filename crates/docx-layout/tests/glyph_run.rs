@@ -19,6 +19,41 @@ fn store_with_liberation() -> FontStore {
 }
 
 #[test]
+fn default_echo_facts_do_not_repeat_default_fields() {
+    let store = store_with_liberation();
+    let json = build_display_list_json_with_fonts(
+        &build_input("a", 10.0, None, false, Some(&[0])),
+        &store,
+    )
+    .unwrap();
+    let list: DisplayList = serde_json::from_str(&json).unwrap();
+    let facts = list.pages[0]
+        .primitives
+        .iter()
+        .find_map(|primitive| match primitive {
+            Primitive::GlyphRun(run) => run.echo.as_ref(),
+            _ => None,
+        })
+        .unwrap();
+    let bytes = serde_json::to_vec(facts).unwrap();
+    println!("ECHO_FACT_BYTES {}", bytes.len());
+    assert!(bytes.len() <= 40, "default echo facts exceed the byte budget");
+    let decoded: docx_layout::display_list::EchoRunFacts = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(&decoded, facts);
+    let mut nondefault = facts.clone();
+    nondefault.kern = true;
+    nondefault.kerning = 12.0;
+    nondefault.primary_font = false;
+    nondefault.letter_spacing = 2.0;
+    nondefault.position = -2.0;
+    nondefault.scale = 80.0;
+    nondefault.can_empty = true;
+    let decoded: docx_layout::display_list::EchoRunFacts =
+        serde_json::from_slice(&serde_json::to_vec(&nondefault).unwrap()).unwrap();
+    assert_eq!(decoded, nondefault);
+}
+
+#[test]
 fn echo_facts_keep_resolved_indents_and_character_spacing() {
     let store = store_with_liberation();
     let mut input: serde_json::Value =
