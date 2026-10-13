@@ -975,7 +975,7 @@ impl WorkbookAuthority {
         let prior_style = match authored_styles.get(&txn, &key) {
             Some(value) => {
                 let style = *indices.get(&value.cast::<String>().ok()?)?;
-                Some(style.unwrap_or_else(|| plain_style(&mut styles)))
+                Some(style.unwrap_or_else(|| styles.plain_xf()))
             }
             None => None,
         };
@@ -1700,7 +1700,7 @@ impl WorkbookAuthority {
                 &sheet_map,
                 &txn,
                 &style_indices,
-                &mut || *plain.get_or_insert_with(|| plain_style(&mut model.styles)),
+                &mut || *plain.get_or_insert_with(|| model.styles.plain_xf()),
                 version,
                 SheetFallbacks {
                     freeze_pane,
@@ -3275,11 +3275,17 @@ fn materialize_cell_formats<T: ReadTxn>(
     }
 
     let mut styles = base.clone();
+    let (plain, _) = cell_format_entry(&CellFormat::default())?;
+    let plain_xf = base.known_plain_xf();
     let mut known = BTreeMap::new();
     for index in 0..base.cell_xfs.len() {
         let index =
             u32::try_from(index).map_err(|_| "cell format table is too large".to_string())?;
-        known.entry(style_key(base, index)?).or_insert(Some(index));
+        let key = style_key(base, index)?;
+        // an xf reading plain stands for the plain format only when known to save plain
+        if key != plain || Some(index) == plain_xf {
+            known.entry(key).or_insert(Some(index));
+        }
     }
     let mut indices = BTreeMap::new();
     for (key, format) in catalog {
@@ -3296,16 +3302,6 @@ fn materialize_cell_formats<T: ReadTxn>(
         indices.insert(key, index);
     }
     Ok((styles, indices))
-}
-
-/// The index a cell authored with the plain format stores when no base xf carries it: xf 0
-/// when xf 0 is plain, else an explicit plain xf.
-fn plain_style(styles: &mut Stylesheet) -> u32 {
-    if styles.cell_format(Some(0)) == CellFormat::default() {
-        0
-    } else {
-        xlsx_ops::plain_xf(styles)
-    }
 }
 
 /// Rewrites the style indices `ops` carry from `source`'s table to the indices of the same
@@ -3330,6 +3326,8 @@ fn remap_styles<'a>(
         let format = source.cell_format(Some(index));
         let resolved = if target.xf(index).is_some() && target.cell_format(Some(index)) == format {
             Some(index)
+        } else if format == CellFormat::default() {
+            Some(target.plain_xf())
         } else {
             match (0..target.cell_xfs.len() as u32)
                 .find(|&candidate| target.cell_format(Some(candidate)) == format)
@@ -3340,7 +3338,6 @@ fn remap_styles<'a>(
                     .map_err(|_| "number format table is full".to_string())?,
             }
         };
-        let resolved = Some(resolved.unwrap_or_else(|| plain_style(target)));
         mapped.insert(index, resolved);
         Ok(resolved)
     };
@@ -4777,7 +4774,7 @@ impl WorkbookAuthority {
                 &sheet_map,
                 &txn,
                 &style_indices,
-                &mut || *plain.get_or_insert_with(|| plain_style(&mut model.styles)),
+                &mut || *plain.get_or_insert_with(|| model.styles.plain_xf()),
                 version,
                 SheetFallbacks {
                     freeze_pane,
