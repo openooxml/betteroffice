@@ -1805,6 +1805,7 @@ test('a source-recorded page break survives deletion undo and a later comment-pa
     const deleted = await client.edit(intent(1, 0, 'deleteForward', { selection: { anchor: tail, focus: tail } }));
     expect(deleted.outcomes[0]?.status).toBe('applied');
     expect(nativeBreakCounts(engine)).toEqual([0, 0]);
+    engine.addUndoBoundary();
     const first = { story: 'body', paraId: engine.paragraphs('body')[0]!.paraId, offset: 1 };
     expect((await client.edit(intent(2, deleted.version, 'insertText', {
       text: '+', selection: { anchor: first, focus: first },
