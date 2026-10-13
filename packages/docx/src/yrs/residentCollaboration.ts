@@ -96,7 +96,10 @@ export async function readResidentPresence(
   const queries = createDisplayListQueries(frame.displayList, native);
   const index = new DisplayPositionIndex({ ...engine.geometryReader, selectionText: engine.selectionText });
   const visible = (rect: DisplayListRect) => rect.pageIndex >= pages[0] && rect.pageIndex < pages[1];
-  const attach = (rect: DisplayListRect) => ({ ...rect, pageId: frame.pages.find(page => page.pageIndex === rect.pageIndex)!.pageId.toString() });
+  const attach = (rect: DisplayListRect) => {
+    const page = frame.pages.find(page => page.pageIndex === rect.pageIndex);
+    return page ? [{ ...rect, pageId: page.pageId.toString() }] : [];
+  };
   try {
     const found = peers.slice(0, 32).map(peer => {
       const unresolved = { clientId: peer.clientId, clock: peer.clock, status: 'unresolved' as const, caret: null, rects: [] };
@@ -116,9 +119,9 @@ export async function readResidentPresence(
       const carets = root === 'body' ? [queries.caretRect(to)]
         : kind === 'hf' ? [...queries.hfCaretRects('header', id!, to), ...queries.hfCaretRects('footer', id!, to)]
         : kind === 'fn' || kind === 'en' ? queries.noteCaretRects(kind === 'fn' ? 'footnote' : 'endnote', Number(id), to) : [];
-      const caret = carets.find(rect => rect && visible(rect));
+      const caret = carets.flatMap(rect => rect && visible(rect) ? attach(rect) : [])[0] ?? null;
       return { clientId: peer.clientId, clock: peer.clock, status: 'ok' as const,
-        caret: caret ? attach(caret) : null, rects: rects.filter(visible).slice(0, 64).map(attach) };
+        caret, rects: rects.filter(visible).flatMap(attach).slice(0, 64) };
     });
     const state = queries.sourceState();
     if (state.status === 'error') throw new Error(`Presence layout is unavailable: ${String(state.error)}`);
