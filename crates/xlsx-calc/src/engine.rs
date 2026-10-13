@@ -7,7 +7,7 @@ use order::{Step, topo_order};
 
 use std::borrow::Cow;
 use std::cell::Cell as Flag;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use xlsx_model::{
@@ -254,9 +254,11 @@ impl Pass<'_> {
 
     /// settle the members of one component of the range graph by what they
     /// actually read. a member that reads another before it settles waits on
-    /// it and runs again once it has. when every member left waits, the ones
-    /// on a cycle of waits are circular: they settle at `circular_value`, and
-    /// the members waiting on them run with that value.
+    /// it: that one runs next, and the waiting member runs again once it has
+    /// settled. the members waiting form one chain, so a member that reads
+    /// one on the chain closes a cycle of reads: the members from that one on
+    /// are circular and settle at `circular_value`, and the member waiting on
+    /// the first of them runs again with that value.
     fn settle(&mut self, wb: &mut Workbook, members: &[Key]) {
         let ids: HashMap<Key, usize> = members.iter().enumerate().map(|(id, &u)| (u, id)).collect();
         let spills: Vec<(usize, SheetId, CellRange)> = members
@@ -267,15 +269,22 @@ impl Pass<'_> {
                 (range.start != range.end).then_some((id, u.0, range))
             })
             .collect();
-        let mut waits = Waits::new(members.len());
-        loop {
-            while let Some(id) = waits.queue.pop_front() {
+        let mut settled = vec![false; members.len()];
+        let mut on_chain: Vec<Option<usize>> = vec![None; members.len()];
+        let mut chain: Vec<usize> = Vec::new();
+        for start in 0..members.len() {
+            if settled[start] {
+                continue;
+            }
+            on_chain[start] = Some(0);
+            chain.push(start);
+            while let Some(&id) = chain.last() {
                 let u = members[id];
                 let log = ReadLog {
                     inner: wb,
                     ids: &ids,
                     spills: &spills,
-                    settled: &waits.settled,
+                    settled: &settled,
                     first: Flag::new(None),
                 };
                 #[cfg(test)]
@@ -288,25 +297,32 @@ impl Pass<'_> {
                     Rc::clone(&self.budget),
                     self.graph,
                 );
-                if let Some(target) = log.first.get() {
-                    waits.wait(id, target);
+                let Some(target) = log.first.get() else {
+                    self.write(wb, u, value, limited);
+                    settled[id] = true;
+                    on_chain[id] = None;
+                    chain.pop();
                     continue;
+                };
+                #[cfg(test)]
+                SCHEDULER_STEPS.with(|count| count.set(count.get() + 1));
+                let Some(at) = on_chain[target] else {
+                    on_chain[target] = Some(chain.len());
+                    chain.push(target);
+                    continue;
+                };
+                for member in chain.drain(at..) {
+                    #[cfg(test)]
+                    SCHEDULER_STEPS.with(|count| count.set(count.get() + 1));
+                    let u = members[member];
+                    if write_if_changed(wb, u, circular_value(wb, u)) {
+                        self.changed.push((u.0, cell_of(u)));
+                    }
+                    self.cycle_cells.push((u.0, cell_of(u)));
+                    settled[member] = true;
+                    on_chain[member] = None;
                 }
-                self.write(wb, u, value, limited);
-                waits.settle(&[id]);
             }
-            let circular = waits.cycles();
-            if circular.is_empty() {
-                break;
-            }
-            for &id in &circular {
-                let u = members[id];
-                if write_if_changed(wb, u, circular_value(wb, u)) {
-                    self.changed.push((u.0, cell_of(u)));
-                }
-                self.cycle_cells.push((u.0, cell_of(u)));
-            }
-            waits.settle(&circular);
         }
     }
 
@@ -335,93 +351,6 @@ impl Pass<'_> {
             Some(NodeValue::Refused) => refuse(wb, u, &mut self.changed),
             None => {}
         }
-    }
-}
-
-/// the members of a component still to run, and which wait on which.
-struct Waits {
-    settled: Vec<bool>,
-    on: Vec<Option<usize>>,
-    waiters: Vec<Vec<usize>>,
-    queue: VecDeque<usize>,
-}
-
-impl Waits {
-    fn new(members: usize) -> Self {
-        Self {
-            settled: vec![false; members],
-            on: vec![None; members],
-            waiters: vec![Vec::new(); members],
-            queue: (0..members).collect(),
-        }
-    }
-
-    fn wait(&mut self, id: usize, target: usize) {
-        #[cfg(test)]
-        SCHEDULER_STEPS.with(|count| count.set(count.get() + 1));
-        self.on[id] = Some(target);
-        self.waiters[target].push(id);
-    }
-
-    /// settle `ids` together and queue the members that waited on them.
-    fn settle(&mut self, ids: &[usize]) {
-        for &id in ids {
-            self.settled[id] = true;
-            self.on[id] = None;
-        }
-        for &id in ids {
-            for waiter in std::mem::take(&mut self.waiters[id]) {
-                if !self.settled[waiter] {
-                    self.on[waiter] = None;
-                    self.queue.push_back(waiter);
-                }
-            }
-        }
-    }
-
-    /// the waiting members on a cycle of waits, in key order. each waits on one
-    /// member still unsettled, so following the waits from any of them ends
-    /// on such a cycle.
-    fn cycles(&self) -> Vec<usize> {
-        const UNSEEN: u8 = 0;
-        const ON_WALK: u8 = 1;
-        const DONE: u8 = 2;
-        let mut state = vec![UNSEEN; self.on.len()];
-        let mut walk = Vec::new();
-        let mut cycles = Vec::new();
-        #[cfg(test)]
-        let mut steps = 0;
-        for start in 0..self.on.len() {
-            #[cfg(test)]
-            {
-                steps += 1;
-            }
-            let mut at = Some(start);
-            while let Some(id) = at
-                && state[id] == UNSEEN
-            {
-                #[cfg(test)]
-                {
-                    steps += 1;
-                }
-                state[id] = ON_WALK;
-                walk.push(id);
-                at = self.on[id];
-            }
-            if let Some(id) = at
-                && state[id] == ON_WALK
-                && let Some(from) = walk.iter().position(|&member| member == id)
-            {
-                cycles.extend_from_slice(&walk[from..]);
-            }
-            for id in walk.drain(..) {
-                state[id] = DONE;
-            }
-        }
-        #[cfg(test)]
-        SCHEDULER_STEPS.with(|count| count.set(count.get() + steps));
-        cycles.sort_unstable();
-        cycles
     }
 }
 
