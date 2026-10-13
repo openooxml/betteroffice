@@ -843,9 +843,13 @@ fn cascade_batched_copies_of_a_fresh_plain_style_save_locked_locally_and_on_a_pe
         CalculationOptions::default(),
     )
     .unwrap();
-    for saved in [workbook.save().unwrap(), peer.save().unwrap()] {
+    for workbook in [&workbook, &peer] {
+        let saved = workbook.save().unwrap();
         let markup = saved_cell_xf(&saved, "B1");
         assert!(!markup.contains(r#"locked="0""#), "B1 saved on {markup}");
+        let checkpoint = workbook.recovery_checkpoint(1, None).unwrap();
+        let (restored, _, _, _) = Workbook::restore_recovery_checkpoint(&checkpoint).unwrap();
+        assert_eq!(restored.save().unwrap(), saved);
     }
     assert_eq!(saved_cell_style(&peer.save().unwrap(), "B1"), 0);
 }
