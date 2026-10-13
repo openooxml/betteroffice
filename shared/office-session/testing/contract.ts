@@ -28,6 +28,7 @@ export interface SessionContractHandle<C extends CommandTable, Q extends QueryTa
   failRecovery(): void;
   breakQueryPost(): void;
   refuseNext(code: string): void;
+  refuseNextCommand(code: string): void;
   malformedReply(): void;
   silence(): void;
   queryReplies(): { reply: Promise<QueryReply>; release(): void };
@@ -133,6 +134,18 @@ export function describeSessionContract<C extends CommandTable, Q extends QueryT
       expect(allowed.reason).not.toBe('read-only');
       if (allowed.status === 'refused') expect([...BASE_REFUSALS, ...fixture.commands[kind]!.refusals]).toContain(allowed.reason!);
     });
+
+    for (const kind of kinds) test(`${kind} settles declared refusals and fails on undeclared codes`, async (h, clock) => {
+      await clock.settle(submit(h, fixture.mode.off).ack);
+      const code = fixture.commands[kind]!.refusals[0] ?? 'busy';
+      h.refuseNextCommand(code);
+      expect(await clock.settle(h.session.submit(kind, fixture.samples[kind]).ack)).toMatchObject({ status: 'refused', reason: code });
+      expect(h.session.stage).toBe('ready');
+      h.refuseNextCommand('undeclared');
+      expect(await clock.settle(h.session.submit(kind, fixture.samples[kind]).ack)).toMatchObject({ status: 'refused', reason: 'unknown-outcome' });
+      expect(h.session.stage).toBe('failed');
+      await expect(clock.settle(read(h))).rejects.toMatchObject({ code: 'crash', message: 'Undeclared refusal: undeclared' });
+    }, { recovery: false });
 
     for (const kind of queries) {
       test(`${kind} observes prior submit and holder commit`, async (h, clock) => {
