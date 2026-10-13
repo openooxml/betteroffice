@@ -365,7 +365,6 @@ export function createCommandHost<P, S, E, F>(
       result = await apply(command, {
         basis: command.basis, currentVersion: before, replayPreviouslyApplied,
       });
-      if (result?.status === 'refused') checkRefusal(result.reason, options.commands?.[command.kind]?.refusals);
       if (!result || typeof result !== 'object' ||
         (result.status !== 'applied' && result.status !== 'noop' &&
           result.status !== 'cancelled' && result.status !== 'refused') ||
@@ -380,10 +379,10 @@ export function createCommandHost<P, S, E, F>(
       }
       version = after;
     } catch (error) {
-      if (error === poison) throw poison;
       poison = unknownOutcome(command.seq, error);
       throw poison;
     }
+    if (result.status === 'refused') checkRefusal(result.reason, options.commands?.[command.kind]?.refusals);
     const outcome: CommandOutcome = result.status === 'refused'
       ? { ...refusal(command.seq, result.reason), ...(result.affectedSeqs === undefined ? {} : { affectedSeqs: result.affectedSeqs }) }
       : result.status === 'cancelled'
