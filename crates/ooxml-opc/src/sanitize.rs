@@ -1080,18 +1080,20 @@ fn sanitize_workbook_sheets(
     {
         return Ok(());
     }
+    let workbook = parts
+        .iter()
+        .position(|(path, _)| normalize_part_name(path).as_ref() == workbook_path)
+        .ok_or_else(|| format!("missing workbook part: {workbook_path}"))?;
+    let (workbook_name, xml) = &parts[workbook];
+    let Some(sheets) = workbook_sheet_map(xml, workbook_name, &relationships, xml_budget)? else {
+        return Ok(());
+    };
     if !root_valid {
         return Err(format!("invalid relationships in {path}"));
     }
-    let (path, bytes) = parts
-        .iter_mut()
-        .find(|(path, _)| normalize_part_name(path).as_ref() == workbook_path)
-        .ok_or_else(|| format!("missing workbook part: {workbook_path}"))?;
-    if let Some(workbook) = rewrite_workbook_sheets(bytes, path, &relationships, xml_budget)? {
-        *bytes = workbook;
-        // Calc chain entries name sheet ids; spreadsheet apps rebuild a missing chain.
-        removed.extend(calc_chains);
-    }
+    parts[workbook].1 = rewrite_workbook_sheets(xml, workbook_name, &sheets)?;
+    // Calc chain entries name sheet ids; spreadsheet apps rebuild a missing chain.
+    removed.extend(calc_chains);
     Ok(())
 }
 
@@ -1106,6 +1108,8 @@ enum WorkbookElement {
     Sheet,
     DefinedName,
     View,
+    // Outside its list (e.g. under mc:AlternateContent); only a rewrite rejects it.
+    Misplaced,
     Other,
 }
 
@@ -1157,9 +1161,10 @@ impl<'a> WorkbookReader<'a> {
                         (2, Some(b"sheets"), b"sheet") => WorkbookElement::Sheet,
                         (2, Some(b"definedNames"), b"definedName") => WorkbookElement::DefinedName,
                         (2, Some(b"bookViews"), b"workbookView") => WorkbookElement::View,
-                        (_, _, b"sheet" | b"definedName" | b"workbookView") => {
+                        (_, _, b"sheet") => {
                             return Err(format!("unexpected workbook element in {path}"));
                         }
+                        (_, _, b"definedName" | b"workbookView") => WorkbookElement::Misplaced,
                         _ => WorkbookElement::Other,
                     };
                 }
@@ -1210,12 +1215,13 @@ fn workbook_sheet_id(
     id.ok_or_else(|| format!("sheet missing relationship id in {path}"))
 }
 
-fn rewrite_workbook_sheets(
+// Each `<sheet>` mapped to its index after removal; None when no sheet is removed.
+fn workbook_sheet_map(
     xml: &[u8],
     path: &str,
     relationships: &BTreeMap<String, SheetRelationship>,
     xml_budget: &mut XmlBudget,
-) -> Result<Option<Vec<u8>>, String> {
+) -> Result<Option<Vec<Option<usize>>>, String> {
     validate_xml_limits(xml, path, xml_budget)?;
     let mut reader = WorkbookReader::new(xml);
     let mut sheets = Vec::new();
@@ -1256,6 +1262,15 @@ fn rewrite_workbook_sheets(
     if remaining == 0 {
         return Err(format!("no remaining workbook sheets in {path}"));
     }
+    Ok(Some(sheets))
+}
+
+fn rewrite_workbook_sheets(
+    xml: &[u8],
+    path: &str,
+    sheets: &[Option<usize>],
+) -> Result<Vec<u8>, String> {
+    let remaining = sheets.iter().flatten().count();
     let mut reader = WorkbookReader::new(xml);
     let mut writer = Writer::new(Vec::with_capacity(xml.len()));
     let mut sheet_index = 0;
@@ -1284,7 +1299,7 @@ fn rewrite_workbook_sheets(
                         if let Some(index) =
                             values.iter_mut().find(|(key, _)| key == "localSheetId")
                         {
-                            let mapped = workbook_sheet_index(&index.1, &sheets, path)?;
+                            let mapped = workbook_sheet_index(&index.1, sheets, path)?;
                             if let Some(mapped) = mapped {
                                 index.1 = mapped.to_string();
                                 false
@@ -1301,7 +1316,7 @@ fn rewrite_workbook_sheets(
                                 let old = value.parse::<usize>().map_err(|_| {
                                     format!("invalid workbook sheet index in {path}")
                                 })?;
-                                let mapped = workbook_sheet_index(value, &sheets, path)?
+                                let mapped = workbook_sheet_index(value, sheets, path)?
                                     .unwrap_or_else(|| {
                                         sheets[..old].iter().flatten().count().min(remaining - 1)
                                     });
@@ -1309,6 +1324,9 @@ fn rewrite_workbook_sheets(
                             }
                         }
                         false
+                    }
+                    WorkbookElement::Misplaced => {
+                        return Err(format!("unexpected workbook element in {path}"));
                     }
                     WorkbookElement::Other => false,
                 };
@@ -1325,7 +1343,7 @@ fn rewrite_workbook_sheets(
                     write_start(&mut writer, output, empty, path)?;
                 }
             }
-            Event::Eof => return Ok(Some(writer.into_inner())),
+            Event::Eof => return Ok(writer.into_inner()),
             other => write(&mut writer, other, path)?,
         }
     }
