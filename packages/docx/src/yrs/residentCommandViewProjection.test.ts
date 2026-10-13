@@ -155,7 +155,9 @@ function glyphLine(options: GlyphLineOptions = {}) {
     [...line].forEach((char, index) => {
       const kern = options.kerned && char === 'A' && line[index + 1] === 'V' ? -2 : 0;
       runs.push({ kind: 'glyphRun', text: char, size: 13.333, fontId: 1, color: '#000000',
-        echo: { x: 96, right: options.right ?? 720, kern: !!options.kerning, kerning: (options.kerning ?? 0) / 2, primaryFont: true },
+        echo: { x: 96, right: options.right ?? 720,
+          kern: (options.kerning ?? 0) > 0 && (options.kerning ?? 0) <= 20,
+          kerning: (options.kerning ?? 0) / 2, primaryFont: true },
         fallbackFont: '400 13.333px Calibri, sans-serif', docStart: doc, docEnd: doc + 1,
         glyphs: [{ id: char.charCodeAt(0), cluster: 0, y: 120 + lineIndex * 20, advance: 10 + kern,
           x: x + (options.shiftX && lineIndex === 1 && index === 1 ? options.shiftX : 0) }] });
