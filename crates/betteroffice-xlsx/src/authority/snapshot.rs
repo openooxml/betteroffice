@@ -3591,13 +3591,17 @@ mod tests {
         }
         let mut released_tag = records[0].clone();
         released_tag[0] = 0;
-        let budget = SnapshotBudget::new(1, 4096).unwrap();
         assert!(BaseBuilder::default().push(&released_tag).is_err());
-        assert!(
-            BaseBuilder::default()
-                .push_bounded(&released_tag, budget)
-                .is_err()
-        );
+        let budget = SnapshotBudget::new(1, 4096).unwrap();
+        let mut bounded = BaseBuilder::default();
+        let mut outcome = bounded.push_bounded(&released_tag, budget);
+        for _ in 0..64 {
+            if !matches!(outcome, Ok(false)) {
+                break;
+            }
+            outcome = bounded.push_bounded(&released_tag, budget);
+        }
+        assert!(outcome.is_err());
     }
 }
 
