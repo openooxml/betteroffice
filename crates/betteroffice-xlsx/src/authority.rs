@@ -178,7 +178,7 @@ impl WorkbookBase {
         let current = if released_styles(&model.styles) {
             styles
         } else {
-            styles.as_written()
+            styles.with_written_fills()
         };
         let (fingerprint, bootstrap_client_id) =
             builder.fingerprint(current, SCHEMA_VERSION, true, true, false)?;
@@ -4192,7 +4192,7 @@ impl<'a> FingerprintStyles<'a> {
         }
     }
 
-    fn as_written(self) -> Self {
+    fn with_written_fills(self) -> Self {
         Self {
             as_written: true,
             ..self
