@@ -177,13 +177,18 @@ export function createCommandHost<P, S, E, F>(
     if (!options.checkRefusals || BASE_REFUSALS.includes(code as typeof BASE_REFUSALS[number]) ||
       declared.includes(code) || ['stale-epoch', 'stale-incarnation', 'wrong-session', 'stale-version',
         'dependency-refused', 'unknown-outcome', 'disposed'].includes(code)) return;
-    poison = new TypeError(`Undeclared refusal: ${code}`);
-    throw poison;
+    throw poisonWith(new TypeError(`Undeclared refusal: ${code}`));
+  }
+
+  function poisonWith(error: Error): Error {
+    poison = error;
+    releasePoisonedFrames();
+    return error;
   }
 
   function serialize<T>(run: () => Promise<T>): Promise<T> {
-    if (pendingHandlers === MAX_PENDING_HANDLERS) {
-      poison = new SessionFailure('out-of-memory', 'Command handler capacity exceeded');
+    if (pendingHandlers === MAX_PENDING_HANDLERS && !poison) {
+      poisonWith(new SessionFailure('out-of-memory', 'Command handler capacity exceeded'));
     }
     if (poison) return Promise.reject(poison);
     pendingHandlers += 1;
@@ -208,9 +213,13 @@ export function createCommandHost<P, S, E, F>(
 
   function releasePoisonedFrames(): void {
     if (!poison) return;
-    for (const boundary of frameBarriers.keys()) releaseFrames(boundary);
-    for (const waiting of queryBarriers.values()) for (const waiter of waiting) waiter.reject(poison);
+    const error = poison;
+    const frames = [...frameBarriers.values()];
+    const queries = [...queryBarriers.values()];
+    frameBarriers.clear();
     queryBarriers.clear();
+    for (const waiting of frames) for (const start of waiting) start();
+    for (const waiting of queries) for (const waiter of waiting) waiter.reject(error);
   }
 
   async function buildFrame(): Promise<FrameEnvelope<F> | TransferResult<FrameEnvelope<F>> | undefined> {
@@ -224,8 +233,7 @@ export function createCommandHost<P, S, E, F>(
       }
       return rendered;
     } catch (error) {
-      poison = terminalFailure(error);
-      throw poison;
+      throw poisonWith(terminalFailure(error));
     }
   }
 
@@ -238,7 +246,7 @@ export function createCommandHost<P, S, E, F>(
   function settle(outcome: CommandOutcome): CommandOutcome {
     if (outcome.status === 'refused' || outcome.status === 'cancelled') {
       try { refused.add(outcome.seq); }
-      catch (error) { poison = terminalFailure(error); throw poison; }
+      catch (error) { throw poisonWith(terminalFailure(error)); }
     }
     throughSeq = outcome.seq;
     if (retainedLimit > 0) {
@@ -248,7 +256,8 @@ export function createCommandHost<P, S, E, F>(
     if (queryBarriers.size) {
       for (const boundary of [...queryBarriers.keys()].sort((a, b) => a - b)) {
         if (boundary > throughSeq) break;
-        const waiting = queryBarriers.get(boundary)!;
+        const waiting = queryBarriers.get(boundary);
+        if (!waiting) continue;
         queryBarriers.delete(boundary);
         for (const waiter of waiting) waiter.start();
       }
@@ -284,8 +293,7 @@ export function createCommandHost<P, S, E, F>(
         reply.revisions = { selection: selectionRevision, layout: ackLayout };
       }
     } catch (error) {
-      poison = terminalFailure(error);
-      throw poison;
+      throw poisonWith(terminalFailure(error));
     }
     return reply;
   }
@@ -308,8 +316,7 @@ export function createCommandHost<P, S, E, F>(
       }
       return reply;
     } catch (error) {
-      poison = terminalFailure(error);
-      throw poison;
+      throw poisonWith(terminalFailure(error));
     }
   }
 
@@ -319,8 +326,7 @@ export function createCommandHost<P, S, E, F>(
       if (!Number.isFinite(current) || current !== version) throw new Error('Version changed outside a command');
       return current;
     } catch (error) {
-      poison = unknownOutcome(seq, error);
-      throw poison;
+      throw poisonWith(unknownOutcome(seq, error));
     }
   }
 
@@ -379,8 +385,7 @@ export function createCommandHost<P, S, E, F>(
       }
       version = after;
     } catch (error) {
-      poison = unknownOutcome(command.seq, error);
-      throw poison;
+      throw poisonWith(unknownOutcome(command.seq, error));
     }
     if (result.status === 'refused') checkRefusal(result.reason, options.commands?.[command.kind]?.refusals);
     const outcome: CommandOutcome = result.status === 'refused'
@@ -412,8 +417,7 @@ export function createCommandHost<P, S, E, F>(
       } catch (error) {
         if (error instanceof SessionFailure ||
           (typeof WebAssembly !== 'undefined' && error instanceof WebAssembly.RuntimeError)) {
-          poison = terminalFailure(error);
-          throw poison;
+          throw poisonWith(terminalFailure(error));
         }
         return queryRefusal('invalid-payload', error instanceof Error ? error.message : String(error));
       }
@@ -490,8 +494,7 @@ export function createCommandHost<P, S, E, F>(
           if (getVersion() !== before) throw new Error('Snapshot changed the command version');
           return transferable({ state, epoch, version, throughSeq }, [state.buffer]);
         } catch (error) {
-          poison = terminalFailure(error);
-          throw poison;
+          throw poisonWith(terminalFailure(error));
         }
       });
     },
@@ -499,8 +502,8 @@ export function createCommandHost<P, S, E, F>(
       return { lane: 'input', reorderable: false };
     },
     frame() {
-      if (pendingFrames === MAX_PENDING_HANDLERS) {
-        poison = new SessionFailure('out-of-memory', 'Command frame capacity exceeded');
+      if (pendingFrames === MAX_PENDING_HANDLERS && !poison) {
+        poisonWith(new SessionFailure('out-of-memory', 'Command frame capacity exceeded'));
       }
       if (poison) {
         releasePoisonedFrames();

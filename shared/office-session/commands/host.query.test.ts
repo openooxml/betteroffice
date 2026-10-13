@@ -234,6 +234,28 @@ describe('worker query and admission contract', () => {
     }
   }
 
+  it('acknowledges the edit when a read it releases exhausts capacity and rejects later boundaries', async () => {
+    const entered = deferred<void>();
+    const gate = deferred<void>();
+    let version = 0;
+    const m = model({ getVersion: () => version,
+      async apply() { entered.resolve(); await gate.promise; version += 1; return { status: 'applied' }; } });
+    m.host.policy(envelope(2));
+    const first = observe(m.read(1));
+    const second = observe(m.read(2));
+    const edit = value(m.host.handler(null, envelope(2)));
+    await entered.promise;
+    for (let index = 0; index < 4095; index += 1) void m.read(0).catch(() => {});
+    gate.resolve();
+    expect((await edit).outcomes).toEqual([{ seq: 2, status: 'applied' }]);
+    await drain();
+    expect(first.result).toBeInstanceOf(SessionFailure);
+    expect(first.result).toMatchObject({ code: 'out-of-memory', message: 'Command handler capacity exceeded' });
+    expect(second).toMatchObject({ done: true });
+    expect(second.result).toBe(first.result);
+    await expect(m.read(0)).rejects.toBe(first.result);
+  });
+
   it('rejects parked queries and frames when revise poisons the host behind a held apply', async () => {
     const entered = deferred<void>();
     const m = model({ apply: () => { entered.resolve(); return new Promise<never>(() => {}); } });
