@@ -3889,6 +3889,8 @@ fn slice_utf16_with_total(text: &str, total: usize, start: usize, end: usize) ->
 }
 
 fn resolve_line_segments<'a>(runs: &'a [RunIn], line: &LineIn) -> Vec<ResolvedSegment<'a>> {
+    #[cfg(any(test, feature = "test-support"))]
+    crate::work_counters::resolved_line();
     let mut out = Vec::new();
     for run_index in line.head_run..=line.tail_run {
         let Some(run) = runs.get(run_index) else {

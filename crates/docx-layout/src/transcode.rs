@@ -39,6 +39,8 @@ impl Transcoder {
         &mut self,
         value: &T,
     ) -> Result<U, String> {
+        #[cfg(any(test, feature = "test-support"))]
+        crate::work_counters::transcoded();
         self.tape.clear();
         value.serialize(&mut self.tape).map_err(|error| error.0)?;
         let mut reader = Reader {

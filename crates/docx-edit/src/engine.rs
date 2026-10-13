@@ -10448,6 +10448,8 @@ mod tests {
 
     mod preview_refresh_tests;
 
+    mod command_relayout_tests;
+
     fn table_wrap_section(content_width: f64, columns: serde_json::Value) -> serde_json::Value {
         json!({
             "pageSize": {"w": content_width + 200.0, "h": 800},
