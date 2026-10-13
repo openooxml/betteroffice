@@ -21289,8 +21289,13 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             let ranges = &pagination.rebuilt_page_ranges;
             assert!(ranges.iter().all(|pages| pages.end <= 3));
             assert!(pagination.display_rebuilt_pages.iter().all(within));
-            assert!(pagination.restamped_pages.iter().flatten().all(within));
+            let restamped = pagination.restamped_pages.as_ref();
+            assert!(restamped.is_none_or(|pages| pages.iter().all(within)));
             assert!(pagination.note_changed_pages.iter().all(within));
+            let pending: BTreeSet<usize> = pagination.pending_display_pages().collect();
+            assert!(
+                pagination.display_full_rebuild || (0..3).all(|page| pending.contains(&page))
+            );
         }
         let headers = engine.retained_headers_footers_json().unwrap().unwrap();
         let headers: serde_json::Value = serde_json::from_str(&headers).unwrap();
@@ -21355,6 +21360,65 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             "headerFooterRefs": {"headerDefault": "header"}
         });
         request
+    }
+
+    /// A 384 x 288 px section break of `width` twips, starting as `start` says.
+    fn section_break(width: u32, start: &str) -> String {
+        format!(
+            r#"<w:sectPr>{start}<w:pgSz w:w="{width}" w:h="4320"/><w:pgMar w:top="360" w:right="360" w:bottom="360" w:left="360" w:header="0" w:footer="0" w:gutter="0"/></w:sectPr>"#
+        )
+    }
+
+    fn ending(text: &str, section: &str) -> String {
+        format!("<w:p><w:pPr>{section}</w:pPr><w:r><w:t>{text}</w:t></w:r></w:p>")
+    }
+
+    fn cut_in_a_later_section(
+        body: &str,
+    ) -> (serde_json::Value, ExactPrefixLayout, serde_json::Value) {
+        let mut request: serde_json::Value =
+            serde_json::from_str(&float_page_request(serde_json::json!({}))).unwrap();
+        request["regions"]["sections"] = serde_json::json!([]);
+        let bytes = docx_bytes("", body);
+        let (full, laid, prefix) = full_and_exact_prefix(&bytes, &request.to_string(), 3, &|_| {});
+        assert!(laid.provisional);
+        assert_eq!(first_pages(&prefix), first_pages(&full));
+        (full, laid, prefix)
+    }
+
+    #[test]
+    fn an_exact_prefix_cut_in_an_odd_page_section_keeps_its_filler_page() {
+        let body = format!(
+            "{}{}{}{}{}",
+            ending("First", &section_break(5760, "")),
+            paragraphs(200, "Odd"),
+            ending("Odd end", &section_break(6480, r#"<w:type w:val="oddPage"/>"#)),
+            paragraphs(50, "Final"),
+            section_break(5760, "")
+        );
+        let (full, ..) = cut_in_a_later_section(&body);
+        let pages = full["layout"]["pages"].as_array().unwrap();
+        assert_eq!(pages[1]["fragments"].as_array().unwrap().len(), 0);
+        assert_eq!(pages[2]["size"]["w"].as_f64(), Some(432.0));
+    }
+
+    #[test]
+    fn an_exact_prefix_cut_on_a_section_break_lays_out_both_sides() {
+        let third = r#"<w:pageBreakBefore/>"#;
+        let body = format!(
+            "{}{}{}{}{}{}",
+            ending("One", ""),
+            ending("Two", third),
+            ending("Three", &format!("{third}{}", section_break(5760, ""))),
+            paragraphs(200, "Wide"),
+            ending("Wide end", &section_break(8640, "")),
+            paragraphs(50, "Final")
+        );
+        let (full, laid, _) = cut_in_a_later_section(&body);
+        let pages = full["layout"]["pages"].as_array().unwrap();
+        assert_eq!(pages[2]["size"]["w"].as_f64(), Some(384.0));
+        assert_eq!(pages[3]["size"]["w"].as_f64(), Some(576.0));
+        assert_eq!(laid.document_width, Some(816.0));
     }
 
     #[test]
