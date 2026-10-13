@@ -602,7 +602,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
         const echoGlyphs = commandEchoGlyphs(glyphCache, engine, full);
         const projectedEcho = hooks.editState().storedMarks ? undefined : projectCommandEchoContext({
           engine: engine as ResidentDocxCommandEngine, selection: hooks.selection(), layout,
-          glyphs: echoGlyphs.provider(pixelRatio, hooks.editState().toolbar?.paragraphProperties),
+          glyphs: echoGlyphs.provider(pixelRatio),
         });
         const echoContext = projectedEcho?.glyphs && (full || requestedPages.has(projectedEcho.page.pageIndex) ||
           pendingOffscreenPageIds.has(projectedEcho.page.pageId))

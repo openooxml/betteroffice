@@ -801,6 +801,8 @@ pub struct GlyphRunPrimitive {
     /// glyph `cluster`s index into it. REQUIRED.
     pub text: String,
     pub glyphs: Vec<PlacedGlyph>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub echo: Option<EchoRunFacts>,
     /// Guessed horizontal paint slot. Missing y/h leaves ink vertically unbounded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paint_clip: Option<ClipRect>,
@@ -834,6 +836,19 @@ pub struct GlyphRunPrimitive {
     pub text_effect: Option<String>,
     #[serde(flatten)]
     pub attrs: DocAttrs,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EchoRunFacts {
+    pub x: f64,
+    pub right: f64,
+    pub kern: bool,
+    pub primary_font: bool,
+    pub letter_spacing: f64,
+    pub position: f64,
+    pub scale: f64,
+    pub can_empty: bool,
 }
 
 /// One positioned glyph inside a [`GlyphRunPrimitive`].
@@ -6008,6 +6023,7 @@ fn emit_line(
     block_ref: &BlockRef,
     ctx: &RenderCtx<'_>,
 ) -> Option<LinePaintMetrics> {
+    let echo_start = prims.len();
     let segments = resolve_line_segments(&block.runs, line);
     let attrs = block.attrs.as_ref();
     let auto_space = ooxml_text::AutoSpace::from_options(
@@ -6138,7 +6154,8 @@ fn emit_line(
         align_shift
     };
 
-    let mut pen_x = geom.frag_x + pad_left + text_indent + left_offset + align_shift;
+    let echo_x = geom.frag_x + pad_left + text_indent + left_offset;
+    let mut pen_x = echo_x + align_shift;
     let line_bottom = geom.line_top + line.line_height;
     // Word hangs the baseline off the box top: whatever the spacing rule adds
     // beyond ascent + descent is leading below the descent, never centered.
@@ -6659,6 +6676,16 @@ fn emit_line(
         }
     }
 
+    for primitive in &mut prims[echo_start..] {
+        if let Primitive::GlyphRun(run) = primitive {
+            if geom.is_rtl || !matches!(geom.alignment, None | Some("left")) {
+                run.echo = None;
+            } else if let Some(echo) = &mut run.echo {
+                echo.x = echo_x;
+                echo.right = echo_x + usable_width;
+            }
+        }
+    }
     Some(LinePaintMetrics {
         end_x: pen_x,
         baseline,
@@ -7373,6 +7400,16 @@ fn try_emit_glyph_runs(
             color: color.to_string(),
             text: sub_text,
             glyphs: placed,
+            echo: Some(EchoRunFacts {
+                x: 0.0,
+                right: 0.0,
+                kern: features.is_empty(),
+                primary_font: chain.first() == Some(&font),
+                letter_spacing: fmt.letter_spacing.unwrap_or(0.0),
+                position: fmt.position_px.unwrap_or(0.0),
+                scale: fmt.horizontal_scale.unwrap_or(100.0),
+                can_empty: false,
+            }),
             paint_clip: paint_clip.clone(),
             word_spacing: word_spacing.clone(),
             rtl,

@@ -83,6 +83,7 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
     const line = context?.glyphs;
     const set = context && contextGlyphSet(context);
     if (!context || !line || !set) return undefined;
+    if (!text && line.canEmpty === false) return undefined;
     const placement = placeEchoGlyphs(set.glyphs, text, line.next, line.x);
     const current = placeEchoGlyphs(set.glyphs, context.text, line.next, line.x);
     if (!placement || !current) return undefined;

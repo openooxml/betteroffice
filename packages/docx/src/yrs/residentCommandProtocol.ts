@@ -193,6 +193,7 @@ export interface DocxEchoGlyphLine {
   next: string;
   /** Rightmost pen end a lengthened line keeps without wrapping. */
   right: number;
+  canEmpty?: boolean;
   /** Free width at the end of the previous line, when this line continues a paragraph. */
   previousSlack?: number;
   /** Width of the next line's leading letters and digits, when a line follows. */

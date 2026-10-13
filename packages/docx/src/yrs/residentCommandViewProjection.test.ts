@@ -155,6 +155,7 @@ function glyphLine(options: GlyphLineOptions = {}) {
     [...line].forEach((char, index) => {
       const kern = options.kerned && char === 'A' && line[index + 1] === 'V' ? -2 : 0;
       runs.push({ kind: 'glyphRun', text: char, size: 13.333, fontId: 1, color: '#000000',
+        echo: { x: 96, right: options.right ?? 720, kern: !!options.kerning, primaryFont: true },
         fallbackFont: '400 13.333px Calibri, sans-serif', docStart: doc, docEnd: doc + 1,
         glyphs: [{ id: char.charCodeAt(0), cluster: 0, y: 120 + lineIndex * 20, advance: 10 + kern,
           x: x + (options.shiftX && lineIndex === 1 && index === 1 ? options.shiftX : 0) }] });
@@ -264,6 +265,18 @@ test('echo declines a single character with expanded tracking', () => {
     if (run.kind === 'glyphRun') Object.assign(run, { echo: { x: 96, right: 720, kern: false, primaryFont: true,
       letterSpacing: 40 / 15 } });
   }
+  expect(projectCommandEchoContext(source)).toBeUndefined();
+});
+
+test('echo requires resolved geometry and default spacing on every run', () => {
+  for (const change of [{ letterSpacing: -1 }, { position: 1 }, { scale: 80 }]) {
+    const source = glyphLine();
+    const run = source.layout.frame.pages[0]!.page.primitives[4] as GlyphRunPrimitive;
+    Object.assign(run.echo!, change);
+    expect(projectCommandEchoContext(source)).toBeUndefined();
+  }
+  const source = glyphLine();
+  delete (source.layout.frame.pages[0]!.page.primitives[4] as GlyphRunPrimitive).echo;
   expect(projectCommandEchoContext(source)).toBeUndefined();
 });
 

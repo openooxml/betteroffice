@@ -18,6 +18,25 @@ fn store_with_liberation() -> FontStore {
     s
 }
 
+#[test]
+fn echo_facts_keep_resolved_indents_and_character_spacing() {
+    let store = store_with_liberation();
+    let mut input: serde_json::Value = serde_json::from_str(&build_input("a", 10.0, None, false, Some(&[0]))).unwrap();
+    input["measured"][0]["block"]["attrs"] = serde_json::json!({ "indent": { "right": 96.0 } });
+    input["measured"][0]["block"]["runs"][0]["letterSpacing"] = serde_json::json!(2.0);
+    let json = build_display_list_json_with_fonts(&input.to_string(), &store).unwrap();
+    let list: DisplayList = serde_json::from_str(&json).unwrap();
+    let facts = list.pages[0].primitives.iter().find_map(|primitive| match primitive {
+        Primitive::GlyphRun(run) => run.echo.as_ref(),
+        _ => None,
+    }).unwrap();
+    assert_eq!(facts.x, 96.0);
+    assert_eq!(facts.right, 624.0);
+    assert_eq!(facts.letter_spacing, 2.0);
+    assert!(facts.primary_font);
+    assert!(!facts.can_empty);
+}
+
 /// Build a one-paragraph, one-line display-list input. `chain` is the
 /// `fontChains` value for `"liberation sans|0|0"` (None ⇒ no fontChains at all,
 /// the browser-measured shape). `trailing_break` appends a `<w:br>` run so a

@@ -21,9 +21,9 @@ export class EchoGlyphSources {
   /** Sends every set again, as after a frame the main thread may not have presented. */
   resend(): void { this.shipped.clear(); }
 
-  provider(pixelRatio: number, paragraphProperties?: EchoGlyphProvider['paragraphProperties']): EchoGlyphProvider {
+  provider(pixelRatio: number): EchoGlyphProvider {
     return {
-      pixelRatio, ...(paragraphProperties ? { paragraphProperties } : {}),
+      pixelRatio,
       glyphSet: (fontId, size, kern) => this.glyphSet(fontId, size, kern),
       glyphInk: (fontId, glyphId) => this.glyphInk(fontId, glyphId),
     };

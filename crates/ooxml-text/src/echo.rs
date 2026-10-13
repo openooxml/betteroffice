@@ -70,6 +70,7 @@ pub fn echo_glyph_set(
             advances[index] = value;
         }
     }
+    let ligature_starts = substitution_barriers(store, font, alphabet, &mut glyph_ids, kern)?;
     let supported: Vec<usize> = (0..alphabet.len())
         .filter(|&index| glyph_ids[index] != 0)
         .collect();
@@ -124,6 +125,15 @@ pub fn echo_glyph_set(
             None => unsafe_pairs.push([key.0 as u32, key.1 as u32]),
         }
     }
+    for (left, &unsafe_start) in ligature_starts.iter().enumerate() {
+        if unsafe_start {
+            for right in 0..alphabet.len() {
+                unsafe_pairs.push([left as u32, right as u32]);
+            }
+        }
+    }
+    unsafe_pairs.sort_unstable();
+    unsafe_pairs.dedup();
     Ok(EchoGlyphSet {
         horizontal,
         glyph_ids,
@@ -131,6 +141,119 @@ pub fn echo_glyph_set(
         kerning,
         unsafe_pairs,
     })
+}
+
+fn substitution_barriers(
+    store: &FontStore,
+    font: FontId,
+    alphabet: &[char],
+    glyph_ids: &mut [u32],
+    kern: bool,
+) -> Result<Vec<bool>, FontError> {
+    use rustybuzz::ttf_parser::{GlyphId, gsub::SubstitutionSubtable};
+    use std::collections::BTreeSet;
+
+    let mut ligatures = vec![false; alphabet.len()];
+    let Some(face) = store.shaping_face(font)? else {
+        glyph_ids.fill(0);
+        return Ok(ligatures);
+    };
+    if face.tables().morx.is_some() {
+        glyph_ids.fill(0);
+        return Ok(ligatures);
+    }
+    let Some(table) = face.tables().gsub else {
+        return Ok(ligatures);
+    };
+    if table.variations.is_some() {
+        glyph_ids.fill(0);
+        return Ok(ligatures);
+    }
+    let nominal: Vec<_> = alphabet
+        .iter()
+        .map(|&ch| store.glyph_id(font, ch))
+        .collect::<Result<_, _>>()?;
+    let mut lookups = BTreeSet::new();
+    let mut required = BTreeSet::new();
+    for index in 0..table.scripts.len() {
+        if let Some(script) = table.scripts.get(index) {
+            if let Some(feature) = script
+                .default_language
+                .and_then(|language| language.required_feature)
+            {
+                required.insert(feature);
+            }
+            for index in 0..script.languages.len() {
+                if let Some(feature) = script
+                    .languages
+                    .get(index)
+                    .and_then(|language| language.required_feature)
+                {
+                    required.insert(feature);
+                }
+            }
+        }
+    }
+    for index in 0..table.features.len() {
+        let Some(feature) = table.features.get(index) else {
+            continue;
+        };
+        let active = matches!(
+            &feature.tag.to_bytes(),
+            b"ccmp"
+                | b"locl"
+                | b"rlig"
+                | b"calt"
+                | b"clig"
+                | b"liga"
+                | b"rclt"
+                | b"rvrn"
+                | b"abvm"
+                | b"blwm"
+                | b"mark"
+                | b"mkmk"
+                | b"curs"
+                | b"dist"
+        ) || kern && feature.tag.to_bytes() == *b"kern"
+            || required.contains(&index);
+        if active {
+            lookups.extend(feature.lookup_indices.into_iter());
+        }
+    }
+    for index in lookups {
+        let Some(lookup) = table.lookups.get(index) else {
+            glyph_ids.fill(0);
+            return Ok(ligatures);
+        };
+        for index in 0..lookup.subtables.len() {
+            let Some(subtable) = lookup.subtables.get::<SubstitutionSubtable<'_>>(index) else {
+                glyph_ids.fill(0);
+                return Ok(ligatures);
+            };
+            for index in 0..alphabet.len() {
+                let covered = nominal[index]
+                    .is_some_and(|id| subtable.coverage().contains(GlyphId(id)))
+                    || glyph_ids[index] != 0
+                        && subtable
+                            .coverage()
+                            .contains(GlyphId(glyph_ids[index] as u16));
+                if !covered {
+                    continue;
+                }
+                match subtable {
+                    SubstitutionSubtable::Ligature(_) => ligatures[index] = true,
+                    SubstitutionSubtable::Context(_)
+                    | SubstitutionSubtable::ChainContext(_)
+                    | SubstitutionSubtable::ReverseChainSingle(_) => {
+                        glyph_ids.fill(0);
+                        return Ok(ligatures);
+                    }
+                    _ => glyph_ids[index] = 0,
+                }
+            }
+        }
+    }
+    Ok(ligatures)
 }
 
 /// A sequence over `count` symbols in which every ordered pair occurs exactly
@@ -268,25 +391,43 @@ mod tests {
             gsub.extend(value.to_be_bytes());
         }
         gsub.extend(b"liga");
-        for value in [8u16, 0, 1, 0, 1, 4, 4, 0, 1, 8, 1, 20, 1, 8, 1, 4, ligature, 3, f, i, 1, 1, f] {
+        for value in [
+            8u16, 0, 1, 0, 1, 4, 4, 0, 1, 8, 1, 20, 1, 8, 1, 4, ligature, 3, f, i, 1, 1, f,
+        ] {
             gsub.extend(value.to_be_bytes());
         }
         let mut bytes = LIBERATION_SANS.to_vec();
         let count = u16::from_be_bytes(bytes[4..6].try_into().unwrap()) as usize;
-        let entry = (0..count).map(|index| 12 + index * 16)
-            .find(|&offset| &bytes[offset..offset + 4] == b"GSUB").unwrap();
+        let entry = (0..count)
+            .map(|index| 12 + index * 16)
+            .find(|&offset| &bytes[offset..offset + 4] == b"GSUB")
+            .unwrap();
         let offset = bytes.len() as u32;
         bytes[entry + 8..entry + 12].copy_from_slice(&offset.to_be_bytes());
         bytes[entry + 12..entry + 16].copy_from_slice(&(gsub.len() as u32).to_be_bytes());
         bytes.extend(gsub);
         let mut store = FontStore::new();
         let font = store.register(bytes).unwrap();
-        let shape = |text| shape_with_direction(&store, font, text, 16.0, &kern_features(false), ShapeDirection::Ltr).unwrap();
+        let shape = |text| {
+            shape_with_direction(
+                &store,
+                font,
+                text,
+                16.0,
+                &kern_features(false),
+                ShapeDirection::Ltr,
+            )
+            .unwrap()
+        };
         assert_eq!(shape("ff").len(), 2);
         assert_eq!(shape("fi").len(), 2);
         assert_eq!(shape("ffi").len(), 1);
         let set = echo_glyph_set(&store, font, 16.0, false, &['f', 'a', 'i']).unwrap();
-        assert!(set.glyph_ids[0] == 0 || set.unsafe_pairs.contains(&[0, 0]) || set.unsafe_pairs.contains(&[0, 2]),
-            "ffi must decline even when ff and fi shape independently");
+        assert!(
+            set.glyph_ids[0] == 0
+                || set.unsafe_pairs.contains(&[0, 0])
+                || set.unsafe_pairs.contains(&[0, 2]),
+            "ffi must decline even when ff and fi shape independently"
+        );
     }
 }
