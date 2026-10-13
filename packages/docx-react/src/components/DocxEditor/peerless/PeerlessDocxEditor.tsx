@@ -98,7 +98,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     if (!worker.current) throw new Error('Peer-less worker is not ready');
     return (await worker.current.save({ comments: [...(props.comments ?? sourceComments.current)] })).bytes;
   }, [props.comments]);
-  const printCapture = useRef<ReturnType<typeof createWorkerPrintCapture> | null>(null);
+  const printCaptures = useRef(new Set<ReturnType<typeof createWorkerPrintCapture>>());
   const print = useCallback(async (preview = false) => {
     const popup = openPrintWindow('Print', '');
     let capture: ReturnType<typeof createWorkerPrintCapture> | null = null;
@@ -108,7 +108,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       const client = worker.current;
       if (!current || !client) throw new Error('Peer-less worker is not ready');
       capture = createWorkerPrintCapture(current.binding, printBitmap, () => active.current === current && !popup.closed);
-      printCapture.current = capture;
+      printCaptures.current.add(capture);
       const pages = await capture.collect(
         (indices, epoch) => client.buildPages(indices, epoch), (epoch) => client.completeLayout(epoch));
       const css = popup.document.createElement('style');
@@ -127,7 +127,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       popup?.close();
       props.onError?.(error instanceof Error ? error : new Error(String(error)));
       throw error;
-    } finally { if (printCapture.current === capture) printCapture.current = null; }
+    } finally { if (capture) printCaptures.current.delete(capture); }
   }, [props.onPrint, props.onError]);
   const prepareFontFamily = useRef<(family: string) => Promise<ResidentFontEnvironment>>(async () => { throw new Error('Worker fonts are unavailable'); });
   const controllerOptions = { ...props, zoom, focus, read, readAt, save, loadBuffer, print, onZoom: setZoom, isDark,
@@ -521,7 +521,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   }, []);
 
   const prepareGeometry = useCallback((frame: DocxCommandFrame): PeerlessFrameGeometry | undefined => {
-    printCapture.current?.accept(frame);
+    for (const capture of printCaptures.current) capture.accept(frame);
     if (!identity.current) return undefined;
     const cached = prepared.current.get(frame);
     if (cached) return cached;

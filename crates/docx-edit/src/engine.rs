@@ -7815,10 +7815,65 @@ impl EngineSession {
         let mut variants = Vec::new();
         let sections = regions.sections.len();
         let measured = cut.map_or(sections, |cut| (cut + 1).min(sections));
+        let mut descriptors = Vec::new();
         for section_index in 0..measured {
             let Some(refs) = effective_header_footer_refs(regions, section_index) else {
                 continue;
             };
+            for (kind, hf_type, r_id) in
+                header_footer_descriptors(&regions.sections[section_index], refs)
+            {
+                if let Some(r_id) = r_id {
+                    descriptors.push((section_index, kind, hf_type, r_id));
+                }
+            }
+        }
+        if measured < sections && !descriptors.is_empty() {
+            let used: HashSet<_> = descriptors
+                .iter()
+                .map(|(_, kind, _, r_id)| (r_id.clone(), *kind == HeaderFooterKind::Header))
+                .collect();
+            let mut refs = measured
+                .checked_sub(1)
+                .and_then(|index| effective_header_footer_refs(regions, index))
+                .unwrap_or_default();
+            let mut last = HashMap::new();
+            for (section_index, section) in regions.sections.iter().enumerate().skip(measured) {
+                if let Some(authored) = &section.header_footer_refs {
+                    refs.inherit(authored);
+                }
+                for (order, (kind, hf_type, r_id)) in
+                    header_footer_descriptors(section, refs.clone())
+                        .into_iter()
+                        .enumerate()
+                {
+                    let Some(r_id) = r_id else {
+                        continue;
+                    };
+                    if used.contains(&(r_id.clone(), kind == HeaderFooterKind::Header)) {
+                        last.insert(
+                            (r_id, kind == HeaderFooterKind::Header),
+                            (section_index, order, kind, hf_type),
+                        );
+                    }
+                }
+            }
+            let mut later: Vec<_> = last
+                .into_iter()
+                .map(|((r_id, _), (section_index, order, kind, hf_type))| {
+                    (section_index, order, kind, hf_type, r_id)
+                })
+                .collect();
+            later.sort_by_key(|(section_index, order, ..)| (*section_index, *order));
+            descriptors.extend(
+                later
+                    .into_iter()
+                    .map(|(section_index, _, kind, hf_type, r_id)| {
+                        (section_index, kind, hf_type, r_id)
+                    }),
+            );
+        }
+        for (section_index, kind, hf_type, r_id) in descriptors {
             let section = &regions.sections[section_index];
             let page_size = section
                 .page_size
@@ -7832,49 +7887,43 @@ impl EngineSession {
                 section.margins.as_ref().or(input.options.margins.as_ref()),
             );
             let content_width = (page_size.w - margins.left - margins.right).max(1.0);
-            let descriptors = header_footer_descriptors(section, refs);
-            for (kind, hf_type, r_id) in descriptors {
-                let Some(r_id) = r_id else {
-                    continue;
-                };
-                let mut blocks = self
-                    .with_resident_story(
-                        &self.doc.header_footer_story(&r_id),
-                        render_env,
-                        |blocks| {
-                            blocks
-                                .iter()
-                                .map(|block| block.as_ref().clone())
-                                .collect::<Vec<_>>()
-                        },
-                    )
-                    .map_err(|error| error.to_string())?;
-                for block in &mut blocks {
-                    resolve_line_unit_spacing(
-                        block,
-                        regions.paragraph_spacing_line_px(section_index),
-                    );
-                    resolve_doc_grid_pitch(block, regions.doc_grid_snap_pitch_px(section_index));
-                }
-                let metrics = HeaderFooterMetrics {
-                    kind,
-                    page_size: &page_size,
-                    margins: &margins,
-                };
-                #[cfg(test)]
-                HEADER_FOOTER_MEASUREMENTS.with(|count| count.set(count.get() + 1));
-                if let Some(variant) = measure_header_footer(
-                    r_id,
-                    kind,
-                    hf_type,
-                    section_index,
-                    blocks,
-                    content_width,
-                    metrics,
-                    measurement,
-                )? {
-                    variants.push(variant);
-                }
+            let mut blocks = self
+                .with_resident_story(
+                    &self.doc.header_footer_story(&r_id),
+                    render_env,
+                    |blocks| {
+                        blocks
+                            .iter()
+                            .map(|block| block.as_ref().clone())
+                            .collect::<Vec<_>>()
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            for block in &mut blocks {
+                resolve_line_unit_spacing(
+                    block,
+                    regions.paragraph_spacing_line_px(section_index),
+                );
+                resolve_doc_grid_pitch(block, regions.doc_grid_snap_pitch_px(section_index));
+            }
+            let metrics = HeaderFooterMetrics {
+                kind,
+                page_size: &page_size,
+                margins: &margins,
+            };
+            #[cfg(test)]
+            HEADER_FOOTER_MEASUREMENTS.with(|count| count.set(count.get() + 1));
+            if let Some(variant) = measure_header_footer(
+                r_id,
+                kind,
+                hf_type,
+                section_index,
+                blocks,
+                content_width,
+                metrics,
+                measurement,
+            )? {
+                variants.push(variant);
             }
         }
         if variants.is_empty()
@@ -21558,7 +21607,9 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         );
         let header = preview_pagination_paragraph(
             300,
-            &preview_fixture::run("This shared header fits on one wide line but wraps on the narrow page"),
+            &preview_fixture::run(
+                "This shared header fits on one wide line but wraps on the narrow page",
+            ),
         );
         let bytes = preview_pagination_story_document(&body, "header", &header);
         let mut request = header_request(font, 96.0);
@@ -21586,14 +21637,20 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 "fontChains": request["measurement"]["fontChains"],
                 "headersFooters": output["headersFooters"]
             });
-            engine.build_display_list_frame(&extras.to_string(), 0).unwrap();
-            let display = serde_json::to_value(engine.with_display_list(Clone::clone).unwrap()).unwrap();
+            engine
+                .build_display_list_frame(&extras.to_string(), 0)
+                .unwrap();
+            let display =
+                serde_json::to_value(engine.with_display_list(Clone::clone).unwrap()).unwrap();
             (output, display)
         };
         let (full, full_display) = layout(false);
         let variants = full["headersFooters"]["variants"].as_array().unwrap();
         let lines = |variant: &serde_json::Value| {
-            variant["measured"][0]["measure"]["lines"].as_array().unwrap().len()
+            variant["measured"][0]["measure"]["lines"]
+                .as_array()
+                .unwrap()
+                .len()
         };
         assert_eq!(lines(&variants[0]), 1);
         assert!(lines(&variants[1]) > 1);
@@ -21606,7 +21663,11 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         );
         let (prefix, prefix_display) = layout(true);
         assert_eq!(first_pages(&prefix), first_pages(&full));
-        assert_eq!(prefix_display["pages"].as_array().unwrap()[..3], full_display["pages"].as_array().unwrap()[..3], "certified header and footer pixels match cold full layout");
+        assert_eq!(
+            prefix_display["pages"].as_array().unwrap()[..3],
+            full_display["pages"].as_array().unwrap()[..3],
+            "certified header and footer pixels match cold full layout"
+        );
         docx_layout::clear_measure_fonts();
     }
 
@@ -21656,7 +21717,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             .layout_document_with_regions_exact_prefix_retained(&request.to_string(), 3)
             .unwrap();
         assert!(laid.provisional);
-        HEADER_FOOTER_MEASUREMENTS.with(|count| assert_eq!(count.get(), 1));
+        HEADER_FOOTER_MEASUREMENTS.with(|count| assert_eq!(count.get(), 2));
         docx_layout::clear_measure_fonts();
     }
 
