@@ -9044,6 +9044,41 @@ impl EngineSession {
         self.build_display_list_frame(&extras, expected_frame_epoch)
     }
 
+    /// The region relayout after one edit. `story` names the story of a plain
+    /// text edit made through [`Self::edit_resident_text`]; when that edit is
+    /// the only change since the retained pass and `input_json` is the
+    /// retained request, this takes [`Self::apply_and_layout`]'s resident path.
+    /// Otherwise, and whenever that path cannot absorb the edit, it runs the
+    /// full pass of [`Self::layout_document_with_regions_retained`].
+    pub fn layout_document_with_regions_after_edit(
+        &self,
+        input_json: &str,
+        story: Option<&str>,
+    ) -> Result<(), String> {
+        let resident = story.filter(|_| {
+            self.typing_epoch.get() == Some(self.doc_epoch())
+                && self.pagination.borrow().doc_epoch.wrapping_add(1) == self.doc_epoch()
+                && self
+                    .regions
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|state| !state.provisional && state.request_json == input_json)
+        });
+        let Some(story) = resident else {
+            return self.layout_document_with_regions_retained(input_json);
+        };
+        let _trigger_reset = RelayoutTriggerReset(self);
+        self.set_relayout_trigger(RelayoutTrigger::Interactive);
+        if !self.apply_and_layout_regions_resident(
+            story,
+            &mut |_| {},
+            RelayoutTrigger::Interactive,
+        )? {
+            self.apply_and_layout_regions_full(RelayoutTrigger::Interactive)?;
+        }
+        Ok(())
+    }
+
     /// Fallback for edits the resident region path cannot absorb: replay the
     /// retained region request through the full pass (no serialization).
     fn apply_and_layout_regions_full(&self, trigger: RelayoutTrigger) -> Result<(), String> {

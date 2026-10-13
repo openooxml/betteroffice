@@ -175,7 +175,7 @@ test('render environment commands change hidden text and theme colors without ed
   });
   try {
     const nativeVersion = engine.proposalEngine.version();
-    const layouts = spyOn(engine, 'layoutDocumentWithRegionsRetained');
+    const layouts = spyOn(engine, 'layoutDocumentWithRegionsAfterEdit');
     const command = intent(1, 0, 'setRenderEnvironment', {
       themeColors: { accent1: 'FF0000' }, showHiddenText: true,
     } as never);
@@ -249,7 +249,7 @@ test('d2c_worker_fixture_clones_staged_page_and_background_bitmaps', async () =>
 
 test('d1a_real_worker_init_insert_delete_acknowledge_current_layout_and_state', async () => {
   const { client, engine, initial, point } = await openWorker();
-  const layouts = spyOn(engine, 'layoutDocumentWithRegionsRetained');
+  const layouts = spyOn(engine, 'layoutDocumentWithRegionsAfterEdit');
   try {
     expect(initial.selection).toMatchObject({ anchor: point, focus: point });
     expect(initial.editState).toMatchObject({ readOnly: false, canUndo: false });

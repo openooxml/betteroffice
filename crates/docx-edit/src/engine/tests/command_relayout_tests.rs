@@ -30,12 +30,10 @@ impl<'a> CommandHost<'a> {
 
     fn insert(&mut self, offset: u32, text: &str) {
         self.engine
-            .doc()
-            .insert_text(
-                &crate::EditCtx::local("", ""),
-                crate::Position::new("body", offset),
-                text,
-                crate::FormatPolicy::Inherit,
+            .edit_resident_text(
+                crate::StoryRange::new("body", offset, offset),
+                Some(text),
+                true,
             )
             .unwrap();
         self.relayout(Some("body"));
@@ -43,18 +41,14 @@ impl<'a> CommandHost<'a> {
 
     fn delete(&mut self, start: u32, end: u32) {
         self.engine
-            .doc()
-            .delete_range(
-                &crate::EditCtx::local("", ""),
-                crate::StoryRange::new("body", start, end),
-            )
+            .edit_resident_text(crate::StoryRange::new("body", start, end), None, true)
             .unwrap();
         self.relayout(Some("body"));
     }
 
-    fn relayout(&mut self, _story: Option<&str>) {
+    fn relayout(&mut self, story: Option<&str>) {
         self.engine
-            .layout_document_with_regions_retained(&self.request)
+            .layout_document_with_regions_after_edit(&self.request, story)
             .unwrap();
         let epoch = self.engine.display.borrow().binary_frame_epoch;
         let frame = self

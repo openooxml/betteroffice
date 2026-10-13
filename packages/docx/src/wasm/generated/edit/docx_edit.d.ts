@@ -352,6 +352,15 @@ export class EditSession {
      */
     drain_update_event(): Uint8Array;
     /**
+     * A plain local text edit that the resident lowering records, so the next
+     * [`Self::layout_document_with_regions_after_edit`] re-lowers and
+     * re-measures only its paragraph: inserts `text` at the collapsed range,
+     * or deletes `[start, end)` without it. The document changes exactly as
+     * through [`Self::insert_text`] or [`Self::delete_range`] without an
+     * author, and the receipt is theirs.
+     */
+    edit_text_resident(story: string, start_para: string, start_offset: number, end_para: string, end_offset: number, text?: string | null): string;
+    /**
      * The yrs v1 update carrying everything this replica has that the peer
      * described by `remote_state_vector` does not. Errors on a malformed
      * state vector.
@@ -541,6 +550,12 @@ export class EditSession {
      * Errors on unparseable input or on layout failure.
      */
     layout_document_json(input: string): string;
+    /**
+     * [`Self::layout_document_with_regions_retained`] after one edit: the
+     * resident path when that edit was the [`Self::edit_text_resident`] taken
+     * last; see `EngineSession::layout_document_with_regions_after_edit`.
+     */
+    layout_document_with_regions_after_edit(input: string): void;
     /**
      * Region-layout input JSON in, a paginated envelope with section and page
      * regions already composed as JSON out — ready for the display builder
@@ -1658,6 +1673,7 @@ export interface InitOutput {
     readonly editsession_display_vertical_move_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_document_properties_json: (a: number) => [number, number];
     readonly editsession_drain_update_event: (a: number) => [number, number];
+    readonly editsession_edit_text_resident: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number, number, number];
     readonly editsession_encode_diff: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_encode_peer_metadata: (a: number) => [number, number, number, number];
     readonly editsession_encode_state: (a: number) => [number, number];
@@ -1689,6 +1705,7 @@ export interface InitOutput {
     readonly editsession_insert_text: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => [number, number, number, number];
     readonly editsession_insert_watermark: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
     readonly editsession_layout_document_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_layout_document_with_regions_after_edit: (a: number, b: number, c: number) => [number, number];
     readonly editsession_layout_document_with_regions_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_layout_document_with_regions_prefix_retained_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_layout_document_with_regions_retained: (a: number, b: number, c: number) => [number, number];

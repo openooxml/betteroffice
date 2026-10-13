@@ -167,7 +167,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
       else delete input.renderEnv.revisionPreview;
       if (!init.layoutWithRegions) input.workerOwned = { ...input.workerOwned, renderEnv: input.renderEnv };
     }
-    if (init.layoutWithRegions) engine.layoutDocumentWithRegionsRetained(JSON.stringify(input));
+    if (init.layoutWithRegions) engine.layoutDocumentWithRegionsAfterEdit(JSON.stringify(input));
     else engine.layoutDocumentJson(JSON.stringify(input));
     retainedLayoutVersion = engine.proposalEngine.version();
     layoutPreviewVersion = snapshot.previewVersion;

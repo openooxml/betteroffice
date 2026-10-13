@@ -1246,6 +1246,9 @@ pub struct EditSession {
     cell_selection: RefCell<Option<LocalCellSelection>>,
     last_apply_profile_json: RefCell<String>,
     resident_deleted_units: Cell<u32>,
+    /// The story and resulting doc epoch of the last
+    /// [`EditSession::edit_text_resident`], until a relayout takes it.
+    resident_text_edit: RefCell<Option<(String, u64)>>,
     /// The comparison applied here, awaiting its saved bytes.
     compared: RefCell<Option<(Box<CompareApplied>, CompareLimits)>>,
     /// Seed images as `media:{n}` tokens rather than `data:` URLs.
@@ -1734,6 +1737,7 @@ impl EditSession {
             cell_selection: RefCell::new(None),
             last_apply_profile_json: RefCell::new("{}".to_owned()),
             resident_deleted_units: Cell::new(0),
+            resident_text_edit: RefCell::new(None),
             compared: RefCell::new(None),
             media_tokens: Cell::new(false),
         };
@@ -1855,6 +1859,21 @@ impl EditSession {
         let _fonts = self.fonts.enter();
         self.engine
             .layout_document_with_regions_retained(input)
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
+    /// [`Self::layout_document_with_regions_retained`] after one edit: the
+    /// resident path when that edit was the [`Self::edit_text_resident`] taken
+    /// last; see `EngineSession::layout_document_with_regions_after_edit`.
+    pub fn layout_document_with_regions_after_edit(&self, input: &str) -> Result<(), JsValue> {
+        let _fonts = self.fonts.enter();
+        let edit = self
+            .resident_text_edit
+            .take()
+            .filter(|(_, epoch)| *epoch == self.engine.doc_epoch());
+        let story = edit.as_ref().map(|(story, _)| story.as_str());
+        self.engine
+            .layout_document_with_regions_after_edit(input, story)
             .map_err(|error| JsValue::from_str(&error))
     }
 
@@ -3589,6 +3608,35 @@ impl EditSession {
                 );
             }
         }
+        Ok(text_receipt_json(receipt))
+    }
+
+    /// A plain local text edit that the resident lowering records, so the next
+    /// [`Self::layout_document_with_regions_after_edit`] re-lowers and
+    /// re-measures only its paragraph: inserts `text` at the collapsed range,
+    /// or deletes `[start, end)` without it. The document changes exactly as
+    /// through [`Self::insert_text`] or [`Self::delete_range`] without an
+    /// author, and the receipt is theirs.
+    pub fn edit_text_resident(
+        &self,
+        story: &str,
+        start_para: &str,
+        start_offset: u32,
+        end_para: &str,
+        end_offset: u32,
+        text: Option<String>,
+    ) -> Result<String, JsValue> {
+        let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
+        let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
+        if text.is_some() && start != end {
+            return Err(js_err("resident text insertion needs a collapsed range"));
+        }
+        let receipt = self
+            .engine
+            .edit_resident_text(StoryRange::new(story, start, end), text.as_deref(), true)
+            .map_err(js_err)?;
+        self.resident_text_edit
+            .replace(Some((story.to_owned(), self.engine.doc_epoch())));
         Ok(text_receipt_json(receipt))
     }
 
