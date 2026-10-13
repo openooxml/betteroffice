@@ -156,6 +156,7 @@ async function backingSizes(page: Page, dpr: number) {
 
 for (const dpr of [1, 2]) {
   test(`worker pages rasterize at device pixels at DPR ${dpr}`, async ({ browser }) => {
+    test.skip(process.env.DOCX_PEERLESS_HARNESS !== '1', 'Harness capabilities require DOCX_PEERLESS_HARNESS=1');
     const context = await browser.newContext({ deviceScaleFactor: dpr, viewport: { width: 1440, height: 1000 } });
     const page = await context.newPage();
     try {
