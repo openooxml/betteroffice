@@ -10,8 +10,7 @@ use vello::peniko::{
 };
 use vello::{Glyph, Scene};
 use xlsx_render::{
-    Align, DisplayList, DrawCmd, GeometryPathCommand, PatternType, Rect as DisplayRect,
-    border_dash,
+    Align, DisplayList, DrawCmd, GeometryPathCommand, PatternType, Rect as DisplayRect, border_dash,
 };
 
 use crate::scene_shared::{
@@ -93,7 +92,12 @@ fn translate_or_placeholder(
 struct PatternTiles(HashMap<(PatternType, Arc<str>, Arc<str>), ImageData>);
 
 impl PatternTiles {
-    fn tile(&mut self, pattern: PatternType, fg: &Arc<str>, bg: &Arc<str>) -> Result<ImageData, String> {
+    fn tile(
+        &mut self,
+        pattern: PatternType,
+        fg: &Arc<str>,
+        bg: &Arc<str>,
+    ) -> Result<ImageData, String> {
         let key = (pattern, fg.clone(), bg.clone());
         if let Some(tile) = self.0.get(&key) {
             return Ok(tile.clone());
