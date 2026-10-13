@@ -574,7 +574,9 @@ fn a_value_edit_after_a_rename_reports_the_status_a_full_rename_leads_to() {
     assert_eq!(last_status(&scoped), last_status(&full));
     assert_eq!(values(&scoped), values(&full));
     let [cycles, limited] = last_status(&scoped);
-    assert!(cells(&["G1", "H1"]).iter().all(|cell| cycles.contains(cell)));
+    for cell in cells(&["G1", "H1"]) {
+        assert!(cycles.contains(&cell));
+    }
     assert!(limited.contains(&(SheetId(0), r("K1"))));
 }
 
