@@ -708,6 +708,40 @@ describe('peerless F2 prefill keyboard replay', () => {
     expect(host.cells.get('0:0:0')).toBe(value);
   });
 
+  it('loads F2 on the next cell when the previous edit is refused', async () => {
+    const host = peerlessHarness();
+    host.cells.set('0:1:0', 'below');
+    const view = await host.mount();
+    const scroll = view.getByTestId('xlsx-scroll');
+    fireEvent.keyDown(scroll, { key: 'a' });
+    fireEvent.change(view.getByTestId('xlsx-cell-editor'), { target: { value: 'abc' } });
+    fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Enter' });
+    fireEvent.keyDown(scroll, { key: 'F2' });
+    await act(async () => host.ack(host.sent.find((command) => command.kind === 'editCell')!, { status: 'refused' }));
+    expect(view.queryByTestId('xlsx-error')).toBeNull();
+    expect(view.getByTestId('xlsx-refused-draft').textContent).toBe('abc');
+    await waitFor(() => expect((view.getByTestId('xlsx-cell-editor') as HTMLInputElement).value).toBe('below'));
+    expect(host.cells.get('0:0:0')).toBe('initial');
+  });
+
+  it('loads F2 while an earlier refused edit is still listed', async () => {
+    const host = peerlessHarness();
+    host.cells.set('0:2:0', 'third');
+    const view = await host.mount();
+    const scroll = view.getByTestId('xlsx-scroll');
+    fireEvent.keyDown(scroll, { key: 'r' });
+    fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Enter' });
+    fireEvent.keyDown(scroll, { key: 'n' });
+    await act(async () => host.ack(host.sent[0]!, { status: 'refused' }));
+    fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Enter' });
+    await act(async () => host.ack(host.sent.find((command) => command.kind === 'editCell' && command.payload.args[3] === 'n')!));
+    fireEvent.keyDown(scroll, { key: 'F2' });
+    await act(async () => {});
+    expect(view.queryByTestId('xlsx-error')).toBeNull();
+    await waitFor(() => expect((view.getByTestId('xlsx-cell-editor') as HTMLInputElement).value).toBe('third'));
+    expect(view.getByTestId('xlsx-refused-draft').textContent).toBe('r');
+  });
+
   describe('prefill reservation regressions', () => {
     const acknowledge = (host: ReturnType<typeof peerlessHarness>, history?: string[]) => {
       const submit = host.session.submit;
@@ -776,6 +810,10 @@ describe('peerless F2 prefill keyboard replay', () => {
       expect(document.activeElement).toBe(view.getByTestId('xlsx-scroll'));
       expect(view.getByTestId('xlsx-refused-draft').textContent).toBe(`${value}X`);
       expect(host.cells.get('0:0:0')).toBe(value);
+      fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'ArrowDown' });
+      await act(async () => {});
+      expect(host.sent.filter((command) => command.kind === 'editCell')).toHaveLength(1);
+      expect(host.sent[host.sent.length - 1]).toMatchObject({ kind: 'select' });
     });
 
     it('reads the reserved edit when F2 reopens the same cell', async () => {
@@ -1025,6 +1063,25 @@ describe('peerless F2 prefill keyboard replay', () => {
       expect(edits[0]).toMatchObject({ payload: { args: [0, 0, 0, `${value}X`] } });
       expect(document.activeElement).toBe(button);
     } finally { button.remove(); }
+  });
+
+  it('appends an Option-composed character in the grid while cell geometry is pending', async () => {
+    const platform = Object.getOwnPropertyDescriptor(navigator, 'platform');
+    Object.defineProperty(navigator, 'platform', { configurable: true, value: 'MacIntel' });
+    restorers.push(() => { if (platform) Object.defineProperty(navigator, 'platform', platform); else Reflect.deleteProperty(navigator, 'platform'); });
+    const host = peerlessHarness();
+    const view = await host.mount();
+    const geometry = deferred<xlsx.WorkbookCellGeometry>();
+    host.cellGeometry.mockReturnValueOnce(geometry.promise);
+    const scroll = view.getByTestId('xlsx-scroll');
+    fireEvent.keyDown(scroll, { key: 'ArrowDown', ctrlKey: true });
+    act(() => host.ack(host.sent[0]!, { paint: true }));
+    fireEvent.keyDown(scroll, { key: 'a' });
+    expect(view.queryByTestId('xlsx-cell-editor')).toBeNull();
+    fireEvent.keyDown(scroll, { key: '@', altKey: true });
+    fireEvent.keyDown(scroll, { key: 'Enter' });
+    expect(host.sent.filter((command) => command.kind === 'editCell')[0]).toMatchObject({ payload: { args: [0, 250, 0, 'a@'] } });
+    await act(async () => geometry.resolve({ sheet: 0, version: 'v1', rect: { x: 0, y: 6000, w: 96, h: 24 }, scrollPosition: { x: 0, y: 6000 } }));
   });
 });
 

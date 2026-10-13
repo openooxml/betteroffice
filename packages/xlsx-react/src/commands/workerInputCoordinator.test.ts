@@ -128,6 +128,32 @@ describe('cell input read hold', () => {
     await Promise.resolve();
     expect(values).toEqual([]);
   });
+
+  test('closes the editor without failing the session when the read is refused admission', async () => {
+    const outcome = deferred<void>();
+    const failures: unknown[] = [];
+    const reports: unknown[] = [];
+    const selected = { anchor: { row: 0, col: 0 }, focus: { row: 0, col: 0 } };
+    const controller = new WorkerDraftController({
+      generation: () => 1, identity: () => 'book', navigation: () => 0,
+      selection: () => selected, sheet: () => 0,
+      target: () => ({ sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A1' } }),
+      resolveSheet: () => 0, editable: () => true, prefill: async () => 'value',
+      select: () => {}, selectionTarget: () => undefined, dependency: () => null,
+      navigate: () => {}, committed: () => {}, focus: () => {},
+      fail: (error) => { failures.push(error); outcome.resolve(); },
+      report: (error) => { reports.push(error); outcome.resolve(); },
+    });
+    const { coordinator } = peerlessHarness(8, 1, controller);
+    controller.attach(coordinator);
+    void coordinator.runAfterPendingInput(() => new Promise<void>(() => {}), true);
+    controller.open();
+    await outcome.promise;
+    expect(failures).toEqual([]);
+    expect(reports).toEqual([expect.any(WorkerInputRefusal)]);
+    expect(controller.loadingCell).toBe(false);
+    expect(controller.getSnapshot().cell).toBeNull();
+  });
 });
 
 describe('prefill reservation recovery', () => {
@@ -193,6 +219,20 @@ describe('prefill reservation recovery', () => {
       expect(coordinator.recoveryCommands).toHaveLength(2);
     });
   }
+
+  test('a refused reservation stops being the default dependency', async () => {
+    const { coordinator, draft, sent, ack } = peerlessHarness();
+    const dispatched = deferred<void>();
+    coordinator.subscribe((event) => { if (event.type === 'dispatched') dispatched.resolve(); });
+    const prefill = pending(draft(''));
+    const reserved = coordinator.reserveInput(prefill.input);
+    prefill.complete('X');
+    await dispatched.promise;
+    ack(sent[0].seq, 'refused');
+    await reserved.result.catch(() => {});
+    coordinator.command({ kind: 'undo', payload: { args: [] } });
+    expect(sent.map((command) => command.kind)).toEqual(['editCell', 'undo']);
+  });
 });
 
 describe('completed composition recovery', () => {
