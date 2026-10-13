@@ -326,7 +326,11 @@ fn plain_xf_ids(e: &BytesStart) -> Result<Option<[u32; 3]>, ParseError> {
         }
     }
     let mut ids = [0; 3];
-    let names = [b"fontId".as_slice(), b"fillId".as_slice(), b"borderId".as_slice()];
+    let names = [
+        b"fontId".as_slice(),
+        b"fillId".as_slice(),
+        b"borderId".as_slice(),
+    ];
     for (id, name) in ids.iter_mut().zip(names) {
         if let Some(value) = attr(e, name)? {
             let Ok(value) = value.parse() else {
