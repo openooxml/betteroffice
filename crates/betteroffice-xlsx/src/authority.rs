@@ -5210,6 +5210,43 @@ mod tests {
     }
 
     #[test]
+    fn pattern_details_keep_the_released_base_fingerprint() {
+        use xlsx_model::{Border, BorderEdge, BorderStyle, Color, Fill, PatternType};
+        let mut patterned = open_test_cases::matrix().remove(0).model;
+        let mut released = patterned.clone();
+        for (model, fill, style) in [
+            (
+                &mut patterned,
+                Fill::Pattern {
+                    pattern: PatternType::LightUp,
+                    fg: Some(Color::Rgb("#123456".into())),
+                    bg: Some(Color::Rgb("#fedcba".into())),
+                },
+                BorderStyle::MediumDashDot,
+            ),
+            (
+                &mut released,
+                Fill::Solid(Color::Rgb("#123456".into())),
+                BorderStyle::Medium,
+            ),
+        ] {
+            model.styles.fills.push(fill);
+            model.styles.borders.push(Border {
+                top: Some(BorderEdge { style, color: None }),
+                ..Border::default()
+            });
+        }
+        let actual = WorkbookBase::from_model(&patterned).unwrap();
+        let expected = WorkbookBase::from_model(&released).unwrap();
+        assert_eq!(actual.fingerprint, expected.fingerprint);
+        assert_eq!(actual.fingerprints, expected.fingerprints);
+        assert_eq!(actual.bootstrap_client_id, expected.bootstrap_client_id);
+        let oracle =
+            WorkbookBase::from_model_with_legacy_dimensions_oracle(&patterned, &[], None).unwrap();
+        assert_eq!(oracle.fingerprints, actual.fingerprints);
+    }
+
+    #[test]
     fn fingerprint_style_overrides_preserve_signed_zero() {
         let mut case = open_test_cases::matrix().remove(0);
         case.model.styles.fonts[0].size_pt = Some(-0.0);
