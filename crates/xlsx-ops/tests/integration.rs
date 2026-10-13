@@ -273,7 +273,7 @@ fn range_style_and_number_format_are_undoable() {
 }
 
 #[test]
-fn clearing_a_style_only_cell_restores_sparse_storage() {
+fn clearing_a_style_only_cell_keeps_an_explicit_default_style() {
     let mut wb = Workbook::default();
     wb.sheets.push(Sheet::new("Sheet1"));
     let range = CellRange::parse_a1("A1").unwrap();
@@ -303,5 +303,7 @@ fn clearing_a_style_only_cell_restores_sparse_storage() {
         },
     )
     .unwrap();
-    assert!(wb.sheets[0].cell(r("A1")).is_none());
+    let cell = wb.sheets[0].cell(r("A1")).unwrap();
+    assert_eq!(cell.style, Some(0));
+    assert_eq!(cell.value, CellValue::Empty);
 }

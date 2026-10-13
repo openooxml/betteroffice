@@ -1084,7 +1084,7 @@ impl Codec for ChartAnchor {
     }
 }
 
-const BASE_SECTIONS: usize = 16;
+const BASE_SECTIONS: usize = 17;
 
 fn base_counts(base: &WorkbookBase) -> [usize; BASE_SECTIONS] {
     let WorkbookBase {
@@ -1096,6 +1096,7 @@ fn base_counts(base: &WorkbookBase) -> [usize; BASE_SECTIONS] {
         freeze_panes,
         formats,
         col_styles,
+        row_styles,
         hyperlinks,
         charts,
         hidden_dimensions,
@@ -1120,6 +1121,7 @@ fn base_counts(base: &WorkbookBase) -> [usize; BASE_SECTIONS] {
         styles.num_fmts.len(),
         styles.indexed_colors.len(),
         tables.len(),
+        row_styles.len(),
     ]
 }
 
@@ -1133,6 +1135,7 @@ fn write_manifest(base: &WorkbookBase, w: &mut Writer) {
         freeze_panes: _,
         formats: _,
         col_styles: _,
+        row_styles: _,
         hyperlinks: _,
         charts: _,
         hidden_dimensions: _,
@@ -1181,6 +1184,7 @@ impl BaseCursor {
             freeze_panes,
             formats,
             col_styles,
+            row_styles,
             hyperlinks,
             charts,
             hidden_dimensions,
@@ -1220,6 +1224,7 @@ impl BaseCursor {
             14 => styles.num_fmts[index].write(&mut w),
             15 => styles.indexed_colors[index].write(&mut w),
             16 => tables[index].write(&mut w),
+            17 => row_styles[index].write(&mut w),
             _ => unreachable!(),
         }
         if self.section == 0 {
@@ -1473,6 +1478,7 @@ enum BaseRecord {
     FreezePane(Option<FreezePane>),
     Format(SheetFormat),
     Columns(Vec<ColStyle>),
+    Rows(BTreeMap<u32, u32>),
     Hyperlinks(Vec<Hyperlink>),
     Charts(Vec<SheetChart>),
     Hidden(HiddenDimensions),
@@ -1494,7 +1500,10 @@ impl BaseRecord {
                 r.value::<DateSystem>()?;
                 r.value::<String>()?;
                 r.value::<Theme>()?;
-                for _ in 0..BASE_SECTIONS {
+                for index in 0..BASE_SECTIONS {
+                    if index == BASE_SECTIONS - 1 && r.complete && r.position == r.payload.len() {
+                        break;
+                    }
                     r.value::<usize>()?;
                 }
                 r.cost = r.cost.max(std::mem::size_of::<BaseManifest>());
@@ -1514,6 +1523,7 @@ impl BaseRecord {
             13 => r.value::<Xf>()?,
             14 => r.value::<(u16, String)>()?,
             16 => r.value::<Table>()?,
+            17 => r.value::<BTreeMap<u32, u32>>()?,
             _ => return Err(SnapshotError::new("invalid authority base section")),
         }
         Ok(r.cost)
@@ -1543,6 +1553,7 @@ impl BaseRecord {
             13 => Xf::decode_cost(),
             14 => <(u16, String)>::decode_cost(),
             16 => Table::decode_cost(),
+            17 => <BTreeMap<u32, u32>>::decode_cost(),
             _ => return Err(SnapshotError::new("invalid authority base section")),
         })
     }
@@ -1555,7 +1566,10 @@ impl BaseRecord {
                 r.prepare::<DateSystem>()?;
                 r.prepare::<String>()?;
                 r.prepare::<Theme>()?;
-                for _ in 0..BASE_SECTIONS {
+                for index in 0..BASE_SECTIONS {
+                    if index == BASE_SECTIONS - 1 && r.position == r.payload.len() {
+                        break;
+                    }
                     r.prepare::<usize>()?;
                 }
                 let cost = std::mem::size_of::<BaseManifest>();
@@ -1571,7 +1585,10 @@ impl BaseRecord {
                 let fingerprint = r.take()?;
                 let theme = r.take()?;
                 let mut counts = [0; BASE_SECTIONS];
-                for count in &mut counts {
+                for (index, count) in counts.iter_mut().enumerate() {
+                    if index == BASE_SECTIONS - 1 && r.position == r.payload.len() {
+                        break;
+                    }
                     *count = r.take()?;
                 }
                 Self::Manifest(Box::new(BaseManifest {
@@ -1598,6 +1615,7 @@ impl BaseRecord {
             14 => Self::NumberFormat(r.value()?),
             15 => Self::Color(r.value()?),
             16 => Self::Table(r.value()?),
+            17 => Self::Rows(r.value()?),
             _ => return Err(SnapshotError::new("invalid authority base section")),
         })
     }
@@ -1690,6 +1708,7 @@ impl BaseBuilder {
                     freeze_panes: Vec::new(),
                     formats: Vec::new(),
                     col_styles: Vec::new(),
+                    row_styles: Vec::new(),
                     hyperlinks: Vec::new(),
                     charts: Vec::new(),
                     hidden_dimensions: Vec::new(),
@@ -1709,6 +1728,7 @@ impl BaseBuilder {
                     BaseRecord::FreezePane(value) => base.freeze_panes.push(value),
                     BaseRecord::Format(value) => base.formats.push(value),
                     BaseRecord::Columns(value) => base.col_styles.push(value),
+                    BaseRecord::Rows(value) => base.row_styles.push(value),
                     BaseRecord::Hyperlinks(value) => base.hyperlinks.push(value),
                     BaseRecord::Charts(value) => base.charts.push(value),
                     BaseRecord::Hidden(value) => base.hidden_dimensions.push(value),
@@ -1756,7 +1776,10 @@ impl BaseBuilder {
             let fingerprint = Codec::read(&mut r)?;
             let theme = Codec::read(&mut r)?;
             let mut styles = Stylesheet::default();
-            for count in &mut self.counts {
+            for (index, count) in self.counts.iter_mut().enumerate() {
+                if index == BASE_SECTIONS - 1 && r.clone().rest().is_empty() {
+                    break;
+                }
                 *count = r.var_usize()?;
             }
             styles.theme = theme;
@@ -1769,6 +1792,7 @@ impl BaseBuilder {
                 freeze_panes: Vec::new(),
                 formats: Vec::new(),
                 col_styles: Vec::new(),
+                row_styles: Vec::new(),
                 hyperlinks: Vec::new(),
                 charts: Vec::new(),
                 hidden_dimensions: Vec::new(),
@@ -1812,6 +1836,7 @@ impl BaseBuilder {
                 14 => base.styles.num_fmts.push(Codec::read(&mut r)?),
                 15 => base.styles.indexed_colors.push(Codec::read(&mut r)?),
                 16 => base.tables.push(Codec::read(&mut r)?),
+                17 => base.row_styles.push(Codec::read(&mut r)?),
                 _ => return Err(SnapshotError::new("invalid authority base section")),
             }
             self.cursor.index += 1;
@@ -1849,6 +1874,7 @@ impl BaseBuilder {
             14 => g.ensure(base, |b| Ok(&mut b.styles.num_fmts), budget),
             15 => g.ensure(base, |b| Ok(&mut b.styles.indexed_colors), budget),
             16 => g.ensure(base, |b| Ok(&mut b.tables), budget),
+            17 => g.ensure(base, |b| Ok(&mut b.row_styles), budget),
             _ => Ok(true),
         }
     }

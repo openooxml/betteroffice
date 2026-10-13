@@ -2513,8 +2513,8 @@ impl Workbook {
         for row in range.start.row..=range.end.row {
             for col in range.start.col..=range.end.col {
                 let at = CellRef::new(row, col);
-                let style = sheet_ref.cell(at).and_then(|cell| cell.style);
-                formats.push((at, self.model.styles.cell_format(style)));
+                let style = sheet_ref.effective_style(at);
+                formats.push((at, self.model.styles.cell_format(Some(style.unwrap_or(0)))));
             }
         }
         Ok(formats)
@@ -2803,6 +2803,7 @@ impl Workbook {
                 | Op::SetFreezePane { sheet, .. }
                 | Op::SetHyperlinks { sheet, .. }
                 | Op::RestoreColStyles { sheet, .. }
+                | Op::RestoreRowStyles { sheet, .. }
                 | Op::MergeCells { sheet, .. }
                 | Op::UnmergeCells { sheet, .. }
                 | Op::PatchRangeStyle { sheet, .. }
@@ -3428,6 +3429,7 @@ fn worksheet_edit_target(op: &Op) -> Option<SheetId> {
         | Op::SetFreezePane { sheet, .. }
         | Op::SetHyperlinks { sheet, .. }
         | Op::RestoreColStyles { sheet, .. }
+        | Op::RestoreRowStyles { sheet, .. }
         | Op::SetCharts { sheet, .. }
         | Op::SetChartAnchor { sheet, .. }
         | Op::MergeCells { sheet, .. }
@@ -3573,7 +3575,8 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
         Op::RestoreSheet { .. }
         | Op::SetDefinedNames { .. }
         | Op::SetCharts { .. }
-        | Op::RestoreColStyles { .. } => {
+        | Op::RestoreColStyles { .. }
+        | Op::RestoreRowStyles { .. } => {
             return Err(Error::InvalidOperation(
                 "restore sheet operations are internal".to_string(),
             ));
@@ -3984,9 +3987,11 @@ fn edit_cell_state(
 ) -> CellState {
     let style = workbook
         .sheet(sheet)
-        .and_then(|sheet| sheet.cell(cell))
-        .and_then(|cell| cell.style);
-    let number_format = workbook.styles.resolved_format(style).number_format;
+        .and_then(|sheet| sheet.effective_style(cell));
+    let number_format = workbook
+        .styles
+        .resolved_format(Some(style.unwrap_or(0)))
+        .number_format;
     let mut state = if !input.is_empty()
         && matches!(
             number_format,
@@ -4001,7 +4006,13 @@ fn edit_cell_state(
     } else {
         cell_state_for_input_no_eval(input)
     };
-    state.style = style;
+    state.style = style.or_else(|| {
+        (input.is_empty()
+            && workbook
+                .sheet(sheet)
+                .is_some_and(|sheet| sheet.cell(cell).is_some()))
+        .then_some(0)
+    });
     state
 }
 
@@ -4405,6 +4416,7 @@ fn invalidates_proposals(op: &Op) -> bool {
             | Op::DeleteCols { .. }
             | Op::SetHyperlinks { .. }
             | Op::RestoreColStyles { .. }
+            | Op::RestoreRowStyles { .. }
             | Op::SetCharts { .. }
             | Op::AddSheet { .. }
             | Op::RemoveSheet { .. }

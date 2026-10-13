@@ -51,6 +51,8 @@ const STRUCTURE_GENERATION: &str = "structureGeneration";
 const CHARTS: &str = "charts";
 const CONTENTS: &str = "contents";
 const COL_WIDTHS: &str = "colWidths";
+const COL_STYLES: &str = "colStyles";
+const ROW_STYLES: &str = "rowStyles";
 const FREEZE_PANE: &str = "freezePane";
 const HYPERLINKS: &str = "hyperlinks";
 const MERGES: &str = "merges";
@@ -140,6 +142,7 @@ struct WorkbookBase {
     freeze_panes: Vec<Option<FreezePane>>,
     formats: Vec<SheetFormat>,
     col_styles: Vec<Vec<ColStyle>>,
+    row_styles: Vec<BTreeMap<u32, u32>>,
     hyperlinks: Vec<Vec<Hyperlink>>,
     charts: Vec<Vec<SheetChart>>,
     hidden_dimensions: Vec<HiddenDimensions>,
@@ -185,6 +188,11 @@ impl WorkbookBase {
                 .sheets
                 .iter()
                 .map(|sheet| sheet.col_styles.clone())
+                .collect(),
+            row_styles: model
+                .sheets
+                .iter()
+                .map(|sheet| sheet.row_styles.clone())
                 .collect(),
             hyperlinks: model
                 .sheets
@@ -297,6 +305,11 @@ impl WorkbookBase {
                 .sheets
                 .iter()
                 .map(|sheet| sheet.col_styles.clone())
+                .collect(),
+            row_styles: model
+                .sheets
+                .iter()
+                .map(|sheet| sheet.row_styles.clone())
                 .collect(),
             hyperlinks: model
                 .sheets
@@ -572,6 +585,7 @@ impl WorkbookAuthority {
             .map_err(|error| crate::snapshot::SnapshotError::new(error.to_string()))?;
         writer.bytes(&styles);
         writer.bytes(&self.encode_state_as_update_v1());
+        base.row_styles.write(&mut writer);
         Ok(writer.into_bytes())
     }
 
@@ -587,7 +601,7 @@ impl WorkbookAuthority {
             return Err(SnapshotError::new("Recovery client id is out of range"));
         }
         let mut reader = Reader::new(bytes);
-        let base = WorkbookBase {
+        let mut base = WorkbookBase {
             bootstrap_client_id: Codec::read(&mut reader)?,
             date_system: Codec::read(&mut reader)?,
             defined_names: Codec::read(&mut reader)?,
@@ -596,6 +610,7 @@ impl WorkbookAuthority {
             freeze_panes: Codec::read(&mut reader)?,
             formats: Codec::read(&mut reader)?,
             col_styles: Codec::read(&mut reader)?,
+            row_styles: Vec::new(),
             hyperlinks: Codec::read(&mut reader)?,
             charts: Codec::read(&mut reader)?,
             hidden_dimensions: Codec::read(&mut reader)?,
@@ -610,6 +625,9 @@ impl WorkbookAuthority {
             ));
         }
         let update = reader.bytes()?;
+        if !reader.clone().rest().is_empty() {
+            base.row_styles = Codec::read(&mut reader)?;
+        }
         reader.finish()?;
         let doc = loop {
             let candidate = Doc::new();
@@ -926,7 +944,7 @@ impl WorkbookAuthority {
         }
         let authored_styles = nested_map(&sheet_map, &txn, STYLES).ok()?;
         let prior_style = match authored_styles.get(&txn, &key) {
-            Some(value) => *indices.get(&value.cast::<String>().ok()?)?,
+            Some(value) => Some(indices.get(&value.cast::<String>().ok()?)?.unwrap_or(0)),
             None => None,
         };
         let remapped = remap_styles(ops, source, &mut styles).ok()?;
@@ -1631,6 +1649,9 @@ impl WorkbookAuthority {
                 .and_then(|base| self.base.col_styles.get(base))
                 .map(Vec::as_slice)
                 .unwrap_or_default();
+            let row_styles = base_sheet
+                .and_then(|base| self.base.row_styles.get(base))
+                .unwrap_or(&EMPTY_ROW_STYLES);
             let hyperlinks = base_sheet
                 .and_then(|base| self.base.hyperlinks.get(base))
                 .map(Vec::as_slice)
@@ -1651,6 +1672,7 @@ impl WorkbookAuthority {
                     freeze_pane,
                     format,
                     col_styles,
+                    row_styles,
                     hyperlinks,
                     charts,
                     hidden_dimensions,
@@ -2064,6 +2086,7 @@ pub(crate) fn is_structural_op(op: &Op) -> bool {
             | Op::SetFreezePane { .. }
             | Op::SetHyperlinks { .. }
             | Op::RestoreColStyles { .. }
+            | Op::RestoreRowStyles { .. }
             | Op::MergeCells { .. }
             | Op::UnmergeCells { .. }
             | Op::AddSheet { .. }
@@ -2867,6 +2890,7 @@ fn requires_full_semantic_sync(op: &Op) -> bool {
             | Op::SetFreezePane { .. }
             | Op::SetHyperlinks { .. }
             | Op::RestoreColStyles { .. }
+            | Op::RestoreRowStyles { .. }
             | Op::SetCharts { .. }
             | Op::SetChartAnchor { .. }
             | Op::RemoveSheet { .. }
@@ -2961,6 +2985,7 @@ fn op_sheet(op: &Op) -> Option<SheetId> {
         | Op::SetFreezePane { sheet, .. }
         | Op::SetHyperlinks { sheet, .. }
         | Op::RestoreColStyles { sheet, .. }
+        | Op::RestoreRowStyles { sheet, .. }
         | Op::SetCharts { sheet, .. }
         | Op::SetChartAnchor { sheet, .. }
         | Op::MergeCells { sheet, .. }
@@ -3055,6 +3080,26 @@ fn sync_sheet(
 ) -> Result<(), String> {
     let col_widths: MapRef = sheet_map.get_or_init(txn, COL_WIDTHS);
     let contents: MapRef = sheet_map.get_or_init(txn, CONTENTS);
+    if !sheet.row_styles.is_empty() || sheet_map.get(txn, ROW_STYLES).is_some() {
+        let rows = sheet
+            .row_styles
+            .iter()
+            .map(|(&row, &style)| Any::Array(vec![Any::from(row), Any::from(style)].into()))
+            .collect::<Vec<_>>();
+        sheet_map.try_update(txn, ROW_STYLES, Any::Array(rows.into()));
+    }
+    if !sheet.col_styles.is_empty() || sheet_map.get(txn, COL_STYLES).is_some() {
+        let columns = sheet
+            .col_styles
+            .iter()
+            .map(|run| {
+                Any::Array(
+                    vec![Any::from(run.first), Any::from(run.last), Any::from(run.xf)].into(),
+                )
+            })
+            .collect::<Vec<_>>();
+        sheet_map.try_update(txn, COL_STYLES, Any::Array(columns.into()));
+    }
     sheet_map.try_update(txn, FREEZE_PANE, freeze_pane_to_any(sheet.freeze_pane));
     let hyperlinks = serde_json::to_string(&sheet.hyperlinks)
         .map_err(|error| format!("cannot encode sheet hyperlinks: {error}"))?;
@@ -3234,7 +3279,7 @@ fn remap_styles<'a>(
         if let Some(&known) = mapped.get(&index) {
             return Ok(known);
         }
-        if source.xf(index).is_none() {
+        if index != 0 && source.xf(index).is_none() {
             return Err(format!("cell style index {index} is out of range"));
         }
         let format = source.cell_format(Some(index));
@@ -3250,6 +3295,7 @@ fn remap_styles<'a>(
                     .map_err(|_| "number format table is full".to_string())?,
             }
         };
+        let resolved = Some(resolved.unwrap_or(0));
         mapped.insert(index, resolved);
         Ok(resolved)
     };
@@ -3382,6 +3428,7 @@ struct SheetFallbacks<'a> {
     freeze_pane: Option<FreezePane>,
     format: SheetFormat,
     col_styles: &'a [ColStyle],
+    row_styles: &'a BTreeMap<u32, u32>,
     hyperlinks: &'a [Hyperlink],
     charts: &'a [SheetChart],
     hidden_dimensions: &'a HiddenDimensions,
@@ -3393,6 +3440,7 @@ impl Default for SheetFallbacks<'_> {
             freeze_pane: None,
             format: SheetFormat::default(),
             col_styles: &[],
+            row_styles: &EMPTY_ROW_STYLES,
             hyperlinks: &[],
             charts: &[],
             hidden_dimensions: &EMPTY_HIDDEN_DIMENSIONS,
@@ -3430,7 +3478,7 @@ fn materialize_sheet<T: ReadTxn>(
         let style = style_indices
             .get(&style_key)
             .ok_or_else(|| format!("cell style {key} references an unknown format"))?;
-        cells.entry((at.row, at.col)).or_default().style = *style;
+        cells.entry((at.row, at.col)).or_default().style = Some(style.unwrap_or(0));
     }
     sheet.adopt_cells(cells);
     sheet.col_widths = materialize_numbers(
@@ -3455,6 +3503,8 @@ fn materialize_sheet<T: ReadTxn>(
     }
     sheet.format = fallbacks.format;
     sheet.col_styles = fallbacks.col_styles.to_vec();
+    sheet.row_styles = fallbacks.row_styles.clone();
+    materialize_style_defaults(&mut sheet, sheet_map, txn)?;
     sheet.freeze_pane = match (version, sheet_map.get(txn, FREEZE_PANE)) {
         (FREEZE_PANE_SCHEMA_VERSION.., Some(Out::Any(value))) => freeze_pane_from_any(&value)?,
         (FREEZE_PANE_SCHEMA_VERSION.., _) => {
@@ -3638,7 +3688,7 @@ fn sheet_schema_keys(version: i64) -> &'static [&'static str] {
 /// source package holds rather than failing the whole workbook.
 fn sheet_schema_optional_keys(version: i64) -> &'static [&'static str] {
     const NONE: &[&str] = &[];
-    const V6: &[&str] = &[CHARTS];
+    const V6: &[&str] = &[CHARTS, ROW_STYLES, COL_STYLES];
     if version >= CHARTS_SCHEMA_VERSION {
         V6
     } else {
@@ -3972,6 +4022,64 @@ struct HiddenDimensions {
     row_heights: BTreeMap<u32, f64>,
 }
 
+static EMPTY_ROW_STYLES: BTreeMap<u32, u32> = BTreeMap::new();
+
+fn materialize_style_defaults<T: ReadTxn>(
+    sheet: &mut Sheet,
+    map: &MapRef,
+    txn: &T,
+) -> Result<(), String> {
+    if let Some(Out::Any(value)) = map.get(txn, ROW_STYLES) {
+        let rows = any_values(&value, "row styles")?;
+        if rows.len() > xlsx_parse::MAX_ROW_STYLES {
+            return Err("row style count exceeded cap".into());
+        }
+        sheet.row_styles.clear();
+        for value in rows {
+            let row = any_values(value, "row style")?;
+            if row.len() != 2 {
+                return Err("invalid row style".into());
+            }
+            let index = any_u32(&row[0], "row index")?;
+            let style = any_u32(&row[1], "row style")?;
+            if index >= MAX_ROWS
+                || sheet
+                    .row_styles
+                    .last_key_value()
+                    .is_some_and(|(&last, _)| index <= last)
+            {
+                return Err("row styles are out of range or reordered".into());
+            }
+            sheet.row_styles.insert(index, style);
+        }
+    } else if map.get(txn, ROW_STYLES).is_some() {
+        return Err("invalid row styles".into());
+    }
+    if let Some(Out::Any(value)) = map.get(txn, COL_STYLES) {
+        let columns = any_values(&value, "column styles")?;
+        if columns.len() > xlsx_parse::MAX_COL_STYLES {
+            return Err("column style count exceeded cap".into());
+        }
+        sheet.col_styles.clear();
+        for value in columns {
+            let run = any_values(value, "column style")?;
+            if run.len() != 3 {
+                return Err("invalid column style".into());
+            }
+            let first = any_u32(&run[0], "first column")?;
+            let last = any_u32(&run[1], "last column")?;
+            let xf = any_u32(&run[2], "column style")?;
+            if first > last || last >= MAX_COLS {
+                return Err("column styles are out of range".into());
+            }
+            sheet.col_styles.push(ColStyle { first, last, xf });
+        }
+    } else if map.get(txn, COL_STYLES).is_some() {
+        return Err("invalid column styles".into());
+    }
+    Ok(())
+}
+
 static EMPTY_HIDDEN_DIMENSIONS: HiddenDimensions = HiddenDimensions {
     col_widths: BTreeMap::new(),
     row_heights: BTreeMap::new(),
@@ -4136,7 +4244,7 @@ impl<'a> FingerprintBuilder<'a> {
             has_col_styles: model
                 .sheets
                 .iter()
-                .any(|sheet| !sheet.col_styles.is_empty()),
+                .any(|sheet| !sheet.col_styles.is_empty() || !sheet.row_styles.is_empty()),
             styles: Vec::new(),
             style_bytes: Vec::new(),
             hashes: BTreeMap::new(),
@@ -4296,6 +4404,12 @@ fn fingerprint_model_with_overrides(
             .sheets
             .iter()
             .any(|sheet| !sheet.col_styles.is_empty());
+    let hash_row_styles = include_col_styles
+        && schema_version >= CHARTS_SCHEMA_VERSION
+        && model
+            .sheets
+            .iter()
+            .any(|sheet| !sheet.row_styles.is_empty());
     for (index, sheet) in model.sheets.iter().enumerate() {
         let (col_widths, row_heights) = match legacy_dimensions.get(index) {
             Some(legacy) => (&legacy.col_widths, &legacy.row_heights),
@@ -4362,6 +4476,11 @@ fn fingerprint_model_with_overrides(
             let col_styles = serde_json::to_vec(&sheet.col_styles)
                 .map_err(|error| format!("cannot fingerprint sheet column styles: {error}"))?;
             hash_bytes(&mut hasher, &col_styles);
+        }
+        if hash_row_styles {
+            let rows = serde_json::to_vec(&sheet.row_styles)
+                .map_err(|error| format!("cannot fingerprint sheet row styles: {error}"))?;
+            hash_bytes(&mut hasher, &rows);
         }
     }
     let digest = hasher.finalize();
@@ -4549,6 +4668,9 @@ impl WorkbookAuthority {
                 .and_then(|base| self.base.col_styles.get(base))
                 .map(Vec::as_slice)
                 .unwrap_or_default();
+            let row_styles = base_sheet
+                .and_then(|base| self.base.row_styles.get(base))
+                .unwrap_or(&EMPTY_ROW_STYLES);
             let hyperlinks = base_sheet
                 .and_then(|base| self.base.hyperlinks.get(base))
                 .map(Vec::as_slice)
@@ -4569,6 +4691,7 @@ impl WorkbookAuthority {
                     freeze_pane,
                     format,
                     col_styles,
+                    row_styles,
                     hyperlinks,
                     charts,
                     hidden_dimensions,
@@ -4667,7 +4790,7 @@ fn materialize_sheet_oracle<T: ReadTxn>(
         let style = style_indices
             .get(&style_key)
             .ok_or_else(|| format!("cell style {key} references an unknown format"))?;
-        cells.entry((at.row, at.col)).or_default().style = *style;
+        cells.entry((at.row, at.col)).or_default().style = Some(style.unwrap_or(0));
     }
     for ((row, col), cell) in cells {
         sheet.set_cell(CellRef::new(row, col), cell);
@@ -4694,6 +4817,8 @@ fn materialize_sheet_oracle<T: ReadTxn>(
     }
     sheet.format = fallbacks.format;
     sheet.col_styles = fallbacks.col_styles.to_vec();
+    sheet.row_styles = fallbacks.row_styles.clone();
+    materialize_style_defaults(&mut sheet, sheet_map, txn)?;
     sheet.freeze_pane = match (version, sheet_map.get(txn, FREEZE_PANE)) {
         (FREEZE_PANE_SCHEMA_VERSION.., Some(Out::Any(value))) => freeze_pane_from_any(&value)?,
         (FREEZE_PANE_SCHEMA_VERSION.., _) => {
@@ -4765,6 +4890,12 @@ fn fingerprint_model_with_schema_oracle(
             .sheets
             .iter()
             .any(|sheet| !sheet.col_styles.is_empty());
+    let hash_row_styles = include_col_styles
+        && schema_version >= CHARTS_SCHEMA_VERSION
+        && model
+            .sheets
+            .iter()
+            .any(|sheet| !sheet.row_styles.is_empty());
     for sheet in &model.sheets {
         hash_bytes(&mut hasher, sheet.name.as_bytes());
         hash_u64(&mut hasher, sheet.iter_cells().count() as u64);
@@ -4827,6 +4958,11 @@ fn fingerprint_model_with_schema_oracle(
             let col_styles = serde_json::to_vec(&sheet.col_styles)
                 .map_err(|error| format!("cannot fingerprint sheet column styles: {error}"))?;
             hash_bytes(&mut hasher, &col_styles);
+        }
+        if hash_row_styles {
+            let rows = serde_json::to_vec(&sheet.row_styles)
+                .map_err(|error| format!("cannot fingerprint sheet row styles: {error}"))?;
+            hash_bytes(&mut hasher, &rows);
         }
     }
     let digest = hasher.finalize();

@@ -154,6 +154,14 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
                 styles: old,
             }]))
         }
+        Op::RestoreRowStyles { sheet, styles } => {
+            let s = sheet_mut(wb, *sheet)?;
+            let old = std::mem::replace(&mut s.row_styles, styles.clone());
+            Ok(InvertedOp(vec![Op::RestoreRowStyles {
+                sheet: *sheet,
+                styles: old,
+            }]))
+        }
         Op::SetCharts { sheet, charts } => {
             let sheet_ref = sheet_mut(wb, *sheet)?;
             let old = std::mem::replace(&mut sheet_ref.charts, charts.clone());
@@ -376,30 +384,23 @@ fn apply_range_formats(
     {
         let sheet_ref = &wb.sheets[sheet.0 as usize];
         let styles = &mut wb.styles;
-        let mut occupied = sheet_ref
-            .iter_cells_in_rect(
-                range.start.row..range.end.row.saturating_add(1),
-                range.start.col..range.end.col.saturating_add(1),
-            )
-            .peekable();
         for row in range.start.row..=range.end.row {
             for col in range.start.col..=range.end.col {
                 let at = CellRef::new(row, col);
-                let old_style = if occupied
-                    .peek()
-                    .is_some_and(|(candidate, _)| (candidate.row, candidate.col) == (row, col))
-                {
-                    occupied.next().and_then(|(_, cell)| cell.style)
-                } else {
-                    None
-                };
-                let mut format = styles.cell_format(old_style);
+                let old_style = sheet_ref.effective_style(at);
+                let mut format = styles.cell_format(Some(old_style.unwrap_or(0)));
                 if let Err(error) = update(&mut format, at.row, at.col) {
                     styles.restore_pools(marks);
                     return Err(error);
                 }
                 match styles.intern_cell_format(&format) {
-                    Ok(style) => staged.push(style),
+                    Ok(style) => staged.push(style.or_else(|| {
+                        (sheet_ref.cell(at).is_some()
+                            || old_style.is_some()
+                            || sheet_ref.row_styles.contains_key(&at.row)
+                            || sheet_ref.col_style(at.col).is_some())
+                        .then_some(0)
+                    })),
                     Err(_) => {
                         styles.restore_pools(marks);
                         return Err(OpError::NumFmtTableFull);
@@ -565,11 +566,44 @@ fn insert_rows(
     let s = sheet_mut(wb, sheet)?;
     let old_hyperlinks = s.hyperlinks.clone();
     let dropped = shift_cells(s, op);
+    let old_row_styles = s.row_styles.clone();
+    let inherited = at
+        .checked_sub(1)
+        .and_then(|row| s.row_styles.get(&row))
+        .copied();
+    let retained = s
+        .row_styles
+        .keys()
+        .filter(|&&row| insert_axis(row, at, count, MAX_ROWS).is_some())
+        .count();
+    let added = if inherited.is_some() {
+        count.min(MAX_ROWS.saturating_sub(at)) as usize
+    } else {
+        0
+    };
+    if retained.saturating_add(added) > xlsx_model::workbook::MAX_ROW_STYLES {
+        return Err(OpError::InvalidStyle("row style count exceeded cap".into()));
+    }
+    s.row_styles = std::mem::take(&mut s.row_styles)
+        .into_iter()
+        .filter_map(|(row, style)| insert_axis(row, at, count, MAX_ROWS).map(|row| (row, style)))
+        .collect();
+    if let Some(style) = inherited {
+        for row in at..at.saturating_add(count).min(MAX_ROWS) {
+            s.row_styles.insert(row, style);
+        }
+    }
     shift_row_heights_up(s, at, count);
     remap_merges_keep(s, op);
     remap_hyperlinks(s, op);
 
     let mut inv = vec![Op::DeleteRows { sheet, at, count }];
+    if !old_row_styles.is_empty() {
+        inv.push(Op::RestoreRowStyles {
+            sheet,
+            styles: old_row_styles,
+        });
+    }
     for (r, c) in dropped {
         inv.push(Op::SetCell {
             sheet,
@@ -603,11 +637,22 @@ fn delete_rows(
     let s = sheet_mut(wb, sheet)?;
     let old_hyperlinks = s.hyperlinks.clone();
     let deleted = shift_cells(s, op);
+    let old_row_styles = s.row_styles.clone();
+    s.row_styles = std::mem::take(&mut s.row_styles)
+        .into_iter()
+        .filter_map(|(row, style)| delete_axis(row, at, count).map(|row| (row, style)))
+        .collect();
     let dropped_heights = shift_row_heights_down(s, at, count);
     let dropped_merges = remap_merges_drop(s, op);
     remap_hyperlinks(s, op);
 
     let mut inv = vec![Op::InsertRows { sheet, at, count }];
+    if !old_row_styles.is_empty() {
+        inv.push(Op::RestoreRowStyles {
+            sheet,
+            styles: old_row_styles,
+        });
+    }
     for (r, c) in deleted {
         inv.push(Op::SetCell {
             sheet,
@@ -812,24 +857,36 @@ fn shift_col_widths_down(s: &mut Sheet, at: ColId, count: u32) -> Vec<(ColId, f6
     dropped
 }
 
-/// a run the insert splits widens over the new columns; a run that ends where
-/// the insert begins does not extend, matching how the widths beside it shift.
 fn shift_col_styles_up(s: &mut Sheet, at: ColId, count: u32) {
-    let last_col = MAX_COLS.saturating_sub(1);
-    for run in &mut s.col_styles {
+    if count == 0 {
+        return;
+    }
+    let inherited = at.checked_sub(1).and_then(|col| s.col_style(col));
+    s.col_styles.retain_mut(|run| {
         if run.last < at {
-            continue;
+            return true;
         }
         if run.first >= at {
-            run.first = run.first.saturating_add(count).min(last_col);
+            let Some(first) = insert_axis(run.first, at, count, MAX_COLS) else {
+                return false;
+            };
+            run.first = first;
         }
-        run.last = run.last.saturating_add(count).min(last_col);
+        run.last = run.last.saturating_add(count).min(MAX_COLS - 1);
+        true
+    });
+    if let Some(xf) = inherited
+        && at < MAX_COLS
+        && s.col_style(at) != Some(xf)
+    {
+        s.col_styles.push(xlsx_model::ColStyle {
+            first: at,
+            last: at.saturating_add(count - 1).min(MAX_COLS - 1),
+            xf,
+        });
     }
 }
 
-/// a run the delete consumes entirely is dropped; one it clips keeps the
-/// columns that survive. the inverse insert widens a clipped run back, but no
-/// op carries column styles, so a consumed run does not return on undo.
 fn shift_col_styles_down(s: &mut Sheet, at: ColId, count: u32) {
     let end = at.saturating_add(count);
     s.col_styles.retain_mut(|run| {
@@ -975,6 +1032,12 @@ fn remove_sheet(wb: &mut Workbook, index: usize) -> Result<InvertedOp, OpError> 
         inv.push(Op::RestoreColStyles {
             sheet,
             styles: removed.col_styles,
+        });
+    }
+    if !removed.row_styles.is_empty() {
+        inv.push(Op::RestoreRowStyles {
+            sheet,
+            styles: removed.row_styles,
         });
     }
     if !removed.charts.is_empty() {

@@ -605,6 +605,8 @@ impl SnapshotValidation {
             self.format_keys.insert(key.clone());
             if index != 0 {
                 self.style_keys.insert(index - 1, key);
+            } else if model.styles.cell_xfs.is_empty() {
+                self.style_keys.insert(0, key);
             }
             self.style_index += 1;
             return Ok(false);
@@ -957,13 +959,14 @@ impl SnapshotValidation {
                     self.field += 1;
                     return Ok(false);
                 }
-                if (required.len() + 4..=required.len() + 5).contains(&self.field)
-                    && self.version < SCHEMA_VERSION
-                {
+                if (required.len() + 4..=required.len() + 5).contains(&self.field) {
                     let columns = self.field == required.len() + 4;
-                    if let Some(hidden) = base
-                        .hidden_dimensions
-                        .get(base_sheet_index(&key).unwrap_or(usize::MAX))
+                    if let Some(hidden) = (self.version < SCHEMA_VERSION)
+                        .then(|| {
+                            base.hidden_dimensions
+                                .get(base_sheet_index(&key).unwrap_or(usize::MAX))
+                        })
+                        .flatten()
                     {
                         let values = if columns {
                             &hidden.col_widths
@@ -999,6 +1002,85 @@ impl SnapshotValidation {
                     }
                     allowance(64, budget, &mut self.unit_bytes)?;
                     self.dimension = None;
+                    self.field += 1;
+                    return Ok(false);
+                }
+                if (required.len() + 6..=required.len() + 7).contains(&self.field) {
+                    allowance(256, budget, &mut self.unit_bytes)?;
+                    let rows = self.field == required.len() + 6;
+                    let field = if rows { ROW_STYLES } else { COL_STYLES };
+                    if let Some(value) = map.get(&txn, field) {
+                        let Out::Any(value) = value else {
+                            return Err(invalid());
+                        };
+                        let values =
+                            any_values(&value, "style defaults").map_err(SnapshotError::new)?;
+                        let count = if rows {
+                            sheet.row_styles.len()
+                        } else {
+                            sheet.col_styles.len()
+                        };
+                        if values.len() != count {
+                            return Err(invalid());
+                        }
+                        if let Some(value) = values.get(self.metadata_child) {
+                            let entry =
+                                any_values(value, "style default").map_err(SnapshotError::new)?;
+                            if rows {
+                                let next = match self.dimension {
+                                    Some(after) => {
+                                        sheet.row_styles.range((Excluded(after), Unbounded)).next()
+                                    }
+                                    None => sheet.row_styles.first_key_value(),
+                                }
+                                .ok_or_else(invalid)?;
+                                if entry.len() != 2
+                                    || any_u32(&entry[0], "row").map_err(SnapshotError::new)?
+                                        != *next.0
+                                    || any_u32(&entry[1], "style").map_err(SnapshotError::new)?
+                                        != *next.1
+                                {
+                                    return Err(invalid());
+                                }
+                                self.dimension = Some(*next.0);
+                            } else {
+                                let run = &sheet.col_styles[self.metadata_child];
+                                if entry.len() != 3
+                                    || any_u32(&entry[0], "first").map_err(SnapshotError::new)?
+                                        != run.first
+                                    || any_u32(&entry[1], "last").map_err(SnapshotError::new)?
+                                        != run.last
+                                    || any_u32(&entry[2], "style").map_err(SnapshotError::new)?
+                                        != run.xf
+                                {
+                                    return Err(invalid());
+                                }
+                            }
+                            self.metadata_child += 1;
+                            return Ok(false);
+                        }
+                    } else if rows {
+                        let left = base
+                            .row_styles
+                            .get(base_sheet_index(&key).unwrap_or(usize::MAX))
+                            .unwrap_or(&EMPTY_ROW_STYLES);
+                        if left.len() != sheet.row_styles.len() {
+                            return Err(invalid());
+                        }
+                        let next = match self.dimension {
+                            Some(after) => left.range((Excluded(after), Unbounded)).next(),
+                            None => left.first_key_value(),
+                        };
+                        if let Some((&row, &style)) = next {
+                            if sheet.row_styles.get(&row) != Some(&style) {
+                                return Err(invalid());
+                            }
+                            self.dimension = Some(row);
+                            return Ok(false);
+                        }
+                    }
+                    self.dimension = None;
+                    self.metadata_child = 0;
                     self.field += 1;
                     return Ok(false);
                 }
@@ -1133,7 +1215,7 @@ impl SnapshotValidation {
                                                 .cell(at)
                                                 .and_then(|cell| cell.style)
                                                 .ok_or_else(invalid)?;
-                                            if style as usize >= base.styles.cell_xfs.len() {
+                                            if style as usize >= base.styles.cell_xfs.len().max(1) {
                                                 return Err(SnapshotError::new(
                                                     "snapshot authority and model disagree: cell style index exceeds the authority base",
                                                 ));
@@ -1198,7 +1280,7 @@ impl SnapshotValidation {
                     allowance(256, budget, &mut self.unit_bytes)?;
                     if cell
                         .style
-                        .is_some_and(|style| style as usize >= base.styles.cell_xfs.len())
+                        .is_some_and(|style| style as usize >= base.styles.cell_xfs.len().max(1))
                     {
                         return Err(SnapshotError::new(
                             "snapshot authority and model disagree: cell style index exceeds the authority base",
@@ -1295,7 +1377,7 @@ impl SnapshotValidation {
             self.phase = 4;
         }
         if self.phase == 4 {
-            if !self.advance_base(base, model, budget)? {
+            if !self.advance_base(&authority.doc, base, model, budget)? {
                 return Ok(false);
             }
             self.phase = 5;
@@ -1394,6 +1476,7 @@ fn color_bytes(color: &xlsx_model::styles::Color) -> usize {
 impl SnapshotValidation {
     fn advance_base(
         &mut self,
+        doc: &Doc,
         base: &WorkbookBase,
         model: &WorkbookModel,
         budget: SnapshotBudget,
@@ -1520,6 +1603,17 @@ impl SnapshotValidation {
             5 => {
                 if let Some(sheet) = model.sheets.get(index) {
                     let key = self.sheet_keys.get(&index).ok_or_else(invalid)?;
+                    let txn = doc.transact();
+                    let sheets = txn.get_map(SHEETS).ok_or_else(invalid)?;
+                    let map = sheets
+                        .get(&txn, key.as_ref())
+                        .and_then(|value| value.cast::<MapRef>().ok())
+                        .ok_or_else(invalid)?;
+                    if map.get(&txn, COL_STYLES).is_some() {
+                        allowance(64, budget, &mut self.unit_bytes)?;
+                        self.base_index += 1;
+                        return Ok(false);
+                    }
                     let left = base
                         .col_styles
                         .get(base_sheet_index(key).unwrap_or(usize::MAX))
