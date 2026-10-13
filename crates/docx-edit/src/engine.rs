@@ -30,8 +30,9 @@ use docx_layout::regions::{
     apply_section_geometry, apply_section_geometry_to_blocks, effective_header_footer_refs,
 };
 use docx_layout::types::{
-    BlockExtent, BlockId, ColumnLayout, Fragment, Input as LayoutInput, Layout, LayoutBlock,
-    MeasuredBlock, NoteAreaContract, ParagraphExtent, Run, SectionBreakType, SectionPageMargins,
+    BlockExtent, BlockId, ColumnLayout, Fragment, HeaderFooterRefs, Input as LayoutInput, Layout,
+    LayoutBlock, MeasuredBlock, NoteAreaContract, ParagraphExtent, Run, SectionBreakType,
+    SectionPageMargins,
 };
 use ooxml_text::measure::{FontChainDependencies, FontChains};
 use serde::Serialize;
@@ -1373,6 +1374,48 @@ where
     Err(docx_layout::LayoutError::Invalid(
         "anchored shape wrapping did not converge".to_owned(),
     ))
+}
+
+/// Each header and footer variant `section` shows, with the story it takes.
+fn header_footer_descriptors(
+    section: &docx_layout::regions::RegionSection,
+    refs: HeaderFooterRefs,
+) -> [(HeaderFooterKind, HeaderFooterType, Option<String>); 6] {
+    let title_page = section.title_pg;
+    [
+        (
+            HeaderFooterKind::Header,
+            HeaderFooterType::Default,
+            refs.header_default
+                .or_else(|| (!title_page).then_some(refs.header_first.clone()).flatten()),
+        ),
+        (
+            HeaderFooterKind::Header,
+            HeaderFooterType::First,
+            title_page.then_some(refs.header_first).flatten(),
+        ),
+        (
+            HeaderFooterKind::Header,
+            HeaderFooterType::Even,
+            refs.header_even,
+        ),
+        (
+            HeaderFooterKind::Footer,
+            HeaderFooterType::Default,
+            refs.footer_default
+                .or_else(|| (!title_page).then_some(refs.footer_first.clone()).flatten()),
+        ),
+        (
+            HeaderFooterKind::Footer,
+            HeaderFooterType::First,
+            title_page.then_some(refs.footer_first).flatten(),
+        ),
+        (
+            HeaderFooterKind::Footer,
+            HeaderFooterType::Even,
+            refs.footer_even,
+        ),
+    ]
 }
 
 /// Widens each section's margins by its headers and footers. An input cut inside
@@ -5930,22 +5973,24 @@ impl EngineSession {
             return false;
         }
         let mut stories = BTreeSet::new();
-        for section in 0..regions.sections.len() {
-            if let Some(refs) = effective_header_footer_refs(regions, section) {
-                stories.extend(
-                    [
-                        refs.header_default,
-                        refs.header_first,
-                        refs.header_even,
-                        refs.footer_default,
-                        refs.footer_first,
-                        refs.footer_even,
-                    ]
-                    .into_iter()
-                    .flatten()
-                    .map(|r_id| self.doc.header_footer_story(&r_id)),
-                );
-            }
+        for refs in regions
+            .sections
+            .iter()
+            .filter_map(|section| section.header_footer_refs.clone())
+        {
+            stories.extend(
+                [
+                    refs.header_default,
+                    refs.header_first,
+                    refs.header_even,
+                    refs.footer_default,
+                    refs.footer_first,
+                    refs.footer_even,
+                ]
+                .into_iter()
+                .flatten()
+                .map(|r_id| self.doc.header_footer_story(&r_id)),
+            );
         }
         stories.iter().all(|story| {
             self.with_resident_story(story, env, |blocks| {
@@ -7718,6 +7763,47 @@ impl EngineSession {
         Ok(separator_heights)
     }
 
+    /// Whether a section from `from` on shows a header or footer, as measuring
+    /// it would find; header extension then applies to every section.
+    fn shows_header_or_footer_from(
+        &self,
+        regions: &DocumentRegions,
+        from: usize,
+        render_env: &RenderEnv,
+    ) -> Result<bool, String> {
+        if from >= regions.sections.len() {
+            return Ok(false);
+        }
+        let mut refs = HeaderFooterRefs::default();
+        let mut stories: HashMap<String, bool> = HashMap::new();
+        for (index, section) in regions.sections.iter().enumerate() {
+            if let Some(authored) = &section.header_footer_refs {
+                refs.inherit(authored);
+            }
+            if index < from {
+                continue;
+            }
+            for (.., r_id) in header_footer_descriptors(section, refs.clone()) {
+                let Some(r_id) = r_id else {
+                    continue;
+                };
+                let shown = match stories.get(&r_id) {
+                    Some(&shown) => shown,
+                    None => {
+                        let story = self.doc.header_footer_story(&r_id);
+                        self.with_resident_story(&story, render_env, |blocks| !blocks.is_empty())
+                            .map_err(|error| error.to_string())?
+                    }
+                };
+                if shown {
+                    return Ok(true);
+                }
+                stories.insert(r_id, shown);
+            }
+        }
+        Ok(false)
+    }
+
     fn measure_header_footer_payload(
         &self,
         input: &mut LayoutInput,
@@ -7727,7 +7813,9 @@ impl EngineSession {
         cut: Option<usize>,
     ) -> Result<Option<HeaderFooterPayload>, String> {
         let mut variants = Vec::new();
-        for section_index in 0..regions.sections.len() {
+        let sections = regions.sections.len();
+        let measured = cut.map_or(sections, |cut| (cut + 1).min(sections));
+        for section_index in 0..measured {
             let Some(refs) = effective_header_footer_refs(regions, section_index) else {
                 continue;
             };
@@ -7744,46 +7832,7 @@ impl EngineSession {
                 section.margins.as_ref().or(input.options.margins.as_ref()),
             );
             let content_width = (page_size.w - margins.left - margins.right).max(1.0);
-            let descriptors = [
-                (
-                    HeaderFooterKind::Header,
-                    HeaderFooterType::Default,
-                    refs.header_default.clone().or_else(|| {
-                        (!section.title_pg)
-                            .then_some(refs.header_first.clone())
-                            .flatten()
-                    }),
-                ),
-                (
-                    HeaderFooterKind::Header,
-                    HeaderFooterType::First,
-                    section.title_pg.then_some(refs.header_first).flatten(),
-                ),
-                (
-                    HeaderFooterKind::Header,
-                    HeaderFooterType::Even,
-                    refs.header_even,
-                ),
-                (
-                    HeaderFooterKind::Footer,
-                    HeaderFooterType::Default,
-                    refs.footer_default.clone().or_else(|| {
-                        (!section.title_pg)
-                            .then_some(refs.footer_first.clone())
-                            .flatten()
-                    }),
-                ),
-                (
-                    HeaderFooterKind::Footer,
-                    HeaderFooterType::First,
-                    section.title_pg.then_some(refs.footer_first).flatten(),
-                ),
-                (
-                    HeaderFooterKind::Footer,
-                    HeaderFooterType::Even,
-                    refs.footer_even,
-                ),
-            ];
+            let descriptors = header_footer_descriptors(section, refs);
             for (kind, hf_type, r_id) in descriptors {
                 let Some(r_id) = r_id else {
                     continue;
@@ -7828,7 +7877,10 @@ impl EngineSession {
                 }
             }
         }
-        if variants.is_empty() && regions.watermark.is_none() {
+        if variants.is_empty()
+            && regions.watermark.is_none()
+            && !self.shows_header_or_footer_from(regions, measured, render_env)?
+        {
             return Ok(None);
         }
         extend_input_for_header_footer(input, regions, &variants, cut);

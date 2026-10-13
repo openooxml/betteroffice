@@ -2295,7 +2295,7 @@ impl Fragment {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HeaderFooterRefs {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2310,6 +2310,24 @@ pub struct HeaderFooterRefs {
     pub footer_first: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub footer_even: Option<String>,
+}
+
+impl HeaderFooterRefs {
+    /// Takes each reference a later section authors, keeping the ones it leaves unset.
+    pub fn inherit(&mut self, authored: &HeaderFooterRefs) {
+        for (inherited, authored) in [
+            (&mut self.header_default, &authored.header_default),
+            (&mut self.header_first, &authored.header_first),
+            (&mut self.header_even, &authored.header_even),
+            (&mut self.footer_default, &authored.footer_default),
+            (&mut self.footer_first, &authored.footer_first),
+            (&mut self.footer_even, &authored.footer_even),
+        ] {
+            if authored.is_some() {
+                inherited.clone_from(authored);
+            }
+        }
+    }
 }
 
 /// One paginated page: its geometry, the fragments placed on it in paint order,
