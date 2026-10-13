@@ -291,6 +291,7 @@ impl MetadataCursor {
             }
             let tag = match self.phase {
                 TABLE if self.child != 0 => TABLE_COLUMN,
+                XF if model.styles.is_released_xf(self.index) => XF,
                 XF => XF_V2,
                 phase => phase,
             };
@@ -301,6 +302,7 @@ impl MetadataCursor {
                 FONT => write_font(w, &model.styles.fonts[self.index]),
                 FILL => write_fill(w, &model.styles.fills[self.index]),
                 BORDER => write_border(w, &model.styles.borders[self.index]),
+                XF if tag == XF => write_released_xf(w, &model.styles.cell_xfs[self.index]),
                 XF => write_xf(w, &model.styles.cell_xfs[self.index]),
                 NUM_FMT => {
                     let (id, code) = &model.styles.num_fmts[self.index];
@@ -666,7 +668,7 @@ impl ModelSnapshotBuilder {
             }
             XF => {
                 let (value, end) = decoded!(LegacyXf);
-                self.model.styles.cell_xfs.push(value.into());
+                self.model.styles.push_released_xf(value.into());
                 end
             }
             XF_V2 => {
@@ -967,7 +969,7 @@ impl ModelSnapshotBuilder {
             FONT => self.model.styles.fonts.push(read_font(r)?),
             FILL => self.model.styles.fills.push(read_fill(r)?),
             BORDER => self.model.styles.borders.push(read_border(r)?),
-            XF => self.model.styles.cell_xfs.push(read_released_xf(r)?),
+            XF => self.model.styles.push_released_xf(read_released_xf(r)?),
             XF_V2 => self.model.styles.cell_xfs.push(read_xf(r)?),
             NUM_FMT => self
                 .model
@@ -1680,6 +1682,20 @@ fn write_xf(w: &mut Writer, value: &Xf) {
     w.bool(*pivot_button);
 }
 
+/// An `XF` record in the layout releases before format facets wrote.
+fn write_released_xf(w: &mut Writer, value: &Xf) {
+    w.option(value.font, Writer::var_u32);
+    w.option(value.fill, Writer::var_u32);
+    w.option(value.border, Writer::var_u32);
+    w.option(value.num_fmt_id, |w, id| w.var_u32(u32::from(id)));
+    w.option(value.alignment.as_ref(), |w, alignment| {
+        w.option(alignment.h.as_ref(), write_halign);
+        w.option(alignment.v.as_ref(), write_valign);
+        w.bool(alignment.wrap_text);
+        w.bool(alignment.shrink_to_fit);
+    });
+}
+
 fn read_released_xf(r: &mut Reader<'_>) -> SnapshotResult<Xf> {
     Ok(Xf {
         font: r.option(Reader::var_u32)?,
@@ -1720,16 +1736,7 @@ pub(crate) fn released_layout(record: &[u8]) -> Vec<u8> {
     let xf = read_xf(&mut Reader::new(&record[1..])).unwrap();
     let mut w = Writer::new();
     w.u8(XF);
-    w.option(xf.font, Writer::var_u32);
-    w.option(xf.fill, Writer::var_u32);
-    w.option(xf.border, Writer::var_u32);
-    w.option(xf.num_fmt_id, |w, id| w.var_u32(u32::from(id)));
-    w.option(xf.alignment.as_ref(), |w, alignment| {
-        w.option(alignment.h.as_ref(), write_halign);
-        w.option(alignment.v.as_ref(), write_valign);
-        w.bool(alignment.wrap_text);
-        w.bool(alignment.shrink_to_fit);
-    });
+    write_released_xf(&mut w, &xf);
     let released = w.into_bytes();
     assert_eq!(
         read_released_xf(&mut Reader::new(&released[1..])).unwrap(),

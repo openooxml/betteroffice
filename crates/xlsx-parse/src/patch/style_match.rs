@@ -4,7 +4,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use xlsx_model::styles::Stylesheet;
+use xlsx_model::styles::{Stylesheet, Xf};
 use xlsx_model::{Cell, CellRef, Sheet};
 
 use crate::axis::SheetAxes;
@@ -102,4 +102,42 @@ impl SourceStyles<'_> {
             None => cell.style,
         }
     }
+}
+
+/// A restored entry read from a snapshot record written before format facets
+/// keeps its source entry when it equals that entry's released reading; any
+/// other entry keeps it only when equal.
+pub(crate) fn keeps_source<T: PartialEq>(
+    current: &T,
+    source: &T,
+    released: bool,
+    released_reading: impl FnOnce(&T) -> T,
+) -> bool {
+    current == source || (released && *current == released_reading(source))
+}
+
+/// Whether `cell_xfs[index]` of `current` writes as the source stylesheet's.
+pub(crate) fn keeps_source_xf(current: &Stylesheet, source: &Stylesheet, index: usize) -> bool {
+    let released = current.is_released_xf(index);
+    match (current.cell_xfs.get(index), source.cell_xfs.get(index)) {
+        (Some(xf), Some(original)) => keeps_source(xf, original, released, Xf::released_reading),
+        _ => false,
+    }
+}
+
+/// Whether `current` writes back as the source stylesheet.
+pub(crate) fn retains_source_styles(current: &Stylesheet, source: &Stylesheet) -> bool {
+    if current == source {
+        return true;
+    }
+    let count = current.cell_xfs.len();
+    if count != source.cell_xfs.len()
+        || !(0..count).any(|index| current.is_released_xf(index))
+        || !(0..count).all(|index| keeps_source_xf(current, source, index))
+    {
+        return false;
+    }
+    let mut kept = current.clone();
+    kept.cell_xfs.clone_from(&source.cell_xfs);
+    kept == *source
 }

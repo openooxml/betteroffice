@@ -259,6 +259,32 @@ pub struct Xf {
     pub pivot_button: bool,
 }
 
+impl Xf {
+    /// this entry as releases before format facets read it: no protection,
+    /// parent style or prefix flags, and only the alignment they modeled.
+    pub fn released_reading(&self) -> Self {
+        let alignment = self
+            .alignment
+            .as_ref()
+            .map(|alignment| Alignment {
+                h: alignment.h,
+                v: alignment.v,
+                wrap_text: alignment.wrap_text,
+                shrink_to_fit: alignment.shrink_to_fit,
+                ..Alignment::default()
+            })
+            .filter(|alignment| !alignment.is_empty());
+        Self {
+            font: self.font,
+            fill: self.fill,
+            border: self.border,
+            num_fmt_id: self.num_fmt_id,
+            alignment,
+            ..Self::default()
+        }
+    }
+}
+
 /// the workbook theme colors in clrScheme declaration order
 /// `[dk1, lt1, dk2, lt2, accent1..6, hlink, folHlink]`; index via [`Theme::slot`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -507,6 +533,10 @@ pub struct Stylesheet {
     /// `#rrggbb` entries; empty strings preserve omitted colors and use the default index.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub indexed_colors: Vec<String>,
+    /// set at the `cell_xfs` indices read from snapshot records written before
+    /// format facets.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    released_xfs: Vec<bool>,
     #[serde(skip)]
     font_memo: PoolMemo,
     #[serde(skip)]
@@ -623,6 +653,7 @@ impl Stylesheet {
             num_fmts,
             theme: _,
             indexed_colors,
+            released_xfs: _,
             font_memo: _,
             fill_memo: _,
             border_memo: _,
@@ -934,7 +965,25 @@ impl Stylesheet {
         self.fills.truncate(marks.fills);
         self.borders.truncate(marks.borders);
         self.cell_xfs.truncate(marks.cell_xfs);
+        self.released_xfs.truncate(marks.cell_xfs);
         self.num_fmts.truncate(marks.num_fmts);
+    }
+
+    /// appends `xf` as read from a snapshot record written before format facets.
+    #[doc(hidden)]
+    pub fn push_released_xf(&mut self, xf: Xf) {
+        self.released_xfs.resize(self.cell_xfs.len(), false);
+        self.released_xfs.push(true);
+        self.cell_xfs.push(xf);
+    }
+
+    /// whether `cell_xfs[index]` was read from a snapshot record written before
+    /// format facets and still holds only what such a record carries.
+    #[doc(hidden)]
+    pub fn is_released_xf(&self, index: usize) -> bool {
+        let entry = self.cell_xfs.get(index);
+        self.released_xfs.get(index) == Some(&true)
+            && entry.is_some_and(|xf| *xf == xf.released_reading())
     }
 
     fn intern_font(&mut self, value: &Font) -> u32 {

@@ -24,7 +24,10 @@ use crate::package::{
     XmlTemplate, attributes_from_fragment, effective_content_type, normalized_part_name,
     parse_relationships, relationship_part_path, remove_attribute, set_attribute,
 };
-use crate::patch::{SheetPatch, SourceStyles, StyleMatch, sheet_data_regeneration_loss};
+use crate::patch::{
+    SheetPatch, SourceStyles, StyleMatch, keeps_source_xf, retains_source_styles,
+    sheet_data_regeneration_loss,
+};
 use crate::read::SharedStringCells;
 use crate::xml::{resolve_part_path, xml_err};
 
@@ -543,7 +546,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
     let styles_retained = matches!(
         (package.styles.as_ref(), styles.as_ref()),
         (Some(source), Some(planned)) if source.path == planned.path
-    ) && wb.styles == package.original_workbook.styles;
+    ) && retains_source_styles(&wb.styles, &package.original_workbook.styles);
     if !styles_retained {
         replace_optional_part(&mut parts, package.styles.as_ref(), styles.as_ref(), || {
             match &package.stylesheet_template {
@@ -3203,15 +3206,15 @@ fn styles_xml_with_namespace(ss: &Stylesheet, main_namespace: &str) -> Result<Ve
     })
 }
 
-/// Reuses each source pool entry the model left alone, so font schemes,
-/// `gray125` fills and `xf` attributes the model does not carry survive an
-/// edit that only appends new entries.
-fn patched_pool<T: PartialEq>(
+/// Reuses each source pool entry `kept` says the model left alone, so font
+/// schemes, `gray125` fills and `xf` attributes the model does not carry
+/// survive an edit that only appends new entries.
+fn patched_pool<T>(
     template: &XmlTemplate,
     pool_name: &str,
     item_name: &str,
     values: &[T],
-    original: &[T],
+    kept: impl Fn(usize, &T) -> bool,
     write_item: impl Fn(&mut Writer<Vec<u8>>, &T) -> io::Result<()>,
     write_pool: impl FnOnce() -> Result<Vec<u8>, ParseError>,
 ) -> Result<Option<Vec<u8>>, ParseError> {
@@ -3225,10 +3228,7 @@ fn patched_pool<T: PartialEq>(
     let sources = pool.children_named(item_name).collect::<Vec<_>>();
     let mut items = Vec::with_capacity(values.len());
     for (index, value) in values.iter().enumerate() {
-        match sources
-            .get(index)
-            .filter(|_| original.get(index) == Some(value))
-        {
+        match sources.get(index).filter(|_| kept(index, value)) {
             Some(source) => items.push(source.bytes.clone()),
             None => {
                 let item = fragment(|writer| write_item(writer, value))?;
@@ -3250,7 +3250,7 @@ fn styles_xml_with_template(
         "numFmts",
         "numFmt",
         &stylesheet.num_fmts,
-        &original.num_fmts,
+        |index, value| original.num_fmts.get(index) == Some(value),
         |writer, (id, code)| {
             writer
                 .create_element("numFmt")
@@ -3266,7 +3266,7 @@ fn styles_xml_with_template(
         "fonts",
         "font",
         &stylesheet.fonts,
-        &original.fonts,
+        |index, value| original.fonts.get(index) == Some(value),
         write_font,
         || fragment(|writer| write_fonts(writer, stylesheet)),
     )?;
@@ -3275,7 +3275,7 @@ fn styles_xml_with_template(
         "fills",
         "fill",
         &stylesheet.fills,
-        &original.fills,
+        |index, value| original.fills.get(index) == Some(value),
         write_fill,
         || fragment(|writer| write_fills(writer, stylesheet)),
     )?;
@@ -3284,7 +3284,7 @@ fn styles_xml_with_template(
         "borders",
         "border",
         &stylesheet.borders,
-        &original.borders,
+        |index, value| original.borders.get(index) == Some(value),
         write_border,
         || fragment(|writer| write_borders(writer, stylesheet)),
     )?;
@@ -3293,7 +3293,7 @@ fn styles_xml_with_template(
         "cellXfs",
         "xf",
         &stylesheet.cell_xfs,
-        &original.cell_xfs,
+        |index, _| keeps_source_xf(stylesheet, original, index),
         write_xf,
         || fragment(|writer| write_cell_xfs(writer, stylesheet)),
     )?;

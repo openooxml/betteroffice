@@ -4329,39 +4329,17 @@ impl<'a> FingerprintStyles<'a> {
         if self.xf_facets {
             Cow::Borrowed(&self.styles.cell_xfs)
         } else {
-            Cow::Owned(self.styles.cell_xfs.iter().map(pre_facet_xf).collect())
+            let xfs = &self.styles.cell_xfs;
+            Cow::Owned(xfs.iter().map(xlsx_model::Xf::released_reading).collect())
         }
-    }
-}
-
-/// An `<xf>` as read by releases that did not model protection, parent styles
-/// or the extended alignment attributes.
-fn pre_facet_xf(xf: &xlsx_model::Xf) -> xlsx_model::Xf {
-    let alignment = xf
-        .alignment
-        .as_ref()
-        .map(|alignment| xlsx_model::Alignment {
-            h: alignment.h,
-            v: alignment.v,
-            wrap_text: alignment.wrap_text,
-            shrink_to_fit: alignment.shrink_to_fit,
-            ..xlsx_model::Alignment::default()
-        })
-        .filter(|alignment| !alignment.is_empty());
-    xlsx_model::Xf {
-        font: xf.font,
-        fill: xf.fill,
-        border: xf.border,
-        num_fmt_id: xf.num_fmt_id,
-        alignment,
-        ..xlsx_model::Xf::default()
     }
 }
 
 #[cfg(test)]
 fn pre_facet_styles(styles: &Stylesheet) -> Stylesheet {
     let mut pre_facet = styles.clone();
-    pre_facet.cell_xfs = styles.cell_xfs.iter().map(pre_facet_xf).collect();
+    let xfs = &styles.cell_xfs;
+    pre_facet.cell_xfs = xfs.iter().map(xlsx_model::Xf::released_reading).collect();
     pre_facet
 }
 
