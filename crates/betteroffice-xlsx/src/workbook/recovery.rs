@@ -7,7 +7,8 @@ use sha2::{Digest, Sha256};
 use super::*;
 
 const MAGIC: &[u8; 8] = b"XLSXRECV";
-const CODEC_VERSION: u8 = 5;
+const CODEC_VERSION: u8 = 6;
+const PATTERN_CODEC_VERSION: u8 = 5;
 /// Checkpoints before patterned fills, whose styles hold only the fills and
 /// border styles those releases read.
 const RELEASED_CODEC_VERSION: u8 = 3;
@@ -532,7 +533,7 @@ impl Workbook {
     ) -> Result<(Self, u64, Option<CalculationOptions>, bool)> {
         if bytes.len() < 41
             || &bytes[..8] != MAGIC
-            || !matches!(bytes[8], RELEASED_CODEC_VERSION | CODEC_VERSION)
+            || !matches!(bytes[8], RELEASED_CODEC_VERSION | PATTERN_CODEC_VERSION | CODEC_VERSION)
         {
             return Err(invalid("Unsupported workbook recovery codec"));
         }
@@ -1450,8 +1451,8 @@ mod tests {
         }
 
         let plain = Workbook::from_model(model()).unwrap();
-        let mut released = plain.recovery_checkpoint(0, None).unwrap();
-        released[8] = 3;
+        let bytes = plain.recovery_checkpoint(0, None).unwrap();
+        let released = with_authority_state(&bytes, 3, &plain.authority.encode_released_recovery_state());
         let (restored, ..) = Workbook::restore_recovery_checkpoint(&released).unwrap();
         assert_eq!(restored.model, plain.model);
     }
