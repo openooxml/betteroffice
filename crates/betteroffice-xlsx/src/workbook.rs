@@ -1775,6 +1775,7 @@ impl Workbook {
             return Ok(MutationResult::default());
         }
         mark(EditStage::Validated);
+        let scope = CalculationScope::of(&self.model, &ops);
         let mut inverse = Vec::new();
         for chunk in per_op.into_iter().rev() {
             inverse.extend(chunk);
@@ -1787,13 +1788,14 @@ impl Workbook {
             CommitHistory::Separate,
             None,
         )?;
+        let scope = scope.confirmed(&self.model, &prepared.model);
         let update = self.commit_prepared(prepared)?;
         self.restore_active_sheet(active_name.as_deref());
         if invalidates_proposals {
             self.proposals.clear();
         }
         mark(EditStage::Applied);
-        let result = self.rebuild_and_recalculate(options);
+        let result = self.recalculate_scope(scope, options);
         mark(EditStage::Recalculated);
         self.publish(update);
         Ok(MutationResult {
@@ -1874,6 +1876,8 @@ impl Workbook {
         let Some(ops) = self.undo.next_undo().map(<[Op]>::to_vec) else {
             return Ok(MutationResult::default());
         };
+        let scope = CalculationScope::of(&self.model, &ops);
+        let before = (scope != CalculationScope::Full).then(|| self.model.clone());
         let update = self
             .authority
             .apply_ops_with_update(
@@ -1900,7 +1904,11 @@ impl Workbook {
         if ops.iter().any(invalidates_proposals) {
             self.proposals.clear();
         }
-        let result = self.rebuild_and_recalculate(options);
+        let scope = match before {
+            Some(before) => scope.confirmed(&before, &self.model),
+            None => CalculationScope::Full,
+        };
+        let result = self.recalculate_scope(scope, options);
         self.publish(update);
         Ok(MutationResult {
             applied: true,
@@ -1919,6 +1927,8 @@ impl Workbook {
         let Some(ops) = self.undo.next_redo().map(<[Op]>::to_vec) else {
             return Ok(MutationResult::default());
         };
+        let scope = CalculationScope::of(&self.model, &ops);
+        let before = (scope != CalculationScope::Full).then(|| self.model.clone());
         let update = self
             .authority
             .apply_ops_with_update(
@@ -1945,7 +1955,11 @@ impl Workbook {
         if ops.iter().any(invalidates_proposals) {
             self.proposals.clear();
         }
-        let result = self.rebuild_and_recalculate(options);
+        let scope = match before {
+            Some(before) => scope.confirmed(&before, &self.model),
+            None => CalculationScope::Full,
+        };
+        let result = self.recalculate_scope(scope, options);
         self.publish(update);
         Ok(MutationResult {
             applied: true,
@@ -2016,7 +2030,8 @@ impl Workbook {
         self.preserved.forget_shared_strings();
         self.preserved.forget_axes();
         self.proposals.clear();
-        let result = self.rebuild_and_recalculate(options);
+        let scope = CalculationScope::Kept.confirmed(&before, &self.model);
+        let result = self.recalculate_scope(scope, options);
         let changed = changed_cells_between(&before, &self.model);
         self.publish(Some(history.update));
         Ok(MutationResult {
@@ -2838,6 +2853,38 @@ impl Workbook {
                 Op::SetCharts { .. } | Op::SetChartAnchor { .. } | Op::SetDefinedNames { .. } => {}
             }
         }
+    }
+
+    fn recalculate_scope(
+        &mut self,
+        scope: CalculationScope,
+        options: CalculationOptions,
+    ) -> CalculationResult {
+        match scope {
+            CalculationScope::Kept => {
+                self.bump_model_epoch();
+                CalculationResult::default()
+            }
+            CalculationScope::Renamed if self.graph.is_some() => self.recalculate_renamed(options),
+            _ => self.rebuild_and_recalculate(options),
+        }
+    }
+
+    fn recalculate_renamed(&mut self, options: CalculationOptions) -> CalculationResult {
+        self.bump_model_epoch();
+        let graph = self.graph.as_mut().expect("graph initialized");
+        let moved = graph.rename_sheets(&self.model);
+        let result = recalc_after_with_seed(
+            &mut self.model,
+            graph,
+            &moved,
+            options.now_serial,
+            self.rand_seed,
+        );
+        self.dirty_geometry_cells(&result.changed);
+        let result = calculation_result(&result);
+        self.last_calculation = result.clone();
+        result
     }
 
     fn rebuild_and_recalculate(&mut self, options: CalculationOptions) -> CalculationResult {
@@ -4396,6 +4443,170 @@ fn rename_sheet_view(names: &mut Vec<String>, op: &Op) {
         }
         _ => {}
     }
+}
+
+/// How much of the workbook a committed batch recalculates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum CalculationScope {
+    /// Nothing the engine reads moved, so the graph and every value stand.
+    Kept,
+    /// Sheet names moved: references re-resolve, and the formulas whose
+    /// references now land elsewhere re-evaluate with the volatile cells.
+    Renamed,
+    Full,
+}
+
+impl CalculationScope {
+    /// What `ops` require of the engine, judged against `model` before they
+    /// apply. The engine reads values, formulas, sheet names, defined names,
+    /// tables, array extents and used extents; styles, merges, panes and
+    /// charts never reach it.
+    fn of(model: &WorkbookModel, ops: &[Op]) -> Self {
+        ops.iter()
+            .map(|op| Self::of_op(model, op))
+            .max()
+            .unwrap_or(Self::Kept)
+    }
+
+    fn of_op(model: &WorkbookModel, op: &Op) -> Self {
+        match op {
+            Op::PatchRangeStyle { .. }
+            | Op::SetRangeNumberFormat { .. }
+            | Op::ApplyRangeFormat { .. }
+            | Op::MergeCells { .. }
+            | Op::UnmergeCells { .. }
+            | Op::SetFreezePane { .. }
+            | Op::SetHyperlinks { .. }
+            | Op::RestoreColStyles { .. }
+            | Op::SetCharts { .. }
+            | Op::SetChartAnchor { .. } => Self::Kept,
+            Op::SetCell { sheet, at, cell } => {
+                if cell_content(model, *sheet, *at) == (&cell.value, cell.formula.as_deref()) {
+                    Self::Kept
+                } else {
+                    Self::Full
+                }
+            }
+            Op::RenameSheet { .. } => Self::Renamed,
+            Op::RestoreSheet { formulas, .. } => {
+                let rewrites = formulas.iter().all(|(sheet, at, state)| {
+                    let (value, formula) = cell_content(model, *sheet, *at);
+                    formula.is_some() && state.formula.is_some() && *value == state.value
+                });
+                if rewrites {
+                    Self::Renamed
+                } else {
+                    Self::Full
+                }
+            }
+            // a zero size hides a row or column, which hidden-aware functions read
+            Op::SetColWidth { .. } | Op::SetRowHeight { .. } => Self::Full,
+            Op::SetDefinedNames { .. }
+            | Op::AddSheet { .. }
+            | Op::RemoveSheet { .. }
+            | Op::InsertRows { .. }
+            | Op::DeleteRows { .. }
+            | Op::InsertCols { .. }
+            | Op::DeleteCols { .. } => Self::Full,
+        }
+    }
+
+    /// The scope once the batch has applied: one that kept every value still
+    /// recalculates in full when it moved anything else the engine reads.
+    fn confirmed(self, before: &WorkbookModel, after: &WorkbookModel) -> Self {
+        if self != Self::Full && keeps_calculation_inputs(before, after, self == Self::Renamed) {
+            self
+        } else {
+            Self::Full
+        }
+    }
+}
+
+/// The value and formula `model` holds at a cell; an absent cell holds neither.
+fn cell_content(model: &WorkbookModel, sheet: SheetId, at: CellRef) -> (&CellValue, Option<&str>) {
+    match model.sheet(sheet).and_then(|sheet| sheet.cell(at)) {
+        Some(cell) => (&cell.value, cell.formula.as_deref()),
+        None => (&CellValue::Empty, None),
+    }
+}
+
+/// Whether `after` holds everything the engine read from `before`. A rename
+/// rewrites the formulas and defined names that name the renamed sheet, so
+/// with `renamed` only their presence has to match.
+fn keeps_calculation_inputs(before: &WorkbookModel, after: &WorkbookModel, renamed: bool) -> bool {
+    keeps_defined_names(&before.defined_names, &after.defined_names, renamed)
+        && before.date_system == after.date_system
+        && before.tables == after.tables
+        && before.sheets.len() == after.sheets.len()
+        && before
+            .sheets
+            .iter()
+            .zip(&after.sheets)
+            .all(|(old, new)| {
+                (renamed || old.name == new.name) && keeps_sheet_inputs(old, new, renamed)
+            })
+}
+
+fn keeps_defined_names(
+    before: &[xlsx_model::DefinedName],
+    after: &[xlsx_model::DefinedName],
+    renamed: bool,
+) -> bool {
+    if !renamed {
+        return before == after;
+    }
+    before.len() == after.len()
+        && before
+            .iter()
+            .zip(after)
+            .all(|(old, new)| old.name == new.name && old.local_sheet == new.local_sheet)
+}
+
+/// Cells holding only a style read as empty, but they still count toward the
+/// used extent, which whole-row and whole-column reads are cut to.
+fn keeps_sheet_inputs(before: &Sheet, after: &Sheet, renamed: bool) -> bool {
+    let mut before_cells = read_cells(before);
+    let mut after_cells = read_cells(after);
+    let cells_kept = loop {
+        match (before_cells.next(), after_cells.next()) {
+            (None, None) => break true,
+            (Some(old), Some(new)) if reads_same(old, new, renamed) => {}
+            _ => break false,
+        }
+    };
+    cells_kept
+        && before.array_formulas().eq(after.array_formulas())
+        && keeps_used_end(before, after)
+}
+
+fn read_cells(sheet: &Sheet) -> impl Iterator<Item = (CellRef, &xlsx_model::Cell)> {
+    sheet
+        .iter_cells()
+        .filter(|(_, cell)| cell.formula.is_some() || cell.value != CellValue::Empty)
+}
+
+fn reads_same(
+    (at, old): (CellRef, &xlsx_model::Cell),
+    (to, new): (CellRef, &xlsx_model::Cell),
+    renamed: bool,
+) -> bool {
+    let formulas = if renamed {
+        old.formula.is_some() == new.formula.is_some()
+    } else {
+        old.formula == new.formula
+    };
+    at == to && old.value == new.value && formulas
+}
+
+/// Scans for the extent only when a cell or hyperlink came or went.
+fn keeps_used_end(before: &Sheet, after: &Sheet) -> bool {
+    let unmoved = before.hyperlinks == after.hyperlinks
+        && before
+            .iter_cells()
+            .map(|(at, _)| at)
+            .eq(after.iter_cells().map(|(at, _)| at));
+    let end = |sheet: &Sheet| sheet.used_range().map(|range| range.end);
+    unmoved || end(before) == end(after)
 }
 
 fn invalidates_proposals(op: &Op) -> bool {
