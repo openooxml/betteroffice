@@ -181,7 +181,8 @@ test('a read-only replica merges remote edits and still refuses local ones', asy
   const a = await open(9201);
   const remote = await createYrsSession({ clientId: 9203 });
   try {
-    expect((await a.session.submit('setReadOnly', { readOnly: true }).ack).status).toBe('applied');
+    expect((await a.session.submit('setReadOnly', { readOnly: true }).ack).status).toBe('noop');
+    expect(a.session.state.editState?.readOnly).toBe(true);
     const version = a.session.state.version;
     remote.loadState(a.engine.encodeState());
     remote.insertText({ story: 'body', paraId: a.engine.paragraphs('body')[0]!.paraId, offset: 4 }, ' remote');
