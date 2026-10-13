@@ -445,11 +445,18 @@ test('an edit overtakes sliced completion and finishes it before changing the do
     expect(edited.ok && edited.commandAck?.outcomes[0]?.status).toBe('applied');
     expect(edited.ok && edited.commandAck?.frame?.payload.layoutProvisional).not.toBe(true);
     if (!edited.ok || !edited.commandAck?.frame) throw new Error('Missing edit frame');
-    f.cold.loadState(f.engine.encodeState());
-    f.cold.layoutDocumentWithRegionsRetained(f.init.layoutInput);
-    const cold = applyFrameDelta(null, decodeFrameDelta(f.cold.buildDisplayListFrame(f.init.extras, 0)));
-    const final = commandFramesAfter(commandFramesAfter(f.frame, f.w.frames), [edited.commandAck.frame]);
-    expect(final.displayList.pages).toEqual(cold.displayList.pages);
+    const reference = await createResidentEngineSession();
+    try {
+      reference.loadState(f.engine.encodeState());
+      reference.registerFont(FONT);
+      reference.layoutDocumentWithRegionsRetained(f.init.layoutInput);
+      reference.setDisplayWindow(0, 3);
+      reference.setDisplayRetainBuiltPages(false);
+      reference.setWindowedIncrementalBuilds(true);
+      const cold = applyFrameDelta(null, decodeFrameDelta(reference.buildDisplayListFrame(f.init.extras, 0)));
+      const final = commandFramesAfter(commandFramesAfter(f.frame, f.w.frames), [edited.commandAck.frame]);
+      expect(final.displayList.pages).toEqual(cold.displayList.pages);
+    } finally { reference.destroy(); }
     const count = f.w.frames.length;
     await f.w.drain();
     expect(f.w.frames).toHaveLength(count);
