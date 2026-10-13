@@ -63,7 +63,9 @@ export async function rasterizeDisplayPageToBackBuffer(
   page: DisplayPage,
   options: DrawPageOptions = {},
   devicePixelRatio: number = 1,
-  zoom: number = 1
+  zoom: number = 1,
+  /** Device-pixel rect to raster; the pixels inside equal an unclipped raster's. */
+  clip?: { x: number; y: number; width: number; height: number }
 ): Promise<PageCanvasBuffer> {
   const ctx = canvas.getContext('2d') as PageCanvasContext | null;
   if (!ctx) throw new Error('Canvas 2D context is unavailable');
@@ -73,6 +75,11 @@ export async function rasterizeDisplayPageToBackBuffer(
   if (canvas.width !== width) canvas.width = width;
   if (canvas.height !== height) canvas.height = height;
   ctx.resetTransform();
+  if (clip) {
+    ctx.beginPath();
+    ctx.rect(clip.x, clip.y, clip.width, clip.height);
+    ctx.clip();
+  }
   ctx.scale(scale, scale);
   await drawDisplayPage(ctx as unknown as CanvasRenderingContext2D, page, options);
   return canvas;

@@ -13,7 +13,7 @@ import { createResidentDocxCommandHooks } from './residentCommandActions';
 import { readCommandStickyPosition } from './residentCommandAnchors';
 import { projectCommandEchoContext } from './residentCommandViewProjection';
 import { EchoGlyphSources, type EchoGlyphEngine } from './residentEchoGlyphSource';
-import { stageCommandPresentation } from './residentCommandPresentation';
+import { echoBackgroundPage, stageCommandPresentation } from './residentCommandPresentation';
 import { registerCommandFonts } from './residentCommandFonts';
 import { residentSourceMetadata, validateResidentSource } from './residentSource';
 import { decodeDocxHostJson } from './yrsSessionFacade';
@@ -666,17 +666,12 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
           async rasterizeBackground(dependency) {
             const retained = retainedPageByKey(layout.frame, dependency.page.pageId);
             if (!retained) throw new Error('Command background is unavailable');
-            const omitted = new Set(dependency.omittedPrimitiveIds);
-            const kept = (_primitive: unknown, index: number) => !omitted.has(retained.primitiveIds[index]!.toString());
-            const buffer = new OffscreenCanvas(1, 1);
-            await rasterizeDisplayPageToBackBuffer(buffer, { ...retained.page,
-              watermarkPrimitiveCount: retained.page.primitives.slice(0, retained.page.watermarkPrimitiveCount ?? 0)
-                .filter(kept).length,
-              primitives: retained.page.primitives.filter(kept),
-            }, rasterOptions, pixelRatio);
             const { rect } = dependency;
             const device = [rect.x, rect.y, rect.width, rect.height].map((value) => Math.round(value * pixelRatio)) as
               [number, number, number, number];
+            const buffer = new OffscreenCanvas(1, 1);
+            await rasterizeDisplayPageToBackBuffer(buffer, echoBackgroundPage(retained, dependency), rasterOptions,
+              pixelRatio, 1, { x: device[0], y: device[1], width: device[2], height: device[3] });
             const crop = new OffscreenCanvas(device[2], device[3]);
             const ctx = crop.getContext('2d');
             if (!ctx) throw new Error('Command background canvas is unavailable');

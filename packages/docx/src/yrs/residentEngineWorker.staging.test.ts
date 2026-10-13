@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { inflateSync } from 'node:zlib';
 import { decodeFrameDelta, FRAME_DELTA_VERSION, retainedFramePageById, type DecodedFrameDelta, type RetainedFrame } from '../layout/render/frameDelta';
 import { buildCommandFrame } from './residentCommandFrame';
-import { closeCommandBitmap, stageCommandPresentation } from './residentCommandPresentation';
+import { closeCommandBitmap, echoBackgroundPage, stageCommandPresentation } from './residentCommandPresentation';
 import type { DocxCommandEchoContext, DocxCommandFrame, DocxEchoGlyphSet } from './residentCommandProtocol';
 import type { DisplayPrimitive, GlyphRunPrimitive } from '../layout/render/displayList';
 import { drawGlyphRunPrimitive } from '../layout/render/canvasBackend';
@@ -90,7 +90,7 @@ async function stageRequestedPages(requested: number[], damaged: number[] = [], 
     pendingOffscreenPageIds: pending, activeOffscreenPageIds: new Set(['1', '2', '3', '4']),
     glyphCache: {}, offscreenDpr: 1, offscreenZoom: 1,
     retainedPageByKey: (frame: RetainedFrame, pageId: string) => retainedFramePageById(frame, BigInt(pageId)),
-    stageCommandPresentation, buildCommandFrame, pendingUpdates: [],
+    stageCommandPresentation, echoBackgroundPage, buildCommandFrame, pendingUpdates: [],
     OffscreenCanvas: class {
       constructor(public width: number, public height: number) {}
       getContext() { return { drawImage() {} }; }
