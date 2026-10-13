@@ -883,6 +883,97 @@ fn cascade_collaborative_plain_clear_without_a_proven_plain_xf_clears_italic_and
     }
 }
 
+/// A standalone workbook clears italic on A1 beside B1's unlocked xf 1, runs `edit`, then takes a
+/// recovery round trip, which rebuilds the workbook from its shared state.
+fn saved_after_recovery(edit: impl FnOnce(&mut Workbook)) -> Vec<u8> {
+    let mut workbook = Workbook::open(&plain_reading_xf_source("", UNLOCKED_XF)).unwrap();
+    clear_style(
+        &mut workbook,
+        "A1",
+        betteroffice_xlsx::StyleProperty::Italic,
+    );
+    edit(&mut workbook);
+    let checkpoint = workbook.recovery_checkpoint(1, None).unwrap();
+    let (restored, _, _, _) = Workbook::restore_recovery_checkpoint(&checkpoint).unwrap();
+    restored.save().unwrap()
+}
+
+/// A1 and C1 come back on their source xf 0, locked, as on main; B1 keeps xf 1.
+fn assert_recovered_on_source_markup(saved: &[u8]) {
+    let source = plain_reading_xf_source("", UNLOCKED_XF);
+    for address in ["A1", "C1"] {
+        assert_eq!(
+            saved_cell_xf(saved, address),
+            saved_cell_xf(&source, address),
+            "{address}"
+        );
+    }
+    assert!(saved_cell_xf(saved, "B1").contains(r#"locked="0""#));
+}
+
+#[test]
+fn cascade_recovery_after_a_plain_clear_keeps_the_cleared_cell_locked() {
+    assert_recovered_on_source_markup(&saved_after_recovery(|_| {}));
+}
+
+#[test]
+fn cascade_recovery_after_a_plain_clear_and_a_value_edit_keeps_the_cell_locked() {
+    assert_recovered_on_source_markup(&saved_after_recovery(|workbook| {
+        workbook
+            .edit_cell(SheetId(0), cell("A1"), "5", CalculationOptions::default())
+            .unwrap();
+    }));
+}
+
+#[test]
+fn cascade_recovery_after_a_plain_clear_undone_and_redone_keeps_the_cell_locked() {
+    assert_recovered_on_source_markup(&saved_after_recovery(|workbook| {
+        workbook.undo(CalculationOptions::default()).unwrap();
+        workbook.redo(CalculationOptions::default()).unwrap();
+    }));
+}
+
+#[test]
+fn cascade_recovery_after_pasting_a_cleared_cell_keeps_the_target_locked() {
+    assert_recovered_on_source_markup(&saved_after_recovery(|workbook| {
+        let style = workbook.model().sheets[0].cell(cell("A1")).unwrap().style;
+        workbook
+            .apply_ops(
+                vec![Op::SetCell {
+                    sheet: SheetId(0),
+                    at: cell("C1"),
+                    cell: CellState {
+                        value: CellValue::Number { value: 3.0 },
+                        style,
+                        ..CellState::default()
+                    },
+                }],
+                CalculationOptions::default(),
+            )
+            .unwrap();
+    }));
+}
+
+#[test]
+fn cascade_recovery_after_copying_a_plain_format_keeps_the_target_locked() {
+    assert_recovered_on_source_markup(&saved_after_recovery(|workbook| {
+        workbook
+            .apply_ops(
+                vec![Op::ApplyRangeFormat {
+                    sheet: SheetId(0),
+                    range: CellRange::parse_a1("C1").unwrap(),
+                    format: betteroffice_xlsx::CapturedFormat {
+                        rows: 1,
+                        columns: 1,
+                        formats: vec![xlsx_model::CellFormat::default()],
+                    },
+                }],
+                CalculationOptions::default(),
+            )
+            .unwrap();
+    }));
+}
+
 #[test]
 fn cascade_collaborative_plain_result_under_a_row_default_over_an_italic_xf_zero_stays_plain() {
     let bytes = italic_xf_zero_source();
