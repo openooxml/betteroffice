@@ -815,7 +815,7 @@ fn cascade_collaborative_automatic_without_a_proven_plain_xf_saves_xf_zero() {
 }
 
 #[test]
-fn cascade_plain_projection_preserves_an_untouched_unlocked_source_xf() {
+fn cascade_plain_projection_keeps_main_saved_xfs_for_untouched_cells() {
     let bytes = styles_part_source(
         &format!(
             r#"<fonts count="2"><font/><font/></fonts>{DEFAULT_FILLS_AND_BORDERS}<cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>{UNLOCKED_XF}</cellXfs>"#
@@ -833,11 +833,12 @@ fn cascade_plain_projection_preserves_an_untouched_unlocked_source_xf() {
             CalculationOptions::default(),
         )
         .unwrap();
-    for peer in [&left, &right] {
+    for (peer, index, source) in [(&left, 1, "B1"), (&right, 0, "A1")] {
         let saved = peer.save().unwrap();
-        assert_eq!(saved_cell_style(&saved, "B1"), 1);
-        assert_eq!(saved_cell_xf(&saved, "B1"), saved_cell_xf(&bytes, "B1"));
+        assert_eq!(saved_cell_style(&saved, "B1"), index);
+        assert_eq!(saved_cell_xf(&saved, "B1"), saved_cell_xf(&bytes, source));
     }
+    assert_eq!(left.model(), right.model());
 }
 
 #[test]
