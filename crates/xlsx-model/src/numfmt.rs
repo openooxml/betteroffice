@@ -52,7 +52,11 @@ impl FormattedValue {
     }
 
     fn fill(&mut self, character: char) {
-        if !self.layout.iter().any(|part| part.kind == FormatPartKind::Fill) {
+        if !self
+            .layout
+            .iter()
+            .any(|part| part.kind == FormatPartKind::Fill)
+        {
             self.layout.push(FormatPart {
                 offset: self.text.len(),
                 kind: FormatPartKind::Fill,
@@ -74,11 +78,22 @@ impl FormattedValue {
             }
         }
     }
+
+    fn append(&mut self, mut other: Self) {
+        for part in &mut other.layout {
+            part.offset += self.text.len();
+        }
+        self.push_str(&other.text);
+        self.layout.extend(other.layout);
+    }
 }
 
 impl From<String> for FormattedValue {
     fn from(text: String) -> Self {
-        Self { text, ..Self::default() }
+        Self {
+            text,
+            ..Self::default()
+        }
     }
 }
 
@@ -700,35 +715,33 @@ fn render_number_section(sec: &Section, mag: f64) -> FormattedValue {
     if let Some(pattern) = sec.fraction {
         return render_fraction(sec, mag, pattern);
     }
-    let total_ph = sec
-        .toks
-        .iter()
-        .filter(|t| matches!(t, Tok::Digit(_)))
-        .count();
-    let has_at = sec.has(|t| matches!(t, Tok::At));
+    render_decimal_tokens(&sec.toks, mag, true)
+}
+
+fn render_decimal_tokens(toks: &[Tok], mag: f64, apply_scaling: bool) -> FormattedValue {
+    let total_ph = toks.iter().filter(|t| matches!(t, Tok::Digit(_))).count();
+    let has_at = toks.iter().any(|t| matches!(t, Tok::At));
     if total_ph == 0 && !has_at {
-        return emit_literals_only(sec);
+        return emit_literals_only(toks);
     }
 
-    let dot_pos = sec.toks.iter().position(|t| matches!(t, Tok::Dot));
+    let dot_pos = toks.iter().position(|t| matches!(t, Tok::Dot));
     let (int_toks, frac_toks): (&[Tok], &[Tok]) = match dot_pos {
-        Some(p) => (&sec.toks[..p], &sec.toks[p + 1..]),
-        None => (&sec.toks[..], &[]),
+        Some(p) => (&toks[..p], &toks[p + 1..]),
+        None => (toks, &[]),
     };
 
     let (grouping, scale) = scan_commas(int_toks);
-    let percent = sec
-        .toks
-        .iter()
-        .filter(|t| matches!(t, Tok::Percent))
-        .count() as i32;
+    let percent = toks.iter().filter(|t| matches!(t, Tok::Percent)).count() as i32;
 
     let mut v = mag;
-    for _ in 0..percent {
-        v *= 100.0;
-    }
-    for _ in 0..scale {
-        v /= 1000.0;
+    if apply_scaling {
+        for _ in 0..percent {
+            v *= 100.0;
+        }
+        for _ in 0..scale {
+            v /= 1000.0;
+        }
     }
 
     let int_kinds: Vec<char> = digit_kinds(int_toks);
@@ -742,16 +755,19 @@ fn render_number_section(sec: &Section, mag: f64) -> FormattedValue {
     let mut int_placeholder = 0;
     let mut frac_placeholder = 0;
     let mut passed_dot = false;
-    for t in &sec.toks {
+    for t in toks {
         match t {
             Tok::Digit(_) => {
                 if !passed_dot {
                     int_placeholder += 1;
-                    let remaining = int_kinds[int_placeholder..].iter().enumerate()
+                    let remaining = int_kinds[int_placeholder..]
+                        .iter()
+                        .enumerate()
                         .filter(|(index, kind)| {
                             int_digits.len() > int_kinds.len() - int_placeholder - index - 1
                                 || matches!(**kind, '0' | '?')
-                        }).count();
+                        })
+                        .count();
                     let end = int_number.len().saturating_sub(remaining);
                     out.digits(&int_number[int_cursor..end]);
                     int_cursor = end;
@@ -842,11 +858,15 @@ fn best_fraction(value: f64, limit: u64) -> (u64, u64) {
     let mut remainder = value;
     loop {
         let whole = remainder.floor() as u64;
-        let Some(q2) = whole.checked_mul(q1).and_then(|q| q0.checked_add(q)) else { break };
+        let Some(q2) = whole.checked_mul(q1).and_then(|q| q0.checked_add(q)) else {
+            break;
+        };
         if q2 > limit {
             break;
         }
-        let Some(p2) = whole.checked_mul(p1).and_then(|p| p0.checked_add(p)) else { break };
+        let Some(p2) = whole.checked_mul(p1).and_then(|p| p0.checked_add(p)) else {
+            break;
+        };
         (p0, q0, p1, q1) = (p1, q1, p2, q2);
         let fraction = remainder - whole as f64;
         if fraction <= f64::EPSILON {
@@ -885,32 +905,26 @@ fn render_fraction(sec: &Section, mag: f64, pattern: FractionPattern) -> Formatt
     let numerator_kinds = digit_kinds(&sec.toks[pattern.numerator..pattern.slash]);
     let denominator_kinds = digit_kinds(&sec.toks[pattern.slash + 1..pattern.denominator_end]);
     let hidden = mixed && numerator == 0 && !numerator_kinds.contains(&'0');
-    let mut out = FormattedValue::default();
-    let mut integer_emitted = false;
-    for tok in &sec.toks[..pattern.numerator] {
-        match tok {
-            Tok::Digit(_) if !integer_emitted => {
-                let digits = if whole == 0 { String::new() } else { whole.to_string() };
-                out.digits(&build_int_number(&integer_kinds, &digits, false));
-                integer_emitted = true;
-            }
-            Tok::Literal(s) => out.push_str(s),
-            Tok::Width(c) => out.padding(*c),
-            Tok::Fill(c) => out.fill(*c),
-            _ => {}
-        }
-    }
+    let mut out = render_decimal_tokens(&sec.toks[..pattern.numerator], whole as f64, false);
     if hidden {
         for _ in &numerator_kinds {
             out.padding('0');
         }
         out.padding('/');
-        let denominator_width = if pattern.fixed.is_some() { denominator.to_string().len() } else { denominator_kinds.len() };
+        let denominator_width = if pattern.fixed.is_some() {
+            denominator.to_string().len()
+        } else {
+            denominator_kinds.len()
+        };
         for _ in 0..denominator_width {
             out.padding('0');
         }
     } else {
-        out.digits(&build_int_number(&numerator_kinds, &numerator.to_string(), false));
+        out.digits(&build_int_number(
+            &numerator_kinds,
+            &numerator.to_string(),
+            false,
+        ));
         out.push('/');
         let digits = denominator.to_string();
         out.push_str(&digits);
@@ -1065,9 +1079,9 @@ fn build_frac(kinds: &[char], frac_digits: &str) -> String {
     out
 }
 
-fn emit_literals_only(sec: &Section) -> FormattedValue {
+fn emit_literals_only(toks: &[Tok]) -> FormattedValue {
     let mut out = FormattedValue::default();
-    for t in &sec.toks {
+    for t in toks {
         match t {
             Tok::Literal(s) => out.push_str(s),
             Tok::Width(c) => out.padding(*c),
@@ -1124,28 +1138,21 @@ fn render_scientific(sec: &Section, mag: f64) -> FormattedValue {
         v *= 100.0;
     }
 
-    let (mant_out, exp_val) = if v == 0.0 {
-        (build_mantissa(&int_kinds, &frac_kinds, 0.0), 0i32)
+    let (mantissa, exp_val) = if v == 0.0 {
+        (0.0, 0i32)
     } else {
         let e = v.log10().floor() as i32;
         let mut exp = e.div_euclid(p) * p;
         let mut m = v / 10f64.powi(exp);
-        let mut mant = build_mantissa(&int_kinds, &frac_kinds, m);
         // rounding can overflow the mantissa (9.99 -> 10): bump exponent, recompute
         let (id, _) = split_digits(m, qf);
         if id.len() as i32 > p {
             exp += p;
             m = v / 10f64.powi(exp);
-            mant = build_mantissa(&int_kinds, &frac_kinds, m);
         }
-        (mant, exp)
+        (m, exp)
     };
 
-    let exp_width = exp_toks
-        .iter()
-        .filter(|t| matches!(t, Tok::Digit('0')))
-        .count()
-        .max(1);
     let sign = if exp_val < 0 {
         "-"
     } else if plus {
@@ -1153,40 +1160,14 @@ fn render_scientific(sec: &Section, mag: f64) -> FormattedValue {
     } else {
         ""
     };
-    let exp_digits = format!("{:0width$}", exp_val.unsigned_abs(), width = exp_width);
-
-    let mut out = FormattedValue::default();
-    for t in mant_toks {
-        match t {
-            Tok::Literal(s) => out.push_str(s),
-            Tok::Width(c) => out.padding(*c),
-            Tok::Fill(c) => out.fill(*c),
-            Tok::Digit(_) | Tok::Dot => break,
-            _ => {}
-        }
-    }
-    out.digits(&mant_out);
-    out.push_str(&format!("E{sign}{exp_digits}"));
-    for t in exp_toks {
-        match t {
-            Tok::Literal(s) => out.push_str(s),
-            Tok::Width(c) => out.padding(*c),
-            Tok::Fill(c) => out.fill(*c),
-            _ => {}
-        }
-    }
+    let mut out = render_decimal_tokens(mant_toks, mantissa, false);
+    out.push_str(&format!("E{sign}"));
+    out.append(render_decimal_tokens(
+        exp_toks,
+        exp_val.unsigned_abs() as f64,
+        false,
+    ));
     out
-}
-
-fn build_mantissa(int_kinds: &[char], frac_kinds: &[char], m: f64) -> String {
-    let (int_digits, frac_digits) = split_digits(m, frac_kinds.len());
-    let int_number = build_int_number(int_kinds, &int_digits, false);
-    let frac_str = build_frac(frac_kinds, &frac_digits);
-    if frac_str.is_empty() {
-        int_number
-    } else {
-        format!("{int_number}.{frac_str}")
-    }
 }
 
 /// excel's "general" render: signed, ~11 significant digits, switching to

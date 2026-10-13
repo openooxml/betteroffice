@@ -1765,7 +1765,7 @@ fn cell_display_text(
         return None;
     }
     let formatted = format_value(&cell.value, &xf.format_code, date_system);
-    if formatted.text.is_empty() {
+    if formatted.text.is_empty() && formatted.layout.is_empty() {
         return None;
     }
     let color = formatted.color.map_or_else(
@@ -2057,6 +2057,34 @@ mod tests {
             |run, _| displayed.push_str(run),
         );
         assert!(!displayed.is_empty() && displayed.chars().all(|c| c == '#'));
+    }
+
+    #[test]
+    fn fill_only_sections_reach_the_painter() {
+        let mut wb = Workbook::default();
+        wb.styles.num_fmts.push((164, "*x".into()));
+        wb.styles.cell_xfs.push(Xf {
+            num_fmt_id: Some(164),
+            ..Xf::default()
+        });
+        let mut cell = num_cell(12.0);
+        cell.style = Some(0);
+        assert_eq!(display_text(&wb.styles, wb.date_system, &cell), "");
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.set_cell(CellRef::new(0, 0), cell);
+        wb.sheets.push(sheet);
+        let vp = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 100.0,
+        };
+        let dl = build_display_list(&wb, SheetId(0), &vp).unwrap();
+        assert!(
+            dl.commands
+                .iter()
+                .any(|cmd| matches!(cmd, DrawCmd::Text { .. }))
+        );
     }
 
     #[test]

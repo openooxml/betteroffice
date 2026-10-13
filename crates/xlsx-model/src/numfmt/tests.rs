@@ -147,6 +147,29 @@ fn general_width_rounding_preserves_half_away_from_zero() {
 }
 
 #[test]
+fn spacing_directives_keep_positions_in_scientific_and_fraction_sections() {
+    assert_eq!(fv(1234.0, "0_)0.0E+00"), "1 2.3E+02");
+    let exponent =
+        serde_json::to_value(format_value(&num(1234.0), "0.0E+0*x0", DateSystem::V1900)).unwrap();
+    assert_eq!(
+        exponent["layout"],
+        serde_json::json!([
+            {"offset": 6, "kind": "fill", "character": "x"}
+        ])
+    );
+    assert_eq!(fv(12.5, "0_)0 ?/?"), "1 2 1/2");
+    let fraction =
+        serde_json::to_value(format_value(&num(12.5), "0*x0 ?/?", DateSystem::V1900)).unwrap();
+    assert_eq!(
+        fraction["layout"],
+        serde_json::json!([
+            {"offset": 1, "kind": "fill", "character": "x"}
+        ])
+    );
+    assert_eq!(fv(1234.5, "#,##0 ?/?"), "1,234 1/2");
+}
+
+#[test]
 fn builtin_table_ids() {
     assert_eq!(builtin_format_code(0), Some("General"));
     assert_eq!(builtin_format_code(1), Some("0"));
