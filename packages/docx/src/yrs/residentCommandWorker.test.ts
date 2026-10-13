@@ -1597,6 +1597,32 @@ for (const comment of [false, true]) {
   }, TIMEOUT);
 }
 
+for (const kind of ['pageBreak', 'columnBreak'] as const) {
+  test(`a remote ${kind} after the final paragraph survives worker saves and a reopen`, async () => {
+    const { client, engine } = await openWorker({ bodyXml: sectionParagraph(1, 'Tail') });
+    const remote = await createResidentEngineSession();
+    const [own, other] = kind === 'pageBreak' ? ['page', 'column'] as const : ['column', 'page'] as const;
+    try {
+      remote.loadState(engine.encodeState());
+      const end = remote.storySegments('body').reduce((index, segment) => index + (segment.kind === 'text' ? segment.text.length : 1), 0);
+      remote.applyRawOps('body', [{ op: 'insertEmbed', index: end, kind, payload: {} }]);
+      await client.applyRemoteUpdate(remote.encodeStateAsUpdate(engine.encodeStateVector()));
+      for (let save = 0; save < 2; save += 1) {
+        const bytes = (await client.save({ comments: [] })).bytes;
+        const xml = savedDocumentXml(bytes);
+        const marks = savedMarks(xml);
+        expect([marks[own], marks[other]]).toEqual([1, 0]);
+        expect(xml.indexOf(`<w:br w:type="${own}"/>`)).toBeGreaterThan(xml.indexOf('>Tail<'));
+        const reopened = await createResidentEngineSession();
+        try {
+          reopened.openDocx(new Uint8Array(bytes));
+          expect(reopened.storySegments('body').filter(segment => segment.kind === 'embed' && segment.embedKind === kind)).toHaveLength(1);
+        } finally { reopened.destroy(); }
+      }
+    } finally { remote.destroy(); client.destroy(); }
+  }, TIMEOUT);
+}
+
 test('a commanded page break and an authored column break survive comment saves', async () => {
   const bodyXml = `<w:p w14:paraId="00000001">${commented(1, textRun('First'))}</w:p>` +
     `<w:p w14:paraId="00000002">${commented(2, textRun('Col') + '<w:r><w:br w:type="column"/></w:r>' + textRun('umn'))}</w:p>` +
@@ -1646,7 +1672,7 @@ for (const comment of [true, false]) {
   }, TIMEOUT);
 }
 
-const sectionXml =(type: string, left: number) => `<w:sectPr><w:type w:val="${type}"/><w:pgMar w:left="${left}"/></w:sectPr>`;
+const sectionXml = (type: string, left: number) => `<w:sectPr><w:type w:val="${type}"/><w:pgMar w:left="${left}"/></w:sectPr>`;
 
 function savedSectionMargins(bytes: ArrayBuffer): [string, string | null, number | null][] {
   const sectPr = /<w:sectPr\b(?:[^>]*\/>|[\s\S]*?<\/w:sectPr>)/;
