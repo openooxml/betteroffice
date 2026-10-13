@@ -3028,6 +3028,7 @@ mod tests {
                 "<sheet name='First' sheetId='1' r:id='first'/>",
             ),
             "<root/>".to_owned(),
+            String::from_utf8_lossy(NESTED_NAMES_WORKBOOK).replace("name='Last'", "name='&x;'"),
             String::from_utf8_lossy(MACRO_WORKBOOK).replace("r:id='macro'", "r:id='first'"),
             String::from_utf8_lossy(MACRO_WORKBOOK).replace("r:id='macro'", "r:id='unknown'"),
         ] {
