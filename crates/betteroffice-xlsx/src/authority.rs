@@ -171,9 +171,9 @@ impl WorkbookBase {
     /// maps are hashed at every schema, so a peer that persisted its state
     /// under one of those releases is only recognisable against them.
     ///
-    /// The current fingerprint hashes the format facets under its own domain
-    /// and is accepted only as is. Every other accepted fingerprint is one a
-    /// release before facets wrote, over its reading of the styles.
+    /// The current fingerprint hashes the format facets under its own domain,
+    /// where no reading drops one. Releases before facets wrote the others,
+    /// over their reading of the styles.
     fn from_model_with_legacy_dimensions(
         model: &WorkbookModel,
         legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
@@ -185,10 +185,14 @@ impl WorkbookBase {
             let current = builder.current(styles)?;
             let mut fingerprints =
                 builder.accepted_fingerprints(styles.without_xf_facets(), legacy_styles)?;
-            fingerprints
-                .entry(SCHEMA_VERSION)
-                .or_default()
-                .insert(0, current.0.clone());
+            let released = fingerprints.remove(&SCHEMA_VERSION).unwrap_or_default();
+            let mut accepted = builder.current_fingerprints(styles, legacy_styles)?;
+            for fingerprint in released {
+                if !accepted.contains(&fingerprint) {
+                    accepted.push(fingerprint);
+                }
+            }
+            fingerprints.insert(SCHEMA_VERSION, accepted);
             Ok((current, fingerprints))
         })?;
         Ok(Self {
@@ -229,18 +233,57 @@ impl WorkbookBase {
     ) -> Result<Self, String> {
         let mut released = model.clone();
         released.styles = pre_facet_styles(&model.styles);
-        let legacy_styles = legacy_styles.map(pre_facet_styles);
+        let released_legacy = legacy_styles.map(pre_facet_styles);
         let mut base =
-            Self::released_base_oracle(&released, legacy_dimensions, legacy_styles.as_ref())?;
+            Self::released_base_oracle(&released, legacy_dimensions, released_legacy.as_ref())?;
         let (fingerprint, bootstrap_client_id) = fingerprint_model_current_oracle(model)?;
-        base.fingerprints
-            .entry(SCHEMA_VERSION)
-            .or_default()
-            .insert(0, fingerprint.clone());
+        let mut accepted = Self::current_fingerprints_oracle(model, legacy_styles)?;
+        for released in base.fingerprints.remove(&SCHEMA_VERSION).unwrap_or_default() {
+            if !accepted.contains(&released) {
+                accepted.push(released);
+            }
+        }
+        base.fingerprints.insert(SCHEMA_VERSION, accepted);
         base.fingerprint = fingerprint;
         base.bootstrap_client_id = bootstrap_client_id;
         base.styles = model.styles.clone();
         Ok(base)
+    }
+
+    #[cfg(test)]
+    fn current_fingerprints_oracle(
+        model: &WorkbookModel,
+        legacy_styles: Option<&Stylesheet>,
+    ) -> Result<Vec<String>, String> {
+        let mut accepted = Vec::new();
+        for include_col_styles in [true, false] {
+            let (fingerprint, _) = fingerprint_model_with_domain_oracle(
+                model,
+                SCHEMA_VERSION,
+                true,
+                include_col_styles,
+                FACETS_FINGERPRINT_DOMAIN,
+            )?;
+            accepted.push(fingerprint);
+        }
+        if let Some(styles) = legacy_styles.filter(|styles| **styles != model.styles) {
+            let mut legacy_model = model.clone();
+            legacy_model.styles = styles.clone();
+            accepted.extend(Self::current_fingerprints_oracle(&legacy_model, None)?);
+        }
+        if !model.styles.indexed_colors.is_empty() {
+            let mut legacy_model = model.clone();
+            legacy_model.styles.indexed_colors.clear();
+            let colorless = Self::current_fingerprints_oracle(&legacy_model, legacy_styles)?;
+            accepted.extend(colorless);
+        }
+        let mut unique = Vec::new();
+        for fingerprint in accepted {
+            if !unique.contains(&fingerprint) {
+                unique.push(fingerprint);
+            }
+        }
+        Ok(unique)
     }
 
     /// The base a release before format facets built, over its reading of
@@ -4485,6 +4528,36 @@ impl<'a> FingerprintBuilder<'a> {
         }
         self.compute(vec![(key, styles)])?;
         Ok(self.hashes[&key].clone())
+    }
+
+    /// The current schema's readings for column styles, applyX flags and the
+    /// palette, under the current domain: the exact fingerprint comes first.
+    fn current_fingerprints(
+        &mut self,
+        styles: FingerprintStyles<'a>,
+        legacy_styles: Option<&'a Stylesheet>,
+    ) -> Result<Vec<String>, String> {
+        let (current, _) = self.hash(styles, SCHEMA_VERSION, true, true, false, true)?;
+        let (without_col_styles, _) = self.hash(styles, SCHEMA_VERSION, true, false, false, true)?;
+        let mut accepted = vec![current];
+        let mut readings = vec![without_col_styles];
+        if let Some(legacy) = legacy_styles
+            .map(FingerprintStyles::new)
+            .filter(|legacy| *legacy != styles)
+        {
+            readings.extend(self.current_fingerprints(legacy, None)?);
+        }
+        if !styles.indexed_colors.is_empty() {
+            let colorless =
+                self.current_fingerprints(styles.without_indexed_colors(), legacy_styles)?;
+            readings.extend(colorless);
+        }
+        for fingerprint in readings {
+            if !accepted.contains(&fingerprint) {
+                accepted.push(fingerprint);
+            }
+        }
+        Ok(accepted)
     }
 
     fn accepted_fingerprints(
