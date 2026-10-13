@@ -7888,22 +7888,15 @@ impl EngineSession {
             );
             let content_width = (page_size.w - margins.left - margins.right).max(1.0);
             let mut blocks = self
-                .with_resident_story(
-                    &self.doc.header_footer_story(&r_id),
-                    render_env,
-                    |blocks| {
-                        blocks
-                            .iter()
-                            .map(|block| block.as_ref().clone())
-                            .collect::<Vec<_>>()
-                    },
-                )
+                .with_resident_story(&self.doc.header_footer_story(&r_id), render_env, |blocks| {
+                    blocks
+                        .iter()
+                        .map(|block| block.as_ref().clone())
+                        .collect::<Vec<_>>()
+                })
                 .map_err(|error| error.to_string())?;
             for block in &mut blocks {
-                resolve_line_unit_spacing(
-                    block,
-                    regions.paragraph_spacing_line_px(section_index),
-                );
+                resolve_line_unit_spacing(block, regions.paragraph_spacing_line_px(section_index));
                 resolve_doc_grid_pitch(block, regions.doc_grid_snap_pitch_px(section_index));
             }
             let metrics = HeaderFooterMetrics {
@@ -21616,7 +21609,10 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         let headed = request["regions"]["sections"][0].clone();
         let mut inherited = headed.clone();
         inherited["pageSize"]["w"] = serde_json::json!(432);
-        inherited.as_object_mut().unwrap().remove("headerFooterRefs");
+        inherited
+            .as_object_mut()
+            .unwrap()
+            .remove("headerFooterRefs");
         request["regions"]["sections"] = serde_json::json!([headed, inherited]);
         let layout = |prefix: bool| {
             let engine = EngineSession::new(149);
@@ -21655,7 +21651,9 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         assert_eq!(lines(&variants[0]), 1);
         assert!(lines(&variants[1]) > 1);
         assert_eq!(
-            full["layout"]["pages"].as_array().unwrap()
+            full["layout"]["pages"]
+                .as_array()
+                .unwrap()
                 .iter()
                 .take_while(|page| page["size"]["w"].as_f64() == Some(816.0))
                 .count(),
