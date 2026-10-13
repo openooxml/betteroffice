@@ -833,7 +833,7 @@ fn cascade_plain_projection_keeps_main_saved_xfs_for_untouched_cells() {
             CalculationOptions::default(),
         )
         .unwrap();
-    for (peer, index, source) in [(&left, 1, "B1"), (&right, 0, "A1")] {
+    for (peer, index, source) in [(&left, 1, "B1"), (&right, 1, "B1")] {
         let saved = peer.save().unwrap();
         assert_eq!(saved_cell_style(&saved, "B1"), index);
         assert_eq!(saved_cell_xf(&saved, "B1"), saved_cell_xf(&bytes, source));

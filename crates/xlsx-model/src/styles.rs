@@ -1252,7 +1252,11 @@ impl Stylesheet {
 
     /// binds the plain format to the first xf reading plain, as a shared state resolves it.
     pub fn bind_plain_xf(&mut self) {
-        self.bound_plain = (0..self.cell_xfs.len() as u32).find(|&index| self.reads_plain(index));
+        self.bound_plain = (0..self.cell_xfs.len() as u32)
+            .find(|&index| self.reads_plain(index))
+            .or_else(|| {
+                (0..self.cell_xfs.len() as u32).find(|&index| self.reads_released_plain(index))
+            });
     }
 
     /// whether the plain format is bound to a shared xf.
@@ -1267,6 +1271,23 @@ impl Stylesheet {
             Some(_) => 0,
             None => self.plain_xf(),
         }
+    }
+
+    fn reads_released_plain(&self, index: u32) -> bool {
+        let mut format = self.resolved_format(Some(index));
+        let alignment = Alignment {
+            h: format.alignment.h,
+            v: format.alignment.v,
+            wrap_text: format.alignment.wrap_text,
+            shrink_to_fit: format.alignment.shrink_to_fit,
+            ..Alignment::default()
+        };
+        format.alignment = &alignment;
+        format.protection = None;
+        format.xf_id = None;
+        format.quote_prefix = false;
+        format.pivot_button = false;
+        format == self.resolved_format(None)
     }
 
     fn reads_plain(&self, index: u32) -> bool {
