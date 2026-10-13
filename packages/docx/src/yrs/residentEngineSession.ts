@@ -56,7 +56,7 @@ import type { ResidentControlTarget, ResidentControlPosition } from './residentC
 import { withPackageMetadata, type ResidentPackageMetadata } from './residentProperties';
 import { getDocumentWatermark } from '../docx/watermarkApi';
 import { resolvedFinalSectionProperties, updateFinalSectionProperties } from '../editor/finalSection';
-import { readSectionSnapshot, withSectionIds, withSectionSnapshot, type DocxSectionMargins, type ResidentSectionSnapshot } from './residentSections';
+import { readSectionSnapshot, withSectionIds, withSectionNames, withSectionSnapshot, type DocxSectionMargins, type ResidentSectionSnapshot } from './residentSections';
 
 export type ResidentEngineSession = Pick<
   YrsSession,
@@ -231,6 +231,7 @@ export async function createResidentEngineSession(
   let partsTouched = false;
   let marginsTouched = false;
   let sectionsTouched = false;
+  let sectionNames = { host: new Map<string, string>(), resident: new Map<string, string>() };
   let sectionLayout: { revision: string; sections: ResidentSectionSnapshot['sections'] } | null = null;
   const parsedMedia = new Map<string, string>();
   let parsedFacade: YrsSession | undefined;
@@ -255,10 +256,11 @@ export async function createResidentEngineSession(
     }
     return Object.keys(margins).length ? withSectionSnapshot(document, readSectionSnapshot(resident, document, margins)) : document;
   };
+  const hostDocument = (): Document => withSectionNames(partDocument(), sectionNames.host);
   const partLayoutInput = (input: string): string => {
     if (!partsTouched && !marginsTouched && !sectionsTouched && session.part_metadata_json() === '{}' &&
       session.document_properties_json() === '{}' && session.section_margins_json() === '{}') return input;
-    const document = partDocument();
+    const document = hostDocument();
     const request = JSON.parse(input);
     const sections = document.package.document.sections?.map(section => ({ sectionId: section.id ?? section.properties.sectionId, properties: section.properties })) ?? [];
     if (!sectionsTouched) sections.push({ sectionId: sections.at(-1)?.sectionId, properties: document.package.document.finalSectionProperties ?? {} });
@@ -272,9 +274,23 @@ export async function createResidentEngineSession(
       ...(request.workerOwned ? { workerHeadersFooters: { ...request.workerHeadersFooters, variants } } : {}) });
   };
   const keySections = (document: Document): Document => {
+    sectionNames = { host: new Map(), resident: new Map() };
     if ((document.package.document.sections?.length ?? 0) < 2 || !geometryReader.hasStory('body')) return document;
-    return withSectionIds(document, resident.paragraphs('body')
+    const keyed = withSectionIds(document, resident.paragraphs('body')
       .filter(paragraph => paragraph.properties.sectPr ?? paragraph.properties._sectionProperties).map(paragraph => paragraph.paraId));
+    document.package.document.sections!.forEach(({ id }, index) => {
+      const key = keyed.package.document.sections![index]!.id;
+      if (id === undefined || key === undefined || id === key) return;
+      sectionNames.host.set(key, id);
+      sectionNames.resident.set(id, key);
+    });
+    return keyed;
+  };
+  const setSectionMark = (paraId: string, sectPr: SectionProperties): boolean => {
+    const version = session.version();
+    const at = { paraId, offset: 0 };
+    resident.setParagraphAttrs({ story: 'body', start: at, end: at }, { other: { sectPr, sectionBreakType: sectPr.sectionStart ?? null } });
+    return session.version() !== version;
   };
   const sectionProperties = (): ResidentSectionSnapshot => {
     return readSectionSnapshot(resident, partDocument(), JSON.parse(session.section_margins_json()), sectionsTouched);
@@ -545,18 +561,15 @@ export async function createResidentEngineSession(
       if (changed) { marginsTouched = true; sectionLayout = null; projectionStories.add('body'); }
       return changed;
     },
-    propertyDocument: partDocument,
-    setPropertyDocument: document => {
+    propertyDocument: hostDocument,
+    setPropertyDocument: input => {
       sectionLayout = null;
+      const document = withSectionNames(input, sectionNames.resident);
       const margins = JSON.parse(session.section_margins_json()) as Record<string, DocxSectionMargins>;
       let changed = false;
-      for (const [index, section] of sections.slice(0, -1).entries()) {
-        const desired = document.package.document.sections?.[index]?.properties;
-        if (desired && JSON.stringify(section.properties) !== JSON.stringify(desired)) {
-          const at = { paraId: section.section, offset: 0 };
-          resident.setParagraphAttrs({ story: 'body', start: at, end: at }, { other: { sectPr: desired } });
-          changed = true;
-        }
+      for (const section of sectionProperties().sections.slice(0, -1)) {
+        const desired = document.package.document.sections?.find(entry => entry.id === section.section)?.properties;
+        if (desired && JSON.stringify(section.properties) !== JSON.stringify(desired)) changed = setSectionMark(section.section, desired) || changed;
       }
       for (const [section, current] of Object.entries(margins)) {
         const desired = section === 'final' ? resolvedFinalSectionProperties(document.package.document)
@@ -575,22 +588,20 @@ export async function createResidentEngineSession(
       session.repeat_content_control_at(at.story, at.index, remove)),
     setControlValue: (at, value) => applyCommandMutation(at.story, () =>
       session.set_content_control_value_index(at.story, at.index, JSON.stringify(value))),
-    partDocument,
+    partDocument: hostDocument,
     partGeometry: frame => readPartGeometry(resident, frame),
     partStory: (id) => `hf:${(JSON.parse(session.header_footer_aliases_json()) as Record<string, string>)[id] ?? id}`,
-    setPartDocument: (document, removeStories = []) => {
+    setPartDocument: (input, removeStories = []) => {
       sectionLayout = null;
       ensureUndo();
+      const document = withSectionNames(input, sectionNames.resident);
       let changed = false;
       if (sectionsTouched) {
         const boundaries = resident.paragraphs('body').filter(paragraph => paragraph.properties.sectPr || paragraph.properties._sectionProperties);
         for (const paragraph of boundaries) {
           const desired = document.package.document.sections?.find(section => section.id === paragraph.paraId)?.properties;
           if (!desired || JSON.stringify(desired) === JSON.stringify(paragraph.properties.sectPr ?? paragraph.properties._sectionProperties)) continue;
-          const at = { paraId: paragraph.paraId, offset: 0 };
-          const version = session.version();
-          resident.setParagraphAttrs({ story: 'body', start: at, end: at }, { other: { sectPr: desired, sectionBreakType: desired.sectionStart ?? null } });
-          changed = session.version() !== version || changed;
+          changed = setSectionMark(paragraph.paraId, desired) || changed;
         }
       }
       changed = session.set_part_metadata(JSON.stringify(partMetadata(document)), JSON.stringify(removeStories)) || changed;

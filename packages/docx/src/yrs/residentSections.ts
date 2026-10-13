@@ -72,6 +72,14 @@ export function withSectionIds(document: Document, closing: readonly string[]): 
   } } };
 }
 
+export function withSectionNames(document: Document, names: ReadonlyMap<string, string>): Document {
+  const body = document.package.document;
+  if (!body.sections || names.size === 0) return document;
+  return { ...document, package: { ...document.package, document: { ...body,
+    sections: body.sections.map(section => section.id !== undefined && names.has(section.id) ? { ...section, id: names.get(section.id) } : section),
+  } } };
+}
+
 export function withSectionSnapshot(document: Document, snapshot: ResidentSectionSnapshot): Document {
   const body = document.package.document;
   const finalSectionProperties = snapshot.sections.at(-1)!.properties;
