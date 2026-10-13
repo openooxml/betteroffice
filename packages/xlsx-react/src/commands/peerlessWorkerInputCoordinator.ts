@@ -636,7 +636,12 @@ export function createPeerlessWorkerInputCoordinator(
       if (reserved) {
         const ticket: PeerlessTicket = { seq: null, result: reserved.promise, lease: cycle };
         Object.defineProperty(ticket, 'seq', { get: () => sealed?.seq ?? null });
-        void reserved.promise.then((status) => { ticket.outcome = status; pump(); }, (error) => { ticket.failure = { error }; pump(); });
+        void reserved.promise.then((status) => { ticket.outcome = status; pump(); }, (error) => {
+          ticket.failure = { error };
+          if (boundary === ticket) boundary = undefined;
+          if (last === ticket) last = undefined;
+          pump();
+        });
         void result.promise.catch(reserved.reject);
         input.composition = composition;
         input.compositionDraft = snapshot;
