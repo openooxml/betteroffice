@@ -513,20 +513,18 @@ function looksSerif(family: string): boolean {
   );
 }
 
-/**
- * A family no clone matches, paired with the bundled face whose advance widths
- * come closest: Montserrat is within 0.3% of Verdana over a sentence of
- * mixed-case text, where Calibri is 24% too narrow, and it keeps the line
- * breaks the deck was written against. Measured the same way, Trebuchet MS,
- * Tahoma, Century Gothic, Tw Cen MT and Lucida Grande all scored worse on the
- * corpus than plain Calibri does, so they are deliberately left out — a closer
- * advance is not worth a letterform that far off (#797). The match holds over
- * a sentence, not per glyph, so each entry also keeps the family's own widest
- * digit in em: Montserrat's zero is 0.662 em where every Verdana digit is
- * 0.636, and a spreadsheet counts its column widths in that digit.
- */
-const WIDTH_MATCHED_SUBSTITUTES: Record<string, { family: string; digitAdvance: number }> = {
-  verdana: { family: 'Montserrat', digitAdvance: 0.636 },
+/** Matching total text widths does not guarantee matching individual digit widths. */
+const WIDTH_MATCHED_SUBSTITUTES: Record<
+  string,
+  {
+    family: string;
+    digitAdvances: Partial<Record<'regular' | 'bold' | 'italic' | 'boldItalic', number>>;
+  }
+> = {
+  verdana: {
+    family: 'Montserrat',
+    digitAdvances: { regular: 0.636, bold: 0.711, italic: 0.636, boldItalic: 0.711 },
+  },
 };
 
 /**
@@ -632,27 +630,25 @@ export function resolveLastResortFace(
   return resolveMetricCompatFace(base, bold, italic)!;
 }
 
-/**
- * The widest digit of `family` in em, where the face drawing it is a
- * width-matched substitute whose digits differ from the family's; `undefined`
- * for every other family, whose digits are read off the face itself.
- */
-export function resolveDigitAdvance(family: string): number | undefined {
-  return WIDTH_MATCHED_SUBSTITUTES[family.trim().toLowerCase()]?.digitAdvance;
+/** Recorded widest digit advance in em for the requested family and style. */
+export function resolveDigitAdvance(
+  family: string,
+  bold = false,
+  italic = false,
+): number | undefined {
+  const style = bold ? (italic ? 'boldItalic' : 'bold') : (italic ? 'italic' : 'regular');
+  return WIDTH_MATCHED_SUBSTITUTES[family.trim().toLowerCase()]?.digitAdvances[style];
 }
 
-/**
- * The maximum digit width spreadsheet column widths are counted in: the
- * widest digit of `family` at `sizePx`, in whole pixels. `measure` reads one
- * digit's advance off the face that draws the family, unless that face is a
- * substitute with digits of its own.
- */
+/** Widest digit advance in whole pixels for spreadsheet column widths. */
 export function maxDigitWidth(
   family: string,
   sizePx: number,
   measure: (digit: string) => number,
+  bold = false,
+  italic = false,
 ): number {
-  const advance = resolveDigitAdvance(family);
+  const advance = resolveDigitAdvance(family, bold, italic);
   if (advance !== undefined) return Math.round(advance * sizePx);
   return Math.max(...[...'0123456789'].map((digit) => Math.round(measure(digit))));
 }

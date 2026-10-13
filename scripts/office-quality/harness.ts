@@ -144,12 +144,25 @@ async function xlsxPrintMetrics(bytes: Uint8Array) {
   const font = styles.querySelectorAll('fonts > font')[fontIndex];
   const family = font?.querySelector('name')?.getAttribute('val') ?? 'Calibri';
   const size = Number(font?.querySelector('sz')?.getAttribute('val') ?? 11);
+  const flag = (name: string) => {
+    const element = font?.querySelector(name);
+    return !!element && !['0', 'false', 'off'].includes(element.getAttribute('val') ?? 'true');
+  };
+  const bold = flag('b');
+  const italic = flag('i');
   const dpi = 72;
   const sizePx = (size * dpi) / 72;
   const context = document.createElement('canvas').getContext('2d')!;
-  context.font = `${sizePx}px "${family.replace(/"/g, '\\"')}"`;
+  const fontStyle = `${italic ? 'italic' : 'normal'} ${bold ? 'bold' : 'normal'}`;
+  context.font = `${fontStyle} ${sizePx}px "${family.replace(/"/g, '\\"')}"`;
   const bounds = context.measureText('0123456789');
-  const digitWidth = maxDigitWidth(family, sizePx, (digit) => context.measureText(digit).width);
+  const digitWidth = maxDigitWidth(
+    family,
+    sizePx,
+    (digit) => context.measureText(digit).width,
+    bold,
+    italic,
+  );
   const workbook = await xml('xl/workbook.xml');
   const relationships = await xml('xl/_rels/workbook.xml.rels');
   return Promise.all(
