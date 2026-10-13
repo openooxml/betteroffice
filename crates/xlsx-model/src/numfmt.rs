@@ -1189,7 +1189,7 @@ fn format_general(n: f64) -> String {
     let a = n.abs();
     let e = a.log10().floor() as i32;
     let body = if !(-4..11).contains(&e) {
-        general_scientific(a, e)
+        scientific_precision(a, 5)
     } else {
         let decimals = (10 - e).clamp(0, 15) as usize;
         let mut s = round_fixed(a, decimals);
@@ -1199,28 +1199,37 @@ fn format_general(n: f64) -> String {
     if neg { format!("-{body}") } else { body }
 }
 
-fn general_scientific(a: f64, e: i32) -> String {
-    scientific_precision(a, e, 5)
-}
-
-fn scientific_precision(a: f64, mut e: i32, decimals: usize) -> String {
-    let divisor = 10f64.powi(e);
-    let mant = if divisor == 0.0 {
-        format!("{a:e}")
-            .split_once('e')
-            .and_then(|(m, _)| m.parse().ok())
-            .unwrap_or(a)
-    } else {
-        a / divisor
-    };
-    let mut m = round_fixed(mant, decimals);
-    if m.parse::<f64>().is_ok_and(|value| value >= 10.0) {
-        e += 1;
-        m = round_fixed(mant / 10.0, decimals);
+/// `a` in scientific notation with `decimals` mantissa places, rounded half
+/// away from zero from its first fifteen significant digits as Excel shows it.
+fn scientific_precision(a: f64, decimals: usize) -> String {
+    let exact = format!("{a:.14e}");
+    let (mantissa, exponent) = exact.split_once('e').unwrap_or((exact.as_str(), "0"));
+    let mut exponent: i32 = exponent.parse().unwrap_or(0);
+    let mut digits: Vec<u8> = mantissa.bytes().filter(u8::is_ascii_digit).collect();
+    let round_up = digits.get(decimals + 1).is_some_and(|digit| *digit >= b'5');
+    digits.truncate(decimals + 1);
+    if round_up {
+        match digits.iter().rposition(|digit| *digit != b'9') {
+            Some(last) => {
+                digits[last] += 1;
+                digits[last + 1..].fill(b'0');
+            }
+            None => {
+                digits.fill(b'0');
+                digits[0] = b'1';
+                exponent += 1;
+            }
+        }
+    }
+    let mut m = String::with_capacity(digits.len() + 1);
+    m.push(char::from(digits[0]));
+    if digits.len() > 1 {
+        m.push('.');
+        m.extend(digits[1..].iter().map(|digit| char::from(*digit)));
     }
     trim_trailing_zeros(&mut m);
-    let sign = if e < 0 { '-' } else { '+' };
-    format!("{m}E{sign}{:02}", e.unsigned_abs())
+    let sign = if exponent < 0 { '-' } else { '+' };
+    format!("{m}E{sign}{:02}", exponent.unsigned_abs())
 }
 
 pub fn is_general(value: &CellValue, code: &str) -> bool {
@@ -1250,7 +1259,7 @@ pub fn fit_general(value: f64, width: f32, mut measure: impl FnMut(&str) -> f32)
         }
     }
     for decimals in (0..=5).rev() {
-        let body = scientific_precision(value.abs(), exponent, decimals);
+        let body = scientific_precision(value.abs(), decimals);
         let candidate = if value < 0.0 {
             format!("-{body}")
         } else {

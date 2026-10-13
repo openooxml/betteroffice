@@ -95,20 +95,40 @@ function hashes(width: number, ctx: CanvasRenderingContext2D): string {
 function fitGeneral(value: number, width: number, ctx: CanvasRenderingContext2D): string | undefined {
   if (!Number.isFinite(value) || value === 0) return undefined;
   const exponent = Math.floor(Math.log10(Math.abs(value)));
-  const trim = (text: string) => text.includes('.') ? text.replace(/0+$/, '').replace(/\.$/, '') : text;
   if (exponent >= -4 && exponent < 11) {
     for (let decimals = Math.min(15, Math.max(0, 10 - exponent)); decimals >= 0; decimals--) {
       const factor = 10 ** decimals;
       const rounded = Math.sign(value) * Math.round(Math.abs(value) * factor) / factor;
-      const candidate = trim(rounded.toFixed(decimals));
+      const candidate = trimZeros(rounded.toFixed(decimals));
       if (Number(candidate) !== 0 && ctx.measureText(candidate).width <= width) return candidate;
     }
   }
   for (let decimals = 5; decimals >= 0; decimals--) {
-    const [mantissa, exponent] = value.toExponential(decimals).split('e');
-    const power = Number(exponent);
-    const candidate = `${trim(mantissa)}E${power < 0 ? '-' : '+'}${Math.abs(power).toString().padStart(2, '0')}`;
+    const candidate = scientific(value, decimals);
     if (ctx.measureText(candidate).width <= width) return candidate;
   }
   return undefined;
+}
+
+/** `value` with `decimals` mantissa places, rounded half away from zero from its first fifteen significant digits as Excel shows it. */
+function scientific(value: number, decimals: number): string {
+  const [mantissa, power] = Math.abs(value).toExponential(14).split('e');
+  const digits = mantissa.replace('.', '');
+  let exponent = Number(power);
+  let kept = digits.slice(0, decimals + 1);
+  if (digits.charCodeAt(decimals + 1) >= 53) {
+    const last = kept.search(/[0-8]9*$/);
+    if (last < 0) {
+      kept = `1${'0'.repeat(decimals)}`;
+      exponent++;
+    } else {
+      kept = `${kept.slice(0, last)}${Number(kept[last]) + 1}${'0'.repeat(kept.length - last - 1)}`;
+    }
+  }
+  const body = kept.length > 1 ? trimZeros(`${kept[0]}.${kept.slice(1)}`) : kept;
+  return `${value < 0 ? '-' : ''}${body}E${exponent < 0 ? '-' : '+'}${Math.abs(exponent).toString().padStart(2, '0')}`;
+}
+
+function trimZeros(text: string): string {
+  return text.includes('.') ? text.replace(/0+$/, '').replace(/\.$/, '') : text;
 }
