@@ -411,7 +411,6 @@ fn patch_xf(source: &[u8], base: &Xf, xf: &Xf) -> Result<Vec<u8>, ParseError> {
 mod tests {
     use super::*;
     use crate::tests::{package, parse_workbook_with_package};
-    use xlsx_model::CellRange;
 
     #[test]
     fn thousands_of_distinct_styled_cells_have_linear_xml_deduplication() {
@@ -438,18 +437,18 @@ mod tests {
         parts.push(("xl/styles.xml".into(), styles.into_bytes()));
         let parsed = parse_workbook_with_package(&parts).unwrap();
         let mut workbook = parsed.workbook;
-        xlsx_ops::apply_in_place(
-            &mut workbook,
-            &xlsx_ops::Op::PatchRangeStyle {
-                sheet: SheetId(0),
-                range: CellRange::new(CellRef::new(0, 0), CellRef::new(count - 1, 0)),
-                patch: xlsx_ops::StylePatch {
-                    bold: Some(true),
-                    ..Default::default()
-                },
-            },
-        )
-        .unwrap();
+        for row in 0..count {
+            let cell = workbook.sheets[0].cell_mut(CellRef::new(row, 0)).unwrap();
+            let source = cell.style.unwrap();
+            let mut format = workbook.styles.cell_format(Some(source));
+            format.font.bold = true;
+            cell.style = Some(
+                workbook
+                    .styles
+                    .intern_derived_cell_format(source, &format)
+                    .unwrap(),
+            );
+        }
         XML_KEY_BUDGET.with(|budget| budget.set(Some(count as usize * 20)));
         let plan = StylePlan::new(
             &workbook,
