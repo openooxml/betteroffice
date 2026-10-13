@@ -811,6 +811,7 @@ struct FractionPattern {
     denominator_end: usize,
     fixed: Option<u64>,
     limit: u64,
+    mixed: bool,
 }
 
 fn fraction_pattern(toks: &[Tok]) -> Option<FractionPattern> {
@@ -850,10 +851,13 @@ fn fraction_pattern(toks: &[Tok]) -> Option<FractionPattern> {
         denominator_end: end,
         fixed,
         limit: 10u64.pow(digits as u32) - 1,
+        mixed: !digit_kinds(&toks[..numerator]).is_empty(),
     })
 }
 
-fn best_fraction(value: f64, limit: u64) -> (u64, u64) {
+/// closest fraction within `limit`, or `None` when a convergent's numerator
+/// does not fit a u64.
+fn best_fraction(value: f64, limit: u64) -> Option<(u64, u64)> {
     let (mut p0, mut q0, mut p1, mut q1) = (0u64, 1u64, 1u64, 0u64);
     let mut remainder = value;
     loop {
@@ -864,47 +868,58 @@ fn best_fraction(value: f64, limit: u64) -> (u64, u64) {
         if q2 > limit {
             break;
         }
-        let Some(p2) = whole.checked_mul(p1).and_then(|p| p0.checked_add(p)) else {
-            break;
-        };
+        let p2 = whole.checked_mul(p1)?.checked_add(p0)?;
         (p0, q0, p1, q1) = (p1, q1, p2, q2);
         let fraction = remainder - whole as f64;
         if fraction <= f64::EPSILON {
-            return (p1, q1);
+            return Some((p1, q1));
         }
         remainder = 1.0 / fraction;
     }
     if q1 == 0 {
-        return (value.round() as u64, 1);
+        return None;
     }
     let count = (limit - q0) / q1;
-    let (p2, q2) = (p0 + count * p1, q0 + count * q1);
+    let (p2, q2) = (count.checked_mul(p1)?.checked_add(p0)?, q0 + count * q1);
     if (p1 as f64 / q1 as f64 - value).abs() <= (p2 as f64 / q2 as f64 - value).abs() {
-        (p1, q1)
+        Some((p1, q1))
     } else {
-        (p2, q2)
+        Some((p2, q2))
     }
 }
 
-fn render_fraction(sec: &Section, mag: f64, pattern: FractionPattern) -> FormattedValue {
+/// (whole, numerator, denominator) for `mag`, or `None` when one does not
+/// fit a u64 and the section shows general text instead.
+fn fraction_parts(mag: f64, pattern: FractionPattern) -> Option<(u64, u64, u64)> {
     if !mag.is_finite() || mag >= u64::MAX as f64 {
-        return format_general(mag).into();
+        return None;
     }
-    let integer_kinds = digit_kinds(&sec.toks[..pattern.numerator]);
-    let mixed = !integer_kinds.is_empty();
-    let mut whole = if mixed { mag.floor() as u64 } else { 0 };
-    let value = if mixed { mag - whole as f64 } else { mag };
+    let mut whole = if pattern.mixed { mag.floor() as u64 } else { 0 };
+    let value = if pattern.mixed { mag - whole as f64 } else { mag };
     let (mut numerator, denominator) = match pattern.fixed {
-        Some(denominator) => ((value * denominator as f64).round() as u64, denominator),
-        None => best_fraction(value, pattern.limit),
+        Some(denominator) => {
+            let scaled = (value * denominator as f64).round();
+            if scaled >= u64::MAX as f64 {
+                return None;
+            }
+            (scaled as u64, denominator)
+        }
+        None => best_fraction(value, pattern.limit)?,
     };
-    if mixed && numerator >= denominator {
+    if pattern.mixed && numerator >= denominator {
         whole += numerator / denominator;
         numerator %= denominator;
     }
+    Some((whole, numerator, denominator))
+}
+
+fn render_fraction(sec: &Section, mag: f64, pattern: FractionPattern) -> FormattedValue {
+    let Some((whole, numerator, denominator)) = fraction_parts(mag, pattern) else {
+        return format_general(mag).into();
+    };
     let numerator_kinds = digit_kinds(&sec.toks[pattern.numerator..pattern.slash]);
     let denominator_kinds = digit_kinds(&sec.toks[pattern.slash + 1..pattern.denominator_end]);
-    let hidden = mixed && numerator == 0 && !numerator_kinds.contains(&'0');
+    let hidden = pattern.mixed && numerator == 0 && !numerator_kinds.contains(&'0');
     let mut out = render_decimal_tokens(&sec.toks[..pattern.numerator], whole as f64, false);
     if hidden {
         for _ in &numerator_kinds {
