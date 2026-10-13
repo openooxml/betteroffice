@@ -35,6 +35,14 @@ TOOL_CALLS = {'betteroffice': 'BetterOffice MCP calls', 'generic': 'shell comman
 module_spec = importlib.util.spec_from_file_location('format_check', ROOT / 'check.py')
 checker = importlib.util.module_from_spec(module_spec)
 module_spec.loader.exec_module(checker)
+FORMATS = tuple(dict.fromkeys(task['format'] for task in checker.tasks()))
+
+
+def format_selection(value):
+    names = {name.strip() for name in value.split(',')}
+    if not names <= set(FORMATS):
+        raise argparse.ArgumentTypeError(f'unknown format in {value!r}; choose from {",".join(FORMATS)}')
+    return tuple(name for name in FORMATS if name in names)
 
 
 def cli_command(command):
@@ -272,12 +280,13 @@ def run_task(task, cli, model, results, arm='betteroffice', python=None):
             'agent_exit_code': exit_code, 'timed_out': timed_out}
 
 
-def write_results(results, model, records, arm='betteroffice', **metadata):
-    (results / 'results.json').write_text(json.dumps({'model': model, 'arm': arm, **metadata, 'timeout_seconds': TIMEOUT_SECONDS,
-                                                    'results': records}, indent=2) + '\n')
+def write_results(results, model, records, arm='betteroffice', formats=FORMATS, **metadata):
+    (results / 'results.json').write_text(json.dumps({'model': model, 'arm': arm, 'formats': list(formats), **metadata,
+                                                    'timeout_seconds': TIMEOUT_SECONDS, 'results': records}, indent=2) + '\n')
     passed = sum(record['pass'] for record in records)
     idle = sum(record['tool_calls'] == 0 for record in records)
-    rows = [f'Model: `{model}`. Arm: `{arm}`. Passed: {passed}/{len(records)}. Tasks without tool calls: {idle}. '
+    rows = [f'Model: `{model}`. Arm: `{arm}`. Formats: {", ".join(formats)}. Passed: {passed}/{len(records)}. '
+            f'Tasks without tool calls: {idle}. '
             f'Tool calls count {TOOL_CALLS[arm]}; n/a means unavailable.',
             '', '| Task | Result | Check message | Tool calls | Duration (s) |',
             '| --- | --- | --- | ---: | ---: |']
@@ -289,10 +298,12 @@ def write_results(results, model, records, arm='betteroffice', **metadata):
 
 
 def main():
-    parser = argparse.ArgumentParser(usage='%(prog)s [--arm betteroffice] <agents-cli-command> <results-dir> [model]\n'
-                                           '       %(prog)s --arm generic --python <python> <results-dir> [model]')
+    parser = argparse.ArgumentParser(usage='%(prog)s [--arm betteroffice] [--formats <list>] <agents-cli-command> <results-dir> [model]\n'
+                                           '       %(prog)s --arm generic --python <python> [--formats <list>] <results-dir> [model]')
     parser.add_argument('--arm', choices=tuple(ALLOWED_ITEMS), default='betteroffice')
     parser.add_argument('--python', help='generic arm: a Python that imports openpyxl, pptx and docx')
+    parser.add_argument('--formats', type=format_selection, default=FORMATS, metavar='<list>',
+                        help=f'comma-separated formats to run, from {",".join(FORMATS)} (default: all)')
     parser.add_argument('arguments', nargs='+', help=argparse.SUPPRESS)
     args = parser.parse_args()
     generic = args.arm == 'generic'
@@ -315,7 +326,7 @@ def main():
             raise ValueError('codex is not on PATH')
     except (ValueError, OSError) as error:
         parser.error(str(error))
-    tasks = checker.tasks()
+    tasks = [task for task in checker.tasks() if task['format'] in args.formats]
     try:
         if generic:
             python_ready(python)
@@ -326,11 +337,11 @@ def main():
     except (RuntimeError, OSError) as error:
         sys.exit(f'run.py: {error}')
     records = []
-    write_results(results, model, records, args.arm, **metadata)
+    write_results(results, model, records, args.arm, args.formats, **metadata)
     for task in tasks:
         record = run_task(task, cli, model, results, args.arm, python)
         records.append(record)
-        write_results(results, model, records, args.arm, **metadata)
+        write_results(results, model, records, args.arm, args.formats, **metadata)
         print(f'{record["task"]}: {"PASS" if record["pass"] else "FAIL"} ({record["duration_seconds"]:.3f}s): {record["check_message"]}', flush=True)
     return 0 if all(record['pass'] for record in records) else 1
 

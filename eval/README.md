@@ -212,6 +212,10 @@ The generic arm takes no MCP command:
 eval/formats/run.sh --arm generic --python /path/to/venv/bin/python /tmp/format-eval-generic gpt-6-luna
 ```
 
+Either arm takes `--formats xlsx,pptx` (comma-separated, default all) to run
+only those formats' tasks; the pre-flight then requires only their tools, and
+both reports name the formats that ran.
+
 The results directory must be new or empty and outside the repository. It
 receives `results.md`, `results.json` (with the arm), and per task the agent's JSON event log,
 its stderr and the output file. Check a single output or the checkers alone
