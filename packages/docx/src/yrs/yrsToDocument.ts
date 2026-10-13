@@ -56,7 +56,7 @@ import type {
   Endnote,
   HeaderFooter,
 } from '../types/document';
-import type { YrsSession } from './index';
+import type { YrsRunInheritance, YrsSession } from './index';
 
 type Attrs = Record<string, unknown>;
 
@@ -423,6 +423,40 @@ function attrsToTextFormatting(attributes: Attrs): TextFormatting {
   return formatting;
 }
 
+/** The run properties a run with these attributes saves with. */
+type RunFormatter = (attributes: Attrs) => TextFormatting;
+
+const directFormatting: RunFormatter = (attributes) =>
+  attrsToTextFormatting(formattingAttrs(attributes));
+
+const ON_OFF_RUN_PROPERTIES = new Set<string>([
+  'bold', 'boldCs', 'italic', 'italicCs', 'allCaps', 'smallCaps', 'strike', 'doubleStrike',
+  'outline', 'shadow', 'emboss', 'imprint', 'hidden', 'rtl',
+]);
+
+const lentByLinkStyle = (mark: unknown): boolean => asObject(mark)?.inheritedHyperlink === true;
+
+/**
+ * What a run with `attributes` that inherits `inherited` writes: the values
+ * that differ, and an explicit off for an inherited switch, color or
+ * underline it clears.
+ */
+function relativeFormatting(attributes: Attrs, inherited: TextFormatting): TextFormatting {
+  const formatting = directFormatting(attributes);
+  const result: Attrs = {};
+  for (const key of new Set([...Object.keys(formatting), ...Object.keys(inherited)])) {
+    const value = formatting[key as keyof TextFormatting];
+    if (sameJson(value, inherited[key as keyof TextFormatting])) continue;
+    if (value !== undefined) result[key] = value;
+    else if (ON_OFF_RUN_PROPERTIES.has(key)) result[key] = false;
+    else if (key === 'color' && !lentByLinkStyle(attributes.textColor)) result[key] = { auto: true };
+    else if (key === 'underline' && !lentByLinkStyle(attributes.underline)) {
+      result[key] = { style: 'none' };
+    }
+  }
+  return result as TextFormatting;
+}
+
 function runContentForText(text: string, formatting: TextFormatting): RunContent[] {
   const content: RunContent[] = [];
   let plainText = '';
@@ -465,12 +499,12 @@ function runContentForText(text: string, formatting: TextFormatting): RunContent
   return content;
 }
 
-function createTextRun(text: string, attributes: Attrs): Run {
-  const formatting = attrsToTextFormatting(formattingAttrs(attributes));
+function createTextRun(text: string, attributes: Attrs, format: RunFormatter): Run {
+  const formatting = format(attributes);
   return {
     type: 'run',
     formatting: Object.keys(formatting).length > 0 ? formatting : undefined,
-    content: runContentForText(text, formatting),
+    content: runContentForText(text, directFormatting(attributes)),
   };
 }
 
@@ -557,7 +591,11 @@ function hyperlinkKey(attributes: Attrs): string | null {
   return link ? asString(link.href) || '' : null;
 }
 
-function fieldFromPayload(payload: Attrs, attributes: Attrs): SimpleField | ComplexField {
+function fieldFromPayload(
+  payload: Attrs,
+  attributes: Attrs,
+  format: RunFormatter
+): SimpleField | ComplexField {
   const fieldData = asString(payload.fieldData);
   if (fieldData && fieldData.length <= 2_000_000) {
     try {
@@ -578,7 +616,7 @@ function fieldFromPayload(payload: Attrs, attributes: Attrs): SimpleField | Comp
     }
   }
 
-  const formatting = attrsToTextFormatting(formattingAttrs(attributes));
+  const formatting = format(attributes);
   const displayRun: Run = {
     type: 'run',
     content: [{ type: 'text', text: asString(payload.displayText) || '' }],
@@ -621,7 +659,7 @@ function mathFromPayload(payload: Attrs): MathEquation {
   };
 }
 
-function horizontalRuleRun(payload: Attrs, attributes: Attrs): Run {
+function horizontalRuleRun(payload: Attrs, attributes: Attrs, format: RunFormatter): Run {
   const value = asObject(payload.rule);
   const height = asFiniteNumber(value?.height);
   if (
@@ -640,7 +678,7 @@ function horizontalRuleRun(payload: Attrs, attributes: Attrs): Run {
     color: value.color,
     xml: value.xml,
   };
-  const formatting = attrsToTextFormatting(formattingAttrs(attributes));
+  const formatting = format(attributes);
   return {
     type: 'run',
     content: [{ type: 'horizontalRule', rule }],
@@ -812,12 +850,16 @@ function chartRunFromPayload(payload: Attrs, recovery: ChartRecovery): Run | nul
   }
 }
 
-function opaqueDrawingRunFromPayload(payload: Attrs, attributes: Attrs): Run | null {
+function opaqueDrawingRunFromPayload(
+  payload: Attrs,
+  attributes: Attrs,
+  format: RunFormatter
+): Run | null {
   const kind = asString(payload.kind);
   const xml = asString(payload.xml);
   if (!kind || !xml) return null;
   const preview = asObject(payload.preview);
-  const formatting = attrsToTextFormatting(formattingAttrs(attributes));
+  const formatting = format(attributes);
   return {
     type: 'run',
     content: [{
@@ -910,7 +952,11 @@ function shapeRunFromPayload(payload: Attrs): Run {
   return { type: 'run', content: [{ type: 'shape', shape }] };
 }
 
-function inlineSdtFromPayload(payload: Attrs, recovery: ChartRecovery): InlineSdt {
+function inlineSdtFromPayload(
+  payload: Attrs,
+  recovery: ChartRecovery,
+  format: RunFormatter
+): InlineSdt {
   let properties: SdtProperties = sdtAttrsToProps(payload);
   const propertiesJson = asString(payload.propertiesJson);
   if (propertiesJson && propertiesJson.length <= 1_000_000) {
@@ -942,7 +988,7 @@ function inlineSdtFromPayload(payload: Attrs, recovery: ChartRecovery): InlineSd
       attributes,
     });
   }
-  let content = inlineSdtContent(buildParagraphContent(items, recovery, undefined, true));
+  let content = inlineSdtContent(buildParagraphContent(items, recovery, format, undefined, true));
   const authoredValue = contentControlValue(payload.value);
   if (authoredValue) {
     try {
@@ -1009,31 +1055,36 @@ function commentReferenceFromPayload(payload: Attrs): Run | null {
   };
 }
 
-function ordinaryContentForItem(item: InlineItem, recovery: ChartRecovery): ParagraphContent | null {
-  if (item.kind === 'text') return createTextRun(item.text, item.attributes);
+function ordinaryContentForItem(
+  item: InlineItem,
+  recovery: ChartRecovery,
+  format: RunFormatter
+): ParagraphContent | null {
+  if (item.kind === 'text') return createTextRun(item.text, item.attributes, format);
   switch (item.embedKind) {
     case 'break':
       return { type: 'run', content: [{ type: 'break', breakType: 'textWrapping' }] };
     case 'tab':
-      return tabRun(item.attributes);
+      return tabRun(item.attributes, format);
     case 'image':
       return imageRunFromPayload(item.payload);
     case 'horizontalRule':
-      return horizontalRuleRun(item.payload, item.attributes);
+      return horizontalRuleRun(item.payload, item.attributes, format);
     case 'shape':
       return shapeRunFromPayload(item.payload);
     case 'chart':
       return chartRunFromPayload(item.payload, recovery);
     case 'opaqueDrawing':
-      return opaqueDrawingRunFromPayload(item.payload, item.attributes);
+      return opaqueDrawingRunFromPayload(item.payload, item.attributes, format);
     case 'field':
       return (
-        commentReferenceFromPayload(item.payload) ?? fieldFromPayload(item.payload, item.attributes)
+        commentReferenceFromPayload(item.payload) ??
+        fieldFromPayload(item.payload, item.attributes, format)
       );
     case 'math':
       return mathFromPayload(item.payload);
     case 'sdt':
-      return inlineSdtFromPayload(item.payload, recovery);
+      return inlineSdtFromPayload(item.payload, recovery, format);
     case 'noteRef': {
       const footnote = item.payload.footnoteRefId;
       const endnote = item.payload.endnoteRefId;
@@ -1051,8 +1102,8 @@ function ordinaryContentForItem(item: InlineItem, recovery: ChartRecovery): Para
   }
 }
 
-function tabRun(attributes: Attrs): Run {
-  const formatting = attrsToTextFormatting(formattingAttrs(attributes));
+function tabRun(attributes: Attrs, format: RunFormatter): Run {
+  const formatting = format(attributes);
   return {
     type: 'run',
     content: [{ type: 'tab' }],
@@ -1060,23 +1111,23 @@ function tabRun(attributes: Attrs): Run {
   };
 }
 
-function trackedContentForItem(item: InlineItem, info: TrackedChangeInfo, inControl: boolean, recovery: ChartRecovery): ParagraphContent | null {
+function trackedContentForItem(item: InlineItem, info: TrackedChangeInfo, inControl: boolean, recovery: ChartRecovery, format: RunFormatter): ParagraphContent | null {
   let child: TrackedWrapper['content'][number];
   if (inControl) {
-    const ordinary = ordinaryContentForItem(item, recovery);
+    const ordinary = ordinaryContentForItem(item, recovery, format);
     child = inlineSdtContent(ordinary ? [ordinary] : [])[0] ?? { type: 'run', content: [] };
-  } else if (item.kind === 'embed' && item.embedKind === 'sdt') child = inlineSdtFromPayload(item.payload, recovery);
+  } else if (item.kind === 'embed' && item.embedKind === 'sdt') child = inlineSdtFromPayload(item.payload, recovery, format);
   else if (item.kind === 'embed' && item.embedKind === 'image') child = imageRunFromPayload(item.payload);
-  else if (item.kind === 'embed' && item.embedKind === 'tab') child = tabRun(item.attributes);
+  else if (item.kind === 'embed' && item.embedKind === 'tab') child = tabRun(item.attributes, format);
   else if (item.kind === 'embed' && item.embedKind === 'horizontalRule')
-    child = horizontalRuleRun(item.payload, item.attributes);
+    child = horizontalRuleRun(item.payload, item.attributes, format);
   else if (item.kind === 'embed' && item.embedKind === 'shape')
     child = shapeRunFromPayload(item.payload);
   else if (item.kind === 'embed' && item.embedKind === 'chart')
     child = chartRunFromPayload(item.payload, recovery) ?? { type: 'run', content: [] };
   else if (item.kind === 'embed' && item.embedKind === 'opaqueDrawing')
-    child = opaqueDrawingRunFromPayload(item.payload, item.attributes) ?? { type: 'run', content: [] };
-  else if (item.kind === 'text') child = createTextRun(item.text, item.attributes);
+    child = opaqueDrawingRunFromPayload(item.payload, item.attributes, format) ?? { type: 'run', content: [] };
+  else if (item.kind === 'text') child = createTextRun(item.text, item.attributes, format);
   else child = { type: 'run', content: [] };
 
   if (item.kind === 'embed' && item.embedKind === 'chart' && child.type === 'run' && child.content.length === 0) return null;
@@ -1103,24 +1154,30 @@ function trackedContentForItem(item: InlineItem, info: TrackedChangeInfo, inCont
  * Adds an item to a hyperlink: a run to its children, and every child, in
  * order, to its structured children once it has them.
  */
-function addToHyperlink(hyperlink: Hyperlink, item: InlineItem, recovery: ChartRecovery): void {
+function addToHyperlink(
+  hyperlink: Hyperlink,
+  item: InlineItem,
+  recovery: ChartRecovery,
+  format: RunFormatter
+): void {
   let child: HyperlinkContent | undefined;
-  if (item.kind === 'text') child = createTextRun(item.text, item.attributes);
+  if (item.kind === 'text') child = createTextRun(item.text, item.attributes, format);
   else if (item.embedKind === 'break') {
     child = { type: 'run', content: [{ type: 'break', breakType: 'textWrapping' }] };
   } else if (item.embedKind === 'tab') child = { type: 'run', content: [{ type: 'tab' }] };
   else if (item.embedKind === 'horizontalRule') {
-    child = horizontalRuleRun(item.payload, item.attributes);
+    child = horizontalRuleRun(item.payload, item.attributes, format);
   } else if (item.embedKind === 'image') child = imageRunFromPayload(item.payload);
   else if (item.embedKind === 'shape') child = shapeRunFromPayload(item.payload);
   else if (item.embedKind === 'chart') child = chartRunFromPayload(item.payload, recovery) ?? undefined;
-  else if (item.embedKind === 'opaqueDrawing') child = opaqueDrawingRunFromPayload(item.payload, item.attributes) ?? undefined;
+  else if (item.embedKind === 'opaqueDrawing') child = opaqueDrawingRunFromPayload(item.payload, item.attributes, format) ?? undefined;
   else if (item.embedKind === 'field') {
     child =
-      commentReferenceFromPayload(item.payload) ?? fieldFromPayload(item.payload, item.attributes);
+      commentReferenceFromPayload(item.payload) ??
+      fieldFromPayload(item.payload, item.attributes, format);
   } else if (item.embedKind === 'math') child = mathFromPayload(item.payload);
   else if (item.embedKind === 'sdt') {
-    const control = inlineSdtFromPayload(item.payload, recovery);
+    const control = inlineSdtFromPayload(item.payload, recovery, format);
     if (item.attributes.ins || item.attributes.del || hasTrackedControlContent(control)) child = control;
   }
   if (!child) return;
@@ -1146,7 +1203,11 @@ function projectionSignature(items: InlineItem[]): string {
   return stableStringify(normalized);
 }
 
-function restoreProjectedFieldResults(items: InlineItem[], recovery: ChartRecovery): InlineItem[] {
+function restoreProjectedFieldResults(
+  items: InlineItem[],
+  recovery: ChartRecovery,
+  format: RunFormatter
+): InlineItem[] {
   const owners: { id: number; owner: EmbedItem; position: number }[] = [];
   for (const [position, item] of items.entries()) {
     if (item.kind !== 'embed' || item.embedKind !== 'field') continue;
@@ -1171,7 +1232,7 @@ function restoreProjectedFieldResults(items: InlineItem[], recovery: ChartRecove
     return false;
   });
   for (const { owner } of owners) {
-    const stored = fieldFromPayload(owner.payload, owner.attributes);
+    const stored = fieldFromPayload(owner.payload, owner.attributes, format);
     if (stored.type !== 'complexField') continue;
     const projection = asObject(owner.payload.resultProjection);
     const originals = Array.isArray(projection?.children) ? projection.children : [];
@@ -1182,7 +1243,7 @@ function restoreProjectedFieldResults(items: InlineItem[], recovery: ChartRecove
       if (index === undefined || !Array.isArray(child?.items)) continue;
       const current = groups.get(owner)?.get(index) ?? [];
       if (projectionSignature(current) === projectionSignature(child.items as InlineItem[])) continue;
-      const rebuilt = fieldInlineContent(buildParagraphContent(current, recovery));
+      const rebuilt = fieldInlineContent(buildParagraphContent(current, recovery, format));
       const original = index < 0 ? stored.structuredCode?.inline?.[-index - 1] : stored.structuredResult?.inline?.[index];
       if (original?.type === 'hyperlink' && rebuilt.length === 1 && rebuilt[0]?.type === 'hyperlink') {
         rebuilt[0] = { ...original, ...rebuilt[0], structuredChildren: rebuilt[0].structuredChildren };
@@ -1222,10 +1283,11 @@ function isTrackedWrapper(content: ParagraphContent | undefined): content is Tra
 function buildParagraphContent(
   items: InlineItem[],
   recovery: ChartRecovery,
+  format: RunFormatter,
   revisionIds?: RevisionIds,
   inControl = false
 ): ParagraphContent[] {
-  items = restoreProjectedFieldResults(items, recovery);
+  items = restoreProjectedFieldResults(items, recovery, format);
   const content: ParagraphContent[] = [];
   let currentRun: Run | null = null;
   let currentFormattingKey: string | null = null;
@@ -1246,7 +1308,7 @@ function buildParagraphContent(
     if (item.kind === 'embed' && item.embedKind === 'noteRef') {
       flushRun();
       flushHyperlink();
-      const note = ordinaryContentForItem(item, recovery);
+      const note = ordinaryContentForItem(item, recovery, format);
       if (note) content.push(note);
       continue;
     }
@@ -1260,7 +1322,7 @@ function buildParagraphContent(
     if (revision) {
       flushRun();
       flushHyperlink();
-      const tracked = trackedContentForItem(item, revision, inControl, recovery);
+      const tracked = trackedContentForItem(item, revision, inControl, recovery, format);
       if (!tracked) continue;
       const previous = content[content.length - 1];
       if (
@@ -1288,14 +1350,14 @@ function buildParagraphContent(
         flushHyperlink();
         currentHyperlink = createHyperlink(item.attributes);
       }
-      if (currentHyperlink) addToHyperlink(currentHyperlink, item, recovery);
+      if (currentHyperlink) addToHyperlink(currentHyperlink, item, recovery, format);
       continue;
     }
 
     flushHyperlink();
     if (item.kind === 'text') {
       const key = stableStringify(formattingAttrs(item.attributes));
-      const nextRun = createTextRun(item.text, item.attributes);
+      const nextRun = createTextRun(item.text, item.attributes, format);
       if (currentRun && currentFormattingKey === key) appendTextRun(currentRun, nextRun);
       else {
         flushRun();
@@ -1306,7 +1368,7 @@ function buildParagraphContent(
     }
 
     flushRun();
-    const child = ordinaryContentForItem(item, recovery);
+    const child = ordinaryContentForItem(item, recovery, format);
     if (child) content.push(child);
   }
 
@@ -1423,17 +1485,11 @@ function restoreOriginalRuns(
   if (itemIndex !== items.length || itemOffset !== 0) return content;
 
   return boundaries.map((boundary, index) => {
-    // restoreOriginalRuns restores the original segmentation/property-change
-    // cache, but non-empty runs keep formatting reconstructed from their live
-    // marks. Only empty runs have no node and therefore take cached formatting.
-    const formatting =
-      boundary.text.length === 0
-        ? boundary.formatting
-        : attrsToTextFormatting(restoredAttrs[index]);
     const run: Run = {
       type: 'run',
-      content: boundaryContent(boundary, formatting ?? {}),
+      content: boundaryContent(boundary, attrsToTextFormatting(restoredAttrs[index])),
     };
+    const formatting = boundary.formatting;
     if (formatting && Object.keys(formatting).length > 0) run.formatting = formatting;
     if (boundary.propertyChanges?.length) run.propertyChanges = boundary.propertyChanges;
     return run;
@@ -1748,11 +1804,12 @@ function paragraphFromStory(
   commentBoundaries: CommentBoundary[],
   baseParagraph: Paragraph | undefined,
   recovery: ChartRecovery,
+  format: RunFormatter,
   revisionIds?: RevisionIds,
   inherited?: ParagraphFormatting
 ): Paragraph {
   const attrs = paragraphAttrs(properties);
-  let content = buildParagraphContent(items, recovery, revisionIds);
+  let content = buildParagraphContent(items, recovery, format, revisionIds);
   content = restoreOriginalRuns(
     content,
     items,
@@ -2420,6 +2477,9 @@ class SaveContext {
   private readonly styles: StyleResolver;
   private readonly syntheticDefaults: boolean;
   private readonly inherited = new Map<string, ParagraphFormatting | undefined>();
+  private readonly styleDefinitions: Document['package']['styles'];
+  private runInheritance: YrsRunInheritance | null = null;
+  private readonly inheritedRuns = new Map<string, TextFormatting>();
 
   constructor(
     private readonly session: YrsSession,
@@ -2437,6 +2497,7 @@ class SaveContext {
     this.baseParagraphs = collectBaseParagraphs(this.baseStories);
     this.comments = commentRanges(session, base.package.document.comments, commentIds);
     this.memo = sessionProjectionMemo(session);
+    this.styleDefinitions = base.package.styles;
     this.styles = createStyleResolver(base.package.styles);
     const defaultStyle = this.styles.getDefaultParagraphStyle();
     this.syntheticDefaults =
@@ -2501,6 +2562,35 @@ class SaveContext {
       }
     }
     return this.inherited.get(key);
+  }
+
+  /**
+   * How the runs of a paragraph with pilcrow `properties` save: relative to
+   * what seeding merged into their marks under the styles the package saves.
+   */
+  private runFormatter(properties: Attrs): RunFormatter {
+    const paragraphStyle = typeof properties.pStyle === 'string' ? properties.pStyle : null;
+    return (attributes) =>
+      relativeFormatting(
+        attributes,
+        this.inheritedRun(paragraphStyle, asString(asObject(attributes.runStyle)?.styleId) || null)
+      );
+  }
+
+  private inheritedRun(paragraphStyle: string | null, runStyle: string | null): TextFormatting {
+    const key = JSON.stringify([paragraphStyle, runStyle]);
+    let inherited = this.inheritedRuns.get(key);
+    if (inherited === undefined) {
+      const inheritance = (this.runInheritance ??= this.session.runInheritance(this.styleDefinitions));
+      inherited = attrsToTextFormatting(inheritance.attributes(paragraphStyle, runStyle));
+      this.inheritedRuns.set(key, inherited);
+    }
+    return inherited;
+  }
+
+  dispose(): void {
+    this.runInheritance?.dispose();
+    this.runInheritance = null;
   }
 
   recovery(storyId: string): ChartRecovery {
@@ -2646,6 +2736,7 @@ class SaveContext {
             boundaries,
             baseParagraph,
             this.recovery(storyId),
+            this.runFormatter(segment.properties),
             this.revisionIds,
             this.inheritedFormatting(storyId, segment.properties)
           );
@@ -2748,7 +2839,12 @@ class SaveContext {
     // A story ending in a flow-break embed is well-formed, not a lost
     // paragraph, so only content the projection can carry opens one.
     if (items.length > 0) {
-      const trailing = buildParagraphContent(items, this.recovery(storyId), this.revisionIds);
+      const trailing = buildParagraphContent(
+        items,
+        this.recovery(storyId),
+        directFormatting,
+        this.revisionIds
+      );
       if (trailing.length > 0) blocks.push({ type: 'paragraph', content: trailing });
     }
     const projected = restoreRawBlocks(blocks, baseBlocks ?? []);
@@ -2804,20 +2900,22 @@ function projectDocument(
 ): Document {
   const previous = projectedMedia;
   projectedMedia = (token) => session.mediaDataUrl?.(token) ?? null;
+  let context: SaveContext | undefined;
   try {
-    return projectStories(session, base, options, revisionIds);
+    context = new SaveContext(session, base, options.commentIds, revisionIds);
+    return projectStories(context, session, base, options);
   } finally {
+    context?.dispose();
     projectedMedia = previous;
   }
 }
 
 function projectStories(
+  context: SaveContext,
   session: YrsSession,
   base: Document,
-  options: YrsToDocumentOptions,
-  revisionIds?: RevisionIds
+  options: YrsToDocumentOptions
 ): Document {
-  const context = new SaveContext(session, base, options.commentIds, revisionIds);
   const shouldProject = (storyId: string): boolean =>
     options.storyIds === undefined || options.storyIds.has(storyId);
   const bodyContent = context.storyIds.has('body') && shouldProject('body')
