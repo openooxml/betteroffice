@@ -1376,6 +1376,30 @@ function boundaryContent(boundary: OriginalRunBoundary, formatting: TextFormatti
   return content;
 }
 
+function sourceBreakBoundaries(paragraph: Paragraph | undefined): OriginalRunBoundary[] {
+  const boundaries: OriginalRunBoundary[] = [];
+  for (const child of paragraph?.content ?? []) {
+    if (child.type !== 'run') {
+      if (
+        child.type === 'commentRangeStart' || child.type === 'commentRangeEnd' ||
+        child.type === 'bookmarkStart' || child.type === 'bookmarkEnd' || child.type === 'rawXml'
+      ) continue;
+      return [];
+    }
+    let text = '';
+    const breaks: NonNullable<OriginalRunBoundary['breaks']> = [];
+    for (const entry of child.content) {
+      if (entry.type === 'text') text += entry.text;
+      else if (entry.type === 'commentReference') text += '\uFFFC';
+      else if (entry.type === 'break' && (entry.breakType === 'page' || entry.breakType === 'column')) {
+        breaks.push({ offset: text.length, type: entry.breakType });
+      } else return [];
+    }
+    boundaries.push({ text, breaks });
+  }
+  return boundaries;
+}
+
 function restoreRecordedBreaks(
   content: ParagraphContent[],
   items: InlineItem[],
@@ -1439,9 +1463,12 @@ function restoreRecordedBreaks(
 function restoreOriginalRuns(
   content: ParagraphContent[],
   items: InlineItem[],
-  boundaries: OriginalRunBoundary[] | undefined
+  boundaries: OriginalRunBoundary[] | undefined,
+  baseParagraph: Paragraph | undefined
 ): ParagraphContent[] {
-  if (!boundaries?.length) return content;
+  if (!boundaries?.length) {
+    return restoreRecordedBreaks(content, items, sourceBreakBoundaries(baseParagraph));
+  }
   const fallback = (): ParagraphContent[] => restoreRecordedBreaks(content, items, boundaries);
   if (
     !content.every(
@@ -1818,7 +1845,8 @@ function paragraphFromStory(
     items,
     Array.isArray(attrs._originalRunBoundaries)
       ? (attrs._originalRunBoundaries as OriginalRunBoundary[])
-      : undefined
+      : undefined,
+    baseParagraph
   );
   content = restoreRawInlines(content, baseParagraph);
   if (baseParagraph) restoreNestedOrdinals(content, baseParagraph.content);
