@@ -2248,15 +2248,22 @@ fn run_content_to_units(
             &drawing_marks(marks),
             1,
         )],
-        "opaqueDrawing" => vec![embed_unit(
-            "opaqueDrawing",
-            map_from_value(json!({
+        "opaqueDrawing" => {
+            let mut payload = map_from_value(json!({
                 "kind": field(Some(content), "kind").cloned().unwrap_or(Value::Null),
                 "xml": field(Some(content), "xml").cloned().unwrap_or(Value::Null),
-            })),
-            &drawing_marks(marks),
-            1,
-        )],
+            }));
+            if let Some(preview) = field(Some(content), "preview").filter(|value| value.is_object())
+            {
+                payload.insert("preview".to_owned(), json!(image_payload(preview)));
+            }
+            vec![embed_unit(
+                "opaqueDrawing",
+                payload,
+                &drawing_marks(marks),
+                1,
+            )]
+        }
         "footnoteRef" => field(Some(content), "id")
             .map(|id| note_ref_unit(id, "footnote", marks))
             .into_iter()
@@ -9114,11 +9121,30 @@ mod tests {
         assert_eq!(kind, "opaqueDrawing");
         assert_eq!(payload["kind"], json!("object"));
         assert_eq!(payload["xml"], paragraph["content"][0]["content"][0]["xml"]);
+        assert!(!payload.contains_key("preview"));
         assert_eq!(units[0].pm_size, 1);
         let document = seed_body(&[paragraph]);
         let (count, blocks) = rendered(&document);
         assert_eq!(count, 1);
         assert!(!blocks.contains("OLEObject"));
+    }
+
+    #[test]
+    fn opaque_preview_media_does_not_count_toward_the_xml_seed_budget() {
+        let xml = "<w:object><o:OLEObject/></w:object>";
+        let content = json!({
+            "type": "opaqueDrawing",
+            "kind": "object",
+            "xml": xml,
+            "preview": {
+                "type": "image",
+                "rId": "rIdImage",
+                "src": "x".repeat(OPAQUE_SEED_BUDGET_BYTES as usize + 1),
+                "size": {"width": 914400, "height": 457200},
+                "wrap": {"type": "inline"}
+            }
+        });
+        assert_eq!(opaque_xml_bytes(&content), xml.len() as u64);
     }
 
     #[test]

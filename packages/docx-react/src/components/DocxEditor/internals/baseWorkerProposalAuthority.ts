@@ -21,6 +21,9 @@ import type {
   DocxProposalWithdrawRequest,
   DocxReadParagraphsRequest,
   DocxReadParagraphsResult,
+  DocxListStoriesResult,
+  DocxReadStoriesRequest,
+  DocxReadStoriesResult,
   ProposalGeometryMirror,
   ProposalGeometryTarget,
   ResidentProposalReply,
@@ -77,6 +80,11 @@ export interface WorkerProposalAuthority {
     request: DocxReadParagraphsRequest,
     main: (request: DocxReadParagraphsRequest) => Promise<DocxReadParagraphsResult>
   ): Promise<DocxReadParagraphsResult>;
+  listStories(main: () => Promise<DocxListStoriesResult>): Promise<DocxListStoriesResult>;
+  readStories(
+    request: DocxReadStoriesRequest,
+    main: () => Promise<DocxReadStoriesResult>
+  ): Promise<DocxReadStoriesResult>;
   paragraphIdentities(
     main: () => Promise<DocxParagraphIdentitySnapshot>
   ): Promise<DocxParagraphIdentitySnapshot>;
@@ -394,6 +402,16 @@ export function registerWorkerProposalAuthority(
       assertCurrent();
       return read.value;
     }, () => main(request)),
+    listStories: (main) => route(async () => {
+      const read = await worker.documentRead({ kind: 'listStories' });
+      assertCurrent();
+      return read.value;
+    }, main),
+    readStories: (request, main) => route(async () => {
+      const read = await worker.documentRead({ kind: 'readStories', request });
+      assertCurrent();
+      return read.value;
+    }, main),
     paragraphIdentities: (main) => route(async () => {
       const read = await worker.documentRead({ kind: 'paragraphIdentities' });
       assertCurrent();

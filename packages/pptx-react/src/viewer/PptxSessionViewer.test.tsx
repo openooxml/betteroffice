@@ -112,8 +112,7 @@ describe('session viewer', () => {
     const init = spyOn(pptx, 'initWasm').mockRejectedValue(new Error('Local wasm forbidden'));
     const local = spyOn(pptx, 'openPresentation').mockImplementation(() => { throw new Error('Local open forbidden'); });
     restorers.push(() => init.mockRestore(), () => local.mockRestore());
-    const changed = mock(() => {});
-    const view = render(<PptxEditor file={file} fonts={[]} readOnly experimentalWorkerOpen initialSlide={2} onChange={changed} />);
+    const view = render(<PptxEditor legacySyncApi file={file} fonts={[]} readOnly experimentalWorkerOpen initialSlide={2} />);
     await waitFor(() => expect(observed).toHaveLength(4));
     expect(observerRoot).toBe(view.container.querySelector('aside'));
     await act(async () => visible([0, 1, 2]));
@@ -125,7 +124,6 @@ describe('session viewer', () => {
     expect(opener).toHaveBeenCalledWith(file, { fonts: [], clientId: undefined });
     expect(init).not.toHaveBeenCalled();
     expect(local).not.toHaveBeenCalled();
-    expect(changed).not.toHaveBeenCalled();
     await act(async () => visible([2], false));
     expect(view.container.querySelectorAll('aside canvas')).toHaveLength(2);
   });
@@ -140,7 +138,7 @@ describe('session viewer', () => {
     restorers.push(() => paint.mockRestore());
     let api: PptxWorkerViewerApi | undefined;
     const ready = mock((value: PptxWorkerViewerApi) => { api = value; });
-    const view = render(<PptxEditor file={file} fonts={[]} readOnly experimentalWorkerOpen onReady={ready} />);
+    const view = render(<PptxEditor legacySyncApi file={file} fonts={[]} readOnly experimentalWorkerOpen onReady={ready} />);
     await waitFor(() => expect(paint).toHaveBeenCalled());
     expect(ready).not.toHaveBeenCalled();
     await act(async () => first.resolve());
@@ -180,7 +178,7 @@ describe('session viewer', () => {
     const { viewer, call } = session();
     open(viewer);
     let api!: PptxWorkerViewerApi;
-    const view = render(<PptxEditor file={file} fonts={[]} readOnly experimentalWorkerOpen
+    const view = render(<PptxEditor legacySyncApi file={file} fonts={[]} readOnly experimentalWorkerOpen
       onReady={(value) => { api = value; }} />);
     await waitFor(() => expect(api).toBeDefined());
     let navigation!: Promise<boolean>;
@@ -218,7 +216,7 @@ describe('session viewer', () => {
         return frame(index);
       } finally { inFlight -= 1; }
     });
-    render(<PptxEditor file={file} fonts={[]} readOnly experimentalWorkerOpen />);
+    render(<PptxEditor legacySyncApi file={file} fonts={[]} readOnly experimentalWorkerOpen />);
     await waitFor(() => expect(observed).toHaveLength(4));
     await act(async () => visible([1]));
     await waitFor(() => expect(call.frame.mock.calls.map(([index]) => index)).toEqual([0, 1, 1]));
@@ -273,7 +271,7 @@ describe('session viewer', () => {
     const opening = deferred<PresentationSession>();
     const opener = open(viewer).mockImplementation(() => opening.promise);
     const fonts = () => [{ family: 'Viewer Font', bold: true, italic: true, bytes: new Uint8Array([3, 4]) }];
-    const view = render(<PptxEditor file={file} fonts={fonts()} readOnly experimentalWorkerOpen />);
+    const view = render(<PptxEditor legacySyncApi file={file} fonts={fonts()} readOnly experimentalWorkerOpen />);
     await waitFor(() => expect(load).toHaveBeenCalledTimes(1));
     expect(opener).toHaveBeenCalledTimes(1);
     expect(call.frame).not.toHaveBeenCalled();
@@ -288,7 +286,7 @@ describe('session viewer', () => {
     expect(new Uint8Array(faces[0].source)).toEqual(new Uint8Array([3, 4]));
     expect(add).toHaveBeenCalledTimes(1);
     expect(opener.mock.calls[0][1]?.fonts).toEqual(fonts());
-    view.rerender(<PptxEditor file={file} fonts={fonts()} readOnly experimentalWorkerOpen />);
+    view.rerender(<PptxEditor legacySyncApi file={file} fonts={fonts()} readOnly experimentalWorkerOpen />);
     expect(opener).toHaveBeenCalledTimes(1);
     view.unmount();
     expect(remove).toHaveBeenCalledTimes(1);
@@ -300,10 +298,10 @@ describe('session viewer', () => {
     const late = deferred<PresentationFrame>();
     old.call.frame.mockImplementation(() => late.promise);
     const opener = open(old.viewer);
-    const view = render(<PptxEditor file={file} fonts={[]} readOnly experimentalWorkerOpen />);
+    const view = render(<PptxEditor legacySyncApi file={file} fonts={[]} readOnly experimentalWorkerOpen />);
     await waitFor(() => expect(old.call.frame).toHaveBeenCalled());
     opener.mockResolvedValue(next.viewer);
-    view.rerender(<PptxEditor file={new Uint8Array([4])} fonts={[]} readOnly experimentalWorkerOpen />);
+    view.rerender(<PptxEditor legacySyncApi file={new Uint8Array([4])} fonts={[]} readOnly experimentalWorkerOpen />);
     await waitFor(() => expect(next.call.frame).toHaveBeenCalled());
     await waitFor(() => expect(painted).toHaveLength(1));
     await act(async () => late.resolve(frame(3)));
@@ -324,7 +322,7 @@ describe('session viewer', () => {
       ctx.fillRect(0, 0, 1, 1);
     });
     restorers.push(() => paint.mockRestore());
-    const view = render(<PptxEditor file={file} fonts={[]} readOnly experimentalWorkerOpen />);
+    const view = render(<PptxEditor legacySyncApi file={file} fonts={[]} readOnly experimentalWorkerOpen />);
     await waitFor(() => expect(context).toBeDefined());
     view.unmount();
     expect(() => context!.fillRect(0, 0, 1, 1)).toThrow('Paint superseded');
@@ -337,7 +335,7 @@ describe('session viewer', () => {
     const opener = open(old.viewer);
     const ready: PptxWorkerViewerApi[] = [];
     const onReady = (api: PptxWorkerViewerApi) => { ready.push(api); };
-    const view = render(<PptxEditor file={file} fonts={[]} readOnly experimentalWorkerOpen onReady={onReady} />);
+    const view = render(<PptxEditor legacySyncApi file={file} fonts={[]} readOnly experimentalWorkerOpen onReady={onReady} />);
     await waitFor(() => expect(ready).toHaveLength(1));
     await waitFor(() => expect((view.getByTestId('pptx-notes-textarea') as HTMLTextAreaElement).value).toBe('Notes 0'));
     const read = deferred<pptx.PptxReadResult>();
@@ -354,7 +352,7 @@ describe('session viewer', () => {
     const pending = [api.readContent(), api.version(), api.findText({ text: 'old' }), api.saveAsync(),
       api.validateEdits(request), api.applyEdits(request)];
     opener.mockResolvedValue(next.viewer);
-    view.rerender(<PptxEditor file={new Uint8Array([4])} fonts={[]} readOnly experimentalWorkerOpen onReady={onReady} />);
+    view.rerender(<PptxEditor legacySyncApi file={new Uint8Array([4])} fonts={[]} readOnly experimentalWorkerOpen onReady={onReady} />);
     await waitFor(() => expect(ready).toHaveLength(2));
     await act(async () => {
       read.resolve({ ok: true, version: 'old', slides: [], stories: [] });
@@ -378,7 +376,7 @@ describe('session viewer', () => {
     const init = spyOn(pptx, 'initWasm');
     restorers.push(() => local.mockRestore(), () => init.mockRestore());
     const errors = mock(() => {});
-    const view = render(<PptxEditor file={file} fonts={[]} readOnly experimentalWorkerOpen onError={errors} />);
+    const view = render(<PptxEditor legacySyncApi file={file} fonts={[]} readOnly experimentalWorkerOpen onError={errors} />);
     await waitFor(() => expect(view.getByText(failure.message)).toBeDefined());
     expect(errors).toHaveBeenCalledWith(failure);
     expect(local).not.toHaveBeenCalled();
@@ -391,7 +389,7 @@ describe('session viewer', () => {
     const saved = mock(() => {});
     const requested = mock(async () => true);
     let api!: PptxWorkerViewerApi;
-    const view = render(<PptxEditor file={file} fonts={[]} readOnly experimentalWorkerOpen
+    const view = render(<PptxEditor legacySyncApi file={file} fonts={[]} readOnly experimentalWorkerOpen
       onReady={(value) => { api = value; }} onSave={saved} onSaveRequest={requested}
       toolbar={<EditorToolbar mode="commands"><ToolbarCommandButton id="save" /><ToolbarCommandButton id="bold" /></EditorToolbar>} />);
     await waitFor(() => expect(api).toBeDefined());
@@ -406,8 +404,8 @@ describe('session viewer', () => {
   });
 
   it('bounds cached frames while retaining the active frame', async () => {
-    const { viewer } = session(40);
     const changed = mock(() => {});
+    const { viewer } = session(40);
     const run = new ViewerSession(viewer, 1, changed, () => {}, () => {});
     run.start();
     await waitFor(() => expect(run.frame(0)).toBeDefined());
@@ -456,7 +454,7 @@ describe('session viewer', () => {
     const saved = mock(() => {});
     const requested = mock(async () => true);
     let api!: PptxWorkerViewerApi;
-    const view = render(<PptxEditor file={file} fonts={[]} readOnly experimentalWorkerOpen
+    const view = render(<PptxEditor legacySyncApi file={file} fonts={[]} readOnly experimentalWorkerOpen
       onReady={(value) => { api = value; }} onSave={saved} onSaveRequest={requested} />);
     await waitFor(() => expect(api).toBeDefined());
     const errors = mock((event: ErrorEvent) => { event.preventDefault(); });
@@ -496,7 +494,7 @@ describe('session viewer', () => {
       if (originalMedia) Object.defineProperty(window, 'matchMedia', originalMedia);
       else Reflect.deleteProperty(window, 'matchMedia');
     });
-    const view = render(<PptxEditor file={file} fonts={[]} readOnly experimentalWorkerOpen />);
+    const view = render(<PptxEditor legacySyncApi file={file} fonts={[]} readOnly experimentalWorkerOpen />);
     await waitFor(() => expect(observed).toHaveLength(4));
     await act(async () => visible([1]));
     await waitFor(() => expect(painted).toHaveLength(2));
@@ -528,7 +526,7 @@ describe('session viewer', () => {
       if (originalHeight) Object.defineProperty(HTMLElement.prototype, 'clientHeight', originalHeight);
       else Reflect.deleteProperty(HTMLElement.prototype, 'clientHeight');
     });
-    render(<PptxEditor file={file} fonts={[]} readOnly experimentalWorkerOpen />);
+    render(<PptxEditor legacySyncApi file={file} fonts={[]} readOnly experimentalWorkerOpen />);
     await waitFor(() => expect(painted).toHaveLength(1));
     expect(Number.isFinite(painted[0].scale)).toBe(true);
     expect(painted[0].scale).toBeGreaterThan(0);
@@ -615,7 +613,7 @@ describe('session viewer', () => {
       createPresentationSession(bytes, options, pair.client));
     restorers.push(() => opener.mockRestore());
     let api!: PptxWorkerViewerApi;
-    render(<PptxEditor file={bytes} fonts={[]} readOnly experimentalWorkerOpen onReady={(value) => { api = value; }} />);
+    render(<PptxEditor legacySyncApi file={bytes} fonts={[]} readOnly experimentalWorkerOpen onReady={(value) => { api = value; }} />);
     await waitFor(() => expect(api).toBeDefined());
     expect((await api.readContent())!.ok).toBe(true);
     expect((await api.saveAsync())!.byteLength).toBeGreaterThan(0);
@@ -627,7 +625,7 @@ describe('session viewer', () => {
     const failure = new Error('Local open reached');
     const local = spyOn(pptx, 'openPresentation').mockImplementation(() => { throw failure; });
     restorers.push(() => init.mockRestore(), () => local.mockRestore());
-    const view = render(<PptxEditor file={file} fonts={[]} />);
+    const view = render(<PptxEditor legacySyncApi experimentalWorkerOpen={false} file={file} fonts={[]} />);
     await waitFor(() => expect(view.getByText(failure.message)).toBeDefined());
     expect(local).toHaveBeenCalledTimes(1);
     expect(opener).not.toHaveBeenCalled();

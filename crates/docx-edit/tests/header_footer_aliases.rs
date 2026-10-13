@@ -501,3 +501,36 @@ fn incoming_alias_story_ids_are_not_routed_to_edit_operations() {
     );
     assert_eq!(doc.paragraphs("hf:rId7").unwrap()[0].text, "Shared band");
 }
+
+#[test]
+fn list_stories_describes_a_shared_header_once_with_every_section_using_it() {
+    let headers = |doc: &EditingDoc| {
+        doc.list_stories()
+            .stories
+            .into_iter()
+            .filter(|info| info.kind == docx_edit::StoryInfoKind::Header)
+            .map(|info| {
+                let uses: Vec<u32> = info
+                    .uses
+                    .unwrap()
+                    .iter()
+                    .map(|used| used.section_index)
+                    .collect();
+                (info.story, info.part.is_some(), uses)
+            })
+            .collect::<Vec<_>>()
+    };
+    let plain = EditingDoc::new(42);
+    seed_from_docx_with_generation(&plain, &alias_package(), "plain").unwrap();
+    assert_eq!(
+        headers(&plain),
+        [
+            ("hf:rId7".to_owned(), true, vec![0]),
+            ("hf:rId9".to_owned(), true, vec![1]),
+        ]
+    );
+    assert_eq!(
+        headers(&seeded(&alias_package())),
+        [("hf:rId7".to_owned(), true, vec![0, 1])]
+    );
+}

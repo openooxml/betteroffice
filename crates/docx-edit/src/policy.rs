@@ -16,6 +16,8 @@ pub(crate) const MAX_OWNERSHIP_DEPTH: usize = 32;
 /// The embed owning one child story.
 pub(crate) struct Owner {
     pub parent: String,
+    /// A table cell owns the story, else a block content control.
+    pub cell: bool,
     /// The `w:lock` value of an owning block content control.
     pub lock: Option<String>,
     /// The owning embed, row or table carries a pending revision.
@@ -83,6 +85,7 @@ impl Ownership {
                                         child.to_string(),
                                         Owner {
                                             parent: story_id.to_owned(),
+                                            cell: true,
                                             lock: None,
                                             revision: revision || row_revision,
                                         },
@@ -97,6 +100,7 @@ impl Ownership {
                                 child,
                                 Owner {
                                     parent: story_id.to_owned(),
+                                    cell: false,
                                     lock: map_string(map, txn, "lock"),
                                     revision,
                                 },
@@ -119,6 +123,11 @@ impl Ownership {
                 entry.insert(owner);
             }
         }
+    }
+
+    /// The first container recorded as owning `story`.
+    pub fn owner(&self, story: &str) -> Option<&Owner> {
+        self.owners.get(story)
     }
 
     /// Whether an embed of another story owns `story`.

@@ -5,6 +5,7 @@ import { rezipPartsToArrayBuffer, toBytes } from '@betteroffice/docx/docx/rezip/
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import {
+  createYrsPositionProjection,
   createYrsSession,
   computeProposalGeometryMirror,
   proposalSetIdentity,
@@ -39,7 +40,7 @@ const WORD = 'application/vnd.openxmlformats-officedocument.wordprocessingml';
 const run = (text: string) => `<w:r><w:t xml:space="preserve">${text}</w:t></w:r>`;
 const paragraph = (id: string, text: string) => `<w:p w14:paraId="${id}">${run(text)}</w:p>`;
 
-function fixture(): Uint8Array {
+function fixture(extraBody = ''): Uint8Array {
   const parts = new Map<string, Uint8Array>();
   parts.set(
     '[Content_Types].xml',
@@ -68,7 +69,7 @@ function fixture(): Uint8Array {
       )}<w:sdt><w:sdtPr><w:lock w:val="contentLocked"/></w:sdtPr><w:sdtContent>${paragraph(
         '0000A001',
         'Locked'
-      )}</w:sdtContent></w:sdt><w:sectPr><w:headerReference w:type="default" r:id="rIdHeader"/></w:sectPr></w:body></w:document>`
+      )}</w:sdtContent></w:sdt>${extraBody}<w:sectPr><w:headerReference w:type="default" r:id="rIdHeader"/></w:sectPr></w:body></w:document>`
     )
   );
   parts.set('word/header1.xml', toBytes(`<w:hdr ${NS}>${paragraph('0000E001', 'Header')}</w:hdr>`));
@@ -125,11 +126,11 @@ function navigationClock() {
 }
 
 async function setup(
-  options: { grant?: DocxPluginGrant; flush?: () => void | Promise<void> } = {}
+  options: { grant?: DocxPluginGrant; flush?: () => void | Promise<void>; extraBody?: string } = {}
 ) {
   const session = await createYrsSession();
   sessions.push(session);
-  session.openDocx(fixture(), true);
+  session.openDocx(fixture(options.extraBody), true);
   const events: string[] = [];
   const editor = {
     getYrsSession: () => session,
@@ -217,6 +218,7 @@ async function setup(
     lifetimeController,
     queries,
     access,
+    invocation,
     clients: createClients(),
     createClients,
     waiting,
@@ -241,7 +243,7 @@ function texts(session: YrsSession): string[] {
 function routeWorker(env: Awaited<ReturnType<typeof setup>>) {
   const authority: Pick<
     workerProposals.WorkerProposalAuthority,
-    'initialized' | 'navigationTarget' | 'readParagraphs' | 'findText'
+    'initialized' | 'navigationTarget' | 'readParagraphs' | 'findText' | 'listStories' | 'readStories'
   > = {
     initialized: true,
     async navigationTarget(story: string, paraId: string) {
@@ -253,6 +255,8 @@ function routeWorker(env: Awaited<ReturnType<typeof setup>>) {
     async findText() {
       return { ok: true as const, version: env.session.version(), matches: [], truncated: false };
     },
+    listStories: (main) => main(),
+    readStories: (_request, main) => main(),
     async readParagraphs(request) {
       return {
         ok: true as const,
@@ -1245,6 +1249,21 @@ describe('plugin read and navigation clients', () => {
     });
   });
 
+  test('scrolls to a table cell paragraph', async () => {
+    const env = await setup({
+      extraBody: `<w:tbl><w:tr><w:tc>${paragraph('0000C001', 'Cell')}</w:tc></w:tr></w:tbl>`,
+    });
+    const target = { story: 'body:t0:r0c0', paraId: '0000C001' };
+    expect(
+      await env.clients.navigation.scrollToParagraph(target, { expectVersion: env.session.version() })
+    ).toEqual({ ok: true });
+    const position = createYrsPositionProjection(env.session, 'body')!.positionForLoc({
+      ...target,
+      offset: 0,
+    });
+    expect(env.events.at(-1)).toBe(`scroll:${position}`);
+  });
+
   test('scrolls to a unique body paragraph without moving focus unless asked', async () => {
     const env = await setup();
     const version = env.session.version();
@@ -1531,6 +1550,146 @@ describe('plugin read and navigation clients', () => {
       expect(touched.every((ended) => ended === null)).toBe(true);
       if (!result.ok) expect(result.failure.code).toBe('document-replaced');
     }
+  });
+});
+
+describe('plugin story reads', () => {
+  const headers = { stories: ['header', 'contentControl'], view: 'accepted' } as const;
+
+  for (const workerFallback of [false, true]) {
+    test.each(['readParagraphs', 'listStories', 'readStories'] as const)(
+      `%s refuses a held document ${workerFallback ? 'when a worker read falls back' : 'without a worker authority'}`,
+      async (method) => {
+        const env = await setup();
+        const worker = routeWorker(env);
+        if (workerFallback) worker.read.mockImplementation((request, main) => main(request));
+        else worker.routing.mockReturnValue(null);
+        env.state.viewer = true;
+        const release = mock(() => { throw new Error('unexpected viewer release'); });
+        workerOpenReplica.holdWorkerOpenDocument(env.session, release);
+        const localReads = [
+          spyOn(env.session, 'readParagraphs'),
+          spyOn(env.session, 'listStories'),
+          spyOn(env.session, 'readStories'),
+        ];
+        restoreWorkers.push(() => {
+          for (const read of localReads) read.mockRestore();
+        });
+        const result = method === 'listStories'
+          ? env.clients.read.listStories()
+          : method === 'readStories'
+            ? env.clients.read.readStories(headers)
+            : env.clients.read.readParagraphs({ view: 'accepted' });
+        expect(await result).toMatchObject({ ok: false, failure: { code: 'input-failed' } });
+        for (const read of localReads) expect(read).not.toHaveBeenCalled();
+        expect(worker.flush).not.toHaveBeenCalled();
+        expect(worker.replica).not.toHaveBeenCalled();
+        expect(release).not.toHaveBeenCalled();
+      }
+    );
+  }
+
+  for (const invalidated of [true, false]) {
+    test.each(['readParagraphs', 'listStories', 'readStories'] as const)(
+      `worker-only %s ${invalidated ? 'preserves the refusal when its read rejects after invalidation' : 'rethrows a read failure while its invocation is active'}`,
+      async (method) => {
+        const env = await setup();
+        let reject!: (error: unknown) => void;
+        const pending = new Promise<never>((_resolve, no) => { reject = no; });
+        const read = mock(() => pending);
+        const clients = createPluginClients(
+          env.invocation,
+          {
+            ...env.access,
+            workerRead: {
+              version: read,
+              readParagraphs: read,
+              listStories: read,
+              readStories: read,
+              findText: read,
+            },
+          },
+          () => env.state.grant,
+          UNAVAILABLE_DOCX_COMMANDS
+        );
+        const result = method === 'listStories'
+          ? clients.read.listStories()
+          : method === 'readStories'
+            ? clients.read.readStories(headers)
+            : clients.read.readParagraphs({ view: 'accepted' });
+        expect(read).toHaveBeenCalledTimes(1);
+        if (invalidated) env.state.ended = 'document-replaced';
+        const error = new Error('The worker read failed');
+        reject(error);
+        if (invalidated) {
+          expect(await result).toMatchObject({ ok: false, failure: { code: 'document-replaced' } });
+        } else {
+          await expect(result).rejects.toBe(error);
+        }
+        expect(env.events).toEqual([]);
+      }
+    );
+  }
+
+  test('list and read stories from the session after flushing input', async () => {
+    const env = await setup();
+    expect(await env.clients.read.listStories()).toEqual(env.session.listStories());
+    expect(await env.clients.read.readStories(headers)).toEqual(env.session.readStories(headers));
+    expect(await env.clients.read.readStories(headers)).toMatchObject({
+      stories: [
+        { story: 'hf:rIdHeader', ok: true, paragraphs: [expect.objectContaining({ text: 'Header' })] },
+        { story: 'body:sdt0', ok: true, paragraphs: [expect.objectContaining({ text: 'Locked' })] },
+      ],
+    });
+    expect(env.events).toEqual(['flush', 'flush', 'flush']);
+    expect(
+      await env.clients.read.readStories({ ...headers, expectVersion: 'older' })
+    ).toMatchObject({ ok: false, version: env.session.version(), failure: { code: 'stale-version' } });
+  });
+
+  test('worker story reads answer as the session would in one read each, without flushing', async () => {
+    const env = await setup();
+    const owner = await createYrsSession();
+    sessions.push(owner);
+    owner.openDocx(fixture(), true);
+    const local = {
+      list: await env.clients.read.listStories(),
+      read: await env.clients.read.readStories(headers),
+    };
+    const worker = routeWorker(env);
+    const list = spyOn(worker.authority, 'listStories').mockImplementation(async () => ({
+      ...owner.listStories(),
+      version: env.session.version(),
+    }));
+    const read = spyOn(worker.authority, 'readStories').mockImplementation(async (request) => {
+      const result = owner.readStories(request);
+      return result.ok ? { ...result, version: env.session.version() } : result;
+    });
+    restoreWorkers.push(() => {
+      list.mockRestore();
+      read.mockRestore();
+    });
+    expect(await env.clients.read.listStories()).toEqual(local.list);
+    expect(await env.clients.read.readStories(headers)).toEqual(local.read);
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(read.mock.calls[0]?.[0]).toEqual(headers);
+    expect(worker.flush).not.toHaveBeenCalled();
+  });
+
+  test('worker story reads keep the refusal of a flushed fallback', async () => {
+    const env = await setup();
+    const worker = routeWorker(env);
+    const read = spyOn(worker.authority, 'readStories').mockImplementation((_request, main) => main());
+    restoreWorkers.push(() => read.mockRestore());
+    const flush = spyOn(env.editor, 'flushPendingInput').mockImplementationOnce(async () => {
+      env.state.ended = 'document-replaced';
+    });
+    restoreWorkers.push(() => flush.mockRestore());
+    expect(await env.clients.read.readStories(headers)).toMatchObject({
+      ok: false,
+      failure: { code: 'document-replaced' },
+    });
   });
 });
 
