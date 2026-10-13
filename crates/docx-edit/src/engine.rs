@@ -8007,16 +8007,18 @@ impl EngineSession {
     }
 
     /// Whether a plain text command from `start_para` to `end_para` in `story`
-    /// edits through [`Self::edit_resident_text`]: it stays in one paragraph
-    /// that [`Self::can_apply_input`] admits, as the hybrid's input path does.
+    /// edits through [`Self::edit_resident_text`]: it changes the document and
+    /// stays in one paragraph that [`Self::can_apply_input`] admits, as the
+    /// hybrid's input path does.
     #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
     pub(crate) fn takes_resident_text_edit(
         &self,
         story: &str,
         start_para: &str,
         end_para: &str,
+        text: Option<&str>,
     ) -> bool {
-        start_para == end_para && self.can_apply_input(story, start_para)
+        text != Some("") && start_para == end_para && self.can_apply_input(story, start_para)
     }
 
     /// Rebuild the typed measured arena from the newly lowered body story.
