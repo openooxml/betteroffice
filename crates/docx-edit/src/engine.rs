@@ -238,6 +238,27 @@ struct RegionPass {
     provisional: bool,
 }
 
+/// A region pass over only as much of the body as fills the first `pages`
+/// pages. An `exact` prefix is taken only where nothing after it can change
+/// those pages, and keeps no others.
+#[derive(Clone, Copy)]
+struct PagePrefix {
+    pages: usize,
+    exact: bool,
+}
+
+/// What [`EngineSession::layout_document_with_regions_exact_prefix_retained`] laid out.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExactPrefixLayout {
+    /// Only the first `pages` pages are laid out, each as the whole document lays it out.
+    pub provisional: bool,
+    pub pages: usize,
+    /// The widest page of the whole document, while only a prefix is laid out.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document_width: Option<f64>,
+}
+
 const OPEN_USES_REGION_PATH: bool = false;
 const PREVIEW_USES_REGION_PATH: bool = false;
 const BULK_USES_REGION_PATH: bool = true;
@@ -739,6 +760,61 @@ fn prefix_boundary(blocks: &[LayoutBlock], mut end: usize) -> usize {
         end += 1;
     }
     end
+}
+
+/// Whether the pages before `block` lay out and paint as they do in the whole
+/// document whatever follows it. Page totals, note references, floats, columns
+/// and continuous section breaks couple earlier pages to later content.
+fn exact_prefix_block(block: &LayoutBlock) -> bool {
+    let local = |fmt: &docx_layout::types::RunFormatting| {
+        fmt.footnote_ref_id.is_none() && fmt.endnote_ref_id.is_none()
+    };
+    match block {
+        LayoutBlock::Paragraph(paragraph) => paragraph.runs.iter().all(|run| match run {
+            Run::Text(run) => local(&run.fmt),
+            Run::Tab(run) => local(&run.fmt),
+            Run::LineBreak(_) => true,
+            Run::Image(run) => {
+                run.position.is_none()
+                    && matches!(run.wrap_type.as_deref(), None | Some("inline"))
+                    && matches!(run.display_mode.as_deref(), None | Some("inline"))
+                    && matches!(run.css_float.as_deref(), None | Some("none"))
+            }
+            Run::Field(run) => {
+                run.field_type == "PAGE"
+                    && run.nested_sequences.is_empty()
+                    && run.instruction.as_deref().is_none_or(|instruction| {
+                        !instruction.contains(['{', '}'])
+                            && instruction.split_whitespace().all(|token| {
+                                !matches!(
+                                    token.to_ascii_uppercase().as_str(),
+                                    "NUMPAGES" | "SECTIONPAGES" | "DATE" | "TIME"
+                                )
+                            })
+                    })
+                    && local(&run.fmt)
+            }
+            Run::Unsupported => false,
+        }),
+        LayoutBlock::Table(table) => {
+            table.floating.is_none()
+                && table.rows.iter().all(|row| {
+                    row.cells
+                        .iter()
+                        .all(|cell| cell.blocks.iter().all(exact_prefix_block))
+                })
+        }
+        LayoutBlock::SectionBreak(section) => {
+            section.break_type != Some(SectionBreakType::Continuous)
+                && section
+                    .columns
+                    .as_ref()
+                    .is_none_or(|columns| columns.count == 1.0)
+        }
+        LayoutBlock::Image(image) => image.anchor.is_none(),
+        LayoutBlock::PageBreak(_) => true,
+        _ => false,
+    }
 }
 
 fn section_breaks(blocks: &[LayoutBlock]) -> usize {
@@ -5639,12 +5715,144 @@ impl EngineSession {
     /// prefix's, NUMPAGES fields render empty, and retained state serves only
     /// display and caret reads until a full pass replaces it. Edits made
     /// meanwhile take the full region pass.
+    ///
+    /// A request with `"exactPrefix": true` lays out as
+    /// [`Self::layout_document_with_regions_exact_prefix_retained`] does, and a
+    /// provisional reply then carries the `documentWidth` that pass reports.
     pub fn layout_document_with_regions_prefix_retained_json(
         &self,
         input_json: &str,
         pages: usize,
     ) -> Result<String, String> {
-        self.layout_regions_retained_json(input_json, Some(pages))
+        let request: serde_json::Value =
+            serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?;
+        if request["exactPrefix"] != true {
+            return self.layout_regions_retained_json(
+                input_json,
+                Some(PagePrefix {
+                    pages,
+                    exact: false,
+                }),
+            );
+        }
+        let prefix = self.layout_document_with_regions_exact_prefix_retained(input_json, pages)?;
+        let mut reply: serde_json::Value = serde_json::from_str(&self.retained_layout_json()?)
+            .map_err(|error| format!("parse: {error}"))?;
+        if let Some(width) = prefix.document_width {
+            reply["documentWidth"] = serde_json::json!(width);
+        }
+        serde_json::to_string(&reply).map_err(|error| format!("serialize: {error}"))
+    }
+
+    /// The retained region layout of the first `pages` pages, taken only when
+    /// each lays out and paints as the whole document's does, with no page
+    /// totals, notes, floats, columns or continuous sections anywhere in it.
+    /// The retained layout then holds exactly those pages. Any other document
+    /// is laid out whole, as [`Self::layout_document_with_regions_retained`] does.
+    pub fn layout_document_with_regions_exact_prefix_retained(
+        &self,
+        input_json: &str,
+        pages: usize,
+    ) -> Result<ExactPrefixLayout, String> {
+        let pass = self.layout_regions(input_json, Some(PagePrefix { pages, exact: true }))?;
+        let mut pagination = self.pagination.borrow_mut();
+        let layout = pagination
+            .layout
+            .as_mut()
+            .expect("layout retained after region layout");
+        if !pass.provisional {
+            return Ok(ExactPrefixLayout {
+                provisional: false,
+                pages: layout.pages.len(),
+                document_width: None,
+            });
+        }
+        layout.pages.truncate(pages);
+        let pages = layout.pages.len();
+        drop(pagination);
+        let request: RegionLayoutInput =
+            serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?;
+        let (input, regions, ..) = request.split();
+        let default = input
+            .options
+            .page_size
+            .as_ref()
+            .map_or(816.0, |size| size.w);
+        let document_width = if regions.sections.is_empty() {
+            default
+        } else {
+            regions
+                .sections
+                .iter()
+                .map(|section| section.page_size.as_ref().map_or(default, |size| size.w))
+                .fold(0.0, f64::max)
+        };
+        Ok(ExactPrefixLayout {
+            provisional: true,
+            pages,
+            document_width: Some(document_width),
+        })
+    }
+
+    /// Whether nothing outside the body can make a prefix's pages differ from
+    /// the whole document's: no notes, columns or continuous sections, and
+    /// headers and footers whose blocks all pass [`exact_prefix_block`].
+    fn exact_prefix_context(
+        &self,
+        options: &docx_layout::types::LayoutOptions,
+        regions: &DocumentRegions,
+        notes: &docx_layout::footnotes::NoteLayoutInput,
+        env: &RenderEnv,
+    ) -> bool {
+        use yrs::{Map, ReadTxn};
+        let single_column =
+            |columns: Option<&ColumnLayout>| columns.is_none_or(|columns| columns.count == 1.0);
+        if !notes.contents.is_empty()
+            || regions.note_areas.is_some()
+            || regions.headers_footers.is_some()
+            || !single_column(options.columns.as_ref())
+            || regions.sections.iter().any(|section| {
+                section.section_start == Some(SectionBreakType::Continuous)
+                    || !single_column(section.columns.as_ref())
+            })
+        {
+            return false;
+        }
+        let notes_present = {
+            let txn = self.doc.yrs_doc().transact();
+            txn.get_map(crate::STORIES).is_some_and(|stories| {
+                stories
+                    .iter(&txn)
+                    .any(|(id, _)| id.starts_with("fn:") || id.starts_with("en:"))
+            })
+        };
+        if notes_present {
+            return false;
+        }
+        let mut stories = BTreeSet::new();
+        for section in 0..regions.sections.len() {
+            if let Some(refs) = effective_header_footer_refs(regions, section) {
+                stories.extend(
+                    [
+                        refs.header_default,
+                        refs.header_first,
+                        refs.header_even,
+                        refs.footer_default,
+                        refs.footer_first,
+                        refs.footer_even,
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .map(|r_id| self.doc.header_footer_story(&r_id)),
+                );
+            }
+        }
+        stories.iter().all(|story| {
+            self.with_resident_story(story, env, |blocks| {
+                blocks.iter().all(|block| exact_prefix_block(block))
+            })
+            .unwrap_or(false)
+        })
     }
 
     /// [`Self::layout_document_with_regions_retained_json`] a step at a time.
@@ -5715,9 +5923,9 @@ impl EngineSession {
     fn layout_regions_retained_json(
         &self,
         input_json: &str,
-        prefix_pages: Option<usize>,
+        prefix: Option<PagePrefix>,
     ) -> Result<String, String> {
-        let pass = self.layout_regions(input_json, prefix_pages)?;
+        let pass = self.layout_regions(input_json, prefix)?;
         self.retained_region_layout_json(&pass)
     }
 
@@ -5782,22 +5990,22 @@ impl EngineSession {
     fn layout_regions(
         &self,
         input_json: &str,
-        prefix_pages: Option<usize>,
+        prefix: Option<PagePrefix>,
     ) -> Result<RegionPass, String> {
         let trigger = self.take_region_relayout_trigger(input_json)?;
-        self.layout_regions_for_trigger(input_json, prefix_pages, trigger)
+        self.layout_regions_for_trigger(input_json, prefix, trigger)
     }
 
     fn layout_regions_for_trigger(
         &self,
         input_json: &str,
-        prefix_pages: Option<usize>,
+        prefix: Option<PagePrefix>,
         trigger: RelayoutTrigger,
     ) -> Result<RegionPass, String> {
         let _trigger_reset = RelayoutTriggerReset(self);
         self.consume_relayout_trigger();
         self.resumable.replace(None);
-        let mut prepared = self.prepare_region_layout(input_json, prefix_pages, trigger)?;
+        let mut prepared = self.prepare_region_layout(input_json, prefix, trigger)?;
         prepared.measure(usize::MAX)?;
         self.finish_region_layout(prepared)
     }
@@ -5892,7 +6100,7 @@ impl EngineSession {
     fn prepare_region_layout(
         &self,
         input_json: &str,
-        prefix_pages: Option<usize>,
+        prefix: Option<PagePrefix>,
         trigger: RelayoutTrigger,
     ) -> Result<PreparedRegionLayout, String> {
         self.certified_measurement_epoch.set(None);
@@ -5966,6 +6174,17 @@ impl EngineSession {
             env.paragraph_spacing_line_px = (line_px != 16.0).then_some(line_px);
             env.doc_grid_pitch_px = regions.doc_grid_snap_pitch_px(0);
         }
+        let prefix = match prefix {
+            Some(PagePrefix { exact: true, .. })
+                if body_story.as_deref() != Some("body")
+                    || !parsed_render_env.as_ref().is_some_and(|env| {
+                        self.exact_prefix_context(&input.options, &regions, &notes, env)
+                    }) =>
+            {
+                None
+            }
+            prefix => prefix,
+        };
         let fonts = docx_layout::measure_fonts_generation();
         let measurement_fingerprint = serde_json::to_vec(&(
             &measurement.defaults,
@@ -6096,10 +6315,14 @@ impl EngineSession {
                     let (widths, table_wrap_frames) =
                         region_table_measurement_frames(blocks.iter(), &input, &regions);
                     let geometry = initial_float_page_geometry(&input, &regions);
-                    match prefix_pages {
+                    match prefix {
                         // Floats whose zones only settle later, such as shapes that page-side
                         // wrapping brings into the body, rule a prefix out too.
-                        Some(pages) if !coupled && floats_follow_the_text(&blocks) => {
+                        Some(PagePrefix { pages, exact })
+                            if !coupled
+                                && floats_follow_the_text(&blocks)
+                                && (!exact || blocks.iter().all(exact_prefix_block)) =>
+                        {
                             let anchored = anchors_objects(&blocks);
                             let (measures, dependencies) = measure_page_prefix(
                                 &mut blocks,
@@ -20837,7 +21060,11 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         for field in ["PAGE", "NUMPAGES", "SECTIONPAGES"] {
             let body = format!(
                 r#"<w:p><w:fldSimple w:instr=" {field} "><w:r><w:t>9</w:t></w:r></w:fldSimple></w:p>{}"#,
-                (0..200).map(|i| format!("<w:p><w:r><w:t>Paragraph {i} fills several pages.</w:t></w:r></w:p>")).collect::<String>()
+                (0..200)
+                    .map(|i| format!(
+                        "<w:p><w:r><w:t>Paragraph {i} fills several pages.</w:t></w:r></w:p>"
+                    ))
+                    .collect::<String>()
             );
             let bytes = docx_bytes("", &body);
             let (full, prefix) = full_and_prefix(&bytes, &request.to_string(), &|_| {
