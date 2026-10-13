@@ -1025,8 +1025,8 @@ impl WorkbookAuthority {
     /// Points each cell back at its own source format when a release before
     /// patterned fills restored it in that format's released reading. Every writer
     /// seeds the format catalog with its reading of each source format, so a
-    /// catalog without a source format's own entry marks that release. A released
-    /// reading no cell uses any longer leaves the catalog.
+    /// catalog without a source format's own entry marks that release. The released
+    /// reading keeps its catalog entry, which that release's writers still reference.
     fn keep_released_source_formats(&self, source: &Self) -> Result<(), String> {
         let base = &self.base.styles;
         let mut sources = HashMap::new();
@@ -1057,7 +1057,6 @@ impl WorkbookAuthority {
             .get_map(SHEETS)
             .ok_or_else(|| "missing sheet map".to_string())?;
         let mut restored_formats = HashMap::new();
-        let mut referenced = HashSet::new();
         for key in sheets.keys(&txn).map(str::to_string).collect::<Vec<_>>() {
             let styles = sheets
                 .get(&txn, &key)
@@ -1081,7 +1080,6 @@ impl WorkbookAuthority {
                 let Some((own, (format, _))) =
                     own.and_then(|own| sources.get(&own).map(|source| (own, source)))
                 else {
-                    referenced.insert(restored);
                     continue;
                 };
                 let current = restored_formats.entry(restored.clone()).or_insert_with(|| {
@@ -1102,20 +1100,11 @@ impl WorkbookAuthority {
                 });
                 if keeps {
                     kept.push((cell.to_string(), own));
-                } else {
-                    referenced.insert(restored);
                 }
             }
             for (cell, own) in kept {
                 catalog.try_update(&mut txn, own.clone(), sources[&own].1.clone());
-                styles.try_update(&mut txn, cell, own.clone());
-                referenced.insert(own);
-            }
-        }
-        for own in &released {
-            let (reading, _) = cell_format_entry(&released_format(&sources[own].0))?;
-            if !referenced.contains(&reading) && !sources.contains_key(&reading) {
-                catalog.remove(&mut txn, &reading);
+                styles.try_update(&mut txn, cell, own);
             }
         }
         Ok(())
