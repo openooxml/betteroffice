@@ -181,13 +181,16 @@ impl WorkbookBase {
     ) -> Result<Self, String> {
         let mut builder = FingerprintBuilder::new(model, legacy_dimensions);
         let styles = FingerprintStyles::new(&model.styles);
-        let (fingerprint, bootstrap_client_id) = builder.current(styles)?;
-        let mut fingerprints =
-            builder.accepted_fingerprints(styles.without_xf_facets(), legacy_styles)?;
-        fingerprints
-            .entry(SCHEMA_VERSION)
-            .or_default()
-            .insert(0, fingerprint.clone());
+        let ((fingerprint, bootstrap_client_id), fingerprints) = builder.batched(|builder| {
+            let current = builder.current(styles)?;
+            let mut fingerprints =
+                builder.accepted_fingerprints(styles.without_xf_facets(), legacy_styles)?;
+            fingerprints
+                .entry(SCHEMA_VERSION)
+                .or_default()
+                .insert(0, current.0.clone());
+            Ok((current, fingerprints))
+        })?;
         Ok(Self {
             bootstrap_client_id,
             date_system: model.date_system,
@@ -4328,6 +4331,7 @@ struct FingerprintBuilder<'a> {
     styles: Vec<(FingerprintStyles<'a>, usize)>,
     style_bytes: Vec<Vec<u8>>,
     hashes: BTreeMap<FingerprintKey, (String, u64)>,
+    planned: Option<Vec<(FingerprintKey, FingerprintStyles<'a>)>>,
 }
 
 impl<'a> FingerprintBuilder<'a> {
@@ -4352,7 +4356,61 @@ impl<'a> FingerprintBuilder<'a> {
             styles: Vec::new(),
             style_bytes: Vec::new(),
             hashes: BTreeMap::new(),
+            planned: None,
         }
+    }
+
+    /// Runs `build` once to learn the fingerprints it needs, hashes them all
+    /// in one pass over the cells, then runs it again on the results.
+    fn batched<T>(
+        &mut self,
+        mut build: impl FnMut(&mut Self) -> Result<T, String>,
+    ) -> Result<T, String> {
+        self.planned = Some(Vec::new());
+        let planning = build(self);
+        let planned = self.planned.take().unwrap_or_default();
+        planning?;
+        self.compute(planned)?;
+        build(self)
+    }
+
+    fn compute(
+        &mut self,
+        planned: Vec<(FingerprintKey, FingerprintStyles<'a>)>,
+    ) -> Result<(), String> {
+        if planned.is_empty() {
+            return Ok(());
+        }
+        let specs = planned
+            .iter()
+            .map(|&(key, styles)| {
+                let (
+                    _,
+                    schema_version,
+                    include_defined_names,
+                    include_col_styles,
+                    legacy_dimensions,
+                    current,
+                ) = key;
+                FingerprintSpec {
+                    styles,
+                    schema_version,
+                    include_defined_names,
+                    include_col_styles,
+                    legacy_dimensions: if legacy_dimensions {
+                        self.legacy_dimensions
+                    } else {
+                        &[]
+                    },
+                    current,
+                }
+            })
+            .collect::<Vec<_>>();
+        let hashes = fingerprint_model(self.model, &specs)?;
+        for ((key, _), hash) in planned.into_iter().zip(hashes) {
+            self.hashes.insert(key, hash);
+        }
+        Ok(())
     }
 
     fn current(&mut self, styles: FingerprintStyles<'a>) -> Result<(String, u64), String> {
@@ -4420,21 +4478,14 @@ impl<'a> FingerprintBuilder<'a> {
         if let Some(hash) = self.hashes.get(&key) {
             return Ok(hash.clone());
         }
-        let hash = fingerprint_model_with_overrides(
-            self.model,
-            version,
-            include_defined_names,
-            include_col_styles,
-            if legacy_dimensions {
-                self.legacy_dimensions
-            } else {
-                &[]
-            },
-            styles,
-            current,
-        )?;
-        self.hashes.insert(key, hash.clone());
-        Ok(hash)
+        if let Some(planned) = &mut self.planned {
+            if !planned.iter().any(|(known, _)| *known == key) {
+                planned.push((key, styles));
+            }
+            return Ok((String::new(), 0));
+        }
+        self.compute(vec![(key, styles)])?;
+        Ok(self.hashes[&key].clone())
     }
 
     fn accepted_fingerprints(
@@ -4515,154 +4566,236 @@ fn append_fingerprint(fingerprints: &mut BTreeMap<i64, Vec<String>>, version: i6
     }
 }
 
-fn fingerprint_model_with_overrides(
-    model: &WorkbookModel,
+/// One base fingerprint: the styles reading, schema and readings it hashes.
+struct FingerprintSpec<'a> {
+    styles: FingerprintStyles<'a>,
     schema_version: i64,
     include_defined_names: bool,
     include_col_styles: bool,
-    legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
-    styles: FingerprintStyles<'_>,
+    legacy_dimensions: &'a [xlsx_parse::LegacySheetDimensions],
     current: bool,
-) -> Result<(String, u64), String> {
-    validate_schema_version(schema_version)?;
+}
+
+const FINGERPRINT_CHUNK_BYTES: usize = 64 * 1024;
+
+/// Hashes every spec in a single pass over the cells, which all of them hash
+/// alike.
+fn fingerprint_model(
+    model: &WorkbookModel,
+    specs: &[FingerprintSpec<'_>],
+) -> Result<Vec<(String, u64)>, String> {
     #[cfg(test)]
     FINGERPRINT_PASSES.set(FINGERPRINT_PASSES.get() + 1);
-    let mut hasher = Sha256::new();
-    hasher.update(fingerprint_domain(schema_version, current));
-    let base = if include_defined_names {
-        serde_json::to_vec(&(
-            model.date_system,
-            &model.defined_names,
-            &model.shared_strings,
-            &styles,
-        ))
-    } else {
-        serde_json::to_vec(&(model.date_system, &model.shared_strings, &styles))
-    }
-    .map_err(|error| format!("cannot fingerprint workbook base: {error}"))?;
-    hash_bytes(&mut hasher, &base);
-    hash_u64(&mut hasher, model.sheets.len() as u64);
-    let hash_col_styles = include_col_styles
-        && schema_version >= CHARTS_SCHEMA_VERSION
-        && model
-            .sheets
-            .iter()
-            .any(|sheet| !sheet.col_styles.is_empty());
+    let mut hashers = specs
+        .iter()
+        .map(|spec| {
+            validate_schema_version(spec.schema_version)?;
+            let mut hasher = Sha256::new();
+            hasher.update(fingerprint_domain(spec.schema_version, spec.current));
+            let base = if spec.include_defined_names {
+                serde_json::to_vec(&(
+                    model.date_system,
+                    &model.defined_names,
+                    &model.shared_strings,
+                    &spec.styles,
+                ))
+            } else {
+                serde_json::to_vec(&(model.date_system, &model.shared_strings, &spec.styles))
+            }
+            .map_err(|error| format!("cannot fingerprint workbook base: {error}"))?;
+            hash_bytes(&mut hasher, &base);
+            hash_u64(&mut hasher, model.sheets.len() as u64);
+            Ok(hasher)
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let has_col_styles = model
+        .sheets
+        .iter()
+        .any(|sheet| !sheet.col_styles.is_empty());
+    let hashes_col_styles = |spec: &FingerprintSpec<'_>| {
+        spec.include_col_styles && spec.schema_version >= CHARTS_SCHEMA_VERSION && has_col_styles
+    };
+    let mut shared = Vec::new();
     for (index, sheet) in model.sheets.iter().enumerate() {
-        let (col_widths, row_heights) = match legacy_dimensions.get(index) {
-            Some(legacy) => (&legacy.col_widths, &legacy.row_heights),
-            None => (&sheet.col_widths, &sheet.row_heights),
-        };
-        hash_bytes(&mut hasher, sheet.name.as_bytes());
-        hash_u64(&mut hasher, sheet.iter_cells().count() as u64);
+        hash_bytes(&mut shared, sheet.name.as_bytes());
+        hash_u64(&mut shared, sheet.iter_cells().count() as u64);
         for (at, cell) in sheet.iter_cells() {
-            hash_u32(&mut hasher, at.row);
-            hash_u32(&mut hasher, at.col);
-            hash_cell_value(&mut hasher, &cell.value);
+            hash_u32(&mut shared, at.row);
+            hash_u32(&mut shared, at.col);
+            hash_cell_value(&mut shared, &cell.value);
             match &cell.formula {
                 Some(formula) => {
-                    hasher.update([1]);
-                    hash_bytes(&mut hasher, formula.as_bytes());
+                    shared.push(1);
+                    hash_bytes(&mut shared, formula.as_bytes());
                 }
-                None => hasher.update([0]),
+                None => shared.push(0),
             }
             match cell.style {
                 Some(style) => {
-                    hasher.update([1]);
-                    hash_u32(&mut hasher, style);
+                    shared.push(1);
+                    hash_u32(&mut shared, style);
                 }
-                None => hasher.update([0]),
+                None => shared.push(0),
+            }
+            if shared.len() >= FINGERPRINT_CHUNK_BYTES {
+                feed_all(&mut hashers, &mut shared);
             }
         }
-        hash_u64(&mut hasher, sheet.merges.len() as u64);
+        hash_u64(&mut shared, sheet.merges.len() as u64);
         for range in &sheet.merges {
-            hash_cell_ref(&mut hasher, range.start);
-            hash_cell_ref(&mut hasher, range.end);
+            hash_cell_ref(&mut shared, range.start);
+            hash_cell_ref(&mut shared, range.end);
         }
-        hash_u64(&mut hasher, col_widths.len() as u64);
-        for (&column, &width) in col_widths {
-            hash_u32(&mut hasher, column);
-            hash_u64(&mut hasher, width.to_bits());
-        }
-        hash_u64(&mut hasher, row_heights.len() as u64);
-        for (&row, &height) in row_heights {
-            hash_u32(&mut hasher, row);
-            hash_u64(&mut hasher, height.to_bits());
-        }
-        if schema_version >= FREEZE_PANE_SCHEMA_VERSION {
-            match sheet.freeze_pane {
-                Some(pane) => {
-                    hasher.update([1]);
-                    hash_u32(&mut hasher, pane.rows);
-                    hash_u32(&mut hasher, pane.cols);
-                    hash_cell_ref(&mut hasher, pane.top_left);
+        feed_all(&mut hashers, &mut shared);
+        let hyperlinks = sheet_json(
+            specs
+                .iter()
+                .any(|spec| spec.schema_version >= HYPERLINK_SCHEMA_VERSION),
+            &sheet.hyperlinks,
+            "hyperlinks",
+        )?;
+        let charts = sheet_json(
+            specs
+                .iter()
+                .any(|spec| spec.schema_version >= CHARTS_SCHEMA_VERSION),
+            &sheet.charts,
+            "charts",
+        )?;
+        let col_styles = sheet_json(
+            specs.iter().any(hashes_col_styles),
+            &sheet.col_styles,
+            "column styles",
+        )?;
+        for (hasher, spec) in hashers.iter_mut().zip(specs) {
+            let (col_widths, row_heights) = match spec.legacy_dimensions.get(index) {
+                Some(legacy) => (&legacy.col_widths, &legacy.row_heights),
+                None => (&sheet.col_widths, &sheet.row_heights),
+            };
+            hash_u64(hasher, col_widths.len() as u64);
+            for (&column, &width) in col_widths {
+                hash_u32(hasher, column);
+                hash_u64(hasher, width.to_bits());
+            }
+            hash_u64(hasher, row_heights.len() as u64);
+            for (&row, &height) in row_heights {
+                hash_u32(hasher, row);
+                hash_u64(hasher, height.to_bits());
+            }
+            if spec.schema_version >= FREEZE_PANE_SCHEMA_VERSION {
+                match sheet.freeze_pane {
+                    Some(pane) => {
+                        hasher.update([1]);
+                        hash_u32(hasher, pane.rows);
+                        hash_u32(hasher, pane.cols);
+                        hash_cell_ref(hasher, pane.top_left);
+                    }
+                    None => hasher.update([0]),
                 }
-                None => hasher.update([0]),
+            }
+            if let Some(bytes) = hyperlinks
+                .as_ref()
+                .filter(|_| spec.schema_version >= HYPERLINK_SCHEMA_VERSION)
+            {
+                hash_bytes(hasher, bytes);
+            }
+            if let Some(bytes) = charts
+                .as_ref()
+                .filter(|_| spec.schema_version >= CHARTS_SCHEMA_VERSION)
+            {
+                hash_bytes(hasher, bytes);
+            }
+            if let Some(bytes) = col_styles.as_ref().filter(|_| hashes_col_styles(spec)) {
+                hash_bytes(hasher, bytes);
             }
         }
-        if schema_version >= HYPERLINK_SCHEMA_VERSION {
-            let hyperlinks = serde_json::to_vec(&sheet.hyperlinks)
-                .map_err(|error| format!("cannot fingerprint sheet hyperlinks: {error}"))?;
-            hash_bytes(&mut hasher, &hyperlinks);
-        }
-        if schema_version >= CHARTS_SCHEMA_VERSION {
-            let charts = serde_json::to_vec(&sheet.charts)
-                .map_err(|error| format!("cannot fingerprint sheet charts: {error}"))?;
-            hash_bytes(&mut hasher, &charts);
-        }
-        if hash_col_styles {
-            let col_styles = serde_json::to_vec(&sheet.col_styles)
-                .map_err(|error| format!("cannot fingerprint sheet column styles: {error}"))?;
-            hash_bytes(&mut hasher, &col_styles);
-        }
     }
-    let digest = hasher.finalize();
-    let fingerprint = format!("{digest:x}");
-    let mut client_bytes = [0_u8; 8];
-    client_bytes.copy_from_slice(&digest[..8]);
-    let mut bootstrap_client_id = u64::from_be_bytes(client_bytes) & MAX_SAFE_CLIENT_ID;
-    if bootstrap_client_id == 0 {
-        bootstrap_client_id = 1;
-    }
-    Ok((fingerprint, bootstrap_client_id))
+    Ok(hashers
+        .into_iter()
+        .map(|hasher| {
+            let digest = hasher.finalize();
+            let fingerprint = format!("{digest:x}");
+            let mut client_bytes = [0_u8; 8];
+            client_bytes.copy_from_slice(&digest[..8]);
+            let mut bootstrap_client_id = u64::from_be_bytes(client_bytes) & MAX_SAFE_CLIENT_ID;
+            if bootstrap_client_id == 0 {
+                bootstrap_client_id = 1;
+            }
+            (fingerprint, bootstrap_client_id)
+        })
+        .collect())
 }
 
-fn hash_cell_value(hasher: &mut Sha256, value: &CellValue) {
+fn sheet_json<T: Serialize>(
+    needed: bool,
+    value: &T,
+    what: &str,
+) -> Result<Option<Vec<u8>>, String> {
+    needed
+        .then(|| serde_json::to_vec(value))
+        .transpose()
+        .map_err(|error| format!("cannot fingerprint sheet {what}: {error}"))
+}
+
+fn feed_all(hashers: &mut [Sha256], bytes: &mut Vec<u8>) {
+    for hasher in hashers.iter_mut() {
+        hasher.update(bytes.as_slice());
+    }
+    bytes.clear();
+}
+
+/// Where fingerprint bytes go: a hasher, or a buffer several hashers share.
+trait FingerprintSink {
+    fn feed(&mut self, bytes: &[u8]);
+}
+
+impl FingerprintSink for Sha256 {
+    fn feed(&mut self, bytes: &[u8]) {
+        self.update(bytes);
+    }
+}
+
+impl FingerprintSink for Vec<u8> {
+    fn feed(&mut self, bytes: &[u8]) {
+        self.extend_from_slice(bytes);
+    }
+}
+
+fn hash_cell_value(sink: &mut impl FingerprintSink, value: &CellValue) {
     match value {
-        CellValue::Empty => hasher.update([0]),
+        CellValue::Empty => sink.feed(&[0]),
         CellValue::Number { value } => {
-            hasher.update([1]);
-            hash_u64(hasher, value.to_bits());
+            sink.feed(&[1]);
+            hash_u64(sink, value.to_bits());
         }
         CellValue::Text { value } => {
-            hasher.update([2]);
-            hash_bytes(hasher, value.as_bytes());
+            sink.feed(&[2]);
+            hash_bytes(sink, value.as_bytes());
         }
-        CellValue::Bool { value } => hasher.update([3, u8::from(*value)]),
+        CellValue::Bool { value } => sink.feed(&[3, u8::from(*value)]),
         CellValue::Error { value } => {
-            hasher.update([4]);
-            hash_bytes(hasher, value.as_str().as_bytes());
+            sink.feed(&[4]);
+            hash_bytes(sink, value.as_str().as_bytes());
         }
     }
 }
 
-fn hash_cell_ref(hasher: &mut Sha256, cell: CellRef) {
-    hash_u32(hasher, cell.row);
-    hash_u32(hasher, cell.col);
-    hasher.update([u8::from(cell.abs_row), u8::from(cell.abs_col)]);
+fn hash_cell_ref(sink: &mut impl FingerprintSink, cell: CellRef) {
+    hash_u32(sink, cell.row);
+    hash_u32(sink, cell.col);
+    sink.feed(&[u8::from(cell.abs_row), u8::from(cell.abs_col)]);
 }
 
-fn hash_bytes(hasher: &mut Sha256, bytes: &[u8]) {
-    hash_u64(hasher, bytes.len() as u64);
-    hasher.update(bytes);
+fn hash_bytes(sink: &mut impl FingerprintSink, bytes: &[u8]) {
+    hash_u64(sink, bytes.len() as u64);
+    sink.feed(bytes);
 }
 
-fn hash_u32(hasher: &mut Sha256, value: u32) {
-    hasher.update(value.to_le_bytes());
+fn hash_u32(sink: &mut impl FingerprintSink, value: u32) {
+    sink.feed(&value.to_le_bytes());
 }
 
-fn hash_u64(hasher: &mut Sha256, value: u64) {
-    hasher.update(value.to_le_bytes());
+fn hash_u64(sink: &mut impl FingerprintSink, value: u64) {
+    sink.feed(&value.to_le_bytes());
 }
 
 #[cfg(test)]
