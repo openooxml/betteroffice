@@ -1987,7 +1987,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'completeLayout') {
-    setFrameDisplayWindow(session);
+    if (!commandLayout) setFrameDisplayWindow(session);
     if (incompleteLayout && request.sliceBlocks && !commandLayout) {
       supersedeSlicedCompletion();
       slicedCompletion = {

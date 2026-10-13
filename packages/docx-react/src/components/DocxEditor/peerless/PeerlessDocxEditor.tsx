@@ -109,7 +109,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       if (!current || !client) throw new Error('Peer-less worker is not ready');
       capture = createWorkerPrintCapture(current.binding, printBitmap, () => active.current === current && !popup.closed);
       printCapture.current = capture;
-      const pages = await capture.collect((indices, epoch) => client.buildPages(indices, epoch));
+      const pages = await capture.collect(
+        (indices, epoch) => client.buildPages(indices, epoch), (epoch) => client.completeLayout(epoch));
       const css = popup.document.createElement('style');
       css.textContent = 'body { margin: 0; } img { display: block; width: 100%; break-after: page; } img:last-child { break-after: auto; } @page { margin: 0; size: auto; } @media print { button { display: none; } }';
       popup.document.head.appendChild(css);
