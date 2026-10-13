@@ -3626,6 +3626,65 @@ mod pagination_rule_tests {
         assert_eq!(resolved(24), resolved(240));
     }
 
+    /// Each later paragraph's one run is whole on its line, and the cases drop
+    /// or add its end while paragraph 0 grows.
+    #[test]
+    fn retained_text_runs_take_the_positions_a_full_pass_resolves() {
+        let document = |extra: usize, ends: &dyn Fn(usize) -> bool| {
+            let mut position = 0;
+            (0..12)
+                .map(|index| {
+                    let len = 1 + if index == 0 { extra } else { 0 };
+                    let start = position;
+                    position += len + 2;
+                    let mut run = json!({"kind": "text", "text": "a".repeat(len), "pmStart": start + 1});
+                    if ends(index) {
+                        run["pmEnd"] = json!(start + 1 + len);
+                    }
+                    json!({
+                        "block": {
+                            "kind": "paragraph", "id": index, "runs": [run],
+                            "pmStart": start, "pmEnd": start + len + 2,
+                        },
+                        "measure": {
+                            "kind": "paragraph", "totalHeight": 40,
+                            "lines": [{
+                                "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": len,
+                                "width": 10, "ascent": 8, "descent": 2, "lineHeight": 40,
+                            }],
+                        },
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        let all = |_: usize| true;
+        let none = |_: usize| false;
+        let some = |index: usize| index % 2 == 0;
+        let cases: [(&dyn Fn(usize) -> bool, &dyn Fn(usize) -> bool); 4] =
+            [(&none, &all), (&all, &none), (&some, &all), (&all, &some)];
+        for (case, (before, after)) in cases.into_iter().enumerate() {
+            let previous = layout_document_checkpointed(&mut input(document(0, before))).unwrap();
+            let mut next_fingerprints = vec![1_u64; 12];
+            next_fingerprints[0] = 2;
+            let incremental = layout_document_incremental(
+                &mut input(document(1, after)),
+                &mut previous.layout.clone(),
+                &previous.checkpoints,
+                &[1_u64; 12],
+                &next_fingerprints,
+                0,
+            )
+            .unwrap();
+            let full = layout_document_checkpointed(&mut input(document(1, after))).unwrap();
+            assert!(incremental.placed_blocks < full.placed_blocks, "case {case}");
+            assert_eq!(
+                serde_json::to_string(&incremental.layout).unwrap(),
+                serde_json::to_string(&full.layout).unwrap(),
+                "case {case}"
+            );
+        }
+    }
+
     #[test]
     fn a_checkpoint_after_a_floating_table_keeps_the_spacing_its_page_starts_with() {
         let floating_table = json!({
