@@ -21535,6 +21535,77 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
     }
 
     #[test]
+    fn an_exact_prefix_keeps_the_last_inherited_header_measurement_for_certified_pages() {
+        docx_layout::clear_measure_fonts();
+        let font = docx_layout::register_measure_font(LIBERATION).unwrap();
+        let page = |index: u32, section: &str| {
+            preview_fixture::paragraph(
+                index + 1,
+                &format!(
+                    "<w:pPr><w:pageBreakBefore/>{section}</w:pPr>{}",
+                    preview_fixture::run("Page")
+                ),
+            )
+        };
+        let narrow = header_section(1440)
+            .replace(r#"w:w="12240""#, r#"w:w="6480""#)
+            .replace(r#"<w:headerReference w:type="default" r:id="header"/>"#, "");
+        let body = format!(
+            "{}{}{}{narrow}",
+            (0..79).map(|index| page(index, "")).collect::<String>(),
+            page(79, &header_section(1440)),
+            (80..100).map(|index| page(index, "")).collect::<String>()
+        );
+        let header = preview_pagination_paragraph(
+            300,
+            &preview_fixture::run("This shared header fits on one wide line but wraps on the narrow page"),
+        );
+        let bytes = preview_pagination_story_document(&body, "header", &header);
+        let mut request = header_request(font, 96.0);
+        let headed = request["regions"]["sections"][0].clone();
+        let mut inherited = headed.clone();
+        inherited["pageSize"]["w"] = serde_json::json!(432);
+        inherited.as_object_mut().unwrap().remove("headerFooterRefs");
+        request["regions"]["sections"] = serde_json::json!([headed, inherited]);
+        let layout = |prefix: bool| {
+            let engine = EngineSession::new(149);
+            crate::seed::seed_from_docx(engine.doc(), &bytes).unwrap();
+            if prefix {
+                let laid = engine
+                    .layout_document_with_regions_exact_prefix_retained(&request.to_string(), 3)
+                    .unwrap();
+                assert!(laid.provisional);
+            } else {
+                engine
+                    .layout_document_with_regions_retained_json(&request.to_string())
+                    .unwrap();
+            }
+            let output: serde_json::Value =
+                serde_json::from_str(&engine.retained_layout_json().unwrap()).unwrap();
+            let extras = serde_json::json!({
+                "fontChains": request["measurement"]["fontChains"],
+                "headersFooters": output["headersFooters"]
+            });
+            engine.build_display_list_frame(&extras.to_string(), 0).unwrap();
+            let display = serde_json::to_value(engine.with_display_list(Clone::clone).unwrap()).unwrap();
+            (output, display)
+        };
+        let (full, full_display) = layout(false);
+        let variants = full["headersFooters"]["variants"].as_array().unwrap();
+        let lines = |variant: &serde_json::Value| {
+            variant["measured"][0]["measure"]["lines"].as_array().unwrap().len()
+        };
+        assert_eq!(lines(&variants[0]), 1);
+        assert!(lines(&variants[1]) > 1);
+        assert!(full["layout"]["pages"].as_array().unwrap()[..80]
+            .iter().all(|page| page["regionSectionIndex"] == 0));
+        let (prefix, prefix_display) = layout(true);
+        assert_eq!(first_pages(&prefix), first_pages(&full));
+        assert_eq!(prefix_display["pages"].as_array().unwrap()[..3], full_display["pages"].as_array().unwrap()[..3], "certified header and footer pixels match cold full layout");
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
     fn an_exact_prefix_measures_headers_only_through_its_own_section() {
         docx_layout::clear_measure_fonts();
         let font = docx_layout::register_measure_font(LIBERATION).unwrap();

@@ -576,6 +576,59 @@ test('worker print builds all pages and invokes the host after complete renderin
   expect(onPrint).toHaveBeenCalledTimes(1);
 });
 
+test('overlapping prints during a provisional prefix both capture the whole document', async () => {
+  const ref = createRef<DocxEditorRef>();
+  const onError = mock(() => {});
+  const popups = [0, 1].map(() => ({ document: document.implementation.createHTMLDocument(), opener: null, closed: false,
+    focus() {}, print: mock(() => {}), close: mock(() => {}) }));
+  let opened = 0;
+  const open = spyOn(window, 'open').mockImplementation(() => popups[opened++] as unknown as Window);
+  const context = spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ drawImage() {} } as unknown as CanvasRenderingContext2D);
+  const png = spyOn(HTMLCanvasElement.prototype, 'toDataURL').mockReturnValue('data:image/png;base64,cGFnZQ==');
+  let release!: () => void;
+  const completing = new Promise<void>((resolve) => { release = resolve; });
+  const complete = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'completeLayout').mockImplementation(async () => {
+    await completing;
+    return null as never;
+  });
+  const geometry = (provisional: boolean): PeerlessFrameGeometry => ({
+    identity: { session: 'print', incarnation: 1, epoch: 1 }, coversThroughSeq: 0,
+    frameEpoch: provisional ? 1 : 2, layoutRevision: 1, layoutProvisional: provisional, caret: null, selectionRects: [],
+    pages: Array.from({ length: provisional ? 3 : 5 }, (_, pageIndex) => ({
+      page: { pageId: String(pageIndex + 1), pageIndex }, bounds: { x: 0, y: pageIndex * 100, width: 200, height: 100 },
+      transform: [1, 0, 0, 1, 0, 0],
+    })),
+  });
+  const build = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'buildPages').mockImplementation(async (indices) => {
+    binding!.viewStore.getSnapshot().geometry = geometry(false);
+    surface.mock.calls.at(-1)![0].sessionOptions.prepareGeometry({ ...commandFrame(2), payload: {
+      ...commandFrame(2).payload, stagedPresentation: { frameEpoch: 2, pages: indices.map((pageIndex) => ({
+        page: { pageId: String(pageIndex + 1), pageIndex }, frameEpoch: 2,
+        bitmap: { width: 200, height: 100, close() {} } as ImageBitmap,
+      })) },
+    } });
+    return null as never;
+  });
+  restorers.push(() => open.mockRestore(), () => context.mockRestore(), () => png.mockRestore(),
+    () => complete.mockRestore(), () => build.mockRestore());
+  const view = render(<DocxEditor {...peerlessProps} ref={ref} onError={onError} />);
+  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  binding!.viewStore.getSnapshot().geometry = geometry(true);
+  await act(async () => {
+    const first = ref.current!.commands.execute('print', null);
+    const second = ref.current!.commands.execute('print', null);
+    await waitFor(() => expect(complete).toHaveBeenCalledTimes(2));
+    release();
+    const outcomes = await Promise.all([first, second]);
+    expect(outcomes).toMatchObject([{ ok: true }, { ok: true }]);
+  });
+  expect(onError).not.toHaveBeenCalled();
+  for (const popup of popups) {
+    expect(popup.document.querySelectorAll('img')).toHaveLength(5);
+    expect(popup.print).toHaveBeenCalledTimes(1);
+  }
+});
+
 test('worker context menu reads selection and table context without a session', async () => {
   const view = render(<DocxEditor {...peerlessProps} showToolbar={false} />);
   await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
