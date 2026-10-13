@@ -50,6 +50,9 @@ type ConnectionRecord<P, S, E, F> = {
   fullFrameThroughSeq: number;
   fullFrameRevision?: number;
   fullFrameRetries: number;
+  /** Highest seq this connection's host had seen at attach or replay end, and highSeq at that moment. */
+  seenSeq: number;
+  seenMark: number;
   unsubscribe(): void;
   unsubscribeFrame?: () => void;
   unsubscribeAck?: () => void;
@@ -227,7 +230,8 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
       waitingReads.delete(request);
       const query = record.connection.client.call.query;
       if (!query) { finishRead(request, readRefusal('unsupported')); continue; }
-      const fence = { session: sessionId, incarnation, epoch, afterSeq: highSeq };
+      const fence = { session: sessionId, incarnation, epoch,
+        afterSeq: highSeq > record.seenMark ? highSeq : record.seenSeq };
       const attempt = ++request.attempt;
       request.connection = record;
       const current = () => !request.done && request.attempt === attempt && live(record);
@@ -642,7 +646,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
   function attach(next: CommandConnection<P, S, E, F>): ConnectionRecord<P, S, E, F> {
     const record: ConnectionRecord<P, S, E, F> = {
       connection: next, active: true, fullFrameBusy: false, fullFrameThroughSeq: -1, fullFrameRetries: 0,
-      unsubscribe: () => {},
+      seenSeq: highSeq, seenMark: highSeq, unsubscribe: () => {},
     };
     connection = record;
     const unsubscribe = next.client.onFailure((failure) => {
@@ -813,6 +817,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
         initialFrame = undefined;
         acceptAck(record, opened);
         const entries = [...log.values()].sort((a, b) => a.envelope.seq - b.envelope.seq);
+        let replayed = opened.throughSeq;
         for (const entry of entries) {
           if (!live(record)) throw record.failure;
           if (blocked(entry.outcome)) continue;
@@ -824,6 +829,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
             if (error instanceof SessionFailure) throw error;
             throw unknown(entry, error, true);
           }
+          replayed = Math.max(replayed, entry.envelope.seq);
           acceptAck(record, ack, true);
           if (cancellationDone) await cancellationDone.promise;
           if (!live(record)) {
@@ -835,6 +841,8 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
           }
         }
         if (!live(record)) throw record.failure;
+        record.seenSeq = replayed;
+        record.seenMark = highSeq;
         recovering = false;
         checkpointAttemptedAt = -1;
         report('recovered');
