@@ -24,6 +24,15 @@ function deferred<T>() {
   const promise = new Promise<T>((done) => { resolve = done; });
   return { promise, resolve };
 }
+async function drain() {
+  for (let turn = 0; turn < 32; turn += 1) await Promise.resolve();
+}
+function observe<T>(promise: Promise<T>) {
+  const state: { done: boolean; result?: unknown } = { done: false };
+  void promise.then((result) => { state.done = true; state.result = result; },
+    (error: unknown) => { state.done = true; state.result = error; });
+  return state;
+}
 async function value<T>(result: Promise<T | TransferResult<T>> | T | TransferResult<T> | DeferredReply<T>): Promise<T> {
   const reply = await (isDeferredReply(result) ? result.promise : result);
   return isTransferResult(reply) ? (reply as TransferResult<T>).value : reply;
@@ -202,6 +211,48 @@ describe('worker query and admission contract', () => {
     const read = m.read(1).catch((error: unknown) => error);
     const failure = await m.host.handler(null, envelope(1)).catch((error: unknown) => error);
     expect(await read).toBe(failure);
+  });
+
+  for (const overflow of ['query', 'checkpoint'] as const) {
+    for (const parked of ['query', 'frame'] as const) {
+      it(`rejects a parked ${parked} when a ${overflow} exceeds handler capacity behind a held apply`, async () => {
+        const entered = deferred<void>();
+        const m = model({ apply: () => { entered.resolve(); return new Promise<never>(() => {}); } });
+        void m.edit(1).catch(() => {});
+        await entered.promise;
+        if (parked === 'frame') m.host.policy(envelope(2));
+        const waiter = observe(parked === 'query' ? m.read(1) : value(m.host.frame()));
+        for (let index = 0; index < 4095; index += 1) void m.read(0).catch(() => {});
+        const failure = await (overflow === 'query' ? m.read(0) : m.host.checkpoint(null)).catch((error: unknown) => error);
+        expect(failure).toBeInstanceOf(SessionFailure);
+        expect(failure).toMatchObject({ code: 'out-of-memory', message: 'Command handler capacity exceeded' });
+        await drain();
+        expect(waiter.done).toBe(true);
+        expect(waiter.result).toBe(failure);
+        await expect(m.read(0)).rejects.toBe(failure);
+      });
+    }
+  }
+
+  it('rejects parked queries and frames when revise poisons the host behind a held apply', async () => {
+    const entered = deferred<void>();
+    const m = model({ apply: () => { entered.resolve(); return new Promise<never>(() => {}); } });
+    void m.edit(1).catch(() => {});
+    await entered.promise;
+    m.host.policy(envelope(2));
+    const query = observe(m.read(1));
+    const frame = observe(value(m.host.frame()));
+    m.layout(-1);
+    let failure: unknown;
+    try { m.host.revise(); } catch (error) { failure = error; }
+    expect(failure).toBeInstanceOf(SessionFailure);
+    expect(failure).toMatchObject({ code: 'crash', message: 'Invalid layout revision' });
+    await drain();
+    expect(query).toMatchObject({ done: true });
+    expect(query.result).toBe(failure);
+    expect(frame).toMatchObject({ done: true });
+    expect(frame.result).toBe(failure);
+    await expect(m.read(0)).rejects.toBe(failure);
   });
 
   it('provides edit checkpoint and query method maps', () => {
