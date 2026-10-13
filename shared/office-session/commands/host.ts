@@ -245,11 +245,13 @@ export function createCommandHost<P, S, E, F>(
       outcomes.set(outcome.seq, copyOutcome(outcome));
       if (outcomes.size > retainedLimit) outcomes.delete(outcomes.keys().next().value!);
     }
-    for (const boundary of [...queryBarriers.keys()].sort((a, b) => a - b)) {
-      if (boundary > throughSeq) break;
-      const waiting = queryBarriers.get(boundary)!;
-      queryBarriers.delete(boundary);
-      for (const waiter of waiting) waiter.start();
+    if (queryBarriers.size) {
+      for (const boundary of [...queryBarriers.keys()].sort((a, b) => a - b)) {
+        if (boundary > throughSeq) break;
+        const waiting = queryBarriers.get(boundary)!;
+        queryBarriers.delete(boundary);
+        for (const waiter of waiting) waiter.start();
+      }
     }
     return outcome;
   }

@@ -151,6 +151,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
   type Held = { hold: Hold; opened: number; waiters: Set<() => void> };
   type PendingRead = {
     kind: string; args: unknown[]; watermark: number; attempt: number; done: boolean;
+    signal?: AbortSignal;
     connection?: ConnectionRecord<P, S, E, F>;
     result: Deferred<QueryReply>;
     cleanup(): void;
@@ -211,6 +212,10 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
     if (!record || !live(record)) return;
     for (const request of waitingReads) {
       if (!live(record) || recovering) return;
+      if (request.signal?.aborted) {
+        finishRead(request, readRefusal('superseded', 'aborted'));
+        continue;
+      }
       let queued = false;
       for (const ticket of pending) {
         if (ticket.ticket.id <= request.watermark && ticket.seq === undefined && !ticket.ackSettled) {
@@ -272,7 +277,8 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
   function read<K extends keyof Q & string>(kind: K, args: ArgsOf<Q[K]>, readOptions: ReadOptions = {}):
     Promise<Read<ResultOf<Q[K]>, RefusalOf<Q[K]>>> {
     const result = deferred<QueryReply>();
-    const request: PendingRead = { kind, args, watermark: ticketId, attempt: 0, done: false, result, cleanup: () => {} };
+    const request: PendingRead = { kind, args, watermark: ticketId, attempt: 0, done: false,
+      signal: readOptions.signal, result, cleanup: () => {} };
     const captured = [...holds.values()].filter((record) => record.hold !== readOptions.within);
     const waiting = new Map<Held, { release(): void; cancel(): void }>();
     const signal = readOptions.signal;
@@ -294,6 +300,8 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
       if (captured.length === 0) { waitingReads.add(request); checkReads(); }
       else for (const record of captured) {
         const release = () => {
+          if (signal?.aborted) { abort(); return; }
+          if (now() - record.opened >= holdTimeoutMs) { finishRead(request, readRefusal('busy')); return; }
           waiting.get(record)!.cancel();
           waiting.delete(record);
           record.waiters.delete(release);
