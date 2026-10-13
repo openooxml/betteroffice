@@ -1608,20 +1608,11 @@ fn resolve_relationship_target(relationship_path: &str, target: &str) -> Option<
         return None;
     }
     let clean_target = target.split(['?', '#']).next().unwrap_or_default();
-    let relationship_path = relationship_path.replace('\\', "/");
-    let mut segments: Vec<String> =
-        if clean_target.starts_with('/') || relationship_path.eq_ignore_ascii_case("_rels/.rels") {
-            Vec::new()
-        } else {
-            relationship_path
-                .split("/_rels/")
-                .next()
-                .unwrap_or_default()
-                .split('/')
-                .filter(|segment| !segment.is_empty())
-                .map(str::to_owned)
-                .collect()
-        };
+    let mut segments = if clean_target.starts_with('/') {
+        Vec::new()
+    } else {
+        relationship_base(relationship_path)
+    };
     let clean_target = clean_target.trim_start_matches('/').replace('\\', "/");
     for segment in clean_target
         .split('/')
@@ -1634,6 +1625,23 @@ fn resolve_relationship_target(relationship_path: &str, target: &str) -> Option<
         }
     }
     Some(segments.join("/").to_ascii_lowercase())
+}
+
+// `<dir>/_rels/<name>.rels` describes `<dir>/<name>`; relative targets resolve against `<dir>`.
+fn relationship_base(relationship_path: &str) -> Vec<String> {
+    let mut segments: Vec<String> = relationship_path
+        .split(['/', '\\'])
+        .filter(|segment| !segment.is_empty())
+        .map(str::to_owned)
+        .collect();
+    segments.pop();
+    if segments
+        .last()
+        .is_some_and(|segment| segment.eq_ignore_ascii_case("_rels"))
+    {
+        segments.pop();
+    }
+    segments
 }
 
 fn normalize_part_name(path: &str) -> Cow<'_, str> {
