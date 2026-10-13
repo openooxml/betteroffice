@@ -755,6 +755,165 @@ fn saved_cell_xf(bytes: &[u8], address: &str) -> String {
     style_entries(&styles, "cellXfs", "xf").swap_remove(index_attribute(tag, "s"))
 }
 
+fn saved_cell_style(bytes: &[u8], address: &str) -> usize {
+    let parts = package_map(bytes);
+    let sheet = String::from_utf8(parts["xl/worksheets/sheet1.xml"].clone()).unwrap();
+    let start = sheet.find(&format!(r#"<c r="{address}""#)).unwrap();
+    let tag = &sheet[start..start + sheet[start..].find('>').unwrap()];
+    index_attribute(tag, "s")
+}
+
+fn nonzero_plain_clear_source(proven_plain: bool) -> Vec<u8> {
+    let plain = if proven_plain {
+        r#"<xf numFmtId="0" fontId="1" fillId="0" borderId="0"/>"#
+    } else {
+        ""
+    };
+    let count = if proven_plain { 5 } else { 4 };
+    let second = if proven_plain {
+        r#"<xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>"#
+    } else {
+        UNLOCKED_XF
+    };
+    styles_part_source(
+        &format!(
+            r#"<fonts count="3"><font><i/></font><font/><font><b/></font></fonts>{DEFAULT_FILLS_AND_BORDERS}<cellXfs count="{count}"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" applyFont="1"/>{second}<xf numFmtId="9" fontId="1" fillId="0" borderId="0"/><xf numFmtId="0" fontId="2" fillId="0" borderId="0"/>{plain}</cellXfs>"#
+        ),
+        r#"<row r="1"><c r="A1" s="2"><v>1</v></c><c r="B1" s="1"><v>2</v></c><c r="C1" s="0"><v>3</v></c><c r="D1" s="3"><v>4</v></c></row>"#,
+    )
+}
+
+#[test]
+fn cascade_collaborative_automatic_without_a_proven_plain_xf_saves_xf_zero() {
+    let bytes = nonzero_plain_clear_source(false);
+    let mut left = Workbook::open_collaborative(&bytes, 871).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 872).unwrap();
+    let baseline = right.encode_state_vector_v1();
+    left.set_range_number_format(
+        SheetId(0),
+        CellRange::parse_a1("A1").unwrap(),
+        NumberFormatMutation::Automatic,
+        CalculationOptions::default(),
+    )
+    .unwrap();
+    right
+        .apply_update_v1(
+            &left.encode_diff_v1(&baseline).unwrap(),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    for peer in [&left, &right] {
+        let saved = peer.save().unwrap();
+        assert_eq!(saved_cell_style(&saved, "A1"), 0);
+        assert_eq!(saved_cell_xf(&saved, "A1"), saved_cell_xf(&bytes, "C1"));
+        assert_eq!(
+            resolved_format(&Workbook::open(&saved).unwrap(), "A1").number_format,
+            xlsx_model::NumberFormat::Builtin { id: 0 }
+        );
+    }
+    assert_eq!(left.model(), right.model());
+}
+
+#[test]
+fn cascade_batched_copies_of_a_fresh_plain_style_save_locked_locally_and_on_a_peer() {
+    let bytes = nonzero_plain_clear_source(false);
+    let mut workbook = Workbook::open(&bytes).unwrap();
+    workbook
+        .set_range_number_format(
+            SheetId(0),
+            CellRange::parse_a1("A1").unwrap(),
+            NumberFormatMutation::Automatic,
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let sheet = &workbook.model().sheets[0];
+    let ops = ["C1", "A1"].map(|address| Op::SetCell {
+        sheet: SheetId(0),
+        at: cell("B1"),
+        cell: CellState::from(sheet.cell(cell(address)).unwrap()),
+    });
+    workbook
+        .apply_ops(ops.to_vec(), CalculationOptions::default())
+        .unwrap();
+    let mut peer = Workbook::open_collaborative(&bytes, 873).unwrap();
+    peer.apply_update_v1(
+        &workbook.encode_diff_v1(&peer.encode_state_vector_v1()).unwrap(),
+        CalculationOptions::default(),
+    )
+    .unwrap();
+    for saved in [workbook.save().unwrap(), peer.save().unwrap()] {
+        let markup = saved_cell_xf(&saved, "B1");
+        assert!(!markup.contains(r#"locked="0""#), "B1 saved on {markup}");
+    }
+    assert_eq!(saved_cell_style(&peer.save().unwrap(), "B1"), 0);
+}
+
+#[test]
+fn cascade_nonzero_plain_clears_reuse_a_proven_plain_xf_locally_and_collaboratively() {
+    let bytes = nonzero_plain_clear_source(true);
+    for collaborative in [false, true] {
+        let mut workbook = if collaborative {
+            Workbook::open_collaborative(&bytes, 874).unwrap()
+        } else {
+            Workbook::open(&bytes).unwrap()
+        };
+        workbook
+            .set_range_number_format(
+                SheetId(0),
+                CellRange::parse_a1("A1").unwrap(),
+                NumberFormatMutation::Automatic,
+                CalculationOptions::default(),
+            )
+            .unwrap();
+        clear_style(&mut workbook, "D1", betteroffice_xlsx::StyleProperty::Bold);
+        let mut peer = Workbook::open_collaborative(&bytes, 875).unwrap();
+        peer.apply_update_v1(
+            &workbook.encode_diff_v1(&peer.encode_state_vector_v1()).unwrap(),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+        for saved in [workbook.save().unwrap(), peer.save().unwrap()] {
+            for address in ["A1", "D1"] {
+                assert_eq!(saved_cell_style(&saved, address), 4, "{address}");
+                assert_eq!(
+                    resolved_format(&Workbook::open(&saved).unwrap(), address),
+                    xlsx_model::CellFormat::default()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn cascade_nonzero_plain_clears_without_a_proven_source_xf_use_zero_in_shared_state() {
+    let bytes = nonzero_plain_clear_source(false);
+    for collaborative in [false, true] {
+        let mut workbook = if collaborative {
+            Workbook::open_collaborative(&bytes, 876).unwrap()
+        } else {
+            Workbook::open(&bytes).unwrap()
+        };
+        clear_style(&mut workbook, "D1", betteroffice_xlsx::StyleProperty::Bold);
+        let mut peer = Workbook::open_collaborative(&bytes, 877).unwrap();
+        peer.apply_update_v1(
+            &workbook.encode_diff_v1(&peer.encode_state_vector_v1()).unwrap(),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(saved_cell_style(&peer.save().unwrap(), "D1"), 0);
+        let saved = workbook.save().unwrap();
+        if collaborative {
+            assert_eq!(saved_cell_style(&saved, "D1"), 0);
+        } else {
+            assert_eq!(saved_cell_style(&saved, "D1"), 4);
+            assert_eq!(
+                resolved_format(&Workbook::open(&saved).unwrap(), "D1"),
+                xlsx_model::CellFormat::default()
+            );
+        }
+    }
+}
+
 /// Clears italic on A1, saves, reopens and clears it on C1: no cleared cell may pick up
 /// `marker` from xf 1's markup, B1 keeps it, and the second clear reuses the first's xf.
 fn assert_plain_clears_leave_source_markup_behind(cell_style_xfs: &str, xf: &str, marker: &str) {
@@ -855,13 +1014,13 @@ fn collaborative_plain_clear_beside_an_unlocked_xf() -> (Vec<u8>, Workbook, Work
     (bytes, left, right)
 }
 
-/// No xf is proven to save plain, so the clear keeps A1's xf, as on main.
 #[test]
 fn cascade_collaborative_plain_clear_leaves_source_protection_behind_on_every_peer() {
     let (bytes, left, right) = collaborative_plain_clear_beside_an_unlocked_xf();
     let source = saved_cell_xf(&bytes, "A1");
     for peer in [&left, &right] {
         let saved = peer.save().unwrap();
+        assert_eq!(saved_cell_style(&saved, "A1"), 0);
         assert_eq!(saved_cell_xf(&saved, "A1"), source);
         assert!(saved_cell_xf(&saved, "B1").contains(r#"locked="0""#));
     }
@@ -910,8 +1069,8 @@ fn assert_plain_edits_share_and_recover_faithfully(workbook: &Workbook) {
     let shared = peer.save().unwrap();
     for address in ["A1", "C1"] {
         assert_eq!(
-            saved_cell_xf(&shared, address),
-            saved_cell_xf(&source, address),
+            saved_cell_style(&shared, address),
+            0,
             "{address}"
         );
     }

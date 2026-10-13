@@ -6009,7 +6009,7 @@ mod tests {
     }
 
     #[test]
-    fn remapping_a_fresh_plain_style_onto_an_unproven_bound_xf_keeps_the_prior_style() {
+    fn remapping_a_fresh_plain_style_onto_an_unproven_bound_xf_uses_zero() {
         let mut target = Stylesheet::default();
         target.fonts.extend([
             xlsx_model::Font {
@@ -6043,7 +6043,7 @@ mod tests {
             set(CellRef::new(0, 0), Some(2)),
             set(CellRef::new(0, 1), Some(1)),
         ];
-        let remapped = remap_styles(&ops, &source, &mut target, |_, _| Some(0)).unwrap();
+        let remapped = remap_styles(&ops, &source, &mut target, |_, _| Some(1)).unwrap();
         let [Op::SetCell { cell: a1, .. }, Op::SetCell { cell: b1, .. }] = &remapped[..] else {
             panic!("expected two remapped cells");
         };
