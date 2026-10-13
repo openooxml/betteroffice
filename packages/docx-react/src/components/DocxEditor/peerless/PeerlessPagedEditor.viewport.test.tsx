@@ -220,6 +220,19 @@ test('raster scale starts at device pixels and settles zoom and rearmed DPR chan
   expect(media.every(({ listener }) => listener === undefined)).toBe(true);
 });
 
+for (const zoom of [0, -1, Number.NaN]) {
+  test(`raster scale falls back to device pixels for zoom ${zoom}`, async () => {
+    const originalDpr = Object.getOwnPropertyDescriptor(window, 'devicePixelRatio');
+    Object.defineProperty(window, 'devicePixelRatio', { configurable: true, value: 2 });
+    restorers.push(() => {
+      if (originalDpr) Object.defineProperty(window, 'devicePixelRatio', originalDpr);
+      else Reflect.deleteProperty(window, 'devicePixelRatio');
+    });
+    const editor = await mount(zoom);
+    expect(editor.initialScales).toEqual([2]);
+  });
+}
+
 test('peerless_page_offsets_are_monotonic_and_non_overlapping', () => {
   const source = readFileSync(`${import.meta.dir}/PeerlessDocxEditor.tsx`, 'utf8');
   const start = source.indexOf('    if (!identity.current)', source.indexOf('const prepareGeometry ='));
