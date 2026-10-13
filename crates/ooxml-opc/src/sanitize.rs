@@ -11,6 +11,8 @@ const CONTENT_TYPES_NAMESPACE: &[u8] =
     b"http://schemas.openxmlformats.org/package/2006/content-types";
 const RELATIONSHIPS_NAMESPACE: &[u8] =
     b"http://schemas.openxmlformats.org/package/2006/relationships";
+const MARKUP_COMPATIBILITY_NAMESPACE: &[u8] =
+    b"http://schemas.openxmlformats.org/markup-compatibility/2006";
 const OFFICE_DOCUMENT_RELATIONSHIP: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument";
 const STRICT_OFFICE_DOCUMENT_RELATIONSHIP: &str =
@@ -1088,7 +1090,7 @@ fn sanitize_workbook_sheets(
         .position(|(path, _)| normalize_part_name(path).as_ref() == workbook_path)
         .ok_or_else(|| format!("missing workbook part: {workbook_path}"))?;
     let (workbook_name, xml) = &parts[workbook];
-    if !names_removed_sheet(xml, workbook_name, &relationships, xml_budget)? {
+    if !rewrites_sheet_entries(xml, workbook_name, &relationships, xml_budget)? {
         return Ok(());
     }
     let Some(sheets) = workbook_sheet_map(xml, workbook_name, &relationships, xml_budget)? else {
@@ -1114,9 +1116,19 @@ enum WorkbookElement {
     Sheet,
     DefinedName,
     View,
-    // Outside its list (e.g. under mc:AlternateContent); only a rewrite rejects it.
+    // Outside its list; only a rewrite rejects it.
     Misplaced,
     Other,
+}
+
+fn is_spreadsheet_namespace(namespace: &ResolveResult<'_>) -> bool {
+    matches!(namespace, ResolveResult::Bound(namespace)
+        if matches!(namespace.0, b"http://schemas.openxmlformats.org/spreadsheetml/2006/main" | b"http://purl.oclc.org/ooxml/spreadsheetml/main"))
+}
+
+fn is_markup_compatibility_namespace(namespace: &ResolveResult<'_>) -> bool {
+    matches!(namespace, ResolveResult::Bound(namespace)
+        if namespace.0 == MARKUP_COMPATIBILITY_NAMESPACE)
 }
 
 struct WorkbookReader<'a> {
@@ -1144,7 +1156,7 @@ impl<'a> WorkbookReader<'a> {
         let mut element = WorkbookElement::Other;
         match &event {
             Event::Start(start) | Event::Empty(start) => {
-                let spreadsheet = matches!(&namespace, ResolveResult::Bound(namespace) if matches!(namespace.0, b"http://schemas.openxmlformats.org/spreadsheetml/2006/main" | b"http://purl.oclc.org/ooxml/spreadsheetml/main"));
+                let spreadsheet = is_spreadsheet_namespace(&namespace);
                 if matches!(&namespace, ResolveResult::Unknown(_)) {
                     return Err(format!("unbound workbook namespace in {path}"));
                 }
@@ -1237,8 +1249,9 @@ fn workbook_sheet_id(
     Ok(id)
 }
 
-// Lenient: any `<sheet>` at any depth or namespace (e.g. under mc:AlternateContent) counts.
-fn names_removed_sheet(
+// Lenient: any `<sheet>` at any depth or namespace may name a removed id. Sheet-indexed
+// entries under markup compatibility keep the workbook as it is.
+fn rewrites_sheet_entries(
     xml: &[u8],
     path: &str,
     relationships: &BTreeMap<String, SheetRelationship>,
@@ -1246,22 +1259,45 @@ fn names_removed_sheet(
 ) -> Result<bool, String> {
     validate_xml_limits(xml, path, xml_budget)?;
     let mut reader = NsReader::from_reader(xml);
+    let mut depth = 0_usize;
+    let mut compatibility_depth = None;
+    let mut names_removed = false;
     loop {
-        let (_, event) = reader
+        let (namespace, event) = reader
             .read_resolved_event()
             .map_err(|error| format!("invalid XML in {path}: {error}"))?;
-        match event {
-            Event::Start(start) | Event::Empty(start)
-                if start.local_name().as_ref() == b"sheet" =>
-            {
-                let removed = sheet_relationship_ids(&reader, &start, path)?
-                    .iter()
-                    .any(|id| matches!(relationships.get(id), Some(SheetRelationship::Removed)));
-                if removed {
-                    return Ok(true);
+        match &event {
+            Event::Start(start) | Event::Empty(start) => {
+                let spreadsheet = is_spreadsheet_namespace(&namespace);
+                let compatibility = is_markup_compatibility_namespace(&namespace);
+                let local = start.local_name();
+                if compatibility_depth.is_some()
+                    && spreadsheet
+                    && matches!(local.as_ref(), b"sheet" | b"definedName" | b"workbookView")
+                {
+                    return Ok(false);
+                }
+                if !names_removed && local.as_ref() == b"sheet" {
+                    names_removed = sheet_relationship_ids(&reader, start, path)?
+                        .iter()
+                        .any(|id| {
+                            matches!(relationships.get(id), Some(SheetRelationship::Removed))
+                        });
+                }
+                if matches!(event, Event::Start(_)) {
+                    if compatibility && compatibility_depth.is_none() {
+                        compatibility_depth = Some(depth);
+                    }
+                    depth += 1;
                 }
             }
-            Event::Eof => return Ok(false),
+            Event::End(_) => {
+                depth -= 1;
+                if compatibility_depth == Some(depth) {
+                    compatibility_depth = None;
+                }
+            }
+            Event::Eof => return Ok(names_removed),
             _ => {}
         }
     }
