@@ -206,10 +206,30 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(report['timeout_seconds'], 600)
         self.assertGreater(report['mcp_startup_seconds'], 0)
         self.assertEqual(report['arm'], 'betteroffice')
+        self.assertEqual(report['formats'], ['xlsx', 'pptx', 'docx'])
         self.assertTrue(all(item['pass'] and item['tool_calls'] == 1 and item['duration_seconds'] > 0 for item in report['results']))
         self.assertEqual((results / 'results.md').read_text().count('| PASS |'), 30)
+        self.assertIn('Formats: xlsx, pptx, docx.', (results / 'results.md').read_text())
         repeat = subprocess.run([str(ROOT / 'run.sh'), command, str(results), 'test-model'], capture_output=True)
         self.assertEqual(repeat.returncode, 2)
+
+    def test_formats_select_the_tasks_and_the_preflight_tools(self):
+        command = ' '.join(shlex.quote(value) for value in self.cli)
+        with patch.dict(os.environ, {'FAKE_MCP_MODE': 'missing-tool'}):
+            selected = subprocess.run([str(ROOT / 'run.sh'), '--formats', 'docx,pptx', command, str(self.root / 'selected'), 'test-model'],
+                                      stdin=subprocess.DEVNULL, capture_output=True, text=True)
+            xlsx = subprocess.run([str(ROOT / 'run.sh'), '--formats', 'xlsx', command, str(self.root / 'xlsx'), 'test-model'],
+                                  stdin=subprocess.DEVNULL, capture_output=True, text=True)
+        self.assertEqual(selected.returncode, 0, selected.stdout + selected.stderr)
+        report = json.loads((self.root / 'selected' / 'results.json').read_text())
+        expected = [task['id'] for task in runner.checker.tasks() if task['format'] in ('pptx', 'docx')]
+        self.assertEqual(len(expected), 20)
+        self.assertEqual([item['task'] for item in report['results']], expected)
+        self.assertEqual(report['formats'], ['pptx', 'docx'])
+        self.assertTrue(all(item['pass'] for item in report['results']))
+        self.assertIn('Formats: pptx, docx. Passed: 20/20.', (self.root / 'selected' / 'results.md').read_text())
+        self.assertEqual(xlsx.returncode, 1, xlsx.stdout + xlsx.stderr)
+        self.assertIn('MCP server not ready: missing required tools: xlsx_sort', xlsx.stderr)
 
     def test_mcp_preflight_requires_a_ready_server_with_the_task_tools(self):
         required = runner.required_tools(runner.checker.tasks())
@@ -352,6 +372,34 @@ class RunnerTests(unittest.TestCase):
         self.assertFalse((self.root / 'broken').exists())
         self.assertEqual(usage.returncode, 2)
         self.assertIn('--python', usage.stderr)
+
+    def test_generic_formats_and_unknown_format(self):
+        generic = [str(ROOT / 'run.sh'), '--arm', 'generic', '--python', str(self.python), '--formats']
+        with self.generic_environment():
+            result = subprocess.run([*generic, 'docx', str(self.root / 'generic docx'), 'test-model'],
+                                    stdin=subprocess.DEVNULL, capture_output=True, text=True)
+            unknown = subprocess.run([*generic, 'docx,odt', str(self.root / 'unknown'), 'test-model'],
+                                     stdin=subprocess.DEVNULL, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = json.loads((self.root / 'generic docx' / 'results.json').read_text())
+        self.assertEqual(report['formats'], ['docx'])
+        self.assertEqual([item['task'] for item in report['results']],
+                         [task['id'] for task in runner.checker.tasks() if task['format'] == 'docx'])
+        self.assertTrue(all(item['pass'] and item['tool_calls'] == 2 for item in report['results']))
+        self.assertEqual(unknown.returncode, 2)
+        self.assertIn("argument --formats: unknown format in 'docx,odt'", unknown.stderr)
+        self.assertFalse((self.root / 'unknown').exists())
+
+
+class FixtureManifestTests(unittest.TestCase):
+    def test_provenance_sits_beside_the_pins(self):
+        manifest = json.loads((ROOT / 'fixtures.json').read_text())
+        self.assertEqual(set(manifest), {'origin', 'provenance', 'fixtures'})
+        self.assertIn('eval/formats/generate-fixtures.ts', manifest['provenance'])
+        tasks = runner.checker.tasks()
+        self.assertEqual(set(manifest['fixtures']), {task['fixture'] for task in tasks})
+        self.assertTrue(all(set(entry) == {'bytes', 'sha256'} for entry in manifest['fixtures'].values()))
+        self.assertTrue(all(runner.checker.fixture(task).is_file() for task in tasks))
 
 
 if __name__ == '__main__':
