@@ -306,3 +306,125 @@ describe.each(Object.keys(SAVES) as (keyof typeof SAVES)[])('%s save keeps inher
     }, TIMEOUT);
   });
 });
+
+type TableEditEngine = EditEngine & Pick<YrsSession, 'storyIds' | 'setCellBorders' | 'setCellTextFormat'>;
+type TableEdit = (engine: TableEditEngine) => string[];
+
+async function saveTableEdit(path: keyof typeof SAVES, source: Uint8Array, apply: TableEdit) {
+  if (path === 'worker-only') {
+    const { client, resident, host } = await openWorker(source);
+    apply({
+      ...resident.proposalEngine,
+      storyIds: resident.storyIds,
+      replaceRange: resident.replaceRange,
+      formatRange: resident.formatRange,
+      insertRow: resident.insertRow,
+      setCellBorders: resident.setCellBorders,
+      setCellTextFormat: resident.setCellTextFormat,
+    });
+    const saved = await client.save({
+      comments: host.package.document.comments ?? [],
+      host: hostSaveMetadata(host),
+    });
+    return documentXml(new Uint8Array(saved.bytes));
+  }
+  const session = await createYrsSession();
+  owned.push(session);
+  if (path === 'agents engine') {
+    session.seedFromDocx(source);
+    apply(session);
+    const draft = await createYrsSession();
+    owned.push(draft);
+    draft.openDocx(new Uint8Array(session.materializeDocx()!.originalBuffer!), false);
+    draft.loadState(session.encodeState());
+    return documentXml((await saveYrsDocx(draft)).bytes);
+  }
+  const host = session.openDocx(source.slice(), true).document;
+  const dirty = new DirtyProjectionStories();
+  for (const story of apply(session)) dirty.add(story);
+  const base = session.materializeDocx() as Document;
+  const projected = yrsToDocument(session, mergeDocxHostMetadata(base, host), dirty.projectionOptions());
+  return documentXml(new Uint8Array(
+    await saveEditorDocument(session, projected, host.package.document.comments ?? [])
+  ));
+}
+
+function savedTable(xml: string): string {
+  const table = xml.match(/<w:tbl\b[^>]*>[\s\S]*?<\/w:tbl>/)?.[0];
+  expect(table).toBeDefined();
+  return table!;
+}
+
+function expectTableInheritance(table: string): void {
+  for (const property of ['tblBorders', 'tblCellMar', 'tcBorders', 'tcMar', 'spacing', 'pStyle', 'jc', 'rFonts']) {
+    expect(table).not.toContain(`<w:${property}`);
+  }
+  expect(table).not.toContain('<w:szCs');
+}
+
+describe('S2 cell and table formatting stays inherited on save', () => {
+  describe.each(Object.keys(SAVES) as (keyof typeof SAVES)[])('%s', (path) => {
+    describe.each(['plain', 'w14'] as Root[])('with a %s document root', (root) => {
+      const source = fixture(root);
+      const at = { story: 'body', tableIndex: 0, row: 0, column: 0 };
+      const range = { anchor: at, head: at };
+
+      it('saves a cell text edit without direct table-style paragraph or cell properties', async () => {
+        const xml = await saveTableEdit(path, source, (engine) => {
+          const story = engine.storyIds().find((id) => id === 'body:t0:r0c0')!;
+          const read = engine.readParagraphs({ story, view: 'accepted' });
+          if (!read.ok) throw new Error(`cell read refused: ${JSON.stringify(read)}`);
+          const paraId = read.paragraphs[0]!.paraId;
+          engine.replaceRange({
+            story, start: { paraId, offset: 0 }, end: { paraId, offset: 4 },
+          }, 'Lease');
+          return [story];
+        });
+        const table = savedTable(xml);
+        expect(text(table)).toContain('Lease');
+        expectTableInheritance(table);
+        expect(table.match(/<w:sz\b[^>]*\/>/g)).toEqual(Array(4).fill('<w:sz w:val="20"/>'));
+      }, TIMEOUT);
+
+      it('keeps untouched table properties inherited when inserting body paragraphs', async () => {
+        const xml = await saveTableEdit(path, source, (engine) => edit(engine, 'paragraphs'));
+        expect(text(xml)).toContain(NEW_PARAGRAPH);
+        const table = savedTable(xml);
+        expectTableInheritance(table);
+        expect(table.match(/<w:sz\b[^>]*\/>/g)).toEqual(Array(4).fill('<w:sz w:val="20"/>'));
+      }, TIMEOUT);
+
+      it('writes a changed cell border', async () => {
+        const xml = await saveTableEdit(path, source, (engine) => {
+          const receipt = engine.setCellBorders(range, {
+            top: { style: 'double', size: 12, color: { rgb: 'FF0000' } },
+          });
+          return ['body', ...receipt.changedStoryIds];
+        });
+        const properties = savedTable(xml).match(/<w:tcPr\b[^>]*>[\s\S]*?<\/w:tcPr>/)?.[0];
+        expect(properties).toContain('<w:tcBorders>');
+        expect(properties).toMatch(/<w:top\b[^>]*w:val="double"[^>]*w:sz="12"[^>]*w:color="FF0000"/);
+      }, TIMEOUT);
+
+      it('writes a changed cell margin', async () => {
+        const xml = await saveTableEdit(path, source, (engine) => {
+          const receipt = engine.setCellTextFormat(range, { margins: { left: 240, right: 108 } });
+          return ['body', ...receipt.changedStoryIds];
+        });
+        const properties = savedTable(xml).match(/<w:tcPr\b[^>]*>[\s\S]*?<\/w:tcPr>/)?.[0];
+        expect(properties).toContain('<w:tcMar>');
+        expect(properties).toMatch(/<w:left\b[^>]*w:w="240"[^>]*w:type="dxa"/);
+      }, TIMEOUT);
+
+      it('inserts cells without adding paragraph styles, alignment, fonts or sizes', async () => {
+        const xml = await saveTableEdit(path, source, (engine) => edit(engine, 'row'));
+        const table = savedTable(xml);
+        expectTableInheritance(table);
+        const empty = paragraphs(table).filter((paragraph) => text(paragraph) === '');
+        expect(empty).toHaveLength(2);
+        for (const paragraph of empty) expect(paragraph).not.toContain('<w:rPr');
+        expect(table.match(/<w:sz\b[^>]*\/>/g)).toEqual(Array(4).fill('<w:sz w:val="20"/>'));
+      }, TIMEOUT);
+    });
+  });
+});
