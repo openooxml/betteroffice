@@ -163,6 +163,10 @@ impl WorkbookBase {
     /// before hidden rows and columns read as zero stored, per sheet. Those
     /// maps are hashed at every schema, so a peer that persisted its state
     /// under one of those releases is only recognisable against them.
+    ///
+    /// Styles holding patterned fills or extended border styles are hashed as
+    /// written under their own domain for the current fingerprint; the
+    /// fingerprints releases before them wrote over their reading stay accepted.
     fn from_model_with_legacy_dimensions(
         model: &WorkbookModel,
         legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
@@ -170,9 +174,15 @@ impl WorkbookBase {
     ) -> Result<Self, String> {
         let mut builder = FingerprintBuilder::new(model, legacy_dimensions);
         let styles = FingerprintStyles::new(&model.styles);
+        let mut fingerprints = builder.accepted_fingerprints(styles, legacy_styles)?;
+        let current = if released_styles(&model.styles) {
+            styles
+        } else {
+            styles.as_written()
+        };
         let (fingerprint, bootstrap_client_id) =
-            builder.fingerprint(styles, SCHEMA_VERSION, true, true, false)?;
-        let fingerprints = builder.accepted_fingerprints(styles, legacy_styles)?;
+            builder.fingerprint(current, SCHEMA_VERSION, true, true, false)?;
+        append_fingerprint(&mut fingerprints, SCHEMA_VERSION, fingerprint.clone());
         Ok(Self {
             bootstrap_client_id,
             date_system: model.date_system,
@@ -205,6 +215,28 @@ impl WorkbookBase {
 
     #[cfg(test)]
     fn from_model_with_legacy_dimensions_oracle(
+        model: &WorkbookModel,
+        legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
+        legacy_styles: Option<&Stylesheet>,
+    ) -> Result<Self, String> {
+        let mut base = Self::released_base_oracle(model, legacy_dimensions, legacy_styles)?;
+        if !released_styles(&model.styles) {
+            let (fingerprint, bootstrap_client_id) =
+                fingerprint_model_oracle(model, SCHEMA_VERSION, true, true, true)?;
+            base.fingerprints
+                .entry(SCHEMA_VERSION)
+                .or_default()
+                .push(fingerprint.clone());
+            base.fingerprint = fingerprint;
+            base.bootstrap_client_id = bootstrap_client_id;
+        }
+        Ok(base)
+    }
+
+    /// The base a release before patterned fills built, over its reading of
+    /// the styles.
+    #[cfg(test)]
+    fn released_base_oracle(
         model: &WorkbookModel,
         legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
         legacy_styles: Option<&Stylesheet>,
@@ -254,11 +286,7 @@ impl WorkbookBase {
         if let Some(styles) = legacy_styles.filter(|styles| **styles != model.styles) {
             let mut legacy_model = model.clone();
             legacy_model.styles = styles.clone();
-            let legacy_base = Self::from_model_with_legacy_dimensions_oracle(
-                &legacy_model,
-                legacy_dimensions,
-                None,
-            )?;
+            let legacy_base = Self::released_base_oracle(&legacy_model, legacy_dimensions, None)?;
             for (version, legacy_fingerprints) in legacy_base.fingerprints {
                 let accepted = fingerprints.entry(version).or_default();
                 for fingerprint in legacy_fingerprints {
@@ -271,11 +299,8 @@ impl WorkbookBase {
         if !model.styles.indexed_colors.is_empty() {
             let mut legacy_model = model.clone();
             legacy_model.styles.indexed_colors.clear();
-            let legacy_base = Self::from_model_with_legacy_dimensions_oracle(
-                &legacy_model,
-                legacy_dimensions,
-                legacy_styles,
-            )?;
+            let legacy_base =
+                Self::released_base_oracle(&legacy_model, legacy_dimensions, legacy_styles)?;
             for (version, legacy_fingerprints) in legacy_base.fingerprints {
                 let accepted = fingerprints.entry(version).or_default();
                 for fingerprint in legacy_fingerprints {
@@ -1010,10 +1035,11 @@ impl WorkbookAuthority {
         if !candidate.is_whole_document() {
             return SnapshotAdoption::NotApplicable;
         }
+        let released = candidate.holds_released_reading();
         if let Err(error) = candidate.upgrade_schema() {
             return SnapshotAdoption::Incompatible(error);
         }
-        if let Err(error) = candidate.keep_released_source_formats(self) {
+        if released && let Err(error) = candidate.keep_released_source_formats(self) {
             return SnapshotAdoption::Incompatible(error);
         }
         match candidate.strict_materialize() {
@@ -1022,33 +1048,43 @@ impl WorkbookAuthority {
         }
     }
 
-    /// Points each cell back at its own source format when a release before
-    /// patterned fills restored it in that format's released reading. Every writer
-    /// seeds the format catalog with its reading of each source format, so a
-    /// catalog without a source format's own entry marks that release. The released
-    /// reading keeps its catalog entry, which that release's writers still reference.
+    /// Whether a release before patterned fills wrote this state over a base
+    /// holding them: only the base's fingerprint carries the pattern fills tag.
+    fn holds_released_reading(&self) -> bool {
+        let tagged = |fingerprint: &str| fingerprint.starts_with(PATTERN_FILLS_FINGERPRINT_TAG);
+        let txn = self.doc.transact();
+        let state = txn
+            .get_map(META)
+            .and_then(|meta| meta.get(&txn, BASE_FINGERPRINT))
+            .and_then(|value| value.cast::<String>().ok());
+        tagged(&self.base.fingerprint) && !state.is_some_and(|fingerprint| tagged(&fingerprint))
+    }
+
+    /// Points each cell of a state a release before patterned fills wrote back
+    /// at its own source format where that release held the format's released
+    /// reading. The reading keeps its catalog entry, which that release's
+    /// writers still reference.
     fn keep_released_source_formats(&self, source: &Self) -> Result<(), String> {
+        use snapshot::ReleasedLayout;
         let base = &self.base.styles;
         let mut sources = HashMap::new();
         for index in 0..base.cell_xfs.len() {
             let index =
                 u32::try_from(index).map_err(|_| "cell format table is too large".to_string())?;
             let format = base.cell_format(Some(index));
+            if format.fill.released_layout() && format.border.released_layout() {
+                continue;
+            }
             let (key, payload) = cell_format_entry(&format)?;
             sources.entry(key).or_insert((format, payload));
+        }
+        if sources.is_empty() {
+            return Ok(());
         }
         let mut txn = self.doc.transact_mut_with(HYDRATE_ORIGIN);
         let catalog = txn
             .get_map(CELL_FORMATS)
             .ok_or_else(|| "missing cell format catalog".to_string())?;
-        let released = sources
-            .keys()
-            .filter(|key| !catalog.contains_key(&txn, key.as_str()))
-            .cloned()
-            .collect::<HashSet<_>>();
-        if released.is_empty() {
-            return Ok(());
-        }
         let source_txn = source.doc.transact();
         let source_sheets = source_txn
             .get_map(SHEETS)
@@ -1091,12 +1127,7 @@ impl WorkbookAuthority {
                     }
                 });
                 let keeps = current.as_ref().is_some_and(|current| {
-                    xlsx_parse::keeps_source(
-                        current,
-                        format,
-                        released.contains(&own),
-                        released_format,
-                    )
+                    xlsx_parse::keeps_source(current, format, true, released_format)
                 });
                 if keeps {
                     kept.push((cell.to_string(), own));
@@ -4147,6 +4178,9 @@ fn fingerprint_model_with_schema(
 struct FingerprintStyles<'a> {
     styles: &'a Stylesheet,
     indexed_colors: &'a [String],
+    /// Fills and borders as written, under the pattern fills domain, rather
+    /// than in their released reading.
+    as_written: bool,
 }
 
 impl<'a> FingerprintStyles<'a> {
@@ -4154,6 +4188,14 @@ impl<'a> FingerprintStyles<'a> {
         Self {
             styles,
             indexed_colors: &styles.indexed_colors,
+            as_written: false,
+        }
+    }
+
+    fn as_written(self) -> Self {
+        Self {
+            as_written: true,
+            ..self
         }
     }
 
@@ -4174,6 +4216,7 @@ impl PartialEq for FingerprintStyles<'_> {
             && self.styles.num_fmts == other.styles.num_fmts
             && self.styles.theme == other.styles.theme
             && self.indexed_colors == other.indexed_colors
+            && self.as_written == other.as_written
     }
 }
 
@@ -4186,10 +4229,15 @@ impl serde::Serialize for FingerprintStyles<'_> {
             if self.indexed_colors.is_empty() { 6 } else { 7 },
         )?;
         state.serialize_field("fonts", &self.styles.fonts)?;
-        let fills: Vec<_> = self.styles.fills.iter().map(released_fill).collect();
-        state.serialize_field("fills", &fills)?;
-        let borders: Vec<_> = self.styles.borders.iter().map(released_border).collect();
-        state.serialize_field("borders", &borders)?;
+        if self.as_written {
+            state.serialize_field("fills", &self.styles.fills)?;
+            state.serialize_field("borders", &self.styles.borders)?;
+        } else {
+            let fills: Vec<_> = self.styles.fills.iter().map(released_fill).collect();
+            state.serialize_field("fills", &fills)?;
+            let borders: Vec<_> = self.styles.borders.iter().map(released_border).collect();
+            state.serialize_field("borders", &borders)?;
+        }
         state.serialize_field("cell_xfs", &self.styles.cell_xfs)?;
         state.serialize_field("num_fmts", &self.styles.num_fmts)?;
         state.serialize_field("theme", &self.styles.theme)?;
@@ -4198,6 +4246,22 @@ impl serde::Serialize for FingerprintStyles<'_> {
         }
         state.end()
     }
+}
+
+/// The domain of the current fingerprint of styles holding patterned fills or
+/// extended border styles, hashed as written. Releases before them hashed their
+/// reading under the per-schema domains.
+const PATTERN_FILLS_FINGERPRINT_DOMAIN: &[u8] = b"betteroffice-xlsx-yrs-v6-pattern-fills";
+
+/// Heads the text of a fingerprint hashed under that domain, so a state says
+/// its writer read the fills and borders as written.
+const PATTERN_FILLS_FINGERPRINT_TAG: &str = "pattern-fills:";
+
+/// Whether releases before patterned fills read `styles` as written.
+pub(crate) fn released_styles(styles: &Stylesheet) -> bool {
+    use snapshot::ReleasedLayout;
+    styles.fills.iter().all(ReleasedLayout::released_layout)
+        && styles.borders.iter().all(ReleasedLayout::released_layout)
 }
 
 /// A format as releases before patterned fills read it.
@@ -4258,7 +4322,7 @@ fn released_border_style(style: xlsx_model::BorderStyle) -> xlsx_model::BorderSt
     }
 }
 
-type FingerprintKey = (usize, i64, bool, bool, bool);
+type FingerprintKey = (usize, i64, bool, bool, bool, bool);
 
 struct FingerprintBuilder<'a> {
     model: &'a WorkbookModel,
@@ -4305,6 +4369,7 @@ impl<'a> FingerprintBuilder<'a> {
         let style_index = match self.styles.iter().find(|(known, _)| {
             std::ptr::eq(known.styles, styles.styles)
                 && std::ptr::eq(known.indexed_colors, styles.indexed_colors)
+                && known.as_written == styles.as_written
         }) {
             Some((_, index)) => *index,
             None => {
@@ -4330,6 +4395,7 @@ impl<'a> FingerprintBuilder<'a> {
             include_defined_names,
             include_col_styles,
             legacy_dimensions,
+            styles.as_written,
         );
         if let Some(hash) = self.hashes.get(&key) {
             return Ok(hash.clone());
@@ -4422,6 +4488,7 @@ fn fingerprint_model_with_overrides(
     validate_schema_version(schema_version)?;
     let mut hasher = Sha256::new();
     let domain = match schema_version {
+        _ if styles.as_written => PATTERN_FILLS_FINGERPRINT_DOMAIN,
         3 => b"betteroffice-xlsx-yrs-v3".as_slice(),
         4 => b"betteroffice-xlsx-yrs-v4".as_slice(),
         5 => b"betteroffice-xlsx-yrs-v5".as_slice(),
@@ -4516,7 +4583,7 @@ fn fingerprint_model_with_overrides(
         }
     }
     let digest = hasher.finalize();
-    let fingerprint = format!("{digest:x}");
+    let fingerprint = fingerprint_text(styles.as_written, format!("{digest:x}"));
     let mut client_bytes = [0_u8; 8];
     client_bytes.copy_from_slice(&digest[..8]);
     let mut bootstrap_client_id = u64::from_be_bytes(client_bytes) & MAX_SAFE_CLIENT_ID;
@@ -4524,6 +4591,14 @@ fn fingerprint_model_with_overrides(
         bootstrap_client_id = 1;
     }
     Ok((fingerprint, bootstrap_client_id))
+}
+
+fn fingerprint_text(as_written: bool, digest: String) -> String {
+    if as_written {
+        format!("{PATTERN_FILLS_FINGERPRINT_TAG}{digest}")
+    } else {
+        digest
+    }
 }
 
 fn hash_cell_value(hasher: &mut Sha256, value: &CellValue) {
@@ -4885,9 +4960,27 @@ fn fingerprint_model_with_schema_oracle(
     include_defined_names: bool,
     include_col_styles: bool,
 ) -> Result<(String, u64), String> {
+    fingerprint_model_oracle(
+        model,
+        schema_version,
+        include_defined_names,
+        include_col_styles,
+        false,
+    )
+}
+
+#[cfg(test)]
+fn fingerprint_model_oracle(
+    model: &WorkbookModel,
+    schema_version: i64,
+    include_defined_names: bool,
+    include_col_styles: bool,
+    as_written: bool,
+) -> Result<(String, u64), String> {
     validate_schema_version(schema_version)?;
     let mut hasher = Sha256::new();
     let domain = match schema_version {
+        _ if as_written => PATTERN_FILLS_FINGERPRINT_DOMAIN,
         3 => b"betteroffice-xlsx-yrs-v3".as_slice(),
         4 => b"betteroffice-xlsx-yrs-v4".as_slice(),
         5 => b"betteroffice-xlsx-yrs-v5".as_slice(),
@@ -4895,16 +4988,18 @@ fn fingerprint_model_with_schema_oracle(
     };
     hasher.update(domain);
     let mut styles = model.styles.clone();
-    styles.fills = styles
-        .fills
-        .iter()
-        .map(|fill| released_fill(fill).into_owned())
-        .collect();
-    styles.borders = styles
-        .borders
-        .iter()
-        .map(|border| released_border(border).into_owned())
-        .collect();
+    if !as_written {
+        styles.fills = styles
+            .fills
+            .iter()
+            .map(|fill| released_fill(fill).into_owned())
+            .collect();
+        styles.borders = styles
+            .borders
+            .iter()
+            .map(|border| released_border(border).into_owned())
+            .collect();
+    }
     let base = if include_defined_names {
         serde_json::to_vec(&(
             model.date_system,
@@ -4992,7 +5087,7 @@ fn fingerprint_model_with_schema_oracle(
         }
     }
     let digest = hasher.finalize();
-    let fingerprint = format!("{digest:x}");
+    let fingerprint = fingerprint_text(as_written, format!("{digest:x}"));
     let mut client_bytes = [0_u8; 8];
     client_bytes.copy_from_slice(&digest[..8]);
     let mut bootstrap_client_id = u64::from_be_bytes(client_bytes) & MAX_SAFE_CLIENT_ID;
@@ -5400,12 +5495,29 @@ mod tests {
         }
         let actual = WorkbookBase::from_model(&patterned).unwrap();
         let expected = WorkbookBase::from_model(&released).unwrap();
-        assert_eq!(actual.fingerprint, expected.fingerprint);
-        assert_eq!(actual.fingerprints, expected.fingerprints);
-        assert_eq!(actual.bootstrap_client_id, expected.bootstrap_client_id);
+        assert_ne!(actual.fingerprint, expected.fingerprint);
+        assert_ne!(actual.bootstrap_client_id, expected.bootstrap_client_id);
+        let current = &actual.fingerprints[&SCHEMA_VERSION];
+        assert!(current.contains(&actual.fingerprint));
+        assert_eq!(
+            released_readings(&actual.fingerprints),
+            expected.fingerprints
+        );
         let oracle =
             WorkbookBase::from_model_with_legacy_dimensions_oracle(&patterned, &[], None).unwrap();
         assert_eq!(oracle.fingerprints, actual.fingerprints);
+        assert_eq!(oracle.fingerprint, actual.fingerprint);
+    }
+
+    /// The accepted fingerprints hashed over the released reading of the styles.
+    fn released_readings(
+        fingerprints: &BTreeMap<i64, Vec<String>>,
+    ) -> BTreeMap<i64, Vec<String>> {
+        let mut released = fingerprints.clone();
+        for accepted in released.values_mut() {
+            accepted.retain(|fingerprint| !fingerprint.starts_with(PATTERN_FILLS_FINGERPRINT_TAG));
+        }
+        released
     }
 
     #[test]
@@ -5481,7 +5593,10 @@ mod tests {
             let base = WorkbookBase::from_model(model).unwrap();
             let oracle =
                 WorkbookBase::from_model_with_legacy_dimensions_oracle(model, &[], None).unwrap();
-            (base.fingerprint, base.fingerprints, oracle.fingerprints)
+            (
+                released_readings(&base.fingerprints),
+                released_readings(&oracle.fingerprints),
+            )
         };
         let expected = hashes(&released);
         assert_eq!(hashes(&patterned), expected);
@@ -5496,10 +5611,9 @@ mod tests {
         *edge_color.styles.borders.last_mut().unwrap() =
             border(BorderStyle::SlantDashDot, "#000002");
         for changed in [foreground, edge_color] {
-            let (fingerprint, fingerprints, oracle) = hashes(&changed);
-            assert_ne!(fingerprint, expected.0);
-            assert_ne!(fingerprints, expected.1);
-            assert_ne!(oracle, expected.2);
+            let (fingerprints, oracle) = hashes(&changed);
+            assert_ne!(fingerprints, expected.0);
+            assert_ne!(oracle, expected.1);
         }
     }
 
