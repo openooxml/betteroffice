@@ -97,3 +97,47 @@ fn cascade_composition_released_fingerprint_layouts_round_trip() {
         assert_eq!(peer.materialize().unwrap(), model);
     }
 }
+
+#[test]
+fn cascade_composition_v6_feature_layouts_round_trip() {
+    let model = composed_model();
+    for (domain, facets, patterns, defaults) in [
+        (b"betteroffice-xlsx-yrs-v6-xf-facets".as_slice(), true, false, false),
+        (b"betteroffice-xlsx-yrs-v6-pattern-fills".as_slice(), false, true, false),
+        (b"betteroffice-xlsx-yrs-v6-xf-facets-pattern-fills".as_slice(), true, true, false),
+        (b"betteroffice-xlsx-yrs-v6-style-defaults".as_slice(), false, false, true),
+    ] {
+        let mut legacy = model.clone();
+        if !facets { legacy.styles = pre_facet_styles(&legacy.styles); }
+        if !patterns {
+            legacy.styles.fills = legacy.styles.fills.iter().map(|fill| released_fill(fill).into_owned()).collect();
+            legacy.styles.borders = legacy.styles.borders.iter().map(|border| released_border(border).into_owned()).collect();
+        }
+        if !defaults { legacy.sheets[0].row_styles.clear(); }
+        let mut base = WorkbookBase::from_model(&legacy).unwrap();
+        (base.fingerprint, base.bootstrap_client_id) = fingerprint_model_with_row_domain_oracle(&model, SCHEMA_VERSION, true, true, defaults, domain).unwrap();
+        let doc = Doc::with_client_id(base.bootstrap_client_id);
+        seed(&doc, &base, &legacy, &["sheet:0".to_string()]).unwrap();
+        if !defaults {
+            let mut txn = doc.transact_mut();
+            let sheet = txn.get_map(SHEETS).unwrap().get(&txn, "sheet:0").unwrap().cast::<MapRef>().unwrap();
+            sheet.remove(&mut txn, COL_STYLES);
+        }
+        let update = doc.transact().encode_state_as_update_v1(&StateVector::default());
+        let current = WorkbookAuthority::from_model_with_client_id(&model, 71).unwrap();
+        let adopted = match current.snapshot_replacement(&update) {
+            SnapshotAdoption::Replacement(adopted) => adopted,
+            SnapshotAdoption::Incompatible(error) => panic!("{domain:?}: {error}"),
+            SnapshotAdoption::NotApplicable => panic!("{domain:?}: not adopted"),
+        };
+        let restored = adopted.materialize().unwrap();
+        assert_eq!(restored.sheets[0].row_styles, model.sheets[0].row_styles);
+        for (at, cell) in model.sheets[0].iter_cells() {
+            let actual = restored.sheets[0].cell(at).unwrap();
+            assert_eq!(restored.styles.cell_format(actual.style), model.styles.cell_format(cell.style), "{domain:?}: {at:?}");
+            assert_eq!(actual.value, cell.value);
+        }
+        let peer = tests::authority_from_update(&model, &adopted.encode_state_as_update_v1(), 72);
+        assert_eq!(peer.materialize().unwrap(), restored);
+    }
+}
