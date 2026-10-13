@@ -72,13 +72,21 @@ async function mount(zoom = 1, caretPage = 0) {
       left: 0, right: 200 * zoom, width: 200 * zoom, height: 60, toJSON() {} };
   });
   const pixels = new Map<HTMLCanvasElement, string>();
+  const readbacks = { count: 0 };
+  const drawnAfterClose: TestBitmap[] = [];
   const context = spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(function (this: HTMLCanvasElement) {
     const canvas = this;
     return { save() {}, restore() {}, setTransform() {}, transform() {}, beginPath() {}, rect() {}, clip() {}, fillRect() {},
       clearRect() { pixels.set(canvas, ''); },
-      drawImage(bitmap: TestBitmap) { pixels.set(canvas, bitmap.pixels); },
+      drawImage(bitmap: TestBitmap) {
+        if (bitmap.closes > 0) drawnAfterClose.push(bitmap);
+        pixels.set(canvas, bitmap.pixels);
+      },
       fillText(text: string) { pixels.set(canvas, text); }, measureText: (text: string) => ({ width: text.length * 10 }),
-      getImageData: () => ({ width: canvas.width, height: canvas.height, pixels: pixels.get(canvas) ?? '' }),
+      getImageData: () => {
+        readbacks.count += 1;
+        return { width: canvas.width, height: canvas.height, pixels: pixels.get(canvas) ?? '' };
+      },
       putImageData(image: ImageData & { pixels: string }) { pixels.set(canvas, image.pixels); },
     } as unknown as CanvasRenderingContext2D;
   } as unknown as typeof HTMLCanvasElement.prototype.getContext);
@@ -138,7 +146,7 @@ async function mount(zoom = 1, caretPage = 0) {
   let binding: PeerlessEditSessionBinding | undefined;
   const view = render(<PeerlessPagedEditor sessionOptions={options} zoom={zoom} onReady={(ready) => { binding = ready; }} />, { container: scroller });
   await waitFor(() => expect(binding).toBeDefined());
-  return { ...view, scroller, requests, edits, frames, pixels, initialScales, binding: binding!,
+  return { ...view, scroller, requests, edits, frames, pixels, readbacks, drawnAfterClose, initialScales, binding: binding!,
     setZoom(value: number) {
       view.rerender(<PeerlessPagedEditor sessionOptions={options} zoom={value} />);
     },
@@ -308,6 +316,8 @@ test('evicted_pages_are_not_recreated_by_pruning_and_bitmaps_are_closed', async 
   await editor.scrollTo(2);
   expect(editor.container.querySelector('[data-page-id="3"] canvas')).not.toBe(evicted);
   expect((staged.bitmap as TestBitmap).closes).toBe(1);
+  expect(editor.drawnAfterClose).toEqual([]);
+  expect(editor.readbacks.count).toBe(0);
 });
 
 test('worker page column centers at the scaled width', async () => {

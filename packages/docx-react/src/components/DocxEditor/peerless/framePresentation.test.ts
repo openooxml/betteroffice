@@ -11,6 +11,7 @@ import type { PeerlessFrameGeometry, PeerlessViewSnapshot, PeerlessViewStore } f
 const identity = { session: 'test', incarnation: 1, epoch: 1 };
 const page = { pageId: '1', pageIndex: 0 };
 const secondPage = { pageId: '2', pageIndex: 1 };
+const thirdPage = { pageId: '3', pageIndex: 2 };
 
 function entry(seq: number): EchoEntry<PeerlessEchoIntent> {
   return { seq, ticket: { id: seq, seq, ack: Promise.resolve({ seq, status: 'applied' }),
@@ -40,10 +41,13 @@ function frame(revision: number, coverage: number, base?: number): DocxCommandFr
   } };
 }
 
-function setup(realPainter = false) {
+function setup(realPainter = false, makeCanvas?: (item: typeof page) => HTMLCanvasElement) {
   const events: string[] = [];
   const draws: ImageBitmap[] = [];
   const pixels = new Map<string, ImageBitmap | ImageData>();
+  const readbacks = { getImageData: 0, putImageData: 0 };
+  const closes = new Map<ImageBitmap, number>();
+  const drawnAfterClose: ImageBitmap[] = [];
   let onDraw: (() => void) | undefined;
   let mounted = true;
   let geometryPages = [page, secondPage];
@@ -62,22 +66,28 @@ function setup(realPainter = false) {
     const canvas = { width: 100, height: 20, getContext: () => ({
       save() {}, restore() {}, setTransform() {}, clearRect() { pixels.delete(item.pageId); },
       getImageData() {
+        readbacks.getImageData += 1;
         const value = { width: canvas.width, height: canvas.height } as ImageData;
         const bitmap = pixels.get(item.pageId);
         if (bitmap) snapshots.set(value, bitmap);
         return value;
       },
-      putImageData(value: ImageData) { pixels.set(item.pageId, snapshots.get(value) ?? value); },
+      putImageData(value: ImageData) {
+        readbacks.putImageData += 1;
+        pixels.set(item.pageId, snapshots.get(value) ?? value);
+      },
       transform() {}, beginPath() {}, rect() {}, clip() {}, fillRect() {},
       measureText(text: string) { return { width: text.length * 10 }; },
       fillText(text: string) { events.push(`echo:${text}`); },
       drawImage(bitmap: ImageBitmap) {
+        if (closes.has(bitmap)) drawnAfterClose.push(bitmap);
         events.push('pixels'); draws.push(bitmap); onDraw?.(); pixels.set(item.pageId, bitmap);
       },
     }) } as unknown as HTMLCanvasElement;
     return canvas;
   }
-  const canvases = new Map([page, secondPage].map((item) => [item.pageId, createCanvas(item)] as const));
+  const create = makeCanvas ?? createCanvas;
+  const canvases = new Map([page, secondPage].map((item) => [item.pageId, create(item)] as const));
   const canvasForPage = (item: typeof page) => mounted ? canvases.get(item.pageId) ?? null : null;
   const painter: PeerlessEchoPainter = realPainter ? createEchoPainter({ canvasForPage }) : {
     installContext() {}, restoreBackground: () => true, preview: () => undefined,
@@ -94,10 +104,14 @@ function setup(realPainter = false) {
         bounds: { x: 0, y: 0, width: 100, height: 20 }, transform: [1, 0, 0, 1, 0, 0] as const })),
       caret: null, selectionRects: [] }; },
   });
-  return { presentation, events, reconciled, store, draws, pixels, canvases, painter,
+  return { presentation, events, reconciled, store, draws, pixels, canvases, painter, readbacks, closes, drawnAfterClose,
     observeDraw(listener: () => void) { onDraw = listener; },
     mountCanvas(value: boolean) { mounted = value; },
-    addCanvas(item: typeof page) { const canvas = createCanvas(item); canvases.set(item.pageId, canvas); return canvas; },
+    addCanvas(item: typeof page) { const canvas = create(item); canvases.set(item.pageId, canvas); return canvas; },
+    track(width = 100, height = 20): ImageBitmap {
+      const value = { width, height, close() { closes.set(value, (closes.get(value) ?? 0) + 1); } } as ImageBitmap;
+      return value;
+    },
     setPages(pages: typeof geometryPages) { geometryPages = pages; },
     setIdentity(next: PeerlessViewSnapshot['identity']) { snapshot = { ...snapshot, identity: next,
       geometry: null, presentedThroughSeq: -1 }; },
@@ -315,7 +329,7 @@ test('d2c_new_revision_at_same_coverage_installs_without_extra_retirement', () =
 });
 
 test('d2c_failed_second_page_draw_restores_pages_from_partial_frames', () => {
-  const { presentation, store, pixels, canvases, observeDraw, painter } = setup(true);
+  const { presentation, store, pixels, canvases, observeDraw, painter, readbacks } = setup(true);
   const closed: ImageBitmap[] = [];
   function bitmap(width = 100, height = 20): ImageBitmap {
     const value = { width, height, close() { closed.push(value); } } as ImageBitmap;
@@ -359,13 +373,14 @@ test('d2c_failed_second_page_draw_restores_pages_from_partial_frames', () => {
   expect(store.getSnapshot().geometry?.frameEpoch).toBe(3);
   expect(store.getSnapshot().presentedThroughSeq).toBe(0);
   expect(closed).toEqual([first, second, rejectedFirst, rejectedSecond]);
+  expect(readbacks).toEqual({ getImageData: 0, putImageData: 0 });
   presentation.dispose();
   painter.dispose();
   expect(closed).toEqual([first, second, rejectedFirst, rejectedSecond, firstBackup, secondBackup]);
 });
 
 test('d2c_viewport_changes_evict_backups_and_restore_active_echo_after_failed_draw', () => {
-  const { presentation, painter, canvases, pixels, draws, events, observeDraw, addCanvas, setPages } = setup(true);
+  const { presentation, painter, canvases, pixels, draws, events, observeDraw, addCanvas, setPages, readbacks } = setup(true);
   const closed = new Map<ImageBitmap, number>();
   const resources: ImageBitmap[] = [];
   const initial = echoFrame(1, 0, 'a');
@@ -423,7 +438,201 @@ test('d2c_viewport_changes_evict_backups_and_restore_active_echo_after_failed_dr
   replacement.bitmap.close = () => { closed.set(replacement.bitmap, (closed.get(replacement.bitmap) ?? 0) + 1); };
   expect(presentation.present(deleted, [], [])).toBe(true);
   expect(closed.get(initial.payload.stagedPresentation!.pages[0]!.bitmap)).toBe(1);
+  expect(readbacks).toEqual({ getImageData: 0, putImageData: 0 });
   presentation.dispose();
   painter.dispose();
   expect(resources.map((value) => closed.get(value))).toEqual(resources.map(() => 1));
+});
+
+function staged(revision: number, base: number | undefined,
+  pages: readonly (readonly [typeof page, ImageBitmap])[]): DocxCommandFrame {
+  const candidate = frame(revision, 0, base);
+  candidate.payload.stagedPresentation!.pages = pages.map(([item, bitmap]) => ({ page: item, frameEpoch: revision, bitmap }));
+  return candidate;
+}
+
+type PixelBitmap = ImageBitmap & { data: Uint8ClampedArray; failing: boolean };
+type PixelCanvas = HTMLCanvasElement & { readonly pixels: Uint8ClampedArray };
+
+function pixelBitmap(width: number, height: number, seed: number, failing = false): PixelBitmap {
+  const data = new Uint8ClampedArray(width * height * 4);
+  for (let index = 0; index < width * height; index++) {
+    if ((index + seed) % 7 === 0) continue;
+    data.set([(index * 3 + seed) % 256, (index * 5 + seed * 7) % 256, (seed * 31) % 256, 255], index * 4);
+  }
+  return { width, height, data, failing, close() {} } as unknown as PixelBitmap;
+}
+
+function pixelCanvas(calls: { getImageData: number; putImageData: number }): PixelCanvas {
+  let width = 300;
+  let height = 150;
+  let data = new Uint8ClampedArray(width * height * 4);
+  const copy = (source: Uint8ClampedArray, sourceWidth: number, sourceHeight: number, x: number, y: number, opaqueOnly: boolean) => {
+    for (let row = 0; row < sourceHeight && row + y < height; row++) {
+      for (let column = 0; column < sourceWidth && column + x < width; column++) {
+        const from = (row * sourceWidth + column) * 4;
+        if (opaqueOnly && source[from + 3] === 0) continue;
+        data.set(source.subarray(from, from + 4), ((row + y) * width + column + x) * 4);
+      }
+    }
+  };
+  const ctx = {
+    save() {}, restore() {}, setTransform() {}, transform() {}, beginPath() {}, rect() {}, clip() {},
+    fillRect() {}, fillText() {}, measureText: (text: string) => ({ width: text.length * 10 }),
+    clearRect(x: number, y: number, w: number, h: number) {
+      for (let row = Math.max(0, y); row < Math.min(height, y + h); row++) {
+        data.fill(0, (row * width + Math.max(0, x)) * 4, (row * width + Math.min(width, x + w)) * 4);
+      }
+    },
+    drawImage(bitmap: PixelBitmap, x = 0, y = 0, ...size: number[]) {
+      if (bitmap.failing) throw new Error('draw-failed');
+      if (size.length && (size[0] !== bitmap.width || size[1] !== bitmap.height)) throw new Error('scaled-draw');
+      copy(bitmap.data, bitmap.width, bitmap.height, x, y, true);
+    },
+    getImageData(x: number, y: number, w: number, h: number) {
+      calls.getImageData += 1;
+      const out = new Uint8ClampedArray(w * h * 4);
+      for (let row = 0; row < h; row++) out.set(data.subarray(((row + y) * width + x) * 4, ((row + y) * width + x + w) * 4), row * w * 4);
+      return { width: w, height: h, data: out } as unknown as ImageData;
+    },
+    putImageData(image: ImageData, x: number, y: number) {
+      calls.putImageData += 1;
+      copy(image.data, image.width, image.height, x, y, false);
+    },
+  };
+  return {
+    get width() { return width; },
+    set width(value: number) { width = value; data = new Uint8ClampedArray(width * height * 4); },
+    get height() { return height; },
+    set height(value: number) { height = value; data = new Uint8ClampedArray(width * height * 4); },
+    get pixels() { return data; },
+    getContext: () => ctx,
+  } as unknown as PixelCanvas;
+}
+
+function expectPixels(canvas: PixelCanvas, bitmap: PixelBitmap): void {
+  expect([canvas.width, canvas.height]).toEqual([bitmap.width, bitmap.height]);
+  expect(canvas.pixels.length === bitmap.data.length && canvas.pixels.every((value, index) => value === bitmap.data[index])).toBe(true);
+}
+
+function pixelSetup() {
+  const calls = { getImageData: 0, putImageData: 0 };
+  const canvases = new Map<string, PixelCanvas>();
+  const context = setup(true, (item) => {
+    const canvas = pixelCanvas(calls);
+    canvases.set(item.pageId, canvas);
+    return canvas;
+  });
+  context.addCanvas(thirdPage);
+  context.setPages([page, secondPage, thirdPage]);
+  return { ...context, calls, canvas: (item: typeof page) => canvases.get(item.pageId)! };
+}
+
+test('installs leave each canvas with exactly the staged pixels at the staged size without readback', () => {
+  const { presentation, canvas, calls } = pixelSetup();
+  const single = pixelBitmap(100, 20, 1);
+  expect(presentation.present(staged(1, undefined, [[page, single]]), [], [])).toBe(true);
+  expectPixels(canvas(page), single);
+  const multi = [pixelBitmap(100, 20, 2), pixelBitmap(100, 20, 3), pixelBitmap(100, 20, 4)] as const;
+  expect(presentation.present(staged(2, 1, [[page, multi[0]], [secondPage, multi[1]], [thirdPage, multi[2]]]), [], [])).toBe(true);
+  expectPixels(canvas(page), multi[0]);
+  expectPixels(canvas(secondPage), multi[1]);
+  expectPixels(canvas(thirdPage), multi[2]);
+  const resized = [pixelBitmap(150, 30, 5), pixelBitmap(80, 16, 6)] as const;
+  expect(presentation.present(staged(3, 2, [[page, resized[0]], [secondPage, resized[1]]]), [], [])).toBe(true);
+  expectPixels(canvas(page), resized[0]);
+  expectPixels(canvas(secondPage), resized[1]);
+  expectPixels(canvas(thirdPage), multi[2]);
+  expect(calls).toEqual({ getImageData: 0, putImageData: 0 });
+});
+
+test('a failed install restores retained pixels exactly and blanks a canvas without a frame at its previous size', () => {
+  const { presentation, canvas, calls, events } = pixelSetup();
+  const first = pixelBitmap(150, 30, 1);
+  const second = pixelBitmap(200, 40, 2);
+  expect(presentation.present(staged(1, undefined, [[page, first], [secondPage, second]]), [], [])).toBe(true);
+  canvas(thirdPage).width = 64;
+  canvas(thirdPage).height = 16;
+  events.length = 0;
+  expect(presentation.present(staged(2, 1, [[page, pixelBitmap(120, 24, 3)],
+    [secondPage, pixelBitmap(210, 42, 4, true)]]), [], [])).toBe(false);
+  expectPixels(canvas(page), first);
+  expectPixels(canvas(secondPage), second);
+  expect(presentation.present(staged(2, 1, [[thirdPage, pixelBitmap(90, 18, 5)],
+    [secondPage, pixelBitmap(210, 42, 6, true)]]), [], [])).toBe(false);
+  expect([canvas(thirdPage).width, canvas(thirdPage).height]).toEqual([64, 16]);
+  expect(canvas(thirdPage).pixels.every((value) => value === 0)).toBe(true);
+  expectPixels(canvas(page), first);
+  expectPixels(canvas(secondPage), second);
+  expect(events.filter((event) => event === 'full')).toHaveLength(2);
+  expect(calls).toEqual({ getImageData: 0, putImageData: 0 });
+});
+
+test('a failed second-page draw redraws both pages from retained bitmaps before echo repaints', () => {
+  const { presentation, events, draws, observeDraw, readbacks } = setup(true);
+  const initial = echoFrame(1, 0, 'a');
+  const first = initial.payload.stagedPresentation!.pages[0]!.bitmap;
+  const second = { width: 100, height: 20, close() {} } as ImageBitmap;
+  initial.payload.stagedPresentation!.pages.push({ page: secondPage, frameEpoch: 1, bitmap: second });
+  expect(presentation.present(initial, [], [])).toBe(true);
+  const pending = entry(1);
+  presentation.hooks.paint([pending]);
+  expect(events.at(-1)).toBe('echo:ax');
+  const rejectedFirst = { width: 100, height: 20, close() {} } as ImageBitmap;
+  const rejectedSecond = { width: 100, height: 20, close() {} } as ImageBitmap;
+  observeDraw(() => { if (draws.at(-1) === rejectedSecond) throw new Error('draw-failed'); });
+  draws.length = 0;
+  events.length = 0;
+  expect(presentation.present(staged(2, 1, [[page, rejectedFirst], [secondPage, rejectedSecond]]), [], [pending])).toBe(false);
+  expect(draws.slice(0, 4)).toEqual([rejectedFirst, rejectedSecond, first, second]);
+  expect(events.slice(-2)).toEqual(['echo:ax', 'full']);
+  expect(readbacks).toEqual({ getImageData: 0, putImageData: 0 });
+});
+
+test('staged bitmaps close exactly once and are never drawn after close', () => {
+  const { presentation, painter, canvases, draws, pixels, observeDraw, addCanvas, setPages, setIdentity,
+    track, closes, drawnAfterClose, readbacks } = setup(true);
+  const tracked: ImageBitmap[] = [];
+  const bitmap = () => { const value = track(); tracked.push(value); return value; };
+  const failOn = (value: ImageBitmap) => observeDraw(() => { if (draws.at(-1) === value) throw new Error('draw-failed'); });
+  const initial = echoFrame(1, 0, 'a');
+  const installed = initial.payload.stagedPresentation!.pages[0]!;
+  installed.bitmap = bitmap();
+  installed.backgrounds![0]!.bitmap = bitmap();
+  const second = bitmap();
+  initial.payload.stagedPresentation!.pages.push({ page: secondPage, frameEpoch: 1, bitmap: second });
+  expect(presentation.present(initial, [], [])).toBe(true);
+  const replacement = bitmap();
+  expect(presentation.present(staged(2, 1, [[page, replacement]]), [], [])).toBe(true);
+  expect(closes.get(installed.bitmap)).toBe(1);
+  canvases.delete(secondPage.pageId);
+  addCanvas(thirdPage);
+  setPages([page, thirdPage]);
+  const third = bitmap();
+  expect(presentation.present(staged(3, 2, [[thirdPage, third]]), [], [])).toBe(true);
+  expect(closes.get(second)).toBe(1);
+  const mismatched = staged(4, 3, [[page, bitmap()]]);
+  mismatched.payload.stagedPresentation!.frameEpoch = 99;
+  expect(presentation.present(mismatched, [], [])).toBe(false);
+  const failedPage = bitmap();
+  const failedThird = bitmap();
+  failOn(failedThird);
+  expect(presentation.present(staged(4, 3, [[page, failedPage], [thirdPage, failedThird]]), [], [])).toBe(false);
+  expect(new Set(draws.slice(-2))).toEqual(new Set([replacement, third]));
+  expect([closes.get(failedPage), closes.get(failedThird)]).toEqual([1, 1]);
+  setIdentity({ ...identity, epoch: 2 });
+  const reset = bitmap();
+  expect(presentation.present(staged(1, undefined, [[page, reset]]), [], [])).toBe(true);
+  expect([closes.get(replacement), closes.get(installed.backgrounds![0]!.bitmap)]).toEqual([1, 1]);
+  expect(closes.has(third)).toBe(false);
+  const failedAfterReset = bitmap();
+  failOn(failedAfterReset);
+  expect(presentation.present(staged(2, 1, [[thirdPage, failedAfterReset]]), [], [])).toBe(false);
+  expect(new Set(draws.slice(-2))).toEqual(new Set([reset, third]));
+  expect(pixels.get(thirdPage.pageId)).toBe(third);
+  presentation.dispose();
+  painter.dispose();
+  expect(tracked.map((value) => closes.get(value))).toEqual(tracked.map(() => 1));
+  expect(drawnAfterClose).toEqual([]);
+  expect(readbacks).toEqual({ getImageData: 0, putImageData: 0 });
 });
