@@ -1493,19 +1493,32 @@ fn xf_elements(styles: &str) -> Vec<&str> {
         .collect()
 }
 
+/// Saves `workbook` after a value edit that leaves every format alone.
+fn save_after_value_edit(mut workbook: Workbook) -> Vec<u8> {
+    let d1 = CellRef::new(0, 3);
+    workbook.edit_cell(SheetId(0), d1, "5", context()).unwrap();
+    workbook.save().unwrap()
+}
+
+fn cell_styles(saved: &[u8]) -> [Option<u32>; 3] {
+    let parsed = xlsx_parse::parse_workbook(&ooxml_opc::unzip_parts(saved).unwrap()).unwrap();
+    let style = |col| parsed.sheets[0].cell(CellRef::new(0, col)).unwrap().style;
+    [0, 1, 2].map(style)
+}
+
 #[test]
 fn format_facets_released_snapshot_saves_the_source_xfs() {
     let (source, released) = released_styles();
     let budget = SnapshotBudget::new(1, 64 * 1024).unwrap();
-    let expected = Workbook::open(&source).unwrap().save().unwrap();
+    let expected = save_after_value_edit(Workbook::open(&source).unwrap());
+    let styles = part(&expected, "xl/styles.xml");
     let worker = released_reading_of(&source, &released);
     let restored = restore(&released_snapshot(&worker, budget), budget);
     let recaptured = restore(&encode(&restored, budget), budget);
-    for workbook in [&restored, &recaptured] {
-        let saved = workbook.save().unwrap();
-        for name in ["xl/styles.xml", "xl/worksheets/sheet1.xml"] {
-            assert_eq!(part(&saved, name), part(&expected, name), "{name}");
-        }
+    for workbook in [restored, recaptured] {
+        let saved = save_after_value_edit(workbook);
+        assert_eq!(part(&saved, "xl/styles.xml"), styles);
+        assert_eq!(cell_styles(&saved), [Some(1), Some(1), Some(2)]);
     }
 }
 
@@ -1534,27 +1547,24 @@ fn format_facets_released_snapshot_edit_writes_only_the_edited_xf() {
     let (expected, written) = (xf_elements(&expected), xf_elements(&written));
     assert_eq!(written.len(), expected.len() + 1);
     assert_eq!(written[..expected.len()], expected[..]);
-    let parsed = xlsx_parse::parse_workbook(&ooxml_opc::unzip_parts(&saved).unwrap()).unwrap();
-    let style = |col| parsed.sheets[0].cell(CellRef::new(0, col)).unwrap().style;
     let edited = Some(expected.len() as u32);
-    assert_eq!([0, 1, 2].map(style), [edited, Some(1), Some(2)]);
+    assert_eq!(cell_styles(&saved), [edited, Some(1), Some(2)]);
 }
 
 #[test]
 fn format_facets_current_snapshot_saves_the_xfs_its_records_hold() {
     let (source, released) = released_styles();
     let budget = SnapshotBudget::new(1, 64 * 1024).unwrap();
-    let expected = Workbook::open(&source).unwrap().save().unwrap();
+    let expected = save_after_value_edit(Workbook::open(&source).unwrap());
+    let styles = part(&expected, "xl/styles.xml");
     let current = restore(&encode(&Workbook::open(&source).unwrap(), budget), budget);
-    let saved = current.save().unwrap();
-    for name in ["xl/styles.xml", "xl/worksheets/sheet1.xml"] {
-        assert_eq!(part(&saved, name), part(&expected, name), "{name}");
-    }
+    let saved = save_after_value_edit(current);
+    assert_eq!(part(&saved, "xl/styles.xml"), styles);
+    assert_eq!(cell_styles(&saved), [Some(1), Some(1), Some(2)]);
     let worker = released_reading_of(&source, &released);
-    let saved = restore(&encode(&worker, budget), budget).save().unwrap();
-    let expected = part(&expected, "xl/styles.xml");
+    let saved = save_after_value_edit(restore(&encode(&worker, budget), budget));
     let written = part(&saved, "xl/styles.xml");
-    let (expected, written) = (xf_elements(&expected), xf_elements(&written));
+    let (expected, written) = (xf_elements(&styles), xf_elements(&written));
     assert_eq!(written.len(), expected.len());
     assert_eq!(written[0], expected[0]);
     for (written, expected) in written.iter().zip(&expected).skip(1) {
@@ -1569,15 +1579,15 @@ fn format_facets_current_snapshot_saves_the_xfs_its_records_hold() {
 fn format_facets_released_snapshot_recovery_saves_the_source_xfs() {
     let (source, released) = released_styles();
     let budget = SnapshotBudget::new(1, 64 * 1024).unwrap();
-    let source_saved = Workbook::open(&source).unwrap().save().unwrap();
-    let expected = part(&source_saved, "xl/styles.xml");
+    let expected = save_after_value_edit(Workbook::open(&source).unwrap());
+    let styles = part(&expected, "xl/styles.xml");
     let worker = released_reading_of(&source, &released);
     let restored = restore(&released_snapshot(&worker, budget), budget);
     let recaptured = restore(&encode(&restored, budget), budget);
-    for workbook in [&restored, &recaptured] {
+    for workbook in [restored, recaptured] {
         let checkpoint = workbook.recovery_checkpoint(1, None).unwrap();
         let (recovered, _, _, _) = Workbook::restore_recovery_checkpoint(&checkpoint).unwrap();
-        let saved = recovered.save().unwrap();
-        assert_eq!(part(&saved, "xl/styles.xml"), expected);
+        let saved = save_after_value_edit(recovered);
+        assert_eq!(part(&saved, "xl/styles.xml"), styles);
     }
 }
