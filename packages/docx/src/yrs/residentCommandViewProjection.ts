@@ -43,8 +43,11 @@ export function projectCommandEchoContext(
   const starts = new Set<number>();
   let retainedBytes = 0;
   let retainedGlyphs = 0;
+  const onCaretLine = (primitive: GlyphRunPrimitive) =>
+    primitive.glyphs.some((glyph) => glyph.y >= caret.y && glyph.y <= caret.y + caret.height);
   for (const primitive of activePage.page.primitives) {
-    if (primitive.kind !== 'glyphRun' || primitive.docStart === undefined || primitive.listMarker) continue;
+    if (primitive.kind !== 'glyphRun' || primitive.docStart === undefined || primitive.listMarker ||
+      !onCaretLine(primitive)) continue;
     retainedBytes += primitive.text.length;
     retainedGlyphs += primitive.glyphs.length;
     if (retainedBytes > DOCX_ECHO_MAX_CONTEXT_BYTES || retainedGlyphs > DOCX_ECHO_MAX_CONTEXT_BYTES / 16) return undefined;
@@ -72,16 +75,21 @@ export function projectCommandEchoContext(
     }
   }
   if (starts.size !== 1) return undefined;
-  const start = starts.values().next().value!;
-  const end = start + paragraph.text.length;
+  const paragraphStart = starts.values().next().value!;
+  const paragraphEnd = paragraphStart + paragraph.text.length;
   for (const retained of [activePage]) {
     if (retained.page.unbuilt) continue;
     const runs = retained.page.primitives.filter((primitive): primitive is GlyphRunPrimitive =>
       primitive.kind === 'glyphRun' && primitive.docStart !== undefined && primitive.docEnd !== undefined &&
-      primitive.docStart >= start && primitive.docEnd <= end && !primitive.listMarker);
+      primitive.docStart >= paragraphStart && primitive.docEnd <= paragraphEnd && !primitive.listMarker &&
+      onCaretLine(primitive));
     runs.sort((a, b) => a.docStart! - b.docStart!);
-    if (!runs.length || runs[0]!.docStart !== start || runs.at(-1)!.docEnd !== end ||
-      runs.map((run) => run.text).join('') !== paragraph.text) continue;
+    if (!runs.length) continue;
+    const start = runs[0]!.docStart!;
+    const end = runs.at(-1)!.docEnd!;
+    const lineOffset = start - paragraphStart;
+    const text = paragraph.text.slice(lineOffset, end - paragraphStart);
+    if (runs.map((run) => run.text).join('') !== text) continue;
     let cursor = start;
     let baseline: number | undefined;
     let right = -Infinity;
@@ -129,11 +137,11 @@ export function projectCommandEchoContext(
       cursor = run.docEnd!;
     }
     if (!supported || baseline === undefined) continue;
-    const offsets = [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(paragraph.text)]
-      .map((segment) => segment.index).concat(paragraph.text.length);
+    const offsets = [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text)]
+      .map((segment) => segment.index).concat(text.length);
     if (offsets.some((offset) => !positions.has(offset))) continue;
-    const anchorGrapheme = offsets.indexOf(selection.anchor.offset);
-    const focusGrapheme = offsets.indexOf(selection.focus.offset);
+    const anchorGrapheme = offsets.indexOf(selection.anchor.offset - lineOffset);
+    const focusGrapheme = offsets.indexOf(selection.focus.offset - lineOffset);
     if (anchorGrapheme < 0 || focusGrapheme < 0) return undefined;
     const size = Math.max(...styleRuns.map((run) => run.fontSizePx));
     const x = positions.get(0)!;
@@ -169,7 +177,7 @@ export function projectCommandEchoContext(
     const page = { pageId: retained.pageId.toString(), pageIndex: retained.pageIndex };
     const context: DocxCommandEchoContext = {
       page, frameEpoch: layout.frame.frameEpoch, layoutRevision: layout.layoutRevision, serializedBytes: 0,
-      text: paragraph.text, styleRuns, selection: { anchorGrapheme, focusGrapheme },
+      text, styleRuns, selection: { anchorGrapheme, focusGrapheme },
       boundaries: offsets.map((utf16, grapheme) => ({ utf16, grapheme,
         caret: { x: positions.get(utf16)!, y, width: 1, height } })),
       transform: [1, 0, 0, 1, 0, 0], shaping: 'simple-ltr',
