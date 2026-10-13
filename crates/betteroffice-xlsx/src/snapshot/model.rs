@@ -2691,4 +2691,46 @@ mod tests {
         assert_eq!(&decoded, opened.model());
         assert_eq!(encode(&decoded, budget), chunks);
     }
+
+    #[test]
+    fn xf_records_released_before_format_facets_still_decode() {
+        let model = sample_model();
+        let budget = SnapshotBudget::new(1, 64 * 1024).unwrap();
+        let chunks = encode(&model, budget);
+        let first = 1 + global_counts(&model)[..5].iter().sum::<usize>();
+        let xfs = first..first + model.styles.cell_xfs.len();
+        let released = chunks
+            .iter()
+            .enumerate()
+            .map(|(ordinal, chunk)| {
+                if !xfs.contains(&ordinal) {
+                    return chunk.clone();
+                }
+                let xf = &model.styles.cell_xfs[ordinal - first];
+                let mut w = Writer::new();
+                w.u8(6);
+                w.option(xf.font, Writer::var_u32);
+                w.option(xf.fill, Writer::var_u32);
+                w.option(xf.border, Writer::var_u32);
+                w.option(xf.num_fmt_id, |w, id| w.var_u32(u32::from(id)));
+                w.option(xf.alignment.as_ref(), |w, alignment| {
+                    w.option(alignment.h.as_ref(), write_halign);
+                    w.option(alignment.v.as_ref(), write_valign);
+                    w.bool(alignment.wrap_text);
+                    w.bool(alignment.shrink_to_fit);
+                });
+                frame(ChunkKind::Model, ordinal as u64, &w.into_bytes())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(decode(&released), model);
+        let mut builder = ModelSnapshotBuilder::new();
+        for chunk in &released {
+            while !builder.advance_bounded(chunk, budget).unwrap().is_ready() {}
+        }
+        assert_eq!(builder.finish().unwrap(), model);
+        for ordinal in xfs {
+            let (_, _, payload) = unframe(&chunks[ordinal]).unwrap();
+            assert_ne!(payload[0], 6, "a current XF record must not read as a released one");
+        }
+    }
 }

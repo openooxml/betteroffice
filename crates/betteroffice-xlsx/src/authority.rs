@@ -77,6 +77,13 @@ pub(crate) const MAX_STATE_VECTOR_ENTRIES: u32 = 65_536;
 thread_local! {
     static FORCE_FULL_MATERIALIZATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static FAST_SET_CELL_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static FINGERPRINT_PASSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Full passes over every cell made to fingerprint a workbook base.
+#[cfg(test)]
+pub(crate) fn fingerprint_passes() -> usize {
+    FINGERPRINT_PASSES.get()
 }
 
 #[cfg(test)]
@@ -4050,6 +4057,22 @@ fn model_with_legacy_dimensions(
     Some(legacy_model)
 }
 
+/// The collaboration state a release before format facets persisted for
+/// `model`, which must already hold that release's reading of its styles.
+#[cfg(test)]
+pub(crate) fn pre_facet_state_for_test(model: &WorkbookModel) -> Vec<u8> {
+    let mut base = WorkbookBase::from_model(model).unwrap();
+    (base.fingerprint, base.bootstrap_client_id) =
+        fingerprint_model_with_schema(model, 6, true, true).unwrap();
+    let doc = Doc::with_client_id(base.bootstrap_client_id);
+    let keys = (0..model.sheets.len())
+        .map(|index| format!("sheet:{index}"))
+        .collect::<Vec<_>>();
+    seed(&doc, &base, model, &keys).unwrap();
+    doc.transact()
+        .encode_state_as_update_v1(&StateVector::default())
+}
+
 #[cfg(test)]
 fn fingerprint_model_for_schema(
     model: &WorkbookModel,
@@ -4348,6 +4371,8 @@ fn fingerprint_model_with_overrides(
     styles: FingerprintStyles<'_>,
 ) -> Result<(String, u64), String> {
     validate_schema_version(schema_version)?;
+    #[cfg(test)]
+    FINGERPRINT_PASSES.set(FINGERPRINT_PASSES.get() + 1);
     let mut hasher = Sha256::new();
     let domain = match schema_version {
         3 => b"betteroffice-xlsx-yrs-v3".as_slice(),
@@ -5887,6 +5912,42 @@ mod tests {
             restored.materialize().unwrap()
         );
         assert!(!same_palette.upgrade_schema().unwrap());
+    }
+
+    #[test]
+    fn a_base_differing_only_in_format_facets_refuses_current_snapshots() {
+        let plain = rich_model();
+        let current = WorkbookAuthority::from_model_with_client_id(&plain, 11)
+            .unwrap()
+            .encode_state_as_update_v1();
+        for facet in 0..2 {
+            let mut faceted = plain.clone();
+            if facet == 0 {
+                faceted.styles.cell_xfs[0].alignment = Some(xlsx_model::Alignment {
+                    text_rotation: Some(90),
+                    ..Default::default()
+                });
+            } else {
+                faceted.styles.cell_xfs[0].protection = Some(xlsx_model::Protection {
+                    locked: false,
+                    hidden: false,
+                });
+            }
+            let base = WorkbookAuthority::from_model_with_client_id(&faceted, 12).unwrap();
+            assert!(
+                matches!(
+                    base.snapshot_replacement(&current),
+                    SnapshotAdoption::Incompatible(_)
+                ),
+                "facet {facet}"
+            );
+            let SnapshotAdoption::Replacement(restored) =
+                base.snapshot_replacement(&pre_facet_state_for_test(&plain))
+            else {
+                panic!("a released snapshot of the faceted base must still restore");
+            };
+            assert_eq!(restored.strict_materialize().unwrap().0, faceted);
+        }
     }
 
     #[test]
