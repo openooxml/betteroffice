@@ -3133,7 +3133,7 @@ mod tests {
     #[test]
     fn regression_remaps_views_across_many_removed_sheets() {
         const SHEETS: usize = 3_000;
-        let removed = |index: usize| index % 3 == 0 || index >= SHEETS - 3;
+        let removed = |index: usize| index.is_multiple_of(3) || index >= SHEETS - 3;
         let mut sheets = String::new();
         let mut views = String::new();
         let mut relationships = String::new();
