@@ -53,6 +53,7 @@ Start a new Codex session after registration. Try:
 | `office_read` | Read bounded paragraph or cell text; DOCX includes run formatting. |
 | `office_cells` | Read an XLSX A1 range with values, formulas, and cell handles. |
 | `office_propose` | Stage exact DOCX/PPTX text replacements. |
+| `docx_edit` | Apply DOCX paragraph styles, bold/italic/underline, paragraph and table-row edits directly and atomically. |
 | `office_propose_cells` | Stage XLSX whole-cell inputs or formulas. |
 | `office_review` | List proposals or inspect one proposal's before/after text. |
 | `office_render` | DOCX only: return a PNG of a current or proposed page. |
@@ -152,7 +153,13 @@ Pass `renderDocxPage` to enable PNG previews. The CLI configures it automaticall
 - Paragraph breaks, inline embeds, and existing tracked changes are protected.
   Reads show an embed as U+FFFC and mark protected runs. Reads expose the raw
   revision text with `ins`/`del` metadata; they are not an accepted-changes view.
-  This release edits plain text, not tables, shapes, styles, or document structure.
+  Proposals edit plain text only; `docx_edit` covers paragraph styles,
+  bold/italic/underline, paragraph insertion and deletion, and table rows.
+- `docx_edit` takes `version` from outline or grep and applies the whole batch
+  as one undo step without tracked changes, or nothing. Outline and read show
+  `table` {row, column, columns} for cell paragraphs; `insert_table_row` takes
+  one text per column. Edited paragraphs get new revisions and deleted ones
+  lose their refs, so earlier match IDs for them are refused.
 - Reads return at most 16,000 UTF-16 units and 100 formatting runs. Search
   defaults to 20 matches and caps each response's text budget. Lists return
   at most 100 summaries. Never treat a page of results as an exhaustive search.
