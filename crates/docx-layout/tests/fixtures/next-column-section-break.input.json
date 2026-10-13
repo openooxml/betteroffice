@@ -192,6 +192,7 @@
       "left": 96
     },
     "pageGap": 20,
+    "bodyBreakType": "nextColumn",
     "columns": {
       "count": 2,
       "gap": 120

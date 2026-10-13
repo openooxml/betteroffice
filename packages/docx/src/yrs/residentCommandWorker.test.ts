@@ -10,6 +10,7 @@ import { residentWorkerFactory } from './__fixtures__/residentWorker';
 import { ResidentEngineWorkerClient } from './residentEngineWorkerClient';
 import type { DocxCommandEnvelope, ResidentCommandInitRequest } from './residentCommandProtocol';
 import type { ResidentEngineWorkerResponse } from './residentEngineWorkerProtocol';
+import type { SectionProperties } from '../types/document';
 
 const TIMEOUT = 20_000;
 const LAYOUT = JSON.stringify({
@@ -30,7 +31,7 @@ beforeAll(async () => {
   startWorker = await residentWorkerFactory();
 });
 
-function syntheticDocument(headersFooters = false, notes = false, controls = false, bodyXml?: string, sectPr?: string): Uint8Array {
+function syntheticDocument(headersFooters = false, notes = false, controls = false, bodyXml?: string, sectPr?: string, comments?: string): Uint8Array {
   const parts = new Map<string, Uint8Array>();
   parts.set('[Content_Types].xml', toBytes(
     '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'
@@ -66,14 +67,22 @@ function syntheticDocument(headersFooters = false, notes = false, controls = fal
     parts.set('word/_rels/document.xml.rels', toBytes(xml.replace('</Relationships>', '<Relationship Id="rIdNotes" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes" Target="footnotes.xml"/></Relationships>')));
     parts.set('word/footnotes.xml', toBytes('<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:footnote w:id="1"><w:p><w:r><w:t>Note</w:t></w:r></w:p></w:footnote></w:footnotes>'));
   }
+  if (comments) {
+    parts.set('[Content_Types].xml', toBytes(new TextDecoder().decode(parts.get('[Content_Types].xml')!).replace('</Types>',
+      '<Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/></Types>')));
+    const relationships = parts.get('word/_rels/document.xml.rels');
+    const xml = relationships ? new TextDecoder().decode(relationships) : '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>';
+    parts.set('word/_rels/document.xml.rels', toBytes(xml.replace('</Relationships>', '<Relationship Id="rIdComments" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/></Relationships>')));
+    parts.set('word/comments.xml', toBytes(`<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">${comments}</w:comments>`));
+  }
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
-export async function openWorker(options: { headersFooters?: boolean; layoutWithRegions?: boolean; notes?: boolean; controls?: boolean; propertyImages?: boolean; objects?: boolean; bodyXml?: string; sectPr?: string; displayWindow?: [number, number]; factory?: typeof startWorker; prepare?: (engine: Awaited<ReturnType<typeof createResidentEngineSession>>) => { story: string; paraId: string; offset: number } } = {}) {
+export async function openWorker(options: { headersFooters?: boolean; layoutWithRegions?: boolean; notes?: boolean; controls?: boolean; propertyImages?: boolean; objects?: boolean; bodyXml?: string; sectPr?: string; comments?: string; displayWindow?: [number, number]; factory?: typeof startWorker; prepare?: (engine: Awaited<ReturnType<typeof createResidentEngineSession>>) => { story: string; paraId: string; offset: number } } = {}) {
   const worker = (options.factory ?? startWorker)(8301);
   const client = new ResidentEngineWorkerClient(worker);
   try {
-    await client.open(syntheticDocument(options.headersFooters, options.notes, options.controls, options.bodyXml, options.sectPr), { generation: 'd1-command-worker' });
+    await client.open(syntheticDocument(options.headersFooters, options.notes, options.controls, options.bodyXml, options.sectPr, options.comments), { generation: 'd1-command-worker' });
     const engine = worker.sessions[0]!;
     if (options.propertyImages || options.objects) engine.applyRawOps('body', [1, 2].map(index => ({
       op: 'insertEmbed', index, kind: 'image', payload: {
@@ -1254,6 +1263,23 @@ test('round two object geometry reads only paragraphs on resident pages', async 
   } finally { client.destroy(); }
 }, TIMEOUT);
 
+test('frame geometry reads the resident layout without a second display list or segment reads for text', async () => {
+  const { readResidentFrameGeometry } = await import('./residentObjectGeometry');
+  const { loadRustDisplayListQueryEngine } = await import('../layout/render/rustDisplayList');
+  const { client, engine, initial } = await openWorker({ bodyXml: syntheticParagraphs(200), displayWindow: [0, 1] });
+  try {
+    const frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
+    const opened = spyOn(await loadRustDisplayListQueryEngine(), 'openDisplayList');
+    const segments = spyOn(engine, 'paragraphSegments');
+    try {
+      const geometry = await readResidentFrameGeometry(engine, frame, initial.selection ?? null, 1);
+      expect(geometry.objects.filter(object => object.kind === 'text').length).toBeGreaterThan(10);
+      expect(opened.mock.calls).toHaveLength(0);
+      expect(segments.mock.calls).toHaveLength(0);
+    } finally { opened.mockRestore(); segments.mockRestore(); }
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
 for (const offset of [0, 4]) {
   test('round two break page insertion persists and undoes at offset ' + offset, async () => {
     const { client, engine, point } = await openWorker();
@@ -1415,15 +1441,28 @@ function savedSectionStarts(bytes: ArrayBuffer): [string, string | null][] {
 for (const scenario of SECTION_BREAK_CASES) {
   for (const type of ['continuous', 'nextPage', 'oddPage', 'evenPage'] as const) {
     test(`section break ${type} starts the section after the caret in ${scenario.name}`, async () => {
-      const { client, engine } = await openWorker({ bodyXml: scenario.body(type), sectPr: scenario.sectPr, prepare(engine) {
+      const open = () => openWorker({ bodyXml: scenario.body(type), sectPr: scenario.sectPr, prepare(engine) {
         return { story: 'body', paraId: engine.geometryReader.paragraphSpans('body')[scenario.paragraph]!.paraId, offset: 6 };
       } });
+      const neutralXml = await open().then(async ({ client, initial }) => {
+        try {
+          const margins = { section: 'final', margins: { marginLeft: 2880 }, expectVersion: initial.frame.payload.documentVersion! };
+          expect((await client.edit(intent(1, 0, 'setSectionMargins', margins))).outcomes[0]?.status).toBe('applied');
+          await client.save({ comments: [] });
+          expect((await client.edit(intent(2, 1, 'undo', {}))).outcomes[0]?.status).toBe('applied');
+          return savedDocumentXml((await client.save({ comments: [] })).bytes);
+        } finally { client.destroy(); }
+      });
+      const { client, engine, initial } = await open();
       try {
         const original = savedBody((await client.save({ comments: [] })).bytes);
         const inserted = await client.edit(intent(1, 0, 'insertSectionBreak', { type }));
         expect(inserted).toMatchObject({ version: 1, outcomes: [{ status: 'applied' }] });
+        const acked = [...inserted.frame!.payload.pageFrames ?? [], inserted.frame!.payload.frame]
+          .reduce((frame, delta) => applyFrameDeltaOwned(frame, decodeFrameDelta(delta)), applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame)));
         const frame = applyFrameDeltaOwned(null, decodeFrameDelta((await client.requestFullFrame()).frame!.payload.frame));
         const pages = scenario.pages[type];
+        expect(pageTexts(acked)).toEqual(pages);
         expect(pageTexts(frame)).toEqual(pages);
         const layout = JSON.parse(engine.retainedLayoutJson()) as { layout: { pages: { parityFiller?: boolean }[] } };
         expect(layout.layout.pages.map(page => page.parityFiller === true)).toEqual(pages.map(text => text === ''));
@@ -1437,11 +1476,167 @@ for (const scenario of SECTION_BREAK_CASES) {
         expect(savedSectionStarts((await client.save({ comments: [] })).bytes)).toEqual(expected);
         const undone = await client.edit(intent(2, 1, 'undo', {}));
         expect(undone).toMatchObject({ version: 2, outcomes: [{ status: 'applied' }], editState: { canUndo: false } });
-        expect(savedBody((await client.save({ comments: [] })).bytes)).toBe(original);
+        const restored = (await client.save({ comments: [] })).bytes;
+        expect(savedBody(restored)).toBe(original);
+        expect(savedDocumentXml(restored)).toBe(neutralXml);
       } finally { client.destroy(); }
     }, TIMEOUT);
   }
 }
+
+const UNTYPED_FOLLOWER_PAGES: Record<BreakStart, string[]> = {
+  continuous: ['BeforeAfter', 'Tail'], nextPage: ['Before', 'After', 'Tail'],
+  oddPage: ['Before', '', 'After', 'Tail'], evenPage: ['Before', 'After', 'Tail'],
+};
+
+for (const type of ['continuous', 'nextPage', 'oddPage', 'evenPage'] as const) {
+  test(`section break ${type} leaves a following untyped section on a new page`, async () => {
+    const { client } = await openWorker({ bodyXml: sectionParagraph(1, 'BeforeAfter', '<w:sectPr/>') + sectionParagraph(2, 'Tail'),
+      sectPr: '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr>', prepare(engine) {
+        return { story: 'body', paraId: engine.geometryReader.paragraphSpans('body')[0]!.paraId, offset: 6 };
+      } });
+    const fullFrame = async () => applyFrameDeltaOwned(null, decodeFrameDelta((await client.requestFullFrame()).frame!.payload.frame));
+    try {
+      expect(pageTexts(await fullFrame())).toEqual(['BeforeAfter', 'Tail']);
+      expect((await client.edit(intent(1, 0, 'insertSectionBreak', { type }))).outcomes[0]?.status).toBe('applied');
+      expect(pageTexts(await fullFrame())).toEqual(UNTYPED_FOLLOWER_PAGES[type]);
+      expect(savedSectionStarts((await client.save({ comments: [] })).bytes)).toEqual([['Before', null], ['After', type], ['', null]]);
+    } finally { client.destroy(); }
+  }, TIMEOUT);
+}
+
+const commentXml = (id: number) => `<w:comment w:id="${id}" w:author="Ada" w:date="2026-01-01T00:00:00Z"><w:p><w:r><w:t>Note ${id}</w:t></w:r></w:p></w:comment>`;
+const commented = (id: number, content: string) =>
+  `<w:commentRangeStart w:id="${id}"/>${content}<w:commentRangeEnd w:id="${id}"/><w:r><w:commentReference w:id="${id}"/></w:r>`;
+const textRun = (text: string) => `<w:r><w:t>${text}</w:t></w:r>`;
+const savedMarks = (xml: string) => ({
+  page: xml.match(/<w:br w:type="page"\/>/g)?.length ?? 0,
+  column: xml.match(/<w:br w:type="column"\/>/g)?.length ?? 0,
+  ranges: xml.match(/<w:commentRangeStart\b/g)?.length ?? 0,
+});
+
+async function sourceComments(bodyXml: string, comments: string) {
+  const { parseDocx } = await import('../docx/parser');
+  return (await parseDocx(syntheticDocument(false, false, false, bodyXml, undefined, comments).buffer as ArrayBuffer)).package.document.comments ?? [];
+}
+
+for (const comment of [false, true]) {
+  test(`remote page and column breaks survive worker saves without a local break command${comment ? ' beside a saved comment' : ''}`, async () => {
+    const bodyXml = sectionParagraph(1, 'One') + `<w:p w14:paraId="00000002">${comment ? commented(1, textRun('Two')) : textRun('Two')}</w:p>` +
+      sectionParagraph(3, 'Three');
+    const comments = comment ? commentXml(1) : undefined;
+    const { client, engine } = await openWorker({ bodyXml, comments });
+    const remote = await createResidentEngineSession();
+    try {
+      remote.loadState(engine.encodeState());
+      const two = remote.geometryReader.paragraphSpans('body')[1]!;
+      remote.insertPageBreak({ story: 'body', paraId: two.paraId, offset: 0 });
+      const three = remote.geometryReader.paragraphSpans('body').slice(0, 2).reduce((index, span) => index + span.length + 1, 0);
+      remote.applyRawOps('body', [{ op: 'insertEmbed', index: three, kind: 'columnBreak', payload: {} }]);
+      await client.applyRemoteUpdate(remote.encodeStateAsUpdate(engine.encodeStateVector()));
+      const host = comment ? await sourceComments(bodyXml, comments!) : [];
+      for (let save = 0; save < 2; save += 1) {
+        const xml = savedDocumentXml((await client.save({ comments: host })).bytes);
+        expect(savedMarks(xml)).toEqual({ page: 1, column: 1, ranges: comment ? 1 : 0 });
+        expect(xml.indexOf('w:type="page"')).toBeLessThan(xml.indexOf('>Two<'));
+        expect(xml.indexOf('w:type="column"')).toBeGreaterThan(xml.indexOf('>Two<'));
+        expect(xml.indexOf('w:type="column"')).toBeLessThan(xml.indexOf('>Three<'));
+      }
+    } finally { remote.destroy(); client.destroy(); }
+  }, TIMEOUT);
+}
+
+test('a commanded page break and an authored column break survive comment saves', async () => {
+  const bodyXml = `<w:p w14:paraId="00000001">${commented(1, textRun('First'))}</w:p>` +
+    `<w:p w14:paraId="00000002">${commented(2, textRun('Col') + '<w:r><w:br w:type="column"/></w:r>' + textRun('umn'))}</w:p>` +
+    sectionParagraph(3, 'Tail');
+  const comments = commentXml(1) + commentXml(2);
+  const { client } = await openWorker({ bodyXml, comments, prepare(engine) {
+    return { story: 'body', paraId: engine.geometryReader.paragraphSpans('body')[0]!.paraId, offset: 2 };
+  } });
+  try {
+    const host = await sourceComments(bodyXml, comments);
+    const inserted = await client.edit(intent(1, 0, 'insertPageBreak', {}));
+    expect(inserted.outcomes[0]?.status).toBe('applied');
+    let version = inserted.version;
+    const snapshot = await client.documentRead({ kind: 'reviewSnapshot' });
+    const ids = snapshot.value!.comments.map(({ id }) => id);
+    expect(ids).toHaveLength(2);
+    for (const [index, id] of ids.entries()) {
+      const read = await client.documentRead({ kind: 'reviewSnapshot' });
+      const updated = await client.edit(intent(index + 2, version, 'updateComment', { id, patch: { body: `Updated ${id}` }, expectVersion: read.version }));
+      expect(updated.outcomes[0]?.status).toBe('applied');
+      version = updated.version;
+      expect(savedMarks(savedDocumentXml((await client.save({ comments: host })).bytes))).toEqual({ page: 1, column: 1, ranges: 2 });
+    }
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+const sectionXml = (type: string, left: number) => `<w:sectPr><w:type w:val="${type}"/><w:pgMar w:left="${left}"/></w:sectPr>`;
+
+function savedSectionMargins(bytes: ArrayBuffer): [string, string | null, number | null][] {
+  const sectPr = /<w:sectPr\b(?:[^>]*\/>|[\s\S]*?<\/w:sectPr>)/;
+  const read = (xml: string): [string | null, number | null] => {
+    const left = /<w:pgMar\b[^>]*\bw:left="(\d+)"/.exec(xml)?.[1];
+    return [/<w:type\b[^>]*\bw:val="([^"]*)"/.exec(xml)?.[1] ?? null, left === undefined ? null : Number(left)];
+  };
+  const sections: [string, string | null, number | null][] = [];
+  const rest = savedDocumentXml(bytes).replace(/<w:p(?:\s[^>]*[^/>])?>[\s\S]*?<\/w:p>/g, paragraph => {
+    const found = sectPr.exec(paragraph)?.[0];
+    if (found) sections.push([[...paragraph.matchAll(/<w:t\b[^>]*>([^<]*)<\/w:t>/g)].map(match => match[1]).join(''), ...read(found)]);
+    return '';
+  });
+  const final = sectPr.exec(rest)?.[0];
+  return final ? [...sections, ['', ...read(final)]] : sections;
+}
+
+const sectionStarts = (engine: Awaited<ReturnType<typeof openWorker>>['engine']) => engine.sectionProperties().sections
+  .map(({ properties }): [string | null, number | null] => [properties.sectionStart ?? null, properties.marginLeft ?? null]);
+
+test('a remote section boundary shift keeps every section its own properties through a local break', async () => {
+  const bodyXml = sectionParagraph(1, 'FirstMore', sectionXml('continuous', 1800)) + sectionParagraph(2, 'Second', sectionXml('nextPage', 2800)) +
+    sectionParagraph(3, 'Tail');
+  const { client, engine } = await openWorker({ bodyXml, sectPr: sectionXml('evenPage', 3800) });
+  const remote = await createResidentEngineSession();
+  try {
+    remote.loadState(engine.encodeState());
+    const first = remote.paragraphs('body')[0]!;
+    remote.splitSection({ story: 'body', paraId: first.paraId, offset: 5 }, first.properties.sectPr as SectionProperties, 'oddPage');
+    await client.applyRemoteUpdate(remote.encodeStateAsUpdate(engine.encodeStateVector()));
+    expect(engine.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['First', 'More', 'Second', 'Tail']);
+    expect(sectionStarts(engine)).toEqual([['continuous', 1800], ['oddPage', 1800], ['nextPage', 2800], ['evenPage', 3800]]);
+    const at = { story: 'body', paraId: engine.paragraphs('body')[1]!.paraId, offset: 2 };
+    const inserted = await client.edit(intent(1, 0, 'insertSectionBreak', { type: 'continuous', selection: { anchor: at, focus: at } }));
+    expect(inserted.outcomes[0]?.status).toBe('applied');
+    expect(sectionStarts(engine)).toEqual([['continuous', 1800], ['oddPage', 1800], ['continuous', 1800], ['nextPage', 2800], ['evenPage', 3800]]);
+    expect(savedSectionMargins((await client.save({ comments: [] })).bytes)).toEqual([
+      ['First', 'continuous', 1800], ['Mo', 'oddPage', 1800], ['re', 'continuous', 1800], ['Second', 'nextPage', 2800], ['', 'evenPage', 3800],
+    ]);
+  } finally { remote.destroy(); client.destroy(); }
+}, TIMEOUT);
+
+test('a section break over a selection across a section boundary splits the section the deletion leaves', async () => {
+  const bodyXml = sectionParagraph(1, 'Zero') + sectionParagraph(2, 'First', sectionXml('continuous', 1800)) + sectionParagraph(3, 'Second') +
+    sectionParagraph(4, 'Third', sectionXml('nextPage', 2800)) + sectionParagraph(5, 'Tail');
+  const { client, engine } = await openWorker({ bodyXml, sectPr: sectionXml('evenPage', 3800) });
+  try {
+    const [zero, , second] = engine.geometryReader.paragraphSpans('body');
+    const selection = { anchor: { story: 'body', paraId: zero!.paraId, offset: 2 }, focus: { story: 'body', paraId: second!.paraId, offset: 3 } };
+    const deleted = await client.edit(intent(1, 0, 'deleteBackward', { selection }));
+    expect(deleted.outcomes[0]?.status).toBe('applied');
+    const merged = engine.sectionProperties();
+    const body = merged.paragraphs.filter(({ story }) => story === 'body').map(({ paraId }) => paraId);
+    const ordinal = body.indexOf(deleted.selection!.focus.paraId);
+    const index = merged.sections.findIndex(({ section }) => section === 'final' || body.indexOf(section) >= ordinal);
+    const containing = merged.sections[index]!.properties;
+    const left = sectionStarts(engine);
+    expect((await client.edit(intent(2, 1, 'undo', {}))).outcomes[0]?.status).toBe('applied');
+    const inserted = await client.edit(intent(3, 2, 'insertSectionBreak', { type: 'oddPage', selection }));
+    expect(inserted.outcomes[0]?.status).toBe('applied');
+    expect(sectionStarts(engine)).toEqual([...left.slice(0, index),
+      [containing.sectionStart ?? null, containing.marginLeft ?? null], ['oddPage', containing.marginLeft ?? null], ...left.slice(index + 1)]);
+  } finally { client.destroy(); }
+}, TIMEOUT);
 
 test('an edited paragraph keeps an empty section mark through save and reopen', async () => {
   const mark = '<w:pPr><w:sectPr/></w:pPr>';
@@ -1559,4 +1754,69 @@ test('round two resident geometry matches the reference walk on built pages', as
     expect(normalize(await readResidentFrameGeometry(engine, unresolved, range, 1)))
       .toEqual(normalize(await reference(engine, unresolved, range, 1)));
   } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('resident geometry, object rects and selection after inline controls match the layout', async () => {
+  const { createDisplayListQueries } = await import('../layout/render/displayListQueries');
+  const { loadRustDisplayListQueryEngine } = await import('../layout/render/rustDisplayList');
+  const r = (text: string) => `<w:r><w:t>${text}</w:t></w:r>`;
+  const p = (id: string, content: string) => `<w:p w14:paraId="${id}">${content}</w:p>`;
+  const sdt = (properties: string, content: string) => `<w:sdt><w:sdtPr>${properties}</w:sdtPr><w:sdtContent>${content}</w:sdtContent></w:sdt>`;
+  const checkbox = (id: number) => sdt(`<w:id w:val="${id}"/><w14:checkbox><w14:checked w14:val="0"/></w14:checkbox>`, r('☐'));
+  const bodyXml = p('00000001', checkbox(1) + r('A')) + p('00000002', checkbox(2) + r('B')) +
+    sdt('<w:id w:val="3"/><w:tag w:val="block"/>', p('00000003', r('Block'))) +
+    p('00000004', r('Text') + sdt('<w:id w:val="4"/><w:tag w:val="name"/><w:text/>', r('Name')) + r('End')) +
+    `<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc>${p('00000005', checkbox(5) + r('C'))}</w:tc></w:tr></w:tbl>` +
+    p('00000006', r('Tail'));
+  const { client, engine, initial } = await openWorker({ bodyXml, objects: true });
+  const frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
+  const queries = createDisplayListQueries(frame.displayList, await loadRustDisplayListQueryEngine());
+  try {
+    interface Block {
+      kind: string; paraId?: string; pmStart?: number; pmEnd?: number; sdtGroups?: { id: string }[];
+      runs?: { kind: string; text?: string; pmStart?: number; pmEnd?: number; inlineSdtWidget?: { pos: number } }[];
+      rows?: { cells: { blocks: Block[] }[] }[];
+    }
+    const layout: Block[] = [];
+    const walk = (blocks: Block[]): void => {
+      for (const block of blocks) {
+        if (block.kind === 'paragraph') layout.push(block);
+        for (const row of block.rows ?? []) for (const cell of row.cells) walk(cell.blocks);
+      }
+    };
+    walk(engine.yrsBlocksForStory('body') as Block[]);
+    expect(layout).toHaveLength(6);
+    const located = <T extends { pageIndex: number }>(rects: T[]) => rects.map(rect => ({ ...rect, pageId: frame.pages[rect.pageIndex]!.pageId.toString() }));
+    const sorted = (values: unknown[]) => values.map(value => JSON.stringify(value)).sort();
+
+    const geometry = engine.residentGeometry('body', [[0, 10_000]]);
+    expect(sorted(geometry.paragraphs.map(({ paraId, from, to }) => ({ paraId, from, to }))))
+      .toEqual(sorted(layout.map(block => ({ paraId: block.paraId, from: block.pmStart! + 1, to: block.pmEnd! - 1 }))));
+    const storyOf = (paraId: string | undefined) => geometry.paragraphs.find(paragraph => paragraph.paraId === paraId)!.story;
+    const control = layout.find(block => block.paraId === '00000003')!;
+    expect(geometry.controls.map(({ story, contentStory, from }) => ({ story, contentStory, group: `sdt@${from}` })))
+      .toEqual([{ story: 'body', contentStory: storyOf('00000003'), group: control.sdtGroups![0]!.id }]);
+    const widgets = layout.flatMap(block => (block.runs ?? []).flatMap(run => run.inlineSdtWidget ? [`${block.paraId}@${run.inlineSdtWidget.pos}`] : []));
+    const inline = geometry.paragraphs.flatMap(paragraph => (paragraph.controls ?? []).map(({ from }) => `${paragraph.paraId}@${from}`));
+    expect(widgets).toHaveLength(3);
+    expect(inline).toHaveLength(4);
+    expect(inline).toEqual(expect.arrayContaining(widgets));
+
+    const objects = initial.frame.payload.geometry!.objects;
+    expect(sorted(objects.filter(object => object.kind === 'text').map(({ story, rects }) => ({ story, rects }))))
+      .toEqual(sorted(layout.map(block => ({ story: storyOf(block.paraId), rects: located(queries.rangeRects(block.pmStart! + 1, block.pmEnd! - 1)) }))
+        .filter(object => object.rects.length > 0)));
+    const images = layout.flatMap(block => (block.runs ?? []).filter(run => run.kind === 'image').map(run => run.pmStart!));
+    expect(images).toHaveLength(2);
+    expect(sorted(objects.filter(object => object.kind === 'image').map(object => object.rects)))
+      .toEqual(sorted(images.map(position => located([queries.imageByPos(position, 'body')!.rect]))));
+
+    const end = layout.find(block => block.paraId === '00000004')!.runs!.find(run => run.text === 'End')!;
+    const selected = await client.edit(intent(1, 0, 'select', { selection: {
+      anchor: { story: 'body', paraId: '00000004', offset: 6 }, focus: { story: 'body', paraId: '00000004', offset: 9 },
+    } }));
+    const expected = located(queries.rangeRects(end.pmStart!, end.pmEnd!));
+    expect(expected.length).toBeGreaterThan(0);
+    expect(selected.frame!.payload.geometry!.selection).toEqual(expected);
+  } finally { queries.dispose(); client.destroy(); }
 }, TIMEOUT);

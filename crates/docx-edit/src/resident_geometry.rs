@@ -29,8 +29,30 @@ pub(crate) struct ResidentParagraph {
     pub from: u64,
     pub to: u64,
     pub leading: u64,
+    /// Story units, leading blocks included.
     pub length: u64,
     pub story_order: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub controls: Vec<ResidentInlineControl>,
+}
+
+/// An inline control node: its story offset in the paragraph and its display range.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ResidentInlineControl {
+    pub offset: u64,
+    pub from: u64,
+    pub to: u64,
+}
+
+/// A block control node and the story holding its content.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ResidentControl {
+    pub story: String,
+    pub content_story: String,
+    pub from: u64,
+    pub to: u64,
 }
 
 #[derive(Clone, Serialize)]
@@ -61,6 +83,7 @@ pub(crate) struct ResidentTable {
 pub(crate) struct ResidentGeometry {
     pub paragraphs: Vec<ResidentParagraph>,
     pub tables: Vec<ResidentTable>,
+    pub controls: Vec<ResidentControl>,
     pub selection: Option<[u64; 2]>,
 }
 
@@ -69,13 +92,19 @@ enum Item {
     Paragraph(ResidentParagraph),
     Table(usize),
     Cell(usize, ResidentCell),
+    Control(usize),
 }
 
 struct Entry {
     from: usize,
     to: usize,
     item: Item,
+    /// The paragraph's inline controls: the point of each node's start and its display units.
+    controls: Vec<(usize, u64)>,
 }
+
+/// A record before indexing: its range, its item and its inline control nodes.
+type Record = (u64, u64, Item, Vec<(u64, u64)>);
 
 pub(crate) struct ResidentGeometryIndex {
     epoch: u64,
@@ -88,6 +117,7 @@ pub(crate) struct ResidentGeometryIndex {
     stories: HashSet<String>,
     tables: Vec<ResidentTable>,
     table_entries: Vec<usize>,
+    controls: Vec<ResidentControl>,
 }
 
 fn span(value: Option<&Any>) -> usize {
@@ -134,8 +164,9 @@ impl ResidentGeometryIndex {
         epoch: u64,
         outline: GeometryPositionOutline,
     ) -> Result<Self, String> {
-        let mut records = Vec::new();
+        let mut records: Vec<Record> = Vec::new();
         let mut tables = Vec::new();
+        let mut controls = Vec::new();
         for (story, projected) in &outline {
             let paragraphs: HashMap<_, _> = projected
                 .paragraphs
@@ -159,6 +190,16 @@ impl ResidentGeometryIndex {
                 };
                 let from = projected.content_start + paragraph.display_start + 1;
                 let to = from + paragraph.length;
+                let mut expanded = 0;
+                let inline = paragraph
+                    .controls
+                    .iter()
+                    .map(|&[offset, size]| {
+                        let start = from + offset + expanded;
+                        expanded += size - 1;
+                        (start, size)
+                    })
+                    .collect();
                 records.push((
                     from,
                     to,
@@ -169,9 +210,11 @@ impl ResidentGeometryIndex {
                         from,
                         to,
                         leading: paragraph.leading,
-                        length: paragraph.length + paragraph.leading,
+                        length: paragraph.length - expanded + paragraph.leading,
                         story_order: 0,
+                        controls: Vec::new(),
                     }),
+                    inline,
                 ));
                 let mut leading = 0;
                 for segment in unit {
@@ -230,7 +273,12 @@ impl ResidentGeometryIndex {
                                     from: cell_from,
                                     to: cell_to,
                                 };
-                                records.push((cell_from, cell_to, Item::Cell(id, cell.clone())));
+                                records.push((
+                                    cell_from,
+                                    cell_to,
+                                    Item::Cell(id, cell.clone()),
+                                    Vec::new(),
+                                ));
                                 cells.push(cell);
                                 for row in row..row + rowspan {
                                     occupied
@@ -256,17 +304,25 @@ impl ResidentGeometryIndex {
                             },
                             cells,
                         });
-                        records.push((start, end, Item::Table(id)));
+                        records.push((start, end, Item::Table(id), Vec::new()));
                         cursor = end;
                         leading += 1;
                         table_index += 1;
                     } else if kind == "blockSdt" {
-                        let story = child(payload.get("story"), format!("{story}:sdt0"));
-                        cursor += outline
-                            .get(&story)
+                        let content_story = child(payload.get("story"), format!("{story}:sdt0"));
+                        let size = outline
+                            .get(&content_story)
                             .ok_or_else(|| "missing control projection".to_owned())?
-                            .size
-                            + 2;
+                            .size;
+                        let end = cursor + size + 2;
+                        records.push((cursor, end, Item::Control(controls.len()), Vec::new()));
+                        controls.push(ResidentControl {
+                            story: story.clone(),
+                            content_story,
+                            from: cursor,
+                            to: end,
+                        });
+                        cursor = end;
                         leading += 1;
                     } else if kind == "pageBreak" || kind == "columnBreak" {
                         cursor += 1;
@@ -276,32 +332,36 @@ impl ResidentGeometryIndex {
                 cursor = projected.content_start + paragraph.display_start + paragraph.length + 2;
             }
         }
-        let mut order: Vec<_> = (0..tables.len()).collect();
-        order.sort_by(|a, b| {
-            if a == b {
-                return std::cmp::Ordering::Equal;
-            }
-            let a = &tables[*a];
-            let b = &tables[*b];
-            if a.from <= b.from && a.to >= b.to {
-                std::cmp::Ordering::Greater
-            } else if b.from <= a.from && b.to >= a.to {
-                std::cmp::Ordering::Less
-            } else {
-                a.from.cmp(&b.from)
-            }
-        });
+        let mut containers: Vec<(u64, u64, Vec<&str>)> = tables
+            .iter()
+            .map(|table| {
+                let stories = table.cells.iter().map(|cell| cell.story.as_str());
+                (table.from, table.to, stories.collect())
+            })
+            .chain(controls.iter().map(|control| {
+                (
+                    control.from,
+                    control.to,
+                    vec![control.content_story.as_str()],
+                )
+            }))
+            .collect();
+        containers.sort_by(|a, b| nested_first((a.0, a.1), (b.0, b.1)));
         let mut story_order = HashMap::from([(root.to_owned(), 0)]);
-        for id in order {
-            for cell in &tables[id].cells {
+        for (_, _, stories) in containers {
+            for story in stories {
                 let next = story_order.len();
-                story_order.entry(cell.story.clone()).or_insert(next);
+                story_order.entry(story.to_owned()).or_insert(next);
             }
         }
         let mut keys = BTreeMap::new();
-        for (from, to, _) in &records {
+        for (from, to, _, inline) in &records {
             keys.insert((*from, false), 0);
             keys.insert((*to, true), 0);
+            // Text typed at a control's start moves the control.
+            for (start, _) in inline {
+                keys.insert((*start, true), 0);
+            }
         }
         let points: Vec<_> = keys.keys().copied().collect();
         for (index, key) in points.iter().enumerate() {
@@ -309,7 +369,7 @@ impl ResidentGeometryIndex {
         }
         let mut entries: Vec<_> = records
             .into_iter()
-            .map(|(from, to, mut item)| {
+            .map(|(from, to, mut item, inline)| {
                 if let Item::Paragraph(paragraph) = &mut item {
                     paragraph.story_order =
                         *story_order.get(&paragraph.story).unwrap_or(&usize::MAX);
@@ -318,6 +378,10 @@ impl ResidentGeometryIndex {
                     from: keys[&(from, false)],
                     to: keys[&(to, true)],
                     item,
+                    controls: inline
+                        .into_iter()
+                        .map(|(start, size)| (keys[&(start, true)], size))
+                        .collect(),
                 }
             })
             .collect();
@@ -350,6 +414,7 @@ impl ResidentGeometryIndex {
             stories: outline.keys().cloned().collect(),
             tables,
             table_entries,
+            controls,
         };
         if !result.entries.is_empty() {
             result.build_maxima(1, 0, result.entries.len());
@@ -380,6 +445,18 @@ impl ResidentGeometryIndex {
         (self.points[point].0 as i64 + shift) as u64
     }
 
+    /// Display units from `entry`'s content start `from` to its story offset `offset`.
+    fn display_offset(&self, entry: &Entry, from: u64, offset: u64) -> u64 {
+        let mut expanded = 0;
+        for &(point, size) in &entry.controls {
+            if self.position(point).saturating_sub(from + expanded) >= offset {
+                break;
+            }
+            expanded += size - 1;
+        }
+        offset.saturating_add(expanded)
+    }
+
     fn locate(&self, at: &ResidentLoc) -> Option<u64> {
         let entry = &self.entries[*self.carets.get(&(at.story.clone(), at.para_id.clone()))?];
         let Item::Paragraph(paragraph) = &entry.item else {
@@ -387,7 +464,8 @@ impl ResidentGeometryIndex {
         };
         let from = self.position(entry.from);
         let to = self.position(entry.to);
-        Some(from + at.offset.saturating_sub(paragraph.leading).min(to - from))
+        let offset = at.offset.saturating_sub(paragraph.leading);
+        Some(from + self.display_offset(entry, from, offset).min(to - from))
     }
 
     fn move_text(
@@ -403,10 +481,11 @@ impl ResidentGeometryIndex {
         };
         let start = self.position(self.entries[entry].from);
         let end = self.position(self.entries[entry].to);
-        if u64::from(offset) > end - start {
+        let offset = self.display_offset(&self.entries[entry], start, u64::from(offset));
+        if offset > end - start {
             return false;
         }
-        let at = start + u64::from(offset);
+        let at = start + offset;
         let (mut left, mut right) = (0, self.points.len());
         while left < right {
             let middle = (left + right) / 2;
@@ -461,6 +540,7 @@ impl ResidentGeometryIndex {
         }
         let mut paragraphs = Vec::new();
         let mut selected: HashMap<usize, Vec<ResidentCell>> = HashMap::new();
+        let mut controls = Vec::new();
         for index in found {
             let entry = &self.entries[index];
             match &entry.item {
@@ -468,10 +548,26 @@ impl ResidentGeometryIndex {
                     let mut value = value.clone();
                     value.from = self.position(entry.from);
                     value.to = self.position(entry.to);
-                    value.length = value.to - value.from + value.leading;
+                    let mut expanded = 0;
+                    for &(point, size) in &entry.controls {
+                        let from = self.position(point);
+                        value.controls.push(ResidentInlineControl {
+                            offset: from - value.from - expanded + value.leading,
+                            from,
+                            to: from + size,
+                        });
+                        expanded += size - 1;
+                    }
+                    value.length = value.to - value.from - expanded + value.leading;
                     if value.story_order != usize::MAX {
                         paragraphs.push(value);
                     }
+                }
+                Item::Control(id) => {
+                    let mut value = self.controls[*id].clone();
+                    value.from = self.position(entry.from);
+                    value.to = self.position(entry.to);
+                    controls.push(value);
                 }
                 Item::Table(id) => {
                     selected.entry(*id).or_default();
@@ -501,17 +597,8 @@ impl ResidentGeometryIndex {
                 }
             })
             .collect();
-        tables.sort_by(|a, b| {
-            if a.from == b.from && a.to == b.to {
-                std::cmp::Ordering::Equal
-            } else if a.from <= b.from && a.to >= b.to {
-                std::cmp::Ordering::Greater
-            } else if b.from <= a.from && b.to >= a.to {
-                std::cmp::Ordering::Less
-            } else {
-                a.from.cmp(&b.from)
-            }
-        });
+        tables.sort_by(|a, b| nested_first((a.from, a.to), (b.from, b.to)));
+        controls.sort_by(|a, b| nested_first((a.from, a.to), (b.from, b.to)));
         let selection = request
             .selection
             .as_ref()
@@ -519,8 +606,22 @@ impl ResidentGeometryIndex {
         ResidentGeometry {
             paragraphs,
             tables,
+            controls,
             selection,
         }
+    }
+}
+
+/// Orders ranges nested ones first, then by start.
+fn nested_first(a: (u64, u64), b: (u64, u64)) -> std::cmp::Ordering {
+    if a == b {
+        std::cmp::Ordering::Equal
+    } else if a.0 <= b.0 && a.1 >= b.1 {
+        std::cmp::Ordering::Greater
+    } else if b.0 <= a.0 && b.1 >= a.1 {
+        std::cmp::Ordering::Less
+    } else {
+        a.0.cmp(&b.0)
     }
 }
 
@@ -583,8 +684,11 @@ impl EditingDoc {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{KIND_KEY, story_ref};
+    use crate::bridge::{RenderEnv, yrs_doc_to_mapped_layout_blocks};
+    use crate::{EditCtx, FormatPolicy, KIND_KEY, Position, StoryRange, story_ref};
+    use docx_layout::types::{LayoutBlock, Run};
     use serde_json::{Value, json};
+    use std::collections::BTreeSet;
     use yrs::{MapPrelim, Text, Transact};
 
     fn story(doc: &EditingDoc, id: &str, segments: Value) {
@@ -687,5 +791,339 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn package(body: &str) -> Vec<u8> {
+        let parts = [
+            (
+                "[Content_Types].xml",
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_owned(),
+            ),
+            (
+                "_rels/.rels",
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_owned(),
+            ),
+            (
+                "word/document.xml",
+                format!(
+                    r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body>{body}<w:sectPr/></w:body></w:document>"#
+                ),
+            ),
+        ];
+        ooxml_opc::rezip_parts(
+            &parts
+                .into_iter()
+                .map(|(name, xml)| (name.to_owned(), xml.into_bytes()))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap()
+    }
+
+    fn controls_doc() -> EditingDoc {
+        let p = |id: &str, content: String| format!(r#"<w:p w14:paraId="{id}">{content}</w:p>"#);
+        let r = |text: &str| format!("<w:r><w:t>{text}</w:t></w:r>");
+        let sdt = |properties: &str, content: String| {
+            format!(
+                "<w:sdt><w:sdtPr>{properties}</w:sdtPr><w:sdtContent>{content}</w:sdtContent></w:sdt>"
+            )
+        };
+        let checkbox = |id: u32| {
+            sdt(
+                &format!(
+                    r#"<w:id w:val="{id}"/><w14:checkbox><w14:checked w14:val="0"/></w14:checkbox>"#
+                ),
+                r("☐"),
+            )
+        };
+        let body = [
+            p("00000001", checkbox(1) + &r("A")),
+            p("00000002", checkbox(2) + &r("B")),
+            sdt(
+                r#"<w:id w:val="3"/><w:tag w:val="block"/>"#,
+                p("00000003", r("Block")),
+            ),
+            p(
+                "00000004",
+                r("Text")
+                    + &sdt(
+                        r#"<w:id w:val="4"/><w:tag w:val="name"/><w:text/>"#,
+                        r("Name"),
+                    )
+                    + &r("End"),
+            ),
+            format!(
+                r#"<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc>{}</w:tc></w:tr></w:tbl>"#,
+                p("00000005", checkbox(5) + &r("C"))
+            ),
+            p("00000006", r("Tail")),
+        ]
+        .concat();
+        let doc = EditingDoc::new(88002);
+        crate::seed_from_docx(&doc, &package(&body)).unwrap();
+        doc
+    }
+
+    type Paragraphs = BTreeSet<(String, String, u64, u64)>;
+    type Inline = BTreeSet<(String, u64, u64)>;
+    type Blocks = BTreeSet<(String, u64, u64)>;
+
+    /// Paragraph content ranges, inline control nodes by paragraph and block control nodes by
+    /// content story, as the layout bridge places them.
+    fn layout_positions(doc: &EditingDoc) -> (Paragraphs, Inline, Blocks) {
+        fn visit(blocks: &[LayoutBlock], ends: &mut HashMap<u64, (u64, Option<String>)>) {
+            for block in blocks {
+                match block {
+                    LayoutBlock::Paragraph(paragraph) => {
+                        let group = paragraph
+                            .sdt_groups
+                            .as_ref()
+                            .and_then(|groups| groups.first());
+                        ends.insert(
+                            paragraph.pm_start.unwrap() as u64,
+                            (
+                                paragraph.pm_end.unwrap() as u64,
+                                group.map(|group| group.id.clone()),
+                            ),
+                        );
+                    }
+                    LayoutBlock::Table(table) => {
+                        for cell in table.rows.iter().flat_map(|row| &row.cells) {
+                            visit(&cell.blocks, ends);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let (blocks, map) =
+            yrs_doc_to_mapped_layout_blocks(doc, "body", &RenderEnv::default()).unwrap();
+        let mut ends = HashMap::new();
+        visit(&blocks, &mut ends);
+        let mut paragraphs = BTreeSet::new();
+        let mut groups: BTreeMap<String, (String, u64)> = BTreeMap::new();
+        for &(start, source) in &map.paragraph_blocks {
+            let (slot, para_id) = &map.paragraphs[source as usize];
+            let story = map.stories[*slot as usize].clone();
+            let (end, group) = ends[&start].clone();
+            paragraphs.insert((story.clone(), para_id.clone(), start + 1, end - 1));
+            if let Some(group) = group {
+                let entry = groups.entry(group).or_insert((story, end));
+                entry.1 = entry.1.max(end);
+            }
+        }
+        let blocks = groups
+            .into_iter()
+            .map(|(group, (story, end))| {
+                let from = group.strip_prefix("sdt@").unwrap().parse().unwrap();
+                (story, from, end + 1)
+            })
+            .collect();
+        let mut atoms: BTreeMap<(u32, u32), (u64, u64)> = BTreeMap::new();
+        for span in map.spans.iter().filter(|span| span.atom) {
+            let range = atoms
+                .entry((span.paragraph, span.raw_start))
+                .or_insert((span.pm_start, span.pm_end));
+            range.0 = range.0.min(span.pm_start);
+            range.1 = range.1.max(span.pm_end);
+        }
+        let inline = atoms
+            .into_iter()
+            .map(|((paragraph, _), (start, end))| {
+                (
+                    map.paragraphs[paragraph as usize].1.clone(),
+                    start - 1,
+                    end + 1,
+                )
+            })
+            .collect();
+        (paragraphs, inline, blocks)
+    }
+
+    fn resident_positions(value: &Value) -> (Paragraphs, Inline, Blocks) {
+        let number = |value: &Value| value.as_u64().unwrap();
+        let text = |value: &Value| value.as_str().unwrap().to_owned();
+        let mut paragraphs = BTreeSet::new();
+        let mut inline = BTreeSet::new();
+        for paragraph in value["paragraphs"].as_array().unwrap() {
+            paragraphs.insert((
+                text(&paragraph["story"]),
+                text(&paragraph["paraId"]),
+                number(&paragraph["from"]),
+                number(&paragraph["to"]),
+            ));
+            for control in paragraph["controls"].as_array().into_iter().flatten() {
+                inline.insert((
+                    text(&paragraph["paraId"]),
+                    number(&control["from"]),
+                    number(&control["to"]),
+                ));
+            }
+        }
+        let blocks = value["controls"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|control| {
+                (
+                    text(&control["contentStory"]),
+                    number(&control["from"]),
+                    number(&control["to"]),
+                )
+            })
+            .collect();
+        (paragraphs, inline, blocks)
+    }
+
+    fn outline_paragraphs(doc: &EditingDoc) -> Paragraphs {
+        let GeometryRead::Value(outline) = doc.geometry_position_outline("body") else {
+            panic!("legacy outline");
+        };
+        outline
+            .iter()
+            .flat_map(|(story, projected)| {
+                projected.paragraphs.iter().map(move |paragraph| {
+                    let from = projected.content_start + paragraph.display_start + 1;
+                    (
+                        story.clone(),
+                        paragraph.para_id.clone(),
+                        from,
+                        from + paragraph.length,
+                    )
+                })
+            })
+            .collect()
+    }
+
+    fn whole(selection: Option<[ResidentLoc; 2]>) -> ResidentRequest {
+        ResidentRequest {
+            ranges: vec![[0, 10_000]],
+            selection,
+        }
+    }
+
+    fn at(story: &str, para_id: &str, offset: u64) -> ResidentLoc {
+        ResidentLoc {
+            story: story.into(),
+            para_id: para_id.into(),
+            offset,
+        }
+    }
+
+    #[test]
+    fn resident_and_outline_positions_match_the_layout_after_inline_and_block_controls() {
+        let doc = controls_doc();
+        let layout = layout_positions(&doc);
+        assert_eq!(layout.0.len(), 6);
+        assert_eq!(layout.1.len(), 4);
+        assert_eq!(layout.2.len(), 1);
+        assert_eq!(outline_paragraphs(&doc), layout.0);
+        let resident = doc
+            .resident_geometry(
+                "body",
+                &whole(Some([at("body", "00000004", 6), at("body", "00000004", 9)])),
+            )
+            .unwrap();
+        let value = serde_json::to_value(&resident).unwrap();
+        assert_eq!(resident_positions(&value), layout);
+        let (blocks, _) =
+            yrs_doc_to_mapped_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+        let end = blocks
+            .iter()
+            .find_map(|block| match block {
+                LayoutBlock::Paragraph(paragraph) => paragraph.runs.iter().find_map(|run| {
+                    matches!(run, Run::Text(text) if text.text == "End")
+                        .then(|| [run.pm_start().unwrap() as u64, run.pm_end().unwrap() as u64])
+                }),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(value["selection"], json!(end));
+        assert_eq!(value["controls"][0]["story"], "body");
+    }
+
+    #[test]
+    fn resident_geometry_after_inline_controls_follows_edits_like_a_rebuild() {
+        let doc = controls_doc();
+        let request = whole(Some([at("body", "00000004", 0), at("body", "00000004", 9)]));
+        doc.resident_geometry("body", &request).unwrap();
+        let ctx = EditCtx::local("", "");
+        let raw = |story: &str, para_id: &str, offset: u32| {
+            doc.paragraph_index(story)
+                .unwrap()
+                .para_span(para_id)
+                .unwrap()
+                .0
+                + offset
+        };
+        let check = |label: &str, incremental: bool| {
+            let cold = serde_json::to_value(
+                ResidentGeometryIndex::build(&doc, "body", doc.committed_epoch())
+                    .unwrap()
+                    .query(&request),
+            )
+            .unwrap();
+            let current = if incremental {
+                let revision = doc.story_revisions.lock().unwrap().geometry;
+                let cache = doc.resident_geometry.lock().unwrap();
+                let index = cache.get("body").expect(label);
+                assert_eq!(index.revision, revision, "{label}");
+                serde_json::to_value(index.query(&request)).unwrap()
+            } else {
+                serde_json::to_value(doc.resident_geometry("body", &request).unwrap()).unwrap()
+            };
+            assert_eq!(current, cold, "{label}");
+            assert_eq!(resident_positions(&cold), layout_positions(&doc), "{label}");
+        };
+        for (label, para_id, offset, text) in [
+            ("after the inline control", "00000004", 6, "+"),
+            ("right before the inline control", "00000004", 5, "x"),
+            ("before a leading checkbox", "00000001", 0, "y"),
+            ("after a cell checkbox", "00000005", 1, "z"),
+            ("inside the block control", "00000003", 5, "w"),
+        ] {
+            let story = outline_paragraphs(&doc)
+                .into_iter()
+                .find(|paragraph| paragraph.1 == para_id)
+                .unwrap()
+                .0;
+            let index = raw(&story, para_id, offset);
+            let before = doc.committed_epoch();
+            doc.insert_text(
+                &ctx,
+                Position::new(story.as_str(), index),
+                text,
+                FormatPolicy::Inherit,
+            )
+            .unwrap();
+            doc.advance_indexes_after_text_insert(
+                &story,
+                before,
+                doc.committed_epoch(),
+                index,
+                text,
+            );
+            check(label, true);
+        }
+        let start = raw("body", "00000004", 7);
+        let before = doc.committed_epoch();
+        doc.delete_range(&ctx, StoryRange::new("body", start, start + 1))
+            .unwrap();
+        doc.advance_indexes_after_text_delete(
+            "body",
+            before,
+            doc.committed_epoch(),
+            start,
+            start + 1,
+        );
+        check("deleting after the inline control", true);
+        let fill: crate::EditRequest = serde_json::from_value(json!({
+            "expectVersion": doc.version().as_str(),
+            "steps": [{"op": "setContentControlText", "target": {"kind": "tag", "tag": "name"}, "text": "Longer name"}]
+        }))
+        .unwrap();
+        doc.apply_edits(&fill, &crate::UndoSession::new())
+            .unwrap()
+            .unwrap();
+        check("typing inside the inline control", false);
     }
 }

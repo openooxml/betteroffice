@@ -2254,6 +2254,8 @@ interface ProjectedBlockMemo {
   children?: readonly BlockContent[][];
   /** Session key of the pilcrow a paragraph was projected from. */
   sessionKey?: string;
+  /** The breaks of a projected paragraph that seeding moves behind it as block embeds. */
+  trailing?: readonly BlockBreakKind[];
 }
 
 interface ProjectedStory {
@@ -2360,7 +2362,55 @@ const NESTED_STORY_ID = /^(.*?)(?::t\d+:r\d+c\d+|:sdt\d+)$/;
 
 /** Page and column breaks the layout gives a block of their own, ahead of a paragraph. */
 const isBlockBreak = (item: InlineItem): boolean =>
-  item.kind === 'embed' && (item.embedKind === 'pageBreak' || item.embedKind === 'columnBreak');
+  item.kind === 'embed' && blockBreakKind(item.embedKind) !== null;
+
+type BlockBreakKind = 'page' | 'column';
+
+function blockBreakKind(embedKind: string): BlockBreakKind | null {
+  return embedKind === 'pageBreak' ? 'page' : embedKind === 'columnBreak' ? 'column' : null;
+}
+
+type FlowToken = BlockBreakKind | 'visible';
+
+function runFlowTokens(run: Run, tokens: FlowToken[]): void {
+  for (const content of run.content) {
+    if (content.type === 'break' && (content.breakType === 'page' || content.breakType === 'column')) {
+      tokens.push(content.breakType);
+    } else if (content.type !== 'text' || content.text.length > 0) tokens.push('visible');
+  }
+}
+
+function flowTokens(content: readonly ParagraphContent[], tokens: FlowToken[] = []): FlowToken[] {
+  for (const item of content) {
+    if (item.type === 'run') runFlowTokens(item, tokens);
+    else if (item.type === 'hyperlink') {
+      for (const child of item.children) if (child.type === 'run') runFlowTokens(child, tokens);
+    } else if (item.type === 'simpleField') {
+      for (const child of item.content) if (child.type === 'run') runFlowTokens(child, tokens);
+    } else if (item.type === 'complexField') {
+      for (const child of [...item.fieldCode, ...item.fieldResult]) runFlowTokens(child, tokens);
+    } else if (item.type === 'inlineSdt') flowTokens(item.content as ParagraphContent[], tokens);
+    else if (item.type === 'insertion' || item.type === 'deletion' || item.type === 'moveFrom' || item.type === 'moveTo') {
+      for (const child of item.content) if (child.type === 'run') runFlowTokens(child, tokens);
+    } else if (item.type === 'mathEquation') tokens.push('visible');
+  }
+  return tokens;
+}
+
+/** The breaks of `paragraph` that seeding moves behind it as block embeds, in order. */
+function trailingBlockBreaks(paragraph: Paragraph): BlockBreakKind[] {
+  const tokens = flowTokens(paragraph.content);
+  if (!tokens.includes('visible')) return tokens.slice(tokens.lastIndexOf('column') + 1) as BlockBreakKind[];
+  const trailing: BlockBreakKind[] = [];
+  let leading = false;
+  let visible = false;
+  for (const token of tokens) {
+    if (token === 'visible') visible = true;
+    else if (visible || leading) trailing.push(token);
+    else leading = true;
+  }
+  return trailing;
+}
 
 /** Stories a committed op touched; `all` invalidates the whole session. */
 export function noteYrsStoriesDirty(
@@ -2411,8 +2461,7 @@ class SaveContext {
     private readonly session: YrsSession,
     base: Document,
     commentIds?: ReadonlyMap<number, string>,
-    private readonly revisionIds?: RevisionIds,
-    private readonly nativeBlockBreaks = false
+    private readonly revisionIds?: RevisionIds
   ) {
     this.storyIds = new Set(session.storyIds());
     this.baseStories = collectBaseStories(session, base);
@@ -2594,10 +2643,14 @@ class SaveContext {
       if (cursor < text.length) items.push({ kind: 'text', text: text.slice(cursor), attributes });
     };
 
+    // Block breaks the previous paragraph's own content carries, and those only the stream does.
+    let witnesses: BlockBreakKind[] = [];
+    let breaks: BlockBreakKind[] = [];
     for (const segment of segments) {
       if (segment.kind === 'text') {
         pushText(segment.text, segment.attributes);
         storyOffset += segment.text.length;
+        witnesses = [];
         continue;
       }
       if (segment.kind === 'pilcrow') {
@@ -2611,6 +2664,7 @@ class SaveContext {
           segment.attributes,
           items,
           boundaries,
+          breaks,
         ] as const;
         const priorMemo =
           baseParagraph !== undefined ? projectedBlocks.get(baseParagraph) : undefined;
@@ -2621,6 +2675,7 @@ class SaveContext {
           sameJson(priorMemo.inputs, inputs)
         ) {
           paragraph = baseParagraph;
+          witnesses = [...(priorMemo.trailing ?? trailingBlockBreaks(baseParagraph))];
         } else {
           // Projection mutates `item.payload`; pin the pre-mutation inputs.
           const snapshot = inputs.map((input, index) =>
@@ -2636,16 +2691,16 @@ class SaveContext {
             this.revisionIds,
             this.inheritedFormatting(storyId, segment.properties)
           );
-          if (this.nativeBlockBreaks) {
-            const breaks: ParagraphContent[] = items.filter(isBlockBreak).map(item => ({ type: 'run', content: [{
-              type: 'break', breakType: item.kind === 'embed' && item.embedKind === 'pageBreak' ? 'page' : 'column',
-            }] }));
-            if (breaks.length) paragraph = { ...paragraph, content: [...breaks, ...paragraph.content] };
-          }
-          projectedBlocks.set(paragraph, { inputs: snapshot, sessionKey: segment.paraId });
+          const trailing = trailingBlockBreaks(paragraph);
+          if (breaks.length) paragraph = { ...paragraph, content: [...breaks.map((breakType): ParagraphContent => ({
+            type: 'run', content: [{ type: 'break', breakType }],
+          })), ...paragraph.content] };
+          projectedBlocks.set(paragraph, { inputs: snapshot, sessionKey: segment.paraId, trailing });
+          witnesses = [...trailing];
         }
         blocks.push(paragraph);
         items = [];
+        breaks = [];
         paragraphIndex += 1;
         storyOffset += 1;
         paragraphStart = storyOffset;
@@ -2733,6 +2788,10 @@ class SaveContext {
       } else {
         items.push(segment as EmbedItem);
       }
+      const kind = blockBreakKind(segment.embedKind);
+      if (!kind) witnesses = [];
+      else if (witnesses.includes(kind)) witnesses.splice(witnesses.indexOf(kind), 1);
+      else breaks.push(kind);
       storyOffset += 1;
       if (items.every(isBlockBreak)) inlineStart = storyOffset;
     }
@@ -2757,7 +2816,6 @@ class SaveContext {
  * while preserving every package part the editor does not own.
  */
 export interface YrsToDocumentOptions {
-  nativeBlockBreaks?: boolean;
   /**
    * Root stories to project. Omit to rebuild every editable story. A `body`
    * projection includes its nested table/content-control stories.
@@ -2811,7 +2869,7 @@ function projectStories(
   options: YrsToDocumentOptions,
   revisionIds?: RevisionIds
 ): Document {
-  const context = new SaveContext(session, base, options.commentIds, revisionIds, options.nativeBlockBreaks);
+  const context = new SaveContext(session, base, options.commentIds, revisionIds);
   const shouldProject = (storyId: string): boolean =>
     options.storyIds === undefined || options.storyIds.has(storyId);
   const bodyContent = context.storyIds.has('body') && shouldProject('body')

@@ -2551,6 +2551,35 @@ fn inherit_inline_revision(runs: &mut [RawRun], attrs: Option<&Attrs>, env: &Ren
     }
 }
 
+/// Display units of an inline control whose payload holds `content`: its content and its two
+/// boundaries.
+pub(crate) fn inline_sdt_size(content: Option<&Any>) -> u32 {
+    match content {
+        Some(Any::Array(content)) => {
+            content
+                .iter()
+                .filter_map(any_map)
+                .map(inline_sdt_child_size)
+                .sum::<u32>()
+                + 2
+        }
+        _ => 2,
+    }
+}
+
+/// Display units of one content item of an inline control. A shape or chart nested in it
+/// produces no run, and every other leaf still occupies one position even without one.
+fn inline_sdt_child_size(child: &std::collections::HashMap<String, Any>) -> u32 {
+    match child.get("kind").and_then(any_str) {
+        Some("text") => utf16_len(child.get("text").and_then(any_str).unwrap_or_default()),
+        Some("sdt") => child
+            .get("payload")
+            .and_then(any_map)
+            .map_or(2, |payload| inline_sdt_size(payload.get("content"))),
+        _ => 1,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn lower_inline_sdt<T: ReadTxn>(
     sdt: &MapRef,
@@ -2562,15 +2591,17 @@ fn lower_inline_sdt<T: ReadTxn>(
     inherited_widget: Option<Value>,
     runs: &mut Vec<RawRun>,
 ) -> u32 {
+    let values = shared_values(sdt, txn);
     lower_inline_sdt_values(
-        &shared_values(sdt, txn),
+        &values,
         env,
         story_index,
         paragraph_pm_start,
         node_pm_start,
         inherited_widget,
         runs,
-    )
+    );
+    inline_sdt_size(values.get("content"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2582,13 +2613,12 @@ fn lower_inline_sdt_values(
     node_pm_start: u32,
     inherited_widget: Option<Value>,
     runs: &mut Vec<RawRun>,
-) -> u32 {
+) {
     let absolute_pos = paragraph_pm_start + 1 + u64::from(node_pm_start);
     let widget = inline_checkbox_widget(values, absolute_pos as i64).or(inherited_widget);
     let mut content_size = 0_u32;
-    let content = match values.get("content") {
-        Some(Any::Array(content)) => content,
-        _ => return 2,
+    let Some(Any::Array(content)) = values.get("content") else {
+        return;
     };
 
     for child in content.iter() {
@@ -2600,25 +2630,24 @@ fn lower_inline_sdt_values(
         let formatting = lower_run_formatting(Some(&attrs), env);
         let child_pm_start = node_pm_start + 1 + content_size;
         let payload = child.get("payload").and_then(any_map);
-        let child_size = match kind.as_str() {
+        let child_size = inline_sdt_child_size(child);
+        match kind.as_str() {
             "text" => {
                 let text = map_string(child, "text").unwrap_or_default();
-                let width = utf16_len(&text);
-                if width > 0 {
+                if child_size > 0 {
                     runs.push(RawRun {
                         kind: RawRunKind::Text(text),
                         formatting,
                         story_start: story_index,
                         story_end: story_index + 1,
                         pm_start: child_pm_start,
-                        pm_end: child_pm_start + width,
+                        pm_end: child_pm_start + child_size,
                         inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
                         inline_sdt_widget: widget.clone(),
                         atom: true,
                         revision_hidden: env.revision_hidden(Some(&attrs)),
                     });
                 }
-                width
             }
             "tab" => {
                 runs.push(RawRun {
@@ -2633,7 +2662,6 @@ fn lower_inline_sdt_values(
                     atom: true,
                     revision_hidden: env.revision_hidden(Some(&attrs)),
                 });
-                1
             }
             "break" => {
                 runs.push(RawRun {
@@ -2648,7 +2676,6 @@ fn lower_inline_sdt_values(
                     atom: true,
                     revision_hidden: env.revision_hidden(Some(&attrs)),
                 });
-                1
             }
             "image" => {
                 if let Some(payload) = payload {
@@ -2665,7 +2692,6 @@ fn lower_inline_sdt_values(
                         revision_hidden: env.revision_hidden(Some(&attrs)),
                     });
                 }
-                1
             }
             "field" => {
                 let field_type = payload
@@ -2708,7 +2734,6 @@ fn lower_inline_sdt_values(
                     atom: true,
                     revision_hidden: env.revision_hidden(Some(&attrs)),
                 });
-                1
             }
             "math" => {
                 let text = payload
@@ -2737,7 +2762,6 @@ fn lower_inline_sdt_values(
                     atom: true,
                     revision_hidden: env.revision_hidden(Some(&attrs)),
                 });
-                1
             }
             "noteRef" => {
                 let footnote_id = payload
@@ -2767,32 +2791,29 @@ fn lower_inline_sdt_values(
                         revision_hidden: env.revision_hidden(Some(&attrs)),
                     });
                 }
-                1
             }
-            "sdt" => payload.map_or(2, |payload| {
-                let first = runs.len();
-                let size = lower_inline_sdt_values(
-                    payload,
-                    env,
-                    story_index,
-                    paragraph_pm_start,
-                    child_pm_start,
-                    widget.clone(),
-                    runs,
-                );
-                inherit_inline_revision(&mut runs[first..], Some(&attrs), env);
-                if env.revision_hidden(Some(&attrs)) {
-                    hide_runs(&mut runs[first..]);
+            "sdt" => {
+                if let Some(payload) = payload {
+                    let first = runs.len();
+                    lower_inline_sdt_values(
+                        payload,
+                        env,
+                        story_index,
+                        paragraph_pm_start,
+                        child_pm_start,
+                        widget.clone(),
+                        runs,
+                    );
+                    inherit_inline_revision(&mut runs[first..], Some(&attrs), env);
+                    if env.revision_hidden(Some(&attrs)) {
+                        hide_runs(&mut runs[first..]);
+                    }
                 }
-                size
-            }),
-            // A shape or chart nested in an inline SDT produces no run; every
-            // other leaf still occupies one position even without one.
-            _ => 1,
-        };
+            }
+            _ => {}
+        }
         content_size += child_size;
     }
-    content_size + 2
 }
 
 fn lower_floating_table(value: &std::collections::HashMap<String, Any>) -> FloatingTablePosition {

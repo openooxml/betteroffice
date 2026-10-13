@@ -1,11 +1,11 @@
-import type { YrsCellLoc, YrsLoc, YrsStickyPosition } from './index';
+import type { YrsCellLoc, YrsLoc, YrsStickyPosition, YrsStorySegment } from './index';
 import type { ResidentEngineSession } from './residentEngineSession';
 import type { DocxCommandSelection } from './residentCommandProtocol';
 import type { RetainedFrame } from '../layout/render/frameDelta';
 import { createYrsPositionProjection } from './yrsPositionProjection';
-import { createDisplayListQueries } from '../layout/render/displayListQueries';
+import type { DisplayListHitRegion, DisplayListRect } from '../layout/render/displayListQueries';
 import { deriveDisplayListSelectedCellRects, type DisplayListTableRegion } from '../layout/render/displayListTables';
-import { loadRustDisplayListQueryEngine } from '../layout/render/rustDisplayList';
+import { findImagePrimitiveByDocPos } from '../layout/render/displayListImages';
 import type { DisplayPrimitive } from '../layout/render/displayList';
 
 export interface ResidentObjectRect {
@@ -113,6 +113,15 @@ export function resolveResidentObject(engine: ResidentEngineSession, handle: str
   return { ...at, kind: target.kind };
 }
 
+type ResidentParagraphGeometry = ReturnType<ResidentEngineSession['residentGeometry']>['paragraphs'][number];
+
+/** Display position of story offset `offset` in `paragraph`, past the content of its inline controls. */
+function displayPosition(paragraph: ResidentParagraphGeometry, offset: number): number {
+  let position = paragraph.from + Math.max(0, offset - paragraph.leading);
+  for (const control of paragraph.controls ?? []) if (control.offset < offset) position += control.to - control.from - 1;
+  return position;
+}
+
 function builtStoryRanges(frame: RetainedFrame): Map<string, Array<[number, number]>> {
   const roots = new Map<string, Array<[number, number]>>();
   const add = (root: string, primitives: readonly DisplayPrimitive[], span?: [number, number]) => {
@@ -150,77 +159,95 @@ function builtStoryRanges(frame: RetainedFrame): Map<string, Array<[number, numb
 export async function readResidentFrameGeometry(
   engine: ResidentEngineSession, frame: RetainedFrame, selection: DocxCommandSelection | null, layoutRevision: number
 ): Promise<ResidentFrameGeometry> {
-  const native = await loadRustDisplayListQueryEngine();
-  const queries = createDisplayListQueries(frame.displayList, native);
   const objects: ResidentObjectGeometry[] = [];
   let selected: ResidentObjectRect[] = [];
   const selectionRoot = selection && selection.anchor.story === selection.focus.story
     ? selection.anchor.story === 'body' || selection.anchor.story.startsWith('body:') ? 'body'
       : selection.anchor.story.split(':').slice(0, 2).join(':') : null;
-  try {
-    for (const [root, ranges] of [...builtStoryRanges(frame)].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
-      if (!engine.geometryReader.hasStory(root)) continue;
-      const projected = engine.residentGeometry(root, ranges, selectionRoot === root && selection
-        ? [selection.anchor, selection.focus] : undefined);
-      const [prefix, id] = root.split(':');
-      const rects = (from: number, to: number) => (root === 'body' ? queries.rangeRects(from, to)
-        : prefix === 'hf' ? [...queries.hfRangeRects('header', id!, from, to), ...queries.hfRangeRects('footer', id!, from, to)]
-        : queries.noteRangeRects(prefix === 'fn' ? 'footnote' : 'endnote', Number(id), from, to))
-        .map(rect => ({ ...rect, pageId: frame.pages[rect.pageIndex]!.pageId.toString() }));
-      if (projected.selection) {
-        const [a, b] = projected.selection;
-        if (a !== b) selected = rects(Math.min(a, b), Math.max(a, b));
-      }
-      const tables = projected.tables;
-      const cells = tables.flatMap(table => table.cells.map(cell => ({
-        tableKey: String(table.from), row: cell.row, col: cell.column,
-        rowSpan: cell.rowspan, colSpan: cell.colspan,
-      })));
-      const tableKeyOf = (position: number | undefined) => position === undefined ? null
-        : tables.find(table => table.from <= position && position < table.to)?.from.toString() ?? null;
-      const noteKind = prefix === 'fn' ? 'footnote' : 'endnote';
-      const list = prefix === 'fn' || prefix === 'en' ? { ...frame.displayList,
-        pages: frame.displayList.pages.map(page => ({ ...page,
-          primitives: (page.noteAreas ?? []).filter(area => (area.kind ?? 'footnote') === noteKind)
-            .flatMap(area => (area.primitives ?? []).filter(primitive => primitive.groupId === `${noteKind}-${id}`)),
-        })),
-      } : frame.displayList;
-      const regions: DisplayListTableRegion[] = prefix === 'hf'
-        ? [{ kind: 'header', rId: id }, { kind: 'footer', rId: id }] : [{ kind: 'body' }];
-      const cellGeometry = new Map<string, ResidentObjectRect[]>();
-      for (const region of regions) for (const box of deriveDisplayListSelectedCellRects(list, cells, tableKeyOf, region)) {
-        const key = `${box.tableKey}:${box.row}:${box.col}`;
-        const bounds = cellGeometry.get(key) ?? [];
-        bounds.push({ pageId: frame.pages[box.pageIndex]!.pageId.toString(), pageIndex: box.pageIndex,
-          x: box.x, y: box.y, width: box.w, height: box.h });
-        cellGeometry.set(key, bounds);
-      }
-      for (const table of tables) for (const cell of table.cells) {
-        const boxes = cellGeometry.get(`${table.from}:${cell.row}:${cell.column}`) ?? [];
-        if (boxes.length) objects.push({ kind: 'cell', story: cell.story,
-          handle: issue(engine, 'cell', { story: cell.story, paraId: cell.paraId, offset: 0 }, table.at), rects: boxes });
-      }
-      for (const paragraph of projected.paragraphs) {
-        const { story, paraId } = paragraph;
-        let offset = 0;
-        for (const segment of engine.paragraphSegments(story, [paragraph.index])[0] ?? []) {
-          const at = { story, paraId, offset };
-          offset += segment.kind === 'text' ? segment.text.length : 1;
-          if (segment.kind !== 'embed' || segment.embedKind !== 'image') continue;
-          const position = paragraph.from + Math.max(0, at.offset - paragraph.leading);
-          const image = root === 'body' || prefix === 'hf' ? queries.imageByPos(position, prefix === 'hf' ? 'header' : 'body', id)
-            ?? (prefix === 'hf' ? queries.imageByPos(position, 'footer', id) : null) : null;
-          if (image) objects.push({ kind: 'image', story, handle: issue(engine, 'image', at),
-            rects: [{ ...image.rect, pageId: frame.pages[image.rect.pageIndex]!.pageId.toString() }] });
-        }
-        const boxes = rects(paragraph.from, paragraph.to);
-        if (boxes.length) objects.push({ kind: 'text', story,
-          handle: issue(engine, 'text', { story, paraId, offset: 0 }, { story, paraId, offset: paragraph.length }), rects: boxes });
-      }
+  const located = (rects: DisplayListRect[]): ResidentObjectRect[] => rects
+    .filter(rect => frame.pages[rect.pageIndex] && !frame.pages[rect.pageIndex]!.page.unbuilt)
+    .map(rect => ({ ...rect, pageId: frame.pages[rect.pageIndex]!.pageId.toString() }));
+  for (const [root, ranges] of [...builtStoryRanges(frame)].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
+    if (!engine.geometryReader.hasStory(root)) continue;
+    const projected = engine.residentGeometry(root, ranges, selectionRoot === root && selection
+      ? [selection.anchor, selection.focus] : undefined);
+    const [prefix, id] = root.split(':');
+    const spans: Array<[number, number]> = projected.paragraphs.map(paragraph => [paragraph.from, paragraph.to]);
+    const range = projected.selection && projected.selection[0] !== projected.selection[1]
+      ? [Math.min(...projected.selection), Math.max(...projected.selection)] as [number, number] : null;
+    if (range) spans.push(range);
+    const regions: Array<[DisplayListHitRegion, string]> = root === 'body' ? [['body', '']]
+      : prefix === 'hf' ? [['header', id!], ['footer', id!]] : [[prefix === 'fn' ? 'footnote' : 'endnote', String(Number(id))]];
+    const answered = regions.map(([region, part]) => engine.residentRangeRects(region, part, spans));
+    const rects = (index: number) => located(answered.flatMap(batch => batch[index] ?? []));
+    if (range) selected = rects(spans.length - 1);
+    const tables = projected.tables;
+    const cells = tables.flatMap(table => table.cells.map(cell => ({
+      tableKey: String(table.from), row: cell.row, col: cell.column,
+      rowSpan: cell.rowspan, colSpan: cell.colspan,
+    })));
+    const tableKeyOf = (position: number | undefined) => position === undefined ? null
+      : tables.find(table => table.from <= position && position < table.to)?.from.toString() ?? null;
+    const noteKind = prefix === 'fn' ? 'footnote' : 'endnote';
+    const list = prefix === 'fn' || prefix === 'en' ? { ...frame.displayList,
+      pages: frame.displayList.pages.map(page => ({ ...page,
+        primitives: (page.noteAreas ?? []).filter(area => (area.kind ?? 'footnote') === noteKind)
+          .flatMap(area => (area.primitives ?? []).filter(primitive => primitive.groupId === `${noteKind}-${id}`)),
+      })),
+    } : frame.displayList;
+    const tableRegions: DisplayListTableRegion[] = prefix === 'hf'
+      ? [{ kind: 'header', rId: id }, { kind: 'footer', rId: id }] : [{ kind: 'body' }];
+    const cellGeometry = new Map<string, ResidentObjectRect[]>();
+    for (const region of tableRegions) for (const box of deriveDisplayListSelectedCellRects(list, cells, tableKeyOf, region)) {
+      const key = `${box.tableKey}:${box.row}:${box.col}`;
+      const bounds = cellGeometry.get(key) ?? [];
+      bounds.push({ pageId: frame.pages[box.pageIndex]!.pageId.toString(), pageIndex: box.pageIndex,
+        x: box.x, y: box.y, width: box.w, height: box.h });
+      cellGeometry.set(key, bounds);
     }
-    const state = queries.sourceState();
-    if (state.status === 'error') throw new Error(`Object layout is unavailable: ${String(state.error)}`);
-    return { version: engine.proposalEngine.version(), frameEpoch: frame.frameEpoch, layoutRevision,
-      selection: selected, objects, unbuiltPages: frame.pages.filter(page => page.page.unbuilt).map(page => page.pageIndex) };
-  } finally { queries.dispose(); }
+    for (const table of tables) for (const cell of table.cells) {
+      const boxes = cellGeometry.get(`${table.from}:${cell.row}:${cell.column}`) ?? [];
+      if (boxes.length) objects.push({ kind: 'cell', story: cell.story,
+        handle: issue(engine, 'cell', { story: cell.story, paraId: cell.paraId, offset: 0 }, table.at), rects: boxes });
+    }
+    const imageStarts: number[] = [];
+    if (root === 'body' || prefix === 'hf') for (const page of frame.displayList.pages) {
+      const bands = root === 'body' ? [page.primitives]
+        : [page.header, page.footer].flatMap(band => band && band.rId === id ? [band.primitives] : []);
+      for (const primitive of bands.flat()) if (primitive.kind === 'image' && primitive.docStart !== undefined) imageStarts.push(primitive.docStart);
+    }
+    const byStory = new Map<string, ResidentParagraphGeometry[]>();
+    for (const paragraph of projected.paragraphs) {
+      if (!imageStarts.some(start => start >= paragraph.from && start <= paragraph.to)) continue;
+      const group = byStory.get(paragraph.story);
+      if (group) group.push(paragraph);
+      else byStory.set(paragraph.story, [paragraph]);
+    }
+    const segments = new Map<ResidentParagraphGeometry, YrsStorySegment[]>();
+    for (const [story, paragraphs] of byStory) {
+      const read = engine.paragraphSegments(story, paragraphs.map(paragraph => paragraph.index));
+      paragraphs.forEach((paragraph, index) => segments.set(paragraph, read[index] ?? []));
+    }
+    for (const [index, paragraph] of projected.paragraphs.entries()) {
+      const { story, paraId } = paragraph;
+      let offset = 0;
+      for (const segment of segments.get(paragraph) ?? []) {
+        const at = { story, paraId, offset };
+        offset += segment.kind === 'text' ? segment.text.length : 1;
+        if (segment.kind !== 'embed' || segment.embedKind !== 'image') continue;
+        const position = displayPosition(paragraph, at.offset);
+        const image = root === 'body' || prefix === 'hf'
+          ? findImagePrimitiveByDocPos(frame.displayList, position, prefix === 'hf' ? 'header' : 'body', id)
+            ?? (prefix === 'hf' ? findImagePrimitiveByDocPos(frame.displayList, position, 'footer', id) : null) : null;
+        if (image) objects.push({ kind: 'image', story, handle: issue(engine, 'image', at),
+          rects: [{ pageIndex: image.pageIndex, x: image.primitive.x, y: image.primitive.y, width: image.primitive.w,
+            height: image.primitive.h, pageId: frame.pages[image.pageIndex]!.pageId.toString() }] });
+      }
+      const boxes = rects(index);
+      if (boxes.length) objects.push({ kind: 'text', story,
+        handle: issue(engine, 'text', { story, paraId, offset: 0 }, { story, paraId, offset: paragraph.length }), rects: boxes });
+    }
+  }
+  return { version: engine.proposalEngine.version(), frameEpoch: frame.frameEpoch, layoutRevision,
+    selection: selected, objects, unbuiltPages: frame.pages.filter(page => page.page.unbuilt).map(page => page.pageIndex) };
 }

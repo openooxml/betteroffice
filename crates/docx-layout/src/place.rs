@@ -844,17 +844,13 @@ struct PlacementOutcome {
     converged: Option<Convergence>,
 }
 
+/// How the section after `section_index` starts: its own type, which ECMA-376 17.6.22
+/// defaults to `nextPage` when absent, so it never inherits the preceding section's.
 fn break_type_after_section(plan: &LayoutPlan, section_index: usize) -> Option<SectionBreakType> {
     plan.section_break_types
         .get(section_index + 1)
         .copied()
         .flatten()
-        .or_else(|| {
-            plan.section_break_types
-                .get(section_index)
-                .copied()
-                .flatten()
-        })
 }
 
 fn section_ends_with_next_column(plan: &LayoutPlan, section_index: usize) -> bool {
@@ -1077,8 +1073,7 @@ fn place<F: PartialEq>(
             }
 
             LayoutBlock::SectionBreak(block) => {
-                // use the NEXT section's columns; for break type, prefer the
-                // next section's but fall back to the current break's
+                // the NEXT section's columns and its own start type
                 let next_type = break_type_after_section(plan, section_idx);
                 let restart = plan
                     .section_page_restarts
@@ -2983,6 +2978,7 @@ mod pagination_rule_tests {
                 "top": 10, "right": 30, "bottom": 10, "left": 30,
             }))
             .unwrap();
+            value.options.body_break_type = Some(SectionBreakType::Continuous);
             value
         };
         let previous = layout_document_checkpointed(&mut value(10.0)).unwrap();
@@ -3036,6 +3032,7 @@ mod pagination_rule_tests {
                 "top": 10, "right": 30, "bottom": 10, "left": 30,
             }))
             .unwrap();
+            value.options.body_break_type = Some(SectionBreakType::Continuous);
             value.options.section_page_margins = Some(
                 serde_json::from_value(json!([
                     { "first": { "top": 10, "right": 10, "bottom": 10, "left": 10 } },
@@ -3155,7 +3152,12 @@ mod pagination_rule_tests {
                     "measure": { "kind": "sectionBreak" },
                 }),
             );
-            let previous = layout_document_checkpointed(&mut input(measured.clone())).unwrap();
+            let typed = |measured: Vec<serde_json::Value>| {
+                let mut value = input(measured);
+                value.options.body_break_type = serde_json::from_value(json!(break_type)).unwrap();
+                value
+            };
+            let previous = layout_document_checkpointed(&mut typed(measured.clone())).unwrap();
             assert_eq!(previous.layout.pages.len(), 3);
             assert_eq!(
                 (
@@ -3170,7 +3172,7 @@ mod pagination_rule_tests {
             let mut next_fingerprints = [1_u64; 16];
             next_fingerprints[2] = 2;
             let incremental = layout_document_incremental(
-                &mut input(next.clone()),
+                &mut typed(next.clone()),
                 &mut previous.layout.clone(),
                 &previous.checkpoints,
                 &[1_u64; 16],
@@ -3178,7 +3180,7 @@ mod pagination_rule_tests {
                 2,
             )
             .unwrap();
-            let full = layout_document_checkpointed(&mut input(next)).unwrap();
+            let full = layout_document_checkpointed(&mut typed(next)).unwrap();
             assert_eq!(incremental.rebuilt_page_start, 0);
             assert_eq!(incremental.rebuilt_page_end, 1);
             assert_eq!(incremental.placed_blocks, placed_blocks);
@@ -4048,5 +4050,95 @@ mod pagination_rule_tests {
             })
             .unwrap();
         assert_eq!((image.x, image.y), (75.0, 5.0));
+    }
+
+    fn section_break(id: &str, break_type: Option<&str>) -> serde_json::Value {
+        let mut block = json!({ "kind": "sectionBreak", "id": id });
+        if let Some(break_type) = break_type {
+            block["type"] = json!(break_type);
+        }
+        json!({ "block": block, "measure": { "kind": "sectionBreak" } })
+    }
+
+    fn page_paragraphs(result: &Layout) -> Vec<Vec<u32>> {
+        result
+            .pages
+            .iter()
+            .map(|page| {
+                page.fragments
+                    .iter()
+                    .filter_map(|fragment| match fragment {
+                        Fragment::Paragraph(ParagraphFragment {
+                            block_id: crate::types::BlockId::Num(id),
+                            ..
+                        }) => Some(*id as u32),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn three_sections(middle: &str, body: Option<SectionBreakType>) -> Layout {
+        let mut value = input(vec![
+            paragraph(1, 1, 20.0, json!({})),
+            section_break("first", None),
+            paragraph(2, 1, 20.0, json!({})),
+            section_break("second", Some(middle)),
+            paragraph(3, 1, 20.0, json!({})),
+        ]);
+        value.options.body_break_type = body;
+        layout_document(&mut value).unwrap()
+    }
+
+    #[test]
+    fn an_untyped_section_after_a_continuous_one_starts_a_new_page() {
+        assert_eq!(
+            page_paragraphs(&three_sections("continuous", None)),
+            [vec![1, 2], vec![3]]
+        );
+        assert_eq!(
+            page_paragraphs(&three_sections(
+                "continuous",
+                Some(SectionBreakType::Continuous)
+            )),
+            [vec![1, 2, 3]]
+        );
+    }
+
+    #[test]
+    fn an_untyped_section_after_an_odd_page_one_starts_the_next_page() {
+        let result = three_sections("oddPage", None);
+        assert_eq!(
+            page_paragraphs(&result),
+            [vec![1], vec![], vec![2], vec![3]]
+        );
+        assert_eq!(
+            result
+                .pages
+                .iter()
+                .map(|page| page.parity_filler == Some(true))
+                .collect::<Vec<_>>(),
+            [false, true, false, false]
+        );
+    }
+
+    #[test]
+    fn an_untyped_first_section_lets_the_next_section_choose_its_start() {
+        for (body, pages) in [
+            (None, vec![vec![1], vec![2]]),
+            (Some(SectionBreakType::Continuous), vec![vec![1, 2]]),
+        ] {
+            let mut value = input(vec![
+                paragraph(1, 1, 20.0, json!({})),
+                section_break("first", None),
+                paragraph(2, 1, 20.0, json!({})),
+            ]);
+            value.options.body_break_type = body;
+            assert_eq!(
+                page_paragraphs(&layout_document(&mut value).unwrap()),
+                pages
+            );
+        }
     }
 }

@@ -55,7 +55,7 @@ export function readSectionSnapshot(engine: ResidentEngineSession, base: Documen
       paragraphs.push({ story, paraId: paragraph.paraId, tabs: nativeTabStops(paragraph.properties.tabs) });
       const properties = (paragraph.properties.sectPr ?? paragraph.properties._sectionProperties) as SectionProperties | undefined;
       if (story === 'body' && properties) sections.push({ section: paragraph.paraId,
-        properties: { ...properties, ...base.package.document.sections?.[sections.length]?.properties,
+        properties: { ...properties, ...base.package.document.sections?.find(section => section.id === paragraph.paraId)?.properties,
           ...(nativeSections ? properties : {}), ...margins[paragraph.paraId] } });
     }
   }
@@ -63,11 +63,22 @@ export function readSectionSnapshot(engine: ResidentEngineSession, base: Documen
   return { version: engine.proposalEngine.version(), sections, paragraphs };
 }
 
+/** `document` with each section keyed by the body paragraph that closes it in the freshly seeded session. */
+export function withSectionIds(document: Document, closing: readonly string[]): Document {
+  const body = document.package.document;
+  if (!body.sections || closing.length === 0) return document;
+  return { ...document, package: { ...document.package, document: { ...body,
+    sections: body.sections.map((section, index) => index < closing.length ? { ...section, id: closing[index] } : section),
+  } } };
+}
+
 export function withSectionSnapshot(document: Document, snapshot: ResidentSectionSnapshot): Document {
   const body = document.package.document;
   const finalSectionProperties = snapshot.sections.at(-1)!.properties;
-  const sections = body.sections?.map((section, index) => ({ ...section,
-    properties: snapshot.sections[index]?.properties ?? finalSectionProperties,
+  const live = new Map(snapshot.sections.map(({ section, properties }) => [section, properties]));
+  const sections = body.sections?.map((section, index, all) => ({ ...section,
+    properties: (section.id === undefined ? undefined : live.get(section.id))
+      ?? (index === all.length - 1 ? finalSectionProperties : section.properties),
   }));
   return { ...document, package: { ...document.package, document: { ...body,
     ...(sections ? { sections } : {}), finalSectionProperties,

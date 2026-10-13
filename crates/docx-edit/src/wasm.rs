@@ -2391,6 +2391,39 @@ impl EditSession {
             .map_err(|error| JsValue::from_str(&error))
     }
 
+    /// [`EditSession::display_range_rects_region_json`] for many ranges, given as flat
+    /// `[from, to, from, to, ...]` pairs. Per range, in order: its rect count, then
+    /// `pageIndex, x, y, width, height` for each rect.
+    pub fn display_range_rects_batch(
+        &self,
+        region: &str,
+        part_id: &str,
+        ranges: Vec<f64>,
+    ) -> Result<Vec<f64>, JsValue> {
+        let ranges: Vec<(i64, i64)> = ranges
+            .chunks_exact(2)
+            .map(|pair| (pair[0] as i64, pair[1] as i64))
+            .collect();
+        let batches = self
+            .engine
+            .display_range_rects_batch(region, part_id, &ranges)
+            .map_err(|error| JsValue::from_str(&error))?;
+        let mut flat = Vec::new();
+        for rects in batches {
+            flat.push(rects.len() as f64);
+            for rect in rects {
+                flat.extend([
+                    rect.page_index as f64,
+                    rect.x,
+                    rect.y,
+                    rect.width,
+                    rect.height,
+                ]);
+            }
+        }
+        Ok(flat)
+    }
+
     /// One glyph outline from this session's resident font store:
     /// `{"upem":n,"cmds":[{"t":"M"|"L"|"Q"|"C"|"Z", …}]}` — commands in font
     /// units, y-up. `font_id` comes from
