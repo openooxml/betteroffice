@@ -21082,7 +21082,9 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
 
     fn paragraphs(count: usize, label: &str) -> String {
         (0..count)
-            .map(|index| format!("<w:p><w:r><w:t>{label} {index} fills several pages.</w:t></w:r></w:p>"))
+            .map(|index| {
+                format!("<w:p><w:r><w:t>{label} {index} fills several pages.</w:t></w:r></w:p>")
+            })
             .collect()
     }
 
@@ -21131,7 +21133,8 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         ] {
             let mut request = base.clone();
             request["regions"]["sections"] = sections.clone();
-            let (full, laid, prefix) = full_and_exact_prefix(&bytes, &request.to_string(), 3, &|_| {});
+            let (full, laid, prefix) =
+                full_and_exact_prefix(&bytes, &request.to_string(), 3, &|_| {});
             let widest = full["layout"]["pages"]
                 .as_array()
                 .unwrap()
@@ -21150,12 +21153,14 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         docx_layout::clear_measure_fonts();
         let font = docx_layout::register_measure_font(LIBERATION).unwrap();
         let header = preview_pagination_paragraph(
-            100,
+            300,
             r#"<w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple>"#,
         );
         let body = format!(
             r#"{}<w:sectPr><w:headerReference w:type="default" r:id="header"/></w:sectPr>"#,
-            preview_pagination_body(&[])
+            (0..300)
+                .map(|index| preview_pagination_paragraph(index, &preview_fixture::run("Line")))
+                .collect::<String>()
         );
         let bytes = preview_pagination_story_document(&body, "header", &header);
         let mut request = preview_pagination_request(font);
@@ -21169,20 +21174,22 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         assert!(laid.provisional);
         {
             let pagination = engine.pagination.borrow();
+            let within = |page: &usize| *page < 3;
             assert_eq!(pagination.layout.as_ref().unwrap().pages.len(), 3);
             assert!(pagination.rebuilt_page_end <= 3);
             assert!(pagination.rebuilt_page_ranges.iter().all(|pages| pages.end <= 3));
-            assert!(pagination.display_rebuilt_pages.iter().all(|&page| page < 3));
-            assert!(pagination.restamped_pages.iter().flatten().all(|&page| page < 3));
-            assert!(pagination.note_changed_pages.iter().all(|&page| page < 3));
+            assert!(pagination.display_rebuilt_pages.iter().all(within));
+            assert!(pagination.restamped_pages.iter().flatten().all(within));
+            assert!(pagination.note_changed_pages.iter().all(within));
         }
-        let headers: serde_json::Value =
-            serde_json::from_str(&engine.retained_headers_footers_json().unwrap().unwrap()).unwrap();
+        let headers = engine.retained_headers_footers_json().unwrap().unwrap();
+        let headers: serde_json::Value = serde_json::from_str(&headers).unwrap();
         let widths: Vec<_> = headers["variants"]
             .as_array()
             .unwrap()
             .iter()
-            .flat_map(|variant| variant["fieldWidths"].as_array().cloned().unwrap_or_default())
+            .filter_map(|variant| variant["fieldWidths"].as_array())
+            .flatten()
             .collect();
         assert!(!widths.is_empty());
         for width in widths {
@@ -21197,7 +21204,8 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         let bytes = docx_bytes("", &paragraphs(200, "Paragraph"));
         let (full, laid, prefix) = full_and_exact_prefix(&bytes, &request, 0, &|_| {});
         assert!(!laid.provisional);
-        assert_eq!(laid.pages, full["layout"]["pages"].as_array().unwrap().len());
+        let pages = full["layout"]["pages"].as_array().unwrap();
+        assert_eq!(laid.pages, pages.len());
         assert_eq!(prefix["layout"], full["layout"]);
     }
 
