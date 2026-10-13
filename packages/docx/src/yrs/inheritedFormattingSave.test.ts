@@ -307,20 +307,46 @@ describe.each(Object.keys(SAVES) as (keyof typeof SAVES)[])('%s save keeps inher
   });
 });
 
-type TableEditEngine = EditEngine & Pick<YrsSession, 'storyIds' | 'setCellBorders' | 'setCellTextFormat'>;
+type TableEditEngine = EditEngine & Pick<YrsSession, 'storyIds'> & {
+  setCellBorders(
+    range: Parameters<YrsSession['setCellBorders']>[0],
+    borders: Parameters<YrsSession['setCellBorders']>[1]
+  ): { changedStoryIds: string[] };
+  setCellTextFormat(
+    range: Parameters<YrsSession['setCellTextFormat']>[0],
+    patch: Parameters<YrsSession['setCellTextFormat']>[1]
+  ): { changedStoryIds: string[] };
+};
 type TableEdit = (engine: TableEditEngine) => string[];
 
 async function saveTableEdit(path: keyof typeof SAVES, source: Uint8Array, apply: TableEdit) {
   if (path === 'worker-only') {
     const { client, resident, host } = await openWorker(source);
+    const patchCell = (patch: Record<string, unknown>) => {
+      let index = 0;
+      for (const segment of resident.storySegments('body')) {
+        if (segment.kind === 'embed' && segment.embedKind === 'table') {
+          const rows = segment.payload.rows as Array<{ cells: Array<{ tcPr: Record<string, unknown> }> }>;
+          Object.assign(rows[0]!.cells[0]!.tcPr, patch);
+          resident.applyRawOps('body', [{ op: 'setEmbedAttr', index, key: 'rows', value: rows }]);
+          return { changedStoryIds: ['body'] };
+        }
+        index += segment.kind === 'text' ? segment.text.length : 1;
+      }
+      throw new Error('no resident table to patch');
+    };
     apply({
       ...resident.proposalEngine,
-      storyIds: resident.storyIds,
+      storyIds: resident.geometryReader.storyIds,
       replaceRange: resident.replaceRange,
       formatRange: resident.formatRange,
       insertRow: resident.insertRow,
-      setCellBorders: resident.setCellBorders,
-      setCellTextFormat: resident.setCellTextFormat,
+      setCellBorders: (_range, borders) => {
+        const table = resident.tablePayload('body', 0)!;
+        const rows = table.rows as Array<{ cells: Array<{ tcPr: Record<string, unknown> }> }>;
+        return patchCell({ borders: { ...(rows[0]!.cells[0]!.tcPr.borders as object), ...borders } });
+      },
+      setCellTextFormat: (_range, patch) => patchCell({ ...patch }),
     });
     const saved = await client.save({
       comments: host.package.document.comments ?? [],
@@ -362,10 +388,17 @@ function expectTableInheritance(table: string): void {
   expect(table).not.toContain('<w:szCs');
 }
 
+function s2Fixture(root: Root): Uint8Array {
+  const parts: PartsMap = new Map(Object.entries(unzipContainer(fixture(root))));
+  const xml = new TextDecoder().decode(parts.get('word/document.xml'));
+  parts.set('word/document.xml', toBytes(xml.replace('<w:sectPr>', `${savedTable(xml)}<w:sectPr>`)));
+  return new Uint8Array(rezipPartsToArrayBuffer(parts));
+}
+
 describe('S2 cell and table formatting stays inherited on save', () => {
   describe.each(Object.keys(SAVES) as (keyof typeof SAVES)[])('%s', (path) => {
     describe.each(['plain', 'w14'] as Root[])('with a %s document root', (root) => {
-      const source = fixture(root);
+      const source = s2Fixture(root);
       const at = { story: 'body', tableIndex: 0, row: 0, column: 0 };
       const range = { anchor: at, head: at };
 
@@ -387,7 +420,11 @@ describe('S2 cell and table formatting stays inherited on save', () => {
       }, TIMEOUT);
 
       it('keeps untouched table properties inherited when inserting body paragraphs', async () => {
-        const xml = await saveTableEdit(path, source, (engine) => edit(engine, 'paragraphs'));
+        const xml = await saveTableEdit(path, source, (engine) => {
+          edit(engine, 'paragraphs');
+          const receipt = engine.insertRow({ ...at, tableIndex: 1 }, 'below');
+          return ['body', ...receipt.createdStoryIds, ...receipt.changedStoryIds];
+        });
         expect(text(xml)).toContain(NEW_PARAGRAPH);
         const table = savedTable(xml);
         expectTableInheritance(table);
