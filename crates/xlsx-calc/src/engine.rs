@@ -320,6 +320,7 @@ thread_local! {
     /// seeks retiring spilled cells took, so a test can see the search skip
     /// the empty positions of a rectangle.
     static RETIREMENT_SEEKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static FORMULA_EVALUATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// what a formula node produced: one value, or a rectangle an array formula
@@ -483,6 +484,8 @@ fn eval_node_with(
     let Some(expr) = graph.ast(u.0, cell_of(u)) else {
         return (None, false);
     };
+    #[cfg(test)]
+    FORMULA_EVALUATIONS.with(|count| count.set(count.get() + 1));
     let cell = cell_of(u);
     let authored = wb.sheet(u.0).and_then(|sheet| sheet.array_formula(cell));
     let mut ctx = EvalContext::with_budget(provider, u.0, budget);
@@ -1425,6 +1428,179 @@ mod tests {
         assert!(r.cycle_cells.is_empty());
         assert_eq!(value(&wb, s, "B1"), num(5.0));
         assert_eq!(value(&wb, s, "A1"), num(6.0));
+    }
+
+    #[test]
+    fn cycle_classification_selective_index() {
+        let (mut wb, s) = one_sheet();
+        put_num(&mut wb, s, "A1", 7.0);
+        for row in 2..=10_001 {
+            put_formula(
+                &mut wb,
+                s,
+                &format!("A{row}"),
+                &format!("INDEX($A$1:A{row},1)"),
+            );
+        }
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert!(result.cycle_cells.is_empty());
+        assert!(result.limited_cells.is_empty());
+        for row in 2..=10_001 {
+            assert_eq!(value(&wb, s, &format!("A{row}")), num(7.0));
+        }
+    }
+
+    #[test]
+    fn cycle_classification_lazy_if() {
+        let (mut wb, s) = one_sheet();
+        put_num(&mut wb, s, "A1", 7.0);
+        for row in 2..=10_001 {
+            put_formula(
+                &mut wb,
+                s,
+                &format!("A{row}"),
+                &format!("IF(TRUE,7,A{row})"),
+            );
+        }
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert!(result.cycle_cells.is_empty());
+        assert!(result.limited_cells.is_empty());
+        for row in 2..=10_001 {
+            assert_eq!(value(&wb, s, &format!("A{row}")), num(7.0));
+        }
+    }
+
+    #[test]
+    fn cycle_classification_selective_vlookup() {
+        let (mut wb, s) = one_sheet();
+        put_num(&mut wb, s, "A1", 7.0);
+        put_num(&mut wb, s, "B1", 7.0);
+        for row in 2..=10_001 {
+            put_formula(
+                &mut wb,
+                s,
+                &format!("B{row}"),
+                &format!("VLOOKUP($A$1,$A$1:B{row},2,FALSE)"),
+            );
+        }
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert!(result.cycle_cells.is_empty());
+        assert!(result.limited_cells.is_empty());
+        for row in 2..=10_001 {
+            assert_eq!(value(&wb, s, &format!("B{row}")), num(7.0));
+        }
+    }
+
+    #[test]
+    fn cycle_classification_whole_column_index() {
+        let (mut wb, s) = one_sheet();
+        put_num(&mut wb, s, "A1", 7.0);
+        for row in 2..=10_001 {
+            put_formula(&mut wb, s, &format!("A{row}"), "INDEX(A:A,1)");
+        }
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert!(result.cycle_cells.is_empty());
+        assert!(result.limited_cells.is_empty());
+        for row in 2..=10_001 {
+            assert_eq!(value(&wb, s, &format!("A{row}")), num(7.0));
+        }
+    }
+
+    fn check_cycle_dependents(other_sheet: bool) {
+        let (mut wb, s) = one_sheet();
+        put_num(&mut wb, s, "A1", 7.0);
+        put_formula(&mut wb, s, "B1", "C1+1");
+        put_formula(&mut wb, s, "C1", "B1+1");
+        let dependent_sheet = if other_sheet {
+            wb.sheets.push(Sheet::new("Sheet2"));
+            SheetId(1)
+        } else {
+            s
+        };
+        for row in 2..=10_001 {
+            put_formula(
+                &mut wb,
+                dependent_sheet,
+                &format!("D{row}"),
+                "Sheet1!B1+Sheet1!C1+7",
+            );
+        }
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        let mut cycles = result.cycle_cells.clone();
+        cycles.sort_by(sort_key);
+        assert_eq!(cycles, vec![(s, a1("B1")), (s, a1("C1"))]);
+        assert!(result.limited_cells.is_empty());
+        assert_eq!(value(&wb, s, "B1"), num(0.0));
+        assert_eq!(value(&wb, s, "C1"), num(0.0));
+        for row in 2..=10_001 {
+            assert_eq!(value(&wb, dependent_sheet, &format!("D{row}")), num(7.0));
+        }
+        assert_eq!(result.changed.len(), 10_002);
+    }
+
+    #[test]
+    fn cycle_classification_same_sheet_dependents() {
+        check_cycle_dependents(false);
+    }
+
+    #[test]
+    fn cycle_classification_cross_sheet_dependents() {
+        check_cycle_dependents(true);
+    }
+
+    #[test]
+    fn cycle_classification_sum_self_reference() {
+        let (mut wb, s) = one_sheet();
+        put_num(&mut wb, s, "A1", 7.0);
+        put_formula(&mut wb, s, "A2", "SUM(A1:A2)");
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(result.cycle_cells, vec![(s, a1("A2"))]);
+        assert_eq!(value(&wb, s, "A2"), num(0.0));
+    }
+
+    #[test]
+    fn cycle_classification_long_lazy_chain() {
+        let (mut wb, s) = one_sheet();
+        put_num(&mut wb, s, "A1", 7.0);
+        for row in 2..=20_001 {
+            put_formula(
+                &mut wb,
+                s,
+                &format!("A{row}"),
+                &format!("IF(TRUE,A{}+1,$A$20001)", row - 1),
+            );
+        }
+        FORMULA_EVALUATIONS.with(|count| count.set(0));
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        let evaluations = FORMULA_EVALUATIONS.with(|count| count.get());
+        assert!(result.cycle_cells.is_empty());
+        assert!(result.limited_cells.is_empty());
+        assert_eq!(value(&wb, s, "A20001"), num(20_007.0));
+        assert!(evaluations <= 3 * 20_000, "{evaluations} evaluations");
+    }
+
+    #[test]
+    fn cycle_classification_wait_cycle_excludes_static_component_dependents() {
+        let (mut wb, s) = one_sheet();
+        put_num(&mut wb, s, "A1", 7.0);
+        put_formula(&mut wb, s, "B1", "IF(TRUE,C1+1,D1)");
+        put_formula(&mut wb, s, "C1", "B1+1");
+        put_formula(&mut wb, s, "D1", "B1+7");
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(result.cycle_cells, vec![(s, a1("B1")), (s, a1("C1"))]);
+        assert_eq!(value(&wb, s, "D1"), num(7.0));
+    }
+
+    #[test]
+    fn cycle_classification_waits_before_selecting_a_branch() {
+        let (mut wb, s) = one_sheet();
+        put_num(&mut wb, s, "A1", 7.0);
+        put_formula(&mut wb, s, "B1", "IF(C1=7,A1,B1)");
+        put_formula(&mut wb, s, "C1", "IF(TRUE,A1,B1)");
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert!(result.cycle_cells.is_empty());
+        assert_eq!(value(&wb, s, "B1"), num(7.0));
+        assert_eq!(value(&wb, s, "C1"), num(7.0));
     }
 
     /// the range graph makes `INDEX(range, k)` a precedent of every cell of
