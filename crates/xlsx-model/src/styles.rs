@@ -450,7 +450,11 @@ impl Clone for FmtIndex {
 
 impl FmtIndex {
     fn heal(&mut self, formats: &[(u16, String)]) {
-        if self.0.get().is_some_and(|ids| ids.table != table_key(formats)) {
+        if self
+            .0
+            .get()
+            .is_some_and(|ids| ids.table != table_key(formats))
+        {
             self.0 = OnceLock::new();
         }
     }
@@ -1571,10 +1575,12 @@ mod tests {
 
     #[test]
     fn resolving_edited_cells_visits_each_declared_format_once() {
-        let mut ss = Stylesheet::default();
-        ss.num_fmts = (0..200)
-            .map(|i| (164 + i, format!("0.{}", "0".repeat(usize::from(i) + 1))))
-            .collect();
+        let mut ss = Stylesheet {
+            num_fmts: (0..200)
+                .map(|i| (164 + i, format!("0.{}", "0".repeat(usize::from(i) + 1))))
+                .collect(),
+            ..Stylesheet::default()
+        };
         let before = FORMAT_VISITS.get();
         for row in 0..500 {
             let mut format = ss.cell_format(None);

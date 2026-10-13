@@ -32,7 +32,12 @@ mod format_tests {
                     limit: usize::MAX,
                 };
                 window
-                    .format(&model, style.and_then(|s| model.styles.xf(s)), &formats, legacy)
+                    .format(
+                        &model,
+                        style.and_then(|s| model.styles.xf(s)),
+                        &formats,
+                        legacy,
+                    )
                     .unwrap();
                 assert_eq!(
                     serde_json::from_slice::<serde_json::Value>(&window.bytes).unwrap(),

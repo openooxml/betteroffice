@@ -918,7 +918,8 @@ impl WorkbookAuthority {
         let txn = self.doc.transact();
         let cell_formats = txn.get_map(CELL_FORMATS)?;
         let (mut styles, indices) =
-            materialize_cell_formats(&cell_formats, &txn, &self.base.styles, SCHEMA_VERSION).ok()?;
+            materialize_cell_formats(&cell_formats, &txn, &self.base.styles, SCHEMA_VERSION)
+                .ok()?;
         let order = txn.get_array(SHEET_ORDER)?;
         let keys = sheet_keys(&order, &txn).ok()?;
         let key = keys.get(sheet.0 as usize)?;
@@ -3214,7 +3215,9 @@ fn materialize_cell_formats<T: ReadTxn>(
     for index in 0..styles.cell_xfs.len() {
         let index =
             u32::try_from(index).map_err(|_| "cell format table is too large".to_string())?;
-        known.entry(style_key(&styles, index)?).or_insert(Some(index));
+        known
+            .entry(style_key(&styles, index)?)
+            .or_insert(Some(index));
     }
     let mut indices = BTreeMap::new();
     for (key, format) in catalog {
