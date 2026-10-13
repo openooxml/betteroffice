@@ -414,7 +414,7 @@ fn genuine_style_change_writes_the_new_index() {
 #[test]
 fn refused_grid_regeneration_preserves_source_after_undo_and_unrelated_edit() {
     let second_sheet = concat!(
-        r#"<sheetData><row s="2" customFormat="1"><c r="A1" s="2"><v>1</v></c>"#,
+        r#"<sheetData><row outlineLevel="1"><c r="A1" s="2"><v>1</v></c>"#,
         r#"<c r="B1" s="2"><v>2</v></c></row></sheetData>"#,
     );
     let source = package_with_second_sheet(VARIANTS[0].1, second_sheet);
@@ -430,7 +430,7 @@ fn refused_grid_regeneration_preserves_source_after_undo_and_unrelated_edit() {
         panic!("expected spreadsheet UnsupportedEdit");
     };
     assert!(message.starts_with("sheet Sheet2:"), "{message}");
-    assert!(message.contains(r#"<row> attribute s="2""#), "{message}");
+    assert!(message.contains(r#"<row> attribute outlineLevel="1""#), "{message}");
 
     assert!(
         workbook

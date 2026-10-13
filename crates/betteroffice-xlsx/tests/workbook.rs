@@ -399,13 +399,16 @@ fn cascade_bounded_snapshot_and_collaborative_replay_keep_defaults() {
             CalculationOptions::default(),
         )
         .unwrap();
-    peer.apply_update_v1(
-        &workbook.encode_state_as_update_v1(),
-        CalculationOptions::default(),
-    )
-    .unwrap();
-    assert_eq!(cascade_fill(&peer, "A6").as_deref(), Some("#ff0000"));
-    assert_eq!(cascade_fill(&peer, "C2").as_deref(), Some("#00ff00"));
+    let before = peer.model().clone();
+    assert!(matches!(
+        peer.apply_update_v1(
+            &workbook.encode_state_as_update_v1(),
+            CalculationOptions::default(),
+        ),
+        Err(Error::CollaborativeStructureChanged)
+    ));
+    assert_eq!(*peer.model(), before);
+    assert_eq!(cascade_fill(&peer, "A5").as_deref(), Some("#ff0000"));
     let mut encoder = WorkbookSnapshotEncoder::new(&workbook, None, budget).unwrap();
     let mut builder = WorkbookSnapshotBuilder::new();
     while let Some(chunk) = encoder.next(&workbook).unwrap() {
@@ -417,6 +420,63 @@ fn cascade_bounded_snapshot_and_collaborative_replay_keep_defaults() {
         restored.model().sheets[0].row_styles,
         workbook.model().sheets[0].row_styles
     );
+    assert_eq!(
+        restored.model().sheets[0].col_styles,
+        workbook.model().sheets[0].col_styles
+    );
+}
+
+#[test]
+fn cascade_inserted_columns_save_their_inherited_style_in_column_order() {
+    use xlsx_model::{CellFormat, Color, Fill};
+    let mut model = WorkbookModel::default();
+    model.sheets.push(Sheet::new("Data"));
+    model.styles.cell_xfs.push(xlsx_model::Xf::default());
+    let style = model
+        .styles
+        .intern_cell_format(&CellFormat {
+            fill: Fill::Solid(Color::Rgb("#00ff00".into())),
+            ..Default::default()
+        })
+        .unwrap()
+        .unwrap();
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    set_test_part(&mut parts, "xl/worksheets/sheet1.xml", format!(
+        r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cols><col min="2" max="2" style="{style}"/><col min="6" max="6" width="20" customWidth="1"/></cols><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData></worksheet>"#
+    ).into_bytes());
+    let mut workbook = Workbook::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::InsertCols {
+                sheet: SheetId(0),
+                at: 2,
+                count: 2,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let saved = workbook.save().unwrap();
+    let xml = test_part_text(
+        &ooxml_opc::unzip_parts(&saved).unwrap(),
+        "xl/worksheets/sheet1.xml",
+    );
+    let ranges = xml
+        .match_indices("<col ")
+        .map(|(start, _)| {
+            let element = &xml[start..start + xml[start..].find('>').unwrap()];
+            let number = |name: &str| -> u32 {
+                let at = element.find(&format!(r#" {name}=""#)).unwrap() + name.len() + 3;
+                element[at..].split('"').next().unwrap().parse().unwrap()
+            };
+            (number("min"), number("max"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(ranges, [(2, 2), (3, 4), (8, 8)], "{xml}");
+    let reopened = Workbook::open(&saved).unwrap();
+    for at in ["B2", "C2", "D2"] {
+        assert_eq!(cascade_fill(&reopened, at).as_deref(), Some("#00ff00"), "{at}");
+    }
+    assert_ne!(cascade_fill(&reopened, "E2").as_deref(), Some("#00ff00"));
 }
 
 #[test]

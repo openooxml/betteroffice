@@ -72,6 +72,126 @@ fn malformed_custom_format_is_refused_during_parse() {
     assert!(matches!(parse_workbook(&parts), Err(ParseError::Xml(_))));
 }
 
+#[test]
+fn empty_cells_without_an_inherited_style_stay_sparse() {
+    let parts = package(
+        r#"<sheetData><row r="1"><c r="A1"/><c r="B1"><v>1</v></c></row></sheetData>"#,
+        &[],
+        false,
+    );
+    assert_eq!(parse_workbook(&parts).unwrap().sheets[0].iter_cells().count(), 1);
+}
+
+/// `(min, max, element)` for each `<col>` in document order.
+fn col_elements(xml: &str) -> Vec<(u32, u32, String)> {
+    let number = |element: &str, name: &str| -> u32 {
+        let start = element.find(&format!(r#" {name}=""#)).unwrap() + name.len() + 3;
+        element[start..].split('"').next().unwrap().parse().unwrap()
+    };
+    xml.match_indices("<col ")
+        .map(|(start, _)| {
+            let element = &xml[start..start + xml[start..].find('>').unwrap() + 1];
+            (number(element, "min"), number(element, "max"), element.to_owned())
+        })
+        .collect()
+}
+
+fn assert_ascending_and_disjoint(cols: &[(u32, u32, String)]) {
+    for pair in cols.windows(2) {
+        assert!(pair[0].1 < pair[1].0, "{} then {}", pair[0].2, pair[1].2);
+    }
+}
+
+#[test]
+fn regenerated_cols_resolve_overlapping_style_runs_in_column_order() {
+    let body = r#"<cols><col min="1" max="16384" style="7"/><col min="2" max="3" width="12.5" style="9" customWidth="1"/></cols><sheetData/>"#;
+    let wb = parse_workbook(&package(body, &[], false)).unwrap();
+    let saved = serialize_workbook(&wb).unwrap();
+    let xml = String::from_utf8(part_bytes(&saved, "xl/worksheets/sheet1.xml")).unwrap();
+    let cols = col_elements(&xml);
+    assert_ascending_and_disjoint(&cols);
+    assert_eq!(
+        cols.iter().map(|(min, max, _)| (*min, *max)).collect::<Vec<_>>(),
+        [(1, 1), (2, 2), (3, 3), (4, 16384)]
+    );
+    let reopened = parse_workbook(&saved).unwrap();
+    let sheet = &reopened.sheets[0];
+    for (col, style) in [(0, 7), (1, 9), (2, 9), (3, 7), (16383, 7)] {
+        assert_eq!(sheet.col_style(col), Some(style), "column {col}");
+    }
+    assert_eq!(sheet.col_widths, wb.sheets[0].col_widths);
+}
+
+#[test]
+fn a_whole_sheet_column_style_saves_as_one_col() {
+    let body = r#"<cols><col min="1" max="16384" style="3"/></cols><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>"#;
+    let parts = package(body, &[], false);
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let mut wb = parsed.workbook.clone();
+    wb.sheets[0].set_cell(
+        CellRef::parse_a1("A1").unwrap(),
+        Cell {
+            value: CellValue::Number { value: 2.0 },
+            ..Cell::default()
+        },
+    );
+    for saved in [
+        serialize_workbook(&wb).unwrap(),
+        serialize_workbook_with_package(&wb, &parsed.package).unwrap(),
+    ] {
+        let xml = String::from_utf8(part_bytes(&saved, "xl/worksheets/sheet1.xml")).unwrap();
+        let cols = col_elements(&xml);
+        assert_eq!(cols.len(), 1, "{xml}");
+        assert_eq!((cols[0].0, cols[0].1), (1, 16384));
+    }
+}
+
+#[test]
+fn patched_cols_coalesce_generated_runs_between_source_columns() {
+    let body = concat!(
+        r#"<cols><col min="1" max="1" width="12" customWidth="1"/>"#,
+        r#"<col min="6" max="6" width="9" style="1" customWidth="1"/></cols>"#,
+        r#"<sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>"#,
+    );
+    let parts = package(body, &[], false);
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let mut wb = parsed.workbook.clone();
+    let sheet = &mut wb.sheets[0];
+    sheet.col_styles = vec![ColStyle {
+        first: 1,
+        last: 16383,
+        xf: 1,
+    }];
+    sheet.col_widths.insert(3, 20.0);
+    sheet.set_cell(
+        CellRef::parse_a1("A1").unwrap(),
+        Cell {
+            value: CellValue::Number { value: 2.0 },
+            ..Cell::default()
+        },
+    );
+    let saved = serialize_workbook_with_package(&wb, &parsed.package).unwrap();
+    let xml = String::from_utf8(part_bytes(&saved, "xl/worksheets/sheet1.xml")).unwrap();
+    let cols = col_elements(&xml);
+    assert_ascending_and_disjoint(&cols);
+    assert_eq!(
+        cols.iter().map(|(min, max, _)| (*min, *max)).collect::<Vec<_>>(),
+        [(1, 1), (2, 3), (4, 4), (5, 5), (6, 6), (7, 16384)]
+    );
+    assert_eq!(cols[0].2, r#"<col min="1" max="1" width="12" customWidth="1"/>"#);
+    assert_eq!(
+        cols[4].2,
+        r#"<col min="6" max="6" width="9" style="1" customWidth="1"/>"#
+    );
+    let reopened = parse_workbook(&saved).unwrap();
+    let sheet = &reopened.sheets[0];
+    assert_eq!(sheet.col_style(0), None);
+    for col in [1, 2, 3, 4, 5, 6, 16383] {
+        assert_eq!(sheet.col_style(col), Some(1), "column {col}");
+    }
+    assert_eq!(sheet.col_widths, wb.sheets[0].col_widths);
+}
+
 /// assemble a one-sheet package around a worksheet body and optional shared
 /// strings, so each test only spells out the part under exercise.
 pub(super) fn package(

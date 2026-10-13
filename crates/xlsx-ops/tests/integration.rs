@@ -273,7 +273,7 @@ fn range_style_and_number_format_are_undoable() {
 }
 
 #[test]
-fn clearing_a_style_only_cell_keeps_an_explicit_default_style() {
+fn clearing_a_style_only_cell_restores_sparse_storage() {
     let mut wb = Workbook::default();
     wb.sheets.push(Sheet::new("Sheet1"));
     let range = CellRange::parse_a1("A1").unwrap();
@@ -303,7 +303,70 @@ fn clearing_a_style_only_cell_keeps_an_explicit_default_style() {
         },
     )
     .unwrap();
-    let cell = wb.sheets[0].cell(r("A1")).unwrap();
-    assert_eq!(cell.style, Some(0));
-    assert_eq!(cell.value, CellValue::Empty);
+    assert!(wb.sheets[0].cell(r("A1")).is_none());
+}
+
+fn clear_italic(range: CellRange) -> Op {
+    Op::PatchRangeStyle {
+        sheet: SheetId(0),
+        range,
+        patch: StylePatch {
+            clear: vec![StyleProperty::Italic],
+            ..StylePatch::default()
+        },
+    }
+}
+
+#[test]
+fn clearing_a_whole_unstyled_column_leaves_no_stored_cells() {
+    let mut wb = Workbook::default();
+    wb.sheets.push(Sheet::new("Sheet1"));
+    apply(
+        &mut wb,
+        &Op::PatchRangeStyle {
+            sheet: SheetId(0),
+            range: CellRange::parse_a1("A1:A3").unwrap(),
+            patch: StylePatch {
+                italic: Some(true),
+                ..StylePatch::default()
+            },
+        },
+    )
+    .unwrap();
+    assert_eq!(wb.sheets[0].iter_cells().count(), 3);
+
+    let column = CellRange::new(r("A1"), CellRef::new(xlsx_model::MAX_ROWS - 1, 0));
+    apply(&mut wb, &clear_italic(column)).unwrap();
+    assert_eq!(wb.sheets[0].iter_cells().count(), 0);
+}
+
+#[test]
+fn clearing_a_cell_under_a_column_style_keeps_an_explicit_default() {
+    let mut wb = Workbook::default();
+    let mut sheet = Sheet::new("Sheet1");
+    sheet.col_styles.push(xlsx_model::ColStyle {
+        first: 0,
+        last: 0,
+        xf: 1,
+    });
+    wb.sheets.push(sheet);
+    wb.styles.fonts = vec![
+        xlsx_model::Font::default(),
+        xlsx_model::Font {
+            italic: true,
+            ..Default::default()
+        },
+    ];
+    wb.styles.cell_xfs = vec![
+        xlsx_model::Xf::default(),
+        xlsx_model::Xf {
+            font: Some(1),
+            ..Default::default()
+        },
+    ];
+    apply(&mut wb, &clear_italic(CellRange::parse_a1("A1:B2").unwrap())).unwrap();
+    for at in ["A1", "A2"] {
+        assert_eq!(wb.sheets[0].cell(r(at)).unwrap().style, Some(0));
+    }
+    assert_eq!(wb.sheets[0].iter_cells().count(), 2);
 }
