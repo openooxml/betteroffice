@@ -768,7 +768,10 @@ function viewportFirst(init: ResidentCommandInitRequest): boolean {
   return init.layoutWithRegions && init.provisionalPages !== undefined;
 }
 
-/** Finishes a certified prefix's layout after the frames already in flight; false when there is none. */
+/**
+ * Finishes a certified prefix's layout after the frames already in flight; false when there is none.
+ * Only for requests `runRequest` does not run inside the frame work, which complete directly.
+ */
 function completeCommandPrefix(host: ResidentCommandHost): Promise<boolean> {
   if (commandLayout?.certifiedPages() == null) return Promise.resolve(false);
   return host.withFrameWork(async () => commandLayout?.complete() ?? false);
@@ -1693,7 +1696,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         value = session.sectionProperties();
         break;
       case 'exportStructuredWithPages':
-        if (commandHost && await completeCommandPrefix(commandHost)) postCommandFrame(0);
+        if (commandLayout?.complete()) postCommandFrame(0);
         value = session.exportStructuredWithPagesJson(request.read.options, request.read.currentRequest);
         break;
       case 'listContentControls':
@@ -2385,10 +2388,11 @@ function clearProvisionalFinalPages(): void {
 /**
  * Replaces a provisional layout with the full one before anything reads it,
  * finishing a sliced completion at once and answering its request first. A
- * command session's certified prefix publishes its completed frame instead.
+ * command session's certified prefix completes inside the request's frame work
+ * and publishes its completed frame instead.
  */
 async function completeProvisionalLayout(): Promise<void> {
-  if (commandHost && await completeCommandPrefix(commandHost)) {
+  if (commandLayout?.complete()) {
     postCommandFrame(0);
     return;
   }
