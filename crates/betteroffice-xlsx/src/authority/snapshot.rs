@@ -1176,6 +1176,35 @@ fn base_section(tag: u8) -> usize {
     }
 }
 
+/// `record` as releases before format facets wrote it: an `XF_SECTION` record
+/// holding such a release's reading moves to their layout, any other stays as
+/// it is.
+#[cfg(test)]
+pub(crate) fn released_base_layout(record: &[u8]) -> Vec<u8> {
+    if record.first() != Some(&XF_V2_TAG) {
+        return record.to_vec();
+    }
+    let xf = Xf::read(&mut Reader::new(&record[1..])).unwrap();
+    let mut w = Writer::new();
+    w.u8(XF_SECTION as u8);
+    xf.font.write(&mut w);
+    xf.fill.write(&mut w);
+    xf.border.write(&mut w);
+    xf.num_fmt_id.write(&mut w);
+    w.option(xf.alignment.as_ref(), |w, alignment| {
+        alignment.h.write(w);
+        alignment.v.write(w);
+        alignment.wrap_text.write(w);
+        alignment.shrink_to_fit.write(w);
+    });
+    let released = w.into_bytes();
+    assert_eq!(
+        Xf::from(LegacyXf::read(&mut Reader::new(&released[1..])).unwrap()),
+        xf
+    );
+    released
+}
+
 fn base_counts(base: &WorkbookBase) -> [usize; BASE_SECTIONS] {
     let WorkbookBase {
         bootstrap_client_id: _,

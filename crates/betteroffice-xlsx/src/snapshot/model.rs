@@ -1710,6 +1710,34 @@ fn read_xf(r: &mut Reader<'_>) -> SnapshotResult<Xf> {
     })
 }
 
+/// `record` as releases before format facets wrote it: an `XF` record holding
+/// such a release's reading moves to their layout, any other stays as it is.
+#[cfg(test)]
+pub(crate) fn released_layout(record: &[u8]) -> Vec<u8> {
+    if record.first() != Some(&XF_V2) {
+        return record.to_vec();
+    }
+    let xf = read_xf(&mut Reader::new(&record[1..])).unwrap();
+    let mut w = Writer::new();
+    w.u8(XF);
+    w.option(xf.font, Writer::var_u32);
+    w.option(xf.fill, Writer::var_u32);
+    w.option(xf.border, Writer::var_u32);
+    w.option(xf.num_fmt_id, |w, id| w.var_u32(u32::from(id)));
+    w.option(xf.alignment.as_ref(), |w, alignment| {
+        w.option(alignment.h.as_ref(), write_halign);
+        w.option(alignment.v.as_ref(), write_valign);
+        w.bool(alignment.wrap_text);
+        w.bool(alignment.shrink_to_fit);
+    });
+    let released = w.into_bytes();
+    assert_eq!(
+        read_released_xf(&mut Reader::new(&released[1..])).unwrap(),
+        xf
+    );
+    released
+}
+
 fn write_anchor_cell(w: &mut Writer, value: &AnchorCell) {
     let AnchorCell {
         col,

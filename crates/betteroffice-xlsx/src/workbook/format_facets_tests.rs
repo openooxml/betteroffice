@@ -15,7 +15,7 @@ fn source(attributes: &str, children: &str, protected: bool) -> (Vec<u8>, String
     (bytes, xf)
 }
 
-fn package(cell_xfs: &str, cells: &str, protected: bool) -> Vec<u8> {
+pub(super) fn package(cell_xfs: &str, cells: &str, protected: bool) -> Vec<u8> {
     let count = cell_xfs.matches("<xf").count();
     let styles = format!(
         r#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
@@ -48,7 +48,7 @@ fn package(cell_xfs: &str, cells: &str, protected: bool) -> Vec<u8> {
     ooxml_opc::rezip_parts(&parts).unwrap()
 }
 
-fn part(bytes: &[u8], name: &str) -> String {
+pub(super) fn part(bytes: &[u8], name: &str) -> String {
     let parts = ooxml_opc::unzip_parts(bytes).unwrap();
     String::from_utf8(parts.into_iter().find(|(path, _)| path == name).unwrap().1).unwrap()
 }
