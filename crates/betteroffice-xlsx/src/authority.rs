@@ -615,10 +615,13 @@ impl WorkbookAuthority {
         writer.into_bytes()
     }
 
+    /// `row_styles` reads the row defaults that follow the Yrs state; a state
+    /// releases before them encoded ends there.
     pub(crate) fn restore_recovery_state(
         bytes: &[u8],
         client_id: u64,
         next_sheet_id: u64,
+        row_styles: bool,
     ) -> crate::snapshot::SnapshotResult<Self> {
         use crate::snapshot::SnapshotError;
         use crate::snapshot::wire::Reader;
@@ -651,7 +654,7 @@ impl WorkbookAuthority {
             ));
         }
         let update = reader.bytes()?;
-        if !reader.clone().rest().is_empty() {
+        if row_styles {
             base.row_styles = Codec::read(&mut reader)?;
         }
         reader.finish()?;
