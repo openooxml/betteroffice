@@ -906,7 +906,10 @@ mod tests {
             .unwrap()
             .set_cell(a1("A1"), formula_cell("Other!A1+1"));
         let rewritten = [(SheetId(1), a1("A1"))];
-        assert_eq!(g.rename_sheets(&wb, &rewritten), vec![(SheetId(1), a1("B1"))]);
+        assert_eq!(
+            g.rename_sheets(&wb, &rewritten),
+            vec![(SheetId(1), a1("B1"))]
+        );
         assert_eq!(deps_a1(&g, "Other", "A1", &wb), vec!["Data!A1", "Data!B1"]);
     }
 
