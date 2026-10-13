@@ -89,9 +89,9 @@ mod inline_content;
 mod list_marker;
 pub mod media;
 mod resident_font;
-pub use resident_font::{ResidentFontError, decode_resident_font};
 #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
 mod resident_geometry;
+pub use resident_font::{ResidentFontError, decode_resident_font};
 mod op;
 mod ops;
 mod part_metadata;
