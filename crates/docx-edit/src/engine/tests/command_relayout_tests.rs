@@ -98,6 +98,7 @@ struct KeystrokeWork {
     paragraphs_flushed: usize,
     full_lowerings: u64,
     transcoded: usize,
+    resolved_lines: usize,
     measured_blocks: u64,
     paginated_pages: usize,
     full_paginations: u64,
@@ -116,6 +117,7 @@ fn keystroke_work(engine: &EngineSession, keystroke: impl FnOnce()) -> Keystroke
         paragraphs_flushed: crate::bridge::PARAGRAPHS_FLUSHED.with(Cell::get),
         full_lowerings: after.lower_cache_misses - before.lower_cache_misses,
         transcoded: layout.transcoded,
+        resolved_lines: layout.resolved_lines,
         measured_blocks: after.resident_measure_calls - before.resident_measure_calls,
         paginated_pages: after.rebuilt_pages,
         full_paginations: (after.pagination_calls - before.pagination_calls)

@@ -3272,6 +3272,178 @@ mod pagination_rule_tests {
         assert!(incremental.placed_blocks * 4 < base.len());
     }
 
+    /// `count` blocks carrying document positions: two-line paragraphs of text,
+    /// tab, break and image runs, tables, images, shapes, paragraphs of one
+    /// character per line that split across pages and, with `inline_shapes`,
+    /// paragraphs holding an inline shape. Each paragraph in `edits` has
+    /// `extra` more characters.
+    fn positioned_document(
+        count: usize,
+        edits: &[usize],
+        extra: usize,
+        inline_shapes: bool,
+    ) -> Vec<serde_json::Value> {
+        let line = |head: (usize, usize), tail: (usize, usize)| {
+            json!({
+                "headRun": head.0, "headChar": head.1, "tailRun": tail.0, "tailChar": tail.1,
+                "width": 10, "ascent": 8, "descent": 2, "lineHeight": 20,
+            })
+        };
+        let mut position = 0;
+        (0..count)
+            .map(|index| {
+                let start = position;
+                let len = 4 + if edits.contains(&index) { extra } else { 0 };
+                let text = |at: usize| {
+                    json!({"kind": "text", "text": "x".repeat(len), "pmStart": at, "pmEnd": at + len})
+                };
+                let paragraph = |runs: Vec<serde_json::Value>, lines: Vec<serde_json::Value>| {
+                    let end = runs.last().map_or(start + 1, |run| {
+                        run["pmEnd"].as_u64().unwrap() as usize
+                    }) + 1;
+                    let height = lines.len() * 20;
+                    (
+                        json!({"kind": "paragraph", "id": index, "runs": runs, "pmStart": start, "pmEnd": end}),
+                        json!({"kind": "paragraph", "lines": lines, "totalHeight": height}),
+                        end - start,
+                    )
+                };
+                let (block, measure, size) = match index % 8 {
+                    2 if inline_shapes => paragraph(
+                        vec![
+                            text(start + 1),
+                            json!({
+                                "kind": "image", "src": "", "width": 10, "height": 10,
+                                "pmStart": start + 1 + len, "pmEnd": start + 2 + len,
+                                "inlineShape": {
+                                    "id": format!("shape-{index}"), "shapeType": "rect",
+                                    "width": 10, "height": 10, "geometryPath": [], "children": [],
+                                    "pmStart": start + 1 + len, "pmEnd": start + 2 + len,
+                                    "docStart": start + 1 + len, "docEnd": start + 2 + len,
+                                },
+                            }),
+                        ],
+                        vec![line((0, 0), (1, 1))],
+                    ),
+                    3 => (
+                        json!({
+                            "kind": "table", "id": index, "columnWidths": [50],
+                            "rows": [{"id": 1000 + index, "cells": [{"id": 2000 + index, "blocks": []}]}],
+                            "pmStart": start, "pmEnd": start + 6,
+                        }),
+                        json!({
+                            "kind": "table", "columnWidths": [50], "totalWidth": 50, "totalHeight": 20,
+                            "rows": [{"height": 20, "cells": [{"width": 50, "height": 20, "blocks": []}]}],
+                        }),
+                        6,
+                    ),
+                    5 => (
+                        json!({
+                            "kind": "image", "id": index, "src": "", "width": 20, "height": 20,
+                            "pmStart": start, "pmEnd": start + 1,
+                        }),
+                        json!({"kind": "image", "width": 20, "height": 20}),
+                        1,
+                    ),
+                    6 => (
+                        json!({
+                            "kind": "shape", "id": index, "shapeType": "rect", "width": 20,
+                            "height": 20, "geometryPath": [], "children": [],
+                            "pmStart": start, "pmEnd": start + 1,
+                            "docStart": start, "docEnd": start + 1,
+                        }),
+                        json!({"kind": "shape", "width": 20, "height": 20}),
+                        1,
+                    ),
+                    7 => paragraph(
+                        vec![text(start + 1)],
+                        (0..len).map(|char| line((0, char), (0, char + 1))).collect(),
+                    ),
+                    _ => paragraph(
+                        vec![
+                            text(start + 1),
+                            json!({"kind": "tab", "pmStart": start + 1 + len, "pmEnd": start + 2 + len}),
+                            json!({"kind": "lineBreak", "pmStart": start + 2 + len, "pmEnd": start + 3 + len}),
+                            json!({
+                                "kind": "image", "src": "", "width": 10, "height": 10,
+                                "pmStart": start + 3 + len, "pmEnd": start + 4 + len,
+                            }),
+                            json!({"kind": "text", "text": "yz", "pmStart": start + 4 + len, "pmEnd": start + 6 + len}),
+                        ],
+                        vec![line((0, 0), (2, 0)), line((3, 0), (4, 2))],
+                    ),
+                };
+                position += size;
+                json!({"block": block, "measure": measure})
+            })
+            .collect()
+    }
+
+    #[test]
+    fn incremental_layout_refreshes_retained_pages_as_a_full_pass_lays_them_out() {
+        let count = 64;
+        let previous =
+            layout_document_checkpointed(&mut input(positioned_document(count, &[], 0, true)))
+                .unwrap();
+        let cases: [&[usize]; 6] = [&[1], &[2], &[7], &[1, 33], &[9, 26, 50], &[23, 41]];
+        for edits in cases {
+            let next = positioned_document(count, edits, 3, true);
+            let previous_fingerprints = vec![1_u64; count];
+            let mut next_fingerprints = previous_fingerprints.clone();
+            for &index in edits {
+                next_fingerprints[index] = 2;
+            }
+            let incremental = layout_document_incremental(
+                &mut input(next.clone()),
+                &mut previous.layout.clone(),
+                &previous.checkpoints,
+                &previous_fingerprints,
+                &next_fingerprints,
+                edits[0],
+            )
+            .unwrap();
+            let full = layout_document_checkpointed(&mut input(next)).unwrap();
+            assert_eq!(
+                serde_json::to_string(&incremental.layout).unwrap(),
+                serde_json::to_string(&full.layout).unwrap(),
+                "{edits:?}"
+            );
+            assert_eq!(incremental.checkpoints, full.checkpoints, "{edits:?}");
+        }
+    }
+
+    #[test]
+    fn incremental_layout_resolves_only_the_lines_it_places() {
+        let resolved = |count: usize| {
+            let previous = layout_document_checkpointed(&mut input(positioned_document(
+                count,
+                &[],
+                0,
+                false,
+            )))
+            .unwrap();
+            let mut next = input(positioned_document(count, &[1], 3, false));
+            let mut next_fingerprints = vec![1_u64; count];
+            next_fingerprints[1] = 2;
+            let mut previous_layout = previous.layout.clone();
+            crate::work_counters::take();
+            let incremental = layout_document_incremental(
+                &mut next,
+                &mut previous_layout,
+                &previous.checkpoints,
+                &vec![1_u64; count],
+                &next_fingerprints,
+                1,
+            )
+            .unwrap();
+            (
+                crate::work_counters::take().resolved_lines,
+                incremental.rebuilt_page_end,
+            )
+        };
+        assert_eq!(resolved(24), resolved(240));
+    }
+
     #[test]
     fn a_checkpoint_after_a_floating_table_keeps_the_spacing_its_page_starts_with() {
         let floating_table = json!({
