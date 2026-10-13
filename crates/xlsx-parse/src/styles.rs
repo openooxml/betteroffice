@@ -60,7 +60,7 @@ fn parse_styles(data: &[u8]) -> Result<(Stylesheet, Vec<Xf>), ParseError> {
     let mut edge: Option<(u8, BorderEdge)> = None;
     let mut xf: Option<Xf> = None;
     let mut explicit = [false; 4];
-    let mut child_applied = [true; 2];
+    let mut protection_applied = true;
     let mut legacy_cell_xfs: Vec<Xf> = Vec::new();
     let mut colors_depth = None;
     let mut indexed_colors_depth = None;
@@ -141,19 +141,16 @@ fn parse_styles(data: &[u8]) -> Result<(Stylesheet, Vec<Xf>), ParseError> {
                     let (parsed, flags) = parse_xf(&e)?;
                     xf = Some(parsed);
                     explicit = flags;
-                    child_applied = [
-                        applied(&e, b"applyAlignment")?.0,
-                        applied(&e, b"applyProtection")?.0,
-                    ];
+                    protection_applied = applied(&e, b"applyProtection")?.0;
                 }
-                b"alignment" if xf.is_some() && section == Section::CellXfs && child_applied[0] => {
+                b"alignment" if xf.is_some() && section == Section::CellXfs => {
                     let a = parse_alignment(&e)?;
                     if !a.is_empty() {
                         xf.as_mut().unwrap().alignment = Some(a);
                     }
                 }
                 b"protection"
-                    if xf.is_some() && section == Section::CellXfs && child_applied[1] =>
+                    if xf.is_some() && section == Section::CellXfs && protection_applied =>
                 {
                     xf.as_mut().unwrap().protection = Some(Protection {
                         locked: attr(&e, b"locked")?.map(|v| is_truthy(&v)).unwrap_or(true),

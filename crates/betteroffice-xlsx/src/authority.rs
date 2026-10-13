@@ -251,9 +251,12 @@ impl WorkbookBase {
                 }
             }
         }
-        if let Some(styles) = legacy_styles.filter(|styles| **styles != model.styles) {
+        if let Some(styles) = legacy_styles
+            .map(pre_facet_styles)
+            .filter(|styles| *styles != model.styles)
+        {
             let mut legacy_model = model.clone();
-            legacy_model.styles = styles.clone();
+            legacy_model.styles = styles;
             let legacy_base = Self::from_model_with_legacy_dimensions_oracle(
                 &legacy_model,
                 legacy_dimensions,
@@ -271,6 +274,24 @@ impl WorkbookBase {
         if !model.styles.indexed_colors.is_empty() {
             let mut legacy_model = model.clone();
             legacy_model.styles.indexed_colors.clear();
+            let legacy_base = Self::from_model_with_legacy_dimensions_oracle(
+                &legacy_model,
+                legacy_dimensions,
+                legacy_styles,
+            )?;
+            for (version, legacy_fingerprints) in legacy_base.fingerprints {
+                let accepted = fingerprints.entry(version).or_default();
+                for fingerprint in legacy_fingerprints {
+                    if !accepted.contains(&fingerprint) {
+                        accepted.push(fingerprint);
+                    }
+                }
+            }
+        }
+        let pre_facet = pre_facet_styles(&model.styles);
+        if pre_facet != model.styles {
+            let mut legacy_model = model.clone();
+            legacy_model.styles = pre_facet;
             let legacy_base = Self::from_model_with_legacy_dimensions_oracle(
                 &legacy_model,
                 legacy_dimensions,
@@ -4056,6 +4077,7 @@ fn fingerprint_model_with_schema(
 struct FingerprintStyles<'a> {
     styles: &'a Stylesheet,
     indexed_colors: &'a [String],
+    xf_facets: bool,
 }
 
 impl<'a> FingerprintStyles<'a> {
@@ -4063,6 +4085,7 @@ impl<'a> FingerprintStyles<'a> {
         Self {
             styles,
             indexed_colors: &styles.indexed_colors,
+            xf_facets: true,
         }
     }
 
@@ -4072,6 +4095,52 @@ impl<'a> FingerprintStyles<'a> {
             ..self
         }
     }
+
+    fn without_xf_facets(self) -> Self {
+        Self {
+            xf_facets: false,
+            ..self
+        }
+    }
+
+    fn cell_xfs(&self) -> Cow<'a, [xlsx_model::Xf]> {
+        if self.xf_facets {
+            Cow::Borrowed(&self.styles.cell_xfs)
+        } else {
+            Cow::Owned(self.styles.cell_xfs.iter().map(pre_facet_xf).collect())
+        }
+    }
+}
+
+/// An `<xf>` as read by releases that did not model protection, parent styles
+/// or the extended alignment attributes.
+fn pre_facet_xf(xf: &xlsx_model::Xf) -> xlsx_model::Xf {
+    let alignment = xf
+        .alignment
+        .as_ref()
+        .map(|alignment| xlsx_model::Alignment {
+            h: alignment.h,
+            v: alignment.v,
+            wrap_text: alignment.wrap_text,
+            shrink_to_fit: alignment.shrink_to_fit,
+            ..xlsx_model::Alignment::default()
+        })
+        .filter(|alignment| !alignment.is_empty());
+    xlsx_model::Xf {
+        font: xf.font,
+        fill: xf.fill,
+        border: xf.border,
+        num_fmt_id: xf.num_fmt_id,
+        alignment,
+        ..xlsx_model::Xf::default()
+    }
+}
+
+#[cfg(test)]
+fn pre_facet_styles(styles: &Stylesheet) -> Stylesheet {
+    let mut pre_facet = styles.clone();
+    pre_facet.cell_xfs = styles.cell_xfs.iter().map(pre_facet_xf).collect();
+    pre_facet
 }
 
 impl PartialEq for FingerprintStyles<'_> {
@@ -4079,7 +4148,7 @@ impl PartialEq for FingerprintStyles<'_> {
         self.styles.fonts == other.styles.fonts
             && self.styles.fills == other.styles.fills
             && self.styles.borders == other.styles.borders
-            && self.styles.cell_xfs == other.styles.cell_xfs
+            && self.cell_xfs() == other.cell_xfs()
             && self.styles.num_fmts == other.styles.num_fmts
             && self.styles.theme == other.styles.theme
             && self.indexed_colors == other.indexed_colors
@@ -4097,7 +4166,7 @@ impl serde::Serialize for FingerprintStyles<'_> {
         state.serialize_field("fonts", &self.styles.fonts)?;
         state.serialize_field("fills", &self.styles.fills)?;
         state.serialize_field("borders", &self.styles.borders)?;
-        state.serialize_field("cell_xfs", &self.styles.cell_xfs)?;
+        state.serialize_field("cell_xfs", &*self.cell_xfs())?;
         state.serialize_field("num_fmts", &self.styles.num_fmts)?;
         state.serialize_field("theme", &self.styles.theme)?;
         if !self.indexed_colors.is_empty() {
@@ -4154,6 +4223,7 @@ impl<'a> FingerprintBuilder<'a> {
         let style_index = match self.styles.iter().find(|(known, _)| {
             std::ptr::eq(known.styles, styles.styles)
                 && std::ptr::eq(known.indexed_colors, styles.indexed_colors)
+                && known.xf_facets == styles.xf_facets
         }) {
             Some((_, index)) => *index,
             None => {
@@ -4230,7 +4300,7 @@ impl<'a> FingerprintBuilder<'a> {
             append_fingerprint(&mut fingerprints, 3, defined_names_v3);
         }
         if let Some(legacy) = legacy_styles
-            .map(FingerprintStyles::new)
+            .map(|legacy| FingerprintStyles::new(legacy).without_xf_facets())
             .filter(|legacy| *legacy != styles)
         {
             let legacy_fingerprints = self.accepted_fingerprints(legacy, None)?;
@@ -4243,6 +4313,15 @@ impl<'a> FingerprintBuilder<'a> {
         if !styles.indexed_colors.is_empty() {
             let legacy_fingerprints =
                 self.accepted_fingerprints(styles.without_indexed_colors(), legacy_styles)?;
+            for (version, accepted) in legacy_fingerprints {
+                for fingerprint in accepted {
+                    append_fingerprint(&mut fingerprints, version, fingerprint);
+                }
+            }
+        }
+        if styles.xf_facets && styles.without_xf_facets() != styles {
+            let legacy_fingerprints =
+                self.accepted_fingerprints(styles.without_xf_facets(), legacy_styles)?;
             for (version, accepted) in legacy_fingerprints {
                 for fingerprint in accepted {
                     append_fingerprint(&mut fingerprints, version, fingerprint);
