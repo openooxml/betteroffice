@@ -241,8 +241,7 @@ fn substitution_barriers(
                 return Ok(ligatures);
             };
             for (index, nominal) in nominal.iter().enumerate() {
-                let covered = nominal
-                    .is_some_and(|id| subtable.coverage().contains(GlyphId(id)))
+                let covered = nominal.is_some_and(|id| subtable.coverage().contains(GlyphId(id)))
                     || glyph_ids[index] != 0
                         && subtable
                             .coverage()
