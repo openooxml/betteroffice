@@ -570,7 +570,7 @@ it('default readiness opens one worker session without a main-thread engine or e
   } finally { engine.mockRestore(); }
 });
 
-it('saving while F2 prefill is pending preserves the untouched cell', async () => {
+it('saving while F2 prefill is pending waits for the seed and preserves the untouched cell', async () => {
   const host = peerlessHarness();
   const ready = mock((_api: XlsxAsyncEditorApi) => {});
   const view = render(host.asyncEditor({ onReady: ready }));
@@ -587,6 +587,11 @@ it('saving while F2 prefill is pending preserves the untouched cell', async () =
     saving = ready.mock.calls[0]![0].commands.execute('save', null);
     await Promise.resolve();
   });
+  await act(async () => {});
+  expect(host.session.save).not.toHaveBeenCalled();
+  expect(view.getByTestId('xlsx-cell-editor')).toBeTruthy();
+  await act(async () => prefill.resolve({ sheet: 0, version: 'v1',
+    cells: [[{ a1: 'A1', input: 'initial', isFormula: false }]] }));
   const edits = host.sent.filter((command) => command.kind === 'editCell');
   await act(async () => {
     for (const command of host.sent) host.ack(command);
@@ -595,9 +600,7 @@ it('saving while F2 prefill is pending preserves the untouched cell', async () =
   expect(edits).toEqual([]);
   expect(host.cells.get('0:0:0')).toBe('initial');
   expect(host.session.save).toHaveBeenCalledTimes(1);
-  await act(async () => prefill.resolve({ sheet: 0, version: 'v1',
-    cells: [[{ a1: 'A1', input: 'initial', isFormula: false }]] }));
-  expect(host.cells.get('0:0:0')).toBe('initial');
+  expect((view.getByTestId('xlsx-cell-editor') as HTMLInputElement).value).toBe('initial');
 });
 
 describe('peerless F2 prefill keyboard replay', () => {
