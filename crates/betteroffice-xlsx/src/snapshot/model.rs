@@ -4,8 +4,8 @@ use std::ops::Bound::{Excluded, Unbounded};
 use xlsx_model::{
     Alignment, AnchorCell, AnchorEditAs, AnchorExtent, AnchorPos, Border, BorderEdge, BorderStyle,
     Cell, CellRef, ChartAnchor, ChartRef, ChartRefKind, ColStyle, Color, DateSystem, DefinedName,
-    Fill, Font, FreezePane, HAlign, Hyperlink, PatternType, Protection, Sheet, SheetChart, SheetFormat, SheetId,
-    Table, Theme, VAlign, Workbook, Xf,
+    Fill, Font, FreezePane, HAlign, Hyperlink, PatternType, Protection, Sheet, SheetChart,
+    SheetFormat, SheetId, Table, Theme, VAlign, Workbook, Xf,
 };
 
 use super::cells::{CellCursor, read_cell, read_range, read_ref, write_range, write_ref};

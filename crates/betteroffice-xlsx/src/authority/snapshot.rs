@@ -1,8 +1,8 @@
 use std::collections::LinkedList;
 
 use xlsx_model::styles::{
-    Alignment, Border, BorderEdge, BorderStyle, Color, Fill, Font, HAlign, PatternType, Protection, Theme,
-    VAlign, Xf,
+    Alignment, Border, BorderEdge, BorderStyle, Color, Fill, Font, HAlign, PatternType, Protection,
+    Theme, VAlign, Xf,
 };
 use xlsx_model::{AnchorCell, ChartRefKind};
 
@@ -2063,8 +2063,11 @@ impl BaseBuilder {
                 9 => base.shared_strings.push(Codec::read(&mut r)?),
                 10 => base.styles.fonts.push(Codec::read(&mut r)?),
                 11 => base.styles.fills.push(Released::<Fill>::read(&mut r)?.0),
-                12 => base.styles.borders.push(Released::<Border>::read(&mut r)?.0),
-                XF_SECTION if tag == XF_V2_TAG => base.styles.cell_xfs.push(Codec::read(&mut r)?),
+                12 => base
+                    .styles
+                    .borders
+                    .push(Released::<Border>::read(&mut r)?.0),
+                XF_V2_TAG => base.styles.cell_xfs.push(Codec::read(&mut r)?),
                 XF_SECTION => base.styles.push_released_xf(LegacyXf::read(&mut r)?.into()),
                 14 => base.styles.num_fmts.push(Codec::read(&mut r)?),
                 15 => base.styles.indexed_colors.push(Codec::read(&mut r)?),

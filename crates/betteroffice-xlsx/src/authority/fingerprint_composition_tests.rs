@@ -46,12 +46,18 @@ fn composition_fingerprint_hashes_both_readings_in_its_own_domain() {
     );
     let mut changed = model.clone();
     changed.styles.cell_xfs[1].quote_prefix = false;
-    assert_ne!(base.fingerprint, WorkbookBase::from_model(&changed).unwrap().fingerprint);
+    assert_ne!(
+        base.fingerprint,
+        WorkbookBase::from_model(&changed).unwrap().fingerprint
+    );
     changed = model.clone();
     if let xlsx_model::Fill::Pattern { bg, .. } = &mut changed.styles.fills[1] {
         *bg = Some(xlsx_model::Color::Indexed(9));
     }
-    assert_ne!(base.fingerprint, WorkbookBase::from_model(&changed).unwrap().fingerprint);
+    assert_ne!(
+        base.fingerprint,
+        WorkbookBase::from_model(&changed).unwrap().fingerprint
+    );
 }
 
 #[test]
@@ -73,9 +79,14 @@ fn composition_predicates_classify_each_reading() {
         }
         assert_eq!(released_fingerprint(&fingerprint), before_facets, "{tag}");
         assert_eq!(authority.holds_released_reading(), before_patterns, "{tag}");
-        assert_eq!(fingerprint_client_id(&fingerprint), Some(client_id_of_digest(0x0123456789abcdef)), "{tag}");
+        assert_eq!(
+            fingerprint_client_id(&fingerprint),
+            Some(client_id_of_digest(0x0123456789abcdef)),
+            "{tag}"
+        );
     }
-    Arc::make_mut(&mut authority.base).fingerprint = format!("{FACETS_FINGERPRINT_TAG}0123456789abcdef");
+    Arc::make_mut(&mut authority.base).fingerprint =
+        format!("{FACETS_FINGERPRINT_TAG}0123456789abcdef");
     assert!(!authority.holds_released_reading());
 }
 
@@ -90,20 +101,87 @@ fn composition_bootstrap_refuses_another_whole_state_and_accepts_its_own() {
     assert!(other.base.fingerprint.starts_with(COMBINED_TAG));
     assert!(!own.seeds_another_bootstrap(&own.encode_state_as_update_v1()));
     assert!(own.seeds_another_bootstrap(&other.encode_state_as_update_v1()));
-    assert_eq!(own.seed_clients(&own.doc.transact().state_vector()), vec![own.base.bootstrap_client_id]);
+    assert_eq!(
+        own.seed_clients(&own.doc.transact().state_vector()),
+        vec![own.base.bootstrap_client_id]
+    );
 }
 
 #[test]
 fn composition_main_released_demo_seed_restores() {
     let bytes = include_bytes!("../../../../apps/demo/public/showcase.xlsx");
     let seed = include_bytes!("released_demo_seed.bin");
-    let options = crate::CalculationOptions { now_serial: Some(45_000.25) };
-    let mut workbook = crate::Workbook::open_collaborative_recalculated(bytes, 71, options).unwrap();
+    let options = crate::CalculationOptions {
+        now_serial: Some(45_000.25),
+    };
+    let mut workbook =
+        crate::Workbook::open_collaborative_recalculated(bytes, 71, options).unwrap();
     let before = workbook.model().clone();
     let result = workbook.apply_update_v1(seed, options).unwrap();
     assert!(result.applied);
     assert_eq!(workbook.model(), &before);
     let mut peer = crate::Workbook::open_collaborative(bytes, 72).unwrap();
-    peer.apply_update_v1(&workbook.encode_state_as_update_v1(), options).unwrap();
+    peer.apply_update_v1(&workbook.encode_state_as_update_v1(), options)
+        .unwrap();
     assert_eq!(peer.model(), workbook.model());
+}
+
+#[test]
+fn composition_single_reading_states_restore_source_formats() {
+    let model = patterned_facets();
+    for reading in [
+        FingerprintReading::Released,
+        FingerprintReading::Facets,
+        FingerprintReading::Patterns,
+    ] {
+        let mut legacy = model.clone();
+        if !reading.has_facets() {
+            legacy.styles = pre_facet_styles(&legacy.styles);
+        }
+        if !reading.as_written() {
+            legacy.styles.fills = legacy
+                .styles
+                .fills
+                .iter()
+                .map(|fill| released_fill(fill).into_owned())
+                .collect();
+            legacy.styles.borders = legacy
+                .styles
+                .borders
+                .iter()
+                .map(|border| released_border(border).into_owned())
+                .collect();
+        }
+        let mut base = WorkbookBase::from_model(&legacy).unwrap();
+        (base.fingerprint, base.bootstrap_client_id) = fingerprint_model_with_domain_oracle(
+            &model,
+            SCHEMA_VERSION,
+            true,
+            true,
+            fingerprint_domain(SCHEMA_VERSION, reading),
+        )
+        .unwrap();
+        let doc = Doc::with_client_id(base.bootstrap_client_id);
+        seed(&doc, &base, &legacy, &["sheet:0".to_string()]).unwrap();
+        let update = doc
+            .transact()
+            .encode_state_as_update_v1(&StateVector::default());
+        let current = WorkbookAuthority::from_model_with_client_id(&model, 71).unwrap();
+        let adopted = match current.snapshot_replacement(&update) {
+            SnapshotAdoption::Replacement(adopted) => adopted,
+            SnapshotAdoption::Incompatible(error) => panic!("{reading:?}: {error}"),
+            SnapshotAdoption::NotApplicable => panic!("{reading:?}: snapshot not adopted"),
+        };
+        let restored = adopted.materialize().unwrap();
+        for (at, cell) in model.sheets[0].iter_cells() {
+            let actual = restored.sheets[0].cell(at).unwrap();
+            assert_eq!(
+                restored.styles.cell_format(actual.style),
+                model.styles.cell_format(cell.style),
+                "{reading:?}: {at:?}"
+            );
+            assert_eq!(actual.value, cell.value);
+            assert_eq!(actual.formula, cell.formula);
+        }
+    }
 }

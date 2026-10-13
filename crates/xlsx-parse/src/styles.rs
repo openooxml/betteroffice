@@ -3,8 +3,8 @@
 
 use quick_xml::events::{BytesStart, Event};
 use xlsx_model::styles::{
-    Alignment, Border, BorderEdge, BorderStyle, Color, Fill, Font, HAlign, PatternType, Protection, Stylesheet,
-    Theme, VAlign, Xf,
+    Alignment, Border, BorderEdge, BorderStyle, Color, Fill, Font, HAlign, PatternType, Protection,
+    Stylesheet, Theme, VAlign, Xf,
 };
 
 use crate::xml::{attr, local_name, next_event, reader};
