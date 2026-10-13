@@ -59,7 +59,7 @@ async function openFontConnection(hold = false, fontKeys: readonly string[] = ['
     return connection;
   });
   const dependencies = {
-    collaborationBinding: { retire() {}, begin() {}, openOptions: undefined },
+    workerCollaboration: { begin() {}, openOptions: undefined },
     active: { current: null },
     takePreloadedResidentEngineWorker: () => null,
     controller: { fontChoices() {} }, fontSource: { current: null }, fontAbort: { current: null }, fontJob: { current: null },

@@ -7,7 +7,8 @@ import * as measurement from '@betteroffice/docx/layout';
 import * as paged from './PeerlessPagedEditor';
 import { PeerlessDocxEditor as DocxEditor } from './PeerlessDocxEditor';
 import { setMissingWorkerCapabilitiesForTests } from '../internals/engineChoice';
-import { usePeerlessCollaboration, createPeerlessCollaborationReplica } from './peerlessCollaboration';
+import { createPeerlessCollaborationReplica } from './peerlessCollaboration';
+import { useWorkerCollaboration } from './useWorkerCollaboration';
 import { PeerlessRemotePresence } from './PeerlessRemotePresence';
 import { createPeerlessViewStore } from './viewStore';
 import type { ResidentEngineWorkerClient } from '@betteroffice/docx/yrs';
@@ -46,9 +47,9 @@ test('replica is published only after ready, rebinds handlers, and retires befor
   const s = setup();
   const first = mock<(replica: CollaborationReplica | null) => void>(() => {});
   const next = mock<(replica: CollaborationReplica | null) => void>(() => {});
-  let lifecycle: ReturnType<typeof usePeerlessCollaboration>;
+  let lifecycle: ReturnType<typeof useWorkerCollaboration>;
   function Harness({ options, bytes = source }: { options: DocxEditorCollaborationOptions; bytes?: Uint8Array }) {
-    lifecycle = usePeerlessCollaboration(options, bytes);
+    lifecycle = useWorkerCollaboration(options, bytes);
     return null;
   }
   const view = render(<Harness options={{ clientId: 41, initialUpdate: source, onReplica: first }} />);
