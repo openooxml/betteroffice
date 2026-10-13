@@ -1358,7 +1358,13 @@ fn rewrite_workbook_sheets(
     path: &str,
     sheets: &[Option<usize>],
 ) -> Result<Vec<u8>, String> {
-    let remaining = sheets.iter().flatten().count();
+    // A view on a removed sheet moves to the next kept one: the count of kept sheets before it.
+    let mut kept_before = Vec::with_capacity(sheets.len());
+    let mut remaining = 0;
+    for sheet in sheets {
+        kept_before.push(remaining);
+        remaining += usize::from(sheet.is_some());
+    }
     let mut reader = WorkbookReader::new(xml);
     let mut writer = Writer::new(Vec::with_capacity(xml.len()));
     let mut sheet_index = 0;
@@ -1401,14 +1407,14 @@ fn rewrite_workbook_sheets(
                     WorkbookElement::View => {
                         for (key, value) in &mut values {
                             if matches!(key.as_str(), "activeTab" | "firstSheet") {
-                                let old = value.parse::<usize>().map_err(|_| {
-                                    format!("invalid workbook sheet index in {path}")
-                                })?;
-                                let mapped = workbook_sheet_index(value, sheets, path)?
-                                    .unwrap_or_else(|| {
-                                        sheets[..old].iter().flatten().count().min(remaining - 1)
-                                    });
-                                *value = mapped.to_string();
+                                let mapped = value
+                                    .parse::<usize>()
+                                    .ok()
+                                    .and_then(|index| kept_before.get(index))
+                                    .ok_or_else(|| {
+                                        format!("invalid workbook sheet index in {path}")
+                                    })?;
+                                *value = (*mapped).min(remaining - 1).to_string();
                             }
                         }
                         false
