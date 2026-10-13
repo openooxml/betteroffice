@@ -4124,7 +4124,11 @@ fn released_fill(fill: &xlsx_model::Fill) -> Cow<'_, xlsx_model::Fill> {
 /// A border as releases before the extended dash styles read it.
 fn released_border(border: &xlsx_model::Border) -> Cow<'_, xlsx_model::Border> {
     let edges = [&border.left, &border.right, &border.top, &border.bottom];
-    if edges.into_iter().flatten().all(|edge| released_border_style(edge.style) == edge.style) {
+    if edges
+        .into_iter()
+        .flatten()
+        .all(|edge| released_border_style(edge.style) == edge.style)
+    {
         return Cow::Borrowed(border);
     }
     let edge = |edge: &Option<xlsx_model::BorderEdge>| {
