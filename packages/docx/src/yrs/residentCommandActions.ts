@@ -11,6 +11,7 @@ import { validControlValue, resolveControlHandle } from './residentControls';
 import { propertyCommand, validPropertyCommand, propertyCommandTarget, applyPropertyCommand } from './residentPropertyCommands';
 import { validSectionMargins, nativeTabStops } from './residentSections';
 import { validFontEnvironment } from './residentFontEnvironment';
+import { MAX_COLLABORATION_FRAME_BYTES } from '../collaboration/protocol';
 import type {
   DocxCommandApplyContext,
   DocxCommandApplyResult,
@@ -108,11 +109,57 @@ function validParagraphAttrs(value: unknown): boolean {
   return fields(value, validators);
 }
 
-function validCommandIntent(command: DocxCommandEnvelope, error: { reason: string }): command is DocxCommandIntent {
+/** Admission policy of one command kind. */
+interface DocxCommandPolicy {
+  /** Payload keys besides the shared `selection` and `suggesting` keys. */
+  keys: readonly string[];
+  /** Refuses `selection` and `suggesting` unless `keys` lists them. */
+  exact?: true;
+  /** Only a collaborating session admits the kind; others refuse it as unsupported. */
+  session?: 'collaboration';
+  /** A remote merge: admitted on any basis and while read-only, and kept out of local undo. */
+  origin?: 'remote';
+  /** Whole-payload check; failing it refuses the payload as invalid. */
+  payload?(payload: Record<string, unknown>): boolean;
+}
+
+const DOCX_COMMAND_POLICIES = {
+  applyRemoteUpdate: { keys: ['update'], exact: true, session: 'collaboration', origin: 'remote',
+    payload: ({ update }) => update instanceof ArrayBuffer && update.byteLength > 0 && update.byteLength <= MAX_COLLABORATION_FRAME_BYTES },
+  applyEdits: { keys: ['request', 'suggesting'], exact: true },
+  setFontEnvironment: { keys: ['faces', 'chains', 'families'], exact: true },
+  setContentControlValue: { keys: [] }, addRepeatingItem: { keys: [] }, removeRepeatingItem: { keys: [] },
+  openPart: { keys: [] }, ensurePart: { keys: [] }, removePart: { keys: [] },
+  setHyperlink: { keys: [] }, setObjectProperties: { keys: [] }, setSectionProperties: { keys: [] },
+  setNoteProperties: { keys: [] }, setWatermark: { keys: [] },
+  setSectionMargins: { keys: ['section', 'margins', 'expectVersion'] },
+  setTabStops: { keys: ['tabs', 'expectVersion'] }, removeTabStop: { keys: ['positionTwips', 'expectVersion'] },
+  undo: { keys: [], exact: true }, redo: { keys: [], exact: true },
+  replaceMatches: { keys: ['targets', 'text', 'expectVersion', 'suggesting'], exact: true },
+  select: { keys: ['selection'] }, insertText: { keys: ['text'] }, replaceSelection: { keys: ['text'] },
+  navigate: { keys: ['unit', 'direction', 'extend', 'goalX'], exact: true },
+  navigateCell: { keys: ['direction', 'extend', 'createLastRow'] },
+  selectPoint: { keys: ['page', 'x', 'y', 'layoutRevision', 'frameEpoch', 'clickCount', 'modifiers', 'story', 'cellId'], exact: true },
+  extendSelection: { keys: ['page', 'x', 'y', 'layoutRevision', 'frameEpoch', 'clickCount', 'modifiers', 'story', 'cellId'], exact: true },
+  deleteBackward: { keys: ['count'] }, deleteForward: { keys: ['count'] }, paragraphBreak: { keys: [] },
+  toggleMark: { keys: ['mark'] }, formatRange: { keys: ['delta'] }, clearFormatting: { keys: [] },
+  setParagraphAttrs: { keys: ['attrs'] }, applyParagraphStyle: { keys: ['styleId'] },
+  setReadOnly: { keys: ['readOnly'], exact: true },
+  setRenderEnvironment: { keys: ['themeColors', 'showHiddenText'], exact: true },
+} satisfies Record<DocxCommandKind, DocxCommandPolicy>;
+
+function commandPolicy(kind: string): DocxCommandPolicy | undefined {
+  return Object.hasOwn(DOCX_COMMAND_POLICIES, kind) ? DOCX_COMMAND_POLICIES[kind as DocxCommandKind] : undefined;
+}
+
+function validCommandIntent(
+  command: DocxCommandEnvelope, error: { reason: string }, environment?: ResidentCommandHooksEnvironment
+): command is DocxCommandIntent {
   const refuse = (reason: string): false => { error.reason = reason; return false; };
   const payload: unknown = command.payload;
   if (!object(payload)) return refuse('invalid-payload');
-  if (command.kind === 'applyRemoteUpdate') return refuse('unsupported-command');
+  const policy = commandPolicy(command.kind);
+  if (policy?.session === 'collaboration' && !environment?.collaboration) return refuse('unsupported-command');
   if (['setContentControlValue', 'addRepeatingItem', 'removeRepeatingItem'].includes(command.kind)) {
     const keys = command.kind === 'setContentControlValue' ? ['handle', 'value', 'expectVersion'] : ['handle', 'expectVersion'];
     return Object.keys(payload).every(key => keys.includes(key)) && string(payload.handle) && string(payload.expectVersion) &&
@@ -120,28 +167,9 @@ function validCommandIntent(command: DocxCommandEnvelope, error: { reason: strin
   }
   if (['openPart', 'ensurePart', 'removePart'].includes(command.kind)) return validPartTarget(payload) || refuse('invalid-part-target');
   if (propertyCommand(command.kind)) return validPropertyCommand(command) || refuse('invalid-properties');
-  const allowed: Record<string, string[]> = {
-    applyEdits: ['request', 'suggesting'],
-    setFontEnvironment: ['faces', 'chains', 'families'],
-    setContentControlValue: [], addRepeatingItem: [], removeRepeatingItem: [],
-    openPart: [], ensurePart: [], removePart: [],
-    setHyperlink: [], setObjectProperties: [], setSectionProperties: [], setNoteProperties: [], setWatermark: [],
-    setSectionMargins: ['section', 'margins', 'expectVersion'],
-    setTabStops: ['tabs', 'expectVersion'], removeTabStop: ['positionTwips', 'expectVersion'],
-    undo: [], redo: [], replaceMatches: ['targets', 'text', 'expectVersion', 'suggesting'],
-    select: ['selection'], insertText: ['text'], replaceSelection: ['text'],
-    navigate: ['unit', 'direction', 'extend', 'goalX'],
-    navigateCell: ['direction', 'extend', 'createLastRow'],
-    selectPoint: ['page', 'x', 'y', 'layoutRevision', 'frameEpoch', 'clickCount', 'modifiers', 'story', 'cellId'],
-    extendSelection: ['page', 'x', 'y', 'layoutRevision', 'frameEpoch', 'clickCount', 'modifiers', 'story', 'cellId'],
-    deleteBackward: ['count'], deleteForward: ['count'], paragraphBreak: [], toggleMark: ['mark'],
-    formatRange: ['delta'], clearFormatting: [], setParagraphAttrs: ['attrs'],
-    applyParagraphStyle: ['styleId'], setReadOnly: ['readOnly'], setRenderEnvironment: ['themeColors', 'showHiddenText'],
-  } satisfies Record<Exclude<DocxCommandKind, 'applyRemoteUpdate'>, string[]>;
-  const keys = Object.hasOwn(allowed, command.kind) ? allowed[command.kind] : undefined;
-  const semanticSelection = ['navigate', 'selectPoint', 'extendSelection', 'undo', 'redo', 'replaceMatches', 'applyEdits', 'setRenderEnvironment', 'setFontEnvironment'].includes(command.kind);
-  if (!keys || Object.keys(payload).some((key) => !keys.includes(key) &&
-    (command.kind === 'setReadOnly' || semanticSelection || !['selection', 'suggesting'].includes(key)))) return refuse('invalid-payload');
+  if (!policy || Object.keys(payload).some((key) => !policy.keys.includes(key) &&
+    (policy.exact || !['selection', 'suggesting'].includes(key)))) return refuse('invalid-payload');
+  if (policy.payload && !policy.payload(payload)) return refuse('invalid-payload');
   if (payload.suggesting !== undefined && (!fields(payload.suggesting, { name: string, date: string }) ||
     !object(payload.suggesting) || !string(payload.suggesting.name) || !string(payload.suggesting.date))) return refuse('invalid-author');
   switch (command.kind) {
@@ -279,7 +307,10 @@ export function preflightDocxCommand(
       editState: projectDocxEditState(engine, state, corrected) };
   };
   const error = { reason: 'invalid-payload' };
-  if (!validCommandIntent(command, error)) return refuse(error.reason);
+  if (!validCommandIntent(command, error, environment)) return refuse(error.reason);
+  if (commandPolicy(command.kind)?.origin === 'remote') {
+    return { status: 'ready', prepared: { command, selection: state.selection, range: null } };
+  }
   if (command.kind === 'setRenderEnvironment') {
     if (!environment?.setRenderEnvironment) return refuse('unsupported-command');
     return { status: 'ready', prepared: { command: structuredClone(command), selection: state.selection, range: null } };
@@ -693,7 +724,7 @@ export const createResidentDocxCommandHooks: ResidentCommandHooksFactory = (engi
   };
   return {
     preflight: (command, context) => {
-      if (command.basis.epoch !== init.epoch) {
+      if (command.basis.epoch !== init.epoch && commandPolicy(command.kind)?.origin !== 'remote') {
         return { status: 'refused', reason: 'stale-epoch', selection: projected().selection, editState: projected().editState };
       }
       const result = preflightDocxCommand(engine, state, command, context, environment);

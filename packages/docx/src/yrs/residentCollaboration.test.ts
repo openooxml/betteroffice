@@ -3,10 +3,16 @@ import { createResidentDocxCommandHooks } from './residentCommandActions';
 import { createResidentCollaboration, readResidentPresence } from './residentCollaboration';
 import { createYrsSession } from './index';
 import { applyFrameDelta, decodeFrameDelta } from '../layout/render/frameDelta';
-import type { ResidentCommandInitRequest } from './residentCommandProtocol';
+import { MAX_COLLABORATION_FRAME_BYTES } from '../collaboration/protocol';
+import type { DocxCommandEnvelope, ResidentCommandHooksEnvironment, ResidentCommandInitRequest } from './residentCommandProtocol';
 import { TIMEOUT, closeCommandEngines, command, context, openCommandEngine, selection, texts } from './residentCommandTestSupport';
 
 afterEach(closeCommandEngines);
+
+const collaborating: ResidentCommandHooksEnvironment = {
+  collaboration: true,
+  readSelectionLayout: () => { throw new Error('Selection layout is unavailable'); },
+};
 
 async function replica(checkpoint?: Uint8Array, clientId = 9101) {
   const arm = await openCommandEngine(['Seed'], { checkpoint, clientId });
@@ -14,7 +20,7 @@ async function replica(checkpoint?: Uint8Array, clientId = 9101) {
   const init = { session: 'collaboration-worker', incarnation: 1, epoch: 1, readOnly: false,
     selection: arm.state.selection, fonts: [], layoutInput: '{}', layoutWithRegions: true,
     layoutRevision: 1, extras: '{}' } satisfies ResidentCommandInitRequest;
-  const hooks = buffer.wrap(createResidentDocxCommandHooks(arm.engine, init));
+  const hooks = buffer.wrap(createResidentDocxCommandHooks(arm.engine, init, collaborating));
   const run = async (kind: string, payload: unknown) => {
     const intent = command(arm, kind as never, payload as never);
     const ctx = context(arm, intent);
@@ -23,7 +29,7 @@ async function replica(checkpoint?: Uint8Array, clientId = 9101) {
     if (result.status === 'applied') arm.version++;
     return { ...result, selection: hooks.selection(), editState: hooks.editState() };
   };
-  return { arm, buffer, hooks, run };
+  return { arm, buffer, hooks, run, init };
 }
 
 test('initial state is loaded once and the replica uses its own client', async () => {
@@ -112,6 +118,24 @@ test('a session without collaboration refuses remote merges as unsupported', asy
       selection: a.arm.state.selection, fonts: [], layoutInput: '{}', layoutWithRegions: true, layoutRevision: 1, extras: '{}' });
     const intent = command(a.arm, 'applyRemoteUpdate', { update: new Uint8Array([1]).buffer });
     expect(await plain.preflight(intent, context(a.arm, intent))).toMatchObject({ status: 'refused', reason: 'unsupported-command' });
+    expect(texts(a.arm)).toEqual(['Seed']);
+  } finally { a.buffer.dispose(); }
+}, TIMEOUT);
+
+test('remote merges are admitted from the command policy in a collaborating session', async () => {
+  const a = await replica();
+  try {
+    const hooks = createResidentDocxCommandHooks(a.arm.engine, { ...a.init, readOnly: true }, collaborating);
+    const admit = async (payload: unknown, extra: Partial<DocxCommandEnvelope> = {}) => {
+      const intent = command(a.arm, 'applyRemoteUpdate', payload as { update: ArrayBuffer }, extra);
+      return hooks.preflight(intent, context(a.arm, intent));
+    };
+    expect(await admit({ update: new Uint8Array([1]).buffer })).toMatchObject({ status: 'ready' });
+    expect(await admit({ update: new Uint8Array([1]).buffer }, { basis: { epoch: 2, version: 999 } })).toMatchObject({ status: 'ready' });
+    for (const payload of [{}, { update: new ArrayBuffer(0) }, { update: new ArrayBuffer(MAX_COLLABORATION_FRAME_BYTES + 1) },
+      { update: new Uint8Array([1]) }, { update: new Uint8Array([1]).buffer, selection: null }]) {
+      expect(await admit(payload)).toMatchObject({ status: 'refused', reason: 'invalid-payload' });
+    }
     expect(texts(a.arm)).toEqual(['Seed']);
   } finally { a.buffer.dispose(); }
 }, TIMEOUT);

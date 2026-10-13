@@ -325,6 +325,8 @@ export interface ResidentCommandHooks {
 /** @internal Worker-owned layout access for ordered selection resolution. */
 export interface ResidentCommandHooksEnvironment {
   supportsFontEnvironment?: boolean;
+  /** The session merges remote updates; its collaboration wrap applies them. */
+  collaboration?: boolean;
   readSelectionLayout(): DocxCommandSelectionLayout;
   setRenderEnvironment?(environment: DocxCommandPayloads['setRenderEnvironment']): void;
 }

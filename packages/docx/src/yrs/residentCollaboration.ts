@@ -1,7 +1,6 @@
 import type { CollaborationTextInsertion } from '../collaboration/types';
-import { MAX_COLLABORATION_FRAME_BYTES } from '../collaboration/protocol';
 import type { ResidentEngineSession } from './residentEngineSession';
-import type { ResidentCommandHooksFactory, DocxCommandIntent } from './residentCommandProtocol';
+import type { ResidentCommandHooksFactory } from './residentCommandProtocol';
 import type { RetainedFrame } from '../layout/render/frameDelta';
 import { DisplayPositionIndex } from './displayPositionIndex';
 import { createDisplayListQueries, type DisplayListRect } from '../layout/render/displayListQueries';
@@ -51,18 +50,9 @@ export function createResidentCollaboration(engine: ResidentEngineSession) {
       const state = () => ({ selection: hooks.selection(), editState: hooks.editState() });
       return {
         ...hooks,
-        preflight(command, context) {
-          if (command.kind !== 'applyRemoteUpdate') return hooks.preflight(command, context);
-          const payload = command.payload as { update?: unknown } | null;
-          if (disposed || !payload || !(payload.update instanceof ArrayBuffer) || !payload.update.byteLength ||
-            payload.update.byteLength > MAX_COLLABORATION_FRAME_BYTES) {
-            return { status: 'refused', reason: 'invalid-payload', ...state() };
-          }
-          return { status: 'ready', prepared: { command: command as DocxCommandIntent,
-            selection: hooks.selection(), range: null } };
-        },
         apply(prepared, context) {
           if (prepared.command.kind !== 'applyRemoteUpdate') return hooks.apply(prepared, context);
+          if (disposed) return { status: 'refused', reason: 'unsupported-command', ...state() };
           const before = engine.proposalEngine.version();
           const since = engine.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
           try {

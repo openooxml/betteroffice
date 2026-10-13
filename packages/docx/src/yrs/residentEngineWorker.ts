@@ -189,6 +189,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
       }
     },
     supportsFontEnvironment: true,
+    collaboration: collaboration !== null,
     readSelectionLayout() {
       const version = engine.proposalEngine.version();
       let frame: RetainedFrame;
