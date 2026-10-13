@@ -7024,6 +7024,53 @@ describe('peerless composition keyboard focus', () => {
     expect(host.attach).not.toHaveBeenCalled();
   });
 
+  it('preserves host focus when F2 waits behind a fence and composed input completes before a queued save', async () => {
+    let coordinator: ReturnType<typeof peerlessInput.createPeerlessWorkerInputCoordinator> | undefined;
+    const original = peerlessInput.createPeerlessWorkerInputCoordinator;
+    const creating = spyOn(peerlessInput, 'createPeerlessWorkerInputCoordinator').mockImplementation((hooks) => {
+      coordinator = original(hooks);
+      return coordinator;
+    });
+    restorers.push(() => creating.mockRestore());
+    const host = peerlessHarness();
+    const view = await host.mount();
+    const dialog = render(<input aria-label="Pending save dialog" />);
+    const hostInput = dialog.getByRole('textbox', { name: 'Pending save dialog' });
+    const entered = deferred<void>();
+    const reply = deferred<void>();
+    let reading!: Promise<void>;
+    act(() => {
+      reading = coordinator!.runAfterPendingInput(() => { entered.resolve(); return reply.promise; }, true);
+    });
+    await entered.promise;
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'F2' });
+    const input = view.getByTestId('xlsx-cell-editor') as HTMLInputElement;
+    expect(input.value).toBe('');
+    act(() => input.focus());
+    fireEvent.compositionStart(input);
+    fireEvent.change(input, { target: { value: 'composed' } });
+    const ended = new Event('compositionend', { bubbles: true });
+    Object.defineProperty(ended, 'data', { value: 'composed' });
+    let saving!: Promise<Uint8Array>;
+    try {
+      await act(async () => {
+        saving = coordinator!.save();
+        void saving.catch(() => {});
+        hostInput.focus();
+        fireEvent(input, ended);
+      });
+      expect(host.sent).toEqual([]);
+      expect(document.activeElement === hostInput).toBe(true);
+    } finally {
+      await act(async () => { reply.resolve(); await reading; });
+    }
+    const edit = await host.commandAt(0);
+    await act(async () => { host.ack(edit, { paint: true }); await saving; });
+    expect(edit).toMatchObject({ kind: 'editCell', payload: { args: [0, 0, 0, 'initialcomposed'] } });
+    expect(document.activeElement === hostInput).toBe(true);
+    expect(host.session.save).toHaveBeenCalledTimes(1);
+  });
+
   for (const source of ['cell', 'formula'] as const) {
     it(`restores ${source} keyboard focus after submitting composed text once and running a toolbar command`, async () => {
       const host = peerlessHarness(true);
