@@ -815,6 +815,32 @@ fn cascade_collaborative_automatic_without_a_proven_plain_xf_saves_xf_zero() {
 }
 
 #[test]
+fn cascade_plain_projection_preserves_an_untouched_unlocked_source_xf() {
+    let bytes = styles_part_source(
+        &format!(
+            r#"<fonts count="2"><font/><font/></fonts>{DEFAULT_FILLS_AND_BORDERS}<cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>{UNLOCKED_XF}</cellXfs>"#
+        ),
+        r#"<row r="1"><c r="A1" s="0"><v>1</v></c><c r="B1" s="1"><v>2</v></c></row>"#,
+    );
+    let mut left = Workbook::open_collaborative(&bytes, 878).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 879).unwrap();
+    let baseline = right.encode_state_vector_v1();
+    left.edit_cell(SheetId(0), cell("A1"), "5", CalculationOptions::default())
+        .unwrap();
+    right
+        .apply_update_v1(
+            &left.encode_diff_v1(&baseline).unwrap(),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    for peer in [&left, &right] {
+        let saved = peer.save().unwrap();
+        assert_eq!(saved_cell_style(&saved, "B1"), 1);
+        assert_eq!(saved_cell_xf(&saved, "B1"), saved_cell_xf(&bytes, "B1"));
+    }
+}
+
+#[test]
 fn cascade_batched_copies_of_a_fresh_plain_style_save_locked_locally_and_on_a_peer() {
     let bytes = nonzero_plain_clear_source(false);
     let mut workbook = Workbook::open(&bytes).unwrap();
