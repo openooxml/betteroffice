@@ -26,7 +26,8 @@ DISABLED_FEATURES = ('shell_tool', 'unified_exec_tty', 'shell_snapshot',
                      'workspace_dependencies', 'worktrees')
 FORMAT_TOOLS = {'xlsx': ('xlsx_outline', 'xlsx_read_range', 'xlsx_write_range', 'xlsx_edit_grid', 'xlsx_edit_sheets',
                          'xlsx_find_replace', 'xlsx_format', 'xlsx_sort'),
-                'pptx': ('pptx_outline', 'pptx_read_slide', 'pptx_edit')}
+                'pptx': ('pptx_outline', 'pptx_read_slide', 'pptx_edit'),
+                'docx': ('office_outline', 'office_grep', 'office_read', 'office_propose', 'office_accept', 'docx_edit')}
 SHELL_FEATURES = ('shell_tool', 'unified_exec', 'unified_exec_tty')
 ALLOWED_ITEMS = {'betteroffice': ('agent_message', 'reasoning', 'error'),
                  'generic': ('agent_message', 'reasoning', 'error', 'command_execution', 'file_change')}
