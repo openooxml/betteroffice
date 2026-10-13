@@ -224,8 +224,7 @@ fn patched_cols_write_changed_and_cleared_source_column_styles() {
         assert_ascending_and_disjoint(&cols);
         let reopened = parse_workbook(&saved).unwrap();
         assert_eq!(
-            reopened.sheets[0].col_widths,
-            wb.sheets[0].col_widths,
+            reopened.sheets[0].col_widths, wb.sheets[0].col_widths,
             "{xml}"
         );
         let styles = (1..=3)
