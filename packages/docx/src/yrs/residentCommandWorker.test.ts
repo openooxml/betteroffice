@@ -1796,6 +1796,34 @@ for (const comment of [true, false]) {
   });
 }
 
+test('a source-recorded page break survives deletion undo and a later comment-paragraph edit', async () => {
+  const opened = await openAuthoredBreakRegression(true);
+  const { client, engine } = opened;
+  try {
+    expect(nativeBreakCounts(engine)).toEqual([1, 0]);
+    const tail = { story: 'body', paraId: engine.paragraphs('body')[1]!.paraId, offset: 0 };
+    const deleted = await client.edit(intent(1, 0, 'deleteForward', { selection: { anchor: tail, focus: tail } }));
+    expect(deleted.outcomes[0]?.status).toBe('applied');
+    expect(nativeBreakCounts(engine)).toEqual([0, 0]);
+    const first = { story: 'body', paraId: engine.paragraphs('body')[0]!.paraId, offset: 1 };
+    expect((await client.edit(intent(2, deleted.version, 'insertText', {
+      text: '+', selection: { anchor: first, focus: first },
+    }))).outcomes[0]?.status).toBe('applied');
+    await expectAuthoredBreakSaves(opened, [0, 0]);
+    const beforeUndoText = await client.requestFullFrame();
+    expect((await client.edit(intent(3, beforeUndoText.version, 'undo', {}))).outcomes[0]?.status).toBe('applied');
+    await expectAuthoredBreakSaves(opened, [0, 0]);
+    const beforeUndoBreak = await client.requestFullFrame();
+    const restored = await client.edit(intent(4, beforeUndoBreak.version, 'undo', {}));
+    expect(restored.outcomes[0]?.status).toBe('applied');
+    expect(nativeBreakCounts(engine)).toEqual([1, 0]);
+    expect((await client.edit(intent(5, restored.version, 'insertText', {
+      text: '+', selection: { anchor: first, focus: first },
+    }))).outcomes[0]?.status).toBe('applied');
+    await expectAuthoredBreakSaves(opened, [1, 0]);
+  } finally { client.destroy(); }
+});
+
 const sectionXml = (type: string, left: number) => `<w:sectPr><w:type w:val="${type}"/><w:pgMar w:left="${left}"/></w:sectPr>`;
 
 function savedSectionMargins(bytes: ArrayBuffer): [string, string | null, number | null][] {
