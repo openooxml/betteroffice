@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use quick_xml::events::Event;
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
+use xlsx_model::workbook::ColumnRuns;
 use xlsx_model::{
     Cell, CellRange, CellRef, CellValue, ColStyle, DateSystem, DefinedName, ErrorValue, FreezePane,
     Hyperlink, Sheet, SheetFormat, SheetId, Stylesheet, Table, Workbook,
@@ -562,6 +563,7 @@ fn parse_worksheet(
     let mut cell_count: u64 = 0;
     let mut hyperlink_count: usize = 0;
     let mut row_style_count: usize = 0;
+    let mut columns = ColumnRuns::default();
     let mut shared_formulas = SharedFormulas::default();
 
     loop {
@@ -660,7 +662,7 @@ fn parse_worksheet(
                         sheet.hyperlinks.push(link);
                     }
                 }
-                b"col" => parse_col(&e, &mut sheet, legacy)?,
+                b"col" => parse_col(&e, &mut sheet, &mut columns, legacy)?,
                 b"sheetFormatPr" => {
                     sheet.format = SheetFormat {
                         default_row_height_pt: attr(&e, b"defaultRowHeight")?
@@ -679,7 +681,14 @@ fn parse_worksheet(
                 match name.local_name().as_ref() {
                     b"c" => {
                         if let Some(c) = cur.take() {
-                            finalize_cell(c, shared, &mut sheet, shared_string_cells, facts)?;
+                            finalize_cell(
+                                c,
+                                shared,
+                                &mut sheet,
+                                &columns,
+                                shared_string_cells,
+                                facts,
+                            )?;
                         }
                         col_cursor += 1;
                     }
@@ -809,6 +818,7 @@ fn ranges_intersect(left: CellRange, right: CellRange) -> bool {
 fn parse_col(
     e: &quick_xml::events::BytesStart,
     sheet: &mut Sheet,
+    columns: &mut ColumnRuns,
     legacy: &mut LegacySheetDimensions,
 ) -> Result<(), ParseError> {
     let hidden = attr(e, b"hidden")?.is_some_and(|value| is_truthy(&value));
@@ -829,11 +839,13 @@ fn parse_col(
         if sheet.col_styles.len() >= MAX_COL_STYLES {
             return Err(ParseError::TooManyColumnStyles);
         }
-        sheet.col_styles.push(ColStyle {
+        let run = ColStyle {
             first: min - 1,
             last: max - 1,
             xf,
-        });
+        };
+        sheet.col_styles.push(run);
+        columns.push(run);
     }
     let width = match authored {
         _ if hidden => 0.0,
@@ -855,6 +867,7 @@ fn finalize_cell(
     c: CellBuild,
     shared: &[String],
     sheet: &mut Sheet,
+    columns: &ColumnRuns,
     shared_string_cells: &mut SharedStringCells,
     facts: &mut SourceCellFacts,
 ) -> Result<(), ParseError> {
@@ -919,7 +932,11 @@ fn finalize_cell(
         formula: c.formula,
         style: c.style,
     };
-    if cell == Cell::default() && sheet.inherited_style(addr).is_some_and(|style| style != 0) {
+    if cell == Cell::default()
+        && sheet
+            .inherited_style_in(addr, columns)
+            .is_some_and(|style| style != 0)
+    {
         cell.style = Some(0);
     }
     if cell != Cell::default() {

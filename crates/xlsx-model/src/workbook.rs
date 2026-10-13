@@ -191,6 +191,84 @@ pub struct ColumnDefaults<'a> {
     cols: HashMap<ColId, Option<u32>>,
 }
 
+/// Column defaults as ascending, disjoint runs, built one source run at a time;
+/// later runs win.
+#[derive(Debug, Clone, Default)]
+pub struct ColumnRuns {
+    runs: BTreeMap<ColId, ColStyle>,
+}
+
+impl ColumnRuns {
+    pub fn push(&mut self, run: ColStyle) {
+        if run.first > run.last {
+            return;
+        }
+        let runs = &mut self.runs;
+        let after = run.last.saturating_add(1);
+        let before = runs.range(..run.first).next_back().map(|(_, &prior)| prior);
+        if let Some(before) = before
+            && before.last >= run.first
+        {
+            runs.insert(
+                before.first,
+                ColStyle {
+                    last: run.first - 1,
+                    ..before
+                },
+            );
+            if before.last > run.last {
+                runs.insert(
+                    after,
+                    ColStyle {
+                        first: after,
+                        ..before
+                    },
+                );
+            }
+        }
+        let inside = runs
+            .range(run.first..=run.last)
+            .map(|(&first, _)| first)
+            .collect::<Vec<_>>();
+        for first in inside {
+            let Some(old) = runs.remove(&first) else {
+                continue;
+            };
+            if old.last > run.last {
+                runs.insert(
+                    after,
+                    ColStyle {
+                        first: after,
+                        ..old
+                    },
+                );
+            }
+        }
+        runs.insert(run.first, run);
+    }
+
+    pub fn style(&self, col: ColId) -> Option<u32> {
+        self.runs
+            .range(..=col)
+            .next_back()
+            .filter(|(_, run)| run.last >= col)
+            .map(|(_, run)| run.xf)
+    }
+
+    fn into_runs(self) -> Vec<ColStyle> {
+        let mut out: Vec<ColStyle> = Vec::with_capacity(self.runs.len());
+        for run in self.runs.into_values() {
+            match out.last_mut() {
+                Some(last) if last.xf == run.xf && last.last.saturating_add(1) == run.first => {
+                    last.last = run.last;
+                }
+                _ => out.push(run),
+            }
+        }
+        out
+    }
+}
+
 impl<'a> ColumnDefaults<'a> {
     pub fn new(sheet: &'a Sheet) -> Self {
         Self {
@@ -275,68 +353,21 @@ impl Sheet {
 
     /// Column defaults as ascending, disjoint runs; later runs win.
     pub fn col_style_runs(&self) -> Vec<ColStyle> {
-        let mut runs: BTreeMap<ColId, ColStyle> = BTreeMap::new();
+        let mut runs = ColumnRuns::default();
         for &run in &self.col_styles {
-            if run.first > run.last {
-                continue;
-            }
-            let after = run.last.saturating_add(1);
-            let before = runs.range(..run.first).next_back().map(|(_, &prior)| prior);
-            if let Some(before) = before
-                && before.last >= run.first
-            {
-                runs.insert(
-                    before.first,
-                    ColStyle {
-                        last: run.first - 1,
-                        ..before
-                    },
-                );
-                if before.last > run.last {
-                    runs.insert(
-                        after,
-                        ColStyle {
-                            first: after,
-                            ..before
-                        },
-                    );
-                }
-            }
-            let inside = runs
-                .range(run.first..=run.last)
-                .map(|(&first, _)| first)
-                .collect::<Vec<_>>();
-            for first in inside {
-                let Some(old) = runs.remove(&first) else {
-                    continue;
-                };
-                if old.last > run.last {
-                    runs.insert(
-                        after,
-                        ColStyle {
-                            first: after,
-                            ..old
-                        },
-                    );
-                }
-            }
-            runs.insert(run.first, run);
+            runs.push(run);
         }
-        let mut out: Vec<ColStyle> = Vec::with_capacity(runs.len());
-        for run in runs.into_values() {
-            match out.last_mut() {
-                Some(last) if last.xf == run.xf && last.last.saturating_add(1) == run.first => {
-                    last.last = run.last;
-                }
-                _ => out.push(run),
-            }
-        }
-        out
+        runs.into_runs()
     }
 
     /// The default a missing cell takes: its row's, then its column's.
     pub fn inherited_style(&self, at: CellRef) -> Option<u32> {
         self.inherited_style_with(at, |col| self.col_style(col))
+    }
+
+    /// [`Sheet::inherited_style`] with the column defaults `columns` holds.
+    pub fn inherited_style_in(&self, at: CellRef, columns: &ColumnRuns) -> Option<u32> {
+        self.inherited_style_with(at, |col| columns.style(col))
     }
 
     /// Existing cells use their own xf; missing cells inherit.
