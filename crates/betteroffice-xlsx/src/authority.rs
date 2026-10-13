@@ -170,6 +170,10 @@ impl WorkbookBase {
     /// before hidden rows and columns read as zero stored, per sheet. Those
     /// maps are hashed at every schema, so a peer that persisted its state
     /// under one of those releases is only recognisable against them.
+    ///
+    /// The current fingerprint hashes the format facets under its own domain
+    /// and is accepted only as is. Every other accepted fingerprint is one a
+    /// release before facets wrote, over its reading of the styles.
     fn from_model_with_legacy_dimensions(
         model: &WorkbookModel,
         legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
@@ -177,9 +181,13 @@ impl WorkbookBase {
     ) -> Result<Self, String> {
         let mut builder = FingerprintBuilder::new(model, legacy_dimensions);
         let styles = FingerprintStyles::new(&model.styles);
-        let (fingerprint, bootstrap_client_id) =
-            builder.fingerprint(styles, SCHEMA_VERSION, true, true, false)?;
-        let fingerprints = builder.accepted_fingerprints(styles, legacy_styles)?;
+        let (fingerprint, bootstrap_client_id) = builder.current(styles)?;
+        let mut fingerprints =
+            builder.accepted_fingerprints(styles.without_xf_facets(), legacy_styles)?;
+        fingerprints
+            .entry(SCHEMA_VERSION)
+            .or_default()
+            .insert(0, fingerprint.clone());
         Ok(Self {
             bootstrap_client_id,
             date_system: model.date_system,
@@ -212,6 +220,30 @@ impl WorkbookBase {
 
     #[cfg(test)]
     fn from_model_with_legacy_dimensions_oracle(
+        model: &WorkbookModel,
+        legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
+        legacy_styles: Option<&Stylesheet>,
+    ) -> Result<Self, String> {
+        let mut released = model.clone();
+        released.styles = pre_facet_styles(&model.styles);
+        let legacy_styles = legacy_styles.map(pre_facet_styles);
+        let mut base =
+            Self::released_base_oracle(&released, legacy_dimensions, legacy_styles.as_ref())?;
+        let (fingerprint, bootstrap_client_id) = fingerprint_model_current_oracle(model)?;
+        base.fingerprints
+            .entry(SCHEMA_VERSION)
+            .or_default()
+            .insert(0, fingerprint.clone());
+        base.fingerprint = fingerprint;
+        base.bootstrap_client_id = bootstrap_client_id;
+        base.styles = model.styles.clone();
+        Ok(base)
+    }
+
+    /// The base a release before format facets built, over its reading of
+    /// the styles.
+    #[cfg(test)]
+    fn released_base_oracle(
         model: &WorkbookModel,
         legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
         legacy_styles: Option<&Stylesheet>,
@@ -258,17 +290,11 @@ impl WorkbookBase {
                 }
             }
         }
-        if let Some(styles) = legacy_styles
-            .map(pre_facet_styles)
-            .filter(|styles| *styles != model.styles)
-        {
+        if let Some(styles) = legacy_styles.filter(|styles| **styles != model.styles) {
             let mut legacy_model = model.clone();
-            legacy_model.styles = styles;
-            let legacy_base = Self::from_model_with_legacy_dimensions_oracle(
-                &legacy_model,
-                legacy_dimensions,
-                None,
-            )?;
+            legacy_model.styles = styles.clone();
+            let legacy_base =
+                Self::released_base_oracle(&legacy_model, legacy_dimensions, None)?;
             for (version, legacy_fingerprints) in legacy_base.fingerprints {
                 let accepted = fingerprints.entry(version).or_default();
                 for fingerprint in legacy_fingerprints {
@@ -281,29 +307,8 @@ impl WorkbookBase {
         if !model.styles.indexed_colors.is_empty() {
             let mut legacy_model = model.clone();
             legacy_model.styles.indexed_colors.clear();
-            let legacy_base = Self::from_model_with_legacy_dimensions_oracle(
-                &legacy_model,
-                legacy_dimensions,
-                legacy_styles,
-            )?;
-            for (version, legacy_fingerprints) in legacy_base.fingerprints {
-                let accepted = fingerprints.entry(version).or_default();
-                for fingerprint in legacy_fingerprints {
-                    if !accepted.contains(&fingerprint) {
-                        accepted.push(fingerprint);
-                    }
-                }
-            }
-        }
-        let pre_facet = pre_facet_styles(&model.styles);
-        if pre_facet != model.styles {
-            let mut legacy_model = model.clone();
-            legacy_model.styles = pre_facet;
-            let legacy_base = Self::from_model_with_legacy_dimensions_oracle(
-                &legacy_model,
-                legacy_dimensions,
-                legacy_styles,
-            )?;
+            let legacy_base =
+                Self::released_base_oracle(&legacy_model, legacy_dimensions, legacy_styles)?;
             for (version, legacy_fingerprints) in legacy_base.fingerprints {
                 let accepted = fingerprints.entry(version).or_default();
                 for fingerprint in legacy_fingerprints {
@@ -4314,7 +4319,7 @@ impl serde::Serialize for FingerprintStyles<'_> {
     }
 }
 
-type FingerprintKey = (usize, i64, bool, bool, bool);
+type FingerprintKey = (usize, i64, bool, bool, bool, bool);
 
 struct FingerprintBuilder<'a> {
     model: &'a WorkbookModel,
@@ -4350,6 +4355,10 @@ impl<'a> FingerprintBuilder<'a> {
         }
     }
 
+    fn current(&mut self, styles: FingerprintStyles<'a>) -> Result<(String, u64), String> {
+        self.hash(styles, SCHEMA_VERSION, true, true, false, true)
+    }
+
     fn fingerprint(
         &mut self,
         styles: FingerprintStyles<'a>,
@@ -4357,6 +4366,25 @@ impl<'a> FingerprintBuilder<'a> {
         include_defined_names: bool,
         include_col_styles: bool,
         legacy_dimensions: bool,
+    ) -> Result<(String, u64), String> {
+        self.hash(
+            styles,
+            version,
+            include_defined_names,
+            include_col_styles,
+            legacy_dimensions,
+            false,
+        )
+    }
+
+    fn hash(
+        &mut self,
+        styles: FingerprintStyles<'a>,
+        version: i64,
+        include_defined_names: bool,
+        include_col_styles: bool,
+        legacy_dimensions: bool,
+        current: bool,
     ) -> Result<(String, u64), String> {
         let style_index = match self.styles.iter().find(|(known, _)| {
             std::ptr::eq(known.styles, styles.styles)
@@ -4387,6 +4415,7 @@ impl<'a> FingerprintBuilder<'a> {
             include_defined_names,
             include_col_styles,
             legacy_dimensions,
+            current,
         );
         if let Some(hash) = self.hashes.get(&key) {
             return Ok(hash.clone());
@@ -4402,6 +4431,7 @@ impl<'a> FingerprintBuilder<'a> {
                 &[]
             },
             styles,
+            current,
         )?;
         self.hashes.insert(key, hash.clone());
         Ok(hash)
@@ -4457,16 +4487,24 @@ impl<'a> FingerprintBuilder<'a> {
                 }
             }
         }
-        if styles.xf_facets && styles.without_xf_facets() != styles {
-            let legacy_fingerprints =
-                self.accepted_fingerprints(styles.without_xf_facets(), legacy_styles)?;
-            for (version, accepted) in legacy_fingerprints {
-                for fingerprint in accepted {
-                    append_fingerprint(&mut fingerprints, version, fingerprint);
-                }
-            }
-        }
         Ok(fingerprints)
+    }
+}
+
+/// The domain of the current base fingerprint, which hashes the format facets.
+/// Releases before them hashed under the per-schema domains, so a fingerprint
+/// read the way they read styles can only ever match one they wrote.
+const FACETS_FINGERPRINT_DOMAIN: &[u8] = b"betteroffice-xlsx-yrs-v6-xf-facets";
+
+fn fingerprint_domain(schema_version: i64, current: bool) -> &'static [u8] {
+    if current {
+        return FACETS_FINGERPRINT_DOMAIN;
+    }
+    match schema_version {
+        3 => b"betteroffice-xlsx-yrs-v3",
+        4 => b"betteroffice-xlsx-yrs-v4",
+        5 => b"betteroffice-xlsx-yrs-v5",
+        _ => b"betteroffice-xlsx-yrs-v6",
     }
 }
 
@@ -4484,18 +4522,13 @@ fn fingerprint_model_with_overrides(
     include_col_styles: bool,
     legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
     styles: FingerprintStyles<'_>,
+    current: bool,
 ) -> Result<(String, u64), String> {
     validate_schema_version(schema_version)?;
     #[cfg(test)]
     FINGERPRINT_PASSES.set(FINGERPRINT_PASSES.get() + 1);
     let mut hasher = Sha256::new();
-    let domain = match schema_version {
-        3 => b"betteroffice-xlsx-yrs-v3".as_slice(),
-        4 => b"betteroffice-xlsx-yrs-v4".as_slice(),
-        5 => b"betteroffice-xlsx-yrs-v5".as_slice(),
-        _ => b"betteroffice-xlsx-yrs-v6".as_slice(),
-    };
-    hasher.update(domain);
+    hasher.update(fingerprint_domain(schema_version, current));
     let base = if include_defined_names {
         serde_json::to_vec(&(
             model.date_system,
@@ -4953,14 +4986,42 @@ fn fingerprint_model_with_schema_oracle(
     include_defined_names: bool,
     include_col_styles: bool,
 ) -> Result<(String, u64), String> {
-    validate_schema_version(schema_version)?;
-    let mut hasher = Sha256::new();
     let domain = match schema_version {
         3 => b"betteroffice-xlsx-yrs-v3".as_slice(),
         4 => b"betteroffice-xlsx-yrs-v4".as_slice(),
         5 => b"betteroffice-xlsx-yrs-v5".as_slice(),
         _ => b"betteroffice-xlsx-yrs-v6".as_slice(),
     };
+    fingerprint_model_with_domain_oracle(
+        model,
+        schema_version,
+        include_defined_names,
+        include_col_styles,
+        domain,
+    )
+}
+
+#[cfg(test)]
+fn fingerprint_model_current_oracle(model: &WorkbookModel) -> Result<(String, u64), String> {
+    fingerprint_model_with_domain_oracle(
+        model,
+        SCHEMA_VERSION,
+        true,
+        true,
+        FACETS_FINGERPRINT_DOMAIN,
+    )
+}
+
+#[cfg(test)]
+fn fingerprint_model_with_domain_oracle(
+    model: &WorkbookModel,
+    schema_version: i64,
+    include_defined_names: bool,
+    include_col_styles: bool,
+    domain: &[u8],
+) -> Result<(String, u64), String> {
+    validate_schema_version(schema_version)?;
+    let mut hasher = Sha256::new();
     hasher.update(domain);
     let base = if include_defined_names {
         serde_json::to_vec(&(
@@ -5480,7 +5541,7 @@ mod tests {
         .unwrap();
         assert_eq!(actual.fingerprints, expected.fingerprints);
         assert_eq!(actual.fingerprint, expected.fingerprint);
-        let (current, _) = fingerprint_model_for_schema(&model, SCHEMA_VERSION).unwrap();
+        let (current, _) = fingerprint_model_current_oracle(&model).unwrap();
         assert_eq!(actual.fingerprint, current);
         for version in MIN_SUPPORTED_SCHEMA_VERSION..=SCHEMA_VERSION {
             for reading in [&before_facets, &held_back] {
