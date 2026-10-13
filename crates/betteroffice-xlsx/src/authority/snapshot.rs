@@ -982,6 +982,76 @@ impl Codec for Fill {
     }
 }
 
+/// A record in the layout written before patterned fills and the extended border
+/// styles: it accepts exactly what those releases wrote.
+pub(crate) struct Released<T>(pub(crate) T);
+
+pub(crate) trait ReleasedLayout: Codec {
+    const REFUSAL: &'static str;
+
+    fn released_layout(&self) -> bool;
+}
+
+impl ReleasedLayout for Fill {
+    const REFUSAL: &'static str = "invalid snapshot fill";
+
+    fn released_layout(&self) -> bool {
+        !matches!(self, Self::Pattern { .. })
+    }
+}
+
+impl ReleasedLayout for Border {
+    const REFUSAL: &'static str = "invalid snapshot BorderStyle";
+
+    fn released_layout(&self) -> bool {
+        [&self.left, &self.right, &self.top, &self.bottom]
+            .into_iter()
+            .flatten()
+            .all(|edge| {
+                matches!(
+                    edge.style,
+                    BorderStyle::Thin
+                        | BorderStyle::Medium
+                        | BorderStyle::Thick
+                        | BorderStyle::Dashed
+                        | BorderStyle::Dotted
+                        | BorderStyle::Double
+                        | BorderStyle::Hair
+                )
+            })
+    }
+}
+
+pub(crate) fn released<T: ReleasedLayout>(value: T) -> SnapshotResult<T> {
+    if value.released_layout() {
+        Ok(value)
+    } else {
+        Err(SnapshotError::new(T::REFUSAL))
+    }
+}
+
+impl<T: ReleasedLayout> Codec for Released<T> {
+    fn preflight(r: &mut DecodePreflight<'_>) -> SnapshotResult<()> {
+        r.value::<T>()
+    }
+
+    fn decode_cost() -> usize {
+        preparation_cost::<Self>().max(T::decode_cost())
+    }
+
+    fn write(&self, w: &mut Writer) {
+        self.0.write(w);
+    }
+
+    fn read(r: &mut Reader<'_>) -> SnapshotResult<Self> {
+        released(T::read(r)?).map(Self)
+    }
+
+    fn read_bounded(r: &mut BoundedReader<'_>) -> SnapshotResult<Self> {
+        released(r.value::<T>()?).map(Self)
+    }
+}
+
 impl Codec for Theme {
     fn preflight(r: &mut DecodePreflight<'_>) -> SnapshotResult<()> {
         for _ in 0..12 {
@@ -1120,6 +1190,18 @@ impl Codec for ChartAnchor {
 }
 
 const BASE_SECTIONS: usize = 16;
+/// Record tags of the fill and border sections since patterned fills; the section
+/// numbers themselves tag records in the released layout.
+const FILL_RECORD: usize = 18;
+const BORDER_RECORD: usize = 19;
+
+fn base_section(tag: usize) -> usize {
+    match tag {
+        FILL_RECORD => 11,
+        BORDER_RECORD => 12,
+        tag => tag,
+    }
+}
 
 fn base_counts(base: &WorkbookBase) -> [usize; BASE_SECTIONS] {
     let WorkbookBase {
@@ -1224,7 +1306,11 @@ impl BaseCursor {
             tables,
         } = base;
         let mut w = Writer::new();
-        w.u8(self.section as u8);
+        w.u8(match self.section {
+            11 => FILL_RECORD,
+            12 => BORDER_RECORD,
+            section => section,
+        } as u8);
         let index = self.index;
         match self.section {
             0 => write_manifest(base, &mut w),
@@ -1522,8 +1608,8 @@ enum BaseRecord {
 }
 
 impl BaseRecord {
-    fn preflight_cost(section: usize, r: &mut DecodePreflight<'_>) -> SnapshotResult<usize> {
-        match section {
+    fn preflight_cost(tag: usize, r: &mut DecodePreflight<'_>) -> SnapshotResult<usize> {
+        match tag {
             0 => {
                 r.value::<u64>()?;
                 r.value::<DateSystem>()?;
@@ -1544,19 +1630,21 @@ impl BaseRecord {
             8 => r.value::<HiddenDimensions>()?,
             9 | 15 => r.value::<String>()?,
             10 => r.value::<Font>()?,
-            11 => r.value::<Fill>()?,
-            12 => r.value::<Border>()?,
+            11 => r.value::<Released<Fill>>()?,
+            12 => r.value::<Released<Border>>()?,
             13 => r.value::<Xf>()?,
             14 => r.value::<(u16, String)>()?,
             16 => r.value::<Table>()?,
+            FILL_RECORD => r.value::<Fill>()?,
+            BORDER_RECORD => r.value::<Border>()?,
             _ => return Err(SnapshotError::new("invalid authority base section")),
         }
         Ok(r.cost)
     }
 
     #[cfg(test)]
-    fn decode_cost(section: usize) -> SnapshotResult<usize> {
-        Ok(match section {
+    fn decode_cost(tag: usize) -> SnapshotResult<usize> {
+        Ok(match tag {
             0 => std::mem::size_of::<BaseManifest>()
                 .max(u64::decode_cost())
                 .max(DateSystem::decode_cost())
@@ -1573,17 +1661,19 @@ impl BaseRecord {
             8 => HiddenDimensions::decode_cost(),
             9 | 15 => String::decode_cost(),
             10 => Font::decode_cost(),
-            11 => Fill::decode_cost(),
-            12 => Border::decode_cost(),
+            11 => Released::<Fill>::decode_cost(),
+            12 => Released::<Border>::decode_cost(),
             13 => Xf::decode_cost(),
             14 => <(u16, String)>::decode_cost(),
             16 => Table::decode_cost(),
+            FILL_RECORD => Fill::decode_cost(),
+            BORDER_RECORD => Border::decode_cost(),
             _ => return Err(SnapshotError::new("invalid authority base section")),
         })
     }
 
-    fn read(r: &mut BoundedReader<'_>, section: usize) -> SnapshotResult<Self> {
-        Ok(match section {
+    fn read(r: &mut BoundedReader<'_>, tag: usize) -> SnapshotResult<Self> {
+        Ok(match tag {
             0 => {
                 let start = r.position;
                 r.prepare::<u64>()?;
@@ -1627,12 +1717,14 @@ impl BaseRecord {
             8 => Self::Hidden(r.value()?),
             9 => Self::String(r.value()?),
             10 => Self::Font(r.value()?),
-            11 => Self::Fill(r.value()?),
-            12 => Self::Border(r.value()?),
+            11 => Self::Fill(r.value::<Released<Fill>>()?.0),
+            12 => Self::Border(r.value::<Released<Border>>()?.0),
             13 => Self::Xf(r.value()?),
             14 => Self::NumberFormat(r.value()?),
             15 => Self::Color(r.value()?),
             16 => Self::Table(r.value()?),
+            FILL_RECORD => Self::Fill(r.value()?),
+            BORDER_RECORD => Self::Border(r.value()?),
             _ => return Err(SnapshotError::new("invalid authority base section")),
         })
     }
@@ -1658,14 +1750,15 @@ impl BaseBuilder {
         }
         let mut cursor = self.cursor.clone();
         cursor.normalize(&self.counts);
-        let section = usize::from(Reader::new(payload).u8()?);
+        let tag = usize::from(Reader::new(payload).u8()?);
+        let section = base_section(tag);
         if section != cursor.section || section > BASE_SECTIONS {
             return Err(SnapshotError::new("unexpected authority base record"));
         }
         let cost = DECODE_RESERVATION
             .saturating_add(1)
             .saturating_add(BaseRecord::preflight_cost(
-                section,
+                tag,
                 &mut DecodePreflight::new(payload, 1, &self.decode),
             )?);
         if cost > budget.max_bytes() {
@@ -1687,11 +1780,12 @@ impl BaseBuilder {
             max_elements: budget.max_records(),
             state: &mut self.decode,
         };
-        let section = usize::from(reader.atomic::<u8>()?);
+        let tag = usize::from(reader.atomic::<u8>()?);
+        let section = base_section(tag);
         if section != self.cursor.section || section > BASE_SECTIONS {
             return Err(SnapshotError::new("unexpected authority base record"));
         }
-        let record = BaseRecord::read(&mut reader, section);
+        let record = BaseRecord::read(&mut reader, tag);
         crate::snapshot::step::record(1, budget.max_bytes() - reader.remaining);
         let record = match record {
             Ok(record) => record,
@@ -1781,7 +1875,8 @@ impl BaseBuilder {
     fn push(&mut self, payload: &[u8]) -> SnapshotResult<()> {
         let mut r = Reader::new(payload);
         self.cursor.normalize(&self.counts);
-        let section = usize::from(r.u8()?);
+        let tag = usize::from(r.u8()?);
+        let section = base_section(tag);
         if section != self.cursor.section || section > BASE_SECTIONS {
             return Err(SnapshotError::new("unexpected authority base record"));
         }
@@ -1817,7 +1912,7 @@ impl BaseBuilder {
                 .base
                 .as_mut()
                 .ok_or_else(|| SnapshotError::new("authority base manifest is missing"))?;
-            match section {
+            match tag {
                 1 => base.defined_names.push(Codec::read(&mut r)?),
                 2 => {
                     let key = Codec::read(&mut r)?;
@@ -1841,12 +1936,17 @@ impl BaseBuilder {
                 8 => base.hidden_dimensions.push(Codec::read(&mut r)?),
                 9 => base.shared_strings.push(Codec::read(&mut r)?),
                 10 => base.styles.fonts.push(Codec::read(&mut r)?),
-                11 => base.styles.fills.push(Codec::read(&mut r)?),
-                12 => base.styles.borders.push(Codec::read(&mut r)?),
+                11 => base.styles.fills.push(Released::<Fill>::read(&mut r)?.0),
+                12 => base
+                    .styles
+                    .borders
+                    .push(Released::<Border>::read(&mut r)?.0),
                 13 => base.styles.cell_xfs.push(Codec::read(&mut r)?),
                 14 => base.styles.num_fmts.push(Codec::read(&mut r)?),
                 15 => base.styles.indexed_colors.push(Codec::read(&mut r)?),
                 16 => base.tables.push(Codec::read(&mut r)?),
+                FILL_RECORD => base.styles.fills.push(Codec::read(&mut r)?),
+                BORDER_RECORD => base.styles.borders.push(Codec::read(&mut r)?),
                 _ => return Err(SnapshotError::new("invalid authority base section")),
             }
             self.cursor.index += 1;
@@ -1856,7 +1956,7 @@ impl BaseBuilder {
 
     fn advance_capacity(&mut self, record: &[u8], budget: SnapshotBudget) -> SnapshotResult<bool> {
         self.cursor.normalize(&self.counts);
-        let section = usize::from(Reader::new(record).u8()?);
+        let section = base_section(usize::from(Reader::new(record).u8()?));
         if section != self.cursor.section || section > BASE_SECTIONS {
             return Err(SnapshotError::new("unexpected authority base record"));
         }

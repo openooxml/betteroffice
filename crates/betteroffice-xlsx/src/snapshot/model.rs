@@ -12,6 +12,7 @@ use super::cells::{CellCursor, read_cell, read_range, read_ref, write_range, wri
 use super::growth::Growth;
 use super::wire::{ChunkKind, Reader, Writer, frame, frame_records, packed_record, unframe};
 use super::{SnapshotBudget, SnapshotError, SnapshotProgress, SnapshotResult};
+use crate::authority::snapshot::{Released, released};
 
 const HEADER: u8 = 0;
 const NAME: u8 = 1;
@@ -34,6 +35,19 @@ const COL_STYLE: u8 = 17;
 const CHART: u8 = 18;
 const CHART_REF: u8 = 19;
 const ARRAY: u8 = 20;
+/// Tags of the fill and border records since patterned fills; `FILL` and `BORDER`
+/// tag records in the released layout.
+const FILL_V2: u8 = 22;
+const BORDER_V2: u8 = 23;
+
+/// The metadata run a record tag belongs to.
+fn run_tag(tag: u8) -> u8 {
+    match tag {
+        FILL_V2 => FILL,
+        BORDER_V2 => BORDER,
+        tag => tag,
+    }
+}
 
 #[cfg(test)]
 thread_local! {
@@ -283,10 +297,11 @@ impl MetadataCursor {
                 self.index = 0;
                 continue;
             }
-            let tag = if self.phase == TABLE && self.child != 0 {
-                TABLE_COLUMN
-            } else {
-                self.phase
+            let tag = match self.phase {
+                TABLE if self.child != 0 => TABLE_COLUMN,
+                FILL => FILL_V2,
+                BORDER => BORDER_V2,
+                phase => phase,
             };
             w.u8(tag);
             match self.phase {
@@ -525,7 +540,7 @@ impl ModelSnapshotBuilder {
         let mut r = Reader::new(record);
         let tag = r.u8()?;
         if self.started {
-            if self.runs.front().map(|&(expected, _)| expected) != Some(tag)
+            if self.runs.front().map(|&(expected, _)| expected) != Some(run_tag(tag))
                 || self.remaining_records == 0
             {
                 return Err(SnapshotError::new(
@@ -593,8 +608,10 @@ impl ModelSnapshotBuilder {
             NAME => preflight!(DefinedName),
             STRING | THEME | INDEXED | TABLE_COLUMN => preflight!(String),
             FONT => preflight!(Font),
-            FILL => preflight!(Fill),
-            BORDER => preflight!(Border),
+            FILL => preflight!(Released<Fill>),
+            FILL_V2 => preflight!(Fill),
+            BORDER => preflight!(Released<Border>),
+            BORDER_V2 => preflight!(Border),
             XF => preflight!(Xf),
             NUM_FMT => preflight!((u16, String)),
             HYPERLINK => preflight!(Hyperlink),
@@ -647,11 +664,21 @@ impl ModelSnapshotBuilder {
                 end
             }
             FILL => {
+                let (Released(value), end) = decoded!(Released<Fill>);
+                self.model.styles.fills.push(value);
+                end
+            }
+            FILL_V2 => {
                 let (value, end) = decoded!(Fill);
                 self.model.styles.fills.push(value);
                 end
             }
             BORDER => {
+                let (Released(value), end) = decoded!(Released<Border>);
+                self.model.styles.borders.push(value);
+                end
+            }
+            BORDER_V2 => {
                 let (value, end) = decoded!(Border);
                 self.model.styles.borders.push(value);
                 end
@@ -795,8 +822,8 @@ impl ModelSnapshotBuilder {
             NAME => g.ensure(m, |m| Ok(&mut m.defined_names), budget),
             STRING => g.ensure(m, |m| Ok(&mut m.shared_strings), budget),
             FONT => g.ensure(m, |m| Ok(&mut m.styles.fonts), budget),
-            FILL => g.ensure(m, |m| Ok(&mut m.styles.fills), budget),
-            BORDER => g.ensure(m, |m| Ok(&mut m.styles.borders), budget),
+            FILL | FILL_V2 => g.ensure(m, |m| Ok(&mut m.styles.fills), budget),
+            BORDER | BORDER_V2 => g.ensure(m, |m| Ok(&mut m.styles.borders), budget),
             XF => g.ensure(m, |m| Ok(&mut m.styles.cell_xfs), budget),
             NUM_FMT => g.ensure(m, |m| Ok(&mut m.styles.num_fmts), budget),
             INDEXED => g.ensure(m, |m| Ok(&mut m.styles.indexed_colors), budget),
@@ -937,7 +964,7 @@ impl ModelSnapshotBuilder {
         let Some((expected, remaining)) = self.runs.front_mut() else {
             return Err(SnapshotError::new("extra snapshot metadata record"));
         };
-        if tag != *expected || self.remaining_records == 0 {
+        if run_tag(tag) != *expected || self.remaining_records == 0 {
             return Err(SnapshotError::new(
                 "snapshot metadata records are reordered",
             ));
@@ -951,8 +978,10 @@ impl ModelSnapshotBuilder {
             NAME => self.model.defined_names.push(read_name(r)?),
             STRING => self.model.shared_strings.push(r.str()?.to_owned()),
             FONT => self.model.styles.fonts.push(read_font(r)?),
-            FILL => self.model.styles.fills.push(read_fill(r)?),
-            BORDER => self.model.styles.borders.push(read_border(r)?),
+            FILL => self.model.styles.fills.push(released(read_fill(r)?)?),
+            FILL_V2 => self.model.styles.fills.push(read_fill(r)?),
+            BORDER => self.model.styles.borders.push(released(read_border(r)?)?),
+            BORDER_V2 => self.model.styles.borders.push(read_border(r)?),
             XF => self.model.styles.cell_xfs.push(read_xf(r)?),
             NUM_FMT => self
                 .model
