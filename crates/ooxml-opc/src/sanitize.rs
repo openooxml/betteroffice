@@ -2512,6 +2512,278 @@ mod tests {
         assert_all_parts_declared(&output);
     }
 
+    const XLSX_MAIN_TYPE: &str =
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml";
+    const XLSM_MAIN_TYPE: &str = "application/vnd.ms-excel.sheet.macroEnabled.main+xml";
+    const PRINTER_SETTINGS_TYPE: &str =
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.printerSettings";
+    const CALC_CHAIN_TYPE: &str =
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.calcChain+xml";
+    const ORDINARY_WORKBOOK: &[u8] = br#"<workbook xmlns='http://schemas.openxmlformats.org/spreadsheetml/2006/main' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'><sheets><sheet name='First' sheetId='1' r:id='first'/><sheet name='Last' sheetId='3' r:id='last'/></sheets></workbook>"#;
+    const WORKSHEET_RELATIONSHIPS: &str = "<Relationship Id='first' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet' Target='worksheets/first.xml'/><Relationship Id='last' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet' Target='worksheets/last.xml'/>";
+    const EXTERNAL_LINK: &str = "Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink' Target='https://example.invalid/' TargetMode='External'";
+    const CALC_CHAIN: &[u8] = br#"<calcChain xmlns='http://schemas.openxmlformats.org/spreadsheetml/2006/main'><c r='A1' i='2'/><c r='B1'/><c r='A1' i='1'/></calcChain>"#;
+
+    fn relationships_xml(body: &str) -> Vec<u8> {
+        format!(
+            "<Relationships xmlns='{}'>{body}</Relationships>",
+            String::from_utf8_lossy(RELATIONSHIPS_NAMESPACE)
+        )
+        .into_bytes()
+    }
+
+    fn declare(parts: &mut [(String, Vec<u8>)], declarations: &str) {
+        parts[0].1 = String::from_utf8(parts[0].1.clone())
+            .unwrap()
+            .replace("</Types>", &format!("{declarations}</Types>"))
+            .into_bytes();
+    }
+
+    fn append_relationships(parts: &mut [(String, Vec<u8>)], path: &str, body: &str) {
+        let (_, bytes) = parts.iter_mut().find(|(name, _)| name == path).unwrap();
+        *bytes = String::from_utf8(bytes.clone())
+            .unwrap()
+            .replace("</Relationships>", &format!("{body}</Relationships>"))
+            .into_bytes();
+    }
+
+    fn ordinary_workbook_parts(relationships: &str) -> Vec<(String, Vec<u8>)> {
+        let mut parts = package_parts("xl/workbook.xml", XLSX_MAIN_TYPE, ORDINARY_WORKBOOK);
+        declare(
+            &mut parts,
+            "<Default Extension='xml' ContentType='application/xml'/><Default Extension='rels' ContentType='application/vnd.openxmlformats-package.relationships+xml'/>",
+        );
+        parts.extend([
+            ("xl/worksheets/first.xml".to_owned(), b"<worksheet/>".to_vec()),
+            ("xl/worksheets/last.xml".to_owned(), b"<worksheet/>".to_vec()),
+            (
+                "xl/_rels/workbook.xml.rels".to_owned(),
+                relationships_xml(relationships),
+            ),
+        ]);
+        parts
+    }
+
+    fn assert_first_and_last_sheets_kept(parts: &[(String, Vec<u8>)]) {
+        let package = rezip_parts(parts).unwrap();
+        for sanitized in [
+            sanitize_package(&package).unwrap(),
+            sanitize_package_for_format(&package, "xlsx").unwrap(),
+        ] {
+            let output = unzip_parts(&sanitized).unwrap();
+            let sheets = element_attributes(part_bytes(&output, "xl/workbook.xml"), b"sheet");
+            assert_eq!(sheets.len(), 2);
+            assert_eq!(attribute_value(&sheets[0], "r:id"), Some("first"));
+            assert_eq!(attribute_value(&sheets[1], "r:id"), Some("last"));
+            let relationships =
+                String::from_utf8_lossy(part_bytes(&output, "xl/_rels/workbook.xml.rels"));
+            assert!(relationships.contains("worksheets/first.xml"), "{relationships}");
+            assert!(relationships.contains("worksheets/last.xml"), "{relationships}");
+            assert!(!relationships.contains("example.invalid"), "{relationships}");
+            assert!(!relationships.contains("macro"), "{relationships}");
+            assert!(!has_part(&output, "xl/custom/sheet.data"));
+            assert_all_parts_declared(&output);
+        }
+    }
+
+    #[test]
+    fn regression_ordinary_workbook_drops_id_less_external_relationships() {
+        let body = format!("{WORKSHEET_RELATIONSHIPS}<Relationship {EXTERNAL_LINK}/>");
+        assert_first_and_last_sheets_kept(&ordinary_workbook_parts(&body));
+    }
+
+    #[test]
+    fn regression_ordinary_workbook_keeps_sheets_shadowed_by_discarded_ids() {
+        let body = format!(
+            "<Relationship Id='first' {EXTERNAL_LINK}/>{WORKSHEET_RELATIONSHIPS}<Relationship Id='last' {EXTERNAL_LINK}/>"
+        );
+        assert_first_and_last_sheets_kept(&ordinary_workbook_parts(&body));
+    }
+
+    #[test]
+    fn regression_ordinary_workbook_tolerates_invalid_relationship_roots() {
+        for (root, namespace) in [
+            ("Relationships", "urn:foreign"),
+            ("Rels", "http://schemas.openxmlformats.org/package/2006/relationships"),
+        ] {
+            let mut parts = ordinary_workbook_parts("");
+            parts.last_mut().unwrap().1 = format!(
+                "<{root} xmlns='{namespace}'>{WORKSHEET_RELATIONSHIPS}<Relationship {EXTERNAL_LINK}/></{root}>"
+            )
+            .into_bytes();
+            assert_first_and_last_sheets_kept(&parts);
+        }
+    }
+
+    #[test]
+    fn regression_macro_sheet_rewrite_ignores_id_less_and_discarded_duplicates() {
+        let mut parts = macro_sheet_parts(XLSM_MAIN_TYPE, MACRO_WORKBOOK);
+        append_relationships(
+            &mut parts,
+            "xl/_rels/workbook.xml.rels",
+            &format!("<Relationship Id='first' {EXTERNAL_LINK}/><Relationship {EXTERNAL_LINK}/>"),
+        );
+        assert_first_and_last_sheets_kept(&parts);
+    }
+
+    fn root_sheet_parts(
+        bin_type: &str,
+        payload: &str,
+        payload_type: &str,
+        worksheet: &[u8],
+    ) -> Vec<(String, Vec<u8>)> {
+        let mut parts = ordinary_workbook_parts(
+            &WORKSHEET_RELATIONSHIPS.replace("worksheets/first.xml", "../sheet1.xml"),
+        );
+        parts.retain(|(path, _)| path != "xl/worksheets/first.xml");
+        declare(
+            &mut parts,
+            &format!(
+                "<Default Extension='bin' ContentType='{bin_type}'/><Override PartName='/{payload}' ContentType='{payload_type}'/>"
+            ),
+        );
+        parts.extend([
+            ("sheet1.xml".to_owned(), worksheet.to_vec()),
+            (
+                "_rels/sheet1.xml.rels".to_owned(),
+                relationships_xml(&format!(
+                    "<Relationship Id='printer' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/printerSettings' Target='{payload}'/>"
+                )),
+            ),
+            (payload.to_owned(), b"printer settings".to_vec()),
+        ]);
+        parts
+    }
+
+    #[test]
+    fn regression_root_level_relationships_keep_safely_typed_targets() {
+        let worksheet = br#"<worksheet xmlns='http://schemas.openxmlformats.org/spreadsheetml/2006/main' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'><pageSetup r:id='printer'/></worksheet>"#;
+        let parts = root_sheet_parts(
+            "application/vnd.ms-office.vbaProject",
+            "printer.bin",
+            PRINTER_SETTINGS_TYPE,
+            worksheet,
+        );
+        let package = rezip_parts(&parts).unwrap();
+        for sanitized in [
+            sanitize_package(&package).unwrap(),
+            sanitize_package_for_format(&package, "xlsx").unwrap(),
+        ] {
+            let output = unzip_parts(&sanitized).unwrap();
+            assert_eq!(part_bytes(&output, "printer.bin"), b"printer settings");
+            assert_eq!(
+                parse_content_types(&output)
+                    .unwrap()
+                    .content_type_for("printer.bin"),
+                Some(PRINTER_SETTINGS_TYPE)
+            );
+            let relationships =
+                String::from_utf8_lossy(part_bytes(&output, "_rels/sheet1.xml.rels"));
+            assert!(
+                relationships.contains("Target='printer.bin'"),
+                "{relationships}"
+            );
+            assert_eq!(part_bytes(&output, "sheet1.xml"), worksheet);
+            assert_all_parts_declared(&output);
+        }
+    }
+
+    #[test]
+    fn regression_root_level_relationships_drop_dangerously_typed_targets() {
+        let parts = root_sheet_parts(
+            PRINTER_SETTINGS_TYPE,
+            "payload.bin",
+            "application/vnd.ms-office.vbaProject",
+            b"<worksheet/>",
+        );
+        let package = rezip_parts(&parts).unwrap();
+        for sanitized in [
+            sanitize_package(&package).unwrap(),
+            sanitize_package_for_format(&package, "xlsx").unwrap(),
+        ] {
+            let output = unzip_parts(&sanitized).unwrap();
+            assert!(!has_part(&output, "payload.bin"));
+            let relationships =
+                String::from_utf8_lossy(part_bytes(&output, "_rels/sheet1.xml.rels"));
+            assert!(!relationships.contains("payload.bin"), "{relationships}");
+            let all = output
+                .iter()
+                .map(|(_, bytes)| String::from_utf8_lossy(bytes))
+                .collect::<String>();
+            assert!(!all.contains("payload.bin"));
+            assert!(!all.contains("vbaProject"));
+            assert_all_parts_declared(&output);
+        }
+    }
+
+    fn add_calc_chain(parts: &mut Vec<(String, Vec<u8>)>, relationship_type: &str) {
+        declare(
+            parts,
+            &format!("<Override PartName='/xl/calcChain.xml' ContentType='{CALC_CHAIN_TYPE}'/>"),
+        );
+        append_relationships(
+            parts,
+            "xl/_rels/workbook.xml.rels",
+            &format!(
+                "<Relationship Id='calc' Type='{relationship_type}' Target='calcChain.xml'/>"
+            ),
+        );
+        parts.push(("xl/calcChain.xml".to_owned(), CALC_CHAIN.to_vec()));
+    }
+
+    #[test]
+    fn regression_removes_calc_chain_with_macro_sheets() {
+        let transitional =
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships/calcChain";
+        let mut parts = ordinary_workbook_parts(WORKSHEET_RELATIONSHIPS);
+        add_calc_chain(&mut parts, transitional);
+        let package = rezip_parts(&parts).unwrap();
+        for sanitized in [
+            sanitize_package(&package).unwrap(),
+            sanitize_package_for_format(&package, "xlsx").unwrap(),
+        ] {
+            let output = unzip_parts(&sanitized).unwrap();
+            assert_eq!(part_bytes(&output, "xl/calcChain.xml"), CALC_CHAIN);
+            assert_eq!(
+                parse_content_types(&output)
+                    .unwrap()
+                    .content_type_for("xl/calcChain.xml"),
+                Some(CALC_CHAIN_TYPE)
+            );
+            assert!(
+                String::from_utf8_lossy(part_bytes(&output, "xl/_rels/workbook.xml.rels"))
+                    .contains("Id='calc'")
+            );
+        }
+        for relationship_type in [
+            transitional.to_owned(),
+            transitional.to_ascii_uppercase(),
+            "http://purl.oclc.org/ooxml/officeDocument/relationships/calcChain".to_owned(),
+        ] {
+            let mut parts = macro_sheet_parts(XLSM_MAIN_TYPE, MACRO_WORKBOOK);
+            add_calc_chain(&mut parts, &relationship_type);
+            let package = rezip_parts(&parts).unwrap();
+            for sanitized in [
+                sanitize_package(&package).unwrap(),
+                sanitize_package_for_format(&package, "xlsx").unwrap(),
+            ] {
+                let output = unzip_parts(&sanitized).unwrap();
+                assert!(
+                    !has_part(&output, "xl/calcChain.xml"),
+                    "{relationship_type}"
+                );
+                let workbook = part_bytes(&output, "xl/workbook.xml");
+                assert_eq!(element_attributes(workbook, b"sheet").len(), 2);
+                let all = output
+                    .iter()
+                    .map(|(_, bytes)| String::from_utf8_lossy(bytes).to_ascii_lowercase())
+                    .collect::<String>();
+                assert!(!all.contains("calcchain"), "{relationship_type}");
+                assert_all_parts_declared(&output);
+            }
+        }
+    }
+
     #[test]
     fn accepts_and_rezips_all_three_formats() {
         let cases = [
