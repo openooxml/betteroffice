@@ -174,7 +174,7 @@ impl WorkbookBase {
         let mut builder = FingerprintBuilder::new(model, legacy_dimensions);
         let styles = FingerprintStyles::new(&model.styles);
         let (fingerprint, bootstrap_client_id) =
-            builder.fingerprint(styles, SCHEMA_VERSION, true, true, false)?;
+            builder.fingerprint(styles, SCHEMA_VERSION, true, true, true, false)?;
         let fingerprints = builder.accepted_fingerprints(styles, legacy_styles)?;
         Ok(Self {
             bootstrap_client_id,
@@ -233,9 +233,18 @@ impl WorkbookBase {
         for version in MIN_SUPPORTED_SCHEMA_VERSION..=SCHEMA_VERSION {
             let (without_col_styles, _) =
                 fingerprint_model_with_schema_oracle(model, version, version >= 4, false)?;
+            let (without_row_styles, _) = fingerprint_model_with_row_styles_oracle(
+                model,
+                version,
+                version >= 4,
+                true,
+                false,
+            )?;
             let accepted = fingerprints.entry(version).or_default();
-            if !accepted.contains(&without_col_styles) {
-                accepted.push(without_col_styles);
+            for fingerprint in [without_col_styles, without_row_styles] {
+                if !accepted.contains(&fingerprint) {
+                    accepted.push(fingerprint);
+                }
             }
         }
         if let Some(legacy) = model_with_legacy_dimensions(model, legacy_dimensions) {
@@ -4215,12 +4224,13 @@ impl serde::Serialize for FingerprintStyles<'_> {
     }
 }
 
-type FingerprintKey = (usize, i64, bool, bool, bool);
+type FingerprintKey = (usize, i64, bool, bool, bool, bool);
 
 struct FingerprintBuilder<'a> {
     model: &'a WorkbookModel,
     legacy_dimensions: &'a [xlsx_parse::LegacySheetDimensions],
     has_col_styles: bool,
+    has_row_styles: bool,
     styles: Vec<(FingerprintStyles<'a>, usize)>,
     style_bytes: Vec<Vec<u8>>,
     hashes: BTreeMap<FingerprintKey, (String, u64)>,
@@ -4245,6 +4255,10 @@ impl<'a> FingerprintBuilder<'a> {
                 .sheets
                 .iter()
                 .any(|sheet| !sheet.col_styles.is_empty() || !sheet.row_styles.is_empty()),
+            has_row_styles: model
+                .sheets
+                .iter()
+                .any(|sheet| !sheet.row_styles.is_empty()),
             styles: Vec::new(),
             style_bytes: Vec::new(),
             hashes: BTreeMap::new(),
@@ -4257,6 +4271,7 @@ impl<'a> FingerprintBuilder<'a> {
         version: i64,
         include_defined_names: bool,
         include_col_styles: bool,
+        include_row_styles: bool,
         legacy_dimensions: bool,
     ) -> Result<(String, u64), String> {
         let style_index = match self.styles.iter().find(|(known, _)| {
@@ -4280,12 +4295,14 @@ impl<'a> FingerprintBuilder<'a> {
         };
         let include_col_styles =
             include_col_styles && version >= CHARTS_SCHEMA_VERSION && self.has_col_styles;
+        let include_row_styles = include_row_styles && include_col_styles && self.has_row_styles;
         let legacy_dimensions = legacy_dimensions && !self.legacy_dimensions.is_empty();
         let key = (
             style_index,
             version,
             include_defined_names,
             include_col_styles,
+            include_row_styles,
             legacy_dimensions,
         );
         if let Some(hash) = self.hashes.get(&key) {
@@ -4296,6 +4313,7 @@ impl<'a> FingerprintBuilder<'a> {
             version,
             include_defined_names,
             include_col_styles,
+            include_row_styles,
             if legacy_dimensions {
                 self.legacy_dimensions
             } else {
@@ -4314,27 +4332,31 @@ impl<'a> FingerprintBuilder<'a> {
     ) -> Result<BTreeMap<i64, Vec<String>>, String> {
         let mut fingerprints = BTreeMap::new();
         for version in MIN_SUPPORTED_SCHEMA_VERSION..=SCHEMA_VERSION {
-            let (fingerprint, _) = self.fingerprint(styles, version, version >= 4, true, false)?;
+            let (fingerprint, _) =
+                self.fingerprint(styles, version, version >= 4, true, true, false)?;
             fingerprints.insert(version, vec![fingerprint]);
         }
-        let (defined_names_v3, _) = self.fingerprint(styles, 3, true, true, false)?;
+        let (defined_names_v3, _) = self.fingerprint(styles, 3, true, true, true, false)?;
         append_fingerprint(&mut fingerprints, 3, defined_names_v3);
         for version in MIN_SUPPORTED_SCHEMA_VERSION..=SCHEMA_VERSION {
             let (without_col_styles, _) =
-                self.fingerprint(styles, version, version >= 4, false, false)?;
+                self.fingerprint(styles, version, version >= 4, false, false, false)?;
             append_fingerprint(&mut fingerprints, version, without_col_styles);
+            let (without_row_styles, _) =
+                self.fingerprint(styles, version, version >= 4, true, false, false)?;
+            append_fingerprint(&mut fingerprints, version, without_row_styles);
         }
         if !self.legacy_dimensions.is_empty() {
             for version in MIN_SUPPORTED_SCHEMA_VERSION..SCHEMA_VERSION {
                 let (legacy_fingerprint, _) =
-                    self.fingerprint(styles, version, version >= 4, true, true)?;
+                    self.fingerprint(styles, version, version >= 4, true, true, true)?;
                 let (without_col_styles, _) =
-                    self.fingerprint(styles, version, version >= 4, false, true)?;
+                    self.fingerprint(styles, version, version >= 4, false, false, true)?;
                 for fingerprint in [legacy_fingerprint, without_col_styles] {
                     append_fingerprint(&mut fingerprints, version, fingerprint);
                 }
             }
-            let (defined_names_v3, _) = self.fingerprint(styles, 3, true, true, true)?;
+            let (defined_names_v3, _) = self.fingerprint(styles, 3, true, true, true, true)?;
             append_fingerprint(&mut fingerprints, 3, defined_names_v3);
         }
         if let Some(legacy) = legacy_styles
@@ -4373,6 +4395,7 @@ fn fingerprint_model_with_overrides(
     schema_version: i64,
     include_defined_names: bool,
     include_col_styles: bool,
+    include_row_styles: bool,
     legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
     styles: FingerprintStyles<'_>,
 ) -> Result<(String, u64), String> {
@@ -4405,6 +4428,7 @@ fn fingerprint_model_with_overrides(
             .iter()
             .any(|sheet| !sheet.col_styles.is_empty());
     let hash_row_styles = include_col_styles
+        && include_row_styles
         && schema_version >= CHARTS_SCHEMA_VERSION
         && model
             .sheets
@@ -4859,6 +4883,23 @@ fn fingerprint_model_with_schema_oracle(
     include_defined_names: bool,
     include_col_styles: bool,
 ) -> Result<(String, u64), String> {
+    fingerprint_model_with_row_styles_oracle(
+        model,
+        schema_version,
+        include_defined_names,
+        include_col_styles,
+        include_col_styles,
+    )
+}
+
+#[cfg(test)]
+fn fingerprint_model_with_row_styles_oracle(
+    model: &WorkbookModel,
+    schema_version: i64,
+    include_defined_names: bool,
+    include_col_styles: bool,
+    include_row_styles: bool,
+) -> Result<(String, u64), String> {
     validate_schema_version(schema_version)?;
     let mut hasher = Sha256::new();
     let domain = match schema_version {
@@ -4891,6 +4932,7 @@ fn fingerprint_model_with_schema_oracle(
             .iter()
             .any(|sheet| !sheet.col_styles.is_empty());
     let hash_row_styles = include_col_styles
+        && include_row_styles
         && schema_version >= CHARTS_SCHEMA_VERSION
         && model
             .sheets
