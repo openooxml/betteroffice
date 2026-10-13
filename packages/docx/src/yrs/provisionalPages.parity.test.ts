@@ -72,6 +72,7 @@ beforeAll(async () => {
 });
 
 function syntheticDocx(feature = 'plain'): Uint8Array {
+  if (feature.startsWith('flow-')) return flowDocx(feature);
   const parts: PartsMap = new Map();
   parts.set('[Content_Types].xml', toBytes(
     '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
@@ -304,6 +305,180 @@ function featureBody(feature: string, body: string): string {
   return body;
 }
 
+const FLOW_LINES = '<w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="exact"/>';
+const PNG = Uint8Array.from(
+  atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='),
+  (char) => char.charCodeAt(0)
+);
+
+/** A paragraph of `lines` 16px lines, each `label` and its line number. */
+function flowParagraph(lines: number, label: string, properties = '', section = ''): string {
+  const text = Array.from({ length: lines }, (_, line) => `<w:t xml:space="preserve">${label} ${line + 1}</w:t>`).join('<w:br/>');
+  return `<w:p><w:pPr>${properties}${FLOW_LINES}${section}</w:pPr><w:r>${text}</w:r></w:p>`;
+}
+
+/** A Letter section with 53 body lines a page, or 38 in landscape. */
+function flowSection(options: { type?: string; references?: string; titlePage?: boolean; landscape?: boolean } = {}): string {
+  const size = options.landscape
+    ? '<w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/>'
+    : '<w:pgSz w:w="12240" w:h="15840"/>';
+  return `<w:sectPr>${options.references ?? ''}${options.type ? `<w:type w:val="${options.type}"/>` : ''}${size}` +
+    '<w:pgMar w:top="1440" w:right="1440" w:bottom="1500" w:left="1440" w:header="200" w:footer="720" w:gutter="0"/>' +
+    `${options.titlePage ? '<w:titlePg/>' : ''}</w:sectPr>`;
+}
+
+/** Documents whose page three ends inside the construct the feature names. */
+function flowDocx(feature: string): Uint8Array {
+  const third = '<w:pageBreakBefore/>';
+  const opening = flowParagraph(1, 'Page one') + flowParagraph(1, 'Page two', third);
+  const tail = (label: string, count = 300) =>
+    Array.from({ length: count }, (_, index) => flowParagraph(1, `${label} ${index}`)).join('');
+  const cell = (content: string) => `<w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>${content}</w:tc>`;
+  const parts: PartsMap = new Map();
+  const relationships: string[] = [];
+  const types: string[] = [];
+  let body: string;
+  switch (feature) {
+    case 'flow-paragraph':
+      body = opening + flowParagraph(120, 'Long', third) + tail('Tail') + flowSection();
+      break;
+    case 'flow-table':
+      body = opening + flowParagraph(1, 'Table follows', third) +
+        '<w:tbl><w:tblPr><w:tblW w:w="8000" w:type="dxa"/><w:tblBorders><w:insideH w:val="single" w:sz="4"/></w:tblBorders></w:tblPr>' +
+        '<w:tblGrid><w:gridCol w:w="4000"/><w:gridCol w:w="4000"/></w:tblGrid>' +
+        `<w:tr><w:trPr><w:tblHeader/></w:trPr>${cell(flowParagraph(1, 'Head A'))}${cell(flowParagraph(1, 'Head B'))}</w:tr>` +
+        `<w:tr>${cell(flowParagraph(80, 'Split'))}${cell(flowParagraph(2, 'Beside'))}</w:tr>` +
+        Array.from({ length: 10 }, (_, row) => `<w:tr>${cell(flowParagraph(1, `Row ${row}`))}${cell(flowParagraph(1, 'Cell'))}</w:tr>`).join('') +
+        '</w:tbl>' + tail('Tail') + flowSection();
+      break;
+    case 'flow-widow':
+      body = opening + flowParagraph(49, 'Filler', third) + flowParagraph(5, 'Widow', '<w:widowControl/>') + tail('Tail') + flowSection();
+      break;
+    case 'flow-keep':
+      body = opening + flowParagraph(46, 'Filler', third) +
+        Array.from({ length: 10 }, (_, index) => flowParagraph(1, `Chain ${index}`, '<w:keepNext/>')).join('') +
+        flowParagraph(1, 'Chain end') + tail('Tail') + flowSection();
+      break;
+    case 'flow-image':
+      types.push('<Default Extension="png" ContentType="image/png"/>');
+      relationships.push('<Relationship Id="rIdImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.png"/>');
+      parts.set('word/media/image1.png', PNG);
+      body = opening + flowParagraph(48, 'Filler', third) +
+        '<w:p><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr><w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">' +
+        '<wp:extent cx="1905000" cy="1428750"/><wp:docPr id="1" name="Picture 1"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">' +
+        '<pic:pic><pic:nvPicPr><pic:cNvPr id="0" name="image1.png"/><pic:cNvPicPr/></pic:nvPicPr>' +
+        '<pic:blipFill><a:blip r:embed="rIdImage"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>' +
+        '<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1905000" cy="1428750"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>' +
+        '</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>' + tail('Tail') + flowSection();
+      break;
+    case 'flow-oddPage':
+      body = opening + flowParagraph(20, 'Third', third, flowSection()) +
+        tail('Odd') + flowParagraph(1, 'Odd end', '', flowSection({ type: 'oddPage' })) + tail('Tail') + flowSection();
+      break;
+    case 'flow-evenPage':
+    case 'flow-evenPage-bare':
+      body = flowParagraph(1, 'Page one') + flowParagraph(1, 'Page two', third, flowSection()) +
+        tail('Even') + flowParagraph(1, 'Even end', '', flowSection({ type: 'evenPage' })) + tail('Tail') + flowSection();
+      break;
+    case 'flow-landscape-bare':
+      body = opening + tail('Wide', 400) +
+        flowParagraph(1, 'Wide end', '', flowSection({ landscape: true })) + tail('Tail') + flowSection();
+      break;
+    case 'flow-titlePg': {
+      const header = (lines: number, label: string) =>
+        `<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">${flowParagraph(lines, label)}</w:hdr>`;
+      parts.set('word/header1.xml', toBytes(header(6, 'First header')));
+      parts.set('word/header2.xml', toBytes(header(1, 'Header')));
+      for (const index of [1, 2]) {
+        relationships.push(`<Relationship Id="rIdHeader${index}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header${index}.xml"/>`);
+        types.push(`<Override PartName="/word/header${index}.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>`);
+      }
+      body = Array.from({ length: 60 }, (_, index) => flowParagraph(10, `Flow ${index}`)).join('') + flowSection({
+        titlePage: true,
+        references: '<w:headerReference w:type="first" r:id="rIdHeader1"/><w:headerReference w:type="default" r:id="rIdHeader2"/>',
+      });
+      break;
+    }
+    default:
+      throw new Error(`Unknown flow feature ${feature}`);
+  }
+  parts.set('[Content_Types].xml', toBytes(
+    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+    `<Default Extension="xml" ContentType="application/xml"/>${types.join('')}` +
+    '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
+    '</Types>'
+  ));
+  parts.set('_rels/.rels', toBytes(
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>' +
+    '</Relationships>'
+  ));
+  if (relationships.length) {
+    parts.set('word/_rels/document.xml.rels', toBytes(
+      `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${relationships.join('')}</Relationships>`
+    ));
+  }
+  parts.set('word/document.xml', toBytes(
+    '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" ' +
+    'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ' +
+    'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" ' +
+    'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">' +
+    `<w:body>${body}</w:body></w:document>`
+  ));
+  return new Uint8Array(rezipPartsToArrayBuffer(parts));
+}
+
+function pageText(page: { primitives: unknown[] }): string {
+  return page.primitives.map((primitive) => (primitive as { text?: string }).text ?? '').join('\n');
+}
+
+/** Asserts that page three of `pages` ends inside the construct the feature names. */
+const FLOW_STRADDLES: Record<string, (pages: RetainedFrame['displayList']['pages']) => void> = {
+  'flow-paragraph': (pages) => {
+    expect(pageText(pages[2]!)).toContain('Long');
+    expect(pageText(pages[3]!)).toContain('Long');
+  },
+  'flow-table': (pages) => {
+    for (const page of [pages[2]!, pages[3]!]) {
+      expect(pageText(page)).toContain('Head A');
+      expect(pageText(page)).toContain('Split');
+    }
+  },
+  'flow-widow': (pages) => {
+    expect(pageText(pages[2]!)).toContain('Widow');
+    expect(pageText(pages[3]!)).toContain('Widow');
+  },
+  'flow-keep': (pages) => {
+    expect(pageText(pages[2]!)).toContain('Filler 46');
+    expect(pageText(pages[3]!)).toContain('Chain');
+  },
+  'flow-image': (pages) => {
+    expect(pageText(pages[2]!)).toContain('Filler 48');
+    expect(pages[3]!.primitives.some((primitive) => primitive.kind === 'image')).toBe(true);
+  },
+  'flow-oddPage': (pages) => {
+    expect(pageText(pages[2]!)).toContain('Third');
+    expect(pageText(pages[3]!).trim()).toBe('');
+    expect(pageText(pages[4]!)).toContain('Odd');
+  },
+  'flow-evenPage': (pages) => {
+    expect(pageText(pages[2]!).trim()).toBe('');
+    expect(pageText(pages[3]!)).toContain('Even');
+  },
+  'flow-titlePg': (pages) => {
+    const last = pageText(pages[2]!).match(/Flow \d+/g)!.at(-1);
+    expect(pageText(pages[3]!).match(/Flow \d+/g)![0]).toBe(last!);
+    expect(pageText(pages[0]!.header!)).toContain('First header');
+    expect(pageText(pages[2]!.header!)).not.toContain('First header');
+  },
+};
+FLOW_STRADDLES['flow-evenPage-bare'] = FLOW_STRADDLES['flow-evenPage']!;
+FLOW_STRADDLES['flow-landscape-bare'] = (pages) => {
+  expect(pages[2]!.width).toBeGreaterThan(pages[2]!.height);
+  expect(pages.at(-1)!.width).toBeLessThan(pages[2]!.width);
+};
+
 async function commandFixture(feature = 'plain') {
   const bytes = syntheticDocx(feature);
   const cold = await createResidentEngineSession();
@@ -314,6 +489,7 @@ async function commandFixture(feature = 'plain') {
   if (feature === 'footnote' || feature === 'endnote') {
     request.notes = { contents: [{ id: 1, noteKind: feature, height: 0 }] } as typeof request.notes;
   }
+  if (feature.endsWith('-bare')) request.regions.sections = [];
   const requirements = JSON.parse(cold.layoutFontRequirementsJson(JSON.stringify(request))) as Array<{ key: string }>;
   cold.clearFonts();
   const font = cold.registerFont(FONT);
@@ -392,6 +568,25 @@ for (const feature of ['NUMPAGES', 'SECTIONPAGES', 'late-NUMPAGES', 'complex-NUM
   });
 }
 
+for (const feature of Object.keys(FLOW_STRADDLES)) {
+  test(`command prefix is exact where page three ends inside ${feature}`, async () => {
+    const f = await commandFixture(feature);
+    try {
+      f.cold.setDisplayWindow(0, 2 ** 32 - 1);
+      const whole = applyFrameDelta(f.full, decodeFrameDelta(f.cold.buildDisplayListFrame(f.init.extras, f.full.frameEpoch)));
+      FLOW_STRADDLES[feature]!(whole.displayList.pages);
+      expect(f.initial.frame.payload.layoutProvisional).toBe(true);
+      expect(f.frame.pages).toHaveLength(3);
+      for (const { page, pageIndex } of f.frame.pages) expect(page).toEqual(f.full.displayList.pages[pageIndex]);
+      expect(f.initial.frame.payload.documentWidth).toBe(Math.max(...whole.displayList.pages.map(({ width }) => width)));
+      await f.present();
+      await f.w.drain();
+      expect(f.w.frames.at(-1)!.payload.layoutProvisional).not.toBe(true);
+      expect(commandFramesAfter(f.frame, f.w.frames).displayList.pages).toEqual(f.full.displayList.pages);
+    } finally { f.destroy(); }
+  });
+}
+
 test('command prefix keeps geometry uncertified until a completed frame', async () => {
   const f = await commandFixture();
   try {
@@ -461,6 +656,37 @@ test('an edit overtakes sliced completion and finishes it before changing the do
     await f.w.drain();
     expect(f.w.frames).toHaveLength(count);
   } finally { f.destroy(); }
+});
+
+/** Longer than the worker holds background work after user input. */
+const INPUT_IDLE_HOLD_MS = 400;
+
+test('a command refused while the prefix is pending leaves it to reach the completed frame', async () => {
+  for (const stale of ['epoch', 'incarnation', 'session', 'version'] as const) {
+    const f = await commandFixture();
+    try {
+      expect(f.initial.frame.payload.layoutProvisional).toBe(true);
+      await f.present();
+      await f.w.turn();
+      const point = { story: 'body', paraId: f.engine.geometryReader.paragraphs('body')[0]!.paraId, offset: 0 };
+      const refused = await f.w.interleave({ type: 'edit', command: {
+        session: stale === 'session' ? 'another' : f.init.session,
+        incarnation: stale === 'incarnation' ? 2 : 1, seq: 1,
+        basis: { epoch: stale === 'epoch' ? 0 : 1, version: stale === 'version' ? 7 : 0 },
+        ...(stale === 'version' ? { expectVersion: true } : {}),
+        kind: 'insertText', payload: { text: 'Edit ', selection: { anchor: point, focus: point } },
+      } });
+      if (!refused.ok || !refused.commandAck) throw new Error(JSON.stringify(refused));
+      expect(refused.commandAck.outcomes[0]?.status).toBe('refused');
+      await f.w.drain();
+      await new Promise((resolve) => setTimeout(resolve, INPUT_IDLE_HOLD_MS));
+      await f.w.drain();
+      const frames = [...f.w.frames, ...(refused.commandAck.frame ? [refused.commandAck.frame] : [])]
+        .sort((left, right) => left.revision - right.revision);
+      expect(frames.at(-1)!.payload.layoutProvisional).not.toBe(true);
+      expect(commandFramesAfter(f.frame, frames).displayList.pages).toEqual(f.full.displayList.pages);
+    } finally { f.destroy(); }
+  }
 });
 
 test('collaboration and replacement cannot publish an abandoned command completion', async () => {
