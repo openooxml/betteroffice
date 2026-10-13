@@ -152,6 +152,8 @@ fn run_recalc(
         let (order, cycle) = topo_order(graph, &pending);
         let mut spilled: Vec<(SheetId, CellRef)> = Vec::new();
         for u in &order {
+            #[cfg(test)]
+            FORMULA_EVALUATIONS.with(|count| count.set(count.get() + 1));
             let (value, limited) = eval_node(wb, *u, context, Rc::clone(&budget), graph);
             if limited {
                 limited_cells.push((u.0, cell_of(*u)));
@@ -320,6 +322,7 @@ thread_local! {
     /// seeks retiring spilled cells took, so a test can see the search skip
     /// the empty positions of a rectangle.
     static RETIREMENT_SEEKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// formula evaluations a recalc ran, the ones it discarded included.
     static FORMULA_EVALUATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
@@ -364,6 +367,8 @@ fn settle_deferred(
                 watch: &unsettled,
                 touched: Flag::new(false),
             };
+            #[cfg(test)]
+            FORMULA_EVALUATIONS.with(|count| count.set(count.get() + 1));
             let (value, limited) = eval_node_with(&log, wb, *u, context, Rc::clone(budget), graph);
             // a spill rewrites a rectangle, which the ordered pass owns
             if log.touched.get() || matches!(value, Some(NodeValue::Spill(_) | NodeValue::Refused))
@@ -484,8 +489,6 @@ fn eval_node_with(
     let Some(expr) = graph.ast(u.0, cell_of(u)) else {
         return (None, false);
     };
-    #[cfg(test)]
-    FORMULA_EVALUATIONS.with(|count| count.set(count.get() + 1));
     let cell = cell_of(u);
     let authored = wb.sheet(u.0).and_then(|sheet| sheet.array_formula(cell));
     let mut ctx = EvalContext::with_budget(provider, u.0, budget);
@@ -1553,9 +1556,15 @@ mod tests {
         let (mut wb, s) = one_sheet();
         put_num(&mut wb, s, "A1", 7.0);
         put_formula(&mut wb, s, "A2", "SUM(A1:A2)");
+        for row in 2..=10_001 {
+            put_formula(&mut wb, s, &format!("B{row}"), "$A$2+7");
+        }
         let (_, result) = rebuild_and_recalc_all(&mut wb, None);
         assert_eq!(result.cycle_cells, vec![(s, a1("A2"))]);
         assert_eq!(value(&wb, s, "A2"), num(0.0));
+        for row in 2..=10_001 {
+            assert_eq!(value(&wb, s, &format!("B{row}")), num(7.0));
+        }
     }
 
     #[test]
