@@ -689,6 +689,39 @@ test('a command refused while the prefix is pending leaves it to reach the compl
   }
 });
 
+for (const request of ['export', 'completeLayout', 'sliced completeLayout'] as const) {
+  test(`${request} finishes a pending prefix inside its own frame work and publishes the completed frame`, async () => {
+    const f = await commandFixture();
+    try {
+      expect(f.initial.frame.payload.layoutProvisional).toBe(true);
+      await f.present();
+      await f.w.turn();
+      const count = f.w.frames.length;
+      const reply = request === 'export'
+        ? await f.w.interleave({ type: 'documentRead', read: {
+          kind: 'exportStructuredWithPages', options: { revisionView: 'markup', stories: ['body'] },
+          currentRequest: f.init.layoutInput,
+        } })
+        : await f.w.interleave({
+          type: 'completeLayout', expectedFrameEpoch: f.w.frames.at(-1)!.revision, paintCaret: false,
+          ...(request === 'sliced completeLayout' ? { sliceBlocks: 8 } : {}),
+        });
+      if (!reply.ok) throw new Error(JSON.stringify(reply));
+      if (request === 'export') {
+        const exported = JSON.parse((reply as { read?: { value?: string } }).read!.value!) as {
+          ok: boolean; value: { layout: { pages: unknown[] } };
+        };
+        expect(exported.ok).toBe(true);
+        expect(exported.value.layout.pages).toHaveLength(f.full.displayList.pages.length);
+      }
+      await f.w.drain();
+      expect(f.w.frames.length).toBeGreaterThan(count);
+      expect(f.w.frames.at(-1)!.payload.layoutProvisional).not.toBe(true);
+      expect(commandFramesAfter(f.frame, f.w.frames).displayList.pages).toEqual(f.full.displayList.pages);
+    } finally { f.destroy(); }
+  });
+}
+
 test('collaboration and replacement cannot publish an abandoned command completion', async () => {
   for (const replace of [false, true]) {
     const f = await commandFixture();

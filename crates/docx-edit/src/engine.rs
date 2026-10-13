@@ -21329,6 +21329,86 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         assert!(pagination.rebuilt_page_end <= pages - 2);
     }
 
+    /// A Letter section break with `margin` twips above and below its body, and the header.
+    fn header_section(margin: u32) -> String {
+        format!(
+            r#"<w:sectPr><w:headerReference w:type="default" r:id="header"/><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="{margin}" w:right="1440" w:bottom="{margin}" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>"#
+        )
+    }
+
+    fn header_request(font: u32, margin: f64) -> serde_json::Value {
+        let mut request = preview_pagination_request(font);
+        request["regions"]["sections"][0] = serde_json::json!({
+            "sectionId": "main",
+            "pageSize": {"w": 816, "h": 1056},
+            "margins": {"top": margin, "right": 96, "bottom": margin, "left": 96,
+                "header": 48, "footer": 48},
+            "headerFooterRefs": {"headerDefault": "header"}
+        });
+        request
+    }
+
+    #[test]
+    fn an_exact_prefix_past_its_supplied_sections_lays_out_as_the_full_pass() {
+        docx_layout::clear_measure_fonts();
+        let font = docx_layout::register_measure_font(LIBERATION).unwrap();
+        let line = |index: u32, section: &str| {
+            preview_fixture::paragraph(
+                index + 1,
+                &format!("<w:pPr>{section}</w:pPr>{}", preview_fixture::run("Line")),
+            )
+        };
+        let lines = |range: std::ops::Range<u32>| {
+            range.map(|index| line(index, "")).collect::<String>()
+        };
+        let run = r#"<w:t xml:space="preserve">Long</w:t>"#;
+        let long = [run; 300].join("<w:br/>");
+        let body = format!(
+            "{}<w:p><w:r>{long}</w:r></w:p>{}{}{}{}",
+            line(0, &header_section(1440)),
+            lines(1..60),
+            line(60, &header_section(6000)),
+            lines(61..120),
+            header_section(1440)
+        );
+        let header = preview_pagination_paragraph(300, &preview_fixture::run("Head"));
+        let bytes = preview_pagination_story_document(&body, "header", &header);
+        let request = header_request(font, 96.0).to_string();
+        let (full, laid, prefix) = full_and_exact_prefix(&bytes, &request, 3, &|_| {});
+        let pages = full["layout"]["pages"].as_array().unwrap();
+        assert!(pages.len() > 5);
+        assert_eq!(pages[1]["margins"]["top"].as_f64(), Some(400.0));
+        let shown = prefix["layout"]["pages"].as_array().unwrap();
+        assert_eq!(shown[..], pages[..shown.len()]);
+        assert!(laid.provisional || shown.len() == pages.len());
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn an_exact_prefix_short_of_two_pages_past_the_cut_lays_out_the_full_pass() {
+        docx_layout::clear_measure_fonts();
+        let font = docx_layout::register_measure_font(LIBERATION).unwrap();
+        let tiny = r#"<w:pPr><w:spacing w:before="0" w:after="0" w:line="45" w:lineRule="exact"/></w:pPr>"#;
+        let paragraph = format!("{tiny}{}", preview_fixture::run("Line"));
+        let body = format!(
+            "{}{}",
+            (0..200)
+                .map(|index| preview_fixture::paragraph(index + 1, &paragraph))
+                .collect::<String>(),
+            header_section(7800)
+        );
+        let header = preview_pagination_paragraph(300, &preview_fixture::run("Head"));
+        let bytes = preview_pagination_story_document(&body, "header", &header);
+        let request = header_request(font, 520.0).to_string();
+        let (full, laid, prefix) = full_and_exact_prefix(&bytes, &request, 3, &|_| {
+            BODY_MEASUREMENT_WORK.with(|work| work.borrow_mut().1 = 0);
+        });
+        assert!(!laid.provisional);
+        assert_eq!(prefix["layout"], full["layout"]);
+        BODY_MEASUREMENT_WORK.with(|work| assert_eq!(work.borrow().1, 2));
+        docx_layout::clear_measure_fonts();
+    }
+
     #[test]
     fn a_provisional_layout_renders_numpages_empty_until_the_full_pass() {
         assert_partial_numpages(false);
