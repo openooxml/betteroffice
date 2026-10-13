@@ -695,6 +695,168 @@ fn cascade_plain_clears_reuse_one_plain_xf_across_save_and_reopen_cycles() {
     );
 }
 
+const DEFAULT_FILLS_AND_BORDERS: &str = concat!(
+    r#"<fills count="1"><fill><patternFill patternType="none"/></fill></fills>"#,
+    r#"<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>"#,
+);
+
+const UNLOCKED_XF: &str = r#"<xf numFmtId="0" fontId="1" fillId="0" borderId="0" applyFont="1" applyProtection="1"><protection locked="0"/></xf>"#;
+
+/// A workbook whose styles part carries `styles` verbatim.
+fn styles_part_source(styles: &str, sheet_data: &str) -> Vec<u8> {
+    let mut model = WorkbookModel::default();
+    model.sheets.push(Sheet::new("Data"));
+    model.styles.cell_xfs.push(xlsx_model::Xf::default());
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    set_test_part(&mut parts, "xl/styles.xml", format!(
+        r#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">{styles}</styleSheet>"#
+    ).into_bytes());
+    set_test_part(&mut parts, "xl/worksheets/sheet1.xml", format!(
+        r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>{sheet_data}</sheetData></worksheet>"#
+    ).into_bytes());
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+/// Italic (and locked) xf 0 on A1 and C1; on B1 an xf 1 the model reads as plain although
+/// its markup `xf` carries more.
+fn plain_reading_xf_source(cell_style_xfs: &str, xf: &str) -> Vec<u8> {
+    styles_part_source(
+        &format!(
+            r#"<fonts count="2"><font><i/></font><font/></fonts>{DEFAULT_FILLS_AND_BORDERS}{cell_style_xfs}<cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" applyFont="1"/>{xf}</cellXfs>"#
+        ),
+        r#"<row r="1"><c r="A1" s="0"><v>1</v></c><c r="B1" s="1"><v>2</v></c><c r="C1" s="0"><v>3</v></c></row>"#,
+    )
+}
+
+fn index_attribute(tag: &str, name: &str) -> usize {
+    tag.split(&format!(r#" {name}=""#))
+        .nth(1)
+        .map_or(0, |rest| rest[..rest.find('"').unwrap()].parse().unwrap())
+}
+
+/// The markup of each `entry` in a styles part's `list`.
+fn style_entries(styles: &str, list: &str, entry: &str) -> Vec<String> {
+    let open = styles.find(&format!("<{list}")).unwrap();
+    let body = open + styles[open..].find('>').unwrap() + 1;
+    styles[body..styles.find(&format!("</{list}>")).unwrap()]
+        .split(&format!("<{entry}"))
+        .skip(1)
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The saved markup of the cellXfs entry a cell names.
+fn saved_cell_xf(bytes: &[u8], address: &str) -> String {
+    let parts = package_map(bytes);
+    let sheet = String::from_utf8(parts["xl/worksheets/sheet1.xml"].clone()).unwrap();
+    let start = sheet.find(&format!(r#"<c r="{address}""#)).unwrap();
+    let tag = &sheet[start..start + sheet[start..].find('>').unwrap()];
+    let styles = String::from_utf8(parts["xl/styles.xml"].clone()).unwrap();
+    style_entries(&styles, "cellXfs", "xf").swap_remove(index_attribute(tag, "s"))
+}
+
+/// Clears italic on A1, saves, reopens and clears it on C1: no cleared cell may pick up
+/// `marker` from xf 1's markup, B1 keeps it, and the second clear reuses the first's xf.
+fn assert_plain_clears_leave_source_markup_behind(cell_style_xfs: &str, xf: &str, marker: &str) {
+    let mut workbook = Workbook::open(&plain_reading_xf_source(cell_style_xfs, xf)).unwrap();
+    clear_style(
+        &mut workbook,
+        "A1",
+        betteroffice_xlsx::StyleProperty::Italic,
+    );
+    let saved = workbook.save().unwrap();
+    let mut reopened = Workbook::open(&saved).unwrap();
+    assert_eq!(
+        resolved_format(&reopened, "A1"),
+        xlsx_model::CellFormat::default()
+    );
+    let xfs = reopened.model().styles.cell_xfs.len();
+    clear_style(
+        &mut reopened,
+        "C1",
+        betteroffice_xlsx::StyleProperty::Italic,
+    );
+    assert_eq!(reopened.model().styles.cell_xfs.len(), xfs);
+    let resaved = reopened.save().unwrap();
+    for (bytes, cleared) in [(&saved, &["A1"][..]), (&resaved, &["A1", "C1"][..])] {
+        for address in cleared {
+            let markup = saved_cell_xf(bytes, address);
+            assert!(!markup.contains(marker), "{address} saved on {markup}");
+        }
+        assert!(saved_cell_xf(bytes, "B1").contains(marker));
+    }
+}
+
+#[test]
+fn cascade_plain_clears_leave_source_protection_behind() {
+    assert_plain_clears_leave_source_markup_behind("", UNLOCKED_XF, r#"locked="0""#);
+}
+
+#[test]
+fn cascade_plain_clears_leave_source_text_rotation_behind() {
+    assert_plain_clears_leave_source_markup_behind(
+        "",
+        r#"<xf numFmtId="0" fontId="1" fillId="0" borderId="0" applyFont="1" applyAlignment="1"><alignment textRotation="90"/></xf>"#,
+        "textRotation",
+    );
+}
+
+#[test]
+fn cascade_plain_clears_leave_a_source_parent_style_behind() {
+    assert_plain_clears_leave_source_markup_behind(
+        r#"<cellStyleXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0"/></cellStyleXfs>"#,
+        r#"<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="1" applyFont="1"/>"#,
+        r#"xfId="1""#,
+    );
+}
+
+#[test]
+fn cascade_plain_clear_names_no_source_font_whose_markup_the_model_drops() {
+    let bytes = styles_part_source(
+        &format!(
+            r#"<fonts count="2"><font><i/></font><font><vertAlign val="superscript"/></font></fonts>{DEFAULT_FILLS_AND_BORDERS}<cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" applyFont="1"/></cellXfs>"#
+        ),
+        r#"<row r="1"><c r="A1" s="0"><v>1</v></c></row>"#,
+    );
+    let mut workbook = Workbook::open(&bytes).unwrap();
+    clear_style(
+        &mut workbook,
+        "A1",
+        betteroffice_xlsx::StyleProperty::Italic,
+    );
+    let saved = workbook.save().unwrap();
+    let xf = saved_cell_xf(&saved, "A1");
+    let styles = String::from_utf8(package_map(&saved)["xl/styles.xml"].clone()).unwrap();
+    let font = &style_entries(&styles, "fonts", "font")[index_attribute(&xf, "fontId")];
+    assert!(!font.contains("vertAlign"), "A1 saved on {xf} naming {font}");
+    assert_eq!(
+        resolved_format(&Workbook::open(&saved).unwrap(), "A1"),
+        xlsx_model::CellFormat::default()
+    );
+}
+
+#[test]
+fn cascade_collaborative_plain_clear_leaves_source_protection_behind_on_every_peer() {
+    let bytes = plain_reading_xf_source("", UNLOCKED_XF);
+    let mut left = Workbook::open_collaborative(&bytes, 861).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 862).unwrap();
+    let baseline = right.encode_state_vector_v1();
+    clear_style(&mut left, "A1", betteroffice_xlsx::StyleProperty::Italic);
+    right
+        .apply_update_v1(
+            &left.encode_diff_v1(&baseline).unwrap(),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(left.model(), right.model());
+    for peer in [&left, &right] {
+        let saved = peer.save().unwrap();
+        let markup = saved_cell_xf(&saved, "A1");
+        assert!(!markup.contains(r#"locked="0""#), "A1 saved on {markup}");
+        assert!(saved_cell_xf(&saved, "B1").contains(r#"locked="0""#));
+    }
+}
+
 #[test]
 fn cascade_collaborative_plain_result_under_a_row_default_over_an_italic_xf_zero_stays_plain() {
     let bytes = italic_xf_zero_source();
