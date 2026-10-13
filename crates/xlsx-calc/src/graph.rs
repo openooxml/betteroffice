@@ -82,8 +82,9 @@ struct NodeEntry {
 /// what evaluating a formula resolves by sheet name.
 #[derive(Default)]
 struct SheetResolution {
-    /// in walk order: the sheet each qualifier names, positional ones too, and
-    /// the definition each defined name binds to, through their bodies.
+    /// in walk order: the sheet each qualifier names, positional ones and
+    /// those of defined names too, and the definition each defined name binds
+    /// to, through their bodies.
     bindings: Vec<SheetBinding>,
     /// whether it shows a cell's formula text, which names sheets.
     shows_formula_text: bool,
@@ -237,6 +238,10 @@ impl DepGraph {
                         }
                     }
                     Expr::Name { scope, name } => {
+                        if let Some(scope) = scope {
+                            let id = self.names.get(&scope.to_lowercase()).copied();
+                            resolution.bindings.push(SheetBinding::Sheet(id));
+                        }
                         let bound = self.defined_name_index(owner, scope, name);
                         resolution.bindings.push(SheetBinding::Name(bound));
                         let Some((sheet, index)) = bound else {
