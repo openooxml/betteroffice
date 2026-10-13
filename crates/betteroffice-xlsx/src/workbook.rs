@@ -4618,6 +4618,7 @@ impl CalculationScope {
             Op::SetDefinedNames { .. }
             | Op::AddSheet { .. }
             | Op::RemoveSheet { .. }
+            | Op::MoveSheet { .. }
             | Op::InsertRows { .. }
             | Op::DeleteRows { .. }
             | Op::InsertCols { .. }
