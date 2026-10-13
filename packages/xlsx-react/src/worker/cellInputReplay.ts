@@ -25,6 +25,7 @@ export function cellInputOperation(event: CellInputEvent, mac: boolean): CellInp
   const word = mac ? event.altKey && !event.metaKey : event.ctrlKey && !event.altKey;
   const line = mac && event.metaKey && !event.altKey;
   if (mod && !event.altKey && event.key.toLowerCase() === 'a') return { kind: 'selectAll' };
+  if (!mod && event.key.length === 1) return { kind: 'insert', text: event.key };
   if (!mac && event.altKey) return null;
   const direction = event.key === 'Home' || line && event.key === 'ArrowLeft' ? 'start' :
     event.key === 'End' || line && event.key === 'ArrowRight' ? 'end' :
@@ -32,7 +33,7 @@ export function cellInputOperation(event: CellInputEvent, mac: boolean): CellInp
   if (direction) return { kind: 'move', direction, extend: event.shiftKey, ...(word ? { unit: 'word' } : {}) };
   if (event.key === 'Backspace' || event.key === 'Delete') return { kind: 'delete',
     direction: event.key === 'Backspace' ? 'backward' : 'forward', unit: line ? 'line' : word ? 'word' : 'character' };
-  return !mod && !event.altKey && event.key.length === 1 ? { kind: 'insert', text: event.key } : null;
+  return null;
 }
 
 function characterOffset(value: string, at: number, backward: boolean): number {
