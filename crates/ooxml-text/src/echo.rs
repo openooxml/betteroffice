@@ -216,16 +216,15 @@ fn substitution_barriers(
                 | b"dist"
                 | b"ltra"
                 | b"ltrm"
-                | b"frac"
-                | b"numr"
-                | b"dnom"
                 | b"rand"
                 | b"trak"
                 | b"Harf"
                 | b"HARF"
                 | b"Buzz"
                 | b"BUZZ"
-        ) || kern && feature.tag.to_bytes() == *b"kern"
+        ) || alphabet.contains(&'\u{2044}')
+            && matches!(&feature.tag.to_bytes(), b"frac" | b"numr" | b"dnom")
+            || kern && feature.tag.to_bytes() == *b"kern"
             || required.contains(&index);
         if active {
             lookups.extend(feature.lookup_indices);
@@ -365,6 +364,13 @@ mod tests {
             seen.dedup();
             assert_eq!(seen.len(), count * count);
         }
+    }
+
+    #[test]
+    fn ordinary_digits_do_not_enable_fraction_substitutions() {
+        let (store, font) = store();
+        let set = echo_glyph_set(&store, font, 16.0, false, &['0', '1', '2', '/', '3']).unwrap();
+        assert!(set.glyph_ids.iter().all(|&id| id != 0));
     }
 
     #[test]
