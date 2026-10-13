@@ -54,7 +54,7 @@ test('checkpoint after N commands restores a fresh session boundary', async () =
     const projection = { ...opened.editState!, ...edit.editState, ...format.editState, ...selected.editState, ...mode.editState };
     const saved = await original.call.save();
     const checkpoint = await original.call.checkpoint();
-    expect(decodeWorkbookRecovery(checkpoint.state).engine[8]).toBe(3);
+    expect(decodeWorkbookRecovery(checkpoint.state).engine[8]).toBe(4);
     expect(await original.call.version()).toBe(mode.engineVersion);
     await expect(replacement.call.openRecovery({ ...checkpoint, throughSeq: checkpoint.throughSeq - 1 }))
       .rejects.toThrow('envelope mismatch');
