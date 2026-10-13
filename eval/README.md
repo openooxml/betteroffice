@@ -3,8 +3,8 @@
 Evaluations of the `@betteroffice/agents` document tools as a model sees them:
 through the MCP server, with no other way to read or write the documents.
 
-- [`formats/`](formats): a scored suite of 10 XLSX and 10 PPTX editing tasks
-  with automatic checkers.
+- [`formats/`](formats): a scored suite of 10 DOCX, 10 XLSX and 10 PPTX editing
+  tasks with automatic checkers.
 - [`usability/`](usability): manual DOCX, XLSX and PPTX tasks for reviewing
   agent ergonomics on an installed package.
 
@@ -12,11 +12,11 @@ through the MCP server, with no other way to read or write the documents.
 
 ### What it measures
 
-Whether a model completes a realistic spreadsheet or presentation edit using
-only the BetterOffice MCP tools, and whether the saved file is exactly right:
-the requested change is present, everything else in the document is preserved,
-and the input file is unchanged. It measures the tools and the model together;
-it is not a general model benchmark.
+Whether a model completes a realistic document, spreadsheet or presentation
+edit using only the BetterOffice MCP tools, and whether the saved file is
+exactly right: the requested change is present, everything else in the
+document is preserved, and the input file is unchanged. It measures the tools
+and the model together; it is not a general model benchmark.
 
 ### Tasks
 
@@ -26,6 +26,7 @@ checker applies to the input to derive the correct result.
 
 | Format | Tasks |
 | --- | --- |
+| DOCX | fix a misspelled heading, replace a term case-sensitively in the title, body, list and table, correct table values, add a table row above the total and update the total, delete a table row and update the total, make a paragraph a Heading 2, bold a phrase inside a paragraph, insert a paragraph below a heading, delete a draft note, a combined placeholder replacement, line deletion and heading change |
 | XLSX | correct a value and recalculate totals, fix a total formula, case-sensitive replace across two sheets, style a header, sort rows by a column, add a total row with formulas and formatting, insert a computed column, rename and reorder sheets while keeping cross-sheet formulas working, build a summary from another sheet, a combined column insert, sort and format |
 | PPTX | change a title, update a figure in a bullet, replace a bullet list, replace a term in titles and bullets but not notes, change two titles but not matching bullet text, delete a slide, reorder slides with their notes, replace speaker notes, add a positioned text box, insert a slide with a title and bullets |
 
@@ -105,12 +106,23 @@ A task passes only if all of these hold:
   and speaker notes, plus every presentation attribute and child, presentation
   properties, view properties, notes masters and table styles. Every run
   counts, including an empty run and its formatting, and only paragraphs whose
-  text the task changes differ from the input. Both formats
-  compare all remaining package parts, including document properties and
-  relationships;
+  text the task changes differ from the input. For DOCX it covers the body in
+  order: each paragraph's style (no style means the default paragraph style),
+  paragraph properties including numbering, every run's properties and text
+  (adjacent runs with identical properties merged, empty runs with formatting
+  kept) and every other paragraph child; each table's properties, grid, rows
+  and cells with their properties and content; the section properties and the
+  document element. Styles, numbering, settings and headers or footers are
+  compared as package parts. Tracked-change markup the input does not have
+  (`w:ins`, `w:del`, moves, property changes) fails the task. A new paragraph
+  is expected in the default paragraph style without direct formatting, a new
+  table row copies the row it is modeled on, including row, cell, paragraph and
+  run properties, and bold sets `w:b` on exactly the requested phrase. All
+  formats compare all remaining package parts, including document properties
+  and relationships;
 - the input file is byte-identical to the original.
 
-The score is the number of passing tasks out of 20. The runner also records
+The score is the number of passing tasks out of 30. The runner also records
 the duration and the number of tool calls per task (BetterOffice MCP calls, or
 shell commands and file changes in the generic arm), and `results.md` counts
 the tasks that made no tool call.
@@ -142,26 +154,37 @@ empty run with those properties; the formatting of created notes is not
 predicted. Unreferenced slide and note payloads are excluded because a slide
 deletion can retain or remove those detached parts without changing the
 presentation.
+In DOCX, the value of `dcterms:modified` in `docProps/core.xml` is ignored
+because the BetterOffice writer stamps the save time there; the element itself
+is compared. Otherwise only equivalent representations are equal: an empty
+property element equals an absent one, adjacent runs with identical properties
+are merged, and a paragraph without a style has the default paragraph style.
+Rsid and paragraph identity attributes are compared as written; the fixtures
+have none.
 
 The checkers are validated against known answers:
 [`formats/validate-checkers.py`](formats/validate-checkers.py) builds a correct
 output for every task and checks that it passes, and that the untouched input,
 an output with an unrelated edit, and an output with a damaged requested change
-all fail, plus unrelated workbook- and presentation-level edits; two enriched
-fixtures also check view and defined-name remapping and metadata preservation,
-and targeted variants check tab selection, notes parts, slide shape elements,
-paragraph end properties, fields and empty formatted runs, and cell, row,
-column and named style formats (45 accepted, 115 rejected).
+all fail, plus unrelated workbook-, presentation- and document-level edits;
+two enriched fixtures also check view and defined-name remapping and metadata
+preservation, and targeted variants check tab selection, notes parts, slide
+shape elements, paragraph end properties, fields and empty formatted runs,
+cell, row, column and named style formats, and for DOCX tracked-change markup,
+run splits and formatting, row placement, style resolution, reordered content
+and package parts (59 accepted, 163 rejected).
 [`formats/test-runner.py`](formats/test-runner.py) tests the runner itself with
 a stand-in agent.
 
 ### Fixtures
 
-The 20 input files are synthetic documents generated by
+The 30 input files are synthetic documents generated by
 [`formats/generate-fixtures.ts`](formats/generate-fixtures.ts) with fixed
-timestamps. They are not stored in the repository. They are published in the
-public corpus bucket under `https://corpus.betteroffice.dev/eval/formats/v1/`,
-and [`formats/fixtures.json`](formats/fixtures.json) pins each file's size and
+timestamps; the DOCX files are hand-written OOXML opened and saved by the
+BetterOffice engine. They are not stored in the repository. They are published
+in the public corpus bucket under
+`https://corpus.betteroffice.dev/eval/formats/v1/`, and
+[`formats/fixtures.json`](formats/fixtures.json) pins each file's size and
 SHA-256.
 
 The checkers download a fixture on first use, verify it, and keep it in the
