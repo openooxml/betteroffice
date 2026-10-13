@@ -760,14 +760,18 @@ where
         }
     }
 
-    emit_column_fills(&mut commands, sheet_ref, styles, &rows, &cols, &merge_index);
+    emit_inherited_fills(
+        &mut commands,
+        sheet_ref,
+        &mut fx,
+        &rows,
+        &cols,
+        &merge_index,
+        geom,
+    );
 
-    for &(at, cell) in &anchors {
-        // a cell naming no style still inherits its column's
-        let Some(hex) = &fx
-            .xf(cell.style.or_else(|| sheet_ref.col_style(at.col)))
-            .fill
-        else {
+    for &(at, _) in &anchors {
+        let Some(hex) = &fx.xf(sheet_ref.effective_style(at)).fill else {
             continue;
         };
         let Some(cell_box) = cell_box(geom, &rows, &cols, &merge_index, at) else {
@@ -819,8 +823,17 @@ where
         }
     }
 
-    for &(at, cell) in &anchors {
-        let xf = fx.xf(cell.style).clone();
+    emit_inherited_borders(
+        &mut commands,
+        sheet_ref,
+        &mut fx,
+        &rows,
+        &cols,
+        &merge_index,
+        geom,
+    );
+    for &(at, _) in &anchors {
+        let xf = fx.xf(sheet_ref.effective_style(at)).clone();
         let Some(border) = &xf.border else {
             continue;
         };
@@ -842,7 +855,7 @@ where
             continue;
         }
         let hyperlink = link_index.at(at);
-        let xf = &**fx.xf(cell.style);
+        let xf = &**fx.xf(sheet_ref.effective_style(at));
         let Some((text, color)) =
             cell_display_text(xf, wb.date_system, cell, &text_color).or_else(|| {
                 hyperlink
@@ -960,8 +973,7 @@ where
             continue;
         }
         let at = CellRef::new(ghost.row, ghost.col);
-        let cell = sheet_ref.cell(at);
-        let xf = fx.xf(cell.and_then(|c| c.style)).clone();
+        let xf = fx.xf(sheet_ref.effective_style(at)).clone();
         let font = xf.font.as_ref();
         let font = GhostFont {
             size: font
@@ -1179,55 +1191,65 @@ fn ellipsize(text: &str, budget: f32, size: f32) -> String {
     format!("{prefix}…")
 }
 
-/// the fill a `<col>` run gives every position it formats that holds no cell
-/// of its own, emitted as one rect per run of such rows.
-fn emit_column_fills(
+fn emit_inherited_fills(
     commands: &mut Vec<DrawCmd>,
     sheet: &Sheet,
-    styles: &Stylesheet,
+    fx: &mut FrameStyles,
     rows: &AxisLayout,
     cols: &AxisLayout,
     merges: &MergeIndex,
+    geom: &GridGeometry,
 ) {
-    if sheet.col_styles.is_empty() {
+    if sheet.col_styles.is_empty() && sheet.row_styles.is_empty() && fx.xf(None).fill.is_none() {
         return;
     }
     for col in &cols.tracks {
-        let Some(style) = sheet.col_style(col.index) else {
-            continue;
-        };
-        let Some(Fill::Solid(color)) = styles.fill_for(style) else {
-            continue;
-        };
-        let Some(hex) = styles.resolve_color(color) else {
-            continue;
-        };
-        let mut run: Option<(f32, f32, u32)> = None;
+        let mut run: Option<(f32, f32, u32, Arc<str>)> = None;
         for row in &rows.tracks {
             let at = CellRef::new(row.index, col.index);
-            let owned = sheet.cell(at).is_some() || merges.covering(at).is_some();
-            match run {
-                Some((start, _, last)) if !owned && row.index == last + 1 => {
-                    run = Some((start, row.end, row.index));
-                }
-                _ => {
-                    if let Some((start, end, _)) = run.take()
-                        && end > start
-                    {
+            let merge = merges.covering(at);
+            let hex = if sheet.cell(at).is_some() || merge.is_some_and(|merge| merge.start != at) {
+                None
+            } else {
+                fx.xf(sheet.effective_style(at)).fill.clone()
+            };
+            if let Some((_, end, last, color)) = &mut run
+                && hex.as_ref() == Some(color)
+                && row.index == *last + 1
+                && merge.is_none()
+            {
+                *end = row.end;
+                *last = row.index;
+                continue;
+            }
+            if let Some((start, end, _, color)) = run.take() {
+                commands.push(DrawCmd::FillRect {
+                    x: col.start,
+                    y: start,
+                    w: col.end - col.start,
+                    h: end - start,
+                    color,
+                    clip: None,
+                });
+            }
+            if let Some(color) = hex {
+                if merge.is_some() {
+                    if let Some(bx) = cell_box(geom, rows, cols, merges, at) {
                         commands.push(DrawCmd::FillRect {
-                            x: col.start,
-                            y: start,
-                            w: (col.end - col.start).max(0.0),
-                            h: end - start,
-                            color: hex.clone().into(),
+                            x: bx.clip.x,
+                            y: bx.clip.y,
+                            w: bx.clip.w,
+                            h: bx.clip.h,
+                            color,
                             clip: None,
                         });
                     }
-                    run = (!owned).then_some((row.start, row.end, row.index));
+                } else {
+                    run = Some((row.start, row.end, row.index, color));
                 }
             }
         }
-        if let Some((start, end, _)) = run
+        if let Some((start, end, _, color)) = run
             && end > start
         {
             commands.push(DrawCmd::FillRect {
@@ -1235,9 +1257,114 @@ fn emit_column_fills(
                 y: start,
                 w: (col.end - col.start).max(0.0),
                 h: end - start,
-                color: hex.into(),
+                color,
                 clip: None,
             });
+        }
+    }
+    for merge in &sheet.merges {
+        let at = merge.start;
+        if sheet.cell(at).is_none()
+            && (!rows.contains(at.row) || !cols.contains(at.col))
+            && let Some(bx) = cell_box(geom, rows, cols, merges, at)
+            && let Some(color) = &fx.xf(sheet.effective_style(at)).fill
+        {
+            commands.push(DrawCmd::FillRect {
+                x: bx.clip.x,
+                y: bx.clip.y,
+                w: bx.clip.w,
+                h: bx.clip.h,
+                color: color.clone(),
+                clip: None,
+            });
+        }
+    }
+}
+
+fn emit_inherited_borders(
+    commands: &mut Vec<DrawCmd>,
+    sheet: &Sheet,
+    fx: &mut FrameStyles,
+    rows: &AxisLayout,
+    cols: &AxisLayout,
+    merges: &MergeIndex,
+    geom: &GridGeometry,
+) {
+    if sheet.row_styles.is_empty() && sheet.col_styles.is_empty() && fx.xf(None).border.is_none() {
+        return;
+    }
+    for row in &rows.tracks {
+        for col in &cols.tracks {
+            let at = CellRef::new(row.index, col.index);
+            if merges.covering(at).is_some_and(|merge| merge.start != at) {
+                continue;
+            }
+            let xf = fx.xf(sheet.effective_style(at)).clone();
+            if sheet.cell(at).is_none()
+                && let Some(border) = &xf.border
+            {
+                emit_borders(commands, geom, rows, cols, sheet, merges, fx, at, border);
+            }
+            let above = at.row.checked_sub(1).filter(|row| !rows.contains(*row));
+            let left = at.col.checked_sub(1).filter(|col| !cols.contains(*col));
+            if above.is_none() && left.is_none() {
+                continue;
+            }
+            let Some(bx) = cell_box(geom, rows, cols, merges, at) else {
+                continue;
+            };
+            if let Some(row) = above
+                && xf.border.as_ref().is_none_or(|border| border.top.is_none())
+                && bx.y >= bx.clip.y
+                && bx.y <= bx.clip.y + bx.clip.h
+            {
+                let neighbor = fx.xf(sheet.effective_style(CellRef::new(row, at.col)));
+                if let Some(edge) = neighbor
+                    .border
+                    .as_ref()
+                    .and_then(|border| border.bottom.as_ref())
+                {
+                    commands.push(border_line(
+                        bx.clip.x,
+                        bx.y,
+                        bx.clip.x + bx.clip.w,
+                        bx.y,
+                        edge,
+                    ));
+                }
+            }
+            if let Some(col) = left
+                && xf
+                    .border
+                    .as_ref()
+                    .is_none_or(|border| border.left.is_none())
+                && bx.x >= bx.clip.x
+                && bx.x <= bx.clip.x + bx.clip.w
+            {
+                let neighbor = fx.xf(sheet.effective_style(CellRef::new(at.row, col)));
+                if let Some(edge) = neighbor
+                    .border
+                    .as_ref()
+                    .and_then(|border| border.right.as_ref())
+                {
+                    commands.push(border_line(
+                        bx.x,
+                        bx.clip.y,
+                        bx.x,
+                        bx.clip.y + bx.clip.h,
+                        edge,
+                    ));
+                }
+            }
+        }
+    }
+    for merge in &sheet.merges {
+        let at = merge.start;
+        if sheet.cell(at).is_none() && (!rows.contains(at.row) || !cols.contains(at.col)) {
+            let xf = fx.xf(sheet.effective_style(at)).clone();
+            if let Some(border) = &xf.border {
+                emit_borders(commands, geom, rows, cols, sheet, merges, fx, at, border);
+            }
         }
     }
 }
@@ -1627,7 +1754,6 @@ struct ResolvedBorderEdge {
 struct FrameStyles<'a> {
     styles: &'a Stylesheet,
     xfs: HashMap<u32, Arc<ResolvedXf>>,
-    none: Option<Arc<ResolvedXf>>,
 }
 
 impl<'a> FrameStyles<'a> {
@@ -1635,21 +1761,15 @@ impl<'a> FrameStyles<'a> {
         FrameStyles {
             styles,
             xfs: HashMap::new(),
-            none: None,
         }
     }
 
     fn xf(&mut self, style: Option<u32>) -> &Arc<ResolvedXf> {
         let styles = self.styles;
-        match style {
-            Some(style) => self
-                .xfs
-                .entry(style)
-                .or_insert_with(|| Arc::new(Self::resolve(styles, Some(style)))),
-            None => self
-                .none
-                .get_or_insert_with(|| Arc::new(Self::resolve(styles, None))),
-        }
+        let style = style.unwrap_or(0);
+        self.xfs
+            .entry(style)
+            .or_insert_with(|| Arc::new(Self::resolve(styles, Some(style))))
     }
 
     fn resolve(styles: &Stylesheet, style: Option<u32>) -> ResolvedXf {
@@ -1758,13 +1878,11 @@ fn cell_display_text(
     Some((formatted.text.into(), color))
 }
 
-/// the number-format code a cell's xf resolves to; general when unset or when
-/// a builtin id is not modeled.
+/// The cell's number-format code; absent `s` uses xf 0.
 pub fn format_code_for_cell(styles: &Stylesheet, cell: &xlsx_model::Cell) -> String {
-    match cell.style.map(|s| styles.format_code_for(s)) {
-        Some(FormatCode::Custom(c)) => c.to_string(),
-        Some(FormatCode::Builtin(id)) => builtin_format_code(id).unwrap_or("General").to_string(),
-        None => "General".to_string(),
+    match styles.format_code_for(cell.style.unwrap_or(0)) {
+        FormatCode::Custom(c) => c.to_string(),
+        FormatCode::Builtin(id) => builtin_format_code(id).unwrap_or("General").to_string(),
     }
 }
 
@@ -1847,12 +1965,12 @@ fn emit_borders(
     at: CellRef,
     border: &ResolvedBorder,
 ) {
-    let Some(cell_box) = cell_box(geom, rows, cols, merges, at) else {
+    let Some(bx) = cell_box(geom, rows, cols, merges, at) else {
         return;
     };
-    let (x, y) = (cell_box.x, cell_box.y);
-    let (x2, y2) = (x + cell_box.w, y + cell_box.h);
-    let clip = cell_box.clip;
+    let (x, y) = (bx.x, bx.y);
+    let (x2, y2) = (x + bx.w, y + bx.h);
+    let clip = bx.clip;
     let (clip_x2, clip_y2) = (clip.x + clip.w, clip.y + clip.h);
     let (end_col, end_row) = match merges.covering(at) {
         Some(m) => (m.end.col, m.end.row),
@@ -1874,14 +1992,16 @@ fn emit_borders(
     if let Some(edge) = &border.bottom
         && y2 >= clip.y
         && y2 <= clip_y2
-        && !neighbor_edge(sheet, fx, end_row + 1, at.col, |b| b.top.is_some())
+        && !(cell_box(geom, rows, cols, merges, CellRef::new(end_row + 1, at.col)).is_some()
+            && neighbor_edge(sheet, merges, fx, end_row + 1, at.col, |b| b.top.is_some()))
     {
         commands.push(border_line(clip.x, y2, clip_x2, y2, edge));
     }
     if let Some(edge) = &border.right
         && x2 >= clip.x
         && x2 <= clip_x2
-        && !neighbor_edge(sheet, fx, at.row, end_col + 1, |b| b.left.is_some())
+        && !(cell_box(geom, rows, cols, merges, CellRef::new(at.row, end_col + 1)).is_some()
+            && neighbor_edge(sheet, merges, fx, at.row, end_col + 1, |b| b.left.is_some()))
     {
         commands.push(border_line(x2, clip.y, x2, clip_y2, edge));
     }
@@ -1890,15 +2010,21 @@ fn emit_borders(
 /// true when the cell at `(row, col)` has a border satisfying `pick`.
 fn neighbor_edge(
     sheet: &Sheet,
+    merges: &MergeIndex,
     fx: &mut FrameStyles,
     row: u32,
     col: u32,
     pick: impl Fn(&ResolvedBorder) -> bool,
 ) -> bool {
-    let Some(cell) = sheet.cell(CellRef::new(row, col)) else {
+    if row >= xlsx_model::MAX_ROWS || col >= xlsx_model::MAX_COLS {
         return false;
-    };
-    fx.xf(cell.style).border.as_ref().is_some_and(pick)
+    }
+    let at = CellRef::new(row, col);
+    let at = merges.covering(at).map_or(at, |merge| merge.start);
+    fx.xf(sheet.effective_style(at))
+        .border
+        .as_ref()
+        .is_some_and(pick)
 }
 
 /// one border edge as a `Line`, carrying the resolved width, dash and color.

@@ -214,20 +214,28 @@ fn autofit_rows(
         return fitted;
     }
     let cached_default = sheet.format.default_row_height_pt.is_some();
+    for &row in sheet.row_styles.keys() {
+        if !sheet.row_heights.contains_key(&row)
+            && let Some(style) = missing_row_style(sheet, row)
+            && let Some(height) =
+                autofit_height(styles, Some(style), default_pt, cached_default, normal)
+        {
+            fitted.insert(row, height);
+        }
+    }
     let spanned: HashSet<(RowId, ColId)> = sheet
         .merges
         .iter()
         .filter(|range| range.end.row > range.start.row)
         .map(|range| (range.start.row, range.start.col))
         .collect();
-    for (at, cell) in sheet.iter_cells() {
+    for (at, _) in sheet.iter_cells() {
         #[cfg(feature = "test-counters")]
         AUTOFIT_CELL_VISITS.set(AUTOFIT_CELL_VISITS.get().wrapping_add(1));
         if sheet.row_heights.contains_key(&at.row) || spanned.contains(&(at.row, at.col)) {
             continue;
         }
-        // a cell naming no style still inherits its column's
-        let style = cell.style.or_else(|| sheet.col_style(at.col));
+        let style = sheet.effective_style(at);
         if let Some(height) = autofit_height(styles, style, default_pt, cached_default, normal) {
             let entry = fitted.entry(at.row).or_insert(height);
             if height > *entry {
@@ -236,6 +244,22 @@ fn autofit_rows(
         }
     }
     fitted
+}
+
+fn missing_row_style(sheet: &Sheet, row: RowId) -> Option<u32> {
+    if row >= MAX_ROWS || !sheet.row_styles.contains_key(&row) {
+        return None;
+    }
+    let mut col = 0;
+    for (at, _) in sheet.iter_cells_in_rect(row..row + 1, 0..xlsx_model::MAX_COLS) {
+        if at.col != col {
+            break;
+        }
+        col += 1;
+    }
+    (col < xlsx_model::MAX_COLS)
+        .then(|| sheet.effective_style(CellRef::new(row, col)))
+        .flatten()
 }
 
 /// EMU -> pixels in the renderer's 96dpi coordinate space.
@@ -658,13 +682,22 @@ impl GridGeometry {
         for row in rows {
             let mut fitted: Option<f64> = None;
             if !sheet.format.custom_height && !sheet.row_heights.contains_key(&row) {
-                for (at, cell) in sheet.iter_cells_in_rect(row..row + 1, 0..xlsx_model::MAX_COLS) {
+                fitted = missing_row_style(sheet, row).and_then(|style| {
+                    autofit_height(
+                        styles,
+                        Some(style),
+                        default_pt,
+                        sheet.format.default_row_height_pt.is_some(),
+                        normal,
+                    )
+                });
+                for (at, _) in sheet.iter_cells_in_rect(row..row + 1, 0..xlsx_model::MAX_COLS) {
                     #[cfg(feature = "test-counters")]
                     AUTOFIT_CELL_VISITS.set(AUTOFIT_CELL_VISITS.get().wrapping_add(1));
                     if self.spanned.contains(&(at.row, at.col)) {
                         continue;
                     }
-                    let style = cell.style.or_else(|| sheet.col_style(at.col));
+                    let style = sheet.effective_style(at);
                     if let Some(height) = autofit_height(
                         styles,
                         style,
@@ -768,6 +801,39 @@ mod tests {
 
     fn styles() -> Stylesheet {
         Stylesheet::default()
+    }
+
+    #[test]
+    fn row_default_fonts_fit_without_materializing_cells() {
+        let mut sheet = Sheet::new("Rows");
+        sheet.row_styles.insert(4, 1);
+        let mut styles = Stylesheet::default();
+        styles.fonts = vec![
+            Font::default(),
+            Font {
+                size_pt: Some(32.0),
+                ..Default::default()
+            },
+        ];
+        styles.cell_xfs = vec![
+            Xf::default(),
+            Xf {
+                font: Some(1),
+                ..Default::default()
+            },
+        ];
+        let mut grid = GridGeometry::new(&sheet, &styles);
+        assert!(
+            (grid.row_y(5) - grid.row_y(4) - row_pt_to_px(autofit_row_height_pt(32.0))).abs()
+                < 0.001
+        );
+        assert_eq!(sheet.iter_cells().count(), 0);
+        sheet.row_styles.remove(&4);
+        grid.update_rows(&sheet, &styles, [4]);
+        assert_eq!(grid.row_y(5), GridGeometry::new(&sheet, &styles).row_y(5));
+        sheet.row_styles.insert(4, 1);
+        sheet.format.zero_height = true;
+        assert_eq!(GridGeometry::new(&sheet, &styles).row_y(5), 0.0);
     }
 
     fn sheet_with(cols: &[(ColId, f64)], rows: &[(RowId, f64)]) -> Sheet {

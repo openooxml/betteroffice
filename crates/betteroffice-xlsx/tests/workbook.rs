@@ -43,13 +43,17 @@ fn cascade_source() -> Vec<u8> {
     row.font.italic = true;
     row.number_format = xlsx_model::NumberFormat::Builtin { id: 49 };
     let row_style = model.styles.intern_cell_format(&row).unwrap().unwrap();
-    let col_style = model.styles.intern_cell_format(&CellFormat {
-        fill: Fill::Solid(Color::Rgb("#00ff00".into())),
-        ..Default::default()
-    }).unwrap().unwrap();
+    let col_style = model
+        .styles
+        .intern_cell_format(&CellFormat {
+            fill: Fill::Solid(Color::Rgb("#00ff00".into())),
+            ..Default::default()
+        })
+        .unwrap()
+        .unwrap();
     let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
     set_test_part(&mut parts, "xl/worksheets/sheet1.xml", format!(
-        r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cols><col min="2" max="2" style="{col_style}"/></cols><sheetData><row r="5" s="{row_style}" customFormat="1" outlineLevel="2"><c r="C5" t="inlineStr"><is><t>plain</t></is></c><c r="D5"/></row><row r="6" s="{row_style}" customFormat="0"/></sheetData></worksheet>"#
+        r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cols><col min="2" max="2" style="{col_style}"/></cols><sheetData><row r="3"><c r="B3" t="inlineStr"><is><t>plain column</t></is></c></row><row r="5" s="{row_style}" customFormat="1" outlineLevel="2"><c r="C5" t="inlineStr"><is><t>plain</t></is></c><c r="D5"/></row><row r="6" s="{row_style}" customFormat="0"/></sheetData></worksheet>"#
     ).into_bytes());
     ooxml_opc::rezip_parts(&parts).unwrap()
 }
@@ -59,12 +63,23 @@ fn cascade_fill(workbook: &Workbook, address: &str) -> Option<String> {
     let geometry = GridGeometry::new(&workbook.model().sheets[0], &workbook.model().styles);
     let x = geometry.col_x(at.col) + 2.0;
     let y = geometry.row_y(at.row) + 2.0;
-    workbook.display_list_for(SheetId(0), &chart_viewport()).unwrap().commands.into_iter()
+    workbook
+        .display_list_for(SheetId(0), &chart_viewport())
+        .unwrap()
+        .commands
+        .into_iter()
         .filter_map(|command| match command {
-            DrawCmd::FillRect { x: left, y: top, w, h, color, .. }
-                if x >= left && x < left + w && y >= top && y < top + h => Some(color.to_string()),
+            DrawCmd::FillRect {
+                x: left,
+                y: top,
+                w,
+                h,
+                color,
+                ..
+            } if x >= left && x < left + w && y >= top && y < top + h => Some(color.to_string()),
             _ => None,
-        }).last()
+        })
+        .last()
 }
 
 #[test]
@@ -76,31 +91,87 @@ fn cascade_missing_cells_render_row_fill_and_borders_before_column() {
     for at in ["C5", "D5", "A6"] {
         assert_ne!(cascade_fill(&workbook, at).as_deref(), Some("#ff0000"));
     }
+    assert_ne!(cascade_fill(&workbook, "B3").as_deref(), Some("#00ff00"));
     let geometry = GridGeometry::new(&workbook.model().sheets[0], &workbook.model().styles);
     let x = geometry.col_x(1);
     let y = geometry.row_y(4);
-    let commands = workbook.display_list_for(SheetId(0), &chart_viewport()).unwrap().commands;
-    assert!(commands.iter().any(|c| matches!(c, DrawCmd::Line { x1, y1, x2, y2, color, .. }
-        if *x1 == x && *x2 == x && *y1 == y && *y2 > y && &**color == "#123456")));
-    assert_eq!(commands.iter().filter(|c| matches!(c, DrawCmd::Line { x1, x2, y1, color, .. }
-        if *x1 == x && *x2 == x && *y1 == y && &**color == "#123456")).count(), 1);
-    assert_eq!(workbook.model().sheets[0].iter_cells().count(), 2);
+    let commands = workbook
+        .display_list_for(SheetId(0), &chart_viewport())
+        .unwrap()
+        .commands;
+    assert!(
+        commands
+            .iter()
+            .any(|c| matches!(c, DrawCmd::Line { x1, y1, x2, y2, color, .. }
+        if *x1 == x && *x2 == x && *y1 == y && *y2 > y && &**color == "#123456"))
+    );
+    assert_eq!(
+        commands
+            .iter()
+            .filter(|c| matches!(c, DrawCmd::Line { x1, x2, y1, color, .. }
+        if *x1 == x && *x2 == x && *y1 == y && &**color == "#123456"))
+            .count(),
+        1
+    );
+    assert_eq!(workbook.model().sheets[0].iter_cells().count(), 3);
+    let viewport = Viewport {
+        y: geometry.row_y(5),
+        ..chart_viewport()
+    };
+    assert!(workbook.display_list_for(SheetId(0), &viewport).unwrap().commands.iter().any(|command|
+        matches!(command, DrawCmd::Line { y1, y2, color, .. } if y1.abs() < 0.01 && y2.abs() < 0.01 && &**color == "#123456")));
 }
 
 #[test]
 fn cascade_value_formula_and_clear_keep_inherited_style_after_save() {
     let mut workbook = Workbook::open(&cascade_source()).unwrap();
     let options = CalculationOptions::default();
-    for (at, input) in [("A5", "0012"), ("B5", "=1+2"), ("C5", "") ] {
-        workbook.edit_cells(SheetId(0), &[CellInput { cell: cell(at), input: input.into() }], options).unwrap();
+    for (at, input) in [
+        ("A5", "0012"),
+        ("B5", "row text"),
+        ("B2", "=1+2"),
+        ("C5", ""),
+    ] {
+        workbook
+            .edit_cells(
+                SheetId(0),
+                &[CellInput {
+                    cell: cell(at),
+                    input: input.into(),
+                }],
+                options,
+            )
+            .unwrap();
     }
-    assert!(matches!(&workbook.model().sheets[0].cell(cell("A5")).unwrap().value, CellValue::Text { value } if value == "0012"));
+    assert!(
+        matches!(&workbook.model().sheets[0].cell(cell("A5")).unwrap().value, CellValue::Text { value } if value == "0012")
+    );
+    assert_eq!(
+        workbook.model().sheets[0]
+            .cell(cell("B2"))
+            .unwrap()
+            .formula
+            .as_deref(),
+        Some("1+2")
+    );
+    assert_eq!(cascade_fill(&workbook, "B2").as_deref(), Some("#00ff00"));
+    assert!(workbook.display_list_for(SheetId(0), &chart_viewport()).unwrap().commands.iter().any(|command|
+        matches!(command, DrawCmd::Text { text, italic, .. } if &**text == "0012" && *italic)));
     let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
     for at in ["A5", "B5"] {
         assert_eq!(cascade_fill(&reopened, at).as_deref(), Some("#ff0000"));
     }
     assert_ne!(cascade_fill(&reopened, "C5").as_deref(), Some("#ff0000"));
-    workbook.edit_cells(SheetId(0), &[CellInput { cell: cell("A5"), input: String::new() }], options).unwrap();
+    workbook
+        .edit_cells(
+            SheetId(0),
+            &[CellInput {
+                cell: cell("A5"),
+                input: String::new(),
+            }],
+            options,
+        )
+        .unwrap();
     assert_eq!(cascade_fill(&workbook, "A5").as_deref(), Some("#ff0000"));
     assert!(workbook.model().sheets[0].cell(cell("A5")).is_some());
 }
@@ -108,19 +179,100 @@ fn cascade_value_formula_and_clear_keep_inherited_style_after_save() {
 #[test]
 fn cascade_bold_missing_column_cell_keeps_fill() {
     let mut workbook = Workbook::open(&cascade_source()).unwrap();
-    workbook.patch_range_style(SheetId(0), CellRange::new(cell("B2"), cell("B2")), StylePatch {
-        bold: Some(true), ..Default::default()
-    }, CalculationOptions::default()).unwrap();
+    workbook
+        .patch_range_style(
+            SheetId(0),
+            CellRange::new(cell("B2"), cell("B2")),
+            StylePatch {
+                bold: Some(true),
+                ..Default::default()
+            },
+            CalculationOptions::default(),
+        )
+        .unwrap();
     let style = workbook.model().sheets[0].cell(cell("B2")).unwrap().style;
     assert!(workbook.model().styles.cell_format(style).font.bold);
     assert_eq!(cascade_fill(&workbook, "B2").as_deref(), Some("#00ff00"));
 }
 
 #[test]
+fn cascade_missing_merged_anchor_keeps_its_fill_in_partial_prints() {
+    let source = Workbook::open(&cascade_source()).unwrap();
+    let mut model = source.model().clone();
+    model.sheets[0]
+        .merges
+        .push(CellRange::parse_a1("A5:B6").unwrap());
+    let workbook = Workbook::from_model(model).unwrap();
+    let metrics = betteroffice_xlsx::PrintMetrics {
+        dpi: 72.0,
+        max_digit_width: 6.0,
+        default_row_height_pt: 14.0,
+        default_column_width: None,
+        font_size_pt: 11.0,
+        font_family: "Calibri".into(),
+        font_ascent: 10.0,
+        font_descent: 3.0,
+    };
+    let list = workbook
+        .print_display_list(
+            SheetId(0),
+            CellRange::parse_a1("A6:B6").unwrap(),
+            &metrics,
+            false,
+        )
+        .unwrap();
+    assert!(list.commands.iter().any(
+        |command| matches!(command, DrawCmd::FillRect { color, w, h, .. }
+        if &**color == "#ff0000" && *w > 100.0 && *h > 10.0)
+    ));
+    assert_eq!(workbook.model().sheets[0].iter_cells().count(), 3);
+}
+
+#[test]
+fn cascade_existing_cells_without_s_and_unstyled_missing_cells_use_xf_zero() {
+    let source = Workbook::open(&cascade_source()).unwrap();
+    let mut model = source.model().clone();
+    let font = model.styles.fonts.len() as u32;
+    model.styles.fonts.push(xlsx_model::Font {
+        bold: true,
+        ..Default::default()
+    });
+    model.styles.cell_xfs[0] = model.styles.cell_xfs[2].clone();
+    model.styles.cell_xfs[0].font = Some(font);
+    model.styles.cell_xfs[0].num_fmt_id = Some(49);
+    let mut workbook = Workbook::from_model(model).unwrap();
+    for at in ["C5", "A2"] {
+        assert_eq!(cascade_fill(&workbook, at).as_deref(), Some("#00ff00"));
+    }
+    assert!(workbook.display_list_for(SheetId(0), &chart_viewport()).unwrap().commands.iter().any(|command|
+        matches!(command, DrawCmd::Text { text, bold, .. } if &**text == "plain" && *bold)));
+    workbook
+        .edit_cell(
+            SheetId(0),
+            cell("A2"),
+            "0012",
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert!(
+        matches!(&workbook.model().sheets[0].cell(cell("A2")).unwrap().value, CellValue::Text { value } if value == "0012")
+    );
+}
+
+#[test]
 fn cascade_structural_edits_shift_and_inherit_styles_with_undo() {
     let mut workbook = Workbook::open(&cascade_source()).unwrap();
     let options = CalculationOptions::default();
-    workbook.apply_ops(vec![Op::InsertRows { sheet: SheetId(0), at: 5, count: 2 }], options).unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::InsertRows {
+                sheet: SheetId(0),
+                at: 5,
+                count: 2,
+            }],
+            options,
+        )
+        .unwrap();
     assert_eq!(cascade_fill(&workbook, "A6").as_deref(), Some("#ff0000"));
     assert_eq!(cascade_fill(&workbook, "A7").as_deref(), Some("#ff0000"));
     workbook.undo(options).unwrap();
@@ -128,14 +280,41 @@ fn cascade_structural_edits_shift_and_inherit_styles_with_undo() {
     workbook.redo(options).unwrap();
     assert_eq!(cascade_fill(&workbook, "A7").as_deref(), Some("#ff0000"));
     workbook.undo(options).unwrap();
-    workbook.apply_ops(vec![Op::InsertRows { sheet: SheetId(0), at: 0, count: 2 }], options).unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 2,
+            }],
+            options,
+        )
+        .unwrap();
     assert_eq!(cascade_fill(&workbook, "A7").as_deref(), Some("#ff0000"));
     workbook.undo(options).unwrap();
-    workbook.apply_ops(vec![Op::DeleteRows { sheet: SheetId(0), at: 4, count: 1 }], options).unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 4,
+                count: 1,
+            }],
+            options,
+        )
+        .unwrap();
     assert_ne!(cascade_fill(&workbook, "A5").as_deref(), Some("#ff0000"));
     workbook.undo(options).unwrap();
     assert_eq!(cascade_fill(&workbook, "A5").as_deref(), Some("#ff0000"));
-    workbook.apply_ops(vec![Op::InsertCols { sheet: SheetId(0), at: 2, count: 2 }], options).unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::InsertCols {
+                sheet: SheetId(0),
+                at: 2,
+                count: 2,
+            }],
+            options,
+        )
+        .unwrap();
     assert_eq!(cascade_fill(&workbook, "C2").as_deref(), Some("#00ff00"));
     assert_eq!(cascade_fill(&workbook, "D2").as_deref(), Some("#00ff00"));
     workbook.undo(options).unwrap();
@@ -147,9 +326,21 @@ fn cascade_saves_preserve_row_attributes_and_regenerate_defaults() {
     let source = cascade_source();
     let mut workbook = Workbook::open(&source).unwrap();
     assert_eq!(workbook.save().unwrap(), source);
-    workbook.edit_cells(SheetId(0), &[CellInput { cell: cell("A1"), input: "7".into() }], CalculationOptions::default()).unwrap();
+    workbook
+        .edit_cells(
+            SheetId(0),
+            &[CellInput {
+                cell: cell("A1"),
+                input: "7".into(),
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
     let saved = ooxml_opc::unzip_parts(&workbook.save().unwrap()).unwrap();
-    assert!(test_part_text(&saved, "xl/worksheets/sheet1.xml").contains(r#"s="1" customFormat="1" outlineLevel="2""#));
+    assert!(
+        test_part_text(&saved, "xl/worksheets/sheet1.xml")
+            .contains(r#"s="1" customFormat="1" outlineLevel="2""#)
+    );
     let regenerated = Workbook::from_model(workbook.model().clone()).unwrap();
     let reopened = Workbook::open(&regenerated.save().unwrap()).unwrap();
     assert_eq!(cascade_fill(&reopened, "A5").as_deref(), Some("#ff0000"));
@@ -170,10 +361,62 @@ fn cascade_bounded_snapshot_and_collaborative_replay_keep_defaults() {
     while !builder.advance(budget).unwrap().is_ready() {}
     let (restored, _) = builder.finish().unwrap().into_parts();
     assert_eq!(cascade_fill(&restored, "A5").as_deref(), Some("#ff0000"));
-    let mut peer = Workbook::open(&source).unwrap();
-    workbook.edit_cells(SheetId(0), &[CellInput { cell: cell("A5"), input: "text".into() }], CalculationOptions::default()).unwrap();
-    peer.apply_update_v1(&workbook.encode_state_as_update_v1(), CalculationOptions::default()).unwrap();
+    assert_eq!(
+        restored.model().sheets[0].row_styles,
+        workbook.model().sheets[0].row_styles
+    );
+    let mut peer = Workbook::open_collaborative(&source, 811).unwrap();
+    workbook
+        .edit_cells(
+            SheetId(0),
+            &[CellInput {
+                cell: cell("A5"),
+                input: "text".into(),
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    peer.apply_update_v1(
+        &workbook.encode_state_as_update_v1(),
+        CalculationOptions::default(),
+    )
+    .unwrap();
     assert_eq!(cascade_fill(&peer, "A5").as_deref(), Some("#ff0000"));
+    workbook
+        .apply_ops(
+            vec![
+                Op::InsertRows {
+                    sheet: SheetId(0),
+                    at: 5,
+                    count: 1,
+                },
+                Op::InsertCols {
+                    sheet: SheetId(0),
+                    at: 2,
+                    count: 1,
+                },
+            ],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    peer.apply_update_v1(
+        &workbook.encode_state_as_update_v1(),
+        CalculationOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(cascade_fill(&peer, "A6").as_deref(), Some("#ff0000"));
+    assert_eq!(cascade_fill(&peer, "C2").as_deref(), Some("#00ff00"));
+    let mut encoder = WorkbookSnapshotEncoder::new(&workbook, None, budget).unwrap();
+    let mut builder = WorkbookSnapshotBuilder::new();
+    while let Some(chunk) = encoder.next(&workbook).unwrap() {
+        builder.push(&chunk).unwrap();
+    }
+    while !builder.advance(budget).unwrap().is_ready() {}
+    let (restored, _) = builder.finish().unwrap().into_parts();
+    assert_eq!(
+        restored.model().sheets[0].row_styles,
+        workbook.model().sheets[0].row_styles
+    );
 }
 
 #[test]
