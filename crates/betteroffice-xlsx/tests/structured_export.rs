@@ -490,6 +490,7 @@ fn exports_sparse_cells_with_values_formulas_and_display_text() {
     assert_eq!(missing.formula_result, Some(XlsxFormulaResult::Missing));
     assert_eq!(cell(&content, 0, "C2").display_text, "1.50");
     assert_eq!(cell(&content, 0, "C2").number_format, "0.00");
+    assert_eq!(cell(&content, 0, "F2").display_text, " 1/2");
     assert_eq!(cell(&content, 0, "G2").display_text, "3/15/23");
     assert_eq!(
         cell(&content, 0, "G2").value,
@@ -578,10 +579,10 @@ fn exports_sparse_cells_with_values_formulas_and_display_text() {
         XlsxExportDiagnosticCode::FormulaCacheUnverified,
         XlsxExportDiagnosticCode::FormulaResultMissing,
         XlsxExportDiagnosticCode::RichTextOmitted,
-        XlsxExportDiagnosticCode::FormattingApproximate,
     ] {
         assert!(found.contains(&code), "{code:?} missing from {found:?}");
     }
+    assert!(!found.contains(&XlsxExportDiagnosticCode::FormattingApproximate));
     let diagnostic = |code| {
         content
             .diagnostics

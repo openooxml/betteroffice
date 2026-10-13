@@ -499,6 +499,7 @@ fn unsupported_constructs_degrade() {
 #[test]
 fn approximate_formats_are_the_ones_that_degrade() {
     let n = CellValue::Number { value: 0.5 };
+    assert!(format_is_approximate(&n, "# ?/"));
     assert!(!format_is_approximate(&n, "# ?/?"));
     assert!(!format_is_approximate(&n, "0.00;# ??/??"));
     assert!(!format_is_approximate(
