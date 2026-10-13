@@ -27,6 +27,7 @@ FACETS = {'applyNumberFormat': ('number_format',), 'applyFont': ('bold', 'italic
           'applyFill': ('fill_pattern', 'fill', 'fill_other', 'fill_background', 'fill_rest'),
           'applyBorder': ('border',), 'applyAlignment': ('alignment',), 'applyProtection': ('protection',)}
 XF_FACET_CHILDREN = (f'{{{NS["s"]}}}alignment', f'{{{NS["s"]}}}protection')
+ORDER_FREE_CHILDREN = {f'{{{NS["s"]}}}{name}' for name in ('font', 'rPr')}
 NOTES_TYPE = 'application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml'
 OWNER = '<owning slide>'
 CREATED = 'notes part created for the requested notes'
@@ -88,8 +89,10 @@ def canonical(node):
     if node is None:
         return None
     text = node.text if node.text and node.text.strip() else None
-    return (node.tag, tuple(sorted(node.attrib.items())), text,
-            tuple(canonical(child) for child in node))
+    children = [canonical(child) for child in node]
+    if node.tag in ORDER_FREE_CHILDREN:
+        children.sort(key=lambda child: child[0])
+    return (node.tag, tuple(sorted(node.attrib.items())), text, tuple(children))
 
 
 def relpath(part):
@@ -316,7 +319,9 @@ def styles(archive):
         font = copy.deepcopy(fonts[int(xf.get('fontId', '0'))])
         bold, italic = boolean(font.find('s:b', NS)), boolean(font.find('s:i', NS))
         for tag in ('b', 'i'):
-            for node in font.findall(f's:{tag}', NS):
+            nodes = font.findall(f's:{tag}', NS)
+            require(len(nodes) <= 1, f'duplicate font child {tag}')
+            for node in nodes:
                 font.remove(node)
         fill = copy.deepcopy(fills[int(xf.get('fillId', '0'))])
         pattern = fill.find('s:patternFill', NS)
@@ -396,6 +401,7 @@ def workbook(archive):
             elif kind == 'b':
                 value = value == '1'
             elif kind == 'n' and value is not None:
+                require(value.strip(), f'{entry.attrib["name"]}!{address}: empty cached value')
                 value = Decimal(value)
                 require(value.is_finite(), f'non-finite value in {address}')
             elif kind == 'e':

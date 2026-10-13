@@ -172,7 +172,7 @@ preservation, and targeted variants check tab selection, notes parts, slide
 shape elements, paragraph end properties, fields and empty formatted runs,
 cell, row, column and named style formats, and for DOCX tracked-change markup,
 run splits and formatting, row placement, style resolution, reordered content
-and package parts (59 accepted, 163 rejected).
+and package parts (61 accepted, 173 rejected).
 [`formats/test-runner.py`](formats/test-runner.py) tests the runner itself with
 a stand-in agent.
 

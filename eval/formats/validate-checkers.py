@@ -637,6 +637,58 @@ def named_font(package):
     root.find('s:cellStyleXfs', NS)[1].set('fontId', str(len(fonts) - 1))
 
 
+def reorder_children(part, path):
+    def edit(package):
+        for node in package.xml(part).findall(path, NS):
+            node[:] = reversed(node)
+    return edit
+
+
+def named_font_child(name, edit):
+    def change(package):
+        root = package.xml('xl/styles.xml')
+        xf = root.find('s:cellStyleXfs', NS)[1]
+        font = root.find('s:fonts', NS)[int(xf.get('fontId', '0'))]
+        edit(font, font.find(f's:{name}', NS))
+    return change
+
+
+def empty_cached_value(kind):
+    def edit(package):
+        cell = package.cell('B5')
+        if kind is None:
+            cell.attrib.pop('t', None)
+        else:
+            cell.set('t', kind)
+        cell.find('s:v', NS).text = None
+    return edit
+
+
+def rich_comment(package):
+    part = 'xl/checker-comments.xml'
+    root = ET.Element(tag('s', 'comments'))
+    ET.SubElement(ET.SubElement(root, tag('s', 'authors')), tag('s', 'author')).text = 'Reviewer'
+    comment = ET.SubElement(ET.SubElement(root, tag('s', 'commentList')), tag('s', 'comment'), ref='A1', authorId='0')
+    run = ET.SubElement(ET.SubElement(comment, tag('s', 'text')), tag('s', 'r'))
+    properties = ET.SubElement(run, tag('s', 'rPr'))
+    ET.SubElement(properties, tag('s', 'sz'), val='11')
+    ET.SubElement(properties, tag('s', 'rFont'), val='DejaVu Sans')
+    ET.SubElement(run, tag('s', 't')).text = 'Review note'
+    package.xml_parts[part] = root
+    ET.SubElement(package.xml('[Content_Types].xml'), '{http://schemas.openxmlformats.org/package/2006/content-types}Override',
+                  PartName='/' + part, ContentType='application/vnd.openxmlformats-officedocument.spreadsheetml.comments+xml')
+    path = 'xl/worksheets/_rels/sheet1.xml.rels'
+    links = package.xml(path) if path in package.parts else ET.Element(tag('rel', 'Relationships'))
+    ET.SubElement(links, tag('rel', 'Relationship'), Id='rIdCheckerComment', Type=NS['r'] + '/comments', Target='../checker-comments.xml')
+    package.xml_parts[path] = links
+
+
+def comment_properties(edit):
+    def change(package):
+        edit(package.xml('xl/checker-comments.xml').find('.//s:rPr', NS))
+    return change
+
+
 def cell_style(key, value):
     def edit(package):
         package.xml('xl/styles.xml').find('s:cellStyles', NS)[1].set(key, value)
@@ -1020,6 +1072,39 @@ def validate_models(directory):
     expect('xlsx-04 custom number format renumbered', xlsx04, variant(directory, 'styles-formats', header, renumber_formats), True)
     named_source = variant(directory, 'named-input', checker.fixture(xlsx04), named_heading)
     named = variant(directory, 'named-output', named_source, lambda package: correct_xlsx(package, 4))
+    reordered = variant(directory, 'font-children-reordered', named, reorder_children('xl/styles.xml', 's:fonts/s:font'))
+    expect('xlsx-04 font children reordered', xlsx04, reordered, True, named_source)
+    for name, child, edit in [
+            ('value changed', 'sz', lambda font, node: node.set('val', '14')),
+            ('child added', 'strike', lambda font, node: ET.SubElement(font, tag('s', 'strike'))),
+            ('child removed', 'name', lambda font, node: font.remove(node)),
+            ('child duplicated', 'sz', lambda font, node: font.append(copy.deepcopy(node))),
+            ('bold child duplicated', 'b', lambda font, node: font.append(copy.deepcopy(node)))]:
+        slug = name.replace(' ', '-')
+        expect(f'xlsx-04 font {name}', xlsx04,
+               variant(directory, f'font-{slug}', reordered, named_font_child(child, edit)), False, named_source)
+    expect('xlsx-04 border children reordered', xlsx04,
+           variant(directory, 'border-children-reordered', named, reorder_children('xl/styles.xml', 's:borders/s:border')),
+           False, named_source)
+
+    xlsx01 = task_named('xlsx-01-correct-value')
+    for name, kind in [('implicit numeric', None), ('explicit numeric', 'n')]:
+        expect(f'xlsx-01 empty formula cache ({name})', xlsx01,
+               variant(directory, f'empty-cache-{kind or "implicit"}', output[xlsx01['id']], empty_cached_value(kind)),
+               False, reason='Budget!B5: empty cached value')
+
+    comment_source = variant(directory, 'comment-input', checker.fixture(xlsx03), rich_comment)
+    comment = variant(directory, 'comment-output', comment_source, lambda package: correct_xlsx(package, 3))
+    reordered_comment = variant(directory, 'comment-properties-reordered', comment,
+                                reorder_children('xl/checker-comments.xml', './/s:rPr'))
+    expect('xlsx-03 rich text properties reordered', xlsx03, reordered_comment, True, comment_source)
+    expect('xlsx-03 rich text property changed', xlsx03,
+           variant(directory, 'comment-property-changed', reordered_comment,
+                   comment_properties(lambda props: props.find('s:sz', NS).set('val', '12'))), False, comment_source)
+    expect('xlsx-03 rich text property duplicated', xlsx03,
+           variant(directory, 'comment-property-duplicated', reordered_comment,
+                   comment_properties(lambda props: props.append(copy.deepcopy(props.find('s:sz', NS))))), False, comment_source)
+
     for number, (name, edit, accept) in enumerate([
             ('named styles kept', None, True),
             ('cell style formats reordered', swap_named_formats, True),
