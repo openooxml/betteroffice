@@ -266,8 +266,10 @@ fn substitution_barriers(
                     SubstitutionSubtable::Context(_)
                     | SubstitutionSubtable::ChainContext(_)
                     | SubstitutionSubtable::ReverseChainSingle(_) => {
-                        glyph_ids.fill(0);
-                        return Ok(ligatures);
+                        if context_may_match(subtable, &nominal) {
+                            glyph_ids.fill(0);
+                            return Ok(ligatures);
+                        }
                     }
                     _ => glyph_ids[index] = 0,
                 }
@@ -275,6 +277,45 @@ fn substitution_barriers(
         }
     }
     Ok(ligatures)
+}
+
+fn context_may_match(
+    subtable: rustybuzz::ttf_parser::gsub::SubstitutionSubtable<'_>,
+    nominal: &[Option<u16>],
+) -> bool {
+    use rustybuzz::ttf_parser::{
+        ChainedContextLookup, ContextLookup, Coverage, GlyphId, gsub::SubstitutionSubtable,
+    };
+    let matches = |coverage: Coverage<'_>| {
+        nominal
+            .iter()
+            .any(|id| id.is_some_and(|id| coverage.contains(GlyphId(id))))
+    };
+    match subtable {
+        SubstitutionSubtable::Context(ContextLookup::Format3 {
+            coverage,
+            coverages,
+            ..
+        }) => matches(coverage) && coverages.into_iter().all(matches),
+        SubstitutionSubtable::ChainContext(ChainedContextLookup::Format3 {
+            coverage,
+            backtrack_coverages,
+            input_coverages,
+            lookahead_coverages,
+            ..
+        }) => {
+            matches(coverage)
+                && backtrack_coverages.into_iter().all(matches)
+                && input_coverages.into_iter().all(matches)
+                && lookahead_coverages.into_iter().all(matches)
+        }
+        SubstitutionSubtable::ReverseChainSingle(table) => {
+            matches(table.coverage)
+                && table.backtrack_coverages.into_iter().all(matches)
+                && table.lookahead_coverages.into_iter().all(matches)
+        }
+        _ => true,
+    }
 }
 
 /// A sequence over `count` symbols in which every ordered pair occurs exactly

@@ -347,3 +347,18 @@ test('echo declines fallback letters when a digits-only primary will resolve fut
     expect(projectCommandEchoContext(source)).toBeUndefined();
   } finally { engine.destroy(); }
 }, 20000);
+
+test('echo admits ordinary letters when contextual lookups require combining marks outside the alphabet', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { preloadEditWasm } = await import('./wasm/index');
+  const { createResidentEngineSession } = await import('./residentEngineSession');
+  const { DOCX_ECHO_ALPHABET } = await import('./residentEchoGlyphs');
+  await preloadEditWasm(new Uint8Array(readFileSync('packages/docx/src/wasm/generated/edit/docx_edit_bg.wasm')));
+  const engine = await createResidentEngineSession();
+  try {
+    const font = engine.registerFont(new Uint8Array(readFileSync('packages/fonts/assets/Carlito-Regular.ttf')));
+    const set = JSON.parse(engine.echoGlyphSetJson(font, Math.fround(960 / 72), false, DOCX_ECHO_ALPHABET));
+    expect(set.glyphIds[DOCX_ECHO_ALPHABET.indexOf('i')]).toBeGreaterThan(0);
+    expect(set.glyphIds[DOCX_ECHO_ALPHABET.indexOf('j')]).toBeGreaterThan(0);
+  } finally { engine.destroy(); }
+}, 20000);
