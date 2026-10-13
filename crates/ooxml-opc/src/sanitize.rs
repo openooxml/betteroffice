@@ -3222,7 +3222,10 @@ mod tests {
                 assert!(!has_part(&output, "vbaProject.bin"));
                 let relationships =
                     String::from_utf8_lossy(part_bytes(&output, "xl/_rels/sheet1.xml.rels"));
-                assert!(!relationships.contains("vbaProject"), "{target}: {relationships}");
+                assert!(
+                    !relationships.contains("vbaProject"),
+                    "{target}: {relationships}"
+                );
                 assert_all_parts_declared(&output);
             }
         }
