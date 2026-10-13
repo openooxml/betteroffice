@@ -508,6 +508,10 @@ test('hybrid compatibility opt-in preserves Document callbacks and warns once', 
   expect(warn.mock.calls.filter(([message]) => String(message).includes('legacySyncApi'))).toHaveLength(1);
 });
 
+test('peerless collaboration requires the explicit hybrid opt-in', () => {
+  expect(() => render(<DocxEditor {...peerlessProps} collaboration={{ onReplica() {} }} />)).toThrow('legacySyncApi');
+});
+
 test.each(['Worker', 'OffscreenCanvas'] as const)('peerless mount falls back with the existing warning when %s is missing', (capability) => {
   setMissingWorkerCapabilitiesForTests([capability]);
   const warn = spyOn(console, 'warn').mockImplementation(() => {});
