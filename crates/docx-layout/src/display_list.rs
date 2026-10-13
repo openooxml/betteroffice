@@ -1578,6 +1578,10 @@ enum RunIn {
 #[serde(rename_all = "camelCase")]
 struct RunFormattingIn {
     #[serde(default)]
+    font_slots: Option<crate::types::RunFontSlots>,
+    #[serde(default)]
+    complex_script: Option<bool>,
+    #[serde(default)]
     bold: Option<bool>,
     #[serde(default)]
     italic: Option<bool>,

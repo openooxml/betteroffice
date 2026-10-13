@@ -284,7 +284,9 @@ fn context_may_match(
     nominal: &[Option<u16>],
 ) -> bool {
     use rustybuzz::ttf_parser::{
-        ChainedContextLookup, ContextLookup, Coverage, GlyphId, gsub::SubstitutionSubtable,
+        GlyphId,
+        gsub::SubstitutionSubtable,
+        opentype_layout::{ChainedContextLookup, ContextLookup, Coverage},
     };
     let matches = |coverage: Coverage<'_>| {
         nominal
