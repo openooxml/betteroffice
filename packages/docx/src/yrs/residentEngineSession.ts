@@ -163,6 +163,8 @@ export type ResidentEngineSession = Pick<
   setSectionMargins(section: string, margins: DocxSectionMargins): boolean;
   updateComment(id: string, patch: DocxCommentPatch): void;
   mediaDataUrl(token: string): string | null;
+  /** @internal Typing echo model of one font at one shaping size; see `echo_glyph_set_json`. */
+  echoGlyphSetJson(fontId: number, size: number, kern: boolean, alphabet: string): string;
   /** @internal */
   proposalEngine: DocxProposalSession & Pick<YrsSession, 'validateEdits'>;
   /** @internal */
@@ -885,6 +887,7 @@ export async function createResidentEngineSession(
       return { frame, profile };
     },
     outlineGlyphJson: (fontId, glyphId) => session.outline_glyph_json(fontId, glyphId),
+    echoGlyphSetJson: (fontId, size, kern, alphabet) => session.echo_glyph_set_json(fontId, size, kern, alphabet),
     loadMediaSources: (json) => session.load_media_sources(json),
     loadNoteSeparators: (state) => session.load_note_separators(state),
     loadState: (update) => {

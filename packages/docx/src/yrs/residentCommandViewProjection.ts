@@ -1,19 +1,43 @@
 import type {
   DocxCommandEchoContext,
+  DocxEchoGlyphLine,
+  DocxEchoRect,
   DocxCommandSelection,
   ResidentDocxCommandEngine,
 } from './residentCommandProtocol';
 import type { DocxCommandSelectionLayout } from './residentCommandSelection';
-import type { GlyphRunPrimitive } from '../layout/render/displayList';
+import type { DisplayPrimitive, GlyphRunPrimitive } from '../layout/render/displayList';
+import type { RetainedFrame } from '../layout/render/frameDelta';
+import { displayPrimitiveRect } from '../layout/render/displayListGeometry';
+import { echoRound3, placeEchoGlyphs, type EchoGlyphIndex, type EchoGlyphPlacement } from './residentEchoGlyphs';
 
 /** @internal */
 export const DOCX_ECHO_MAX_CONTEXT_BYTES = 16 * 1024;
+
+/** @internal A glyph set with the ink extent of its glyphs, in font units. */
+export interface EchoGlyphSource {
+  key: string;
+  glyphs: EchoGlyphIndex;
+  ink: { upem: number; xMin: number; yMin: number; yMax: number; overhang: number };
+}
+
+/** @internal The worker's shaping facts for exact echo placement. */
+export interface EchoGlyphProvider {
+  glyphSet(fontId: number, size: number, kern: boolean): EchoGlyphSource | undefined;
+  /** Ink box of one glyph in font units with the font's units per em; null without ink, undefined when unknown. */
+  glyphInk(fontId: number, glyphId: number): { upem: number; xMin: number; xMax: number; yMin: number; yMax: number } | null | undefined;
+  pixelRatio: number;
+  /** Authored properties of the caret paragraph; a right indent narrows lines where the page box cannot tell. */
+  paragraphProperties?: { indentRight?: number };
+}
 
 /** @internal */
 export interface ProjectCommandEchoContextInput {
   engine: ResidentDocxCommandEngine;
   selection: DocxCommandSelection | null;
   layout: DocxCommandSelectionLayout;
+  /** Without it the context carries no exact glyph line. */
+  glyphs?: EchoGlyphProvider;
 }
 
 /** @internal Undefined declines echo, including when the serialized context exceeds the cap. */
@@ -174,15 +198,25 @@ export function projectCommandEchoContext(
     }
     if (!supported || edge < right || edge <= x || height <= 0) continue;
     const page = { pageId: retained.pageId.toString(), pageIndex: retained.pageIndex };
+    let damageRect: DocxEchoRect = { x, y, width: edge - x, height };
+    let glyphLine: DocxEchoGlyphLine | undefined;
+    if (input.glyphs) {
+      const projected = projectGlyphLine({ provider: input.glyphs, retained, runs, omitted, text, baseline, edge,
+        paragraphText: paragraph.text, lineOffset, start, end, paragraphStart, paragraphEnd,
+        kerning: () => lineKerning(engine, selection.focus.paraId, lineOffset, text.length) });
+      if (!projected) return undefined;
+      ({ line: glyphLine, rect: damageRect } = projected);
+    }
     const context: DocxCommandEchoContext = {
       page, frameEpoch: layout.frame.frameEpoch, layoutRevision: layout.layoutRevision, serializedBytes: 0,
       text, styleRuns: mergeStyleRuns(styleRuns), selection: { anchorGrapheme, focusGrapheme },
       boundaries: offsets.map((utf16, grapheme) => ({ utf16, grapheme,
         caret: { x: positions.get(utf16)!, y, width: 1, height } })),
       transform: [1, 0, 0, 1, 0, 0], shaping: 'simple-ltr',
-      damage: [{ page, rect: { x, y, width: edge - x, height },
+      damage: [{ page, rect: damageRect,
         backgroundId: `${layout.frame.frameEpoch}:${page.pageId}:echo`,
         omittedPrimitiveIds: [...omitted].sort((a, b) => a - b).map((index) => retained.primitiveIds[index]!.toString()) }],
+      ...(glyphLine ? { glyphs: glyphLine } : {}),
     };
     let bytes = new TextEncoder().encode(JSON.stringify(context)).byteLength;
     while (bytes !== context.serializedBytes) {
@@ -209,4 +243,193 @@ function mergeStyleRuns(runs: readonly EchoStyleRun[]): EchoStyleRun[] {
     } else merged.push({ ...run });
   }
   return merged;
+}
+
+interface GlyphLineInput {
+  provider: EchoGlyphProvider;
+  retained: RetainedFrame['pages'][number];
+  runs: readonly GlyphRunPrimitive[];
+  omitted: ReadonlySet<number>;
+  text: string;
+  baseline: number;
+  edge: number;
+  paragraphText: string;
+  lineOffset: number;
+  start: number;
+  end: number;
+  paragraphStart: number;
+  paragraphEnd: number;
+  /** The line's `w:kern` threshold in half points (0 when off), or undefined when its runs differ. */
+  kerning(): number | undefined;
+}
+
+const CSS_FONT = /^(italic )?(400|700) (\d+(?:\.\d+)?)px (.+), sans-serif$/;
+
+/**
+ * The echoed line in the engine's own placement: verifies that one glyph set reproduces every glyph
+ * and pen position of the line, then bounds the ink a single-character edit can paint. Undefined
+ * when the line, its neighbours or later paint fall outside what the echo can reproduce exactly.
+ */
+function projectGlyphLine(input: GlyphLineInput): { line: DocxEchoGlyphLine; rect: DocxEchoRect } | undefined {
+  const { provider, retained, runs, text, baseline } = input;
+  const first = runs[0]!;
+  if (runs.some((run) => run.fontId !== first.fontId || run.size !== first.size || run.color !== first.color ||
+    run.fallbackFont !== first.fallbackFont) ||
+    [...input.omitted].some((index) => retained.page.primitives[index]!.kind !== 'glyphRun')) return undefined;
+  const font = CSS_FONT.exec(first.fallbackFont ?? '');
+  const halfPoints = Math.round(first.size * 1.5);
+  if (!font || echoRound3(halfPoints / 2 * 96 / 72) !== first.size) return undefined;
+  const shapingSize = Math.fround(Math.fround(halfPoints / 2 * 96) / 72);
+  const threshold = input.kerning();
+  if (threshold === undefined) return undefined;
+  const kern = threshold > 0 && halfPoints >= threshold;
+  const glyphIds: number[] = [];
+  const xs: number[] = [];
+  for (const run of runs) {
+    let byte = 0;
+    let glyph = 0;
+    for (const char of run.text) {
+      const placed = run.glyphs[glyph];
+      if (!placed || placed.cluster !== byte || run.glyphs[glyph + 1]?.cluster === byte) return undefined;
+      glyphIds.push(placed.id);
+      xs.push(placed.x);
+      byte += new TextEncoder().encode(char).byteLength;
+      glyph += 1;
+    }
+    if (glyph !== run.glyphs.length) return undefined;
+  }
+  const after = input.paragraphText.codePointAt(input.lineOffset + text.length);
+  const next = after === undefined ? '' : String.fromCodePoint(after);
+  const source = provider.glyphSet(first.fontId, shapingSize, kern);
+  if (!source) return undefined;
+  const page = retained.page;
+  const boxes = [page.contentBounds, ...(page.columnBounds ?? [])].filter((box) => box !== undefined);
+  // boxes carry rounded pixels; a margin of whole twips recovers the exact pen origin
+  const origins = boxes.flatMap((box) => [box.x, Math.round(box.x * 15) / 15, Math.round(box.x * 15) * 96 / 1440]
+    .filter((x, index, all) => all.indexOf(x) === index && echoRound3(x) === xs[0]).map((x) => ({ box, x })));
+  let chosen: { box: { x: number; width: number }; x: number; placement: EchoGlyphPlacement } | undefined;
+  for (const { box, x } of origins) {
+    const placement = placeEchoGlyphs(source.glyphs, text, next, x);
+    if (placement && placement.glyphIds.every((id, index) => id === glyphIds[index]) &&
+      placement.xs.every((value, index) => value === xs[index])) {
+      chosen = { box, x, placement };
+      break;
+    }
+  }
+  if (!chosen || input.edge < chosen.box.x + chosen.box.width || provider.paragraphProperties?.indentRight) return undefined;
+  const right = chosen.box.x + chosen.box.width;
+  const { placement } = chosen;
+  let inkEnd = chosen.x;
+  [...text].forEach((char, index) => {
+    if (char !== ' ') inkEnd = placement.xs[index]! + placement.advances[index]!;
+  });
+  // a filled line may be justified, which a shorter line would stretch
+  if (inkEnd >= right - 0.5) return undefined;
+  if (page.primitives.some((primitive, index) => !input.omitted.has(index) && primitive.docStart !== undefined &&
+    primitive.docEnd !== undefined && primitive.docStart < input.end && primitive.docEnd > input.start)) return undefined;
+  const lineRuns = (from: number, to: number, above: boolean) => page.primitives.filter((primitive): primitive is GlyphRunPrimitive =>
+    primitive.kind === 'glyphRun' && !primitive.listMarker && primitive.docStart !== undefined && primitive.docEnd !== undefined &&
+    primitive.docStart >= from && primitive.docEnd <= to && primitive.glyphs.length > 0 &&
+    (above ? primitive.glyphs[0]!.y < baseline : primitive.glyphs[0]!.y > baseline))
+    .sort((a, b) => a.docStart! - b.docStart!);
+  let previousSlack: number | undefined;
+  if (input.lineOffset > 0) {
+    const previous = lineRuns(input.paragraphStart, input.start, true);
+    if (!previous.length) return undefined;
+    const last = previous.at(-1)!;
+    const glyph = last.glyphs.at(-1)!;
+    previousSlack = right - (glyph.x + (glyph.advance ?? 0));
+  }
+  let nextWord: number | undefined;
+  if (input.lineOffset + text.length < input.paragraphText.length) {
+    const following = lineRuns(input.end, input.paragraphEnd, false);
+    nextWord = 0;
+    for (const run of following) {
+      if (run.glyphs[0]!.y !== following[0]!.glyphs[0]!.y || !/^[A-Za-z0-9]+$/.test(run.text)) break;
+      nextWord += run.glyphs.reduce((width, glyph) => width + (glyph.advance ?? 0), 0);
+    }
+  }
+  const ink = { xMin: Math.min(0, source.ink.xMin / source.ink.upem), yMin: Math.min(0, source.ink.yMin / source.ink.upem),
+    yMax: Math.max(0, source.ink.yMax / source.ink.upem), overhang: Math.max(0, source.ink.overhang / source.ink.upem) };
+  const ratio = provider.pixelRatio;
+  const left = Math.floor((xs[0]! + ink.xMin * first.size) * ratio) - 1;
+  const top = Math.floor((baseline - ink.yMax * first.size) * ratio) - 1;
+  const inkRight = Math.ceil((Math.max(right, placement.end) + ink.overhang * first.size) * ratio) + 1;
+  const bottom = Math.ceil((baseline - ink.yMin * first.size) * ratio) + 1;
+  const device = {
+    x: Math.max(0, left), y: Math.max(0, top),
+    width: Math.min(Math.ceil(page.width * ratio), inkRight) - Math.max(0, left),
+    height: Math.min(Math.ceil(page.height * ratio), bottom) - Math.max(0, top),
+  };
+  if (device.width <= 0 || device.height <= 0) return undefined;
+  const band = { x: device.x / ratio, y: device.y / ratio, w: device.width / ratio, h: device.height / ratio };
+  if (paintedOver(provider, page, input.omitted, band)) return undefined;
+  return {
+    line: { glyphSet: source.key, fontId: first.fontId, size: first.size,
+      color: first.color, x: chosen.x, y: baseline, next, right,
+      ...(previousSlack === undefined ? {} : { previousSlack }), ...(nextWord === undefined ? {} : { nextWord }),
+      device, pixelRatio: ratio },
+    rect: { x: band.x, y: band.y, width: band.w, height: band.h },
+  };
+}
+
+/** Whether anything painted after the echoed line reaches into its repaint band. */
+function paintedOver(
+  provider: EchoGlyphProvider,
+  page: RetainedFrame['pages'][number]['page'],
+  omitted: ReadonlySet<number>,
+  band: { x: number; y: number; w: number; h: number },
+): boolean {
+  const margin = 1 / provider.pixelRatio;
+  const meets = (rect: { x: number; y: number; w: number; h: number }) =>
+    rect.x - margin < band.x + band.w && rect.x + rect.w + margin > band.x &&
+    rect.y - margin < band.y + band.h && rect.y + rect.h + margin > band.y;
+  const reaches = (primitive: DisplayPrimitive): boolean => {
+    if (primitive.kind !== 'glyphRun') {
+      const rect = displayPrimitiveRect(primitive);
+      const slack = primitive.kind === 'shape' || primitive.kind === 'image' || primitive.kind === 'text'
+        ? Math.max(rect.h, 16) : 0;
+      return meets({ x: rect.x - slack, y: rect.y - slack, w: rect.w + 2 * slack, h: rect.h + 2 * slack });
+    }
+    const coarse = displayPrimitiveRect(primitive);
+    if (!meets({ x: coarse.x - primitive.size, y: coarse.y - primitive.size,
+      w: coarse.w + 2 * primitive.size, h: coarse.h + 2 * primitive.size })) return false;
+    return primitive.glyphs.some((glyph) => {
+      const ink = provider.glyphInk(primitive.fontId, glyph.id);
+      if (ink === null) return false;
+      if (!ink) return true;
+      const scale = primitive.size / ink.upem;
+      return meets({ x: glyph.x + ink.xMin * scale, y: glyph.y - ink.yMax * scale,
+        w: (ink.xMax - ink.xMin) * scale, h: (ink.yMax - ink.yMin) * scale });
+    });
+  };
+  const firstOmitted = Math.min(...omitted);
+  for (let index = firstOmitted + 1; index < page.primitives.length; index += 1) {
+    if (!omitted.has(index) && reaches(page.primitives[index]!)) return true;
+  }
+  for (const area of page.noteAreas ?? []) {
+    for (const primitive of [...(area.separatorPrimitives ?? []), ...(area.primitives ?? [])]) {
+      if (reaches(primitive)) return true;
+    }
+  }
+  return (page.pageBorders ?? []).some((border) => border.zOrder !== 'back' &&
+    meets({ x: border.x, y: border.y, w: border.w, h: border.h }));
+}
+
+/** The `w:kern` threshold layout shapes the line's runs with, read from their marks as lowering does. */
+function lineKerning(engine: ResidentDocxCommandEngine, paraId: string, offset: number, length: number): number | undefined {
+  const index = engine.geometryReader.paragraphSpans('body').findIndex((span) => span.paraId === paraId);
+  if (index < 0) return undefined;
+  const values = new Set<number>();
+  let start = 0;
+  for (const segment of engine.paragraphSegments('body', [index])[0] ?? []) {
+    const end = start + (segment.kind === 'text' ? segment.text.length : 1);
+    if (segment.kind === 'text' && start <= offset + length && end >= offset) {
+      const spacing = segment.attributes.characterSpacing as { kerning?: unknown } | undefined;
+      const kerning = typeof spacing?.kerning === 'number' && spacing.kerning > 0 ? spacing.kerning : 0;
+      values.add(kerning);
+    }
+    start = end;
+  }
+  return values.size === 1 ? [...values][0] : undefined;
 }

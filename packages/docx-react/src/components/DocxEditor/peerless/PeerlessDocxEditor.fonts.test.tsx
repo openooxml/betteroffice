@@ -10,6 +10,8 @@ import { registerCommandFonts } from '../../../../../docx/src/yrs/residentComman
 import { stageCommandPresentation } from '../../../../../docx/src/yrs/residentCommandPresentation';
 import { openCommandEngine, closeCommandEngines } from '../../../../../docx/src/yrs/residentCommandTestSupport';
 import { projectCommandEchoContext } from '../../../../../docx/src/yrs/residentCommandViewProjection';
+import { EchoGlyphSources } from '../../../../../docx/src/yrs/residentEchoGlyphSource';
+import { buildGlyphPath, parseOutlineJson } from '../../../../../docx/src/layout/render/glyphCache';
 import { fontEnvironmentForRegistrations } from './workerFonts';
 import { createEchoPainter, type PeerlessEchoIntent } from './echoPainter';
 import { createFramePresentation } from './framePresentation';
@@ -157,7 +159,32 @@ test('typed_input_draws_on_page_canvas_with_authoritative_frame_held', async () 
     const delta = decodeFrameDelta(bytes);
     const retained = applyFrameDelta(null, delta);
     const layout = { frame: retained, layoutRevision: init.layoutRevision };
-    const echoContext = projectCommandEchoContext({ engine: arm.engine, selection: arm.state.selection, layout });
+    const sources = new EchoGlyphSources(arm.engine, 1);
+    const echoContext = projectCommandEchoContext({ engine: arm.engine, selection: arm.state.selection, layout,
+      glyphs: sources.provider(1) });
+    expect(echoContext?.glyphs).toBeDefined();
+    const echoGlyphSets = sources.unsent(echoContext);
+    class RecordingPath {
+      commands: string[] = [];
+      moveTo(...values: number[]) { this.commands.push(`M${values}`); }
+      lineTo(...values: number[]) { this.commands.push(`L${values}`); }
+      quadraticCurveTo(...values: number[]) { this.commands.push(`Q${values}`); }
+      bezierCurveTo(...values: number[]) { this.commands.push(`C${values}`); }
+      closePath() { this.commands.push('Z'); }
+    }
+    const scope = globalThis as { Path2D?: unknown };
+    const previousPath = scope.Path2D;
+    scope.Path2D = RecordingPath;
+    cleanups.push(() => { scope.Path2D = previousPath; });
+    const glyphChars = new Map<string, string>();
+    for (const set of echoGlyphSets) {
+      [...set.alphabet].forEach((char, index) => {
+        const outline = set.outlines[set.glyphIds[index]!];
+        if (!outline) return;
+        const path = buildGlyphPath(parseOutlineJson(outline).cmds, () => new RecordingPath() as unknown as Path2D);
+        glyphChars.set((path as unknown as RecordingPath).commands.join(' '), char);
+      });
+    }
     const bitmap = (width: number, height: number, text: string) => ({ width, height, text, close() {} }) as unknown as ImageBitmap;
     const staged = await stageCommandPresentation({ layout, pixelRatio: 1, echoContext,
       pages: retained.pages.map(({ pageId, pageIndex }) => ({ pageId: pageId.toString(), pageIndex })),
@@ -166,7 +193,7 @@ test('typed_input_draws_on_page_canvas_with_authoritative_frame_held', async () 
     });
     const candidate = buildCommandFrame({ frame: bytes, metadata: delta, coversThroughSeq: 0,
       caret: arm.engine.residentCaretSnapshot(), layoutRevision: init.layoutRevision,
-      echoContext, stagedPresentation: staged.value,
+      echoContext, echoGlyphSets, stagedPresentation: staged.value,
     }).value;
     const identity = { session: init.session, incarnation: init.incarnation, epoch: init.epoch };
     const initial: ResidentCommandConnection['initial'] = { ...identity, version: 0, throughSeq: 0, outcomes: [],
@@ -179,8 +206,13 @@ test('typed_input_draws_on_page_canvas_with_authoritative_frame_held', async () 
     const texts: string[] = [];
     const canvas = { width: retained.pages[0]!.page.width, height: retained.pages[0]!.page.height,
       getContext: () => ({ save() {}, restore() {}, setTransform() {}, transform() {}, beginPath() {}, rect() {}, clip() {}, fillRect() {},
-        clearRect() { pixels = ''; }, drawImage(image: ImageBitmap & { text: string }) { pixels = image.text; },
-        fillText(text: string) { texts.push(text); pixels = text; }, measureText: (text: string) => ({ width: text.length * 10 }),
+        translate() {}, scale() {}, clearRect() { pixels = ''; },
+        drawImage(image: ImageBitmap & { text: string }) { pixels = image.text; if (!image.text) texts.push(''); },
+        fill(path: RecordingPath) {
+          pixels += glyphChars.get(path.commands.join(' ')) ?? '?';
+          texts.push(texts.pop()! + (glyphChars.get(path.commands.join(' ')) ?? '?'));
+        },
+        fillText() { throw new Error('the echo paints glyph outlines only'); },
         getImageData: () => ({ width: canvas.width, height: canvas.height }) as ImageData, putImageData() {},
       }),
     } as unknown as HTMLCanvasElement;

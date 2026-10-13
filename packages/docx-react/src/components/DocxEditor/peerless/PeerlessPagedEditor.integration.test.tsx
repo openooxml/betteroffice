@@ -11,6 +11,7 @@ import type { PeerlessEditSessionBinding, UsePeerlessEditSessionOptions } from '
 import * as composition from './composition';
 import { installCompositionEventPolyfill } from './compositionEventPolyfill.testing';
 import { PeerlessPagedEditor } from './PeerlessPagedEditor';
+import { glyphChar, installGlyphPaths, testEchoGlyphLine, testEchoGlyphSet } from './echoGlyphs.testing';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -61,20 +62,22 @@ function frame(revision: number, coverage: number, text = ''): DocxCommandFrame 
         caret: { x: utf16 * 10, y: 0, width: 1, height: 40 } })),
       selection: { anchorGrapheme: text.length, focusGrapheme: text.length },
       damage: [{ page, rect, backgroundId: 'background', omittedPrimitiveIds: [] }],
+      glyphs: testEchoGlyphLine({ device: { x: 0, y: 0, width: 200, height: 40 } }),
     },
+    echoGlyphSets: [testEchoGlyphSet],
   } };
 }
 
 async function mount(selection = false, accessible = false, table = false,
   prepare?: UsePeerlessEditSessionOptions['prepareGeometry']) {
   const events: string[] = [];
+  restorers.push(installGlyphPaths());
   const canvas = document.createElement('canvas');
   const ctx = {
     save() {}, restore() {}, setTransform() {}, clearRect() {}, putImageData() {},
     getImageData: () => ({ width: canvas.width, height: canvas.height }) as ImageData,
     transform() {}, beginPath() {}, rect() {}, clip() {}, fillRect() {},
-    measureText: (text: string) => ({ width: text.length * 10 }),
-    fillText: (text: string) => { events.push(`echo:${text}`); },
+    translate() {}, scale() {}, fill: (path: unknown) => { events.push(`echo:${glyphChar(path)}`); },
     drawImage: () => { events.push('pixels'); },
   };
   Object.defineProperty(canvas, 'getContext', { value: () => ctx });

@@ -48,7 +48,6 @@ import { WorkerDocumentPreview, type WorkerPreviewJob } from './WorkerDocumentPr
 import { fontEnvironmentForRegistrations, prepareWorkerFontEnvironment } from './workerFonts';
 import type { Document } from '@betteroffice/docx/types/document';
 import type { ResidentFontEnvironment } from '@betteroffice/docx/yrs';
-import { getPrimaryFontFamily } from '../../ui/fontPickerValue';
 import { PeerlessPagedEditor } from './PeerlessPagedEditor';
 import type { PeerlessFrameGeometry, PeerlessViewIdentity } from './viewStore';
 
@@ -202,7 +201,6 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     signature: string | null; provider: DocxEditorProps['measurementFontProvider'] } | null>(null);
   const fontAbort = useRef<AbortController | null>(null);
   const fontJob = useRef<{ signature: string; provider: DocxEditorProps['measurementFontProvider'] } | null>(null);
-  const workerOnlyFonts = useRef(new Set<string>());
   const settings = useRef({ readOnly: effectiveReadOnly, workerLimitBytes: memoryBudget?.workerLimitBytes, measurementFontProvider,
     theme: props.theme, showHiddenText: props.showHiddenText ?? false, previewFirstPage: props.previewFirstPage, mediaTokens: props.mediaTokens, fonts: props.fonts, reportFonts: !!props.onFontsLoaded });
   useLayoutEffect(() => {
@@ -435,7 +433,6 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       await current.binding.admission.whenCompositionSettled?.();
       await current.binding.session.flush();
       if (!isCurrent()) return;
-      for (const font of fonts ?? []) workerOnlyFonts.current.add(font.family.toLowerCase());
       let payload: ResidentFontEnvironment;
       if (opened.signature === null && !fonts?.length && provider === opened.provider) payload = structuredClone(opened.initial);
       else {
@@ -567,7 +564,6 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
 
   const sessionOptions = useMemo<UsePeerlessEditSessionOptions | null>(() => source ? {
     source, openConnection, canvasForPage, prepareGeometry, onError: reportError,
-    canEchoFont: family => !workerOnlyFonts.current.has(getPrimaryFontFamily(family).toLowerCase()),
   } : null, [source, openConnection, canvasForPage, prepareGeometry, reportError]);
   const onClipboard = useCallback(async (cut: boolean) => {
     const current = active.current;

@@ -25,7 +25,6 @@ export interface UsePeerlessEditSessionOptions {
   recovery?: DocxWorkerEditSessionOptions<PeerlessDocumentSource, PeerlessEchoIntent>['recovery'];
   canvasForPage(page: DocxCommandPageIdentity): HTMLCanvasElement | null;
   prepareGeometry(frame: DocxCommandFrame): PeerlessFrameGeometry | undefined;
-  canEchoFont?(family: string): boolean;
   onError?(error: Error): void;
 }
 
@@ -111,21 +110,22 @@ export function usePeerlessEditSession(
         });
         cleanups.push(() => viewStore.dispose());
         const canvasForPage = (page: DocxCommandPageIdentity) => callbacks.current.canvasForPage(page);
-        const echoPainter = createEchoPainter({ canvasForPage, canEchoFont: family => callbacks.current.canEchoFont?.(family) ?? true });
+        const requestFullFrame = () => {
+          if (!connection || controller.signal.aborted) return;
+          const resident = connection;
+          void resident.requestFullFrame().then((ack) => {
+            if (!ack.frame) return;
+            if (!controller.signal.aborted && resident === connection && receiveRequestedFrame) receiveRequestedFrame(ack.frame);
+            else discardCommandPresentation(ack.frame);
+          }).catch((error: unknown) => {
+            if (!controller.signal.aborted) callbacks.current.onError?.(error instanceof Error ? error : new Error(String(error)));
+          });
+        };
+        const echoPainter = createEchoPainter({ canvasForPage, requestFullFrame });
         cleanups.push(() => echoPainter.dispose());
         const presentation = createFramePresentation({
           viewStore, echoPainter, canvasForPage, prepareGeometry: (frame) => callbacks.current.prepareGeometry(frame),
-          requestFullFrame: () => {
-            if (!connection || controller.signal.aborted) return;
-            const resident = connection;
-            void resident.requestFullFrame().then((ack) => {
-              if (!ack.frame) return;
-              if (!controller.signal.aborted && resident === connection && receiveRequestedFrame) receiveRequestedFrame(ack.frame);
-              else discardCommandPresentation(ack.frame);
-            }).catch((error: unknown) => {
-              if (!controller.signal.aborted) callbacks.current.onError?.(error instanceof Error ? error : new Error(String(error)));
-            });
-          },
+          requestFullFrame,
         });
         cleanups.push(() => presentation.dispose());
         const session = createDocxWorkerEditSession<PeerlessDocumentSource, PeerlessEchoIntent>({

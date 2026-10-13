@@ -12,6 +12,7 @@ import { createResidentCommandHost } from './residentCommandHost';
 import { createResidentDocxCommandHooks } from './residentCommandActions';
 import { readCommandStickyPosition } from './residentCommandAnchors';
 import { projectCommandEchoContext } from './residentCommandViewProjection';
+import { EchoGlyphSources, type EchoGlyphEngine } from './residentEchoGlyphSource';
 import { stageCommandPresentation } from './residentCommandPresentation';
 import { registerCommandFonts } from './residentCommandFonts';
 import { residentSourceMetadata, validateResidentSource } from './residentSource';
@@ -596,13 +597,17 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
           for (let index = viewport.start; index < Math.min(viewport.end, layout.frame.pages.length); index += 1) requestedPages.add(index);
         }
         if (changes.window && caretPage !== undefined) requestedPages.add(caretPage);
+        if (!glyphCache) glyphCache = new GlyphCache({ provider: (fontId, glyphId) => engine.outlineGlyphJson(fontId, glyphId) });
+        const pixelRatio = offscreenDpr * offscreenZoom;
+        const echoGlyphs = commandEchoGlyphs(glyphCache, engine, full);
         const projectedEcho = hooks.editState().storedMarks ? undefined : projectCommandEchoContext({
           engine: engine as ResidentDocxCommandEngine, selection: hooks.selection(), layout,
+          glyphs: echoGlyphs.provider(pixelRatio, hooks.editState().toolbar?.paragraphProperties),
         });
-        const echoContext = projectedEcho && (full || requestedPages.has(projectedEcho.page.pageIndex) ||
+        const echoContext = projectedEcho?.glyphs && (full || requestedPages.has(projectedEcho.page.pageIndex) ||
           pendingOffscreenPageIds.has(projectedEcho.page.pageId))
           ? projectedEcho : undefined;
-        if (!glyphCache) glyphCache = new GlyphCache({ provider: (fontId, glyphId) => engine.outlineGlyphJson(fontId, glyphId) });
+        const echoGlyphSets = echoGlyphs.unsent(echoContext);
         const images = new Map<string, ImageBitmap>();
         const failedImages = new Set<string>();
         const rasterOptions = {
@@ -624,7 +629,6 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
             return image;
           },
         };
-        const pixelRatio = offscreenDpr * offscreenZoom;
         const visiblePages = new Set<number>();
         const center = caretPage ?? 0;
         if (caretPage !== undefined) visiblePages.add(center);
@@ -671,11 +675,12 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
               primitives: retained.page.primitives.filter(kept),
             }, rasterOptions, pixelRatio);
             const { rect } = dependency;
-            const crop = new OffscreenCanvas(Math.ceil(rect.width * pixelRatio), Math.ceil(rect.height * pixelRatio));
+            const device = [rect.x, rect.y, rect.width, rect.height].map((value) => Math.round(value * pixelRatio)) as
+              [number, number, number, number];
+            const crop = new OffscreenCanvas(device[2], device[3]);
             const ctx = crop.getContext('2d');
             if (!ctx) throw new Error('Command background canvas is unavailable');
-            ctx.drawImage(buffer, rect.x * pixelRatio, rect.y * pixelRatio,
-              rect.width * pixelRatio, rect.height * pixelRatio, 0, 0, crop.width, crop.height);
+            ctx.drawImage(buffer, ...device, 0, 0, device[2], device[3]);
             return crop.transferToImageBitmap();
           },
         }).finally(() => { for (const image of images.values()) image.close(); });
@@ -698,8 +703,9 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
           parts: engine.partGeometry(retainedFrame!),
           geometry: hooks.editState().readOnly ? undefined
             : await readResidentFrameGeometry(engine, retainedFrame!, hooks.selection(), layoutRevision),
-          echoContext, stagedPresentation: presentation.value,
+          echoContext, ...(echoGlyphSets.length ? { echoGlyphSets } : {}), stagedPresentation: presentation.value,
         });
+        echoGlyphs.sent(echoGlyphSets);
         revision = built.value.revision;
         changes.reviewFrame = { frameEpoch: retainedFrame!.frameEpoch, previewVersion: framePreviewVersion };
         pendingUpdates = [];
@@ -711,6 +717,19 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
   commandInit = init;
   commandHost = host;
   return host;
+}
+
+type EchoGlyphState = { cache: GlyphCache; engine: EchoGlyphEngine; sources: EchoGlyphSources };
+
+/** Echo glyph sets live as long as the glyph cache of the font store they were shaped from. */
+function commandEchoGlyphs(cache: GlyphCache, engine: EchoGlyphEngine, full: boolean): EchoGlyphSources {
+  let state = echoGlyphState;
+  if (!state || state.cache !== cache || state.engine !== engine) {
+    state = { cache, engine, sources: new EchoGlyphSources(engine, ++echoGlyphGeneration) };
+    echoGlyphState = state;
+  }
+  if (full) state.sources.resend();
+  return state.sources;
 }
 
 function replacementCommandInit(): ResidentCommandInitRequest | null {
@@ -826,6 +845,8 @@ let sentHeadersFootersEpoch = 0;
 let fontsRevision = -1;
 let retainedFrame: RetainedFrame | null = null;
 let glyphCache: GlyphCache | null = null;
+let echoGlyphState: EchoGlyphState | null = null;
+let echoGlyphGeneration = 0;
 const offscreenCanvases = new Map<string, OffscreenCanvas>();
 const offscreenBackBuffers = new Map<string, OffscreenCanvas>();
 const pendingOffscreenPageIds = new Set<string>();

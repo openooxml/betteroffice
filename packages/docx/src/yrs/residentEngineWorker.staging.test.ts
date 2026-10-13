@@ -4,7 +4,16 @@ import { inflateSync } from 'node:zlib';
 import { decodeFrameDelta, FRAME_DELTA_VERSION, retainedFramePageById, type DecodedFrameDelta, type RetainedFrame } from '../layout/render/frameDelta';
 import { buildCommandFrame } from './residentCommandFrame';
 import { closeCommandBitmap, stageCommandPresentation } from './residentCommandPresentation';
-import type { DocxCommandEchoContext, DocxCommandFrame } from './residentCommandProtocol';
+import type { DocxCommandEchoContext, DocxCommandFrame, DocxEchoGlyphSet } from './residentCommandProtocol';
+import { drawGlyphRunPrimitive } from '../layout/render/canvasBackend';
+import { GlyphCache } from '../layout/render/glyphCache';
+import { indexEchoGlyphSet, leadingWordWidth, placeEchoGlyphs } from './residentEchoGlyphs';
+
+const echoAlphabet = 'abxy';
+const echoGlyphSet: DocxEchoGlyphSet = { key: 'set', fontId: 1, alphabet: echoAlphabet, horizontal: 0.01,
+  glyphIds: [...echoAlphabet].map((char) => char.charCodeAt(0)), advances: [1000, 1000, 1000, 1000],
+  kerning: [], unsafePairs: [], outlines: Object.fromEntries([...echoAlphabet].map((char) => [char.charCodeAt(0),
+    JSON.stringify({ upem: 1000, cmds: [{ t: 'M', x: char.charCodeAt(0), y: 0 }, { t: 'L', x: 0, y: 700 }, { t: 'Z' }] })])) };
 
 test('package_image_fixture_has_complete_colored_scanlines', () => {
   const png = Buffer.from(readFileSync(new URL('./__fixtures__/seed-parity/images/word/media/image1.png.base64', import.meta.url), 'utf8'), 'base64');
@@ -72,6 +81,8 @@ async function stageRequestedPages(requested: number[], damaged: number[] = [], 
     finalizeResidentFrame: async () => ({ bytes, delta, caret: { frameEpoch: 7, caretRect: null } }),
     hooks: { editState: () => ({ storedMarks: null }), selection: () => null },
     projectCommandEchoContext: () => echoContext,
+    commandEchoGlyphs: () => ({ provider: () => undefined,
+      unsent: (context?: DocxCommandEchoContext) => context?.glyphs ? [echoGlyphSet] : [], sent() {} }),
     pendingOffscreenPageIds: pending, activeOffscreenPageIds: new Set(['1', '2', '3', '4']),
     glyphCache: {}, offscreenDpr: 1, offscreenZoom: 1,
     retainedPageByKey: (frame: RetainedFrame, pageId: string) => retainedFramePageById(frame, BigInt(pageId)),
@@ -130,29 +141,37 @@ test('remount_request_with_pending_echo_restages_context_and_background', async 
       caret: { x: utf16 * 10, y: 0, width: 1, height: 20 } })),
     selection: { anchorGrapheme: 2, focusGrapheme: 2 }, transform: [1, 0, 0, 1, 0, 0],
     damage: [{ page, rect, backgroundId: 'background', omittedPrimitiveIds: [] }], shaping: 'simple-ltr',
+    glyphs: { glyphSet: 'set', fontId: 1, size: 12, color: '#000', x: 0, y: 14, next: '', right: 100,
+      device: { x: 0, y: 0, width: 100, height: 20 }, pixelRatio: 1 },
   };
   const result = await stageRequestedPages([2], [], echoContext);
   expect(result.delta.operations).toEqual([]);
   expect(result.frame.value.payload.echoContext).toEqual(echoContext);
+  expect(result.frame.value.payload.echoGlyphSets).toEqual([echoGlyphSet]);
   expect(result.frame.value.payload.stagedPresentation?.pages[0]?.backgrounds).toEqual([
     { id: 'background', rect, bitmap: result.background },
   ]);
   expect(result.frame.transfer).toContain(result.background);
   expect(result.rasters).toEqual([2, 2]);
   const texts: string[] = [];
+  const scope = globalThis as { Path2D?: unknown };
+  const previousPath = scope.Path2D;
+  scope.Path2D = class { glyph?: number; moveTo(x: number) { this.glyph ??= x; } lineTo() {} closePath() {} };
   const createCanvas = () => ({ width: 600, height: 800, getContext: () => ({
     save() {}, restore() {}, setTransform() {}, transform() {}, beginPath() {}, rect() {}, clip() {},
-    clearRect() {}, fillRect() {}, drawImage() {},
-    measureText(text: string) { return { width: text.length * 10 }; },
-    fillText(text: string) { texts.push(text); },
+    clearRect() {}, fillRect() {}, translate() {}, scale() {},
+    drawImage() { texts.push(''); },
+    fill(path: { glyph: number }) { texts.push(texts.pop()! + String.fromCharCode(path.glyph)); },
   }) }) as unknown as HTMLCanvasElement;
   let canvas = createCanvas();
   const source = readFileSync(new URL('../../../docx-react/src/components/DocxEditor/peerless/echoPainter.ts', import.meta.url), 'utf8');
   const painterSource = source.slice(source.indexOf('export function createEchoPainter('))
     .replace('export function createEchoPainter(', 'function createEchoPainter(');
-  const painter = new Function('decodeFrameDelta', 'canvasForPage', 'closeCommandBitmap',
+  const painter = new Function('decodeFrameDelta', 'canvasForPage', 'closeCommandBitmap', 'drawGlyphRunPrimitive',
+    'GlyphCache', 'indexEchoGlyphSet', 'leadingWordWidth', 'placeEchoGlyphs',
     new Bun.Transpiler({ loader: 'ts' }).transformSync(painterSource) + '\nreturn createEchoPainter({ canvasForPage });'
-  )(decodeFrameDelta, () => canvas, closeCommandBitmap) as {
+  )(decodeFrameDelta, () => canvas, closeCommandBitmap, drawGlyphRunPrimitive, GlyphCache, indexEchoGlyphSet,
+    leadingWordWidth, placeEchoGlyphs) as {
     preview(intent: { kind: 'insertText'; payload: { text: string } }): object | undefined;
     reconcile(frame: DocxCommandFrame, retired: readonly unknown[], remaining: readonly unknown[]): void;
     paint(entries: readonly unknown[]): void;
@@ -161,7 +180,7 @@ test('remount_request_with_pending_echo_restages_context_and_background', async 
   try {
     painter.reconcile({ revision: 6, coversThroughSeq: 9, payload: {
       frame: new ArrayBuffer(0), layoutRevision: 0, caret: { frameEpoch: 6, caretRect: null },
-      echoContext: { ...echoContext, frameEpoch: 6 },
+      echoContext: { ...echoContext, frameEpoch: 6 }, echoGlyphSets: [echoGlyphSet],
       stagedPresentation: { frameEpoch: 6, pages: [{ page, frameEpoch: 6,
         bitmap: { width: 600, height: 800, close() {} } as ImageBitmap,
         backgrounds: [{ id: 'background', rect, bitmap: { width: 100, height: 20, close() {} } as ImageBitmap }],
@@ -174,15 +193,16 @@ test('remount_request_with_pending_echo_restages_context_and_background', async 
       ticket: { id: 10, seq: 10, ack: Promise.resolve({ seq: 10, status: 'applied' }),
         presented: Promise.resolve('presented') } };
     painter.paint([pending]);
-    expect(texts).toEqual(['abx']);
+    expect(texts.at(-1)).toBe('abx');
     texts.length = 0;
     canvas = createCanvas();
     painter.reconcile(result.frame.value, [], [pending]);
     expect(result.frame.value.coversThroughSeq).toBe(9);
-    expect(texts).toEqual(['abx']);
+    expect(texts.at(-1)).toBe('abx');
     expect(painter.preview({ kind: 'insertText', payload: { text: 'y' } })).toBeDefined();
   } finally {
     painter.dispose();
+    scope.Path2D = previousPath;
   }
 });
 

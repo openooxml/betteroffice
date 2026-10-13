@@ -2420,6 +2420,22 @@ impl EditSession {
         docx_layout::outline_glyph_json(font_id, glyph_id)
     }
 
+    /// Typing echo model of one font at one shaping size from this session's
+    /// resident font store: `{"horizontal","glyphIds","advances","kerning",
+    /// "unsafePairs"}`, indexed by the characters of `alphabet`. `kern` is the
+    /// run's kerning gate. Errors for an unknown font or a non-positive size.
+    pub fn echo_glyph_set_json(
+        &self,
+        font_id: u32,
+        size: f32,
+        kern: bool,
+        alphabet: &str,
+    ) -> Result<String, JsValue> {
+        let _fonts = self.fonts.enter();
+        docx_layout::echo_glyph_set_json(font_id, size, kern, alphabet)
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
     /// Hydrates from a yrs v1 update. The first load after an unseeded open retains prior
     /// comment writes and marks loaded fields differing from seed placeholders as authored.
     pub fn load(&self, update: &[u8]) -> Result<(), JsValue> {

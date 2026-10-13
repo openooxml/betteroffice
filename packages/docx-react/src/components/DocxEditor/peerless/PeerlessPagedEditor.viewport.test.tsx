@@ -9,6 +9,7 @@ import type { DocxCommandAck, DocxCommandEchoContext, DocxCommandEnvelope, DocxC
 import type { PeerlessEditSessionBinding, UsePeerlessEditSessionOptions } from '../hooks/usePeerlessEditSession';
 import type { PeerlessFrameGeometry } from './viewStore';
 import { PeerlessPagedEditor } from './PeerlessPagedEditor';
+import { glyphChar, installGlyphPaths, testEchoGlyphLine, testEchoGlyphSet } from './echoGlyphs.testing';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -50,11 +51,12 @@ function frame(revision: number, indices: number[], caretPage = 0): DocxCommandF
       bold: false, italic: false, underline: false, strike: false, transform: [1, 0, 0, 1, 0, 0], baseline: { x: 0, y: 14 } }],
     boundaries: [0, 1, 2].map((utf16) => ({ utf16, grapheme: utf16, caret: { x: utf16 * 10, y: 0, width: 1, height: 20 } })),
     damage: [{ page, rect: damageRect, backgroundId: 'background', omittedPrimitiveIds: [] }], shaping: 'simple-ltr',
+    glyphs: testEchoGlyphLine({ device: { x: 0, y: 0, width: 200, height: 30 } }),
   };
   const bitmap = (pixels: string) => ({ width: 200, height: 100, pixels, closes: 0,
     close(this: TestBitmap) { this.closes += 1; } }) as TestBitmap;
   return { revision, coversThroughSeq: 0, payload: {
-    frame: bytes, layoutRevision: 1, echoContext,
+    frame: bytes, layoutRevision: 1, echoContext, echoGlyphSets: [testEchoGlyphSet],
     caret: { frameEpoch: revision, caretRect: { ...page, x: 10, y: 0, height: 20 } },
     stagedPresentation: { frameEpoch: revision, pages: indices.map((pageIndex) => ({
       page: { pageId: String(pageIndex + 1), pageIndex }, frameEpoch: revision,
@@ -80,12 +82,12 @@ async function mount(zoom = 1, caretPage = 0) {
     return { save() {}, restore() {}, setTransform() {}, transform() {}, beginPath() {}, rect() {}, clip() {}, fillRect() {},
       clearRect() { pixels.set(canvas, ''); },
       drawImage(bitmap: TestBitmap) { pixels.set(canvas, bitmap.pixels); },
-      fillText(text: string) { pixels.set(canvas, text); }, measureText: (text: string) => ({ width: text.length * 10 }),
+      translate() {}, scale() {}, fill(path: unknown) { pixels.set(canvas, (pixels.get(canvas) ?? '') + glyphChar(path)); },
       getImageData: () => ({ width: canvas.width, height: canvas.height, pixels: pixels.get(canvas) ?? '' }),
       putImageData(image: ImageData & { pixels: string }) { pixels.set(canvas, image.pixels); },
     } as unknown as CanvasRenderingContext2D;
   } as unknown as typeof HTMLCanvasElement.prototype.getContext);
-  restorers.push(() => rect.mockRestore(), () => context.mockRestore());
+  restorers.push(() => rect.mockRestore(), () => context.mockRestore(), installGlyphPaths());
   let revision = 1;
   let receive: ((candidate: DocxCommandFrame) => void) | undefined;
   const built = new Set([0, 1, 2, caretPage]);

@@ -56,6 +56,7 @@ export {
 
 export {
   drawDisplayPage,
+  drawGlyphRunPrimitive,
   drawPrimitive,
   presentDisplayPageBackBuffer,
   presentOffscreenPageBackBuffer,

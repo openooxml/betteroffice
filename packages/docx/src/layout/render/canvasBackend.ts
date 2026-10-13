@@ -279,13 +279,7 @@ async function drawPrimitiveCore(
       drawTextRun(ctx, families?.size ? textRunWithFamilies(primitive, families) : primitive);
       break;
     case 'glyphRun':
-      drawGlyphRun(
-        ctx,
-        families?.size && primitive.fallbackFont
-          ? { ...primitive, fallbackFont: withFontFamilies(primitive.fallbackFont, families) }
-          : primitive,
-        options.glyphCache
-      );
+      drawGlyphRunPrimitive(ctx, primitive, options);
       break;
     case 'rect':
       drawRect(ctx, primitive);
@@ -339,6 +333,22 @@ async function drawPrimitiveCore(
     default:
       throw unknownPrimitiveError(primitive);
   }
+}
+
+/** Paints one glyph run synchronously, exactly as page rasterization does. */
+export function drawGlyphRunPrimitive(
+  ctx: CanvasRenderingContext2D,
+  primitive: GlyphRunPrimitive,
+  options: DrawPageOptions = {}
+): void {
+  const families = options.fontFamilies;
+  drawGlyphRun(
+    ctx,
+    families?.size && primitive.fallbackFont
+      ? { ...primitive, fallbackFont: withFontFamilies(primitive.fallbackFont, families) }
+      : primitive,
+    options.glyphCache
+  );
 }
 
 // text runs anchor at the left pen origin with an alphabetic baseline; rtl

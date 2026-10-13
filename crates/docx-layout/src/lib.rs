@@ -930,6 +930,31 @@ pub fn outline_glyph_json(font_id: u32, glyph_id: u32) -> Result<String, JsValue
     .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
+/// [`ooxml_text::echo_glyph_set`] against the resident font store, as JSON.
+pub fn echo_glyph_set_json(
+    font_id: u32,
+    size: f32,
+    kern: bool,
+    alphabet: &str,
+) -> Result<String, String> {
+    module_fonts_usable()?;
+    if !size.is_finite() || size <= 0.0 {
+        return Err(format!("echo glyph size {size} is not positive"));
+    }
+    let alphabet: Vec<char> = alphabet.chars().collect();
+    let set = with_measure_fonts(|store| {
+        ooxml_text::echo_glyph_set(
+            &store.borrow(),
+            ooxml_text::FontId::from_u32(font_id),
+            size,
+            kern,
+            &alphabet,
+        )
+    })
+    .map_err(|error| error.to_string())?;
+    serde_json::to_string(&set).map_err(|error| error.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -955,6 +980,19 @@ mod tests {
         assert!(cmds[0]["x"].is_number() && cmds[0]["y"].is_number());
         assert_eq!(cmds.last().unwrap()["t"], "Z");
 
+        clear_measure_fonts();
+    }
+
+    #[test]
+    fn echo_glyph_set_json_reads_the_resident_font_store() {
+        clear_measure_fonts();
+        let font_id = register_measure_font_bytes(LIBERATION_SANS).expect("register fixture font");
+        let json = echo_glyph_set_json(font_id, 16.0, false, "Ax").expect("echo json");
+        let v: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+        assert_eq!(v["glyphIds"][0], 36);
+        assert_eq!(v["advances"].as_array().map(Vec::len), Some(2));
+        assert!(v["horizontal"].as_f64().is_some_and(|value| value > 0.0));
+        assert!(echo_glyph_set_json(font_id, 0.0, false, "A").is_err());
         clear_measure_fonts();
     }
 
