@@ -97,7 +97,10 @@ enum SheetBinding {
 
 /// a defined name's formula without the `=` some producers store.
 fn definition_source(defined: &DefinedName) -> &str {
-    defined.formula.strip_prefix('=').unwrap_or(&defined.formula)
+    defined
+        .formula
+        .strip_prefix('=')
+        .unwrap_or(&defined.formula)
 }
 
 impl DepGraph {

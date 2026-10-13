@@ -4638,10 +4638,13 @@ impl<'a> CalculationInputs<'a> {
             && self.tables[..] == after.tables[..]
             && self.sheet_names.len() == after.sheets.len()
             && (renamed || keeps_sheet_names(&self.sheet_names, &after.sheets))
-            && self.sheets.iter().all(|(id, sheet)| match (sheet, after.sheet(*id)) {
-                (Some(old), Some(new)) => keeps_sheet_inputs(old, new, renamed),
-                _ => false,
-            })
+            && self
+                .sheets
+                .iter()
+                .all(|(id, sheet)| match (sheet, after.sheet(*id)) {
+                    (Some(old), Some(new)) => keeps_sheet_inputs(old, new, renamed),
+                    _ => false,
+                })
     }
 }
 
