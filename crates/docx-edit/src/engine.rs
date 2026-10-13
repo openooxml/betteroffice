@@ -21052,34 +21052,153 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         assert_eq!(first_pages(&prefix), first_pages(&full));
     }
 
+    /// The full pass and an exact prefix pass of `pages` pages over `bytes`, each on a fresh
+    /// session that `prepare` sets up after seeding, with the prefix pass's retained layout.
+    fn full_and_exact_prefix(
+        bytes: &[u8],
+        request: &str,
+        pages: usize,
+        prepare: &dyn Fn(&EngineSession),
+    ) -> (serde_json::Value, ExactPrefixLayout, serde_json::Value) {
+        let seeded = || {
+            let engine = EngineSession::new(149);
+            crate::seed::seed_from_docx(engine.doc(), bytes).unwrap();
+            prepare(&engine);
+            engine
+        };
+        let full = seeded()
+            .layout_document_with_regions_retained_json(request)
+            .unwrap();
+        let engine = seeded();
+        let laid = engine
+            .layout_document_with_regions_exact_prefix_retained(request, pages)
+            .unwrap();
+        (
+            serde_json::from_str(&full).unwrap(),
+            laid,
+            serde_json::from_str(&engine.retained_layout_json().unwrap()).unwrap(),
+        )
+    }
+
+    fn paragraphs(count: usize, label: &str) -> String {
+        (0..count)
+            .map(|index| format!("<w:p><w:r><w:t>{label} {index} fills several pages.</w:t></w:r></w:p>"))
+            .collect()
+    }
+
     #[test]
     fn exact_prefix_rejects_page_totals_and_trims_certified_pages() {
-        let mut request: serde_json::Value =
-            serde_json::from_str(&float_page_request(serde_json::json!({}))).unwrap();
-        request["exactPrefix"] = serde_json::json!(true);
+        let request = float_page_request(serde_json::json!({}));
         for field in ["PAGE", "NUMPAGES", "SECTIONPAGES"] {
             let body = format!(
                 r#"<w:p><w:fldSimple w:instr=" {field} "><w:r><w:t>9</w:t></w:r></w:fldSimple></w:p>{}"#,
-                (0..200)
-                    .map(|i| format!(
-                        "<w:p><w:r><w:t>Paragraph {i} fills several pages.</w:t></w:r></w:p>"
-                    ))
-                    .collect::<String>()
+                paragraphs(200, "Paragraph")
             );
             let bytes = docx_bytes("", &body);
-            let (full, prefix) = full_and_prefix(&bytes, &request.to_string(), &|_| {
+            let (full, laid, prefix) = full_and_exact_prefix(&bytes, &request, 3, &|_| {
                 BODY_MEASUREMENT_WORK.with(|work| work.borrow_mut().0.clear());
             });
             if field == "PAGE" {
+                assert!(laid.provisional);
+                assert_eq!(laid.pages, 3);
                 assert_eq!(prefix["provisional"], true);
                 assert_eq!(prefix["layout"]["pages"].as_array().unwrap().len(), 3);
                 assert_eq!(first_pages(&prefix), first_pages(&full));
                 BODY_MEASUREMENT_WORK.with(|work| assert!(work.borrow().0.len() < 201));
             } else {
+                assert!(!laid.provisional, "{field}");
                 assert_ne!(prefix["provisional"], true, "{field}");
                 assert_eq!(prefix["layout"], full["layout"], "{field}");
             }
         }
+    }
+
+    #[test]
+    fn an_exact_prefix_lays_out_its_section_as_the_section_break_ending_it() {
+        let margins = r#"<w:pgMar w:top="360" w:right="360" w:bottom="360" w:left="360" w:header="0" w:footer="0" w:gutter="0"/>"#;
+        let body = format!(
+            r#"{}<w:p><w:pPr><w:sectPr><w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/>{margins}</w:sectPr></w:pPr></w:p>{}<w:sectPr><w:pgSz w:w="5760" w:h="4320"/>{margins}</w:sectPr>"#,
+            paragraphs(1000, "Landscape"),
+            paragraphs(100, "Final")
+        );
+        let bytes = docx_bytes("", &body);
+        let base: serde_json::Value =
+            serde_json::from_str(&float_page_request(serde_json::json!({}))).unwrap();
+        let final_section = base["regions"]["sections"][0].clone();
+        for sections in [
+            serde_json::json!([]),
+            serde_json::json!([{ "sectionId": "first" }, final_section]),
+        ] {
+            let mut request = base.clone();
+            request["regions"]["sections"] = sections.clone();
+            let (full, laid, prefix) = full_and_exact_prefix(&bytes, &request.to_string(), 3, &|_| {});
+            let widest = full["layout"]["pages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|page| page["size"]["w"].as_f64().unwrap())
+                .fold(0.0, f64::max);
+            assert!(widest > 1000.0, "{sections}");
+            assert!(laid.provisional, "{sections}");
+            assert_eq!(first_pages(&prefix), first_pages(&full), "{sections}");
+            assert_eq!(laid.document_width, Some(widest), "{sections}");
+        }
+    }
+
+    #[test]
+    fn an_exact_prefix_keeps_damage_and_field_widths_to_its_pages() {
+        docx_layout::clear_measure_fonts();
+        let font = docx_layout::register_measure_font(LIBERATION).unwrap();
+        let header = preview_pagination_paragraph(
+            100,
+            r#"<w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple>"#,
+        );
+        let body = format!(
+            r#"{}<w:sectPr><w:headerReference w:type="default" r:id="header"/></w:sectPr>"#,
+            preview_pagination_body(&[])
+        );
+        let bytes = preview_pagination_story_document(&body, "header", &header);
+        let mut request = preview_pagination_request(font);
+        request["regions"]["sections"][0]["headerFooterRefs"] =
+            serde_json::json!({"headerDefault": "header"});
+        let engine = EngineSession::new(75230);
+        crate::seed_from_docx(engine.doc(), &bytes).unwrap();
+        let laid = engine
+            .layout_document_with_regions_exact_prefix_retained(&request.to_string(), 3)
+            .unwrap();
+        assert!(laid.provisional);
+        {
+            let pagination = engine.pagination.borrow();
+            assert_eq!(pagination.layout.as_ref().unwrap().pages.len(), 3);
+            assert!(pagination.rebuilt_page_end <= 3);
+            assert!(pagination.rebuilt_page_ranges.iter().all(|pages| pages.end <= 3));
+            assert!(pagination.display_rebuilt_pages.iter().all(|&page| page < 3));
+            assert!(pagination.restamped_pages.iter().flatten().all(|&page| page < 3));
+            assert!(pagination.note_changed_pages.iter().all(|&page| page < 3));
+        }
+        let headers: serde_json::Value =
+            serde_json::from_str(&engine.retained_headers_footers_json().unwrap().unwrap()).unwrap();
+        let widths: Vec<_> = headers["variants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|variant| variant["fieldWidths"].as_array().cloned().unwrap_or_default())
+            .collect();
+        assert!(!widths.is_empty());
+        for width in widths {
+            assert_eq!(width["perPage"].as_array().unwrap().len(), 3);
+        }
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn an_exact_prefix_of_no_pages_lays_out_the_whole_document() {
+        let request = float_page_request(serde_json::json!({}));
+        let bytes = docx_bytes("", &paragraphs(200, "Paragraph"));
+        let (full, laid, prefix) = full_and_exact_prefix(&bytes, &request, 0, &|_| {});
+        assert!(!laid.provisional);
+        assert_eq!(laid.pages, full["layout"]["pages"].as_array().unwrap().len());
+        assert_eq!(prefix["layout"], full["layout"]);
     }
 
     #[test]
