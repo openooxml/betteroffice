@@ -216,7 +216,16 @@ pub fn serialize_paragraph_formatting(
     if !base_only {
         write_paragraph_mark_properties(&mut body, formatting, p_pr_ins, p_pr_del);
         if let Some(properties) = section_properties {
-            append_generated(&mut body, &serialize_section_properties(Some(properties)));
+            // A paragraph-level sectPr ends a section even when it holds nothing.
+            let section = serialize_section_properties(Some(properties));
+            append_generated(
+                &mut body,
+                if section.is_empty() {
+                    "<w:sectPr/>"
+                } else {
+                    &section
+                },
+            );
         }
         if let Some(change) = property_changes.and_then(|changes| changes.first()) {
             append_generated(&mut body, &serialize_paragraph_property_change(change)?);
@@ -1068,6 +1077,59 @@ mod tests {
         assert_eq!(
             serialize_paragraph(&paragraph, &mut context()).unwrap(),
             "<w:p w14:paraId=\"AA&amp;BB&quot;CC\"><w:pPr><w:keepNext w:val=\"0\"/><w:jc w:val=\"center\"/></w:pPr><w:r><w:lastRenderedPageBreak/><w:t>hello &amp; goodbye</w:t></w:r></w:p>"
+        );
+    }
+
+    /// A paragraph-level sectPr ends a section even when it holds nothing, so
+    /// it always saves; the body-level one and other paragraphs are unchanged.
+    #[test]
+    fn paragraph_section_marks_save_even_when_empty() {
+        let save = |section_properties: Option<SectionProperties>| {
+            let paragraph = Paragraph {
+                node_type: "paragraph".to_owned(),
+                para_id: Some("00000001".to_owned()),
+                repeated_para_id: None,
+                para_id_attribute: None,
+                source_ordinal: None,
+                text_id: None,
+                extra_attributes: Vec::new(),
+                formatting: None,
+                property_changes: None,
+                p_pr_ins: None,
+                p_pr_del: None,
+                content: vec![ParagraphContent::Inline(InlineNode::Run(Run {
+                    node_type: RunType::Run,
+                    formatting: None,
+                    property_changes: None,
+                    content: vec![RunContent::Text {
+                        text: "A".to_owned(),
+                        preserve_space: None,
+                    }],
+                }))],
+                list_rendering: None,
+                rendered_page_break_before: None,
+                section_properties,
+            };
+            serialize_paragraph(&paragraph, &mut context()).unwrap()
+        };
+        assert_eq!(
+            save(None),
+            "<w:p w14:paraId=\"00000001\"><w:r><w:t>A</w:t></w:r></w:p>"
+        );
+        assert_eq!(
+            save(Some(SectionProperties {
+                section_start: Some("continuous".to_owned()),
+                ..SectionProperties::default()
+            })),
+            "<w:p w14:paraId=\"00000001\"><w:pPr><w:sectPr><w:type w:val=\"continuous\"/></w:sectPr></w:pPr><w:r><w:t>A</w:t></w:r></w:p>"
+        );
+        assert_eq!(
+            save(Some(SectionProperties::default())),
+            "<w:p w14:paraId=\"00000001\"><w:pPr><w:sectPr/></w:pPr><w:r><w:t>A</w:t></w:r></w:p>"
+        );
+        assert_eq!(
+            serialize_section_properties(Some(&SectionProperties::default())),
+            ""
         );
     }
 

@@ -54,7 +54,7 @@ import type { RetainedFrame } from '../layout/render/frameDelta';
 import type { ResidentControlTarget, ResidentControlPosition } from './residentControls';
 import { withPackageMetadata, type ResidentPackageMetadata } from './residentProperties';
 import { getDocumentWatermark } from '../docx/watermarkApi';
-import { resolvedFinalSectionProperties } from '../editor/finalSection';
+import { resolvedFinalSectionProperties, updateFinalSectionProperties } from '../editor/finalSection';
 import { readSectionSnapshot, withSectionSnapshot, type DocxSectionMargins, type ResidentSectionSnapshot } from './residentSections';
 
 export type ResidentEngineSession = Pick<
@@ -142,7 +142,7 @@ export type ResidentEngineSession = Pick<
   | 'yrsBlocksForStory'
 > & {
   useCommandBreakProjection(): void;
-  splitSection(at: YrsLoc, properties: SectionProperties): YrsLoc;
+  splitSection(at: YrsLoc, properties: SectionProperties, start: NonNullable<SectionProperties['sectionStart']>): YrsLoc;
   residentGeometry(root: string, ranges: Array<[number, number]>, selection?: [YrsLoc, YrsLoc]): {
     paragraphs: Array<{ story: string; paraId: string; index: number; from: number; to: number; leading: number; length: number }>;
     tables: Array<{ story: string; tableIndex: number; from: number; to: number; at: YrsLoc;
@@ -486,17 +486,27 @@ export async function createResidentEngineSession(
 
   const resident: ResidentEngineSession = {
     useCommandBreakProjection: () => { nativeBlockBreaks = true; },
-    splitSection: (at, properties) => {
-      const original = resident.paragraphs(at.story).find(paragraph => paragraph.paraId === at.paraId)?.properties;
-      if (!original) throw new Error('Section break paragraph is unavailable');
-      const closing = original.sectPr ?? original._sectionProperties;
+    splitSection: (at, properties, start) => {
+      const paragraphs = resident.paragraphs(at.story);
+      const index = paragraphs.findIndex(paragraph => paragraph.paraId === at.paraId);
+      if (index < 0) throw new Error('Section break paragraph is unavailable');
+      const sectionOf = (attrs: Record<string, unknown>) => (attrs.sectPr ?? attrs._sectionProperties) as SectionProperties | undefined;
+      const closing = paragraphs.slice(index).find(paragraph => sectionOf(paragraph.properties));
       const split = resident.splitParagraph(at);
-      const set = (paraId: string, other: NonNullable<import('./index').YrsParagraphAttrs['other']>) =>
-        resident.setParagraphAttrs({ story: at.story, start: { paraId, offset: 0 }, end: { paraId, offset: 0 } }, { other });
-      set(split.firstParaId, { sectPr: properties, sectionBreakType: properties.sectionStart });
-      if (closing) set(split.secondParaId, { sectPr: closing, sectionBreakType: original.sectionBreakType ?? null });
+      const set = (paraId: string, sectPr: SectionProperties) =>
+        resident.setParagraphAttrs({ story: at.story, start: { paraId, offset: 0 }, end: { paraId, offset: 0 } },
+          { other: { sectPr, sectionBreakType: sectPr.sectionStart ?? null } });
+      set(split.firstParaId, properties);
+      if (closing) set(closing.paraId === at.paraId ? split.secondParaId : closing.paraId, { ...sectionOf(closing.properties), sectionStart: start });
       sectionsTouched = true;
       sectionLayout = null;
+      if (!closing) {
+        const document = partDocument();
+        const body = updateFinalSectionProperties(document.package.document, final => ({ ...final, sectionStart: start }));
+        session.set_part_metadata(JSON.stringify(partMetadata({ ...document, package: { ...document.package, document: body } })), '[]');
+        partsTouched = true;
+        sectionLayout = null;
+      }
       return { story: at.story, paraId: split.secondParaId, offset: 0 };
     },
     residentGeometry: (root, ranges, selection) => JSON.parse(session.resident_geometry_json(root, JSON.stringify({ ranges, selection }))),

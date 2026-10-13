@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 import { rezipPartsToArrayBuffer, toBytes } from '../docx/rezip/parts';
 import { applyFrameDeltaOwned, decodeFrameDelta, type RetainedFrame } from '../layout/render/frameDelta';
 import { preloadEditWasm } from './wasm/index';
-import { preloadOpcWasm } from '../wasm/opc';
+import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
 import { createResidentEngineSession } from './residentEngineSession';
 import { residentWorkerFactory } from './__fixtures__/residentWorker';
 import { ResidentEngineWorkerClient } from './residentEngineWorkerClient';
@@ -30,7 +30,7 @@ beforeAll(async () => {
   startWorker = await residentWorkerFactory();
 });
 
-function syntheticDocument(headersFooters = false, notes = false, controls = false, bodyXml?: string): Uint8Array {
+function syntheticDocument(headersFooters = false, notes = false, controls = false, bodyXml?: string, sectPr?: string): Uint8Array {
   const parts = new Map<string, Uint8Array>();
   parts.set('[Content_Types].xml', toBytes(
     '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'
@@ -44,7 +44,7 @@ function syntheticDocument(headersFooters = false, notes = false, controls = fal
     (notes ? '<w:r><w:footnoteReference w:id="1"/></w:r>' : '') + '</w:p>') +
     (controls ? '<w:p><w:sdt><w:sdtPr><w:id w:val="7"/><w:tag w:val="check"/><w14:checkbox><w14:checked w14:val="0"/></w14:checkbox></w:sdtPr><w:sdtContent><w:r><w:t>☐</w:t></w:r></w:sdtContent></w:sdt></w:p>' +
       '<w:sdt><w:sdtPr><w:id w:val="8"/><w15:repeatingSection xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"/></w:sdtPr><w:sdtContent><w:sdt><w:sdtPr><w:id w:val="9"/><w:tag w:val="item"/><w15:repeatingSectionItem xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>Item text</w:t></w:r></w:p></w:sdtContent></w:sdt></w:sdtContent></w:sdt>' : '') +
-    (headersFooters ? '<w:sectPr><w:headerReference w:type="default" r:id="rIdHeader"/><w:footerReference w:type="default" r:id="rIdFooter"/></w:sectPr>' : '<w:sectPr/>') +
+    (sectPr ?? (headersFooters ? '<w:sectPr><w:headerReference w:type="default" r:id="rIdHeader"/><w:footerReference w:type="default" r:id="rIdFooter"/></w:sectPr>' : '<w:sectPr/>')) +
     '</w:body></w:document>'
   ));
   if (headersFooters) {
@@ -69,11 +69,11 @@ function syntheticDocument(headersFooters = false, notes = false, controls = fal
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
-export async function openWorker(options: { headersFooters?: boolean; layoutWithRegions?: boolean; notes?: boolean; controls?: boolean; propertyImages?: boolean; objects?: boolean; bodyXml?: string; displayWindow?: [number, number]; factory?: typeof startWorker; prepare?: (engine: Awaited<ReturnType<typeof createResidentEngineSession>>) => { story: string; paraId: string; offset: number } } = {}) {
+export async function openWorker(options: { headersFooters?: boolean; layoutWithRegions?: boolean; notes?: boolean; controls?: boolean; propertyImages?: boolean; objects?: boolean; bodyXml?: string; sectPr?: string; displayWindow?: [number, number]; factory?: typeof startWorker; prepare?: (engine: Awaited<ReturnType<typeof createResidentEngineSession>>) => { story: string; paraId: string; offset: number } } = {}) {
   const worker = (options.factory ?? startWorker)(8301);
   const client = new ResidentEngineWorkerClient(worker);
   try {
-    await client.open(syntheticDocument(options.headersFooters, options.notes, options.controls, options.bodyXml), { generation: 'd1-command-worker' });
+    await client.open(syntheticDocument(options.headersFooters, options.notes, options.controls, options.bodyXml, options.sectPr), { generation: 'd1-command-worker' });
     const engine = worker.sessions[0]!;
     if (options.propertyImages || options.objects) engine.applyRawOps('body', [1, 2].map(index => ({
       op: 'insertEmbed', index, kind: 'image', payload: {
@@ -1300,11 +1300,11 @@ for (const type of ['nextPage', 'continuous'] as const) {
       expect(engine.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['Seed', '']);
       const sections = (await client.documentRead({ kind: 'sectionProperties' })).value.sections;
       expect(sections).toHaveLength(2);
-      expect(sections[0]!.properties.sectionStart).toBe(type);
+      expect(sections.map(section => section.properties.sectionStart ?? null)).toEqual([null, type]);
       const { parseDocx } = await import('../docx/parser');
       const reopened = await parseDocx((await client.save({ comments: [] })).bytes);
       expect(reopened.package.document.sections).toHaveLength(2);
-      expect(reopened.package.document.sections![0]!.properties.sectionStart).toBe(type);
+      expect(reopened.package.document.sections!.map(section => section.properties.sectionStart ?? null)).toEqual([null, type]);
       const undo = await client.edit(intent(2, 1, 'undo', {}));
       expect(undo.outcomes[0]?.status).toBe('applied');
       expect(engine.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['Seed']);
@@ -1325,8 +1325,8 @@ test('round two break sections preserve current and existing closing properties'
     expect(inserted.outcomes[0]?.status).toBe('applied');
     const sections = engine.sectionProperties().sections;
     expect(sections).toHaveLength(3);
-    expect(sections[0]!.properties).toMatchObject({ sectionStart: 'nextPage', marginLeft: 1800 });
-    expect(sections[1]!.properties).toMatchObject({ sectionStart: 'continuous', marginLeft: 1800 });
+    expect(sections[0]!.properties).toMatchObject({ sectionStart: 'continuous', marginLeft: 1800 });
+    expect(sections[1]!.properties).toMatchObject({ sectionStart: 'nextPage', marginLeft: 1800 });
     const { parseDocx } = await import('../docx/parser');
     expect((await parseDocx((await client.save({ comments: [] })).bytes)).package.document.sections).toHaveLength(3);
     expect((await client.edit(intent(2, 1, 'undo', {}))).outcomes[0]?.status).toBe('applied');
@@ -1350,10 +1350,114 @@ test('round two break sections remain editable through section property commands
     const saved = await parseDocx((await client.save({ comments: [] })).bytes);
     expect(saved.package.document.sections![0]!.properties).toMatchObject({ marginLeft: 1800, sectionStart: 'continuous' });
     expect((await client.edit(intent(3, 2, 'undo', {}))).outcomes[0]?.status).toBe('applied');
-    expect(engine.sectionProperties().sections[0]!.properties.sectionStart).toBe('nextPage');
+    expect(engine.sectionProperties().sections[0]!.properties.sectionStart).toBe(snapshot.sections[0]!.properties.sectionStart);
     expect((await client.edit(intent(4, 3, 'undo', {}))).outcomes[0]?.status).toBe('applied');
     expect(engine.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['Seed']);
   } finally { client.destroy(); }
+}, TIMEOUT);
+
+type BreakStart = 'continuous' | 'nextPage' | 'oddPage' | 'evenPage';
+const otherStart = (type: BreakStart) => type === 'continuous' ? 'nextPage' : 'continuous';
+const sectPrXml = (type: string) => `<w:sectPr><w:type w:val="${type}"/></w:sectPr>`;
+const sectionParagraph = (id: number, text: string, sectPr = '') =>
+  `<w:p w14:paraId="${id.toString(16).padStart(8, '0')}">${sectPr ? `<w:pPr>${sectPr}</w:pPr>` : ''}<w:r><w:t>${text}</w:t></w:r></w:p>`;
+const SECTION_BREAK_CASES: {
+  name: string; paragraph: number; body: (type: BreakStart) => string; sectPr: string;
+  pages: Record<BreakStart, string[]>; sections: (type: BreakStart) => [string, string | null][];
+}[] = [{
+  name: 'the final section', paragraph: 0,
+  body: () => sectionParagraph(1, 'BeforeAfter'),
+  sectPr: '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>',
+  pages: { continuous: ['BeforeAfter'], nextPage: ['Before', 'After'], oddPage: ['Before', '', 'After'], evenPage: ['Before', 'After'] },
+  sections: type => [['Before', null], ['', type]],
+}, {
+  name: 'a paragraph ending a section', paragraph: 0,
+  body: type => sectionParagraph(1, 'BeforeAfter', sectPrXml(otherStart(type))) + sectionParagraph(2, 'Tail'),
+  sectPr: sectPrXml('continuous'),
+  pages: { continuous: ['BeforeAfterTail'], nextPage: ['Before', 'AfterTail'], oddPage: ['Before', '', 'AfterTail'], evenPage: ['Before', 'AfterTail'] },
+  sections: type => [['Before', otherStart(type)], ['After', type], ['', 'continuous']],
+}, {
+  name: 'the middle of three sections', paragraph: 1,
+  body: type => sectionParagraph(1, 'One', sectPrXml('continuous')) + sectionParagraph(2, 'BeforeAfter') +
+    sectionParagraph(3, 'Mid', sectPrXml(otherStart(type))) + sectionParagraph(4, 'Three'),
+  sectPr: sectPrXml('continuous'),
+  pages: { continuous: ['One', 'BeforeAfterMidThree'], nextPage: ['OneBefore', 'AfterMidThree'], oddPage: ['OneBefore', '', 'AfterMidThree'], evenPage: ['OneBefore', 'AfterMidThree'] },
+  sections: type => [['One', 'continuous'], ['Before', otherStart(type)], ['Mid', type], ['', 'continuous']],
+}];
+
+function pageTexts(frame: RetainedFrame): string[] {
+  return frame.displayList.pages.map(({ primitives }) => primitives
+    .map(primitive => primitive.kind === 'glyphRun' || primitive.kind === 'text' ? primitive.text : '').join(''));
+}
+
+function savedDocumentXml(bytes: ArrayBuffer): string {
+  return new TextDecoder().decode(unzipContainer(new Uint8Array(bytes))['word/document.xml']!);
+}
+
+function savedBody(bytes: ArrayBuffer): string {
+  const xml = savedDocumentXml(bytes);
+  return xml.slice(xml.indexOf('<w:body>'), xml.indexOf('</w:body>'));
+}
+
+function savedSectionStarts(bytes: ArrayBuffer): [string, string | null][] {
+  const sectPr = /<w:sectPr\b(?:[^>]*\/>|[\s\S]*?<\/w:sectPr>)/;
+  const start = (xml: string) => /<w:type\b[^>]*\bw:val="([^"]*)"/.exec(xml)?.[1] ?? null;
+  const sections: [string, string | null][] = [];
+  const rest = savedDocumentXml(bytes).replace(/<w:p(?:\s[^>]*[^/>])?>[\s\S]*?<\/w:p>/g, paragraph => {
+    const found = sectPr.exec(paragraph)?.[0];
+    if (found) sections.push([[...paragraph.matchAll(/<w:t\b[^>]*>([^<]*)<\/w:t>/g)].map(match => match[1]).join(''), start(found)]);
+    return '';
+  });
+  const final = sectPr.exec(rest)?.[0];
+  return final ? [...sections, ['', start(final)]] : sections;
+}
+
+for (const scenario of SECTION_BREAK_CASES) {
+  for (const type of ['continuous', 'nextPage', 'oddPage', 'evenPage'] as const) {
+    test(`section break ${type} starts the section after the caret in ${scenario.name}`, async () => {
+      const { client, engine } = await openWorker({ bodyXml: scenario.body(type), sectPr: scenario.sectPr, prepare(engine) {
+        return { story: 'body', paraId: engine.geometryReader.paragraphSpans('body')[scenario.paragraph]!.paraId, offset: 6 };
+      } });
+      try {
+        const original = savedBody((await client.save({ comments: [] })).bytes);
+        const inserted = await client.edit(intent(1, 0, 'insertSectionBreak', { type }));
+        expect(inserted).toMatchObject({ version: 1, outcomes: [{ status: 'applied' }] });
+        const frame = applyFrameDeltaOwned(null, decodeFrameDelta((await client.requestFullFrame()).frame!.payload.frame));
+        const pages = scenario.pages[type];
+        expect(pageTexts(frame)).toEqual(pages);
+        const layout = JSON.parse(engine.retainedLayoutJson()) as { layout: { pages: { parityFiller?: boolean }[] } };
+        expect(layout.layout.pages.map(page => page.parityFiller === true)).toEqual(pages.map(text => text === ''));
+        const expected = scenario.sections(type);
+        const snapshot = (await client.documentRead({ kind: 'sectionProperties' })).value;
+        expect(snapshot.sections.map((section): string | null => section.properties.sectionStart ?? null)).toEqual(expected.map(([, start]) => start));
+        for (const { properties } of engine.paragraphs('body')) {
+          const sectPr = (properties.sectPr ?? properties._sectionProperties) as { sectionStart?: string } | undefined;
+          expect(properties.sectionBreakType ?? null).toBe(sectPr?.sectionStart ?? null);
+        }
+        expect(savedSectionStarts((await client.save({ comments: [] })).bytes)).toEqual(expected);
+        const undone = await client.edit(intent(2, 1, 'undo', {}));
+        expect(undone).toMatchObject({ version: 2, outcomes: [{ status: 'applied' }], editState: { canUndo: false } });
+        expect(savedBody((await client.save({ comments: [] })).bytes)).toBe(original);
+      } finally { client.destroy(); }
+    }, TIMEOUT);
+  }
+}
+
+test('an edited paragraph keeps an empty section mark through save and reopen', async () => {
+  const mark = '<w:pPr><w:sectPr/></w:pPr>';
+  const marked = `<w:p w14:paraId="00000001">${mark}<w:r><w:t>Seed</w:t></w:r></w:p><w:p w14:paraId="00000002"><w:r><w:t>Tail</w:t></w:r></w:p>`;
+  const save = async (bodyXml: string) => {
+    const { client } = await openWorker({ bodyXml });
+    try {
+      expect((await client.edit(intent(1, 0, 'insertText', { text: '!' }))).outcomes[0]?.status).toBe('applied');
+      return (await client.save({ comments: [] })).bytes;
+    } finally { client.destroy(); }
+  };
+  const saved = await save(marked);
+  expect(savedDocumentXml(await save(marked.replace(mark, '')))).toBe(savedDocumentXml(saved).replace(mark, ''));
+  expect(savedSectionStarts(saved)).toEqual([['Seed!', null], ['', null]]);
+  const { parseDocx } = await import('../docx/parser');
+  expect((await parseDocx(saved)).package.document.sections).toHaveLength(2);
 }, TIMEOUT);
 
 test('section break typing reuses unchanged section projections', async () => {

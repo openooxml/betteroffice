@@ -471,7 +471,7 @@ export function preflightDocxCommand(
       const properties = residentSectionPropertiesAt(engine, { story: 'body', ...resolved.range.start });
       if (!properties) return refuse('invalid-selection');
       return { status: 'ready', prepared: { command: structuredClone(command), selection: resolved.selection, range: resolved.range,
-        sectionBreakProperties: { ...properties, sectionStart: command.payload.type } } };
+        sectionBreakProperties: properties } };
     }
   }
   if (command.kind === 'toggleList' || command.kind === 'changeIndent') return { status: 'ready', prepared: {
@@ -885,7 +885,7 @@ export function applyDocxCommand(
           caret({ ...at, offset: at.offset + 1 });
         } else {
           if (!prepared.sectionBreakProperties) throw new Error('Prepared command lacks section properties');
-          caret(engine.splitSection(at, prepared.sectionBreakProperties));
+          caret(engine.splitSection(at, prepared.sectionBreakProperties, command.payload.type));
         }
       }
       break;
