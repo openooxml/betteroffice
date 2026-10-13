@@ -901,6 +901,11 @@ impl Stylesheet {
         (self.xf(index).is_some() && self.reads_plain(index)).then_some(index)
     }
 
+    /// Whether `index` is the xf known to save plain.
+    pub fn is_saved_plain_xf(&self, index: u32) -> bool {
+        self.known_plain_xf() == Some(index)
+    }
+
     /// the xf the plain format takes, appending one when none is known. A source entry the
     /// model reads as plain or default may carry markup a save keeps, so the new xf names only
     /// pool entries known to save as defaults.

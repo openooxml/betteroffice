@@ -50,6 +50,9 @@ impl<'a> StyleMatch<'a> {
         {
             return false;
         }
+        if self.current.is_saved_plain_xf(current) && !self.original.is_saved_plain_xf(source) {
+            return false;
+        }
         let meant = self.original.resolved_format(Some(source));
         self.original.cell_xfs[source as usize] == self.current.cell_xfs[source as usize]
             && meant == self.current.resolved_format(Some(current))
