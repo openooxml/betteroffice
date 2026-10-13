@@ -752,7 +752,7 @@ test('a print completion publishes the whole layout before the next page build a
       type: 'completeLayout', expectedFrameEpoch: f.w.frames.at(-1)!.revision, paintCaret: false,
     });
     expect(completed.ok).toBe(true);
-    const built = await f.w.send({
+    const built = await f.w.interleave({
       type: 'buildPages', pages: [0], expectedFrameEpoch: f.w.frames.at(-1)!.revision, paintCaret: false,
     });
     expect(built.ok).toBe(true);
