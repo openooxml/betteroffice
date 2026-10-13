@@ -2758,7 +2758,11 @@ mod tests {
             .iter()
             .filter_map(|chunk| {
                 let (kind, _, payload) = unframe(chunk).unwrap();
-                (kind == ChunkKind::Model).then(|| payload[0])
+                if kind == ChunkKind::Model {
+                    Some(payload[0])
+                } else {
+                    None
+                }
             })
             .collect::<Vec<_>>();
         assert_eq!(
