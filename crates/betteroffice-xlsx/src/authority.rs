@@ -5345,7 +5345,10 @@ mod tests {
         for version in MIN_SUPPORTED_SCHEMA_VERSION..=SCHEMA_VERSION {
             for reading in [&before_facets, &held_back] {
                 let (fingerprint, _) = fingerprint_model_for_schema(reading, version).unwrap();
-                assert!(actual.accepts_fingerprint(version, &fingerprint), "{version}");
+                assert!(
+                    actual.accepts_fingerprint(version, &fingerprint),
+                    "{version}"
+                );
             }
         }
     }
