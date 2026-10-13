@@ -118,12 +118,13 @@ test('insert_table_row copies the anchor row, its cell properties and first-run 
   expect(tableRows[2]).toMatch(/w:fill="DDEEFF"[\s\S]*w:fill="FFEEDD"/i);
   expect(tableRows[2]).toMatch(/<w:jc w:val="(right|end)"\/>/);
 
-  const header = doc.grep({ query: 'Quarter' });
-  const top = await doc.edit({ version: header.version, edits: [{ op: 'insert_table_row', row: header.matches[0].ref, position: 'before', cells: ['Top', 'Row'] }] });
+  const outline = doc.list({ limit: 100 });
+  const header = outline.items.find(item => item.text === 'Quarter')!;
+  const top = await doc.edit({ version: outline.version, edits: [{ op: 'insert_table_row', row: header.ref, position: 'before', cells: ['Top', 'Row'] }] });
   const [topRef] = top.results[0].refs as string[];
   expect(doc.read(topRef)).toMatchObject({ text: 'Top', table: { row: 1, rows: 4 } });
   expect(doc.read(topRef).runs[0].formatting.bold).toBe(true);
-  expect(doc.read(header.matches[0].ref).table).toMatchObject({ row: 2 });
+  expect(doc.read(header.ref).table).toMatchObject({ row: 2 });
 });
 
 test('delete_table_row removes one row; refusals name the problem and change nothing', async () => {
