@@ -584,6 +584,16 @@ def flattened_field(package):
     paragraph[list(paragraph).index(field)] = run
 
 
+def empty_run_paragraph(package):
+    run = ET.SubElement(ET.SubElement(package.shape(2, 'Bullets').find('p:txBody', NS), tag('a', 'p')), tag('a', 'r'))
+    ET.SubElement(run, tag('a', 'rPr'), sz='1800', b='1')
+    ET.SubElement(run, tag('a', 't'))
+
+
+def resize_empty_run(package):
+    package.shape(2, 'Bullets').findall('p:txBody/a:p', NS)[-1].find('a:r/a:rPr', NS).set('sz', '4800')
+
+
 def shape_edit(name, path, **attributes):
     def edit(package):
         package.shape(2, name).find(path, NS).attrib.update(attributes)
@@ -896,6 +906,17 @@ def validate_models(directory):
             ('field flattened into its run', flattened_field, False)]):
         result = variant(directory, f'ended-{number}', ended, *([edit] if edit else []))
         expect(f'pptx-01 {name}', pptx01, result, accept, ended_source)
+    empty_source = variant(directory, 'empty-run-input', checker.fixture(pptx01), empty_run_paragraph)
+    empty = variant(directory, 'empty-run-output', empty_source, lambda package: correct_pptx(package, 1))
+    expect('pptx-01 empty formatted run kept', pptx01, empty, True, empty_source)
+    expect('pptx-01 untouched empty run resized', pptx01,
+           variant(directory, 'empty-run-resized', empty, resize_empty_run), False, empty_source)
+    pptx04 = task_named('pptx-04-replace-term')
+    field_source = variant(directory, 'term-field-input', checker.fixture(pptx04), ended_slides)
+    term = variant(directory, 'term-field-output', field_source, lambda package: correct_pptx(package, 4))
+    expect('pptx-04 untouched field paragraph kept', pptx04, term, True, field_source)
+    expect('pptx-04 untouched field paragraph changed', pptx04,
+           variant(directory, 'term-field-changed', term, field_type), False, field_source)
     lines = pptx08['expected']['notes']['2'].split('\n')
     source, result = styled_notes(directory, 'notes-styled', ['1700', '1700'], lines)
     expect('pptx-08 styled notes', pptx08, result, True, source)
