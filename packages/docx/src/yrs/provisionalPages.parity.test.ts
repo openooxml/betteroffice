@@ -739,6 +739,30 @@ for (const request of ['export', 'completeLayout', 'sliced completeLayout'] as c
   });
 }
 
+test('a print completion publishes the whole layout before the next page build and keeps windowed builds', async () => {
+  const f = await commandFixture();
+  try {
+    expect(f.initial.frame.payload.layoutProvisional).toBe(true);
+    const windowed: boolean[] = [];
+    const setWindowed = f.engine.setWindowedIncrementalBuilds.bind(f.engine);
+    f.engine.setWindowedIncrementalBuilds = (enabled: boolean) => { windowed.push(enabled); setWindowed(enabled); };
+    await f.present();
+    await f.w.turn();
+    const completed = await f.w.interleave({
+      type: 'completeLayout', expectedFrameEpoch: f.w.frames.at(-1)!.revision, paintCaret: false,
+    });
+    expect(completed.ok).toBe(true);
+    const built = await f.w.send({
+      type: 'buildPages', pages: [0], expectedFrameEpoch: f.w.frames.at(-1)!.revision, paintCaret: false,
+    });
+    expect(built.ok).toBe(true);
+    expect(f.w.frames.at(-2)!.payload.layoutProvisional).not.toBe(true);
+    expect(f.w.frames.at(-1)!.payload.layoutProvisional).not.toBe(true);
+    expect(commandFramesAfter(f.frame, f.w.frames).displayList.pages).toEqual(f.full.displayList.pages);
+    expect(windowed).not.toContain(false);
+  } finally { f.destroy(); }
+});
+
 test('collaboration and replacement cannot publish an abandoned command completion', async () => {
   for (const replace of [false, true]) {
     const f = await commandFixture();

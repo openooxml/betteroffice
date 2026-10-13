@@ -360,6 +360,7 @@ thread_local! {
         preview_shifts: 0,
     }) };
     static BODY_MEASUREMENT_WORK: RefCell<(Vec<usize>, u64)> = const { RefCell::new((Vec::new(), 0)) };
+    static HEADER_FOOTER_MEASUREMENTS: Cell<usize> = const { Cell::new(0) };
     static SHIFT_SAFETY_WORK: Cell<usize> = const { Cell::new(0) };
     static CERTIFIED_FLOAT_WORK: RefCell<(Vec<usize>, Vec<usize>, Vec<usize>, Vec<usize>)> = const { RefCell::new((Vec::new(), Vec::new(), Vec::new(), Vec::new())) };
     static OPEN_REGION_PATH_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
@@ -7811,6 +7812,8 @@ impl EngineSession {
                     page_size: &page_size,
                     margins: &margins,
                 };
+                #[cfg(test)]
+                HEADER_FOOTER_MEASUREMENTS.with(|count| count.set(count.get() + 1));
                 if let Some(variant) = measure_header_footer(
                     r_id,
                     kind,
@@ -21476,6 +21479,50 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         assert_eq!(top.as_f64(), Some(48.0));
         assert!(laid.provisional);
         assert_eq!(first_pages(&prefix), first_pages(&full));
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn an_exact_prefix_measures_headers_only_through_its_own_section() {
+        docx_layout::clear_measure_fonts();
+        let font = docx_layout::register_measure_font(LIBERATION).unwrap();
+        let plain = r#"<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>"#;
+        let paragraph = |index: u32, properties: &str| {
+            preview_fixture::paragraph(
+                index + 1,
+                &format!("<w:pPr>{properties}</w:pPr>{}", preview_fixture::run("Line")),
+            )
+        };
+        let opening = format!("<w:pageBreakBefore/>{}", header_section(1440));
+        let body = format!(
+            "{}{}{}{plain}",
+            (0..79)
+                .map(|index| paragraph(index, "<w:pageBreakBefore/>"))
+                .collect::<String>(),
+            paragraph(79, &opening),
+            (80..1080)
+                .map(|index| paragraph(index, plain))
+                .collect::<String>()
+        );
+        let header: String = (0..20)
+            .map(|index| preview_pagination_paragraph(300 + index, &preview_fixture::run("Head")))
+            .collect();
+        let bytes = preview_pagination_story_document(&body, "header", &header);
+        let mut request = header_request(font, 96.0);
+        let headed = request["regions"]["sections"][0].clone();
+        let mut inherited = headed.clone();
+        inherited.as_object_mut().unwrap().remove("headerFooterRefs");
+        let mut sections = vec![headed];
+        sections.extend(std::iter::repeat_n(inherited, 1001));
+        request["regions"]["sections"] = serde_json::Value::Array(sections);
+        let engine = EngineSession::new(149);
+        crate::seed::seed_from_docx(engine.doc(), &bytes).unwrap();
+        HEADER_FOOTER_MEASUREMENTS.with(|count| count.set(0));
+        let laid = engine
+            .layout_document_with_regions_exact_prefix_retained(&request.to_string(), 3)
+            .unwrap();
+        assert!(laid.provisional);
+        HEADER_FOOTER_MEASUREMENTS.with(|count| assert_eq!(count.get(), 1));
         docx_layout::clear_measure_fonts();
     }
 
