@@ -4,6 +4,7 @@
 use ooxml_drawingml::GeometryPathCommand;
 use serde::Serialize;
 use std::sync::Arc;
+use xlsx_model::PatternType;
 
 /// horizontal text anchoring within a cell's clip rect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -28,6 +29,19 @@ pub struct Rect {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "op", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum DrawCmd {
+    PatternFill {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        pattern: PatternType,
+        fg: Arc<str>,
+        bg: Arc<str>,
+        origin_x: f32,
+        origin_y: f32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        clip: Option<Rect>,
+    },
     FillRect {
         x: f32,
         y: f32,
@@ -47,6 +61,10 @@ pub enum DrawCmd {
         /// `None` = solid; `"dashed"`/`"dotted"`/`"double"` request a backend stroke pattern.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         style: Option<Arc<str>>,
+        /// Rail width of a `"double"` line: two rails this wide on the outer edges of
+        /// `width`. Without it, painters keep the legacy rails derived from `width`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rail: Option<f32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         clip: Option<Rect>,
     },
@@ -178,6 +196,29 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
         .commands
         .into_iter()
         .map(|c| match c {
+            DrawCmd::PatternFill {
+                x,
+                y,
+                w,
+                h,
+                pattern,
+                fg,
+                bg,
+                origin_x,
+                origin_y,
+                clip,
+            } => DrawCmd::PatternFill {
+                x: x * factor,
+                y: y * factor,
+                w: w * factor,
+                h: h * factor,
+                pattern,
+                fg,
+                bg,
+                origin_x: origin_x * factor,
+                origin_y: origin_y * factor,
+                clip: clip.map(|clip| scale_rect(clip, factor)),
+            },
             DrawCmd::FillRect {
                 x,
                 y,
@@ -201,6 +242,7 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
                 width,
                 color,
                 style,
+                rail,
                 clip,
             } => DrawCmd::Line {
                 x1: x1 * factor,
@@ -210,6 +252,7 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
                 width: width * factor,
                 color,
                 style,
+                rail: rail.map(|rail| rail * factor),
                 clip: clip.map(|clip| scale_rect(clip, factor)),
             },
             DrawCmd::Path {
@@ -305,6 +348,19 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
     }
 }
 
+pub fn border_dash(style: &str) -> &'static [f32] {
+    match style {
+        "dashed" => &[4.0, 2.0],
+        "dotted" => &[1.0, 2.0],
+        "mediumDashed" => &[8.0, 4.0],
+        "dashDot" | "slantDashDot" => &[4.0, 2.0, 1.0, 2.0],
+        "mediumDashDot" => &[8.0, 4.0, 2.0, 4.0],
+        "dashDotDot" => &[4.0, 2.0, 1.0, 2.0, 1.0, 2.0],
+        "mediumDashDotDot" => &[8.0, 4.0, 2.0, 4.0, 2.0, 4.0],
+        _ => &[],
+    }
+}
+
 fn scale_rect(rect: Rect, factor: f32) -> Rect {
     Rect {
         x: rect.x * factor,
@@ -375,6 +431,7 @@ mod tests {
                     width: 1.0,
                     color: "#d4d4d4".into(),
                     style: None,
+                    rail: None,
                     clip: None,
                 },
                 DrawCmd::Path {

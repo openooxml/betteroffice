@@ -40,6 +40,53 @@ fn invalid() -> SnapshotError {
     SnapshotError::new("snapshot authority and model disagree")
 }
 
+#[cfg(test)]
+mod pattern_tests {
+    use super::*;
+    use xlsx_model::{BorderEdge, BorderStyle, Color, Fill, PatternType};
+
+    #[test]
+    fn pattern_border_streamed_format_matches_serde() {
+        for pattern in PatternType::ALL {
+            let format = CellFormat {
+                fill: Fill::Pattern {
+                    pattern,
+                    fg: Some(Color::Theme { idx: 4, tint: 0.25 }),
+                    bg: Some(Color::Rgb("#123456".into())),
+                },
+                border: xlsx_model::Border {
+                    top: Some(BorderEdge {
+                        style: BorderStyle::MediumDashDotDot,
+                        color: Some(Color::Auto),
+                    }),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut model = WorkbookModel::default();
+            let style = model.styles.intern_cell_format(&format).unwrap().unwrap();
+            let xf = model.styles.cell_xfs.get(style as usize);
+            let mut position = JsonPosition::default();
+            let mut bytes = Vec::new();
+            loop {
+                let mut meter = 0;
+                let (done, chunk) = json_window(
+                    &mut position,
+                    SnapshotBudget::new(1, 768).unwrap(),
+                    &mut meter,
+                    |window| window.format(&model, xf, &BTreeMap::new()),
+                )
+                .unwrap();
+                bytes.extend(chunk);
+                if done {
+                    break;
+                }
+            }
+            assert_eq!(bytes, serde_json::to_vec(&format).unwrap());
+        }
+    }
+}
+
 fn allowance(bytes: usize, budget: SnapshotBudget, meter: &mut usize) -> SnapshotResult<usize> {
     if bytes > budget.max_bytes() {
         return Err(SnapshotError::new(
@@ -223,6 +270,15 @@ impl JsonWindow<'_> {
                 self.raw(b"{\"Solid\":")?;
                 self.color(color)?;
                 self.raw(b"}")?;
+            }
+            xlsx_model::styles::Fill::Pattern { pattern, fg, bg } => {
+                self.raw(b"{\"Pattern\":{\"pattern\":")?;
+                self.small(pattern)?;
+                self.raw(b",\"fg\":")?;
+                self.optional_color(fg.as_ref())?;
+                self.raw(b",\"bg\":")?;
+                self.optional_color(bg.as_ref())?;
+                self.raw(b"}}")?;
             }
         }
         self.raw(b",\"border\":{")?;
@@ -1602,6 +1658,11 @@ impl SnapshotValidation {
                     let right = model.styles.fills.get(index).ok_or_else(invalid)?;
                     let size = |fill: &xlsx_model::styles::Fill| match fill {
                         xlsx_model::styles::Fill::Solid(color) => color_bytes(color) + 32,
+                        xlsx_model::styles::Fill::Pattern { fg, bg, .. } => {
+                            fg.as_ref().map_or(4, color_bytes)
+                                + bg.as_ref().map_or(4, color_bytes)
+                                + 64
+                        }
                         _ => 32,
                     };
                     if !equal_record(

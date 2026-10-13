@@ -1849,6 +1849,50 @@ mod tests {
     }
 
     #[test]
+    fn pattern_border_full_format_wire_round_trip() {
+        let mut session = Session::open(&sample_xlsx(), None).unwrap();
+        let mut captured: serde_json::Value = serde_json::from_str(
+            &session
+                .capture_format_json(r#"{"sheet":0,"range":"A1"}"#)
+                .unwrap(),
+        )
+        .unwrap();
+        captured["formats"][0]["fill"] = serde_json::json!({"Pattern": {
+            "pattern": "lightUp", "fg": {"Rgb": "#123456"}, "bg": {"Rgb": "#fedcba"}
+        }});
+        captured["formats"][0]["border"]["top"] =
+            serde_json::json!({"style": "MediumDashed", "color": {"Indexed": 5}});
+        session
+            .apply_format_json(
+                &serde_json::json!({"sheet": 0, "range": "A1", "format": captured}).to_string(),
+                None,
+            )
+            .unwrap();
+        session
+            .patch_range_style_json(r#"{"sheet":0,"range":"A1","patch":{"bold":true}}"#, None)
+            .unwrap();
+        let source: serde_json::Value = serde_json::from_str(
+            &session
+                .capture_format_json(r#"{"sheet":0,"range":"A1"}"#)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(source["formats"][0]["fill"], captured["formats"][0]["fill"]);
+        assert_eq!(
+            source["formats"][0]["border"],
+            captured["formats"][0]["border"]
+        );
+        let reopened = Session::open(&session.save().unwrap(), None).unwrap();
+        let target: serde_json::Value = serde_json::from_str(
+            &reopened
+                .capture_format_json(r#"{"sheet":0,"range":"A1"}"#)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(target, source);
+    }
+
+    #[test]
     fn formatting_mutations_change_display_list_json() {
         let mut session = Session::open(&sample_xlsx(), None).unwrap();
         let before_patch = display_value(&session);

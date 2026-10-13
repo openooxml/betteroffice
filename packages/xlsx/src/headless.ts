@@ -9,6 +9,8 @@ export type {
   Rect,
   TextAlign,
   FillRectCmd,
+  PatternFillCmd,
+  PatternType,
   LineCmd,
   GeometryPathCommand,
   PathStroke,

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DocxEditor, type DocxEditorRef } from "@betteroffice/docx-react";
-import { XlsxEditor, type XlsxEditorApi } from "@betteroffice/xlsx-react";
+import { XlsxEditor, type XlsxAsyncEditorApi } from "@betteroffice/xlsx-react";
 import { PptxEditor, type PptxAsyncEditorApi } from "@betteroffice/pptx-react";
 import { configureDefaultFonts } from "@betteroffice/docx/layout";
 import { setGoogleFontsEnabled } from "@betteroffice/docx/utils";
@@ -50,6 +50,12 @@ export async function prepareFile(
     return { bytes, format };
   }
   if (format === "xlsx") {
+    if (typeof Worker === "function" && typeof OffscreenCanvas === "function") {
+      const { openWorkbookSession } = await import("@betteroffice/xlsx");
+      const session = await openWorkbookSession(bytes);
+      await session.dispose();
+      return { bytes, format };
+    }
     const { initWasm, openWorkbook } = await import("@betteroffice/xlsx");
     await initWasm();
     openWorkbook(bytes).dispose();
@@ -113,10 +119,10 @@ export default function Editor({
   onOpen(file: File): Promise<void>;
   onStatus(status: string): void;
 }) {
-  const serialization = useRef<{ failure: Error | null } | null>(null);
+  const serialization = useRef<{ failure: Error | null; bytes?: Uint8Array } | null>(null);
   const serializations = useRef<Promise<unknown>>(Promise.resolve());
   const docx = useRef<DocxEditorRef>(null);
-  const xlsx = useRef<XlsxEditorApi | null>(null);
+  const xlsx = useRef<XlsxAsyncEditorApi | null>(null);
   const pptx = useRef<PptxAsyncEditorApi | null>(null);
   const presentationWaiter = useRef<{
     resolve(api: PptxAsyncEditorApi): void;
@@ -199,15 +205,13 @@ export default function Editor({
     callbacks.current.onError(error);
   }, [file.format, presentationUnavailable]);
   const workbookReady = useCallback(
-    (api: XlsxEditorApi) => {
+    (api: XlsxAsyncEditorApi) => {
       xlsx.current = api;
-      const unsubscribe = api.handle.onUpdate(changed);
       return () => {
-        unsubscribe();
         xlsx.current = null;
       };
     },
-    [changed]
+    []
   );
   const presentationReady = useCallback((api: PptxAsyncEditorApi) => {
     pptx.current = api;
@@ -220,6 +224,12 @@ export default function Editor({
       presentationUnavailable(new Error("The presentation editor was disposed."));
     };
   }, [presentationUnavailable]);
+
+  const serializeWorkbook = async () => {
+    const result = await xlsx.current?.commands.execute("save", null);
+    if (result && !result.ok) throw new Error(result.failure.message);
+    return serialization.current?.bytes;
+  };
 
   useEffect(() => {
     let active = true;
@@ -239,7 +249,7 @@ export default function Editor({
           if (document.activeElement instanceof HTMLElement)
             document.activeElement.blur();
           await new Promise<void>((resolve) => setTimeout(resolve, 0));
-          const current: { failure: Error | null } = { failure: null };
+          const current: { failure: Error | null; bytes?: Uint8Array } = { failure: null };
           serialization.current = current;
           try {
             let presentation = pptx.current;
@@ -265,7 +275,7 @@ export default function Editor({
               file.format === "docx"
                 ? await docx.current?.save()
                 : file.format === "xlsx"
-                ? xlsx.current?.handle.save()
+                ? await serializeWorkbook()
                 : await presentation!.saveAsync();
             return savedBytes(bytes, current.failure);
           } finally {
@@ -330,7 +340,12 @@ export default function Editor({
       <XlsxEditor
         file={file.bytes}
         fileName={name}
-        onSave={saveBytes}
+        onSave={(bytes) => {
+          if (serialization.current) serialization.current.bytes = bytes;
+          else saveBytes(bytes);
+        }}
+        onChange={changed}
+        onError={error}
         onReady={workbookReady}
         collaboration={
           room

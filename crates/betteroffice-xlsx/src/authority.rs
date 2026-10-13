@@ -182,11 +182,12 @@ impl WorkbookBase {
         let mut builder = FingerprintBuilder::new(model, legacy_dimensions);
         let styles = FingerprintStyles::new(&model.styles);
         let ((fingerprint, bootstrap_client_id), fingerprints) = builder.batched(|builder| {
-            let current = builder.current(styles)?;
+            let current_styles = if released_styles(&model.styles) { styles } else { styles.with_written_fills() };
+            let current = builder.current(current_styles)?;
             let mut fingerprints =
                 builder.accepted_fingerprints(styles.without_xf_facets(), legacy_styles)?;
             let released = fingerprints.remove(&SCHEMA_VERSION).unwrap_or_default();
-            let mut accepted = builder.current_fingerprints(styles, legacy_styles)?;
+            let mut accepted = builder.current_fingerprints(current_styles, legacy_styles)?;
             for fingerprint in released {
                 if !accepted.contains(&fingerprint) {
                     accepted.push(fingerprint);
@@ -1092,13 +1093,110 @@ impl WorkbookAuthority {
         if !candidate.is_whole_document() {
             return SnapshotAdoption::NotApplicable;
         }
+        let released = candidate.holds_released_reading();
         if let Err(error) = candidate.upgrade_schema_from(Some(&self.doc)) {
+            return SnapshotAdoption::Incompatible(error);
+        }
+        if released && let Err(error) = candidate.keep_released_source_formats(self) {
             return SnapshotAdoption::Incompatible(error);
         }
         match candidate.strict_materialize() {
             Err(error) => SnapshotAdoption::Incompatible(error),
             Ok(_) => SnapshotAdoption::Replacement(Box::new(candidate)),
         }
+    }
+
+    /// Whether a release before patterned fills wrote this state over a base
+    /// holding them: only the base's fingerprint carries the pattern fills tag.
+    fn holds_released_reading(&self) -> bool {
+        let tagged = |fingerprint: &str| fingerprint.starts_with(PATTERN_FILLS_FINGERPRINT_TAG);
+        let txn = self.doc.transact();
+        let state = txn
+            .get_map(META)
+            .and_then(|meta| meta.get(&txn, BASE_FINGERPRINT))
+            .and_then(|value| value.cast::<String>().ok());
+        tagged(&self.base.fingerprint) && !state.is_some_and(|fingerprint| tagged(&fingerprint))
+    }
+
+    /// Points each cell of a state a release before patterned fills wrote back
+    /// at its own source format where that release held the format's released
+    /// reading. The reading keeps its catalog entry, which that release's
+    /// writers still reference.
+    fn keep_released_source_formats(&self, source: &Self) -> Result<(), String> {
+        use snapshot::ReleasedLayout;
+        let base = &self.base.styles;
+        let mut sources = HashMap::new();
+        for index in 0..base.cell_xfs.len() {
+            let index =
+                u32::try_from(index).map_err(|_| "cell format table is too large".to_string())?;
+            let format = base.cell_format(Some(index));
+            if format.fill.released_layout() && format.border.released_layout() {
+                continue;
+            }
+            let (key, payload) = cell_format_entry(&format)?;
+            sources.entry(key).or_insert((format, payload));
+        }
+        if sources.is_empty() {
+            return Ok(());
+        }
+        let mut txn = self.doc.transact_mut_with(HYDRATE_ORIGIN);
+        let catalog = txn
+            .get_map(CELL_FORMATS)
+            .ok_or_else(|| "missing cell format catalog".to_string())?;
+        let source_txn = source.doc.transact();
+        let source_sheets = source_txn
+            .get_map(SHEETS)
+            .ok_or_else(|| "missing sheet map".to_string())?;
+        let sheets = txn
+            .get_map(SHEETS)
+            .ok_or_else(|| "missing sheet map".to_string())?;
+        let mut restored_formats = HashMap::new();
+        for key in sheets.keys(&txn).map(str::to_string).collect::<Vec<_>>() {
+            let styles = sheets
+                .get(&txn, &key)
+                .and_then(|value| value.cast::<MapRef>().ok())
+                .ok_or_else(|| format!("sheet {key} is not a map"))
+                .and_then(|sheet| nested_map(&sheet, &txn, STYLES))?;
+            let source_styles = source_sheets
+                .get(&source_txn, &key)
+                .and_then(|value| value.cast::<MapRef>().ok())
+                .and_then(|sheet| nested_map(&sheet, &source_txn, STYLES).ok());
+            let mut kept = Vec::new();
+            for (cell, value) in styles.iter(&txn) {
+                let restored = value
+                    .cast::<String>()
+                    .map_err(|_| format!("cell style {cell} is not a string"))?;
+                let own = source_styles
+                    .as_ref()
+                    .and_then(|styles| styles.get(&source_txn, cell))
+                    .and_then(|value| value.cast::<String>().ok())
+                    .filter(|own| *own != restored);
+                let Some((own, (format, _))) =
+                    own.and_then(|own| sources.get(&own).map(|source| (own, source)))
+                else {
+                    continue;
+                };
+                let current = restored_formats.entry(restored.clone()).or_insert_with(|| {
+                    match catalog.get(&txn, &restored) {
+                        Some(Out::Any(Any::String(payload))) => {
+                            serde_json::from_str::<CellFormat>(&payload).ok()
+                        }
+                        _ => None,
+                    }
+                });
+                let keeps = current.as_ref().is_some_and(|current| {
+                    xlsx_parse::keeps_source(current, format, true, released_format)
+                });
+                if keeps {
+                    kept.push((cell.to_string(), own));
+                }
+            }
+            for (cell, own) in kept {
+                catalog.try_update(&mut txn, own.clone(), sources[&own].1.clone());
+                styles.try_update(&mut txn, cell, own);
+            }
+        }
+        Ok(())
     }
 
     /// Whether `update` holds a whole workbook seeded by another bootstrap
@@ -4326,6 +4424,7 @@ struct FingerprintStyles<'a> {
     styles: &'a Stylesheet,
     indexed_colors: &'a [String],
     xf_facets: bool,
+    as_written: bool,
 }
 
 impl<'a> FingerprintStyles<'a> {
@@ -4334,6 +4433,14 @@ impl<'a> FingerprintStyles<'a> {
             styles,
             indexed_colors: &styles.indexed_colors,
             xf_facets: true,
+            as_written: false,
+        }
+    }
+
+    fn with_written_fills(self) -> Self {
+        Self {
+            as_written: true,
+            ..self
         }
     }
 
@@ -4378,6 +4485,7 @@ impl PartialEq for FingerprintStyles<'_> {
             && self.styles.num_fmts == other.styles.num_fmts
             && self.styles.theme == other.styles.theme
             && self.indexed_colors == other.indexed_colors
+            && self.as_written == other.as_written
     }
 }
 
@@ -4390,8 +4498,15 @@ impl serde::Serialize for FingerprintStyles<'_> {
             if self.indexed_colors.is_empty() { 6 } else { 7 },
         )?;
         state.serialize_field("fonts", &self.styles.fonts)?;
-        state.serialize_field("fills", &self.styles.fills)?;
-        state.serialize_field("borders", &self.styles.borders)?;
+        if self.as_written {
+            state.serialize_field("fills", &self.styles.fills)?;
+            state.serialize_field("borders", &self.styles.borders)?;
+        } else {
+            let fills: Vec<_> = self.styles.fills.iter().map(released_fill).collect();
+            state.serialize_field("fills", &fills)?;
+            let borders: Vec<_> = self.styles.borders.iter().map(released_border).collect();
+            state.serialize_field("borders", &borders)?;
+        }
         state.serialize_field("cell_xfs", &*self.cell_xfs())?;
         state.serialize_field("num_fmts", &self.styles.num_fmts)?;
         state.serialize_field("theme", &self.styles.theme)?;
@@ -4399,6 +4514,80 @@ impl serde::Serialize for FingerprintStyles<'_> {
             state.serialize_field("indexed_colors", self.indexed_colors)?;
         }
         state.end()
+    }
+}
+
+/// The domain of the current fingerprint of styles holding patterned fills or
+/// extended border styles, hashed as written. Releases before them hashed their
+/// reading under the per-schema domains.
+const PATTERN_FILLS_FINGERPRINT_DOMAIN: &[u8] = b"betteroffice-xlsx-yrs-v6-pattern-fills";
+
+/// Heads the text of a fingerprint hashed under that domain, so a state says
+/// its writer read the fills and borders as written.
+const PATTERN_FILLS_FINGERPRINT_TAG: &str = "pattern-fills:";
+
+/// Whether releases before patterned fills read `styles` as written.
+pub(crate) fn released_styles(styles: &Stylesheet) -> bool {
+    use snapshot::ReleasedLayout;
+    styles.fills.iter().all(ReleasedLayout::released_layout)
+        && styles.borders.iter().all(ReleasedLayout::released_layout)
+}
+
+/// A format as releases before patterned fills read it.
+fn released_format(format: &CellFormat) -> CellFormat {
+    CellFormat {
+        fill: released_fill(&format.fill).into_owned(),
+        border: released_border(&format.border).into_owned(),
+        ..format.clone()
+    }
+}
+
+/// A fill as releases before patterned fills read it: a pattern as its solid
+/// foreground. Base fingerprints hash fills this way, so a source keeps the
+/// fingerprint and bootstrap client that those releases persisted.
+fn released_fill(fill: &xlsx_model::Fill) -> Cow<'_, xlsx_model::Fill> {
+    match fill {
+        xlsx_model::Fill::Pattern { fg, .. } => Cow::Owned(xlsx_model::Fill::Solid(
+            fg.clone().unwrap_or(xlsx_model::Color::Auto),
+        )),
+        fill => Cow::Borrowed(fill),
+    }
+}
+
+/// A border as releases before the extended dash styles read it.
+fn released_border(border: &xlsx_model::Border) -> Cow<'_, xlsx_model::Border> {
+    let edges = [&border.left, &border.right, &border.top, &border.bottom];
+    if edges
+        .into_iter()
+        .flatten()
+        .all(|edge| released_border_style(edge.style) == edge.style)
+    {
+        return Cow::Borrowed(border);
+    }
+    let edge = |edge: &Option<xlsx_model::BorderEdge>| {
+        edge.as_ref().map(|edge| xlsx_model::BorderEdge {
+            style: released_border_style(edge.style),
+            color: edge.color.clone(),
+        })
+    };
+    Cow::Owned(xlsx_model::Border {
+        left: edge(&border.left),
+        right: edge(&border.right),
+        top: edge(&border.top),
+        bottom: edge(&border.bottom),
+    })
+}
+
+fn released_border_style(style: xlsx_model::BorderStyle) -> xlsx_model::BorderStyle {
+    use xlsx_model::BorderStyle;
+    match style {
+        BorderStyle::MediumDashed | BorderStyle::MediumDashDot | BorderStyle::MediumDashDotDot => {
+            BorderStyle::Medium
+        }
+        BorderStyle::DashDot | BorderStyle::DashDotDot | BorderStyle::SlantDashDot => {
+            BorderStyle::Dashed
+        }
+        style => style,
     }
 }
 
@@ -4528,6 +4717,7 @@ impl<'a> FingerprintBuilder<'a> {
             std::ptr::eq(known.styles, styles.styles)
                 && std::ptr::eq(known.indexed_colors, styles.indexed_colors)
                 && known.xf_facets == styles.xf_facets
+                && known.as_written == styles.as_written
         }) {
             Some((_, index)) => *index,
             None => {
@@ -4863,7 +5053,8 @@ fn client_id_of_digest(head: u64) -> u64 {
 /// The bootstrap client a base fingerprint seeds: the head of its digest.
 fn fingerprint_client_id(fingerprint: &str) -> Option<u64> {
     let digest = fingerprint
-        .strip_prefix(FACETS_FINGERPRINT_TAG)
+        .strip_prefix(PATTERN_FILLS_FINGERPRINT_TAG)
+        .or_else(|| fingerprint.strip_prefix(FACETS_FINGERPRINT_TAG))
         .unwrap_or(fingerprint);
     let head = u64::from_str_radix(digest.get(..16)?, 16).ok()?;
     Some(client_id_of_digest(head))
@@ -5300,15 +5491,28 @@ fn fingerprint_model_with_domain_oracle(
     validate_schema_version(schema_version)?;
     let mut hasher = Sha256::new();
     hasher.update(domain);
+    let mut styles = model.styles.clone();
+    if domain != PATTERN_FILLS_FINGERPRINT_DOMAIN {
+        styles.fills = styles
+            .fills
+            .iter()
+            .map(|fill| released_fill(fill).into_owned())
+            .collect();
+        styles.borders = styles
+            .borders
+            .iter()
+            .map(|border| released_border(border).into_owned())
+            .collect();
+    }
     let base = if include_defined_names {
         serde_json::to_vec(&(
             model.date_system,
             &model.defined_names,
             &model.shared_strings,
-            &model.styles,
+            &styles,
         ))
     } else {
-        serde_json::to_vec(&(model.date_system, &model.shared_strings, &model.styles))
+        serde_json::to_vec(&(model.date_system, &model.shared_strings, &styles))
     }
     .map_err(|error| format!("cannot fingerprint workbook base: {error}"))?;
     hash_bytes(&mut hasher, &base);
@@ -5763,6 +5967,155 @@ mod tests {
                 "{}",
                 case.label
             );
+        }
+    }
+
+    #[test]
+    fn pattern_details_keep_the_released_base_fingerprint() {
+        use xlsx_model::{Border, BorderEdge, BorderStyle, Color, Fill, PatternType};
+        let mut patterned = open_test_cases::matrix().remove(0).model;
+        let mut released = patterned.clone();
+        for (model, fill, style) in [
+            (
+                &mut patterned,
+                Fill::Pattern {
+                    pattern: PatternType::LightUp,
+                    fg: Some(Color::Rgb("#123456".into())),
+                    bg: Some(Color::Rgb("#fedcba".into())),
+                },
+                BorderStyle::MediumDashDot,
+            ),
+            (
+                &mut released,
+                Fill::Solid(Color::Rgb("#123456".into())),
+                BorderStyle::Medium,
+            ),
+        ] {
+            model.styles.fills.push(fill);
+            model.styles.borders.push(Border {
+                top: Some(BorderEdge { style, color: None }),
+                ..Border::default()
+            });
+        }
+        let actual = WorkbookBase::from_model(&patterned).unwrap();
+        let expected = WorkbookBase::from_model(&released).unwrap();
+        assert_ne!(actual.fingerprint, expected.fingerprint);
+        assert_ne!(actual.bootstrap_client_id, expected.bootstrap_client_id);
+        let current = &actual.fingerprints[&SCHEMA_VERSION];
+        assert!(current.contains(&actual.fingerprint));
+        assert_eq!(
+            released_readings(&actual.fingerprints),
+            expected.fingerprints
+        );
+        let oracle =
+            WorkbookBase::from_model_with_legacy_dimensions_oracle(&patterned, &[], None).unwrap();
+        assert_eq!(oracle.fingerprints, actual.fingerprints);
+        assert_eq!(oracle.fingerprint, actual.fingerprint);
+    }
+
+    /// The accepted fingerprints hashed over the released reading of the styles.
+    fn released_readings(fingerprints: &BTreeMap<i64, Vec<String>>) -> BTreeMap<i64, Vec<String>> {
+        let mut released = fingerprints.clone();
+        for accepted in released.values_mut() {
+            accepted.retain(|fingerprint| !fingerprint.starts_with(PATTERN_FILLS_FINGERPRINT_TAG));
+        }
+        released
+    }
+
+    #[test]
+    fn pattern_backgrounds_tell_current_bases_apart() {
+        use xlsx_model::{Color, Fill, PatternType};
+        let bases = ["#fedcba", "#00ff00"].map(|bg| {
+            let mut model = open_test_cases::matrix().remove(0).model;
+            model.styles.fills.push(Fill::Pattern {
+                pattern: PatternType::LightUp,
+                fg: Some(Color::Rgb("#123456".into())),
+                bg: Some(Color::Rgb(bg.into())),
+            });
+            let base = WorkbookBase::from_model(&model).unwrap();
+            let oracle =
+                WorkbookBase::from_model_with_legacy_dimensions_oracle(&model, &[], None).unwrap();
+            assert_eq!(oracle.fingerprint, base.fingerprint);
+            assert_eq!(oracle.fingerprints, base.fingerprints);
+            assert_eq!(oracle.bootstrap_client_id, base.bootstrap_client_id);
+            base
+        });
+        assert_ne!(bases[0].fingerprint, bases[1].fingerprint);
+        assert_ne!(bases[0].bootstrap_client_id, bases[1].bootstrap_client_id);
+    }
+
+    #[test]
+    fn released_reader_hashes_follow_the_released_collapse_rule() {
+        use xlsx_model::{Border, BorderEdge, BorderStyle, Color, Fill, PatternType};
+        // released parsers read a pattern as a solid of its foreground (auto without one)
+        // and the six extended border styles as medium or dashed
+        let collapse = |style: BorderStyle| match style.as_sml() {
+            "mediumDashed" | "mediumDashDot" | "mediumDashDotDot" => BorderStyle::Medium,
+            "dashDot" | "dashDotDot" | "slantDashDot" => BorderStyle::Dashed,
+            _ => style,
+        };
+        let border = |style, color: &str| Border {
+            top: Some(BorderEdge {
+                style,
+                color: Some(Color::Rgb(color.into())),
+            }),
+            ..Border::default()
+        };
+        let mut patterned = open_test_cases::matrix().remove(0).model;
+        let mut released = patterned.clone();
+        let first_pattern = patterned.styles.fills.len();
+        for (index, pattern) in PatternType::ALL.into_iter().enumerate() {
+            let fg = (index % 2 == 0).then(|| Color::Rgb(format!("#1234{index:02}")));
+            patterned.styles.fills.push(Fill::Pattern {
+                pattern,
+                fg: fg.clone(),
+                bg: Some(Color::Indexed(9)),
+            });
+            released
+                .styles
+                .fills
+                .push(Fill::Solid(fg.unwrap_or(Color::Auto)));
+        }
+        for token in [
+            "mediumDashed",
+            "dashDot",
+            "mediumDashDot",
+            "dashDotDot",
+            "mediumDashDotDot",
+            "slantDashDot",
+        ] {
+            let style = BorderStyle::from_sml(token);
+            patterned.styles.borders.push(border(style, "#654321"));
+            released
+                .styles
+                .borders
+                .push(border(collapse(style), "#654321"));
+        }
+        let hashes = |model: &WorkbookModel| {
+            let base = WorkbookBase::from_model(model).unwrap();
+            let oracle =
+                WorkbookBase::from_model_with_legacy_dimensions_oracle(model, &[], None).unwrap();
+            (
+                released_readings(&base.fingerprints),
+                released_readings(&oracle.fingerprints),
+            )
+        };
+        let expected = hashes(&released);
+        assert_eq!(hashes(&patterned), expected);
+
+        let mut foreground = patterned.clone();
+        foreground.styles.fills[first_pattern] = Fill::Pattern {
+            pattern: PatternType::ALL[0],
+            fg: Some(Color::Rgb("#000001".into())),
+            bg: Some(Color::Indexed(9)),
+        };
+        let mut edge_color = patterned.clone();
+        *edge_color.styles.borders.last_mut().unwrap() =
+            border(BorderStyle::SlantDashDot, "#000002");
+        for changed in [foreground, edge_color] {
+            let (fingerprints, oracle) = hashes(&changed);
+            assert_ne!(fingerprints, expected.0);
+            assert_ne!(oracle, expected.1);
         }
     }
 
