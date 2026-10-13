@@ -380,7 +380,7 @@ export function createCommandHost<P, S, E, F>(
       }
       version = after;
     } catch (error) {
-      if (poison) throw poison;
+      if (error === poison) throw poison;
       poison = unknownOutcome(command.seq, error);
       throw poison;
     }
