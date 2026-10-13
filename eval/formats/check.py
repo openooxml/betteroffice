@@ -505,7 +505,7 @@ def paragraph(node, inherited_bullet=False):
         if kind == 'r':
             if runs and runs[-1]['kind'] == 'r' and runs[-1]['style'] == style:
                 runs[-1]['text'] += text
-            elif text:
+            else:
                 runs.append({'kind': kind, 'text': text, 'style': style, 'field': None})
         elif kind == 'br':
             runs.append({'kind': kind, 'text': '\n', 'style': style, 'field': None})
@@ -619,6 +619,8 @@ def styled_run(item):
 
 
 def replace_paragraph_text(item, text):
+    if text == item['text']:
+        return
     require(styled_run(item), 'fixture replacement must have one styled run')
     item['text'] = text
     item['runs'][0]['text'] = text
@@ -634,7 +636,7 @@ def replace_notes(notes, lines):
     template = paragraphs[0]
     run = template['runs'][0]
     bodies[0]['paragraphs'] = [{'text': line, 'bullet': template['bullet'], 'props': template['props'], 'end': template['end'],
-                                'runs': [dict(run, text=line)] if line else []}
+                                'runs': [dict(run, text=line)]}
                                for line in lines]
     return notes
 
