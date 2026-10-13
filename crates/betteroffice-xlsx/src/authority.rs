@@ -32,6 +32,8 @@ use yrs::{
 
 #[cfg(test)]
 mod fingerprint_composition_tests;
+#[cfg(test)]
+mod cascade_composition_tests;
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod snapshot;
 pub(crate) mod snapshot_validation;
@@ -6856,7 +6858,7 @@ mod tests {
         }
     }
 
-    fn legacy_update(model: &WorkbookModel, version: i64, include_defined_names: bool) -> Vec<u8> {
+    pub(super) fn legacy_update(model: &WorkbookModel, version: i64, include_defined_names: bool) -> Vec<u8> {
         let base = WorkbookBase::from_model(model).unwrap();
         let (_, client_id) =
             fingerprint_model_with_schema(model, version, include_defined_names, true).unwrap();
@@ -6893,7 +6895,7 @@ mod tests {
             .encode_state_as_update_v1(&StateVector::default())
     }
 
-    fn authority_from_update(
+    pub(super) fn authority_from_update(
         model: &WorkbookModel,
         update: &[u8],
         client_id: u64,

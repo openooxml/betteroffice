@@ -695,3 +695,14 @@ test('direct edits validate pending command settlements before synchronization',
   await pending;
   expect(() => host.validateDirectEdits()).toThrow('Direct edits require an unused command host');
 });
+
+ test('cascade composition accepts released engine layouts and codec six', () => {
+  for (const codec of [3, 5, 6]) {
+    for (const collaborative of [true, false]) {
+      expect(isCollaborativeWorkbookRecovery(engineHeader(JSON.stringify({ collaborative }), codec))).toBe(collaborative);
+    }
+  }
+  for (const codec of [2, 4, 7]) {
+    expect(() => isCollaborativeWorkbookRecovery(engineHeader(undefined, codec))).toThrow('Unsupported workbook recovery checkpoint');
+  }
+});
