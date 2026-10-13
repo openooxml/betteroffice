@@ -249,3 +249,5 @@ test('a collaborating session refuses the unordered remote update request', asyn
     expect(a.engine.paragraphs('body')[0]!.text).toBe('Seed remote');
   } finally { remote.destroy(); a.session.dispose(); }
 }, TIMEOUT);
+
+test.todo('a merge that deletes the story holding the local selection repairs the confirmed selection');
