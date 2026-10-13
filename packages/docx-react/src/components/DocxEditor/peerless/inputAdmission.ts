@@ -315,6 +315,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
       const target: PeerlessAdmissionTarget = tail
         ? { kind: 'predecessor', ticket: tail, suggesting: suggesting === null ? undefined : { name: suggesting, date: new Date().toISOString() } }
         : { kind: 'worker-selection', snapshot: viewStore.getSnapshot(), suggesting: suggesting === null ? undefined : { name: suggesting, date: new Date().toISOString() } };
+      void session.flush().catch(() => {});
       if (echoDisabledReason !== 'intent-cap') disableEcho('fence');
       return { slot: compositionSlot, target };
     },
