@@ -52,20 +52,36 @@ export function createFramePresentation(
     return false;
   }
 
-  function forget(canvas: HTMLCanvasElement): void {
-    const backup = authoritative.get(canvas);
-    if (!backup) return;
-    authoritative.delete(canvas);
-    releaseBitmap(backup.bitmap, owner);
+  function setBackup(canvas: HTMLCanvasElement, next?: { page: DocxCommandPageIdentity; bitmap: ImageBitmap }): void {
+    const previous = authoritative.get(canvas);
+    if (next) {
+      retainBitmap(next.bitmap, owner);
+      authoritative.set(canvas, next);
+    } else authoritative.delete(canvas);
+    if (previous && ![...authoritative.values()].some(({ bitmap }) => bitmap === previous.bitmap)) {
+      releaseBitmap(previous.bitmap, owner);
+    }
   }
 
   function pruneBackups(geometry?: PeerlessFrameGeometry): void {
     for (const [canvas, backup] of authoritative) {
-      if (options.canvasForPage(backup.page) !== canvas || (geometry && !geometry.pages.some((item) =>
-        item.page.pageId === backup.page.pageId && item.page.pageIndex === backup.page.pageIndex))) {
-        forget(canvas);
-      }
+      const page = geometry?.pages.find((item) => item.page.pageId === backup.page.pageId)?.page;
+      if (options.canvasForPage(backup.page) !== canvas || (geometry && !page)) setBackup(canvas);
+      else if (page && page.pageIndex !== backup.page.pageIndex) authoritative.set(canvas, { ...backup, page });
     }
+  }
+
+  function repaint(canvas: HTMLCanvasElement, width: number, height: number, bitmap?: ImageBitmap): void {
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.save();
+    try {
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      canvas.width = width;
+      canvas.height = height;
+      ctx.clearRect(0, 0, width, height);
+      if (bitmap) ctx.drawImage(bitmap, 0, 0);
+    } finally { ctx.restore(); }
   }
 
   function install(
@@ -146,18 +162,9 @@ export function createFramePresentation(
       }
     } catch {
       for (const canvas of new Set([...authoritative.keys(), ...targets.map((item) => item.canvas)])) {
-        const ctx = canvas.getContext('2d');
-        if (!ctx) continue;
         const backup = authoritative.get(canvas)?.bitmap;
-        ctx.save();
-        try {
-          ctx.setTransform(1, 0, 0, 1, 0, 0);
-          const target = targets.find((item) => item.canvas === canvas);
-          canvas.width = backup?.width ?? target!.width;
-          canvas.height = backup?.height ?? target!.height;
-          ctx.clearRect(0, 0, canvas.width, canvas.height);
-          if (backup) ctx.drawImage(backup, 0, 0);
-        } finally { ctx.restore(); }
+        const target = targets.find((item) => item.canvas === canvas);
+        repaint(canvas, backup?.width ?? target!.width, backup?.height ?? target!.height, backup);
       }
       options.echoPainter.paint([...retired, ...remaining]);
       options.requestFullFrame();
@@ -165,10 +172,9 @@ export function createFramePresentation(
     }
     for (const { page, canvas } of targets) {
       for (const [previous, backup] of authoritative) {
-        if (previous === canvas || backup.page.pageId === page.page.pageId) forget(previous);
+        if (previous !== canvas && backup.page.pageId === page.page.pageId) setBackup(previous);
       }
-      retainBitmap(page.bitmap, owner);
-      authoritative.set(canvas, { page: page.page, bitmap: page.bitmap });
+      setBackup(canvas, { page: page.page, bitmap: page.bitmap });
       handedOff.add(page.bitmap);
       for (const background of page.backgrounds ?? []) handedOff.add(background.bitmap);
     }
@@ -180,12 +186,17 @@ export function createFramePresentation(
           canvases: readonly HTMLCanvasElement[]): void;
         viewportProbe?(geometry: PeerlessFrameGeometry): void;
       } }).__docxPeerlessHarness : undefined;
-    harness?.viewportProbe?.(geometry);
-    options.viewStore.installFrameGeometry(geometry);
-    pruneBackups();
-    harness?.presentationProbe('installed', frame, retired, remaining, targets.map(({ canvas }) => canvas));
-    options.echoPainter.reconcile(frame, retired, remaining);
-    harness?.presentationProbe('reconciled', frame, retired, remaining, targets.map(({ canvas }) => canvas));
+    try {
+      harness?.viewportProbe?.(geometry);
+      options.viewStore.installFrameGeometry(geometry);
+      pruneBackups();
+      harness?.presentationProbe('installed', frame, retired, remaining, targets.map(({ canvas }) => canvas));
+      options.echoPainter.reconcile(frame, retired, remaining);
+      harness?.presentationProbe('reconciled', frame, retired, remaining, targets.map(({ canvas }) => canvas));
+    } catch {
+      options.echoPainter.disable('reconcile');
+      for (const [canvas, { bitmap }] of authoritative) repaint(canvas, bitmap.width, bitmap.height, bitmap);
+    }
     coverage = frame.coversThroughSeq;
     revision = frame.revision;
     return true;
@@ -200,7 +211,7 @@ export function createFramePresentation(
     present: install,
     dispose() {
       disposed = true;
-      for (const canvas of authoritative.keys()) forget(canvas);
+      for (const canvas of authoritative.keys()) setBackup(canvas);
     },
   };
 }
