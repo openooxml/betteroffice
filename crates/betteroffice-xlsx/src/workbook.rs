@@ -4541,13 +4541,9 @@ impl CalculationScope {
                 }
             }
             Op::RenameSheet { .. } => Self::Renamed,
-            Op::RestoreSheet { formulas, .. } => {
-                let rewrites = formulas.iter().all(|(sheet, at, state)| {
-                    let (value, formula) = cell_content(model, *sheet, *at);
-                    formula.is_some() && state.formula.is_some() && *value == state.value
-                });
-                if rewrites { Self::Renamed } else { Self::Full }
-            }
+            // undo and redo of a rename restore formulas that an edit outside
+            // history may have changed in more than their sheet names
+            Op::RestoreSheet { .. } => Self::Full,
             // a zero size hides a row or column, which hidden-aware functions read
             Op::SetColWidth { .. } | Op::SetRowHeight { .. } => Self::Full,
             Op::SetDefinedNames { .. }
