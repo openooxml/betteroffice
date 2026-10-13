@@ -1259,7 +1259,7 @@ impl Codec for ChartAnchor {
     }
     fn read_bounded(r: &mut BoundedReader<'_>) -> SnapshotResult<Self> {
         Ok(match r.atomic::<u8>()? {
-            0 | 20 => {
+            0 => {
                 let start = r.position;
                 r.prepare::<AnchorCell>()?;
                 r.prepare::<AnchorCell>()?;
