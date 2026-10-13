@@ -637,8 +637,11 @@ impl Stylesheet {
     }
 
     pub fn format_code_for_id(&self, id: u16) -> FormatCode<'_> {
-        if let Some((_, code)) = self.num_fmts.iter().find(|(k, _)| *k == id) {
-            return FormatCode::Custom(code);
+        let found = self.num_fmts.iter().position(|(k, _)| *k == id);
+        #[cfg(test)]
+        count_format_visits(found.map_or(self.num_fmts.len(), |slot| slot + 1));
+        if let Some(slot) = found {
+            return FormatCode::Custom(&self.num_fmts[slot].1);
         }
         FormatCode::Builtin(id)
     }
@@ -931,6 +934,17 @@ impl Stylesheet {
 }
 
 const INTERN_CACHE_MIN_POOL: usize = 128;
+
+#[cfg(test)]
+thread_local! {
+    static FORMAT_VISITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// declared formats examined while resolving codes.
+#[cfg(test)]
+fn count_format_visits(count: usize) {
+    FORMAT_VISITS.set(FORMAT_VISITS.get() + count as u64);
+}
 
 fn seed_memo(memo: &mut PoolMemo, pool_len: usize, key: Option<u64>, index: u32) {
     if let Some(key) = key {
@@ -1416,6 +1430,29 @@ mod tests {
         );
         assert_eq!(unique.font_memo.map.len(), 1);
         assert_eq!(unique.xf_memo.map.len(), 1);
+    }
+
+    #[test]
+    fn resolving_edited_cells_visits_each_declared_format_once() {
+        let mut ss = Stylesheet::default();
+        ss.num_fmts = (0..200)
+            .map(|i| (164 + i, format!("0.{}", "0".repeat(usize::from(i) + 1))))
+            .collect();
+        let before = FORMAT_VISITS.get();
+        for row in 0..500 {
+            let mut format = ss.cell_format(None);
+            format.number_format = if row % 2 == 0 {
+                NumberFormat::Builtin { id: 14 }
+            } else {
+                NumberFormat::Custom {
+                    pattern: "0.0%".into(),
+                }
+            };
+            let style = ss.intern_cell_format(&format).unwrap();
+            ss.resolved_format(style);
+        }
+        let visits = FORMAT_VISITS.get() - before;
+        assert!(visits <= 500 + 200, "{visits} visits for 500 cells and 200 formats");
     }
 
     #[test]

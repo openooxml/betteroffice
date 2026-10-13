@@ -4052,6 +4052,39 @@ fn fingerprint_model_with_schema(
     )
 }
 
+/// The replica schema 6 seeded for `model`, which read builtin ids below 164
+/// as their builtins whatever the workbook declared for them.
+#[cfg(test)]
+pub(crate) fn schema_6_authority(model: &WorkbookModel, client_id: u64) -> WorkbookAuthority {
+    const VERSION: i64 = 6;
+    let (fingerprint, bootstrap_client_id) =
+        fingerprint_model_with_schema(model, VERSION, true, true).unwrap();
+    let mut base = WorkbookBase::from_model(model).unwrap();
+    base.fingerprint = fingerprint;
+    base.bootstrap_client_id = bootstrap_client_id;
+    base.fingerprints.retain(|version, _| *version <= VERSION);
+    let mut builtin = model.clone();
+    builtin.styles.num_fmts.retain(|(id, _)| *id >= 164);
+    let doc = Doc::with_client_id(bootstrap_client_id);
+    let keys = (0..model.sheets.len())
+        .map(|index| format!("sheet:{index}"))
+        .collect::<Vec<_>>();
+    seed(&doc, &base, &builtin, &keys).unwrap();
+    {
+        let mut txn = doc.transact_mut_with("test:schema-6");
+        let meta = txn.get_map(META).unwrap();
+        meta.try_update(&mut txn, "schemaVersion", VERSION);
+    }
+    let update = doc
+        .transact()
+        .encode_state_as_update_v1(&StateVector::default());
+    let replica = Doc::with_client_id(client_id);
+    hydrate_doc(&replica, &update).unwrap();
+    let authority = WorkbookAuthority::hydrated(replica, Arc::new(base), 0);
+    authority.materialize().unwrap();
+    authority
+}
+
 #[derive(Clone, Copy)]
 struct FingerprintStyles<'a> {
     styles: &'a Stylesheet,

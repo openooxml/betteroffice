@@ -2792,5 +2792,54 @@ fn snapshot_lineage_uses_cached_authority_revision_for_every_fragment() {
     assert_eq!(failure.to_string(), "snapshot workbook lineage has changed");
 }
 
+#[test]
+fn schema_6_snapshot_with_a_declared_builtin_restores_its_builtin_display() {
+    let mut model = WorkbookModel {
+        sheets: vec![crate::Sheet::new("Data")],
+        ..WorkbookModel::default()
+    };
+    model.styles.num_fmts.push((14, "0.00".into()));
+    model.styles.cell_xfs.push(xlsx_model::styles::Xf {
+        num_fmt_id: Some(14),
+        ..xlsx_model::styles::Xf::default()
+    });
+    let at = CellRef::new(0, 0);
+    model.sheets[0].set_cell(
+        at,
+        Cell {
+            value: CellValue::Number { value: 45_000.0 },
+            style: Some(0),
+            ..Cell::default()
+        },
+    );
+    let mut builtin = model.styles.clone();
+    builtin.num_fmts.clear();
+    let cell = model.sheets[0].cell(at).unwrap();
+    let displayed = xlsx_render::display_text(&builtin, model.date_system, cell);
+    assert_ne!(
+        displayed,
+        xlsx_render::display_text(&model.styles, model.date_system, cell)
+    );
+    let mut worker = Workbook::from_model(model.clone()).unwrap();
+    worker.authority = crate::authority::schema_6_authority(&model, 91);
+    for budget in budgets() {
+        let (peer, _) = completed_builder(&encode(&worker, budget), budget)
+            .finish()
+            .unwrap()
+            .into_parts();
+        let (again, _) = completed_builder(&encode(&peer, budget), budget)
+            .finish()
+            .unwrap()
+            .into_parts();
+        for restored in [&peer, &again] {
+            let cell = restored.model.sheets[0].cell(at).unwrap();
+            assert_eq!(
+                xlsx_render::display_text(&restored.model.styles, restored.model.date_system, cell),
+                displayed
+            );
+        }
+    }
+}
+
 #[path = "invariant_tests.rs"]
 mod invariants;

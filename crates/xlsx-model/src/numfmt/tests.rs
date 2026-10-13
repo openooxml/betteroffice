@@ -147,6 +147,17 @@ fn general_width_rounding_preserves_half_away_from_zero() {
 }
 
 #[test]
+fn general_width_rounding_uses_fifteen_significant_digits() {
+    for value in [1.005e12, 1.005e12 - 2f64.powi(-13)] {
+        assert_eq!(
+            fit_general(value, 86.0, |text| text.len() as f32 * 10.0).as_deref(),
+            Some("1.01E+12"),
+            "{value}"
+        );
+    }
+}
+
+#[test]
 fn spacing_directives_keep_positions_in_scientific_and_fraction_sections() {
     assert_eq!(fv(1234.0, "0_)0.0E+00"), "1 2.3E+02");
     let exponent =

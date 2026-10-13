@@ -139,6 +139,35 @@ describe('Canvas2D text', () => {
     expect(formattedTrace('123456789', { left: 2, width: 26, parts: [], general: 123456789, overflow: true }, 30)[0].text).toBe('##');
   });
 
+  it('rounds fitted scientific Generals from fifteen significant digits', () => {
+    for (const value of [1.005e12, 1.005e12 - 2 ** -13]) {
+      expect(formattedTrace('1.005E+12', { left: 2, width: 86, parts: [], general: value, overflow: true }, 90)[0].text).toBe('1.01E+12');
+    }
+  });
+
+  it('paints a fitting number and its underline over the extent its right-aligned text had', () => {
+    const runs: { text: string; x: number; align: string }[] = [];
+    const rects: number[][] = [];
+    const context = {
+      font: '', fillStyle: '', textAlign: '', textBaseline: '',
+      save() {}, restore() {}, setTransform() {}, clearRect() {},
+      beginPath() {}, rect() {}, clip() {},
+      measureText(value: string) { return { width: value.length * 10 }; },
+      fillText(value: string, x: number) { runs.push({ text: value, x, align: this.textAlign }); },
+      fillRect(x: number, y: number, w: number, h: number) { rects.push([x, y, w, h]); },
+    };
+    paintDisplayList(context as unknown as CanvasRenderingContext2D, {
+      width: 100, height: 20,
+      commands: [{ op: 'text', x: 98, y: 15, text: '1234', fontSize: 9, color: '#000000',
+        align: 'right', underline: true, clip: { x: 0, y: 0, w: 100, h: 20 },
+        numberFormat: { left: 2, width: 96, parts: [], overflow: true },
+      } as unknown as TextCmd],
+    }, 1);
+    const px = 9 * (96 / 72);
+    expect(runs).toEqual([{ text: '1234', x: 98 - 40, align: 'left' }]);
+    expect(rects).toEqual([[98 - 40, 15 + px * 0.1, 40, Math.max(px * 0.05, 0.5)]]);
+  });
+
   it('uses point-sized fonts for cells, ghosts, and charts at every display scale', () => {
     const fonts: string[] = [];
     const transforms: number[][] = [];
