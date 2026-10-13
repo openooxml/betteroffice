@@ -825,6 +825,9 @@ impl Workbook {
         if self.restore_snapshot(update, options)? {
             return Ok(self.remote_mutation_result(&before, true));
         }
+        if self.authority.seeds_another_bootstrap(update) {
+            return Err(Error::CollaborativeStructureChanged);
+        }
         let staged = self.stage_remote_updates(&[update], None)?;
         if staged.structure != structure {
             return Err(Error::CollaborativeStructureChanged);

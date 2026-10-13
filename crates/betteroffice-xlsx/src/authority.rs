@@ -1097,6 +1097,36 @@ impl WorkbookAuthority {
         }
     }
 
+    /// Whether `update` holds a whole workbook seeded by another bootstrap,
+    /// which only `snapshot_replacement` may take into a pristine replica.
+    /// Merged into an edited one, its seed would race this replica's seed for
+    /// every shared key.
+    pub(crate) fn seeds_another_bootstrap(&self, update: &[u8]) -> bool {
+        let Ok(incoming) = decode_update_v1(update) else {
+            return false;
+        };
+        let known = self.doc.transact().state_vector();
+        if incoming
+            .state_vector()
+            .iter()
+            .all(|(client, _)| known.contains_client(client))
+        {
+            return false;
+        }
+        let doc = Doc::with_client_id(self.client_id());
+        if hydrate_doc(&doc, update).is_err() {
+            return false;
+        }
+        let candidate = Self::hydrated(doc, self.base.clone(), self.next_sheet_id);
+        candidate.is_whole_document()
+            && !candidate
+                .doc
+                .transact()
+                .state_vector()
+                .iter()
+                .any(|(client, _)| client.get() == self.base.bootstrap_client_id)
+    }
+
     /// True while the replica still holds nothing but its own bootstrap.
     fn is_pristine(&self) -> bool {
         let txn = self.doc.transact();
