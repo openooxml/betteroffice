@@ -40,9 +40,10 @@ function crashableHost(): {
   };
 }
 
-function recoveryWorker(change?: (status: CommandStatus) => CommandStatus) {
+function recoveryWorker(change?: (status: CommandStatus) => CommandStatus,
+  transports: () => { client: SessionTransport; host: SessionTransport } = createInProcessPair) {
   const open = spyOn(workbookRecoveryBackend, 'open').mockImplementation(async (...args) => {
-    const pair = createInProcessPair();
+    const pair = transports();
     createWorkbookSessionHost(pair.host);
     const recovery = await (Reflect.apply(createWorkbookRecoverySession, undefined,
       [args[0], args[1], pair.client, ...args.slice(2)]) as ReturnType<typeof createWorkbookRecoverySession>);
@@ -477,8 +478,11 @@ test.each([false, true])('public recovery survives a withheld checkpoint reply (
 
 test.each(['draft', 'composition'] as const)('public recovery keeps retained edits at the cap with an open %s', async (blocked) => {
   const host = crashableHost();
-  const opener = recoveryWorker();
-  const session = await createTestWorkbookSession(await initialPaintBook(), host.wrap, { includeEditState: true, calculation });
+  // 768 sequential round trips: setTimeout(0) delivery would spend seconds in timer clamps.
+  const opener = recoveryWorker(undefined, recoveryPair);
+  const pair = recoveryPair();
+  createWorkbookSessionHost(host.wrap(pair.host));
+  const session = await createWorkbookSession(await initialPaintBook(), { includeEditState: true, calculation }, pair.client);
   const { run, api } = recoveryEditor(session);
   run.connectRecoveryInput({ draft: blocked === 'draft'
     ? { generation: 1, sheet: 0, row: 10, col: 0, value: 'draft', source: 'cell' } : null, pending: false },
