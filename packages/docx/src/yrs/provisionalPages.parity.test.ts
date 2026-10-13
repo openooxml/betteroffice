@@ -141,6 +141,12 @@ function worker(session: ResidentEngineSession, controlled = false) {
         scope.onmessage({ data: { ...request, id } as ResidentEngineWorkerRequest });
       });
     },
+    /** Sends `request` while a completion step's turn is queued; that turn runs the request first. */
+    async interleave(request: ResidentEngineWorkerRequestWithoutId): Promise<ResidentEngineWorkerResponse> {
+      const reply = this.send(request);
+      await this.turn();
+      return reply;
+    },
   };
 }
 
@@ -312,7 +318,10 @@ async function commandFixture(feature = 'plain') {
   cold.clearFonts();
   const font = cold.registerFont(FONT);
   const fontChains = Object.fromEntries(requirements.map(({ key }) => [key, [font]]));
-  request.measurement = { fontChains, defaults: { fontSize: 11, fontFamily: 'Liberation Sans' }, authoritativeShaping: true };
+  request.measurement = {
+    fontChains, defaults: { fontSize: 11, fontFamily: 'Liberation Sans' },
+    compat: { noLeading: false, doNotExpandShiftReturn: false }, authoritativeShaping: true,
+  };
   const layoutInput = JSON.stringify(request);
   cold.layoutDocumentWithRegionsRetainedJson(layoutInput);
   cold.setDisplayWindow(0, 3);
@@ -409,7 +418,7 @@ test('command viewport beyond the prefix completes before painting and cancels s
     expect(f.initial.frame.payload.layoutProvisional).toBe(true);
     await f.present();
     await f.w.turn();
-    await f.w.send({ type: 'commandViewport', request: { start: 40, end: 43, frameEpoch: f.w.frames.at(-1)!.revision } });
+    await f.w.interleave({ type: 'commandViewport', request: { start: 40, end: 43, frameEpoch: f.w.frames.at(-1)!.revision } });
     const away = f.w.frames.at(-1)!;
     const frame = commandFramesAfter(f.frame, f.w.frames);
     expect(away.payload.layoutProvisional).not.toBe(true);
@@ -429,7 +438,7 @@ test('an edit overtakes sliced completion and finishes it before changing the do
     await f.present();
     await f.w.turn();
     const point = { story: 'body', paraId: f.engine.geometryReader.paragraphs('body')[0]!.paraId, offset: 0 };
-    const edited = await f.w.send({ type: 'edit', command: {
+    const edited = await f.w.interleave({ type: 'edit', command: {
       session: f.init.session, incarnation: 1, seq: 1, basis: { epoch: 1, version: 0 },
       kind: 'insertText', payload: { text: 'Edit ', selection: { anchor: point, focus: point } },
     } });
@@ -457,7 +466,7 @@ test('collaboration and replacement cannot publish an abandoned command completi
       if (replace) {
         const replacement = await createResidentEngineSession();
         f.w.replaceSession(replacement);
-        const reply = await f.w.send({ type: 'bootstrap', snapshot: {
+        const reply = await f.w.interleave({ type: 'bootstrap', snapshot: {
           clientId: 1, state: f.cold.encodeState(), fontsRevision: 1, fonts: [FONT], renderInputs: [], measureInputs: [],
           layoutInput: f.init.layoutInput, layoutWithRegions: true, layoutRevision: 1, selection: null,
         }, extras: f.init.extras, expectedFrameEpoch: 0, displayWindow: [0, 3] });
@@ -465,7 +474,7 @@ test('collaboration and replacement cannot publish an abandoned command completi
         expect(reply.ok && reply.commandInitial?.frame.payload.layoutProvisional).toBe(true);
         replacement.destroy();
       } else {
-        const reply = await f.w.send({ type: 'commandUpdate', update: f.engine.encodeState() });
+        const reply = await f.w.interleave({ type: 'commandUpdate', update: f.engine.encodeState() });
         expect(reply.ok).toBe(true);
         expect(f.w.frames.at(-1)!.payload.layoutProvisional).not.toBe(true);
       }
