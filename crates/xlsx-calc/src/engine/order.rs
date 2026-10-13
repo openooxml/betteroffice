@@ -5,9 +5,9 @@
 //! over each row or column of formulas it spans, so a range over many
 //! formulas costs a few edges rather than one per formula.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
-use xlsx_model::SheetId;
+use xlsx_model::{CellRange, SheetId};
 
 use super::{Key, key};
 use crate::graph::DepGraph;
@@ -44,36 +44,28 @@ impl Network {
     fn build(graph: &DepGraph, recompute: &HashSet<Key>) -> Self {
         let mut keys: Vec<Key> = recompute.iter().copied().collect();
         keys.sort_unstable();
-        let ids: HashMap<Key, u32> = keys.iter().zip(0..).map(|(&k, id)| (k, id)).collect();
-        let mut columns: BTreeMap<(SheetId, u32), Line> = BTreeMap::new();
-        let mut rows: BTreeMap<(SheetId, u32), Line> = BTreeMap::new();
-        for (&(sheet, row, col), id) in keys.iter().zip(0..) {
-            columns.entry((sheet, col)).or_default().push(row, id);
-            rows.entry((sheet, row)).or_default().push(col, id);
-        }
         let mut edges = Edges {
-            nodes: ids.len() as u32,
+            nodes: keys.len() as u32,
             pairs: Vec::new(),
-            self_reads: vec![false; ids.len()],
+            self_reads: vec![false; keys.len()],
         };
-        for (sheet, range, reader_sheet, reader_cell) in graph.edges() {
-            let Some(&reader) = ids.get(&key(reader_sheet, reader_cell)) else {
-                continue;
+        {
+            let mut lines = Lines {
+                keys: &keys,
+                columns: None,
+                trees: HashMap::new(),
             };
-            let (start, end) = (range.start, range.end);
-            let (lines, across, along) = if end.col - start.col <= end.row - start.row {
-                (&mut columns, (start.col, end.col), (start.row, end.row))
-            } else {
-                (&mut rows, (start.row, end.row), (start.col, end.col))
-            };
-            for (_, line) in lines.range_mut((sheet, across.0)..=(sheet, across.1)) {
-                line.link(reader, along, &mut edges);
-            }
-            for (anchor_sheet, anchor) in graph.spill_sources(sheet, range) {
-                if let Some(&source) = ids.get(&key(anchor_sheet, anchor))
-                    && source != reader
-                {
-                    edges.push(reader, source);
+            for (sheet, range, reader_sheet, reader_cell) in graph.edges() {
+                let Some(reader) = lines.id(key(reader_sheet, reader_cell)) else {
+                    continue;
+                };
+                lines.link(reader, sheet, range, &mut edges);
+                for (anchor_sheet, anchor) in graph.spill_sources(sheet, range) {
+                    if let Some(source) = lines.id(key(anchor_sheet, anchor))
+                        && source != reader
+                    {
+                        edges.push(reader, source);
+                    }
                 }
             }
         }
@@ -141,18 +133,17 @@ impl Network {
     }
 
     fn step(&self, nodes: &[u32]) -> Step {
-        let mut members: Vec<u32> = nodes
-            .iter()
-            .copied()
-            .filter(|&node| (node as usize) < self.keys.len())
-            .collect();
-        if let ([member], [_]) = (members.as_slice(), nodes)
-            && !self.self_reads[*member as usize]
+        if let &[node] = nodes
+            && !self.self_reads[node as usize]
         {
-            return Step::Cell(self.keys[*member as usize]);
+            return Step::Cell(self.keys[node as usize]);
         }
+        let mut members: Vec<Key> = nodes
+            .iter()
+            .filter_map(|&node| self.keys.get(node as usize).copied())
+            .collect();
         members.sort_unstable();
-        Step::Component(members.iter().map(|&id| self.keys[id as usize]).collect())
+        Step::Component(members)
     }
 }
 
@@ -173,34 +164,122 @@ impl Edges {
     }
 }
 
-/// the formulas along one row or column in order, and the first node of their
-/// segment tree once a range needs one. internal index `i` covers indices `2i`
-/// and `2i + 1`, and the formulas are the leaves from index `len` on.
-#[derive(Default)]
-struct Line {
-    positions: Vec<u32>,
-    formulas: Vec<u32>,
-    tree: Option<u32>,
+/// a row or column of formulas: its sheet, whether it is a row, and its index.
+type LineKey = (SheetId, bool, u32);
+
+/// the formulas of a recompute set along each row and column, and the segment
+/// trees over the lines some range covers more than one formula of. formulas
+/// are numbered in key order, so each row is a run of numbers; the order by
+/// column is sorted once a range first needs it.
+struct Lines<'k> {
+    keys: &'k [Key],
+    columns: Option<Vec<u32>>,
+    trees: HashMap<LineKey, u32>,
 }
 
-impl Line {
-    fn push(&mut self, position: u32, formula: u32) {
-        self.positions.push(position);
-        self.formulas.push(formula);
+impl Lines<'_> {
+    fn id(&self, at: Key) -> Option<u32> {
+        self.keys.binary_search(&at).ok().map(|id| id as u32)
     }
 
-    /// link `reader` to the formulas from `first` to `last` along this line,
-    /// through the tree nodes the span covers whole.
-    fn link(&mut self, reader: u32, (first, last): (u32, u32), edges: &mut Edges) {
-        let start = self.positions.partition_point(|&at| at < first);
-        let end = self.positions.partition_point(|&at| at <= last);
-        match end - start {
+    /// link `reader` to the formulas `range` covers on `sheet`, line by line
+    /// along the rows or the columns it spans fewer of.
+    fn link(&mut self, reader: u32, sheet: SheetId, range: CellRange, edges: &mut Edges) {
+        let (start, end) = (range.start, range.end);
+        let keys = self.keys;
+        if (start.row, start.col) == (end.row, end.col) {
+            if let Some(id) = self.id((sheet, start.row, start.col)) {
+                edges.push(reader, id);
+            }
+            return;
+        }
+        if end.col - start.col > end.row - start.row {
+            let mut at = keys.partition_point(|&(s, row, _)| (s, row) < (sheet, start.row));
+            while let Some(&(s, row, _)) = keys.get(at)
+                && s == sheet
+                && row <= end.row
+            {
+                let len = keys[at..].partition_point(|&(s, r, _)| (s, r) == (sheet, row));
+                let run = &keys[at..at + len];
+                let span = (
+                    run.partition_point(|&(.., col)| col < start.col),
+                    run.partition_point(|&(.., col)| col <= end.col),
+                );
+                let first = at as u32;
+                let line = Line::new((sheet, true, row), len, |index: u32| first + index);
+                line.link(reader, span, &mut self.trees, edges);
+                at += len;
+            }
+            return;
+        }
+        let columns: &[u32] = self.columns.get_or_insert_with(|| by_column(keys));
+        let column = |id: u32| {
+            let (s, row, col) = keys[id as usize];
+            (s, col, row)
+        };
+        let mut at = columns.partition_point(|&id| column(id) < (sheet, start.col, 0));
+        while let Some(&id) = columns.get(at)
+            && column(id).0 == sheet
+            && column(id).1 <= end.col
+        {
+            let col = column(id).1;
+            let len = columns[at..].partition_point(|&id| column(id) <= (sheet, col, u32::MAX));
+            let run = &columns[at..at + len];
+            let span = (
+                run.partition_point(|&id| column(id).2 < start.row),
+                run.partition_point(|&id| column(id).2 <= end.row),
+            );
+            let line = Line::new((sheet, false, col), len, |index: u32| run[index as usize]);
+            line.link(reader, span, &mut self.trees, edges);
+            at += len;
+        }
+    }
+}
+
+/// formula numbers ordered by sheet, column and row.
+fn by_column(keys: &[Key]) -> Vec<u32> {
+    let mut ids: Vec<u32> = (0..keys.len() as u32).collect();
+    ids.sort_unstable_by_key(|&id| {
+        let (sheet, row, col) = keys[id as usize];
+        (sheet, col, row)
+    });
+    ids
+}
+
+/// one line of formulas and the number of each, in line order, for its
+/// segment tree: internal index `i` covers indices `2i` and `2i + 1`, and the
+/// formulas are the leaves from index `len` on.
+struct Line<F> {
+    key: LineKey,
+    len: u32,
+    leaf: F,
+}
+
+impl<F: Fn(u32) -> u32> Line<F> {
+    fn new(key: LineKey, len: usize, leaf: F) -> Self {
+        Self {
+            key,
+            len: len as u32,
+            leaf,
+        }
+    }
+
+    /// link `reader` to the formulas from `first` up to `last` along this
+    /// line, through the tree nodes the span covers whole.
+    fn link(
+        &self,
+        reader: u32,
+        (first, last): (usize, usize),
+        trees: &mut HashMap<LineKey, u32>,
+        edges: &mut Edges,
+    ) {
+        let (first, last) = (first as u32, last as u32);
+        match last - first {
             0 => {}
-            1 => edges.push(reader, self.formulas[start]),
+            1 => edges.push(reader, (self.leaf)(first)),
             _ => {
-                let tree = self.tree(edges);
-                let leaves = self.formulas.len() as u32;
-                let (mut low, mut high) = (start as u32 + leaves, end as u32 + leaves);
+                let tree = *trees.entry(self.key).or_insert_with(|| self.tree(edges));
+                let (mut low, mut high) = (first + self.len, last + self.len);
                 while low < high {
                     if low & 1 == 1 {
                         edges.push(reader, self.node(tree, low));
@@ -217,25 +296,20 @@ impl Line {
         }
     }
 
-    fn tree(&mut self, edges: &mut Edges) -> u32 {
-        if let Some(tree) = self.tree {
-            return tree;
-        }
+    fn tree(&self, edges: &mut Edges) -> u32 {
         let tree = edges.nodes;
-        let leaves = self.formulas.len() as u32;
-        edges.nodes += leaves - 1;
-        for index in 1..leaves {
+        edges.nodes += self.len - 1;
+        for index in 1..self.len {
             for child in [2 * index, 2 * index + 1] {
                 edges.push(self.node(tree, index), self.node(tree, child));
             }
         }
-        self.tree = Some(tree);
         tree
     }
 
     fn node(&self, tree: u32, index: u32) -> u32 {
-        match index.checked_sub(self.formulas.len() as u32) {
-            Some(leaf) => self.formulas[leaf as usize],
+        match index.checked_sub(self.len) {
+            Some(leaf) => (self.leaf)(leaf),
             None => tree + index - 1,
         }
     }
