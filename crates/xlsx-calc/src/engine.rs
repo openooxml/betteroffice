@@ -1,9 +1,11 @@
 //! recalc driver: given edited cells, re-evaluate exactly the formulas that
 //! could have changed, in dependency order, and report what moved.
 
+mod order;
+
 use std::borrow::Cow;
 use std::cell::Cell as Flag;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
 use xlsx_model::{
@@ -14,6 +16,7 @@ use xlsx_model::{
 use crate::array::{Spill, charged_spill, evaluate_spill};
 use crate::eval::{EvalContext, EvaluationBudget, MAX_RECALCULATION_CELL_VISITS, evaluate};
 use crate::graph::DepGraph;
+use order::{Step, topo_order};
 
 /// the outcome of a recalc: cells whose displayed value changed, and cells
 /// settled by cycle participation rather than by their own formula.
@@ -130,81 +133,52 @@ fn collect_recompute(graph: &DepGraph, seeds: &[(SheetId, CellRef)]) -> HashSet<
 /// workbook can loop here.
 const MAX_SPILL_ROUNDS: usize = 4;
 
-/// cells one deferred pass will try to settle. a larger apparent cycle keeps
-/// the range graph's answer rather than paying a quadratic scan for it.
-const MAX_DEFERRED_CYCLE_CELLS: usize = 4096;
-
-/// topologically order `recompute` and evaluate it, writing changed values into
-/// `wb`. cells caught in a cycle are settled and reported separately.
+/// order `recompute` and evaluate it, writing changed values into `wb`. the
+/// members of a cycle in the range graph settle by what they actually read, so
+/// only the cells on a cycle of reads are reported as circular.
 fn run_recalc(
     wb: &mut Workbook,
     graph: &DepGraph,
     recompute: HashSet<Key>,
     context: RecalcContext,
 ) -> RecalcResult {
-    let budget = Rc::new(EvaluationBudget::new(MAX_RECALCULATION_CELL_VISITS));
-    let mut changed: Vec<(SheetId, CellRef)> = Vec::new();
-    let mut limited_cells = Vec::new();
-    let mut cycle_cells: Vec<(SheetId, CellRef)> = Vec::new();
+    let mut pass = Pass {
+        graph,
+        context,
+        budget: Rc::new(EvaluationBudget::new(MAX_RECALCULATION_CELL_VISITS)),
+        changed: Vec::new(),
+        cycle_cells: Vec::new(),
+        limited_cells: Vec::new(),
+        spilled: Vec::new(),
+    };
     let mut pending = recompute;
 
     for _ in 0..MAX_SPILL_ROUNDS {
-        let (order, cycle) = topo_order(graph, &pending);
-        let mut spilled: Vec<(SheetId, CellRef)> = Vec::new();
-        for u in &order {
-            #[cfg(test)]
-            FORMULA_EVALUATIONS.with(|count| count.set(count.get() + 1));
-            let (value, limited) = eval_node(wb, *u, context, Rc::clone(&budget), graph);
-            if limited {
-                limited_cells.push((u.0, cell_of(*u)));
-            }
-            match value {
-                Some(NodeValue::Scalar(value)) => {
-                    if write_if_changed(wb, *u, value) {
-                        changed.push((u.0, cell_of(*u)));
-                    }
-                }
-                Some(NodeValue::Spill(spill)) => {
-                    match write_spill(wb, *u, spill, &budget, &mut changed) {
-                        Some(moved) => spilled.extend(moved),
-                        None => {
-                            if !limited {
-                                limited_cells.push((u.0, cell_of(*u)));
-                            }
-                            refuse(wb, *u, &mut changed);
-                        }
-                    }
-                }
-                Some(NodeValue::Refused) => refuse(wb, *u, &mut changed),
-                None => {}
+        for step in topo_order(graph, &pending) {
+            match step {
+                Step::Cell(u) => pass.evaluate(wb, u),
+                Step::Component(members) => pass.settle(wb, &members),
             }
         }
-        let circular = settle_deferred(
-            wb,
-            &cycle,
-            graph,
-            context,
-            &budget,
-            &mut changed,
-            &mut limited_cells,
-        );
-        for u in &circular {
-            if write_if_changed(wb, *u, circular_value(wb, *u)) {
-                changed.push((u.0, cell_of(*u)));
-            }
-            cycle_cells.push((u.0, cell_of(*u)));
-        }
-        if spilled.is_empty() {
+        if pass.spilled.is_empty() {
             break;
         }
-        pending = dependents_closure(graph, &spilled);
+        pending = dependents_closure(graph, &std::mem::take(&mut pass.spilled));
         if pending.is_empty() {
             break;
         }
     }
 
+    let Pass {
+        mut changed,
+        mut cycle_cells,
+        limited_cells,
+        ..
+    } = pass;
     changed.sort_by(sort_key);
     changed.dedup();
+    cycle_cells.sort_by(sort_key);
+    cycle_cells.dedup();
     RecalcResult {
         changed,
         cycle_cells,
@@ -231,92 +205,6 @@ fn dependents_closure(graph: &DepGraph, seeds: &[(SheetId, CellRef)]) -> HashSet
     found
 }
 
-/// kahn's sort over the sub-graph induced by `recompute`: returns the evaluable
-/// order and, separately, the cells caught in (or only reachable through) a cycle.
-fn topo_order(graph: &DepGraph, recompute: &HashSet<Key>) -> (Vec<Key>, Vec<Key>) {
-    let mut points: HashMap<SheetId, BTreeMap<RowId, Vec<ColId>>> = HashMap::new();
-    for &(sheet, row, col) in recompute {
-        points
-            .entry(sheet)
-            .or_default()
-            .entry(row)
-            .or_default()
-            .push(col);
-    }
-
-    let mut adj: HashMap<Key, Vec<Key>> = HashMap::new();
-    let mut indegree: HashMap<Key, usize> = recompute.iter().map(|k| (*k, 0)).collect();
-    let mut seen: HashSet<(Key, Key)> = HashSet::new();
-
-    for (es, range, vs, vc) in graph.edges() {
-        let v = key(vs, vc);
-        if !recompute.contains(&v) {
-            continue;
-        }
-        let Some(rows) = points.get(&es) else {
-            continue;
-        };
-        for (&row, cols) in rows.range(range.start.row..=range.end.row) {
-            for &col in cols {
-                if col < range.start.col || col > range.end.col {
-                    continue;
-                }
-                let u = (es, row, col);
-                if seen.insert((u, v)) {
-                    adj.entry(u).or_default().push(v);
-                    *indegree.get_mut(&v).unwrap() += 1;
-                }
-            }
-        }
-        for (sheet, anchor) in graph.spill_sources(es, range) {
-            let u = key(sheet, anchor);
-            if u == v || !recompute.contains(&u) {
-                continue;
-            }
-            if seen.insert((u, v)) {
-                adj.entry(u).or_default().push(v);
-                *indegree.get_mut(&v).unwrap() += 1;
-            }
-        }
-    }
-
-    let mut queue: VecDeque<Key> = {
-        let mut ready: Vec<Key> = recompute
-            .iter()
-            .copied()
-            .filter(|k| indegree.get(k) == Some(&0))
-            .collect();
-        ready.sort();
-        ready.into_iter().collect()
-    };
-
-    let mut order: Vec<Key> = Vec::new();
-    while let Some(u) = queue.pop_front() {
-        order.push(u);
-        if let Some(children) = adj.get(&u) {
-            let mut ready: Vec<Key> = Vec::new();
-            for &v in children {
-                let d = indegree.get_mut(&v).unwrap();
-                *d -= 1;
-                if *d == 0 {
-                    ready.push(v);
-                }
-            }
-            ready.sort();
-            queue.extend(ready);
-        }
-    }
-
-    let ordered: HashSet<Key> = order.iter().copied().collect();
-    let mut cycle: Vec<Key> = recompute
-        .iter()
-        .copied()
-        .filter(|k| !ordered.contains(k))
-        .collect();
-    cycle.sort();
-    (order, cycle)
-}
-
 #[cfg(test)]
 thread_local! {
     /// seeks retiring spilled cells took, so a test can see the search skip
@@ -336,80 +224,216 @@ enum NodeValue {
     Refused,
 }
 
-/// evaluate one formula node; `None` keeps the cached value, because the cell
-/// has no formula, it no longer parses, or an engine gap reached the result.
-/// the range graph makes every cell of a range a precedent, so a table whose
-/// column reads its own earlier rows through `INDEX(range, k)` looks circular
-/// even though no cell reads itself. settle what the reads really allow: a
-/// cell whose evaluation touches nothing still unsettled was never in a
-/// cycle. what is left over is.
-fn settle_deferred(
-    wb: &mut Workbook,
-    cycle: &[Key],
-    graph: &DepGraph,
+/// one recalc: the budget its evaluations share and what they found.
+struct Pass<'g> {
+    graph: &'g DepGraph,
     context: RecalcContext,
-    budget: &Rc<EvaluationBudget>,
-    changed: &mut Vec<(SheetId, CellRef)>,
-    limited_cells: &mut Vec<(SheetId, CellRef)>,
-) -> Vec<Key> {
-    if cycle.is_empty() || cycle.len() > MAX_DEFERRED_CYCLE_CELLS {
-        return cycle.to_vec();
-    }
-    let mut unsettled: HashSet<Key> = cycle.iter().copied().collect();
-    for _ in 0..cycle.len() {
-        let mut settled_any = false;
-        for u in cycle {
-            if !unsettled.contains(u) {
-                continue;
-            }
-            let log = ReadLog {
-                inner: wb,
-                watch: &unsettled,
-                touched: Flag::new(false),
-            };
-            #[cfg(test)]
-            FORMULA_EVALUATIONS.with(|count| count.set(count.get() + 1));
-            let (value, limited) = eval_node_with(&log, wb, *u, context, Rc::clone(budget), graph);
-            // a spill rewrites a rectangle, which the ordered pass owns
-            if log.touched.get() || matches!(value, Some(NodeValue::Spill(_) | NodeValue::Refused))
-            {
-                continue;
-            }
-            unsettled.remove(u);
-            settled_any = true;
-            if limited {
-                limited_cells.push((u.0, cell_of(*u)));
-            }
-            if let Some(NodeValue::Scalar(value)) = value
-                && write_if_changed(wb, *u, value)
-            {
-                changed.push((u.0, cell_of(*u)));
-            }
-        }
-        if !settled_any {
-            break;
-        }
-    }
-    cycle
-        .iter()
-        .copied()
-        .filter(|u| unsettled.contains(u))
-        .collect()
+    budget: Rc<EvaluationBudget>,
+    changed: Vec<(SheetId, CellRef)>,
+    cycle_cells: Vec<(SheetId, CellRef)>,
+    limited_cells: Vec<(SheetId, CellRef)>,
+    /// spilled cells whose value moved; the next round runs their readers.
+    spilled: Vec<(SheetId, CellRef)>,
 }
 
-/// a provider that notes whether a formula read any of the cells still
-/// waiting to settle, without recording the rest.
+impl Pass<'_> {
+    /// evaluate a formula no cycle of the range graph passes through.
+    fn evaluate(&mut self, wb: &mut Workbook, u: Key) {
+        #[cfg(test)]
+        FORMULA_EVALUATIONS.with(|count| count.set(count.get() + 1));
+        let (value, limited) = eval_node(wb, u, self.context, Rc::clone(&self.budget), self.graph);
+        self.write(wb, u, value, limited);
+    }
+
+    /// settle the members of one component of the range graph by what they
+    /// actually read. a member that reads another before it settles waits on
+    /// it and runs again once it has. when every member left waits, the ones
+    /// on a cycle of waits are circular: they settle at `circular_value`, and
+    /// the members waiting on them run with that value.
+    fn settle(&mut self, wb: &mut Workbook, members: &[Key]) {
+        let ids: HashMap<Key, usize> = members.iter().enumerate().map(|(id, &u)| (u, id)).collect();
+        let spills: Vec<(usize, SheetId, CellRange)> = members
+            .iter()
+            .enumerate()
+            .filter_map(|(id, &u)| {
+                let range = wb.sheet(u.0)?.array_formula(cell_of(u))?;
+                (range.start != range.end).then_some((id, u.0, range))
+            })
+            .collect();
+        let mut waits = Waits::new(members.len());
+        loop {
+            while let Some(id) = waits.queue.pop_front() {
+                let u = members[id];
+                let log = ReadLog {
+                    inner: wb,
+                    ids: &ids,
+                    spills: &spills,
+                    settled: &waits.settled,
+                    first: Flag::new(None),
+                };
+                #[cfg(test)]
+                FORMULA_EVALUATIONS.with(|count| count.set(count.get() + 1));
+                let (value, limited) = eval_node_with(
+                    &log,
+                    wb,
+                    u,
+                    self.context,
+                    Rc::clone(&self.budget),
+                    self.graph,
+                );
+                if let Some(target) = log.first.get() {
+                    waits.wait(id, target);
+                    continue;
+                }
+                self.write(wb, u, value, limited);
+                waits.settle(&[id]);
+            }
+            let circular = waits.cycles();
+            if circular.is_empty() {
+                break;
+            }
+            for &id in &circular {
+                let u = members[id];
+                if write_if_changed(wb, u, circular_value(wb, u)) {
+                    self.changed.push((u.0, cell_of(u)));
+                }
+                self.cycle_cells.push((u.0, cell_of(u)));
+            }
+            waits.settle(&circular);
+        }
+    }
+
+    fn write(&mut self, wb: &mut Workbook, u: Key, value: Option<NodeValue>, limited: bool) {
+        let at = (u.0, cell_of(u));
+        if limited {
+            self.limited_cells.push(at);
+        }
+        match value {
+            Some(NodeValue::Scalar(value)) => {
+                if write_if_changed(wb, u, value) {
+                    self.changed.push(at);
+                }
+            }
+            Some(NodeValue::Spill(spill)) => {
+                match write_spill(wb, u, spill, &self.budget, &mut self.changed) {
+                    Some(moved) => self.spilled.extend(moved),
+                    None => {
+                        if !limited {
+                            self.limited_cells.push(at);
+                        }
+                        refuse(wb, u, &mut self.changed);
+                    }
+                }
+            }
+            Some(NodeValue::Refused) => refuse(wb, u, &mut self.changed),
+            None => {}
+        }
+    }
+}
+
+/// the members of a component still to run, and which wait on which.
+struct Waits {
+    settled: Vec<bool>,
+    on: Vec<Option<usize>>,
+    waiters: Vec<Vec<usize>>,
+    queue: VecDeque<usize>,
+}
+
+impl Waits {
+    fn new(members: usize) -> Self {
+        Self {
+            settled: vec![false; members],
+            on: vec![None; members],
+            waiters: vec![Vec::new(); members],
+            queue: (0..members).collect(),
+        }
+    }
+
+    fn wait(&mut self, id: usize, target: usize) {
+        self.on[id] = Some(target);
+        self.waiters[target].push(id);
+    }
+
+    /// settle `ids` together and queue the members that waited on them.
+    fn settle(&mut self, ids: &[usize]) {
+        for &id in ids {
+            self.settled[id] = true;
+            self.on[id] = None;
+        }
+        for &id in ids {
+            for waiter in std::mem::take(&mut self.waiters[id]) {
+                if !self.settled[waiter] {
+                    self.on[waiter] = None;
+                    self.queue.push_back(waiter);
+                }
+            }
+        }
+    }
+
+    /// the waiting members on a cycle of waits, in key order. each waits on one
+    /// member still unsettled, so following the waits from any of them ends
+    /// on such a cycle.
+    fn cycles(&self) -> Vec<usize> {
+        const UNSEEN: u8 = 0;
+        const ON_WALK: u8 = 1;
+        const DONE: u8 = 2;
+        let mut state = vec![UNSEEN; self.on.len()];
+        let mut walk = Vec::new();
+        let mut cycles = Vec::new();
+        for start in 0..self.on.len() {
+            let mut at = Some(start);
+            while let Some(id) = at
+                && state[id] == UNSEEN
+            {
+                state[id] = ON_WALK;
+                walk.push(id);
+                at = self.on[id];
+            }
+            if let Some(id) = at
+                && state[id] == ON_WALK
+                && let Some(from) = walk.iter().position(|&member| member == id)
+            {
+                cycles.extend_from_slice(&walk[from..]);
+            }
+            for id in walk.drain(..) {
+                state[id] = DONE;
+            }
+        }
+        cycles.sort_unstable();
+        cycles
+    }
+}
+
+/// a provider that notes the first unsettled member of the settling component
+/// a formula reads, through the member's own cell or the rectangle it spills
+/// over. what the formula reads after that may follow from the stale value, so
+/// only the first such read is certain to be needed.
 struct ReadLog<'a> {
     inner: &'a Workbook,
-    watch: &'a HashSet<Key>,
-    touched: Flag<bool>,
+    ids: &'a HashMap<Key, usize>,
+    spills: &'a [(usize, SheetId, CellRange)],
+    settled: &'a [bool],
+    first: Flag<Option<usize>>,
 }
 
 impl ReadLog<'_> {
     fn note(&self, sheet: SheetId, at: CellRef) {
-        if self.watch.contains(&key(sheet, at)) {
-            self.touched.set(true);
+        if self.first.get().is_some() {
+            return;
         }
+        let unsettled = |id: &usize| !self.settled[*id];
+        let read = self
+            .ids
+            .get(&key(sheet, at))
+            .copied()
+            .filter(unsettled)
+            .or_else(|| {
+                self.spills
+                    .iter()
+                    .find(|(id, on, range)| *on == sheet && range.contains(at) && unsettled(id))
+                    .map(|&(id, ..)| id)
+            });
+        self.first.set(read);
     }
 }
 
@@ -466,6 +490,8 @@ fn cell_random_seed(seed: u32, cell: Key) -> u64 {
     mix_random_seed(mix_random_seed(seed_sheet) ^ row_col)
 }
 
+/// evaluate one formula node; `None` keeps the cached value, because the cell
+/// has no formula, it no longer parses, or an engine gap reached the result.
 fn eval_node(
     wb: &Workbook,
     u: Key,
@@ -1612,6 +1638,31 @@ mod tests {
         assert_eq!(value(&wb, s, "C1"), num(7.0));
     }
 
+    /// a range reaches the formulas it covers through a tree over each row or
+    /// column, and must still run after every one of them.
+    #[test]
+    fn ranges_over_many_formulas_order_every_precedent_first() {
+        const N: u32 = 40;
+        let (mut wb, s) = one_sheet();
+        let column = |at: u32| CellRef::new(at, 0).to_a1();
+        let row = |at: u32| CellRef::new(N + 1, at).to_a1();
+        put_num(&mut wb, s, &column(N - 1), 1.0);
+        put_num(&mut wb, s, &row(N - 1), 1.0);
+        for at in 0..N - 1 {
+            let below = format!("SUM({}:{})", column(at + 1), column(N - 1));
+            put_formula(&mut wb, s, &column(at), &below);
+            let right = format!("SUM({}:{})", row(at + 1), row(N - 1));
+            put_formula(&mut wb, s, &row(at), &right);
+        }
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert!(result.cycle_cells.is_empty());
+        for at in 0..N - 1 {
+            let expected = num(2f64.powi((N - 2 - at) as i32));
+            assert_eq!(value(&wb, s, &column(at)), expected);
+            assert_eq!(value(&wb, s, &row(at)), expected);
+        }
+    }
+
     /// the range graph makes `INDEX(range, k)` a precedent of every cell of
     /// `range`, so a column reading its own earlier rows looks circular. what
     /// the cells actually read says otherwise.
@@ -1835,17 +1886,20 @@ mod tests {
         graph.set_formula(sheet, a1("A1"), Some("RANDBETWEEN(1,1000000)"));
         let seeds = [(sheet, a1("A1"))];
         let recompute = collect_recompute(&graph, &seeds);
-        let (order, cycle) = topo_order(&graph, &recompute);
-        assert!(cycle.is_empty());
-        assert_eq!(order[0], key(sheet, a1("A1")));
+        let order = topo_order(&graph, &recompute);
+        assert!(order.iter().all(|step| matches!(step, Step::Cell(_))));
+        assert_eq!(order[0], Step::Cell(key(sheet, a1("A1"))));
         for address in ["B3", "C3", "E3"] {
-            assert!(order.contains(&key(sheet, a1(address))));
+            assert!(order.contains(&Step::Cell(key(sheet, a1(address)))));
         }
         recalc_after_with_seed(&mut wb, &mut graph, &seeds, Some(45_000.5), Some(42));
         assert!(matches!(value(&wb, sheet, "A1"), CellValue::Number { .. }));
         assert_eq!(addresses.map(|address| value(&wb, sheet, address)), before);
         let formulas = graph.formula_cells().map(|(s, c)| key(s, c)).collect();
-        assert_eq!(topo_order(&graph, &formulas).0[0], key(sheet, a1("A1")));
+        assert_eq!(
+            topo_order(&graph, &formulas)[0],
+            Step::Cell(key(sheet, a1("A1")))
+        );
         rebuild_and_recalc_all_with_seed(&mut wb, Some(45_000.5), Some(42));
         assert_eq!(addresses.map(|address| value(&wb, sheet, address)), before);
     }
