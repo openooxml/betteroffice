@@ -31,9 +31,9 @@ use yrs::{
 };
 
 #[cfg(test)]
-mod fingerprint_composition_tests;
-#[cfg(test)]
 mod cascade_composition_tests;
+#[cfg(test)]
+mod fingerprint_composition_tests;
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod snapshot;
 pub(crate) mod snapshot_validation;
@@ -305,12 +305,18 @@ impl WorkbookBase {
         reading: FingerprintReading,
     ) -> Result<Vec<String>, String> {
         let mut accepted = Vec::new();
-        for (include_col_styles, include_row_styles) in [(true, true), (false, false), (true, false)] {
+        for (include_col_styles, include_row_styles) in
+            [(true, true), (false, false), (true, false)]
+        {
             let defaults = include_col_styles && include_row_styles && has_style_defaults(model);
             let current = reading.with_defaults(defaults);
             for reading in std::iter::once(current).chain(current.legacy()) {
                 let (fingerprint, _) = fingerprint_model_with_row_domain_oracle(
-                    model, SCHEMA_VERSION, true, include_col_styles, include_row_styles,
+                    model,
+                    SCHEMA_VERSION,
+                    true,
+                    include_col_styles,
+                    include_row_styles,
                     fingerprint_domain(SCHEMA_VERSION, reading),
                 )?;
                 accepted.push(fingerprint);
@@ -4942,9 +4948,19 @@ impl<'a> FingerprintBuilder<'a> {
         include_row_styles: bool,
         legacy_dimensions: bool,
     ) -> Result<(String, u64), String> {
-        let defaults = include_col_styles && include_row_styles && version >= CHARTS_SCHEMA_VERSION && self.has_style_defaults;
-        let reading = FingerprintReading::of(styles.xf_facets, styles.as_written).with_defaults(defaults);
-        self.hash_as(styles, version, include_defined_names, (include_col_styles, include_row_styles, legacy_dimensions), reading.legacy().unwrap_or(reading))
+        let defaults = include_col_styles
+            && include_row_styles
+            && version >= CHARTS_SCHEMA_VERSION
+            && self.has_style_defaults;
+        let reading =
+            FingerprintReading::of(styles.xf_facets, styles.as_written).with_defaults(defaults);
+        self.hash_as(
+            styles,
+            version,
+            include_defined_names,
+            (include_col_styles, include_row_styles, legacy_dimensions),
+            reading.legacy().unwrap_or(reading),
+        )
     }
 
     fn hash(
@@ -4956,9 +4972,19 @@ impl<'a> FingerprintBuilder<'a> {
         include_row_styles: bool,
         legacy_dimensions: bool,
     ) -> Result<(String, u64), String> {
-        let defaults = include_col_styles && include_row_styles && version >= CHARTS_SCHEMA_VERSION && self.has_style_defaults;
-        let reading = FingerprintReading::of(styles.xf_facets, styles.as_written).with_defaults(defaults);
-        self.hash_as(styles, version, include_defined_names, (include_col_styles, include_row_styles, legacy_dimensions), reading)
+        let defaults = include_col_styles
+            && include_row_styles
+            && version >= CHARTS_SCHEMA_VERSION
+            && self.has_style_defaults;
+        let reading =
+            FingerprintReading::of(styles.xf_facets, styles.as_written).with_defaults(defaults);
+        self.hash_as(
+            styles,
+            version,
+            include_defined_names,
+            (include_col_styles, include_row_styles, legacy_dimensions),
+            reading,
+        )
     }
 
     fn hash_as(
@@ -5027,11 +5053,19 @@ impl<'a> FingerprintBuilder<'a> {
         let mut readings = Vec::new();
         for (columns, rows) in [(true, true), (false, false), (true, false)] {
             let (current, _) = self.hash(styles, SCHEMA_VERSION, true, columns, rows, false)?;
-            if !accepted.contains(&current) { accepted.push(current); }
+            if !accepted.contains(&current) {
+                accepted.push(current);
+            }
             let defaults = columns && rows && self.has_style_defaults;
-            if let Some(legacy) = FingerprintReading::of(styles.xf_facets, styles.as_written).with_defaults(defaults).legacy() {
-                let (fingerprint, _) = self.hash_as(styles, SCHEMA_VERSION, true, (columns, rows, false), legacy)?;
-                if !accepted.contains(&fingerprint) { accepted.push(fingerprint); }
+            if let Some(legacy) = FingerprintReading::of(styles.xf_facets, styles.as_written)
+                .with_defaults(defaults)
+                .legacy()
+            {
+                let (fingerprint, _) =
+                    self.hash_as(styles, SCHEMA_VERSION, true, (columns, rows, false), legacy)?;
+                if !accepted.contains(&fingerprint) {
+                    accepted.push(fingerprint);
+                }
             }
         }
         if let Some(legacy) = legacy_styles
@@ -5122,19 +5156,27 @@ impl<'a> FingerprintBuilder<'a> {
 const LEGACY_STYLE_DEFAULTS_FINGERPRINT_DOMAIN: &[u8] = b"betteroffice-xlsx-yrs-v6-style-defaults";
 const LEGACY_FACETS_FINGERPRINT_DOMAIN: &[u8] = b"betteroffice-xlsx-yrs-v6-xf-facets";
 const LEGACY_PATTERN_FILLS_FINGERPRINT_DOMAIN: &[u8] = b"betteroffice-xlsx-yrs-v6-pattern-fills";
-const LEGACY_FACETS_PATTERN_FILLS_FINGERPRINT_DOMAIN: &[u8] = b"betteroffice-xlsx-yrs-v6-xf-facets-pattern-fills";
+const LEGACY_FACETS_PATTERN_FILLS_FINGERPRINT_DOMAIN: &[u8] =
+    b"betteroffice-xlsx-yrs-v6-xf-facets-pattern-fills";
 const STYLE_DEFAULTS_FINGERPRINT_DOMAIN: &[u8] = b"betteroffice-xlsx-yrs-v7-style-defaults";
-const FACETS_STYLE_DEFAULTS_FINGERPRINT_DOMAIN: &[u8] = b"betteroffice-xlsx-yrs-v7-xf-facets-style-defaults";
-const PATTERNS_STYLE_DEFAULTS_FINGERPRINT_DOMAIN: &[u8] = b"betteroffice-xlsx-yrs-v7-pattern-fills-style-defaults";
-const FACETS_PATTERNS_STYLE_DEFAULTS_FINGERPRINT_DOMAIN: &[u8] = b"betteroffice-xlsx-yrs-v7-xf-facets-pattern-fills-style-defaults";
+const FACETS_STYLE_DEFAULTS_FINGERPRINT_DOMAIN: &[u8] =
+    b"betteroffice-xlsx-yrs-v7-xf-facets-style-defaults";
+const PATTERNS_STYLE_DEFAULTS_FINGERPRINT_DOMAIN: &[u8] =
+    b"betteroffice-xlsx-yrs-v7-pattern-fills-style-defaults";
+const FACETS_PATTERNS_STYLE_DEFAULTS_FINGERPRINT_DOMAIN: &[u8] =
+    b"betteroffice-xlsx-yrs-v7-xf-facets-pattern-fills-style-defaults";
 
 fn has_style_defaults(model: &WorkbookModel) -> bool {
-    model.sheets.iter().any(|sheet| !sheet.col_styles.is_empty() || !sheet.row_styles.is_empty())
+    model
+        .sheets
+        .iter()
+        .any(|sheet| !sheet.col_styles.is_empty() || !sheet.row_styles.is_empty())
 }
 
 const FACETS_FINGERPRINT_DOMAIN: &[u8] = b"betteroffice-xlsx-yrs-v7-xf-facets";
 const FACETS_FINGERPRINT_TAG: &str = "xf-facets:";
-const FACETS_PATTERN_FILLS_FINGERPRINT_DOMAIN: &[u8] = b"betteroffice-xlsx-yrs-v7-xf-facets-pattern-fills";
+const FACETS_PATTERN_FILLS_FINGERPRINT_DOMAIN: &[u8] =
+    b"betteroffice-xlsx-yrs-v7-xf-facets-pattern-fills";
 const FACETS_PATTERN_FILLS_FINGERPRINT_TAG: &str = "xf-facets-pattern-fills:";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -5185,11 +5227,27 @@ impl FingerprintReading {
     }
 
     fn has_facets(self) -> bool {
-        matches!(self, Self::Facets | Self::FacetsPatterns | Self::FacetsDefaults | Self::FacetsPatternsDefaults | Self::LegacyFacets | Self::LegacyFacetsPatterns)
+        matches!(
+            self,
+            Self::Facets
+                | Self::FacetsPatterns
+                | Self::FacetsDefaults
+                | Self::FacetsPatternsDefaults
+                | Self::LegacyFacets
+                | Self::LegacyFacetsPatterns
+        )
     }
 
     fn as_written(self) -> bool {
-        matches!(self, Self::Patterns | Self::FacetsPatterns | Self::PatternsDefaults | Self::FacetsPatternsDefaults | Self::LegacyPatterns | Self::LegacyFacetsPatterns)
+        matches!(
+            self,
+            Self::Patterns
+                | Self::FacetsPatterns
+                | Self::PatternsDefaults
+                | Self::FacetsPatternsDefaults
+                | Self::LegacyPatterns
+                | Self::LegacyFacetsPatterns
+        )
     }
 
     fn tag(self) -> &'static str {
@@ -5197,7 +5255,9 @@ impl FingerprintReading {
             Self::Released | Self::LegacyDefaults => "",
             Self::Facets | Self::LegacyFacets => FACETS_FINGERPRINT_TAG,
             Self::Patterns | Self::LegacyPatterns => PATTERN_FILLS_FINGERPRINT_TAG,
-            Self::FacetsPatterns | Self::LegacyFacetsPatterns => FACETS_PATTERN_FILLS_FINGERPRINT_TAG,
+            Self::FacetsPatterns | Self::LegacyFacetsPatterns => {
+                FACETS_PATTERN_FILLS_FINGERPRINT_TAG
+            }
             Self::Defaults => "style-defaults:",
             Self::FacetsDefaults => "xf-facets-style-defaults:",
             Self::PatternsDefaults => "pattern-fills-style-defaults:",
@@ -5217,7 +5277,10 @@ const TAGGED_FINGERPRINT_READINGS: [FingerprintReading; 7] = [
 ];
 
 fn fingerprint_reading(fingerprint: &str) -> FingerprintReading {
-    TAGGED_FINGERPRINT_READINGS.into_iter().find(|reading| fingerprint.starts_with(reading.tag())).unwrap_or(FingerprintReading::Released)
+    TAGGED_FINGERPRINT_READINGS
+        .into_iter()
+        .find(|reading| fingerprint.starts_with(reading.tag()))
+        .unwrap_or(FingerprintReading::Released)
 }
 
 fn fingerprint_text(reading: FingerprintReading, digest: String) -> String {
@@ -5236,7 +5299,9 @@ fn fingerprint_domain(schema_version: i64, reading: FingerprintReading) -> &'sta
         FingerprintReading::Defaults => STYLE_DEFAULTS_FINGERPRINT_DOMAIN,
         FingerprintReading::FacetsDefaults => FACETS_STYLE_DEFAULTS_FINGERPRINT_DOMAIN,
         FingerprintReading::PatternsDefaults => PATTERNS_STYLE_DEFAULTS_FINGERPRINT_DOMAIN,
-        FingerprintReading::FacetsPatternsDefaults => FACETS_PATTERNS_STYLE_DEFAULTS_FINGERPRINT_DOMAIN,
+        FingerprintReading::FacetsPatternsDefaults => {
+            FACETS_PATTERNS_STYLE_DEFAULTS_FINGERPRINT_DOMAIN
+        }
         FingerprintReading::LegacyDefaults => LEGACY_STYLE_DEFAULTS_FINGERPRINT_DOMAIN,
         FingerprintReading::LegacyFacets => LEGACY_FACETS_FINGERPRINT_DOMAIN,
         FingerprintReading::LegacyPatterns => LEGACY_PATTERN_FILLS_FINGERPRINT_DOMAIN,
@@ -5358,7 +5423,15 @@ fn fingerprint_model(
             &sheet.col_styles,
             "column styles",
         )?;
-        let row_styles = sheet_json(specs.iter().any(|spec| spec.include_row_styles) && model.sheets.iter().any(|sheet| !sheet.row_styles.is_empty()), &sheet.row_styles, "row styles")?;
+        let row_styles = sheet_json(
+            specs.iter().any(|spec| spec.include_row_styles)
+                && model
+                    .sheets
+                    .iter()
+                    .any(|sheet| !sheet.row_styles.is_empty()),
+            &sheet.row_styles,
+            "row styles",
+        )?;
         for (hasher, spec) in hashers.iter_mut().zip(specs) {
             let (col_widths, row_heights) = match spec.legacy_dimensions.get(index) {
                 Some(legacy) => (&legacy.col_widths, &legacy.row_heights),
@@ -5892,7 +5965,8 @@ fn fingerprint_model_current_oracle(model: &WorkbookModel) -> Result<(String, u6
         has_style_defaults(model),
         fingerprint_domain(
             SCHEMA_VERSION,
-            FingerprintReading::of(true, !released_styles(&model.styles)).with_defaults(has_style_defaults(model)),
+            FingerprintReading::of(true, !released_styles(&model.styles))
+                .with_defaults(has_style_defaults(model)),
         ),
     )
 }
@@ -5905,7 +5979,14 @@ fn fingerprint_model_with_domain_oracle(
     include_col_styles: bool,
     domain: &[u8],
 ) -> Result<(String, u64), String> {
-    fingerprint_model_with_row_domain_oracle(model, schema_version, include_defined_names, include_col_styles, false, domain)
+    fingerprint_model_with_row_domain_oracle(
+        model,
+        schema_version,
+        include_defined_names,
+        include_col_styles,
+        false,
+        domain,
+    )
 }
 
 #[cfg(test)]
@@ -5920,8 +6001,14 @@ fn fingerprint_model_with_row_domain_oracle(
     validate_schema_version(schema_version)?;
     let mut hasher = Sha256::new();
     hasher.update(domain);
-    let reading = TAGGED_FINGERPRINT_READINGS.into_iter()
-        .chain([FingerprintReading::LegacyDefaults, FingerprintReading::LegacyFacets, FingerprintReading::LegacyPatterns, FingerprintReading::LegacyFacetsPatterns])
+    let reading = TAGGED_FINGERPRINT_READINGS
+        .into_iter()
+        .chain([
+            FingerprintReading::LegacyDefaults,
+            FingerprintReading::LegacyFacets,
+            FingerprintReading::LegacyPatterns,
+            FingerprintReading::LegacyFacetsPatterns,
+        ])
         .find(|reading| fingerprint_domain(schema_version, *reading) == domain)
         .unwrap_or(FingerprintReading::Released);
     let mut styles = model.styles.clone();
@@ -5962,7 +6049,9 @@ fn fingerprint_model_with_row_domain_oracle(
             .sheets
             .iter()
             .any(|sheet| !sheet.col_styles.is_empty());
-    let hash_row_styles = include_row_styles && include_col_styles && schema_version >= CHARTS_SCHEMA_VERSION
+    let hash_row_styles = include_row_styles
+        && include_col_styles
+        && schema_version >= CHARTS_SCHEMA_VERSION
         && model
             .sheets
             .iter()
@@ -6917,7 +7006,11 @@ mod tests {
         }
     }
 
-    pub(super) fn legacy_update(model: &WorkbookModel, version: i64, include_defined_names: bool) -> Vec<u8> {
+    pub(super) fn legacy_update(
+        model: &WorkbookModel,
+        version: i64,
+        include_defined_names: bool,
+    ) -> Vec<u8> {
         let base = WorkbookBase::from_model(model).unwrap();
         let (_, client_id) =
             fingerprint_model_with_schema(model, version, include_defined_names, true).unwrap();

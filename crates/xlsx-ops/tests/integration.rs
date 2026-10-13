@@ -508,7 +508,7 @@ fn a_default_full_format_under_an_italic_default_xf_renders_plain() {
                 rows: 1,
                 columns: 1,
                 formats: vec![xlsx_model::CellFormat::default()],
-                        kept: Vec::new(),
+                kept: Vec::new(),
             },
         },
     )
@@ -572,6 +572,7 @@ fn a_format_edit_that_changes_nothing_leaves_missing_cells_sparse() {
         border: Some(0),
         num_fmt_id: Some(0),
         alignment: None,
+        ..xlsx_model::Xf::default()
     }];
     let column = CellRange::new(r("A1"), CellRef::new(xlsx_model::MAX_ROWS - 1, 0));
     apply(&mut wb, &clear_italic(column)).unwrap();

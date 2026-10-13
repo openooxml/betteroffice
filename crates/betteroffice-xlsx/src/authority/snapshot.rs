@@ -1314,11 +1314,19 @@ fn base_section(tag: usize) -> usize {
 }
 
 fn manifest_tag(base: &WorkbookBase) -> u8 {
-    if base.row_styles.is_empty() { 0 } else { ROW_STYLE_MANIFEST_TAG }
+    if base.row_styles.is_empty() {
+        0
+    } else {
+        ROW_STYLE_MANIFEST_TAG
+    }
 }
 
 fn manifest_counts(tag: usize) -> usize {
-    if tag == usize::from(ROW_STYLE_MANIFEST_TAG) { BASE_SECTIONS } else { RELEASED_BASE_SECTIONS }
+    if tag == usize::from(ROW_STYLE_MANIFEST_TAG) {
+        BASE_SECTIONS
+    } else {
+        RELEASED_BASE_SECTIONS
+    }
 }
 
 /// `record` as releases before format facets wrote it: an `XF_SECTION` record
@@ -3939,7 +3947,11 @@ mod tests {
         let base = WorkbookBase::from_model(&styled_defaults_model(BTreeMap::new())).unwrap();
         let records = base_records(&base);
         assert_eq!(records[0], released_manifest(&base));
-        assert!(records.iter().all(|record| base_section(usize::from(record[0])) <= RELEASED_BASE_SECTIONS));
+        assert!(
+            records
+                .iter()
+                .all(|record| base_section(usize::from(record[0])) <= RELEASED_BASE_SECTIONS)
+        );
         for decoded in decoded_bases(&records) {
             assert!(decoded.row_styles.is_empty());
             assert_eq!(base_records(&decoded), records);

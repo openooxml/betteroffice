@@ -1257,7 +1257,15 @@ fn emit_inherited_fills(
                 continue;
             }
             if let Some((start, end, _, fill, origin)) = run.take() {
-                commands.push(fill.command(Rect { x: col.start, y: start, w: col.end - col.start, h: end - start }, (origin_x, origin)));
+                commands.push(fill.command(
+                    Rect {
+                        x: col.start,
+                        y: start,
+                        w: col.end - col.start,
+                        h: end - start,
+                    },
+                    (origin_x, origin),
+                ));
             }
             if let Some(fill) = fill {
                 if merge.is_some() {
@@ -1269,8 +1277,18 @@ fn emit_inherited_fills(
                 }
             }
         }
-        if let Some((start, end, _, fill, origin_y)) = run && end > start {
-            commands.push(fill.command(Rect { x: col.start, y: start, w: (col.end - col.start).max(0.0), h: end - start }, (origin_x, origin_y)));
+        if let Some((start, end, _, fill, origin_y)) = run
+            && end > start
+        {
+            commands.push(fill.command(
+                Rect {
+                    x: col.start,
+                    y: start,
+                    w: (col.end - col.start).max(0.0),
+                    h: end - start,
+                },
+                (origin_x, origin_y),
+            ));
         }
     }
     for merge in &sheet.merges {
@@ -1280,7 +1298,18 @@ fn emit_inherited_fills(
             && let Some(bx) = cell_box(geom, rows, cols, merges, at)
             && let Some(fill) = &fx.xf_at(at).fill
         {
-            let origin = (if at.col < cols.frozen { 0.0 } else { -cols.scroll }, if at.row < rows.frozen { 0.0 } else { -rows.scroll });
+            let origin = (
+                if at.col < cols.frozen {
+                    0.0
+                } else {
+                    -cols.scroll
+                },
+                if at.row < rows.frozen {
+                    0.0
+                } else {
+                    -rows.scroll
+                },
+            );
             commands.push(fill.command(bx.clip, origin));
         }
     }

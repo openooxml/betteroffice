@@ -533,7 +533,10 @@ impl Workbook {
     ) -> Result<(Self, u64, Option<CalculationOptions>, bool)> {
         if bytes.len() < 41
             || &bytes[..8] != MAGIC
-            || !matches!(bytes[8], RELEASED_CODEC_VERSION | PATTERN_CODEC_VERSION | CODEC_VERSION)
+            || !matches!(
+                bytes[8],
+                RELEASED_CODEC_VERSION | PATTERN_CODEC_VERSION | CODEC_VERSION
+            )
         {
             return Err(invalid("Unsupported workbook recovery codec"));
         }
@@ -1452,7 +1455,8 @@ mod tests {
 
         let plain = Workbook::from_model(model()).unwrap();
         let bytes = plain.recovery_checkpoint(0, None).unwrap();
-        let released = with_authority_state(&bytes, 3, &plain.authority.encode_released_recovery_state());
+        let released =
+            with_authority_state(&bytes, 3, &plain.authority.encode_released_recovery_state());
         let (restored, ..) = Workbook::restore_recovery_checkpoint(&released).unwrap();
         assert_eq!(restored.model, plain.model);
     }
@@ -1482,15 +1486,25 @@ mod tests {
             fg: None,
             bg: None,
         });
-        styled.styles.cell_xfs.push(xlsx_model::Xf { xf_id: Some(2), ..xlsx_model::Xf::default() });
+        styled.styles.cell_xfs.push(xlsx_model::Xf {
+            xf_id: Some(2),
+            ..xlsx_model::Xf::default()
+        });
         let workbook = Workbook::from_model(styled).unwrap();
         let bytes = workbook.recovery_checkpoint(0, None).unwrap();
-        let old = with_authority_state(&bytes, 5, &workbook.authority.encode_released_recovery_state());
+        let old = with_authority_state(
+            &bytes,
+            5,
+            &workbook.authority.encode_released_recovery_state(),
+        );
         let (restored, ..) = Workbook::restore_recovery_checkpoint(&old).unwrap();
         assert_eq!(restored.model, workbook.model);
         let new = restored.recovery_checkpoint(0, None).unwrap();
         assert_eq!(new[8], 6);
-        assert_eq!(Workbook::restore_recovery_checkpoint(&new).unwrap().0.model, restored.model);
+        assert_eq!(
+            Workbook::restore_recovery_checkpoint(&new).unwrap().0.model,
+            restored.model
+        );
     }
 
     #[test]
@@ -1502,7 +1516,9 @@ mod tests {
         let (restored, ..) = Workbook::restore_recovery_checkpoint(&old).unwrap();
         assert_eq!(restored.model, workbook.model);
         assert_eq!(restored.recovery_checkpoint(0, None).unwrap()[8], 6);
-        assert!(Workbook::restore_recovery_checkpoint(&with_authority_state(&bytes, 4, &state)).is_err());
+        assert!(
+            Workbook::restore_recovery_checkpoint(&with_authority_state(&bytes, 4, &state))
+                .is_err()
+        );
     }
-
 }
