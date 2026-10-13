@@ -1278,11 +1278,12 @@ fn rewrites_sheet_entries(
                     return Ok(false);
                 }
                 if !names_removed && local.as_ref() == b"sheet" {
-                    names_removed = sheet_relationship_ids(&reader, start, path)?
-                        .iter()
-                        .any(|id| {
-                            matches!(relationships.get(id), Some(SheetRelationship::Removed))
-                        });
+                    names_removed =
+                        sheet_relationship_ids(&reader, start, path)?
+                            .iter()
+                            .any(|id| {
+                                matches!(relationships.get(id), Some(SheetRelationship::Removed))
+                            });
                 }
                 if matches!(event, Event::Start(_)) {
                     if compatibility && compatibility_depth.is_none() {
