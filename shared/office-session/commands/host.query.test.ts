@@ -27,7 +27,7 @@ function deferred<T>() {
 async function drain() {
   for (let turn = 0; turn < 32; turn += 1) await Promise.resolve();
 }
-function observe<T>(promise: Promise<T>) {
+function observe(promise: Promise<unknown>) {
   const state: { done: boolean; result?: unknown } = { done: false };
   void promise.then((result) => { state.done = true; state.result = result; },
     (error: unknown) => { state.done = true; state.result = error; });
