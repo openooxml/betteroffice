@@ -3616,7 +3616,9 @@ impl EditSession {
     /// re-measures only its paragraph: inserts `text` at the collapsed range,
     /// or deletes `[start, end)` without it. The document changes exactly as
     /// through [`Self::insert_text`] or [`Self::delete_range`] without an
-    /// author, and the receipt is theirs.
+    /// author, and the receipt is theirs. An edit that spans paragraphs, or
+    /// whose paragraph resident input is not ready for, goes through them
+    /// instead and records nothing for the relayout.
     pub fn edit_text_resident(
         &self,
         story: &str,
@@ -3630,6 +3632,24 @@ impl EditSession {
         let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
         if text.is_some() && start != end {
             return Err(js_err("resident text insertion needs a collapsed range"));
+        }
+        if !self
+            .engine
+            .takes_resident_text_edit(story, start_para, end_para)
+        {
+            self.resident_text_edit.replace(None);
+            return match text {
+                Some(text) => self.insert_text(story, start_para, start_offset, &text, None, None),
+                None => self.delete_range(
+                    story,
+                    start_para,
+                    start_offset,
+                    end_para,
+                    end_offset,
+                    None,
+                    None,
+                ),
+            };
         }
         let receipt = self
             .engine

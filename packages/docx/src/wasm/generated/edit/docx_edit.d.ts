@@ -357,7 +357,9 @@ export class EditSession {
      * re-measures only its paragraph: inserts `text` at the collapsed range,
      * or deletes `[start, end)` without it. The document changes exactly as
      * through [`Self::insert_text`] or [`Self::delete_range`] without an
-     * author, and the receipt is theirs.
+     * author, and the receipt is theirs. An edit that spans paragraphs, or
+     * whose paragraph resident input is not ready for, goes through them
+     * instead and records nothing for the relayout.
      */
     edit_text_resident(story: string, start_para: string, start_offset: number, end_para: string, end_offset: number, text?: string | null): string;
     /**
