@@ -1593,7 +1593,8 @@ impl WorkbookAuthority {
         let version = self.schema_version()?;
         validate_schema_version(version)?;
         self.deduplicate_sheet_order()?;
-        let current = self.has_current_base_fingerprint();
+        let fingerprint = self.state_fingerprint();
+        let current = fingerprint.as_deref() == Some(self.base.fingerprint.as_str());
         if version == SCHEMA_VERSION && current {
             return Ok(false);
         }
@@ -1620,7 +1621,7 @@ impl WorkbookAuthority {
             })
             .collect::<Result<BTreeMap<_, _>, String>>()?;
         let mut txn = self.doc.transact_mut_with(HYDRATE_ORIGIN);
-        if !current {
+        if !current && fingerprint.as_deref().is_some_and(released_fingerprint) {
             migrate_pre_facet_formats(&mut txn, &self.base.styles, source)?;
         }
         let sheets = txn
@@ -1689,11 +1690,15 @@ impl WorkbookAuthority {
     }
 
     fn has_current_base_fingerprint(&self) -> bool {
+        self.state_fingerprint()
+            .is_some_and(|fingerprint| fingerprint == self.base.fingerprint)
+    }
+
+    fn state_fingerprint(&self) -> Option<String> {
         let txn = self.doc.transact();
         txn.get_map(META)
             .and_then(|meta| meta.get(&txn, BASE_FINGERPRINT))
             .and_then(|value| value.cast::<String>().ok())
-            .is_some_and(|fingerprint| fingerprint == self.base.fingerprint)
     }
 
     fn materialize_internal(
@@ -4664,6 +4669,12 @@ fn fingerprint_text(current: bool, digest: String) -> String {
     } else {
         digest
     }
+}
+
+/// Whether `fingerprint` was hashed over a release's reading of the styles
+/// from before format facets.
+fn released_fingerprint(fingerprint: &str) -> bool {
+    !fingerprint.starts_with(FACETS_FINGERPRINT_TAG)
 }
 
 fn fingerprint_domain(schema_version: i64, current: bool) -> &'static [u8] {
