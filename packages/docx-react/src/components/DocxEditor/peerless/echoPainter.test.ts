@@ -64,6 +64,18 @@ test('worker-only fonts decline main-canvas echo while retaining authoritative p
   expect(texts).toEqual([]);
 });
 
+test('a backspace that lets the line rewrap onto the previous one declines', () => {
+  const { painter } = setup();
+  const glyphs = { glyphSet: 'set', fontId: 1, size: 12, color: '#000', x: 0, y: 14, next: '', right: 100,
+    device: { x: 0, y: 0, width: 100, height: 20 }, pixelRatio: 1 };
+  const line = { ...context(), text: 'cde', selection: { anchorGrapheme: 2, focusGrapheme: 2 },
+    boundaries: [0, 1, 2, 3].map((utf16) => ({ utf16, grapheme: utf16, caret: { x: utf16 * 10, y: 0, width: 1, height: 20 } })) };
+  painter.installContext({ ...line, glyphs });
+  expect(painter.preview({ kind: 'deleteBackward', payload: {} })).toBeDefined();
+  painter.installContext({ ...line, glyphs: { ...glyphs, previousSlack: 0.2 } });
+  expect(painter.preview({ kind: 'deleteBackward', payload: {} })).toBeUndefined();
+});
+
 function sessionWithHeldReplies(painter: PeerlessEchoPainter) {
   type Payload = PeerlessTextIntent['payload'];
   type Ack = CommandAck<null, undefined, DocxCommandFrame['payload']>;

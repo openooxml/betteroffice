@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test';
 import type { DisplayPage, GlyphRunPrimitive } from '../layout/render/displayList';
 import type { RetainedFrame } from '../layout/render/frameDelta';
 import type { ResidentDocxCommandEngine } from './residentCommandProtocol';
-import { projectCommandEchoContext } from './residentCommandViewProjection';
+import { projectCommandEchoContext, type EchoGlyphProvider } from './residentCommandViewProjection';
 
 function input(text = 'é🙂a') {
   const run: GlyphRunPrimitive = { kind: 'glyphRun', text, size: 12, fontId: 1, color: '#000',
@@ -139,4 +139,109 @@ test('projection echoes a cluster-positioned line as one style run within the co
   expect(context?.text).toBe(text);
   expect(context?.styleRuns.map(({ startUtf16, endUtf16, baseline }) => [startUtf16, endUtf16, baseline.x])).toEqual([[0, 160, 0]]);
   expect(context!.serializedBytes).toBeLessThanOrEqual(16 * 1024);
+});
+
+type GlyphLineOptions = { shiftX?: number; caretLine?: number; later?: DisplayPage['primitives'];
+  x?: number; advance?: number; kerned?: boolean; kerning?: number; right?: number; lines?: string[] };
+
+function glyphLine(options: GlyphLineOptions = {}) {
+  const lines = options.lines ?? ['ab ', 'cd'];
+  const text = lines.join('');
+  const runs: GlyphRunPrimitive[] = [];
+  let doc = 1;
+  lines.forEach((line, lineIndex) => {
+    let x = options.x ?? 96;
+    [...line].forEach((char, index) => {
+      const kern = options.kerned && char === 'A' && line[index + 1] === 'V' ? -2 : 0;
+      runs.push({ kind: 'glyphRun', text: char, size: 13.333, fontId: 1, color: '#000000',
+        fallbackFont: '400 13.333px Calibri, sans-serif', docStart: doc, docEnd: doc + 1,
+        glyphs: [{ id: char.charCodeAt(0), cluster: 0, y: 120 + lineIndex * 20, advance: 10 + kern,
+          x: x + (options.shiftX && lineIndex === 1 && index === 1 ? options.shiftX : 0) }] });
+      x += (options.advance ?? 10) + kern;
+      doc += 1;
+    });
+  });
+  const primitives = [...runs, ...(options.later ?? [])];
+  const page: DisplayPage = { pageIndex: 0, width: 816, height: 1056, primitives,
+    contentBounds: { x: 96, y: 96, width: options.right === undefined ? 624 : options.right - 96, height: 864 } };
+  const frame: RetainedFrame = { protocolVersion: 1, docEpoch: 1, layoutEpoch: 1, frameEpoch: 3,
+    pages: [{ pageId: 1n, pageIndex: 0, fingerprint: 1n,
+      primitiveIds: new BigUint64Array(primitives.map((_, index) => BigInt(index + 1))), page }],
+    damagedPageIds: new Set([1n]), removedPageIds: new Set(), displayList: { pages: [page] } };
+  const caretLine = options.caretLine ?? lines.length - 1;
+  const lineStart = lines.slice(0, caretLine).join('').length;
+  const caretGlyph = runs[lineStart + 1]!.glyphs[0]!;
+  const engine = {
+    proposalEngine: { readParagraphs: () => ({ ok: true, paragraphs: [{ paraId: 'p', text, atoms: [] }] }) },
+    geometryReader: { locateParagraph: () => ({ start: 0, end: text.length }), paragraphSpans: () => [{ paraId: 'p' }] },
+    paragraphSegments: () => [[{ kind: 'text', text,
+      attributes: options.kerning ? { characterSpacing: { kerning: options.kerning } } : {} }]],
+    residentCaretSnapshot: () => ({ frameEpoch: 3,
+      caretRect: { pageId: '1', pageIndex: 0, x: caretGlyph.x, y: 108 + caretLine * 20, height: 16 } }),
+  } as unknown as ResidentDocxCommandEngine;
+  const at = { story: 'body', paraId: 'p', offset: lineStart + 1 };
+  const alphabet = 'abcdeAV ';
+  const glyphSet = (kern: boolean) => {
+    const set = { key: kern ? 'kern' : 'set', fontId: 1, alphabet, horizontal: 0.01,
+      glyphIds: [...alphabet].map((char) => char.charCodeAt(0)), advances: [...alphabet].map(() => 1000),
+      kerning: kern ? [[5, 6, -200] as const] : [], unsafePairs: [], outlines: {} };
+    return { key: set.key, ink: { upem: 1000, xMin: 0, yMin: -200, yMax: 700, overhang: 0 }, glyphs: { set, horizontal: 0.01,
+      chars: new Map([...alphabet].map((char, index) => [char, index])),
+      kerning: new Map(set.kerning.map(([left, right, units]) => [left * alphabet.length + right, units])),
+      unsafe: new Set<number>() } };
+  };
+  const sets: unknown[][] = [];
+  const glyphs: EchoGlyphProvider = { pixelRatio: 1,
+    glyphSet(fontId, size, kern) {
+      sets.push([fontId, size, kern]);
+      return glyphSet(kern);
+    },
+    glyphInk: () => ({ upem: 1000, xMin: 0, xMax: 500, yMin: -200, yMax: 700 }),
+  };
+  return { engine, selection: { anchor: at, focus: at }, layout: { frame, layoutRevision: 2 }, glyphs, sets };
+}
+
+test('glyph line reproduces the engine placement of a wrapped continuation line', () => {
+  const source = glyphLine();
+  const context = projectCommandEchoContext(source);
+  expect(source.sets).toEqual([[1, Math.fround(960 / 72), false]]);
+  expect(context?.glyphs).toEqual({ glyphSet: 'set', fontId: 1, size: 13.333, color: '#000000', x: 96, y: 140,
+    next: '', right: 720, previousSlack: 594, device: { x: 95, y: 129, width: 626, height: 15 }, pixelRatio: 1 });
+  expect(context?.damage[0]?.rect).toEqual({ x: 95, y: 129, width: 626, height: 15 });
+  expect(context?.damage[0]?.omittedPrimitiveIds).toEqual(['4', '5']);
+  const first = projectCommandEchoContext(glyphLine({ caretLine: 0 }));
+  expect(first?.glyphs).toMatchObject({ next: 'c', nextWord: 20, y: 120 });
+  expect(first?.glyphs?.previousSlack).toBeUndefined();
+});
+
+test('glyph line keeps only the glyph sets that reproduce the line spacing and kerning', () => {
+  expect(projectCommandEchoContext(glyphLine({ shiftX: 0.001 }))).toBeUndefined();
+  const { glyphs: _, ...withoutGlyphs } = glyphLine({ shiftX: 0.001 });
+  expect(projectCommandEchoContext(withoutGlyphs)?.text).toBe('cd');
+  expect(projectCommandEchoContext(glyphLine({ advance: 11 }))).toBeUndefined();
+  expect(projectCommandEchoContext(glyphLine({ lines: ['ab ', 'AVc'], kerned: true, kerning: 2 }))?.glyphs?.glyphSet)
+    .toBe('kern');
+  expect(projectCommandEchoContext(glyphLine({ lines: ['ab ', 'AVc'], kerned: true }))).toBeUndefined();
+  expect(projectCommandEchoContext(glyphLine({ lines: ['ab ', 'AVc'], kerning: 2 }))).toBeUndefined();
+});
+
+test('glyph line declines lines whose origin or stretch moves with their width', () => {
+  expect(projectCommandEchoContext(glyphLine({ x: 146 }))).toBeUndefined();
+  expect(projectCommandEchoContext(glyphLine({ right: 116 }))).toBeUndefined();
+  expect(projectCommandEchoContext(glyphLine({ right: 117 }))?.glyphs).toBeDefined();
+});
+
+test('glyph line declines decorations and backgrounds bound to its text', () => {
+  const underline = { kind: 'decoration' as const, deco: 'underline' as const, x: 96, y: 142, w: 20, h: 1, color: '#f00',
+    docStart: 4, docEnd: 6 };
+  expect(projectCommandEchoContext(glyphLine({ later: [underline] }))).toBeUndefined();
+  const highlight = { kind: 'rect' as const, x: 96, y: 128, w: 10, h: 16, fill: '#ff0', docStart: 4, docEnd: 5 };
+  expect(projectCommandEchoContext(glyphLine({ later: [highlight] }))).toBeUndefined();
+});
+
+test('glyph line declines when later paint reaches its band', () => {
+  expect(projectCommandEchoContext(glyphLine({ later: [{ kind: 'rect', x: 300, y: 138, w: 20, h: 2, fill: '#f00' }] })))
+    .toBeUndefined();
+  expect(projectCommandEchoContext(glyphLine({ later: [{ kind: 'rect', x: 300, y: 200, w: 20, h: 2, fill: '#f00' }] }))
+    ?.glyphs).toBeDefined();
 });
