@@ -99,6 +99,15 @@ test('echo declines a line that would wrap or pull a word up from the next line'
   expect(painter.preview({ kind: 'deleteBackward', payload: {} })).toBeUndefined();
 });
 
+test('echo declines deleting the sole 24pt glyph above a 10pt paragraph mark', () => {
+  const { painter } = setup();
+  const line = { ...context(), text: 'a', selection: { anchorGrapheme: 1, focusGrapheme: 1 },
+    boundaries: context().boundaries.slice(0, 2),
+    glyphs: Object.assign({ ...context().glyphs!, size: 32 }, { canEmpty: false }) };
+  painter.installContext(line);
+  expect(painter.preview({ kind: 'deleteBackward', payload: {} })).toBeUndefined();
+});
+
 test('a backspace that lets the line rewrap onto the previous one declines', () => {
   const { painter } = setup();
   const glyphs = { glyphSet: 'set', fontId: 1, size: 12, color: '#000', x: 0, y: 14, next: '', right: 100,

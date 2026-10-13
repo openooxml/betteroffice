@@ -252,4 +252,41 @@ mod tests {
             == 1;
         assert_eq!(set.unsafe_pairs.contains(&[0, 1]), ligated);
     }
+
+    #[test]
+    fn three_component_ligature_without_pair_ligatures_is_not_echoed() {
+        let (store, font) = store();
+        let f = store.glyph_id(font, 'f').unwrap().unwrap();
+        let i = store.glyph_id(font, 'i').unwrap().unwrap();
+        let ligature = store.glyph_id(font, 'A').unwrap().unwrap();
+        let mut gsub = Vec::new();
+        for value in [1u16, 0, 10, 30, 44, 1] {
+            gsub.extend(value.to_be_bytes());
+        }
+        gsub.extend(b"DFLT");
+        for value in [8u16, 4, 0, 0, 0xffff, 1, 0, 1] {
+            gsub.extend(value.to_be_bytes());
+        }
+        gsub.extend(b"liga");
+        for value in [8u16, 0, 1, 0, 1, 4, 4, 0, 1, 8, 1, 20, 1, 8, 1, 4, ligature, 3, f, i, 1, 1, f] {
+            gsub.extend(value.to_be_bytes());
+        }
+        let mut bytes = LIBERATION_SANS.to_vec();
+        let count = u16::from_be_bytes(bytes[4..6].try_into().unwrap()) as usize;
+        let entry = (0..count).map(|index| 12 + index * 16)
+            .find(|&offset| &bytes[offset..offset + 4] == b"GSUB").unwrap();
+        let offset = bytes.len() as u32;
+        bytes[entry + 8..entry + 12].copy_from_slice(&offset.to_be_bytes());
+        bytes[entry + 12..entry + 16].copy_from_slice(&(gsub.len() as u32).to_be_bytes());
+        bytes.extend(gsub);
+        let mut store = FontStore::new();
+        let font = store.register(bytes).unwrap();
+        let shape = |text| shape_with_direction(&store, font, text, 16.0, &kern_features(false), ShapeDirection::Ltr).unwrap();
+        assert_eq!(shape("ff").len(), 2);
+        assert_eq!(shape("fi").len(), 2);
+        assert_eq!(shape("ffi").len(), 1);
+        let set = echo_glyph_set(&store, font, 16.0, false, &['f', 'i']).unwrap();
+        assert!(set.glyph_ids[0] == 0 || set.unsafe_pairs.contains(&[0, 0]) || set.unsafe_pairs.contains(&[0, 1]),
+            "ffi must decline even when ff and fi shape independently");
+    }
 }

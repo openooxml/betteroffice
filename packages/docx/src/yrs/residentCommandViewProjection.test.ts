@@ -3,6 +3,7 @@ import type { DisplayPage, GlyphRunPrimitive } from '../layout/render/displayLis
 import type { RetainedFrame } from '../layout/render/frameDelta';
 import type { ResidentDocxCommandEngine } from './residentCommandProtocol';
 import { projectCommandEchoContext, type EchoGlyphProvider } from './residentCommandViewProjection';
+import { indexEchoGlyphSet, placeEchoGlyphs } from './residentEchoGlyphs';
 
 function input(text = 'é🙂a') {
   const run: GlyphRunPrimitive = { kind: 'glyphRun', text, size: 12, fontId: 1, color: '#000',
@@ -170,14 +171,15 @@ function glyphLine(options: GlyphLineOptions = {}) {
     damagedPageIds: new Set([1n]), removedPageIds: new Set(), displayList: { pages: [page] } };
   const caretLine = options.caretLine ?? lines.length - 1;
   const lineStart = lines.slice(0, caretLine).join('').length;
-  const caretGlyph = runs[lineStart + 1]!.glyphs[0]!;
+  const caretGlyph = runs[lineStart + Math.min(1, lines[caretLine]!.length - 1)]!.glyphs[0]!;
   const engine = {
     proposalEngine: { readParagraphs: () => ({ ok: true, paragraphs: [{ paraId: 'p', text, atoms: [] }] }) },
     geometryReader: { locateParagraph: () => ({ start: 0, end: text.length }), paragraphSpans: () => [{ paraId: 'p' }] },
     paragraphSegments: () => [[{ kind: 'text', text,
       attributes: options.kerning ? { characterSpacing: { kerning: options.kerning } } : {} }]],
     residentCaretSnapshot: () => ({ frameEpoch: 3,
-      caretRect: { pageId: '1', pageIndex: 0, x: caretGlyph.x, y: 108 + caretLine * 20, height: 16 } }),
+      caretRect: { pageId: '1', pageIndex: 0, x: caretGlyph.x + (lines[caretLine]!.length === 1 ? 10 : 0),
+        y: 108 + caretLine * 20, height: 16 } }),
   } as unknown as ResidentDocxCommandEngine;
   const at = { story: 'body', paraId: 'p', offset: lineStart + 1 };
   const alphabet = 'abcdeAV ';
@@ -245,3 +247,74 @@ test('glyph line declines when later paint reaches its band', () => {
   expect(projectCommandEchoContext(glyphLine({ later: [{ kind: 'rect', x: 300, y: 200, w: 20, h: 2, fill: '#f00' }] }))
     ?.glyphs).toBeDefined();
 });
+
+test('echo uses the resolved right edge of a style with a 1440 twip right indent', () => {
+  const source = glyphLine({ lines: ['ab ', 'cd'] });
+  for (const run of source.layout.frame.pages[0]!.page.primitives) {
+    if (run.kind === 'glyphRun') Object.assign(run, { echo: { x: 96, right: 624, kern: false, primaryFont: true } });
+  }
+  expect(projectCommandEchoContext(source)?.glyphs?.right).toBe(624);
+});
+
+test('echo declines a single character with expanded tracking', () => {
+  const source = glyphLine({ lines: ['c'] });
+  Object.assign(source.engine, { paragraphSegments: () => [[{ kind: 'text', text: 'c',
+    attributes: { characterSpacing: { spacing: 40 } } }]] });
+  for (const run of source.layout.frame.pages[0]!.page.primitives) {
+    if (run.kind === 'glyphRun') Object.assign(run, { echo: { x: 96, right: 720, kern: false, primaryFont: true,
+      letterSpacing: 40 / 15 } });
+  }
+  expect(projectCommandEchoContext(source)).toBeUndefined();
+});
+
+test('echo declines fallback letters when a digits-only primary will resolve future digits', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { preloadEditWasm } = await import('./wasm/index');
+  const { createResidentEngineSession } = await import('./residentEngineSession');
+  await preloadEditWasm(new Uint8Array(readFileSync('packages/docx/src/wasm/generated/edit/docx_edit_bg.wasm')));
+  const bytes = new Uint8Array(readFileSync('crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'));
+  const primary = new Uint8Array(bytes.length + 40);
+  primary.set(bytes);
+  const view = new DataView(primary.buffer);
+  const cmap = bytes.length;
+  view.setUint16(cmap + 2, 1);
+  view.setUint16(cmap + 4, 3);
+  view.setUint16(cmap + 6, 10);
+  view.setUint32(cmap + 8, 12);
+  view.setUint16(cmap + 12, 12);
+  view.setUint32(cmap + 16, 28);
+  view.setUint32(cmap + 24, 1);
+  view.setUint32(cmap + 28, 48);
+  view.setUint32(cmap + 32, 57);
+  view.setUint32(cmap + 36, 36);
+  for (let index = 0; index < view.getUint16(4); index += 1) {
+    const entry = 12 + index * 16;
+    if (view.getUint32(entry) === 0x636d6170) {
+      view.setUint32(entry + 8, cmap);
+      view.setUint32(entry + 12, 40);
+    }
+  }
+  const engine = await createResidentEngineSession();
+  try {
+    const digits = engine.registerFont(primary);
+    const fallback = engine.registerFont(bytes);
+    expect(JSON.parse(engine.echoGlyphSetJson(digits, 13.333333, false, 'abc1')).glyphIds.slice(0, 3)).toEqual([0, 0, 0]);
+    const shaped = JSON.parse(engine.echoGlyphSetJson(fallback, Math.fround(960 / 72), false, 'abc1'));
+    expect(JSON.parse(engine.echoGlyphSetJson(digits, 13.333333, false, '1')).glyphIds[0]).not.toBe(shaped.glyphIds[3]);
+    const glyphs = indexEchoGlyphSet({ key: 'fallback', fontId: fallback, alphabet: 'abc1', ...shaped, outlines: {} });
+    const placement = placeEchoGlyphs(glyphs, 'abc', '', 96)!;
+    const source = glyphLine({ lines: ['abc'] });
+    for (const [index, run] of source.layout.frame.pages[0]!.page.primitives.entries()) {
+      if (run.kind !== 'glyphRun') continue;
+      run.fontId = fallback;
+      run.glyphs[0] = { ...run.glyphs[0]!, id: placement.glyphIds[index]!, x: placement.xs[index]!,
+        advance: placement.advances[index]! };
+      Object.assign(run, { echo: { x: 96, right: 720, kern: false, primaryFont: false } });
+    }
+    Object.assign(source.engine, { residentCaretSnapshot: () => ({ frameEpoch: 3,
+      caretRect: { pageId: '1', pageIndex: 0, x: placement.xs[1], y: 108, height: 16 } }) });
+    source.glyphs.glyphSet = () => ({ key: 'fallback', glyphs,
+      ink: { upem: 2048, xMin: 0, yMin: -400, yMax: 1500, overhang: 0 } });
+    expect(projectCommandEchoContext(source)).toBeUndefined();
+  } finally { engine.destroy(); }
+}, 20000);
