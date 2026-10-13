@@ -281,55 +281,54 @@ fn format_facets_bounded_snapshot_and_replay() {
         ..Default::default()
     };
     model.styles.cell_xfs.push(xf);
+    let at = CellRef::new(0, 0);
+    let range = CellRange::new(at, at);
     model.sheets[0].set_cell(
-        CellRef::new(0, 0),
+        at,
         Cell {
             style: Some(0),
             value: CellValue::Number { value: 7.0 },
             ..Default::default()
         },
     );
-    let mut workbook = Workbook::from_model(model).unwrap();
-    for budget in budgets() {
-        let peer = hydrate(&workbook, budget);
-        assert_eq!(
-            serde_json::to_value(&peer.model().styles.cell_xfs[0]).unwrap(),
-            expected
-        );
-    }
-    workbook
-        .patch_range_style(
-            SheetId(0),
-            CellRange::new(CellRef::new(0, 0), CellRef::new(0, 0)),
-            crate::StylePatch {
-                bold: Some(true),
-                ..Default::default()
-            },
-            context(),
-        )
-        .unwrap();
-    let mut peer = hydrate(&workbook, budgets()[0]);
-    assert_eq!(peer.model().styles, workbook.model().styles);
-    peer.patch_range_style(
-        SheetId(0),
-        CellRange::new(CellRef::new(0, 0), CellRef::new(0, 0)),
+    let patches = [
+        crate::StylePatch {
+            bold: Some(true),
+            ..Default::default()
+        },
         crate::StylePatch {
             italic: Some(true),
             ..Default::default()
         },
-        context(),
-    )
-    .unwrap();
-    let style = peer.model().sheets[0]
-        .cell(CellRef::new(0, 0))
-        .unwrap()
-        .style;
-    let format = serde_json::to_value(peer.model().styles.cell_format(style)).unwrap();
-    assert_eq!(format["protection"], expected["protection"]);
-    assert_eq!(format["alignment"], expected["alignment"]);
-    assert_eq!(format["xfId"], expected["xf_id"]);
-    assert_eq!(format["quotePrefix"], expected["quote_prefix"]);
-    assert_eq!(format["pivotButton"], expected["pivot_button"]);
+    ];
+    for budget in budgets() {
+        let mut worker = Workbook::from_model(model.clone()).unwrap();
+        let mut peer = hydrate(&worker, budget);
+        assert_eq!(
+            serde_json::to_value(&peer.model().styles.cell_xfs[0]).unwrap(),
+            expected
+        );
+        for (step, patch) in patches.iter().enumerate() {
+            for workbook in [&mut worker, &mut peer] {
+                workbook
+                    .patch_range_style(SheetId(0), range, patch.clone(), context())
+                    .unwrap();
+            }
+            assert_edited_identity(&worker, &peer);
+            for workbook in [&worker, &peer] {
+                let style = workbook.model().sheets[0].cell(at).unwrap().style;
+                let format =
+                    serde_json::to_value(workbook.model().styles.cell_format(style)).unwrap();
+                assert_eq!(format["font"]["bold"], true);
+                assert_eq!(format["font"]["italic"], step == 1);
+                assert_eq!(format["protection"], expected["protection"]);
+                assert_eq!(format["alignment"], expected["alignment"]);
+                assert_eq!(format["xfId"], expected["xf_id"]);
+                assert_eq!(format["quotePrefix"], expected["quote_prefix"]);
+                assert_eq!(format["pivotButton"], expected["pivot_button"]);
+            }
+        }
+    }
 }
 
 fn canonical_model(model: &WorkbookModel) -> Vec<Vec<u8>> {
