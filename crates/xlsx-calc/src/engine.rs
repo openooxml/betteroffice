@@ -391,20 +391,19 @@ struct Spills {
 
 impl Spills {
     fn new(wb: &Workbook, members: &[Key]) -> Self {
+        let rectangles: Vec<(usize, SheetId, CellRange)> = members
+            .iter()
+            .enumerate()
+            .filter_map(|(id, &u)| {
+                let range = wb.sheet(u.0)?.array_formula(cell_of(u))?;
+                (range.start != range.end).then_some((id, u.0, range))
+            })
+            .collect();
         let mut spills = Self {
             sizes: Vec::new(),
             blocks: HashMap::new(),
         };
-        for (id, &u) in members.iter().enumerate() {
-            let Some(range) = wb
-                .sheet(u.0)
-                .and_then(|sheet| sheet.array_formula(cell_of(u)))
-            else {
-                continue;
-            };
-            if range.start == range.end {
-                continue;
-            }
+        for (id, sheet, range) in rectangles {
             let size = (
                 (range.end.row - range.start.row).saturating_add(1).ilog2(),
                 (range.end.col - range.start.col).saturating_add(1).ilog2(),
@@ -413,7 +412,7 @@ impl Spills {
                 spills.sizes.push(size);
             }
             let block = (
-                u.0,
+                sheet,
                 size.0,
                 size.1,
                 range.start.row >> size.0,
