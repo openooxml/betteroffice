@@ -13,6 +13,7 @@ import type {
   LineCmd,
   PathCmd,
   Rect,
+  TextAlign,
   TextCmd,
 } from '../display-list/types';
 import { paintNumberFormat } from './number-format';
@@ -175,23 +176,29 @@ function paintText(ctx: CanvasRenderingContext2D, cmd: TextCmd): void {
   }
   ctx.fillStyle = cmd.color;
   ctx.font = fontString(cmd);
-  ctx.textAlign = ALIGN_TO_TEXT_ALIGN[cmd.align ?? 'left'];
   ctx.textBaseline = 'alphabetic';
-  const paint = (text: string, x: number, align = cmd.align ?? 'left') => {
-    const run = { ...cmd, text, x, align };
-    ctx.textAlign = ALIGN_TO_TEXT_ALIGN[align];
-    if (cmd.highlight) paintHighlight(ctx, run);
-    ctx.fillStyle = cmd.color;
-    ctx.fillText(text, x, cmd.y);
-    if (cmd.underline || cmd.strike || cmd.dashedUnderline) paintDecorations(ctx, run);
-  };
   if (cmd.numberFormat) {
-    paintNumberFormat(cmd.text, cmd.numberFormat, cmd.align ?? 'left',
-      (text) => ctx.measureText(text).width, (text, x) => paint(text, x, 'left'));
+    ctx.textAlign = 'left';
+    paintNumberFormat(ctx, cmd, cmd.numberFormat, paintRun);
   } else {
-    paint(cmd.text, cmd.x);
+    const align = cmd.align ?? 'left';
+    ctx.textAlign = ALIGN_TO_TEXT_ALIGN[align];
+    paintRun(ctx, cmd, cmd.text, cmd.x, align);
   }
   ctx.restore();
+}
+
+function paintRun(
+  ctx: CanvasRenderingContext2D,
+  cmd: TextCmd,
+  text: string,
+  x: number,
+  align: TextAlign
+): void {
+  if (cmd.highlight) paintHighlight(ctx, cmd, text, x, align);
+  ctx.fillStyle = cmd.color;
+  ctx.fillText(text, x, cmd.y);
+  if (cmd.underline || cmd.strike || cmd.dashedUnderline) paintDecorations(ctx, cmd, text, x, align);
 }
 
 // css font shorthand: `[italic] [bold] <size>px <family>`. Workbook fonts are
@@ -212,10 +219,15 @@ function fontSizePx(cmd: TextCmd): number {
   return cmd.fontSize * PX_PER_PT;
 }
 
-function paintDecorations(ctx: CanvasRenderingContext2D, cmd: TextCmd): void {
-  const width = ctx.measureText(cmd.text).width;
-  const align = cmd.align ?? 'left';
-  const x0 = align === 'right' ? cmd.x - width : align === 'center' ? cmd.x - width / 2 : cmd.x;
+function paintDecorations(
+  ctx: CanvasRenderingContext2D,
+  cmd: TextCmd,
+  text: string,
+  x: number,
+  align: TextAlign
+): void {
+  const width = ctx.measureText(text).width;
+  const x0 = align === 'right' ? x - width : align === 'center' ? x - width / 2 : x;
   const fontSize = fontSizePx(cmd);
   const thickness = Math.max(fontSize * 0.05, 0.5);
   ctx.fillStyle = cmd.color;
@@ -231,11 +243,16 @@ function paintDecorations(ctx: CanvasRenderingContext2D, cmd: TextCmd): void {
   }
 }
 
-function paintHighlight(ctx: CanvasRenderingContext2D, cmd: TextCmd): void {
-  const metrics = ctx.measureText(cmd.text);
+function paintHighlight(
+  ctx: CanvasRenderingContext2D,
+  cmd: TextCmd,
+  text: string,
+  x: number,
+  align: TextAlign
+): void {
+  const metrics = ctx.measureText(text);
   const width = metrics.width;
-  const align = cmd.align ?? 'left';
-  const x0 = align === 'right' ? cmd.x - width : align === 'center' ? cmd.x - width / 2 : cmd.x;
+  const x0 = align === 'right' ? x - width : align === 'center' ? x - width / 2 : x;
   const fontSize = fontSizePx(cmd);
   const ascent = metrics.actualBoundingBoxAscent || fontSize * 0.8;
   const descent = metrics.actualBoundingBoxDescent || fontSize * 0.2;
