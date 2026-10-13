@@ -17,3 +17,15 @@ export const docxVersionSchema = z.number().int().nonnegative().describe('versio
 export const docxBatchSchema = z.object({ version: docxVersionSchema, edits: z.array(docxEditSchema).min(1).max(32) }).strict();
 export type DocxAgentEdit = z.infer<typeof docxEditSchema>;
 export type DocxAgentBatch = z.infer<typeof docxBatchSchema>;
+
+/** What one edit did: its target ref, the resolved style, the formatted range, new paragraph refs, or whether the table went with its last row. */
+export interface DocxEditOutcome {
+  index: number;
+  op: DocxAgentEdit['op'];
+  ref?: string;
+  style?: string;
+  start?: number;
+  end?: number;
+  refs?: Array<string | null>;
+  deletedTable?: boolean;
+}

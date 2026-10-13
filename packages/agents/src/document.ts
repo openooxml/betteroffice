@@ -1,6 +1,6 @@
 import { createYrsSession, saveYrsDocx, type DocxParagraphTarget, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
 import { cellPosition, deleteParagraph, deleteTableRow, hostEdit, insertTableRow, lineText, notInTable, requireParagraph, resolveStyle, tableCells, type ParagraphStyle } from './docx-edits';
-import { docxBatchSchema, type DocxAgentBatch, type DocxAgentEdit } from './docx-schema';
+import { docxBatchSchema, type DocxAgentBatch, type DocxAgentEdit, type DocxEditOutcome } from './docx-schema';
 import {
   DocumentToolError,
   type DocumentOptions,
@@ -26,7 +26,7 @@ interface Paragraph extends ParagraphRef {
   table?: TableCellPosition;
 }
 
-type EditStep = (draft: YrsSession) => { result: Record<string, unknown>; created?: DocxParagraphTarget[] };
+type EditStep = (draft: YrsSession) => { result: Omit<DocxEditOutcome, 'index' | 'op' | 'refs'>; created?: DocxParagraphTarget[] };
 
 interface HeldProposal {
   value: Proposal;
@@ -196,7 +196,7 @@ export class DocxAgentDocument {
     this.index();
     return {
       applied: true as const, version: this.epoch,
-      results: outcomes.map(({ result, created }, index) => ({
+      results: outcomes.map(({ result, created }, index): DocxEditOutcome => ({
         index, op: edits[index].op, ...result,
         ...(created && { refs: created.map(({ story, paraId }) => this.identities.get(JSON.stringify([story, paraId]))?.ref ?? null) }),
       })),
