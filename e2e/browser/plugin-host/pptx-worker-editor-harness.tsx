@@ -139,7 +139,7 @@ let file: Uint8Array;
 let fonts: { family: string; bytes: Uint8Array }[];
 let readOnly = false;
 const render = () => root.render(<div data-editor>
-  <PptxEditor file={file} fonts={fonts} experimentalWorkerOpen clientId={42} readOnly={readOnly}
+  <PptxEditor legacySyncApi file={file} fonts={fonts} experimentalWorkerOpen clientId={42} readOnly={readOnly}
     onError={(error) => errors.push({ name: error.name,
       code: error instanceof PptxWorkerEditorFailedError || error instanceof PptxPeerNotReadyError ? error.code : '',
       cause: error instanceof PptxWorkerEditorFailedError && error.cause instanceof SessionFailure ? error.cause.code : '',

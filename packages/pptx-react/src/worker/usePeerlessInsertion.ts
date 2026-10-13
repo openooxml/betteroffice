@@ -9,6 +9,17 @@ import type { PeerlessPresentation } from './usePeerlessPresentation';
 
 export interface PeerlessInsertionOrigin { run: PeerlessPresentation; slideId: string }
 
+interface TextBoxEcho { origin: PeerlessInsertionOrigin; rect: ShapeRect; seq?: number }
+
+function displayCoordinate(emu: number): number {
+  const pixels = Math.fround(Math.fround(emu) * Math.fround(1 / 9525));
+  for (let digits = 1; digits <= 9; digits++) {
+    const value = Number(pixels.toPrecision(digits));
+    if (Math.fround(value) === pixels) return value;
+  }
+  return pixels;
+}
+
 const imageTypes: Record<string, string> = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg',
   gif: 'image/gif', bmp: 'image/bmp', tif: 'image/tiff', tiff: 'image/tiff', webp: 'image/webp', svg: 'image/svg+xml' };
 
@@ -67,8 +78,10 @@ export async function insertPeerlessPicture(origin: PeerlessInsertionOrigin, fil
 
 export function usePeerlessInsertion(run: PeerlessPresentation | null, canvas: RefObject<HTMLCanvasElement | null>, focus: () => void) {
   const { t } = useTranslation();
-  const [tool, setTool] = useState<PptxEditorTool>('select');
+  const [tool, updateTool] = useState<PptxEditorTool>('select');
   const [preview, setPreview] = useState<ShapeRect | null>(null);
+  const [echo, setEcho] = useState<TextBoxEcho | null>(null);
+  const pending = useRef<TextBoxEcho | null>(null);
   const gesture = useRef<{ origin: PeerlessInsertionOrigin; start: SlidePoint; end: SlidePoint;
     pointerId: number; element: HTMLElement; tool: PptxEditorTool } | null>(null);
   const cancel = useCallback(() => {
@@ -77,7 +90,10 @@ export function usePeerlessInsertion(run: PeerlessPresentation | null, canvas: R
     gesture.current = null;
     current?.element.releasePointerCapture?.(current.pointerId);
     setPreview(null);
+    pending.current = null;
+    setEcho(null);
   }, []);
+  const setTool = useCallback((value: PptxEditorTool) => { pending.current = null; setEcho(null); updateTool(value); }, []);
   useEffect(() => {
     setTool('select');
     return cancel;
@@ -86,9 +102,19 @@ export function usePeerlessInsertion(run: PeerlessPresentation | null, canvas: R
     window.addEventListener('blur', cancel);
     const changed = () => {
       if (gesture.current && (!run?.inputEnabled || run.store.getSnapshot().confirmed?.frame.slideId !== gesture.current.origin.slideId)) cancel();
+      const insertion = pending.current;
+      if (!insertion) return;
+      const displayed = run?.getVisualSnapshot()?.view.confirmed?.frame;
+      if (!run?.inputEnabled || run.store.getSnapshot().confirmed?.frame.slideId !== insertion.origin.slideId ||
+        displayed?.slideId !== insertion.origin.slideId ||
+        insertion.seq !== undefined && displayed.coversThroughSeq >= insertion.seq) {
+        pending.current = null;
+        setEcho(null);
+      }
     };
     const release = run?.store.subscribePresentation(changed);
-    return () => { window.removeEventListener('blur', cancel); release?.(); };
+    const visual = run?.subscribeVisual(changed);
+    return () => { window.removeEventListener('blur', cancel); release?.(); visual?.(); };
   }, [run, cancel]);
   const point = (event: PointerEvent<HTMLElement>) => {
     const frame = run?.getVisualSnapshot()?.view.confirmed;
@@ -135,16 +161,29 @@ export function usePeerlessInsertion(run: PeerlessPresentation | null, canvas: R
       width: Math.round(Math.max(12, width) * size.width / frame.width), height: Math.round(Math.max(12, height) * size.height / frame.height) };
     const payload = { slideId: current.origin.slideId, inputTime: event.timeStamp, undoGroup: 'insertion' };
     const preset = shapePresetFromTool(current.tool);
+    const insertion: TextBoxEcho | null = textbox ? { origin: current.origin, rect: {
+      x: displayCoordinate(rect.x), y: displayCoordinate(rect.y),
+      width: displayCoordinate(rect.width), height: displayCoordinate(rect.height),
+    } } : null;
+    pending.current = insertion;
+    setEcho(insertion);
     const operation = textbox ? current.origin.run.store.dispatch({ kind: 'insertTextBox', payload: { ...payload,
       draft: { name: t('objects.defaultTextBoxName'), rect, text: '', style: DEFAULT_EDITOR_TEXT_STYLE } } })
       : preset ? current.origin.run.store.dispatch({ kind: 'insertShape', payload: { ...payload,
         draft: { name: preset, rect, geometry: preset, fill: '#d9eaf7' } } }) : null;
-    setTool('select');
+    updateTool('select');
+    if (operation && textbox) focus();
+    const clear = () => { if (pending.current === insertion) { pending.current = null; setEcho(null); } };
     void operation?.then((ack) => {
-      if (current.origin.run.current && ack.outcomes.some((outcome) => outcome.committed) && textbox) focus();
-    }).catch(() => {});
+      if (!insertion || pending.current !== insertion) return;
+      if (ack.outcomes.some((outcome) => outcome.seq === ack.throughSeq && outcome.status === 'refused')) { clear(); return; }
+      insertion.seq = ack.throughSeq;
+      const displayed = current.origin.run.getVisualSnapshot()?.view.confirmed?.frame;
+      if (!current.origin.run.inputEnabled || displayed?.slideId !== insertion.origin.slideId ||
+        displayed.coversThroughSeq >= insertion.seq) clear();
+    }, clear);
     return true;
   };
-  return { tool, preview, setTool, cancel, onPointerDown, onPointerMove, onPointerUp,
+  return { tool, preview, echo: echo?.origin.run === run ? echo : null, setTool, cancel, onPointerDown, onPointerMove, onPointerUp,
     onPointerCancel: (event: PointerEvent<HTMLElement>) => { if (gesture.current?.pointerId === event.pointerId) cancel(); } };
 }

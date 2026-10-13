@@ -1,5 +1,7 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { CSSProperties, RefObject } from 'react';
+import { indexGeometry, transformedRect } from '@betteroffice/pptx/peerless';
+import type { ShapeRect } from '@betteroffice/pptx';
 import { usePeerlessCommandBinding } from '../commands/usePeerlessCommandBinding';
 import { PptxCommandContext } from '../commands/PptxCommandProvider';
 import type { PptxCommandStore } from '../commands/types';
@@ -83,11 +85,23 @@ function useStageFit(stage: RefObject<HTMLDivElement | null>, run: PeerlessPrese
   return { previewFit, current };
 }
 
-function Overlays({ run, commands, preview, onError }: { run: PeerlessPresentation; commands: PptxCommandStore; preview: PeerlessShapePreviewStore; onError(error: Error): void }) {
+function Overlays({ run, commands, preview, insertion, onError }: { run: PeerlessPresentation; commands: PptxCommandStore; preview: PeerlessShapePreviewStore; insertion: ShapeRect | null; onError(error: Error): void }) {
   const snapshot = useSyncExternalStore(run.subscribeVisual, run.getVisualSnapshot, run.getVisualSnapshot);
+  const geometry = useMemo(() => snapshot?.view.confirmed ? indexGeometry(snapshot.view.confirmed.displayList) : null,
+    [snapshot?.view.confirmed]);
   if (!snapshot?.view.confirmed) return null;
   const { view, fit } = snapshot;
   const confirmed = view.confirmed!;
+  const selected = view.selection;
+  const rectangles = selected && selected.kind !== 'object' && selected.slideId === confirmed.frame.slideId
+    ? geometry!.hits.filter(({ primitive }) => primitive.shapeId === selected.shapeId)
+      .map(({ primitive, transforms }) => transformedRect(transforms,
+        { x: primitive.x, y: primitive.y, width: primitive.w, height: primitive.h })) : [];
+  const x = Math.min(...rectangles.map((rect) => rect.x));
+  const y = Math.min(...rectangles.map((rect) => rect.y));
+  const edited = insertion ?? (rectangles.length ? { x, y,
+    width: Math.max(...rectangles.map((rect) => rect.x + rect.width)) - x,
+    height: Math.max(...rectangles.map((rect) => rect.y + rect.height)) - y } : null);
   return <div style={{ position: 'absolute', left: 0, top: 0, pointerEvents: 'none',
     touchAction: 'none', overflow: 'hidden',
     width: confirmed.displayList.width * fit.scale, height: confirmed.displayList.height * fit.scale }}>
@@ -96,8 +110,14 @@ function Overlays({ run, commands, preview, onError }: { run: PeerlessPresentati
       transform: `scale(${fit.scale})`, transformOrigin: '0 0' }}>
       <PeerlessCaret store={run.visual} />
     </div>
-    {view.selection?.kind === 'object' && <PeerlessShapeOverlay selection={view.selection} preview={preview}
+    {!insertion && view.selection?.kind === 'object' && <PeerlessShapeOverlay selection={view.selection} preview={preview}
       scale={fit.scale} readOnly={view.editState.readOnly} />}
+    {edited && <span data-testid="pptx-text-edit-outline" aria-hidden="true" style={{
+      position: 'absolute', zIndex: 3, pointerEvents: 'none', border: '2px dashed #6b7280',
+      boxSizing: 'border-box', boxShadow: '0 0 0 1px rgba(255, 255, 255, 0.9)',
+      left: edited.x * fit.scale, top: edited.y * fit.scale,
+      width: Math.max(1, edited.width * fit.scale), height: Math.max(1, edited.height * fit.scale),
+    }} />}
     <PeerlessTextInput store={run.store} commands={commands} visual={run.visual} viewport={{ left: 0, top: 0, scale: fit.scale }}
       onShortcut={(shortcut) => {
         if (shortcut === 'copy' || shortcut === 'cut') void peerlessClipboard(run, shortcut === 'cut').catch((error: unknown) => { if (!run.failure) onError(error instanceof Error ? error : new Error(String(error))); });
@@ -199,7 +219,12 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorProps) {
           return;
         }
       }
-    })().catch(() => {});
+    })().catch((cause: unknown) => {
+      if (!current || !presentation.current || presentation.failure) return;
+      const error = cause instanceof Error ? cause : new Error(String(cause));
+      console.error('[PptxEditor] onReady failed', error);
+      try { callbacks.current.onError?.(error); } catch {}
+    });
     return () => { current = false; api.current = null; if (typeof cleanup === 'function') cleanup(); };
   }, [presentation, focus, commands]);
   useEffect(() => {
@@ -223,7 +248,10 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorProps) {
         onNavigate={navigate} />}
       <div ref={stage} role="application" aria-label={t('editor.appLabel')} tabIndex={0}
         aria-readonly={Boolean(props.readOnly || failure)} style={styles.stage}
-        onKeyDownCapture={(event) => { if (event.key === 'Escape') insertion.cancel(); shapes.onKeyDown(event); }}
+        onKeyDownCapture={(event) => {
+          if (event.key === 'Escape') insertion.cancel();
+          shapes.onKeyDown(event);
+        }}
         onKeyDown={(event) => {
           if (!presentation?.current || review.diff) return;
           const selected = presentation.store.getSnapshot().selection;
@@ -245,7 +273,8 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorProps) {
           left: insertion.preview.x * insertionScale, top: insertion.preview.y * insertionScale,
           width: insertion.preview.width * insertionScale, height: insertion.preview.height * insertionScale, border: '1px dashed #2563eb' }} />}
         {presentation && !failure && props.collaboration?.presence && <PeerlessPresence run={presentation} presence={props.collaboration.presence} />}
-        {presentation && !review.diff && <Overlays run={presentation} commands={commands} preview={shapes.preview} onError={(error) => callbacks.current.onError?.(error)} />}
+        {presentation && !review.diff && <Overlays run={presentation} commands={commands} preview={shapes.preview}
+          insertion={insertion.echo?.rect ?? null} onError={(error) => callbacks.current.onError?.(error)} />}
         {presentation && <PeerlessReview run={presentation} state={review} proposals={proposals} commands={commands}
           onError={(error) => callbacks.current.onError?.(error)} exit={() => { setReview({ ...review, presenting: false }); focus(); }} />}
       </div>

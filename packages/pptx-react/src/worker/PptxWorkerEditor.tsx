@@ -1,12 +1,17 @@
-import type { PEERLESS_FLAG, PptxEditorProps } from '../PptxEditor';
+import type { PptxInThreadEditorProps } from '../PptxEditor';
+import { LEGACY_SYNC_API } from '../runtimeOptions';
 import { PptxEditorContent } from '../PptxEditor';
 import type { PptxWorkerEditorApi } from './createWorkerEditorApi';
 import { useEditableSessionPresentation } from './useEditableSessionPresentation';
 
-/** @experimental */
-export type PptxWorkerEditorProps = Omit<PptxEditorProps, 'onReady' | 'readOnly' | typeof PEERLESS_FLAG> & {
-  experimentalWorkerOpen: true;
+export type PptxWorkerEditorProps = Omit<PptxInThreadEditorProps, 'onReady' | 'readOnly' | 'experimentalWorkerOpen' | 'collaboration'> & {
+  /** @deprecated Removed in 0.6.0. Omit for the async editor. */
+  [LEGACY_SYNC_API]: true;
+  collaboration?: undefined;
+  /** Keeps worker opening enabled in the legacy runtime. */
+  experimentalWorkerOpen?: true;
   readOnly?: false;
+  /** Without `Worker`, falls back to the in-thread engine and passes `PptxEditorApi`. */
   onReady?: (api: PptxWorkerEditorApi) => void;
 };
 

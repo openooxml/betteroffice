@@ -47,6 +47,7 @@ import {
   Suspense,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -93,7 +94,7 @@ import type {
 } from './plugins/createPluginClients';
 import { PluginOverlays } from './plugins/PluginOverlays';
 import { PluginDock, useDockArea, type DockPlacement } from './plugins/PluginPanels';
-import type { PptxEditorPluginProps, PptxPluginSelection } from './plugins/types';
+import type { PptxEditorPluginProps, PptxPlugin, PptxPluginSelection } from './plugins/types';
 import { usePptxPluginHost } from './plugins/usePptxPluginHost';
 import {
   RESIZE_HANDLES,
@@ -145,7 +146,9 @@ import type { EditablePresentation } from './worker/useEditableSessionPresentati
 import { createWorkerInputCoordinator, type WorkerInputCoordinator } from './commands/workerInputCoordinator';
 import { currentContext, frameImages } from './viewer/sessionPaint';
 import type { PptxAsyncEditorApi } from './worker/createPeerlessEditorApi';
-import { PptxAsyncEditorUnavailableError } from './worker/PptxAsyncEditorUnavailableError';
+import { LEGACY_SYNC_API } from './runtimeOptions';
+import { warnPptxEngine, type PptxEngineWarning } from './engineWarnings';
+import { PeerlessPptxEditorLoader } from './PeerlessPptxEditorLoader';
 
 const THUMBNAIL_SLICE_MS = 12;
 export const PEERLESS_FLAG = 'asyncApi' as const;
@@ -266,6 +269,8 @@ export interface PptxWorkerViewerApi extends Omit<
 }
 
 export interface PptxAsyncCollaborationOptions extends Omit<PptxEditorCollaborationOptions, 'onReplica'> {
+  /** Change to open a different collaboration room. */
+  roomId?: string;
   onReplica?: (replica: import('@betteroffice/pptx').AsyncCollaborationReplica | null) => void;
 }
 
@@ -276,14 +281,15 @@ export interface PptxEditorCollaborationOptions {
   presence?: PptxPresence;
 }
 
-export interface PptxEditorProps extends PptxEditorPluginProps {
-  /** @internal */
-  [PEERLESS_FLAG]?: false;
+export interface PptxInThreadEditorProps extends PptxEditorPluginProps {
   file?: Uint8Array;
   /** Font faces; equivalent inline arrays do not reopen the presentation. */
   fonts: ReadonlyArray<PptxFontFace>;
   clientId?: number;
+  /** Uses the deprecated in-thread engine when set. */
   collaboration?: PptxEditorCollaborationOptions;
+  /** @deprecated Omit this prop to use the default worker-owned editor. */
+  experimentalWorkerOpen?: false;
   i18n?: Translations;
   className?: string;
   /** Download name for the save button; falls back to `presentation.pptx`. */
@@ -310,22 +316,41 @@ export interface PptxEditorProps extends PptxEditorPluginProps {
   showToolbar?: boolean;
 }
 
-/** @experimental */
+/** @deprecated Removed in 0.6.0. Use PptxAsyncEditorProps. */
 export type PptxWorkerViewerProps = Omit<
-  PptxEditorProps, 'onReady' | 'readOnly'
+  PptxInThreadEditorProps, 'onReady' | 'readOnly' | 'experimentalWorkerOpen' | 'collaboration' | 'plugins' | 'onChange'
 > & {
+  /** @deprecated Removed in 0.6.0. Omit for the async editor. */
+  [LEGACY_SYNC_API]: true;
+  collaboration?: undefined;
+  plugins?: readonly [];
+  onChange?: undefined;
   readOnly: true;
-  /** @experimental Opt-in worker opening currently applies to read-only editors. */
-  experimentalWorkerOpen: true;
+  /** Keeps worker opening enabled in the legacy runtime. */
+  experimentalWorkerOpen?: true;
+  /** Without `Worker`, falls back to the in-thread engine and passes `PptxEditorApi`. */
   onReady?: (api: PptxWorkerViewerApi) => void;
 };
 
-export type PptxAsyncEditorProps = Omit<PptxWorkerEditorProps, 'onReady' | 'readOnly' | 'collaboration' | 'experimentalWorkerOpen'> & {
-  [PEERLESS_FLAG]: true;
-  experimentalWorkerOpen?: true;
-  readOnly?: boolean;
+export type PptxAsyncEditorProps = Omit<PptxInThreadEditorProps,
+  'onReady' | 'collaboration' | 'experimentalWorkerOpen' | keyof PptxEditorPluginProps> & {
+  plugins?: never;
+  pluginGrants?: never;
+  onPluginError?: never;
+  /** @internal */
+  [PEERLESS_FLAG]?: true;
+  /** @deprecated Removed in 0.6.0. Omit for the async editor. */
+  [LEGACY_SYNC_API]?: false;
+  /** @deprecated False selects the in-thread engine. */
+  experimentalWorkerOpen?: boolean;
   collaboration?: PptxAsyncCollaborationOptions;
   onReady?: (api: PptxAsyncEditorApi) => void | (() => void);
+};
+
+/** @deprecated Removed in 0.6.0. Use PptxAsyncEditorProps. */
+export type PptxLegacyEditorProps = PptxInThreadEditorProps & {
+  /** @deprecated Removed in 0.6.0. Omit for the async editor. */
+  [LEGACY_SYNC_API]: true;
 };
 
 interface PictureOrigin {
@@ -544,26 +569,43 @@ const initialStyle: EffectiveTextStyle = {
   fontFamily: 'Arial',
 };
 
-type WorkerSessionProps = Omit<PptxWorkerEditorProps, 'readOnly' | 'onReady'> & {
-  readOnly: boolean;
+type WorkerSessionProps = Omit<PptxWorkerEditorProps, 'readOnly' | 'onReady' | 'experimentalWorkerOpen'> & {
+  experimentalWorkerOpen?: true;
+  readOnly?: boolean;
   onReady?: (api: PptxWorkerEditorApi | PptxWorkerViewerApi) => void;
 };
 
+type WorkerEditorSessionProps = Omit<PptxWorkerEditorProps, 'readOnly'> & { readOnly?: boolean };
+type CollaborationSessionProps = Omit<PptxLegacyEditorProps, 'experimentalWorkerOpen'> & {
+  collaboration: PptxEditorCollaborationOptions;
+  experimentalWorkerOpen?: boolean;
+};
+type GeneralEditorSessionProps = Omit<PptxLegacyEditorProps, 'experimentalWorkerOpen' | 'onReady'> & {
+  experimentalWorkerOpen?: boolean;
+  onReady?: (api: PptxEditorApi | PptxWorkerEditorApi | PptxWorkerViewerApi) => void;
+};
+
+export type PptxEditorProps = PptxAsyncEditorProps | GeneralEditorSessionProps;
+
 export function PptxEditor(props: PptxAsyncEditorProps): JSX.Element;
-export function PptxEditor(props: PptxWorkerEditorProps & { [PEERLESS_FLAG]?: false }): JSX.Element;
+export function PptxEditor(props: PptxLegacyEditorProps & { experimentalWorkerOpen: false }): JSX.Element;
+export function PptxEditor(props: CollaborationSessionProps): JSX.Element;
+export function PptxEditor(props: PptxWorkerEditorProps): JSX.Element;
+export function PptxEditor(props: WorkerEditorSessionProps & { onChange: NonNullable<PptxInThreadEditorProps['onChange']> }): JSX.Element;
+export function PptxEditor(props: WorkerEditorSessionProps & { plugins: readonly [PptxPlugin, ...PptxPlugin[]] }): JSX.Element;
 export function PptxEditor(props: PptxWorkerViewerProps): JSX.Element;
-export function PptxEditor(props: WorkerSessionProps & { [PEERLESS_FLAG]?: false }): JSX.Element;
+export function PptxEditor(props: WorkerSessionProps): JSX.Element;
 export function PptxEditor(props: PptxEditorProps): JSX.Element;
-export function PptxEditor({
-  i18n,
-  ...props
-}: PptxAsyncEditorProps | PptxWorkerEditorProps | PptxWorkerViewerProps | WorkerSessionProps | PptxEditorProps): JSX.Element {
+export function PptxEditor({ i18n, ...props }:
+  PptxAsyncEditorProps | WorkerEditorSessionProps | PptxWorkerViewerProps | WorkerSessionProps |
+  CollaborationSessionProps | PptxLegacyEditorProps | GeneralEditorSessionProps): JSX.Element {
+  const legacy = props[LEGACY_SYNC_API] === true;
   return (
     <LocaleProvider i18n={i18n}>
-      {PEERLESS_FLAG in props && props[PEERLESS_FLAG] ? (
-        <PptxAsyncEditorSession {...props as PptxAsyncEditorProps} i18n={i18n} />
+      {legacy ? (
+        <PptxEditorSession {...props as GeneralEditorSessionProps} i18n={i18n} />
       ) : (
-        <PptxEditorSession {...props as PptxWorkerEditorProps | PptxWorkerViewerProps | WorkerSessionProps | PptxEditorProps} i18n={i18n} />
+        <PptxAsyncEditorSession {...props as PptxAsyncEditorProps} i18n={i18n} />
       )}
     </LocaleProvider>
   );
@@ -571,54 +613,66 @@ export function PptxEditor({
 
 function PptxAsyncEditorSession(props: PptxAsyncEditorProps) {
   const { t } = useTranslation();
-  const [PeerlessPptxSurface] = useState(() => lazy(() => pptxPeerlessEditorLoader.load()
-    .then((module) => ({ default: module.PeerlessPptxSurface }))
-    .catch((cause: unknown) => { throw new PptxWorkerEditorChunkLoadError(cause); })));
-  const [workerAvailable] = useState(() => typeof Worker === 'function');
-  const [canvasAvailable] = useState(() => typeof OffscreenCanvas === 'function');
-  const reason = (props as { experimentalWorkerOpen?: boolean }).experimentalWorkerOpen === false ? 'worker-open-disabled'
-    : !workerAvailable ? 'no-worker' : !canvasAvailable ? 'no-offscreen-canvas' : null;
-  const error = useMemo(() => {
-    if (reason === 'worker-open-disabled') {
-      return new PptxAsyncEditorUnavailableError('The async presentation editor requires experimentalWorkerOpen to be enabled');
-    }
-    if (reason === 'no-worker') return new PptxAsyncEditorUnavailableError('The async presentation editor requires Worker support');
-    if (reason === 'no-offscreen-canvas') return new PptxAsyncEditorUnavailableError('The async presentation editor requires OffscreenCanvas support');
-    return null;
-  }, [reason]);
-  const onError = useRef(props.onError);
-  onError.current = props.onError;
-  const reported = useRef(new Set<NonNullable<typeof reason>>());
+  const [PptxAsyncInThreadSession] = useState(() => lazy(() => import('./PptxAsyncInThreadSession')
+    .then((module) => ({ default: module.PptxAsyncInThreadSession }))));
+  const inThread = props.experimentalWorkerOpen === false;
+  const identity = useMemo(() => ({}), [props.file, inThread]);
+  const start = () => ({ identity, reason: inThread ? 'deprecated' as const
+    : typeof Worker !== 'function' ? 'no-worker' as const
+    : typeof OffscreenCanvas !== 'function' ? 'no-offscreen-canvas' as const : undefined });
+  const [choice, setChoice] = useState(start);
+  const engine = choice.identity === identity ? choice : start();
+  if (choice !== engine) setChoice(engine);
+  useEffect(() => { if (engine.reason) warnPptxEngine(engine.reason); }, [engine.reason]);
+  const unsupportedPlugins = !engine.reason && ((props as PptxEditorPluginProps).plugins?.length ?? 0) > 0;
+  const pluginError = useMemo(() => new Error(`PptxEditor plugins require ${LEGACY_SYNC_API}={true}.`), []);
+  const reportedPlugins = useRef(false);
   useEffect(() => {
-    if (reason === null) {
-      reported.current.clear();
-      return;
-    }
-    if (reported.current.has(reason)) return;
-    reported.current.add(reason);
-    if (error) onError.current?.(error);
-  }, [error, reason]);
-  return error ? <div className={props.className} role="alert">{error.message}</div>
-    : <PeerlessEditorBoundary onError={props.onError} className={props.className}>
-      <Suspense fallback={<div className={props.className} role="status">{t('worker.preparing')}</div>}>
-        <PeerlessPptxSurface {...props} />
-      </Suspense>
-    </PeerlessEditorBoundary>;
+    if (!unsupportedPlugins || reportedPlugins.current) return;
+    reportedPlugins.current = true;
+    try { props.onError?.(pluginError); } catch {}
+  }, [unsupportedPlugins, pluginError, props.onError]);
+  if (unsupportedPlugins) return <PeerlessEditorError error={pluginError} className={props.className} />;
+  const fallback = <div className={props.className} role="status">{t('worker.preparing')}</div>;
+  return <PeerlessEditorBoundary onError={props.onError} className={props.className}>
+    {engine.reason ? <Suspense fallback={fallback}><PptxAsyncInThreadSession {...props} /></Suspense>
+      : <PeerlessPptxEditorLoader load={pptxPeerlessEditorLoader.load} identity={identity}
+        ErrorType={PptxWorkerEditorChunkLoadError} fallback={fallback} editorProps={props} />}
+  </PeerlessEditorBoundary>;
 }
 
-function PptxEditorSession(props: PptxWorkerEditorProps | PptxWorkerViewerProps | WorkerSessionProps | PptxEditorProps) {
+function choosePptxEngine(inThread: boolean, collaboration: PptxEditorCollaborationOptions | undefined,
+  workerAvailable: boolean): PptxEngineWarning | undefined {
+  if (inThread) return 'deprecated';
+  if (collaboration != null) return 'collaboration';
+  if (!workerAvailable) return 'no-worker';
+}
+
+function PptxEditorSession(props: WorkerEditorSessionProps | PptxWorkerViewerProps | WorkerSessionProps | CollaborationSessionProps | PptxLegacyEditorProps | GeneralEditorSessionProps) {
+  useEffect(() => { warnPptxEngine('legacy-sync-api'); }, []);
   const fonts = useStableFontFaces(props.fonts);
-  const workerOpen = 'experimentalWorkerOpen' in props && props.experimentalWorkerOpen;
-  const identity = useMemo(() => ({}), [props.file, fonts, props.clientId, props.collaboration, workerOpen]);
-  const [choice, setChoice] = useState({ identity, editable: !props.readOnly });
-  const editable = choice.identity === identity ? choice.editable || !props.readOnly : !props.readOnly;
-  if (choice.identity !== identity || choice.editable !== editable) setChoice({ identity, editable });
-  return workerOpen && editable ? (
-    <PptxWorkerEditor {...props as PptxWorkerEditorProps} />
-  ) : workerOpen ? (
-    <PptxSessionViewer {...props as PptxWorkerViewerProps} />
+  const inThread = props.experimentalWorkerOpen === false;
+  const identity = useMemo(() => ({}), [props.file, fonts, props.clientId, props.collaboration, inThread]);
+  const engineIdentity = useMemo(() => ({}), [props.file, props.collaboration, inThread]);
+  const startEngine = () => ({ identity: engineIdentity,
+    reason: choosePptxEngine(inThread, props.collaboration, typeof Worker === 'function') });
+  const [engineChoice, setEngineChoice] = useState(startEngine);
+  const engine = engineChoice.identity === engineIdentity ? engineChoice : startEngine();
+  if (engineChoice !== engine) setEngineChoice(engine);
+  const needsEditor = !props.readOnly || (props.plugins?.length ?? 0) > 0 || props.onChange !== undefined;
+  const start = () => ({ identity, editable: needsEditor });
+  const [choice, setChoice] = useState(start);
+  const session = choice.identity === identity ? choice : start();
+  const editable = session.editable || needsEditor;
+  if (choice !== session || choice.editable !== editable) setChoice({ ...session, editable });
+  useEffect(() => { if (engine.reason) warnPptxEngine(engine.reason); }, [engine.reason]);
+  const Editor = PptxWorkerEditor as (props: WorkerEditorSessionProps) => JSX.Element;
+  return engine.reason ? (
+    <PptxEditorContent {...props as PptxInThreadEditorProps} />
+  ) : editable ? (
+    <Editor {...props as WorkerEditorSessionProps} />
   ) : (
-    <PptxEditorContent {...props as PptxEditorProps} />
+    <PptxSessionViewer {...props as PptxWorkerViewerProps} />
   );
 }
 
@@ -627,6 +681,7 @@ export function PptxEditorContent({
   fonts,
   clientId,
   collaboration,
+  collaborationIdentity,
   className,
   fileName,
   initialSlide,
@@ -644,7 +699,8 @@ export function PptxEditorContent({
   onPluginError,
   backend,
   onWorkerReady,
-}: PptxEditorProps & {
+}: Omit<PptxInThreadEditorProps, 'experimentalWorkerOpen'> & {
+  collaborationIdentity?: object;
   backend?: (changed: () => void) => EditablePresentation;
   onWorkerReady?: (api: PptxWorkerEditorApi) => void;
 }) {
@@ -780,7 +836,8 @@ export function PptxEditorContent({
     save: () => Promise<PptxWorkerEditorRecovery>; name: string;
   } | null>(null);
   const [collaborationReplica, setCollaborationReplica] =
-    useState<CollaborationReplica | null>(null);
+    useState<PresentationHandle | null>(null);
+  const publishedReplicaRef = useRef<{ handle: PresentationHandle } | null>(null);
   const [remotePeers, setRemotePeers] = useState<readonly PptxPresencePeer[]>([]);
   const [presenting, setPresenting] = useState(false);
   const [proposals, setProposals, proposalsRef] = useSyncedState<Proposal[]>([]);
@@ -1327,7 +1384,7 @@ export function PptxEditorContent({
         });
         worker.dispose();
       }
-      else handle?.dispose();
+      else if (publishedReplicaRef.current?.handle !== handle) handle?.dispose();
       if (workerRef.current === worker) workerRef.current = null;
       if (handleRef.current === handle) handleRef.current = null;
       imageCacheRef.current.clear();
@@ -1339,6 +1396,7 @@ export function PptxEditorContent({
     applyBatch,
     beginPluginLoad,
     collaborationClientId,
+    collaborationIdentity,
     collaborationInitialUpdate,
     clearSelection,
     commandStore,
@@ -1358,10 +1416,18 @@ export function PptxEditorContent({
     thumbnailStore,
   ]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!collaborationOnReplica || !collaborationReplica) return;
+    const publication = { handle: collaborationReplica };
+    publishedReplicaRef.current = publication;
     collaborationOnReplica(collaborationReplica);
-    return () => collaborationOnReplica(null);
+    return () => {
+      collaborationOnReplica(null);
+      queueMicrotask(() => {
+        if (handleRef.current !== collaborationReplica) collaborationReplica.dispose();
+        if (publishedReplicaRef.current === publication) publishedReplicaRef.current = null;
+      });
+    };
   }, [collaborationOnReplica, collaborationReplica]);
 
   // hover goes untracked under a non-select tool, so drop it rather than let a

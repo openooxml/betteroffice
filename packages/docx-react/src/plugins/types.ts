@@ -8,6 +8,9 @@ import type {
   DocxParagraphAnchor,
   DocxReadParagraphsRequest,
   DocxReadParagraphsResult,
+  DocxListStoriesResult,
+  DocxReadStoriesRequest,
+  DocxReadStoriesResult,
   DocxTextRange,
   DocxValidationResult,
 } from '@betteroffice/docx/yrs';
@@ -73,6 +76,15 @@ export interface DocxPluginReadClient {
   readParagraphs(
     request: DocxReadParagraphsRequest
   ): Promise<DocxReadParagraphsResult | DocxPluginRefusal>;
+  /** Every story with its kind, container and, for a header or footer, its part and uses. */
+  listStories(): Promise<DocxListStoriesResult | DocxPluginRefusal>;
+  /**
+   * The paragraphs of the selected stories in one read; a story that cannot be read reports
+   * why, and the read stops at its limits with `truncated`.
+   */
+  readStories(
+    request: DocxReadStoriesRequest
+  ): Promise<DocxReadStoriesResult | DocxPluginRefusal>;
   findText(request: DocxFindTextRequest): Promise<DocxFindTextResult | DocxPluginRefusal>;
   /** Checks a batch without granting anything; a later apply is checked again. */
   validateEdits(request: DocxEditRequest): Promise<DocxValidationResult | DocxPluginRefusal>;
@@ -207,7 +219,9 @@ export interface DocxPluginGeometry {
   /**
    * Every visible fragment in overlay-layer pixels. The anchor is the collapsed end of the
    * last fragment, a wholly hidden target's boundary, or its paragraph; pageRect is its page.
-   * Refuses stale or unrendered layouts.
+   * A header or footer target has fragments on every built page that paints it and anchors on
+   * the first; one that no laid-out page paints, built or not, is `missing-target` once the
+   * layout is complete and `layout-unavailable` before. Refuses stale or unrendered layouts.
    */
   getAnchorGeometry(target: DocxGeometryTarget): DocxAnchorGeometryResult;
 }
@@ -222,8 +236,9 @@ export type DocxPluginNavigationFailureCode =
 /** @experimental The plugin API may change in minor releases. */
 export interface DocxPluginNavigation {
   /**
-   * Scrolls a body paragraph into view once pending input and the layout are current. Focus and
-   * selection stay where they are unless `focus` is set.
+   * Scrolls a body paragraph, including one in a table cell, into view once pending input and the
+   * layout are current. Focus and selection stay where they are unless `focus` is set. Header and
+   * footer paragraphs refuse with `unsupported`.
    */
   scrollToParagraph(
     target: { story: string; paraId: string },

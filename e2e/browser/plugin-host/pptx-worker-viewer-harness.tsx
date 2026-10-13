@@ -263,10 +263,10 @@ async function mount(root: HTMLElement, probe: WorkerViewerProbe) {
   const common = { ...inputs, readOnly: true as const, initialSlide, showToolbar: false, onError };
   createRoot(root).render(<React.Fragment>
     {!workerOnly && <div data-arm="in-thread">
-      <PptxEditor {...common} onReady={localReady.resolve} />
+      <PptxEditor legacySyncApi {...common} experimentalWorkerOpen={false} onReady={localReady.resolve} />
     </div>}
     <div data-arm="worker">
-      <PptxEditor {...common} experimentalWorkerOpen onReady={workerReady.resolve} />
+      <PptxEditor legacySyncApi {...common} experimentalWorkerOpen onReady={workerReady.resolve} />
     </div>
   </React.Fragment>);
   const [local, worker] = await Promise.all([

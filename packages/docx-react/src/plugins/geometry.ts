@@ -6,7 +6,10 @@ import {
 import type { PointPosition, RenderedDomContext } from '@betteroffice/docx/plugin-api';
 import { createCanvasHostProjector } from '@betteroffice/docx/plugin-api/RenderedDomContext';
 import {
+  anchorDisplayRoot,
+  headerFooterDisplayRIds,
   proposalSetIdentity,
+  resolvedTargetGeometry,
   type AnchorGeometryTarget,
   type ProposalGeometryMirror,
   type ProposalGeometryTarget,
@@ -23,7 +26,13 @@ import {
   type RawAnchorRange,
 } from './anchorGeometry';
 import { currentPreviewKey, proposalSnapshot, renderedPreviewKey } from './proposalPreview';
-import type { DocxAnchorRect, DocxPluginGeometry, DocxPluginLayout, DocxPluginRect } from './types';
+import type {
+  DocxAnchorGeometryResult,
+  DocxAnchorRect,
+  DocxPluginGeometry,
+  DocxPluginLayout,
+  DocxPluginRect,
+} from './types';
 
 import { flushEditorInput } from '../components/DocxEditor/editorBatches';
 import { isWorkerViewer } from '../components/DocxEditor/internals/workerViewer';
@@ -157,6 +166,17 @@ function subtract(ranges: readonly Interval[], holes: readonly Interval[]): Inte
   return pieces.sort((a, b) => a.from - b.from || a.to - b.to);
 }
 
+/** Overlapping `ranges`, in document order, merged. */
+function unionOf(ranges: readonly Interval[]): Interval[] {
+  const union: Interval[] = [];
+  for (const range of ranges) {
+    const previous = union.at(-1);
+    if (previous && range.from < previous.to) previous.to = Math.max(previous.to, range.to);
+    else union.push({ ...range });
+  }
+  return union;
+}
+
 function sameLine(a: DisplayListRect, b: DisplayListRect): boolean {
   return a.pageIndex === b.pageIndex && a.y < b.y + b.height && b.y < a.y + a.height;
 }
@@ -191,7 +211,8 @@ export function createPluginGeometry(
   queries: DisplayListQueries,
   access: () => AnchorGeometryAccess | null,
   held: () => boolean = () => false,
-  readPoint?: (clientX: number, clientY: number) => Promise<DocxPointPosition | null>
+  readPoint?: (clientX: number, clientY: number) => Promise<DocxPointPosition | null>,
+  complete: () => boolean = () => false
 ): DocxPluginGeometry {
   const shown = () => dom.zoom === layout.zoom && current();
   const projector = createCanvasHostProjector(dom.pagesContainer, queries, dom.zoom);
@@ -253,6 +274,103 @@ export function createPluginGeometry(
     const end = lastUnitEnd(from, to);
     return end === null ? null : caretAt(end, true);
   };
+  const pendingPage = (pageIndex: number): boolean => {
+    const window = displayWindowOf(queries)?.read();
+    return (
+      !!window &&
+      pageIndex >= window[0] &&
+      pageIndex < window[1] &&
+      queries.displayList?.pages[pageIndex]?.unbuilt === true
+    );
+  };
+  /** Projects `rects` and `anchor` onto the pages as they stand now. */
+  const respond = (
+    rects: readonly DisplayListRect[],
+    anchor: DisplayListRect | null
+  ): DocxAnchorGeometryResult => {
+    const projected = rects.map(project);
+    const anchorRect = anchor && project(anchor);
+    const page = anchorRect && projector.getPageBounds(anchorRect.pageIndex);
+    if (!anchorRect || !page || projected.some((rect) => rect === null)) return unavailable();
+    return {
+      ok: true,
+      version: layout.version,
+      previewVersion: layout.previewVersion,
+      layoutId: layout.id,
+      rects: projected as DocxAnchorRect[],
+      anchor: anchorRect,
+      pageRect: toOverlayRect(dom.pagesContainer, layer, dom.zoom, page),
+    };
+  };
+  /**
+   * Places a target in a header or footer story, which repeats on every page whose band shows it
+   * under one of `routed` relationship ids. Unbuilt pages outside the display window are left out;
+   * the anchor sits on the first built page that paints it, else on the first unbuilt one.
+   */
+  const placeRepeated = (
+    routed: readonly string[],
+    ranges: Interval[],
+    hidden: readonly Interval[],
+    paragraph: number | null
+  ): DocxAnchorGeometryResult => {
+    const rIds = new Set(routed);
+    const pages = queries.displayList?.pages ?? [];
+    const bands = pages.flatMap(({ header, footer, hfParts, unbuilt }, pageIndex) => {
+      for (const [region, rId] of [
+        ['header', header?.rId ?? hfParts?.header],
+        ['footer', footer?.rId ?? hfParts?.footer],
+      ] as const) {
+        if (rId !== undefined && rIds.has(rId)) return [{ region, rId, pageIndex, unbuilt: !!unbuilt }];
+      }
+      return [];
+    });
+    if (!bands.length) {
+      return complete()
+        ? anchorFailure('missing-target', 'No page paints this header or footer')
+        : anchorFailure('layout-unavailable', 'No laid-out page paints this header or footer');
+    }
+    if (bands.some(({ pageIndex }) => pendingPage(pageIndex))) return unavailable();
+    const built = new Map(
+      bands.filter(({ unbuilt }) => !unbuilt).map((band) => [`${band.region}:${band.rId}`, band])
+    );
+    ranges.sort((a, b) => a.from - b.from || a.to - b.to);
+    const shown = unionOf(subtract(ranges, hidden)).filter(({ from, to }) => from < to);
+    const drawn = [...built.values()]
+      .flatMap(({ region, rId }) =>
+        shown.flatMap(({ from, to }) =>
+          queries.hfRangeRects(region, rId, from, to).filter((rect) => rect.width > 0)
+        )
+      )
+      .sort((a, b) => a.pageIndex - b.pageIndex);
+    const firstOf = (candidates: readonly DisplayListRect[]) =>
+      candidates.reduce<DisplayListRect | null>(
+        (first, rect) => (!first || rect.pageIndex < first.pageIndex ? rect : first),
+        null
+      );
+    const first = firstOf(drawn);
+    const last = ranges.at(-1);
+    const gap = last && widen(last, hidden);
+    const end = first
+      ? lastInReadingOrder(drawn.filter(({ pageIndex }) => pageIndex === first.pageIndex))
+      : firstOf(
+          [...built.values()].flatMap(({ region, rId }) => [
+            ...(gap ? queries.hfCaretRects(region, rId, gap.from) : []),
+            ...(gap ? queries.hfCaretRects(region, rId, gap.to) : []),
+            ...(paragraph === null ? [] : queries.hfAnchorRects(region, rId, paragraph)),
+          ])
+        );
+    if (end) return respond(drawn, { ...end, width: 0 });
+    const unbuilt = bands.find((band) => band.unbuilt);
+    if (!unbuilt) return respond(drawn, null);
+    const content = pages[unbuilt.pageIndex]?.contentBounds;
+    return respond(drawn, {
+      pageIndex: unbuilt.pageIndex,
+      x: content?.x ?? 0,
+      y: (content?.y ?? 0) + (unbuilt.region === 'footer' ? (content?.height ?? 0) : 0),
+      width: 0,
+      height: 0,
+    });
+  };
   return {
     layout,
     dom,
@@ -307,12 +425,21 @@ export function createPluginGeometry(
       if (mirrored && !mirrored.ok) return mirrored;
       const resolved = mirror ? null : resolveAnchorTarget(session, target, layout.version);
       if (resolved && !resolved.ok) return resolved;
+      const root = resolved ? anchorDisplayRoot(resolved.paragraph.story) : 'body';
+      if (root === null) return anchorFailure('unsupported', 'The target has no display position');
+      const repeated =
+        resolved && root !== 'body'
+          ? resolvedTargetGeometry(session, layout.version, () =>
+              hiddenRanges(session, layout.version)
+            )(resolved)
+          : mirrored;
+      if (repeated && !repeated.ok) return repeated;
+      if (repeated?.root) {
+        const { root: story, rIds, ranges, hidden = [], paragraph } = repeated;
+        const routed = rIds ?? headerFooterDisplayRIds(session, story.slice('hf:'.length));
+        return placeRepeated(routed, [...ranges], hidden, paragraph);
+      }
       const window = displayWindowOf(queries)?.read();
-      const pendingPage = (pageIndex: number): boolean =>
-        !!window &&
-        pageIndex >= window[0] &&
-        pageIndex < window[1] &&
-        queries.displayList?.pages[pageIndex]?.unbuilt === true;
       const display = (range: RawAnchorRange): Interval | null => {
         const from = editor.yrsLocToDisplayPosition(range.start);
         const to = editor.yrsLocToDisplayPosition(range.end);
@@ -321,7 +448,7 @@ export function createPluginGeometry(
       const ranges: Interval[] = mirrored?.ok ? [...mirrored.ranges] : [];
       for (const range of resolved?.ok ? resolved.ranges : []) {
         const mapped = display(range);
-        if (!mapped) return anchorFailure('unsupported', 'The target has no body display position');
+        if (!mapped) return anchorFailure('unsupported', 'The target has no display position');
         ranges.push(mapped);
       }
       ranges.sort((a, b) => a.from - b.from || a.to - b.to);
@@ -342,23 +469,13 @@ export function createPluginGeometry(
         hiddenRanges(session, layout.version)
           .map(display)
           .filter((range): range is Interval => range !== null);
-      const union: Interval[] = [];
-      for (const range of subtract(ranges, hidden)) {
-        const previous = union.at(-1);
-        if (previous && range.from < previous.to) previous.to = Math.max(previous.to, range.to);
-        else union.push({ ...range });
-      }
-      const rects: DocxAnchorRect[] = [];
       const drawn: DisplayListRect[] = [];
       let tail: Interval | null = null;
-      for (const { from, to } of union) {
+      for (const { from, to } of unionOf(subtract(ranges, hidden))) {
         if (from >= to) continue;
         const visible = queries.rangeRects(from, to).filter((rect) => rect.width > 0);
         for (const rect of visible) {
           if (pendingPage(rect.pageIndex)) return unavailable();
-          const projected = project(rect);
-          if (!projected) return unavailable();
-          rects.push(projected);
           drawn.push(rect);
         }
         if (visible.length > 0) tail = { from, to };
@@ -379,19 +496,7 @@ export function createPluginGeometry(
       if ((end && pendingPage(end.pageIndex)) || (fallback && pendingPage(fallback.pageIndex))) {
         return unavailable();
       }
-      const anchor = end ? project(end) : fallback ? project({ ...fallback, width: 0 }) : null;
-      if (!anchor) return unavailable();
-      const page = projector.getPageBounds(anchor.pageIndex);
-      if (!page) return unavailable();
-      return {
-        ok: true,
-        version: layout.version,
-        previewVersion: layout.previewVersion,
-        layoutId: layout.id,
-        rects,
-        anchor,
-        pageRect: toOverlayRect(dom.pagesContainer, layer, dom.zoom, page),
-      };
+      return respond(drawn, end ?? (fallback && { ...fallback, width: 0 }));
     },
   };
 }

@@ -760,6 +760,12 @@ function trackedMarks(marks: readonly MarkDescriptor[]): MarkDescriptor[] {
   return marks.filter((mark) => mark.name === 'insertion' || mark.name === 'deletion' || mark.name === 'hyperlink');
 }
 
+function drawingMarks(marks: readonly MarkDescriptor[]): MarkDescriptor[] {
+  return marks.filter((mark) =>
+    mark.name === 'hidden' || mark.name === 'insertion' || mark.name === 'deletion' || mark.name === 'hyperlink'
+  );
+}
+
 function runContentToUnits(
   content: RunContent,
   marks: readonly MarkDescriptor[],
@@ -828,7 +834,11 @@ function runContentToUnits(
     case 'chart':
       return [embedUnit('chart', chartPayload(content.chart), trackedMarks(marks))];
     case 'opaqueDrawing':
-      return [embedUnit('opaqueDrawing', { kind: content.kind, xml: content.xml }, trackedMarks(marks))];
+      return [embedUnit('opaqueDrawing', {
+        kind: content.kind,
+        xml: content.xml,
+        ...(content.preview ? { preview: imagePayload(content.preview) } : {}),
+      }, drawingMarks(marks))];
     case 'footnoteRef':
       return [noteRefUnit(content.id, 'footnote', marks)];
     case 'endnoteRef':
