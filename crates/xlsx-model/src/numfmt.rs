@@ -904,7 +904,11 @@ fn fraction_parts(mag: f64, pattern: FractionPattern) -> Option<(u64, u64, u64)>
         return None;
     }
     let mut whole = if pattern.mixed { mag.floor() as u64 } else { 0 };
-    let value = if pattern.mixed { mag - whole as f64 } else { mag };
+    let value = if pattern.mixed {
+        mag - whole as f64
+    } else {
+        mag
+    };
     let (mut numerator, denominator) = match pattern.fixed {
         Some(denominator) => {
             let scaled = (value * denominator as f64).round();
