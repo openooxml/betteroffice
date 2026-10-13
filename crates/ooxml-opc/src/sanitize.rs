@@ -2554,8 +2554,14 @@ mod tests {
             "<Default Extension='xml' ContentType='application/xml'/><Default Extension='rels' ContentType='application/vnd.openxmlformats-package.relationships+xml'/>",
         );
         parts.extend([
-            ("xl/worksheets/first.xml".to_owned(), b"<worksheet/>".to_vec()),
-            ("xl/worksheets/last.xml".to_owned(), b"<worksheet/>".to_vec()),
+            (
+                "xl/worksheets/first.xml".to_owned(),
+                b"<worksheet/>".to_vec(),
+            ),
+            (
+                "xl/worksheets/last.xml".to_owned(),
+                b"<worksheet/>".to_vec(),
+            ),
             (
                 "xl/_rels/workbook.xml.rels".to_owned(),
                 relationships_xml(relationships),
@@ -2577,9 +2583,18 @@ mod tests {
             assert_eq!(attribute_value(&sheets[1], "r:id"), Some("last"));
             let relationships =
                 String::from_utf8_lossy(part_bytes(&output, "xl/_rels/workbook.xml.rels"));
-            assert!(relationships.contains("worksheets/first.xml"), "{relationships}");
-            assert!(relationships.contains("worksheets/last.xml"), "{relationships}");
-            assert!(!relationships.contains("example.invalid"), "{relationships}");
+            assert!(
+                relationships.contains("worksheets/first.xml"),
+                "{relationships}"
+            );
+            assert!(
+                relationships.contains("worksheets/last.xml"),
+                "{relationships}"
+            );
+            assert!(
+                !relationships.contains("example.invalid"),
+                "{relationships}"
+            );
             assert!(!relationships.contains("macro"), "{relationships}");
             assert!(!has_part(&output, "xl/custom/sheet.data"));
             assert_all_parts_declared(&output);
@@ -2604,7 +2619,10 @@ mod tests {
     fn regression_ordinary_workbook_tolerates_invalid_relationship_roots() {
         for (root, namespace) in [
             ("Relationships", "urn:foreign"),
-            ("Rels", "http://schemas.openxmlformats.org/package/2006/relationships"),
+            (
+                "Rels",
+                "http://schemas.openxmlformats.org/package/2006/relationships",
+            ),
         ] {
             let mut parts = ordinary_workbook_parts("");
             parts.last_mut().unwrap().1 = format!(
@@ -2724,9 +2742,7 @@ mod tests {
         append_relationships(
             parts,
             "xl/_rels/workbook.xml.rels",
-            &format!(
-                "<Relationship Id='calc' Type='{relationship_type}' Target='calcChain.xml'/>"
-            ),
+            &format!("<Relationship Id='calc' Type='{relationship_type}' Target='calcChain.xml'/>"),
         );
         parts.push(("xl/calcChain.xml".to_owned(), CALC_CHAIN.to_vec()));
     }
