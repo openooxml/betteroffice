@@ -503,6 +503,19 @@ describe('command host', () => {
     expect(s.frames).toEqual([]);
   });
 
+  for (const mode of ['throws', 'rejects'] as const) {
+    it(`poisons an apply that ${mode} undefined with an unknown outcome`, async () => {
+      const s = model({ apply: mode === 'throws' ? () => { throw undefined; } : () => Promise.reject(undefined) });
+      const error = await edit(s.host, envelope(1)).catch((error: unknown) => error);
+      expect(isCommandOutcomeUnknownError(error)).toBe(true);
+      if (!isCommandOutcomeUnknownError(error)) throw new Error('Missing unknown-outcome error');
+      expect(error.refusal).toEqual({ seq: 1 });
+      expect(error.message).toBe('Command 1 has an unknown outcome: undefined');
+      expect(await edit(s.host, envelope(2)).catch((error: unknown) => error)).toBe(error);
+      expect(await s.host.checkpoint(null).catch((error: unknown) => error)).toBe(error);
+    });
+  }
+
   it('requires applied to advance version and noop to preserve it', async () => {
     for (const status of ['applied', 'noop'] as const) {
       let version = 10;
