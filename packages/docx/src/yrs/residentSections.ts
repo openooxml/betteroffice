@@ -47,16 +47,32 @@ export function residentSectionPropertiesAt(engine: ResidentEngineSession, at: Y
     paragraphs.findIndex(paragraph => paragraph.paraId === section.section) >= ordinal)?.properties ?? null;
 }
 
-export function readSectionSnapshot(engine: ResidentEngineSession, base: Document, margins: Record<string, DocxSectionMargins>, nativeSections = false): ResidentSectionSnapshot {
+export function sectionMarkKey(mark: unknown): string {
+  const sorted = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(sorted);
+    if (value !== null && typeof value === 'object') {
+      return Object.fromEntries(Object.keys(value).sort().map(key =>
+        [key, sorted((value as Record<string, unknown>)[key])]));
+    }
+    return value;
+  };
+  return JSON.stringify(sorted(mark));
+}
+
+export function readSectionSnapshot(engine: ResidentEngineSession, base: Document, margins: Record<string, DocxSectionMargins>, seeded: ReadonlyMap<string, string>, nativeSections = false): ResidentSectionSnapshot {
   const sections: ResidentSectionSnapshot['sections'] = [];
   const paragraphs: ResidentSectionSnapshot['paragraphs'] = [];
   for (const story of engine.geometryReader.storyIds()) {
     for (const paragraph of engine.paragraphs(story)) {
       paragraphs.push({ story, paraId: paragraph.paraId, tabs: nativeTabStops(paragraph.properties.tabs) });
       const properties = (paragraph.properties.sectPr ?? paragraph.properties._sectionProperties) as SectionProperties | undefined;
-      if (story === 'body' && properties) sections.push({ section: paragraph.paraId,
-        properties: { ...properties, ...base.package.document.sections?.find(section => section.id === paragraph.paraId)?.properties,
-          ...(nativeSections ? properties : {}), ...margins[paragraph.paraId] } });
+      if (story === 'body' && properties) {
+        const source = !nativeSections && seeded.get(paragraph.paraId) === sectionMarkKey(properties)
+          ? base.package.document.sections?.find(section => section.id === paragraph.paraId)?.properties
+          : undefined;
+        sections.push({ section: paragraph.paraId,
+          properties: { ...properties, ...source, ...margins[paragraph.paraId] } });
+      }
     }
   }
   sections.push({ section: 'final', properties: { ...resolvedFinalSectionProperties(base.package.document), ...margins.final } });

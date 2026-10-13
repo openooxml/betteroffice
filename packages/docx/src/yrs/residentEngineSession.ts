@@ -56,7 +56,7 @@ import type { ResidentControlTarget, ResidentControlPosition } from './residentC
 import { withPackageMetadata, type ResidentPackageMetadata } from './residentProperties';
 import { getDocumentWatermark } from '../docx/watermarkApi';
 import { resolvedFinalSectionProperties, updateFinalSectionProperties } from '../editor/finalSection';
-import { readSectionSnapshot, withSectionIds, withSectionNames, withSectionSnapshot, type DocxSectionMargins, type ResidentSectionSnapshot } from './residentSections';
+import { readSectionSnapshot, sectionMarkKey, withSectionIds, withSectionNames, withSectionSnapshot, type DocxSectionMargins, type ResidentSectionSnapshot } from './residentSections';
 
 export type ResidentEngineSession = Pick<
   YrsSession,
@@ -231,6 +231,7 @@ export async function createResidentEngineSession(
   let partsTouched = false;
   let marginsTouched = false;
   let sectionsTouched = false;
+  const seededSectionMarks = new Map<string, string>();
   let sectionNames = { host: new Map<string, string>(), resident: new Map<string, string>() };
   let sectionLayout: { revision: string; sections: ResidentSectionSnapshot['sections'] } | null = null;
   const parsedMedia = new Map<string, string>();
@@ -247,14 +248,14 @@ export async function createResidentEngineSession(
         document.package.document.sections?.map(section => [section.id, section.properties]),
         document.package.document.finalSectionProperties, margins]);
       if (sectionLayout?.revision !== revision) sectionLayout = { revision,
-        sections: readSectionSnapshot(resident, document, margins, true).sections };
+        sections: readSectionSnapshot(resident, document, margins, seededSectionMarks, true).sections };
       const sections = sectionLayout.sections;
       return { ...document, package: { ...document.package, document: { ...document.package.document,
         sections: sections.map(section => ({ id: section.section, properties: section.properties, content: [] })),
         finalSectionProperties: sections.at(-1)!.properties,
       } } };
     }
-    return Object.keys(margins).length ? withSectionSnapshot(document, readSectionSnapshot(resident, document, margins)) : document;
+    return Object.keys(margins).length ? withSectionSnapshot(document, readSectionSnapshot(resident, document, margins, seededSectionMarks)) : document;
   };
   const hostDocument = (): Document => withSectionNames(partDocument(), sectionNames.host);
   const partLayoutInput = (input: string): string => {
@@ -275,9 +276,16 @@ export async function createResidentEngineSession(
   };
   const keySections = (document: Document): Document => {
     sectionNames = { host: new Map(), resident: new Map() };
-    if ((document.package.document.sections?.length ?? 0) < 2 || !geometryReader.hasStory('body')) return document;
-    const keyed = withSectionIds(document, resident.paragraphs('body')
-      .filter(paragraph => paragraph.properties.sectPr ?? paragraph.properties._sectionProperties).map(paragraph => paragraph.paraId));
+    seededSectionMarks.clear();
+    if (!geometryReader.hasStory('body')) return document;
+    const closing = resident.paragraphs('body')
+      .filter(paragraph => paragraph.properties.sectPr ?? paragraph.properties._sectionProperties);
+    for (const paragraph of closing) {
+      seededSectionMarks.set(paragraph.paraId,
+        sectionMarkKey(paragraph.properties.sectPr ?? paragraph.properties._sectionProperties));
+    }
+    if ((document.package.document.sections?.length ?? 0) < 2) return document;
+    const keyed = withSectionIds(document, closing.map(paragraph => paragraph.paraId));
     document.package.document.sections!.forEach(({ id }, index) => {
       const key = keyed.package.document.sections![index]!.id;
       if (id === undefined || key === undefined || id === key) return;
@@ -293,7 +301,7 @@ export async function createResidentEngineSession(
     return session.version() !== version;
   };
   const sectionProperties = (): ResidentSectionSnapshot => {
-    return readSectionSnapshot(resident, partDocument(), JSON.parse(session.section_margins_json()), sectionsTouched);
+    return readSectionSnapshot(resident, partDocument(), JSON.parse(session.section_margins_json()), seededSectionMarks, sectionsTouched);
   };
   session.set_local_lowering(true);
   const listeners = new Set<
