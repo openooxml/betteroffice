@@ -788,6 +788,27 @@ mod tests {
     }
 
     #[test]
+    fn rename_keeps_the_parsed_bodies_of_live_defined_names() {
+        let mut wb = wb2();
+        wb.defined_names.push(DefinedName {
+            name: "Tick".into(),
+            formula: "TODAY()".into(),
+            local_sheet: None,
+            hidden: false,
+        });
+        wb.sheet_mut(SheetId(0))
+            .unwrap()
+            .set_cell(a1("A1"), formula_cell("Tick"));
+        let mut g = DepGraph::build(&wb);
+        let body = Arc::downgrade(&g.asts.lock().unwrap()["TODAY()"]);
+        wb.sheets[1].name = "Other".into();
+        g.rename_sheets(&wb);
+        let cached = g.asts.lock().unwrap().get("TODAY()").cloned();
+        let body = body.upgrade().expect("the body's ast was dropped");
+        assert!(cached.is_some_and(|cached| Arc::ptr_eq(&cached, &body)));
+    }
+
+    #[test]
     fn single_cell_dependents() {
         let mut wb = wb2();
         wb.sheet_mut(SheetId(0))

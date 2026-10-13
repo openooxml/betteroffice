@@ -44,6 +44,37 @@ fn source(formulas: &str) -> Vec<u8> {
     ooxml_opc::rezip_parts(&parts).unwrap()
 }
 
+/// A package whose three sheets hold `rows` in their first row and whose
+/// workbook defines `names`.
+fn package(rows: [&str; 3], names: &str) -> Vec<u8> {
+    let mut parts = ooxml_opc::unzip_parts(&workbook_bytes()).unwrap();
+    for (name, bytes) in &mut parts {
+        if name == "xl/workbook.xml" {
+            if !names.is_empty() {
+                let xml = String::from_utf8(std::mem::take(bytes)).unwrap();
+                let defined = format!("</sheets><definedNames>{names}</definedNames>");
+                *bytes = xml.replace("</sheets>", &defined).into_bytes();
+            }
+            continue;
+        }
+        let Some(index) = name
+            .strip_prefix("xl/worksheets/sheet")
+            .and_then(|rest| rest.strip_suffix(".xml"))
+        else {
+            continue;
+        };
+        let row = match rows[index.parse::<usize>().unwrap() - 1] {
+            "" => String::new(),
+            cells => format!(r#"<row r="1">{cells}</row>"#),
+        };
+        *bytes = format!(
+            r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>{row}</sheetData></worksheet>"#
+        )
+        .into_bytes();
+    }
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
 fn bold(range: &str) -> Op {
     Op::PatchRangeStyle {
         sheet: SheetId(0),
@@ -98,9 +129,13 @@ fn format_op(kind: &str) -> Op {
 }
 
 fn rename() -> Op {
+    rename_sheet(0, "Renamed")
+}
+
+fn rename_sheet(index: u32, name: &str) -> Op {
     Op::RenameSheet {
-        sheet: SheetId(0),
-        name: "Renamed".into(),
+        sheet: SheetId(index),
+        name: name.into(),
     }
 }
 
@@ -128,6 +163,32 @@ fn number(value: f64) -> CellValue {
 
 fn error(value: ErrorValue) -> CellValue {
     CellValue::Error { value }
+}
+
+fn text(value: &str) -> CellValue {
+    CellValue::Text {
+        value: value.into(),
+    }
+}
+
+fn cycle_cells(workbook: &Workbook) -> Vec<(SheetId, CellRef)> {
+    let calculation = workbook.last_calculation();
+    let mut cells: Vec<_> = calculation
+        .cycle_cells
+        .iter()
+        .map(|address| (address.sheet, address.cell))
+        .collect();
+    cells.sort_by_key(|(sheet, at)| (sheet.0, at.row, at.col));
+    cells
+}
+
+/// A full recalculation finds nothing the scoped one left behind.
+fn assert_fully_calculated(workbook: &mut Workbook) {
+    let scoped = values(workbook);
+    let status = calculation_status(workbook.last_calculation());
+    workbook.recalculate_all(options());
+    assert_eq!(values(workbook), scoped);
+    assert_eq!(calculation_status(workbook.last_calculation()), status);
 }
 
 fn calculation_counters(workbook: &Workbook) -> (bool, u64) {
@@ -295,6 +356,89 @@ fn rename_reevaluates_only_volatile_formulas_and_their_dependents() {
         .unwrap();
     assert_eq!(value(&workbook, "C1"), number(10.0));
     assert_eq!(value(&workbook, "E1"), number(11.0));
+}
+
+#[test]
+fn rename_reevaluates_what_shows_a_rewritten_formula() {
+    let rows = [
+        concat!(
+            r#"<c r="A1"><v>2</v></c><c r="C1"><f>Sheet1!A1</f><v>2</v></c>"#,
+            r#"<c r="D1" t="str"><f>FORMULATEXT(C1)</f><v>=Sheet1!A1</v></c>"#,
+        ),
+        "",
+        r#"<c r="A1"><f>Sheet2!A1+1</f><v>1</v></c>"#,
+    ];
+    let mut workbook = Workbook::open(&package(rows, "")).unwrap();
+    track_formula_evaluations();
+    workbook.apply_ops(vec![rename()], options()).unwrap();
+    let rewritten = workbook.model.sheets[0].cell(r("C1")).unwrap();
+    let rewritten = rewritten.formula.clone().unwrap();
+    assert!(rewritten.contains("Renamed!"));
+    assert_eq!(value(&workbook, "D1"), text(&format!("={rewritten}")));
+    assert_eq!(evaluated(), cells(&["D1"]));
+    assert_fully_calculated(&mut workbook);
+}
+
+#[test]
+fn rename_reevaluates_what_resolves_by_the_new_name() {
+    let rows = [
+        concat!(
+            r#"<c r="C1" t="e"><f>New!Rate</f><v>#REF!</v></c>"#,
+            r#"<c r="D1" t="e"><f>ROW(New!B5)</f><v>#VALUE!</v></c>"#,
+            r#"<c r="E1" t="e"><f>C1+1</f><v>#REF!</v></c>"#,
+        ),
+        "",
+        r#"<c r="A1"><f>Sheet2!A1+1</f><v>1</v></c>"#,
+    ];
+    let names = r#"<definedName name="Rate">7</definedName>"#;
+    let mut workbook = Workbook::open(&package(rows, names)).unwrap();
+    track_formula_evaluations();
+    workbook
+        .apply_ops(vec![rename_sheet(0, "New")], options())
+        .unwrap();
+    for (at, expected) in [("C1", 7.0), ("D1", 5.0), ("E1", 8.0)] {
+        assert_eq!(value(&workbook, at), number(expected));
+    }
+    assert_eq!(evaluated(), cells(&["C1", "D1", "E1"]));
+    assert_fully_calculated(&mut workbook);
+}
+
+#[test]
+fn rename_keeps_the_status_of_formulas_it_does_not_reach() {
+    let rows = [
+        concat!(
+            r#"<c r="C1"><f>D1+1</f><v>0</v></c><c r="D1"><f>C1+1</f><v>0</v></c>"#,
+            r#"<c r="G1"><f>IF(INDIRECT("Sheet3!A1")=1,H1,0)</f><v>0</v></c>"#,
+            r#"<c r="H1"><f>G1+1</f><v>0</v></c>"#,
+        ),
+        "",
+        r#"<c r="A1"><v>1</v></c>"#,
+    ];
+    let mut workbook = Workbook::open(&package(rows, "")).unwrap();
+    workbook.recalculate_all(options());
+    let cycles = cells(&["C1", "D1", "G1", "H1"]);
+    assert_eq!(cycle_cells(&workbook), cycles);
+    workbook
+        .apply_ops(vec![rename_sheet(1, "Other")], options())
+        .unwrap();
+    assert_eq!(cycle_cells(&workbook), cycles);
+    let read = workbook
+        .read_cells(&super::target::ReadRequest::default())
+        .unwrap()
+        .unwrap();
+    let mut shown: Vec<_> = read
+        .calculation
+        .cycle_cells
+        .iter()
+        .map(|cell| cell.a1.as_str())
+        .collect();
+    shown.sort_unstable();
+    assert_eq!(shown, ["C1", "D1", "G1", "H1"]);
+    workbook
+        .apply_ops(vec![rename_sheet(2, "Gone")], options())
+        .unwrap();
+    assert_eq!(cycle_cells(&workbook), cells(&["C1", "D1"]));
+    assert_fully_calculated(&mut workbook);
 }
 
 #[test]
