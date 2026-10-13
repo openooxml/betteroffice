@@ -5,4 +5,5 @@ export { PptxAgentPresentation, openPptx, attachPptx, type SlideTextChange } fro
 export type { AgentProposal, PrototypeOptions } from './prototype';
 export type { XlsxScalar, XlsxWriteEdit, XlsxGridEdit, XlsxSheetEdit, XlsxFormatEdit } from './xlsx-operations';
 export type { PptxAgentEdit, PptxAgentBatch } from './pptx-schema';
+export type { DocxAgentEdit, DocxAgentBatch } from './docx-schema';
 export { renderPptxSlide } from './pptx-render';
