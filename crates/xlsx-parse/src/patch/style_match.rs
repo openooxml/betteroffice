@@ -50,7 +50,14 @@ impl<'a> StyleMatch<'a> {
         {
             return false;
         }
-        if self.current.is_saved_plain_xf(current) && !self.original.is_saved_plain_xf(source) {
+        let plain = self.current.is_saved_plain_xf(current)
+            || (self.original.is_saved_plain_xf(current)
+                && self.original.cell_xfs.get(current as usize)
+                    == self.current.cell_xfs.get(current as usize))
+            || (current as usize >= self.original.cell_xfs.len()
+                && self.current.resolved_format(Some(current))
+                    == self.current.resolved_format(None));
+        if plain && !self.original.is_saved_plain_xf(source) {
             return false;
         }
         let meant = self.original.resolved_format(Some(source));
