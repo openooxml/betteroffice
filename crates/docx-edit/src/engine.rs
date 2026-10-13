@@ -6608,13 +6608,7 @@ impl EngineSession {
             .unwrap_or_default();
         let mut measured_headers_footers = if let Some(render_env) = parsed_render_env.as_ref() {
             let cut = exact_cut.and_then(|cut| cut.section);
-            self.measure_header_footer_payload(
-                &mut input,
-                &regions,
-                &measurement,
-                render_env,
-                cut,
-            )?
+            self.measure_header_footer_payload(&mut input, &regions, &measurement, render_env, cut)?
         } else {
             None
         };
@@ -6964,13 +6958,7 @@ impl EngineSession {
             .unwrap_or_default();
         let mut measured_headers_footers = if let Some(render_env) = parsed_render_env.as_ref() {
             let cut = exact_cut.and_then(|cut| cut.section);
-            self.measure_header_footer_payload(
-                &mut input,
-                &regions,
-                &measurement,
-                render_env,
-                cut,
-            )?
+            self.measure_header_footer_payload(&mut input, &regions, &measurement, render_env, cut)?
         } else {
             None
         };

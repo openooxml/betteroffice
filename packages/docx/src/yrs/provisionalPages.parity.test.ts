@@ -480,7 +480,13 @@ FLOW_STRADDLES['flow-landscape-bare'] = (pages) => {
   expect(pages.at(-1)!.width).toBeLessThan(pages[2]!.width);
 };
 
-async function commandFixture(feature = 'plain') {
+const MEASUREMENT = {
+  defaults: { fontSize: 11, fontFamily: 'Liberation Sans' },
+  compat: { noLeading: false, doNotExpandShiftReturn: false }, authoritativeShaping: true,
+};
+
+/** `exportable` registers the font for the default family too, as an export requires. */
+async function commandFixture(feature = 'plain', exportable = false) {
   const bytes = syntheticDocx(feature);
   const cold = await createResidentEngineSession();
   const engine = await createResidentEngineSession();
@@ -491,14 +497,12 @@ async function commandFixture(feature = 'plain') {
     request.notes = { contents: [{ id: 1, noteKind: feature, height: 0 }] } as typeof request.notes;
   }
   if (feature.endsWith('-bare')) request.regions.sections = [];
+  if (exportable) request.measurement = { ...MEASUREMENT, fontChains: {} };
   const requirements = JSON.parse(cold.layoutFontRequirementsJson(JSON.stringify(request))) as Array<{ key: string }>;
   cold.clearFonts();
   const font = cold.registerFont(FONT);
   const fontChains = Object.fromEntries(requirements.map(({ key }) => [key, [font]]));
-  request.measurement = {
-    fontChains, defaults: { fontSize: 11, fontFamily: 'Liberation Sans' },
-    compat: { noLeading: false, doNotExpandShiftReturn: false }, authoritativeShaping: true,
-  };
+  request.measurement = { ...MEASUREMENT, fontChains };
   const layoutInput = JSON.stringify(request);
   cold.layoutDocumentWithRegionsRetainedJson(layoutInput);
   cold.setDisplayWindow(0, 3);
@@ -694,7 +698,7 @@ const EXPORT_OPTIONS: DocxPageExportOptions = { revisionView: 'markup', stories:
 
 for (const request of ['export', 'completeLayout', 'sliced completeLayout'] as const) {
   test(`${request} finishes a pending prefix inside its own frame work and publishes the completed frame`, async () => {
-    const f = await commandFixture();
+    const f = await commandFixture('plain', request === 'export');
     try {
       expect(f.initial.frame.payload.layoutProvisional).toBe(true);
       await f.present();
