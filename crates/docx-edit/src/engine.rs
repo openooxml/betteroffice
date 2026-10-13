@@ -21600,7 +21600,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         assert_eq!(
             full["layout"]["pages"].as_array().unwrap()
                 .iter()
-                .take_while(|page| page["size"]["w"] == 816)
+                .take_while(|page| page["size"]["w"].as_f64() == Some(816.0))
                 .count(),
             80
         );
