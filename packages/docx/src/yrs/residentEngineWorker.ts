@@ -117,6 +117,8 @@ let sessionFonts: ResidentSessionFonts | null = null;
 let commandHooksFactory: ResidentCommandHooksFactory | null = null;
 let commandFrameChanges: {
   pages: Set<number>; updates: Uint8Array[];
+  /** The document changed outside a command and its layout has not followed yet. */
+  layoutStale?: boolean;
   viewport?: ResidentCommandViewportRequest;
   window?: [number, number];
   reviewFrame?: { frameEpoch: number; previewVersion: number };
@@ -171,7 +173,10 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
     else engine.layoutDocumentJson(JSON.stringify(input));
     retainedLayoutVersion = engine.proposalEngine.version();
     layoutPreviewVersion = snapshot.previewVersion;
-    if (commandFrameChanges) commandFrameChanges.layoutPreviewVersion = layoutPreviewVersion;
+    if (commandFrameChanges) {
+      commandFrameChanges.layoutPreviewVersion = layoutPreviewVersion;
+      commandFrameChanges.layoutStale = false;
+    }
     layoutDirty = true;
   };
   let selectionLayout: { version: string; frame: RetainedFrame } | undefined;
@@ -424,7 +429,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
         }
         const updates = changes.updates.splice(0);
         for (const update of updates) engine.applyUpdate(update);
-        if (updates.length) relayout();
+        if (updates.length || changes.layoutStale) relayout();
         const framePreviewVersion = layoutPreviewVersion;
         const relaid = layoutDirty;
         layoutDirty = false;
@@ -734,7 +739,12 @@ function replyCommand<K extends 'commandInitial' | 'commandAck' | 'checkpoint', 
   reply({ id, ok: true, [key]: value }, isTransferResult(result) ? result.transfer : []);
 }
 
-function postCommandFrame(id: number): void {
+/** Answers `id` with the next command frame, carrying `answer` (and its `transfer`) along. */
+function postCommandFrame(
+  id: number,
+  answer: Omit<ResidentEngineWorkerResponse & { ok: true }, 'id' | 'ok'> = {},
+  transfer: Transferable[] = []
+): void {
   const host = requireCommandHost();
   const init = commandInit!;
   void host.frame().then((result) => {
@@ -744,10 +754,10 @@ function postCommandFrame(id: number): void {
     }
     const frame = isTransferResult(result) ? result.value : result;
     reply({
-      id, ok: true, ...frame.payload, selection: session?.selection() ?? null,
+      ...answer, id, ok: true, ...frame.payload, selection: session?.selection() ?? null,
       ...(frame.payload.pageFrames ? { pageFrames: [...frame.payload.pageFrames, frame.payload.frame] } : {}),
       commandFrame: { session: init.session, incarnation: init.incarnation, epoch: init.epoch, frame },
-    }, isTransferResult(result) ? result.transfer : []);
+    }, [...transfer, ...(isTransferResult(result) ? result.transfer : [])]);
   }).catch((error: unknown) => {
     if (commandHost !== host) {
       replyFailure(id, new SessionFailure('disposed', 'Resident command document was replaced'));
@@ -1409,6 +1419,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     }
     const held = pendingUpdates;
     pendingUpdates = [];
+    const before = session.proposalEngine.version();
     try {
       const saved = openedParsed ? await session.saveDocument(request.host, request.comments, editorSaves) : await session.save(
         new Uint8Array(openedSource!.bytes),
@@ -1424,17 +1435,15 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         ? [exactBuffer(session.encodeStateAsUpdate(request.stateVector))]
         : [];
       const stateVector = exactBuffer(session.encodeStateVector());
-      reply(
-        {
-          id: request.id,
-          ok: true,
-          saved: bytes,
-          updates,
-          stateVector,
-          version: session.proposalEngine.version(),
-        },
-        [bytes, ...updates, stateVector]
-      );
+      const answer = { saved: bytes, updates, stateVector, version: session.proposalEngine.version() };
+      if (commandHost && answer.version !== before) {
+        // Identities the save assigned change the document as a remote update would; the answer waits for their frame.
+        noteDocumentChange();
+        fontRequirements = null;
+        completedLayout = null;
+        commandFrameChanges!.layoutStale = true;
+        postCommandFrame(request.id, answer, [bytes, ...updates, stateVector]);
+      } else reply({ id: request.id, ok: true, ...answer }, [bytes, ...updates, stateVector]);
     } finally {
       pendingUpdates = held;
     }
