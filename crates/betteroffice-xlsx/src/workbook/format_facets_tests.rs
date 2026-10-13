@@ -395,9 +395,8 @@ fn format_facets_released_captures_keep_the_facets_they_do_not_carry() {
         if let Some(locked) = locked {
             format["protection"] = json!({ "locked": locked });
         }
-        let captured: CapturedFormat =
-            serde_json::from_value(json!({"rows": 1, "columns": 1, "formats": [format]}))
-                .unwrap();
+        let captured = json!({"rows": 1, "columns": 1, "formats": [format]});
+        let captured: CapturedFormat = serde_json::from_value(captured).unwrap();
         let mut workbook = Workbook::open(&bytes).unwrap();
         workbook
             .apply_format(SheetId(0), range, captured, options())
@@ -451,7 +450,8 @@ fn format_facets_survive_a_collaboration_state_saved_before_them() {
         r#"<c r="A1" s="2"><v>7</v></c><c r="B1" s="1"><v>8</v></c>"#,
         false,
     );
-    let mut released = xlsx_parse::parse_workbook(&ooxml_opc::unzip_parts(&bytes).unwrap()).unwrap();
+    let parts = ooxml_opc::unzip_parts(&bytes).unwrap();
+    let mut released = xlsx_parse::parse_workbook(&parts).unwrap();
     for xf in &mut released.styles.cell_xfs {
         *xf = xlsx_model::Xf {
             font: xf.font,
@@ -484,12 +484,16 @@ fn format_facets_survive_a_collaboration_state_saved_before_them() {
         Some(1)
     );
     let format = format_value(&workbook, "A1");
-    assert_eq!(format["protection"], json!({"locked": false, "hidden": false}));
+    assert_eq!(
+        format["protection"],
+        json!({"locked": false, "hidden": false})
+    );
     assert_eq!(format["alignment"]["text_rotation"], 90);
     assert_eq!(format["xfId"], 1);
     let saved = workbook.save().unwrap();
     assert!(part(&saved, "xl/styles.xml").contains(faceted));
-    let reopened = xlsx_parse::parse_workbook(&ooxml_opc::unzip_parts(&saved).unwrap()).unwrap();
+    let saved_parts = ooxml_opc::unzip_parts(&saved).unwrap();
+    let reopened = xlsx_parse::parse_workbook(&saved_parts).unwrap();
     assert_eq!(reopened.sheets[0].cell(r("A1")).unwrap().style, Some(2));
     assert_eq!(reopened.styles.cell_xfs.len(), 3);
 }

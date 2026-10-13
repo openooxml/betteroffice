@@ -3485,6 +3485,69 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn base_xf_records_released_before_format_facets_still_decode() {
+        let mut a = source();
+        let base = Arc::make_mut(&mut a.base);
+        base.styles.fonts = vec![Font::default()];
+        base.styles.cell_xfs = vec![
+            Xf {
+                font: Some(0),
+                num_fmt_id: Some(9),
+                alignment: Some(Alignment {
+                    h: Some(HAlign::Right),
+                    v: Some(VAlign::Center),
+                    wrap_text: true,
+                    ..Alignment::default()
+                }),
+                ..Xf::default()
+            },
+            Xf::default(),
+        ];
+        let records = base_records(&a.base);
+        let first = 1 + base_counts(&a.base)[..12].iter().sum::<usize>();
+        let xfs = first..first + a.base.styles.cell_xfs.len();
+        let released = records
+            .iter()
+            .enumerate()
+            .map(|(index, record)| {
+                if !xfs.contains(&index) {
+                    return record.clone();
+                }
+                let xf = &a.base.styles.cell_xfs[index - first];
+                let mut w = Writer::new();
+                w.u8(13);
+                xf.font.write(&mut w);
+                xf.fill.write(&mut w);
+                xf.border.write(&mut w);
+                xf.num_fmt_id.write(&mut w);
+                w.option(xf.alignment.as_ref(), |w, alignment| {
+                    alignment.h.write(w);
+                    alignment.v.write(w);
+                    alignment.wrap_text.write(w);
+                    alignment.shrink_to_fit.write(w);
+                });
+                w.into_bytes()
+            })
+            .collect::<Vec<_>>();
+        let budget = SnapshotBudget::new(1, 4096).unwrap();
+        let mut bounded = BaseBuilder::default();
+        let mut whole = BaseBuilder::default();
+        for record in &released {
+            while !bounded.push_bounded(record, budget).unwrap() {}
+            whole.push(record).unwrap();
+        }
+        for builder in [bounded, whole] {
+            assert_eq!(
+                builder.finish().unwrap().styles.cell_xfs,
+                a.base.styles.cell_xfs
+            );
+        }
+        for index in xfs {
+            assert_ne!(records[index][0], 13);
+        }
+    }
 }
 
 impl WorkbookAuthority {
@@ -3548,65 +3611,5 @@ mod ceiling_tests {
             failure.to_string(),
             "authority base record exceeds byte limit"
         );
-    }
-
-    #[test]
-    fn base_xf_records_released_before_format_facets_still_decode() {
-        let mut a = source();
-        let base = Arc::make_mut(&mut a.base);
-        base.styles.fonts = vec![Font::default()];
-        base.styles.cell_xfs = vec![
-            Xf {
-                font: Some(0),
-                num_fmt_id: Some(9),
-                alignment: Some(Alignment {
-                    h: Some(HAlign::Right),
-                    v: Some(VAlign::Center),
-                    wrap_text: true,
-                    ..Alignment::default()
-                }),
-                ..Xf::default()
-            },
-            Xf::default(),
-        ];
-        let records = base_records(&a.base);
-        let first = 1 + base_counts(&a.base)[..12].iter().sum::<usize>();
-        let xfs = first..first + a.base.styles.cell_xfs.len();
-        let released = records
-            .iter()
-            .enumerate()
-            .map(|(index, record)| {
-                if !xfs.contains(&index) {
-                    return record.clone();
-                }
-                let xf = &a.base.styles.cell_xfs[index - first];
-                let mut w = Writer::new();
-                w.u8(13);
-                xf.font.write(&mut w);
-                xf.fill.write(&mut w);
-                xf.border.write(&mut w);
-                xf.num_fmt_id.write(&mut w);
-                w.option(xf.alignment.as_ref(), |w, alignment| {
-                    alignment.h.write(w);
-                    alignment.v.write(w);
-                    alignment.wrap_text.write(w);
-                    alignment.shrink_to_fit.write(w);
-                });
-                w.into_bytes()
-            })
-            .collect::<Vec<_>>();
-        let budget = SnapshotBudget::new(1, 4096).unwrap();
-        let mut bounded = BaseBuilder::default();
-        let mut whole = BaseBuilder::default();
-        for record in &released {
-            while !bounded.push_bounded(record, budget).unwrap() {}
-            whole.push(record).unwrap();
-        }
-        for builder in [bounded, whole] {
-            assert_eq!(builder.finish().unwrap().styles.cell_xfs, a.base.styles.cell_xfs);
-        }
-        for index in xfs {
-            assert_ne!(records[index][0], 13, "a current XF record must not read as a released one");
-        }
     }
 }

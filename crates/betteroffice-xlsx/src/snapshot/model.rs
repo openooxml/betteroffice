@@ -2730,7 +2730,7 @@ mod tests {
         assert_eq!(builder.finish().unwrap(), model);
         for ordinal in xfs {
             let (_, _, payload) = unframe(&chunks[ordinal]).unwrap();
-            assert_ne!(payload[0], 6, "a current XF record must not read as a released one");
+            assert_ne!(payload[0], 6);
         }
     }
 }
