@@ -61,6 +61,10 @@ pub enum DrawCmd {
         /// `None` = solid; `"dashed"`/`"dotted"`/`"double"` request a backend stroke pattern.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         style: Option<Arc<str>>,
+        /// Rail width of a `"double"` line: two rails this wide on the outer edges of
+        /// `width`. Without it, painters keep the legacy rails derived from `width`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rail: Option<f32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         clip: Option<Rect>,
     },
@@ -238,6 +242,7 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
                 width,
                 color,
                 style,
+                rail,
                 clip,
             } => DrawCmd::Line {
                 x1: x1 * factor,
@@ -247,6 +252,7 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
                 width: width * factor,
                 color,
                 style,
+                rail: rail.map(|rail| rail * factor),
                 clip: clip.map(|clip| scale_rect(clip, factor)),
             },
             DrawCmd::Path {
@@ -425,6 +431,7 @@ mod tests {
                     width: 1.0,
                     color: "#d4d4d4".into(),
                     style: None,
+                    rail: None,
                     clip: None,
                 },
                 DrawCmd::Path {

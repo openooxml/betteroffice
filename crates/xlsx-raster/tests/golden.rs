@@ -88,6 +88,7 @@ fn line(
         width,
         color: color.into(),
         style: style.map(Into::into),
+        rail: None,
         clip: None,
     }
 }

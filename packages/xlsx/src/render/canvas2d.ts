@@ -188,7 +188,9 @@ function paintLine(ctx: CanvasRenderingContext2D, cmd: LineCmd, dpr: number, ori
   ctx.lineCap = 'butt';
   let { x1, y1, x2, y2 } = cmd;
   const width = Math.max(1, Math.round(cmd.width * dpr));
-  if (cmd.style) {
+  // a double without a rail width keeps the legacy passes around the unsnapped line
+  const legacyDouble = cmd.style === 'double' && cmd.rail === undefined;
+  if (cmd.style && !legacyDouble) {
     if (y1 === y2) {
       y1 = y2 = (Math.floor(y1 * dpr + origin.y) + (width % 2) / 2 - origin.y) / dpr;
       x1 = (Math.round(x1 * dpr + origin.x) - origin.x) / dpr;
@@ -200,10 +202,10 @@ function paintLine(ctx: CanvasRenderingContext2D, cmd: LineCmd, dpr: number, ori
     }
   }
   if (cmd.style === 'double') {
-    const off = cmd.width / 3;
+    const off = cmd.rail === undefined ? Math.max(cmd.width * 0.8, 0.8) : (cmd.width - cmd.rail) / 2;
     const horizontal = Math.abs(y1 - y2) <= Math.abs(x1 - x2);
     const [dx, dy] = horizontal ? [0, off] : [off, 0];
-    ctx.lineWidth = cmd.width / 3;
+    ctx.lineWidth = cmd.rail ?? Math.max(cmd.width * 0.6, 0.5);
     ctx.setLineDash([]);
     strokeSegment(ctx, x1 - dx, y1 - dy, x2 - dx, y2 - dy);
     strokeSegment(ctx, x1 + dx, y1 + dy, x2 + dx, y2 + dy);

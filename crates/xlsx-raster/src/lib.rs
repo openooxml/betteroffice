@@ -111,27 +111,23 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
                 width,
                 color,
                 style,
+                rail,
                 clip,
             } => {
-                if let Some(clip) = clip {
-                    clip_surface.paint(&mut pixmap, *clip, |target, transform, mask| {
-                        paint_line(
+                let paint = |target: &mut Pixmap, transform: Transform, mask: Option<&Mask>| {
+                    match rail {
+                        Some(rail) if style.as_deref() == Some("double") => paint_double(
+                            target, *x1, *y1, *x2, *y2, *width, *rail, color, transform, mask,
+                        ),
+                        _ => paint_line(
                             target, *x1, *y1, *x2, *y2, *width, color, style, transform, mask,
-                        )
-                    })?;
+                        ),
+                    }
+                };
+                if let Some(clip) = clip {
+                    clip_surface.paint(&mut pixmap, *clip, paint)?;
                 } else {
-                    paint_line(
-                        &mut pixmap,
-                        *x1,
-                        *y1,
-                        *x2,
-                        *y2,
-                        *width,
-                        color,
-                        style,
-                        Transform::identity(),
-                        None,
-                    )?;
+                    paint(&mut pixmap, Transform::identity(), None)?;
                 }
             }
             DrawCmd::Path {
@@ -248,8 +244,8 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
     Ok(data)
 }
 
-/// paint a line honoring its dash/double style; `double` approximates excel's
-/// double border with two thin parallel passes.
+/// paint a line honoring its dash/double style; a `double` without a rail width
+/// keeps the legacy approximation: two thin passes around the unsnapped line.
 #[allow(clippy::too_many_arguments)]
 fn paint_line(
     pixmap: &mut Pixmap,
@@ -264,27 +260,12 @@ fn paint_line(
     mask: Option<&Mask>,
 ) -> Result<(), String> {
     let color = parse_color(color)?;
-    let (mut x1, mut y1, mut x2, mut y2) = (x1, y1, x2, y2);
-    if style.is_some() {
-        let offset = (width.round() as u32 % 2) as f32 / 2.0;
-        if y1 == y2 {
-            y1 = y1.floor() + offset;
-            y2 = y1;
-            x1 = x1.round();
-            x2 = x2.round();
-        } else if x1 == x2 {
-            x1 = x1.floor() + offset;
-            x2 = x1;
-            y1 = y1.round();
-            y2 = y2.round();
-        }
-    }
     match style.as_deref() {
         Some("double") => {
-            let off = width / 3.0;
+            let off = (width * 0.8).max(0.8);
             let horizontal = (y1 - y2).abs() <= (x1 - x2).abs();
             let (dx, dy) = if horizontal { (0.0, off) } else { (off, 0.0) };
-            let w = width / 3.0;
+            let w = (width * 0.6).max(0.5);
             stroke_seg(
                 pixmap,
                 x1 - dx,
@@ -311,6 +292,7 @@ fn paint_line(
             );
         }
         Some(style) if !xlsx_render::border_dash(style).is_empty() => {
+            let (x1, y1, x2, y2) = snap(x1, y1, x2, y2, width.round());
             let scale = if style.starts_with("medium") {
                 width / 2.0
             } else {
@@ -339,6 +321,59 @@ fn paint_line(
         _ => stroke_seg(pixmap, x1, y1, x2, y2, width, color, None, transform, mask),
     }
     Ok(())
+}
+
+/// paint a double line as two `rail`-wide passes on the outer edges of `width`.
+#[allow(clippy::too_many_arguments)]
+fn paint_double(
+    pixmap: &mut Pixmap,
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+    width: f32,
+    rail: f32,
+    color: &str,
+    transform: Transform,
+    mask: Option<&Mask>,
+) -> Result<(), String> {
+    let color = parse_color(color)?;
+    let (x1, y1, x2, y2) = snap(x1, y1, x2, y2, width.round().max(1.0));
+    let off = (width - rail) / 2.0;
+    let (dx, dy) = if (y1 - y2).abs() <= (x1 - x2).abs() {
+        (0.0, off)
+    } else {
+        (off, 0.0)
+    };
+    for sign in [-1.0, 1.0] {
+        stroke_seg(
+            pixmap,
+            x1 + sign * dx,
+            y1 + sign * dy,
+            x2 + sign * dx,
+            y2 + sign * dy,
+            rail,
+            color,
+            None,
+            transform,
+            mask,
+        );
+    }
+    Ok(())
+}
+
+/// centre an axis-aligned line on device pixels for a pen `pen` pixels wide.
+fn snap(x1: f32, y1: f32, x2: f32, y2: f32, pen: f32) -> (f32, f32, f32, f32) {
+    let offset = (pen as u32 % 2) as f32 / 2.0;
+    if y1 == y2 {
+        let y = y1.floor() + offset;
+        (x1.round(), y, x2.round(), y)
+    } else if x1 == x2 {
+        let x = x1.floor() + offset;
+        (x, y1.round(), x, y2.round())
+    } else {
+        (x1, y1, x2, y2)
+    }
 }
 
 /// stroke a single segment with an optional dash pattern.
@@ -571,6 +606,7 @@ mod tests {
             width: 1.0,
             color: "#000000".into(),
             style: Some("dashDot".into()),
+            rail: None,
             clip: None,
         });
         let pixels = Pixmap::decode_png(&render_png(&dl).unwrap()).unwrap();
@@ -645,15 +681,15 @@ mod tests {
         }
         let mut pixmap = Pixmap::new(16, 8).unwrap();
         pixmap.fill(Color::WHITE);
-        paint_line(
+        paint_double(
             &mut pixmap,
             0.0,
             4.5,
             16.0,
             4.5,
             3.0,
+            1.0,
             "#000000",
-            &Some("double".into()),
             Transform::identity(),
             None,
         )
@@ -820,6 +856,7 @@ mod tests {
                     width: 1.0,
                     color: "#d4d4d4".into(),
                     style: None,
+                    rail: None,
                     clip: None,
                 },
                 DrawCmd::Text {

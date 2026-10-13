@@ -67,7 +67,7 @@ describe('Canvas2D pattern borders', () => {
     const dl = { width: 100, height: 40, commands: styles.map((style) => ({
       op: 'line', x1: 0, y1: 10, x2: 100, y2: 10,
       width: style === 'double' ? 3 : style.startsWith('medium') ? 2 : 1,
-      color: '#000000', style,
+      color: '#000000', style, ...(style === 'double' ? { rail: 1 } : {}),
     })) } as DisplayList;
     paintDisplayList(context as unknown as CanvasRenderingContext2D, dl, 1);
     expect(dashes).toEqual([[8, 4], [4, 2, 1, 2], [8, 4, 2, 4], [4, 2, 1, 2, 1, 2], [8, 4, 2, 4, 2, 4], [4, 2, 1, 2], []]);

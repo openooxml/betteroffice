@@ -75,6 +75,11 @@ export interface LineCmd {
    */
   style?: 'dashed' | 'dotted' | 'double' | 'mediumDashed' | 'dashDot' | 'mediumDashDot'
     | 'dashDotDot' | 'mediumDashDotDot' | 'slantDashDot';
+  /**
+   * Rail width of a `'double'` line: two rails this wide on the outer edges of
+   * `width`. Absent, painters keep the legacy rails derived from `width`.
+   */
+  rail?: number;
   clip?: Rect;
 }
 

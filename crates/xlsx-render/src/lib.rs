@@ -403,6 +403,7 @@ fn emit_grid_segments(
                     width,
                     color: color.clone(),
                     style: None,
+                    rail: None,
                     clip: None,
                 });
             };
@@ -820,6 +821,7 @@ where
                 width,
                 color: text_color.clone(),
                 style: None,
+                rail: None,
                 clip: None,
             });
         }
@@ -1007,6 +1009,7 @@ where
             width: PANE_DIVIDER_WIDTH,
             color: pane_divider_color.clone(),
             style: None,
+            rail: None,
             clip: None,
         });
     }
@@ -1019,6 +1022,7 @@ where
             width: PANE_DIVIDER_WIDTH,
             color: pane_divider_color.clone(),
             style: None,
+            rail: None,
             clip: None,
         });
     }
@@ -1981,6 +1985,7 @@ fn border_line(x1: f32, y1: f32, x2: f32, y2: f32, edge: &ResolvedBorderEdge) ->
         width: edge.width,
         color: edge.color.clone(),
         style: edge.style.clone(),
+        rail: (edge.style.as_deref() == Some("double")).then_some(edge.width / 3.0),
         clip: None,
     }
 }

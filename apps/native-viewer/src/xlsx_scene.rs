@@ -176,9 +176,10 @@ fn translate_command(
             width,
             color,
             style,
+            rail,
             clip,
         } => {
-            let line = PreparedLine::new(*x1, *y1, *x2, *y2, *width, color, style)?;
+            let line = PreparedLine::new(*x1, *y1, *x2, *y2, *width, color, style, *rail)?;
             paint_clipped(scene, clip.as_ref(), |scene| line.paint(scene))
         }
         DrawCmd::Path {
@@ -268,6 +269,7 @@ struct PreparedLine {
     width: f32,
     color: Color,
     style: Option<String>,
+    rail: Option<f32>,
 }
 
 impl PreparedLine {
@@ -280,6 +282,7 @@ impl PreparedLine {
         width: f32,
         color: &str,
         style: &Option<String>,
+        rail: Option<f32>,
     ) -> Result<Self, String> {
         if !matches!(style.as_deref(), None | Some("solid" | "double"))
             && border_dash(style.as_deref().unwrap_or_default()).is_empty()
@@ -297,20 +300,25 @@ impl PreparedLine {
             width: nonnegative_f32(width, "line width")?,
             color: strict_color(color)?,
             style: style.clone(),
+            rail: rail
+                .map(|rail| nonnegative_f32(rail, "line rail"))
+                .transpose()?,
         })
     }
 
     fn paint(&self, scene: &mut Scene) {
         match self.style.as_deref() {
             Some("double") => {
-                let offset = self.width / 3.0;
+                let (offset, width) = match self.rail {
+                    Some(rail) => ((self.width - rail) / 2.0, rail),
+                    None => ((self.width * 0.8).max(0.8), (self.width * 0.6).max(0.5)),
+                };
                 let horizontal = (self.y1 - self.y2).abs() <= (self.x1 - self.x2).abs();
                 let (dx, dy) = if horizontal {
                     (0.0, offset)
                 } else {
                     (offset, 0.0)
                 };
-                let width = self.width / 3.0;
                 stroke_segment(
                     scene,
                     self.x1 - dx,
@@ -837,6 +845,7 @@ mod tests {
                 width: 1.0,
                 color: "#123456".into(),
                 style: style.map(str::to_owned),
+                rail: None,
                 clip: Some(clip),
             });
         }
@@ -907,6 +916,7 @@ mod tests {
             width: 1.0,
             color: "#000000".into(),
             style: Some("future-style".into()),
+            rail: None,
             clip: None,
         }]))
         .unwrap();
