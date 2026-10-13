@@ -1039,24 +1039,16 @@ impl Workbook {
         let mut model = staged.model;
         retain_array_formulas(&self.model, &mut model);
         let update = staged.update;
-        // keep what the editing replica kept, or the replicas drift apart
-        let full = CalculationScope::Kept.confirmed(&self.model, &model) == CalculationScope::Full;
-        let rebuilt = full.then(|| {
-            rebuild_and_recalc_all_with_seed(&mut model, options.now_serial, self.rand_seed)
-        });
-        let mut calculation = match &rebuilt {
-            Some((_, recalc)) => calculation_result(recalc),
-            None => self.last_calculation.clone(),
-        };
+        let (graph, recalc) =
+            rebuild_and_recalc_all_with_seed(&mut model, options.now_serial, self.rand_seed);
+        let mut calculation = calculation_result(&recalc);
         calculation.changed = changed_cells_between(&self.model, &model);
         self.authority
             .apply_staged_update_v1(&commit_update)
             .map_err(authority_error)?;
         self.install_model(model)?;
         self.invalidate_sheet_info();
-        if let Some((graph, _)) = rebuilt {
-            self.graph = Some(graph);
-        }
+        self.graph = Some(graph);
         self.last_calculation = calculation.clone();
         self.undo.clear();
         self.preserved_undo.clear();
@@ -1783,7 +1775,13 @@ impl Workbook {
             return Ok(MutationResult::default());
         }
         mark(EditStage::Validated);
-        let scope = CalculationScope::of(&self.model, &ops);
+        // replicas holding stale results converge only through the full
+        // recalculation every one of them runs on each exchange
+        let scope = if self.is_collaborative() {
+            CalculationScope::Full
+        } else {
+            CalculationScope::of(&self.model, &ops)
+        };
         let mut inverse = Vec::new();
         for chunk in per_op.into_iter().rev() {
             inverse.extend(chunk);
@@ -2038,8 +2036,7 @@ impl Workbook {
         self.preserved.forget_shared_strings();
         self.preserved.forget_axes();
         self.proposals.clear();
-        let scope = CalculationScope::Kept.confirmed(&before, &self.model);
-        let result = self.recalculate_scope(scope, options);
+        let result = self.rebuild_and_recalculate(options);
         let changed = changed_cells_between(&before, &self.model);
         self.publish(Some(history.update));
         Ok(MutationResult {

@@ -154,6 +154,7 @@ fn assert_kept(
     counters: (bool, u64),
 ) {
     assert!(result.applied);
+    assert!(result.changed.is_empty());
     assert!(result.cycle_cells.is_empty());
     assert!(result.limited_cells.is_empty());
     assert_eq!(&values(workbook), before);
@@ -162,43 +163,31 @@ fn assert_kept(
 }
 
 fn check_format(kind: &str, history: bool) {
-    let edited = CellRange::parse_a1("A1:F1").unwrap();
-    for collaborative in [false, true] {
-        let bytes = source(&format!("{STALE}{VOLATILE}"));
-        let mut workbook = if collaborative {
-            Workbook::open_collaborative(&bytes, 41).unwrap()
-        } else {
-            Workbook::open(&bytes).unwrap()
-        };
-        let before = values(&workbook);
-        let counters = calculation_counters(&workbook);
+    let bytes = source(&format!("{STALE}{VOLATILE}"));
+    let mut workbook = Workbook::open(&bytes).unwrap();
+    let before = values(&workbook);
+    let counters = calculation_counters(&workbook);
+    let epoch = workbook.model_epoch;
+    track_formula_evaluations();
+    let result = workbook
+        .apply_ops(vec![format_op(kind)], options())
+        .unwrap();
+    assert_kept(&workbook, &result, &before, counters);
+    assert!(workbook.model_epoch > epoch);
+    if !history {
+        return;
+    }
+    for redo in [false, true] {
         let epoch = workbook.model_epoch;
         track_formula_evaluations();
-        let result = workbook
-            .apply_ops(vec![format_op(kind)], options())
-            .unwrap();
+        let result = if redo {
+            workbook.redo(options())
+        } else {
+            workbook.undo(options())
+        }
+        .unwrap();
         assert_kept(&workbook, &result, &before, counters);
-        assert!(result.changed.is_empty());
         assert!(workbook.model_epoch > epoch);
-        if !history {
-            continue;
-        }
-        for redo in [false, true] {
-            let epoch = workbook.model_epoch;
-            track_formula_evaluations();
-            let result = if redo {
-                workbook.redo(options())
-            } else {
-                workbook.undo(options())
-            }
-            .unwrap();
-            assert_kept(&workbook, &result, &before, counters);
-            assert!(workbook.model_epoch > epoch);
-            // a collaborative step reports every cell it replaced, styles included
-            for address in &result.changed {
-                assert!(collaborative && edited.contains(address.cell));
-            }
-        }
     }
 }
 
@@ -335,6 +324,16 @@ fn format_edit_moving_the_used_extent_recalculates() {
     assert_eq!(value(&workbook, "C1"), number(3.0));
     workbook.undo(options()).unwrap();
     assert_eq!(value(&workbook, "C1"), number(0.0));
+}
+
+#[test]
+fn collaborative_format_edit_still_recalculates_every_formula() {
+    let mut workbook = Workbook::open_collaborative(&source(STALE), 41).unwrap();
+    track_formula_evaluations();
+    workbook
+        .apply_ops(vec![format_op("bold")], options())
+        .unwrap();
+    assert_eq!(evaluated(), cells(&["C1", "D1", "E1", "F1"]));
 }
 
 #[test]
