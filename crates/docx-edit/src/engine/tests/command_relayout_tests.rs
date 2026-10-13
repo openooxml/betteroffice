@@ -307,3 +307,123 @@ fn command_edits_lay_out_as_a_full_recompute_does() {
     twin_delete(start, start + 3);
     check(&mut host, "delete to the paragraph end");
 }
+
+const INLINE_SHAPE: &str = r#"<w:r><w:drawing><wp:inline><wp:extent cx="457200" cy="228600"/><wp:docPr id="3" name="shape"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="457200" cy="228600"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>"#;
+
+const ANCHORED_SHAPE: &str = r#"<w:r><w:drawing><wp:anchor simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="margin"><wp:align>left</wp:align></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="457200" cy="228600"/><wp:wrapNone/><wp:docPr id="4" name="anchored"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="457200" cy="228600"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>"#;
+
+/// Six short paragraphs ahead of pages holding paragraphs split across pages
+/// and the `objects` named: "table", "image" (inline), "shape" (inline) or
+/// "anchored" (a floating shape).
+fn objects_engine(client_id: u64, objects: &[&str]) -> EngineSession {
+    use super::lowering_fixture::{Package, image, para, run};
+    let cell = |content: String| {
+        format!(r#"<w:tc><w:tcPr><w:tcW w:w="1500" w:type="dxa"/></w:tcPr>{content}</w:tc>"#)
+    };
+    let words = (0..120)
+        .map(|word| format!("word{word}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut body: String = (0..6)
+        .map(|index| {
+            para(
+                &format!("{:08X}", 0x100 + index),
+                &run(&format!(
+                    "Paragraph {index}: the quick brown fox jumps over the lazy dog."
+                )),
+            )
+        })
+        .collect();
+    for round in 0..3 {
+        let id = |offset: u32| format!("{:08X}", 0x200 + round * 0x10 + offset);
+        body += &para(&id(0), &run(&words));
+        if objects.contains(&"table") {
+            body += &format!(
+                r#"<w:tbl><w:tblPr><w:tblW w:w="3000" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="1500"/><w:gridCol w:w="1500"/></w:tblGrid><w:tr>{}{}</w:tr></w:tbl>"#,
+                cell(para(&id(1), &run("Left cell"))),
+                cell(para(&id(2), &run("A right cell long enough to wrap"))),
+            );
+        }
+        if objects.contains(&"image") {
+            body += &para(
+                &id(3),
+                &format!(
+                    "{}{}{}",
+                    run("Image "),
+                    image("rIdImage", "picture"),
+                    run(" then text")
+                ),
+            );
+        }
+        if objects.contains(&"shape") {
+            body += &para(
+                &id(4),
+                &format!("{}{INLINE_SHAPE}{}", run("Shape "), run(" then text")),
+            );
+        }
+        if objects.contains(&"anchored") && round == 1 {
+            body += &para(&id(5), &format!("{}{ANCHORED_SHAPE}", run("Anchor ")));
+        }
+        body += &para(&id(6), &run("A closing paragraph."));
+    }
+    let bytes = Package::new(&body)
+        .rel("rIdImage", "image", "media/image1.png")
+        .bytes();
+    let engine = EngineSession::new(client_id);
+    crate::seed_from_docx(engine.doc(), &bytes).unwrap();
+    engine.set_relayout_trigger(RelayoutTrigger::Open);
+    engine
+}
+
+#[test]
+fn command_edits_ahead_of_tables_images_and_split_paragraphs_lay_out_as_a_full_recompute_does() {
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+    for anchored in [false, true] {
+        let objects: &[&str] = if anchored {
+            &["table", "image", "shape", "anchored"]
+        } else {
+            &["table", "image", "shape"]
+        };
+        let engine = objects_engine(9714, objects);
+        let mut host = CommandHost::open(&engine, font);
+        let mut undo = engine.doc().undo_manager();
+        let ctx = crate::EditCtx::local("", "");
+        let typed = |host: &mut CommandHost, label: &str, work: KeystrokeWork| {
+            let label = format!("{label}, anchored {anchored}");
+            if !anchored {
+                assert_eq!(work.full_paginations, 0, "{label}: {work:?}");
+            }
+            host.assert_matches_cold(&label);
+        };
+
+        let end = paragraph_end(&engine, 1);
+        let work = keystroke_work(&engine, || host.insert(end - 3, "x"));
+        typed(&mut host, "typing", work);
+        let work = keystroke_work(&engine, || host.delete(end - 3, end - 2));
+        typed(&mut host, "backspace", work);
+        let work = keystroke_work(&engine, || host.delete(end - 6, end - 5));
+        typed(&mut host, "forward delete", work);
+
+        undo.add_undo_barrier();
+        let end = paragraph_end(&engine, 2);
+        let long =
+            "A long pasted passage that wraps over several lines and moves the page breaks. ";
+        host.insert(end, &long.repeat(4));
+        host.assert_matches_cold(&format!("page-break-moving paste, anchored {anchored}"));
+        assert!(undo.undo());
+        host.relayout(None);
+        host.assert_matches_cold(&format!("undo, anchored {anchored}"));
+
+        let end = paragraph_end(&engine, 3);
+        engine
+            .doc()
+            .split_paragraph(&ctx, crate::Position::new("body", end - 6), None)
+            .unwrap();
+        host.relayout(None);
+        host.assert_matches_cold(&format!("enter, anchored {anchored}"));
+        let work = keystroke_work(&engine, || host.insert(end - 2, "y"));
+        typed(&mut host, "typing after enter", work);
+    }
+}
