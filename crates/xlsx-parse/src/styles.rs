@@ -448,14 +448,14 @@ mod tests {
 
     #[test]
     fn format_facets_child_apply_flags_and_defaults() {
-        for (flags, applied) in [
+        for (flags, protected) in [
             ("", true),
             (r#"applyAlignment="1" applyProtection="true""#, true),
             (r#"applyAlignment="0" applyProtection="false""#, false),
         ] {
             let xml = format!(
                 r#"<styleSheet><cellXfs><xf xfId="1" quotePrefix="true" pivotButton="1" {flags}>
-<alignment textRotation="0" indent="0" relativeIndent="0" justifyLastLine="0" readingOrder="0"/>
+<alignment horizontal="center" textRotation="0" indent="0" relativeIndent="0" justifyLastLine="0" readingOrder="0"/>
 <protection hidden="1"/></xf></cellXfs></styleSheet>"#
             );
             let (styles, _) = parse_styles(xml.as_bytes()).unwrap();
@@ -463,29 +463,23 @@ mod tests {
             assert_eq!(xf.xf_id, Some(1));
             assert!(xf.quote_prefix);
             assert!(xf.pivot_button);
-            if applied {
-                assert_eq!(
-                    xf.protection,
-                    Some(Protection {
-                        locked: true,
-                        hidden: true
-                    })
-                );
-                assert_eq!(
-                    xf.alignment,
-                    Some(Alignment {
-                        text_rotation: Some(0),
-                        indent: Some(0),
-                        relative_indent: Some(0),
-                        justify_last_line: Some(false),
-                        reading_order: Some(0),
-                        ..Default::default()
-                    })
-                );
-            } else {
-                assert!(xf.protection.is_none());
-                assert!(xf.alignment.is_none());
-            }
+            assert_eq!(
+                xf.alignment,
+                Some(Alignment {
+                    h: Some(HAlign::Center),
+                    text_rotation: Some(0),
+                    indent: Some(0),
+                    relative_indent: Some(0),
+                    justify_last_line: Some(false),
+                    reading_order: Some(0),
+                    ..Default::default()
+                })
+            );
+            let protection = Protection {
+                locked: true,
+                hidden: true,
+            };
+            assert_eq!(xf.protection, protected.then_some(protection));
         }
     }
 }

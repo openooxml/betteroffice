@@ -5232,6 +5232,46 @@ mod tests {
     }
 
     #[test]
+    fn fingerprints_accept_the_reading_before_format_facets() {
+        let mut model = open_test_cases::matrix().remove(0).model;
+        let before_facets = model.clone();
+        let xf = &mut model.styles.cell_xfs[1];
+        xf.xf_id = Some(0);
+        xf.quote_prefix = true;
+        xf.protection = Some(xlsx_model::Protection {
+            locked: false,
+            hidden: false,
+        });
+        xf.alignment = Some(xlsx_model::Alignment {
+            text_rotation: Some(90),
+            ..Default::default()
+        });
+        let mut legacy_styles = model.styles.clone();
+        legacy_styles.cell_xfs[1].num_fmt_id = None;
+        let mut held_back = before_facets.clone();
+        held_back.styles.cell_xfs[1].num_fmt_id = None;
+        let actual =
+            WorkbookBase::from_model_with_legacy_dimensions(&model, &[], Some(&legacy_styles))
+                .unwrap();
+        let expected = WorkbookBase::from_model_with_legacy_dimensions_oracle(
+            &model,
+            &[],
+            Some(&legacy_styles),
+        )
+        .unwrap();
+        assert_eq!(actual.fingerprints, expected.fingerprints);
+        assert_eq!(actual.fingerprint, expected.fingerprint);
+        let (current, _) = fingerprint_model_for_schema(&model, SCHEMA_VERSION).unwrap();
+        assert_eq!(actual.fingerprint, current);
+        for version in MIN_SUPPORTED_SCHEMA_VERSION..=SCHEMA_VERSION {
+            for reading in [&before_facets, &held_back] {
+                let (fingerprint, _) = fingerprint_model_for_schema(reading, version).unwrap();
+                assert!(actual.accepts_fingerprint(version, &fingerprint), "{version}");
+            }
+        }
+    }
+
+    #[test]
     fn single_projection_matches_double_projection_matrix() {
         for case in open_test_cases::matrix() {
             let (actual, model, structure) = WorkbookAuthority::from_source_with_projection(
