@@ -8,7 +8,7 @@ import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
 import { createResidentEngineSession } from './residentEngineSession';
 import { residentWorkerFactory } from './__fixtures__/residentWorker';
 import { ResidentEngineWorkerClient } from './residentEngineWorkerClient';
-import type { DocxCommandEnvelope, ResidentCommandInitRequest } from './residentCommandProtocol';
+import type { DocxCommandEnvelope, DocxCommandFrame, ResidentCommandInitRequest } from './residentCommandProtocol';
 import type { ResidentEngineWorkerResponse } from './residentEngineWorkerProtocol';
 import type { SectionProperties } from '../types/document';
 
@@ -907,6 +907,57 @@ test('review_commands_order_proposals_preview_withdrawal_and_revision_resolution
     expect(rejected.outcomes[0]?.status).toBe('applied');
     expect(engine.paragraphs('body')[0]?.text).toBe('Bud');
   } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('identity assigning save presents its native version before version checked reads', async () => {
+  const { client, engine, point } = await openWorker();
+  const frames: DocxCommandFrame[] = [];
+  const unsubscribe = client.onFrame((frame) => { frames.push(frame); });
+  try {
+    const broken = await client.edit(intent(1, 0, 'paragraphBreak', {}));
+    expect(broken.outcomes[0]?.status).toBe('applied');
+    const saved = await client.save({ comments: [] });
+    expect(saved.version).not.toBe(broken.frame!.payload.documentVersion);
+    expect(saved.version).toBe(engine.proposalEngine.version());
+    expect(frames.map((frame) => frame.payload.documentVersion)).toEqual([saved.version]);
+    const frameEpoch = frames[0]!.revision;
+    expect(await client.documentReadAt({ kind: 'reviewSnapshot' }, saved.version)).toMatchObject({
+      status: 'ok', version: saved.version, value: { version: saved.version, frameEpoch },
+    });
+    const range = { story: 'body', start: { paraId: point.paraId, offset: 0 }, end: { paraId: point.paraId, offset: 4 } };
+    expect(await client.documentReadAt({ kind: 'rangeHighlights', ranges: [range], expectVersion: saved.version }, saved.version))
+      .toMatchObject({ status: 'ok', value: { version: saved.version, frameEpoch } });
+    const commented = await client.edit(intent(2, 1, 'addComment', {
+      ranges: [range], author: 'Ada', date: '2026-01-01', body: 'Saved', expectVersion: saved.version,
+    }));
+    expect(commented.outcomes[0]?.status).toBe('applied');
+  } finally {
+    unsubscribe();
+    client.destroy();
+  }
+}, TIMEOUT);
+
+test('save that assigns no identities keeps its version frame and layout', async () => {
+  const { client, engine } = await openWorker();
+  const frames: DocxCommandFrame[] = [];
+  const unsubscribe = client.onFrame((frame) => { frames.push(frame); });
+  const layouts = spyOn(engine, 'layoutDocumentWithRegionsRetained');
+  try {
+    expect((await client.edit(intent(1, 0, 'paragraphBreak', {}))).outcomes[0]?.status).toBe('applied');
+    const first = await client.save({ comments: [] });
+    const published = frames.length;
+    const laidOut = layouts.mock.calls.length;
+    const parts = await client.documentReadAt({ kind: 'partSnapshot' }, first.version);
+    const second = await client.save({ comments: [] });
+    expect(second.version).toBe(first.version);
+    expect(frames).toHaveLength(published);
+    expect(layouts).toHaveBeenCalledTimes(laidOut);
+    expect(await client.documentReadAt({ kind: 'partSnapshot' }, second.version)).toEqual(parts);
+  } finally {
+    layouts.mockRestore();
+    unsubscribe();
+    client.destroy();
+  }
 }, TIMEOUT);
 
 test('toolbar_metadata_and_insertion_commands_are_versioned_worker_services', async () => {
