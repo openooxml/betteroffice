@@ -10,7 +10,7 @@ import type {
 import type { PeerlessEchoIntent, PeerlessEchoPainter } from './echoPainter';
 import { admitIntent, createInputAdmission, submitFormattingIntent } from './inputAdmission';
 import { coalesceInputDrafts, type PeerlessCommandDraft } from './inputCoalescing';
-import type { PeerlessViewSnapshot, PeerlessViewStore } from './viewStore';
+import { createPeerlessViewStore, type PeerlessViewSnapshot } from './viewStore';
 
 function ticket(id: number): CommandTicket {
   return { id, seq: undefined, ack: Promise.resolve({ status: 'noop' }), presented: Promise.resolve('presented') };
@@ -83,10 +83,7 @@ function typingSession() {
     identity: { session: 'test', incarnation: 1, epoch: 1 }, version: 0, throughSeq: 0, presentedThroughSeq: 0,
     workerSelection: null, anchors: null, geometry: null, editState: undefined,
   };
-  const viewStore: PeerlessViewStore = {
-    getSnapshot: () => snapshot, getServerSnapshot: () => snapshot,
-    subscribe: () => () => {}, acceptWorkerState() {}, installFrameGeometry() {}, dispose() {},
-  };
+  const viewStore = createPeerlessViewStore(snapshot);
   const echoPainter: PeerlessEchoPainter = {
     installContext() {}, restoreBackground: () => true,
     preview: (intent) => ({ intent, originalIntentCount: 1, contextFrameEpoch: 1 }),
@@ -96,9 +93,15 @@ function typingSession() {
   const pump = () => { while (queued.length) queued.shift()!(); };
   let acknowledged = 0;
   return { session, admission, calls, pump,
-    type(text: string) {
+    installGeometry(coversThroughSeq: number) {
+      viewStore.installFrameGeometry({
+        identity: snapshot.identity, coversThroughSeq, frameEpoch: coversThroughSeq, layoutRevision: 1,
+        pages: [], caret: { x: 0, y: 0, width: 1, height: 16 }, selectionRects: [],
+      });
+    },
+    type(text: string, onSubmitted?: (ticket: CommandTicket) => void) {
       return [...text].map((char) => {
-        const result = admitIntent(admission, { kind: 'insertText', payload: { text: char } });
+        const result = admitIntent(admission, { kind: 'insertText', payload: { text: char } }, { onSubmitted });
         pump();
         if (result.status !== 'submitted') throw new Error(`Expected submitted input, got ${result.status}`);
         return result.ticket;
@@ -156,6 +159,51 @@ test('chained typing never coalesces across a selection or format change', async
     .toEqual([['insertText', 'ef'], ['navigate', null], ['insertText', 'gh'], ['toggleMark', null], ['insertText', 'ij']]);
   h.admission.dispose();
   await h.session.dispose();
+});
+
+test.each([
+  { name: 'cancelled empty', text: null },
+  { name: 'committed empty', text: '' },
+])('deferred typing stays in separate transactions across a $name composition', async ({ text }) => {
+  const h = typingSession();
+  try {
+    h.type('wxyz');
+    expect(h.calls).toHaveLength(4);
+    const navigation = admitIntent(h.admission, {
+      kind: 'navigate', payload: { unit: 'line', direction: 'down', extend: false, goalX: 0 },
+    }, { onSubmitted: h.pump });
+    expect(navigation.status).toBe('submitted');
+    const before = h.type('abcde', h.pump);
+    const reservation = h.admission.reserveComposition();
+    const composition = h.admission.settleComposition(reservation.slot,
+      text === null ? null : { text, target: reservation.target });
+    expect(composition.status).toBe('ignored');
+    let submitted!: () => void;
+    const whenSubmitted = new Promise<void>((resolve) => { submitted = resolve; });
+    const [f] = h.type('f', () => { h.pump(); submitted(); });
+    expect(h.calls).toHaveLength(4);
+    expect([...before, f!].every((ticket) => ticket.seq === undefined)).toBe(true);
+
+    await h.acknowledge(4);
+    expect(h.calls).toHaveLength(4);
+    h.installGeometry(4);
+    await whenSubmitted;
+    expect(h.calls.slice(4).map(({ envelope }) =>
+      [envelope.kind, 'text' in envelope.payload ? envelope.payload.text : null]))
+      .toEqual([['navigate', null], ['insertText', 'a'], ['insertText', 'b'], ['insertText', 'c']]);
+    await h.acknowledge(1);
+    expect(h.calls[8]!.envelope).toMatchObject({ kind: 'insertText', payload: { text: 'de' }, afterSeq: 8 });
+    await h.acknowledge(1);
+    expect(h.calls[9]!.envelope).toMatchObject({ kind: 'insertText', payload: { text: 'f' }, afterSeq: 9 });
+    expect(before.at(-1)!.seq).not.toBe(f!.seq);
+    await h.acknowledge(4);
+    const outcomes = await Promise.all([...before, f!].map((ticket) => ticket.ack));
+    expect(outcomes.map((outcome) => outcome.seq)).toEqual([6, 7, 8, 9, 9, 10]);
+    expect(outcomes.every((outcome) => outcome.status === 'applied')).toBe(true);
+  } finally {
+    h.admission.dispose();
+    await h.session.dispose();
+  }
 });
 
 test.each([
