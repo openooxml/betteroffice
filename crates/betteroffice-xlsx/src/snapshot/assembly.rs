@@ -1860,11 +1860,14 @@ impl WorkbookSnapshotBuilder {
             .ok_or_else(|| error("snapshot authority builder is missing"))?
             .finish_drained()?;
         authority.set_snapshot_projection_valid(projection_valid);
-        let model = self
+        let mut model = self
             .model
             .take()
             .ok_or_else(|| error("snapshot model builder is missing"))?
             .finish()?;
+        model
+            .styles
+            .set_legacy_builtin_ids(authority.legacy_builtin_ids());
         if model.styles.snapshot_field_counts() != style_counts
             || model.sheets.get(header.active_sheet.0 as usize).is_none()
         {

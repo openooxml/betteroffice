@@ -298,7 +298,9 @@ impl RecoveryCalculation {
             return Err(invalid("Recovery calculation sheet count mismatch"));
         }
         if let Some(styles) = &self.styles {
+            let legacy = model.styles.legacy_builtin_ids();
             model.styles = styles.clone();
+            model.styles.set_legacy_builtin_ids(legacy);
         }
         for (index, sheet) in model.sheets.iter_mut().enumerate() {
             for (at, cell) in &self.cells[index] {

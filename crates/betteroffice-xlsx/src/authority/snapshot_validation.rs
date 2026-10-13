@@ -19,7 +19,11 @@ mod format_tests {
                 ..Default::default()
             });
             let formats = BTreeMap::from([(id, 0)]);
-            for style in [None, Some(0)] {
+            for (style, legacy) in [None, Some(0)]
+                .into_iter()
+                .flat_map(|style| [(style, false), (style, true)])
+            {
+                model.styles.set_legacy_builtin_ids(legacy);
                 let mut position = JsonPosition::default();
                 let mut window = JsonWindow {
                     position: &mut position,
@@ -28,7 +32,7 @@ mod format_tests {
                     limit: usize::MAX,
                 };
                 window
-                    .format(&model, style.and_then(|s| model.styles.xf(s)), &formats)
+                    .format(&model, style.and_then(|s| model.styles.xf(s)), &formats, legacy)
                     .unwrap();
                 assert_eq!(
                     serde_json::from_slice::<serde_json::Value>(&window.bytes).unwrap(),
@@ -216,11 +220,13 @@ impl JsonWindow<'_> {
         }
     }
 
+    /// `legacy` reads builtin ids as builtins whatever the workbook declares.
     fn format(
         &mut self,
         model: &WorkbookModel,
         xf: Option<&xlsx_model::styles::Xf>,
         formats: &BTreeMap<u16, usize>,
+        legacy: bool,
     ) -> JsonResult {
         let default = CellFormat::default();
         let font = xf
@@ -279,7 +285,7 @@ impl JsonWindow<'_> {
         }
         self.raw(b"},\"numberFormat\":")?;
         let id = xf.and_then(|xf| xf.num_fmt_id).unwrap_or(0);
-        if let Some(&index) = formats.get(&id) {
+        if let Some(&index) = formats.get(&id).filter(|_| !legacy || id >= 164) {
             self.raw(b"{\"kind\":\"custom\",\"pattern\":")?;
             self.string(&model.styles.num_fmts[index].1)?;
             self.raw(b"}")?;
@@ -609,9 +615,10 @@ impl SnapshotValidation {
                 return Ok(false);
             };
             let start = self.json.bytes;
+            let legacy = self.version < NUMBER_FORMAT_SCHEMA_VERSION;
             let (done, bytes) =
                 json_window(&mut self.json, budget, &mut self.unit_bytes, |window| {
-                    window.format(model, xf, &self.number_formats)
+                    window.format(model, xf, &self.number_formats, legacy)
                 })?;
             if let Some(key) = &self.format_key {
                 let payload = atomic(&formats, &txn, key)?;
@@ -992,7 +999,7 @@ impl SnapshotValidation {
                     return Ok(false);
                 }
                 if (required.len() + 4..=required.len() + 5).contains(&self.field)
-                    && self.version < SCHEMA_VERSION
+                    && self.version < HIDDEN_DIMENSIONS_SCHEMA_VERSION
                 {
                     let columns = self.field == required.len() + 4;
                     if let Some(hidden) = base
@@ -1287,7 +1294,7 @@ impl SnapshotValidation {
                         let actual = child
                             .get(&txn, &index.to_string())
                             .and_then(|value| value.cast::<f64>().ok());
-                        let fallback = if self.version < SCHEMA_VERSION {
+                        let fallback = if self.version < HIDDEN_DIMENSIONS_SCHEMA_VERSION {
                             base.hidden_dimensions
                                 .get(
                                     base_sheet_index(

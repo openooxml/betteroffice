@@ -539,6 +539,10 @@ pub struct Stylesheet {
     /// `#rrggbb` entries; empty strings preserve omitted colors and use the default index.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub indexed_colors: Vec<String>,
+    /// declared codes for builtin ids are ignored, as shared state written
+    /// before they were honoured reads them.
+    #[serde(skip)]
+    legacy_builtin_ids: bool,
     #[serde(skip)]
     font_memo: PoolMemo,
     #[serde(skip)]
@@ -562,6 +566,7 @@ impl PartialEq for Stylesheet {
             && self.num_fmts == other.num_fmts
             && self.theme == other.theme
             && self.indexed_colors == other.indexed_colors
+            && self.legacy_builtin_ids == other.legacy_builtin_ids
     }
 }
 
@@ -640,6 +645,7 @@ impl Stylesheet {
             num_fmts,
             theme: _,
             indexed_colors,
+            legacy_builtin_ids: _,
             font_memo: _,
             fill_memo: _,
             border_memo: _,
@@ -708,6 +714,19 @@ impl Stylesheet {
         self.xf(style_index)?.alignment.as_ref()
     }
 
+    #[doc(hidden)]
+    pub fn legacy_builtin_ids(&self) -> bool {
+        self.legacy_builtin_ids
+    }
+
+    /// Only sticks where a builtin id is declared, the one case the readings
+    /// differ.
+    #[doc(hidden)]
+    pub fn set_legacy_builtin_ids(&mut self, legacy: bool) {
+        self.legacy_builtin_ids =
+            legacy && self.num_fmts.iter().any(|(id, _)| *id < BUILTIN_ID_LIMIT);
+    }
+
     /// Declared codes override implied builtins for every id.
     pub fn format_code_for(&self, style_index: u32) -> FormatCode<'_> {
         let id = self
@@ -718,6 +737,9 @@ impl Stylesheet {
     }
 
     pub fn format_code_for_id(&self, id: u16) -> FormatCode<'_> {
+        if self.legacy_builtin_ids && id < BUILTIN_ID_LIMIT {
+            return FormatCode::Builtin(id);
+        }
         match self.declared_code(id) {
             Some(code) => FormatCode::Custom(code),
             None => FormatCode::Builtin(id),
@@ -726,7 +748,7 @@ impl Stylesheet {
 
     /// the builtin's own code when the workbook declares `id` as something else.
     fn shadowed_builtin(&self, id: u16) -> Option<&'static str> {
-        if id >= BUILTIN_ID_LIMIT {
+        if self.legacy_builtin_ids || id >= BUILTIN_ID_LIMIT {
             return None;
         }
         let builtin = crate::numfmt::builtin_format_code(id).unwrap_or("General");

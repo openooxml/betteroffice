@@ -2792,8 +2792,9 @@ fn snapshot_lineage_uses_cached_authority_revision_for_every_fragment() {
     assert_eq!(failure.to_string(), "snapshot workbook lineage has changed");
 }
 
-#[test]
-fn schema_6_snapshot_with_a_declared_builtin_restores_its_builtin_display() {
+/// A1 holds a date-sized serial under builtin id 14, which the workbook
+/// declares as `0.00`.
+fn declared_builtin_model() -> WorkbookModel {
     let mut model = WorkbookModel {
         sheets: vec![crate::Sheet::new("Data")],
         ..WorkbookModel::default()
@@ -2803,23 +2804,34 @@ fn schema_6_snapshot_with_a_declared_builtin_restores_its_builtin_display() {
         num_fmt_id: Some(14),
         ..xlsx_model::styles::Xf::default()
     });
-    let at = CellRef::new(0, 0);
     model.sheets[0].set_cell(
-        at,
+        CellRef::new(0, 0),
         Cell {
             value: CellValue::Number { value: 45_000.0 },
             style: Some(0),
             ..Cell::default()
         },
     );
-    let mut builtin = model.styles.clone();
-    builtin.num_fmts.clear();
-    let cell = model.sheets[0].cell(at).unwrap();
-    let displayed = xlsx_render::display_text(&builtin, model.date_system, cell);
-    assert_ne!(
-        displayed,
-        xlsx_render::display_text(&model.styles, model.date_system, cell)
-    );
+    model
+}
+
+fn a1_display(model: &WorkbookModel) -> String {
+    let cell = model.sheets[0].cell(CellRef::new(0, 0)).unwrap();
+    xlsx_render::display_text(&model.styles, model.date_system, cell)
+}
+
+/// what schema 6 displayed for A1: the builtin, whatever the workbook declares.
+fn builtin_a1_display() -> String {
+    let mut model = declared_builtin_model();
+    model.styles.num_fmts.clear();
+    a1_display(&model)
+}
+
+#[test]
+fn schema_6_snapshot_with_a_declared_builtin_restores_its_builtin_display() {
+    let model = declared_builtin_model();
+    let displayed = builtin_a1_display();
+    assert_ne!(displayed, a1_display(&model));
     let mut worker = Workbook::from_model(model.clone()).unwrap();
     worker.authority = crate::authority::schema_6_authority(&model, 91);
     for budget in budgets() {
@@ -2832,13 +2844,26 @@ fn schema_6_snapshot_with_a_declared_builtin_restores_its_builtin_display() {
             .unwrap()
             .into_parts();
         for restored in [&peer, &again] {
-            let cell = restored.model.sheets[0].cell(at).unwrap();
-            assert_eq!(
-                xlsx_render::display_text(&restored.model.styles, restored.model.date_system, cell),
-                displayed
-            );
+            assert_eq!(a1_display(&restored.model), displayed);
         }
     }
+}
+
+#[test]
+fn restored_schema_6_snapshot_stages_updates_at_its_own_schema() {
+    let model = declared_builtin_model();
+    let mut worker = Workbook::from_model(model.clone()).unwrap();
+    worker.authority = crate::authority::schema_6_authority(&model, 91);
+    let budget = budgets()[2];
+    let (peer, _) = completed_builder(&encode(&worker, budget), budget)
+        .finish()
+        .unwrap()
+        .into_parts();
+    let staged = peer
+        .authority
+        .stage_updates_v1(&[yrs::Update::EMPTY_V1], None)
+        .unwrap();
+    assert_eq!(a1_display(&staged.model), builtin_a1_display());
 }
 
 #[path = "invariant_tests.rs"]
