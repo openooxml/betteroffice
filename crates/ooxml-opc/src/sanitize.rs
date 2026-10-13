@@ -668,7 +668,9 @@ fn record_main_relationship(
             "main document relationship must be internal",
         ));
     }
-    let target = resolve_relationship_target("_rels/.rels", target)
+    // The main part decides the package kind, so a target above the root stays invalid.
+    let target = resolve_target("_rels/.rels", target)
+        .and_then(|(target, climbed)| (!climbed).then_some(target))
         .ok_or_else(|| invalid_relationships("invalid main document target"))?;
     if targets.len() < 2 {
         targets.push((target, relationship_kind));
@@ -1668,6 +1670,11 @@ fn validate_xml_attributes(
 }
 
 fn resolve_relationship_target(relationship_path: &str, target: &str) -> Option<String> {
+    resolve_target(relationship_path, target).map(|(target, _)| target)
+}
+
+// RFC 3986 dot segments: `..` at the package root stays there; the flag reports such a climb.
+fn resolve_target(relationship_path: &str, target: &str) -> Option<(String, bool)> {
     if target.is_empty() || external_target(target) {
         return None;
     }
@@ -1678,17 +1685,18 @@ fn resolve_relationship_target(relationship_path: &str, target: &str) -> Option<
         relationship_base(relationship_path)
     };
     let clean_target = clean_target.trim_start_matches('/').replace('\\', "/");
+    let mut climbed = false;
     for segment in clean_target
         .split('/')
         .filter(|segment| !segment.is_empty() && *segment != ".")
     {
         if segment == ".." {
-            segments.pop()?;
+            climbed |= segments.pop().is_none();
         } else {
             segments.push(segment.to_owned());
         }
     }
-    Some(segments.join("/").to_ascii_lowercase())
+    Some((segments.join("/").to_ascii_lowercase(), climbed))
 }
 
 // `<dir>/_rels/<name>.rels` describes `<dir>/<name>`; relative targets resolve against `<dir>`.
