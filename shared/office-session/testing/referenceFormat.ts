@@ -49,6 +49,7 @@ function open(options: ContractOpenOptions) {
     let malformed = false;
     let silence = false;
     let refusal: RefusalResult<'locked'> | undefined;
+    let commandRefusal: string | undefined;
     let gate: Gate | undefined;
     let admittedSeq: number | undefined;
     pair.host.listen((message) => {
@@ -107,6 +108,10 @@ function open(options: ContractOpenOptions) {
       readOnly: () => readOnly, layoutRevision: () => layout, replayAppliedSeqs, checkRefusals: true,
       getVersion: () => version,
       apply(envelope) {
+        if (commandRefusal !== undefined) {
+          const reason = commandRefusal; commandRefusal = undefined;
+          return { status: 'refused', reason };
+        }
         const payload = envelope.payload;
         if ('blocked' in payload && payload.blocked) return { status: 'refused', reason: 'locked' };
         if ('text' in payload) { text += payload.text; version += 1; return { status: 'applied' }; }
@@ -140,6 +145,7 @@ function open(options: ContractOpenOptions) {
       emitAck() { const ack = commandHost.revise(); if (ack) host.emit('ack', ack); },
       poison() { poison = true; }, breakQueryPost() { breakPost = true; },
       refuseNext(code: string) { refusal = refuse(code) as RefusalResult<'locked'>; },
+      refuseNextCommand(code: string) { commandRefusal = code; },
       malformedReply() { malformed = true; }, silence() { silence = true; },
       queryReplies() {
         let resolve!: (reply: QueryReply) => void;
@@ -171,6 +177,7 @@ function open(options: ContractOpenOptions) {
     bumpLayout: () => active.bumpLayout(), emitAck: () => active.emitAck(),
     failRecovery() { failRecovery = true; },
     breakQueryPost: () => active.breakQueryPost(), refuseNext: (code: string) => active.refuseNext(code),
+    refuseNextCommand: (code: string) => active.refuseNextCommand(code),
     malformedReply: () => active.malformedReply(), silence: () => active.silence(),
     queryReplies: () => active.queryReplies(), park: (kind: string, args: unknown[]) => active.park(kind, args),
     get queryCount() { return queryCount; }, transferredBuffers,
