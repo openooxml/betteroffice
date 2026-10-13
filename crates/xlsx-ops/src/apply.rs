@@ -463,14 +463,34 @@ fn apply_range_formats(
     Ok(InvertedOp(inverse))
 }
 
-/// An xf resolving to the plain format, for workbooks whose xf 0 does not.
+/// An xf resolving to the plain format, for workbooks whose xf 0 does not. A saved xf reads an
+/// unset facet as pool entry 0, so each facet whose entry 0 is not the default names a default
+/// entry.
 pub fn plain_xf(styles: &mut xlsx_model::Stylesheet) -> u32 {
-    let plain = xlsx_model::Xf::default();
-    let index = match styles.cell_xfs.iter().position(|xf| *xf == plain) {
+    let plain = xlsx_model::Xf {
+        font: default_entry(&mut styles.fonts),
+        fill: default_entry(&mut styles.fills),
+        border: default_entry(&mut styles.borders),
+        num_fmt_id: None,
+        alignment: None,
+    };
+    position_or_push(&mut styles.cell_xfs, plain)
+}
+
+fn default_entry<T: Default + PartialEq>(pool: &mut Vec<T>) -> Option<u32> {
+    let default = T::default();
+    if pool.first().is_none_or(|first| *first == default) {
+        return None;
+    }
+    Some(position_or_push(pool, default))
+}
+
+fn position_or_push<T: PartialEq>(pool: &mut Vec<T>, value: T) -> u32 {
+    let index = match pool.iter().position(|entry| *entry == value) {
         Some(index) => index,
         None => {
-            styles.cell_xfs.push(plain);
-            styles.cell_xfs.len() - 1
+            pool.push(value);
+            pool.len() - 1
         }
     };
     index as u32
