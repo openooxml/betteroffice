@@ -7771,4 +7771,18 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn an_empty_text_command_records_no_resident_edit() {
+        let session = shown_text_session(79.0);
+        let paragraph = session.engine.doc().paragraphs("body").unwrap()[0]
+            .para_id
+            .clone();
+        let before = session.engine.doc().story_segments("body").unwrap();
+        session
+            .edit_text_resident("body", &paragraph, 1, &paragraph, 1, Some(String::new()))
+            .unwrap();
+        assert!(session.resident_text_edit.borrow().is_none());
+        assert_eq!(session.engine.doc().story_segments("body").unwrap(), before);
+    }
 }
