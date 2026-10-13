@@ -508,6 +508,7 @@ fn a_default_full_format_under_an_italic_default_xf_renders_plain() {
                 rows: 1,
                 columns: 1,
                 formats: vec![xlsx_model::CellFormat::default()],
+                        kept: Vec::new(),
             },
         },
     )
