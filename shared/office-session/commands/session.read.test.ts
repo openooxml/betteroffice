@@ -324,4 +324,32 @@ describe('fenced session reads and holds', () => {
     expect(h.session.stage).toBe('ready');
     await h.session.dispose();
   });
+
+  for (const applied of [false, true]) for (const posted of [false, true]) {
+    it(`fences ${posted ? 'a reissued' : 'a new'} read at the replayed frontier when the last sent command was refused${applied ? ' after an applied one' : ''}`, async () => {
+      const replacement = port(1);
+      const h = harness({ maxRecoveryAttempts: 1, recovery: { reopen: async () => replacement.connection } });
+      if (applied) { h.session.submit('insert', 'a'); h.pump(); h.worker.ack(0); await drain(); }
+      const refused = h.session.submit('insert', 'b'); h.pump();
+      h.worker.ack(applied ? 1 : 0, { version: applied ? 1 : 0,
+        outcomes: [{ seq: refused.seq!, status: 'refused', reason: 'locked' }] });
+      expect(await refused.ack).toMatchObject({ status: 'refused' });
+      const early = posted ? h.session.read('text', []) : undefined;
+      if (posted) expect(h.worker.reads[0]!.fence.afterSeq).toBe(refused.seq!);
+      h.worker.crash(); await drain();
+      expect(replacement.edits.map((edit) => edit.envelope.seq)).toEqual(applied ? [1] : []);
+      if (applied) { replacement.ack(0); await drain(); }
+      expect(h.session.stage).toBe('ready');
+      const read = early ?? h.session.read('text', []);
+      expect(replacement.reads[0]!.fence.afterSeq).toBe(applied ? 1 : 0);
+      replacement.answer(0);
+      expect(await read).toMatchObject({ ok: true, at: { incarnation: 1 } });
+      const next = h.session.submit('insert', 'c'); h.pump();
+      const later = h.session.read('text', []);
+      expect(replacement.reads[1]!.fence.afterSeq).toBe(next.seq!);
+      replacement.answer(1);
+      expect(await later).toMatchObject({ ok: true });
+      await h.session.dispose();
+    });
+  }
 });

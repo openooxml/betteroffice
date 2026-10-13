@@ -236,6 +236,25 @@ export function describeSessionContract<C extends CommandTable, Q extends QueryT
       expect(reply.at.doc).toBe(old.at.doc); expect(reply.at.throughSeq).toBe(old.at.throughSeq);
       expect(h.queryCount).toBe(2);
     });
+    for (const [name, applied, posted] of [
+      ['answers reads after recovery when the only sent command was refused', false, false],
+      ['answers reads after recovery when the last sent command was refused', true, false],
+      ['answers a reissued read after recovery when the last sent command was refused', true, true],
+    ] as const) test(name, async (h, clock) => {
+      if (applied) expect((await clock.settle(submit(h, fixture.moves.doc).ack)).status).toBe('applied');
+      h.refuseNextCommand(fixture.commands[fixture.moves.doc.kind]!.refusals[0] ?? 'busy');
+      expect((await clock.settle(submit(h, fixture.moves.doc).ack)).status).toBe('refused');
+      const gate = posted ? h.queryReplies() : undefined;
+      const early = posted ? read(h) : undefined;
+      if (gate) expect((await clock.settle(gate.reply)).ok).toBe(true);
+      h.crash(); gate?.release();
+      expect(await clock.settle(early ?? read(h))).toMatchObject({ ok: true, at: { incarnation: 1 } });
+      expect(h.session.stage).toBe('ready');
+      const ticket = submit(h, fixture.moves.doc);
+      const later = await clock.settle(read(h));
+      expect(later.ok).toBe(true);
+      if (later.ok) expect(later.at.throughSeq).toBeGreaterThanOrEqual(ticket.seq!);
+    });
     test('keeps captured holds across recovery', async (h, clock) => {
       const owner = h.session.hold('draft'); const pending = read(h);
       h.crash(); await clock.drain(); expect(h.queryCount).toBe(0);
