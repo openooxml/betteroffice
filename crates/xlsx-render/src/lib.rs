@@ -2085,6 +2085,43 @@ mod tests {
     }
 
     #[test]
+    fn fractions_beyond_integer_range_paint_general_text() {
+        for (value, code, expected) in [
+            (1e18, "?/32", "1E+18"),
+            (1_000_000_000_000.75, "?/?????????", "1E+12"),
+        ] {
+            let mut wb = Workbook::default();
+            wb.styles.num_fmts.push((164, code.into()));
+            wb.styles.cell_xfs.push(Xf {
+                num_fmt_id: Some(164),
+                ..Xf::default()
+            });
+            let mut cell = num_cell(value);
+            cell.style = Some(0);
+            assert_eq!(display_text(&wb.styles, wb.date_system, &cell), expected);
+            let mut sheet = Sheet::new("Sheet1");
+            sheet.set_cell(CellRef::new(0, 0), cell);
+            wb.sheets.push(sheet);
+            let vp = Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: 400.0,
+                height: 100.0,
+            };
+            let dl = build_display_list(&wb, SheetId(0), &vp).unwrap();
+            let texts: Vec<&str> = dl
+                .commands
+                .iter()
+                .filter_map(|cmd| match cmd {
+                    DrawCmd::Text { text, .. } => Some(&**text),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(texts, [expected]);
+        }
+    }
+
+    #[test]
     fn structural_order_and_clip_rect() {
         let mut sheet = Sheet::new("Sheet1");
         sheet.set_cell(CellRef::new(0, 0), num_cell(42.0));

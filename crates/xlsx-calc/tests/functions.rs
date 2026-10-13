@@ -506,6 +506,14 @@ fn text_formats_fraction_placeholders() {
 }
 
 #[test]
+fn text_fractions_beyond_integer_range_show_general() {
+    check(&[
+        ("TEXT(1E18, \"?/32\")", t("1E+18")),
+        ("TEXT(1000000000000.75, \"?/?????????\")", t("1E+12")),
+    ]);
+}
+
+#[test]
 fn search_preserves_contextual_lowercasing() {
     check(&[
         ("SEARCH(\"ΟΣ\", \"ΟΣ\")", n(1.0)),

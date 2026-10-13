@@ -102,6 +102,18 @@ fn fractions_use_best_approximation() {
 }
 
 #[test]
+fn fractions_beyond_integer_range_fall_back_to_general() {
+    for (value, code, expected) in [
+        (1e18, "?/32", "1E+18"),
+        (1_000_000_000_000.75, "?/?????????", "1E+12"),
+    ] {
+        assert_eq!(fv(value, code), expected);
+        assert_eq!(fv(-value, code), format!("-{expected}"));
+        assert!(format_is_approximate(&num(value), code));
+    }
+}
+
+#[test]
 fn general_width_rounding_preserves_half_away_from_zero() {
     assert_eq!(
         fit_general(1.25e12, 76.0, |text| text.len() as f32 * 10.0).as_deref(),
