@@ -1200,20 +1200,23 @@ impl<'a> WorkbookReader<'a> {
     }
 }
 
+// Only relationship ids are decoded; other attribute values stay unread.
 fn sheet_relationship_ids(
     reader: &NsReader<&[u8]>,
     start: &BytesStart<'_>,
     path: &str,
 ) -> Result<Vec<String>, String> {
     let mut ids = Vec::new();
-    for (key, value) in attributes(reader, start, path)? {
-        let (namespace, local) = reader
-            .resolver()
-            .resolve_attribute(quick_xml::name::QName(key.as_bytes()));
+    for attribute in start.attributes() {
+        let attribute = attribute.map_err(|error| format!("invalid XML in {path}: {error}"))?;
+        let (namespace, local) = reader.resolver().resolve_attribute(attribute.key);
         if local.as_ref() == b"id"
             && matches!(namespace, ResolveResult::Bound(namespace) if matches!(namespace.0, b"http://schemas.openxmlformats.org/officeDocument/2006/relationships" | b"http://purl.oclc.org/ooxml/officeDocument/relationships"))
         {
-            ids.push(value);
+            let id = attribute
+                .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
+                .map_err(|error| format!("invalid XML in {path}: {error}"))?;
+            ids.push(id.into_owned());
         }
     }
     Ok(ids)
