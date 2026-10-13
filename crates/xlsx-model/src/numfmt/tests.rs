@@ -135,6 +135,18 @@ fn fractions_use_best_approximation() {
 }
 
 #[test]
+fn general_width_rounding_preserves_half_away_from_zero() {
+    assert_eq!(
+        fit_general(1.25e12, 76.0, |text| text.len() as f32 * 10.0).as_deref(),
+        Some("1.3E+12")
+    );
+    assert_eq!(
+        fit_general(-1.25e12, 86.0, |text| text.len() as f32 * 10.0).as_deref(),
+        Some("-1.3E+12")
+    );
+}
+
+#[test]
 fn builtin_table_ids() {
     assert_eq!(builtin_format_code(0), Some("General"));
     assert_eq!(builtin_format_code(1), Some("0"));

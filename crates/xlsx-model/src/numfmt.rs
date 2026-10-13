@@ -1219,8 +1219,24 @@ fn format_general(n: f64) -> String {
 }
 
 fn general_scientific(a: f64, e: i32) -> String {
-    let mant = a / 10f64.powi(e);
-    let mut m = round_fixed(mant, 5);
+    scientific_precision(a, e, 5)
+}
+
+fn scientific_precision(a: f64, mut e: i32, decimals: usize) -> String {
+    let divisor = 10f64.powi(e);
+    let mant = if divisor == 0.0 {
+        format!("{a:e}")
+            .split_once('e')
+            .and_then(|(m, _)| m.parse().ok())
+            .unwrap_or(a)
+    } else {
+        a / divisor
+    };
+    let mut m = round_fixed(mant, decimals);
+    if m.parse::<f64>().is_ok_and(|value| value >= 10.0) {
+        e += 1;
+        m = round_fixed(mant / 10.0, decimals);
+    }
     trim_trailing_zeros(&mut m);
     let sign = if e < 0 { '-' } else { '+' };
     format!("{m}E{sign}{:02}", e.unsigned_abs())
@@ -1238,11 +1254,7 @@ pub fn is_general(value: &CellValue, code: &str) -> bool {
     parsed[select(&parsed, *value).0].toks == [Tok::General]
 }
 
-pub fn fit_general(
-    value: f64,
-    width: f32,
-    mut measure: impl FnMut(&str) -> f32,
-) -> Option<String> {
+pub fn fit_general(value: f64, width: f32, mut measure: impl FnMut(&str) -> f32) -> Option<String> {
     if !value.is_finite() || value == 0.0 {
         return None;
     }
@@ -1257,12 +1269,12 @@ pub fn fit_general(
         }
     }
     for decimals in (0..=5).rev() {
-        let raw = format!("{value:.decimals$e}");
-        let (mantissa, exponent) = raw.split_once('e')?;
-        let mut mantissa = mantissa.to_string();
-        trim_trailing_zeros(&mut mantissa);
-        let exponent: i32 = exponent.parse().ok()?;
-        let candidate = format!("{mantissa}E{}{:02}", if exponent < 0 { '-' } else { '+' }, exponent.unsigned_abs());
+        let body = scientific_precision(value.abs(), exponent, decimals);
+        let candidate = if value < 0.0 {
+            format!("-{body}")
+        } else {
+            body
+        };
         if measure(&candidate) <= width {
             return Some(candidate);
         }
