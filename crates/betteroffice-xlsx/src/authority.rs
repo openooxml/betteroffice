@@ -238,7 +238,11 @@ impl WorkbookBase {
             Self::released_base_oracle(&released, legacy_dimensions, released_legacy.as_ref())?;
         let (fingerprint, bootstrap_client_id) = fingerprint_model_current_oracle(model)?;
         let mut accepted = Self::current_fingerprints_oracle(model, legacy_styles)?;
-        for released in base.fingerprints.remove(&SCHEMA_VERSION).unwrap_or_default() {
+        for released in base
+            .fingerprints
+            .remove(&SCHEMA_VERSION)
+            .unwrap_or_default()
+        {
             if !accepted.contains(&released) {
                 accepted.push(released);
             }
@@ -4568,7 +4572,8 @@ impl<'a> FingerprintBuilder<'a> {
         legacy_styles: Option<&'a Stylesheet>,
     ) -> Result<Vec<String>, String> {
         let (current, _) = self.hash(styles, SCHEMA_VERSION, true, true, false, true)?;
-        let (without_col_styles, _) = self.hash(styles, SCHEMA_VERSION, true, false, false, true)?;
+        let (without_col_styles, _) =
+            self.hash(styles, SCHEMA_VERSION, true, false, false, true)?;
         let mut accepted = vec![current];
         let mut readings = vec![without_col_styles];
         if let Some(legacy) = legacy_styles
