@@ -7120,7 +7120,7 @@ mod tests {
                 "schema v{version} must recognise a fingerprint hashing column styles only"
             );
         }
-        let (current, _) = fingerprint_model_for_schema(&model, SCHEMA_VERSION).unwrap();
+        let (current, _) = fingerprint_model_current_oracle(&model).unwrap();
         let (released, _) = fingerprint_model_with_row_styles_oracle(
             &columns_only,
             SCHEMA_VERSION,
@@ -7163,8 +7163,12 @@ mod tests {
         let (released, released_client) =
             fingerprint_model_with_row_styles_oracle(&plain, SCHEMA_VERSION, true, true, false)
                 .unwrap();
-        assert_eq!(base.fingerprint, released);
-        assert_eq!(base.bootstrap_client_id, released_client);
+        let (current, current_client) = fingerprint_model_current_oracle(&plain).unwrap();
+        assert_eq!(base.fingerprint, current);
+        assert_eq!(base.bootstrap_client_id, current_client);
+        assert!(base.fingerprints[&SCHEMA_VERSION].contains(&released));
+        assert_ne!(base.fingerprint, released);
+        assert_ne!(base.bootstrap_client_id, released_client);
     }
 
     #[test]

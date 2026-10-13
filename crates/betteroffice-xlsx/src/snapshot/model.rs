@@ -1042,7 +1042,7 @@ impl ModelSnapshotBuilder {
                 .ok_or_else(|| SnapshotError::new("snapshot table column has no table"))?
                 .columns
                 .push(r.str()?.to_owned()),
-            SHEET | STYLED_SHEET => self.read_sheet(r, tag == STYLED_SHEET)?,
+            SHEET | STYLED_SHEET => self.read_sheet(r, raw == STYLED_SHEET)?,
             _ => self.read_sheet_record(tag, r)?,
         }
         self.validate_counts()?;
