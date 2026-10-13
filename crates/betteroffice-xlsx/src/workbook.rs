@@ -1039,16 +1039,24 @@ impl Workbook {
         let mut model = staged.model;
         retain_array_formulas(&self.model, &mut model);
         let update = staged.update;
-        let (graph, recalc) =
-            rebuild_and_recalc_all_with_seed(&mut model, options.now_serial, self.rand_seed);
-        let mut calculation = calculation_result(&recalc);
+        // keep what the editing replica kept, or the replicas drift apart
+        let full = CalculationScope::Kept.confirmed(&self.model, &model) == CalculationScope::Full;
+        let rebuilt = full.then(|| {
+            rebuild_and_recalc_all_with_seed(&mut model, options.now_serial, self.rand_seed)
+        });
+        let mut calculation = match &rebuilt {
+            Some((_, recalc)) => calculation_result(recalc),
+            None => self.last_calculation.clone(),
+        };
         calculation.changed = changed_cells_between(&self.model, &model);
         self.authority
             .apply_staged_update_v1(&commit_update)
             .map_err(authority_error)?;
         self.install_model(model)?;
         self.invalidate_sheet_info();
-        self.graph = Some(graph);
+        if let Some((graph, _)) = rebuilt {
+            self.graph = Some(graph);
+        }
         self.last_calculation = calculation.clone();
         self.undo.clear();
         self.preserved_undo.clear();
@@ -2855,6 +2863,8 @@ impl Workbook {
         }
     }
 
+    /// A kept batch moves no value, so the last calculation keeps its cycle and
+    /// limited cells and reports nothing changed.
     fn recalculate_scope(
         &mut self,
         scope: CalculationScope,
@@ -2863,6 +2873,7 @@ impl Workbook {
         match scope {
             CalculationScope::Kept => {
                 self.bump_model_epoch();
+                self.last_calculation.changed.clear();
                 CalculationResult::default()
             }
             CalculationScope::Renamed if self.graph.is_some() => self.recalculate_renamed(options),
@@ -4493,11 +4504,7 @@ impl CalculationScope {
                     let (value, formula) = cell_content(model, *sheet, *at);
                     formula.is_some() && state.formula.is_some() && *value == state.value
                 });
-                if rewrites {
-                    Self::Renamed
-                } else {
-                    Self::Full
-                }
+                if rewrites { Self::Renamed } else { Self::Full }
             }
             // a zero size hides a row or column, which hidden-aware functions read
             Op::SetColWidth { .. } | Op::SetRowHeight { .. } => Self::Full,
@@ -4538,13 +4545,9 @@ fn keeps_calculation_inputs(before: &WorkbookModel, after: &WorkbookModel, renam
         && before.date_system == after.date_system
         && before.tables == after.tables
         && before.sheets.len() == after.sheets.len()
-        && before
-            .sheets
-            .iter()
-            .zip(&after.sheets)
-            .all(|(old, new)| {
-                (renamed || old.name == new.name) && keeps_sheet_inputs(old, new, renamed)
-            })
+        && before.sheets.iter().zip(&after.sheets).all(|(old, new)| {
+            (renamed || old.name == new.name) && keeps_sheet_inputs(old, new, renamed)
+        })
 }
 
 fn keeps_defined_names(

@@ -151,7 +151,10 @@ impl DepGraph {
             .expect("parse cache poisoned")
             .retain(|_, ast| Arc::strong_count(ast) > 1);
         moved.sort_unstable();
-        moved.into_iter().map(|key| (key.sheet, key.cell())).collect()
+        moved
+            .into_iter()
+            .map(|key| (key.sheet, key.cell()))
+            .collect()
     }
 
     /// re-derive one node's edges after its formula changed, without touching
