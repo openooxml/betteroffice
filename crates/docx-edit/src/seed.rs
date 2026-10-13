@@ -7467,7 +7467,10 @@ mod tests {
         let body = inheritance.paragraph_formatting(None, None).unwrap();
         assert_eq!(body["spaceBefore"], json!(20));
         assert_eq!(body["spaceAfter"], json!(160));
-        assert_eq!(inheritance.run_attrs(None, None)["fontSize"]["size"], json!(22));
+        assert_eq!(
+            inheritance.run_attrs(None, None)["fontSize"]["size"],
+            json!(22)
+        );
     }
 
     #[test]
