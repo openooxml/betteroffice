@@ -956,8 +956,7 @@ impl WorkbookAuthority {
         }
         let txn = self.doc.transact();
         let cell_formats = txn.get_map(CELL_FORMATS)?;
-        let (mut styles, _) =
-            materialize_cell_formats(&cell_formats, &txn, &self.base.styles).ok()?;
+        let (mut styles, _) = materialize_cell_formats(&cell_formats, &txn, &self.base.styles).ok()?;
         styles.bind_plain_xf();
         let order = txn.get_array(SHEET_ORDER)?;
         let keys = sheet_keys(&order, &txn).ok()?;
@@ -3320,7 +3319,7 @@ fn remap_styles<'a>(
         let resolved = if target.xf(index).is_some() && target.cell_format(Some(index)) == format {
             Some(index)
         } else if target.binds_plain() && format == CellFormat::default() {
-            Some(target.plain_edit_xf().unwrap_or(0))
+            Some(target.plain_edit_xf())
         } else {
             let found = (0..target.cell_xfs.len() as u32)
                 .find(|&candidate| target.cell_format(Some(candidate)) == format);

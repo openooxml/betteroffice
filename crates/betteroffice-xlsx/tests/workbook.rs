@@ -837,7 +837,9 @@ fn cascade_batched_copies_of_a_fresh_plain_style_save_locked_locally_and_on_a_pe
         .unwrap();
     let mut peer = Workbook::open_collaborative(&bytes, 873).unwrap();
     peer.apply_update_v1(
-        &workbook.encode_diff_v1(&peer.encode_state_vector_v1()).unwrap(),
+        &workbook
+            .encode_diff_v1(&peer.encode_state_vector_v1())
+            .unwrap(),
         CalculationOptions::default(),
     )
     .unwrap();
@@ -868,7 +870,9 @@ fn cascade_nonzero_plain_clears_reuse_a_proven_plain_xf_locally_and_collaborativ
         clear_style(&mut workbook, "D1", betteroffice_xlsx::StyleProperty::Bold);
         let mut peer = Workbook::open_collaborative(&bytes, 875).unwrap();
         peer.apply_update_v1(
-            &workbook.encode_diff_v1(&peer.encode_state_vector_v1()).unwrap(),
+            &workbook
+                .encode_diff_v1(&peer.encode_state_vector_v1())
+                .unwrap(),
             CalculationOptions::default(),
         )
         .unwrap();
@@ -896,7 +900,9 @@ fn cascade_nonzero_plain_clears_without_a_proven_source_xf_use_zero_in_shared_st
         clear_style(&mut workbook, "D1", betteroffice_xlsx::StyleProperty::Bold);
         let mut peer = Workbook::open_collaborative(&bytes, 877).unwrap();
         peer.apply_update_v1(
-            &workbook.encode_diff_v1(&peer.encode_state_vector_v1()).unwrap(),
+            &workbook
+                .encode_diff_v1(&peer.encode_state_vector_v1())
+                .unwrap(),
             CalculationOptions::default(),
         )
         .unwrap();
@@ -1068,9 +1074,10 @@ fn assert_plain_edits_share_and_recover_faithfully(workbook: &Workbook) {
         .unwrap();
     let shared = peer.save().unwrap();
     for address in ["A1", "C1"] {
+        assert_eq!(saved_cell_style(&shared, address), 0, "{address}");
         assert_eq!(
-            saved_cell_style(&shared, address),
-            0,
+            saved_cell_xf(&shared, address),
+            saved_cell_xf(&source, address),
             "{address}"
         );
     }

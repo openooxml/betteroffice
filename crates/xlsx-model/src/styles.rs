@@ -931,12 +931,12 @@ impl Stylesheet {
         self.bound_plain.is_some()
     }
 
-    /// the xf a plain format edit stores: under a binding the bound xf when it is known to save
-    /// plain, else `None`, which leaves the cell as it was.
-    pub fn plain_edit_xf(&mut self) -> Option<u32> {
+    /// Resolves a plain edit, using xf 0 when the binding is unproven.
+    pub fn plain_edit_xf(&mut self) -> u32 {
         match self.bound_plain {
-            Some(index) => (self.known_plain_xf() == Some(index)).then_some(index),
-            None => Some(self.plain_xf()),
+            Some(index) if self.known_plain_xf() == Some(index) => index,
+            Some(_) => 0,
+            None => self.plain_xf(),
         }
     }
 

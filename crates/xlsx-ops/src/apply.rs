@@ -408,10 +408,7 @@ fn apply_range_formats(
                 match styles.intern_cell_format(&format) {
                     Ok(Some(style)) => staged.push(Some(style)),
                     Ok(None) if !plain_default => {
-                        match *plain.get_or_insert_with(|| styles.plain_edit_xf()) {
-                            Some(style) => staged.push(Some(style)),
-                            None => staged.push(stored.flatten()),
-                        }
+                        staged.push(Some(*plain.get_or_insert_with(|| styles.plain_edit_xf())));
                     }
                     Ok(None) => staged.push(
                         defaults
