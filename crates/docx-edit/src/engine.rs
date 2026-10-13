@@ -21597,8 +21597,13 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         };
         assert_eq!(lines(&variants[0]), 1);
         assert!(lines(&variants[1]) > 1);
-        assert!(full["layout"]["pages"].as_array().unwrap()[..80]
-            .iter().all(|page| page["regionSectionIndex"] == 0));
+        assert_eq!(
+            full["layout"]["pages"].as_array().unwrap()
+                .iter()
+                .take_while(|page| page["size"]["w"] == 816)
+                .count(),
+            80
+        );
         let (prefix, prefix_display) = layout(true);
         assert_eq!(first_pages(&prefix), first_pages(&full));
         assert_eq!(prefix_display["pages"].as_array().unwrap()[..3], full_display["pages"].as_array().unwrap()[..3], "certified header and footer pixels match cold full layout");
