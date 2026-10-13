@@ -104,6 +104,8 @@ pub const MAX_HYPERLINKS: usize = 65_536;
 /// upper bound on `<col>` runs naming a style in one worksheet.
 pub const MAX_COL_STYLES: usize = 65_536;
 
+pub const MAX_ROW_STYLES: usize = xlsx_model::workbook::MAX_ROW_STYLES;
+
 /// upper bound on table parts read from one package.
 pub const MAX_TABLES: usize = 65_536;
 
@@ -156,6 +158,7 @@ pub enum ParseError {
     TooManyHyperlinks,
     /// a worksheet exceeded [`MAX_COL_STYLES`].
     TooManyColumnStyles,
+    TooManyRowStyles,
     /// a style pool exceeded [`MAX_STYLE_ENTRIES`].
     TooManyStyles,
     /// a part exceeded [`MAX_TREE_BYTES`], [`MAX_TREE_NODES`] or
@@ -183,6 +186,7 @@ impl core::fmt::Display for ParseError {
             ParseError::TooManyColumnStyles => {
                 write!(f, "worksheet column style count exceeded cap")
             }
+            ParseError::TooManyRowStyles => write!(f, "worksheet row style count exceeded cap"),
             ParseError::TooManyStyles => write!(f, "style pool count exceeded cap"),
             ParseError::TreeTooLarge => write!(f, "part exceeded the element tree cap"),
             ParseError::TooManyCharts => write!(f, "chart reference or anchor count exceeded cap"),

@@ -2859,6 +2859,7 @@ fn write_sheet_data(
 
     let mut cells = sheet.iter_cells().peekable();
     let mut heights = sheet.row_heights.keys().copied().peekable();
+    let mut row_styles = sheet.row_styles.keys().copied().peekable();
 
     writer
         .create_element("sheetData")
@@ -2866,10 +2867,13 @@ fn write_sheet_data(
             loop {
                 let cell_row = cells.peek().map(|(addr, _)| addr.row);
                 let height_row = heights.peek().copied();
-                let row = match (cell_row, height_row) {
-                    (Some(a), Some(b)) => a.min(b),
-                    (Some(a), None) | (None, Some(a)) => a,
-                    (None, None) => break,
+                let style_row = row_styles.peek().copied();
+                let Some(row) = [cell_row, height_row, style_row]
+                    .into_iter()
+                    .flatten()
+                    .min()
+                else {
+                    break;
                 };
                 write_row(
                     writer,
@@ -2884,6 +2888,9 @@ fn write_sheet_data(
                 )?;
                 if height_row == Some(row) {
                     heights.next();
+                }
+                if style_row == Some(row) {
+                    row_styles.next();
                 }
             }
             Ok(())
@@ -2969,19 +2976,34 @@ fn active_pane(rows: u32, cols: u32) -> &'static str {
 }
 
 pub(crate) fn write_cols(w: &mut Writer<Vec<u8>>, sheet: &Sheet) -> io::Result<()> {
-    if sheet.col_widths.is_empty() {
+    if sheet.col_widths.is_empty() && sheet.col_styles.is_empty() {
         return Ok(());
     }
     w.create_element("cols").write_inner_content(|w| {
+        for run in &sheet.col_styles {
+            let first = (u64::from(run.first) + 1).to_string();
+            let last = (u64::from(run.last) + 1).to_string();
+            let style = run.xf.to_string();
+            let mut element = BytesStart::new("col");
+            element.push_attribute(("min", first.as_str()));
+            element.push_attribute(("max", last.as_str()));
+            element.push_attribute(("style", style.as_str()));
+            w.write_event(Event::Empty(element))?;
+        }
         for (&col, &width) in &sheet.col_widths {
-            write_col(w, col, width)?;
+            write_col(w, col, width, sheet.col_style(col))?;
         }
         Ok(())
     })?;
     Ok(())
 }
 
-pub(crate) fn write_col(w: &mut Writer<Vec<u8>>, col: ColId, width: f64) -> io::Result<()> {
+pub(crate) fn write_col(
+    w: &mut Writer<Vec<u8>>,
+    col: ColId,
+    width: f64,
+    style: Option<u32>,
+) -> io::Result<()> {
     let n = (u64::from(col) + 1).to_string();
     let width = fmt_num(width);
     let mut element = BytesStart::new("col");
@@ -2989,6 +3011,10 @@ pub(crate) fn write_col(w: &mut Writer<Vec<u8>>, col: ColId, width: f64) -> io::
     element.push_attribute(("max", n.as_str()));
     element.push_attribute(("width", width.as_str()));
     element.push_attribute(("customWidth", "1"));
+    let style = style.map(|style| style.to_string());
+    if let Some(style) = &style {
+        element.push_attribute(("style", style.as_str()));
+    }
     if width == "0" {
         element.push_attribute(("hidden", "1"));
     }
@@ -3014,6 +3040,11 @@ where
     let r = (row as u64 + 1).to_string();
     let mut start = BytesStart::new("row");
     start.push_attribute(("r", r.as_str()));
+    let style = sheet.row_styles.get(&row).map(u32::to_string);
+    if let Some(style) = &style {
+        start.push_attribute(("s", style.as_str()));
+        start.push_attribute(("customFormat", "1"));
+    }
     let ht = sheet.row_heights.get(&row).map(|h| fmt_num(*h));
     if let Some(h) = &ht {
         start.push_attribute(("ht", h.as_str()));

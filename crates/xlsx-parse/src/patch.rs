@@ -187,11 +187,13 @@ impl SheetPatch<'_> {
         let mut cells = self.sheet.iter_cells().peekable();
         let mut originals = SourceCellCursor::new(self.original, self.original.iter_cells());
         let mut heights = self.sheet.row_heights.keys().copied().peekable();
+        let mut row_styles = self.sheet.row_styles.keys().copied().peekable();
         loop {
             let next_source = source_rows.peek().map(|(current, _)| *current);
             let next_cell = cells.peek().map(|(at, _)| at.row);
             let next_height = heights.peek().copied();
-            let Some(row) = [next_source, next_cell, next_height]
+            let next_style = row_styles.peek().copied();
+            let Some(row) = [next_source, next_cell, next_height, next_style]
                 .into_iter()
                 .flatten()
                 .min()
@@ -200,6 +202,9 @@ impl SheetPatch<'_> {
             };
             if next_height == Some(row) {
                 heights.next();
+            }
+            if next_style == Some(row) {
+                row_styles.next();
             }
             if next_source == Some(row) {
                 let (_, source_row) = source_rows.next().expect("peeked");
@@ -280,12 +285,37 @@ impl SheetPatch<'_> {
                 continue;
             }
             let mut writer = Writer::new(Vec::new());
-            write_col(&mut writer, col, width).map_err(xml_err)?;
+            write_col(&mut writer, col, width, self.sheet.col_style(col)).map_err(xml_err)?;
+            covered.insert(col);
             let at = entries
                 .iter()
                 .position(|(min, _, generated)| !generated && *min > col)
                 .unwrap_or(entries.len());
             entries.insert(at, (col, writer.into_inner(), true));
+        }
+        let col_limit = if self.sheet.col_styles.is_empty() {
+            0
+        } else {
+            xlsx_model::MAX_COLS
+        };
+        for col in 0..col_limit {
+            if covered.contains(&col) {
+                continue;
+            }
+            let Some(style) = self.sheet.col_style(col) else {
+                continue;
+            };
+            let number = (col + 1).to_string();
+            let style = style.to_string();
+            let mut writer = Writer::new(Vec::new());
+            let mut element = quick_xml::events::BytesStart::new("col");
+            element.push_attribute(("min", number.as_str()));
+            element.push_attribute(("max", number.as_str()));
+            element.push_attribute(("style", style.as_str()));
+            writer
+                .write_event(quick_xml::events::Event::Empty(element))
+                .map_err(xml_err)?;
+            entries.push((col, writer.into_inner(), true));
         }
         if entries.is_empty() {
             return Ok(None);
@@ -303,7 +333,7 @@ impl SheetPatch<'_> {
     }
 
     fn generated_cols(&self) -> Result<Option<Vec<u8>>, ParseError> {
-        (!self.sheet.col_widths.is_empty())
+        (!self.sheet.col_widths.is_empty() || !self.sheet.col_styles.is_empty())
             .then(|| fragment(|writer| write_cols(writer, self.sheet)))
             .transpose()
     }
@@ -447,13 +477,23 @@ impl SheetPatch<'_> {
         let moved = source.index != row;
         let height = self.sheet.row_heights.get(&row).copied();
         let height_changed = height != self.original.row_heights.get(&source.index).copied();
+        let style = self.sheet.row_styles.get(&row).copied();
+        let style_changed = style != self.original.row_styles.get(&source.index).copied();
         let (name, mut attributes) = start_tag(&data[source.tag.clone()])?;
-        let mut rewrite = moved || height_changed;
+        let mut rewrite = moved || height_changed || style_changed;
         if moved {
             set_attribute(&mut attributes, "r", "r", (u64::from(row) + 1).to_string());
         }
         if height_changed {
             set_row_height(&mut attributes, height);
+        }
+        if style_changed {
+            remove_attribute(&mut attributes, "s");
+            remove_attribute(&mut attributes, "customFormat");
+            if let Some(style) = style {
+                set_attribute(&mut attributes, "s", "s", style.to_string());
+                set_attribute(&mut attributes, "customFormat", "customFormat", "1".into());
+            }
         }
         if let Some((min, max)) = columns
             && spans_exclude(&attributes, min, max)
@@ -1177,6 +1217,8 @@ pub(crate) fn sheet_data_regeneration_loss(data: &[u8]) -> Result<Option<String>
                             matches!(
                                 key,
                                 b"r" | b"ht"
+                                    | b"s"
+                                    | b"customFormat"
                                     | b"customHeight"
                                     | b"hidden"
                                     | b"spans"

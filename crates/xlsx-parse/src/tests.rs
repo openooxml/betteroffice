@@ -36,6 +36,42 @@ fn parse_workbook(parts: &[(String, impl AsRef<[u8]>)]) -> Result<Workbook, Pars
     crate::parse_workbook(&owned_parts(parts))
 }
 
+#[test]
+fn row_style_defaults_are_sparse_and_require_custom_format() {
+    let parts = package(
+        r#"<cols><col min="1" max="16384" style="2"/></cols><sheetData><row r="5" s="1" customFormat="1"><c r="A5"/></row><row r="6" s="3" customFormat="0"/><row r="7" s="4"/><row r="8" s="5" customFormat="true"/></sheetData>"#,
+        &[],
+        false,
+    );
+    let workbook = parse_workbook(&parts).unwrap();
+    let sheet = &workbook.sheets[0];
+    assert_eq!(sheet.row_styles, [(4, 1), (7, 5)].into_iter().collect());
+    assert_eq!(sheet.effective_style(CellRef::new(4, 0)), Some(0));
+    assert_eq!(sheet.effective_style(CellRef::new(4, 1)), Some(1));
+    assert_eq!(sheet.effective_style(CellRef::new(5, 1)), Some(2));
+    assert_eq!(sheet.iter_cells().count(), 1);
+}
+
+#[test]
+fn a_worksheet_past_the_row_style_cap_is_refused() {
+    let rows = r#"<row r="5" s="1" customFormat="1"/>"#.repeat(crate::MAX_ROW_STYLES + 1);
+    let parts = package(&format!("<sheetData>{rows}</sheetData>"), &[], false);
+    assert!(matches!(
+        parse_workbook(&parts),
+        Err(ParseError::TooManyRowStyles)
+    ));
+}
+
+#[test]
+fn malformed_custom_format_is_refused_during_parse() {
+    let parts = package(
+        r#"<sheetData><row r="1" customFormat="&missing;"><c r="A1"><v>1</v></c></row></sheetData>"#,
+        &[],
+        false,
+    );
+    assert!(matches!(parse_workbook(&parts), Err(ParseError::Xml(_))));
+}
+
 /// assemble a one-sheet package around a worksheet body and optional shared
 /// strings, so each test only spells out the part under exercise.
 pub(super) fn package(
@@ -2430,6 +2466,10 @@ fn row_insert_shifts_preserved_row_and_cell_markup() {
     for (row, height) in heights {
         workbook.sheets[0].row_heights.insert(row + 1, height);
     }
+    workbook.sheets[0].row_styles = std::mem::take(&mut workbook.sheets[0].row_styles)
+        .into_iter()
+        .map(|(row, style)| (row + 1, style))
+        .collect();
     let mut provenance = vec![SharedStringCells::new(); 2];
     for ((row, col), index) in parsed.package.source_shared_string_cells(0) {
         provenance[0].insert((row + 1, col), index);

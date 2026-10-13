@@ -141,7 +141,7 @@ pub struct SheetFormat {
     pub zero_height: bool,
 }
 
-/// a `<col>` run's style: the `cellXfs` index its columns give a cell that names none.
+/// A column run's default style for missing cells.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ColStyle {
     pub first: ColId,
@@ -160,13 +160,16 @@ pub struct Sheet {
     pub row_heights: BTreeMap<RowId, f64>,
     /// parsed from `sheetFormatPr`; read by the renderer, never by the writer.
     pub format: SheetFormat,
-    /// `<col>` style runs in source order; read by the renderer, never the writer.
+    /// Column defaults in source order.
     pub col_styles: Vec<ColStyle>,
+    pub row_styles: BTreeMap<RowId, u32>,
     pub charts: Vec<SheetChart>,
     /// anchors of `t="array"` formulas mapped to the rectangle their result
     /// occupies. authored from the file, then kept current by recalc.
     array_formulas: BTreeMap<(RowId, ColId), CellRange>,
 }
+
+pub const MAX_ROW_STYLES: usize = 65_536;
 
 impl Sheet {
     pub fn new(name: impl Into<String>) -> Self {
@@ -212,14 +215,25 @@ impl Sheet {
         self.cells.get(&(at.row, at.col))
     }
 
-    /// the style a `<col>` run gives a cell that names none; later runs win.
-    /// only the fill and the row fit consult it; other facets read `Cell::style`.
+    /// Column default; later runs win.
     pub fn col_style(&self, col: ColId) -> Option<u32> {
         self.col_styles
             .iter()
             .rev()
             .find(|run| (run.first..=run.last).contains(&col))
             .map(|run| run.xf)
+    }
+
+    /// Existing cells use their own xf; missing cells inherit row, then column.
+    pub fn effective_style(&self, at: CellRef) -> Option<u32> {
+        match self.cell(at) {
+            Some(cell) => cell.style,
+            None => self
+                .row_styles
+                .get(&at.row)
+                .copied()
+                .or_else(|| self.col_style(at.col)),
+        }
     }
 
     pub fn cell_mut(&mut self, at: CellRef) -> Option<&mut Cell> {

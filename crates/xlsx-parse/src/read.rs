@@ -17,8 +17,8 @@ use crate::xml::{
     resolve_part_path, xml_err,
 };
 use crate::{
-    MAX_CELLS, MAX_COL_STYLES, MAX_DEFINED_NAMES, MAX_HYPERLINKS, MAX_SHARED_STRINGS,
-    MAX_TABLE_COLUMNS, MAX_TABLES, ParseError,
+    MAX_CELLS, MAX_COL_STYLES, MAX_DEFINED_NAMES, MAX_HYPERLINKS, MAX_ROW_STYLES,
+    MAX_SHARED_STRINGS, MAX_TABLE_COLUMNS, MAX_TABLES, ParseError,
 };
 
 /// excel's row-height ceiling in points.
@@ -79,7 +79,7 @@ pub(crate) fn parse_workbook_indexed(
         };
     let styles_bytes = typed_part(parts, wb_rels, "styles", "xl/styles.xml")?;
     let theme_bytes = typed_part(parts, wb_rels, "theme", "xl/theme/theme1.xml")?;
-    let (styles, legacy_styles) = parse_stylesheet(styles_bytes, theme_bytes)?;
+    let (mut styles, legacy_styles) = parse_stylesheet(styles_bytes, theme_bytes)?;
 
     let mut sheets = Vec::with_capacity(meta.sheets.len());
     let mut shared_string_cells = Vec::with_capacity(meta.sheets.len());
@@ -129,6 +129,15 @@ pub(crate) fn parse_workbook_indexed(
         legacy_dimensions.push(legacy);
     }
 
+    if styles.cell_xfs.is_empty()
+        && sheets.iter().any(|sheet| {
+            sheet.row_styles.values().any(|&style| style == 0)
+                || sheet.col_styles.iter().any(|run| run.xf == 0)
+                || sheet.iter_cells().any(|(_, cell)| cell.style == Some(0))
+        })
+    {
+        styles.cell_xfs.push(xlsx_model::Xf::default());
+    }
     Ok(IndexedWorkbook {
         workbook: Workbook {
             sheets,
@@ -552,6 +561,7 @@ fn parse_worksheet(
     let mut cur: Option<CellBuild> = None;
     let mut cell_count: u64 = 0;
     let mut hyperlink_count: usize = 0;
+    let mut row_style_count: usize = 0;
     let mut shared_formulas = SharedFormulas::default();
 
     loop {
@@ -564,6 +574,16 @@ fn parse_worksheet(
                     };
                     cur_row = Some(row);
                     col_cursor = 0;
+                    if attr(&e, b"customFormat")?.is_some_and(|value| is_truthy(&value)) {
+                        let style = attr(&e, b"s")?
+                            .and_then(|value| value.parse::<u32>().ok())
+                            .unwrap_or(0);
+                        row_style_count += 1;
+                        if row_style_count > MAX_ROW_STYLES {
+                            return Err(ParseError::TooManyRowStyles);
+                        }
+                        sheet.row_styles.insert(row, style);
+                    }
                     let height = attr(&e, b"ht")?.and_then(|v| v.parse::<f64>().ok());
                     if let Some(height) = height {
                         legacy.row_heights.insert(row, height);
@@ -894,11 +914,14 @@ fn finalize_cell(
         },
     };
 
-    let cell = Cell {
+    let mut cell = Cell {
         value,
         formula: c.formula,
         style: c.style,
     };
+    if cell == Cell::default() {
+        cell.style = Some(0);
+    }
     if cell != Cell::default() {
         sheet.set_cell(addr, cell);
     }

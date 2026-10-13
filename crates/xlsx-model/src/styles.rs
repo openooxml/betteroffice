@@ -703,6 +703,7 @@ impl Stylesheet {
 
     #[inline(never)]
     fn intern_builtin_cell_format(&mut self, format: &CellFormat, num_fmt_id: u16) -> u32 {
+        self.ensure_default_xf();
         if self.cell_xfs.len() < INTERN_CACHE_MIN_POOL {
             let font = intern_linear(&mut self.fonts, &format.font);
             let fill = intern_linear(&mut self.fills, &format.fill);
@@ -740,6 +741,7 @@ impl Stylesheet {
         pattern: &str,
     ) -> Result<Option<u32>, NumFmtTableFull> {
         let num_fmt_id = Some(self.intern_number_format(pattern).ok_or(NumFmtTableFull)?);
+        self.ensure_default_xf();
         if self.cell_xfs.len() < INTERN_CACHE_MIN_POOL {
             let font = intern_linear(&mut self.fonts, &format.font);
             let fill = intern_linear(&mut self.fills, &format.fill);
@@ -755,6 +757,21 @@ impl Stylesheet {
             return Ok(Some(intern_linear(&mut self.cell_xfs, &xf)));
         }
         Ok(Some(self.intern_cell_format_large(format, num_fmt_id)))
+    }
+
+    fn ensure_default_xf(&mut self) {
+        if self.fonts.is_empty() {
+            self.fonts.push(Font::default());
+        }
+        if self.fills.is_empty() {
+            self.fills.push(Fill::None);
+        }
+        if self.borders.is_empty() {
+            self.borders.push(Border::default());
+        }
+        if self.cell_xfs.is_empty() {
+            self.cell_xfs.push(Xf::default());
+        }
     }
 
     #[inline(never)]
@@ -1271,6 +1288,21 @@ mod tests {
     }
 
     #[test]
+    fn the_first_cell_format_preserves_the_default_xf() {
+        let mut styles = Stylesheet::default();
+        let format = CellFormat {
+            font: Font {
+                bold: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(styles.intern_cell_format(&format).unwrap(), Some(1));
+        assert_eq!(styles.cell_format(Some(0)), CellFormat::default());
+        assert_eq!(styles.cell_format(Some(1)), format);
+    }
+
+    #[test]
     fn pool_interning_is_stable_and_reuses_indices() {
         let mut ss = Stylesheet::default();
         let plain = Font {
@@ -1394,7 +1426,7 @@ mod tests {
             };
             assert_eq!(
                 unique.intern_cell_format(&format).unwrap(),
-                Some(index as u32)
+                Some(index as u32 + 1)
             );
             formats.push(format);
         }
@@ -1402,7 +1434,7 @@ mod tests {
         assert!(unique.xf_memo.map.is_empty());
 
         let repeated = formats.last().unwrap();
-        let repeated_index = (formats.len() - 1) as u32;
+        let repeated_index = formats.len() as u32;
         assert_eq!(
             unique.intern_cell_format(repeated).unwrap(),
             Some(repeated_index)

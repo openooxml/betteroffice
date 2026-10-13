@@ -30,13 +30,13 @@ fn save_error(parsed: &ParsedWorkbook, workbook: &Workbook) -> ParseError {
 fn regenerated_sheet_data_allows_modeled_markup_and_layout_hints() {
     let source = concat!(
         r#"<sheetData xmlns:x14ac="http://schemas.microsoft.com/office/spreadsheetml/2009/9/ac">"#,
-        r#"<row ht="20" customHeight="1" hidden="0" spans="1:5" thickTop="1" thickBot="1" x14ac:dyDescent="0.25">"#,
+        r#"<row s="2" customFormat="1" ht="20" customHeight="1" hidden="0" spans="1:5" thickTop="1" thickBot="1" x14ac:dyDescent="0.25">"#,
         r#"<c r="A1" s="2" t="n"><v>1</v></c>"#,
         r#"<c r="B1"><f t="shared" ref="B1:B2" si="0">A1*2</f><v>2</v></c>"#,
         r#"<c r="C1"><f t="normal">1</f><v>1</v></c>"#,
         r#"<c r="D1"><f t="array" ref="D1">1</f><v>1</v></c>"#,
         r#"<c r="E1" t="inlineStr"><is><t xml:space="preserve"> plain </t></is></c></row>"#,
-        r#"<row r="2" ht="0" customHeight="1" hidden="1"><c r="A2" t="b"><v>1</v></c>"#,
+        r#"<row r="2" customFormat="1" ht="0" customHeight="1" hidden="1"><c r="A2" t="b"><v>1</v></c>"#,
         r#"<c r="B2"><f t="shared" si="0"/><v>2</v></c></row></sheetData>"#,
     );
     assert!(scan_sheet_data(source.as_bytes()).unwrap().is_none());
@@ -51,6 +51,8 @@ fn regenerated_sheet_data_allows_modeled_markup_and_layout_hints() {
     assert!(cells(&saved)["A1"].contains("<v>9</v>"));
     assert!(saved.contains(r#"ht="20" customHeight="1""#));
     assert!(saved.contains(r#"ht="0" customHeight="1" hidden="1""#));
+    assert!(saved.contains(r#"s="2" customFormat="1""#));
+    assert!(saved.contains(r#"s="0" customFormat="1""#));
     assert!(cells(&saved)["D1"].contains(r#"<f t="array" ref="D1">1</f>"#));
 }
 
@@ -58,27 +60,15 @@ fn regenerated_sheet_data_allows_modeled_markup_and_layout_hints() {
 fn regenerated_sheet_data_refuses_unmodeled_markup() {
     for (row_attributes, cell_markup, expected, location) in [
         (
-            r#"s="2" customFormat="1""#,
-            "<v>1</v>",
-            r#"<row> attribute s="2""#,
-            "row 1",
-        ),
-        (
             r#"outlineLevel="1""#,
             "<v>1</v>",
             r#"<row> attribute outlineLevel="1""#,
             "row 1",
         ),
         (
-            r#"customFormat="1""#,
+            r#"outlineLevel="&missing;""#,
             "<v>1</v>",
-            r#"<row> attribute customFormat="1""#,
-            "row 1",
-        ),
-        (
-            r#"customFormat="&missing;""#,
-            "<v>1</v>",
-            r#"<row> attribute customFormat="&missing;""#,
+            r#"<row> attribute outlineLevel="&missing;""#,
             "row 1",
         ),
         (
@@ -233,7 +223,7 @@ fn patch_errors_keep_the_sheet_name_and_original_error() {
         let row = if columns {
             r#"<row r="1">"#
         } else {
-            r#"<row r="1" ht="20" hidden="0" customFormat="&missing;">"#
+            r#"<row r="1" ht="20" hidden="0" outlineLevel="&missing;">"#
         };
         let cols = if columns {
             r#"<cols><col min="1" max="1" width="10" hidden="0" style="0" customWidth="&missing;"/></cols>"#
