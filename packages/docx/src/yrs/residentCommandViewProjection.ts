@@ -270,7 +270,7 @@ function projectGlyphLine(input: GlyphLineInput): { line: DocxEchoGlyphLine; rec
   const first = runs[0]!;
   const facts = first.echo;
   if (!facts || !facts.primaryFont || runs.some(run => !run.echo || !run.echo.primaryFont ||
-    run.echo.x !== facts.x || run.echo.right !== facts.right || run.echo.kern !== facts.kern ||
+    run.echo.x !== facts.x || run.echo.right !== facts.right || run.echo.kern !== facts.kern || run.echo.kerning !== facts.kerning ||
     run.echo.letterSpacing || run.echo.position || run.echo.scale !== undefined && run.echo.scale !== 100)) return undefined;
   if (runs.some((run) => run.fontId !== first.fontId || run.size !== first.size || run.color !== first.color ||
     run.fallbackFont !== first.fallbackFont) ||
