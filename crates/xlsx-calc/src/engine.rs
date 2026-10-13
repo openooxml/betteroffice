@@ -1614,6 +1614,29 @@ mod tests {
         assert!(evaluations <= 3 * 20_000, "{evaluations} evaluations");
     }
 
+    /// a chain that reads against key order waits once per cell, then settles
+    /// back along the waits.
+    #[test]
+    fn cycle_classification_reversed_lazy_chain() {
+        let (mut wb, s) = one_sheet();
+        put_num(&mut wb, s, "A20002", 7.0);
+        for row in 2..=20_001 {
+            put_formula(
+                &mut wb,
+                s,
+                &format!("A{row}"),
+                &format!("IF(TRUE,A{}+1,$A$2)", row + 1),
+            );
+        }
+        FORMULA_EVALUATIONS.with(|count| count.set(0));
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        let evaluations = FORMULA_EVALUATIONS.with(|count| count.get());
+        assert!(result.cycle_cells.is_empty());
+        assert!(result.limited_cells.is_empty());
+        assert_eq!(value(&wb, s, "A2"), num(20_007.0));
+        assert!(evaluations <= 3 * 20_000, "{evaluations} evaluations");
+    }
+
     #[test]
     fn cycle_classification_wait_cycle_excludes_static_component_dependents() {
         let (mut wb, s) = one_sheet();
