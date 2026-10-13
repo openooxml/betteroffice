@@ -11,7 +11,7 @@ use xlsx_model::{Cell, CellRange, CellRef, Sheet, Workbook};
 
 use crate::axis::SheetAxes;
 use crate::package::{XmlAttribute, attributes, remove_attribute, set_attribute};
-use crate::read::SharedStringCells;
+use crate::read::{SharedStringCells, is_truthy};
 use crate::write::{
     SharedStringPlan, cell_value_markup, col_runs, fmt_num, fragment, shared_string_index,
     write_cell, write_col_run, write_cols, write_row,
@@ -1166,6 +1166,8 @@ pub(crate) fn sheet_data_regeneration_loss(data: &[u8]) -> Result<Option<String>
                 if !allowed {
                     return loss(format!("<{}>", String::from_utf8_lossy(&name)), location);
                 }
+                let row_format = name == b"row"
+                    && attr(&element, b"customFormat")?.is_some_and(|value| is_truthy(&value));
                 for attribute in element.attributes() {
                     let attribute = attribute.map_err(xml_err)?;
                     let key = attribute.key.as_ref();
@@ -1183,11 +1185,11 @@ pub(crate) fn sheet_data_regeneration_loss(data: &[u8]) -> Result<Option<String>
                         String::from_utf8_lossy(attribute.value.as_ref())
                     };
                     let allowed = match name.as_slice() {
+                        b"row" if key == b"s" => row_format && value.parse::<u32>().is_ok(),
                         b"row" => {
                             matches!(
                                 key,
                                 b"r" | b"ht"
-                                    | b"s"
                                     | b"customFormat"
                                     | b"customHeight"
                                     | b"hidden"

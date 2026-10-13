@@ -943,7 +943,7 @@ fn error_from_str(s: &str) -> Option<ErrorValue> {
     })
 }
 
-fn is_truthy(v: &str) -> bool {
+pub(crate) fn is_truthy(v: &str) -> bool {
     matches!(v, "1" | "true" | "on")
 }
 
