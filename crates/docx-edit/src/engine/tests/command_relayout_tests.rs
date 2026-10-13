@@ -597,3 +597,108 @@ fn command_edits_with_a_page_numbered_header_lay_out_as_a_full_recompute_does() 
     host.command("body", 2, 2, Some("y"));
     host.assert_matches_cold("typing after a header edit");
 }
+
+#[test]
+fn retained_pages_of_rich_runs_lay_out_as_a_full_recompute_does() {
+    use super::lowering_fixture::{NS, Package, para, run};
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+    let filler = |from: u32, count: u32| -> String {
+        (from..from + count)
+            .map(|index| {
+                para(
+                    &format!("{:08X}", 0x600 + index),
+                    &run(&format!(
+                        "Filler paragraph {index} with enough words to wrap over two lines."
+                    )),
+                )
+            })
+            .collect()
+    };
+    let rich = [
+        format!(
+            r#"{}<w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple>{}<w:fldSimple w:instr=" SEQ Figure "><w:r><w:t>1</w:t></w:r></w:fldSimple>"#,
+            run("Page "),
+            run(" figure ")
+        ),
+        format!(
+            r#"{}<w:hyperlink w:anchor="target"><w:r><w:t>a link</w:t></w:r></w:hyperlink>{}<w:commentRangeStart w:id="0"/>{}<w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r>"#,
+            run("Before "),
+            run(" and "),
+            run("commented words")
+        ),
+        format!(
+            r#"{}<w:ins w:id="1" w:author="Ann" w:date="2026-01-02T00:00:00Z">{}</w:ins><w:del w:id="2" w:author="Bob" w:date="2026-01-03T00:00:00Z"><w:r><w:delText xml:space="preserve">removed </w:delText></w:r></w:del>{}"#,
+            run("Kept "),
+            run("inserted "),
+            run("tail")
+        ),
+        format!(
+            r#"{}<w:sdt><w:sdtPr><w:tag w:val="name"/><w:id w:val="7"/><w:text/></w:sdtPr><w:sdtContent>{}</w:sdtContent></w:sdt>{}"#,
+            run("Before "),
+            run("Ada Lovelace"),
+            run(" after")
+        ),
+        format!(
+            r#"<w:pPr><w:tabs><w:tab w:val="right" w:leader="dot" w:pos="3600"/></w:tabs></w:pPr>{}<w:r><w:tab/></w:r>{}"#,
+            run("Chapter"),
+            run("7")
+        ),
+    ];
+    let body = format!(
+        "{}{}{}{}",
+        filler(0, 24),
+        rich.iter()
+            .enumerate()
+            .map(|(index, content)| para(&format!("{:08X}", 0x700 + index), content))
+            .collect::<String>(),
+        filler(24, 4),
+        rich.iter()
+            .enumerate()
+            .map(|(index, content)| para(&format!("{:08X}", 0x710 + index), content))
+            .collect::<String>(),
+    );
+    let comments = format!(
+        r#"<w:comments {NS}><w:comment w:id="0" w:author="A"><w:p><w:r><w:t>Note</w:t></w:r></w:p></w:comment></w:comments>"#
+    );
+    let bytes = Package::new(&body)
+        .part(
+            "comments.xml",
+            "rIdComments",
+            "comments",
+            "comments",
+            &comments,
+        )
+        .bytes();
+    let engine = EngineSession::new(9723);
+    crate::seed_from_docx(engine.doc(), &bytes).unwrap();
+    engine.set_relayout_trigger(RelayoutTrigger::Open);
+    let mut host = CommandHost::open(&engine, font);
+    let pages = engine
+        .pagination
+        .borrow()
+        .layout
+        .as_ref()
+        .unwrap()
+        .pages
+        .len();
+    let start = paragraph_start(&engine, "00000601");
+    for (label, edit) in [
+        ("positions moving up", (start + 2, start + 2, Some("xyz"))),
+        ("positions moving down", (start + 2, start + 7, None)),
+        ("positions moving down again", (start + 1, start + 3, None)),
+        (
+            "positions moving up again",
+            (start + 1, start + 1, Some("x")),
+        ),
+    ] {
+        let (from, to, text) = edit;
+        let work = keystroke_work(&engine, || {
+            assert!(host.command("body", from, to, text), "{label}");
+        });
+        assert_eq!(work.full_paginations, 0, "{label}: {work:?}");
+        assert!(work.paginated_pages <= 2, "{label}: {work:?} of {pages}");
+        host.assert_matches_cold(label);
+    }
+}
