@@ -22,7 +22,10 @@ use std::sync::{Arc, Mutex, Weak};
 use ooxml_drawingml::chart::ChartSpace;
 use serde::{Deserialize, Serialize};
 use xlsx_calc::graph::DepGraph;
-use xlsx_calc::{RecalcResult, rebuild_and_recalc_all_with_seed, recalc_after_with_seed};
+use xlsx_calc::{
+    RecalcResult, rebuild_and_recalc_all_with_seed, recalc_after_with_recomputed,
+    recalc_after_with_seed,
+};
 use xlsx_model::{
     Border, BorderEdge, BorderStyle, CellFormat, CellRange, CellRef, CellValue, ChartAnchor, Fill,
     FormatCode, FreezePane, HAlign, Hyperlink, MAX_COLS, MAX_ROWS, NumberFormat, Sheet, SheetChart,
@@ -2878,19 +2881,43 @@ impl Workbook {
         }
     }
 
+    /// The run re-evaluates only what the rename reaches, so every formula
+    /// outside it keeps the cycle or limited status it last had.
     fn recalculate_renamed(&mut self, options: CalculationOptions) -> CalculationResult {
         self.bump_model_epoch();
         let graph = self.graph.as_mut().expect("graph initialized");
-        let moved = graph.rename_sheets(&self.model);
-        let result = recalc_after_with_seed(
+        let seeds = graph.rename_sheets(&self.model);
+        let (result, recomputed) = recalc_after_with_recomputed(
             &mut self.model,
             graph,
-            &moved,
+            &seeds,
             options.now_serial,
             self.rand_seed,
         );
         self.dirty_geometry_cells(&result.changed);
-        let result = calculation_result(&result);
+        let recomputed: HashSet<_> = recomputed
+            .into_iter()
+            .map(|(sheet, cell)| (sheet.0, cell.row, cell.col))
+            .collect();
+        let untouched = |address: &&CellAddress| {
+            !recomputed.contains(&(address.sheet.0, address.cell.row, address.cell.col))
+        };
+        let previous = &self.last_calculation;
+        let mut result = calculation_result(&result);
+        result.cycle_cells = previous
+            .cycle_cells
+            .iter()
+            .filter(untouched)
+            .copied()
+            .chain(result.cycle_cells)
+            .collect();
+        result.limited_cells = previous
+            .limited_cells
+            .iter()
+            .filter(untouched)
+            .copied()
+            .chain(result.limited_cells)
+            .collect();
         self.last_calculation = result.clone();
         result
     }

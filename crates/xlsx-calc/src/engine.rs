@@ -78,12 +78,44 @@ pub fn recalc_after_with_seed(
     now_serial: Option<f64>,
     rand_seed: Option<u32>,
 ) -> RecalcResult {
-    let recompute = collect_recompute(graph, dirty_seeds);
     let context = RecalcContext {
         now_serial,
         rand_seed,
     };
-    let result = run_recalc(wb, graph, recompute, context);
+    recalc_seeded(wb, graph, dirty_seeds, context, None)
+}
+
+/// [`recalc_after_with_seed`], also returning every formula cell it
+/// re-evaluated, in address order: the cells its cycle and limited lists
+/// speak for.
+pub fn recalc_after_with_recomputed(
+    wb: &mut Workbook,
+    graph: &mut DepGraph,
+    dirty_seeds: &[(SheetId, CellRef)],
+    now_serial: Option<f64>,
+    rand_seed: Option<u32>,
+) -> (RecalcResult, Vec<(SheetId, CellRef)>) {
+    let context = RecalcContext {
+        now_serial,
+        rand_seed,
+    };
+    let mut recomputed = HashSet::new();
+    let result = recalc_seeded(wb, graph, dirty_seeds, context, Some(&mut recomputed));
+    let mut recomputed: Vec<Key> = recomputed.into_iter().collect();
+    recomputed.sort_unstable();
+    let cells = recomputed.iter().map(|&k| (k.0, cell_of(k)));
+    (result, cells.collect())
+}
+
+fn recalc_seeded(
+    wb: &mut Workbook,
+    graph: &mut DepGraph,
+    dirty_seeds: &[(SheetId, CellRef)],
+    context: RecalcContext,
+    recomputed: Option<&mut HashSet<Key>>,
+) -> RecalcResult {
+    let recompute = collect_recompute(graph, dirty_seeds);
+    let result = run_recalc(wb, graph, recompute, context, recomputed);
     graph.refresh_spills(wb);
     result
 }
@@ -107,7 +139,7 @@ pub fn rebuild_and_recalc_all_with_seed(
         now_serial,
         rand_seed,
     };
-    let result = run_recalc(wb, &graph, recompute, context);
+    let result = run_recalc(wb, &graph, recompute, context, None);
     graph.refresh_spills(wb);
     (graph, result)
 }
@@ -155,12 +187,14 @@ const MAX_SPILL_ROUNDS: usize = 4;
 const MAX_DEFERRED_CYCLE_CELLS: usize = 4096;
 
 /// topologically order `recompute` and evaluate it, writing changed values into
-/// `wb`. cells caught in a cycle are settled and reported separately.
+/// `wb`. cells caught in a cycle are settled and reported separately. every
+/// cell a round takes up joins `recomputed`.
 fn run_recalc(
     wb: &mut Workbook,
     graph: &DepGraph,
     recompute: HashSet<Key>,
     context: RecalcContext,
+    mut recomputed: Option<&mut HashSet<Key>>,
 ) -> RecalcResult {
     let budget = Rc::new(EvaluationBudget::new(MAX_RECALCULATION_CELL_VISITS));
     let mut changed: Vec<(SheetId, CellRef)> = Vec::new();
@@ -169,6 +203,9 @@ fn run_recalc(
     let mut pending = recompute;
 
     for _ in 0..MAX_SPILL_ROUNDS {
+        if let Some(recomputed) = &mut recomputed {
+            recomputed.extend(pending.iter().copied());
+        }
         let (order, cycle) = topo_order(graph, &pending);
         let mut spilled: Vec<(SheetId, CellRef)> = Vec::new();
         for u in &order {
