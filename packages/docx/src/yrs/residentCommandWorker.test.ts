@@ -1759,11 +1759,11 @@ for (const comment of [true, false]) {
       }))).outcomes[0]?.status).toBe('applied');
       expect(engine.paragraphs('body')).toHaveLength(3);
       await expectAuthoredBreakSaves(opened, [1, 0]);
-      const beforeUndo = await client.documentRead({ kind: 'reviewSnapshot' });
+      const beforeUndo = await client.requestFullFrame();
       expect((await client.edit(intent(2, beforeUndo.version, 'undo', {}))).outcomes[0]?.status).toBe('applied');
       expect(engine.paragraphs('body')).toHaveLength(2);
       await expectAuthoredBreakSaves(opened, [1, 0]);
-      const beforeRedo = await client.documentRead({ kind: 'reviewSnapshot' });
+      const beforeRedo = await client.requestFullFrame();
       expect((await client.edit(intent(3, beforeRedo.version, 'redo', {}))).outcomes[0]?.status).toBe('applied');
       expect(engine.paragraphs('body')).toHaveLength(3);
       await expectAuthoredBreakSaves(opened, [1, 0]);
@@ -1786,7 +1786,7 @@ for (const comment of [true, false]) {
       expect(nativeBreakCounts(remote)).toEqual([0, 0]);
       await client.applyRemoteUpdate(remote.encodeStateAsUpdate(engine.encodeStateVector()));
       expect(nativeBreakCounts(engine)).toEqual([0, 0]);
-      const basis = await client.documentRead({ kind: 'reviewSnapshot' });
+      const basis = await client.requestFullFrame();
       const first = { story: 'body', paraId: engine.paragraphs('body')[0]!.paraId, offset: 1 };
       expect((await client.edit(intent(1, basis.version, 'insertText', {
         text: '+', selection: { anchor: first, focus: first },
