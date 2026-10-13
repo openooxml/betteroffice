@@ -10,6 +10,8 @@ use crate::{
     serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes,
 };
 
+/// cellXfs[2] differs from cellXfs[1] only in protection; cellXfs[3] adds bold;
+/// cellXfs[4] repeats cellXfs[2] with word booleans.
 const STYLES: &str = concat!(
     r#"<styleSheet><fonts count="2"><font><sz val="11"/></font><font><b/><sz val="11"/></font></fonts>"#,
     r#"<fills count="1"><fill><patternFill patternType="none"/></fill></fills>"#,
@@ -45,6 +47,8 @@ pub(super) fn parsed_sheet(sheet: &str) -> ParsedWorkbook {
     parse_workbook_with_package(&parts).unwrap()
 }
 
+/// The model as an open projects it: cells on cellXfs[2] move to the first
+/// equivalent entry.
 pub(super) fn projected(parsed: &ParsedWorkbook) -> Workbook {
     let mut workbook = parsed.workbook.clone();
     let sheet = &mut workbook.sheets[0];
