@@ -41,7 +41,7 @@ import {
   XlsxEditor,
   XlsxSaveRefusedError,
   type XlsxEditorApi,
-  type XlsxEditorProps,
+  type XlsxInThreadEditorProps,
 } from './XlsxEditor';
 
 const WASM = resolve(import.meta.dir, '../../xlsx/src/wasm/generated/xlsx_wasm_bg.wasm');
@@ -182,7 +182,7 @@ function pointAt(fixture: Fixture, addr: CellAddr): { clientX: number; clientY: 
 async function mountEditor(fixture: Fixture = plain, onSave?: (bytes: Uint8Array) => void) {
   const ready: { handle: WorkbookHandle | null } = { handle: null };
   const view = render(
-    <XlsxEditor
+    <XlsxEditor legacySyncApi experimentalWorkerOpen={false}
       file={fixture.bytes.slice()}
       onSave={onSave}
       onReady={(api) => {
@@ -207,7 +207,7 @@ async function mountEditor(fixture: Fixture = plain, onSave?: (bytes: Uint8Array
     reopenWith: (next: Fixture) =>
       act(async () => {
         view.rerender(
-          <XlsxEditor
+          <XlsxEditor legacySyncApi experimentalWorkerOpen={false}
             file={next.bytes.slice()}
             onSave={onSave}
             onReady={(api) => {
@@ -287,7 +287,7 @@ describe('XlsxEditor grid pointer handling', () => {
     let api: XlsxEditorApi | undefined;
     let changes = 0;
     const view = render(
-      <XlsxEditor
+      <XlsxEditor legacySyncApi experimentalWorkerOpen={false}
         file={source.slice()}
         onChange={() => changes++}
         onReady={(ready) => {
@@ -813,7 +813,7 @@ describe('XlsxEditor host integration', () => {
     let api: XlsxEditorApi | undefined;
     let changes = 0;
     const view = render(
-      <XlsxEditor
+      <XlsxEditor legacySyncApi experimentalWorkerOpen={false}
         file={plain.bytes.slice()}
         onChange={() => changes++}
         onReady={(ready) => {
@@ -854,7 +854,7 @@ describe('XlsxEditor host integration', () => {
     let api: XlsxEditorApi | undefined;
     let changes = 0;
     const view = render(
-      <XlsxEditor
+      <XlsxEditor legacySyncApi experimentalWorkerOpen={false}
         file={plain.bytes.slice()}
         onChange={() => changes++}
         onReady={(ready) => {
@@ -910,7 +910,7 @@ describe('XlsxEditor host integration', () => {
       const onReady = (ready: XlsxEditorApi) => {
         api = ready;
       };
-      const view = render(<XlsxEditor file={file} onReady={onReady} />);
+      const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={file} onReady={onReady} />);
       await waitFor(() => expect(api).toBeDefined());
       const target = { row: 2, col: 0 };
       const before = api!.handle.cell(0, target.row, target.col).input;
@@ -919,7 +919,7 @@ describe('XlsxEditor host integration', () => {
       });
 
       fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'v', ctrlKey: true });
-      view.rerender(<XlsxEditor file={file} onReady={onReady} readOnly />);
+      view.rerender(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={file} onReady={onReady} readOnly />);
       await act(async () => resolveClipboard('late paste'));
 
       expect(api!.handle.cell(0, target.row, target.col).input).toBe(before);
@@ -937,7 +937,7 @@ describe('XlsxEditor proposal review', () => {
   it('reviews a staged proposal through accept, undo, reject, stale warning, and force apply', async () => {
     let api: XlsxEditorApi | undefined;
     const view = render(
-      <XlsxEditor file={plain.bytes.slice()} onReady={(ready) => { api = ready; }} />
+      <XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={plain.bytes.slice()} onReady={(ready) => { api = ready; }} />
     );
     await waitFor(() => expect(api).toBeDefined());
     const workbook = api!.handle;
@@ -1008,7 +1008,7 @@ describe('XlsxEditor pending host edits', () => {
     source.dispose();
     let api: XlsxEditorApi | undefined;
     const view = render(
-      <XlsxEditor
+      <XlsxEditor legacySyncApi experimentalWorkerOpen={false}
         file={file}
         onReady={(ready) => {
           api = ready;
@@ -1044,7 +1044,7 @@ describe('XlsxEditor pending host edits', () => {
   it('commits the current cell draft before selecting another cell', async () => {
     let api: XlsxEditorApi | undefined;
     const view = render(
-      <XlsxEditor
+      <XlsxEditor legacySyncApi experimentalWorkerOpen={false}
         file={plain.bytes.slice()}
         onReady={(ready) => {
           api = ready;
@@ -1072,7 +1072,7 @@ describe('XlsxEditor pending host edits', () => {
         let api: XlsxEditorApi | undefined;
         let changes = 0;
         const view = render(
-          <XlsxEditor
+          <XlsxEditor legacySyncApi experimentalWorkerOpen={false}
             file={plain.bytes.slice()}
             onChange={() => {
               changes += 1;
@@ -1118,7 +1118,7 @@ describe('XlsxEditor pending host edits', () => {
   it('commits the next cell edit on blur after a host save', async () => {
     let api: XlsxEditorApi | undefined;
     const view = render(
-      <XlsxEditor
+      <XlsxEditor legacySyncApi experimentalWorkerOpen={false}
         file={plain.bytes.slice()}
         onReady={(ready) => {
           api = ready;
@@ -1148,15 +1148,15 @@ describe('XlsxEditor commands', () => {
   const MOD = isMacPlatform() ? { metaKey: true } : { ctrlKey: true };
   const target = { row: 2, col: 0 };
 
-  async function mountCommands(props: Partial<XlsxEditorProps> = {}) {
+  async function mountCommands(props: Partial<XlsxInThreadEditorProps> = {}) {
     let api: XlsxEditorApi | undefined;
     let changes = 0;
     const saves: Uint8Array[] = [];
     const onReady = (ready: XlsxEditorApi) => {
       api = ready;
     };
-    const element = (next: Partial<XlsxEditorProps> = {}) => (
-      <XlsxEditor
+    const element = (next: Partial<XlsxInThreadEditorProps> = {}) => (
+      <XlsxEditor legacySyncApi experimentalWorkerOpen={false}
         file={plain.bytes}
         onChange={() => {
           changes += 1;
@@ -1194,7 +1194,7 @@ describe('XlsxEditor commands', () => {
       saves,
       execute,
       typeInCell,
-      rerender: (next: Partial<XlsxEditorProps>) => view.rerender(element(next)),
+      rerender: (next: Partial<XlsxInThreadEditorProps>) => view.rerender(element(next)),
       input: () => api!.handle.cell(0, target.row, target.col).input,
     };
   }
@@ -1781,7 +1781,7 @@ describe('XlsxEditor commands', () => {
     try {
       let api: XlsxEditorApi | undefined;
       const view = render(
-        <XlsxEditor
+        <XlsxEditor legacySyncApi experimentalWorkerOpen={false}
           file={plain.bytes.slice()}
           onReady={(ready) => {
             api = ready;
@@ -1791,7 +1791,7 @@ describe('XlsxEditor commands', () => {
       await waitFor(() => expect(api).toBeDefined());
       let printing: Promise<XlsxCommandResult> | undefined;
       view.rerender(
-        <XlsxEditor
+        <XlsxEditor legacySyncApi experimentalWorkerOpen={false}
           file={charted.bytes.slice()}
           onReady={(ready) => {
             paints = 0;
@@ -1828,7 +1828,7 @@ describe('XlsxEditor commands', () => {
     let api: XlsxEditorApi | undefined;
     const saves: Uint8Array[] = [];
     const view = render(
-      <XlsxEditor
+      <XlsxEditor legacySyncApi experimentalWorkerOpen={false}
         file={charted.bytes.slice()}
         onSave={(bytes) => {
           saves.push(bytes);
@@ -1941,18 +1941,18 @@ describe('XlsxEditor commands', () => {
 
   it('reports the workbook lifecycle and fails commands of a replaced workbook', async () => {
     let api: XlsxEditorApi | undefined;
-    const view = render(<XlsxEditor onReady={(ready) => void (api = ready)} />);
+    const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} onReady={(ready) => void (api = ready)} />);
     const store = await new Promise<XlsxCommandStore>((resolve) => {
       function Probe() {
         resolve(useXlsxCommands());
         return null;
       }
-      view.rerender(<XlsxEditor toolbar={<Probe />} />);
+      view.rerender(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} toolbar={<Probe />} />);
     });
     const code = (state: { enabled: boolean; disabledReason?: { code: string } }) =>
       state.enabled ? null : state.disabledReason!.code;
     expect(code(store.getState('save'))).toBe('no-document');
-    view.rerender(<XlsxEditor file={plain.bytes.slice()} onReady={(ready) => void (api = ready)} />);
+    view.rerender(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={plain.bytes.slice()} onReady={(ready) => void (api = ready)} />);
     expect(code(store.getState('save'))).toBe('document-loading');
     await waitFor(() => expect(api).toBeDefined());
     await waitFor(() => expect(store.getState('save').enabled).toBe(true));
@@ -2209,7 +2209,7 @@ describe('XlsxEditor commands', () => {
   it('refuses a command during an unfinished chart drag and lands a nudge before undo', async () => {
     let api: XlsxEditorApi | undefined;
     const view = render(
-      <XlsxEditor
+      <XlsxEditor legacySyncApi experimentalWorkerOpen={false}
         file={charted.bytes.slice()}
         onReady={(ready) => {
           api = ready;
@@ -2254,7 +2254,7 @@ describe('XlsxEditor commands', () => {
   it('disables merging while collaborating', async () => {
     let api: XlsxEditorApi | undefined;
     render(
-      <XlsxEditor
+      <XlsxEditor legacySyncApi experimentalWorkerOpen={false}
         file={plain.bytes.slice()}
         collaboration={{}}
         onReady={(ready) => {
@@ -2360,7 +2360,7 @@ describe('XlsxEditor edit batches', () => {
     const onReady = (ready: XlsxEditorApi) => {
       api = ready;
     };
-    const view = render(<XlsxEditor file={file} onReady={onReady} {...props} />);
+    const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={file} onReady={onReady} {...props} />);
     await waitFor(() => expect(api).toBeDefined());
     return { view, api: api!, file, onReady };
   }
@@ -2477,7 +2477,7 @@ describe('XlsxEditor edit batches', () => {
       );
       let current = api;
       view.rerender(
-        <XlsxEditor
+        <XlsxEditor legacySyncApi experimentalWorkerOpen={false}
           file={plain.bytes.slice()}
           onReady={(ready) => {
             current = ready;
@@ -2508,7 +2508,7 @@ describe('XlsxEditor edit batches', () => {
         () => null,
         (error: unknown) => error
       );
-      view.rerender(<XlsxEditor file={plain.bytes.slice()} onReady={onReady} />);
+      view.rerender(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={plain.bytes.slice()} onReady={onReady} />);
       await act(async () => clipboard.resolve('late'));
       const replaced = await settled(() => outcome);
       expect(replaced).toBeInstanceOf(XlsxCommandAdmissionError);
@@ -2656,10 +2656,10 @@ describe('XlsxEditor edit batches', () => {
           current = ready;
         };
         if (change === 'replace') {
-          view.rerender(<XlsxEditor file={plain.bytes.slice()} onReady={swap} />);
+          view.rerender(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={plain.bytes.slice()} onReady={swap} />);
           await waitFor(() => expect(current).not.toBe(api));
         } else {
-          view.rerender(<XlsxEditor file={file} onReady={onReady} readOnly />);
+          view.rerender(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={file} onReady={onReady} readOnly />);
         }
         await act(async () => clipboard.settle());
         expect(current.handle.cell(0, 2, 1).input).toBe('100');
@@ -2680,7 +2680,7 @@ describe('XlsxEditor edit batches', () => {
       const version = await settled(() => api.version());
       fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'v', ctrlKey: true });
       const outcome = api.applyEdits(setB3(version, 'batch'));
-      view.rerender(<XlsxEditor file={file} onReady={onReady} readOnly />);
+      view.rerender(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={file} onReady={onReady} readOnly />);
       await act(async () => clipboard.resolve('late'));
       const result = await settled(() => outcome);
       expect(result.ok).toBe(false);
@@ -2746,7 +2746,7 @@ describe('XlsxEditor host controls', () => {
     let requests = 0;
     let saved!: Uint8Array;
     const builtIn: Uint8Array[] = [];
-    const view = render(<XlsxEditor file={plain.bytes.slice()} onReady={(ready) => { api = ready; }}
+    const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={plain.bytes.slice()} onReady={(ready) => { api = ready; }}
       onSave={(bytes) => builtIn.push(bytes)} onSaveRequest={async () => {
         requests++;
         await api.flushPendingInput();
@@ -2767,7 +2767,7 @@ describe('XlsxEditor host controls', () => {
     let api!: XlsxEditorApi;
     let requests = 0;
     const saved: Uint8Array[] = [];
-    render(<XlsxEditor file={plain.bytes.slice()} onReady={(ready) => { api = ready; }}
+    render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={plain.bytes.slice()} onReady={(ready) => { api = ready; }}
       onSave={(bytes) => saved.push(bytes)} onSaveRequest={async () => {
         if (++requests === 1) throw new Error('Host save failed');
         return true;
@@ -2789,7 +2789,7 @@ describe('XlsxEditor host controls', () => {
       let release!: (value: boolean | void) => void;
       const pending = new Promise<boolean | void>((resolve) => { release = resolve; });
       const saved: Uint8Array[] = [];
-      const view = render(<XlsxEditor file={plain.bytes.slice()} onReady={(ready) => { api = ready; }}
+      const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={plain.bytes.slice()} onReady={(ready) => { api = ready; }}
         onSaveRequest={() => { requests++; return pending; }} onSave={(bytes) => saved.push(bytes)} />);
       await waitFor(() => expect(api).toBeDefined());
       fireEvent.change(view.getByTestId('xlsx-formula-input'), { target: { value: 'Host save draft' } });
@@ -2809,7 +2809,7 @@ describe('XlsxEditor host controls', () => {
   for (const source of ['cell', 'formula'] as const) {
     it(`waits for ${source} composition before making the draft authoritative`, async () => {
       let api: XlsxEditorApi | undefined;
-      const view = render(<XlsxEditor file={plain.bytes.slice()} onReady={(ready) => { api = ready; }} />);
+      const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={plain.bytes.slice()} onReady={(ready) => { api = ready; }} />);
       await waitFor(() => expect(api).toBeDefined());
       const target = { row: 2, col: 0 };
       await act(async () => { api!.selectCells(0, selectionAt(target)); });
@@ -2840,7 +2840,7 @@ describe('XlsxEditor host controls', () => {
     const clipboard = navigator.clipboard.readText;
     navigator.clipboard.readText = () => new Promise<string>((resolve) => { release = resolve; });
     try {
-      const view = render(<XlsxEditor file={plain.bytes.slice()} onReady={(ready) => { api = ready; }} />);
+      const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={plain.bytes.slice()} onReady={(ready) => { api = ready; }} />);
       await waitFor(() => expect(api).toBeDefined());
       fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'v', ctrlKey: true });
       let finished = false;
@@ -2861,14 +2861,14 @@ describe('XlsxEditor host controls', () => {
     const saved: Uint8Array[] = [];
     const props = { onReady: (ready: XlsxEditorApi) => { opened.push(ready); },
       onSaveRequest: () => { requests++; return pending; }, onSave: (bytes: Uint8Array) => { saved.push(bytes); } };
-    const view = render(<XlsxEditor {...props} file={plain.bytes.slice()} />);
+    const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} {...props} file={plain.bytes.slice()} />);
     await waitFor(() => expect(opened).toHaveLength(1));
     fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 's', ctrlKey: true });
     await waitFor(() => expect(requests).toBe(1));
     fireEvent.compositionStart(view.getByTestId('xlsx-formula-input'));
     const flushed = opened[0].flushPendingInput();
     void flushed.catch(() => {});
-    await act(async () => { view.rerender(<XlsxEditor {...props} file={plain.bytes.slice()} />); });
+    await act(async () => { view.rerender(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} {...props} file={plain.bytes.slice()} />); });
     await expect(flushed).rejects.toThrow(XlsxCommandAdmissionError);
     await waitFor(() => expect(opened).toHaveLength(2));
     await act(async () => { release(true); });
@@ -2879,7 +2879,7 @@ describe('XlsxEditor host controls', () => {
 
   it('queries painted cells without moving selection and returns null over charts', async () => {
     let api: XlsxEditorApi | undefined;
-    const view = render(<XlsxEditor file={charted.bytes.slice()} onReady={(ready) => { api = ready; }} />);
+    const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={charted.bytes.slice()} onReady={(ready) => { api = ready; }} />);
     await waitFor(() => expect(api).toBeDefined());
     const canvas = view.container.querySelector('canvas')!;
     canvas.getBoundingClientRect = () => new DOMRect(40, 60, VIEWPORT.width, VIEWPORT.height);
@@ -2912,7 +2912,7 @@ describe('clipboard access failure recovery', () => {
         : () => Promise.reject(new Error('Clipboard access denied'));
       try {
         let api: XlsxEditorApi | undefined;
-        const view = render(<XlsxEditor file={plain.bytes.slice()} onReady={(ready) => { api = ready; }} />);
+        const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={plain.bytes.slice()} onReady={(ready) => { api = ready; }} />);
         await waitFor(() => expect(api).toBeDefined());
         fireEvent.change(view.getByTestId('xlsx-formula-input'), { target: { value: 'Keep my edits' } });
         fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'v', ctrlKey: true });
@@ -2929,7 +2929,7 @@ describe('clipboard access failure recovery', () => {
     navigator.clipboard.writeText = () => Promise.reject(new Error('Clipboard access denied'));
     try {
       let api: XlsxEditorApi | undefined;
-      const view = render(<XlsxEditor file={plain.bytes.slice()} onReady={(ready) => { api = ready; }} />);
+      const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={plain.bytes.slice()} onReady={(ready) => { api = ready; }} />);
       await waitFor(() => expect(api).toBeDefined());
       const before = api!.handle.cell(0, 0, 0).input;
       fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'x', ctrlKey: true });

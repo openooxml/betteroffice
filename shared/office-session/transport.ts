@@ -1,5 +1,6 @@
 import { SessionFailure } from './types';
 
+/** Endpoint seam: ordered reliable delivery; ports and sockets may copy instead of transfer. */
 export interface SessionTransport {
   post(message: unknown, transfer?: Transferable[]): void;
   listen(listener: (message: unknown) => void): () => void;
@@ -12,6 +13,7 @@ export interface SessionScope {
   addEventListener(type: string, listener: EventListener): void;
   removeEventListener(type: string, listener: EventListener): void;
   close?(): void;
+  start?(): void;
 }
 
 function transportFor(scope: SessionScope, close: () => void): SessionTransport {
@@ -25,6 +27,7 @@ function transportFor(scope: SessionScope, close: () => void): SessionTransport 
       cleanups.delete(remove);
     };
     cleanups.add(remove);
+    scope.start?.();
     return remove;
   }
   return {
@@ -58,7 +61,7 @@ export function createWorkerTransport(worker: Worker): SessionTransport {
   return transportFor(worker, () => worker.terminate());
 }
 
-/** Adapts a dedicated worker scope. */
+/** Adapts a worker scope or message port. */
 export function createScopeTransport(scope: SessionScope): SessionTransport {
   return transportFor(scope, () => scope.close?.());
 }

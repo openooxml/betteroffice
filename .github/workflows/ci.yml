@@ -63,6 +63,7 @@ jobs:
 
       - name: Type check
         run: |
+          bun run typecheck:shared
           bun run typecheck:packages
           bun run --filter '@betteroffice/collaboration-relay' typecheck
 
