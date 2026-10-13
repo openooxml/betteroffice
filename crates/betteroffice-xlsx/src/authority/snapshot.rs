@@ -2426,11 +2426,10 @@ mod tests {
             }),
             ..Border::default()
         };
-        let push = |section: usize, payload: Vec<u8>| {
+        let push = |section: usize, payload: Vec<u8>| -> SnapshotResult<Stylesheet> {
             let mut builder = builder_for_section(section, 1);
-            builder
-                .push_bounded(&payload, SnapshotBudget::new(1, 1024).unwrap())
-                .map(|_| builder.base.unwrap().styles)
+            while !builder.push_bounded(&payload, SnapshotBudget::new(1, 1024).unwrap())? {}
+            Ok(builder.base.unwrap().styles)
         };
         let current = |tag: u8, value: &dyn Fn(&mut Writer)| {
             let mut writer = Writer::new();
