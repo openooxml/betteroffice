@@ -573,7 +573,8 @@ test('a failed second-page draw redraws both pages from retained bitmaps before 
   const initial = echoFrame(1, 0, 'a');
   const first = initial.payload.stagedPresentation!.pages[0]!.bitmap;
   const second = { width: 100, height: 20, close() {} } as ImageBitmap;
-  initial.payload.stagedPresentation!.pages.push({ page: secondPage, frameEpoch: 1, bitmap: second });
+  initial.payload.stagedPresentation!.pages = [...initial.payload.stagedPresentation!.pages,
+    { page: secondPage, frameEpoch: 1, bitmap: second }];
   expect(presentation.present(initial, [], [])).toBe(true);
   const pending = entry(1);
   presentation.hooks.paint([pending]);
@@ -600,7 +601,8 @@ test('staged bitmaps close exactly once and are never drawn after close', () => 
   installed.bitmap = bitmap();
   installed.backgrounds![0]!.bitmap = bitmap();
   const second = bitmap();
-  initial.payload.stagedPresentation!.pages.push({ page: secondPage, frameEpoch: 1, bitmap: second });
+  initial.payload.stagedPresentation!.pages = [...initial.payload.stagedPresentation!.pages,
+    { page: secondPage, frameEpoch: 1, bitmap: second }];
   expect(presentation.present(initial, [], [])).toBe(true);
   const replacement = bitmap();
   expect(presentation.present(staged(2, 1, [[page, replacement]]), [], [])).toBe(true);
