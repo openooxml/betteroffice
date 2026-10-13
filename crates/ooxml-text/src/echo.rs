@@ -285,8 +285,8 @@ mod tests {
         assert_eq!(shape("ff").len(), 2);
         assert_eq!(shape("fi").len(), 2);
         assert_eq!(shape("ffi").len(), 1);
-        let set = echo_glyph_set(&store, font, 16.0, false, &['f', 'i']).unwrap();
-        assert!(set.glyph_ids[0] == 0 || set.unsafe_pairs.contains(&[0, 0]) || set.unsafe_pairs.contains(&[0, 1]),
+        let set = echo_glyph_set(&store, font, 16.0, false, &['f', 'a', 'i']).unwrap();
+        assert!(set.glyph_ids[0] == 0 || set.unsafe_pairs.contains(&[0, 0]) || set.unsafe_pairs.contains(&[0, 2]),
             "ffi must decline even when ff and fi shape independently");
     }
 }
