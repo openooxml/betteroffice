@@ -836,6 +836,15 @@ fn exact_prefix_block(block: &LayoutBlock) -> bool {
     }
 }
 
+/// Whether every body block passes [`exact_prefix_block`] and the supplied regions
+/// describe every section, or none. Header extension gives each supplied section its
+/// region's margins and the body's final section the last region's, so a cut ending in
+/// a section past them would not lay it out as the whole body does.
+fn exact_prefix_body(regions: &DocumentRegions, blocks: &[LayoutBlock]) -> bool {
+    blocks.iter().all(exact_prefix_block)
+        && (regions.sections.is_empty() || regions.sections.len() > section_breaks(blocks))
+}
+
 fn section_breaks(blocks: &[LayoutBlock]) -> usize {
     blocks
         .iter()
@@ -6404,7 +6413,7 @@ impl EngineSession {
                         Some(PagePrefix { pages, exact })
                             if !coupled
                                 && floats_follow_the_text(&blocks)
-                                && (!exact || blocks.iter().all(exact_prefix_block)) =>
+                                && (!exact || exact_prefix_body(&regions, &blocks)) =>
                         {
                             let anchored = anchors_objects(&blocks);
                             let sections =
