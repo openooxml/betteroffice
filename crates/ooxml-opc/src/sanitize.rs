@@ -1003,8 +1003,10 @@ fn sanitize_workbook_sheets(
     };
     validate_xml_limits(bytes, path, xml_budget)?;
     let mut reader = NsReader::from_reader(bytes.as_slice());
-    let mut relationships = BTreeMap::new();
-    let mut has_removed_macro_sheet = false;
+    let mut kept_by_id = BTreeMap::new();
+    let mut removed_macro_sheets = Vec::new();
+    let mut root_seen = false;
+    let mut root_valid = false;
     let mut depth = 0;
     loop {
         let (namespace, event) = reader
@@ -1012,24 +1014,24 @@ fn sanitize_workbook_sheets(
             .map_err(|error| format!("invalid XML in {path}: {error}"))?;
         match &event {
             Event::Start(start) | Event::Empty(start) => {
-                if depth == 0
-                    && (start.local_name().as_ref() != b"Relationships"
-                        || !is_relationships_namespace(&namespace))
-                {
-                    return Err(format!("invalid relationships in {path}"));
+                if depth == 0 {
+                    root_valid = !root_seen
+                        && start.local_name().as_ref() == b"Relationships"
+                        && is_relationships_namespace(&namespace);
+                    root_seen = true;
                 }
                 if depth == 1
                     && start.local_name().as_ref() == b"Relationship"
                     && is_relationships_namespace(&namespace)
                 {
                     let values = attributes(&reader, start, path)?;
-                    let id = attribute_value(&values, "Id")
-                        .ok_or_else(|| format!("Relationship missing Id in {path}"))?;
                     let is_removed = remove_relationship(&values, removed, content_types, path);
+                    let relationship_type = attribute_value(&values, "Type")
+                        .unwrap_or_default()
+                        .to_ascii_lowercase();
                     let target = attribute_value(&values, "Target")
                         .and_then(|target| resolve_relationship_target(path, target));
-                    let macro_sheet = attribute_value(&values, "Type")
-                        .is_some_and(|value| value.to_ascii_lowercase().contains("macrosheet"))
+                    let macro_sheet = relationship_type.contains("macrosheet")
                         || target.as_deref().is_some_and(|target| {
                             target.contains("/macrosheets/")
                                 || content_types
@@ -1038,9 +1040,14 @@ fn sanitize_workbook_sheets(
                                         value.to_ascii_lowercase().contains("macrosheet")
                                     })
                         });
-                    has_removed_macro_sheet |= is_removed && macro_sheet;
-                    if relationships.insert(id.to_owned(), is_removed).is_some() {
-                        return Err(format!("duplicate relationship Id in {path}"));
+                    // Id-less relationships cannot be referenced by a sheet.
+                    if let Some(id) = attribute_value(&values, "Id") {
+                        let kept = kept_by_id.entry(id.to_owned()).or_insert(0_usize);
+                        if !is_removed {
+                            *kept += 1;
+                        } else if macro_sheet {
+                            removed_macro_sheets.push(id.to_owned());
+                        }
                     }
                 }
                 if matches!(event, Event::Start(_)) {
@@ -1052,15 +1059,40 @@ fn sanitize_workbook_sheets(
             _ => {}
         }
     }
-    if !has_removed_macro_sheet {
+    let relationships: BTreeMap<_, _> = kept_by_id
+        .into_iter()
+        .map(|(id, kept)| {
+            let relationship = match kept {
+                0 => SheetRelationship::Removed,
+                1 => SheetRelationship::Kept,
+                _ => SheetRelationship::Ambiguous,
+            };
+            (id, relationship)
+        })
+        .collect();
+    if !removed_macro_sheets
+        .iter()
+        .any(|id| matches!(relationships.get(id), Some(SheetRelationship::Removed)))
+    {
         return Ok(());
+    }
+    if !root_valid {
+        return Err(format!("invalid relationships in {path}"));
     }
     let (path, bytes) = parts
         .iter_mut()
         .find(|(path, _)| normalize_part_name(path).as_ref() == workbook_path)
         .ok_or_else(|| format!("missing workbook part: {workbook_path}"))?;
-    *bytes = rewrite_workbook_sheets(bytes, path, &relationships, xml_budget)?;
+    if let Some(workbook) = rewrite_workbook_sheets(bytes, path, &relationships, xml_budget)? {
+        *bytes = workbook;
+    }
     Ok(())
+}
+
+enum SheetRelationship {
+    Kept,
+    Removed,
+    Ambiguous,
 }
 
 #[derive(Clone, Copy)]
@@ -1175,9 +1207,9 @@ fn workbook_sheet_id(
 fn rewrite_workbook_sheets(
     xml: &[u8],
     path: &str,
-    relationships: &BTreeMap<String, bool>,
+    relationships: &BTreeMap<String, SheetRelationship>,
     xml_budget: &mut XmlBudget,
-) -> Result<Vec<u8>, String> {
+) -> Result<Option<Vec<u8>>, String> {
     validate_xml_limits(xml, path, xml_budget)?;
     let mut reader = WorkbookReader::new(xml);
     let mut sheets = Vec::new();
@@ -1193,10 +1225,15 @@ fn rewrite_workbook_sheets(
                 if !seen_ids.insert(id.clone()) {
                     return Err(format!("duplicate sheet relationship in {path}"));
                 }
-                let removed = relationships
-                    .get(&id)
-                    .ok_or_else(|| format!("unknown sheet relationship in {path}"))?;
-                if *removed {
+                let removed = match relationships.get(&id) {
+                    Some(SheetRelationship::Kept) => false,
+                    Some(SheetRelationship::Removed) => true,
+                    Some(SheetRelationship::Ambiguous) => {
+                        return Err(format!("ambiguous sheet relationship in {path}"));
+                    }
+                    None => return Err(format!("unknown sheet relationship in {path}")),
+                };
+                if removed {
                     sheets.push(None);
                 } else {
                     sheets.push(Some(remaining));
@@ -1206,6 +1243,9 @@ fn rewrite_workbook_sheets(
             Event::Eof => break,
             _ => {}
         }
+    }
+    if remaining == sheets.len() {
+        return Ok(None);
     }
     if remaining == 0 {
         return Err(format!("no remaining workbook sheets in {path}"));
@@ -1279,7 +1319,7 @@ fn rewrite_workbook_sheets(
                     write_start(&mut writer, output, empty, path)?;
                 }
             }
-            Event::Eof => return Ok(writer.into_inner()),
+            Event::Eof => return Ok(Some(writer.into_inner())),
             other => write(&mut writer, other, path)?,
         }
     }
