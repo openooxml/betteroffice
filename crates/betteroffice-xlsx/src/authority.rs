@@ -5809,6 +5809,35 @@ mod tests {
     }
 
     #[test]
+    fn remapping_a_plain_style_over_an_italic_xf_zero_keeps_it_plain() {
+        let mut target = Stylesheet::default();
+        target.fonts.push(xlsx_model::Font {
+            italic: true,
+            ..Default::default()
+        });
+        target.cell_xfs.push(Xf {
+            font: Some(0),
+            ..Xf::default()
+        });
+        let mut source = target.clone();
+        source.cell_xfs.push(Xf::default());
+        let ops = [Op::SetCell {
+            sheet: SheetId(0),
+            at: CellRef::new(0, 0),
+            cell: CellState {
+                style: Some(1),
+                ..CellState::default()
+            },
+        }];
+        let remapped = remap_styles(&ops, &source, &mut target).unwrap();
+        let [Op::SetCell { cell, .. }] = &remapped[..] else {
+            panic!("expected one remapped cell");
+        };
+        assert_eq!(target.cell_format(cell.style), CellFormat::default());
+        assert!(target.cell_format(Some(0)).font.italic);
+    }
+
+    #[test]
     fn deterministic_bootstrap_round_trips_formula_fallbacks() {
         let model = rich_model();
         let left = WorkbookAuthority::from_model_with_client_id(&model, 11).unwrap();

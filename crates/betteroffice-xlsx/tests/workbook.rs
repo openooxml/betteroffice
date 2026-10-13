@@ -509,6 +509,215 @@ fn cascade_missing_cells_resolve_each_column_default_once_per_frame() {
     );
 }
 
+fn styled_xf_zero_source(
+    fonts: Vec<xlsx_model::Font>,
+    cell_xfs: Vec<xlsx_model::Xf>,
+    sheet_data: &str,
+) -> Vec<u8> {
+    let mut model = WorkbookModel::default();
+    model.sheets.push(Sheet::new("Data"));
+    model.styles.fonts = fonts;
+    model.styles.cell_xfs = cell_xfs;
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    set_test_part(&mut parts, "xl/worksheets/sheet1.xml", format!(
+        r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>{sheet_data}</sheetData></worksheet>"#
+    ).into_bytes());
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+/// Italic xf 0 on `A1 s="0"`, and a bold default on row 2.
+fn italic_xf_zero_source() -> Vec<u8> {
+    styled_xf_zero_source(
+        vec![
+            xlsx_model::Font {
+                italic: true,
+                ..Default::default()
+            },
+            xlsx_model::Font {
+                bold: true,
+                ..Default::default()
+            },
+        ],
+        vec![
+            xlsx_model::Xf {
+                font: Some(0),
+                ..Default::default()
+            },
+            xlsx_model::Xf {
+                font: Some(1),
+                ..Default::default()
+            },
+        ],
+        r#"<row r="1"><c r="A1" s="0"><v>1</v></c></row><row r="2" s="1" customFormat="1"/>"#,
+    )
+}
+
+fn resolved_format(workbook: &Workbook, address: &str) -> xlsx_model::CellFormat {
+    let model = workbook.model();
+    let style = model.sheets[0].effective_style(cell(address));
+    model.styles.cell_format(Some(style.unwrap_or(0)))
+}
+
+fn clear_style(workbook: &mut Workbook, range: &str, property: betteroffice_xlsx::StyleProperty) {
+    workbook
+        .patch_range_style(
+            SheetId(0),
+            CellRange::parse_a1(range).unwrap(),
+            StylePatch {
+                clear: vec![property],
+                ..StylePatch::default()
+            },
+            CalculationOptions::default(),
+        )
+        .unwrap();
+}
+
+#[test]
+fn cascade_collaborative_clear_over_an_italic_xf_zero_stays_plain_on_peers_and_after_save() {
+    let bytes = italic_xf_zero_source();
+    let mut left = Workbook::open_collaborative(&bytes, 831).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 832).unwrap();
+    let mut cleared = resolved_format(&left, "A1");
+    assert!(cleared.font.italic);
+    cleared.font.italic = false;
+    assert_eq!(cleared, xlsx_model::CellFormat::default());
+    let baseline = right.encode_state_vector_v1();
+    clear_style(&mut left, "A1", betteroffice_xlsx::StyleProperty::Italic);
+    right
+        .apply_update_v1(
+            &left.encode_diff_v1(&baseline).unwrap(),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    for peer in [&left, &right] {
+        assert_eq!(
+            resolved_format(peer, "A1"),
+            xlsx_model::CellFormat::default()
+        );
+        assert!(resolved_format(peer, "B1").font.italic);
+        let reopened = Workbook::open(&peer.save().unwrap()).unwrap();
+        assert_eq!(
+            resolved_format(&reopened, "A1"),
+            xlsx_model::CellFormat::default()
+        );
+        assert!(resolved_format(&reopened, "B1").font.italic);
+    }
+    assert_eq!(left.model(), right.model());
+}
+
+#[test]
+fn cascade_collaborative_plain_result_under_a_row_default_over_an_italic_xf_zero_stays_plain() {
+    let bytes = italic_xf_zero_source();
+    let mut left = Workbook::open_collaborative(&bytes, 833).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 834).unwrap();
+    assert!(left.model().sheets[0].cell(cell("A2")).is_none());
+    let mut cleared = resolved_format(&left, "A2");
+    assert!(cleared.font.bold && !cleared.font.italic);
+    cleared.font.bold = false;
+    assert_eq!(cleared, xlsx_model::CellFormat::default());
+    let baseline = right.encode_state_vector_v1();
+    clear_style(&mut left, "A2", betteroffice_xlsx::StyleProperty::Bold);
+    right
+        .apply_update_v1(
+            &left.encode_diff_v1(&baseline).unwrap(),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    for peer in [&left, &right] {
+        assert_eq!(
+            resolved_format(peer, "A2"),
+            xlsx_model::CellFormat::default()
+        );
+        assert!(resolved_format(peer, "B2").font.bold);
+        let reopened = Workbook::open(&peer.save().unwrap()).unwrap();
+        assert_eq!(
+            resolved_format(&reopened, "A2"),
+            xlsx_model::CellFormat::default()
+        );
+    }
+    assert_eq!(left.model(), right.model());
+}
+
+#[test]
+fn cascade_collaborative_clear_over_a_plain_xf_zero_adds_no_xf() {
+    let bytes = styled_xf_zero_source(
+        vec![
+            xlsx_model::Font::default(),
+            xlsx_model::Font {
+                italic: true,
+                ..Default::default()
+            },
+        ],
+        vec![
+            xlsx_model::Xf::default(),
+            xlsx_model::Xf {
+                font: Some(1),
+                ..Default::default()
+            },
+        ],
+        r#"<row r="1"><c r="A1" s="1"><v>1</v></c></row>"#,
+    );
+    let mut local = Workbook::open(&bytes).unwrap();
+    let mut left = Workbook::open_collaborative(&bytes, 835).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 836).unwrap();
+    let xfs = local.model().styles.cell_xfs.len();
+    let baseline = right.encode_state_vector_v1();
+    for workbook in [&mut local, &mut left] {
+        clear_style(workbook, "A1:B2", betteroffice_xlsx::StyleProperty::Italic);
+    }
+    right
+        .apply_update_v1(
+            &left.encode_diff_v1(&baseline).unwrap(),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let stored = local.model().sheets[0].cell(cell("A1")).unwrap().style;
+    assert!(matches!(stored, None | Some(0)));
+    for peer in [&local, &left, &right] {
+        assert_eq!(
+            resolved_format(peer, "A1"),
+            xlsx_model::CellFormat::default()
+        );
+        assert_eq!(
+            peer.model().sheets[0].cell(cell("A1")).unwrap().style,
+            stored
+        );
+        assert_eq!(peer.model().sheets[0].iter_cells().count(), 1);
+        assert_eq!(peer.model().styles.cell_xfs.len(), xfs);
+    }
+}
+
+#[test]
+fn cascade_collaborative_xf_zero_set_after_a_plain_clear_restores_italic() {
+    let bytes = italic_xf_zero_source();
+    let mut left = Workbook::open_collaborative(&bytes, 837).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 838).unwrap();
+    let baseline = right.encode_state_vector_v1();
+    clear_style(&mut left, "A1", betteroffice_xlsx::StyleProperty::Italic);
+    left.apply_ops(
+        vec![Op::SetCell {
+            sheet: SheetId(0),
+            at: cell("A1"),
+            cell: CellState {
+                value: CellValue::Number { value: 2.0 },
+                style: Some(0),
+                ..CellState::default()
+            },
+        }],
+        CalculationOptions::default(),
+    )
+    .unwrap();
+    right
+        .apply_update_v1(
+            &left.encode_diff_v1(&baseline).unwrap(),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    for peer in [&left, &right] {
+        assert!(resolved_format(peer, "A1").font.italic);
+    }
+}
+
 #[test]
 fn text_search_uses_formatted_values_and_stable_cell_order() {
     let mut first = Sheet::new("Data");
