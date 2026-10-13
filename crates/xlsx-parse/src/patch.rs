@@ -7,7 +7,7 @@ use std::ops::Range;
 use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::{Reader, Writer};
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
-use xlsx_model::{Cell, CellRange, CellRef, Sheet, Workbook};
+use xlsx_model::{Cell, CellRange, CellRef, ColId, ColStyle, Sheet, Workbook};
 
 use crate::axis::SheetAxes;
 use crate::package::{XmlAttribute, attributes, remove_attribute, set_attribute};
@@ -110,6 +110,7 @@ struct DirtyFormulas {
 struct WidthPiece {
     range: Range<u32>,
     changed: Option<Option<f64>>,
+    style: Option<Option<u32>>,
 }
 
 struct SourceCellCursor<'a, I: Iterator> {
@@ -241,6 +242,8 @@ impl SheetPatch<'_> {
         };
         let mut entries: Vec<(u32, Vec<u8>)> = Vec::new();
         let mut covered = Vec::new();
+        let model_runs = self.sheet.col_style_runs();
+        let source_runs = self.original.col_style_runs();
         for col in &cols {
             let (name, attributes) = start_tag(&source[col.tag.clone()])?;
             let pieces = self
@@ -248,10 +251,12 @@ impl SheetPatch<'_> {
                 .cols
                 .current_ranges(col.range.clone())
                 .into_iter()
-                .flat_map(|range| self.width_pieces(range))
+                .flat_map(|range| self.width_pieces(range, &model_runs, &source_runs))
                 .collect::<Vec<_>>();
-            let verbatim =
-                pieces.len() == 1 && pieces[0].range == col.range && pieces[0].changed.is_none();
+            let verbatim = pieces.len() == 1
+                && pieces[0].range == col.range
+                && pieces[0].changed.is_none()
+                && pieces[0].style.is_none();
             for (index, piece) in pieces.iter().enumerate() {
                 let mut bytes = Vec::new();
                 if index == 0 {
@@ -270,6 +275,13 @@ impl SheetPatch<'_> {
                     set_attribute(&mut attributes, "max", "max", piece.range.end.to_string());
                     if let Some(width) = piece.changed {
                         set_col_width(&mut attributes, width);
+                    }
+                    match piece.style {
+                        Some(Some(style)) => {
+                            set_attribute(&mut attributes, "style", "style", style.to_string())
+                        }
+                        Some(None) => remove_attribute(&mut attributes, "style"),
+                        None => {}
                     }
                     write_start_tag(&mut bytes, &name, &attributes, col.empty)?;
                     if !col.empty {
@@ -308,22 +320,32 @@ impl SheetPatch<'_> {
             .transpose()
     }
 
-    /// Splits a column span wherever the model width parted from the source.
-    fn width_pieces(&self, range: Range<u32>) -> Vec<WidthPiece> {
+    /// Splits a column span wherever the model width or style parted from the
+    /// source; the runs are both sides' ascending, disjoint column styles.
+    fn width_pieces(
+        &self,
+        range: Range<u32>,
+        model_runs: &[ColStyle],
+        source_runs: &[ColStyle],
+    ) -> Vec<WidthPiece> {
         let mut pieces: Vec<WidthPiece> = Vec::new();
         for col in range {
+            let source = self.axes.cols.source(col);
             let model = self.sheet.col_widths.get(&col).copied();
-            let original = self
-                .axes
-                .cols
-                .source(col)
-                .and_then(|source| self.original.col_widths.get(&source).copied());
+            let original = source.and_then(|source| self.original.col_widths.get(&source).copied());
             let changed = (model != original).then_some(model);
+            let model_style = run_style(model_runs, col);
+            let source_style = source.and_then(|source| run_style(source_runs, source));
+            let same = self.styles.equivalent(source_style, model_style);
+            let style = (!same).then_some(model_style);
             match pieces.last_mut() {
-                Some(piece) if piece.changed == changed => piece.range.end = col + 1,
+                Some(piece) if piece.changed == changed && piece.style == style => {
+                    piece.range.end = col + 1
+                }
                 _ => pieces.push(WidthPiece {
                     range: col..col + 1,
                     changed,
+                    style,
                 }),
             }
         }
@@ -993,6 +1015,12 @@ fn set_row_height(attributes: &mut Vec<XmlAttribute>, height: Option<f64>) {
             set_attribute(attributes, "hidden", "hidden", "1".to_owned());
         }
     }
+}
+
+/// The style ascending, disjoint `runs` give `col`.
+fn run_style(runs: &[ColStyle], col: ColId) -> Option<u32> {
+    let at = runs.partition_point(|run| run.last < col);
+    runs.get(at).filter(|run| run.first <= col).map(|run| run.xf)
 }
 
 fn set_col_width(attributes: &mut Vec<XmlAttribute>, width: Option<f64>) {

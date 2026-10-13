@@ -952,6 +952,8 @@ fn sheet_body_matches(
         && sheet.merges == original.merges
         && sheet.col_widths == original.col_widths
         && sheet.row_heights == original.row_heights
+        && sheet.col_styles == original.col_styles
+        && sheet.row_styles == original.row_styles
         && sheet.array_formulas().eq(original.array_formulas())
         && if let Some(axes) = axes {
             let mut sources = original.iter_cells();
