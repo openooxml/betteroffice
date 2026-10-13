@@ -673,7 +673,16 @@ fn delete_rows(
     let dropped_merges = remap_merges_drop(s, op);
     remap_hyperlinks(s, op);
 
-    let mut inv = vec![Op::InsertRows { sheet, at, count }];
+    let mut inv = Vec::new();
+    if !old_row_styles.is_empty() {
+        // the restore after the insert sets the map, so the insert must neither
+        // inherit nor count rows against the cap
+        inv.push(Op::RestoreRowStyles {
+            sheet,
+            styles: BTreeMap::new(),
+        });
+    }
+    inv.push(Op::InsertRows { sheet, at, count });
     if !old_row_styles.is_empty() {
         inv.push(Op::RestoreRowStyles {
             sheet,
