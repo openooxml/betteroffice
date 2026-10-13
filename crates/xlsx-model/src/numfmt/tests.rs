@@ -70,6 +70,16 @@ fn implied_currency_and_accounting_codes() {
 }
 
 #[test]
+fn declared_general_code_applies_without_an_explicit_style() {
+    let mut styles = crate::Stylesheet::default();
+    styles.num_fmts.push((0, "0.00".into()));
+    assert_eq!(
+        styles.resolved_format(None).number_format,
+        crate::styles::FormatCode::Custom("0.00")
+    );
+}
+
+#[test]
 fn display_padding_retains_character_and_fill_position() {
     let formatted = format_value(&num(12.0), "_(€* #,##0_)", DateSystem::V1900);
     let json = serde_json::to_value(&formatted).unwrap();

@@ -845,8 +845,8 @@ where
         }
         let hyperlink = link_index.at(at);
         let xf = &**fx.xf(cell.style);
-        let Some((text, color, parts)) =
-            cell_display_text(xf, wb.date_system, cell, &text_color).or_else(|| {
+        let Some((text, color, parts)) = cell_display_text(xf, wb.date_system, cell, &text_color)
+            .or_else(|| {
                 hyperlink
                     .filter(|link| link.range.start == at)
                     .and_then(|link| link.display.clone())
@@ -888,16 +888,23 @@ where
             Align::Center => cell_box.x + cell_box.w / 2.0,
         };
         let ty = text_baseline(cell_box, size, valign, print.map(|(m, _)| m));
-        let number_format = (!parts.is_empty() || matches!(cell.value, CellValue::Number { .. })).then(|| NumberFormatLayout {
-            left: cell_box.x + print.map_or(TEXT_PAD_PX, |(m, _)| 3.0 * 96.0 / m.dpi),
-            width: (cell_box.w - print.map_or(2.0 * TEXT_PAD_PX, |(m, _)| 5.0 * 96.0 / m.dpi)).max(0.0),
-            parts,
-            general: match cell.value {
-                CellValue::Number { value } if value.is_finite() && xlsx_model::numfmt::is_general(&cell.value, &xf.format_code) => Some(value),
-                _ => None,
-            },
-            overflow: matches!(cell.value, CellValue::Number { .. }),
-        });
+        let number_format = (!parts.is_empty() || matches!(cell.value, CellValue::Number { .. }))
+            .then(|| NumberFormatLayout {
+                left: cell_box.x + print.map_or(TEXT_PAD_PX, |(m, _)| 3.0 * 96.0 / m.dpi),
+                width: (cell_box.w - print.map_or(2.0 * TEXT_PAD_PX, |(m, _)| 5.0 * 96.0 / m.dpi))
+                    .max(0.0),
+                parts,
+                general: match cell.value {
+                    CellValue::Number { value }
+                        if value.is_finite()
+                            && xlsx_model::numfmt::is_general(&cell.value, &xf.format_code) =>
+                    {
+                        Some(value)
+                    }
+                    _ => None,
+                },
+                overflow: matches!(cell.value, CellValue::Number { .. }),
+            });
         let clip = spill_clip(
             geom,
             &cols,
@@ -1668,12 +1675,12 @@ impl<'a> FrameStyles<'a> {
     }
 
     fn resolve(styles: &Stylesheet, style: Option<u32>) -> ResolvedXf {
-        let format_code = match style.map(|s| styles.format_code_for(s)) {
-            Some(FormatCode::Custom(code)) => Arc::from(code),
-            Some(FormatCode::Builtin(id)) => {
-                Arc::from(builtin_format_code(id).unwrap_or("General"))
-            }
-            None => Arc::from("General"),
+        let format_code = match style
+            .map(|s| styles.format_code_for(s))
+            .unwrap_or_else(|| styles.format_code_for_id(0))
+        {
+            FormatCode::Custom(code) => Arc::from(code),
+            FormatCode::Builtin(id) => Arc::from(builtin_format_code(id).unwrap_or("General")),
         };
         let font = style
             .and_then(|s| styles.font_for(s))
@@ -1776,15 +1783,17 @@ fn cell_display_text(
 /// the number-format code a cell's xf resolves to; general when unset or when
 /// a builtin id is not modeled.
 pub fn format_code_for_cell(styles: &Stylesheet, cell: &xlsx_model::Cell) -> String {
-    match cell.style.map(|s| styles.format_code_for(s)) {
-        Some(FormatCode::Custom(c)) => c.to_string(),
-        Some(FormatCode::Builtin(id)) => builtin_format_code(id).unwrap_or("General").to_string(),
-        None => "General".to_string(),
+    match cell
+        .style
+        .map(|s| styles.format_code_for(s))
+        .unwrap_or_else(|| styles.format_code_for_id(0))
+    {
+        FormatCode::Custom(c) => c.to_string(),
+        FormatCode::Builtin(id) => builtin_format_code(id).unwrap_or("General").to_string(),
     }
 }
 
-/// the exact string the grid would paint for `cell`, number-format aware.
-/// empty cells and formats that yield nothing render as "".
+/// Width-free formatted text for exports and clipboard.
 pub fn display_text(
     styles: &Stylesheet,
     date_system: xlsx_model::DateSystem,
@@ -1981,12 +1990,24 @@ mod tests {
             cell.style = Some(0);
             sheet.set_cell(CellRef::new(0, 0), cell);
             wb.sheets.push(sheet);
-            let viewport = Viewport { x: 0.0, y: 0.0, width: 400.0, height: 100.0 };
+            let viewport = Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: 400.0,
+                height: 100.0,
+            };
             let dl = build_display_list(&wb, SheetId(0), &viewport).unwrap();
-            let command = dl.commands.iter().find(|c| matches!(c, DrawCmd::Text { .. })).unwrap();
+            let command = dl
+                .commands
+                .iter()
+                .find(|c| matches!(c, DrawCmd::Text { .. }))
+                .unwrap();
             let json = serde_json::to_value(command).unwrap();
             assert_eq!(json["numberFormat"]["left"], 2.0);
-            assert_eq!(json["numberFormat"]["width"], geometry::col_chars_to_px(width) - 4.0);
+            assert_eq!(
+                json["numberFormat"]["width"],
+                geometry::col_chars_to_px(width) - 4.0
+            );
             assert_eq!(json["numberFormat"]["parts"][1]["kind"], "fill");
         }
     }
@@ -1994,7 +2015,10 @@ mod tests {
     #[test]
     fn narrow_date_display_list_enables_numeric_overflow() {
         let mut wb = Workbook::default();
-        wb.styles.cell_xfs.push(Xf { num_fmt_id: Some(14), ..Xf::default() });
+        wb.styles.cell_xfs.push(Xf {
+            num_fmt_id: Some(14),
+            ..Xf::default()
+        });
         let mut sheet = Sheet::new("Sheet1");
         sheet.col_widths.insert(0, 3.0);
         let mut cell = num_cell(43831.0);
@@ -2002,15 +2026,58 @@ mod tests {
         assert_eq!(display_text(&wb.styles, wb.date_system, &cell), "1/1/20");
         sheet.set_cell(CellRef::new(0, 0), cell);
         wb.sheets.push(sheet);
-        let vp = Viewport { x: 0.0, y: 0.0, width: 200.0, height: 100.0 };
+        let vp = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 100.0,
+        };
         let dl = build_display_list(&wb, SheetId(0), &vp).unwrap();
-        let command = dl.commands.iter().find(|c| matches!(c, DrawCmd::Text { .. })).unwrap();
-        let DrawCmd::Text { text, number_format: Some(layout), align, .. } = command else { panic!("missing numeric layout") };
+        let command = dl
+            .commands
+            .iter()
+            .find(|c| matches!(c, DrawCmd::Text { .. }))
+            .unwrap();
+        let DrawCmd::Text {
+            text,
+            number_format: Some(layout),
+            align,
+            ..
+        } = command
+        else {
+            panic!("missing numeric layout")
+        };
         assert!(layout.overflow);
         let mut displayed = String::new();
-        paint_number_format(text, layout, *align, |s| s.len() as f32 * 10.0,
-            |run, _| displayed.push_str(run));
+        paint_number_format(
+            text,
+            layout,
+            *align,
+            |s| s.len() as f32 * 10.0,
+            |run, _| displayed.push_str(run),
+        );
         assert!(!displayed.is_empty() && displayed.chars().all(|c| c == '#'));
+    }
+
+    #[test]
+    fn default_cells_use_declared_general_override() {
+        let mut wb = Workbook::default();
+        wb.styles.num_fmts.push((0, "0.00".into()));
+        let cell = num_cell(12.0);
+        assert_eq!(display_text(&wb.styles, wb.date_system, &cell), "12.00");
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.set_cell(CellRef::new(0, 0), cell);
+        wb.sheets.push(sheet);
+        let vp = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 100.0,
+        };
+        let dl = build_display_list(&wb, SheetId(0), &vp).unwrap();
+        assert!(dl.commands.iter().any(|cmd| matches!(cmd,
+            DrawCmd::Text { text, number_format: Some(layout), .. }
+                if &**text == "12.00" && layout.general.is_none())));
     }
 
     #[test]

@@ -27,7 +27,9 @@ mod format_tests {
                     bytes: Vec::new(),
                     limit: usize::MAX,
                 };
-                window.format(&model, style.and_then(|s| model.styles.xf(s)), &formats).unwrap();
+                window
+                    .format(&model, style.and_then(|s| model.styles.xf(s)), &formats)
+                    .unwrap();
                 assert_eq!(
                     serde_json::from_slice::<serde_json::Value>(&window.bytes).unwrap(),
                     serde_json::to_value(model.styles.cell_format(style)).unwrap()
@@ -277,7 +279,7 @@ impl JsonWindow<'_> {
         }
         self.raw(b"},\"numberFormat\":")?;
         let id = xf.and_then(|xf| xf.num_fmt_id).unwrap_or(0);
-        if let Some(&index) = formats.get(&id).filter(|_| xf.is_some()) {
+        if let Some(&index) = formats.get(&id) {
             self.raw(b"{\"kind\":\"custom\",\"pattern\":")?;
             self.string(&model.styles.num_fmts[index].1)?;
             self.raw(b"}")?;

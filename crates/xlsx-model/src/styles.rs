@@ -633,6 +633,10 @@ impl Stylesheet {
             .xf(style_index)
             .and_then(|xf| xf.num_fmt_id)
             .unwrap_or(0);
+        self.format_code_for_id(id)
+    }
+
+    pub fn format_code_for_id(&self, id: u16) -> FormatCode<'_> {
         if let Some((_, code)) = self.num_fmts.iter().find(|(k, _)| *k == id) {
             return FormatCode::Custom(code);
         }
@@ -676,7 +680,7 @@ impl Stylesheet {
                 .unwrap_or(&DEFAULT_BORDER),
             number_format: match style_index {
                 Some(index) => self.format_code_for(index),
-                None => FormatCode::Builtin(0),
+                None => self.format_code_for_id(0),
             },
             alignment: xf
                 .and_then(|xf| xf.alignment.as_ref())
