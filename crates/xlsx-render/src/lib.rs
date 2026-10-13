@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use xlsx_model::numfmt::{builtin_format_code, format_value};
 use xlsx_model::styles::{BorderEdge, BorderStyle, FormatCode, Stylesheet};
 use xlsx_model::value::CellValue;
-use xlsx_model::workbook::{Hyperlink, Sheet};
+use xlsx_model::workbook::{ColumnDefaults, Hyperlink, Sheet};
 use xlsx_model::{
     CellRange, CellRef, Fill, HAlign, MAX_COLS, MAX_ROWS, SheetChart, SheetId, VAlign, Workbook,
 };
@@ -669,7 +669,7 @@ where
     .into();
     let pane_divider_color: Arc<str> = PANE_DIVIDER_COLOR.into();
     let print_font_family: Option<Arc<str>> = print.map(|(m, _)| m.font_family.as_str().into());
-    let mut fx = FrameStyles::new(styles);
+    let mut fx = FrameStyles::new(styles, sheet_ref);
     let geom = geometry.expect("sheet geometry initialized");
     let (rows, cols, frozen_rows, frozen_cols) =
         viewport_axes(sheet_ref, viewport, geom, print.is_some());
@@ -771,7 +771,7 @@ where
     );
 
     for &(at, _) in &anchors {
-        let Some(hex) = &fx.xf(sheet_ref.effective_style(at)).fill else {
+        let Some(hex) = &fx.xf_at(at).fill else {
             continue;
         };
         let Some(cell_box) = cell_box(geom, &rows, &cols, &merge_index, at) else {
@@ -833,7 +833,7 @@ where
         geom,
     );
     for &(at, _) in &anchors {
-        let xf = fx.xf(sheet_ref.effective_style(at)).clone();
+        let xf = fx.xf_at(at).clone();
         let Some(border) = &xf.border else {
             continue;
         };
@@ -842,7 +842,6 @@ where
             geom,
             &rows,
             &cols,
-            sheet_ref,
             &merge_index,
             &mut fx,
             at,
@@ -855,7 +854,7 @@ where
             continue;
         }
         let hyperlink = link_index.at(at);
-        let xf = &**fx.xf(sheet_ref.effective_style(at));
+        let xf = &**fx.xf_at(at);
         let Some((text, color)) =
             cell_display_text(xf, wb.date_system, cell, &text_color).or_else(|| {
                 hyperlink
@@ -973,7 +972,7 @@ where
             continue;
         }
         let at = CellRef::new(ghost.row, ghost.col);
-        let xf = fx.xf(sheet_ref.effective_style(at)).clone();
+        let xf = fx.xf_at(at).clone();
         let font = xf.font.as_ref();
         let font = GhostFont {
             size: font
@@ -1211,7 +1210,7 @@ fn emit_inherited_fills(
             let hex = if sheet.cell(at).is_some() || merge.is_some_and(|merge| merge.start != at) {
                 None
             } else {
-                fx.xf(sheet.effective_style(at)).fill.clone()
+                fx.xf_at(at).fill.clone()
             };
             if let Some((_, end, last, color)) = &mut run
                 && hex.as_ref() == Some(color)
@@ -1267,7 +1266,7 @@ fn emit_inherited_fills(
         if sheet.cell(at).is_none()
             && (!rows.contains(at.row) || !cols.contains(at.col))
             && let Some(bx) = cell_box(geom, rows, cols, merges, at)
-            && let Some(color) = &fx.xf(sheet.effective_style(at)).fill
+            && let Some(color) = &fx.xf_at(at).fill
         {
             commands.push(DrawCmd::FillRect {
                 x: bx.clip.x,
@@ -1299,11 +1298,11 @@ fn emit_inherited_borders(
             if merges.covering(at).is_some_and(|merge| merge.start != at) {
                 continue;
             }
-            let xf = fx.xf(sheet.effective_style(at)).clone();
+            let xf = fx.xf_at(at).clone();
             if sheet.cell(at).is_none()
                 && let Some(border) = &xf.border
             {
-                emit_borders(commands, geom, rows, cols, sheet, merges, fx, at, border);
+                emit_borders(commands, geom, rows, cols, merges, fx, at, border);
             }
             let above = at.row.checked_sub(1).filter(|row| !rows.contains(*row));
             let left = at.col.checked_sub(1).filter(|col| !cols.contains(*col));
@@ -1318,7 +1317,7 @@ fn emit_inherited_borders(
                 && bx.y >= bx.clip.y
                 && bx.y <= bx.clip.y + bx.clip.h
             {
-                let neighbor = fx.xf(sheet.effective_style(CellRef::new(row, at.col)));
+                let neighbor = fx.xf_at(CellRef::new(row, at.col));
                 if let Some(edge) = neighbor
                     .border
                     .as_ref()
@@ -1341,7 +1340,7 @@ fn emit_inherited_borders(
                 && bx.x >= bx.clip.x
                 && bx.x <= bx.clip.x + bx.clip.w
             {
-                let neighbor = fx.xf(sheet.effective_style(CellRef::new(at.row, col)));
+                let neighbor = fx.xf_at(CellRef::new(at.row, col));
                 if let Some(edge) = neighbor
                     .border
                     .as_ref()
@@ -1361,9 +1360,9 @@ fn emit_inherited_borders(
     for merge in &sheet.merges {
         let at = merge.start;
         if sheet.cell(at).is_none() && (!rows.contains(at.row) || !cols.contains(at.col)) {
-            let xf = fx.xf(sheet.effective_style(at)).clone();
+            let xf = fx.xf_at(at).clone();
             if let Some(border) = &xf.border {
-                emit_borders(commands, geom, rows, cols, sheet, merges, fx, at, border);
+                emit_borders(commands, geom, rows, cols, merges, fx, at, border);
             }
         }
     }
@@ -1754,14 +1753,22 @@ struct ResolvedBorderEdge {
 struct FrameStyles<'a> {
     styles: &'a Stylesheet,
     xfs: HashMap<u32, Arc<ResolvedXf>>,
+    defaults: ColumnDefaults<'a>,
 }
 
 impl<'a> FrameStyles<'a> {
-    fn new(styles: &'a Stylesheet) -> Self {
+    fn new(styles: &'a Stylesheet, sheet: &'a Sheet) -> Self {
         FrameStyles {
             styles,
             xfs: HashMap::new(),
+            defaults: ColumnDefaults::new(sheet),
         }
+    }
+
+    /// The xf a cell renders with: its own, or its row's or column's default.
+    fn xf_at(&mut self, at: CellRef) -> &Arc<ResolvedXf> {
+        let style = self.defaults.effective_style(at);
+        self.xf(style)
     }
 
     fn xf(&mut self, style: Option<u32>) -> &Arc<ResolvedXf> {
@@ -1959,7 +1966,6 @@ fn emit_borders(
     geom: &GridGeometry,
     rows: &AxisLayout,
     cols: &AxisLayout,
-    sheet: &Sheet,
     merges: &MergeIndex,
     fx: &mut FrameStyles,
     at: CellRef,
@@ -1993,7 +1999,7 @@ fn emit_borders(
         && y2 >= clip.y
         && y2 <= clip_y2
         && !(cell_box(geom, rows, cols, merges, CellRef::new(end_row + 1, at.col)).is_some()
-            && neighbor_edge(sheet, merges, fx, end_row + 1, at.col, |b| b.top.is_some()))
+            && neighbor_edge(merges, fx, end_row + 1, at.col, |b| b.top.is_some()))
     {
         commands.push(border_line(clip.x, y2, clip_x2, y2, edge));
     }
@@ -2001,7 +2007,7 @@ fn emit_borders(
         && x2 >= clip.x
         && x2 <= clip_x2
         && !(cell_box(geom, rows, cols, merges, CellRef::new(at.row, end_col + 1)).is_some()
-            && neighbor_edge(sheet, merges, fx, at.row, end_col + 1, |b| b.left.is_some()))
+            && neighbor_edge(merges, fx, at.row, end_col + 1, |b| b.left.is_some()))
     {
         commands.push(border_line(x2, clip.y, x2, clip_y2, edge));
     }
@@ -2009,7 +2015,6 @@ fn emit_borders(
 
 /// true when the cell at `(row, col)` has a border satisfying `pick`.
 fn neighbor_edge(
-    sheet: &Sheet,
     merges: &MergeIndex,
     fx: &mut FrameStyles,
     row: u32,
@@ -2021,10 +2026,7 @@ fn neighbor_edge(
     }
     let at = CellRef::new(row, col);
     let at = merges.covering(at).map_or(at, |merge| merge.start);
-    fx.xf(sheet.effective_style(at))
-        .border
-        .as_ref()
-        .is_some_and(pick)
+    fx.xf_at(at).border.as_ref().is_some_and(pick)
 }
 
 /// one border edge as a `Line`, carrying the resolved width, dash and color.

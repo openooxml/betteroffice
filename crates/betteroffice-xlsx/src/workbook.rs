@@ -2509,11 +2509,12 @@ impl Workbook {
         range: CellRange,
     ) -> Result<Vec<(CellRef, CellFormat)>> {
         let sheet_ref = self.sheet(sheet)?;
+        let mut defaults = xlsx_model::workbook::ColumnDefaults::new(sheet_ref);
         let mut formats = Vec::new();
         for row in range.start.row..=range.end.row {
             for col in range.start.col..=range.end.col {
                 let at = CellRef::new(row, col);
-                let style = sheet_ref.effective_style(at);
+                let style = defaults.effective_style(at);
                 formats.push((at, self.model.styles.cell_format(Some(style.unwrap_or(0)))));
             }
         }

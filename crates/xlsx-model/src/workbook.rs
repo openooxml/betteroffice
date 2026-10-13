@@ -1,7 +1,7 @@
 //! sparse workbook containers and the calc-facing cell-access trait.
 
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ops::{Range, RangeInclusive};
 
 use serde::{Deserialize, Serialize};
@@ -184,6 +184,40 @@ pub struct Sheet {
 
 pub const MAX_ROW_STYLES: usize = 65_536;
 
+/// [`Sheet::effective_style`] for many cells of one sheet, scanning the column
+/// runs once per column.
+pub struct ColumnDefaults<'a> {
+    sheet: &'a Sheet,
+    cols: HashMap<ColId, Option<u32>>,
+}
+
+impl<'a> ColumnDefaults<'a> {
+    pub fn new(sheet: &'a Sheet) -> Self {
+        Self {
+            sheet,
+            cols: HashMap::new(),
+        }
+    }
+
+    pub fn effective_style(&mut self, at: CellRef) -> Option<u32> {
+        let sheet = self.sheet;
+        sheet.effective_style_with(at, |col| self.col_style(col))
+    }
+
+    pub fn inherited_style(&mut self, at: CellRef) -> Option<u32> {
+        let sheet = self.sheet;
+        sheet.inherited_style_with(at, |col| self.col_style(col))
+    }
+
+    fn col_style(&mut self, col: ColId) -> Option<u32> {
+        let sheet = self.sheet;
+        if sheet.col_styles.is_empty() {
+            return None;
+        }
+        *self.cols.entry(col).or_insert_with(|| sheet.col_style(col))
+    }
+}
+
 impl Sheet {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
@@ -302,17 +336,33 @@ impl Sheet {
 
     /// The default a missing cell takes: its row's, then its column's.
     pub fn inherited_style(&self, at: CellRef) -> Option<u32> {
-        self.row_styles
-            .get(&at.row)
-            .copied()
-            .or_else(|| self.col_style(at.col))
+        self.inherited_style_with(at, |col| self.col_style(col))
     }
 
     /// Existing cells use their own xf; missing cells inherit.
     pub fn effective_style(&self, at: CellRef) -> Option<u32> {
+        self.effective_style_with(at, |col| self.col_style(col))
+    }
+
+    fn inherited_style_with(
+        &self,
+        at: CellRef,
+        col_style: impl FnOnce(ColId) -> Option<u32>,
+    ) -> Option<u32> {
+        match self.row_styles.get(&at.row) {
+            Some(&style) => Some(style),
+            None => col_style(at.col),
+        }
+    }
+
+    fn effective_style_with(
+        &self,
+        at: CellRef,
+        col_style: impl FnOnce(ColId) -> Option<u32>,
+    ) -> Option<u32> {
         match self.cell(at) {
             Some(cell) => cell.style,
-            None => self.inherited_style(at),
+            None => self.inherited_style_with(at, col_style),
         }
     }
 

@@ -386,13 +386,14 @@ fn apply_range_formats(
         let styles = &mut wb.styles;
         let plain_default = styles.cell_format(Some(0)) == xlsx_model::CellFormat::default();
         let mut plain = None;
+        let mut defaults = xlsx_model::workbook::ColumnDefaults::new(sheet_ref);
         for row in range.start.row..=range.end.row {
             for col in range.start.col..=range.end.col {
                 let at = CellRef::new(row, col);
                 let stored = sheet_ref.cell(at).map(|cell| cell.style);
                 let old_style = match stored {
                     Some(style) => style,
-                    None => sheet_ref.inherited_style(at),
+                    None => defaults.inherited_style(at),
                 };
                 let before = styles.cell_format(Some(old_style.unwrap_or(0)));
                 let mut format = before.clone();
@@ -410,7 +411,7 @@ fn apply_range_formats(
                         staged.push(Some(*plain.get_or_insert_with(|| plain_xf(styles))));
                     }
                     Ok(None) => staged.push(
-                        sheet_ref
+                        defaults
                             .inherited_style(at)
                             .is_some_and(|inherited| inherited != 0)
                             .then_some(0),
