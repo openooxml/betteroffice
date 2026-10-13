@@ -15,6 +15,7 @@ import { preloadEditWasm } from '../wasm/edit';
 import { decodeDocxHostJson, type YrsResidentWorkerSnapshot } from './index';
 import { createResidentEngineSession, type ResidentEngineSession } from './residentEngineSession';
 import type { DocxCommandFrame, ResidentCommandInitRequest } from './residentCommandProtocol';
+import type { DocxPageExportOptions } from './pagedExport';
 import type {
   ResidentEngineWorkerRequest,
   ResidentEngineWorkerRequestWithoutId,
@@ -689,6 +690,8 @@ test('a command refused while the prefix is pending leaves it to reach the compl
   }
 });
 
+const EXPORT_OPTIONS: DocxPageExportOptions = { revisionView: 'markup', stories: ['body'] };
+
 for (const request of ['export', 'completeLayout', 'sliced completeLayout'] as const) {
   test(`${request} finishes a pending prefix inside its own frame work and publishes the completed frame`, async () => {
     const f = await commandFixture();
@@ -699,7 +702,7 @@ for (const request of ['export', 'completeLayout', 'sliced completeLayout'] as c
       const count = f.w.frames.length;
       const reply = request === 'export'
         ? await f.w.interleave({ type: 'documentRead', read: {
-          kind: 'exportStructuredWithPages', options: { revisionView: 'markup', stories: ['body'] },
+          kind: 'exportStructuredWithPages', options: EXPORT_OPTIONS,
           currentRequest: f.init.layoutInput,
         } })
         : await f.w.interleave({
@@ -708,11 +711,12 @@ for (const request of ['export', 'completeLayout', 'sliced completeLayout'] as c
         });
       if (!reply.ok) throw new Error(JSON.stringify(reply));
       if (request === 'export') {
-        const exported = JSON.parse((reply as { read?: { value?: string } }).read!.value!) as {
-          ok: boolean; value: { layout: { pages: unknown[] } };
-        };
-        expect(exported.ok).toBe(true);
-        expect(exported.value.layout.pages).toHaveLength(f.full.displayList.pages.length);
+        type Exported = { ok: boolean; content?: { layout: { pages: unknown[] } }; failure?: { code: string } };
+        const outcome = ({ ok, content, failure }: Exported) =>
+          ({ ok, pages: content?.layout.pages.length, code: failure?.code });
+        const exported = JSON.parse((reply as { read?: { value?: string } }).read!.value!) as Exported;
+        const cold = JSON.parse(f.cold.exportStructuredWithPagesJson(EXPORT_OPTIONS, f.init.layoutInput)) as Exported;
+        expect(outcome(exported)).toEqual(outcome(cold));
       }
       await f.w.drain();
       expect(f.w.frames.length).toBeGreaterThan(count);

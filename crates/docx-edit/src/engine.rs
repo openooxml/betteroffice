@@ -21293,9 +21293,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             assert!(restamped.is_none_or(|pages| pages.iter().all(within)));
             assert!(pagination.note_changed_pages.iter().all(within));
             let pending: BTreeSet<usize> = pagination.pending_display_pages().collect();
-            assert!(
-                pagination.display_full_rebuild || (0..3).all(|page| pending.contains(&page))
-            );
+            assert!(pagination.display_full_rebuild || (0..3).all(|page| pending.contains(&page)));
         }
         let headers = engine.retained_headers_footers_json().unwrap().unwrap();
         let headers: serde_json::Value = serde_json::from_str(&headers).unwrap();
@@ -21392,7 +21390,10 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             "{}{}{}{}{}",
             ending("First", &section_break(5760, "")),
             paragraphs(200, "Odd"),
-            ending("Odd end", &section_break(6480, r#"<w:type w:val="oddPage"/>"#)),
+            ending(
+                "Odd end",
+                &section_break(6480, r#"<w:type w:val="oddPage"/>"#)
+            ),
             paragraphs(50, "Final"),
             section_break(5760, "")
         );
@@ -21431,9 +21432,8 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 &format!("<w:pPr>{section}</w:pPr>{}", preview_fixture::run("Line")),
             )
         };
-        let lines = |range: std::ops::Range<u32>| {
-            range.map(|index| line(index, "")).collect::<String>()
-        };
+        let lines =
+            |range: std::ops::Range<u32>| range.map(|index| line(index, "")).collect::<String>();
         let run = r#"<w:t xml:space="preserve">Long</w:t>"#;
         let long = [run; 300].join("<w:br/>");
         let body = format!(
