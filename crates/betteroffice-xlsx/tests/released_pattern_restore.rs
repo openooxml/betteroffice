@@ -188,7 +188,12 @@ fn released_snapshot(twin: &[u8], released_edit: Option<StylePatch>) -> Vec<u8> 
             .unwrap();
     }
     workbook
-        .edit_cell(SheetId(0), CellRef::parse_a1("B1").unwrap(), "edited", options)
+        .edit_cell(
+            SheetId(0),
+            CellRef::parse_a1("B1").unwrap(),
+            "edited",
+            options,
+        )
         .unwrap();
     workbook.encode_state_as_update_v1()
 }
@@ -220,7 +225,10 @@ fn a_released_snapshot_keeps_the_source_pattern_and_border_on_save() {
         .save()
         .unwrap();
     let (_, xf, fill, border) = saved_format(&saved, "A1");
-    assert_eq!(xf, pool_entry(&part(&source, "xl/styles.xml"), "cellXfs", "xf", 1));
+    assert_eq!(
+        xf,
+        pool_entry(&part(&source, "xl/styles.xml"), "cellXfs", "xf", 1)
+    );
     assert_eq!(fill, LIGHT_UP);
     assert_eq!(border, DASH_DOT);
 }

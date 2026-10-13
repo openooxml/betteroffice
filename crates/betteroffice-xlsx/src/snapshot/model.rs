@@ -1876,7 +1876,13 @@ mod tests {
             record.into_bytes()
         });
         let mut chunks = vec![declared_header(13 + fills.len() + borders.len(), counts)];
-        for (ordinal, record) in fills.iter().chain(borders).cloned().chain(theme).enumerate() {
+        for (ordinal, record) in fills
+            .iter()
+            .chain(borders)
+            .cloned()
+            .chain(theme)
+            .enumerate()
+        {
             chunks.push(frame(ChunkKind::Model, ordinal as u64 + 1, &record));
         }
         chunks
@@ -1955,7 +1961,10 @@ mod tests {
             assert!(advance_all(&stream, budget).is_err());
         }
         let current_stream = style_stream(&[pattern_as(22)], &[dash_dot_as(23)]);
-        for restored in [unbounded(&current_stream), advance_all(&current_stream, budget)] {
+        for restored in [
+            unbounded(&current_stream),
+            advance_all(&current_stream, budget),
+        ] {
             let restored = restored.unwrap();
             assert_eq!(restored.styles.fills, vec![pattern.clone()]);
             assert_eq!(restored.styles.borders, vec![dash_dot.clone()]);

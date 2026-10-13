@@ -114,16 +114,15 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
                 rail,
                 clip,
             } => {
-                let paint = |target: &mut Pixmap, transform: Transform, mask: Option<&Mask>| {
-                    match rail {
+                let paint =
+                    |target: &mut Pixmap, transform: Transform, mask: Option<&Mask>| match rail {
                         Some(rail) if style.as_deref() == Some("double") => paint_double(
                             target, *x1, *y1, *x2, *y2, *width, *rail, color, transform, mask,
                         ),
                         _ => paint_line(
                             target, *x1, *y1, *x2, *y2, *width, color, style, transform, mask,
                         ),
-                    }
-                };
+                    };
                 if let Some(clip) = clip {
                     clip_surface.paint(&mut pixmap, *clip, paint)?;
                 } else {
@@ -715,7 +714,11 @@ mod tests {
                 .unwrap();
                 let mut expected = blank();
                 let (rail, offset) = ((width * 0.6).max(0.5), (width * 0.8).max(0.8));
-                let (dx, dy) = if y1 == y2 { (0.0, offset) } else { (offset, 0.0) };
+                let (dx, dy) = if y1 == y2 {
+                    (0.0, offset)
+                } else {
+                    (offset, 0.0)
+                };
                 for sign in [-1.0, 1.0] {
                     stroke_seg(
                         &mut expected,
@@ -779,7 +782,10 @@ mod tests {
             assert_eq!(ink[rail as usize] - ink[0], 2 * rail, "{factor}: {ink:?}");
             for y in ink[0]..ink[0] + 3 * rail {
                 let pixel = pixels.pixel(16, y).unwrap();
-                assert!(ink.contains(&y) || pixel.green() > 128, "{factor}: gap at {y}");
+                assert!(
+                    ink.contains(&y) || pixel.green() > 128,
+                    "{factor}: gap at {y}"
+                );
             }
         }
     }

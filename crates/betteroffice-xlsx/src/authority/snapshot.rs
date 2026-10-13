@@ -2451,14 +2451,9 @@ mod tests {
             push(12, vec![12, 0, 0, 0, 1, 5, 1, 2, 5]).unwrap().borders,
             vec![edge(BorderStyle::Double)]
         );
+        let dash_dot = edge(BorderStyle::MediumDashDot);
         assert!(push(11, current(11, &|w: &mut Writer| pattern.write(w))).is_err());
-        assert!(
-            push(
-                12,
-                current(12, &|w: &mut Writer| edge(BorderStyle::MediumDashDot).write(w))
-            )
-            .is_err()
-        );
+        assert!(push(12, current(12, &|w: &mut Writer| dash_dot.write(w))).is_err());
         assert_eq!(
             push(11, current(18, &|w: &mut Writer| pattern.write(w)))
                 .unwrap()
@@ -2466,18 +2461,15 @@ mod tests {
             vec![pattern.clone()]
         );
         assert_eq!(
-            push(
-                12,
-                current(19, &|w: &mut Writer| edge(BorderStyle::MediumDashDot).write(w))
-            )
-            .unwrap()
-            .borders,
-            vec![edge(BorderStyle::MediumDashDot)]
+            push(12, current(19, &|w: &mut Writer| dash_dot.write(w)))
+                .unwrap()
+                .borders,
+            vec![dash_dot.clone()]
         );
 
         let mut base = (*source().base).clone();
         base.styles.fills = vec![pattern.clone()];
-        base.styles.borders = vec![edge(BorderStyle::MediumDashDot)];
+        base.styles.borders = vec![dash_dot];
         let mut tags = Vec::new();
         for section in [11, 12] {
             let mut cursor = BaseCursor {
