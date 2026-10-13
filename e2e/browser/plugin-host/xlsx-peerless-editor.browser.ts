@@ -25,7 +25,8 @@ async function edit(page: Page, value: string, commit = 'Enter') {
   await scroll.focus();
   await scroll.press('F2');
   const input = page.getByTestId('xlsx-cell-editor');
-  await input.fill('');
+  await input.press('ControlOrMeta+A');
+  await input.press('Delete');
   await input.pressSequentially(value);
   await expect(input).toHaveValue(value);
   await expect(input).toBeFocused();
