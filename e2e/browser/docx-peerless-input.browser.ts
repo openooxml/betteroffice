@@ -776,6 +776,78 @@ test('echo paints the caret line of a wrapped paragraph before the reply and rec
   expect(await harnessText(page)).toBe(ECHO_PARAGRAPHS.join(''));
 });
 
+test('echo paints exactly the pixels of the reply for inserts and backspaces', async ({ page }) => {
+  test.skip(process.env.DOCX_PEERLESS_HARNESS !== '1', 'Presentation checkpoints require DOCX_PEERLESS_HARNESS=1');
+  await openHarness(page, 1, await echoDocumentBytes());
+  const input = await focusHarness(page);
+  const canvas = page.locator('[data-peerless-docx] [data-page-id] canvas').first();
+  const key = async (label: string, press: () => Promise<void>) => {
+    await settled(page);
+    expect(await page.evaluate(() => window.__docxPeerlessInput.frames.at(-1)?.payload.echoContext),
+      `${label}: the caret line must carry an echo context`).toBeDefined();
+    const before = await canvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL());
+    const start = await page.evaluate(() => {
+      window.__docxPeerlessInput.holdAcks = true;
+      window.__docxPeerlessInput.holdFrames = true;
+      return window.__docxPeerlessInput.commands.length;
+    });
+    await press();
+    await paintTurns(page);
+    await expect.poll(() => page.evaluate((start) => {
+      const probe = window.__docxPeerlessInput;
+      const seq = probe.commands[start]?.seq;
+      return seq !== undefined && probe.heldAcks.some(({ message }) => message.ok &&
+        (message.commandAck?.throughSeq ?? -1) >= seq && !!message.commandAck?.frame);
+    }, start)).toBe(true);
+    const comparison = await canvas.evaluate((element, start) => {
+      const probe = window.__docxPeerlessInput;
+      const seq = probe.commands[start]!.seq;
+      const frame = probe.heldAcks.map(({ message }) => message.ok ? message.commandAck : undefined)
+        .find((ack) => ack?.frame && ack.throughSeq >= seq)!.frame!;
+      const item = frame.payload.stagedPresentation!.pages.find(({ page }) => page.pageIndex === 0)!;
+      const target = element as HTMLCanvasElement;
+      const reply = document.createElement('canvas');
+      reply.width = item.bitmap.width;
+      reply.height = item.bitmap.height;
+      const replyContext = reply.getContext('2d', { willReadFrequently: true })!;
+      replyContext.drawImage(item.bitmap, 0, 0);
+      if (reply.width !== target.width || reply.height !== target.height) return { size: false, differing: -1, max: 0, bbox: null };
+      const echo = target.getContext('2d')!.getImageData(0, 0, target.width, target.height).data;
+      const expected = replyContext.getImageData(0, 0, reply.width, reply.height).data;
+      let differing = 0;
+      let max = 0;
+      let bbox: number[] | null = null;
+      for (let index = 0; index < echo.length; index += 4) {
+        let delta = 0;
+        for (let channel = 0; channel < 4; channel += 1) delta = Math.max(delta, Math.abs(echo[index + channel]! - expected[index + channel]!));
+        if (!delta) continue;
+        differing += 1;
+        max = Math.max(max, delta);
+        const x = (index / 4) % target.width;
+        const y = Math.floor(index / 4 / target.width);
+        bbox = bbox ? [Math.min(bbox[0]!, x), Math.min(bbox[1]!, y), Math.max(bbox[2]!, x), Math.max(bbox[3]!, y)] : [x, y, x, y];
+      }
+      return { size: true, differing, max, bbox };
+    }, start);
+    const early = await canvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL());
+    expect(early, `${label}: the echo paints before the reply`).not.toEqual(before);
+    expect(comparison, `${label}: the echo paints exactly the reply's pixels`).toEqual({ size: true, differing: 0, max: 0, bbox: null });
+    await page.evaluate(() => {
+      window.__docxPeerlessInput.releaseAcks();
+      window.__docxPeerlessInput.releaseFrames();
+    });
+    await settled(page);
+  };
+  for (const press of ['ArrowDown', 'ArrowDown', ...Array<string>(8).fill('ArrowRight')]) await input.press(press);
+  await key('wrapped insert', () => beforeinput(input, 'x'));
+  await key('wrapped backspace', () => input.press('Backspace'));
+  await input.press('ControlOrMeta+Home');
+  for (const press of ['ArrowDown', 'ArrowDown', 'ArrowDown', 'ArrowDown', 'End', 'ArrowLeft', 'ArrowLeft', 'ArrowLeft', 'ArrowLeft']) await input.press(press);
+  await key('single-line insert', () => beforeinput(input, 'x'));
+  await key('single-line backspace', () => input.press('Backspace'));
+  expect(await harnessText(page)).toBe(ECHO_PARAGRAPHS.join(''));
+});
+
 test('viewing_refuses_typing_then_editing_applies', async ({ page }) => {
   await open(page);
   const input = await focusDocument(page);
