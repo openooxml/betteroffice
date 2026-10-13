@@ -890,7 +890,7 @@ impl Stylesheet {
 
     /// the xf the plain format takes without adding one: xf 0 when it reads plain, else an xf
     /// known to save plain.
-    pub fn known_plain_xf(&self) -> Option<u32> {
+    fn known_plain_xf(&self) -> Option<u32> {
         if self.reads_plain(0) {
             return Some(0);
         }
