@@ -3,7 +3,11 @@ declare const __QUALITY_FONT_BASE_CJK__: string | null;
 
 import JSZip from 'jszip';
 import { createFontProvider } from '../../packages/fonts/src/cdn';
-import { resolveScriptFallbackFace, type BundledFontScript } from '../../packages/fonts/src/manifest';
+import {
+  maxDigitWidth,
+  resolveScriptFallbackFace,
+  type BundledFontScript,
+} from '../../packages/fonts/src/manifest';
 import { normalFontIndex } from './xlsx-styles';
 
 const api = window as any;
@@ -141,12 +145,11 @@ async function xlsxPrintMetrics(bytes: Uint8Array) {
   const family = font?.querySelector('name')?.getAttribute('val') ?? 'Calibri';
   const size = Number(font?.querySelector('sz')?.getAttribute('val') ?? 11);
   const dpi = 72;
+  const sizePx = (size * dpi) / 72;
   const context = document.createElement('canvas').getContext('2d')!;
-  context.font = `${(size * dpi) / 72}px "${family.replace(/"/g, '\\"')}"`;
+  context.font = `${sizePx}px "${family.replace(/"/g, '\\"')}"`;
   const bounds = context.measureText('0123456789');
-  const maxDigitWidth = Math.max(
-    ...[...'0123456789'].map((digit) => Math.round(context.measureText(digit).width))
-  );
+  const digitWidth = maxDigitWidth(family, sizePx, (digit) => context.measureText(digit).width);
   const workbook = await xml('xl/workbook.xml');
   const relationships = await xml('xl/_rels/workbook.xml.rels');
   return Promise.all(
@@ -163,7 +166,7 @@ async function xlsxPrintMetrics(bytes: Uint8Array) {
       const format = (await xml(path)).querySelector('sheetFormatPr');
       return {
         dpi,
-        maxDigitWidth,
+        maxDigitWidth: digitWidth,
         fontSizePt: size,
         fontFamily: family,
         fontAscent: bounds.fontBoundingBoxAscent,
