@@ -2854,6 +2854,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn regression_removes_default_declared_calc_chain_with_macro_sheets() {
+        let mut parts = macro_sheet_parts(XLSM_MAIN_TYPE, MACRO_WORKBOOK);
+        declare(
+            &mut parts,
+            &format!("<Default Extension='chain' ContentType='{CALC_CHAIN_TYPE}'/>"),
+        );
+        append_relationships(
+            &mut parts,
+            "xl/_rels/workbook.xml.rels",
+            "<Relationship Id='calc' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/calcChain' Target='calc.chain'/>",
+        );
+        parts.push(("xl/calc.chain".to_owned(), CALC_CHAIN.to_vec()));
+        for output in sanitize_both(&parts) {
+            assert!(!has_part(&output, "xl/calc.chain"));
+            let relationships =
+                String::from_utf8_lossy(part_bytes(&output, "xl/_rels/workbook.xml.rels"));
+            assert!(!relationships.contains("calc"), "{relationships}");
+            assert_all_parts_declared(&output);
+        }
+    }
+
     const VBA_PROJECT_TYPE: &str = "application/vnd.ms-office.vbaProject";
     const NESTED_NAMES_WORKBOOK: &[u8] = br#"<workbook xmlns='http://schemas.openxmlformats.org/spreadsheetml/2006/main' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships' xmlns:mc='http://schemas.openxmlformats.org/markup-compatibility/2006'><sheets><sheet name='First' sheetId='1' r:id='first'/><sheet name='Last' sheetId='3' r:id='last'/></sheets><definedNames><mc:AlternateContent><mc:Choice Requires='r'><definedName name='choice'>First!$A$1</definedName></mc:Choice><mc:Fallback><definedName name='fallback'>Last!$A$1</definedName></mc:Fallback></mc:AlternateContent></definedNames></workbook>"#;
 
