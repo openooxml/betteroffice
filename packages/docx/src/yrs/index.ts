@@ -955,6 +955,16 @@ export interface YrsWorkerDocumentMirror {
   proposals: DocxProposalRegistryState;
 }
 
+/** What runs inherit under one package's styles. @internal */
+export interface YrsRunInheritance {
+  /**
+   * The attributes seeding merges into the marks of a run of `runStyle` in a
+   * paragraph of `paragraphStyle` before the run's direct formatting.
+   */
+  attributes(paragraphStyle: string | null, runStyle: string | null): Record<string, unknown>;
+  dispose(): void;
+}
+
 export interface YrsSession extends CollaborationReplica {
   /** The yrs client id this replica writes with. */
   readonly clientId: number;
@@ -1438,6 +1448,8 @@ export interface YrsSession extends CollaborationReplica {
    * order and upper case. Reads only. @internal
    */
   writtenParagraphIds(bytes: Uint8Array): Record<string, string[]>;
+  /** Resolves what runs inherit under a package's `styles`. Reads only. @internal */
+  runInheritance(styles: Document['package']['styles']): YrsRunInheritance;
 
   // -- version-checked host edits --
 

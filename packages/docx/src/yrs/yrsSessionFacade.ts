@@ -1367,6 +1367,14 @@ export function wrapSession(
       ),
     writtenParagraphIds: (bytes) =>
       JSON.parse(session.written_paragraph_ids(bytes)) as Record<string, string[]>,
+    runInheritance: (styles) => {
+      const inheritance = session.run_inheritance(JSON.stringify(styles ?? null));
+      return {
+        attributes: (paragraphStyle, runStyle) =>
+          JSON.parse(inheritance.attributes(paragraphStyle, runStyle)) as Record<string, unknown>,
+        dispose: () => inheritance.free(),
+      };
+    },
     exportStructured: (options) =>
       JSON.parse(
         session.export_structured_json(JSON.stringify(options))

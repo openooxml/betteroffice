@@ -347,12 +347,9 @@ impl SourceMetadata {
         let formatting = style_id.map_or_else(|| json!({}), |id| json!({ "styleId": id }));
         let paragraph = json!({ "type": "paragraph", "formatting": formatting, "content": [] });
         let attrs = paragraph_attrs(&paragraph, &self.styles, &[], &[], None);
-        let run = marks_to_attrs(&formatting_to_marks(
-            paragraph_style_formatting(&paragraph, &self.styles, None).as_deref(),
-        ));
         Ok(StyledParagraph {
             properties: payload(para_attrs_to_ppr(attrs))?,
-            run: payload(run)?,
+            run: payload(inherited_run_attrs(&self.styles, style_id, None))?,
         })
     }
 
@@ -1738,6 +1735,43 @@ fn run_marks(run: &Value, style_formatting: Option<&Value>, styles: &StyleResolv
         }
     }
     marks
+}
+
+/// What seeding gives an unformatted run carrying only `run_style` in a paragraph of
+/// `paragraph_style`, without the run style reference.
+fn inherited_run_attrs(
+    styles: &StyleResolver,
+    paragraph_style: Option<&str>,
+    run_style: Option<&str>,
+) -> JsonObject {
+    let styled = |id: Option<&str>| id.map_or_else(|| json!({}), |id| json!({ "styleId": id }));
+    let paragraph = json!({ "type": "paragraph", "formatting": styled(paragraph_style) });
+    let run = json!({ "type": "run", "formatting": styled(run_style) });
+    let style = paragraph_style_formatting(&paragraph, styles, None);
+    let mut attrs = marks_to_attrs(&run_marks(&run, style.as_deref(), styles));
+    attrs.remove("runStyle");
+    attrs
+}
+
+/// What runs inherit under one package's styles.
+#[cfg(any(test, feature = "wasm"))]
+pub(crate) struct RunInheritance(StyleResolver);
+
+#[cfg(any(test, feature = "wasm"))]
+impl RunInheritance {
+    pub(crate) fn new(definitions: Option<&Value>) -> Self {
+        Self(StyleResolver::new(definitions))
+    }
+
+    /// What seeding merges into the marks of a run of `run_style` in a paragraph of
+    /// `paragraph_style` before the run's direct formatting.
+    pub(crate) fn run_attrs(
+        &self,
+        paragraph_style: Option<&str>,
+        run_style: Option<&str>,
+    ) -> JsonObject {
+        inherited_run_attrs(&self.0, paragraph_style, run_style)
+    }
 }
 
 fn is_hyperlink_style_name(name: &str) -> bool {
@@ -7311,6 +7345,46 @@ mod tests {
                 .unwrap()
                 .contains("structuredResult")
         );
+    }
+
+    #[test]
+    fn run_inheritance_is_what_seeding_gives_an_unformatted_run() {
+        let definitions = json!({
+            "docDefaults": { "rPr": { "fontFamily": { "ascii": "DejaVu Sans" }, "fontSize": 22 } },
+            "styles": [
+                { "type": "paragraph", "styleId": "Normal", "default": true },
+                { "type": "paragraph", "styleId": "Heading1", "rPr": { "bold": true, "fontSize": 32 } },
+                { "type": "character", "styleId": "Link", "name": "Hyperlink",
+                  "rPr": { "color": { "rgb": "0563C1" }, "underline": { "style": "single" } } }
+            ]
+        });
+        let styles = StyleResolver::new(Some(&definitions));
+        let inheritance = RunInheritance::new(Some(&definitions));
+        let styled = |id: Option<&str>| id.map_or_else(|| json!({}), |id| json!({ "styleId": id }));
+        for (paragraph_style, run_style) in [
+            (None, None),
+            (Some("Heading1"), None),
+            (Some("Heading1"), Some("Link")),
+            (Some("Missing"), Some("Missing")),
+        ] {
+            let paragraph = json!({
+                "type": "paragraph",
+                "formatting": styled(paragraph_style),
+                "content": [{
+                    "type": "run",
+                    "formatting": styled(run_style),
+                    "content": [{ "type": "text", "text": "x" }]
+                }]
+            });
+            let units = paragraph_units(&paragraph, &styles, None, &BTreeMap::new()).units;
+            let mut seeded = units[0].attrs.clone();
+            seeded.remove("runStyle");
+            assert_eq!(inheritance.run_attrs(paragraph_style, run_style), seeded);
+        }
+        let linked = inheritance.run_attrs(Some("Heading1"), Some("Link"));
+        assert_eq!(linked["bold"], json!(true));
+        assert_eq!(linked["fontSize"]["size"], json!(32));
+        assert_eq!(linked["textColor"]["inheritedHyperlink"], json!(true));
     }
 
     #[test]
