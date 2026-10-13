@@ -5420,6 +5420,28 @@ mod tests {
     }
 
     #[test]
+    fn pattern_backgrounds_tell_current_bases_apart() {
+        use xlsx_model::{Color, Fill, PatternType};
+        let bases = ["#fedcba", "#00ff00"].map(|bg| {
+            let mut model = open_test_cases::matrix().remove(0).model;
+            model.styles.fills.push(Fill::Pattern {
+                pattern: PatternType::LightUp,
+                fg: Some(Color::Rgb("#123456".into())),
+                bg: Some(Color::Rgb(bg.into())),
+            });
+            let base = WorkbookBase::from_model(&model).unwrap();
+            let oracle =
+                WorkbookBase::from_model_with_legacy_dimensions_oracle(&model, &[], None).unwrap();
+            assert_eq!(oracle.fingerprint, base.fingerprint);
+            assert_eq!(oracle.fingerprints, base.fingerprints);
+            assert_eq!(oracle.bootstrap_client_id, base.bootstrap_client_id);
+            base
+        });
+        assert_ne!(bases[0].fingerprint, bases[1].fingerprint);
+        assert_ne!(bases[0].bootstrap_client_id, bases[1].bootstrap_client_id);
+    }
+
+    #[test]
     fn released_reader_hashes_follow_the_released_collapse_rule() {
         use xlsx_model::{Border, BorderEdge, BorderStyle, Color, Fill, PatternType};
         // released parsers read a pattern as a solid of its foreground (auto without one)

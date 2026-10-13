@@ -1360,4 +1360,42 @@ mod tests {
         wrong_engine.extend_from_slice(&payload);
         assert!(Workbook::restore_recovery_checkpoint(&wrong_engine).is_err());
     }
+
+    #[test]
+    fn recovery_checkpoints_version_pattern_fills_and_refuse_them_in_the_released_codec() {
+        use xlsx_model::{Border, BorderEdge, BorderStyle, Color, Fill, PatternType};
+        let mut patterned = model();
+        patterned.styles.fills.push(Fill::Pattern {
+            pattern: PatternType::LightUp,
+            fg: Some(Color::Rgb("#123456".into())),
+            bg: None,
+        });
+        let mut dashed = model();
+        dashed.styles.borders.push(Border {
+            top: Some(BorderEdge {
+                style: BorderStyle::MediumDashDot,
+                color: None,
+            }),
+            ..Border::default()
+        });
+        for styled in [patterned, dashed] {
+            let workbook = Workbook::from_model(styled).unwrap();
+            let bytes = workbook.recovery_checkpoint(0, None).unwrap();
+            assert_ne!(
+                bytes[8], 3,
+                "patterned fills and extended borders need their own codec version"
+            );
+            let (restored, ..) = Workbook::restore_recovery_checkpoint(&bytes).unwrap();
+            assert_eq!(restored.model, workbook.model);
+            let mut released = bytes;
+            released[8] = 3;
+            assert!(Workbook::restore_recovery_checkpoint(&released).is_err());
+        }
+
+        let plain = Workbook::from_model(model()).unwrap();
+        let mut released = plain.recovery_checkpoint(0, None).unwrap();
+        released[8] = 3;
+        let (restored, ..) = Workbook::restore_recovery_checkpoint(&released).unwrap();
+        assert_eq!(restored.model, plain.model);
+    }
 }

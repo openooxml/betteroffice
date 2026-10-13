@@ -9,7 +9,7 @@ import type { WorkbookHandle } from '../wasm/loader';
 import { createWorkbookCommandState, projectEditState } from './commandHandlers';
 import { createWorkbookCommandHost } from './commandHost';
 import type { CommandStatus, WorkbookCommand, WorkbookSharedCommand, WorkbookSharedWireAck } from './commandProtocol';
-import { decodeWorkbookRecovery, encodeWorkbookRecovery, restoreWorkbookCommandState } from './recovery';
+import { decodeWorkbookRecovery, encodeWorkbookRecovery, isCollaborativeWorkbookRecovery, restoreWorkbookCommandState } from './recovery';
 import { createWorkbookSessionHost } from './host';
 import { WORKBOOK_SESSION_METHODS, type WorkbookSessionEvents, type WorkbookSessionMethods } from './methods';
 import { batchRequests } from './testHelpers';
@@ -103,6 +103,10 @@ function engineHeader(metadata = '{"collaborative":false}', version = 3) {
   engine.set(payload, 42);
   return engine;
 }
+
+test('recovery reads engine checkpoints from before and since patterned fills', () => {
+  for (const version of [3, 5]) expect(isCollaborativeWorkbookRecovery(engineHeader(undefined, version))).toBe(false);
+});
 
 test.each([
   ['unsupported codec', engineHeader(undefined, 4)],
