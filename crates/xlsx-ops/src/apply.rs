@@ -464,7 +464,7 @@ fn apply_range_formats(
 }
 
 /// An xf resolving to the plain format, for workbooks whose xf 0 does not.
-fn plain_xf(styles: &mut xlsx_model::Stylesheet) -> u32 {
+pub fn plain_xf(styles: &mut xlsx_model::Stylesheet) -> u32 {
     let plain = xlsx_model::Xf::default();
     let index = match styles.cell_xfs.iter().position(|xf| *xf == plain) {
         Some(index) => index,
