@@ -1376,7 +1376,14 @@ export function wrapSession(
           JSON.parse(inheritance.paragraph_formatting(
             paragraphStyle, JSON.stringify(tableFormatting ?? null)
           )) ?? undefined,
-        tableAttributes: (table) => JSON.parse(inheritance.table_attributes(JSON.stringify(table))),
+        tableAttributes: (table) => JSON.parse(inheritance.table_attributes(JSON.stringify({
+          formatting: table.formatting,
+          columnWidths: table.columnWidths,
+          rows: table.rows.map((row) => ({
+            formatting: row.formatting,
+            cells: row.cells.map((cell) => ({ formatting: cell.formatting })),
+          })),
+        }))),
         dispose: () => inheritance.free(),
       };
     },
