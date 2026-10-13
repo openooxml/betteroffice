@@ -512,3 +512,99 @@ fn format_facets_open_hashes_cells_no_more_often_than_before_them() {
     // for the stylesheet and for its reading before applyX flags: ten passes
     assert!(crate::authority::fingerprint_passes() - before <= 10);
 }
+
+/// The collaboration state a release before format facets persisted for `bytes`.
+fn released_state(bytes: &[u8]) -> Vec<u8> {
+    let parts = ooxml_opc::unzip_parts(bytes).unwrap();
+    let mut released = xlsx_parse::parse_workbook(&parts).unwrap();
+    for xf in &mut released.styles.cell_xfs {
+        *xf = xf.released_reading();
+    }
+    crate::authority::pre_facet_state_for_test(&released)
+}
+
+#[test]
+fn format_facets_peers_reconnect_after_sharing_an_adopted_released_state() {
+    let (bytes, _) = source("xfId=\"1\"", "<alignment textRotation=\"90\"/>", false);
+    let state = released_state(&bytes);
+    let mut a = Workbook::open_collaborative(&bytes, 77).unwrap();
+    a.apply_update_v1(&state, options()).unwrap();
+    let mut b = Workbook::open_collaborative(&bytes, 78).unwrap();
+    b.apply_update_v1(&a.encode_state_as_update_v1(), options())
+        .unwrap();
+    b.edit_cell(SheetId(0), r("D1"), "6", options()).unwrap();
+    a.edit_cell(SheetId(0), r("C1"), "5", options()).unwrap();
+    a.apply_update_v1(&b.encode_state_as_update_v1(), options())
+        .unwrap();
+    b.apply_update_v1(&a.encode_state_as_update_v1(), options())
+        .unwrap();
+    for workbook in [&a, &b] {
+        let sheet = &workbook.model().sheets[0];
+        let value = |address| sheet.cell(r(address)).unwrap().value.clone();
+        assert_eq!(value("C1"), xlsx_model::CellValue::Number { value: 5.0 });
+        assert_eq!(value("D1"), xlsx_model::CellValue::Number { value: 6.0 });
+        let format = format_value(workbook, "A1");
+        assert_eq!(format["alignment"]["text_rotation"], 90);
+        assert_eq!(format["xfId"], 1);
+    }
+
+    let mut edited = Workbook::open_collaborative(&bytes, 79).unwrap();
+    edited
+        .edit_cell(SheetId(0), r("C1"), "1", options())
+        .unwrap();
+    assert!(matches!(
+        edited.apply_update_v1(&state, options()),
+        Err(Error::CollaborativeStructureChanged)
+    ));
+}
+
+fn with_palette(bytes: &[u8]) -> Vec<u8> {
+    let palette = r#"<colors><indexedColors><rgbColor rgb="FF123456"/></indexedColors></colors>"#;
+    let mut parts = ooxml_opc::unzip_parts(bytes).unwrap();
+    for (name, part) in &mut parts {
+        if name == "xl/styles.xml" {
+            let styles = String::from_utf8(part.clone()).unwrap();
+            *part = styles
+                .replace("</styleSheet>", &format!("{palette}</styleSheet>"))
+                .into_bytes();
+        }
+    }
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn format_facets_cleared_in_a_current_state_stay_cleared_when_adopted() {
+    let plain = package(
+        r#"<xf/><xf numFmtId="2" fontId="0" fillId="0" borderId="0"><alignment textRotation="90"/></xf>"#,
+        r#"<c r="A1" s="1"><v>7</v></c><c r="B1" s="1"><v>8</v></c>"#,
+        false,
+    );
+    let range = CellRange::new(r("A1"), r("A1"));
+    let mut peer = Workbook::open_collaborative(&plain, 81).unwrap();
+    let mut captured = peer.capture_format(SheetId(0), range).unwrap();
+    captured.formats[0].alignment.text_rotation = None;
+    peer.apply_format(SheetId(0), range, captured, options())
+        .unwrap();
+    assert_eq!(
+        format_value(&peer, "A1")["alignment"]["text_rotation"],
+        Value::Null
+    );
+
+    let palette = with_palette(&plain);
+    let mut workbook = Workbook::open_collaborative(&palette, 82).unwrap();
+    assert!(!workbook.model().styles.indexed_colors.is_empty());
+    workbook
+        .apply_update_v1(&peer.encode_state_as_update_v1(), options())
+        .unwrap();
+    let saved = workbook.save().unwrap();
+    let reopened = Workbook::open(&saved).unwrap();
+    for workbook in [&workbook, &reopened] {
+        let cleared = format_value(workbook, "A1");
+        assert_eq!(cleared["alignment"]["text_rotation"], Value::Null);
+        assert_eq!(cleared["numberFormat"]["id"], 2);
+        assert_eq!(
+            format_value(workbook, "B1")["alignment"]["text_rotation"],
+            90
+        );
+    }
+}
