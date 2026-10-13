@@ -926,6 +926,11 @@ impl Stylesheet {
         self.bound_plain = (0..self.cell_xfs.len() as u32).find(|&index| self.reads_plain(index));
     }
 
+    /// whether the plain format is bound to a shared xf.
+    pub fn binds_plain(&self) -> bool {
+        self.bound_plain.is_some()
+    }
+
     /// the xf a plain format edit stores: under a binding the bound xf when it is known to save
     /// plain, else `None`, which leaves the cell as it was.
     pub fn plain_edit_xf(&mut self) -> Option<u32> {
