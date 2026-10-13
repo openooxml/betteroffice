@@ -76,7 +76,7 @@ SERVER_TOOLS = ['office_files', 'office_open', 'office_outline', 'office_grep', 
                 'office_verify', 'office_close', 'office_propose', 'office_propose_cells', 'office_review', 'office_accept',
                 'office_reject', 'office_export', 'xlsx_outline', 'xlsx_read_range', 'xlsx_preview', 'xlsx_write_range',
                 'xlsx_edit_grid', 'xlsx_edit_sheets', 'xlsx_find_replace', 'xlsx_format', 'xlsx_sort',
-                'pptx_outline', 'pptx_read_slide', 'pptx_preview', 'pptx_edit']
+                'pptx_outline', 'pptx_read_slide', 'pptx_preview', 'pptx_edit', 'docx_edit']
 FAKE_MCP = '''#!/usr/bin/env python3
 import json
 import os
@@ -166,7 +166,7 @@ class RunnerTests(unittest.TestCase):
         for task in runner.checker.tasks():
             package = validation.Package(runner.checker.fixture(task))
             number = int(task['id'].split('-')[1])
-            (validation.correct_xlsx if task['format'] == 'xlsx' else validation.correct_pptx)(package, number)
+            validation.CORRECT[task['format']](package, number)
             package.save(self.correct / f'{task["id"]}.{task["format"]}')
         self.environment = patch.dict(os.environ, {
             'PATH': str(self.bin) + os.pathsep + os.environ['PATH'], 'FAKE_TASKS': str(ROOT / 'tasks.json'),
@@ -202,18 +202,18 @@ class RunnerTests(unittest.TestCase):
                                 stdin=subprocess.DEVNULL, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         report = json.loads((results / 'results.json').read_text())
-        self.assertEqual(len(report['results']), 20)
+        self.assertEqual(len(report['results']), 30)
         self.assertEqual(report['timeout_seconds'], 600)
         self.assertGreater(report['mcp_startup_seconds'], 0)
         self.assertEqual(report['arm'], 'betteroffice')
         self.assertTrue(all(item['pass'] and item['tool_calls'] == 1 and item['duration_seconds'] > 0 for item in report['results']))
-        self.assertEqual((results / 'results.md').read_text().count('| PASS |'), 20)
+        self.assertEqual((results / 'results.md').read_text().count('| PASS |'), 30)
         repeat = subprocess.run([str(ROOT / 'run.sh'), command, str(results), 'test-model'], capture_output=True)
         self.assertEqual(repeat.returncode, 2)
 
     def test_mcp_preflight_requires_a_ready_server_with_the_task_tools(self):
         required = runner.required_tools(runner.checker.tasks())
-        self.assertTrue({'office_open', 'office_export', 'xlsx_sort', 'pptx_edit'} <= set(required) <= set(SERVER_TOOLS))
+        self.assertTrue({'office_open', 'office_export', 'xlsx_sort', 'pptx_edit', 'docx_edit'} <= set(required) <= set(SERVER_TOOLS))
         self.assertGreater(runner.mcp_ready(self.cli, required), 0)
         for mode, reason in [('silent', 'did not answer tools/list within 1 seconds'),
                              ('missing-tool', 'missing required tools: xlsx_sort'), ('exit', 'exited with code 3')]:
