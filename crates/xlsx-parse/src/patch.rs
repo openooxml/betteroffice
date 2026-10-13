@@ -695,9 +695,19 @@ impl SheetPatch<'_> {
             self.plan,
         );
         let mut writer = Writer::new(std::mem::take(out));
-        let style = original.map_or(cell.style, |original| {
-            self.styles.written(original.style, cell.style)
-        });
+        let style = if original.is_some()
+            || self
+                .axes
+                .rows
+                .source(at.row)
+                .zip(self.axes.cols.source(at.col))
+                .is_some()
+        {
+            self.styles
+                .written(original.and_then(|cell| cell.style), cell.style)
+        } else {
+            cell.style
+        };
         write_cell(
             &mut writer,
             at,

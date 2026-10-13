@@ -44,8 +44,8 @@ export const PRESENTATION_EDITOR_POLICIES: MethodPolicies<PresentationEditorMeth
 };
 
 export const PRESENTATION_REPLAY_MUTATORS = {
-  insertText: true, deleteText: true, formatText: true, insertParagraphBreak: true,
-  setParagraphAlignment: true, insertSlide: true, deleteSlide: true, moveSlide: true,
+  insertText: true, deleteText: true, formatText: true, setStoryParagraphs: true, insertParagraphBreak: true,
+  setParagraphAlignment: true, insertSlide: true, duplicateSlide: true, deleteSlide: true, moveSlide: true,
   setSlideNotes: true, addTextBox: true, addShape: true, addPicture: true, removeShape: true,
   moveShape: true, resizeShape: true, setShapeRect: true, setShapeFill: true, setShapeStroke: true,
   setShapeAdjust: true, bringShapeToFront: true, sendShapeToBack: true, bringShapeForward: true,

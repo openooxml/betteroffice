@@ -131,6 +131,33 @@ pub struct CapturedFormat {
     pub rows: u32,
     pub columns: u32,
     pub formats: Vec<CellFormat>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_styles: Vec<Option<u32>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_formats: Vec<PreservedCellFormat>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PreservedCellFormat {
+    #[serde(flatten)]
+    pub format: CellFormat,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_xf: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derived_from: Option<u32>,
+}
+
+impl PreservedCellFormat {
+    pub fn from_style(styles: &xlsx_model::Stylesheet, style: Option<u32>) -> Self {
+        let (source_xf, derived_from) = style
+            .map(|index| styles.format_source(index))
+            .unwrap_or((None, None));
+        Self {
+            format: styles.cell_format(style),
+            source_xf,
+            derived_from,
+        }
+    }
 }
 
 pub(crate) fn patch_cell_format(

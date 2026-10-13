@@ -463,6 +463,8 @@ fn edit_cell_lockstep_matches_full_materialization() {
             name: "Added".into(),
         },
         Op::RemoveSheet { index: 1 },
+        Op::MoveSheet { from: 0, to: 2 },
+        Op::MoveSheet { from: 2, to: 0 },
     ] {
         pair.step(true, |workbook| {
             workbook.apply_ops(vec![op.clone()], options())
@@ -653,4 +655,331 @@ fn preserved_state_snapshots_copy_on_write() {
     original.forget_shared_strings();
     assert!(original.shared_string_cells.iter().all(BTreeMap::is_empty));
     assert_eq!(*snapshot.shared_string_cells, expected);
+}
+
+#[test]
+fn move_sheet_preserves_package_identity_and_undo() {
+    let mut workbook = Workbook::open(&workbook_bytes()).unwrap();
+    let names = workbook.sheet_names();
+    let model = workbook.model.clone();
+    let origins = workbook.preserved.origins.clone();
+    let version = workbook.version();
+    assert!(
+        workbook
+            .apply_ops(vec![Op::MoveSheet { from: 0, to: 2 }], options())
+            .unwrap()
+            .applied
+    );
+    assert_eq!(
+        workbook.sheet_names(),
+        vec![names[1].clone(), names[2].clone(), names[0].clone()]
+    );
+    assert_eq!(
+        workbook.preserved.origins,
+        vec![origins[1], origins[2], origins[0]]
+    );
+    assert_eq!(workbook.model.sheets[2], model.sheets[0]);
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    assert_eq!(reopened.sheet_names(), workbook.sheet_names());
+    assert_eq!(reopened.model.sheets[2], model.sheets[0]);
+    assert_ne!(workbook.version(), version);
+    workbook.undo(options()).unwrap();
+    assert_eq!(workbook.model.sheets, model.sheets);
+    assert_eq!(workbook.preserved.origins, origins);
+    workbook.redo(options()).unwrap();
+    assert_eq!(workbook.model.sheets[2], model.sheets[0]);
+    let before = workbook.model.clone();
+    assert!(
+        workbook
+            .apply_ops(
+                vec![
+                    Op::MoveSheet { from: 2, to: 0 },
+                    Op::MoveSheet { from: 7, to: 0 }
+                ],
+                options()
+            )
+            .is_err()
+    );
+    assert_eq!(workbook.model, before);
+}
+
+#[test]
+fn moved_tables_recover_after_move_undo_and_redo() {
+    use xlsx_model::{DefinedName, Table};
+
+    let mut model = WorkbookModel {
+        sheets: vec![Sheet::new("A"), Sheet::new("B")],
+        ..WorkbookModel::default()
+    };
+    for (sheet, name) in [(0, "Items"), (1, "Others")] {
+        model.tables.push(Table {
+            name: name.into(),
+            sheet: SheetId(sheet),
+            range: CellRange::new(r("A1"), r("A2")),
+            header_rows: 1,
+            totals_rows: 0,
+            columns: vec!["Value".into()],
+        });
+        model.defined_names.push(DefinedName {
+            name: "LocalValue".into(),
+            formula: format!("{}!$A$2", model.sheets[sheet as usize].name),
+            local_sheet: Some(SheetId(sheet)),
+            hidden: false,
+        });
+        model.sheets[sheet as usize].hyperlinks.push(Hyperlink {
+            range: CellRange::new(r("A1"), r("A1")),
+            external_target: Some(format!("https://example.org/{sheet}")),
+            location: None,
+            tooltip: None,
+            display: None,
+        });
+        model.sheets[sheet as usize].row_heights.insert(3, 0.0);
+        model.sheets[sheet as usize].col_widths.insert(3, 0.0);
+    }
+    let mut workbook = Workbook::from_model(model).unwrap();
+    for (sheet, at, input) in [
+        (0, "A1", "Value"),
+        (0, "A2", "10"),
+        (1, "A1", "Value"),
+        (1, "A2", "99"),
+        (1, "B1", "=SUM(Items[Value])+SUM(Others[Value])"),
+        (1, "C1", "=SUM(Items[Value])"),
+        (1, "D1", "=SUM(Others[Value])"),
+    ] {
+        workbook
+            .edit_cell(SheetId(sheet), r(at), input, options())
+            .unwrap();
+    }
+    workbook
+        .apply_ops(vec![Op::MoveSheet { from: 0, to: 1 }], options())
+        .unwrap();
+    for phase in 0..3 {
+        let moved = phase != 1;
+        assert_eq!(workbook.model.tables[0].sheet, SheetId(u32::from(moved)));
+        assert_eq!(workbook.model.tables[1].sheet, SheetId(u32::from(!moved)));
+        let checkpoint = workbook
+            .recovery_checkpoint_with_history(1, None, true)
+            .unwrap();
+        let (mut restored, _, _, _) = Workbook::restore_recovery_checkpoint(&checkpoint).unwrap();
+        restored.recalculate_all(options());
+        assert_eq!(restored.model.tables, workbook.model.tables);
+        assert_eq!(restored.model.defined_names, workbook.model.defined_names);
+        assert_eq!(restored.model.sheets, workbook.model.sheets);
+        let formula_sheet = SheetId(u32::from(!moved));
+        assert_eq!(
+            restored
+                .model
+                .sheet(formula_sheet)
+                .unwrap()
+                .cell(r("B1"))
+                .unwrap()
+                .value,
+            CellValue::Number { value: 109.0 }
+        );
+        assert_eq!(
+            restored
+                .model
+                .sheet(formula_sheet)
+                .unwrap()
+                .cell(r("C1"))
+                .unwrap()
+                .value,
+            CellValue::Number { value: 10.0 }
+        );
+        assert_eq!(
+            restored
+                .model
+                .sheet(formula_sheet)
+                .unwrap()
+                .cell(r("D1"))
+                .unwrap()
+                .value,
+            CellValue::Number { value: 99.0 }
+        );
+        if phase == 0 {
+            workbook.undo(options()).unwrap();
+            restored.undo(options()).unwrap();
+        } else if phase == 1 {
+            workbook.redo(options()).unwrap();
+            restored.redo(options()).unwrap();
+        }
+        assert_eq!(restored.model, workbook.model);
+    }
+}
+
+#[test]
+fn mixed_sheet_batch_admits_cells_at_their_current_index() {
+    let mut workbook = Workbook::from_model(WorkbookModel {
+        sheets: vec![Sheet::new("A"), Sheet::new("B")],
+        ..WorkbookModel::default()
+    })
+    .unwrap();
+    workbook
+        .apply_ops(
+            vec![
+                Op::AddSheet {
+                    index: 2,
+                    name: "C".into(),
+                },
+                Op::MoveSheet { from: 0, to: 2 },
+                Op::RenameSheet {
+                    sheet: SheetId(0),
+                    name: "Renamed".into(),
+                },
+                Op::SetCell {
+                    sheet: SheetId(2),
+                    at: r("A1"),
+                    cell: cell_state_for_input_no_eval("42"),
+                },
+            ],
+            options(),
+        )
+        .unwrap();
+    assert_eq!(workbook.sheet_names(), vec!["Renamed", "C", "A"]);
+    assert_eq!(
+        workbook.model.sheets[2].cell(r("A1")).unwrap().value,
+        CellValue::Number { value: 42.0 }
+    );
+    assert!(workbook.model.sheets[0].cell(r("A1")).is_none());
+    assert!(workbook.model.sheets[1].cell(r("A1")).is_none());
+}
+
+fn workbook_with_chartsheet() -> Workbook {
+    let mut parts = ooxml_opc::unzip_parts(&workbook_bytes()).unwrap();
+    for (path, bytes) in &mut parts {
+        if path == "xl/_rels/workbook.xml.rels" {
+            let xml = String::from_utf8(bytes.clone()).unwrap().replace(
+                "relationships/worksheet\" Target=\"worksheets/sheet2.xml",
+                "relationships/chartsheet\" Target=\"worksheets/sheet2.xml",
+            );
+            *bytes = xml.into_bytes();
+        } else if path == "xl/worksheets/sheet2.xml" {
+            *bytes = br#"<chartsheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"/>"#.to_vec();
+        }
+    }
+    let workbook = Workbook::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+    assert!(
+        !workbook
+            .source_package
+            .as_ref()
+            .unwrap()
+            .facts()
+            .source_sheet_is_worksheet(1)
+    );
+    workbook
+}
+
+#[test]
+fn mixed_sheet_batch_refuses_moved_chartsheet_cell_edit() {
+    let mut workbook = workbook_with_chartsheet();
+    let before = workbook.model.clone();
+    let error = workbook
+        .apply_ops(
+            vec![
+                Op::MoveSheet { from: 1, to: 0 },
+                Op::SetCell {
+                    sheet: SheetId(0),
+                    at: r("A1"),
+                    cell: cell_state_for_input_no_eval("42"),
+                },
+            ],
+            options(),
+        )
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("not an editable worksheet"),
+        "{error}"
+    );
+    assert_eq!(workbook.model, before);
+}
+
+#[test]
+fn mixed_sheet_batch_admits_worksheet_at_old_chartsheet_index() {
+    let mut workbook = workbook_with_chartsheet();
+    let name = workbook.model.sheets[0].name.clone();
+    workbook
+        .apply_ops(
+            vec![
+                Op::MoveSheet { from: 1, to: 0 },
+                Op::SetCell {
+                    sheet: SheetId(1),
+                    at: r("A1"),
+                    cell: cell_state_for_input_no_eval("42"),
+                },
+            ],
+            options(),
+        )
+        .unwrap();
+    assert_eq!(workbook.model.sheets[1].name, name);
+    assert_eq!(
+        workbook.model.sheets[1].cell(r("A1")).unwrap().value,
+        CellValue::Number { value: 42.0 }
+    );
+}
+
+fn assert_active_sheet_batch(ops: Vec<Op>, before: SheetId, after: SheetId) {
+    let mut workbook = Workbook::from_model(WorkbookModel {
+        sheets: vec![Sheet::new("A"), Sheet::new("B")],
+        ..WorkbookModel::default()
+    })
+    .unwrap();
+    workbook.set_active_sheet(before).unwrap();
+    let original_name = workbook.model.sheets[before.0 as usize].name.clone();
+    workbook.apply_ops(ops, options()).unwrap();
+    assert_eq!(workbook.active_sheet(), after);
+    assert_eq!(workbook.model.sheets[after.0 as usize].name, "Renamed");
+    workbook.undo(options()).unwrap();
+    assert_eq!(workbook.active_sheet(), before);
+    assert_eq!(workbook.model.sheets[before.0 as usize].name, original_name);
+    workbook.redo(options()).unwrap();
+    assert_eq!(workbook.active_sheet(), after);
+    assert_eq!(workbook.model.sheets[after.0 as usize].name, "Renamed");
+}
+
+#[test]
+fn active_sheet_follows_move_and_rename_batch() {
+    assert_active_sheet_batch(
+        vec![
+            Op::MoveSheet { from: 0, to: 1 },
+            Op::RenameSheet {
+                sheet: SheetId(1),
+                name: "Renamed".into(),
+            },
+        ],
+        SheetId(0),
+        SheetId(1),
+    );
+}
+
+#[test]
+fn active_sheet_follows_insert_and_rename_batch() {
+    assert_active_sheet_batch(
+        vec![
+            Op::AddSheet {
+                index: 0,
+                name: "C".into(),
+            },
+            Op::RenameSheet {
+                sheet: SheetId(1),
+                name: "Renamed".into(),
+            },
+        ],
+        SheetId(0),
+        SheetId(1),
+    );
+}
+
+#[test]
+fn active_sheet_follows_remove_before_and_rename_batch() {
+    assert_active_sheet_batch(
+        vec![
+            Op::RemoveSheet { index: 0 },
+            Op::RenameSheet {
+                sheet: SheetId(0),
+                name: "Renamed".into(),
+            },
+        ],
+        SheetId(1),
+        SheetId(0),
+    );
 }

@@ -12,7 +12,8 @@ mod undo;
 pub use apply::{InvertedOp, OpError, apply, apply_in_place, apply_ops, remap_ref};
 pub use formatting::{
     BorderLineStyle, BorderPatch, BorderPreset, CapturedFormat, HorizontalAlignment,
-    NumberFormatMutation, StylePatch, StyleProperty, TextWrapping, VerticalAlignment,
+    NumberFormatMutation, PreservedCellFormat, StylePatch, StyleProperty, TextWrapping,
+    VerticalAlignment,
 };
 pub use input::{ParsedInput, cell_state_for_input, cell_state_for_input_no_eval, parse_input};
 pub use op::{CellState, Op, Provenance, Transaction};

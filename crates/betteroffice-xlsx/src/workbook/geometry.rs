@@ -91,6 +91,7 @@ impl Workbook {
                 }
                 Op::AddSheet { .. }
                 | Op::RemoveSheet { .. }
+                | Op::MoveSheet { .. }
                 | Op::RenameSheet { .. }
                 | Op::RestoreSheet { .. } => delta.full = true,
             }

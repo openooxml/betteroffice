@@ -376,7 +376,8 @@ fn patched_array_master_uses_the_current_rectangle_and_preserves_untouched_cells
 
 #[test]
 fn rewritten_cells_keep_their_equivalent_source_index() {
-    let parsed = parsed();
+    let source = SHEET.replace(r#"<c r="B1" s="2">"#, r#"<c r="B1" s="1">"#);
+    let parsed = parsed_sheet(&source);
     let mut workbook = projected(&parsed);
     edit(&mut workbook, "A1", |cell| {
         cell.value = xlsx_model::CellValue::Number { value: 9.0 }
@@ -395,7 +396,9 @@ fn rewritten_cells_keep_their_equivalent_source_index() {
 
 #[test]
 fn regenerated_sheet_data_keeps_equivalent_source_indices() {
-    let source = SHEET.replace(r#"<row r="1">"#, "<row>");
+    let source = SHEET
+        .replace(r#"<row r="1">"#, "<row>")
+        .replace(r#"<c r="B1" s="2">"#, r#"<c r="B1" s="1">"#);
     assert!(super::scan_sheet_data(source.as_bytes()).unwrap().is_none());
     let parsed = parsed_sheet(&source);
     let mut workbook = projected(&parsed);

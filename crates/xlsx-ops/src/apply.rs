@@ -86,6 +86,7 @@ pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
 pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
     match op {
         Op::SetCell { sheet, at, cell } => {
+            wb.styles.preserve_style_identity();
             let s = sheet_mut(wb, *sheet)?;
             let old = s.cell(*at).map(CellState::from).unwrap_or_default();
             s.set_cell(*at, cell.clone().into());
@@ -232,14 +233,14 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
             sheet,
             range,
             patch,
-        } => apply_range_formats(wb, *sheet, *range, |format, row, col| {
+        } => apply_range_formats(wb, *sheet, *range, true, None, |format, row, col| {
             patch_cell_format(format, patch, *range, row, col)
         }),
         Op::SetRangeNumberFormat {
             sheet,
             range,
             format,
-        } => apply_range_formats(wb, *sheet, *range, |cell_format, _, _| {
+        } => apply_range_formats(wb, *sheet, *range, true, None, |cell_format, _, _| {
             mutate_number_format(cell_format, format);
             Ok(())
         }),
@@ -248,6 +249,7 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
             range,
             format,
         } => {
+            wb.styles.preserve_style_identity();
             if format.rows == 0
                 || format.columns == 0
                 || format.formats.len() != (format.rows as usize) * (format.columns as usize)
@@ -256,13 +258,20 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
                     "captured format dimensions do not match its cells".into(),
                 ));
             }
-            apply_range_formats(wb, *sheet, *range, |cell_format, row, col| {
-                let source_row = (row - range.start.row) % format.rows;
-                let source_col = (col - range.start.col) % format.columns;
-                let index = (source_row * format.columns + source_col) as usize;
-                *cell_format = format.formats[index].clone();
-                Ok(())
-            })
+            apply_range_formats(
+                wb,
+                *sheet,
+                *range,
+                false,
+                Some(format),
+                |cell_format, row, col| {
+                    let source_row = (row - range.start.row) % format.rows;
+                    let source_col = (col - range.start.col) % format.columns;
+                    let index = (source_row * format.columns + source_col) as usize;
+                    *cell_format = format.formats[index].clone();
+                    Ok(())
+                },
+            )
         }
         Op::AddSheet { index, name } => {
             let idx = (*index).min(wb.sheets.len());
@@ -271,6 +280,35 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
             Ok(InvertedOp(vec![Op::RemoveSheet { index: idx }]))
         }
         Op::RemoveSheet { index } => remove_sheet(wb, *index),
+        Op::MoveSheet { from, to } => {
+            if *from >= wb.sheets.len() || *to >= wb.sheets.len() {
+                return Err(OpError::SheetIndexOutOfRange((*from).max(*to)));
+            }
+            let sheet = wb.sheets.remove(*from);
+            wb.sheets.insert(*to, sheet);
+            let remap = |old: SheetId| {
+                let index = old.0 as usize;
+                SheetId(if index == *from {
+                    *to
+                } else if from < to && index > *from && index <= *to {
+                    index - 1
+                } else if from > to && index >= *to && index < *from {
+                    index + 1
+                } else {
+                    index
+                } as u32)
+            };
+            for name in &mut wb.defined_names {
+                name.local_sheet = name.local_sheet.map(remap);
+            }
+            for table in wb.tables.iter_mut() {
+                table.sheet = remap(table.sheet);
+            }
+            Ok(InvertedOp(vec![Op::MoveSheet {
+                from: *to,
+                to: *from,
+            }]))
+        }
         Op::RenameSheet { sheet, name } => {
             let old = wb
                 .sheet(*sheet)
@@ -355,6 +393,8 @@ fn apply_range_formats(
     wb: &mut Workbook,
     sheet: SheetId,
     range: CellRange,
+    partial: bool,
+    captured: Option<&crate::formatting::CapturedFormat>,
     mut update: impl FnMut(&mut xlsx_model::CellFormat, u32, u32) -> Result<(), OpError>,
 ) -> Result<InvertedOp, OpError> {
     if wb.sheet(sheet).is_none() {
@@ -373,6 +413,7 @@ fn apply_range_formats(
         .map_or(0, |cols| u64::from(cols) + 1);
     let range_cells = rows.saturating_mul(cols);
     let mut staged = Vec::with_capacity(usize::try_from(range_cells).unwrap_or(0));
+    let mut resolved_formats = BTreeMap::new();
     {
         let sheet_ref = &wb.sheets[sheet.0 as usize];
         let styles = &mut wb.styles;
@@ -393,12 +434,94 @@ fn apply_range_formats(
                 } else {
                     None
                 };
-                let mut format = styles.cell_format(old_style);
+                let mut format = styles.cell_format(if partial {
+                    Some(old_style.unwrap_or(0))
+                } else {
+                    old_style
+                });
+                let previous = format.clone();
                 if let Err(error) = update(&mut format, at.row, at.col) {
                     styles.restore_pools(marks);
                     return Err(error);
                 }
-                match styles.intern_cell_format(&format) {
+                if let Some(captured) = captured {
+                    let source_row = (row - range.start.row) % captured.rows;
+                    let source_col = (col - range.start.col) % captured.columns;
+                    let index = (source_row * captured.columns + source_col) as usize;
+                    if let Some(source) = captured.source_formats.get(index) {
+                        if source.format != format {
+                            styles.restore_pools(marks);
+                            return Err(OpError::InvalidStyle(
+                                "captured provenance does not match its format".into(),
+                            ));
+                        }
+                        if let Some(style) = resolved_formats.get(&index) {
+                            staged.push(*style);
+                            continue;
+                        }
+                        let matches = |style| {
+                            crate::formatting::PreservedCellFormat::from_style(styles, style)
+                                == *source
+                        };
+                        let selected = captured
+                            .source_styles
+                            .get(index)
+                            .copied()
+                            .filter(|style| {
+                                style.is_none_or(|index| styles.xf(index).is_some())
+                                    && matches(*style)
+                            })
+                            .or_else(|| {
+                                (0..styles.cell_xfs.len() as u32)
+                                    .find(|&index| matches(Some(index)))
+                                    .map(Some)
+                            });
+                        let selected = match selected {
+                            Some(style) => Ok(style),
+                            None => match source.derived_from {
+                                Some(base) if styles.xf(base).is_some() => {
+                                    styles.intern_derived_cell_format(base, &format).map(Some)
+                                }
+                                _ => styles.intern_cell_format(&format),
+                            },
+                        };
+                        match selected {
+                            Ok(style) => {
+                                resolved_formats.insert(index, style);
+                                staged.push(style);
+                            }
+                            Err(_) => {
+                                styles.restore_pools(marks);
+                                return Err(OpError::NumFmtTableFull);
+                            }
+                        }
+                        continue;
+                    }
+                }
+                if format == previous {
+                    staged.push(old_style);
+                    continue;
+                }
+                let source = styles
+                    .format_source(old_style.unwrap_or(0))
+                    .1
+                    .unwrap_or(old_style.unwrap_or(0));
+                let origin = styles.format_source(source);
+                let can_unset = origin == (None, None) || origin.0 == Some(0);
+                let style = if partial
+                    && can_unset
+                    && format == xlsx_model::CellFormat::default()
+                    && styles.cell_format(Some(0)) == format
+                {
+                    Ok(None)
+                } else if partial {
+                    styles
+                        .intern_derived_cell_format(old_style.unwrap_or(0), &format)
+                        .map(Some)
+                } else {
+                    styles.intern_cell_format(&format)
+                };
+                match style {
                     Ok(style) => staged.push(style),
                     Err(_) => {
                         styles.restore_pools(marks);
@@ -2241,6 +2364,8 @@ mod range_format_exhaustion_tests {
                 xlsx_model::CellRef::new(0, 1),
             ),
             format: CapturedFormat {
+                source_styles: Vec::new(),
+                source_formats: Vec::new(),
                 rows: 1,
                 columns: 2,
                 formats: vec![
@@ -2287,6 +2412,8 @@ mod range_format_exhaustion_tests {
                 xlsx_model::CellRef::new(0, 1),
             ),
             format: CapturedFormat {
+                source_styles: Vec::new(),
+                source_formats: Vec::new(),
                 rows: 1,
                 columns: 2,
                 formats: vec![

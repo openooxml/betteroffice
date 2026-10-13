@@ -10,6 +10,9 @@ impl SheetPatch<'_> {
         };
         let original = self.styles.original;
         let written = &self.workbook.styles;
+        if written.has_style_identity() && original.xf(current).is_some() {
+            return false;
+        }
         let Some(source_xf) = original.cell_xfs.get(source as usize) else {
             return false;
         };
@@ -352,7 +355,7 @@ impl SheetPatch<'_> {
         }
         if !self.equivalent_style_oracle(original.style, cell.style) {
             attributes.retain(|attribute| attribute.name != "s");
-            if let Some(style) = cell.style {
+            if let Some(style) = self.styles.written(original.style, cell.style) {
                 attributes.push(XmlAttribute {
                     name: "s".to_owned(),
                     value: style.to_string(),
@@ -433,9 +436,20 @@ impl SheetPatch<'_> {
             self.plan,
         );
         let mut writer = Writer::new(std::mem::take(out));
-        let style = original
+        let mut style = original
             .filter(|source| self.equivalent_style_oracle(source.style, cell.style))
             .map_or(cell.style, |source| source.style);
+        if (original.is_some()
+            || self
+                .axes
+                .rows
+                .source(at.row)
+                .zip(self.axes.cols.source(at.col))
+                .is_some())
+            && let Some(derived) = self.styles.derived.get(&cell.style.unwrap_or(u32::MAX))
+        {
+            style = Some(*derived);
+        }
         write_cell(
             &mut writer,
             at,

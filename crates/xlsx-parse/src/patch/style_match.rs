@@ -14,6 +14,7 @@ pub(crate) struct StyleMatch<'a> {
     pub(super) original: &'a Stylesheet,
     current: &'a Stylesheet,
     pairs: RefCell<HashMap<(u32, u32), bool>>,
+    pub(super) derived: HashMap<u32, u32>,
 }
 
 impl<'a> StyleMatch<'a> {
@@ -22,7 +23,13 @@ impl<'a> StyleMatch<'a> {
             original,
             current,
             pairs: RefCell::new(HashMap::new()),
+            derived: HashMap::new(),
         }
+    }
+
+    pub(crate) fn with_derived(mut self, derived: HashMap<u32, u32>) -> Self {
+        self.derived = derived;
+        self
     }
 
     /// Whether a source cell's index still means the format the model's index
@@ -44,6 +51,9 @@ impl<'a> StyleMatch<'a> {
     fn resolve(&self, source: u32, current: u32) -> bool {
         let in_range =
             |stylesheet: &Stylesheet, index: u32| (index as usize) < stylesheet.cell_xfs.len();
+        if self.current.has_style_identity() && in_range(self.original, current) {
+            return false;
+        }
         if !in_range(self.original, source)
             || !in_range(self.current, source)
             || !in_range(self.current, current)
@@ -58,6 +68,9 @@ impl<'a> StyleMatch<'a> {
 
     /// The index to write for a model cell whose source cell carried `source`.
     pub(crate) fn written(&self, source: Option<u32>, current: Option<u32>) -> Option<u32> {
+        if let Some(index) = self.derived.get(&current.unwrap_or(u32::MAX)) {
+            return Some(*index);
+        }
         if self.equivalent(source, current) {
             source
         } else {
@@ -99,7 +112,8 @@ impl SourceStyles<'_> {
             .map(|(row, col)| CellRef::new(row, col));
         match source.and_then(|source| self.original.cell(source)) {
             Some(original) => self.styles.written(original.style, cell.style),
-            None => cell.style,
+            None if source.is_some() => self.styles.written(None, cell.style),
+            None => self.styles.written(None, cell.style),
         }
     }
 }

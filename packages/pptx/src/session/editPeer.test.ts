@@ -138,6 +138,7 @@ async function mixed(context: Awaited<ReturnType<typeof setup>>, parity: boolean
   await run({ method: 'insertParagraphBreak', args: [story, 2] });
   await run({ method: 'formatText', args: [story, 0, 2, { italic: true }] });
   await run({ method: 'setParagraphAlignment', args: [story, 0, 2, 'ctr'] });
+  await run({ method: 'setStoryParagraphs', args: [story, [{ runs: [{ text: 'New paragraphs', style: { italic: true } }] }, { runs: [{ text: 'Second' }] }]] });
   await run({ method: 'addShape', args: [slide, { name: 'Session shape', geometry: 'roundRect', rect, fill: '#123456' }] });
   const shape = access.snapshot().slides[0].shapes.find((item) => item.name === 'Session shape')!.id;
   const ops: PptxWorkerEditorOperation[] = [
@@ -162,6 +163,7 @@ async function mixed(context: Awaited<ReturnType<typeof setup>>, parity: boolean
   await run({ method: 'setCommentStatus', args: [comment, true] });
   await run({ method: 'setCommentPosition', args: [comment, { xEmu: 100, yEmu: 200 }] });
   await run({ method: 'removeComment', args: [comment] });
+  await run({ method: 'duplicateSlide', args: [slide, 1] });
   await run({ method: 'setSlideNotes', args: [slide, 'Notes'] });
   await run({ method: 'propose', args: ['agent', 'Review', [{ type: 'setSlideNotes', slideId: slide, text: 'Accepted' }]] });
   await run({ method: 'acceptProposal', args: [access.listProposals()[0].id] });

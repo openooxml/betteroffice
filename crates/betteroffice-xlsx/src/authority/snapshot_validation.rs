@@ -29,6 +29,7 @@ pub(crate) struct SnapshotValidation {
     record_offset: usize,
     format_digest: Sha256,
     format_key: Option<String>,
+    plain_format: bool,
     style_index: u32,
     style_keys: BTreeMap<u32, String>,
     format_keys: BTreeSet<String>,
@@ -187,6 +188,7 @@ impl JsonWindow<'_> {
         model: &WorkbookModel,
         xf: Option<&xlsx_model::styles::Xf>,
         formats: &BTreeMap<u16, usize>,
+        source_xf: Option<u32>,
     ) -> JsonResult {
         let default = CellFormat::default();
         let font = xf
@@ -259,6 +261,10 @@ impl JsonWindow<'_> {
             xf.and_then(|xf| xf.alignment.as_ref())
                 .unwrap_or(&default.alignment),
         )?;
+        if let Some(source) = source_xf {
+            self.raw(b",\"source_xf\":")?;
+            self.small(&source)?;
+        }
         self.raw(b"}")
     }
 
@@ -440,7 +446,7 @@ impl SnapshotValidation {
     pub(crate) fn advance(
         &mut self,
         authority: &WorkbookAuthority,
-        model: &WorkbookModel,
+        model: &mut WorkbookModel,
         keys: &mut SnapshotKeys,
         budget: SnapshotBudget,
     ) -> SnapshotResult<bool> {
@@ -470,7 +476,7 @@ impl SnapshotValidation {
     fn advance_unit(
         &mut self,
         authority: &WorkbookAuthority,
-        model: &WorkbookModel,
+        model: &mut WorkbookModel,
         keys: &mut SnapshotKeys,
         budget: SnapshotBudget,
     ) -> SnapshotResult<bool> {
@@ -577,9 +583,20 @@ impl SnapshotValidation {
             let start = self.json.bytes;
             let (done, bytes) =
                 json_window(&mut self.json, budget, &mut self.unit_bytes, |window| {
-                    window.format(model, xf, &self.number_formats)
+                    window.format(
+                        model,
+                        xf,
+                        &self.number_formats,
+                        (index != 0 && !self.plain_format).then(|| index - 1),
+                    )
                 })?;
             if let Some(key) = &self.format_key {
+                if index != 0 && !self.plain_format && !formats.contains_key(&txn, key) {
+                    self.plain_format = true;
+                    self.format_key = None;
+                    self.json = JsonPosition::default();
+                    return Ok(false);
+                }
                 let payload = atomic(&formats, &txn, key)?;
                 let payload = string(&payload)?;
                 if payload.len() > MAX_CELL_FORMAT_BYTES
@@ -605,7 +622,12 @@ impl SnapshotValidation {
             self.format_keys.insert(key.clone());
             if index != 0 {
                 self.style_keys.insert(index - 1, key);
+                if self.plain_format {
+                    model.styles.mark_generated_format(index - 1);
+                }
             }
+            model.styles.preserve_style_identity();
+            self.plain_format = false;
             self.style_index += 1;
             return Ok(false);
         }
