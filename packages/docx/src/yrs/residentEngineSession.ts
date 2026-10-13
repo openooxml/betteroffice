@@ -592,7 +592,10 @@ export async function createResidentEngineSession(
     openSourceDocx: (bytes, options) => {
       session.set_media_tokens(options.mediaTokens === true);
       const json = resident.openDocx(bytes, options.digest, options.generation, !options.initialUpdate);
-      if (options.initialUpdate) resident.loadState(options.initialUpdate);
+      if (options.initialUpdate) {
+        resident.loadState(options.initialUpdate);
+        markProjectionStories(session.story_ids());
+      }
       return json;
     },
     openDocument: (document, options) => {

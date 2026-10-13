@@ -1,8 +1,8 @@
 import { afterEach, beforeAll, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { rezipPartsToArrayBuffer, toBytes } from '../docx/rezip/parts';
-import { preloadOpcWasm } from '../wasm/opc';
+import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
+import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
 import { residentWorkerFactory } from './__fixtures__/residentWorker';
 import { ResidentSourceWorkerClient } from './residentSourceWorkerClient';
 import { createResidentCommandConnection } from './residentCommandConnection';
@@ -19,12 +19,21 @@ beforeAll(async () => {
 });
 afterEach(closeCommandEngines);
 
-function documentBytes() {
-  return new Uint8Array(rezipPartsToArrayBuffer(new Map([
-    ['[Content_Types].xml', toBytes('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')],
-    ['_rels/.rels', toBytes('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="r1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>')],
-    ['word/document.xml', toBytes('<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Seed</w:t></w:r></w:p><w:p><w:pPr><w:pageBreakBefore/></w:pPr><w:r><w:t>Second</w:t></w:r></w:p><w:sectPr/></w:body></w:document>')],
-  ])));
+const REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+
+function documentBytes(header?: string) {
+  const parts: PartsMap = new Map();
+  const set = (name: string, xml: string) => parts.set(name, toBytes(xml));
+  set('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
+    (header === undefined ? '' : '<Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>') + '</Types>');
+  set('_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="r1" Type="${REL}/officeDocument" Target="word/document.xml"/></Relationships>`);
+  if (header !== undefined) {
+    set('word/_rels/document.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdH1" Type="${REL}/header" Target="header1.xml"/></Relationships>`);
+    set('word/header1.xml', `<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>${header}</w:t></w:r></w:p></w:hdr>`);
+  }
+  set('word/document.xml', `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"${header === undefined ? '' : ` xmlns:r="${REL}"`}><w:body><w:p><w:r><w:t>Seed</w:t></w:r></w:p><w:p><w:pPr><w:pageBreakBefore/></w:pPr><w:r><w:t>Second</w:t></w:r></w:p>` +
+    (header === undefined ? '<w:sectPr/>' : '<w:sectPr><w:headerReference w:type="default" r:id="rIdH1"/></w:sectPr>') + '</w:body></w:document>');
+  return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
 async function parsedDocument(): Promise<Document> {
@@ -35,10 +44,10 @@ async function parsedDocument(): Promise<Document> {
   } finally { parser.destroy(); }
 }
 
-async function openCommands(clientId: number, initialUpdate?: Uint8Array, document?: Document) {
+async function openCommands(clientId: number, initialUpdate?: Uint8Array, document?: Document, bytes = documentBytes()) {
   const worker = start(clientId);
   const client = new ResidentSourceWorkerClient(worker);
-  await client.openSource({ ...(document ? { document } : { bytes: documentBytes() }), collaboration: { clientId, initialUpdate } });
+  await client.openSource({ ...(document ? { document } : { bytes }), collaboration: { clientId, initialUpdate } });
   const engine = worker.sessions[0]!;
   const at = { story: 'body', paraId: engine.paragraphs('body')[0]!.paraId, offset: 4 };
   const initial = await client.commandInit({ session: `replica-${clientId}`, incarnation: 1, epoch: 1,
@@ -51,9 +60,9 @@ async function openCommands(clientId: number, initialUpdate?: Uint8Array, docume
   return { worker, client, engine, initial };
 }
 
-async function open(clientId: number, initialUpdate?: Uint8Array, document?: Document) {
-  const { worker, client, engine, initial } = await openCommands(clientId, initialUpdate, document);
-  const session = createDocxWorkerEditSession({ source: documentBytes(),
+async function open(clientId: number, initialUpdate?: Uint8Array, document?: Document, bytes = documentBytes()) {
+  const { worker, client, engine, initial } = await openCommands(clientId, initialUpdate, document, bytes);
+  const session = createDocxWorkerEditSession({ source: bytes,
     connection: await createResidentCommandConnection(client, initial),
     echo: { paint() {}, drop() {}, present() {} }, maxRecoveryAttempts: 0,
     recovery: { reopen: () => Promise.reject(new Error('Unexpected reopen')) },
@@ -248,6 +257,36 @@ test('a collaborating session refuses the unordered remote update request', asyn
     expect((await a.session.submit('applyRemoteUpdate', { update: remoteUpdate(a, remote) }, merge).ack).status).toBe('applied');
     expect(a.engine.paragraphs('body')[0]!.text).toBe('Seed remote');
   } finally { remote.destroy(); a.session.dispose(); }
+}, TIMEOUT);
+
+test('a byte source saves the shared stories it joined with and leaves a plain open untouched', async () => {
+  const bytes = documentBytes('HeaderSeed');
+  const remote = await createYrsSession({ clientId: 9203 });
+  const plain = await open(9201, undefined, undefined, bytes);
+  const saveAfterTyping = async (opened: Awaited<ReturnType<typeof open>>) => {
+    expect((await opened.session.submit('insertText', { text: 'B' }).ack).status).toBe('applied');
+    const saved = new Uint8Array((await opened.client.save({ comments: [] })).bytes);
+    const reopened = await createYrsSession({ clientId: 9298 });
+    try {
+      reopened.openDocx(saved.slice(), true);
+      return { saved, body: reopened.paragraphs('body')[0]!.text, header: reopened.paragraphs('hf:rIdH1').map(paragraph => paragraph.text) };
+    } finally { reopened.destroy(); }
+  };
+  try {
+    const untouched = await saveAfterTyping(plain);
+    expect(untouched.body).toBe('SeedB');
+    expect(untouched.header).toEqual(['HeaderSeed']);
+    expect(unzipContainer(untouched.saved)['word/header1.xml']).toEqual(unzipContainer(bytes)['word/header1.xml']);
+
+    remote.openDocx(bytes.slice(), true);
+    remote.insertText({ story: 'hf:rIdH1', paraId: remote.paragraphs('hf:rIdH1')[0]!.paraId, offset: 10 }, ' shared');
+    const shared = await open(9202, remote.encodeState(), undefined, bytes);
+    try {
+      const joined = await saveAfterTyping(shared);
+      expect(joined.body).toBe('SeedB');
+      expect(joined.header).toEqual(['HeaderSeed shared']);
+    } finally { shared.session.dispose(); }
+  } finally { remote.destroy(); plain.session.dispose(); }
 }, TIMEOUT);
 
 test.todo('a merge that deletes the story holding the local selection repairs the confirmed selection', () => {});
