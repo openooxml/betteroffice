@@ -1038,7 +1038,7 @@ impl WorkbookAuthority {
         if !candidate.is_whole_document() {
             return SnapshotAdoption::NotApplicable;
         }
-        if let Err(error) = candidate.upgrade_schema() {
+        if let Err(error) = candidate.upgrade_schema_from(Some(&self.doc)) {
             return SnapshotAdoption::Incompatible(error);
         }
         match candidate.strict_materialize() {
@@ -1118,7 +1118,7 @@ impl WorkbookAuthority {
             let txn = staged.doc.transact();
             txn.store().pending_update().is_some() || txn.store().pending_ds().is_some()
         };
-        if let Err(error) = staged.upgrade_schema()
+        if let Err(error) = staged.upgrade_schema_from(Some(&self.doc))
             && !pending
         {
             return Err(AuthorityError::InvalidState(error));
@@ -1476,11 +1476,20 @@ impl WorkbookAuthority {
         self.materialize_internal(true)
     }
 
+    #[cfg(test)]
     fn upgrade_schema(&self) -> Result<bool, String> {
+        self.upgrade_schema_from(None)
+    }
+
+    /// `source` is the replica adopting this state, whose cells hold the
+    /// formats a state persisted before format facets keyed only by its
+    /// reading of them.
+    fn upgrade_schema_from(&self, source: Option<&Doc>) -> Result<bool, String> {
         let version = self.schema_version()?;
         validate_schema_version(version)?;
         self.deduplicate_sheet_order()?;
-        if version == SCHEMA_VERSION && self.has_current_base_fingerprint() {
+        let current = self.has_current_base_fingerprint();
+        if version == SCHEMA_VERSION && current {
             return Ok(false);
         }
         let (model, structure) = self.materialize_internal(false)?;
@@ -1506,6 +1515,9 @@ impl WorkbookAuthority {
             })
             .collect::<Result<BTreeMap<_, _>, String>>()?;
         let mut txn = self.doc.transact_mut_with(HYDRATE_ORIGIN);
+        if !current {
+            migrate_pre_facet_formats(&mut txn, &self.base.styles, source)?;
+        }
         let sheets = txn
             .get_map(SHEETS)
             .ok_or_else(|| "missing sheet map".to_string())?;
@@ -3353,6 +3365,109 @@ fn cell_format_entry(format: &CellFormat) -> Result<(String, String), String> {
         .map_err(|error| format!("cannot encode cell format: {error}"))?;
     let digest = Sha256::digest(payload.as_bytes());
     Ok((format!("{digest:x}"), payload))
+}
+
+/// `format` as releases before format facets resolved it.
+fn pre_facet_format(format: &CellFormat) -> CellFormat {
+    CellFormat {
+        font: format.font.clone(),
+        fill: format.fill.clone(),
+        border: format.border.clone(),
+        number_format: format.number_format.clone(),
+        alignment: xlsx_model::Alignment {
+            h: format.alignment.h,
+            v: format.alignment.v,
+            wrap_text: format.alignment.wrap_text,
+            shrink_to_fit: format.alignment.shrink_to_fit,
+            ..xlsx_model::Alignment::default()
+        },
+        ..CellFormat::default()
+    }
+}
+
+/// Moves cells keyed by a release before format facets onto the formats of
+/// `styles`. A cell takes its counterpart's format in `source` when that
+/// reads the same, and otherwise the first one that does, as such a release
+/// resolved it.
+fn migrate_pre_facet_formats(
+    txn: &mut TransactionMut<'_>,
+    styles: &Stylesheet,
+    source: Option<&Doc>,
+) -> Result<(), String> {
+    let mut entries = Vec::with_capacity(styles.cell_xfs.len());
+    let mut first = HashMap::new();
+    let mut readings = HashMap::new();
+    for index in 0..styles.cell_xfs.len() {
+        let index =
+            u32::try_from(index).map_err(|_| "cell format table is too large".to_string())?;
+        let format = styles.cell_format(Some(index));
+        let (released, _) = cell_format_entry(&pre_facet_format(&format))?;
+        let entry = cell_format_entry(&format)?;
+        first.entry(released.clone()).or_insert(entries.len());
+        readings.insert(entry.0.clone(), released);
+        entries.push(entry);
+    }
+    if readings.iter().all(|(key, released)| key == released) {
+        return Ok(());
+    }
+    let source = source.map(Doc::transact);
+    let sheets = txn
+        .get_map(SHEETS)
+        .ok_or_else(|| "missing sheet map".to_string())?;
+    let catalog = txn
+        .get_map(CELL_FORMATS)
+        .ok_or_else(|| "missing cell format catalog".to_string())?;
+    let keys = sheets.keys(&*txn).map(str::to_string).collect::<Vec<_>>();
+    let mut used = HashSet::new();
+    for key in keys {
+        let sheet = sheets
+            .get(&*txn, &key)
+            .and_then(|value| value.cast::<MapRef>().ok())
+            .ok_or_else(|| format!("sheet {key} is not a map"))?;
+        let cell_styles = nested_map(&sheet, &*txn, STYLES)?;
+        let counterparts = source.as_ref().and_then(|source| {
+            let sheet = source
+                .get_map(SHEETS)?
+                .get(source, &key)?
+                .cast::<MapRef>()
+                .ok()?;
+            nested_map(&sheet, source, STYLES).ok()
+        });
+        let cells = cell_styles
+            .iter(&*txn)
+            .filter_map(|(cell, value)| Some((cell.to_string(), value.cast::<String>().ok()?)))
+            .collect::<Vec<_>>();
+        for (cell, released) in cells {
+            let counterpart = counterparts
+                .as_ref()
+                .zip(source.as_ref())
+                .and_then(|(styles, source)| styles.get(source, &cell))
+                .and_then(|value| value.cast::<String>().ok());
+            let target = match counterpart {
+                Some(counterpart) if readings.get(&counterpart) == Some(&released) => counterpart,
+                _ => match first.get(&released) {
+                    Some(&index) => entries[index].0.clone(),
+                    None => continue,
+                },
+            };
+            if target != released {
+                cell_styles.try_update(txn, cell, Any::from(target.clone()));
+            }
+            used.insert(target);
+        }
+    }
+    for (key, payload) in &entries {
+        if used.contains(key) {
+            catalog.try_update(txn, key.clone(), payload.clone());
+        }
+    }
+    let (default, _) = cell_format_entry(&CellFormat::default())?;
+    for released in first.keys() {
+        if !readings.contains_key(released) && *released != default {
+            catalog.remove(txn, released);
+        }
+    }
+    Ok(())
 }
 
 fn authored_content_equal(left: Option<&Cell>, right: Option<&Cell>) -> bool {
