@@ -92,6 +92,60 @@ fn paragraph_end(engine: &EngineSession, index: usize) -> u32 {
         .1
 }
 
+/// The body's segments and every root as JSON, whose maps compare whatever
+/// order their entries were integrated in.
+fn document_content(engine: &EngineSession) -> (Vec<crate::StorySegment>, BTreeMap<String, Any>) {
+    use yrs::types::ToJson;
+    use yrs::{ReadTxn, Transact};
+    let roots = {
+        let txn = engine.doc().doc.transact();
+        txn.root_refs()
+            .map(|(name, root)| (name.to_owned(), root.to_json(&txn)))
+            .collect()
+    };
+    (engine.doc().story_segments("body").unwrap(), roots)
+}
+
+#[test]
+fn document_content_tells_documents_apart() {
+    let ctx = crate::EditCtx::local("", "");
+    let engine = paragraphs_engine(9715, 3);
+    assert_eq!(
+        document_content(&engine),
+        document_content(&paragraphs_engine(9715, 3))
+    );
+    let typed = paragraphs_engine(9715, 3);
+    typed
+        .doc()
+        .insert_text(
+            &ctx,
+            crate::Position::new("body", 2),
+            "x",
+            crate::FormatPolicy::Inherit,
+        )
+        .unwrap();
+    let bold = paragraphs_engine(9715, 3);
+    bold.doc()
+        .toggle_format(
+            &ctx,
+            crate::StoryRange::new("body", 1, 3),
+            crate::SimpleFormat::Bold,
+        )
+        .unwrap();
+    let renumbered = paragraphs_engine(9716, 3);
+    for (label, other) in [
+        ("an extra character", &typed),
+        ("a run attribute", &bold),
+        ("paragraph ids", &renumbered),
+    ] {
+        assert_ne!(
+            document_content(&engine),
+            document_content(other),
+            "{label}"
+        );
+    }
+}
+
 /// The work one keystroke does that would scale with the document.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct KeystrokeWork {
@@ -192,8 +246,8 @@ fn command_edits_lay_out_as_a_full_recompute_does() {
         twin.layout_document_with_regions_retained(&host.request)
             .unwrap();
         assert_eq!(
-            host.engine.doc().encode_state_as_update_v1(),
-            twin.doc().encode_state_as_update_v1(),
+            document_content(host.engine),
+            document_content(&twin),
             "{label}: document"
         );
         host.assert_matches_cold(label);
@@ -222,7 +276,7 @@ fn command_edits_lay_out_as_a_full_recompute_does() {
         .split_paragraph(&ctx, crate::Position::new("body", end - 6), None)
         .unwrap();
     twin.doc()
-        .apply_update_v1(&engine.doc().encode_state_as_update_v1())
+        .split_paragraph(&ctx, crate::Position::new("body", end - 6), None)
         .unwrap();
     host.relayout(None);
     check(&mut host, "enter");
