@@ -11,12 +11,18 @@ struct CommandHost<'a> {
 
 impl<'a> CommandHost<'a> {
     fn open(engine: &'a EngineSession, font: u32) -> Self {
+        Self::open_with(engine, small_page_request(font))
+    }
+
+    /// [`Self::open`] with the region request `request`, whose fonts the
+    /// frames use too.
+    fn open_with(engine: &'a EngineSession, request: String) -> Self {
         engine.set_local_lowering(true);
-        let request = small_page_request(font);
         engine
             .layout_document_with_regions_retained(&request)
             .unwrap();
-        let extras = json!({"fontChains": {"calibri|0|0": [font]}}).to_string();
+        let parsed: serde_json::Value = serde_json::from_str(&request).unwrap();
+        let extras = json!({"fontChains": parsed["measurement"]["fontChains"]}).to_string();
         let mut retained = HashMap::new();
         let frame = engine.build_display_list_frame(&extras, 0).unwrap();
         crate::frame_delta::apply_placeholder_test_frame(&frame, &mut retained);
@@ -44,6 +50,40 @@ impl<'a> CommandHost<'a> {
             .edit_resident_text(crate::StoryRange::new("body", start, end), None, true)
             .unwrap();
         self.relayout(Some("body"));
+    }
+
+    /// A plain text command as the worker routes it: the resident edit and
+    /// relayout where the engine takes them, else the generic edit and the full
+    /// relayout. Returns whether it was resident.
+    fn command(&mut self, story: &str, start: u32, end: u32, text: Option<&str>) -> bool {
+        let index = self.engine.doc().paragraph_index(story).unwrap();
+        let paragraph = |offset| index.para_at(offset).unwrap().para_id.to_string();
+        let resident =
+            self.engine
+                .takes_resident_text_edit(story, &paragraph(start), &paragraph(end), text);
+        if resident {
+            self.engine
+                .edit_resident_text(crate::StoryRange::new(story, start, end), text, true)
+                .unwrap();
+            self.relayout(Some(story));
+            return true;
+        }
+        let ctx = crate::EditCtx::local("", "");
+        match text {
+            Some(text) => self.engine.doc().insert_text(
+                &ctx,
+                crate::Position::new(story, start),
+                text,
+                crate::FormatPolicy::Inherit,
+            ),
+            None => self
+                .engine
+                .doc()
+                .delete_range(&ctx, crate::StoryRange::new(story, start, end)),
+        }
+        .unwrap();
+        self.relayout(None);
+        false
     }
 
     fn relayout(&mut self, story: Option<&str>) {
@@ -426,4 +466,134 @@ fn command_edits_ahead_of_tables_images_and_split_paragraphs_lay_out_as_a_full_r
         let work = keystroke_work(&engine, || host.insert(end - 2, "y"));
         typed(&mut host, "typing after enter", work);
     }
+}
+
+/// `edited` as the first body paragraph, then `between`, then filler that runs
+/// over several small pages.
+fn breadth_engine(client_id: u64, edited: &str, between: &str) -> EngineSession {
+    use super::lowering_fixture::{Package, para, run};
+    let filler: String = (0..30)
+        .map(|index| {
+            para(
+                &format!("{:08X}", 0x300 + index),
+                &run(&format!(
+                    "Filler paragraph {index} with enough words to wrap over two lines."
+                )),
+            )
+        })
+        .collect();
+    let body = format!("{}{between}{filler}", para("10000001", edited));
+    let engine = EngineSession::new(client_id);
+    crate::seed_from_docx(engine.doc(), &Package::new(&body).bytes()).unwrap();
+    engine.set_relayout_trigger(RelayoutTrigger::Open);
+    engine
+}
+
+/// The start of the body paragraph keyed `id`.
+fn paragraph_start(engine: &EngineSession, id: &str) -> u32 {
+    engine
+        .doc()
+        .paragraph_index("body")
+        .unwrap()
+        .para_span(id)
+        .unwrap()
+        .0
+}
+
+#[test]
+fn command_edits_around_rich_content_lay_out_as_a_full_recompute_does() {
+    use super::lowering_fixture::run;
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+    let cell = |id: &str, text: &str| {
+        format!(
+            r#"<w:tc><w:tcPr><w:tcW w:w="1500" w:type="dxa"/></w:tcPr>{}</w:tc>"#,
+            super::lowering_fixture::para(id, &run(text))
+        )
+    };
+    let table = format!(
+        r#"<w:tbl><w:tblPr><w:tblW w:w="3000" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="1500"/><w:gridCol w:w="1500"/></w:tblGrid><w:tr>{}{}</w:tr></w:tbl>"#,
+        cell("10000011", "Left cell"),
+        cell("10000012", "Right cell"),
+    );
+    let tracked = format!(
+        r#"{}<w:ins w:id="1" w:author="Ann" w:date="2026-01-02T00:00:00Z">{}</w:ins><w:del w:id="2" w:author="Bob" w:date="2026-01-03T00:00:00Z"><w:r><w:delText xml:space="preserve">removed </w:delText></w:r></w:del>{}"#,
+        run("Kept "),
+        run("inserted "),
+        run("tail")
+    );
+    let control = format!(
+        r#"{}<w:sdt><w:sdtPr><w:tag w:val="name"/><w:id w:val="7"/><w:text/></w:sdtPr><w:sdtContent>{}</w:sdtContent></w:sdt>{}"#,
+        run("Before "),
+        run("Ada Lovelace"),
+        run(" after")
+    );
+    let field_and_link = format!(
+        r#"{}<w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple>{}<w:hyperlink w:anchor="target"><w:r><w:t>a link</w:t></w:r></w:hyperlink>{}"#,
+        run("Page "),
+        run(" and "),
+        run(" end")
+    );
+    let cases: [(&str, String, &str, &str); 4] = [
+        (
+            "table cell",
+            run("Before the table"),
+            table.as_str(),
+            "body:t0:r0c0",
+        ),
+        ("tracked changes", tracked, "", "body"),
+        ("inline control", control, "", "body"),
+        ("field and hyperlink", field_and_link, "", "body"),
+    ];
+    for (label, edited, between, story) in cases {
+        let engine = breadth_engine(9720, &edited, between);
+        let mut host = CommandHost::open(&engine, font);
+        assert!(host.command(story, 2, 2, Some("x")), "{label}");
+        host.assert_matches_cold(&format!("{label}: typing"));
+        assert!(host.command(story, 2, 3, None), "{label}");
+        host.assert_matches_cold(&format!("{label}: delete"));
+    }
+
+    let engine = breadth_engine(9721, &run("First paragraph text"), &table);
+    let mut host = CommandHost::open(&engine, font);
+    let second = paragraph_start(&engine, "00000300");
+    assert!(!host.command("body", 3, second + 3, None));
+    host.assert_matches_cold("delete across a table");
+    let second = paragraph_start(&engine, "00000301");
+    assert!(!host.command("body", 3, second + 3, None));
+    host.assert_matches_cold("delete across paragraphs");
+}
+
+#[test]
+fn command_edits_with_a_page_numbered_header_lay_out_as_a_full_recompute_does() {
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+    let body = format!(
+        r#"{}<w:sectPr><w:headerReference w:type="default" r:id="rIdHeader2"/><w:pgSz w:w="7200" w:h="5760"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720" w:header="300" w:footer="300" w:gutter="0"/></w:sectPr>"#,
+        (0..24)
+            .map(|index| lowering_pages::p(
+                &format!("{:08X}", 0x500 + index),
+                &lowering_pages::r(&format!(
+                    "Body paragraph {index} under a header that numbers its page."
+                ))
+            ))
+            .collect::<String>()
+    );
+    let bytes = lowering_pages::with_body(&body);
+    let engine = EngineSession::new(9722);
+    crate::seed_from_docx(engine.doc(), &bytes).unwrap();
+    engine.set_relayout_trigger(RelayoutTrigger::Open);
+    let request = lowering_pages::region_request(&engine, &bytes, font).to_string();
+    let mut host = CommandHost::open_with(&engine, request);
+    host.command("body", 2, 2, Some("x"));
+    host.assert_matches_cold("typing under a page-numbered header");
+    let long = "A long pasted passage that adds a page and renumbers the pages after it. ";
+    host.command("body", 2, 2, Some(&long.repeat(12)));
+    host.assert_matches_cold("a paste that adds pages");
+    assert!(!host.command("hf:rIdHeader2", 1, 1, Some("x")));
+    host.assert_matches_cold("a header edit");
+    host.command("body", 2, 2, Some("y"));
+    host.assert_matches_cold("typing after a header edit");
 }
