@@ -103,3 +103,15 @@ impl SourceStyles<'_> {
         }
     }
 }
+
+/// A restored entry read from a snapshot record written before format facets
+/// keeps its source entry when it equals that entry's released reading; any
+/// other entry keeps it only when equal.
+pub fn keeps_source<T: PartialEq>(
+    current: &T,
+    source: &T,
+    released: bool,
+    released_reading: impl FnOnce(&T) -> T,
+) -> bool {
+    current == source || (released && *current == released_reading(source))
+}
