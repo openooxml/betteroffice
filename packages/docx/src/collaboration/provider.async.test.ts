@@ -616,6 +616,39 @@ describe('CollaborationProvider async replicas', () => {
     expect(value.errors).toEqual([]);
   });
 
+  it('retains awareness generations only while a typing merge can compare against them', async () => {
+    const value = setup();
+    await open(value);
+    const generations = (value.provider as unknown as { awarenessGenerations: ReadonlyMap<number, number> })
+      .awarenessGenerations;
+    const churn = (first: number) => {
+      for (let clientId = first; clientId < first + 64; clientId++) {
+        value.transport.receive(peerAwareness(1, 1, clientId));
+        value.transport.receive(peerAwareness(2, 2, clientId));
+        value.transport.receive(encodeAwarenessMessage([{ clientId, clock: 3, state: null }]));
+      }
+    };
+    announcePeer(value.transport);
+    value.transport.receive(encodeUpdate(Uint8Array.of(9)));
+    await settle();
+    churn(100);
+    value.transport.receive(peerAwareness(4, 7));
+    value.replica.merges[0].result.resolve(inference);
+    await settle();
+    expect(value.provider.peers).toHaveLength(1);
+    expect(value.provider.peers[0]).toMatchObject({ clientId: 8, inferredCursor: null });
+    expect(value.provider.peers[0].cursor?.head).toEqual(Uint8Array.of(7));
+    expect(generations.size).toBe(0);
+
+    churn(200);
+    expect(value.provider.peers.map((peer) => peer.clientId)).toEqual([8]);
+    expect(generations.size).toBe(0);
+    value.transport.receive(encodeAwarenessMessage([{ clientId: 8, clock: 5, state: null }]));
+    expect(value.provider.peers).toEqual([]);
+    expect(generations.size).toBe(0);
+    expect(value.errors).toEqual([]);
+  });
+
   for (const callback of ['peers', 'status'] as const) {
     it(`retires a mixed frame when a ${callback} callback reopens the transport`, async () => {
       const value = setup();

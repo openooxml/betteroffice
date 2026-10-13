@@ -168,6 +168,7 @@ export class CollaborationProvider {
   private awarenessRecords: ReadonlyMap<number, AwarenessRecord> = new Map();
   private readonly awarenessGenerations = new Map<number, number>();
   private awarenessGeneration = 0;
+  private readonly arrivalsInFlight = new Map<number, number>();
   private unsubscribeReplica: () => void;
   private unsubscribeTransport: () => void = () => {};
   private hasTransportSubscription = false;
@@ -674,6 +675,8 @@ export class CollaborationProvider {
     this.openEpoch += 1;
     this.replicaTail = Promise.resolve();
     this.replicaBytes = 0;
+    this.arrivalsInFlight.clear();
+    this.awarenessGenerations.clear();
   }
 
   private enqueueReplicaMessages(
@@ -684,6 +687,7 @@ export class CollaborationProvider {
     const connection = frame.connection;
     if (!this.isCurrentOpen(token, connection)) return;
     const awarenessAtArrival = this.awarenessGeneration;
+    this.arrivalsInFlight.set(awarenessAtArrival, (this.arrivalsInFlight.get(awarenessAtArrival) ?? 0) + 1);
     const operation = this.replicaTail.then(async () => {
       for (const message of messages) {
         if (!this.isCurrentOpen(token, connection)) return;
@@ -735,9 +739,9 @@ export class CollaborationProvider {
       }
     }).finally(() => {
       frame.remaining -= messages.length;
-      if (frame.remaining === 0 && connection === this.openEpoch) {
-        this.replicaBytes -= frame.bytes;
-      }
+      if (connection !== this.openEpoch) return;
+      if (frame.remaining === 0) this.replicaBytes -= frame.bytes;
+      this.settleArrival(awarenessAtArrival);
     });
     this.replicaTail = operation.catch(() => {});
   }
@@ -778,8 +782,22 @@ export class CollaborationProvider {
     }
   }
 
+  private settleArrival(generation: number): void {
+    const remaining = this.arrivalsInFlight.get(generation)! - 1;
+    if (remaining > 0) this.arrivalsInFlight.set(generation, remaining);
+    else this.arrivalsInFlight.delete(generation);
+    if (this.arrivalsInFlight.size === 0) {
+      this.awarenessGenerations.clear();
+      return;
+    }
+    const oldest = Math.min(...this.arrivalsInFlight.keys());
+    for (const [clientId, changed] of this.awarenessGenerations) {
+      if (changed <= oldest) this.awarenessGenerations.delete(clientId);
+    }
+  }
+
   private setAwarenessRecords(records: ReadonlyMap<number, AwarenessRecord>): void {
-    if (this.asyncReplica && records !== this.awarenessRecords) {
+    if (this.arrivalsInFlight.size > 0 && records !== this.awarenessRecords) {
       for (const [clientId, record] of records) {
         if (record.clock === this.awarenessRecords.get(clientId)?.clock) continue;
         this.awarenessGenerations.set(clientId, ++this.awarenessGeneration);
