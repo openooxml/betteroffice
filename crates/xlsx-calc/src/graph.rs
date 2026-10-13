@@ -187,14 +187,26 @@ impl DepGraph {
                 .filter(|reader| text_readers.contains(reader));
             seeds.extend(readers);
         }
-        self.asts
-            .lock()
-            .expect("parse cache poisoned")
-            .retain(|_, ast| Arc::strong_count(ast) > 1);
+        self.retain_live_asts(wb);
         seeds
             .into_iter()
             .map(|key| (key.sheet, key.cell()))
             .collect()
+    }
+
+    /// drop the asts of formula text no cell or defined name holds any more.
+    fn retain_live_asts(&self, wb: &Workbook) {
+        let live: HashSet<&str> = wb
+            .sheets
+            .iter()
+            .flat_map(|sheet| sheet.iter_cells())
+            .filter_map(|(_, cell)| cell.formula.as_deref())
+            .chain(wb.defined_names.iter().map(definition_source))
+            .collect();
+        self.asts
+            .lock()
+            .expect("parse cache poisoned")
+            .retain(|source, _| live.contains(source.as_str()));
     }
 
     /// what evaluating `ast` from `owner` resolves by sheet name, through the
