@@ -18,83 +18,6 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use xlsx_model::{CellValue, DateSystem};
-
-    #[test]
-    fn accounting_fill_uses_measured_padding_at_two_widths() {
-        let formatted = xlsx_model::numfmt::format_value(
-            &CellValue::Number { value: 12.0 },
-            "_(€* #,##0_)",
-            DateSystem::V1900,
-        );
-        for width in [96.0, 156.0] {
-            let layout = NumberFormatLayout {
-                left: 2.0,
-                width,
-                parts: formatted.layout.clone(),
-                general: None,
-                overflow: true,
-            };
-            let mut runs = Vec::new();
-            paint_number_format(
-                &formatted.text,
-                &layout,
-                Align::Right,
-                |text| {
-                    text.chars()
-                        .map(|c| match c {
-                            '(' => 5.0,
-                            ')' => 7.0,
-                            ' ' => 3.0,
-                            _ => 10.0,
-                        })
-                        .sum()
-                },
-                |text, x| runs.push((text.to_string(), x)),
-            );
-            assert_eq!(runs[0], ("€".into(), 7.0));
-            assert_eq!(runs.last().unwrap(), &("12".into(), width - 25.0));
-        }
-    }
-
-    #[test]
-    fn numbers_and_dates_fit_without_spilling() {
-        for (text, general, width, expected) in [
-            ("1/1/2020", None, 26.0, "##"),
-            ("1234.56789", Some(1234.56789), 76.0, "1234.57"),
-            ("123456789", Some(123456789.0), 66.0, "1E+08"),
-            ("123456789", Some(123456789.0), 26.0, "##"),
-            ("1234.50", None, 26.0, "##"),
-        ] {
-            let layout = NumberFormatLayout {
-                left: 2.0,
-                width,
-                parts: Vec::new(),
-                general,
-                overflow: true,
-            };
-            let mut runs = Vec::new();
-            paint_number_format(
-                text,
-                &layout,
-                Align::Right,
-                |s| s.len() as f32 * 10.0,
-                |text, x| runs.push((text.to_string(), x)),
-            );
-            assert_eq!(
-                runs,
-                [(
-                    expected.to_string(),
-                    2.0 + width - expected.len() as f32 * 10.0
-                )]
-            );
-        }
-    }
-}
-
 pub fn paint_number_format(
     text: &str,
     layout: &NumberFormatLayout,
@@ -175,5 +98,82 @@ pub fn paint_number_format(
     }
     if cursor < text.len() {
         paint(&text[cursor..], x);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xlsx_model::{CellValue, DateSystem};
+
+    #[test]
+    fn accounting_fill_uses_measured_padding_at_two_widths() {
+        let formatted = xlsx_model::numfmt::format_value(
+            &CellValue::Number { value: 12.0 },
+            "_(€* #,##0_)",
+            DateSystem::V1900,
+        );
+        for width in [96.0, 156.0] {
+            let layout = NumberFormatLayout {
+                left: 2.0,
+                width,
+                parts: formatted.layout.clone(),
+                general: None,
+                overflow: true,
+            };
+            let mut runs = Vec::new();
+            paint_number_format(
+                &formatted.text,
+                &layout,
+                Align::Right,
+                |text| {
+                    text.chars()
+                        .map(|c| match c {
+                            '(' => 5.0,
+                            ')' => 7.0,
+                            ' ' => 3.0,
+                            _ => 10.0,
+                        })
+                        .sum()
+                },
+                |text, x| runs.push((text.to_string(), x)),
+            );
+            assert_eq!(runs[0], ("€".into(), 7.0));
+            assert_eq!(runs.last().unwrap(), &("12".into(), width - 25.0));
+        }
+    }
+
+    #[test]
+    fn numbers_and_dates_fit_without_spilling() {
+        for (text, general, width, expected) in [
+            ("1/1/2020", None, 26.0, "##"),
+            ("1234.56789", Some(1234.56789), 76.0, "1234.57"),
+            ("123456789", Some(123456789.0), 66.0, "1E+08"),
+            ("123456789", Some(123456789.0), 26.0, "##"),
+            ("1234.50", None, 26.0, "##"),
+        ] {
+            let layout = NumberFormatLayout {
+                left: 2.0,
+                width,
+                parts: Vec::new(),
+                general,
+                overflow: true,
+            };
+            let mut runs = Vec::new();
+            paint_number_format(
+                text,
+                &layout,
+                Align::Right,
+                |s| s.len() as f32 * 10.0,
+                |text, x| runs.push((text.to_string(), x)),
+            );
+            assert_eq!(
+                runs,
+                [(
+                    expected.to_string(),
+                    2.0 + width - expected.len() as f32 * 10.0
+                )]
+            );
+        }
     }
 }
