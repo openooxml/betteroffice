@@ -445,12 +445,7 @@ export class WorkerDraftController {
   keyUp(): void { if (!this.composing) { this.trailing = null; this.conversionEnter = false; } }
 
   seal = (): PeerlessWorkerInputSeal => {
-    if (this.loading) {
-      if (this.loading.operations.length || this.composing?.loading === this.loading) return this.sealPrefill(this.loading);
-      this.cancelPrefill();
-      this.setDraft(null);
-      this.publish({ cell: null });
-    }
+    if (this.loading && (this.loading.operations.length || this.composing?.loading === this.loading)) return this.sealPrefill(this.loading);
     if (!this.composing) {
       if (!this.draft && this.snapshot.cell) this.publish({ cell: null });
       return {};
