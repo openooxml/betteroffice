@@ -236,6 +236,9 @@ struct RegionPass {
     notes_converged: bool,
     /// The layout covers only a leading part of the body.
     provisional: bool,
+    /// The widest page of the whole body, when an exact prefix pass kept only
+    /// its certified pages.
+    certified_width: Option<f64>,
 }
 
 /// A region pass over only as much of the body as fills the first `pages`
@@ -258,6 +261,20 @@ pub struct ExactPrefixLayout {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub document_width: Option<f64>,
 }
+
+/// The pages an exact prefix pass keeps once it lays out two past them, and
+/// the widest page of the whole body.
+#[derive(Clone, Copy)]
+struct ExactCut {
+    pages: usize,
+    document_width: f64,
+}
+
+/// The page size pagination takes when a request names none.
+const DEFAULT_PAGE_SIZE: docx_layout::types::Size = docx_layout::types::Size {
+    w: 816.0,
+    h: 1056.0,
+};
 
 const OPEN_USES_REGION_PATH: bool = false;
 const PREVIEW_USES_REGION_PATH: bool = false;
@@ -382,6 +399,7 @@ struct PreparedRegionLayout {
     measured_table_wrap_frames: Vec<TableMeasurementFrame>,
     measured_float_geometry: Option<[f64; 5]>,
     provisional: bool,
+    exact_cut: Option<ExactCut>,
     cached_page_totals: bool,
     /// Body blocks still being measured; `input.measured` is final without them.
     body: Option<BodyMeasure>,
@@ -841,6 +859,100 @@ fn options_through_section(
     options
 }
 
+/// Each section of the whole body as its pagination opens it, so a body cut
+/// inside any section lays that section out as the whole body does.
+struct BodySections {
+    options: docx_layout::types::LayoutOptions,
+    /// The geometry and start of each section a body break ends.
+    ended: Vec<(docx_layout::prescan::SectionLayoutConfig, Option<SectionBreakType>)>,
+}
+
+impl BodySections {
+    fn new(blocks: &[LayoutBlock], options: &docx_layout::types::LayoutOptions) -> Self {
+        let mut size = options.page_size.clone().unwrap_or(DEFAULT_PAGE_SIZE);
+        let mut margins =
+            docx_layout::section_breaks::resolve_page_margins(options.margins.as_ref());
+        let ended = blocks
+            .iter()
+            .filter_map(|block| match block {
+                LayoutBlock::SectionBreak(section) => Some(section),
+                _ => None,
+            })
+            .map(|section| {
+                size = section.page_size.clone().unwrap_or_else(|| size.clone());
+                margins = section.margins.clone().unwrap_or_else(|| margins.clone());
+                let config = docx_layout::prescan::SectionLayoutConfig {
+                    page_size: size.clone(),
+                    margins: margins.clone(),
+                    columns: section.columns.clone(),
+                };
+                (config, section.break_type)
+            })
+            .collect();
+        Self {
+            options: options.clone(),
+            ended,
+        }
+    }
+
+    /// The options of the body cut inside section `last`, which then lays
+    /// out as its final section.
+    fn through(&self, last: usize) -> docx_layout::types::LayoutOptions {
+        let mut options = self.options.clone();
+        if let Some((config, start)) = self.ended.get(last) {
+            options.final_page_size = Some(config.page_size.clone());
+            options.final_margins = Some(config.margins.clone());
+            options.columns.clone_from(&config.columns);
+            options.body_break_type = *start;
+        }
+        options
+    }
+
+    fn widest_page(&self) -> f64 {
+        let last = self
+            .options
+            .final_page_size
+            .as_ref()
+            .or(self.options.page_size.as_ref())
+            .map_or(DEFAULT_PAGE_SIZE.w, |size| size.w);
+        self.ended
+            .iter()
+            .map(|(config, _)| config.page_size.w)
+            .fold(last, f64::max)
+    }
+}
+
+/// Keeps the first `pages` pages of an exact prefix pass and the damage it
+/// records on them; false, leaving the pass whole, when it did not lay out two
+/// pages past them.
+fn cut_exact_prefix(pagination: &mut PaginationState, pages: usize) -> bool {
+    let layout = pagination
+        .layout
+        .as_mut()
+        .expect("layout retained after successful pagination");
+    if layout.pages.len() < pages + 2 {
+        return false;
+    }
+    layout.pages.truncate(pages);
+    pagination.rebuilt_page_start = pagination.rebuilt_page_start.min(pages);
+    pagination.rebuilt_page_end = pagination.rebuilt_page_end.min(pages);
+    for range in &mut pagination.rebuilt_page_ranges {
+        range.start = range.start.min(pages);
+        range.end = range.end.min(pages);
+    }
+    pagination
+        .rebuilt_page_ranges
+        .retain(|range| !range.is_empty());
+    pagination
+        .display_rebuilt_pages
+        .retain(|&page| page < pages);
+    pagination.note_changed_pages.retain(|&page| page < pages);
+    if let Some(restamped) = &mut pagination.restamped_pages {
+        restamped.retain(|&page| page < pages);
+    }
+    true
+}
+
 /// Measures leading blocks until their pagination runs two pages past
 /// `pages` outside a section with columns, far enough that no later block
 /// moves the first `pages` pages.
@@ -855,8 +967,7 @@ fn measure_page_prefix_plain(
     table_wrap_frames: &[impl Copy + Into<TableMeasurementFrame>],
     measurement: &docx_layout::measure_blocks::MeasurementConfig,
     geometry: &docx_layout::measure_blocks::FloatPageGeometry,
-    request_options: &docx_layout::types::LayoutOptions,
-    regions: &DocumentRegions,
+    through: &dyn Fn(usize) -> docx_layout::types::LayoutOptions,
     pages: usize,
     anchored: bool,
 ) -> Result<(Vec<BlockExtent>, Vec<FontChainDependencies>), String> {
@@ -901,8 +1012,7 @@ fn measure_page_prefix_plain(
         if end == blocks.len() {
             return Ok((measures, dependencies));
         }
-        let options =
-            options_through_section(request_options, regions, section_breaks(&blocks[..end]));
+        let options = through(section_breaks(&blocks[..end]));
         // Columns are balanced over their whole section, so no prefix ends inside one.
         if options
             .columns
@@ -939,8 +1049,7 @@ fn measure_page_prefix(
     table_wrap_frames: &[impl Copy + Into<TableMeasurementFrame>],
     measurement: &docx_layout::measure_blocks::MeasurementConfig,
     geometry: &docx_layout::measure_blocks::FloatPageGeometry,
-    request_options: &docx_layout::types::LayoutOptions,
-    regions: &DocumentRegions,
+    through: &dyn Fn(usize) -> docx_layout::types::LayoutOptions,
     pages: usize,
     anchored: bool,
     trigger: RelayoutTrigger,
@@ -952,8 +1061,7 @@ fn measure_page_prefix(
             table_wrap_frames,
             measurement,
             geometry,
-            request_options,
-            regions,
+            through,
             pages,
             anchored,
         );
@@ -996,8 +1104,7 @@ fn measure_page_prefix(
         if end == blocks.len() {
             return Ok((measures, dependencies));
         }
-        let options =
-            options_through_section(request_options, regions, section_breaks(&blocks[..end]));
+        let options = through(section_breaks(&blocks[..end]));
         // Columns are balanced over their whole section, so no prefix ends inside one.
         if options
             .columns
@@ -5684,6 +5791,7 @@ impl EngineSession {
             RegionPass {
                 notes_converged: state.notes_converged,
                 provisional: state.provisional,
+                certified_width: None,
             }
         };
         self.retained_region_layout_json(&pass)
@@ -5715,82 +5823,55 @@ impl EngineSession {
     /// prefix's, NUMPAGES fields render empty, and retained state serves only
     /// display and caret reads until a full pass replaces it. Edits made
     /// meanwhile take the full region pass.
-    ///
-    /// A request with `"exactPrefix": true` lays out as
-    /// [`Self::layout_document_with_regions_exact_prefix_retained`] does, and a
-    /// provisional reply then carries the `documentWidth` that pass reports.
     pub fn layout_document_with_regions_prefix_retained_json(
         &self,
         input_json: &str,
         pages: usize,
     ) -> Result<String, String> {
-        let request: serde_json::Value =
-            serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?;
-        if request["exactPrefix"] != true {
-            return self.layout_regions_retained_json(
-                input_json,
-                Some(PagePrefix {
-                    pages,
-                    exact: false,
-                }),
-            );
-        }
-        let prefix = self.layout_document_with_regions_exact_prefix_retained(input_json, pages)?;
-        let mut reply: serde_json::Value = serde_json::from_str(&self.retained_layout_json()?)
-            .map_err(|error| format!("parse: {error}"))?;
-        if let Some(width) = prefix.document_width {
-            reply["documentWidth"] = serde_json::json!(width);
-        }
-        serde_json::to_string(&reply).map_err(|error| format!("serialize: {error}"))
+        self.layout_regions_retained_json(
+            input_json,
+            Some(PagePrefix {
+                pages,
+                exact: false,
+            }),
+        )
     }
 
     /// The retained region layout of the first `pages` pages, taken only when
     /// each lays out and paints as the whole document's does, with no page
     /// totals, notes, floats, columns or continuous sections anywhere in it.
-    /// The retained layout then holds exactly those pages. Any other document
-    /// is laid out whole, as [`Self::layout_document_with_regions_retained`] does.
+    /// The retained layout then holds exactly those pages. Any other document,
+    /// or no pages, is laid out whole, as
+    /// [`Self::layout_document_with_regions_retained`] does.
     pub fn layout_document_with_regions_exact_prefix_retained(
         &self,
         input_json: &str,
         pages: usize,
     ) -> Result<ExactPrefixLayout, String> {
-        let pass = self.layout_regions(input_json, Some(PagePrefix { pages, exact: true }))?;
-        let mut pagination = self.pagination.borrow_mut();
-        let layout = pagination
-            .layout
-            .as_mut()
-            .expect("layout retained after region layout");
-        if !pass.provisional {
+        let pass = if pages > 0 {
+            self.layout_regions(input_json, Some(PagePrefix { pages, exact: true }))?
+        } else {
+            self.layout_regions(input_json, None)?
+        };
+        if let Some(width) = pass.certified_width {
             return Ok(ExactPrefixLayout {
-                provisional: false,
-                pages: layout.pages.len(),
-                document_width: None,
+                provisional: true,
+                pages,
+                document_width: Some(width),
             });
         }
-        layout.pages.truncate(pages);
-        let pages = layout.pages.len();
-        drop(pagination);
-        let request: RegionLayoutInput =
-            serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?;
-        let (input, regions, ..) = request.split();
-        let default = input
-            .options
-            .page_size
+        if pass.provisional {
+            self.layout_regions(input_json, None)?;
+        }
+        let pagination = self.pagination.borrow();
+        let layout = pagination
+            .layout
             .as_ref()
-            .map_or(816.0, |size| size.w);
-        let document_width = if regions.sections.is_empty() {
-            default
-        } else {
-            regions
-                .sections
-                .iter()
-                .map(|section| section.page_size.as_ref().map_or(default, |size| size.w))
-                .fold(0.0, f64::max)
-        };
+            .expect("layout retained after region layout");
         Ok(ExactPrefixLayout {
-            provisional: true,
-            pages,
-            document_width: Some(document_width),
+            provisional: false,
+            pages: layout.pages.len(),
+            document_width: None,
         })
     }
 
@@ -6220,6 +6301,7 @@ impl EngineSession {
         let mut measured_table_wrap_frames = Vec::new();
         let mut measured_float_geometry = None;
         let mut provisional = false;
+        let mut exact_cut = None;
         let mut body = None;
         if let Some(story) = body_story.as_deref() {
             let render_env = parsed_render_env
@@ -6324,14 +6406,19 @@ impl EngineSession {
                                 && (!exact || blocks.iter().all(exact_prefix_block)) =>
                         {
                             let anchored = anchors_objects(&blocks);
+                            let sections =
+                                exact.then(|| BodySections::new(&blocks, &input.options));
+                            let through = |last: usize| match &sections {
+                                Some(sections) => sections.through(last),
+                                None => options_through_section(&request_options, &regions, last),
+                            };
                             let (measures, dependencies) = measure_page_prefix(
                                 &mut blocks,
                                 &widths,
                                 &table_wrap_frames,
                                 &measurement,
                                 &geometry,
-                                &request_options,
-                                &regions,
+                                &through,
                                 pages,
                                 anchored,
                                 trigger,
@@ -6345,9 +6432,12 @@ impl EngineSession {
                             blocks.truncate(measures.len());
                             if provisional {
                                 let last = section_breaks(&blocks);
-                                input.options =
-                                    options_through_section(&request_options, &regions, last);
+                                input.options = through(last);
                                 regions.sections.truncate(last + 1);
+                                exact_cut = sections.map(|sections| ExactCut {
+                                    pages,
+                                    document_width: sections.widest_page(),
+                                });
                             }
                             input.measured = blocks
                                 .into_iter()
@@ -6402,6 +6492,7 @@ impl EngineSession {
             measured_table_wrap_frames,
             measured_float_geometry,
             provisional,
+            exact_cut,
             cached_page_totals,
             body,
         })
@@ -6474,6 +6565,7 @@ impl EngineSession {
             measured_table_wrap_frames,
             measured_float_geometry,
             provisional,
+            exact_cut,
             cached_page_totals,
             body,
             ..
@@ -6649,6 +6741,7 @@ impl EngineSession {
             self.pagination.borrow_mut().layout = Some(stabilized.layout);
         }
         let mut pagination = self.pagination.borrow_mut();
+        let certified = exact_cut.filter(|cut| cut_exact_prefix(&mut pagination, cut.pages));
         let layout = pagination
             .layout
             .as_mut()
@@ -6710,6 +6803,8 @@ impl EngineSession {
             })
             .transpose()?;
         pagination.note_changed_pages = note_changed_pages;
+        let page_count = certified.map_or(usize::MAX, |cut| cut.pages);
+        restamped_pages.retain(|&page| page < page_count);
         if let Some(pages) = &mut pagination.restamped_pages {
             pages.extend(restamped_pages);
         }
@@ -6785,6 +6880,7 @@ impl EngineSession {
         Ok(RegionPass {
             notes_converged,
             provisional,
+            certified_width: certified.map(|cut| cut.document_width),
         })
     }
 
@@ -6819,6 +6915,7 @@ impl EngineSession {
             measured_table_wrap_frames,
             measured_float_geometry,
             provisional,
+            exact_cut,
             cached_page_totals,
             body,
         } = prepared;
@@ -7125,6 +7222,7 @@ impl EngineSession {
         pagination.pagination_blocks_placed = pagination
             .pagination_blocks_placed
             .wrapping_add(placement_passes.placed_blocks as u64);
+        let certified = exact_cut.filter(|cut| cut_exact_prefix(&mut pagination, cut.pages));
         let layout = pagination
             .layout
             .as_mut()
@@ -7296,6 +7394,7 @@ impl EngineSession {
         Ok(RegionPass {
             notes_converged,
             provisional,
+            certified_width: certified.map(|cut| cut.document_width),
         })
     }
 
@@ -13456,6 +13555,8 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         let (widths, frames) =
             region_measurement_frames(blocks.iter(), &prepared.input, &prepared.regions);
         let geometry = initial_float_page_geometry(&prepared.input, &prepared.regions);
+        let (options, regions) = (&prepared.input.options, &prepared.regions);
+        let through = |last: usize| options_through_section(options, regions, last);
         let mut expected_blocks = blocks.clone();
         let (expected, _) = measure_page_prefix_plain(
             &mut expected_blocks,
@@ -13463,8 +13564,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             &frames,
             &prepared.measurement,
             &geometry,
-            &prepared.input.options,
-            &prepared.regions,
+            &through,
             8,
             true,
         )
@@ -13483,8 +13583,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 &frames,
                 &prepared.measurement,
                 &geometry,
-                &prepared.input.options,
-                &prepared.regions,
+                &through,
                 8,
                 anchors_objects(&blocks),
                 trigger,
@@ -21207,6 +21306,25 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         let pages = full["layout"]["pages"].as_array().unwrap();
         assert_eq!(laid.pages, pages.len());
         assert_eq!(prefix["layout"], full["layout"]);
+    }
+
+    #[test]
+    fn an_exact_cut_needs_two_laid_out_pages_past_it() {
+        let request = float_page_request(serde_json::json!({}));
+        let engine = EngineSession::new(149);
+        let bytes = docx_bytes("", &paragraphs(200, "Paragraph"));
+        crate::seed::seed_from_docx(engine.doc(), &bytes).unwrap();
+        engine
+            .layout_document_with_regions_retained(&request)
+            .unwrap();
+        let mut pagination = engine.pagination.borrow_mut();
+        let pages = pagination.layout.as_ref().unwrap().pages.len();
+        assert!(pages > 4);
+        assert!(!cut_exact_prefix(&mut pagination, pages - 1));
+        assert_eq!(pagination.layout.as_ref().unwrap().pages.len(), pages);
+        assert!(cut_exact_prefix(&mut pagination, pages - 2));
+        assert_eq!(pagination.layout.as_ref().unwrap().pages.len(), pages - 2);
+        assert!(pagination.rebuilt_page_end <= pages - 2);
     }
 
     #[test]
