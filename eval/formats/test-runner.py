@@ -1,9 +1,11 @@
 import importlib.util
 import json
 import os
+import re
 import shlex
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -39,6 +41,8 @@ assert len(list(workspace.iterdir())) == 1
 assert workspace.name.startswith('office-format-')
 overrides = [args[i + 1] for i, arg in enumerate(args) if arg == '-c']
 assert 'approval_policy="never"' in overrides
+assert 'mcp_servers.betteroffice.required=true' in overrides
+assert 'mcp_servers.betteroffice.startup_timeout_sec=' + os.environ['FAKE_STARTUP_TIMEOUT'] in overrides
 command = json.loads(next(value.split('=', 1)[1] for value in overrides if value.startswith('mcp_servers.betteroffice.command=')))
 mcp_args = json.loads(next(value.split('=', 1)[1] for value in overrides if value.startswith('mcp_servers.betteroffice.args=')))
 assert Path(command).is_absolute() and Path(command).is_file()
@@ -52,21 +56,57 @@ if os.environ.get('FAKE_MODE') == 'hang':
     time.sleep(60)
 if os.environ.get('FAKE_MODE') == 'crash':
     sys.exit(9)
-if os.environ.get('FAKE_MODE') != 'missing':
+if os.environ.get('FAKE_MODE') not in ('missing', 'no-tools'):
     source = workspace / task['input'] if os.environ.get('FAKE_MODE') == 'untouched' else Path(os.environ['FAKE_CORRECT']) / (task['id'] + '.' + task['format'])
     shutil.copyfile(source, workspace / task['output'])
 if os.environ.get('FAKE_MODE') == 'change-source':
     (workspace / task['input']).write_bytes(b'changed')
 print(json.dumps({'type': 'thread.started'}))
-for event in ['item.started', 'item.completed']:
-    print(json.dumps({'type': event, 'item': {'id': 'tool-1', 'type': 'mcp_tool_call', 'server': 'betteroffice'}}))
 mode = os.environ.get('FAKE_MODE')
+for event in [] if mode == 'no-tools' else ['item.started', 'item.completed']:
+    print(json.dumps({'type': event, 'item': {'id': 'tool-1', 'type': 'mcp_tool_call', 'server': 'betteroffice'}}))
 if mode == 'command':
     print(json.dumps({'type': 'item.completed', 'item': {'id': 'shell-1', 'type': 'command_execution', 'command': 'unzip -p input.xlsx'}}))
 elif mode == 'other-mcp':
     print(json.dumps({'type': 'item.completed', 'item': {'id': 'other-tool', 'type': 'mcp_tool_call', 'server': 'other'}}))
 elif mode == 'other-tool':
     print(json.dumps({'type': 'item.completed', 'item': {'id': 'browser-1', 'type': 'web_search', 'query': 'file:///input.xlsx'}}))
+'''
+SERVER_TOOLS = ['office_files', 'office_open', 'office_outline', 'office_grep', 'office_read', 'office_cells', 'office_render',
+                'office_verify', 'office_close', 'office_propose', 'office_propose_cells', 'office_review', 'office_accept',
+                'office_reject', 'office_export', 'xlsx_outline', 'xlsx_read_range', 'xlsx_preview', 'xlsx_write_range',
+                'xlsx_edit_grid', 'xlsx_edit_sheets', 'xlsx_find_replace', 'xlsx_format', 'xlsx_sort',
+                'pptx_outline', 'pptx_read_slide', 'pptx_preview', 'pptx_edit']
+FAKE_MCP = '''#!/usr/bin/env python3
+import json
+import os
+import sys
+from pathlib import Path
+args = sys.argv[1:]
+assert args[:-2] == ['argument with spaces'] and args[-2] == '--root'
+assert Path(args[-1]).is_dir() and not any(Path(args[-1]).iterdir())
+mode = os.environ.get('FAKE_MCP_MODE')
+if mode == 'exit':
+    sys.exit(3)
+tools = [name for name in json.loads(os.environ['FAKE_MCP_TOOLS']) if not (mode == 'missing-tool' and name == 'xlsx_sort')]
+initialized = False
+for line in sys.stdin:
+    message = json.loads(line)
+    if message['method'] == 'notifications/initialized':
+        initialized = True
+        continue
+    if message['method'] == 'initialize':
+        result = {'protocolVersion': message['params']['protocolVersion'], 'capabilities': {'tools': {}},
+                  'serverInfo': {'name': 'fake', 'version': '1'}}
+    else:
+        assert message['method'] == 'tools/list' and initialized
+        if mode == 'silent':
+            continue
+        start = int(message['params'].get('cursor', '0'))
+        result = {'tools': [{'name': name, 'inputSchema': {'type': 'object'}} for name in tools[start:start + 10]]}
+        if start + 10 < len(tools):
+            result['nextCursor'] = str(start + 10)
+    print(json.dumps({'jsonrpc': '2.0', 'id': message['id'], 'result': result}), flush=True)
 '''
 
 
@@ -80,7 +120,7 @@ class RunnerTests(unittest.TestCase):
         fake.write_text(FAKE_CODEX)
         fake.chmod(0o755)
         cli = self.bin / 'mcp'
-        cli.write_text('#!/bin/sh\nexit 0\n')
+        cli.write_text(FAKE_MCP)
         cli.chmod(0o755)
         self.cli = [str(cli), 'argument with spaces']
         self.correct = self.root / 'correct'
@@ -92,7 +132,8 @@ class RunnerTests(unittest.TestCase):
             package.save(self.correct / f'{task["id"]}.{task["format"]}')
         self.environment = patch.dict(os.environ, {
             'PATH': str(self.bin) + os.pathsep + os.environ['PATH'], 'FAKE_TASKS': str(ROOT / 'tasks.json'),
-            'FAKE_CORRECT': str(self.correct), 'FAKE_MODEL': 'test-model',
+            'FAKE_CORRECT': str(self.correct), 'FAKE_MODEL': 'test-model', 'FAKE_STARTUP_TIMEOUT': '60',
+            'FAKE_MCP_TOOLS': json.dumps(SERVER_TOOLS),
         })
         self.environment.start()
 
@@ -115,10 +156,49 @@ class RunnerTests(unittest.TestCase):
         report = json.loads((results / 'results.json').read_text())
         self.assertEqual(len(report['results']), 20)
         self.assertEqual(report['timeout_seconds'], 600)
+        self.assertGreater(report['mcp_startup_seconds'], 0)
         self.assertTrue(all(item['pass'] and item['tool_calls'] == 1 and item['duration_seconds'] > 0 for item in report['results']))
         self.assertEqual((results / 'results.md').read_text().count('| PASS |'), 20)
         repeat = subprocess.run([str(ROOT / 'run.sh'), command, str(results), 'test-model'], capture_output=True)
         self.assertEqual(repeat.returncode, 2)
+
+    def test_mcp_preflight_requires_a_ready_server_with_the_task_tools(self):
+        required = runner.required_tools(runner.checker.tasks())
+        self.assertTrue({'office_open', 'office_export', 'xlsx_sort', 'pptx_edit'} <= set(required) <= set(SERVER_TOOLS))
+        self.assertGreater(runner.mcp_ready(self.cli, required), 0)
+        for mode, reason in [('silent', 'did not answer tools/list within 1 seconds'),
+                             ('missing-tool', 'missing required tools: xlsx_sort'), ('exit', 'exited with code 3')]:
+            with self.subTest(mode=mode), patch.dict(os.environ, {'FAKE_MCP_MODE': mode}), \
+                    patch.object(runner, 'STARTUP_TIMEOUT_SECONDS', 1):
+                started = time.monotonic()
+                with self.assertRaisesRegex(RuntimeError, 'MCP server not ready: .*' + re.escape(reason)):
+                    runner.mcp_ready(self.cli, required)
+                self.assertLess(time.monotonic() - started, 5)
+
+    def test_run_stops_before_the_first_task_when_the_server_is_not_ready(self):
+        results = self.root / 'not ready'
+        command = ' '.join(shlex.quote(value) for value in self.cli)
+        with patch.dict(os.environ, {'FAKE_MCP_MODE': 'missing-tool'}):
+            result = subprocess.run([str(ROOT / 'run.sh'), command, str(results), 'test-model'],
+                                    stdin=subprocess.DEVNULL, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('MCP server not ready: missing required tools: xlsx_sort', result.stderr)
+        self.assertFalse(results.exists())
+
+    def test_codex_waits_for_the_required_server(self):
+        command = runner.command_line(self.cli, self.root, 'test-model', 'Do the task.')
+        overrides = [command[i + 1] for i, arg in enumerate(command) if arg == '-c']
+        self.assertIn('mcp_servers.betteroffice.required=true', overrides)
+        self.assertIn('mcp_servers.betteroffice.startup_timeout_sec=60', overrides)
+
+    def test_tasks_without_tool_calls_are_reported(self):
+        record = self.run_one('no-tools')
+        self.assertEqual(record['tool_calls'], 0)
+        self.assertFalse(record['pass'])
+        runner.write_results(self.root / 'no-tools', 'test-model', [record, self.run_one('missing')])
+        report = (self.root / 'no-tools' / 'results.md').read_text()
+        self.assertIn('Tasks without tool calls: 1.', report)
+        self.assertRegex(report, r'\| xlsx-01-correct-value \| FAIL \| [^|]+ \| 0 \|')
 
     def test_missing_output_crash_and_untouched_export_fail(self):
         for mode in ['missing', 'crash', 'untouched', 'change-source']:
