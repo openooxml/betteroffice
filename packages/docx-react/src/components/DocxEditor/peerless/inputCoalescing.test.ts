@@ -1,7 +1,16 @@
 import { expect, test } from 'bun:test';
+import type {
+  DocxCommandFramePayload, DocxCommandPayload, DocxCommandSelection, DocxEditState,
+} from '@betteroffice/docx/peerless';
 import { createOutbox } from '../../../../../../shared/office-session/commands/outbox';
-import type { CommandTicket } from '../../../../../../shared/office-session/commands/types';
+import { createWorkerEditSession } from '../../../../../../shared/office-session/commands/session';
+import type {
+  CommandAck, CommandConnection, CommandEnvelope, CommandTicket,
+} from '../../../../../../shared/office-session/commands/types';
+import type { PeerlessEchoIntent, PeerlessEchoPainter } from './echoPainter';
+import { admitIntent, createInputAdmission, submitFormattingIntent } from './inputAdmission';
 import { coalesceInputDrafts, type PeerlessCommandDraft } from './inputCoalescing';
+import type { PeerlessViewSnapshot, PeerlessViewStore } from './viewStore';
 
 function ticket(id: number): CommandTicket {
   return { id, seq: undefined, ack: Promise.resolve({ status: 'noop' }), presented: Promise.resolve('presented') };
@@ -41,4 +50,104 @@ test('d2b_coalescing_preserves_aliases_and_fences', () => {
     expect(coalesceInputDrafts(a, { ...next, options: b.options })).toBeUndefined();
   }
   expect(coalesceInputDrafts(draft('a', { fence: true }), draft('b'))).toBeUndefined();
+});
+
+function typingSession() {
+  type Ack = CommandAck<DocxCommandSelection | null, DocxEditState, DocxCommandFramePayload>;
+  const calls: { envelope: CommandEnvelope<DocxCommandPayload>; resolve(value: Ack): void }[] = [];
+  const queued: (() => void)[] = [];
+  const connection: CommandConnection<DocxCommandPayload, DocxCommandSelection | null, DocxEditState, DocxCommandFramePayload> = {
+    initial: { session: 'test', incarnation: 1, epoch: 1, version: 0, throughSeq: 0, outcomes: [] },
+    client: {
+      call: {
+        edit: (envelope) => new Promise<Ack>((resolve) => { calls.push({ envelope, resolve }); }),
+        checkpoint: async () => ({ state: new Uint8Array(), epoch: 1, version: 0, throughSeq: 0 }),
+      },
+      failure: undefined, onFailure: () => () => {}, dispose: async () => {},
+    },
+  };
+  const session = createWorkerEditSession<string, DocxCommandPayload, DocxCommandSelection | null, DocxEditState,
+    DocxCommandFramePayload, PeerlessEchoIntent>({
+    source: 'test', connection, recovery: { reopen: async () => { throw new Error('unexpected recovery'); } },
+    maxRecoveryAttempts: 0, checkpointPolicy: () => false, coalesce: coalesceInputDrafts,
+    requestFullFrame: async () => connection.initial, now: () => 0,
+    enqueue(callback) { queued.push(callback); },
+    echo: { paint() {}, drop() {}, present: () => true },
+  });
+  const snapshot: PeerlessViewSnapshot = {
+    identity: { session: 'test', incarnation: 1, epoch: 1 }, version: 0, throughSeq: 0, presentedThroughSeq: 0,
+    workerSelection: null, anchors: null, geometry: null, editState: undefined,
+  };
+  const viewStore: PeerlessViewStore = {
+    getSnapshot: () => snapshot, getServerSnapshot: () => snapshot,
+    subscribe: () => () => {}, acceptWorkerState() {}, installFrameGeometry() {}, dispose() {},
+  };
+  const echoPainter: PeerlessEchoPainter = {
+    installContext() {}, restoreBackground: () => true,
+    preview: (intent) => ({ intent, originalIntentCount: 1, contextFrameEpoch: 1 }),
+    paint() {}, drop() {}, reconcile() {}, disable() {}, dispose() {},
+  };
+  const admission = createInputAdmission({ session, viewStore, echoPainter });
+  const pump = () => { while (queued.length) queued.shift()!(); };
+  let acknowledged = 0;
+  return { session, admission, calls, pump,
+    type(text: string) {
+      return [...text].map((char) => {
+        const result = admitIntent(admission, { kind: 'insertText', payload: { text: char } });
+        pump();
+        if (result.status !== 'submitted') throw new Error(`Expected submitted input, got ${result.status}`);
+        return result.ticket;
+      });
+    },
+    async acknowledge(count: number) {
+      const batch = calls.slice(acknowledged, acknowledged + count);
+      acknowledged += count;
+      for (const { envelope, resolve } of batch) {
+        resolve({ ...connection.initial, version: envelope.seq, throughSeq: envelope.seq,
+          outcomes: [{ seq: envelope.seq, status: 'applied' }] });
+      }
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      pump();
+    },
+  };
+}
+
+test('chained typing behind held acks sends one coalesced insertText per in-flight window', async () => {
+  const h = typingSession();
+  const typed = h.type('abcdefghijklmnop');
+  const order: number[] = [];
+  typed.forEach((ticket, index) => { void ticket.ack.then(() => { order.push(index); }); });
+  expect(h.calls.map(({ envelope }) => envelope.payload)).toEqual([...'abcd'].map((text) => ({ text })));
+  await h.acknowledge(1);
+  expect(h.calls).toHaveLength(5);
+  expect(h.calls[4]!.envelope).toMatchObject({ kind: 'insertText', payload: { text: 'efghijklmnop' }, afterSeq: 4 });
+  const later = h.type('qrstu');
+  expect(h.calls).toHaveLength(5);
+  await h.acknowledge(1);
+  expect(h.calls).toHaveLength(6);
+  expect(h.calls[5]!.envelope).toMatchObject({ kind: 'insertText', payload: { text: 'qrstu' }, afterSeq: 5 });
+  await h.acknowledge(4);
+  const outcomes = await Promise.all([...typed, ...later].map((ticket) => ticket.ack));
+  expect(outcomes.map((outcome) => outcome.seq)).toEqual([1, 2, 3, 4, ...Array(12).fill(5), ...Array(5).fill(6)]);
+  expect(outcomes.every((outcome) => outcome.status === 'applied')).toBe(true);
+  expect(order).toEqual(typed.map((_, index) => index));
+  h.admission.dispose();
+  await h.session.dispose();
+});
+
+test('chained typing never coalesces across a selection or format change', async () => {
+  const h = typingSession();
+  h.type('abcdef');
+  admitIntent(h.admission, { kind: 'navigate', payload: { unit: 'character', direction: 'backward', extend: false } });
+  h.pump();
+  h.type('gh');
+  submitFormattingIntent(h.admission, { kind: 'toggleMark', payload: { mark: { type: 'bold' } } });
+  h.pump();
+  h.type('ij');
+  await h.acknowledge(4);
+  await h.acknowledge(4);
+  expect(h.calls.slice(4).map(({ envelope }) => [envelope.kind, 'text' in envelope.payload ? envelope.payload.text : null]))
+    .toEqual([['insertText', 'ef'], ['navigate', null], ['insertText', 'gh'], ['toggleMark', null], ['insertText', 'ij']]);
+  h.admission.dispose();
+  await h.session.dispose();
 });
