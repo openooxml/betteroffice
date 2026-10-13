@@ -953,7 +953,10 @@ impl WorkbookAuthority {
         }
         let authored_styles = nested_map(&sheet_map, &txn, STYLES).ok()?;
         let prior_style = match authored_styles.get(&txn, &key) {
-            Some(value) => Some(indices.get(&value.cast::<String>().ok()?)?.unwrap_or(0)),
+            Some(value) => {
+                let style = *indices.get(&value.cast::<String>().ok()?)?;
+                Some(style.unwrap_or_else(|| plain_style(&mut styles)))
+            }
             None => None,
         };
         let remapped = remap_styles(ops, source, &mut styles).ok()?;
@@ -1626,6 +1629,7 @@ impl WorkbookAuthority {
         let mut seen = HashSet::with_capacity(keys.len());
         let mut model = self.base.workbook();
         model.styles = styles;
+        let mut plain = None;
         let expected_sheet_keys = sheet_schema_keys(version);
         let optional_sheet_keys = sheet_schema_optional_keys(version);
         for key in keys.iter() {
@@ -1676,6 +1680,7 @@ impl WorkbookAuthority {
                 &sheet_map,
                 &txn,
                 &style_indices,
+                &mut || *plain.get_or_insert_with(|| plain_style(&mut model.styles)),
                 version,
                 SheetFallbacks {
                     freeze_pane,
@@ -1712,6 +1717,7 @@ impl WorkbookAuthority {
                     &sheet_map,
                     &txn,
                     &style_indices,
+                    &mut || 0,
                     version,
                     SheetFallbacks::default(),
                 )?;
@@ -3272,6 +3278,16 @@ fn materialize_cell_formats<T: ReadTxn>(
     Ok((styles, indices))
 }
 
+/// The index a cell authored with the plain format stores when no base xf carries it: xf 0
+/// when xf 0 is plain, else an explicit plain xf.
+fn plain_style(styles: &mut Stylesheet) -> u32 {
+    if styles.cell_format(Some(0)) == CellFormat::default() {
+        0
+    } else {
+        xlsx_ops::plain_xf(styles)
+    }
+}
+
 /// Rewrites the style indices `ops` carry from `source`'s table to the indices of the same
 /// formats in `target`, adding formats `target` lacks. Two tables built from one base agree on
 /// its indices but intern later formats in their own order.
@@ -3304,7 +3320,7 @@ fn remap_styles<'a>(
                     .map_err(|_| "number format table is full".to_string())?,
             }
         };
-        let resolved = Some(resolved.unwrap_or(0));
+        let resolved = Some(resolved.unwrap_or_else(|| plain_style(target)));
         mapped.insert(index, resolved);
         Ok(resolved)
     };
@@ -3461,6 +3477,7 @@ fn materialize_sheet<T: ReadTxn>(
     sheet_map: &MapRef,
     txn: &T,
     style_indices: &BTreeMap<String, Option<u32>>,
+    plain: &mut dyn FnMut() -> u32,
     version: i64,
     fallbacks: SheetFallbacks<'_>,
 ) -> Result<Sheet, String> {
@@ -3487,7 +3504,11 @@ fn materialize_sheet<T: ReadTxn>(
         let style = style_indices
             .get(&style_key)
             .ok_or_else(|| format!("cell style {key} references an unknown format"))?;
-        cells.entry((at.row, at.col)).or_default().style = Some(style.unwrap_or(0));
+        let style = match *style {
+            Some(style) => style,
+            None => plain(),
+        };
+        cells.entry((at.row, at.col)).or_default().style = Some(style);
     }
     sheet.adopt_cells(cells);
     sheet.col_widths = materialize_numbers(
@@ -4660,6 +4681,7 @@ impl WorkbookAuthority {
         let mut seen = HashSet::with_capacity(keys.len());
         let mut model = self.base.workbook();
         model.styles = styles;
+        let mut plain = None;
         let expected_sheet_keys = sheet_schema_keys(version);
         let optional_sheet_keys = sheet_schema_optional_keys(version);
         for key in keys.iter() {
@@ -4710,6 +4732,7 @@ impl WorkbookAuthority {
                 &sheet_map,
                 &txn,
                 &style_indices,
+                &mut || *plain.get_or_insert_with(|| plain_style(&mut model.styles)),
                 version,
                 SheetFallbacks {
                     freeze_pane,
@@ -4746,6 +4769,7 @@ impl WorkbookAuthority {
                     &sheet_map,
                     &txn,
                     &style_indices,
+                    &mut || 0,
                     version,
                     SheetFallbacks::default(),
                 )?;
@@ -4788,6 +4812,7 @@ fn materialize_sheet_oracle<T: ReadTxn>(
     sheet_map: &MapRef,
     txn: &T,
     style_indices: &BTreeMap<String, Option<u32>>,
+    plain: &mut dyn FnMut() -> u32,
     version: i64,
     fallbacks: SheetFallbacks<'_>,
 ) -> Result<Sheet, String> {
@@ -4814,7 +4839,11 @@ fn materialize_sheet_oracle<T: ReadTxn>(
         let style = style_indices
             .get(&style_key)
             .ok_or_else(|| format!("cell style {key} references an unknown format"))?;
-        cells.entry((at.row, at.col)).or_default().style = Some(style.unwrap_or(0));
+        let style = match *style {
+            Some(style) => style,
+            None => plain(),
+        };
+        cells.entry((at.row, at.col)).or_default().style = Some(style);
     }
     for ((row, col), cell) in cells {
         sheet.set_cell(CellRef::new(row, col), cell);
