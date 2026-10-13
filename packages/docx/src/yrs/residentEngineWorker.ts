@@ -767,6 +767,12 @@ function viewportFirst(init: ResidentCommandInitRequest): boolean {
   return init.layoutWithRegions && init.provisionalPages !== undefined;
 }
 
+/** Finishes a certified prefix's layout after the frames already in flight; false when there is none. */
+function completeCommandPrefix(host: ResidentCommandHost): Promise<boolean> {
+  if (commandLayout?.certifiedPages() == null) return Promise.resolve(false);
+  return host.withFrameWork(async () => commandLayout?.complete() ?? false);
+}
+
 /** A sliced region layout that a change in between abandoned. */
 function abandonedRegionLayout(error: unknown): boolean {
   if (error instanceof WebAssembly.RuntimeError) return false;
@@ -1196,7 +1202,8 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'edit') {
-    await requireCommandHost().withFrameWork(completeProvisionalLayout);
+    if (commandHost) await completeCommandPrefix(commandHost);
+    await completeProvisionalLayout();
     noteDocumentChange();
     fontRequirements = null;
     completedLayout = null;
@@ -1227,7 +1234,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     if (!Number.isSafeInteger(start) || start < 0 || !Number.isSafeInteger(end) || end <= start ||
       !Number.isSafeInteger(frameEpoch) || frameEpoch < 0) throw new TypeError('Invalid command viewport');
     const host = requireCommandHost();
-    if (end > (commandLayout?.certifiedPages() ?? end)) await host.withFrameWork(completeProvisionalLayout);
+    if (end > (commandLayout?.certifiedPages() ?? end)) await completeCommandPrefix(host);
     commandFrameChanges!.viewport = request.request;
     postCommandFrame(request.id);
     if (frameEpoch > 0 && commandLayout?.certifiedPages() != null && !slicedCompletion) {
