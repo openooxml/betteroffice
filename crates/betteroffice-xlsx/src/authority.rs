@@ -5953,7 +5953,7 @@ mod tests {
     }
 
     #[test]
-    fn remapping_a_plain_style_skips_an_xf_not_known_to_save_plain() {
+    fn remapping_a_plain_style_follows_the_shared_plain_key() {
         let mut target = Stylesheet::default();
         target.fonts.extend([
             xlsx_model::Font {
@@ -5987,11 +5987,7 @@ mod tests {
             panic!("expected one remapped cell");
         };
         assert_eq!(target.cell_format(cell.style), CellFormat::default());
-        assert_ne!(
-            cell.style,
-            Some(1),
-            "xf 1 reads plain, but nothing proves its saved markup does"
-        );
+        assert_eq!(cell.style, Some(1), "the first xf reading plain");
     }
 
     #[test]

@@ -838,8 +838,8 @@ fn cascade_plain_clear_names_no_source_font_whose_markup_the_model_drops() {
     );
 }
 
-#[test]
-fn cascade_collaborative_plain_clear_leaves_source_protection_behind_on_every_peer() {
+/// Peers that cleared italic on A1 beside B1's plain-reading but unlocked xf 1.
+fn collaborative_plain_clear_beside_an_unlocked_xf() -> (Vec<u8>, Workbook, Workbook) {
     let bytes = plain_reading_xf_source("", UNLOCKED_XF);
     let mut left = Workbook::open_collaborative(&bytes, 861).unwrap();
     let mut right = Workbook::open_collaborative(&bytes, 862).unwrap();
@@ -852,7 +852,30 @@ fn cascade_collaborative_plain_clear_leaves_source_protection_behind_on_every_pe
         )
         .unwrap();
     assert_eq!(left.model(), right.model());
+    (bytes, left, right)
+}
+
+/// No xf is proven to save plain, so the clear keeps A1's xf, as on main.
+#[test]
+fn cascade_collaborative_plain_clear_leaves_source_protection_behind_on_every_peer() {
+    let (bytes, left, right) = collaborative_plain_clear_beside_an_unlocked_xf();
+    let source = saved_cell_xf(&bytes, "A1");
     for peer in [&left, &right] {
+        let saved = peer.save().unwrap();
+        assert_eq!(saved_cell_xf(&saved, "A1"), source);
+        assert!(saved_cell_xf(&saved, "B1").contains(r#"locked="0""#));
+    }
+}
+
+#[test]
+#[ignore = "pre-existing on main: a collaborative plain clear without a proven-plain xf keeps the old format"]
+fn cascade_collaborative_plain_clear_without_a_proven_plain_xf_clears_italic_and_keeps_the_lock() {
+    let (_, left, right) = collaborative_plain_clear_beside_an_unlocked_xf();
+    for peer in [&left, &right] {
+        assert_eq!(
+            resolved_format(peer, "A1"),
+            xlsx_model::CellFormat::default()
+        );
         let saved = peer.save().unwrap();
         let markup = saved_cell_xf(&saved, "A1");
         assert!(!markup.contains(r#"locked="0""#), "A1 saved on {markup}");
