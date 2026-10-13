@@ -5,7 +5,7 @@ import * as yrs from '@betteroffice/docx/yrs';
 import * as peerless from '@betteroffice/docx/peerless';
 import * as measurement from '@betteroffice/docx/layout';
 import * as paged from './PeerlessPagedEditor';
-import { DocxEditor } from '../../DocxEditor';
+import { PeerlessDocxEditor as DocxEditor } from './PeerlessDocxEditor';
 import { setMissingWorkerCapabilitiesForTests } from '../internals/engineChoice';
 import { usePeerlessCollaboration, createPeerlessCollaborationReplica } from './peerlessCollaboration';
 import { PeerlessRemotePresence } from './PeerlessRemotePresence';
@@ -133,7 +133,8 @@ test('editor opens the requested room, reopens on room and document changes, and
     document: { content: [], sections: [] }, theme: {}, numbering: {}, settings: {}, fontTable: { fonts: [] },
     relationshipEntries: [], mediaEntries: [], chartEntries: [],
   } }, embeddedFontParts: [] } });
-  const open = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'open').mockResolvedValue({ hostJson, stateVector: source });
+  const open = spyOn(peerless.ResidentSourceWorkerClient.prototype, 'openSource').mockResolvedValue({ document: JSON.parse(hostJson).envelope.document, stateVector: source });
+  const prewarm = spyOn(peerless.ResidentSourceWorkerClient.prototype, 'prewarm').mockResolvedValue();
   const requirements = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'fontRequirements').mockResolvedValue('[]');
   const textEngine = spyOn(measurement, 'getRustTextEngine').mockResolvedValue({ registerFont: () => 0,
     registerSubstituteFont: () => 0, clearFonts() {} });
@@ -162,14 +163,14 @@ test('editor opens the requested room, reopens on room and document changes, and
     useLayoutEffect(() => { if (binding) onReady?.(binding); }, [binding, onReady]);
     return null;
   });
-  restores.push(() => open.mockRestore(), () => requirements.mockRestore(), () => textEngine.mockRestore(),
+  restores.push(() => open.mockRestore(), () => prewarm.mockRestore(), () => requirements.mockRestore(), () => textEngine.mockRestore(),
     () => init.mockRestore(), () => connection.mockRestore(), () => surface.mockRestore());
   const first = mock<(replica: CollaborationReplica | null) => void>(() => {});
   const next = mock<(replica: CollaborationReplica | null) => void>(() => {});
   const initialUpdate = new Uint8Array([2]);
   const view = render(<DocxEditor experimentalPeerless documentBuffer={source} showToolbar={false} collaboration={{ clientId: 41, initialUpdate, onReplica: first }} />);
   await waitFor(() => expect(first).toHaveBeenCalledTimes(1));
-  expect(open.mock.calls[0]![1]?.collaboration).toEqual({ clientId: 41, initialUpdate });
+  expect(open.mock.calls[0]![0]?.collaboration).toEqual({ clientId: 41, initialUpdate });
   const original = first.mock.calls[0]![0]!;
   view.rerender(<DocxEditor experimentalPeerless documentBuffer={source} showToolbar={false} collaboration={{ clientId: 41, initialUpdate, onReplica: next }} />);
   await waitFor(() => expect(next).toHaveBeenCalledWith(original));
@@ -187,7 +188,7 @@ test('editor opens the requested room, reopens on room and document changes, and
   const swapped = next.mock.calls.at(-1)![0]!;
   view.rerender(<DocxEditor experimentalPeerless documentBuffer={replacement} showToolbar={false} />);
   await waitFor(() => expect(open).toHaveBeenCalledTimes(4));
-  expect(open.mock.calls[3]![1]?.collaboration).toBeUndefined();
+  expect(open.mock.calls[3]![0]?.collaboration).toBeUndefined();
   expect(next.mock.calls.at(-1)![0]).toBeNull();
   await expect(swapped.applyUpdate(source)).rejects.toThrow('retired');
   view.rerender(<DocxEditor experimentalPeerless documentBuffer={replacement} showToolbar={false} collaboration={{ clientId: 42, initialUpdate, onReplica: next }} />);
