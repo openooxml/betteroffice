@@ -21542,7 +21542,10 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         let paragraph = |index: u32, properties: &str| {
             preview_fixture::paragraph(
                 index + 1,
-                &format!("<w:pPr>{properties}</w:pPr>{}", preview_fixture::run("Line")),
+                &format!(
+                    "<w:pPr>{properties}</w:pPr>{}",
+                    preview_fixture::run("Line")
+                ),
             )
         };
         let opening = format!("<w:pageBreakBefore/>{}", header_section(1440));
@@ -21563,7 +21566,10 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         let mut request = header_request(font, 96.0);
         let headed = request["regions"]["sections"][0].clone();
         let mut inherited = headed.clone();
-        inherited.as_object_mut().unwrap().remove("headerFooterRefs");
+        inherited
+            .as_object_mut()
+            .unwrap()
+            .remove("headerFooterRefs");
         let mut sections = vec![headed];
         sections.extend(std::iter::repeat_n(inherited, 1001));
         request["regions"]["sections"] = serde_json::Value::Array(sections);
