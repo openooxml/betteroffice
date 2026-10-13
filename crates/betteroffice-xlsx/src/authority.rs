@@ -890,6 +890,7 @@ impl WorkbookAuthority {
             return Ok(self.encode_ops_update(state_vector));
         }
         let mut model = self.materialize()?;
+        model.styles.bind_plain_xf();
         let ops =
             remap_styles(ops, styles, &mut model.styles).map_err(AuthorityError::InvalidState)?;
         let ops = ops.as_ref();
