@@ -14,6 +14,49 @@ async function open(page: Page, holdHydration = false) {
   await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.paintedTexts())).toContain('initial');
 }
 
+test('default worker API stages proposals after typing and supports accepting and rejecting them', async ({ page }) => {
+  await page.goto('/xlsx-worker-editor.html?asyncApi=1');
+  await page.waitForFunction(() => '__xlsxWorkerEditor' in window);
+  await page.evaluate(() => window.__xlsxWorkerEditor.ready);
+  expect(await page.evaluate(() => window.__xlsxWorkerEditor.mainThreadEngines())).toBe(0);
+  await page.getByTestId('xlsx-scroll').focus();
+  await page.getByTestId('xlsx-scroll').press('F2');
+  await page.getByTestId('xlsx-cell-editor').fill('typed before proposal');
+  const proposed = await page.evaluate(() => window.__xlsxWorkerEditor.peerless!.editor.proposeChanges!({
+    agentId: 'browser', note: 'accept this edit', edits: [{ sheet: 0, row: 0, col: 0, input: 'accepted' }],
+  }));
+  expect(proposed.ok).toBe(true);
+  if (!proposed.ok) throw new Error(proposed.failure.message);
+  expect(proposed.proposal.id).toBeTruthy();
+  expect(proposed.proposal.cells).toMatchObject([{ oldText: 'typed before proposal', newText: 'accepted' }]);
+  await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.peerless!.editor.commands.getState('proposalsPanel').value)).toBe(1);
+  const cellValues = () => page.evaluate(async () => {
+    const result = await window.__xlsxWorkerEditor.peerless!.editor.exportStructured({ scope: [{ sheet: 0, range: 'A1:B1' }] });
+    if (!result.ok) throw new Error(result.failure.message);
+    return result.content.sheets[0]!.cells.map((cell) => cell.displayText);
+  });
+  expect(await cellValues()).toEqual(['typed before proposal', '1']);
+  expect(await page.evaluate((proposalId) => window.__xlsxWorkerEditor.peerless!.editor.commands.execute('proposalAccept', { proposalId }),
+    proposed.proposal.id)).toMatchObject({ ok: true });
+  await expect.poll(cellValues).toEqual(['accepted', '1']);
+  await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.peerless!.editor.commands.getState('proposalsPanel').value)).toBe(0);
+  const rejected = await page.evaluate(() => window.__xlsxWorkerEditor.peerless!.editor.proposeChanges!({
+    agentId: 'browser', edits: [{ sheet: 0, row: 0, col: 1, input: '99' }],
+  }));
+  expect(rejected.ok).toBe(true);
+  if (!rejected.ok) throw new Error(rejected.failure.message);
+  expect(rejected.proposal.id).not.toBe(proposed.proposal.id);
+  expect(rejected.proposal.note).toBeNull();
+  await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.peerless!.editor.commands.getState('proposalsPanel').value)).toBe(1);
+  expect(await cellValues()).toEqual(['accepted', '1']);
+  expect(await page.evaluate((proposalId) => window.__xlsxWorkerEditor.peerless!.editor.commands.execute('proposalReject', { proposalId }),
+    rejected.proposal.id)).toMatchObject({ ok: true });
+  await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.peerless!.editor.commands.getState('proposalsPanel').value)).toBe(0);
+  expect(await cellValues()).toEqual(['accepted', '1']);
+  expect(await page.evaluate(() => window.__xlsxWorkerEditor.mainThreadEngines())).toBe(0);
+  expect(await page.evaluate(() => window.__xlsxWorkerEditor.errors)).toEqual([]);
+});
+
 async function edit(page: Page, value: string, capturePreview = false) {
   const scroll = page.getByTestId('xlsx-scroll');
   await scroll.focus();

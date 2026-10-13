@@ -1,7 +1,10 @@
+import type { XlsxAsyncEditorApi } from '@betteroffice/xlsx-react';
+
 export interface WorkerEditorProbe {
   ready: Promise<void>;
   mainThreadEngines(): number;
   peerless: {
+    readonly editor: XlsxAsyncEditorApi;
     cells(sheet: number, range: string): Promise<string[][]>;
     selection(): Promise<{
       sheetIndex: number;
