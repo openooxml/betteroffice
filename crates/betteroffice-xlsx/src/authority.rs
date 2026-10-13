@@ -891,8 +891,14 @@ impl WorkbookAuthority {
         }
         let mut model = self.materialize()?;
         model.styles.bind_plain_xf();
-        let ops =
-            remap_styles(ops, styles, &mut model.styles).map_err(AuthorityError::InvalidState)?;
+        let ops = remap_styles(ops, styles, &mut model.styles, |sheet, at| {
+            model
+                .sheets
+                .get(sheet.0 as usize)
+                .and_then(|sheet| sheet.cell(at))
+                .and_then(|cell| cell.style)
+        })
+        .map_err(AuthorityError::InvalidState)?;
         let ops = ops.as_ref();
         let authored_styles = ops
             .iter()
@@ -958,6 +964,7 @@ impl WorkbookAuthority {
         let cell_formats = txn.get_map(CELL_FORMATS)?;
         let (mut styles, indices) =
             materialize_cell_formats(&cell_formats, &txn, &self.base.styles).ok()?;
+        styles.bind_plain_xf();
         let order = txn.get_array(SHEET_ORDER)?;
         let keys = sheet_keys(&order, &txn).ok()?;
         let key = keys.get(sheet.0 as usize)?;
@@ -980,7 +987,7 @@ impl WorkbookAuthority {
             }
             None => None,
         };
-        let remapped = remap_styles(ops, source, &mut styles).ok()?;
+        let remapped = remap_styles(ops, source, &mut styles, |_, _| prior_style).ok()?;
         let Op::SetCell { cell, .. } = &remapped[0] else {
             return None;
         };
@@ -3301,16 +3308,18 @@ fn materialize_cell_formats<T: ReadTxn>(
 
 /// Rewrites the style indices `ops` carry from `source`'s table to the indices of the same
 /// formats in `target`, adding formats `target` lacks. Two tables built from one base agree on
-/// its indices but intern later formats in their own order.
+/// its indices but intern later formats in their own order. A plain style that a target with a
+/// bound plain xf cannot share faithfully keeps the cell's `prior` style.
 fn remap_styles<'a>(
     ops: &'a [Op],
     source: &Stylesheet,
     target: &mut Stylesheet,
+    prior: impl Fn(SheetId, CellRef) -> Option<u32>,
 ) -> Result<Cow<'a, [Op]>, String> {
-    let mut mapped: HashMap<u32, Option<u32>> = HashMap::new();
-    let mut resolve = |style: Option<u32>| -> Result<Option<u32>, String> {
+    let mut mapped: HashMap<u32, Option<Option<u32>>> = HashMap::new();
+    let mut resolve = |style: Option<u32>| -> Result<Option<Option<u32>>, String> {
         let Some(index) = style else {
-            return Ok(None);
+            return Ok(Some(None));
         };
         if let Some(&known) = mapped.get(&index) {
             return Ok(known);
@@ -3320,18 +3329,20 @@ fn remap_styles<'a>(
         }
         let format = source.cell_format(Some(index));
         let resolved = if target.xf(index).is_some() && target.cell_format(Some(index)) == format {
-            Some(index)
+            Some(Some(index))
+        } else if target.binds_plain() && format == CellFormat::default() {
+            target.plain_edit_xf().map(Some)
         } else {
-            match (0..target.cell_xfs.len() as u32)
-                .find(|&candidate| target.cell_format(Some(candidate)) == format)
-            {
+            let found = (0..target.cell_xfs.len() as u32)
+                .find(|&candidate| target.cell_format(Some(candidate)) == format);
+            let found = match found {
                 Some(found) => Some(found),
                 None => target
                     .intern_cell_format(&format)
                     .map_err(|_| "number format table is full".to_string())?,
-            }
+            };
+            Some(Some(found.unwrap_or_else(|| target.plain_xf())))
         };
-        let resolved = Some(resolved.unwrap_or_else(|| target.plain_xf()));
         mapped.insert(index, resolved);
         Ok(resolved)
     };
@@ -3339,7 +3350,10 @@ fn remap_styles<'a>(
     for (position, op) in ops.iter().enumerate() {
         let rewritten = match op {
             Op::SetCell { sheet, at, cell } => {
-                let style = resolve(cell.style)?;
+                let style = match resolve(cell.style)? {
+                    Some(style) => style,
+                    None => prior(*sheet, *at),
+                };
                 (style != cell.style).then(|| Op::SetCell {
                     sheet: *sheet,
                     at: *at,
@@ -3357,7 +3371,10 @@ fn remap_styles<'a>(
                 let mut changed = false;
                 let mut restored = Vec::with_capacity(formulas.len());
                 for (formula_sheet, at, state) in formulas {
-                    let style = resolve(state.style)?;
+                    let style = match resolve(state.style)? {
+                        Some(style) => style,
+                        None => prior(*formula_sheet, *at),
+                    };
                     changed |= style != state.style;
                     restored.push((
                         *formula_sheet,
@@ -5945,7 +5962,7 @@ mod tests {
                 ..CellState::default()
             },
         }];
-        let remapped = remap_styles(&ops, &source, &mut target).unwrap();
+        let remapped = remap_styles(&ops, &source, &mut target, |_, _| None).unwrap();
         let [Op::SetCell { cell, .. }] = &remapped[..] else {
             panic!("expected one remapped cell");
         };
@@ -5983,12 +6000,55 @@ mod tests {
                 ..CellState::default()
             },
         }];
-        let remapped = remap_styles(&ops, &source, &mut target).unwrap();
+        let remapped = remap_styles(&ops, &source, &mut target, |_, _| None).unwrap();
         let [Op::SetCell { cell, .. }] = &remapped[..] else {
             panic!("expected one remapped cell");
         };
         assert_eq!(target.cell_format(cell.style), CellFormat::default());
         assert_eq!(cell.style, Some(1), "the first xf reading plain");
+    }
+
+    #[test]
+    fn remapping_a_fresh_plain_style_onto_an_unproven_bound_xf_keeps_the_prior_style() {
+        let mut target = Stylesheet::default();
+        target.fonts.extend([
+            xlsx_model::Font {
+                italic: true,
+                ..Default::default()
+            },
+            xlsx_model::Font::default(),
+        ]);
+        target.cell_xfs.extend([
+            Xf {
+                font: Some(0),
+                ..Xf::default()
+            },
+            Xf {
+                font: Some(1),
+                ..Xf::default()
+            },
+        ]);
+        let mut source = target.clone();
+        source.cell_xfs.push(Xf::default());
+        target.bind_plain_xf();
+        let set = |at, style| Op::SetCell {
+            sheet: SheetId(0),
+            at,
+            cell: CellState {
+                style,
+                ..CellState::default()
+            },
+        };
+        let ops = [
+            set(CellRef::new(0, 0), Some(2)),
+            set(CellRef::new(0, 1), Some(1)),
+        ];
+        let remapped = remap_styles(&ops, &source, &mut target, |_, _| Some(0)).unwrap();
+        let [Op::SetCell { cell: a1, .. }, Op::SetCell { cell: b1, .. }] = &remapped[..] else {
+            panic!("expected two remapped cells");
+        };
+        assert_eq!(a1.style, Some(0));
+        assert_eq!(b1.style, Some(1));
     }
 
     #[test]
