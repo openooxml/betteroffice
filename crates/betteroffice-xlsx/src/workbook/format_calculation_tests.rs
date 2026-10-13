@@ -358,16 +358,12 @@ fn rename_reevaluates_only_volatile_formulas_and_their_dependents() {
     assert_eq!(value(&workbook, "E1"), number(11.0));
 }
 
-#[test]
-fn rename_reevaluates_what_shows_a_rewritten_formula() {
-    let rows = [
-        concat!(
-            r#"<c r="A1"><v>2</v></c><c r="C1"><f>Sheet1!A1</f><v>2</v></c>"#,
-            r#"<c r="D1" t="str"><f>FORMULATEXT(C1)</f><v>=Sheet1!A1</v></c>"#,
-        ),
-        "",
-        r#"<c r="A1"><f>Sheet2!A1+1</f><v>1</v></c>"#,
-    ];
+/// D1 shows C1's `formula`, which names the renamed sheet.
+fn assert_rename_reevaluates_formula_text(formula: &str) {
+    let first = format!(
+        r#"<c r="A1"><v>2</v></c><c r="C1"><f>{formula}</f><v>2</v></c><c r="D1" t="str"><f>FORMULATEXT(C1)</f><v>={formula}</v></c>"#
+    );
+    let rows = [first.as_str(), "", r#"<c r="A1"><f>Sheet2!A1+1</f><v>1</v></c>"#];
     let mut workbook = Workbook::open(&package(rows, "")).unwrap();
     track_formula_evaluations();
     workbook.apply_ops(vec![rename()], options()).unwrap();
@@ -377,6 +373,16 @@ fn rename_reevaluates_what_shows_a_rewritten_formula() {
     assert_eq!(value(&workbook, "D1"), text(&format!("={rewritten}")));
     assert_eq!(evaluated(), cells(&["D1"]));
     assert_fully_calculated(&mut workbook);
+}
+
+#[test]
+fn rename_reevaluates_what_shows_a_rewritten_formula() {
+    assert_rename_reevaluates_formula_text("Sheet1!A1");
+}
+
+#[test]
+fn rename_reevaluates_what_shows_a_rewritten_formula_the_engine_cannot_parse() {
+    assert_rename_reevaluates_formula_text("SUM(Sheet1!A1#)");
 }
 
 #[test]
@@ -400,6 +406,29 @@ fn rename_reevaluates_what_resolves_by_the_new_name() {
         assert_eq!(value(&workbook, at), number(expected));
     }
     assert_eq!(evaluated(), cells(&["C1", "D1", "E1"]));
+    assert_fully_calculated(&mut workbook);
+}
+
+#[test]
+fn rename_reevaluates_a_missing_name_qualified_by_the_new_sheet_name() {
+    let rows = [
+        concat!(
+            r#"<c r="C1" t="e"><f>New!Missing</f><v>#REF!</v></c>"#,
+            r#"<c r="E1" t="e"><f>Alias</f><v>#REF!</v></c>"#,
+        ),
+        "",
+        r#"<c r="A1"><f>Sheet2!A1+1</f><v>1</v></c>"#,
+    ];
+    let names = r#"<definedName name="Alias">New!Missing</definedName>"#;
+    let mut workbook = Workbook::open(&package(rows, names)).unwrap();
+    track_formula_evaluations();
+    workbook
+        .apply_ops(vec![rename_sheet(0, "New")], options())
+        .unwrap();
+    for at in ["C1", "E1"] {
+        assert_eq!(value(&workbook, at), error(ErrorValue::Name));
+    }
+    assert_eq!(evaluated(), cells(&["C1", "E1"]));
     assert_fully_calculated(&mut workbook);
 }
 
