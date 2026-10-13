@@ -292,7 +292,8 @@ fn paint_line(
             );
         }
         Some(style) if !xlsx_render::border_dash(style).is_empty() => {
-            let (x1, y1, x2, y2) = snap(x1, y1, x2, y2, width.round());
+            let pen = width.round().max(1.0);
+            let (x1, y1, x2, y2) = snap(x1, y1, x2, y2, pen);
             let scale = if style.starts_with("medium") {
                 width / 2.0
             } else {
@@ -305,18 +306,7 @@ fn paint_line(
                     .collect(),
                 0.0,
             );
-            stroke_seg(
-                pixmap,
-                x1,
-                y1,
-                x2,
-                y2,
-                width.round().max(1.0),
-                color,
-                dash,
-                transform,
-                mask,
-            );
+            stroke_seg(pixmap, x1, y1, x2, y2, pen, color, dash, transform, mask);
         }
         _ => stroke_seg(pixmap, x1, y1, x2, y2, width, color, None, transform, mask),
     }
