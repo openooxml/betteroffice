@@ -3348,17 +3348,23 @@ impl<'a> Exporter<'a> {
             "opaqueDrawing" => {
                 let element =
                     super::source::element_name(any_str(payload.get("xml")).unwrap_or_default());
+                let preview = any_map(payload.get("preview"));
                 self.note(
                     DiagnosticCode::UnsupportedContent,
                     Severity::Warning,
                     Some(anchor.clone()),
-                    format!(
-                        "An inline {element} is not represented in the export; it stays in the package."
-                    ),
+                    if preview.is_some() {
+                        format!("An inline {element} stays in the package; only its image preview is represented in the export.")
+                    } else {
+                        format!("An inline {element} is not represented in the export; it stays in the package.")
+                    },
                 );
-                InlineKind::Unsupported {
-                    element,
-                    alt_text: None,
+                match preview {
+                    Some(preview) => self.image(ctx, preview, &anchor),
+                    None => InlineKind::Unsupported {
+                        element,
+                        alt_text: None,
+                    },
                 }
             }
             "sdt" => {

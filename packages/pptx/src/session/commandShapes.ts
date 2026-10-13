@@ -2,7 +2,7 @@ import type { ShapeRect, ShapeSnapshot, SlideSnapshot } from '../types';
 
 export const MIN_SHAPE_SIZE_EMU = 76_200;
 
-function findShape(shapes: ShapeSnapshot[], shapeId: string): ShapeSnapshot | null {
+export function findShape(shapes: ShapeSnapshot[], shapeId: string): ShapeSnapshot | null {
   for (const shape of shapes) {
     if (shape.id === shapeId) return shape;
     const child = findShape(shape.children, shapeId);

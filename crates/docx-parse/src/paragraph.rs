@@ -1081,9 +1081,14 @@ pub(crate) fn parse_run_composed(
                     .iter()
                     .any(|content| !matches!(content, RunContent::OpaqueDrawing { .. }));
                 if !modeled && !alternate_content_has_text_box(child) {
+                    let preview = parsed.into_iter().find_map(|content| match content {
+                        RunContent::OpaqueDrawing { preview, .. } => preview,
+                        _ => None,
+                    });
                     replacements.push(vec![RunContent::OpaqueDrawing {
                         kind: "alternateContent".to_owned(),
                         xml: child.to_raw_inline_xml(),
+                        preview,
                     }]);
                 } else {
                     replacements.push(parsed);
@@ -1118,13 +1123,15 @@ fn parse_drawing_owned(
                 rule: Box::new(rule),
             }]);
         }
+        let media = drawing.as_ref().map(|context| context.media);
         if has_ole_object(element, 0) {
             return Ok(vec![RunContent::OpaqueDrawing {
                 kind: element.local_name().to_owned(),
                 xml: element.to_raw_inline_xml(),
+                preview: vml_image_content(element, relationships, media, Some(budget))
+                    .map(Box::new),
             }]);
         }
-        let media = drawing.as_ref().map(|context| context.media);
         if let Some(image) = vml_image_content(element, relationships, media, Some(budget)) {
             return Ok(vec![RunContent::Drawing {
                 image: Box::new(image),
@@ -1134,6 +1141,7 @@ fn parse_drawing_owned(
             return Ok(vec![RunContent::OpaqueDrawing {
                 kind: element.local_name().to_owned(),
                 xml: element.to_raw_inline_xml(),
+                preview: None,
             }]);
         }
         return Ok(Vec::new());
@@ -1148,6 +1156,7 @@ fn parse_drawing_owned(
             return Ok(vec![RunContent::OpaqueDrawing {
                 kind: "drawing".to_owned(),
                 xml: element.to_raw_inline_xml(),
+                preview: None,
             }]);
         }
         DrawingChart::None => {}
@@ -1697,7 +1706,7 @@ mod tests {
             })
             .flat_map(|run| run.content.iter())
             .filter_map(|content| match content {
-                RunContent::OpaqueDrawing { kind, xml } => Some((kind.as_str(), xml.as_str())),
+                RunContent::OpaqueDrawing { kind, xml, .. } => Some((kind.as_str(), xml.as_str())),
                 _ => None,
             })
             .collect();
@@ -1709,9 +1718,53 @@ mod tests {
     }
 
     #[test]
+    fn alternate_content_ole_keeps_selected_preview_and_wrapper_xml() {
+        let fallback = r#"<w:object><v:shape style="width:72pt;height:36pt"><v:imagedata r:id="rIdImg"/></v:shape><o:OLEObject Type="Embed" ProgID="Equation.DSMT4" r:id="rIdOle"/></w:object>"#;
+        for (choice, expected_size) in [
+            ("", Some((72.0, 36.0))),
+            (
+                r#"<w:object><v:shape style="width:144pt;height:72pt"><v:imagedata r:id="rIdChoice"/></v:shape><o:OLEObject Type="Embed" ProgID="Equation.DSMT4" r:id="rIdOle"/></w:object>"#,
+                Some((144.0, 72.0)),
+            ),
+            (
+                r#"<w:object><o:OLEObject Type="Embed" ProgID="Equation.DSMT4" r:id="rIdOle"/></w:object>"#,
+                None,
+            ),
+        ] {
+            let choice = if choice.is_empty() {
+                r#"<mc:Choice Requires="wps"/>"#.to_owned()
+            } else {
+                format!(r#"<mc:Choice Requires="wps">{choice}</mc:Choice>"#)
+            };
+            let wrapper = format!(
+                r#"<mc:AlternateContent>{choice}<mc:Fallback>{fallback}</mc:Fallback></mc:AlternateContent>"#
+            );
+            let paragraph = parse(&format!(
+                r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:r>{wrapper}</w:r></w:p>"#
+            ));
+            assert_eq!(paragraph.content.len(), 1);
+            let ParagraphContent::Inline(InlineNode::Run(run)) = &paragraph.content[0] else {
+                panic!("expected OLE run");
+            };
+            assert_eq!(run.content.len(), 1);
+            let RunContent::OpaqueDrawing { kind, xml, preview } = &run.content[0] else {
+                panic!("expected opaque AlternateContent");
+            };
+            assert_eq!(kind, "alternateContent");
+            assert_eq!(xml, &wrapper);
+            assert_eq!(
+                preview
+                    .as_ref()
+                    .map(|image| (image.size.width, image.size.height)),
+                expected_size.map(|(width, height)| (width * 12_700.0, height * 12_700.0))
+            );
+        }
+    }
+
+    #[test]
     fn ole_objects_and_unresolved_picts_stay_opaque() {
         let paragraph = parse(
-            r#"<w:p xmlns:w="w" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:r="r">
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
               <w:r><w:object><v:shape style="width:72pt;height:36pt"><v:imagedata r:id="rIdImg"/></v:shape><o:OLEObject Type="Embed" ProgID="Equation.DSMT4" ShapeID="_1" DrawAspect="Content" ObjectID="_1" r:id="rIdOle"/></w:object></w:r>
               <w:r><w:pict><v:shape id="PowerPlusWaterMarkObject1" style="width:72pt;height:36pt"><v:imagedata r:id="rIdImg"/></v:shape></w:pict></w:r>
               <w:r><w:pict><v:shape style="width:72pt;height:36pt"><v:imagedata r:id=""/></v:shape></w:pict></w:r>
@@ -1728,8 +1781,8 @@ mod tests {
                 run.content
                     .iter()
                     .filter_map(|content| match content {
-                        RunContent::OpaqueDrawing { kind, xml } => {
-                            Some((kind.as_str(), xml.as_str()))
+                        RunContent::OpaqueDrawing { kind, xml, preview } => {
+                            Some((kind.as_str(), xml.as_str(), preview.as_deref()))
                         }
                         _ => None,
                     })
@@ -1739,12 +1792,22 @@ mod tests {
         assert_eq!(opaques.len(), 3);
         assert_eq!(opaques[0].len(), 1);
         assert_eq!(opaques[0][0].0, "object");
-        assert!(opaques[0][0].1.contains("OLEObject"));
+        assert_eq!(
+            opaques[0][0].1,
+            r#"<w:object><v:shape style="width:72pt;height:36pt"><v:imagedata r:id="rIdImg"/></v:shape><o:OLEObject Type="Embed" ProgID="Equation.DSMT4" ShapeID="_1" DrawAspect="Content" ObjectID="_1" r:id="rIdOle"/></w:object>"#
+        );
+        let preview = opaques[0][0]
+            .2
+            .expect("OLE image fallback must remain visible");
+        assert_eq!(preview.size.width, 72.0 * 12_700.0);
+        assert_eq!(preview.size.height, 36.0 * 12_700.0);
         assert_eq!(opaques[1].len(), 1);
         assert_eq!(opaques[1][0].0, "pict");
         assert!(opaques[1][0].1.contains("imagedata"));
+        assert!(opaques[1][0].2.is_none());
         assert_eq!(opaques[2].len(), 1);
         assert_eq!(opaques[2][0].0, "pict");
+        assert!(opaques[2][0].2.is_none());
     }
 
     #[test]

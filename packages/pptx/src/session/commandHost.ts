@@ -5,7 +5,7 @@ import { SessionFailure, type MethodHandlers, type MethodPolicies } from '../../
 import type { PptxEditRequest, PptxEditResult, PptxStoryTarget, PptxStoryText, PptxTextField } from '../edits';
 import { DEFAULT_EDITOR_TEXT_STYLE, insertionEchoRun } from '../textFormatting';
 import type { ParagraphAlignment, PptxCaretAnchor, SlideDisplayList, ShapeRect, ShapeDraft, PresetShapeDraft, PictureDraft, ShapeReceipt, ShapeSnapshot, StorySnapshot, TextStyle, TextStyleSnapshot } from '../types';
-import { canMoveShape, canResizeShape, effectiveShapeRect, findTopLevelShape, MIN_SHAPE_SIZE_EMU } from './commandShapes';
+import { canMoveShape, canResizeShape, effectiveShapeRect, findShape, findTopLevelShape, MIN_SHAPE_SIZE_EMU } from './commandShapes';
 import {
   decodeTiffImage, initWasm, openPresentation, presentationMetadata, presentationStoryFormatting, type PresentationCommandReadResult,
   type PresentationHandle, type PresentationHistoryReceipt,
@@ -227,7 +227,7 @@ export function registerPresentationCommandHandlers(
   function selectedObject(slideId: string, shapeId: string): PresentationCommandObjectSelection | null {
     const deck = presentation().snapshot();
     const slide = deck.slides.find((slide) => slide.id === slideId);
-    const shape = slide && findTopLevelShape(slide, shapeId);
+    const shape = slide && findShape(slide.shapes, shapeId);
     const geometry = authoritativeGeometry(slideId);
     if (!shape || shape.id !== shapeId || !geometry) return null;
     const ids = new Set<string>();
@@ -256,7 +256,8 @@ export function registerPresentationCommandHandlers(
     const story = shape.textStories[0];
     return { kind: 'object', slideId, shapeId, storyId: story?.id ?? '',
       anchor: 0, focus: 0, affinity: 'downstream', token: objectToken(slideId, shape), bounds, rect,
-      canMove: canMoveShape(shape), canResize: canResizeShape(shape), units };
+      canMove: slide!.shapes.includes(shape) && canMoveShape(shape),
+      canResize: slide!.shapes.includes(shape) && canResizeShape(shape), units };
   }
 
   function objectStory(object: PresentationCommandObjectSelection): PresentationCommandSelection | null {
@@ -482,7 +483,7 @@ export function registerPresentationCommandHandlers(
           && paragraph.editable && paragraph.fields.length === 0)) echoRun = neighbour.neighbour;
     }
     const slide = objectSelection ? opened.snapshot().slides.find((slide) => slide.id === objectSelection!.slideId) : null;
-    const shape = slide && findTopLevelShape(slide, objectSelection!.shapeId);
+    const shape = slide && slide.shapes.find((shape) => shape.id === objectSelection!.shapeId);
     const color = (value: string | null | undefined) => value && /^[#]?[0-9a-f]{6}$/i.test(value) ? `#${value.replace(/^#/, '')}` : null;
     lastEditState = { readOnly, proposals: opened.listProposals(), notes: activeSlideId ? { slideId: activeSlideId, text: notes.get(activeSlideId) ?? '' } : null,
       object: shape && slide ? { formattable: shape.kind === 'shape', geometry: shape.geometry ?? null,
@@ -699,10 +700,16 @@ export function registerPresentationCommandHandlers(
       return { kind: 'history', direction: command.kind };
     }
     if (command.kind === 'selectObject') {
-      const { frame: tag, x, y, scale } = command.payload;
-      if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(scale) || scale <= 0) return 'invalid-payload';
+      const { frame: tag } = command.payload;
       if (!objectFrame(tag) || command.basis.version !== version || presentation().version() !== version) return 'stale-basis';
       if (composition) return 'invalid-composition';
+      if ('shapeId' in command.payload) {
+        if (typeof command.payload.shapeId !== 'string') return 'invalid-payload';
+        const object = selectedObject(tag.slideId, command.payload.shapeId);
+        return object ? { kind: 'object', object } : 'bad-target';
+      }
+      const { x, y, scale } = command.payload;
+      if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(scale) || scale <= 0) return 'invalid-payload';
       const geometry = frames.get(frameKey(tag))!.geometry;
       const hit = hitGeometry(geometry, { x, y }, undefined, scale);
       if (hit?.kind !== 'shape') return 'bad-target';
