@@ -1,6 +1,7 @@
 use super::edit_tests::{options, r, workbook_bytes};
 use super::*;
-use crate::{XlsxAnchor, XlsxExportOptions, XlsxFormulaResult};
+use crate::{EditRequest, XlsxAnchor, XlsxExportOptions, XlsxFormulaResult};
+use serde_json::json;
 use xlsx_calc::engine::{take_evaluated_formulas, track_formula_evaluations};
 use xlsx_model::ErrorValue;
 use xlsx_ops::BorderPatch;
@@ -578,6 +579,61 @@ fn a_value_edit_after_a_rename_reports_the_status_a_full_rename_leads_to() {
         assert!(cycles.contains(&cell));
     }
     assert!(limited.contains(&(SheetId(0), r("K1"))));
+}
+
+/// Sheet1 renamed to New; C1 reads A1 = 1 through the sheet name, D1 reads C1.
+fn renamed_workbook() -> Workbook {
+    let first = concat!(
+        r#"<c r="A1"><v>1</v></c><c r="C1"><f>Sheet1!A1</f><v>1</v></c>"#,
+        r#"<c r="D1"><f>C1+1</f><v>2</v></c>"#,
+    );
+    let mut workbook = Workbook::open(&package([first, "", ""], "")).unwrap();
+    workbook
+        .apply_ops(vec![rename_sheet(0, "New")], options())
+        .unwrap();
+    workbook
+}
+
+/// Without an undo step, C1 gets `formula`, which keeps it at 1, and A1 becomes 2.
+fn edit_outside_history(workbook: &mut Workbook, formula: &str) {
+    let target = |a1: &str| json!({ "sheetId": "sheet:0", "range": { "kind": "a1", "a1": a1 } });
+    let request: EditRequest = serde_json::from_value(json!({
+        "expectVersion": workbook.version(),
+        "history": "none",
+        "steps": [
+            { "op": "setFormulas", "target": target("C1"), "formulas": [[formula]] },
+            { "op": "setCellInputs", "target": target("A1"), "inputs": [["2"]] },
+        ],
+    }))
+    .unwrap();
+    workbook.apply_edits(&request).unwrap().unwrap();
+    assert_eq!(value(workbook, "C1"), number(1.0));
+}
+
+/// The restored `formula` reads A1 again, so C1 and D1 follow A1 = 2.
+fn assert_restored_formula_recalculated(workbook: &mut Workbook, formula: &str) {
+    let restored = workbook.model.sheets[0].cell(r("C1")).unwrap();
+    assert_eq!(restored.formula.as_deref(), Some(formula));
+    assert_eq!(value(workbook, "C1"), number(2.0));
+    assert_eq!(value(workbook, "D1"), number(3.0));
+    assert_fully_calculated(workbook);
+}
+
+#[test]
+fn undoing_a_rename_recalculates_a_formula_edited_outside_history() {
+    let mut workbook = renamed_workbook();
+    edit_outside_history(&mut workbook, "New!A1*0+1");
+    workbook.undo(options()).unwrap();
+    assert_restored_formula_recalculated(&mut workbook, "Sheet1!A1");
+}
+
+#[test]
+fn redoing_a_rename_recalculates_a_formula_edited_outside_history() {
+    let mut workbook = renamed_workbook();
+    workbook.undo(options()).unwrap();
+    edit_outside_history(&mut workbook, "Sheet1!A1*0+1");
+    workbook.redo(options()).unwrap();
+    assert_restored_formula_recalculated(&mut workbook, "New!A1");
 }
 
 #[test]
