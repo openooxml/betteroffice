@@ -34,6 +34,12 @@ const COL_STYLE: u8 = 17;
 const CHART: u8 = 18;
 const CHART_REF: u8 = 19;
 const ARRAY: u8 = 20;
+/// An `XF` record laid out with format facets; a plain `XF` record predates them.
+const XF_V2: u8 = 21;
+
+fn run_tag(tag: u8) -> u8 {
+    if tag == XF_V2 { XF } else { tag }
+}
 
 #[cfg(test)]
 thread_local! {
@@ -283,10 +289,10 @@ impl MetadataCursor {
                 self.index = 0;
                 continue;
             }
-            let tag = if self.phase == TABLE && self.child != 0 {
-                TABLE_COLUMN
-            } else {
-                self.phase
+            let tag = match self.phase {
+                TABLE if self.child != 0 => TABLE_COLUMN,
+                XF => XF_V2,
+                phase => phase,
             };
             w.u8(tag);
             match self.phase {
@@ -523,7 +529,8 @@ impl ModelSnapshotBuilder {
             chunk.len() - self.offset
         };
         let mut r = Reader::new(record);
-        let tag = r.u8()?;
+        let raw = r.u8()?;
+        let tag = run_tag(raw);
         if self.started {
             if self.runs.front().map(|&(expected, _)| expected) != Some(tag)
                 || self.remaining_records == 0
@@ -538,13 +545,13 @@ impl ModelSnapshotBuilder {
                 ));
             }
             if decoding || extent > budget.max_bytes() {
-                self.preflight_large_record(tag, budget)?;
+                self.preflight_large_record(raw, budget)?;
             }
             if !self.advance_capacity(tag, budget)? {
                 return Ok(SnapshotProgress::pending());
             }
             if decoding || extent > budget.max_bytes() {
-                let Some(consumed) = self.read_large_record(tag, r.rest(), budget)? else {
+                let Some(consumed) = self.read_large_record(raw, r.rest(), budget)? else {
                     return Ok(SnapshotProgress::pending());
                 };
                 self.offset += 1 + consumed;
@@ -555,7 +562,7 @@ impl ModelSnapshotBuilder {
                 }
                 return Ok(SnapshotProgress::pending());
             }
-            self.read_record(tag, &mut r)?;
+            self.read_record(raw, &mut r)?;
         } else {
             if extent > budget.max_bytes() {
                 return Err(SnapshotError::new(
@@ -583,7 +590,7 @@ impl ModelSnapshotBuilder {
     }
 
     fn preflight_large_record(&self, tag: u8, budget: SnapshotBudget) -> SnapshotResult<()> {
-        use crate::authority::snapshot::preflight_record;
+        use crate::authority::snapshot::{LegacyXf, preflight_record};
         macro_rules! preflight {
             ($ty:ty) => {
                 preflight_record::<$ty>(&self.decode, (self.ordinal, self.offset), budget)
@@ -595,7 +602,8 @@ impl ModelSnapshotBuilder {
             FONT => preflight!(Font),
             FILL => preflight!(Fill),
             BORDER => preflight!(Border),
-            XF => preflight!(Xf),
+            XF => preflight!(LegacyXf),
+            XF_V2 => preflight!(Xf),
             NUM_FMT => preflight!((u16, String)),
             HYPERLINK => preflight!(Hyperlink),
             CHART_REF => preflight!(ChartRef),
@@ -616,7 +624,7 @@ impl ModelSnapshotBuilder {
         payload: &[u8],
         budget: SnapshotBudget,
     ) -> SnapshotResult<Option<usize>> {
-        use crate::authority::snapshot::decode_record;
+        use crate::authority::snapshot::{LegacyXf, decode_record};
         macro_rules! decoded {
             ($ty:ty) => {
                 match decode_record::<$ty>(
@@ -657,6 +665,11 @@ impl ModelSnapshotBuilder {
                 end
             }
             XF => {
+                let (value, end) = decoded!(LegacyXf);
+                self.model.styles.cell_xfs.push(value.into());
+                end
+            }
+            XF_V2 => {
                 let (value, end) = decoded!(Xf);
                 self.model.styles.cell_xfs.push(value);
                 end
@@ -933,7 +946,8 @@ impl ModelSnapshotBuilder {
         Ok(())
     }
 
-    fn read_record(&mut self, tag: u8, r: &mut Reader<'_>) -> SnapshotResult<()> {
+    fn read_record(&mut self, raw: u8, r: &mut Reader<'_>) -> SnapshotResult<()> {
+        let tag = run_tag(raw);
         let Some((expected, remaining)) = self.runs.front_mut() else {
             return Err(SnapshotError::new("extra snapshot metadata record"));
         };
@@ -947,13 +961,14 @@ impl ModelSnapshotBuilder {
             self.runs.pop_front();
         }
         self.remaining_records -= 1;
-        match tag {
+        match raw {
             NAME => self.model.defined_names.push(read_name(r)?),
             STRING => self.model.shared_strings.push(r.str()?.to_owned()),
             FONT => self.model.styles.fonts.push(read_font(r)?),
             FILL => self.model.styles.fills.push(read_fill(r)?),
             BORDER => self.model.styles.borders.push(read_border(r)?),
-            XF => self.model.styles.cell_xfs.push(read_xf(r)?),
+            XF => self.model.styles.cell_xfs.push(read_released_xf(r)?),
+            XF_V2 => self.model.styles.cell_xfs.push(read_xf(r)?),
             NUM_FMT => self
                 .model
                 .styles
@@ -1615,6 +1630,16 @@ fn write_alignment(w: &mut Writer, value: &Alignment) {
     w.option(*reading_order, Writer::var_u32);
 }
 
+fn read_released_alignment(r: &mut Reader<'_>) -> SnapshotResult<Alignment> {
+    Ok(Alignment {
+        h: r.option(read_halign)?,
+        v: r.option(read_valign)?,
+        wrap_text: r.bool()?,
+        shrink_to_fit: r.bool()?,
+        ..Alignment::default()
+    })
+}
+
 fn read_alignment(r: &mut Reader<'_>) -> SnapshotResult<Alignment> {
     Ok(Alignment {
         h: r.option(read_halign)?,
@@ -1653,6 +1678,17 @@ fn write_xf(w: &mut Writer, value: &Xf) {
     w.option(*xf_id, Writer::var_u32);
     w.bool(*quote_prefix);
     w.bool(*pivot_button);
+}
+
+fn read_released_xf(r: &mut Reader<'_>) -> SnapshotResult<Xf> {
+    Ok(Xf {
+        font: r.option(Reader::var_u32)?,
+        fill: r.option(Reader::var_u32)?,
+        border: r.option(Reader::var_u32)?,
+        num_fmt_id: r.option(read_u16)?,
+        alignment: r.option(read_released_alignment)?,
+        ..Xf::default()
+    })
 }
 
 fn read_xf(r: &mut Reader<'_>) -> SnapshotResult<Xf> {

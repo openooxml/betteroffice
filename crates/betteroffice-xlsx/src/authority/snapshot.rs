@@ -820,6 +820,62 @@ struct_codec!(Alignment {
     reading_order
 });
 struct_codec!(Protection { locked, hidden });
+
+/// `Alignment` as laid out before format facets.
+struct LegacyAlignment {
+    h: Option<HAlign>,
+    v: Option<VAlign>,
+    wrap_text: bool,
+    shrink_to_fit: bool,
+}
+struct_codec!(LegacyAlignment {
+    h,
+    v,
+    wrap_text,
+    shrink_to_fit
+});
+
+/// `Xf` as laid out before format facets, which it reads as absent.
+pub(crate) struct LegacyXf {
+    font: Option<u32>,
+    fill: Option<u32>,
+    border: Option<u32>,
+    num_fmt_id: Option<u16>,
+    alignment: Option<LegacyAlignment>,
+}
+struct_codec!(LegacyXf {
+    font,
+    fill,
+    border,
+    num_fmt_id,
+    alignment
+});
+
+impl From<LegacyXf> for Xf {
+    fn from(xf: LegacyXf) -> Self {
+        let LegacyXf {
+            font,
+            fill,
+            border,
+            num_fmt_id,
+            alignment,
+        } = xf;
+        Self {
+            font,
+            fill,
+            border,
+            num_fmt_id,
+            alignment: alignment.map(|alignment| Alignment {
+                h: alignment.h,
+                v: alignment.v,
+                wrap_text: alignment.wrap_text,
+                shrink_to_fit: alignment.shrink_to_fit,
+                ..Alignment::default()
+            }),
+            ..Self::default()
+        }
+    }
+}
 struct_codec!(Xf {
     font,
     fill,
@@ -1107,6 +1163,18 @@ impl Codec for ChartAnchor {
 }
 
 const BASE_SECTIONS: usize = 16;
+const XF_SECTION: usize = 13;
+/// Tags an `XF_SECTION` record laid out with format facets; a record tagged
+/// with the section itself predates them.
+const XF_V2_TAG: u8 = 17;
+
+fn base_section(tag: u8) -> usize {
+    if tag == XF_V2_TAG {
+        XF_SECTION
+    } else {
+        usize::from(tag)
+    }
+}
 
 fn base_counts(base: &WorkbookBase) -> [usize; BASE_SECTIONS] {
     let WorkbookBase {
@@ -1211,7 +1279,11 @@ impl BaseCursor {
             tables,
         } = base;
         let mut w = Writer::new();
-        w.u8(self.section as u8);
+        w.u8(if self.section == XF_SECTION {
+            XF_V2_TAG
+        } else {
+            self.section as u8
+        });
         let index = self.index;
         match self.section {
             0 => write_manifest(base, &mut w),
@@ -1509,8 +1581,8 @@ enum BaseRecord {
 }
 
 impl BaseRecord {
-    fn preflight_cost(section: usize, r: &mut DecodePreflight<'_>) -> SnapshotResult<usize> {
-        match section {
+    fn preflight_cost(tag: u8, r: &mut DecodePreflight<'_>) -> SnapshotResult<usize> {
+        match base_section(tag) {
             0 => {
                 r.value::<u64>()?;
                 r.value::<DateSystem>()?;
@@ -1533,7 +1605,8 @@ impl BaseRecord {
             10 => r.value::<Font>()?,
             11 => r.value::<Fill>()?,
             12 => r.value::<Border>()?,
-            13 => r.value::<Xf>()?,
+            XF_SECTION if tag == XF_V2_TAG => r.value::<Xf>()?,
+            XF_SECTION => r.value::<LegacyXf>()?,
             14 => r.value::<(u16, String)>()?,
             16 => r.value::<Table>()?,
             _ => return Err(SnapshotError::new("invalid authority base section")),
@@ -1569,8 +1642,8 @@ impl BaseRecord {
         })
     }
 
-    fn read(r: &mut BoundedReader<'_>, section: usize) -> SnapshotResult<Self> {
-        Ok(match section {
+    fn read(r: &mut BoundedReader<'_>, tag: u8) -> SnapshotResult<Self> {
+        Ok(match base_section(tag) {
             0 => {
                 let start = r.position;
                 r.prepare::<u64>()?;
@@ -1616,7 +1689,8 @@ impl BaseRecord {
             10 => Self::Font(r.value()?),
             11 => Self::Fill(r.value()?),
             12 => Self::Border(r.value()?),
-            13 => Self::Xf(r.value()?),
+            XF_SECTION if tag == XF_V2_TAG => Self::Xf(r.value()?),
+            XF_SECTION => Self::Xf(r.value::<LegacyXf>()?.into()),
             14 => Self::NumberFormat(r.value()?),
             15 => Self::Color(r.value()?),
             16 => Self::Table(r.value()?),
@@ -1645,14 +1719,15 @@ impl BaseBuilder {
         }
         let mut cursor = self.cursor.clone();
         cursor.normalize(&self.counts);
-        let section = usize::from(Reader::new(payload).u8()?);
+        let tag = Reader::new(payload).u8()?;
+        let section = base_section(tag);
         if section != cursor.section || section > BASE_SECTIONS {
             return Err(SnapshotError::new("unexpected authority base record"));
         }
         let cost = DECODE_RESERVATION
             .saturating_add(1)
             .saturating_add(BaseRecord::preflight_cost(
-                section,
+                tag,
                 &mut DecodePreflight::new(payload, 1, &self.decode),
             )?);
         if cost > budget.max_bytes() {
@@ -1674,11 +1749,12 @@ impl BaseBuilder {
             max_elements: budget.max_records(),
             state: &mut self.decode,
         };
-        let section = usize::from(reader.atomic::<u8>()?);
+        let tag = reader.atomic::<u8>()?;
+        let section = base_section(tag);
         if section != self.cursor.section || section > BASE_SECTIONS {
             return Err(SnapshotError::new("unexpected authority base record"));
         }
-        let record = BaseRecord::read(&mut reader, section);
+        let record = BaseRecord::read(&mut reader, tag);
         crate::snapshot::step::record(1, budget.max_bytes() - reader.remaining);
         let record = match record {
             Ok(record) => record,
@@ -1768,7 +1844,8 @@ impl BaseBuilder {
     fn push(&mut self, payload: &[u8]) -> SnapshotResult<()> {
         let mut r = Reader::new(payload);
         self.cursor.normalize(&self.counts);
-        let section = usize::from(r.u8()?);
+        let tag = r.u8()?;
+        let section = base_section(tag);
         if section != self.cursor.section || section > BASE_SECTIONS {
             return Err(SnapshotError::new("unexpected authority base record"));
         }
@@ -1830,7 +1907,8 @@ impl BaseBuilder {
                 10 => base.styles.fonts.push(Codec::read(&mut r)?),
                 11 => base.styles.fills.push(Codec::read(&mut r)?),
                 12 => base.styles.borders.push(Codec::read(&mut r)?),
-                13 => base.styles.cell_xfs.push(Codec::read(&mut r)?),
+                XF_SECTION if tag == XF_V2_TAG => base.styles.cell_xfs.push(Codec::read(&mut r)?),
+                XF_SECTION => base.styles.cell_xfs.push(LegacyXf::read(&mut r)?.into()),
                 14 => base.styles.num_fmts.push(Codec::read(&mut r)?),
                 15 => base.styles.indexed_colors.push(Codec::read(&mut r)?),
                 16 => base.tables.push(Codec::read(&mut r)?),
@@ -1843,7 +1921,7 @@ impl BaseBuilder {
 
     fn advance_capacity(&mut self, record: &[u8], budget: SnapshotBudget) -> SnapshotResult<bool> {
         self.cursor.normalize(&self.counts);
-        let section = usize::from(Reader::new(record).u8()?);
+        let section = base_section(Reader::new(record).u8()?);
         if section != self.cursor.section || section > BASE_SECTIONS {
             return Err(SnapshotError::new("unexpected authority base record"));
         }
