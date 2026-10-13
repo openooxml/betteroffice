@@ -638,3 +638,77 @@ test('staged bitmaps close exactly once and are never drawn after close', () => 
   expect(drawnAfterClose).toEqual([]);
   expect(readbacks).toEqual({ getImageData: 0, putImageData: 0 });
 });
+
+test('a page moved by geometry alone keeps its backup for a later rollback', () => {
+  const { presentation, painter, pixels, draws, observeDraw, setPages, track, closes, drawnAfterClose } = setup(true);
+  const tracked: ImageBitmap[] = [];
+  const bitmap = () => { const value = track(); tracked.push(value); return value; };
+  const first = bitmap();
+  const second = bitmap();
+  expect(presentation.present(staged(1, undefined, [[page, first], [secondPage, second]]), [], [])).toBe(true);
+  const moved = { pageId: secondPage.pageId, pageIndex: 2 };
+  setPages([page, moved]);
+  const replacement = bitmap();
+  expect(presentation.present(staged(2, 1, [[page, replacement]]), [], [])).toBe(true);
+  const restaged = bitmap();
+  const failing = bitmap();
+  observeDraw(() => { if (draws.at(-1) === failing) throw new Error('draw-failed'); });
+  expect(presentation.present(staged(3, 2, [[moved, restaged], [page, failing]]), [], [])).toBe(false);
+  expect(pixels.get(secondPage.pageId)).toBe(second);
+  expect(pixels.get(page.pageId)).toBe(replacement);
+  presentation.dispose();
+  painter.dispose();
+  expect(tracked.map((value) => closes.get(value))).toEqual(tracked.map(() => 1));
+  expect(drawnAfterClose).toEqual([]);
+});
+
+test('reinstalling the authoritative bitmap object keeps it open for rollback', () => {
+  const { presentation, painter, pixels, draws, observeDraw, setIdentity, track, closes, drawnAfterClose } = setup(true);
+  const tracked: ImageBitmap[] = [];
+  const bitmap = () => { const value = track(); tracked.push(value); return value; };
+  const second = bitmap();
+  expect(presentation.present(staged(1, undefined, [[page, bitmap()], [secondPage, second]]), [], [])).toBe(true);
+  setIdentity({ ...identity, epoch: 2 });
+  expect(presentation.present(staged(1, undefined, [[page, bitmap()]]), [], [])).toBe(true);
+  expect(presentation.present(staged(2, 1, [[secondPage, second]]), [], [])).toBe(true);
+  expect(closes.has(second)).toBe(false);
+  const failing = bitmap();
+  observeDraw(() => { if (draws.at(-1) === failing) throw new Error('draw-failed'); });
+  expect(presentation.present(staged(3, 2, [[secondPage, failing]]), [], [])).toBe(false);
+  expect(pixels.get(secondPage.pageId)).toBe(second);
+  presentation.dispose();
+  painter.dispose();
+  expect(tracked.map((value) => closes.get(value))).toEqual(tracked.map(() => 1));
+  expect(drawnAfterClose).toEqual([]);
+});
+
+test('a failed echo reconciliation keeps the installed frame and its bitmaps open', () => {
+  const { presentation, painter, pixels, draws, observeDraw, track, closes, drawnAfterClose } = setup(true);
+  const presenter = createPresenter({ echo: presentation.hooks, transactionalPresentation: true, sameCoverageFrames: true,
+    discardFrame: discardCommandPresentation, requestFullFrame() {}, now: () => 0 });
+  const tracked: ImageBitmap[] = [];
+  const bitmap = () => { const value = track(); tracked.push(value); return value; };
+  const initial = echoFrame(1, 0, 'a');
+  initial.payload.stagedPresentation!.pages[0]!.bitmap = bitmap();
+  initial.payload.stagedPresentation!.pages[0]!.backgrounds![0]!.bitmap = bitmap();
+  expect(presenter.present(initial)).toBe('presented');
+  presenter.add(entry(1));
+  const next = echoFrame(2, 0, 'a');
+  const installed = bitmap();
+  const background = bitmap();
+  next.payload.stagedPresentation!.pages[0]!.bitmap = installed;
+  next.payload.stagedPresentation!.pages[0]!.backgrounds![0]!.bitmap = background;
+  observeDraw(() => { if (draws.at(-1) === background) throw new Error('draw-failed'); });
+  presenter.present(next);
+  expect(closes.has(installed)).toBe(false);
+  expect(pixels.get(page.pageId)).toBe(installed);
+  const failing = bitmap();
+  observeDraw(() => { if (draws.at(-1) === failing) throw new Error('draw-failed'); });
+  expect(presenter.present(staged(3, undefined, [[page, failing]]))).toBe('stale');
+  expect(pixels.get(page.pageId)).toBe(installed);
+  presenter.dispose();
+  presentation.dispose();
+  painter.dispose();
+  expect(tracked.map((value) => closes.get(value))).toEqual(tracked.map(() => 1));
+  expect(drawnAfterClose).toEqual([]);
+});
