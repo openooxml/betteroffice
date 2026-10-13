@@ -329,7 +329,7 @@
             "value": 0.5
           },
           "formula": null,
-          "displayText": "0.5",
+          "displayText": " 1/2",
           "numberFormat": "# ?/?",
           "formulaResult": null,
           "merge": null
@@ -352,6 +352,27 @@
           "formula": null,
           "displayText": "3/15/23",
           "numberFormat": "m/d/yy",
+          "formulaResult": null,
+          "merge": null
+        },
+        {
+          "id": "s0!H2",
+          "anchor": {
+            "kind": "cell",
+            "sheet": {
+              "sheetId": "sheet:0",
+              "index": 0,
+              "name": "Data"
+            },
+            "a1": "H2"
+          },
+          "value": {
+            "kind": "number",
+            "value": 0.25
+          },
+          "formula": null,
+          "displayText": "0.25",
+          "numberFormat": "# ?/",
           "formulaResult": null,
           "merge": null
         },
@@ -530,7 +551,7 @@
       ],
       "source": {
         "part": "xl/worksheets/sheet1.xml",
-        "partSha256": "4e9222675b55346b8d6f4300d906d5e3d8d36b3a17dc8a327417b19aff704d5b",
+        "partSha256": "ab8a38589013ceddd1dfb836df8a5a376fac485a40ba2858b53bde3aa520267c",
         "path": []
       },
       "truncated": false
@@ -823,9 +844,9 @@
           "index": 0,
           "name": "Data"
         },
-        "a1": "F2"
+        "a1": "H2"
       },
-      "message": "The number format \"# ?/?\" is only approximated, so displayText falls back to General here and wherever this sheet uses it."
+      "message": "The number format \"# ?/\" is only approximated, so displayText falls back to General here and wherever this sheet uses it."
     },
     {
       "code": "formula-result-missing",
