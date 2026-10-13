@@ -477,6 +477,8 @@ pub struct Stylesheet {
     #[serde(skip)]
     saved_plain: SavedPlain,
     #[serde(skip)]
+    bound_plain: Option<u32>,
+    #[serde(skip)]
     font_memo: PoolMemo,
     #[serde(skip)]
     fill_memo: PoolMemo,
@@ -576,6 +578,7 @@ impl Stylesheet {
             theme: _,
             indexed_colors,
             saved_plain: _,
+            bound_plain: _,
             font_memo: _,
             fill_memo: _,
             border_memo: _,
@@ -916,6 +919,20 @@ impl Stylesheet {
         let index = (self.cell_xfs.len() - 1) as u32;
         self.saved_plain.xf = Some(index);
         index
+    }
+
+    /// binds the plain format to the first xf reading plain, as a shared state resolves it.
+    pub fn bind_plain_xf(&mut self) {
+        self.bound_plain = (0..self.cell_xfs.len() as u32).find(|&index| self.reads_plain(index));
+    }
+
+    /// the xf a plain format edit stores: under a binding the bound xf when it is known to save
+    /// plain, else `None`, which leaves the cell as it was.
+    pub fn plain_edit_xf(&mut self) -> Option<u32> {
+        match self.bound_plain {
+            Some(index) => (self.known_plain_xf() == Some(index)).then_some(index),
+            None => Some(self.plain_xf()),
+        }
     }
 
     fn reads_plain(&self, index: u32) -> bool {
