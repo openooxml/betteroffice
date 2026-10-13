@@ -263,12 +263,14 @@ pub struct ExactPrefixLayout {
     pub document_width: Option<f64>,
 }
 
-/// The pages an exact prefix pass keeps once it lays out two past them, and
-/// the widest page of the whole body.
+/// The pages an exact prefix pass keeps once it lays out two past them, the
+/// widest page of the whole body, and the body section the cut ends in when
+/// that is not the final one.
 #[derive(Clone, Copy)]
 struct ExactCut {
     pages: usize,
     document_width: f64,
+    section: Option<usize>,
 }
 
 /// The page size pagination takes when a request names none.
@@ -1372,10 +1374,13 @@ where
     ))
 }
 
+/// Widens each section's margins by its headers and footers. An input cut inside
+/// body section `cut` lays that section out as its final one.
 fn extend_input_for_header_footer(
     input: &mut LayoutInput,
     regions: &DocumentRegions,
     variants: &[HeaderFooterVariant],
+    cut: Option<usize>,
 ) {
     if regions.sections.is_empty() {
         return;
@@ -1486,7 +1491,9 @@ fn extend_input_for_header_footer(
         })
         .then_some(float_bands);
     input.options.margins = extended.first().cloned();
-    input.options.final_margins = extended.last().cloned();
+    input.options.final_margins = cut
+        .map_or(extended.last(), |section| extended.get(section))
+        .cloned();
     let mut section_index = 0;
     for measured in &mut input.measured {
         let LayoutBlock::SectionBreak(section_break) = &mut measured.block else {
@@ -5289,6 +5296,7 @@ impl EngineSession {
                 &regions,
                 &worker.measurement,
                 &env,
+                None,
             )?;
             input.measured = self.measure_plain_worker(story, &env, &input, &worker.measurement)?;
             header_measurement = Some(worker.measurement);
@@ -6443,11 +6451,16 @@ impl EngineSession {
                             if provisional {
                                 let last = section_breaks(&blocks);
                                 input.options = through(last);
-                                regions.sections.truncate(last + 1);
-                                exact_cut = sections.map(|sections| ExactCut {
-                                    pages,
-                                    document_width: sections.widest_page(),
-                                });
+                                match sections {
+                                    Some(sections) => {
+                                        exact_cut = Some(ExactCut {
+                                            pages,
+                                            document_width: sections.widest_page(),
+                                            section: (last < sections.ended.len()).then_some(last),
+                                        });
+                                    }
+                                    None => regions.sections.truncate(last + 1),
+                                }
                             }
                             input.measured = blocks
                                 .into_iter()
@@ -6594,7 +6607,14 @@ impl EngineSession {
             .map(|env| env.revision_preview.clone())
             .unwrap_or_default();
         let mut measured_headers_footers = if let Some(render_env) = parsed_render_env.as_ref() {
-            self.measure_header_footer_payload(&mut input, &regions, &measurement, render_env)?
+            let cut = exact_cut.and_then(|cut| cut.section);
+            self.measure_header_footer_payload(
+                &mut input,
+                &regions,
+                &measurement,
+                render_env,
+                cut,
+            )?
         } else {
             None
         };
@@ -6943,7 +6963,14 @@ impl EngineSession {
             .map(|env| env.revision_preview.clone())
             .unwrap_or_default();
         let mut measured_headers_footers = if let Some(render_env) = parsed_render_env.as_ref() {
-            self.measure_header_footer_payload(&mut input, &regions, &measurement, render_env)?
+            let cut = exact_cut.and_then(|cut| cut.section);
+            self.measure_header_footer_payload(
+                &mut input,
+                &regions,
+                &measurement,
+                render_env,
+                cut,
+            )?
         } else {
             None
         };
@@ -7708,6 +7735,7 @@ impl EngineSession {
         regions: &DocumentRegions,
         measurement: &docx_layout::measure_blocks::MeasurementConfig,
         render_env: &RenderEnv,
+        cut: Option<usize>,
     ) -> Result<Option<HeaderFooterPayload>, String> {
         let mut variants = Vec::new();
         for section_index in 0..regions.sections.len() {
@@ -7812,7 +7840,7 @@ impl EngineSession {
         if variants.is_empty() && regions.watermark.is_none() {
             return Ok(None);
         }
-        extend_input_for_header_footer(input, regions, &variants);
+        extend_input_for_header_footer(input, regions, &variants, cut);
         Ok(Some(HeaderFooterPayload {
             title_pg: false,
             even_and_odd_headers: regions.even_and_odd_headers,
@@ -27509,7 +27537,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             visual_bottom: 100.0,
             field_widths: Vec::new(),
         }];
-        extend_input_for_header_footer(&mut input, &regions, &variants);
+        extend_input_for_header_footer(&mut input, &regions, &variants, None);
         let margins = input.options.margins.expect("extended margins");
         assert_eq!(margins.top, 1438.0 / 15.0);
         assert_eq!(margins.bottom, 96.0);
