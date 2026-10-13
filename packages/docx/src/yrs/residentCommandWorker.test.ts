@@ -1672,6 +1672,130 @@ for (const comment of [true, false]) {
   }, TIMEOUT);
 }
 
+async function openAuthoredBreakRegression(comment: boolean, type: 'page' | 'column' = 'page') {
+  const content = textRun('Left') + `<w:r><w:br w:type="${type}"/></w:r>` + textRun('Right');
+  const bodyXml = `<w:p w14:paraId="00000001">${comment ? commented(1, content) : content}</w:p>` + sectionParagraph(2, 'Tail');
+  const comments = comment ? commentXml(1) : undefined;
+  const host = comment ? await sourceComments(bodyXml, comments!) : [];
+  return { ...await openWorker({ bodyXml, comments }), host };
+}
+
+function nativeBreakCounts(engine: Awaited<ReturnType<typeof createResidentEngineSession>>): [number, number] {
+  const segments = engine.storySegments('body');
+  return ['pageBreak', 'columnBreak'].map(kind => segments.filter(segment =>
+    segment.kind === 'embed' && segment.embedKind === kind).length) as [number, number];
+}
+
+async function expectAuthoredBreakSaves(
+  opened: Awaited<ReturnType<typeof openAuthoredBreakRegression>>,
+  expected: [number, number]
+) {
+  for (let save = 0; save < 2; save += 1) {
+    expect(nativeBreakCounts(opened.engine)).toEqual(expected);
+    const marks = savedMarks(savedDocumentXml((await opened.client.save({ comments: opened.host })).bytes));
+    expect([marks.page, marks.column]).toEqual(expected);
+    expect(nativeBreakCounts(opened.engine)).toEqual(expected);
+  }
+}
+
+for (const comment of [true, false]) {
+  const suffix = comment ? ' beside a saved comment' : '';
+  test(`a locally deleted authored page break stays deleted after editing its paragraph${suffix}`, async () => {
+    const opened = await openAuthoredBreakRegression(comment);
+    const { client, engine } = opened;
+    try {
+      expect(nativeBreakCounts(engine)).toEqual([1, 0]);
+      const tail = { story: 'body', paraId: engine.paragraphs('body')[1]!.paraId, offset: 0 };
+      const deleted = await client.edit(intent(1, 0, 'deleteForward', { selection: { anchor: tail, focus: tail } }));
+      expect(deleted.outcomes[0]?.status).toBe('applied');
+      expect(nativeBreakCounts(engine)).toEqual([0, 0]);
+      const first = { story: 'body', paraId: engine.paragraphs('body')[0]!.paraId, offset: 1 };
+      expect((await client.edit(intent(2, deleted.version, 'insertText', {
+        text: '+', selection: { anchor: first, focus: first },
+      }))).outcomes[0]?.status).toBe('applied');
+      await expectAuthoredBreakSaves(opened, [0, 0]);
+    } finally { client.destroy(); }
+  });
+
+  test(`an authored page break is written once after Enter splits its paragraph${suffix}`, async () => {
+    const opened = await openAuthoredBreakRegression(comment);
+    const { client, engine } = opened;
+    try {
+      expect(nativeBreakCounts(engine)).toEqual([1, 0]);
+      const at = { story: 'body', paraId: engine.paragraphs('body')[0]!.paraId, offset: 2 };
+      expect((await client.edit(intent(1, 0, 'paragraphBreak', {
+        selection: { anchor: at, focus: at },
+      }))).outcomes[0]?.status).toBe('applied');
+      expect(engine.paragraphs('body')).toHaveLength(3);
+      await expectAuthoredBreakSaves(opened, [1, 0]);
+    } finally { client.destroy(); }
+  });
+
+  test(`a deleted authored column break is not replayed when its paragraph is edited${suffix}`, async () => {
+    const opened = await openAuthoredBreakRegression(comment, 'column');
+    const { client, engine } = opened;
+    try {
+      expect(nativeBreakCounts(engine)).toEqual([0, 1]);
+      const tail = { story: 'body', paraId: engine.paragraphs('body')[1]!.paraId, offset: 0 };
+      const deleted = await client.edit(intent(1, 0, 'deleteForward', { selection: { anchor: tail, focus: tail } }));
+      expect(deleted.outcomes[0]?.status).toBe('applied');
+      expect(nativeBreakCounts(engine)).toEqual([0, 0]);
+      const first = { story: 'body', paraId: engine.paragraphs('body')[0]!.paraId, offset: 1 };
+      expect((await client.edit(intent(2, deleted.version, 'insertText', {
+        text: '+', selection: { anchor: first, focus: first },
+      }))).outcomes[0]?.status).toBe('applied');
+      await expectAuthoredBreakSaves(opened, [0, 0]);
+    } finally { client.destroy(); }
+  });
+
+  test(`an authored page break is written once through split undo and redo${suffix}`, async () => {
+    const opened = await openAuthoredBreakRegression(comment);
+    const { client, engine } = opened;
+    try {
+      expect(nativeBreakCounts(engine)).toEqual([1, 0]);
+      const at = { story: 'body', paraId: engine.paragraphs('body')[0]!.paraId, offset: 2 };
+      expect((await client.edit(intent(1, 0, 'paragraphBreak', {
+        selection: { anchor: at, focus: at },
+      }))).outcomes[0]?.status).toBe('applied');
+      expect(engine.paragraphs('body')).toHaveLength(3);
+      await expectAuthoredBreakSaves(opened, [1, 0]);
+      const beforeUndo = await client.documentRead({ kind: 'reviewSnapshot' });
+      expect((await client.edit(intent(2, beforeUndo.version, 'undo', {}))).outcomes[0]?.status).toBe('applied');
+      expect(engine.paragraphs('body')).toHaveLength(2);
+      await expectAuthoredBreakSaves(opened, [1, 0]);
+      const beforeRedo = await client.documentRead({ kind: 'reviewSnapshot' });
+      expect((await client.edit(intent(3, beforeRedo.version, 'redo', {}))).outcomes[0]?.status).toBe('applied');
+      expect(engine.paragraphs('body')).toHaveLength(3);
+      await expectAuthoredBreakSaves(opened, [1, 0]);
+    } finally { client.destroy(); }
+  });
+
+  test(`a peer-deleted authored page break stays deleted after a local paragraph edit${suffix}`, async () => {
+    const opened = await openAuthoredBreakRegression(comment);
+    const { client, engine } = opened;
+    const remote = await createResidentEngineSession();
+    try {
+      remote.loadState(engine.encodeState());
+      expect(nativeBreakCounts(remote)).toEqual([1, 0]);
+      const segments = remote.storySegments('body');
+      const embed = segments.findIndex(segment => segment.kind === 'embed' && segment.embedKind === 'pageBreak');
+      expect(embed).toBeGreaterThanOrEqual(0);
+      const index = segments.slice(0, embed).reduce((offset, segment) =>
+        offset + (segment.kind === 'text' ? segment.text.length : 1), 0);
+      remote.applyRawOps('body', [{ op: 'delete', index, len: 1 }]);
+      expect(nativeBreakCounts(remote)).toEqual([0, 0]);
+      await client.applyRemoteUpdate(remote.encodeStateAsUpdate(engine.encodeStateVector()));
+      expect(nativeBreakCounts(engine)).toEqual([0, 0]);
+      const basis = await client.documentRead({ kind: 'reviewSnapshot' });
+      const first = { story: 'body', paraId: engine.paragraphs('body')[0]!.paraId, offset: 1 };
+      expect((await client.edit(intent(1, basis.version, 'insertText', {
+        text: '+', selection: { anchor: first, focus: first },
+      }))).outcomes[0]?.status).toBe('applied');
+      await expectAuthoredBreakSaves(opened, [0, 0]);
+    } finally { remote.destroy(); client.destroy(); }
+  });
+}
+
 const sectionXml = (type: string, left: number) => `<w:sectPr><w:type w:val="${type}"/><w:pgMar w:left="${left}"/></w:sectPr>`;
 
 function savedSectionMargins(bytes: ArrayBuffer): [string, string | null, number | null][] {
