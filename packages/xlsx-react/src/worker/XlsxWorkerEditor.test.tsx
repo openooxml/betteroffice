@@ -675,6 +675,16 @@ describe('peerless F2 prefill keyboard replay', () => {
     expect(input.selectionStart).toBe(value.length + 1);
   });
 
+  it('selects nothing when the still-empty editor is selected before prefill, so held keys apply at the end', async () => {
+    const { input, resolve } = await setup();
+    input.select();
+    key(input, 'Delete');
+    type(input, 'X');
+    await resolve();
+    expect(input.value).toBe(`${value}X`);
+    expect(input.selectionStart).toBe(value.length + 1);
+  });
+
   it('closes Enter immediately and commits once after replay with the selection moved down', async () => {
     const { host, view, input, resolve } = await setup();
     key(input, 'a', { ctrlKey: true });
