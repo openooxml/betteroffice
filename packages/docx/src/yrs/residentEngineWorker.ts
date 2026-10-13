@@ -362,6 +362,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
     hooks: {
       ...hooks,
       async preflight(command, context) {
+        await completeCommandPrefix(host);
         if (command.kind === 'selectPoint' || command.kind === 'extendSelection' || command.kind === 'navigate') {
           await loadRustDisplayListQueryEngine();
         }
@@ -1202,8 +1203,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'edit') {
-    if (commandHost) await completeCommandPrefix(commandHost);
-    await completeProvisionalLayout();
+    if (!commandLayout) await completeProvisionalLayout();
     noteDocumentChange();
     fontRequirements = null;
     completedLayout = null;
@@ -1693,7 +1693,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         value = session.sectionProperties();
         break;
       case 'exportStructuredWithPages':
-        if (commandLayout?.complete()) postCommandFrame(0);
+        if (commandHost && await completeCommandPrefix(commandHost)) postCommandFrame(0);
         value = session.exportStructuredWithPagesJson(request.read.options, request.read.currentRequest);
         break;
       case 'listContentControls':
@@ -1985,7 +1985,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   }
   if (request.type === 'completeLayout') {
     setFrameDisplayWindow(session);
-    if (incompleteLayout && request.sliceBlocks) {
+    if (incompleteLayout && request.sliceBlocks && !commandLayout) {
       supersedeSlicedCompletion();
       slicedCompletion = {
         id: request.id,
@@ -2384,10 +2384,15 @@ function clearProvisionalFinalPages(): void {
 
 /**
  * Replaces a provisional layout with the full one before anything reads it,
- * finishing a sliced completion at once and answering its request first.
+ * finishing a sliced completion at once and answering its request first. A
+ * command session's certified prefix publishes its completed frame instead.
  */
 async function completeProvisionalLayout(): Promise<void> {
-  if (!session || !incompleteLayout || commandLayout?.complete()) return;
+  if (commandHost && await completeCommandPrefix(commandHost)) {
+    postCommandFrame(0);
+    return;
+  }
+  if (!session || !incompleteLayout) return;
   const waiting = slicedCompletion;
   slicedCompletion = null;
   const { layoutInput, ...request } = incompleteLayout;
