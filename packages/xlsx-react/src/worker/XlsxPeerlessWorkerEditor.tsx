@@ -281,7 +281,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       if (selected) void coordinatorRef.current?.command({ kind: 'select', payload: { selection: selected } }).result.catch(report);
     },
     committed: (ticket) => { void ticket.result.catch(report); commands.refresh(); },
-    fail: (error) => run?.fail(error), focus,
+    fail: (error) => run?.fail(error), report, focus,
   }), [run]);
   const capture = useCallback((): WorkerPaintRequest | null => {
     const owner = ownerRef.current;

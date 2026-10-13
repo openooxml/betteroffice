@@ -159,7 +159,7 @@ export interface PeerlessWorkerInputCoordinator {
     options?: PeerlessWorkerCommandOptions
   ): PeerlessWorkerCommandTicket;
   setReadOnly(readOnly: boolean): PeerlessWorkerCommandTicket;
-  runAfterPendingInput<T>(operation: () => T | Promise<T>, fence?: boolean | 'posted'): Promise<T>;
+  runAfterPendingInput<T>(operation: () => T | Promise<T>, fence?: boolean | 'posted' | 'settled'): Promise<T>;
   flush(): Promise<void>;
   whenApplied(seq?: number): Promise<void>;
   save(): Promise<Uint8Array>;
@@ -594,7 +594,7 @@ export function createPeerlessWorkerInputCoordinator(
     }
     return ticket;
   };
-  const runAfterPendingInput = <T>(operation: () => T | Promise<T>, fence: boolean | 'posted' = false,
+  const runAfterPendingInput = <T>(operation: () => T | Promise<T>, fence: boolean | 'posted' | 'settled' = false,
     reservedInput?: PeerlessWorkerPendingInput): Promise<T> => {
     const result = deferred<T>();
     try {
@@ -675,14 +675,16 @@ export function createPeerlessWorkerInputCoordinator(
             seal.restoreFocus?.();
             result.resolve(value);
           }, result.reject);
-          return fence === true ? Promise.resolve(value).then(() => {}) : undefined;
+          return fence === true || fence === 'settled' ? Promise.resolve(value).then(() => {}) : undefined;
         } finally { admittedReadOnly = previous; admittedAfter = previousAfter; }
       };
       const fencedInvoke = async () => {
-        await lease.wait(Promise.all([
-          ...ahead, ...[...outstanding.values()].map((entry) => entry.ticket.result),
-        ]));
-        if (rejected.length) throw new XlsxCommandAdmissionError('input-failed');
+        const earlier = [...ahead, ...[...outstanding.values()].map((entry) => entry.ticket.result)];
+        if (fence === 'settled') await lease.wait(Promise.allSettled(earlier));
+        else {
+          await lease.wait(Promise.all(earlier));
+          if (rejected.length) throw new XlsxCommandAdmissionError('input-failed');
+        }
         await invoke();
       };
       enqueue({ reject: result.reject, recoveryInput: () => {

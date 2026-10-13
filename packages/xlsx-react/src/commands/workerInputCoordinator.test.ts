@@ -91,7 +91,7 @@ describe('cell input read hold', () => {
     let started = false;
     const reading = holdWorkerCellInputRead(coordinator, () => {
       started = true; entered.resolve(); return reply.promise;
-    }, (value) => { values.push(value); received.resolve(); }, applied.promise, () => false);
+    }, (value) => { values.push(value); received.resolve(); }, applied.promise, () => false, (error) => { throw error; });
     const later = coordinator.runAfterPendingInput(() => coordinator.command({ kind: 'undo', payload: { args: [] } }).result);
     expect(started).toBe(false);
     ack(first.seq!);
@@ -117,7 +117,7 @@ describe('cell input read hold', () => {
     let cancelled = false;
     const reading = holdWorkerCellInputRead(coordinator, () => {
       entered.resolve(); return reply.promise;
-    }, (value) => { values.push(value); }, applied.promise, () => cancelled);
+    }, (value) => { values.push(value); }, applied.promise, () => cancelled, (error) => { throw error; });
     await entered.promise;
     const saving = coordinator.save();
     cancelled = true;
@@ -244,7 +244,8 @@ describe('completed composition recovery', () => {
       target: () => ({ sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A1' } }),
       resolveSheet: () => 0, editable: () => true, prefill: async () => '',
       select: () => {}, selectionTarget: () => undefined, dependency: () => null,
-      navigate: () => {}, committed: () => {}, fail: (error) => { throw error; }, focus: () => {},
+      navigate: () => {}, committed: () => {}, fail: (error) => { throw error; }, report: (error) => { throw error; },
+      focus: () => {},
     });
     const harness = peerlessHarness(8, 8, controller);
     controller.attach(harness.coordinator);
@@ -368,7 +369,8 @@ describe('queued composition snapshots', () => {
           target: () => ({ sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A1' } }),
           resolveSheet: () => 0, editable: () => true, prefill: async () => '',
           select: () => {}, selectionTarget: () => undefined, dependency: () => null,
-          navigate: () => {}, committed: () => {}, fail: (error) => { throw error; }, focus: () => {},
+          navigate: () => {}, committed: () => {}, fail: (error) => { throw error; }, report: (error) => { throw error; },
+          focus: () => {},
         });
         const { coordinator, sent, saved, ack } = peerlessHarness(8, 8, controller);
         controller.attach(coordinator);
@@ -443,7 +445,8 @@ describe('peerless worker input', () => {
           target: () => ({ sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A1' } }),
           resolveSheet: () => 0, editable: () => true, prefill: async () => '',
           select: () => {}, selectionTarget: () => undefined, dependency: () => null,
-          navigate: () => {}, committed: () => {}, fail: (error) => { throw error; }, focus: () => {},
+          navigate: () => {}, committed: () => {}, fail: (error) => { throw error; }, report: (error) => { throw error; },
+          focus: () => {},
         });
         const { coordinator, sent, saved, ack } = peerlessHarness(8, 8, controller);
         controller.attach(coordinator);

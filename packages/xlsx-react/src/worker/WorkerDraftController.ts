@@ -48,6 +48,7 @@ interface DraftControllerOptions {
   navigate(): void;
   committed(ticket: PeerlessWorkerCommandTicket, draft: WorkerNativeDraft): void;
   fail(error: unknown): void;
+  report(error: unknown): void;
   focus(): void;
 }
 
@@ -119,7 +120,8 @@ export class WorkerDraftController {
       input: { ready, target: draft, draft: () => loading!.completed },
     } : null;
     const reading = loading ? holdWorkerCellInputRead(this.coordinator, () => this.options.prefill(draft.sheet, draft),
-      (value) => { loading.value = value; this.completePrefill(loading); }, loading.input.ready, () => loading.cancelled) : null;
+      (value) => { loading.value = value; this.completePrefill(loading); }, loading.input.ready, () => loading.cancelled,
+      (error) => this.refusePrefill(loading, error)) : null;
     this.loading = loading;
     this.setDraft(draft);
     this.publish({ cell: draft, formula: null });
@@ -150,6 +152,17 @@ export class WorkerDraftController {
       this.publish({ cell: draft });
     }
     loading.settle(true);
+  }
+
+  private refusePrefill(loading: CellPrefill, error: unknown): void {
+    loading.settle(false);
+    if (loading.cancelled || this.disposed || this.options.identity() !== loading.identity) return;
+    if (this.loading === loading) {
+      this.cancelPrefill();
+      this.setDraft(null);
+      this.publish({ cell: null });
+    }
+    if (!this.coordinator?.error) this.options.report(error);
   }
 
   private cancelPrefill(): void {

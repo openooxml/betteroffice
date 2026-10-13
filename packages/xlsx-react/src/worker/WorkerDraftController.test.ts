@@ -16,7 +16,7 @@ function setup() {
     target: () => ({ sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A1' } }),
     resolveSheet: () => 0, editable: () => true, prefill, select,
     selectionTarget: () => undefined, dependency: () => null, navigate: () => {},
-    committed: () => {}, fail: (error) => { throw error; }, focus,
+    committed: () => {}, fail: (error) => { throw error; }, report: (error) => { throw error; }, focus,
   });
   controller.attach({
     setDraft: () => {},

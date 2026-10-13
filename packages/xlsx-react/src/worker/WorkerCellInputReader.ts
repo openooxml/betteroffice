@@ -6,10 +6,17 @@ export function readWorkerCellInput(session: WorkbookSession, sheet: number, a1:
 }
 
 export function holdWorkerCellInputRead(coordinator: PeerlessWorkerInputCoordinator, read: () => Promise<string>,
-  receive: (value: string) => void, applied: Promise<boolean>, cancelled: () => boolean): Promise<void> {
+  receive: (value: string) => void, applied: Promise<boolean>, cancelled: () => boolean,
+  refused: (error: unknown) => void): Promise<void> {
+  let failure: { error: unknown } | undefined;
   return coordinator.runAfterPendingInput(async () => {
     if (cancelled()) return;
-    const loaded = read().then((value) => { if (!cancelled()) receive(value); });
-    await Promise.race([loaded.then(() => applied), applied]);
-  }, true);
+    try {
+      const loaded = read().then((value) => { if (!cancelled()) receive(value); });
+      await Promise.race([loaded.then(() => applied), applied]);
+    } catch (error) { failure = { error }; throw error; }
+  }, 'settled').catch((error) => {
+    if (failure) throw failure.error;
+    refused(error);
+  });
 }

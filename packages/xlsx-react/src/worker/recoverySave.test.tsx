@@ -103,7 +103,7 @@ test('public recovery includes a completed held prefill before the read hold rel
     target: () => ({ sheetId: session.state.sheets[0].id, range: { kind: 'a1', a1: 'A11' } }),
     resolveSheet: () => 0, editable: () => true, prefill: () => { readingStarted(); return prefill; },
     select: () => {}, selectionTarget: () => undefined, dependency: () => null,
-    navigate: () => {}, committed: () => {}, fail: () => {}, focus: () => {},
+    navigate: () => {}, committed: () => {}, fail: () => {}, report: () => {}, focus: () => {},
   });
   const coordinator = createPeerlessWorkerInputCoordinator({
     generation: () => 1, session: () => run.session, isReady: () => run.ready,
