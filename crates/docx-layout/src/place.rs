@@ -3647,7 +3647,8 @@ mod pagination_rule_tests {
                     let len = 1 + if index == 0 { extra } else { 0 };
                     let start = position;
                     position += len + 2;
-                    let mut run = json!({"kind": "text", "text": "a".repeat(len), "pmStart": start + 1});
+                    let mut run =
+                        json!({"kind": "text", "text": "a".repeat(len), "pmStart": start + 1});
                     if ends(index) {
                         run["pmEnd"] = json!(start + 1 + len);
                     }
@@ -3686,7 +3687,10 @@ mod pagination_rule_tests {
             )
             .unwrap();
             let full = layout_document_checkpointed(&mut input(document(1, after))).unwrap();
-            assert!(incremental.placed_blocks < full.placed_blocks, "case {case}");
+            assert!(
+                incremental.placed_blocks < full.placed_blocks,
+                "case {case}"
+            );
             assert_eq!(
                 serde_json::to_string(&incremental.layout).unwrap(),
                 serde_json::to_string(&full.layout).unwrap(),
