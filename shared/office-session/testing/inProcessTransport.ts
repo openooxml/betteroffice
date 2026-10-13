@@ -1,7 +1,7 @@
 import type { SessionTransport } from '../transport';
 import { SessionFailure } from '../types';
 
-export function createInProcessPair(): { client: SessionTransport; host: SessionTransport } {
+export function createInProcessPair(options: { transfer?: boolean } = {}): { client: SessionTransport; host: SessionTransport } {
   let closed = false;
   const timers = new Set<ReturnType<typeof setTimeout>>();
   const listeners = [new Set<(message: unknown) => void>(), new Set<(message: unknown) => void>()];
@@ -9,7 +9,7 @@ export function createInProcessPair(): { client: SessionTransport; host: Session
   const endpoint = (side: number): SessionTransport => ({
     post(message, transfer = []) {
       if (closed) throw new SessionFailure('disposed', 'Session transport is closed');
-      const cloned = structuredClone(message, { transfer });
+      const cloned = options.transfer === false ? structuredClone(message) : structuredClone(message, { transfer });
       const timer = setTimeout(() => {
         timers.delete(timer);
         const receiving = listeners[1 - side]!;

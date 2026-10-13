@@ -102,6 +102,18 @@ export interface DocxPluginHostBinding {
   publishViewerSelection(selection: ViewerSelectionChange): void;
 }
 
+/** Whether `queries` show the editor's whole, final layout. */
+function layoutComplete(editor: PagedEditorRef | null, queries: DisplayListQueries | null): boolean {
+  const layout = editor?.getLayout();
+  return (
+    !!queries &&
+    !!layout &&
+    !layout.partial &&
+    sourceVersionOf(layout) === sourceVersionOf(queries) &&
+    queries.pageCount() === layout.pages.length
+  );
+}
+
 /** Owns the plugin host of one `DocxEditor` and binds it to the editor's authority. */
 export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPluginHostBinding {
   const latest = useRef(options);
@@ -140,15 +152,9 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
       geometry: () => geometryRef.current,
       layout() {
         const queries = latest.current.queries;
-        const layout = latest.current.pagedEditorRef.current?.getLayout();
         return {
           queries,
-          complete:
-            !!queries &&
-            !!layout &&
-            !layout.partial &&
-            sourceVersionOf(layout) === sourceVersionOf(queries) &&
-            queries.pageCount() === layout.pages.length,
+          complete: layoutComplete(latest.current.pagedEditorRef.current, queries),
           failed: latest.current.layoutError !== null,
         };
       },
@@ -393,7 +399,8 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
         (isPresented(dom.context.pagesContainer, shownList) || queriesCurrentRef.current),
       (clientX, clientY) => readPluginPositionAtPoint(
         latest.current.pagedEditorRef, clientX, clientY, latest.current.experimentalWorkerOpen === true
-      )
+      ),
+      () => layoutComplete(latest.current.pagedEditorRef.current, dom.queries)
     );
     const resolveAnchor = created.getAnchorGeometry;
     created.getAnchorGeometry = (target) => {

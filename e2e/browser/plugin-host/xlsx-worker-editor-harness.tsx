@@ -125,6 +125,8 @@ globalThis.Worker = new Proxy(NativeWorker, {
 let generation = 0;
 let activeSession: WorkbookSession | null = null;
 let latestFrame: WorkbookFrame | null = null;
+let cellInputHold: ReturnType<typeof deferred<void>> | null = null;
+let heldCellInputs = 0;
 const backendOpen = editableWorkbookSessionBackend.open;
 editableWorkbookSessionBackend.open = async (...args) => {
   const token = ++generation;
@@ -142,6 +144,15 @@ editableWorkbookSessionBackend.open = async (...args) => {
   session.call.frame = async (...input) => {
     const value = await frame(...input);
     if (token === generation) latestFrame = value;
+    return value;
+  };
+  const cellInputs = session.call.cellInputs;
+  session.call.cellInputs = async (...input) => {
+    const hold = cellInputHold;
+    const value = await cellInputs(...input);
+    if (!hold) return value;
+    heldCellInputs += 1;
+    try { await hold.promise; } finally { heldCellInputs -= 1; }
     return value;
   };
   return session;
@@ -196,12 +207,12 @@ let readOnly = false;
 let readyCount = 0;
 const open = (bytes: Uint8Array) => {
   source = bytes;
-  const editor = peerless ? <XlsxEditor asyncApi file={bytes} readOnly={readOnly} plugins={[plugin]}
+  const editor = peerless ? <XlsxEditor file={bytes} readOnly={readOnly} plugins={[plugin]}
     pluginGrants={{ routes: { document: 'write', editBatches: true } }} onError={(error) => errors.push(error.message)}
     onSave={(bytes) => { savedBytes = bytes; }} onReady={(value) => {
       readyCount += 1;
       peerlessApi = value; peerlessCurrent.resolve(value);
-    }} /> : <XlsxEditor file={bytes} experimentalWorkerOpen readOnly={readOnly} plugins={[plugin]}
+    }} /> : <XlsxEditor legacySyncApi file={bytes} experimentalWorkerOpen readOnly={readOnly} plugins={[plugin]}
     pluginGrants={{ routes: { document: 'write', editBatches: true } }} onError={(error) => errors.push(error.message)}
     onReady={(value) => {
       readyCount += 1;
@@ -272,6 +283,9 @@ window.__xlsxWorkerEditor = {
     } finally { await session.dispose(); }
   },
   releaseHydration() { holdingHydration = false; hydrationRelease.resolve(); },
+  holdCellInputs() { cellInputHold = deferred<void>(); },
+  heldCellInputs: () => heldCellInputs,
+  releaseCellInputs() { cellInputHold?.resolve(); cellInputHold = null; },
   async flush() { await api!.flush(); },
   async zoom(scale) { await api!.commands.execute('zoom', { scale }); },
   cellClip() {

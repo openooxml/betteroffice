@@ -11,6 +11,7 @@ import { isLayoutMetaV1, type LayoutMetaV1 } from './layoutMeta';
 import type { Layout } from '../layout/pagination';
 import { proposalRevisionPreview } from './proposals';
 import { createYrsSession } from './index';
+import { storiesDocx } from './__fixtures__/storiesDocx';
 import { readSidebar, readOutlineHeadings } from './sidebarReads';
 import { sidebarDocx } from './__fixtures__/sidebarDocx';
 import { readResidentSearch } from './residentSearch';
@@ -354,8 +355,8 @@ function worker() {
         harness.failRaster = null;
         throw new Error('raster failed');
       }
-      buffer.width = page.width * dpr * zoom;
-      buffer.height = page.height * dpr * zoom;
+      buffer.width = Math.ceil(page.width * dpr * zoom);
+      buffer.height = Math.ceil(page.height * dpr * zoom);
       buffer.pixels = harness.commandText ?? `${id}:${page.width}`;
     },
     present(canvas: Surface, buffer: Surface) {
@@ -606,6 +607,57 @@ function commandEnvelope(seq: number, text = '!'): DocxCommandEnvelope {
     basis: { epoch: COMMAND_INIT.epoch, version: 0 }, seq, kind: 'insertText', payload: { text },
   };
 }
+
+test('command raster scale sizes the initial bitmaps before presentation', async () => {
+  const { client, w } = await commandWorker();
+  try {
+    const initial = await client.commandInit({ ...COMMAND_INIT, rasterScale: 2 } as ResidentCommandInitRequest);
+    const pages = initial.frame.payload.stagedPresentation!.pages;
+    expect(pages.map(({ bitmap }) => [bitmap.width, bitmap.height])).toEqual([[200, 200]]);
+    expect(w.harness.rasterized).toEqual([1]);
+  } finally { client.destroy(); }
+});
+
+test('command raster scale repaints every window page in one viewport frame', async () => {
+  const { client, w } = await commandWorker();
+  Object.assign(w.harness.session, {
+    buildDisplayListFrame(_extras: string, expected: number) {
+      w.delta([1, 2, 3], expected === 0, 100.25, 3);
+      return Uint8Array.of(w.harness.delta!.frameEpoch);
+    },
+  });
+  try {
+    const initial = await client.commandInit({ ...COMMAND_INIT, displayWindow: [0, 3], rasterScale: 1 } as ResidentCommandInitRequest);
+    const frames: DocxCommandFrame[] = [];
+    client.onFrame((candidate) => frames.push(candidate));
+    w.resetCalls();
+    await client.requestViewport({ start: 0, end: 3, frameEpoch: initial.frame.revision, rasterScale: 2 } as Parameters<typeof client.requestViewport>[0]);
+    expect(frames).toHaveLength(1);
+    expect(frames[0]!.payload.stagedPresentation!.pages.map(({ page, bitmap }) => [page.pageIndex, bitmap.width, bitmap.height]))
+      .toEqual([[0, 201, 200], [1, 201, 200], [2, 201, 200]]);
+    expect(w.harness.rasterized).toEqual([1, 2, 3]);
+  } finally { client.destroy(); }
+});
+
+test('command raster scale preserves pixels when rounded window sizes match', async () => {
+  const { client, w } = await commandWorker();
+  Object.assign(w.harness.session, {
+    buildDisplayPagesFrame(pages: number[]) {
+      w.delta(pages.map((index) => index + 1), false, 100, 1);
+      return Uint8Array.of(w.harness.delta!.frameEpoch);
+    },
+  });
+  try {
+    const initial = await client.commandInit({ ...COMMAND_INIT, displayWindow: [0, 1], rasterScale: 1.001 } as ResidentCommandInitRequest);
+    const frames: DocxCommandFrame[] = [];
+    client.onFrame((candidate) => frames.push(candidate));
+    w.resetCalls();
+    await client.requestViewport({ start: 0, end: 1, frameEpoch: initial.frame.revision, rasterScale: 1.002 } as Parameters<typeof client.requestViewport>[0]);
+    expect(frames).toHaveLength(1);
+    expect(frames[0]!.payload.stagedPresentation!.pages).toEqual([]);
+    expect(w.harness.rasterized).toEqual([]);
+  } finally { client.destroy(); }
+});
 
 function replaceCommandDocument(client: ResidentEngineWorkerClient) {
   return client.bootstrap({
@@ -1786,6 +1838,45 @@ test('document reads skip stale versions and read the current version', async ()
   });
   expect(current).not.toHaveProperty('superseded');
   expect(reads).toBe(1);
+});
+
+test('story reads answer from the worker as the session would', async () => {
+  const main = await createYrsSession();
+  const engine = await createResidentEngineSession();
+  const w = worker();
+  try {
+    main.openDocx(storiesDocx(), true);
+    engine.openDocx(storiesDocx());
+    await w.bootstrap();
+    Object.assign(w.harness.session, {
+      proposalEngine: engine.proposalEngine,
+      listStories: engine.listStories,
+      readStories: engine.readStories,
+    });
+    const version = engine.proposalEngine.version();
+    const value = (reply: unknown) => (reply as { read?: { value?: Record<string, unknown> } }).read?.value;
+    const listed = await w.send({ type: 'documentRead', read: { kind: 'listStories' } });
+    expect(listed).toMatchObject({ ok: true, read: { version, value: { ok: true, version } } });
+    expect(value(listed)?.stories).toEqual(main.listStories().stories);
+    for (const stories of ['all', ['header', 'tableCell'], ['missing', 'footer']] as const) {
+      const request = { stories, view: 'accepted' as const };
+      const reply = await w.send({ type: 'documentRead', read: { kind: 'readStories', request } });
+      const local = main.readStories(request);
+      expect(reply).toMatchObject({ ok: true, read: { value: { ok: true, version } } });
+      expect(value(reply)?.stories).toEqual(local.ok ? local.stories : undefined);
+    }
+    const stale = await w.send({
+      type: 'documentRead',
+      read: { kind: 'readStories', request: { view: 'accepted', expectVersion: 'older' } },
+    });
+    expect(stale).toMatchObject({
+      ok: true,
+      read: { value: { ok: false, version, failure: { code: 'stale-version' } } },
+    });
+  } finally {
+    main.destroy();
+    engine.destroy();
+  }
 });
 
 test.each([false, true])(
