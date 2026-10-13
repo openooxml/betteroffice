@@ -78,7 +78,7 @@ fn fixture() -> Vec<u8> {
     let data = worksheet(concat!(
         r#"<cols><col min="5" max="5" width="0" customWidth="1" hidden="1"/></cols><sheetData>"#,
         r#"<row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>2</v></c><c r="C1" t="inlineStr"><is><t>Price</t></is></c><c r="D1" t="inlineStr"><is><t>Total</t></is></c><c r="E1" t="inlineStr"><is><t>secret column</t></is></c></row>"#,
-        r#"<row r="2"><c r="A2" t="s"><v>1</v></c><c r="B2"><v>3</v></c><c r="C2" s="1"><v>1.5</v></c><c r="D2"><f>B2*C2</f><v>4.5</v></c><c r="F2" s="2"><v>0.5</v></c><c r="G2" s="3"><v>45000</v></c></row>"#,
+        r#"<row r="2"><c r="A2" t="s"><v>1</v></c><c r="B2"><v>3</v></c><c r="C2" s="1"><v>1.5</v></c><c r="D2"><f>B2*C2</f><v>4.5</v></c><c r="F2" s="2"><v>0.5</v></c><c r="G2" s="3"><v>45000</v></c><c r="H2" s="4"><v>0.25</v></c></row>"#,
         r#"<row r="3"><c r="A3" t="inlineStr"><is><t>Pear &lt;script&gt;|*x* &amp; [y](z)</t></is></c><c r="B3"><v>2</v></c><c r="D3"><f>B3*C3</f></c><c r="H3" s="1"/></row>"#,
         r#"<row r="4" hidden="1"><c r="A4" t="inlineStr"><is><t>secret row</t></is></c></row>"#,
         r#"<row r="6"><c r="A6" t="inlineStr"><is><t>merged</t></is></c><c r="B6" t="inlineStr"><is><t>covered</t></is></c></row>"#,
@@ -123,7 +123,7 @@ fn fixture() -> Vec<u8> {
         (
             "xl/styles.xml",
             format!(
-                r##"<?xml version="1.0" encoding="UTF-8"?><styleSheet xmlns="{MAIN}"><numFmts count="1"><numFmt numFmtId="164" formatCode="# ?/?"/></numFmts><cellXfs count="4"><xf numFmtId="0"/><xf numFmtId="2" applyNumberFormat="1"/><xf numFmtId="164" applyNumberFormat="1"/><xf numFmtId="14" applyNumberFormat="1"/></cellXfs></styleSheet>"##
+                r##"<?xml version="1.0" encoding="UTF-8"?><styleSheet xmlns="{MAIN}"><numFmts count="2"><numFmt numFmtId="164" formatCode="# ?/?"/><numFmt numFmtId="165" formatCode="# ?/"/></numFmts><cellXfs count="5"><xf numFmtId="0"/><xf numFmtId="2" applyNumberFormat="1"/><xf numFmtId="164" applyNumberFormat="1"/><xf numFmtId="14" applyNumberFormat="1"/><xf numFmtId="165" applyNumberFormat="1"/></cellXfs></styleSheet>"##
             ),
         ),
         (
@@ -461,8 +461,8 @@ fn exports_sparse_cells_with_values_formulas_and_display_text() {
     assert_eq!(
         addresses(&content, 0),
         [
-            "A1", "B1", "C1", "D1", "A2", "B2", "C2", "D2", "F2", "G2", "A3", "B3", "D3", "H3",
-            "A6", "B6", "A7", "Z1000"
+            "A1", "B1", "C1", "D1", "A2", "B2", "C2", "D2", "F2", "G2", "H2", "A3", "B3", "D3",
+            "H3", "A6", "B6", "A7", "Z1000"
         ]
     );
     assert_eq!(
@@ -491,6 +491,8 @@ fn exports_sparse_cells_with_values_formulas_and_display_text() {
     assert_eq!(cell(&content, 0, "C2").display_text, "1.50");
     assert_eq!(cell(&content, 0, "C2").number_format, "0.00");
     assert_eq!(cell(&content, 0, "F2").display_text, " 1/2");
+    assert_eq!(cell(&content, 0, "H2").display_text, "0.25");
+    assert_eq!(cell(&content, 0, "H2").number_format, "# ?/");
     assert_eq!(cell(&content, 0, "G2").display_text, "3/15/23");
     assert_eq!(
         cell(&content, 0, "G2").value,
@@ -579,10 +581,10 @@ fn exports_sparse_cells_with_values_formulas_and_display_text() {
         XlsxExportDiagnosticCode::FormulaCacheUnverified,
         XlsxExportDiagnosticCode::FormulaResultMissing,
         XlsxExportDiagnosticCode::RichTextOmitted,
+        XlsxExportDiagnosticCode::FormattingApproximate,
     ] {
         assert!(found.contains(&code), "{code:?} missing from {found:?}");
     }
-    assert!(!found.contains(&XlsxExportDiagnosticCode::FormattingApproximate));
     let diagnostic = |code| {
         content
             .diagnostics
@@ -600,8 +602,12 @@ fn exports_sparse_cells_with_values_formulas_and_display_text() {
     );
     assert_eq!(
         to_json(&diagnostic(XlsxExportDiagnosticCode::FormattingApproximate).anchor)["a1"],
-        "F2"
+        "H2"
     );
+    assert!(!content.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == XlsxExportDiagnosticCode::FormattingApproximate
+            && to_json(&diagnostic.anchor)["a1"] == "F2"
+    }));
     assert!(
         diagnostic(XlsxExportDiagnosticCode::CommentsOmitted)
             .message
@@ -865,7 +871,7 @@ fn limits_truncate_at_complete_records() {
             assert_eq!(content, full);
         }
     }
-    assert_eq!(previous_cells, 21);
+    assert_eq!(previous_cells, 22);
 }
 
 #[test]
