@@ -212,6 +212,13 @@ thread_local! {
     static RETIREMENT_SEEKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// formula evaluations a recalc ran, the ones it discarded included.
     static FORMULA_EVALUATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// waits settling components registered, plus the members their search
+    /// for cycles of waits visited.
+    static SCHEDULER_STEPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// reads settling components made, and the spilled rectangles those reads
+    /// were compared against.
+    static SETTLING_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static SPILL_CHECKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// what a formula node produced: one value, or a rectangle an array formula
@@ -350,6 +357,8 @@ impl Waits {
     }
 
     fn wait(&mut self, id: usize, target: usize) {
+        #[cfg(test)]
+        SCHEDULER_STEPS.with(|count| count.set(count.get() + 1));
         self.on[id] = Some(target);
         self.waiters[target].push(id);
     }
@@ -380,11 +389,21 @@ impl Waits {
         let mut state = vec![UNSEEN; self.on.len()];
         let mut walk = Vec::new();
         let mut cycles = Vec::new();
+        #[cfg(test)]
+        let mut steps = 0;
         for start in 0..self.on.len() {
+            #[cfg(test)]
+            {
+                steps += 1;
+            }
             let mut at = Some(start);
             while let Some(id) = at
                 && state[id] == UNSEEN
             {
+                #[cfg(test)]
+                {
+                    steps += 1;
+                }
                 state[id] = ON_WALK;
                 walk.push(id);
                 at = self.on[id];
@@ -399,6 +418,8 @@ impl Waits {
                 state[id] = DONE;
             }
         }
+        #[cfg(test)]
+        SCHEDULER_STEPS.with(|count| count.set(count.get() + steps));
         cycles.sort_unstable();
         cycles
     }
@@ -418,6 +439,8 @@ struct ReadLog<'a> {
 
 impl ReadLog<'_> {
     fn note(&self, sheet: SheetId, at: CellRef) {
+        #[cfg(test)]
+        SETTLING_READS.with(|count| count.set(count.get() + 1));
         if self.first.get().is_some() {
             return;
         }
@@ -430,7 +453,11 @@ impl ReadLog<'_> {
             .or_else(|| {
                 self.spills
                     .iter()
-                    .find(|(id, on, range)| *on == sheet && range.contains(at) && unsettled(id))
+                    .find(|(id, on, range)| {
+                        #[cfg(test)]
+                        SPILL_CHECKS.with(|count| count.set(count.get() + 1));
+                        *on == sheet && range.contains(at) && unsettled(id)
+                    })
                     .map(|&(id, ..)| id)
             });
         self.first.set(read);
@@ -1659,6 +1686,93 @@ mod tests {
         assert!(result.cycle_cells.is_empty());
         assert_eq!(value(&wb, s, "B1"), num(7.0));
         assert_eq!(value(&wb, s, "C1"), num(7.0));
+    }
+
+    /// A1 reads itself, and each later cell reads itself once the one before
+    /// it shows `0`, so every cell is a cycle of its own, found one after the
+    /// other. each evaluation registers at most one wait and each member is
+    /// collected into a cycle once, so the work stays within one step per
+    /// evaluation plus one per cell.
+    #[test]
+    fn cycle_classification_self_cycles_found_in_turn() {
+        const CELLS: u32 = 20_000;
+        let (mut wb, s) = one_sheet();
+        put_formula(&mut wb, s, "A1", &format!("IF(TRUE,A1,A{CELLS})"));
+        for row in 2..=CELLS {
+            put_formula(
+                &mut wb,
+                s,
+                &format!("A{row}"),
+                &format!("IF(A{}=0,A{row},1)", row - 1),
+            );
+        }
+        FORMULA_EVALUATIONS.with(|count| count.set(0));
+        SCHEDULER_STEPS.with(|count| count.set(0));
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        let evaluations = FORMULA_EVALUATIONS.with(|count| count.get());
+        let steps = SCHEDULER_STEPS.with(|count| count.get());
+        assert!(
+            evaluations <= 3 * u64::from(CELLS),
+            "{evaluations} evaluations"
+        );
+        assert!(steps <= 4 * u64::from(CELLS), "{steps} steps");
+        let every: Vec<_> = (0..CELLS).map(|row| (s, CellRef::new(row, 0))).collect();
+        assert!(
+            result.cycle_cells == every,
+            "{} cycle cells",
+            result.cycle_cells.len()
+        );
+        for row in 1..=CELLS {
+            assert_eq!(value(&wb, s, &format!("A{row}")), num(0.0));
+        }
+    }
+
+    /// arrays tied into one component only by branches they never take, each
+    /// reading a constant outside it. each read is compared with the
+    /// rectangles of at most nine grid blocks of the one size class here, and
+    /// rectangles that do not overlap never share a block.
+    #[test]
+    fn cycle_classification_spill_lookup_scales_with_reads() {
+        const ARRAYS: u32 = 5_000;
+        let (mut wb, s) = one_sheet();
+        put_num(&mut wb, s, "A1", 7.0);
+        for row in 1..=ARRAYS {
+            put_recorded(
+                &mut wb,
+                s,
+                &format!("B{row}"),
+                &format!("IF($A$1=7,{{1,2}},B{})", row % ARRAYS + 1),
+                &format!("B{row}:C{row}"),
+            );
+        }
+        SETTLING_READS.with(|count| count.set(0));
+        SPILL_CHECKS.with(|count| count.set(0));
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        let reads = SETTLING_READS.with(|count| count.get());
+        let checks = SPILL_CHECKS.with(|count| count.get());
+        assert!(reads >= u64::from(ARRAYS), "{reads} reads");
+        assert!(checks <= 9 * reads, "{checks} checks over {reads} reads");
+        assert!(result.cycle_cells.is_empty());
+        for row in 1..=ARRAYS {
+            assert_eq!(value(&wb, s, &format!("B{row}")), num(1.0));
+            assert_eq!(value(&wb, s, &format!("C{row}")), num(2.0));
+        }
+    }
+
+    /// the range graph puts A1 and the array on one cycle, but A1 only reads
+    /// inside the rectangle the array spills over: it waits for the array,
+    /// which spills its real result.
+    #[test]
+    fn cycle_classification_waits_on_a_spill_interior() {
+        let (mut wb, s) = one_sheet();
+        put_formula(&mut wb, s, "A1", "B2");
+        put_recorded(&mut wb, s, "B1", "IF(TRUE,{1;2},A1)", "B1:B2");
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert!(result.cycle_cells.is_empty());
+        assert_eq!(value(&wb, s, "A1"), num(2.0));
+        assert_eq!(value(&wb, s, "B1"), num(1.0));
+        assert_eq!(value(&wb, s, "B2"), num(2.0));
+        assert_eq!(changed_a1(&result), vec!["A1", "B1", "B2"]);
     }
 
     /// a range reaches the formulas it covers through a tree over each row or
