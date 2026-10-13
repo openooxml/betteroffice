@@ -59,18 +59,36 @@ fn sanitize_package_inner(data: &[u8], expected_format: Option<&str>) -> Result<
     let mut removed: HashSet<String> = parts
         .iter()
         .filter(|(path, _)| {
-            dangerous_path(path)
-                || content_types
-                    .as_ref()
-                    .and_then(|types| types.content_type_for(path))
-                    .is_some_and(dangerous_content_type)
+            !path.eq_ignore_ascii_case("[Content_Types].xml")
+                && dangerous_part(path, content_types.as_ref())
         })
         .map(|(path, _)| normalize_part_name(path).into_owned())
         .collect();
     if let Some(content_types) = &content_types {
-        removed.extend(content_types.dangerous.iter().cloned());
+        removed.extend(
+            content_types
+                .dangerous
+                .iter()
+                .filter(|path| path.as_str() != "[content_types].xml")
+                .cloned(),
+        );
     }
 
+    if matches!(
+        detected,
+        DocumentKind::Xlsx
+            | DocumentKind::Xlsm
+            | DocumentKind::Xltx
+            | DocumentKind::Xltm
+            | DocumentKind::Xlam
+    ) {
+        sanitize_workbook_sheets(
+            &mut parts,
+            &removed,
+            content_types.as_ref(),
+            &mut xml_budget,
+        )?;
+    }
     if !removed.is_empty() {
         parts.retain(|(path, _)| !removed.contains(normalize_part_name(path).as_ref()));
     }
@@ -84,7 +102,13 @@ fn sanitize_package_inner(data: &[u8], expected_format: Option<&str>) -> Result<
         } else if lower.ends_with(".rels")
             || content_type.is_some_and(is_relationships_content_type)
         {
-            *bytes = sanitize_relationships(bytes, &removed, path, &mut xml_budget)?;
+            *bytes = sanitize_relationships(
+                bytes,
+                &removed,
+                content_types.as_ref(),
+                path,
+                &mut xml_budget,
+            )?;
         } else if is_xml_part(&lower) || content_type.is_some_and(is_xml_content_type) {
             *bytes = neutralize_fields(bytes, path, &mut xml_budget)?;
         }
@@ -867,6 +891,7 @@ fn macro_free_content_type(content_type: &str) -> &str {
 fn sanitize_relationships(
     xml: &[u8],
     removed: &HashSet<String>,
+    content_types: Option<&ContentTypes>,
     path: &str,
     xml_budget: &mut XmlBudget,
 ) -> Result<Vec<u8>, String> {
@@ -894,7 +919,12 @@ fn sanitize_relationships(
         match event {
             Event::Start(start) => {
                 let remove = start.name().local_name().as_ref() == b"Relationship"
-                    && remove_relationship(&attributes(&reader, &start, path)?, removed, path);
+                    && remove_relationship(
+                        &attributes(&reader, &start, path)?,
+                        removed,
+                        content_types,
+                        path,
+                    );
                 if remove {
                     skip_depth = 1;
                 } else {
@@ -903,7 +933,12 @@ fn sanitize_relationships(
             }
             Event::Empty(start) => {
                 let remove = start.name().local_name().as_ref() == b"Relationship"
-                    && remove_relationship(&attributes(&reader, &start, path)?, removed, path);
+                    && remove_relationship(
+                        &attributes(&reader, &start, path)?,
+                        removed,
+                        content_types,
+                        path,
+                    );
                 if !remove {
                     write_start(&mut writer, start.into_owned(), true, path)?;
                 }
@@ -919,6 +954,7 @@ fn sanitize_relationships(
 fn remove_relationship(
     attributes: &[(String, String)],
     removed: &HashSet<String>,
+    content_types: Option<&ContentTypes>,
     relationship_path: &str,
 ) -> bool {
     let target = attribute_value(attributes, "Target").unwrap_or_default();
@@ -927,9 +963,338 @@ fn remove_relationship(
     target_mode.trim().eq_ignore_ascii_case("External")
         || external_target(target)
         || dangerous_relationship_type(relationship_type)
-        || dangerous_path(target)
-        || resolve_relationship_target(relationship_path, target)
-            .is_some_and(|target| removed.contains(&target))
+        || resolve_relationship_target(relationship_path, target).is_some_and(|target| {
+            removed.contains(&target) || dangerous_part(&target, content_types)
+        })
+}
+
+fn dangerous_part(path: &str, content_types: Option<&ContentTypes>) -> bool {
+    content_types
+        .and_then(|types| types.content_type_for(path))
+        .map_or_else(|| dangerous_path(path), dangerous_content_type)
+}
+
+fn sanitize_workbook_sheets(
+    parts: &mut [(String, Vec<u8>)],
+    removed: &HashSet<String>,
+    content_types: Option<&ContentTypes>,
+    xml_budget: &mut XmlBudget,
+) -> Result<(), String> {
+    let part_names = parts
+        .iter()
+        .map(|(path, _)| normalize_part_name(path).into_owned())
+        .collect();
+    let workbook_path = main_document_part(parts, &part_names, xml_budget)
+        .map(|main| main.part_name)
+        .unwrap_or_else(|_| "xl/workbook.xml".to_owned());
+    let (directory, filename) = workbook_path
+        .rsplit_once('/')
+        .unwrap_or(("", &workbook_path));
+    let relationships_path = if directory.is_empty() {
+        format!("_rels/{filename}.rels")
+    } else {
+        format!("{directory}/_rels/{filename}.rels")
+    };
+    let Some((path, bytes)) = parts
+        .iter()
+        .find(|(path, _)| normalize_part_name(path).as_ref() == relationships_path)
+    else {
+        return Ok(());
+    };
+    validate_xml_limits(bytes, path, xml_budget)?;
+    let mut reader = NsReader::from_reader(bytes.as_slice());
+    let mut relationships = BTreeMap::new();
+    let mut has_removed_macro_sheet = false;
+    let mut depth = 0;
+    loop {
+        let (namespace, event) = reader
+            .read_resolved_event()
+            .map_err(|error| format!("invalid XML in {path}: {error}"))?;
+        match &event {
+            Event::Start(start) | Event::Empty(start) => {
+                if depth == 0
+                    && (start.local_name().as_ref() != b"Relationships"
+                        || !is_relationships_namespace(&namespace))
+                {
+                    return Err(format!("invalid relationships in {path}"));
+                }
+                if depth == 1
+                    && start.local_name().as_ref() == b"Relationship"
+                    && is_relationships_namespace(&namespace)
+                {
+                    let values = attributes(&reader, start, path)?;
+                    let id = attribute_value(&values, "Id")
+                        .ok_or_else(|| format!("Relationship missing Id in {path}"))?;
+                    let is_removed = remove_relationship(&values, removed, content_types, path);
+                    let target = attribute_value(&values, "Target")
+                        .and_then(|target| resolve_relationship_target(path, target));
+                    let macro_sheet = attribute_value(&values, "Type")
+                        .is_some_and(|value| value.to_ascii_lowercase().contains("macrosheet"))
+                        || target.as_deref().is_some_and(|target| {
+                            target.contains("/macrosheets/")
+                                || content_types
+                                    .and_then(|types| types.content_type_for(target))
+                                    .is_some_and(|value| {
+                                        value.to_ascii_lowercase().contains("macrosheet")
+                                    })
+                        });
+                    has_removed_macro_sheet |= is_removed && macro_sheet;
+                    if relationships.insert(id.to_owned(), is_removed).is_some() {
+                        return Err(format!("duplicate relationship Id in {path}"));
+                    }
+                }
+                if matches!(event, Event::Start(_)) {
+                    depth += 1;
+                }
+            }
+            Event::End(_) => depth -= 1,
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    if !has_removed_macro_sheet {
+        return Ok(());
+    }
+    let (path, bytes) = parts
+        .iter_mut()
+        .find(|(path, _)| normalize_part_name(path).as_ref() == workbook_path)
+        .ok_or_else(|| format!("missing workbook part: {workbook_path}"))?;
+    *bytes = rewrite_workbook_sheets(bytes, path, &relationships, xml_budget)?;
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum WorkbookElement {
+    Sheet,
+    DefinedName,
+    View,
+    Other,
+}
+
+struct WorkbookReader<'a> {
+    reader: NsReader<&'a [u8]>,
+    stack: Vec<Vec<u8>>,
+    root_seen: bool,
+    sheets_seen: bool,
+}
+
+impl<'a> WorkbookReader<'a> {
+    fn new(xml: &'a [u8]) -> Self {
+        Self {
+            reader: NsReader::from_reader(xml),
+            stack: Vec::new(),
+            root_seen: false,
+            sheets_seen: false,
+        }
+    }
+
+    fn read_event(&mut self, path: &str) -> Result<(Event<'a>, WorkbookElement), String> {
+        let (namespace, event) = self
+            .reader
+            .read_resolved_event()
+            .map_err(|error| format!("invalid XML in {path}: {error}"))?;
+        let mut element = WorkbookElement::Other;
+        match &event {
+            Event::Start(start) | Event::Empty(start) => {
+                let spreadsheet = matches!(&namespace, ResolveResult::Bound(namespace) if matches!(namespace.0, b"http://schemas.openxmlformats.org/spreadsheetml/2006/main" | b"http://purl.oclc.org/ooxml/spreadsheetml/main"));
+                if matches!(&namespace, ResolveResult::Unknown(_)) {
+                    return Err(format!("unbound workbook namespace in {path}"));
+                }
+                let local = start.local_name();
+                if self.stack.is_empty() {
+                    if self.root_seen || !spreadsheet || local.as_ref() != b"workbook" {
+                        return Err(format!("invalid workbook root in {path}"));
+                    }
+                    self.root_seen = true;
+                }
+                if spreadsheet {
+                    let parent = self.stack.last().map(Vec::as_slice);
+                    if self.stack.len() == 1 && local.as_ref() == b"sheets" {
+                        if self.sheets_seen {
+                            return Err(format!("duplicate workbook sheets in {path}"));
+                        }
+                        self.sheets_seen = true;
+                    }
+                    element = match (self.stack.len(), parent, local.as_ref()) {
+                        (2, Some(b"sheets"), b"sheet") => WorkbookElement::Sheet,
+                        (2, Some(b"definedNames"), b"definedName") => WorkbookElement::DefinedName,
+                        (2, Some(b"bookViews"), b"workbookView") => WorkbookElement::View,
+                        (_, _, b"sheet" | b"definedName" | b"workbookView") => {
+                            return Err(format!("unexpected workbook element in {path}"));
+                        }
+                        _ => WorkbookElement::Other,
+                    };
+                }
+                if matches!(event, Event::Start(_)) {
+                    self.stack.push(if spreadsheet {
+                        local.as_ref().to_vec()
+                    } else {
+                        Vec::new()
+                    });
+                }
+            }
+            Event::End(_) => {
+                self.stack.pop();
+            }
+            Event::Text(text) if self.stack.is_empty() && !xml_whitespace(text.as_ref()) => {
+                return Err(format!("text outside workbook root in {path}"));
+            }
+            Event::CData(_) if self.stack.is_empty() => {
+                return Err(format!("CDATA outside workbook root in {path}"));
+            }
+            Event::Eof if !self.root_seen || !self.sheets_seen || !self.stack.is_empty() => {
+                return Err(format!("incomplete workbook in {path}"));
+            }
+            _ => {}
+        }
+        Ok((event, element))
+    }
+}
+
+fn workbook_sheet_id(
+    reader: &NsReader<&[u8]>,
+    start: &BytesStart<'_>,
+    path: &str,
+) -> Result<String, String> {
+    let values = attributes(reader, start, path)?;
+    let mut id = None;
+    for (key, value) in values {
+        let (namespace, local) = reader
+            .resolver()
+            .resolve_attribute(quick_xml::name::QName(key.as_bytes()));
+        if local.as_ref() == b"id"
+            && matches!(namespace, ResolveResult::Bound(namespace) if matches!(namespace.0, b"http://schemas.openxmlformats.org/officeDocument/2006/relationships" | b"http://purl.oclc.org/ooxml/officeDocument/relationships"))
+            && id.replace(value).is_some()
+        {
+            return Err(format!("duplicate sheet relationship in {path}"));
+        }
+    }
+    id.ok_or_else(|| format!("sheet missing relationship id in {path}"))
+}
+
+fn rewrite_workbook_sheets(
+    xml: &[u8],
+    path: &str,
+    relationships: &BTreeMap<String, bool>,
+    xml_budget: &mut XmlBudget,
+) -> Result<Vec<u8>, String> {
+    validate_xml_limits(xml, path, xml_budget)?;
+    let mut reader = WorkbookReader::new(xml);
+    let mut sheets = Vec::new();
+    let mut seen_ids = HashSet::new();
+    let mut remaining = 0;
+    loop {
+        let (event, element) = reader.read_event(path)?;
+        match event {
+            Event::Start(start) | Event::Empty(start)
+                if matches!(element, WorkbookElement::Sheet) =>
+            {
+                let id = workbook_sheet_id(&reader.reader, &start, path)?;
+                if !seen_ids.insert(id.clone()) {
+                    return Err(format!("duplicate sheet relationship in {path}"));
+                }
+                let removed = relationships
+                    .get(&id)
+                    .ok_or_else(|| format!("unknown sheet relationship in {path}"))?;
+                if *removed {
+                    sheets.push(None);
+                } else {
+                    sheets.push(Some(remaining));
+                    remaining += 1;
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    if remaining == 0 {
+        return Err(format!("no remaining workbook sheets in {path}"));
+    }
+    let mut reader = WorkbookReader::new(xml);
+    let mut writer = Writer::new(Vec::with_capacity(xml.len()));
+    let mut sheet_index = 0;
+    let mut skip_depth = 0;
+    loop {
+        let (event, element) = reader.read_event(path)?;
+        if skip_depth > 0 {
+            match event {
+                Event::Start(_) => skip_depth += 1,
+                Event::End(_) => skip_depth -= 1,
+                _ => {}
+            }
+            continue;
+        }
+        let empty = matches!(event, Event::Empty(_));
+        match event {
+            Event::Start(start) | Event::Empty(start) => {
+                let mut values = attributes(&reader.reader, &start, path)?;
+                let remove = match element {
+                    WorkbookElement::Sheet => {
+                        let remove = sheets[sheet_index].is_none();
+                        sheet_index += 1;
+                        remove
+                    }
+                    WorkbookElement::DefinedName => {
+                        if let Some(index) =
+                            values.iter_mut().find(|(key, _)| key == "localSheetId")
+                        {
+                            let mapped = workbook_sheet_index(&index.1, &sheets, path)?;
+                            if let Some(mapped) = mapped {
+                                index.1 = mapped.to_string();
+                                false
+                            } else {
+                                true
+                            }
+                        } else {
+                            false
+                        }
+                    }
+                    WorkbookElement::View => {
+                        for (key, value) in &mut values {
+                            if matches!(key.as_str(), "activeTab" | "firstSheet") {
+                                let old = value.parse::<usize>().map_err(|_| {
+                                    format!("invalid workbook sheet index in {path}")
+                                })?;
+                                let mapped = workbook_sheet_index(value, &sheets, path)?
+                                    .unwrap_or_else(|| {
+                                        sheets[..old].iter().flatten().count().min(remaining - 1)
+                                    });
+                                *value = mapped.to_string();
+                            }
+                        }
+                        false
+                    }
+                    WorkbookElement::Other => false,
+                };
+                if remove {
+                    if !empty {
+                        skip_depth = 1;
+                    }
+                } else {
+                    let mut output = start.into_owned();
+                    output.clear_attributes();
+                    for (key, value) in values {
+                        output.push_attribute((key.as_str(), value.as_str()));
+                    }
+                    write_start(&mut writer, output, empty, path)?;
+                }
+            }
+            Event::Eof => return Ok(writer.into_inner()),
+            other => write(&mut writer, other, path)?,
+        }
+    }
+}
+
+fn workbook_sheet_index(
+    value: &str,
+    sheets: &[Option<usize>],
+    path: &str,
+) -> Result<Option<usize>, String> {
+    value
+        .parse::<usize>()
+        .ok()
+        .and_then(|index| sheets.get(index).copied())
+        .ok_or_else(|| format!("invalid workbook sheet index in {path}"))
 }
 
 fn neutralize_fields(
