@@ -37,7 +37,10 @@ fn default_echo_facts_do_not_repeat_default_fields() {
         .unwrap();
     let bytes = serde_json::to_vec(facts).unwrap();
     println!("ECHO_FACT_BYTES {}", bytes.len());
-    assert!(bytes.len() <= 40, "default echo facts exceed the byte budget");
+    assert!(
+        bytes.len() <= 40,
+        "default echo facts exceed the byte budget"
+    );
     let decoded: docx_layout::display_list::EchoRunFacts = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(&decoded, facts);
     let mut nondefault = facts.clone();

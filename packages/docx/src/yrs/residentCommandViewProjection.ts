@@ -269,8 +269,10 @@ function projectGlyphLine(input: GlyphLineInput): { line: DocxEchoGlyphLine; rec
   const { provider, retained, runs, text, baseline } = input;
   const first = runs[0]!;
   const facts = first.echo;
-  if (!facts || !facts.primaryFont || runs.some(run => !run.echo || !run.echo.primaryFont ||
-    run.echo.x !== facts.x || run.echo.right !== facts.right || run.echo.kern !== facts.kern || run.echo.kerning !== facts.kerning ||
+  const kern = facts?.kern ?? false;
+  if (!facts || facts.primaryFont === false || runs.some(run => !run.echo || run.echo.primaryFont === false ||
+    run.echo.x !== facts.x || run.echo.right !== facts.right || (run.echo.kern ?? false) !== kern ||
+    (run.echo.kerning ?? 0) !== (facts.kerning ?? 0) ||
     run.echo.letterSpacing || run.echo.position || run.echo.scale !== undefined && run.echo.scale !== 100)) return undefined;
   if (runs.some((run) => run.fontId !== first.fontId || run.size !== first.size || run.color !== first.color ||
     run.fallbackFont !== first.fallbackFont) ||
@@ -279,7 +281,6 @@ function projectGlyphLine(input: GlyphLineInput): { line: DocxEchoGlyphLine; rec
   const halfPoints = Math.round(first.size * 1.5);
   if (!font || echoRound3(halfPoints / 2 * 96 / 72) !== first.size) return undefined;
   const shapingSize = Math.fround(Math.fround(halfPoints / 2 * 96) / 72);
-  const kern = facts.kern;
   const glyphIds: number[] = [];
   const xs: number[] = [];
   for (const run of runs) {
@@ -362,7 +363,7 @@ function projectGlyphLine(input: GlyphLineInput): { line: DocxEchoGlyphLine; rec
   return {
     line: { glyphSet: source.key, fontId: first.fontId, size: first.size,
       color: first.color, x: chosen.x, y: baseline, next, right,
-      ...(facts.canEmpty === undefined ? {} : { canEmpty: facts.canEmpty }),
+      canEmpty: facts.canEmpty ?? false,
       ...(previousSlack === undefined ? {} : { previousSlack }), ...(nextWord === undefined ? {} : { nextWord }),
       device, pixelRatio: ratio },
     rect: { x: band.x, y: band.y, width: band.w, height: band.h },

@@ -843,13 +843,40 @@ pub struct GlyphRunPrimitive {
 pub struct EchoRunFacts {
     pub x: f64,
     pub right: f64,
+    #[serde(default, skip_serializing_if = "is_false")]
     pub kern: bool,
+    #[serde(default, skip_serializing_if = "echo_zero")]
     pub kerning: f64,
+    #[serde(default = "echo_primary", skip_serializing_if = "echo_is_primary")]
     pub primary_font: bool,
+    #[serde(default, skip_serializing_if = "echo_zero")]
     pub letter_spacing: f64,
+    #[serde(default, skip_serializing_if = "echo_zero")]
     pub position: f64,
+    #[serde(default = "echo_scale", skip_serializing_if = "echo_default_scale")]
     pub scale: f64,
+    #[serde(default, skip_serializing_if = "is_false")]
     pub can_empty: bool,
+}
+
+fn echo_zero(value: &f64) -> bool {
+    *value == 0.0
+}
+
+fn echo_primary() -> bool {
+    true
+}
+
+fn echo_is_primary(value: &bool) -> bool {
+    *value
+}
+
+fn echo_scale() -> f64 {
+    100.0
+}
+
+fn echo_default_scale(value: &f64) -> bool {
+    *value == echo_scale()
 }
 
 /// One positioned glyph inside a [`GlyphRunPrimitive`].
