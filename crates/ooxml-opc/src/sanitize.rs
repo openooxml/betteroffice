@@ -2483,13 +2483,13 @@ mod tests {
     #[test]
     fn regression_rejects_unsafe_macro_sheet_workbook_rewrites() {
         for workbook in [
-            "<root/>".to_owned(),
+            "<root xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'><sheet r:id='macro'/></root>".to_owned(),
             String::from_utf8_lossy(MACRO_WORKBOOK).replace(
                 "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
                 "urn:foreign",
             ),
-            String::from_utf8_lossy(MACRO_WORKBOOK).replace("r:id='macro'", "r:id='first'"),
-            String::from_utf8_lossy(MACRO_WORKBOOK).replace("r:id='macro'", "r:id='unknown'"),
+            String::from_utf8_lossy(MACRO_WORKBOOK).replace("r:id='last'", "r:id='first'"),
+            String::from_utf8_lossy(MACRO_WORKBOOK).replace("r:id='last'", "r:id='unknown'"),
             String::from_utf8_lossy(MACRO_WORKBOOK)
                 .replace("localSheetId='2'", "localSheetId='invalid'"),
         ] {
@@ -2952,6 +2952,71 @@ mod tests {
         }
     }
 
+    fn wrap_alternate_content(workbook: &[u8], sheet: &str) -> String {
+        let wrapped = format!(
+            "<mc:AlternateContent xmlns:mc='http://schemas.openxmlformats.org/markup-compatibility/2006'><mc:Choice Requires='r'>{sheet}</mc:Choice><mc:Fallback>{sheet}</mc:Fallback></mc:AlternateContent>"
+        );
+        let workbook = String::from_utf8_lossy(workbook);
+        assert!(workbook.contains(sheet), "{sheet}");
+        workbook.replace(sheet, &wrapped)
+    }
+
+    #[test]
+    fn regression_unreferenced_macro_sheets_ignore_workbook_structure() {
+        for workbook in [
+            wrap_alternate_content(
+                NESTED_NAMES_WORKBOOK,
+                "<sheet name='First' sheetId='1' r:id='first'/>",
+            ),
+            "<root/>".to_owned(),
+            String::from_utf8_lossy(MACRO_WORKBOOK).replace("r:id='macro'", "r:id='first'"),
+            String::from_utf8_lossy(MACRO_WORKBOOK).replace("r:id='macro'", "r:id='unknown'"),
+        ] {
+            for root in ["Relationships", "Rels"] {
+                let mut parts = macro_sheet_parts(XLSM_MAIN_TYPE, workbook.as_bytes());
+                replace_part_text(
+                    &mut parts,
+                    "xl/_rels/workbook.xml.rels",
+                    "Relationships",
+                    root,
+                );
+                for output in sanitize_both(&parts) {
+                    assert_eq!(part_bytes(&output, "xl/workbook.xml"), workbook.as_bytes());
+                    let relationships =
+                        String::from_utf8_lossy(part_bytes(&output, "xl/_rels/workbook.xml.rels"));
+                    for kept in ["worksheets/first.xml", "worksheets/last.xml"] {
+                        assert!(relationships.contains(kept), "{relationships}");
+                    }
+                    assert!(!relationships.contains("macro"), "{relationships}");
+                    assert!(!has_part(&output, "xl/custom/sheet.data"));
+                    assert_all_parts_declared(&output);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn macro_sheet_rewrites_reject_alternate_content_sheets() {
+        for sheet in [
+            "<sheet name='Macro' sheetId='2' r:id='macro'></sheet>",
+            "<sheet name='First' sheetId='1' r:id='first'/>",
+        ] {
+            let workbook = wrap_alternate_content(MACRO_WORKBOOK, sheet);
+            let parts = macro_sheet_parts(XLSM_MAIN_TYPE, workbook.as_bytes());
+            let package = rezip_parts(&parts).unwrap();
+            for result in [
+                sanitize_package(&package),
+                sanitize_package_for_format(&package, "xlsx"),
+            ] {
+                let error = result.unwrap_err();
+                assert!(
+                    error.contains("unexpected workbook element in xl/workbook.xml"),
+                    "{error}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn regression_targets_climbing_above_the_root_resolve_at_the_root() {
         let mut parts = root_sheet_parts(
@@ -3062,6 +3127,45 @@ mod tests {
                 String::from_utf8_lossy(part_bytes(&output, "xl/_rels/sheet1.xml.rels"));
             assert!(!relationships.contains("vbaProject"), "{relationships}");
             assert_all_parts_declared(&output);
+        }
+    }
+
+    #[test]
+    fn regression_drops_targets_with_percent_encoded_separators_or_dots() {
+        for target in [
+            "%5CvbaProject.bin",
+            "%2FvbaProject.bin",
+            "%5cvbaProject.bin",
+            "%2e%2E/vbaProject.bin",
+        ] {
+            let mut parts = ordinary_workbook_parts(
+                &WORKSHEET_RELATIONSHIPS.replace("worksheets/first.xml", "sheet1.xml"),
+            );
+            parts.retain(|(path, _)| path != "xl/worksheets/first.xml");
+            declare(
+                &mut parts,
+                &format!(
+                    "<Default Extension='bin' ContentType='{PRINTER_SETTINGS_TYPE}'/><Override PartName='/vbaProject.bin' ContentType='{VBA_PROJECT_TYPE}'/>"
+                ),
+            );
+            let printer = format!(
+                "<Relationship Id='printer' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/printerSettings' Target='{target}'/>"
+            );
+            parts.extend([
+                ("xl/sheet1.xml".to_owned(), b"<worksheet/>".to_vec()),
+                (
+                    "xl/_rels/sheet1.xml.rels".to_owned(),
+                    relationships_xml(&printer),
+                ),
+                ("vbaProject.bin".to_owned(), b"vba payload".to_vec()),
+            ]);
+            for output in sanitize_both(&parts) {
+                assert!(!has_part(&output, "vbaProject.bin"));
+                let relationships =
+                    String::from_utf8_lossy(part_bytes(&output, "xl/_rels/sheet1.xml.rels"));
+                assert!(!relationships.contains("vbaProject"), "{target}: {relationships}");
+                assert_all_parts_declared(&output);
+            }
         }
     }
 
