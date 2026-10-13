@@ -3,7 +3,7 @@
   <w:body>
     <w:p>
       <w:r><w:t xml:space="preserve">Opaque drawings follow </w:t></w:r>
-      <w:r><w:object><o:OLEObject Type="Embed" ProgID="Equation.DSMT4" ShapeID="_1" DrawAspect="Content" ObjectID="_1" r:id="rIdOle"/></w:object></w:r>
+      <w:r><w:object><v:shape style="width:72pt;height:36pt"><v:imagedata r:id="rIdImage"/></v:shape><o:OLEObject Type="Embed" ProgID="Equation.DSMT4" ShapeID="_1" DrawAspect="Content" ObjectID="_1" r:id="rIdOle"/></w:object></w:r>
       <w:r><w:drawing><wp:inline><wp:extent cx="5486400" cy="3200400"/><wp:docPr id="2" name="Chart X"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart r:id="rIdChart9"/></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>
       <w:r><mc:AlternateContent><mc:Choice Requires="wps"><w:pict><v:rect style="width:10pt;height:10pt"/></w:pict></mc:Choice><mc:Fallback><w:pict><v:rect style="width:10pt;height:10pt"/></w:pict></mc:Fallback></mc:AlternateContent></w:r>
       <w:r><w:t xml:space="preserve"> tail</w:t></w:r>

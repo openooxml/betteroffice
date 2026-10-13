@@ -495,6 +495,9 @@ const review = defineDocxPlugin<State>({
   stale or unpainted layout, and `layout-change` repeats once the pages have painted
   a layout that arrived before its pixels; `layout.previewVersion` is the proposal
   preview the pixels show.
+  A target in a header or footer has fragments on every built page that paints it
+  and its anchor on the first; one that no laid-out page paints, built or not, is
+  `missing-target` once the layout is complete.
   The layer ignores the
   pointer; interactive overlay elements set `pointer-events: auto`.
   `snapshot.selection.displayRange` belongs to one layout and is never an edit

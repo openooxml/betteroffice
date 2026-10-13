@@ -11,10 +11,12 @@ export function PluginOverlays({
   host,
   activations,
   layerRef,
+  claimPointerEvents,
 }: {
   host: PptxPluginHost;
   activations: readonly PptxPluginActivation[];
   layerRef: (element: HTMLDivElement | null) => void;
+  claimPointerEvents?: boolean;
 }) {
   return (
     <div
@@ -28,7 +30,7 @@ export function PluginOverlays({
         const Overlay = activation.plugin.overlay;
         const geometry = activation.context.geometry;
         return Overlay && geometry ? (
-          <PluginRenderScope key={activation.key} host={host} activation={activation}>
+          <PluginRenderScope key={activation.key} host={host} activation={activation} claimPointerEvents={claimPointerEvents}>
             <Overlay context={activation.context} geometry={geometry} />
           </PluginRenderScope>
         ) : null;

@@ -115,7 +115,12 @@ pub enum RunContent {
     Chart { chart: Box<crate::chart::Chart> },
     /// A drawing the parser does not model, replayed verbatim on save.
     #[serde(rename = "opaqueDrawing")]
-    OpaqueDrawing { kind: String, xml: String },
+    OpaqueDrawing {
+        kind: String,
+        xml: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preview: Option<Box<crate::image::Image>>,
+    },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -324,11 +329,13 @@ fn parse_run_contents(element: &XmlElement) -> Vec<RunContent> {
             "drawing" | "pict" | "object" => output.push(RunContent::OpaqueDrawing {
                 kind: child.local_name().to_owned(),
                 xml: child.to_raw_inline_xml(),
+                preview: None,
             }),
             "AlternateContent" if contains_drawing_owned_content(child) => {
                 output.push(RunContent::OpaqueDrawing {
                     kind: "alternateContent".to_owned(),
                     xml: child.to_raw_inline_xml(),
+                    preview: None,
                 });
             }
             "cr" => output.push(RunContent::Break {

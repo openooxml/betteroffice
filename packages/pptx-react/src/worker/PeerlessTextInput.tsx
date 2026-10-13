@@ -1,4 +1,4 @@
-import { useEffect, useRef, useSyncExternalStore, type ReactElement } from 'react';
+import { useEffect, useRef, useSyncExternalStore, type ReactElement, type RefObject } from 'react';
 import type { PeerlessViewStore } from './peerlessViewStore';
 import type { PeerlessVisualStore } from './usePeerlessPresentation';
 import { commitComposition, peerlessInputReference } from './peerlessViewStore';
@@ -11,6 +11,7 @@ import { usePeerlessTextSelection } from './usePeerlessTextSelection';
 export type PeerlessInputShortcut = 'undo' | 'redo' | 'copy' | 'cut' | 'save';
 
 export interface PeerlessTextInputProps {
+  inputRef?: RefObject<HTMLTextAreaElement | null>;
   store: PeerlessViewStore;
   visual?: PeerlessVisualStore;
   viewport?: { left: number; top: number; scale: number };
@@ -20,11 +21,12 @@ export interface PeerlessTextInputProps {
 
 let nextInputGroup = 0;
 
-export function PeerlessTextInput({ store, visual = store, viewport, onShortcut, commands }: PeerlessTextInputProps): ReactElement {
+export function PeerlessTextInput({ store, visual = store, viewport, onShortcut, commands, inputRef: providedInputRef }: PeerlessTextInputProps): ReactElement {
   const { t } = useTranslation();
   const textInput = t('editor.textInput');
   const selectionAnnouncement = t('editor.selectionAnnouncement');
-  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const localInputRef = useRef<HTMLTextAreaElement>(null);
+  const inputRef = providedInputRef ?? localInputRef;
   const commandsRef = useRef(commands);
   commandsRef.current = commands;
   const shortcutRef = useRef(onShortcut);
@@ -232,7 +234,7 @@ export function PeerlessTextInput({ store, visual = store, viewport, onShortcut,
       input.removeEventListener('focus', focus);
       input.removeEventListener('blur', blur);
     };
-  }, [store, move]);
+  }, [store, move, inputRef]);
 
   const scale = viewport?.scale ?? 1;
   const left = (viewport?.left ?? 0) + (view.caret?.x ?? 0) * scale;

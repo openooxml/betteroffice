@@ -3,6 +3,7 @@ import type { SessionTransport } from '../../../../shared/office-session/transpo
 import { SessionFailure } from '../../../../shared/office-session/types';
 import { createWorkerEditSession } from '../../../../shared/office-session/commands/session';
 import type { CommandTicket } from '../../../../shared/office-session/commands/types';
+import type { PptxFontFace } from '../types';
 import { createPresentationSharedAdapter,
   type PresentationSharedAck, type PresentationSharedMethods, type PresentationSharedOpenResult } from './commandSharedAdapter';
 import { presentationSharedInputs, type PresentationSharedInput } from './commandSharedInput';
@@ -23,6 +24,12 @@ import {
   type PresentationCommandRefusalReason,
 } from './commandProtocol';
 
+type CommandFont = Omit<PptxFontFace, 'bytes'> & { bytes: Uint8Array | ArrayBuffer };
+type CommandOpenInput = Omit<PresentationCommandOpenOptions, 'fonts' | 'fallbackFonts'> & {
+  fonts?: readonly CommandFont[];
+  fallbackFonts?: readonly CommandFont[];
+};
+
 export async function createPresentationCommandClient(
   bytes: Uint8Array | ArrayBuffer,
   options: PresentationCommandOpenOptions,
@@ -34,7 +41,7 @@ export async function createPresentationCommandClient(
 /** @internal */
 export async function createSharedPresentationCommandClient(
   bytes: Uint8Array | ArrayBuffer,
-  options: PresentationCommandOpenOptions,
+  options: CommandOpenInput,
   transport: SessionTransport
 ): Promise<PresentationCommandClient> {
   return createCommandClient(bytes, options, transport, true);
@@ -42,7 +49,7 @@ export async function createSharedPresentationCommandClient(
 
 async function createCommandClient(
   bytes: Uint8Array | ArrayBuffer,
-  options: PresentationCommandOpenOptions,
+  options: CommandOpenInput,
   transport: SessionTransport,
   shared: boolean
 ): Promise<PresentationCommandClient> {
@@ -75,12 +82,12 @@ async function createCommandClient(
     const transfer: Transferable[] = [document];
     const input: PresentationCommandOpenOptions = { ...options,
       fonts: options.fonts?.map((face) => {
-        const bytes = face.bytes.slice(0);
+        const bytes = copyBytes(face.bytes);
         transfer.push(bytes);
         return { ...face, bytes };
       }),
       fallbackFonts: options.fallbackFonts?.map((face) => {
-        const bytes = face.bytes.slice(0);
+        const bytes = copyBytes(face.bytes);
         transfer.push(bytes);
         return { ...face, bytes };
       }) };

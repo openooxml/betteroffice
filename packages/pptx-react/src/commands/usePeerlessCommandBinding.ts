@@ -89,7 +89,7 @@ export function usePeerlessCommandBinding(run: PeerlessPresentation | null, {
         const text = (action: Parameters<typeof formatPeerlessText>[1]) => formatPeerlessText(run.store, action);
         let operation: Promise<PresentationCommandAck | null> | null = null;
         switch (id) {
-          case 'zoom': setZoom((args as PptxCommandArgs['zoom']).scale); focus(); return { ok: true, status: 'executed' };
+          case 'zoom': setZoom((args as PptxCommandArgs['zoom']).scale); return { ok: true, status: 'executed' };
           case 'proposalsPanel': setReview({ ...review, open: args === null ? !review.open : (args as PptxCommandArgs['proposalsPanel'])!.open }); return { ok: true, status: 'opened' };
           case 'proposalSelect': flushSync(() => setReview({ ...review, selectedId: (args as PptxCommandArgs['proposalSelect']).proposalId })); return { ok: true, status: 'executed' };
           case 'proposalDiff': {

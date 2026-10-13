@@ -46,6 +46,7 @@ import {
 import {
   computeAnchorTargetGeometry,
   computeProposalGeometryMirror,
+  hiddenRanges,
   resolveNavigationTarget,
 } from './proposalGeometry';
 import { findBodyMatches } from './findMatches';
@@ -1626,9 +1627,13 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
           request.read.paraId
         );
         break;
-      case 'anchorTargets':
-        value = computeAnchorTargetGeometry(session.geometryReader, request.read.targets);
+      case 'anchorTargets': {
+        const reader = session.geometryReader;
+        value = computeAnchorTargetGeometry(reader, request.read.targets, () =>
+          hiddenRanges(reader, reader.version(), proposals?.snapshot() ?? null)
+        );
         break;
+      }
       case 'searchText':
         value = readResidentSearch(
           {
