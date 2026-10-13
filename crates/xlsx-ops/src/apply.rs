@@ -384,22 +384,37 @@ fn apply_range_formats(
     {
         let sheet_ref = &wb.sheets[sheet.0 as usize];
         let styles = &mut wb.styles;
+        let plain_default = styles.cell_format(Some(0)) == xlsx_model::CellFormat::default();
+        let mut plain = None;
         for row in range.start.row..=range.end.row {
             for col in range.start.col..=range.end.col {
                 let at = CellRef::new(row, col);
-                let old_style = sheet_ref.effective_style(at);
-                let mut format = styles.cell_format(Some(old_style.unwrap_or(0)));
+                let stored = sheet_ref.cell(at).map(|cell| cell.style);
+                let old_style = match stored {
+                    Some(style) => style,
+                    None => sheet_ref.inherited_style(at),
+                };
+                let before = styles.cell_format(Some(old_style.unwrap_or(0)));
+                let mut format = before.clone();
                 if let Err(error) = update(&mut format, at.row, at.col) {
                     styles.restore_pools(marks);
                     return Err(error);
                 }
+                if format == before {
+                    staged.push(stored.flatten());
+                    continue;
+                }
                 match styles.intern_cell_format(&format) {
-                    Ok(style) => staged.push(style.or_else(|| {
+                    Ok(Some(style)) => staged.push(Some(style)),
+                    Ok(None) if !plain_default => {
+                        staged.push(Some(*plain.get_or_insert_with(|| plain_xf(styles))));
+                    }
+                    Ok(None) => staged.push(
                         sheet_ref
                             .inherited_style(at)
                             .is_some_and(|inherited| inherited != 0)
-                            .then_some(0)
-                    })),
+                            .then_some(0),
+                    ),
                     Err(_) => {
                         styles.restore_pools(marks);
                         return Err(OpError::NumFmtTableFull);
@@ -445,6 +460,19 @@ fn apply_range_formats(
         }
     }
     Ok(InvertedOp(inverse))
+}
+
+/// An xf resolving to the plain format, for workbooks whose xf 0 does not.
+fn plain_xf(styles: &mut xlsx_model::Stylesheet) -> u32 {
+    let plain = xlsx_model::Xf::default();
+    let index = match styles.cell_xfs.iter().position(|xf| *xf == plain) {
+        Some(index) => index,
+        None => {
+            styles.cell_xfs.push(plain);
+            styles.cell_xfs.len() - 1
+        }
+    };
+    index as u32
 }
 
 /// apply a sequence of ops, returning the combined inverse (per-op inverses
