@@ -964,6 +964,7 @@ fn remove_relationship(
     let relationship_type = attribute_value(attributes, "Type").unwrap_or_default();
     target_mode.trim().eq_ignore_ascii_case("External")
         || external_target(target)
+        || encoded_path_delimiter(target)
         || dangerous_relationship_type(relationship_type)
         || resolve_relationship_target(relationship_path, target).is_some_and(|target| {
             removed.contains(&target) || dangerous_part(&target, content_types)
@@ -1603,6 +1604,18 @@ fn external_target(target: &str) -> bool {
                 && bytes
                     .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
         })
+}
+
+// OPC part names never percent-encode a separator or a dot, and readers disagree on where such
+// a target points.
+fn encoded_path_delimiter(target: &str) -> bool {
+    target.as_bytes().windows(3).any(|window| {
+        window[0] == b'%'
+            && matches!(
+                (window[1], window[2].to_ascii_uppercase()),
+                (b'2', b'E' | b'F') | (b'5', b'C')
+            )
+    })
 }
 
 #[derive(Default)]
