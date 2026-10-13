@@ -227,10 +227,10 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     if (applyFrameDelta(null, decodeFrameDelta(frame.frame)).pages.some(({ page }) => !page.unbuilt)) controller.painted();
   }, [controller]);
   const source = useMemo(() => {
-    if (parsedDocument) return parsedDocument;
+    if (parsedDocument) return { ...parsedDocument };
     if (documentBuffer instanceof Uint8Array) return new Uint8Array(documentBuffer);
     if (documentBuffer instanceof ArrayBuffer) return new Uint8Array(documentBuffer.slice(0));
-    return loaded && loaded.input === documentBuffer ? loaded.source : null;
+    return loaded && loaded.input === documentBuffer ? new Uint8Array(loaded.source) : null;
   }, [documentBuffer, parsedDocument, loaded, workerCollaboration.reopenKey]);
 
   useEffect(() => {
