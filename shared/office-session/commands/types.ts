@@ -1,5 +1,6 @@
-import { hasOwn, type TransferResult } from '../protocol';
+import { hasOwn, type DeferredReply, type TransferResult } from '../protocol';
 import type { MethodPolicy, SessionFailure } from '../types';
+import type { CommandTable, QueryFence, QueryHandlers, QueryReply, QueryTable, WorkerEditSession } from './spec';
 
 /** @internal Reply error name for an indeterminate command outcome. */
 export const COMMAND_OUTCOME_UNKNOWN = 'CommandOutcomeUnknown';
@@ -63,6 +64,7 @@ export type CommandAck<S, E, F> = {
   selection?: S;
   editState?: E;
   frame?: FrameEnvelope<F>;
+  revisions?: { selection: number; layout: number };
 };
 
 /** @internal Snapshot captured at a settled command boundary. */
@@ -168,11 +170,14 @@ export type CommandConnection<P, S, E, F> = {
     readonly call: {
       edit(envelope: CommandEnvelope<P>): Promise<CommandAck<S, E, F>>;
       checkpoint(): Promise<Checkpoint>;
+      /** @internal Posts queries after all edits previously handed to this connection. */
+      query?(fence: QueryFence, kind: string, args: unknown[]): Promise<QueryReply>;
     };
     readonly failure: SessionFailure | undefined;
     onFailure(listener: (failure: SessionFailure) => void): () => void;
     /** @internal Subscribes to frames posted by this connection's worker. */
     onFrame?(listener: (frame: FrameEnvelope<F>) => void): () => void;
+    onAck?(listener: (ack: CommandAck<S, E, F>) => void): () => void;
     dispose(): Promise<void>;
   };
 };
@@ -208,6 +213,11 @@ export type CommandHostOptions<P, S, E, F> = {
   prunedDuplicateReason?: string;
   refusedSeqs?: readonly number[];
   replayAppliedSeqs?: readonly number[];
+  commands?: CommandTable;
+  queries?: { specs: QueryTable; handlers: QueryHandlers<QueryTable> };
+  readOnly?(): boolean;
+  layoutRevision?(): number;
+  checkRefusals?: boolean;
   selectionEquals?(previous: S | undefined, next: S | undefined): boolean;
   editStateEquals?(previous: E | undefined, next: E | undefined): boolean;
   getVersion(): number;
@@ -230,6 +240,10 @@ export interface CommandHost<P, S, E, F> {
   policy(envelope: CommandEnvelope<P>): MethodPolicy;
   checkpoint(context: unknown): Promise<Checkpoint | TransferResult<Checkpoint>>;
   checkpointPolicy(): MethodPolicy;
+  query?(context: unknown, fence: QueryFence, kind: string, args: unknown[]):
+    Promise<QueryReply | TransferResult<QueryReply>> | DeferredReply<QueryReply>;
+  queryPolicy?(fence: QueryFence, kind: string, args: unknown[]): MethodPolicy;
+  revise?(change?: { selection?: S; editState?: E }): CommandAck<S, E, F> | undefined;
   /** @internal Builds a frame at a command boundary after admitted edits. */
   frame(): Promise<FrameEnvelope<F> | TransferResult<FrameEnvelope<F>>>;
 }
@@ -237,7 +251,7 @@ export interface CommandHost<P, S, E, F> {
 /** @internal Factory contract implemented by host.ts. */
 export type CreateCommandHost = <P, S, E, F>(
   options: CommandHostOptions<P, S, E, F>
-) => CommandHost<P, S, E, F>;
+) => Required<CommandHost<P, S, E, F>>;
 
 /** @internal Queued merged draft and all tickets sharing its eventual sequence and outcome. */
 export type OutboxEntry<P, X> = {
@@ -328,9 +342,12 @@ export type RecoveryHooks<O, P, S, E, F> = {
 };
 
 /** @internal Worker-backed session limits, recovery, reconciliation, and injected scheduling. */
-export type WorkerEditSessionOptions<O, P, S, E, F, X> = {
+export type WorkerEditSessionOptions<O, P, S, E, F, X, Q extends QueryTable = {}> = {
   source: O;
   connection: CommandConnection<P, S, E, F>;
+  queries?: Q;
+  holdTimeoutMs?: number;
+  timer?(callback: () => void, ms: number): () => void;
   recovery: RecoveryHooks<O, P, S, E, F>;
   echo?: EchoHooks<X, F>;
   /** @internal Releases rejected frame resources; accepted frames belong to the painter. */
@@ -354,9 +371,9 @@ export type WorkerEditSessionOptions<O, P, S, E, F, X> = {
 };
 
 /** @internal Factory contract implemented by session.ts. */
-export type CreateWorkerEditSession = <O, P, S, E, F, X>(
-  options: WorkerEditSessionOptions<O, P, S, E, F, X>
-) => EditSession<P, S, E, X>;
+export type CreateWorkerEditSession = <O, P, S, E, F, X, Q extends QueryTable = {}>(
+  options: WorkerEditSessionOptions<O, P, S, E, F, X, Q>
+) => WorkerEditSession<P, S, E, X, Q>;
 
 /** @internal Immediate legacy mutation with host-confirmed rendering and unchanged backend choice. */
 export type LegacyEditSessionOptions<P, S, E, X> = {
@@ -393,7 +410,9 @@ export function isCommandAck(value: unknown): value is CommandAck<unknown, unkno
   return record(value) && typeof value.session === 'string' &&
     counter(value.incarnation) && counter(value.epoch) && counter(value.throughSeq) &&
     finite(value.version) && Array.isArray(value.outcomes) && value.outcomes.every(outcome) &&
-    (value.frame === undefined || frame(value.frame));
+    (value.frame === undefined || frame(value.frame)) &&
+    (value.revisions === undefined || (record(value.revisions) &&
+      counter(value.revisions.selection) && counter(value.revisions.layout)));
 }
 
 /** @internal Identifies the unknown-outcome reply error and its preserved sequence. */
