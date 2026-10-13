@@ -76,13 +76,14 @@ describe('Canvas2D paths', () => {
 });
 
 describe('Canvas2D text', () => {
-  function formattedTrace(text: string, numberFormat: unknown, width: number) {
+  function formattedTrace(text: string, numberFormat: unknown, width: number, measured: string[] = []) {
     const trace: { text: string; x: number; align: string }[] = [];
     const context = {
       font: '', fillStyle: '', textAlign: '', textBaseline: '',
       save() {}, restore() {}, setTransform() {}, clearRect() {},
       beginPath() {}, rect() {}, clip() {},
       measureText(value: string) {
+        measured.push(value);
         return { width: [...value].reduce((sum, char) => sum + (char === ' ' ? 3 : char === '(' ? 5 : char === ')' ? 7 : 10), 0) };
       },
       fillText(value: string, x: number) { trace.push({ text: value, x, align: this.textAlign }); },
@@ -166,6 +167,38 @@ describe('Canvas2D text', () => {
     const px = 9 * (96 / 72);
     expect(runs).toEqual([{ text: '1234', x: 98 - 40, align: 'left' }]);
     expect(rects).toEqual([[98 - 40, 15 + px * 0.1, 40, Math.max(px * 0.05, 0.5)]]);
+  });
+
+  it('paints a layout without padding, fill or overflow at its aligned edge without measuring', () => {
+    for (const [align, x] of [['left', 2], ['center', 50], ['right', 98]] as const) {
+      const runs: { text: string; x: number; align: string }[] = [];
+      const context = {
+        font: '', fillStyle: '', textAlign: '', textBaseline: '',
+        save() {}, restore() {}, setTransform() {}, clearRect() {},
+        beginPath() {}, rect() {}, clip() {},
+        measureText(value: string): never { throw new Error(`measured ${value}`); },
+        fillText(value: string, at: number) { runs.push({ text: value, x: at, align: this.textAlign }); },
+      };
+      paintDisplayList(context as unknown as CanvasRenderingContext2D, {
+        width: 100, height: 20,
+        commands: [{ op: 'text', x, y: 15, text: '1234', fontSize: 11, color: '#000000', align,
+          clip: { x: 0, y: 0, w: 100, h: 20 }, numberFormat: { left: 2, width: 96, parts: [] },
+        } as unknown as TextCmd],
+      }, 1);
+      expect(runs).toEqual([{ text: '1234', x, align }]);
+    }
+  });
+
+  it('measures padded, filled and overflow-checked layouts', () => {
+    for (const numberFormat of [
+      { left: 2, width: 96, parts: [{ offset: 0, kind: 'padding', character: '(' }] },
+      { left: 2, width: 96, parts: [{ offset: 1, kind: 'fill', character: '.' }] },
+      { left: 2, width: 96, parts: [], general: 1234, overflow: true },
+    ]) {
+      const measured: string[] = [];
+      formattedTrace(' 1234', numberFormat, 100, measured);
+      expect(measured.length).toBeGreaterThan(0);
+    }
   });
 
   it('uses point-sized fonts for cells, ghosts, and charts at every display scale', () => {
