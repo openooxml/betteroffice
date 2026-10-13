@@ -1,12 +1,15 @@
 import argparse
+import contextlib
 import hashlib
 import importlib.util
 import json
 import os
+import selectors
 import shlex
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -14,12 +17,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parents[1]
 TIMEOUT_SECONDS = 600
+STARTUP_TIMEOUT_SECONDS = 60
 DISABLED_FEATURES = ('shell_tool', 'unified_exec_tty', 'shell_snapshot',
                      'browser_use', 'browser_use_external', 'browser_use_full_cdp_access',
                      'in_app_browser', 'computer_use', 'apps', 'view_image', 'in_app_local_automation',
                      'plugins', 'remote_plugin', 'multi_agent', 'hooks',
                      'skill_search', 'skill_mcp_dependency_install', 'image_generation',
                      'workspace_dependencies', 'worktrees')
+FORMAT_TOOLS = {'xlsx': ('xlsx_outline', 'xlsx_read_range', 'xlsx_write_range', 'xlsx_edit_grid', 'xlsx_edit_sheets',
+                         'xlsx_find_replace', 'xlsx_format', 'xlsx_sort'),
+                'pptx': ('pptx_outline', 'pptx_read_slide', 'pptx_edit')}
 module_spec = importlib.util.spec_from_file_location('format_check', ROOT / 'check.py')
 checker = importlib.util.module_from_spec(module_spec)
 module_spec.loader.exec_module(checker)
@@ -40,6 +47,87 @@ def cli_command(command):
     return args
 
 
+def required_tools(tasks):
+    return sorted({'office_open', 'office_export', *(tool for task in tasks for tool in FORMAT_TOOLS[task['format']])})
+
+
+def mcp_tools(process, deadline):
+    selector = selectors.DefaultSelector()
+    selector.register(process.stdout, selectors.EVENT_READ)
+    pending = b''
+
+    def gone(method):
+        try:
+            code = process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            return f'closed its output before answering {method}'
+        return f'exited with code {code} before answering {method}'
+
+    def call(identity, method, params=None):
+        nonlocal pending
+        message = {'jsonrpc': '2.0', 'method': method, **({'params': params} if params is not None else {}),
+                   **({'id': identity} if identity is not None else {})}
+        try:
+            process.stdin.write(json.dumps(message).encode() + b'\n')
+            process.stdin.flush()
+        except BrokenPipeError:
+            raise RuntimeError(gone(method)) from None
+        while identity is not None:
+            while b'\n' in pending:
+                line, pending = pending.split(b'\n', 1)
+                try:
+                    reply = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(reply, dict) and reply.get('id') == identity:
+                    if 'error' in reply:
+                        raise RuntimeError(f'{method} failed: {reply["error"]}')
+                    return reply.get('result') or {}
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not selector.select(remaining):
+                raise RuntimeError(f'did not answer {method} within {STARTUP_TIMEOUT_SECONDS} seconds')
+            chunk = os.read(process.stdout.fileno(), 65536)
+            if not chunk:
+                raise RuntimeError(gone(method))
+            pending += chunk
+
+    call(1, 'initialize', {'protocolVersion': '2025-06-18', 'capabilities': {},
+                           'clientInfo': {'name': 'format-eval-preflight', 'version': '1'}})
+    call(None, 'notifications/initialized')
+    names, cursor, identity = set(), None, 2
+    while True:
+        page = call(identity, 'tools/list', {'cursor': cursor} if cursor else {})
+        names.update(tool.get('name') for tool in page.get('tools', []))
+        cursor, identity = page.get('nextCursor'), identity + 1
+        if not cursor:
+            return names
+
+
+def mcp_ready(cli, required):
+    with tempfile.TemporaryDirectory(prefix='office-mcp-ready-') as root, tempfile.TemporaryFile() as stderr:
+        started = time.monotonic()
+        process = subprocess.Popen([*cli, '--root', root], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr,
+                                   start_new_session=True)
+        try:
+            listed, failure = mcp_tools(process, started + STARTUP_TIMEOUT_SECONDS), None
+            elapsed = time.monotonic() - started
+        except RuntimeError as error:
+            failure = error
+        finally:
+            stop_process(process)
+            for pipe in (process.stdin, process.stdout):
+                with contextlib.suppress(OSError):
+                    pipe.close()
+        if failure:
+            stderr.seek(0)
+            detail = stderr.read().decode(errors='replace').strip()[-2000:]
+            raise RuntimeError(f'MCP server not ready: {failure}' + (f'; stderr: {detail}' if detail else ''))
+    missing = sorted(set(required) - listed)
+    if missing:
+        raise RuntimeError('MCP server not ready: missing required tools: ' + ', '.join(missing))
+    return round(elapsed, 3)
+
+
 def command_line(cli, workspace, model, prompt):
     return ['codex', 'exec', '-m', model, '--sandbox', 'read-only', '--skip-git-repo-check',
             '--ignore-user-config', '--ignore-rules', '--ephemeral', '--json', '-C', str(workspace),
@@ -48,6 +136,8 @@ def command_line(cli, workspace, model, prompt):
             '-c', 'web_search="disabled"',
             '-c', 'mcp_servers.betteroffice.command=' + json.dumps(cli[0]),
             '-c', 'mcp_servers.betteroffice.args=' + json.dumps(cli[1:] + ['--root', str(workspace)]),
+            '-c', 'mcp_servers.betteroffice.required=true',
+            '-c', f'mcp_servers.betteroffice.startup_timeout_sec={STARTUP_TIMEOUT_SECONDS}',
             prompt + ' Use only the betteroffice MCP tools to read and edit the documents. All other tool calls disqualify the task. The documents live in the current directory.']
 
 
@@ -152,11 +242,13 @@ def run_task(task, cli, model, results):
             'agent_exit_code': exit_code, 'timed_out': timed_out}
 
 
-def write_results(results, model, records):
-    (results / 'results.json').write_text(json.dumps({'model': model, 'timeout_seconds': TIMEOUT_SECONDS,
+def write_results(results, model, records, **metadata):
+    (results / 'results.json').write_text(json.dumps({'model': model, **metadata, 'timeout_seconds': TIMEOUT_SECONDS,
                                                     'results': records}, indent=2) + '\n')
     passed = sum(record['pass'] for record in records)
-    rows = [f'Model: `{model}`. Passed: {passed}/{len(records)}. Tool calls count BetterOffice MCP calls; n/a means unavailable.',
+    idle = sum(record['tool_calls'] == 0 for record in records)
+    rows = [f'Model: `{model}`. Passed: {passed}/{len(records)}. Tasks without tool calls: {idle}. '
+            'Tool calls count BetterOffice MCP calls; n/a means unavailable.',
             '', '| Task | Result | Check message | Tool calls | Duration (s) |',
             '| --- | --- | --- | ---: | ---: |']
     for record in records:
@@ -182,15 +274,20 @@ def main():
             raise ValueError('results-dir must be new or empty')
         if shutil.which('codex') is None:
             raise ValueError('codex is not on PATH')
-        results.mkdir(parents=True, exist_ok=True)
     except (ValueError, OSError) as error:
         parser.error(str(error))
+    tasks = checker.tasks()
+    try:
+        metadata = {'mcp_startup_seconds': mcp_ready(cli, required_tools(tasks))}
+        results.mkdir(parents=True, exist_ok=True)
+    except (RuntimeError, OSError) as error:
+        sys.exit(f'run.py: {error}')
     records = []
-    write_results(results, args.model, records)
-    for task in checker.tasks():
+    write_results(results, args.model, records, **metadata)
+    for task in tasks:
         record = run_task(task, cli, args.model, results)
         records.append(record)
-        write_results(results, args.model, records)
+        write_results(results, args.model, records, **metadata)
         print(f'{record["task"]}: {"PASS" if record["pass"] else "FAIL"} ({record["duration_seconds"]:.3f}s): {record["check_message"]}', flush=True)
     return 0 if all(record['pass'] for record in records) else 1
 
