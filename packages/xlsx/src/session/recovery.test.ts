@@ -9,7 +9,9 @@ import type { WorkbookHandle } from '../wasm/loader';
 import { createWorkbookCommandState, projectEditState } from './commandHandlers';
 import { createWorkbookCommandHost } from './commandHost';
 import type { CommandStatus, WorkbookCommand, WorkbookSharedCommand, WorkbookSharedWireAck } from './commandProtocol';
-import { decodeWorkbookRecovery, encodeWorkbookRecovery, restoreWorkbookCommandState } from './recovery';
+import {
+  decodeWorkbookRecovery, encodeWorkbookRecovery, isCollaborativeWorkbookRecovery, restoreWorkbookCommandState,
+} from './recovery';
 import { createWorkbookSessionHost } from './host';
 import { WORKBOOK_SESSION_METHODS, type WorkbookSessionEvents, type WorkbookSessionMethods } from './methods';
 import { batchRequests } from './testHelpers';
@@ -244,6 +246,21 @@ test('recovery stores engine bytes without JSON expansion', () => {
   const decoded = decodeWorkbookRecovery(bytes);
   expect(decoded.engine).toEqual(engine);
   expect(decoded.engine.buffer).toBe(bytes.buffer);
+});
+
+test('engine checkpoints are read at codecs 3 and 4 and refused at any other', () => {
+  const engine = (codec: number, collaborative: boolean) => {
+    const metadata = new TextEncoder().encode(JSON.stringify({ collaborative }));
+    return new Uint8Array([...new TextEncoder().encode('XLSXRECV'), codec, ...new Uint8Array(32), metadata.length,
+      ...metadata]);
+  };
+  for (const codec of [3, 4]) {
+    expect(isCollaborativeWorkbookRecovery(engine(codec, false))).toBe(false);
+    expect(isCollaborativeWorkbookRecovery(engine(codec, true))).toBe(true);
+  }
+  for (const codec of [2, 5]) {
+    expect(() => isCollaborativeWorkbookRecovery(engine(codec, false))).toThrow('Unsupported workbook recovery checkpoint');
+  }
 });
 
 test('recovery preserves applied dependencies and compatibility duplicates', async () => {
