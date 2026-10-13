@@ -1715,6 +1715,26 @@ test('a remote section boundary shift keeps every section its own properties thr
   } finally { remote.destroy(); client.destroy(); }
 }, TIMEOUT);
 
+test('a remote start type change on an existing closing paragraph survives a local break', async () => {
+  const bodyXml = sectionParagraph(1, 'ZeroMore') + sectionParagraph(2, 'Closing', sectionXml('continuous', 1800)) + sectionParagraph(3, 'Tail');
+  const { client, engine } = await openWorker({ bodyXml, sectPr: sectionXml('nextPage', 2800) });
+  const remote = await createResidentEngineSession();
+  try {
+    remote.loadState(engine.encodeState());
+    const [zero, closing] = remote.paragraphs('body');
+    remote.splitSection({ story: 'body', paraId: zero!.paraId, offset: 4 }, closing!.properties.sectPr as SectionProperties, 'oddPage');
+    await client.applyRemoteUpdate(remote.encodeStateAsUpdate(engine.encodeStateVector()));
+    expect(sectionStarts(engine)).toEqual([['continuous', 1800], ['oddPage', 1800], ['nextPage', 2800]]);
+    const at = { story: 'body', paraId: engine.paragraphs('body')[1]!.paraId, offset: 2 };
+    const inserted = await client.edit(intent(1, 0, 'insertSectionBreak', { type: 'continuous', selection: { anchor: at, focus: at } }));
+    expect(inserted.outcomes[0]?.status).toBe('applied');
+    expect(sectionStarts(engine)).toEqual([['continuous', 1800], ['oddPage', 1800], ['continuous', 1800], ['nextPage', 2800]]);
+    expect(savedSectionMargins((await client.save({ comments: [] })).bytes)).toEqual([
+      ['Zero', 'continuous', 1800], ['Mo', 'oddPage', 1800], ['Closing', 'continuous', 1800], ['', 'nextPage', 2800],
+    ]);
+  } finally { remote.destroy(); client.destroy(); }
+}, TIMEOUT);
+
 test('a section break over a selection across a section boundary splits the section the deletion leaves', async () => {
   const bodyXml = sectionParagraph(1, 'Zero') + sectionParagraph(2, 'First', sectionXml('continuous', 1800)) + sectionParagraph(3, 'Second') +
     sectionParagraph(4, 'Third', sectionXml('nextPage', 2800)) + sectionParagraph(5, 'Tail');
