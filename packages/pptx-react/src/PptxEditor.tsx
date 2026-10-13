@@ -148,14 +148,11 @@ import { currentContext, frameImages } from './viewer/sessionPaint';
 import type { PptxAsyncEditorApi } from './worker/createPeerlessEditorApi';
 import { LEGACY_SYNC_API } from './runtimeOptions';
 import { warnPptxEngine, type PptxEngineWarning } from './engineWarnings';
+import { PeerlessPptxEditorLoader } from './PeerlessPptxEditorLoader';
 
 const THUMBNAIL_SLICE_MS = 12;
 export const PEERLESS_FLAG = 'asyncApi' as const;
 export const pptxPeerlessEditorLoader = { load: () => import('./worker/PeerlessPptxSurface') };
-const peerlessPptxSurfaces = new WeakMap<
-  typeof pptxPeerlessEditorLoader.load,
-  Awaited<ReturnType<typeof pptxPeerlessEditorLoader.load>>['PeerlessPptxSurface']
->();
 
 export class PptxWorkerEditorChunkLoadError extends Error {
   readonly code = 'chunk-load-failed';
@@ -616,20 +613,6 @@ export function PptxEditor({ i18n, ...props }:
 
 function PptxAsyncEditorSession(props: PptxAsyncEditorProps) {
   const { t } = useTranslation();
-  const [PeerlessPptxSurface] = useState(() => {
-    const load = pptxPeerlessEditorLoader.load;
-    const cached = peerlessPptxSurfaces.get(load);
-    if (cached) return cached;
-    return lazy(() => load()
-      .then((module) => {
-        peerlessPptxSurfaces.set(load, module.PeerlessPptxSurface);
-        return { default: module.PeerlessPptxSurface };
-      })
-      .catch((cause: unknown) => {
-        peerlessPptxSurfaces.delete(load);
-        throw new PptxWorkerEditorChunkLoadError(cause);
-      }));
-  });
   const [PptxAsyncInThreadSession] = useState(() => lazy(() => import('./PptxAsyncInThreadSession')
     .then((module) => ({ default: module.PptxAsyncInThreadSession }))));
   const inThread = props.experimentalWorkerOpen === false;
@@ -650,10 +633,11 @@ function PptxAsyncEditorSession(props: PptxAsyncEditorProps) {
     try { props.onError?.(pluginError); } catch {}
   }, [unsupportedPlugins, pluginError, props.onError]);
   if (unsupportedPlugins) return <PeerlessEditorError error={pluginError} className={props.className} />;
+  const fallback = <div className={props.className} role="status">{t('worker.preparing')}</div>;
   return <PeerlessEditorBoundary onError={props.onError} className={props.className}>
-    <Suspense fallback={<div className={props.className} role="status">{t('worker.preparing')}</div>}>
-      {engine.reason ? <PptxAsyncInThreadSession {...props} /> : <PeerlessPptxSurface {...props} />}
-    </Suspense>
+    {engine.reason ? <Suspense fallback={fallback}><PptxAsyncInThreadSession {...props} /></Suspense>
+      : <PeerlessPptxEditorLoader load={pptxPeerlessEditorLoader.load} identity={identity}
+        ErrorType={PptxWorkerEditorChunkLoadError} fallback={fallback} editorProps={props} />}
   </PeerlessEditorBoundary>;
 }
 
