@@ -82,6 +82,10 @@ impl DepGraph {
     /// build the whole graph from a workbook's stored formulas; unparseable
     /// formulas are skipped.
     pub fn build(wb: &Workbook) -> Self {
+        Self::build_with(wb, ParseCache::default())
+    }
+
+    fn build_with(wb: &Workbook, asts: ParseCache) -> Self {
         let names = wb
             .sheets
             .iter()
@@ -110,7 +114,7 @@ impl DepGraph {
             volatile: HashSet::new(),
             spills: HashMap::new(),
             spills_by_sheet: HashMap::new(),
-            asts: ParseCache::default(),
+            asts,
         };
         for (i, sheet) in wb.sheets.iter().enumerate() {
             let sid = SheetId(i as u32);
@@ -122,6 +126,32 @@ impl DepGraph {
         }
         g.refresh_spills(wb);
         g
+    }
+
+    /// re-resolve every reference after sheets were renamed, reusing the asts of
+    /// formula text the rename left alone. returns the formula cells whose
+    /// references now resolve to other cells, in address order.
+    pub fn rename_sheets(&mut self, wb: &Workbook) -> Vec<(SheetId, CellRef)> {
+        let asts = std::mem::take(&mut self.asts);
+        let previous = std::mem::replace(self, Self::build_with(wb, asts));
+        let mut moved: Vec<NodeKey> = self
+            .deps
+            .iter()
+            .filter(|(key, node)| {
+                previous
+                    .deps
+                    .get(*key)
+                    .is_none_or(|old| old.edges != node.edges)
+            })
+            .map(|(key, _)| *key)
+            .collect();
+        drop(previous);
+        self.asts
+            .lock()
+            .expect("parse cache poisoned")
+            .retain(|_, ast| Arc::strong_count(ast) > 1);
+        moved.sort_unstable();
+        moved.into_iter().map(|key| (key.sheet, key.cell())).collect()
     }
 
     /// re-derive one node's edges after its formula changed, without touching
@@ -736,6 +766,22 @@ mod tests {
             .collect();
         out.sort();
         out
+    }
+
+    #[test]
+    fn rename_reresolves_references_and_reports_the_ones_that_moved() {
+        let mut wb = wb2();
+        let data = wb.sheet_mut(SheetId(1)).unwrap();
+        data.set_cell(a1("A1"), formula_cell("Sheet1!A1+1"));
+        data.set_cell(a1("B1"), formula_cell("Other!A1"));
+        let mut g = DepGraph::build(&wb);
+        assert_eq!(deps_a1(&g, "Sheet1", "A1", &wb), vec!["Data!A1"]);
+        wb.sheets[0].name = "Other".into();
+        wb.sheet_mut(SheetId(1))
+            .unwrap()
+            .set_cell(a1("A1"), formula_cell("Other!A1+1"));
+        assert_eq!(g.rename_sheets(&wb), vec![(SheetId(1), a1("B1"))]);
+        assert_eq!(deps_a1(&g, "Other", "A1", &wb), vec!["Data!A1", "Data!B1"]);
     }
 
     #[test]
