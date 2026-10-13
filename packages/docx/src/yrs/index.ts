@@ -16,7 +16,7 @@
 
 import type { RetainedLayoutMeta } from './layoutMeta';
 import type { ResidentEngineWorkerFontSync } from './residentEngineWorkerProtocol';
-import type { Document } from '../types/document';
+import type { Document, ParagraphFormatting, Table } from '../types/document';
 import type { CompatibilityFlags } from '../docx/settingsParser';
 import type {
   DocxParagraphAnchor,
@@ -962,7 +962,20 @@ export interface YrsRunInheritance {
    * paragraph of `paragraphStyle` before the run's direct formatting.
    */
   attributes(paragraphStyle: string | null, runStyle: string | null): Record<string, unknown>;
+  paragraphFormatting(
+    paragraphStyle: string | null,
+    tableFormatting: ParagraphFormatting | undefined
+  ): ParagraphFormatting | undefined;
+  tableAttributes(table: Table): YrsTableInheritance;
   dispose(): void;
+}
+
+export interface YrsTableInheritance {
+  attributes: Record<string, unknown>;
+  rows: Array<Array<{
+    attributes: Record<string, unknown>;
+    paragraphFormatting: ParagraphFormatting | null;
+  }>>;
 }
 
 export interface YrsSession extends CollaborationReplica {

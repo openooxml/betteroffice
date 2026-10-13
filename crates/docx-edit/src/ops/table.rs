@@ -22,7 +22,7 @@ use crate::op::{OpError, OpResult};
 use crate::seed::border_side_sources;
 use crate::{
     EditCtx, EditingDoc, KIND_KEY, ParagraphIdOrigin, Position, STORIES, check_position,
-    insertion_attrs, map_string, out_len, revision_value, story_ref, write_pilcrow_properties,
+    insertion_attrs, map_string, out_len, revision_value, story_ref,
 };
 
 const TR_INS: &str = "trIns";
@@ -567,6 +567,10 @@ fn selected_anchors(data: &TableData, range: &TableRange) -> OpResult<Vec<CellAn
 }
 
 fn reset_cell_spans(mut cell: CellData) -> CellData {
+    let source_story = Any::from(cell.story.as_str());
+    cell.tc_pr
+        .entry("_sourceCellStory".to_owned())
+        .or_insert(source_story);
     set_spans(&mut cell, 1, 1);
     cell.tc_pr.remove("colwidth");
     cell.tc_pr.remove("cellMarker");
@@ -664,7 +668,8 @@ fn create_cell_story(
         MapPrelim::default(),
         insertion_attrs(None, None),
     );
-    write_pilcrow_properties(&pilcrow, txn, &para_id, "Normal", "left");
+    pilcrow.insert(txn, KIND_KEY, crate::PILCROW_KIND);
+    pilcrow.insert(txn, crate::PARA_ID, para_id.as_str());
     ids.bind(txn, &pilcrow, &para_id, ParagraphIdOrigin::Authored);
     Ok(para_id)
 }

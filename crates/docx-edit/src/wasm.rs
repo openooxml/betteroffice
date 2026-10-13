@@ -1245,6 +1245,23 @@ impl RunInheritance {
             .run_attrs(paragraph_style.as_deref(), run_style.as_deref());
         serde_json::to_string(&attrs).map_err(js_err)
     }
+
+    pub fn paragraph_formatting(
+        &mut self,
+        paragraph_style: Option<String>,
+        table_formatting_json: &str,
+    ) -> Result<String, JsValue> {
+        let table_formatting = serde_json::from_str(table_formatting_json).map_err(js_err)?;
+        let formatting = self
+            .inner
+            .paragraph_formatting(paragraph_style.as_deref(), table_formatting);
+        serde_json::to_string(&formatting).map_err(js_err)
+    }
+
+    pub fn table_attributes(&self, table_json: &str) -> Result<String, JsValue> {
+        let table = serde_json::from_str(table_json).map_err(js_err)?;
+        serde_json::to_string(&self.inner.table_attrs(&table)).map_err(js_err)
+    }
 }
 
 /// One yrs replica of the DOCX editing model, held for a JS host.

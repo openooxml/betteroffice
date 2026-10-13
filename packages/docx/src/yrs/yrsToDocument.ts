@@ -56,7 +56,7 @@ import type {
   Endnote,
   HeaderFooter,
 } from '../types/document';
-import type { YrsRunInheritance, YrsSession } from './index';
+import type { YrsRunInheritance, YrsSession, YrsTableInheritance } from './index';
 
 type Attrs = Record<string, unknown>;
 
@@ -1957,10 +1957,7 @@ function normalizeVMergeRuns(rows: TableRow[]): void {
 }
 
 function tableCellFromPayload(context: SaveContext, payload: TableCellPayload): TableCell {
-  const attrs = {
-    ...TABLE_CELL_ATTR_DEFAULTS,
-    ...(payload.tcPr ?? {}),
-  } as unknown as TableCellSaveAttrs;
+  const attrs = context.cellAttrs(payload);
   const content =
     payload.story && context.storyIds.has(payload.story)
       ? context.storyToBlocks(payload.story)
@@ -2092,8 +2089,9 @@ function tableFromPayload(context: SaveContext, payload: TablePayload): Table {
     ...(payload.tblPr ?? {}),
     columnWidths: grid.length > 0 ? grid : undefined,
   } as TableSaveAttrs;
+  context.applyTableBaseline(payload, attrs);
   let formatting = tableAttrsToFormatting(attrs);
-  if (!formatting?.borders) {
+  if (!formatting?.borders && !attrs._originalFormatting) {
     const borders = inferTableBorders(rows);
     if (borders) formatting = { ...(formatting ?? {}), borders };
   }
@@ -2326,6 +2324,8 @@ function restoreRawBlocks(projected: BlockContent[], base: readonly BlockContent
 
 /** A projected block plus a fingerprint of the story inputs it was built from. */
 interface ProjectedBlockMemo {
+  tableBaseline?: YrsTableInheritance;
+  tableSourcePrefix?: string;
   /** Bucket key for locating same-container candidates (first cell story / child story). */
   key?: string;
   /** Snapshot of the raw story inputs the block was built from. */
@@ -2394,13 +2394,21 @@ export function ownProjectedParagraphs(blocks: readonly BlockContent[]): BlockCo
       return own;
     }
     if (block.type !== 'table') return block;
-    return {
+    const own: Table = {
       ...block,
       rows: block.rows.map((row) => ({
         ...row,
         cells: row.cells.map((cell) => ({ ...cell, content: ownProjectedParagraphs(cell.content) })),
       })),
     };
+    const prior = projectedBlocks.get(block);
+    if (prior) {
+      projectedBlocks.set(own, {
+        tableBaseline: prior.tableBaseline,
+        tableSourcePrefix: prior.tableSourcePrefix,
+      });
+    }
+    return own;
   });
 }
 const sessionProjectionMemos = new WeakMap<YrsSession, SessionProjectionMemo>();
@@ -2489,6 +2497,11 @@ class SaveContext {
   private readonly styleDefinitions: Document['package']['styles'];
   private runInheritance: YrsRunInheritance | null = null;
   private readonly inheritedRuns = new Map<string, TextFormatting>();
+  private readonly sourceTables = new Map<string, Table>();
+  private readonly tableBaselines = new Map<Table, YrsTableInheritance>();
+  private readonly payloadBaselines = new WeakMap<TablePayload, YrsTableInheritance>();
+  private readonly sourceCells = new Map<string, YrsTableInheritance['rows'][number][number]>();
+  private readonly cellParagraphs = new Map<string, ParagraphFormatting | undefined>();
 
   constructor(
     private readonly session: YrsSession,
@@ -2499,6 +2512,13 @@ class SaveContext {
     this.storyIds = new Set(session.storyIds());
     this.baseStories = collectBaseStories(session, base);
     for (const [storyId, blocks] of this.baseStories) {
+      let tableIndex = 0;
+      for (const block of blocks) {
+        if (block.type !== 'table') continue;
+        const prefix = projectedBlocks.get(block)?.tableSourcePrefix ?? `${storyId}:t${tableIndex}`;
+        this.sourceTables.set(prefix, block);
+        tableIndex += 1;
+      }
       const scoped = new Map<string, string>();
       collectChartDrawings(blocks, scoped);
       if (scoped.size > 0) this.baseChartDrawings.set(storyId, scoped);
@@ -2532,6 +2552,76 @@ class SaveContext {
       : !this.memo.dirty.has(storyId);
   }
 
+  private inheritance(): YrsRunInheritance {
+    return (this.runInheritance ??= this.session.runInheritance(this.styleDefinitions));
+  }
+
+  private prepareTable(payload: TablePayload, parent: string): void {
+    const cells = (Array.isArray(payload.rows) ? payload.rows : [])
+      .flatMap((row) => Array.isArray(row.cells) ? row.cells : []);
+    let source: { prefix: string; table: Table } | undefined;
+    const candidates = payload.tblPr?._originalFormatting ? cells : [];
+    for (const cell of candidates) {
+      const story = asString(cell.tcPr?._sourceCellStory) ?? asString(cell.story);
+      const prefix = story?.match(/^(.*:t\d+):r\d+c\d+$/)?.[1];
+      const table = prefix ? this.sourceTables.get(prefix) : undefined;
+      if (prefix && table) {
+        source = { prefix, table };
+        break;
+      }
+    }
+    if (source) {
+      let baseline = this.tableBaselines.get(source.table);
+      if (!baseline) {
+        baseline = projectedBlocks.get(source.table)?.tableBaseline ??
+          this.inheritance().tableAttributes(source.table);
+        this.tableBaselines.set(source.table, baseline);
+      }
+      this.payloadBaselines.set(payload, baseline);
+      const prefix = source.prefix;
+      baseline.rows.forEach((row, rowIndex) => {
+        row.forEach((cell, cellIndex) => {
+          this.sourceCells.set(`${prefix}:r${rowIndex}c${cellIndex}`, cell);
+        });
+      });
+    }
+    for (const cell of cells) {
+      if (typeof cell.story !== 'string') continue;
+      this.memo.parents.set(cell.story, parent);
+      const source = asString(cell.tcPr?._sourceCellStory) ?? cell.story;
+      this.cellParagraphs.set(cell.story, this.sourceCells.get(source)?.paragraphFormatting ?? undefined);
+    }
+  }
+
+  applyTableBaseline(payload: TablePayload, attrs: TableSaveAttrs): void {
+    const baseline = this.payloadBaselines.get(payload);
+    if (baseline) {
+      attrs._originalResolvedMargins = baseline.attributes.cellMargins as TableSaveAttrs['cellMargins'];
+    }
+  }
+
+  cellAttrs(payload: TableCellPayload): TableCellSaveAttrs {
+    const attrs = {
+      ...TABLE_CELL_ATTR_DEFAULTS,
+      ...(payload.tcPr ?? {}),
+    } as unknown as TableCellSaveAttrs;
+    const origin = asString(payload.tcPr?._sourceCellStory);
+    const source = origin ?? asString(payload.story);
+    const baseline = source !== undefined ? this.sourceCells.get(source) : undefined;
+    if (baseline) {
+      attrs._originalResolvedBorders = baseline.attributes.borders as TableCellSaveAttrs['borders'];
+      attrs._originalResolvedMargins = baseline.attributes.margins as TableCellSaveAttrs['margins'];
+      const original = asObject(baseline.attributes._originalFormatting);
+      if (origin && original && !attrs._originalFormatting) {
+        const formatting = { ...original };
+        delete formatting.gridSpan;
+        delete formatting.vMerge;
+        attrs._originalFormatting = formatting as TableCellSaveAttrs['_originalFormatting'];
+      }
+    }
+    return attrs;
+  }
+
   private cellContents(payload: TablePayload, parent: string): BlockContent[][] {
     const contents: BlockContent[][] = [];
     for (const row of Array.isArray(payload.rows) ? payload.rows : []) {
@@ -2547,20 +2637,21 @@ class SaveContext {
     return contents;
   }
 
-  /**
-   * What a paragraph of `storyId` with pilcrow `properties` inherits from
-   * docDefaults and its style. None where more can apply than the resolver
-   * sees: table cells and content controls (a table style), numbered
-   * paragraphs or styles (the numbering level), synthesized defaults, and
-   * left and right indents (the style parser ignores w:start and w:end).
-   */
   private inheritedFormatting(storyId: string, properties: Attrs): ParagraphFormatting | undefined {
-    if (NESTED_STORY_ID.test(storyId) || this.syntheticDefaults || properties.numPr != null) {
+    const cell = this.cellParagraphs.has(storyId);
+    if (
+      (NESTED_STORY_ID.test(storyId) && !cell) ||
+      (this.syntheticDefaults && !cell) || properties.numPr != null
+    ) {
       return undefined;
     }
-    const key = typeof properties.pStyle === 'string' ? properties.pStyle : '';
+    const style = typeof properties.pStyle === 'string' ? properties.pStyle : '';
+    const tableFormatting = this.cellParagraphs.get(storyId);
+    const key = cell ? JSON.stringify([style, tableFormatting]) : style;
     if (!this.inherited.has(key)) {
-      const resolved = this.styles.resolveParagraphStyle(key || null).paragraphFormatting;
+      const resolved = cell
+        ? this.inheritance().paragraphFormatting(style || null, tableFormatting)
+        : this.styles.resolveParagraphStyle(style || null).paragraphFormatting;
       if (resolved === undefined || resolved.numPr != null) {
         this.inherited.set(key, undefined);
       } else {
@@ -2590,7 +2681,7 @@ class SaveContext {
     const key = JSON.stringify([paragraphStyle, runStyle]);
     let inherited = this.inheritedRuns.get(key);
     if (inherited === undefined) {
-      const inheritance = (this.runInheritance ??= this.session.runInheritance(this.styleDefinitions));
+      const inheritance = this.inheritance();
       inherited = attrsToTextFormatting(inheritance.attributes(paragraphStyle, runStyle));
       this.inheritedRuns.set(key, inherited);
     }
@@ -2762,6 +2853,7 @@ class SaveContext {
 
       if (segment.embedKind === 'table') {
         const payload = segment.payload as TablePayload;
+        this.prepareTable(payload, storyId);
         const inputs = [segment.attributes, payload] as const;
         const firstCell = Array.isArray(payload.rows) ? payload.rows[0]?.cells?.[0] : undefined;
         const key = `T${firstCell?.story ?? ''}`;
@@ -2779,6 +2871,8 @@ class SaveContext {
           projectedBlocks.set(table, {
             key,
             inputs,
+            tableBaseline: this.payloadBaselines.get(payload),
+            tableSourcePrefix: asString(firstCell?.story)?.match(/^(.*:t\d+):r\d+c\d+$/)?.[1],
             children: contents ?? this.cellContents(payload, storyId),
           });
         }

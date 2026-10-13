@@ -1772,6 +1772,38 @@ impl RunInheritance {
     ) -> JsonObject {
         inherited_run_attrs(&self.0, paragraph_style, run_style)
     }
+
+    pub(crate) fn paragraph_formatting(
+        &mut self,
+        paragraph_style: Option<&str>,
+        table_formatting: Option<Value>,
+    ) -> Option<Value> {
+        let previous = self.0.set_table_paragraph_formatting(table_formatting);
+        let resolved = self.0.resolve_paragraph_style(paragraph_style);
+        let formatting = resolved.paragraph.clone();
+        self.0.restore_table_paragraph_formatting(previous);
+        formatting
+    }
+
+    pub(crate) fn table_attrs(&self, table: &Value) -> Value {
+        let projected = project_table(table, &self.0, None, 12);
+        let rows: Vec<Vec<Value>> = projected
+            .rows
+            .into_iter()
+            .map(|row| {
+                row.cells
+                    .into_iter()
+                    .map(|cell| {
+                        json!({
+                            "attributes": cell.attrs,
+                            "paragraphFormatting": cell.paragraph_formatting
+                        })
+                    })
+                    .collect()
+            })
+            .collect();
+        json!({ "attributes": projected.attrs, "rows": rows })
+    }
 }
 
 fn is_hyperlink_style_name(name: &str) -> bool {
@@ -7385,6 +7417,57 @@ mod tests {
         assert_eq!(linked["bold"], json!(true));
         assert_eq!(linked["fontSize"]["size"], json!(32));
         assert_eq!(linked["textColor"]["inheritedHyperlink"], json!(true));
+    }
+
+    #[test]
+    fn save_inheritance_reads_table_seeding_without_leaking_cell_paragraph_defaults() {
+        let definitions = json!({
+            "docDefaults": {
+                "pPr": { "spaceBefore": 20, "spaceAfter": 160, "lineSpacing": 259 },
+                "rPr": { "fontSize": 22 }
+            },
+            "styles": [
+                { "type": "paragraph", "styleId": "Normal", "default": true },
+                { "type": "paragraph", "styleId": "Heading", "pPr": { "spaceAfter": 80 } },
+                { "type": "table", "styleId": "Grid",
+                  "pPr": { "spaceAfter": 0, "lineSpacing": 240 },
+                  "tblPr": {
+                      "borders": { "top": { "style": "single", "size": 4 } },
+                      "cellMargins": { "left": { "value": 108, "type": "dxa" } }
+                  },
+                  "tblStylePr": [
+                      { "type": "firstRow", "pPr": { "spaceBefore": 40 } }
+                  ]
+                }
+            ]
+        });
+        let table = json!({
+            "type": "table",
+            "formatting": { "styleId": "Grid", "look": { "firstRow": true } },
+            "rows": [{ "cells": [{ "type": "tableCell", "content": [] }] }]
+        });
+        let mut inheritance = RunInheritance::new(Some(&definitions));
+        let baseline = inheritance.table_attrs(&table);
+        assert_eq!(baseline["attributes"]["cellMargins"]["left"], json!(108));
+        assert!(baseline["attributes"]["_originalFormatting"]["cellMargins"].is_null());
+        let cell = &baseline["rows"][0][0];
+        assert_eq!(cell["attributes"]["borders"]["top"]["size"], json!(4));
+        assert!(cell["attributes"]["_originalFormatting"]["borders"].is_null());
+        let extra = Some(cell["paragraphFormatting"].clone());
+        let paragraph = inheritance
+            .paragraph_formatting(None, extra.clone())
+            .unwrap();
+        assert_eq!(paragraph["spaceBefore"], json!(40));
+        assert_eq!(paragraph["spaceAfter"], json!(0));
+        assert_eq!(paragraph["lineSpacing"], json!(240));
+        let styled = inheritance
+            .paragraph_formatting(Some("Heading"), extra)
+            .unwrap();
+        assert_eq!(styled["spaceAfter"], json!(80));
+        let body = inheritance.paragraph_formatting(None, None).unwrap();
+        assert_eq!(body["spaceBefore"], json!(20));
+        assert_eq!(body["spaceAfter"], json!(160));
+        assert_eq!(inheritance.run_attrs(None, None)["fontSize"]["size"], json!(22));
     }
 
     #[test]

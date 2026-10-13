@@ -1372,6 +1372,11 @@ export function wrapSession(
       return {
         attributes: (paragraphStyle, runStyle) =>
           JSON.parse(inheritance.attributes(paragraphStyle, runStyle)) as Record<string, unknown>,
+        paragraphFormatting: (paragraphStyle, tableFormatting) =>
+          JSON.parse(inheritance.paragraph_formatting(
+            paragraphStyle, JSON.stringify(tableFormatting ?? null)
+          )) ?? undefined,
+        tableAttributes: (table) => JSON.parse(inheritance.table_attributes(JSON.stringify(table))),
         dispose: () => inheritance.free(),
       };
     },
