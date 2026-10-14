@@ -2344,6 +2344,30 @@ mod tests {
             CellValue::Number { value: 4.0 }
         );
     }
+
+    #[test]
+    fn number_format_matching_the_base_xf_is_stored_on_an_unstyled_cell() {
+        let mut wb = wb_one_sheet();
+        wb.styles.cell_xfs.push(xlsx_model::Xf {
+            num_fmt_id: Some(10),
+            ..Default::default()
+        });
+        wb.sheets[0].set_cell(r("A1"), num(0.5).into());
+        apply(
+            &mut wb,
+            &Op::SetRangeNumberFormat {
+                sheet: SheetId(0),
+                range: CellRange::new(r("A1"), r("A1")),
+                format: crate::NumberFormatMutation::Percent,
+            },
+        )
+        .unwrap();
+        let style = wb.sheets[0].cell(r("A1")).unwrap().style;
+        assert_eq!(
+            wb.styles.cell_format(style).number_format,
+            xlsx_model::NumberFormat::Builtin { id: 10 }
+        );
+    }
 }
 
 #[cfg(test)]
