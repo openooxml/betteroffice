@@ -514,18 +514,22 @@ function looksSerif(family: string): boolean {
 }
 
 /** Matching total text widths does not guarantee matching individual digit widths. */
-const WIDTH_MATCHED_SUBSTITUTES: Record<
+const WIDTH_MATCHED_SUBSTITUTES = new Map<
   string,
   {
     family: string;
     digitAdvances: Partial<Record<'regular' | 'bold' | 'italic' | 'boldItalic', number>>;
   }
-> = {
-  verdana: {
+>([
+  ['verdana', {
     family: 'Montserrat',
     digitAdvances: { regular: 0.636, bold: 0.711, italic: 0.636, boldItalic: 0.711 },
-  },
-};
+  }],
+]);
+
+function resolveWidthMatchedSubstitute(family: string) {
+  return WIDTH_MATCHED_SUBSTITUTES.get(family.trim().toLowerCase());
+}
 
 /**
  * `Calibri Light` and `Inter Light` are families of their own on the machine
@@ -620,7 +624,7 @@ export function resolveLastResortFace(
   if (looksMono(family)) {
     return resolveMetricCompatFace('Courier New', bold, italic)!;
   }
-  const matched = WIDTH_MATCHED_SUBSTITUTES[family.trim().toLowerCase()];
+  const matched = resolveWidthMatchedSubstitute(family);
   if (matched) {
     const face = resolveMetricCompatFace(matched.family, bold, italic);
     if (face) return face;
@@ -637,7 +641,7 @@ export function resolveDigitAdvance(
   italic = false,
 ): number | undefined {
   const style = bold ? (italic ? 'boldItalic' : 'bold') : (italic ? 'italic' : 'regular');
-  return WIDTH_MATCHED_SUBSTITUTES[family.trim().toLowerCase()]?.digitAdvances[style];
+  return resolveWidthMatchedSubstitute(family)?.digitAdvances[style];
 }
 
 /** Widest digit advance in whole pixels for spreadsheet column widths. */
