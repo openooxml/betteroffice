@@ -210,8 +210,10 @@ pub(crate) fn root_with_prefixes<'s>(
     let wanted = bindings(serialized, &target);
     let mut declarations = String::new();
     for prefix in prefixes {
-        if !bound.contains_key(prefix) {
-            declarations.push_str(&format!(" xmlns:{prefix}=\"{}\"", wanted.get(prefix)?));
+        if !bound.contains_key(prefix)
+            && let Some(uri) = wanted.get(prefix)
+        {
+            declarations.push_str(&format!(" xmlns:{prefix}=\"{uri}\""));
         }
     }
     let mut edits = Vec::new();
@@ -257,16 +259,20 @@ pub(crate) fn root_with_prefixes<'s>(
 
 /// Whether `source`'s root binds every prefix in `prefixes` to the namespace `serialized`'s
 /// root binds it to, so that paragraphs written with them need no new declaration.
-fn root_binds(source: &str, serialized: &str, prefixes: &BTreeSet<&str>) -> Option<bool> {
+pub(crate) fn root_binds(
+    source: &str,
+    serialized: &str,
+    prefixes: &BTreeSet<&str>,
+    allow_missing: bool,
+) -> Option<bool> {
     let root = root_tag(source)?;
     let bound = bindings(source, &root);
     let target = root_tag(serialized)?;
     let wanted = bindings(serialized, &target);
-    Some(prefixes.iter().all(|prefix| {
-        matches!(
-            (bound.get(prefix), wanted.get(prefix)),
-            (Some(existing), Some(uri)) if existing.trim() == uri.trim()
-        )
+    Some(prefixes.iter().all(|prefix| match (bound.get(prefix), wanted.get(prefix)) {
+        (Some(existing), Some(uri)) => existing.trim() == uri.trim(),
+        (None, _) => allow_missing,
+        _ => false,
     }))
 }
 
@@ -806,7 +812,7 @@ pub(crate) fn splice_story_part(
     }
     let rooted = root_with_prefixes(source, serialized, &prefixes)?;
     let source = rooted.as_ref();
-    if !root_binds(source, serialized, &prefixes)? {
+    if !root_binds(source, serialized, &prefixes, false)? {
         return None;
     }
     let occurrences = match &rooted {
