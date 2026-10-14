@@ -144,17 +144,12 @@ def mcp_ready(cli, required):
 
 def python_ready(python):
     try:
-        result = subprocess.run([str(python), '-c', 'import openpyxl, pptx, docx; import json, sysconfig; print(json.dumps(sysconfig.get_paths()))'], stdin=subprocess.DEVNULL,
+        result = subprocess.run([str(python), '-c', 'import openpyxl, pptx, docx'], stdin=subprocess.DEVNULL,
                                 capture_output=True, text=True, timeout=STARTUP_TIMEOUT_SECONDS)
     except (OSError, subprocess.TimeoutExpired) as error:
         raise RuntimeError(f'{python} cannot import openpyxl, pptx and docx: {error}') from None
     if result.returncode != 0:
         raise RuntimeError(f'{python} cannot import openpyxl, pptx and docx: {result.stderr.strip()[-2000:]}')
-    try:
-        paths = json.loads(result.stdout)
-        return list(dict.fromkeys(Path(paths[key]).resolve() for key in ('stdlib', 'platstdlib', 'purelib', 'platlib')))
-    except (ValueError, KeyError, TypeError) as error:
-        raise RuntimeError(f'{python} did not report its library paths: {error}') from None
 
 
 def command_line(cli, workspace, model, prompt, arm='betteroffice'):
@@ -267,7 +262,7 @@ def path_violation(text, workspace):
     return None
 
 
-def access_violation(log, arm='betteroffice', workspace=None, python=None, libraries=()):
+def access_violation(log, arm='betteroffice', workspace=None):
     for event in events(log):
         item = event.get('item')
         if not isinstance(item, dict):
@@ -316,9 +311,7 @@ def stop_process(process):
     process.wait()
 
 
-def run_task(task, cli, model, results, arm='betteroffice', python=None, libraries=None):
-    if libraries is None:
-        libraries = python_ready(python) if arm == 'generic' and python is not None else []
+def run_task(task, cli, model, results, arm='betteroffice', python=None):
     environment = None if python is None else dict(os.environ, PATH=str(python.parent) + os.pathsep + os.environ.get('PATH', ''))
     directory = results / task['id']
     directory.mkdir()
@@ -363,7 +356,7 @@ def run_task(task, cli, model, results, arm='betteroffice', python=None, librari
         if runtime_error:
             message = runtime_error + ('; ' + message if not passed else '')
             passed = False
-        violation = access_violation(log, arm, workspace, python, libraries)
+        violation = access_violation(log, arm, workspace)
         if violation:
             message = violation + ('; ' + message if not passed else '')
             passed = False
@@ -426,10 +419,9 @@ def main():
     except (ValueError, OSError) as error:
         parser.error(str(error))
     tasks = [task for task in checker.tasks() if task['format'] in args.formats]
-    libraries = []
     try:
         if generic:
-            libraries = python_ready(python)
+            python_ready(python)
             metadata = {'python': str(python)}
         else:
             metadata = {'mcp_startup_seconds': mcp_ready(cli, required_tools(tasks))}
@@ -439,7 +431,7 @@ def main():
     records = []
     write_results(results, model, records, args.arm, args.formats, **metadata)
     for task in tasks:
-        record = run_task(task, cli, model, results, args.arm, python, libraries)
+        record = run_task(task, cli, model, results, args.arm, python)
         records.append(record)
         write_results(results, model, records, args.arm, args.formats, **metadata)
         print(f'{record["task"]}: {"PASS" if record["pass"] else "FAIL"} ({record["duration_seconds"]:.3f}s): {record["check_message"]}', flush=True)

@@ -113,7 +113,6 @@ GENERIC_SUFFIX = (' Use shell commands and Python with openpyxl, python-pptx and
                   ' Use only this directory, the Python interpreter and its standard library/site-packages.'
                   ' The audit fails logged commands that reference the repository, evaluation sources or task metadata, and file changes outside this directory.'
                   ' Reads are not sandboxed: this is an audit of logged commands, not filesystem isolation.')
-PYTHON_PREFLIGHT = 'import openpyxl, pptx, docx; import json, sysconfig; print(json.dumps(sysconfig.get_paths()))'
 FAKE_GENERIC_CODEX = '''#!/usr/bin/env python3
 import json
 import os
@@ -187,12 +186,8 @@ class RunnerTests(unittest.TestCase):
         self.environment.start()
         self.generic_bin = self.root / 'generic bin'
         executable(self.generic_bin / 'codex', FAKE_GENERIC_CODEX)
-        self.python_libraries = [self.root / 'runtime' / 'stdlib', self.root / 'runtime' / 'site-packages']
-        paths = json.dumps({'stdlib': str(self.python_libraries[0]), 'platstdlib': str(self.python_libraries[0]),
-                            'purelib': str(self.python_libraries[1]), 'platlib': str(self.python_libraries[1])})
         self.python = executable(self.root / 'python bin' / 'python',
-                                 '#!/bin/sh\n[ "$1" = -c ] && [ "$2" = ' + shlex.quote(PYTHON_PREFLIGHT) + ' ] || exit 7\n'
-                                 "printf '%s\\n' " + shlex.quote(paths) + '\n')
+                                 '#!/bin/sh\n[ "$1" = -c ] && [ "$2" = "import openpyxl, pptx, docx" ] || exit 7\n')
         self.broken_python = executable(self.root / 'broken python' / 'python',
                                         "#!/bin/sh\necho \"ModuleNotFoundError: No module named 'docx'\" >&2\nexit 1\n")
 
@@ -451,7 +446,7 @@ class RunnerTests(unittest.TestCase):
             with self.subTest(spelling=spelling), patch.object(runner, 'REPO', repository):
                 log.write_text(json.dumps({'type': 'item.completed', 'item': {
                     'type': 'command_execution', 'command': f"printf 'prefix{spelling}suffix'"}}) + '\n')
-                self.assertIn('forbidden path access', runner.access_violation(log, 'generic', workspace, self.python, []))
+                self.assertIn('forbidden path access', runner.access_violation(log, 'generic', workspace))
 
     def test_generic_workspace_stays_outside_repository_when_tempdir_is_in_repository(self):
         results = self.root / 'generic-tempdir'
@@ -460,7 +455,7 @@ class RunnerTests(unittest.TestCase):
             record = runner.run_task(runner.checker.tasks()[0], None, 'test-model', results, arm='generic', python=self.python)
         self.assertTrue(record['pass'], record['check_message'])
 
-    def test_generic_path_audit_allows_task_files_and_python_runtime_only(self):
+    def test_generic_path_audit_allows_task_files_and_non_repository_paths(self):
         workspace = self.root / 'workspace'
         workspace.mkdir()
         log = self.root / 'paths.jsonl'
@@ -479,11 +474,11 @@ class RunnerTests(unittest.TestCase):
             with self.subTest(command=command):
                 log.write_text(json.dumps({'type': 'item.completed', 'item': {
                     'type': 'command_execution', 'command': command}}) + '\n')
-                self.assertIsNone(runner.access_violation(log, 'generic', workspace, self.python, [library / 'python3.14']))
+                self.assertIsNone(runner.access_violation(log, 'generic', workspace))
         (workspace / 'linked').symlink_to(runner.REPO, target_is_directory=True)
         log.write_text(json.dumps({'type': 'item.completed', 'item': {
             'type': 'command_execution', 'command': 'cat linked/AGENTS.md'}}) + '\n')
-        self.assertIn('forbidden path access', runner.access_violation(log, 'generic', workspace, self.python, []))
+        self.assertIn('forbidden path access', runner.access_violation(log, 'generic', workspace))
 
     def test_generic_shell_run_checks_its_python(self):
         results = self.root / 'generic results'
@@ -505,9 +500,6 @@ class RunnerTests(unittest.TestCase):
         self.assertFalse((self.root / 'broken').exists())
         self.assertEqual(usage.returncode, 2)
         self.assertIn('--python', usage.stderr)
-
-    def test_generic_python_preflight_records_only_library_roots(self):
-        self.assertEqual(runner.python_ready(self.python), self.python_libraries)
 
     def test_generic_formats_and_unknown_format(self):
         generic = [str(ROOT / 'run.sh'), '--arm', 'generic', '--python', str(self.python), '--formats']
