@@ -10,7 +10,8 @@ const MIN_PER_HALF = 8;
 const SECONDS_PER_NAME = 5.5;
 
 // an inline-block whose bottom margin edge is the wordmark's baseline, so logos and text
-// in one line share it; sized so every wordmark has the same x-height
+// in one line share it; sized so every wordmark has the same x-height. The name is visually
+// hidden text rather than an aria-label, so text extractors read it as well as screen readers.
 function Mark({ entry }: { entry: UsedByEntry }) {
   if (!entry.logo) {
     return (
@@ -20,19 +21,21 @@ function Mark({ entry }: { entry: UsedByEntry }) {
   const { src, box, baseline, xHeight } = entry.logo;
   const [w, h] = box;
   return (
-    <span
-      role="img"
-      aria-label={entry.name}
-      style={{
-        display: "inline-block",
-        width: px(w / xHeight),
-        height: px(h / xHeight),
-        marginBottom: px(-(h - baseline) / xHeight),
-        backgroundColor: "currentColor",
-        mask: `url(${src}) center / contain no-repeat`,
-        WebkitMask: `url(${src}) center / contain no-repeat`,
-      }}
-    />
+    <>
+      <span
+        aria-hidden="true"
+        style={{
+          display: "inline-block",
+          width: px(w / xHeight),
+          height: px(h / xHeight),
+          marginBottom: px(-(h - baseline) / xHeight),
+          backgroundColor: "currentColor",
+          mask: `url(${src}) center / contain no-repeat`,
+          WebkitMask: `url(${src}) center / contain no-repeat`,
+        }}
+      />
+      <span className="sr-only">{entry.name}</span>
+    </>
   );
 }
 
