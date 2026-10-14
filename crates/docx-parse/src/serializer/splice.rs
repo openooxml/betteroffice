@@ -489,6 +489,87 @@ fn pairs_within(xml: &str) -> Option<bool> {
     Some(open.values().all(|count| *count == 0))
 }
 
+/// The comment markers `written`, the XML written for an unchanged paragraph, adds to `source`,
+/// the paragraph's source XML, each as the offset in `source` it goes at and its markup in
+/// `written`: a range start or end as its tag, a reference as the run that holds only it. Each
+/// goes right after the marker it follows in `written`, or after that marker's reference run.
+/// `None` unless `written` holds `source`'s comment markers in order with only such markers
+/// added, each after a marker that is an empty range tag or alone in its run.
+fn added_comment_ranges<'w>(source: &str, written: &'w str) -> Option<Vec<(usize, &'w str)>> {
+    fn markers<'x>(xml: &'x str, tags: &[Tag<'x>]) -> Option<Vec<(usize, String)>> {
+        tags.iter()
+            .enumerate()
+            .filter(|(_, tag)| {
+                !tag.end
+                    && matches!(
+                        tag.name,
+                        "w:commentRangeStart" | "w:commentRangeEnd" | "w:commentReference"
+                    )
+            })
+            .map(|(index, tag)| Some((index, unescaped(xml, attribute(tag, "w:id")?)?)))
+            .collect()
+    }
+    /// The span of the marker at `index`: its empty range tag, or the run it is alone in.
+    fn markup(tags: &[Tag<'_>], index: usize) -> Option<Range<usize>> {
+        let tag = &tags[index];
+        if tag.name != "w:commentReference" {
+            return tag.empty.then(|| tag.range.clone());
+        }
+        let close = tags
+            .get(index + 1)
+            .filter(|tag| tag.end && tag.name == "w:r")?;
+        let mut at = index.checked_sub(1)?;
+        if tags[at].end && tags[at].name == "w:rPr" {
+            let mut depth = 0usize;
+            loop {
+                if tags[at].end {
+                    depth += 1;
+                } else if !tags[at].empty {
+                    depth = depth.checked_sub(1)?;
+                }
+                if depth == 0 {
+                    break;
+                }
+                at = at.checked_sub(1)?;
+            }
+            at = at.checked_sub(1)?;
+        }
+        let open = &tags[at];
+        (open.name == "w:r" && !open.end && !open.empty).then(|| open.range.start..close.range.end)
+    }
+    let source_tags = tags(source)?;
+    let written_tags = tags(written)?;
+    let source_markers = markers(source, &source_tags)?;
+    let mut held = source_markers.iter().peekable();
+    let mut after = None;
+    let mut added = Vec::new();
+    for (index, id) in markers(written, &written_tags)? {
+        let name = written_tags[index].name;
+        if let Some((kept, _)) =
+            held.next_if(|(kept, kept_id)| source_tags[*kept].name == name && *kept_id == id)
+        {
+            after = markup(&source_tags, *kept).map(|span| span.end);
+            continue;
+        }
+        added.push((after?, &written[markup(&written_tags, index)?]));
+    }
+    (held.next().is_none() && !added.is_empty()).then_some(added)
+}
+
+/// `source` with each tag in `added` inserted at its offset.
+fn with_insertions(source: &str, added: &[(usize, &str)]) -> String {
+    let mut output =
+        String::with_capacity(source.len() + added.iter().map(|(_, tag)| tag.len()).sum::<usize>());
+    let mut cursor = 0;
+    for &(at, tag) in added {
+        output.push_str(&source[cursor..at]);
+        output.push_str(tag);
+        cursor = at;
+    }
+    output.push_str(&source[cursor..]);
+    output
+}
+
 fn paragraph_span(xml: &str, occurrence: &ParagraphOccurrence) -> Option<Range<usize>> {
     let start = occurrence.tag.start;
     let relative = element_span(&xml[start..], &[])?;
@@ -696,7 +777,8 @@ fn row_edits<'a>(
 /// `source` with the paragraphs `part` addresses rewritten from `recorded` where they changed
 /// or their written XML no longer agrees with their source on comments, revisions, notes or
 /// relationships, the removed ones dropped and the new ones inserted at their anchors, every
-/// other byte kept except paragraph IDs: the written ones, and `assignments` for source
+/// other byte kept except paragraph IDs and the comment markers an unchanged paragraph gains,
+/// which go into its source XML (see [`added_comment_ranges`]): the written IDs, and `assignments` for source
 /// paragraphs no model paragraph is written from. `None` when the part cannot be spliced, so
 /// the caller writes `serialized` whole: among others when a paragraph to rewrite, remove or
 /// insert is not [`simple`] in its source or written XML, or sits in anything but a story root
@@ -755,10 +837,23 @@ pub(crate) fn splice_story_part(
         return None;
     }
     let mut replaced = BTreeSet::new();
+    let mut ranged = BTreeSet::new();
     for (&ordinal, xml) in written {
-        if changed.contains(&ordinal)
-            || !marks(&source[spans[&ordinal].clone()])?.admit(&marks(xml)?)
-        {
+        if changed.contains(&ordinal) {
+            replaced.insert(ordinal);
+            continue;
+        }
+        let paragraph = &source[spans[&ordinal].clone()];
+        let wanted = marks(xml)?;
+        if marks(paragraph)?.admit(&wanted) {
+            continue;
+        }
+        let rangeable = added_comment_ranges(paragraph, xml).is_some_and(|added| {
+            marks(&with_insertions(paragraph, &added)).is_some_and(|patched| patched.admit(&wanted))
+        });
+        if rangeable {
+            ranged.insert(ordinal);
+        } else {
             replaced.insert(ordinal);
         }
     }
@@ -805,6 +900,11 @@ pub(crate) fn splice_story_part(
     }
     for (_, _, xml) in &rows.edits {
         prefixes.extend(required_prefixes(xml)?);
+    }
+    for ordinal in &ranged {
+        for (_, tag) in added_comment_ranges(&source[spans[ordinal].clone()], &written[ordinal])? {
+            prefixes.extend(required_prefixes(tag)?);
+        }
     }
     let root = root_tag(source)?;
     let bound = bindings(source, &root);
@@ -860,6 +960,12 @@ pub(crate) fn splice_story_part(
         }
         let xml = written.get(&ordinal).map_or("", String::as_str);
         edits.push((span(ordinal)?, 2, xml));
+    }
+    for &ordinal in &ranged {
+        let range = span(ordinal)?;
+        for (at, tag) in added_comment_ranges(&source[range.clone()], &written[&ordinal])? {
+            edits.push((range.start + at..range.start + at, 0, tag));
+        }
     }
     for (at, (anchor, xml)) in inserted.iter().enumerate() {
         if rows.inserted.contains(&at) {
@@ -1841,6 +1947,45 @@ mod tests {
         assert_eq!(
             splice_around(&source, &[(0, paragraph)], &[], &[], (start, end)),
             Some(source.clone())
+        );
+    }
+
+    #[test]
+    fn unchanged_paragraphs_take_added_comment_ranges_into_their_source() {
+        let field = "<w:r><w:t xml:space=\"preserve\">Page </w:t><w:fldChar w:fldCharType=\"begin\"/><w:instrText xml:space=\"preserve\"> PAGE </w:instrText><w:fldChar w:fldCharType=\"separate\"/><w:t>1</w:t><w:fldChar w:fldCharType=\"end\"/></w:r>";
+        let first = |reply: &str| {
+            format!(
+                "<w:p w14:paraId=\"00000001\"><w:commentRangeStart w:id=\"1\"/>{reply}{field}</w:p>"
+            )
+        };
+        let second = |reply: &str| {
+            format!(
+                "<w:p w14:paraId=\"00000002\"><w:r><w:t>Tail</w:t></w:r><w:commentRangeEnd w:id=\"1\"/>{reply}<w:r><w:commentReference w:id=\"1\"/></w:r></w:p>"
+            )
+        };
+        let start = "<w:commentRangeStart w:id=\"2\"/>";
+        let end = "<w:commentRangeEnd w:id=\"2\"/><w:r><w:rPr><w:rStyle w:val=\"CommentReference\"/></w:rPr><w:commentReference w:id=\"2\"/></w:r>";
+        let written_first = format!(
+            "<w:p w14:paraId=\"00000001\"><w:commentRangeStart w:id=\"1\"/>{start}<w:r><w:t xml:space=\"preserve\">Page 1</w:t></w:r></w:p>"
+        );
+        let written_second = second(end).replace("<w:t>Tail</w:t>", "<w:t>Tail</w:t><w:t/>");
+        assert_eq!(
+            splice(
+                &body(&format!("{}{}", first(""), second(""))),
+                &[(0, &written_first), (1, &written_second)],
+                &[]
+            ),
+            Some(body(&format!("{}{}", first(start), second(end))))
+        );
+    }
+
+    #[test]
+    fn a_comment_range_that_follows_no_source_range_rewrites_its_paragraph() {
+        let source = "<w:p w14:paraId=\"00000001\"><w:r><w:t>Plain</w:t></w:r></w:p>";
+        let written = "<w:p w14:paraId=\"00000001\"><w:commentRangeStart w:id=\"2\"/><w:r><w:t>Plain</w:t></w:r><w:commentRangeEnd w:id=\"2\"/></w:p>";
+        assert_eq!(
+            splice(&body(source), &[(0, written)], &[]),
+            Some(body(written))
         );
     }
 }
