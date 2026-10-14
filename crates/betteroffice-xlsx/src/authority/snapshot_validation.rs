@@ -40,6 +40,53 @@ fn invalid() -> SnapshotError {
     SnapshotError::new("snapshot authority and model disagree")
 }
 
+#[cfg(test)]
+mod pattern_tests {
+    use super::*;
+    use xlsx_model::{BorderEdge, BorderStyle, Color, Fill, PatternType};
+
+    #[test]
+    fn pattern_border_streamed_format_matches_serde() {
+        for pattern in PatternType::ALL {
+            let format = CellFormat {
+                fill: Fill::Pattern {
+                    pattern,
+                    fg: Some(Color::Theme { idx: 4, tint: 0.25 }),
+                    bg: Some(Color::Rgb("#123456".into())),
+                },
+                border: xlsx_model::Border {
+                    top: Some(BorderEdge {
+                        style: BorderStyle::MediumDashDotDot,
+                        color: Some(Color::Auto),
+                    }),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut model = WorkbookModel::default();
+            let style = model.styles.intern_cell_format(&format).unwrap().unwrap();
+            let xf = model.styles.cell_xfs.get(style as usize);
+            let mut position = JsonPosition::default();
+            let mut bytes = Vec::new();
+            loop {
+                let mut meter = 0;
+                let (done, chunk) = json_window(
+                    &mut position,
+                    SnapshotBudget::new(1, 768).unwrap(),
+                    &mut meter,
+                    |window| window.format(&model, xf, &BTreeMap::new()),
+                )
+                .unwrap();
+                bytes.extend(chunk);
+                if done {
+                    break;
+                }
+            }
+            assert_eq!(bytes, serde_json::to_vec(&format).unwrap());
+        }
+    }
+}
+
 fn allowance(bytes: usize, budget: SnapshotBudget, meter: &mut usize) -> SnapshotResult<usize> {
     if bytes > budget.max_bytes() {
         return Err(SnapshotError::new(
@@ -224,6 +271,15 @@ impl JsonWindow<'_> {
                 self.color(color)?;
                 self.raw(b"}")?;
             }
+            xlsx_model::styles::Fill::Pattern { pattern, fg, bg } => {
+                self.raw(b"{\"Pattern\":{\"pattern\":")?;
+                self.small(pattern)?;
+                self.raw(b",\"fg\":")?;
+                self.optional_color(fg.as_ref())?;
+                self.raw(b",\"bg\":")?;
+                self.optional_color(bg.as_ref())?;
+                self.raw(b"}}")?;
+            }
         }
         self.raw(b",\"border\":{")?;
         for (key, edge) in [
@@ -259,6 +315,20 @@ impl JsonWindow<'_> {
             xf.and_then(|xf| xf.alignment.as_ref())
                 .unwrap_or(&default.alignment),
         )?;
+        if let Some(protection) = xf.and_then(|xf| xf.protection.as_ref()) {
+            self.raw(b",\"protection\":")?;
+            self.small(protection)?;
+        }
+        if let Some(id) = xf.and_then(|xf| xf.xf_id) {
+            self.raw(b",\"xfId\":")?;
+            self.small(&id)?;
+        }
+        if xf.is_some_and(|xf| xf.quote_prefix) {
+            self.raw(b",\"quotePrefix\":true")?;
+        }
+        if xf.is_some_and(|xf| xf.pivot_button) {
+            self.raw(b",\"pivotButton\":true")?;
+        }
         self.raw(b"}")
     }
 
@@ -1588,6 +1658,11 @@ impl SnapshotValidation {
                     let right = model.styles.fills.get(index).ok_or_else(invalid)?;
                     let size = |fill: &xlsx_model::styles::Fill| match fill {
                         xlsx_model::styles::Fill::Solid(color) => color_bytes(color) + 32,
+                        xlsx_model::styles::Fill::Pattern { fg, bg, .. } => {
+                            fg.as_ref().map_or(4, color_bytes)
+                                + bg.as_ref().map_or(4, color_bytes)
+                                + 64
+                        }
                         _ => 32,
                     };
                     if !equal_record(
@@ -1736,5 +1811,64 @@ impl SnapshotValidation {
         self.base_index = 0;
         self.base_child = 0;
         Ok(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_facets_json_windows_match_cell_format_serde() {
+        let mut model = WorkbookModel::default();
+        model.styles.cell_xfs = vec![
+            xlsx_model::Xf {
+                protection: Some(xlsx_model::Protection {
+                    locked: false,
+                    hidden: true,
+                }),
+                xf_id: Some(1),
+                quote_prefix: true,
+                pivot_button: true,
+                alignment: Some(xlsx_model::Alignment {
+                    text_rotation: Some(255),
+                    indent: Some(4),
+                    relative_indent: Some(-2),
+                    justify_last_line: Some(true),
+                    reading_order: Some(2),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            xlsx_model::Xf {
+                protection: Some(xlsx_model::Protection::default()),
+                xf_id: Some(0),
+                ..Default::default()
+            },
+        ];
+        for style in [None, Some(0), Some(1)] {
+            let expected = serde_json::to_vec(&model.styles.cell_format(style)).unwrap();
+            let mut position = JsonPosition::default();
+            let mut actual = Vec::new();
+            let xf = style.and_then(|index| model.styles.xf(index));
+            let formats = BTreeMap::new();
+            let mut windows = 0;
+            let budget = SnapshotBudget::new(1, 1024).unwrap();
+            for _ in 0..=expected.len() {
+                let mut meter = 0;
+                let (done, bytes) = json_window(&mut position, budget, &mut meter, |window| {
+                    window.format(&model, xf, &formats)
+                })
+                .unwrap();
+                assert!(meter <= budget.max_bytes());
+                actual.extend(bytes);
+                windows += 1;
+                if done {
+                    break;
+                }
+            }
+            assert_eq!(actual, expected);
+            assert!(windows > 1);
+        }
     }
 }

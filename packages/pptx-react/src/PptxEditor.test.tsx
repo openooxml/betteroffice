@@ -20,7 +20,7 @@ import type {
   PptxPresenceCursor,
   SlideDisplayList,
 } from '@betteroffice/pptx';
-import type { PptxEditorApi, PptxEditorProps, PptxWorkerViewerApi } from './PptxEditor';
+import type { PptxEditorApi, PptxEditorProps, PptxInThreadEditorProps, PptxWorkerViewerApi } from './PptxEditor';
 import { paintSelection, PptxEditor, SelectionOverlay } from './PptxEditor';
 import { EditorToolbar, PptxCommandProvider, ToolbarCommandButton } from './index';
 import { isMacPlatform, matchesChord } from './commands/descriptors';
@@ -38,13 +38,13 @@ it('preserves editor props and contextual API types across overloads', () => {
   assertType<Equal<PptxEditorProps, Parameters<typeof PptxEditor>[0]>>();
   assertType<Equal<ComponentProps<typeof PptxEditor>, PptxEditorProps>>();
   assertType<Equal<PptxEditorProps, ComponentProps<typeof PptxEditor>>>();
-  const check = (props: Partial<Parameters<typeof PptxEditor>[0]> = {}) => {
+  const check = (props: Partial<PptxInThreadEditorProps> = {}) => {
     const opened: PptxEditorApi[] = [];
-    const editor = <PptxEditor fonts={[]} onReady={(api) => {
+    const editor = <PptxEditor legacySyncApi experimentalWorkerOpen={false} fonts={[]} onReady={(api) => {
       assertType<Equal<typeof api, PptxEditorApi>>();
       opened.push(api);
     }} {...props} />;
-    const viewer = <PptxEditor fonts={[]} readOnly experimentalWorkerOpen onReady={(api) => {
+    const viewer = <PptxEditor legacySyncApi fonts={[]} readOnly experimentalWorkerOpen onReady={(api) => {
       assertType<Equal<typeof api, PptxWorkerViewerApi>>();
     }} />;
     return { editor, viewer };
@@ -155,7 +155,7 @@ describe('PptxEditor slide layout cache', () => {
         restorers.push(() => context.mockRestore());
         const presence = spyOn(presenceRendering, 'groupPresenceBySlide');
         restorers.push(() => presence.mockRestore());
-        view = render(<PptxEditor file={fixture} fonts={fonts}
+        view = render(<PptxEditor legacySyncApi experimentalWorkerOpen={false} file={fixture} fonts={fonts}
           collaboration={{ clientId: 9441, initialUpdate: seed }}
           onError={(error) => errors.push(error)}
           onReady={(ready) => { api = ready; }} />);
@@ -237,7 +237,7 @@ describe('PptxEditor slide layout cache', () => {
         getContext as unknown as HTMLCanvasElement['getContext']
       );
       restorers.push(() => context.mockRestore());
-      view = render(<PptxEditor file={fixture} fonts={fonts}
+      view = render(<PptxEditor legacySyncApi experimentalWorkerOpen={false} file={fixture} fonts={fonts}
         collaboration={{ clientId: 9450 }}
         onReady={(ready) => { api = ready; }} />);
       await waitFor(() => expect(api).toBeDefined());
@@ -305,7 +305,7 @@ describe('PptxEditor slide layout cache', () => {
       let api: PptxEditorApi | undefined;
       let view: ReturnType<typeof render> | undefined;
       try {
-        view = render(<PptxEditor file={fixture} fonts={fonts}
+        view = render(<PptxEditor legacySyncApi experimentalWorkerOpen={false} file={fixture} fonts={fonts}
           collaboration={{ clientId: 9421, initialUpdate: seed }}
           onReady={(ready) => {
             api = ready;
@@ -383,7 +383,7 @@ describe('PptxEditor slide layout cache', () => {
       let api: PptxEditorApi | undefined;
       let view: ReturnType<typeof render> | undefined;
       try {
-        view = render(<PptxEditor file={fixture} fonts={fonts}
+        view = render(<PptxEditor legacySyncApi experimentalWorkerOpen={false} file={fixture} fonts={fonts}
           collaboration={{ clientId: 9431, initialUpdate: seed }}
           onReady={(ready) => { api = ready; }} />);
         await waitFor(() => expect(api).toBeDefined());
@@ -444,7 +444,7 @@ describe('PptxEditor slide layout cache', () => {
     let api: PptxEditorApi | undefined;
     let view: ReturnType<typeof render> | undefined;
     try {
-      view = render(<PptxEditor file={fixture} fonts={fonts}
+      view = render(<PptxEditor legacySyncApi experimentalWorkerOpen={false} file={fixture} fonts={fonts}
         collaboration={{ clientId: 9411, initialUpdate: seed }}
         onReady={(ready) => { api = ready; }} />);
       await waitFor(() => expect(api).toBeDefined());
@@ -532,7 +532,7 @@ describe('PptxEditor slide layout cache', () => {
     );
     let view: ReturnType<typeof render> | undefined;
     try {
-      view = render(<PptxEditor file={fixture} fonts={fonts}
+      view = render(<PptxEditor legacySyncApi experimentalWorkerOpen={false} file={fixture} fonts={fonts}
         collaboration={{ clientId: 9401, initialUpdate: seed }}
         onReady={(ready) => { api = ready; }} />);
       await waitFor(() => expect(api).toBeDefined());
@@ -687,7 +687,7 @@ describe('PptxEditor PNG export', () => {
         try {
           const opened: PptxEditorApi[] = [];
           const view = render(
-            <PptxEditor
+            <PptxEditor legacySyncApi experimentalWorkerOpen={false}
               file={fixture}
               fileName="report.pptx"
               fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]}
@@ -702,7 +702,7 @@ describe('PptxEditor PNG export', () => {
           if (scenario === 'unmount') view.unmount();
           if (scenario === 'replace' || scenario === 'stale-error') {
             view.rerender(
-              <PptxEditor
+              <PptxEditor legacySyncApi experimentalWorkerOpen={false}
                 file={fixture.slice()}
                 fileName="replacement.pptx"
                 fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]}
@@ -762,7 +762,7 @@ describe('PptxEditor insert image', () => {
         const opened: PptxEditorApi[] = [];
         const errors: Error[] = [];
         const view = render(
-          <PptxEditor
+          <PptxEditor legacySyncApi experimentalWorkerOpen={false}
             file={fixture}
             fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]}
             clientId={9103}
@@ -818,7 +818,7 @@ describe('PptxEditor insert image', () => {
       try {
         const opened: PptxEditorApi[] = [];
         const view = render(
-          <PptxEditor
+          <PptxEditor legacySyncApi experimentalWorkerOpen={false}
             file={fixture}
             fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]}
             clientId={9104}
@@ -886,19 +886,19 @@ describe('PptxEditor pending image insertion', () => {
         onError: (error: Error) => errors.push(error),
       };
       try {
-        const view = render(<PptxEditor {...props} />);
+        const view = render(<PptxEditor legacySyncApi experimentalWorkerOpen={false} {...props} />);
         await waitFor(() => expect(opened).toHaveLength(1), { timeout: 15_000 });
         const before = opened[0].handle.snapshot();
         const file = new File([Uint8Array.from([0x89, 0x50, 0x4e, 0x47])], 'pending.png', { type: 'image/png' });
         fireEvent.change(view.getByTestId('pptx-insert-image-input'), { target: { files: [file] } });
         await waitFor(() => expect(finish).toBeDefined());
         if (scenario === 'replace' || scenario === 'stale-error') {
-          view.rerender(<PptxEditor {...props} file={new Uint8Array(fixture)} />);
+          view.rerender(<PptxEditor legacySyncApi experimentalWorkerOpen={false} {...props} file={new Uint8Array(fixture)} />);
           await waitFor(() => expect(opened).toHaveLength(2), { timeout: 15_000 });
         } else if (scenario === 'unmount') {
           view.unmount();
         } else if (scenario === 'readOnly') {
-          view.rerender(<PptxEditor {...props} readOnly />);
+          view.rerender(<PptxEditor legacySyncApi experimentalWorkerOpen={false} {...props} readOnly />);
         }
         await act(async () => { finish!(); await Promise.resolve(); });
         if (scenario !== 'unmount') expect(opened[opened.length - 1].handle.snapshot()).toEqual(before);
@@ -924,12 +924,12 @@ describe('PptxEditor font stability', () => {
       ];
 
       const { rerender } = render(
-        <PptxEditor file={fixture} fonts={face()} clientId={9101} onReady={onReady} />
+        <PptxEditor legacySyncApi experimentalWorkerOpen={false} file={fixture} fonts={face()} clientId={9101} onReady={onReady} />
       );
       await waitFor(() => expect(opened.length).toBe(1), { timeout: 15_000 });
 
       await act(async () => {
-        rerender(<PptxEditor file={fixture} fonts={face()} clientId={9101} onReady={onReady} />);
+        rerender(<PptxEditor legacySyncApi experimentalWorkerOpen={false} file={fixture} fonts={face()} clientId={9101} onReady={onReady} />);
       });
 
       expect(opened.length).toBe(1);
@@ -949,7 +949,7 @@ describe('PptxEditor host integration', () => {
       onPresence: () => () => {},
     };
     const view = render(
-      <PptxEditor
+      <PptxEditor legacySyncApi experimentalWorkerOpen={false}
         file={fixture}
         fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]}
         collaboration={{ clientId: 9120, presence }}
@@ -1022,7 +1022,7 @@ describe('PptxEditor viewing transitions', () => {
       onReady,
     };
     const view = render(
-      <PptxEditor {...props} initialSlide={Number.MAX_SAFE_INTEGER} readOnly />
+      <PptxEditor legacySyncApi experimentalWorkerOpen={false} {...props} initialSlide={Number.MAX_SAFE_INTEGER} readOnly />
     );
     await act(async () => {
       await waitFor(() => expect(opened).toHaveLength(1), { timeout: 15_000 });
@@ -1041,7 +1041,7 @@ describe('PptxEditor viewing transitions', () => {
       view.container.querySelector('button[aria-current="page"]')?.textContent
     ).toContain(String(last));
     await act(async () => {
-      view.rerender(<PptxEditor {...props} initialSlide={1} />);
+      view.rerender(<PptxEditor legacySyncApi experimentalWorkerOpen={false} {...props} initialSlide={1} />);
     });
     expect(opened).toHaveLength(1);
     expect(view.getByTestId('pptx-editor-toolbar')).toBeDefined();
@@ -1066,7 +1066,7 @@ describe('PptxEditor viewing transitions', () => {
     fireEvent.keyDown(view.getByRole('application'), { key: 'x' });
     expect(api.handle.story(story.id).paragraphs[0].runs[0].text).toStartWith('x');
     await act(async () => {
-      view.rerender(<PptxEditor {...props} readOnly />);
+      view.rerender(<PptxEditor legacySyncApi experimentalWorkerOpen={false} {...props} readOnly />);
     });
     const edited = api.handle.snapshot();
     fireEvent.keyDown(view.getByRole('application'), { key: 'Backspace' });
@@ -1231,7 +1231,7 @@ describe('PptxEditor proposal review', () => {
     let api: PptxEditorApi | undefined;
     let view: ReturnType<typeof render> | undefined;
     try {
-      view = render(<PptxEditor file={fixture} fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]}
+      view = render(<PptxEditor legacySyncApi experimentalWorkerOpen={false} file={fixture} fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]}
         clientId={9212} onReady={(ready) => { api = ready; }} />);
       await act(async () => { await waitFor(() => expect(api).toBeDefined()); });
       const handle = api!.handle;
@@ -1261,7 +1261,7 @@ describe('PptxEditor proposal review', () => {
 
   it('previews, accepts, undoes, rejects, and reviews stale targets through the editor UI', async () => {
     let api: PptxEditorApi | undefined;
-    const view = render(<PptxEditor file={fixture} fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]}
+    const view = render(<PptxEditor legacySyncApi experimentalWorkerOpen={false} file={fixture} fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]}
       clientId={9210} onReady={(ready) => { api = ready; }} />);
     await act(async () => { await waitFor(() => expect(api).toBeDefined(), { timeout: 15000 }); });
     const handle = api!.handle;
@@ -1340,7 +1340,7 @@ describe('PptxEditor proposal review', () => {
     let api: PptxEditorApi | undefined;
     const cursors: Array<PptxPresenceCursor | null> = [];
     const presence = { peers: [], setCursor: (cursor: PptxPresenceCursor | null) => cursors.push(cursor), onPresence: () => () => {} };
-    const view = render(<PptxEditor file={fixture} fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]}
+    const view = render(<PptxEditor legacySyncApi experimentalWorkerOpen={false} file={fixture} fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]}
       collaboration={{ clientId: 9211, presence }} onReady={(ready) => { api = ready; }} />);
     await act(async () => { await waitFor(() => expect(api).toBeDefined()); });
     const handle = api!.handle;
@@ -1383,7 +1383,7 @@ describe('PptxEditor speaker notes', () => {
   it('saves immediately and follows undo, redo, and remote updates', async () => {
     let api: PptxEditorApi | undefined;
     const view = render(
-      <PptxEditor
+      <PptxEditor legacySyncApi experimentalWorkerOpen={false}
         file={fixture}
         fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]}
         clientId={9110}
@@ -1448,7 +1448,7 @@ describe('PptxEditor host controls', () => {
       let release!: (value: boolean | void) => void;
       const decisionPromise = new Promise<boolean | void>((resolve) => { release = resolve; });
       const saved: Uint8Array[] = [];
-      const view = render(<PptxEditor file={fixture} fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]} onReady={(ready) => { api = ready; }}
+      const view = render(<PptxEditor legacySyncApi experimentalWorkerOpen={false} file={fixture} fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]} onReady={(ready) => { api = ready; }}
         onSaveRequest={() => { calls++; return decisionPromise; }} onSave={(bytes) => saved.push(bytes)} />);
       await waitFor(() => expect(api).toBeDefined());
       if (!view.queryByTestId('pptx-save')) fireEvent.click(view.getByTestId('pptx-toolbar-more'));
@@ -1473,12 +1473,12 @@ describe('PptxEditor host controls', () => {
     const saved: Uint8Array[] = [];
     const props = { fonts: [{ family: 'Liberation Sans', bytes: fontBytes }], onReady: (ready: PptxEditorApi) => { opened.push(ready); },
       onSaveRequest: () => { requests++; return pending; }, onSave: (bytes: Uint8Array) => { saved.push(bytes); } };
-    const view = render(<PptxEditor {...props} file={fixture} />);
+    const view = render(<PptxEditor legacySyncApi experimentalWorkerOpen={false} {...props} file={fixture} />);
     await waitFor(() => expect(opened).toHaveLength(1));
     if (!view.queryByTestId('pptx-save')) fireEvent.click(view.getByTestId('pptx-toolbar-more'));
     fireEvent.click(view.getByTestId('pptx-save'));
     await waitFor(() => expect(requests).toBe(1));
-    view.rerender(<PptxEditor {...props} file={fixture.slice()} />);
+    view.rerender(<PptxEditor legacySyncApi experimentalWorkerOpen={false} {...props} file={fixture.slice()} />);
     await waitFor(() => expect(opened).toHaveLength(2));
     await act(async () => { release(true); });
     expect(saved).toHaveLength(0);
@@ -1489,7 +1489,7 @@ describe('PptxEditor host controls', () => {
 
   it('resolves scaled client points on the current slide without selecting or focusing', async () => {
     let api: PptxEditorApi | undefined;
-    const view = render(<PptxEditor file={fixture} fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]}
+    const view = render(<PptxEditor legacySyncApi experimentalWorkerOpen={false} file={fixture} fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]}
       onReady={(ready) => { api = ready; }} />);
     await waitFor(() => expect(api).toBeDefined());
     const canvas = view.getByTestId('pptx-slide-canvas');
@@ -1519,7 +1519,7 @@ describe('PptxEditor host controls', () => {
 
   it('waits for accepted image input and propagates its failure', async () => {
     let api: PptxEditorApi | undefined;
-    const view = render(<PptxEditor file={fixture} fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]} onReady={(ready) => { api = ready; }} />);
+    const view = render(<PptxEditor legacySyncApi experimentalWorkerOpen={false} file={fixture} fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]} onReady={(ready) => { api = ready; }} />);
     await waitFor(() => expect(api).toBeDefined());
     let reader!: FileReader;
     const read = spyOn(FileReader.prototype, 'readAsDataURL').mockImplementation(function (this: FileReader) { reader = this; });
@@ -1542,10 +1542,10 @@ describe('PptxEditor host controls', () => {
 describe('PptxEditor commands', () => {
   const faces = () => [{ family: 'Liberation Sans', bytes: fontBytes }];
 
-  async function open(props: Partial<Parameters<typeof PptxEditor>[0]> = {}) {
+  async function open(props: Partial<PptxInThreadEditorProps> = {}) {
     const opened: PptxEditorApi[] = [];
     const view = render(
-      <PptxEditor file={fixture} fonts={faces()} onReady={(api) => opened.push(api)} {...props} />
+      <PptxEditor legacySyncApi experimentalWorkerOpen={false} file={fixture} fonts={faces()} onReady={(api) => opened.push(api)} {...props} />
     );
     await act(async () => {
       await waitFor(() => expect(opened).toHaveLength(1), { timeout: 15_000 });
@@ -1587,7 +1587,7 @@ describe('PptxEditor commands', () => {
     function Host() {
       const [file, setFile] = useState(fixture);
       return (
-        <PptxEditor
+        <PptxEditor legacySyncApi experimentalWorkerOpen={false}
           file={file}
           fonts={fonts}
           onError={(error) => errors.push(error)}
@@ -1804,7 +1804,7 @@ describe('PptxEditor commands', () => {
       const replaced: PptxEditorApi[] = [];
       await act(async () => {
         view.rerender(
-          <PptxEditor
+          <PptxEditor legacySyncApi experimentalWorkerOpen={false}
             file={fixture.slice()}
             fonts={faces()}
             onReady={(ready) => replaced.push(ready)}
@@ -1848,7 +1848,7 @@ describe('PptxEditor commands', () => {
       const replaced: PptxEditorApi[] = [];
       await act(async () => {
         view.rerender(
-          <PptxEditor file={fixture.slice()} fonts={faces()} onReady={(ready) => replaced.push(ready)} />
+          <PptxEditor legacySyncApi experimentalWorkerOpen={false} file={fixture.slice()} fonts={faces()} onReady={(ready) => replaced.push(ready)} />
         );
       });
       await waitFor(() => expect(replaced).toHaveLength(1), { timeout: 15_000 });
@@ -1928,7 +1928,7 @@ describe('PptxEditor commands', () => {
       const blocked = api.commands.execute('underline', null);
       await act(async () => {
         view.rerender(
-          <PptxEditor file={fixture} fonts={faces()} onReady={() => {}} readOnly />
+          <PptxEditor legacySyncApi experimentalWorkerOpen={false} file={fixture} fonts={faces()} onReady={() => {}} readOnly />
         );
       });
       await act(async () => {
@@ -1998,7 +1998,7 @@ describe('PptxEditor commands', () => {
       const stale = api.commands.execute('underline', null);
       await act(async () => {
         view.rerender(
-          <PptxEditor file={fixture.slice()} fonts={faces()} onReady={() => {}} />
+          <PptxEditor legacySyncApi experimentalWorkerOpen={false} file={fixture.slice()} fonts={faces()} onReady={() => {}} />
         );
       });
       await act(async () => {
@@ -2070,7 +2070,7 @@ describe('PptxEditor commands', () => {
     const first = await open({ onSave: (bytes) => saved.push(bytes) });
     const other: PptxEditorApi[] = [];
     const second = render(
-      <PptxEditor file={fixture.slice()} fonts={faces()} onReady={(api) => other.push(api)} />
+      <PptxEditor legacySyncApi experimentalWorkerOpen={false} file={fixture.slice()} fonts={faces()} onReady={(api) => other.push(api)} />
     );
     await act(async () => {
       await waitFor(() => expect(other).toHaveLength(1), { timeout: 15_000 });
@@ -2179,20 +2179,20 @@ describe('PptxEditor commands', () => {
     );
     await act(async () => {
       view.rerender(
-        <PptxEditor file={fixture} fonts={faces()} toolbar={custom} readOnly />
+        <PptxEditor legacySyncApi experimentalWorkerOpen={false} file={fixture} fonts={faces()} toolbar={custom} readOnly />
       );
     });
     expect(view.getByTestId('pptx-bold').title).toContain('The presentation is read-only.');
     expect(view.queryByTestId('pptx-save')).toBeNull();
     await act(async () => {
       view.rerender(
-        <PptxEditor file={fixture} fonts={faces()} toolbar={custom} showToolbar={false} />
+        <PptxEditor legacySyncApi experimentalWorkerOpen={false} file={fixture} fonts={faces()} toolbar={custom} showToolbar={false} />
       );
     });
     expect(view.queryByTestId('pptx-bold')).toBeNull();
     expect(view.getByTestId('pptx-insert-image-input')).toBeDefined();
     await act(async () => {
-      view.rerender(<PptxEditor file={fixture} fonts={faces()} readOnly />);
+      view.rerender(<PptxEditor legacySyncApi experimentalWorkerOpen={false} file={fixture} fonts={faces()} readOnly />);
     });
     expect(view.queryByTestId('pptx-editor-toolbar')).toBeNull();
     expect(view.getByTestId('pptx-present')).toBeDefined();
@@ -2270,7 +2270,7 @@ describe('PptxEditor edit batches', () => {
     try {
       let api: PptxEditorApi | undefined;
       const view = render(
-        <PptxEditor file={fixture} fonts={fonts()} clientId={9130} onReady={(ready) => { api = ready; }} />
+        <PptxEditor legacySyncApi experimentalWorkerOpen={false} file={fixture} fonts={fonts()} clientId={9130} onReady={(ready) => { api = ready; }} />
       );
       await act(async () => {
         await waitFor(() => expect(api).toBeDefined(), { timeout: 15_000 });
@@ -2305,7 +2305,7 @@ describe('PptxEditor edit batches', () => {
     let api: PptxEditorApi | undefined;
     const changes: DeckSnapshot[] = [];
     const view = render(
-      <PptxEditor file={fixture} fonts={fonts()} clientId={9131} onReady={(ready) => { api = ready; }}
+      <PptxEditor legacySyncApi experimentalWorkerOpen={false} file={fixture} fonts={fonts()} clientId={9131} onReady={(ready) => { api = ready; }}
         onChange={(snapshot) => changes.push(snapshot)} />
     );
     await act(async () => {
@@ -2334,7 +2334,7 @@ describe('PptxEditor edit batches', () => {
 
   it('refuses writes while read-only but still reads', async () => {
     let api: PptxEditorApi | undefined;
-    render(<PptxEditor file={fixture} fonts={fonts()} clientId={9132} onReady={(ready) => { api = ready; }} readOnly />);
+    render(<PptxEditor legacySyncApi experimentalWorkerOpen={false} file={fixture} fonts={fonts()} clientId={9132} onReady={(ready) => { api = ready; }} readOnly />);
     await act(async () => {
       await waitFor(() => expect(api).toBeDefined(), { timeout: 15_000 });
     });
@@ -2354,7 +2354,7 @@ describe('PptxEditor edit batches', () => {
     try {
       let api: PptxEditorApi | undefined;
       const props = { file: fixture, fonts: fonts(), clientId: 9134, onReady: (ready: PptxEditorApi) => { api = ready; } };
-      const view = render(<PptxEditor {...props} />);
+      const view = render(<PptxEditor legacySyncApi experimentalWorkerOpen={false} {...props} />);
       await act(async () => {
         await waitFor(() => expect(api).toBeDefined(), { timeout: 15_000 });
       });
@@ -2363,7 +2363,7 @@ describe('PptxEditor edit batches', () => {
       insertImage(view, 'pending.png');
       await waitFor(() => expect(images.started()).toBe(true));
       const applying = api!.applyEdits(notesRequest(read.version, read.slides[0].id, 'Blocked'));
-      await act(async () => { view.rerender(<PptxEditor {...props} readOnly />); });
+      await act(async () => { view.rerender(<PptxEditor legacySyncApi experimentalWorkerOpen={false} {...props} readOnly />); });
       await act(async () => { images.finish(); });
       expect(await applying).toMatchObject({
         ok: false,
@@ -2383,7 +2383,7 @@ describe('PptxEditor edit batches', () => {
     try {
       const opened: PptxEditorApi[] = [];
       const props = { fonts: fonts(), clientId: 9133, onReady: (ready: PptxEditorApi) => { opened.push(ready); } };
-      const view = render(<PptxEditor {...props} file={fixture} />);
+      const view = render(<PptxEditor legacySyncApi experimentalWorkerOpen={false} {...props} file={fixture} />);
       await act(async () => {
         await waitFor(() => expect(opened).toHaveLength(1), { timeout: 15_000 });
       });
@@ -2393,7 +2393,7 @@ describe('PptxEditor edit batches', () => {
       await waitFor(() => expect(images.started()).toBe(true));
       const applying = opened[0].applyEdits(notesRequest(read.version, read.slides[0].id, 'Orphaned'));
       void applying.catch(() => {});
-      view.rerender(<PptxEditor {...props} file={new Uint8Array(fixture)} />);
+      view.rerender(<PptxEditor legacySyncApi experimentalWorkerOpen={false} {...props} file={new Uint8Array(fixture)} />);
       await act(async () => {
         await waitFor(() => expect(opened).toHaveLength(2), { timeout: 15_000 });
       });

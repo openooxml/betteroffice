@@ -666,6 +666,7 @@ fn paint_chart_placeholder(
             width: PLACEHOLDER_BORDER_WIDTH,
             color: PLACEHOLDER_BORDER.into(),
             style: None,
+            rail: None,
             clip: Some(clip),
         })?;
     }
@@ -975,6 +976,7 @@ fn translate_op(op: PlotOp, chart_clip: Rect) -> Result<Option<DrawCmd>, ()> {
             width: positive_f32(width)?,
             color: color.into(),
             style: None,
+            rail: None,
             clip: Some(chart_clip),
         })),
         PlotOp::Path {

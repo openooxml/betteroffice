@@ -3,7 +3,7 @@ import type { ComponentProps } from 'react';
 import { PptxPeerNotReadyError, PptxWorkerEditorDisposedError, PptxWorkerEditorFailedError } from '@betteroffice/pptx';
 import type { PptxEditRequest, PptxWorkerEditorAccess, PptxWorkerEditorSession, PptxWorkerEditorState } from '@betteroffice/pptx';
 import { PptxEditor } from '../PptxEditor';
-import type { PptxEditorApi, PptxEditorProps, PptxWorkerViewerApi } from '../PptxEditor';
+import type { PptxEditorApi, PptxEditorProps, PptxLegacyEditorProps, PptxWorkerViewerApi } from '../PptxEditor';
 import { createWorkerEditorApi, type PptxWorkerEditorApi } from './createWorkerEditorApi';
 import type { PptxWorkerEditorProps } from './PptxWorkerEditor';
 
@@ -42,21 +42,21 @@ function setup(gestureActive: () => boolean = () => false) {
 test('legacy_contextual_api_types_are_unchanged', () => {
   assertType<Equal<Parameters<typeof PptxEditor>[0], PptxEditorProps>>();
   assertType<Equal<ComponentProps<typeof PptxEditor>, PptxEditorProps>>();
-  const editor: PptxEditorProps = { fonts: [], onReady(api) { assertType<Equal<typeof api, PptxEditorApi>>(); } };
-  const viewer = PptxEditor({ fonts: [], readOnly: true, experimentalWorkerOpen: true, onReady(api) {
+  const editor: PptxLegacyEditorProps = { legacySyncApi: true, experimentalWorkerOpen: false, fonts: [], onReady(api) { assertType<Equal<typeof api, PptxEditorApi>>(); } };
+  const viewer = PptxEditor({ legacySyncApi: true, fonts: [], readOnly: true, experimentalWorkerOpen: true, onReady(api) {
     assertType<Equal<typeof api, PptxWorkerViewerApi>>();
   } });
-  const worker: PptxWorkerEditorProps = { fonts: [], experimentalWorkerOpen: true,
+  const worker: PptxWorkerEditorProps = { legacySyncApi: true, fonts: [], experimentalWorkerOpen: true,
     onReady(api) { assertType<Equal<typeof api, PptxWorkerEditorApi>>(); } };
   const editable = PptxEditor({ ...worker, readOnly: false, onReady(api) {
     assertType<Equal<typeof api, PptxWorkerEditorApi>>();
   } });
-  const dynamic = { fonts: worker.fonts, experimentalWorkerOpen: true as const,
+  const dynamic = { legacySyncApi: true as const, fonts: worker.fonts, experimentalWorkerOpen: true as const,
     readOnly: Boolean(editor.readOnly), onReady(_api: PptxWorkerEditorApi | PptxWorkerViewerApi) {} };
   const dynamicEditor = PptxEditor(dynamic);
   // @ts-expect-error
   const editorOnly = PptxEditor({ ...dynamic, onReady: (_api: PptxWorkerEditorApi) => {} });
-  const toggled = PptxEditor({ fonts: [], experimentalWorkerOpen: true, readOnly: dynamic.readOnly, onReady(api) {
+  const toggled = PptxEditor({ legacySyncApi: true, fonts: [], experimentalWorkerOpen: true, readOnly: dynamic.readOnly, onReady(api) {
     assertType<Equal<typeof api, PptxWorkerEditorApi | PptxWorkerViewerApi>>();
   } });
   expect(editor.fonts).toEqual(worker.fonts);

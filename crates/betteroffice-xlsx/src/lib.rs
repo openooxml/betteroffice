@@ -63,8 +63,8 @@ pub use xlsx_model::{
 };
 pub use xlsx_ops::{
     BorderLineStyle, BorderPatch, BorderPreset, CapturedFormat, CellState, HorizontalAlignment,
-    NumberFormatMutation, Op, Proposal, ProposedEdit, Provenance, StylePatch, StyleProperty,
-    TextWrapping, Transaction, VerticalAlignment,
+    KeptFacets, NumberFormatMutation, Op, Proposal, ProposedEdit, Provenance, StylePatch,
+    StyleProperty, TextWrapping, Transaction, VerticalAlignment,
 };
 pub use xlsx_render::{
     Align, ChartA11yAttrs, ChartRegion, DisplayList, DrawCmd, GridGeometry, GridMeta,

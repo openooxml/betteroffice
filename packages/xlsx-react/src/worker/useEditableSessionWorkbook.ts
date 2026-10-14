@@ -3,7 +3,7 @@ import {
   type WorkbookSession, type WorkbookEditPeer,
 } from '@betteroffice/xlsx';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import type { XlsxEditorProps } from '../XlsxEditor';
+import type { XlsxInThreadEditorProps } from '../XlsxEditor';
 import { XlsxCommandAdmissionError } from '../commands/createXlsxCommandStore';
 import type { XlsxCommandStore } from '../commands/types';
 import type { WorkerInputCoordinator } from '../commands/workerInputCoordinator';
@@ -18,7 +18,7 @@ export const editableWorkbookSessionBackend = {
   attach: createWorkbookEditPeer,
 };
 
-export type EditableSessionWorkbookProps = Omit<XlsxEditorProps, 'onReady' | 'collaboration'> & {
+export type EditableSessionWorkbookProps = Omit<XlsxInThreadEditorProps, 'onReady' | 'collaboration' | 'experimentalWorkerOpen'> & {
   onError?: (error: Error) => void;
   onReady?: (api: XlsxWorkerEditorApi) => void | (() => void);
 };
@@ -239,7 +239,7 @@ export function useLegacySessionWorkbook(
   const [, setRevision] = useState(0);
   const [error, setError] = useState<Error | null>(null);
   const [loading, setLoading] = useState(false);
-  const collaboration = (props as EditableSessionWorkbookProps & Pick<XlsxEditorProps, 'collaboration'>).collaboration;
+  const collaboration = (props as EditableSessionWorkbookProps & Pick<XlsxInThreadEditorProps, 'collaboration'>).collaboration;
   const reportError = useCallback((value: unknown) => {
     const error = asError(value);
     setError(error);

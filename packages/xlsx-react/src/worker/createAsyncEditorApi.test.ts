@@ -30,6 +30,8 @@ describe('async editor commands', () => {
       expect(refusal).toBeInstanceOf(XlsxAsyncApiSyncAccessError);
       expect(refusal).toMatchObject({ name: 'XlsxAsyncApiSyncAccessError', code: 'sync-api-unavailable', member, alternative });
       expect((refusal as Error).message).toContain(alternative);
+      expect((refusal as Error).message).toContain('legacySyncApi');
+      expect((refusal as Error).message).not.toContain('with asyncApi');
     });
   }
 

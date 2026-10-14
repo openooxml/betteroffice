@@ -64,7 +64,7 @@ export interface WorkerEditorApiBridge {
   apply(result: EditResult | XlsxEditResult, op?: WorkbookReplayOp): void;
 }
 
-/** @experimental */
+/** @deprecated Removed in 0.6.0. Use XlsxAsyncEditorApi. */
 export interface XlsxWorkerEditorApi extends Omit<XlsxWorkerViewerApi, 'save' | 'selectCells'> {
   readonly hydrated: boolean;
   readonly failure: Error | null;

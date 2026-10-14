@@ -51,15 +51,6 @@
 
 ## Packages
 
-### Agent tools
-
-[`@betteroffice/agents`](packages/agents) provides grep-style discovery, bounded reads,
-and reviewable edits for DOCX, with initial XLSX cell/formula and PPTX slide-text
-prototypes. DOCX also supports rendered previews and tracked changes.
-Use its TypeScript SDK with an existing document session or connect the local
-`betteroffice-mcp` server to an agent. All three formats support proposed export
-and save/reopen checks; live-session attachment and PNG previews are DOCX-only.
-
 ### Documents — `.docx`
 
 | package | registry | what it does |
@@ -93,6 +84,12 @@ Unrecognized drawing markup inside DOCX runs survives editor saves.
 
 VSDX packages build from this repository; see the [VSDX guide](https://docs.betteroffice.dev/docs/vsdx).
 
+### Agent tools
+
+[`@betteroffice/agents`](packages/agents) lets agents find, read and edit DOCX, with tracked
+changes and previews, through a TypeScript SDK or the `betteroffice-mcp` server.
+XLSX cells and PPTX slide text are early prototypes.
+
 What to install for which language, with a first example each:
 [npm](https://docs.betteroffice.dev/docs/javascript),
 [crates.io](https://docs.betteroffice.dev/docs/rust),
@@ -108,35 +105,35 @@ What to install for which language, with a first example each:
 Page agreement is reported separately from SSIM.
 
 <table>
-<tr><th width="180"></th><th width="230" align="right">BetterOffice (<a href="https://www.npmjs.com/package/@betteroffice/docx/v/0.3.0">0.3.0</a>)</th><th width="230" align="right">BetterOffice (<a href="https://github.com/openooxml/betteroffice/commit/a0204b228b301eb5f284dbabec1ab0a490cc6856">a0204b22</a>)</th><th width="230" align="right">LibreOffice (26.2.3.2)</th></tr>
-<tr><td>Exact page counts</td><td align="right">63/63</td><td align="right">63/63</td><td align="right">44/63</td></tr>
-<tr><td>Absolute page error</td><td align="right">0</td><td align="right">0</td><td align="right">57</td></tr>
-<tr><td>SSIM</td><td align="right">0.8381</td><td align="right">0.8381</td><td align="right">0.7694</td></tr>
-<tr><td>Scored/total</td><td align="right">63/63</td><td align="right">63/63</td><td align="right">63/63</td></tr>
-<tr><td>Render time (avg)</td><td align="right">485 ms</td><td align="right">484 ms</td><td align="right">758 ms</td></tr>
-<tr><td>Parse success</td><td align="right">100.00%</td><td align="right">100.00%</td><td align="right">100.00%</td></tr>
+<tr><th width="180"></th><th width="230" align="right">BetterOffice (<a href="https://github.com/openooxml/betteroffice/commit/3a49caad7db3114258669913e6eda9a066c50dd8">3a49caad</a>)</th><th width="230" align="right">LibreOffice (26.2.3.2)</th></tr>
+<tr><td>Exact page counts</td><td align="right">63/63</td><td align="right">44/63</td></tr>
+<tr><td>Absolute page error</td><td align="right">0</td><td align="right">57</td></tr>
+<tr><td>SSIM</td><td align="right">0.8519</td><td align="right">0.7694</td></tr>
+<tr><td>Scored/total</td><td align="right">63/63</td><td align="right">63/63</td></tr>
+<tr><td>Render time (avg)</td><td align="right">430 ms</td><td align="right">773 ms</td></tr>
+<tr><td>Parse success</td><td align="right">100.00%</td><td align="right">100.00%</td></tr>
 </table>
 
 
 ### PPTX
 
 <table>
-<tr><th width="180"></th><th width="230" align="right">BetterOffice (<a href="https://www.npmjs.com/package/@betteroffice/pptx/v/0.2.0">0.2.0</a>)</th><th width="230" align="right">BetterOffice (<a href="https://github.com/openooxml/betteroffice/commit/a0204b228b301eb5f284dbabec1ab0a490cc6856">a0204b22</a>)</th><th width="230" align="right">LibreOffice (26.2.3.2)</th></tr>
-<tr><td>SSIM</td><td align="right">0.9169</td><td align="right">0.9169</td><td align="right">0.9030</td></tr>
-<tr><td>Scored/total</td><td align="right">103/103</td><td align="right">103/103</td><td align="right">103/103</td></tr>
-<tr><td>Render time (avg)</td><td align="right">157 ms</td><td align="right">157 ms</td><td align="right">1324 ms</td></tr>
-<tr><td>Parse success</td><td align="right">100.00%</td><td align="right">100.00%</td><td align="right">100.00%</td></tr>
+<tr><th width="180"></th><th width="230" align="right">BetterOffice (<a href="https://github.com/openooxml/betteroffice/commit/3a49caad7db3114258669913e6eda9a066c50dd8">3a49caad</a>)</th><th width="230" align="right">LibreOffice (26.2.3.2)</th></tr>
+<tr><td>SSIM</td><td align="right">0.9170</td><td align="right">0.9030</td></tr>
+<tr><td>Scored/total</td><td align="right">103/103</td><td align="right">103/103</td></tr>
+<tr><td>Render time (avg)</td><td align="right">159 ms</td><td align="right">1351 ms</td></tr>
+<tr><td>Parse success</td><td align="right">100.00%</td><td align="right">100.00%</td></tr>
 </table>
 
 ### XLSX
 
 <table>
-<tr><th width="180"></th><th width="230" align="right">BetterOffice (<a href="https://www.npmjs.com/package/@betteroffice/xlsx/v/0.3.0">0.3.0</a>)</th><th width="230" align="right">BetterOffice (<a href="https://github.com/openooxml/betteroffice/commit/a0204b228b301eb5f284dbabec1ab0a490cc6856">a0204b22</a>)</th><th width="230" align="right">LibreOffice (26.2.3.2)</th></tr>
-<tr><td>SSIM</td><td align="right">0.7661</td><td align="right">0.7661</td><td align="right">0.6892</td></tr>
-<tr><td>Scored/total</td><td align="right">207/208</td><td align="right">207/208</td><td align="right">195/208</td></tr>
-<tr><td>Recalc accuracy</td><td align="right">99.60%</td><td align="right">99.60%</td><td align="right">85.87%</td></tr>
-<tr><td>Recalc time (avg)</td><td align="right">95 ms</td><td align="right">95 ms</td><td align="right">448 ms</td></tr>
-<tr><td>Parse success</td><td align="right">100.00%</td><td align="right">100.00%</td><td align="right">100.00%</td></tr>
+<tr><th width="180"></th><th width="230" align="right">BetterOffice (<a href="https://github.com/openooxml/betteroffice/commit/3a49caad7db3114258669913e6eda9a066c50dd8">3a49caad</a>)</th><th width="230" align="right">LibreOffice (26.2.3.2)</th></tr>
+<tr><td>SSIM</td><td align="right">0.7661</td><td align="right">0.6892</td></tr>
+<tr><td>Scored/total</td><td align="right">207/208</td><td align="right">195/208</td></tr>
+<tr><td>Recalc accuracy</td><td align="right">99.60%</td><td align="right">85.87%</td></tr>
+<tr><td>Recalc time (avg)</td><td align="right">64 ms</td><td align="right">405 ms</td></tr>
+<tr><td>Parse success</td><td align="right">100.00%</td><td align="right">100.00%</td></tr>
 </table>
 
 For how scores, timings and coverage are measured, see the [benchmark methodology](scripts/office-quality/README.md).

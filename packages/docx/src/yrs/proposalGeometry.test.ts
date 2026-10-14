@@ -14,6 +14,7 @@ import { createProposalRegistry, type DocxProposalInput, type DocxProposalResult
 import {
   computeAnchorTargetGeometry,
   computeProposalGeometryMirror,
+  hiddenRangesForPreview,
   proposalSetIdentity,
   resolveAnchorTarget,
   resolveNavigationTarget,
@@ -131,6 +132,42 @@ function duplicated(reader: ProposalGeometryReader): ProposalGeometryReader {
 
 beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
 
+function headerFixture(): Uint8Array {
+  const W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"';
+  const REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  const deleted = (id: number, text: string) =>
+    `<w:del w:id="${id}" w:author="Reviewer"><w:r><w:delText>${text}</w:delText></w:r></w:del>`;
+  const parts: PartsMap = new Map();
+  parts.set(
+    '[Content_Types].xml',
+    toBytes('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/></Types>')
+  );
+  parts.set(
+    '_rels/.rels',
+    toBytes(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDoc" Type="${REL}/officeDocument" Target="word/document.xml"/></Relationships>`)
+  );
+  parts.set(
+    'word/_rels/document.xml.rels',
+    toBytes(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdH" Type="${REL}/header" Target="header1.xml"/></Relationships>`)
+  );
+  parts.set(
+    'word/header1.xml',
+    toBytes(
+      `<w:hdr ${W}><w:p w14:paraId="0000E001"><w:r><w:t>Head</w:t></w:r>${deleted(1, 'gone')}<w:r><w:t>tail</w:t></w:r></w:p>` +
+        '<w:tbl><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:p w14:paraId="0000E002"><w:r><w:t>cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>' +
+        '<w:p w14:paraId="0000E003"/></w:hdr>'
+    )
+  );
+  parts.set(
+    'word/document.xml',
+    toBytes(
+      `<w:document ${W} xmlns:r="${REL}"><w:body><w:p w14:paraId="00000001"><w:r><w:t>Body</w:t></w:r>${deleted(2, 'cut')}</w:p>` +
+        '<w:sectPr><w:headerReference w:type="default" r:id="rIdH"/></w:sectPr></w:body></w:document>'
+    )
+  );
+  return new Uint8Array(rezipPartsToArrayBuffer(parts));
+}
+
 describe('proposal geometry readers', () => {
   test('matches resident anchor targets to the main session and editor display projection', async () => {
     const main = await createYrsSession({ clientId: 79102 });
@@ -173,7 +210,7 @@ describe('proposal geometry readers', () => {
         { kind: 'revision', revisionId },
         { kind: 'search', paragraph, text: 'absent text' },
         { kind: 'range', version: 'stale', range },
-        { kind: 'range', version, range: { ...range, story: 'hf:header' } },
+        { kind: 'range', version, range: { ...range, story: 'fn:1' } },
         { kind: 'revision', revisionId: 'unknown' },
       ];
       const mainTargets = targets(main.version(), revisionOf(main.getProposals()));
@@ -540,14 +577,89 @@ describe('proposal geometry readers', () => {
       const mirror = computeProposalGeometryMirror(reader, main.getProposals());
       expect(mirror.targets.cell).toEqual({
         ok: false,
-        failure: { code: 'unsupported', message: 'The target has no body display position' },
+        failure: { code: 'unsupported', message: 'The target has no display position' },
       });
       expect(mirror.targets.delete).toEqual({
         ok: false,
-        failure: { code: 'unsupported', message: 'The target has no body display position' },
+        failure: { code: 'unsupported', message: 'The target has no display position' },
       });
       expect(mirror.hidden).toHaveLength(1);
     } finally {
+      main.destroy();
+    }
+  });
+});
+
+describe('header and footer anchor targets', () => {
+  test('map into their story with its hidden ranges, cells included, resident and main alike', async () => {
+    const main = await createYrsSession({ clientId: 79103 });
+    const resident = await createResidentEngineSession();
+    try {
+      main.openDocx(headerFixture(), true);
+      resident.openDocx(headerFixture());
+      const persisted = main.paragraphIdentities().paragraphs.find(
+        ({ ooxmlParaId }) => ooxmlParaId === '0000E001'
+      )!.persisted!;
+      const preview = Object.fromEntries(
+        main.listRevisions().map(({ revisionId }) => [revisionId, 'accepted' as const])
+      );
+      const range = (version: string, story: string, paraId: string, end: number) =>
+        ({
+          kind: 'range',
+          version,
+          range: { story, start: { paraId, offset: 0 }, end: { paraId, offset: end }, view: 'accepted' },
+        }) as const;
+      const targets = (reader: typeof main | typeof resident.geometryReader) => {
+        const version = reader.version();
+        const revision = reader.listRevisions().find(({ story }) => story === 'hf:rIdH')!;
+        return [
+          range(version, 'hf:rIdH', '0000E001', 8),
+          range(version, 'hf:rIdH:t0:r0c0', '0000E002', 4),
+          range(version, 'body', '00000001', 4),
+          range(version, 'fn:1', '0000E001', 1),
+          { kind: 'search', paragraph: persisted, text: 'tail' },
+          { kind: 'revision', revisionId: revision.revisionId },
+        ] as const;
+      };
+      const hidden = (reader: typeof main | typeof resident.geometryReader) => () =>
+        hiddenRangesForPreview(reader, reader.version(), preview);
+      const answers = computeAnchorTargetGeometry(main, targets(main), hidden(main));
+      const [header, cell, body, note, search, revision] = answers;
+      expect(header).toEqual({
+        ok: true,
+        root: 'hf:rIdH',
+        ranges: [{ from: 1, to: 13 }],
+        paragraph: 1,
+        hidden: [{ from: 5, to: 9 }],
+      });
+      expect(cell).toMatchObject({ ok: true, root: 'hf:rIdH', hidden: [{ from: 5, to: 9 }] });
+      if (!cell?.ok) throw new Error('unreachable');
+      expect(cell.ranges[0]!.from).toBeGreaterThan(13);
+      expect(body).toEqual({ ok: true, ranges: [{ from: 1, to: 5 }], paragraph: 1 });
+      expect(note).toMatchObject({ ok: false, failure: { code: 'unsupported' } });
+      expect(search).toMatchObject({ ok: true, root: 'hf:rIdH', ranges: [{ from: 9, to: 13 }] });
+      expect(revision).toMatchObject({ ok: true, root: 'hf:rIdH', ranges: [{ from: 5, to: 9 }] });
+      const residentAnswers = computeAnchorTargetGeometry(
+        resident.geometryReader,
+        targets(resident.geometryReader),
+        hidden(resident.geometryReader)
+      );
+      expect(residentAnswers.map((answer) => answer.ok && answer.rIds)).toEqual([
+        ['rIdH'], ['rIdH'], undefined, false, ['rIdH'], ['rIdH'],
+      ]);
+      expect(
+        residentAnswers.map((answer) => {
+          if (!answer.ok) return answer;
+          const { rIds: _, ...rest } = answer;
+          return rest;
+        })
+      ).toEqual(answers);
+      expect(resolveAnchorTarget(main, { kind: 'paragraph', paragraph: persisted }, main.version())).toMatchObject({
+        ok: true,
+        paragraph: { story: 'hf:rIdH' },
+      });
+    } finally {
+      resident.destroy();
       main.destroy();
     }
   });

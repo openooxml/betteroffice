@@ -39,10 +39,13 @@ import type {
   DocxFindTextResult,
   DocxReadParagraphsRequest,
   DocxReadParagraphsResult,
+  DocxReadStoriesRequest,
+  DocxReadStoriesResult,
   DocxTextTarget,
   DocxValidationResult,
 } from './edits';
 import type { DocxParagraphHeading } from './readTypes';
+import type { DocxListStoriesResult } from './stories';
 import {
   type DocxProposalRegistryState,
   type DocxProposalRequest,
@@ -105,6 +108,7 @@ export * from './structuredExport';
 export * from './pagedExport';
 export * from './inputPositionMap';
 export * from './storyPlainText';
+export * from './stories';
 export type { DocxResolvedPointPosition } from './pointPosition';
 export type { ResidentRangeHighlights } from './residentRangeHighlights';
 export type { ResidentDocumentRead, ResidentDocumentReadValues } from './residentEngineWorkerProtocol';
@@ -181,7 +185,7 @@ export {
   type DocxSavedParagraph,
   type DocxSessionSave,
 } from './saveYrsDocx';
-export { headerFooterStory, sessionSourcePackage } from './sessionInternals';
+export { headerFooterDisplayRIds, headerFooterStory, sessionSourcePackage } from './sessionInternals';
 export { PeerMetadataError, peerMetadataTags } from './peerMetadata';
 export {
   DirtyProjectionStories,
@@ -1444,6 +1448,13 @@ export interface YrsSession extends CollaborationReplica {
   version(): string;
   /** Paragraph texts in one view, with the version they were read at. */
   readParagraphs(request: DocxReadParagraphsRequest): DocxReadParagraphsResult;
+  /**
+   * Paragraph texts of the selected stories in one read. A story that cannot be read reports
+   * why, and the read stops at its limits with `truncated`.
+   */
+  readStories(request: DocxReadStoriesRequest): DocxReadStoriesResult;
+  /** Every story with its kind, container and, for a header or footer, its part and uses. */
+  listStories(): DocxListStoriesResult;
   /** Exact, case-sensitive, paragraph-local search; overlapping matches count separately. */
   findText(request: DocxFindTextRequest): DocxFindTextResult;
   /** Resolves and checks an edit batch without changing anything or reserving ids. */

@@ -40,8 +40,16 @@ export function headerFooterStory(session: object | null | undefined, rId: strin
   return `hf:${canonical || rId}`;
 }
 
+/** The relationship ids whose bands show `rId`'s story. @internal */
 export function headerFooterDisplayRIds(session: object, rId: string): string[] {
-  const aliases = registry.get(session)?.headerFooterAliases();
+  return routedHeaderFooterRIds(registry.get(session)?.headerFooterAliases(), rId);
+}
+
+/** `rId`'s canonical relationship id and every alias `aliases` routes to it. @internal */
+export function routedHeaderFooterRIds(
+  aliases: ReadonlyMap<string, string> | undefined,
+  rId: string
+): string[] {
   const canonical = aliases?.get(rId) ?? rId;
   return [canonical, ...[...(aliases ?? [])].flatMap(([alias, owner]) =>
     owner === canonical ? [alias] : []

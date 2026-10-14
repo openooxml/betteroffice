@@ -1,16 +1,20 @@
 import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
 import { isHostMessage } from '../../../../shared/office-session/protocol';
 import { SessionFailure } from '../../../../shared/office-session/types';
+import { requestWasmCompile } from '../../../../shared/office-session/client';
+import { wasmAssetUrl } from '../wasm/asset';
 import type { OpenPresentationSessionOptions } from './client';
 import { createSharedPresentationCommandClient } from './commandClient';
 import { presentationSharedInputs } from './commandSharedInput';
 import { CommandOutcomeUnknown } from './commandProtocol';
 import type {
-  PresentationCommandClient, PresentationCommandFailure, PresentationCommandOpenOptions, PresentationCommandOpenResult,
+  PresentationCommandClient, PresentationCommandFailure, PresentationCommandOpenResult,
 } from './commandProtocol';
 import {
   PptxWorkerEditorDisposedError, PptxWorkerEditorFailedError,
 } from './peerHydrationError';
+
+const wasmModules = new Map<string, WebAssembly.Module>();
 
 /** @internal */
 export interface PeerlessSessionOptions extends OpenPresentationSessionOptions {
@@ -45,18 +49,18 @@ export function createPeerlessSession(
   bytes: Uint8Array | ArrayBuffer, options: PeerlessSessionOptions = {},
 ): PeerlessSession {
   if (options.signal?.aborted) throw new PptxWorkerEditorDisposedError();
-  const fonts = (faces: PeerlessSessionOptions['fonts']) => faces?.map((face) => ({
-    family: face.family, bytes: new Uint8Array(face.bytes).slice().buffer,
-    bold: face.bold, italic: face.italic,
-  }));
-  const input: PresentationCommandOpenOptions = {
-    session: crypto.randomUUID(), incarnation: crypto.randomUUID(),
-    clientId: options.collaboration?.clientId ?? options.clientId, collaboration: options.collaboration != null, fonts: fonts(options.fonts), fallbackFonts: fonts(options.fallbackFonts),
-    initialUpdate: options.collaboration?.initialUpdate ?? options.initialUpdate, wasm: options.wasm,
-    observeChanges: options.observeChanges, readOnly: options.readOnly, activeSlideIndex: options.activeSlideIndex,
-  };
+  const cacheUrl = !options.worker && options.wasm === undefined ? wasmAssetUrl().href : undefined;
+  const wasm = options.wasm ?? (cacheUrl ? wasmModules.get(cacheUrl) : undefined);
   const transport = createWorkerTransport(options.worker ? options.worker() :
     new Worker(new URL('./pptxSessionWorker.mjs', import.meta.url), { type: 'module' }));
+  if (cacheUrl && !wasm) requestWasmCompile(transport);
+  const input = {
+    session: crypto.randomUUID(), incarnation: crypto.randomUUID(),
+    clientId: options.collaboration?.clientId ?? options.clientId, collaboration: options.collaboration != null,
+    fonts: options.fonts, fallbackFonts: options.fallbackFonts,
+    initialUpdate: options.collaboration?.initialUpdate ?? options.initialUpdate, wasm,
+    observeChanges: options.observeChanges, readOnly: options.readOnly, activeSlideIndex: options.activeSlideIndex,
+  };
   const listeners = new Set<(error: PresentationCommandFailure) => void>();
   const connectionErrors = new Set<(error: unknown) => void>();
   let failure: PresentationCommandFailure | undefined;
@@ -107,8 +111,11 @@ export function createPeerlessSession(
   const monitored: SessionTransport = {
     post: (message, transfer) => transport.post(message, transfer),
     listen: (listener) => transport.listen((message) => {
-      if (isHostMessage(message) && message.kind === 'failure') {
-        fail(new SessionFailure(message.code, message.message, message.diagnostics));
+      if (isHostMessage(message)) {
+        if (message.kind === 'wasm-module' && cacheUrl && !disposed && !failure && message.url === cacheUrl && !wasmModules.has(cacheUrl)) {
+          wasmModules.set(cacheUrl, message.module);
+        }
+        if (message.kind === 'failure') fail(new SessionFailure(message.code, message.message, message.diagnostics));
       }
       listener(message);
     }),

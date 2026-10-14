@@ -12,6 +12,8 @@ pub(crate) mod pages;
 pub(crate) mod source;
 mod walk;
 
+pub(crate) use walk::header_footer_index;
+
 use std::fmt;
 
 use serde::de::Error as _;

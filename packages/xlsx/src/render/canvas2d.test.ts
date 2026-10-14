@@ -1,7 +1,128 @@
 import { describe, expect, it } from 'bun:test';
 import fixture from '../../test-fixtures/path-backend-agreement.json';
-import type { DisplayList, GeometryPathCommand, TextCmd } from '../display-list/types';
+import type { DisplayList, GeometryPathCommand, PatternType, TextCmd } from '../display-list/types';
 import { paintDisplayList } from './canvas2d';
+import { PATTERN_MASKS } from './patterns';
+
+describe('Canvas2D pattern masks', () => {
+  it('cover the specified share of each 8x8 tile', () => {
+    // gray shares are the spec's percentages of 64 pixels; hatches are 1-px (light) or
+    // 2-px (dark) lines every 4 px, and grids and trellises count each crossing once
+    const expected: Record<PatternType, number> = {
+      gray0625: 64 / 16, gray125: 64 / 8, lightGray: 64 / 4, mediumGray: 64 / 2, darkGray: 64 * 3 / 4,
+      lightHorizontal: 16, lightVertical: 16, lightDown: 16, lightUp: 16,
+      lightGrid: 16 + 16 - 4, lightTrellis: 16 + 16 - 8,
+      darkHorizontal: 32, darkVertical: 32, darkDown: 32, darkUp: 32,
+      darkGrid: 32 + 32 - 16, darkTrellis: 32 + 32 - 16,
+    };
+    const set = (rows: readonly number[]) =>
+      rows.reduce((sum, row) => sum + row.toString(2).split('').filter((bit) => bit === '1').length, 0);
+    expect(Object.fromEntries(Object.entries(PATTERN_MASKS).map(([pattern, rows]) => [pattern, set(rows)])))
+      .toEqual(expected);
+  });
+});
+
+describe('Canvas2D double lines', () => {
+  it('keep the released rails and gap when the command carries no rail width', () => {
+    for (const dpr of [1, 2]) for (const width of [0.5, 1, 2]) {
+      const strokes: number[][] = [];
+      let points: number[] = [];
+      const context = {
+        lineWidth: 0, strokeStyle: '', lineCap: '',
+        save() {}, restore() {}, setTransform() {}, clearRect() {}, rect() {}, clip() {}, setLineDash() {},
+        beginPath() { points = []; },
+        moveTo(x: number, y: number) { points.push(x, y); },
+        lineTo(x: number, y: number) { points.push(x, y); },
+        stroke() { strokes.push([this.lineWidth, ...points]); },
+      };
+      const dl = { width: 100, height: 40, commands: [
+        { op: 'line', x1: 0, y1: 10, x2: 100, y2: 10, width, color: '#000000', style: 'double' },
+        { op: 'line', x1: 20, y1: 0, x2: 20, y2: 40, width, color: '#000000', style: 'double' },
+      ] } as DisplayList;
+      paintDisplayList(context as unknown as CanvasRenderingContext2D, dl, dpr);
+      const rail = Math.max(width * 0.6, 0.5);
+      const offset = Math.max(width * 0.8, 0.8);
+      expect(strokes).toEqual([
+        [rail, 0, 10 - offset, 100, 10 - offset],
+        [rail, 0, 10 + offset, 100, 10 + offset],
+        [rail, 20 - offset, 0, 20 - offset, 40],
+        [rail, 20 + offset, 0, 20 + offset, 40],
+      ]);
+    }
+  });
+});
+
+describe('Canvas2D pattern borders', () => {
+  it('paints all six dash styles and a three-pixel double border', () => {
+    const dashes: number[][] = [];
+    const widths: number[] = [];
+    const context = {
+      lineWidth: 0, strokeStyle: '', lineCap: '',
+      save() {}, restore() {}, setTransform() {}, clearRect() {},
+      beginPath() {}, rect() {}, clip() {}, moveTo() {}, lineTo() {},
+      setLineDash(value: number[]) { dashes.push(value); },
+      stroke() { widths.push(this.lineWidth); },
+    };
+    const styles = ['mediumDashed', 'dashDot', 'mediumDashDot', 'dashDotDot', 'mediumDashDotDot', 'slantDashDot', 'double'];
+    const dl = { width: 100, height: 40, commands: styles.map((style) => ({
+      op: 'line', x1: 0, y1: 10, x2: 100, y2: 10,
+      width: style === 'double' ? 3 : style.startsWith('medium') ? 2 : 1,
+      color: '#000000', style, ...(style === 'double' ? { rail: 1 } : {}),
+    })) } as DisplayList;
+    paintDisplayList(context as unknown as CanvasRenderingContext2D, dl, 1);
+    expect(dashes).toEqual([[8, 4], [4, 2, 1, 2], [8, 4, 2, 4], [4, 2, 1, 2, 1, 2], [8, 4, 2, 4, 2, 4], [4, 2, 1, 2], []]);
+    expect(widths).toEqual([2, 1, 2, 1, 2, 1, 1, 1]);
+  });
+
+  it('caches eight device-pixel tiles and anchors them to the sheet at every dpr', () => {
+    const tiles: number[][] = [];
+    const transforms: number[][] = [];
+    const patternTransforms: object[] = [];
+    const patterns: object[] = [];
+    const original = globalThis.OffscreenCanvas;
+    class TileCanvas {
+      constructor(public width: number, public height: number) {}
+      getContext() {
+        return {
+          createImageData: () => ({ data: new Uint8ClampedArray(256) }),
+          putImageData: (image: ImageData) => tiles.push(Array.from(image.data)),
+        };
+      }
+    }
+    globalThis.OffscreenCanvas = TileCanvas as unknown as typeof OffscreenCanvas;
+    const context = {
+      fillStyle: '',
+      save() {}, restore() {}, clearRect() {}, beginPath() {}, rect() {}, clip() {}, fillRect() {},
+      setTransform(...value: number[]) { transforms.push(value); },
+      createPattern() {
+        const pattern = { setTransform(value: object) { patternTransforms.push(value); } };
+        patterns.push(pattern);
+        return pattern;
+      },
+    };
+    const dl = { width: 32, height: 8, commands: [0, 13].map((x) => ({
+      op: 'patternFill', x, y: 0, w: x === 0 ? 13 : 19, h: 8,
+      pattern: 'lightUp', fg: '#000000', bg: '#ffffff', originX: -3, originY: -2,
+    })) } as unknown as DisplayList;
+    try {
+      for (const dpr of [1, 2]) paintDisplayList(context as unknown as CanvasRenderingContext2D, dl, dpr);
+      paintDisplayList(context as unknown as CanvasRenderingContext2D, dl, 2, { x: 37.5, y: 19.5 });
+      expect(tiles).toHaveLength(2);
+      expect(patterns).toHaveLength(2);
+      for (const tile of tiles) {
+        for (let y = 0; y < 8; y += 1) for (let x = 0; x < 8; x += 1) {
+          expect(tile[(y * 8 + x) * 4]).toBe((x + y) % 4 === 0 ? 0 : 255);
+        }
+      }
+      expect(patternTransforms).toContainEqual({ a: 1, b: 0, c: 0, d: 1, e: -3, f: -2 });
+      expect(patternTransforms).toContainEqual({ a: 0.5, b: 0, c: 0, d: 0.5, e: -3, f: -2 });
+      expect(patternTransforms).toContainEqual({ a: 0.5, b: 0, c: 0, d: 0.5, e: -2.75, f: -1.75 });
+      expect(transforms).toContainEqual([2, 0, 0, 2, 0, 0]);
+    } finally {
+      globalThis.OffscreenCanvas = original;
+    }
+  });
+});
 
 interface PathTrace {
   verb: string;

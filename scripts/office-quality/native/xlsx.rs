@@ -17,7 +17,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Err("usage: xlsx-native-bench input.xlsx output.xlsx".into());
     }
     let bytes = fs::read(&args[0])?;
-    let workbook = Workbook::open_recalculated(&bytes, CalculationOptions::default())?;
+    let mut workbook = Workbook::open_for_read(&bytes)?;
+    workbook.recalculate_all(CalculationOptions::default());
     let output = workbook.save()?;
     fs::write(&args[1], &output)?;
     println!(

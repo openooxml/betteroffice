@@ -44,7 +44,8 @@ const HEADER_BYTES = 21;
 
 export function isCollaborativeWorkbookRecovery(engine: Uint8Array): boolean {
   const unsupported = (): never => { throw new TypeError('Unsupported workbook recovery checkpoint'); };
-  if (engine.length < 42 || !MAGIC.every((byte, index) => engine[index] === byte) || engine[8] !== 3) return unsupported();
+  // engine codec 3 predates patterned fills; 5 frames its metadata the same way
+  if (engine.length < 42 || !MAGIC.every((byte, index) => engine[index] === byte) || (engine[8] !== 3 && engine[8] !== 5)) return unsupported();
   // Engine metadata follows the codec header and SHA-256 digest.
   let offset = 41;
   let length = 0;
