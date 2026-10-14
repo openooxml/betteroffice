@@ -10,6 +10,7 @@ if (ownsDom) GlobalRegistrator.register();
 
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import * as wasm from '@betteroffice/docx/yrs/wasm/index';
+import { loadRustDisplayListQueryEngine } from '@betteroffice/docx/layout/render';
 import { takePreloadedResidentEngineWorker } from '@betteroffice/docx/yrs';
 import { residentWorkerFactory, type InProcessResidentWorker } from '@betteroffice/docx/yrs/__fixtures__/residentWorker';
 import { resetEngineChoiceForTests, setMissingWorkerCapabilitiesForTests } from './internals/engineChoice';
@@ -228,5 +229,33 @@ test('a load that fails frees the worker document it replaced', async () => {
     view.unmount();
   } finally {
     for (const release of [...terminated, ...destroyed]) release.mockRestore();
+  }
+}, 60_000);
+
+test('unmounting the editor closes every display-list store handle it opened', async () => {
+  await installWorker();
+  const engine = await loadRustDisplayListQueryEngine();
+  const openDisplayList = engine.openDisplayList!;
+  const closeDisplayList = engine.closeDisplayList!;
+  const open = new Set<number>();
+  const opens = spyOn(engine, 'openDisplayList').mockImplementation((json: string) => {
+    const handle = openDisplayList(json);
+    open.add(handle);
+    return handle;
+  });
+  const closes = spyOn(engine, 'closeDisplayList').mockImplementation((handle: number) => {
+    open.delete(handle);
+    closeDisplayList(handle);
+  });
+  const ref = createRef<Editor>();
+  try {
+    const view = render(<DocxEditor ref={ref} documentBuffer={await commentedDocx(3)} />);
+    await waitFor(() => expect(ref.current?.getTotalPages()).toBe(3), { timeout: 20_000 });
+    await waitFor(() => expect(open.size).toBeGreaterThan(0), { timeout: 20_000 });
+    view.unmount();
+    expect(open.size).toBe(0);
+  } finally {
+    opens.mockRestore();
+    closes.mockRestore();
   }
 }, 60_000);

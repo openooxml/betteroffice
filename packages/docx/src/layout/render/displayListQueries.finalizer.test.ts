@@ -1,25 +1,31 @@
-import { describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import type { DisplayPage } from './displayList';
+import { createDisplayListQueries, endDisplayListQueriesLine } from './displayListQueries';
 import type { RustDisplayListQueryEngine } from './rustDisplayList';
 
-const registered = new Set<object>();
-const NativeRegistry = globalThis.FinalizationRegistry;
+// Tokens of live finalizer registrations whose target is a query facade.
+const registered = new Set<WeakKey>();
+const registry = FinalizationRegistry.prototype;
+const { register, unregister } = registry;
 
-class CountingRegistry<T> extends NativeRegistry<T> {
-  override register(target: WeakKey, held: T, token?: WeakKey): void {
-    super.register(target, held, token);
-    if (token) registered.add(token);
-  }
-
-  override unregister(token: WeakKey): boolean {
+beforeAll(() => {
+  registry.register = function (this: FinalizationRegistry<unknown>, target, held, token) {
+    const facade = target as { rangeRects?: unknown; dispose?: unknown };
+    if (token && typeof facade.rangeRects === 'function' && typeof facade.dispose === 'function') {
+      registered.add(token);
+    }
+    register.call(this, target, held, token);
+  };
+  registry.unregister = function (this: FinalizationRegistry<unknown>, token) {
     registered.delete(token);
-    return super.unregister(token);
-  }
-}
+    return unregister.call(this, token);
+  };
+});
 
-globalThis.FinalizationRegistry = CountingRegistry as typeof FinalizationRegistry;
-const { createDisplayListQueries, endDisplayListQueriesLine } = await import('./displayListQueries');
-globalThis.FinalizationRegistry = NativeRegistry;
+afterAll(() => {
+  registry.register = register;
+  registry.unregister = unregister;
+});
 
 function page(pageIndex: number): DisplayPage {
   return { pageIndex, width: 100, height: 100, primitives: [] };
