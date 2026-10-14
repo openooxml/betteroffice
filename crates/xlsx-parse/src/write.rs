@@ -336,6 +336,10 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
         &mut used_paths,
         &worksheet_relationship_type,
     )?;
+    let mut planned_ids = sheets
+        .iter()
+        .filter_map(|sheet| sheet.relationship.id().map(str::to_owned))
+        .collect::<HashSet<_>>();
     let shared_strings = have_sst.then(|| {
         plan_part(
             package.shared_strings.as_ref(),
@@ -344,6 +348,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
             &shared_strings_relationship_type,
             "xl/sharedStrings.xml",
             &mut used_relationship_ids,
+            &mut planned_ids,
         )
     });
     let shared_string_plan = package
@@ -366,6 +371,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
             &styles_relationship_type,
             "xl/styles.xml",
             &mut used_relationship_ids,
+            &mut planned_ids,
         )
     });
     let synthesized_styles = package.styles.is_none() && !wb.styles.is_empty();
@@ -377,6 +383,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
             &theme_relationship_type,
             "xl/theme/theme1.xml",
             &mut used_relationship_ids,
+            &mut planned_ids,
         )
     });
 
@@ -1106,6 +1113,8 @@ fn plan_sheets(
         .collect()
 }
 
+/// Plans a part the reader finds by relationship type, so its relationship
+/// takes a fresh id when a sheet or another part already holds the source one.
 fn plan_part(
     source: Option<&PartReference>,
     relationships: &[Relationship],
@@ -1113,43 +1122,41 @@ fn plan_part(
     relationship_type: &str,
     fallback_path: &str,
     used_relationship_ids: &mut HashSet<String>,
+    planned_ids: &mut HashSet<String>,
 ) -> PlannedPart {
-    if let Some(source) = source {
-        let source_relationship = source
+    let typed = |relationship: &&Relationship| {
+        relationship.has_type(type_suffix) && relationship.target().is_some()
+    };
+    let source_relationship = source.and_then(|source| {
+        source
             .relationship_id
             .as_deref()
             .and_then(|id| {
                 relationships
                     .iter()
+                    .filter(typed)
                     .find(|relationship| relationship.id() == Some(id))
             })
-            .or_else(|| {
-                relationships
-                    .iter()
-                    .find(|relationship| relationship.has_type(type_suffix))
-            });
-        let relationship = match source_relationship {
-            Some(relationship) => relationship.clone(),
-            None => new_relationship(
-                next_relationship_id(used_relationship_ids),
-                relationship_type,
-                relative_to_xl(&source.path),
-            ),
-        };
-        return PlannedPart {
-            path: source.path.clone(),
-            relationship,
-        };
-    }
-
-    PlannedPart {
-        path: fallback_path.to_owned(),
-        relationship: new_relationship(
+            .or_else(|| relationships.iter().find(typed))
+    });
+    let path = source.map_or_else(|| fallback_path.to_owned(), |source| source.path.clone());
+    let mut relationship = match source_relationship {
+        Some(relationship) => relationship.clone(),
+        None => new_relationship(
             next_relationship_id(used_relationship_ids),
             relationship_type,
-            relative_to_xl(fallback_path),
+            relative_to_xl(&path),
         ),
+    };
+    if relationship
+        .id()
+        .is_none_or(|id| !planned_ids.insert(id.to_owned()))
+    {
+        let id = next_relationship_id(used_relationship_ids);
+        planned_ids.insert(id.clone());
+        set_attribute(&mut relationship.attributes, "Id", "Id", id);
     }
+    PlannedPart { path, relationship }
 }
 
 /// Picks the relationship type the source uses, keeping Strict URIs intact.
