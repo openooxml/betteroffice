@@ -97,7 +97,9 @@ function syntheticDocx(feature = 'plain'): Uint8Array {
   ));
   const body = Array.from({ length: 80 }, (_, index) =>
     `<w:p w14:paraId="${(index + 1).toString(16).padStart(8, '0')}">` +
-    '<w:pPr><w:pageBreakBefore/></w:pPr><w:r><w:rPr><w:sz w:val="22"/></w:rPr><w:t>' +
+    '<w:pPr><w:pageBreakBefore/></w:pPr><w:r><w:rPr>' +
+    (feature === 'echo' ? '<w:rFonts w:ascii="Liberation Sans" w:hAnsi="Liberation Sans"/>' : '') +
+    '<w:sz w:val="22"/></w:rPr><w:t>' +
     `Paragraph ${index + 1}. ${feature === 'echo' ? 'alpha beta gamma' : 'alpha beta gamma delta epsilon zeta eta theta '.repeat(8 + index % 5)}` +
     '</w:t></w:r></w:p>'
   ).join('');
