@@ -1383,6 +1383,8 @@ function boundaryContent(boundary: OriginalRunBoundary, formatting: TextFormatti
 }
 
 function sourceBreakBoundaries(paragraph: Paragraph | undefined): OriginalRunBoundary[] {
+  const recorded = paragraph && projectedBlocks.get(paragraph)?.sourceRuns;
+  if (recorded) return recorded;
   const boundaries: OriginalRunBoundary[] = [];
   for (const child of paragraph?.content ?? []) {
     if (child.type !== 'run') {
@@ -2413,6 +2415,7 @@ interface ProjectedBlockMemo {
   sessionKey?: string;
   /** The breaks of a projected paragraph that seeding moves behind it as block embeds. */
   trailing?: readonly BlockBreakKind[];
+  sourceRuns?: OriginalRunBoundary[];
 }
 
 interface ProjectedStory {
@@ -2453,8 +2456,8 @@ function carryParagraphIdentities(
     const source = previous[index++];
     if (!source?.paraId) return block;
     const carried: Paragraph = { ...block, paraId: source.paraId };
-    const sessionKey = projectedBlocks.get(source)?.sessionKey;
-    if (sessionKey) projectedBlocks.set(carried, { sessionKey });
+    const memo = projectedBlocks.get(source);
+    if (memo?.sessionKey) projectedBlocks.set(carried, { sessionKey: memo.sessionKey, sourceRuns: memo.sourceRuns });
     return carried;
   });
 }
@@ -2468,8 +2471,8 @@ export function ownProjectedParagraphs(blocks: readonly BlockContent[]): BlockCo
   return blocks.map((block) => {
     if (block.type === 'paragraph') {
       const own: Paragraph = { ...block };
-      const sessionKey = projectedBlocks.get(block)?.sessionKey;
-      if (sessionKey) projectedBlocks.set(own, { sessionKey });
+      const memo = projectedBlocks.get(block);
+      if (memo?.sessionKey) projectedBlocks.set(own, { sessionKey: memo.sessionKey, sourceRuns: memo.sourceRuns });
       return own;
     }
     if (block.type !== 'table') return block;
@@ -2833,6 +2836,8 @@ class SaveContext {
         const savedParaId = paragraphIds[paragraphIndex] ?? '';
         const baseParagraph = this.baseParagraphs.get(segment.paraId);
         const boundaries = paragraphCommentBoundaries(storyOffset);
+        const source = sourceBreakBoundaries(baseParagraph);
+        const sourceRuns = source.some(boundary => boundary.breaks?.length) ? source : undefined;
         const inputs = [
           segment.paraId,
           savedParaId,
@@ -2842,6 +2847,7 @@ class SaveContext {
           boundaries,
           breaks,
           liveTrailing,
+          sourceRuns,
         ] as const;
         const priorMemo =
           baseParagraph !== undefined ? projectedBlocks.get(baseParagraph) : undefined;
@@ -2876,7 +2882,7 @@ class SaveContext {
           if (pending.length) paragraph = { ...paragraph, content: [...pending.map((breakType): ParagraphContent => ({
             type: 'run', content: [{ type: 'break', breakType }],
           })), ...paragraph.content] };
-          projectedBlocks.set(paragraph, { inputs: snapshot, sessionKey: segment.paraId, trailing });
+          projectedBlocks.set(paragraph, { inputs: snapshot, sessionKey: segment.paraId, trailing, sourceRuns });
           witnesses = [...trailing];
         }
         blocks.push(paragraph);
@@ -2994,8 +3000,8 @@ class SaveContext {
       const previous = blocks[index];
       if (previous?.type === 'paragraph') {
         const paragraph: Paragraph = { ...previous, content: [...previous.content, ...pendingBreaks] };
-        const sessionKey = projectedBlocks.get(previous)?.sessionKey;
-        if (sessionKey) projectedBlocks.set(paragraph, { sessionKey });
+        const memo = projectedBlocks.get(previous);
+        if (memo?.sessionKey) projectedBlocks.set(paragraph, { sessionKey: memo.sessionKey, sourceRuns: memo.sourceRuns });
         blocks[index] = paragraph;
       } else {
         blocks.push({ type: 'paragraph', content: pendingBreaks });
