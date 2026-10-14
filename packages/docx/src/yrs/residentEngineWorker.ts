@@ -256,7 +256,19 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
     if (!at || (at.story !== 'body' && !at.story.startsWith('body:'))) return undefined;
     const position = displayPositionIndex(engine).positionOf(at, 'body');
     if (position === null) return undefined;
-    const { frame, version } = readSelectionFrame();
+    const { frame: selectedFrame, version } = readSelectionFrame();
+    let frame = selectedFrame;
+    if (prefix && limit === prefix.pages) {
+      const pages = frame.pages.filter(({ page, pageIndex }) => pageIndex < limit && page.unbuilt &&
+        page.positionSpan && position >= page.positionSpan[0] && position <= page.positionSpan[1])
+        .map(({ pageIndex }) => pageIndex);
+      if (pages.length) {
+        frame = applyFrameDelta(frame, decodeFrameDelta(engine.buildDisplayPagesFrame(pages, frame.frameEpoch)));
+        if (layoutDirty || !retainedFrame) selectionLayout = { version, frame };
+        else retainedFrame = frame;
+        for (const page of pages) commandFrameChanges?.pages.add(page);
+      }
+    }
     const queries = queriesFor(frame, version);
     const forward = queries.rangeRects(position, position + 1).find((rect) =>
       rect.height > 0 && rect.pageIndex < limit && frame.pages[rect.pageIndex] && !frame.pages[rect.pageIndex]!.page.unbuilt);
@@ -401,7 +413,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
         if (index === undefined || !Number.isSafeInteger(index) || index < 0 || index >= prefix.pages ||
           typeof point?.page?.pageId !== 'string') return false;
         const page = retainedPageByKey(readSelectionFrame().frame, point.page.pageId);
-        if (!page || page.page.unbuilt || page.pageIndex !== index) return false;
+        if (!page || page.pageIndex !== index) return false;
         return (command.kind !== 'extendSelection' && !point.modifiers?.shift) ||
           (!!base && selectionPageOf(base.anchor, prefix.pages) !== undefined);
       }
