@@ -454,13 +454,9 @@ fn apply_range_formats(
                     let source_col = (col - range.start.col) % captured.columns;
                     let index = (source_row * captured.columns + source_col) as usize;
                     if let Some(source) = captured.source_formats.get(index) {
-                        if source.format != format {
-                            styles.restore_pools(marks);
-                            return Err(OpError::InvalidStyle(
-                                "captured provenance does not match its format".into(),
-                            ));
-                        }
-                        if let Some(style) = resolved_formats.get(&index) {
+                        if source.format == format
+                            && let Some(style) = resolved_formats.get(&index)
+                        {
                             staged.push(*style);
                             continue;
                         }
@@ -468,19 +464,23 @@ fn apply_range_formats(
                             crate::formatting::PreservedCellFormat::from_style(styles, style)
                                 == *source
                         };
-                        let selected = captured
-                            .source_styles
-                            .get(index)
-                            .copied()
-                            .filter(|style| {
-                                style.is_none_or(|index| styles.xf(index).is_some())
-                                    && matches(*style)
-                            })
-                            .or_else(|| {
-                                (0..styles.cell_xfs.len() as u32)
-                                    .find(|&index| matches(Some(index)))
-                                    .map(Some)
-                            });
+                        let selected = if source.format == format {
+                            captured
+                                .source_styles
+                                .get(index)
+                                .copied()
+                                .filter(|style| {
+                                    style.is_none_or(|index| styles.xf(index).is_some())
+                                        && matches(*style)
+                                })
+                                .or_else(|| {
+                                    (0..styles.cell_xfs.len() as u32)
+                                        .find(|&index| matches(Some(index)))
+                                        .map(Some)
+                                })
+                        } else {
+                            None
+                        };
                         let selected = match selected {
                             Some(style) => Ok(style),
                             None => match source.derived_from {
@@ -492,7 +492,9 @@ fn apply_range_formats(
                         };
                         match selected {
                             Ok(style) => {
-                                resolved_formats.insert(index, style);
+                                if source.format == format {
+                                    resolved_formats.insert(index, style);
+                                }
                                 staged.push(style);
                             }
                             Err(_) => {
@@ -2349,6 +2351,71 @@ mod range_format_exhaustion_tests {
     use super::*;
     use crate::formatting::CapturedFormat;
     use xlsx_model::{CellFormat, CellRange, NumberFormat, SheetId};
+
+    #[test]
+    fn captured_format_differing_from_provenance_applies_its_format() {
+        let mut wb = Workbook::default();
+        wb.sheets.push(xlsx_model::Sheet::new("Sheet1"));
+        wb.styles.cell_xfs.push(xlsx_model::Xf::default());
+        let original = CellFormat {
+            number_format: NumberFormat::Builtin { id: 1 },
+            ..CellFormat::default()
+        };
+        let source_style = wb.styles.intern_derived_cell_format(0, &original).unwrap();
+        let source =
+            crate::formatting::PreservedCellFormat::from_style(&wb.styles, Some(source_style));
+        let target = CellFormat {
+            quote_prefix: true,
+            ..CellFormat::default()
+        };
+        let target_style = wb.styles.intern_cell_format(&target).unwrap();
+        wb.sheets[0].set_cell(
+            xlsx_model::CellRef::new(0, 1),
+            xlsx_model::Cell {
+                style: target_style,
+                ..Default::default()
+            },
+        );
+        let applied = CellFormat {
+            number_format: NumberFormat::Builtin { id: 2 },
+            ..original
+        };
+        apply(
+            &mut wb,
+            &Op::ApplyRangeFormat {
+                sheet: SheetId(0),
+                range: CellRange::new(
+                    xlsx_model::CellRef::new(0, 0),
+                    xlsx_model::CellRef::new(0, 1),
+                ),
+                format: CapturedFormat {
+                    rows: 1,
+                    columns: 1,
+                    formats: vec![applied.clone()],
+                    kept: vec![crate::formatting::KeptFacets {
+                        quote_prefix: true,
+                        ..Default::default()
+                    }],
+                    source_styles: vec![Some(source_style)],
+                    source_formats: vec![source],
+                },
+            },
+        )
+        .unwrap();
+        for col in 0..2 {
+            let style = wb.sheets[0]
+                .cell(xlsx_model::CellRef::new(0, col))
+                .unwrap()
+                .style;
+            let expected = CellFormat {
+                quote_prefix: col == 1,
+                ..applied.clone()
+            };
+            assert_eq!(wb.styles.cell_format(style), expected);
+            assert_ne!(style, Some(source_style));
+            assert_eq!(wb.styles.format_source(style.unwrap()), (None, Some(0)));
+        }
+    }
 
     #[test]
     fn mid_range_format_exhaustion_leaves_the_workbook_unchanged() {
