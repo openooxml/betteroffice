@@ -9,6 +9,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
+name = "alloc-no-stdlib"
+version = "2.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc7bb162ec39d46ab1ca8c77bf72e890535becd1751bb45f64c597edb4c8c6b3"
+
+[[package]]
+name = "allocator-api2"
+version = "0.2.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
+
+[[package]]
 name = "arc-swap"
 version = "1.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -52,16 +64,137 @@ dependencies = [
 ]
 
 [[package]]
+name = "autocfg"
+version = "1.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
+
+[[package]]
+name = "base64"
+version = "0.22.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
+name = "betteroffice-docx"
+version = "0.4.3"
+dependencies = [
+ "betteroffice-docx-edit",
+ "betteroffice-docx-layout",
+ "betteroffice-docx-parse",
+ "betteroffice-docx-raster",
+ "betteroffice-ooxml-text",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "betteroffice-docx-edit"
+version = "0.4.3"
+dependencies = [
+ "betteroffice-docx-layout",
+ "betteroffice-docx-parse",
+ "betteroffice-ooxml-diff",
+ "betteroffice-ooxml-text",
+ "betteroffice-opc",
+ "foldhash",
+ "ryu-js",
+ "serde",
+ "serde_json",
+ "sha2",
+ "unicode-segmentation",
+ "wuff",
+ "yrs",
+]
+
+[[package]]
+name = "betteroffice-docx-layout"
+version = "0.4.3"
+dependencies = [
+ "betteroffice-drawingml",
+ "betteroffice-ooxml-text",
+ "foldhash",
+ "serde",
+ "serde_json",
+ "unicode-segmentation",
+ "wasm-bindgen",
+ "zmij",
+]
+
+[[package]]
+name = "betteroffice-docx-native"
+version = "0.4.3"
+dependencies = [
+ "betteroffice-docx",
+ "napi",
+ "napi-build",
+ "napi-derive",
+ "serde_json",
+]
+
+[[package]]
+name = "betteroffice-docx-parse"
+version = "0.4.3"
+dependencies = [
+ "base64",
+ "betteroffice-drawingml",
+ "betteroffice-opc",
+ "indexmap",
+ "memchr",
+ "quick-xml",
+ "ryu-js",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "wasm-bindgen",
+]
+
+[[package]]
+name = "betteroffice-docx-python"
+version = "0.2.0"
+dependencies = [
+ "betteroffice-docx",
+ "betteroffice-python-common",
+ "pyo3",
+ "serde_json",
+]
+
+[[package]]
+name = "betteroffice-docx-raster"
+version = "0.4.3"
+dependencies = [
+ "base64",
+ "betteroffice-docx-layout",
+ "betteroffice-ooxml-text",
+ "image",
+ "png",
+ "serde_json",
+ "tiny-skia",
+]
+
+[[package]]
 name = "betteroffice-drawingml"
-version = "0.0.4"
+version = "0.4.3"
 dependencies = [
  "indexmap",
  "serde",
 ]
 
 [[package]]
+name = "betteroffice-metafile"
+version = "0.4.3"
+dependencies = [
+ "betteroffice-drawingml",
+]
+
+[[package]]
+name = "betteroffice-ooxml-diff"
+version = "0.4.3"
+
+[[package]]
 name = "betteroffice-ooxml-text"
-version = "0.0.4"
+version = "0.4.3"
 dependencies = [
  "rustybuzz",
  "serde",
@@ -73,28 +206,29 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-opc"
-version = "0.0.4"
+version = "0.4.3"
 dependencies = [
- "js-sys",
  "quick-xml",
- "wasm-bindgen",
  "zip",
 ]
 
 [[package]]
 name = "betteroffice-pptx"
-version = "0.0.4"
+version = "0.4.3"
 dependencies = [
  "betteroffice-pptx-edit",
  "betteroffice-pptx-parse",
+ "betteroffice-pptx-raster",
  "betteroffice-pptx-render",
 ]
 
 [[package]]
 name = "betteroffice-pptx-edit"
-version = "0.0.4"
+version = "0.4.3"
 dependencies = [
+ "base64",
  "betteroffice-drawingml",
+ "betteroffice-ooxml-diff",
  "betteroffice-pptx-parse",
  "serde",
  "serde_json",
@@ -104,9 +238,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "betteroffice-pptx-parse"
-version = "0.0.4"
+name = "betteroffice-pptx-native"
+version = "0.2.0"
 dependencies = [
+ "betteroffice-pptx",
+ "napi",
+ "napi-build",
+ "napi-derive",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "betteroffice-pptx-parse"
+version = "0.4.3"
+dependencies = [
+ "base64",
  "betteroffice-drawingml",
  "betteroffice-opc",
  "quick-xml",
@@ -116,7 +263,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-pptx-python"
-version = "0.0.1"
+version = "0.2.0"
 dependencies = [
  "betteroffice-pptx",
  "betteroffice-python-common",
@@ -125,10 +272,26 @@ dependencies = [
 ]
 
 [[package]]
-name = "betteroffice-pptx-render"
-version = "0.0.4"
+name = "betteroffice-pptx-raster"
+version = "0.4.3"
 dependencies = [
  "betteroffice-drawingml",
+ "betteroffice-ooxml-text",
+ "betteroffice-pptx-render",
+ "image",
+ "png",
+ "resvg",
+ "simplecss",
+ "svgtypes",
+ "tiny-skia",
+]
+
+[[package]]
+name = "betteroffice-pptx-render"
+version = "0.4.3"
+dependencies = [
+ "betteroffice-drawingml",
+ "betteroffice-metafile",
  "betteroffice-ooxml-text",
  "betteroffice-pptx-edit",
  "betteroffice-pptx-parse",
@@ -146,8 +309,121 @@ dependencies = [
 ]
 
 [[package]]
+name = "betteroffice-vsdx"
+version = "0.4.3"
+dependencies = [
+ "betteroffice-vsdx-edit",
+ "betteroffice-vsdx-eval",
+ "betteroffice-vsdx-parse",
+ "betteroffice-vsdx-raster",
+ "betteroffice-vsdx-render",
+ "betteroffice-vsdx-resolve",
+ "betteroffice-vsdx-validate",
+]
+
+[[package]]
+name = "betteroffice-vsdx-edit"
+version = "0.4.3"
+dependencies = [
+ "betteroffice-vsdx-eval",
+ "betteroffice-vsdx-parse",
+ "betteroffice-vsdx-resolve",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "yrs",
+]
+
+[[package]]
+name = "betteroffice-vsdx-eval"
+version = "0.4.3"
+dependencies = [
+ "betteroffice-drawingml",
+ "betteroffice-vsdx-formula",
+ "betteroffice-vsdx-parse",
+ "betteroffice-vsdx-resolve",
+ "thiserror",
+]
+
+[[package]]
+name = "betteroffice-vsdx-formula"
+version = "0.4.3"
+
+[[package]]
+name = "betteroffice-vsdx-parse"
+version = "0.4.3"
+dependencies = [
+ "betteroffice-drawingml",
+ "betteroffice-opc",
+ "quick-xml",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "betteroffice-vsdx-python"
+version = "0.0.1"
+dependencies = [
+ "betteroffice-python-common",
+ "betteroffice-vsdx",
+ "betteroffice-vsdx-parse",
+ "pyo3",
+]
+
+[[package]]
+name = "betteroffice-vsdx-raster"
+version = "0.4.3"
+dependencies = [
+ "betteroffice-drawingml",
+ "betteroffice-ooxml-text",
+ "betteroffice-vsdx-parse",
+ "betteroffice-vsdx-render",
+ "image",
+ "png",
+ "rustybuzz",
+ "tiny-skia",
+]
+
+[[package]]
+name = "betteroffice-vsdx-render"
+version = "0.4.3"
+dependencies = [
+ "base64",
+ "betteroffice-drawingml",
+ "betteroffice-ooxml-text",
+ "betteroffice-vsdx-eval",
+ "betteroffice-vsdx-parse",
+ "betteroffice-vsdx-resolve",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "betteroffice-vsdx-resolve"
+version = "0.4.3"
+dependencies = [
+ "betteroffice-drawingml",
+ "betteroffice-vsdx-formula",
+ "betteroffice-vsdx-parse",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "betteroffice-vsdx-validate"
+version = "0.4.3"
+dependencies = [
+ "betteroffice-vsdx-formula",
+ "betteroffice-vsdx-parse",
+ "betteroffice-vsdx-resolve",
+ "serde",
+]
+
+[[package]]
 name = "betteroffice-xlsx"
-version = "0.0.4"
+version = "0.4.3"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-opc",
@@ -165,21 +441,32 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-xlsx-calc"
-version = "0.0.4"
+version = "0.4.3"
 dependencies = [
  "betteroffice-xlsx-model",
 ]
 
 [[package]]
 name = "betteroffice-xlsx-model"
-version = "0.0.4"
+version = "0.4.3"
 dependencies = [
  "serde",
 ]
 
 [[package]]
+name = "betteroffice-xlsx-native"
+version = "0.3.0"
+dependencies = [
+ "betteroffice-xlsx",
+ "napi",
+ "napi-build",
+ "napi-derive",
+ "serde_json",
+]
+
+[[package]]
 name = "betteroffice-xlsx-ops"
-version = "0.0.4"
+version = "0.4.3"
 dependencies = [
  "betteroffice-xlsx-calc",
  "betteroffice-xlsx-model",
@@ -188,7 +475,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-xlsx-parse"
-version = "0.0.4"
+version = "0.4.3"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-xlsx-model",
@@ -197,7 +484,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-xlsx-python"
-version = "0.0.1"
+version = "0.2.0"
 dependencies = [
  "betteroffice-python-common",
  "betteroffice-xlsx",
@@ -206,7 +493,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-xlsx-raster"
-version = "0.0.4"
+version = "0.4.3"
 dependencies = [
  "betteroffice-xlsx-render",
  "png",
@@ -216,10 +503,11 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-xlsx-render"
-version = "0.0.4"
+version = "0.4.3"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-xlsx-model",
+ "hashbrown 0.17.1",
  "serde",
 ]
 
@@ -236,6 +524,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
 dependencies = [
  "generic-array",
+]
+
+[[package]]
+name = "brotli-decompressor"
+version = "5.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a32acac15fe1967bc3986b2a6347dffc965602354ea6f450ad07e8bfd253583"
+dependencies = [
+ "alloc-no-stdlib",
 ]
 
 [[package]]
@@ -265,10 +562,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "byteorder-lite"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f1fe948ff07f4bd06c30984e69f5b4899c516a3ef74f34df92a2df2ab535495"
+
+[[package]]
+name = "bytes"
+version = "1.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
+
+[[package]]
+name = "color_quant"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d7b894f5411737b7867f4827955924d7c254fc9f4d91a6aad6b097804b1018b"
 
 [[package]]
 name = "concurrent-queue"
@@ -277,6 +592,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ca0197aee26d1ae37445ee532fefce43251d24cc7c166799f4d46817f1d3973"
 dependencies = [
  "crossbeam-utils",
+]
+
+[[package]]
+name = "convert_case"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1af709f1f33454bf52eadfc8c78b3b9ef9cb26fb54d16dc9cd9a7299f899fd1b"
+dependencies = [
+ "unicode-segmentation",
 ]
 
 [[package]]
@@ -313,6 +637,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61803da095bee82a81bb1a452ecc25d3b2f1416d1897eb86430c6159ef717c17"
 
 [[package]]
+name = "crunchy"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
+
+[[package]]
 name = "crypto-common"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -321,6 +651,12 @@ dependencies = [
  "generic-array",
  "typenum",
 ]
+
+[[package]]
+name = "ctor"
+version = "1.0.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "914a755b7c2d4af2bdcff7ce1739e2db9a1b81a9b07123d8015786ae03c0980d"
 
 [[package]]
 name = "dashmap"
@@ -335,6 +671,12 @@ dependencies = [
  "once_cell",
  "parking_lot_core",
 ]
+
+[[package]]
+name = "data-url"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
 
 [[package]]
 name = "digest"
@@ -360,6 +702,15 @@ name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
+
+[[package]]
+name = "euclid"
+version = "0.22.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1a05365e3b1c6d1650318537c7460c6923f1abdd272ad6842baa2b509957a06"
+dependencies = [
+ "num-traits",
+]
 
 [[package]]
 name = "event-listener"
@@ -392,6 +743,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "fax"
+version = "0.2.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "caf1079563223d5d59d83c85886a56e586cfd5c1a26292e971a0fa266531ac5a"
+
+[[package]]
 name = "fdeflate"
 version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -412,6 +769,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "float-cmp"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "98de4bbd547a563b716d8dfa9aad1cb19bfab00f4fa09a6a4ed21dbcf44ce9c4"
+
+[[package]]
+name = "foldhash"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
+
+[[package]]
 name = "font-types"
 version = "0.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -421,25 +790,89 @@ dependencies = [
 ]
 
 [[package]]
+name = "futures"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9a31d2a3fbaaeb2af2368bbdd904aa8e812d3c04a1ee10d3171f52d556e5d0a3"
+dependencies = [
+ "futures-channel",
+ "futures-core",
+ "futures-executor",
+ "futures-io",
+ "futures-sink",
+ "futures-task",
+ "futures-util",
+]
+
+[[package]]
+name = "futures-channel"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1f9e3d69d39e4862ffed03ed071a76f9a13ba1d9109d355b0f0aa6b15e393c4"
+dependencies = [
+ "futures-core",
+ "futures-sink",
+]
+
+[[package]]
 name = "futures-core"
-version = "0.3.33"
+version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2cd50c473c80f6d7c3670a752354b8e569b1a7cbfdc0419ec88e5edad85e0dc7"
+checksum = "92d699e522242e69e3003b94ecc1f960f3a5e015aa7c5d7486e65ad01dd94f5e"
 
 [[package]]
-name = "futures-task"
-version = "0.3.33"
+name = "futures-executor"
+version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b231ed28831efb4a61a08580c4bc233ec56bc009f4cd8f52da2c3cb97df0c109"
-
-[[package]]
-name = "futures-util"
-version = "0.3.33"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a77a90a256fce34da66415271e30f94ee91c57b04b8a2c042d9cf3220179deaa"
+checksum = "031b47cf1a3c6cc8bc2fc76cd437f521619387907d469316e7c0bc278f1f5432"
 dependencies = [
  "futures-core",
  "futures-task",
+ "futures-util",
+]
+
+[[package]]
+name = "futures-io"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53c0fa8157de1303bfffdaa1cc2a673bfffb60102f76b0ef4441659124373fed"
+
+[[package]]
+name = "futures-macro"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9fb9654ba8355388abeb8dcb4fc62f511300867002afc858860463bdd9fe0c44"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.3",
+]
+
+[[package]]
+name = "futures-sink"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1944426bf7d03f1d14f708785e4b33efd750b36d48a157b836b3efc15ede8e1d"
+
+[[package]]
+name = "futures-task"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd417de3d1d015fc3bfd2b1ea46dfc7bab72ef86f1cc7cc9c78e728b34a6d1fd"
+
+[[package]]
+name = "futures-util"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d50a92467f8ba5dd6e3ee5d4bd04d73ab2e4e1c44474a0674821dfce14b79bc"
+dependencies = [
+ "futures-channel",
+ "futures-core",
+ "futures-io",
+ "futures-macro",
+ "futures-sink",
+ "futures-task",
+ "memchr",
  "pin-project-lite",
  "slab",
 ]
@@ -468,6 +901,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "gif"
+version = "0.14.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee8cfcc411d9adbbaba82fb72661cc1bcca13e8bba98b364e62b2dba8f960159"
+dependencies = [
+ "color_quant",
+ "weezl",
+]
+
+[[package]]
+name = "half"
+version = "2.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ea2d84b969582b4b1864a92dc5d27cd2b77b622a8d79306834f1be5ba20d84b"
+dependencies = [
+ "cfg-if",
+ "crunchy",
+ "zerocopy",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -478,12 +932,52 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+dependencies = [
+ "allocator-api2",
+ "equivalent",
+ "foldhash",
+]
 
 [[package]]
 name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
+
+[[package]]
+name = "image"
+version = "0.25.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85ab80394333c02fe689eaf900ab500fbd0c2213da414687ebf995a65d5a6104"
+dependencies = [
+ "bytemuck",
+ "byteorder-lite",
+ "color_quant",
+ "gif",
+ "image-webp",
+ "moxcms",
+ "num-traits",
+ "png",
+ "tiff",
+ "zune-core",
+ "zune-jpeg",
+]
+
+[[package]]
+name = "image-webp"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "525e9ff3e1a4be2fbea1fdf0e98686a6d98b4d8f937e1bf7402245af1909e8c3"
+dependencies = [
+ "byteorder-lite",
+ "quick-error",
+]
+
+[[package]]
+name = "imagesize"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65b27460c2c92b037f3f94c538ed9a3342f3fdf923606781629ccb35f82d042a"
 
 [[package]]
 name = "indexmap"
@@ -510,8 +1004,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "53b44bfcdb3f8d5837a46dae1ca9660a837176eee74a28b229bc626816589102"
 dependencies = [
  "cfg-if",
- "futures-util",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "kurbo"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b60dfc32f652b926df6192e55525b16d186c69d47876c3ead4da5cc9f8450e2"
+dependencies = [
+ "arrayvec",
+ "euclid",
+ "polycool",
+ "smallvec",
 ]
 
 [[package]]
@@ -519,6 +1024,16 @@ name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+
+[[package]]
+name = "libloading"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "754ca22de805bb5744484a5b151a9e1a8e837d5dc232c2d7d8c2e3492edc8b60"
+dependencies = [
+ "cfg-if",
+ "windows-link",
+]
 
 [[package]]
 name = "libm"
@@ -558,6 +1073,91 @@ dependencies = [
 ]
 
 [[package]]
+name = "moxcms"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bb85c154ba489f01b25c0d36ae69a87e4a1c73a72631fc6c0eb6dde34a73e44b"
+dependencies = [
+ "num-traits",
+ "pxfm",
+]
+
+[[package]]
+name = "napi"
+version = "3.12.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d2c1d080c842ec1347ebf3cfb9347c15f8c2262f143cc30eea41ddf1c7da720"
+dependencies = [
+ "bitflags",
+ "ctor",
+ "futures",
+ "libc",
+ "napi-build",
+ "napi-sys",
+ "nohash-hasher",
+ "rustc-hash",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "napi-build"
+version = "2.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "860e7c40864f95cfb83cde99f9ebadd88ef3d9bdccd7dd2cee0cc96a2dd4ffa7"
+
+[[package]]
+name = "napi-derive"
+version = "3.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "350057056a30368aa76c11a0d406b0aa61321710be2c36656ab4f6efe0b785a2"
+dependencies = [
+ "convert_case",
+ "ctor",
+ "napi-derive-backend",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "napi-derive-backend"
+version = "6.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4c1c87a71568f3fe5c736b10878ff55064b250bb4ea4b48c8055713e07b9e463"
+dependencies = [
+ "convert_case",
+ "proc-macro2",
+ "quote",
+ "semver",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "napi-sys"
+version = "3.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4d29a242104e456960e6c6479847570be731c1a92b8f8c05ddfb5439e5c09915"
+dependencies = [
+ "libloading",
+]
+
+[[package]]
+name = "nohash-hasher"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2bf50223579dc7cdcfb3bfcacf7069ff68243f8c363f62ffa99cf000a6b9c451"
+
+[[package]]
+name = "num-traits"
+version = "0.2.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
+dependencies = [
+ "autocfg",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -583,6 +1183,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "pico-args"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5be167a7af36ee22fe3115051bc51f6e6c7054c9348e28deb4f49bd6f705a315"
+
+[[package]]
 name = "pin-project-lite"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -602,6 +1208,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "polycool"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "50596ddc09eb5ad5f75cacd40209568e66df71baf86e1499a0e99c4cff12a5a6"
+dependencies = [
+ "arrayvec",
+]
+
+[[package]]
 name = "portable-atomic"
 version = "1.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -615,6 +1230,12 @@ checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
 ]
+
+[[package]]
+name = "pxfm"
+version = "0.1.30"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
 
 [[package]]
 name = "pyo3"
@@ -674,6 +1295,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "quick-error"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a993555f31e5a609f617c12db6250dedcac1b0a85076912c436e6fc9b2c8e6a3"
+
+[[package]]
 name = "quick-xml"
 version = "0.41.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -719,6 +1346,45 @@ dependencies = [
 ]
 
 [[package]]
+name = "resvg"
+version = "0.48.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "67e3803f97b999e80cbf7c6ecdd07a8102204d92e1633cf48783720c521196bd"
+dependencies = [
+ "bytemuck",
+ "log",
+ "pico-args",
+ "rgb",
+ "svgtypes",
+ "tiny-skia",
+ "usvg",
+]
+
+[[package]]
+name = "rgb"
+version = "0.8.53"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47b34b781b31e5d73e9fbc8689c70551fd1ade9a19e3e28cfec8580a79290cc4"
+dependencies = [
+ "bytemuck",
+]
+
+[[package]]
+name = "roxmltree"
+version = "0.21.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1964b10c76125c36f8afe190065a4bf9a87bf324842c05701330bba9f1cacbb"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
+name = "rustc-hash"
+version = "2.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6b1e7f9a428571be2dc5bc0505c13fb6bf936822b894ec87abf8a08a4e51742d"
+
+[[package]]
 name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -743,10 +1409,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryu-js"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "04d056b875a9d2e6cb9a61d127afee9ac5999b9f87bcb32079d1318e505be714"
+
+[[package]]
 name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
+
+[[package]]
+name = "semver"
+version = "1.0.28"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
 
 [[package]]
 name = "serde"
@@ -809,6 +1487,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
 
 [[package]]
+name = "simplecss"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7a9c6883ca9c3c7c90e888de77b7a5c849c779d25d74a1269b0218b14e8b136c"
+dependencies = [
+ "log",
+]
+
+[[package]]
+name = "siphasher"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
+
+[[package]]
 name = "skrifa"
 version = "0.44.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -844,6 +1537,19 @@ name = "strict-num"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6637bab7722d379c8b41ba849228d680cc12d0a45ba1fa2b48f2a30577a06731"
+dependencies = [
+ "float-cmp",
+]
+
+[[package]]
+name = "svgtypes"
+version = "0.16.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "695b5790b3131dafa99b3bbfd25a216edb3d216dad9ca208d4657bfb8f2abc3d"
+dependencies = [
+ "kurbo",
+ "siphasher",
+]
 
 [[package]]
 name = "syn"
@@ -891,6 +1597,20 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.3",
+]
+
+[[package]]
+name = "tiff"
+version = "0.11.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b63feaf3343d35b6ca4d50483f94843803b0f51634937cc2ec519fc32232bc52"
+dependencies = [
+ "fax",
+ "flate2",
+ "half",
+ "quick-error",
+ "weezl",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -983,6 +1703,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "383ad40bb927465ec0ce7720e033cb4ca06912855fc35db31b5755d0de75b1ee"
 
 [[package]]
+name = "unicode-segmentation"
+version = "1.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
+
+[[package]]
+name = "usvg"
+version = "0.48.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "977d0a4abdef933f424a99fe09f95576e089b90aebc6f016a3bc813762493e91"
+dependencies = [
+ "data-url",
+ "imagesize",
+ "kurbo",
+ "log",
+ "pico-args",
+ "roxmltree",
+ "simplecss",
+ "siphasher",
+ "strict-num",
+ "svgtypes",
+ "tiny-skia-path",
+]
+
+[[package]]
 name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1034,10 +1779,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "weezl"
+version = "0.1.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
+
+[[package]]
 name = "windows-link"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
+
+[[package]]
+name = "wuff"
+version = "0.2.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "200a7b806377b65f1ff9a985874332f15357c87e5dd7855f35f06dade95b8b3d"
+dependencies = [
+ "brotli-decompressor",
+ "bytes",
+ "flate2",
+]
 
 [[package]]
 name = "yrs"
@@ -1058,6 +1820,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "zerocopy"
+version = "0.8.56"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "556764e583adb45a9f8d413c2a147fa7e8d821e48e12b14fd560b607998b75eb"
+dependencies = [
+ "zerocopy-derive",
+]
+
+[[package]]
+name = "zerocopy-derive"
+version = "0.8.56"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f2ab42fc20575779bd240faa45f94a74256f755c0fa9e89f0ede20d91d0cdfc1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "zip"
 version = "8.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1068,7 +1850,6 @@ dependencies = [
  "indexmap",
  "memchr",
  "typed-path",
- "zopfli",
 ]
 
 [[package]]
@@ -1084,13 +1865,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
-name = "zopfli"
-version = "0.8.3"
+name = "zune-core"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f05cd8797d63865425ff89b5c4a48804f35ba0ce8d125800027ad6017d2b5249"
+checksum = "d56377fd46368984a170bc5aac5567e52ca5da874caa60bea39fcbca78fb658b"
+
+[[package]]
+name = "zune-jpeg"
+version = "0.5.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
 dependencies = [
- "bumpalo",
- "crc32fast",
- "log",
- "simd-adler32",
+ "zune-core",
 ]

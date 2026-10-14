@@ -19,7 +19,7 @@ interface Target {
   deps: string[];
 }
 
-async function readTargets(): Promise<Target[]> {
+export async function readTargets(): Promise<Target[]> {
   const packages = resolve(root, 'packages');
   const entries = await readdir(packages, { withFileTypes: true });
   const targets: Target[] = [];
@@ -30,7 +30,9 @@ async function readTargets(): Promise<Target[]> {
     if (!packaged) continue;
     const manifest = JSON.parse(packaged);
     if (!manifest.scripts?.build) continue;
-    const deps = Object.entries<string>(manifest.dependencies ?? {})
+    // A workspace peer still has to be built first: its types resolve to dist/.
+    const deps = [manifest.dependencies, manifest.peerDependencies]
+      .flatMap((group) => Object.entries<string>(group ?? {}))
       .filter(([, range]) => range.startsWith('workspace:'))
       .map(([name]) => name);
     targets.push({ name: manifest.name, dir, deps });
@@ -38,7 +40,7 @@ async function readTargets(): Promise<Target[]> {
   return targets;
 }
 
-function order(targets: Target[]): Target[] {
+export function order(targets: Target[]): Target[] {
   const byName = new Map(targets.map((target) => [target.name, target]));
   const sorted: Target[] = [];
   const seen = new Set<string>();
@@ -78,37 +80,39 @@ async function hashInputs(dir: string): Promise<string> {
   return hash.digest('hex');
 }
 
-const targets = order(await readTargets());
-const keys = new Map<string, string>();
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  const targets = order(await readTargets());
+  const keys = new Map<string, string>();
 
-async function keyOf(target: Target): Promise<string> {
-  return createHash('sha256')
-    .update(await hashInputs(target.dir))
-    .update(target.deps.map((dep) => keys.get(dep) ?? '').join('\0'))
-    .digest('hex');
-}
-
-for (const target of targets) {
-  const key = await keyOf(target);
-  keys.set(target.name, key);
-
-  const stamp = resolve(target.dir, 'dist', STAMP);
-  const current = await readFile(stamp, 'utf8').catch(() => null);
-  if (current === key) {
-    console.log(`${target.name}: up to date`);
-    continue;
+  async function keyOf(target: Target): Promise<string> {
+    return createHash('sha256')
+      .update(await hashInputs(target.dir))
+      .update(target.deps.map((dep) => keys.get(dep) ?? '').join('\0'))
+      .digest('hex');
   }
 
-  console.log(`${target.name}: building`);
-  const build = spawnSync('bun', ['run', '--filter', target.name, 'build'], {
-    cwd: root,
-    stdio: 'inherit',
-  });
-  if (build.status !== 0) process.exit(build.status ?? 1);
+  for (const target of targets) {
+    const key = await keyOf(target);
+    keys.set(target.name, key);
 
-  // The wasm builds vendor their output back into the hashed tree, so a key
-  // taken beforehand never matches again; stamp the tree as it settled.
-  const settled = await keyOf(target);
-  keys.set(target.name, settled);
-  await writeFile(stamp, settled);
+    const stamp = resolve(target.dir, 'dist', STAMP);
+    const current = await readFile(stamp, 'utf8').catch(() => null);
+    if (current === key) {
+      console.log(`${target.name}: up to date`);
+      continue;
+    }
+
+    console.log(`${target.name}: building`);
+    const build = spawnSync('bun', ['run', '--filter', target.name, 'build'], {
+      cwd: root,
+      stdio: 'inherit',
+    });
+    if (build.status !== 0) process.exit(build.status ?? 1);
+
+    // The wasm builds vendor their output back into the hashed tree, so a key
+    // taken beforehand never matches again; stamp the tree as it settled.
+    const settled = await keyOf(target);
+    keys.set(target.name, settled);
+    await writeFile(stamp, settled);
+  }
 }

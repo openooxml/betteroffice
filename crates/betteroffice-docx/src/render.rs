@@ -4,7 +4,8 @@ use std::sync::{Mutex, PoisonError};
 
 use docx_layout::display_list::DisplayList;
 use docx_raster::{
-    FontChains, ImageMap, ImageScope, RenderResources, RenderedPage, scoped_image_key,
+    FontChains, GlyphCache, ImageCache, ImageMap, ImageScope, RenderResources, RenderedPage,
+    scoped_image_key,
 };
 use ooxml_text::FontStore;
 use serde_json::Number;
@@ -19,13 +20,14 @@ pub const MAX_PIXMAP_DIM: u32 = docx_raster::MAX_PAGE_DIM;
 pub const MAX_PIXMAP_PIXELS: u64 = docx_raster::MAX_PAGE_PIXELS;
 
 /// Registered faces plus the `family|bold|italic` chains the raster backend
-/// resolves runs against. The store sits behind a `Mutex` so a [`Document`]
-/// holding one stays `Send + Sync`.
+/// resolves runs against. The store and glyph cache sit behind a `Mutex` so a
+/// [`Document`] holding one stays `Send + Sync`.
 #[derive(Default)]
 pub(crate) struct FontRegistry {
     store: Mutex<FontStore>,
     chains: FontChains,
     faces: usize,
+    glyphs: Mutex<GlyphCache>,
 }
 
 impl FontRegistry {
@@ -60,10 +62,12 @@ impl FontRegistry {
 }
 
 /// Caller-supplied bytes for relationship ids the display list did not already
-/// carry as `data:` URLs, keyed by owning part.
+/// carry as `data:` URLs, keyed by owning part, plus the decoded images a page
+/// leaves for the next — behind a `Mutex` so the document stays `Send + Sync`.
 #[derive(Default)]
 pub(crate) struct ImageRegistry {
     entries: ImageMap,
+    cache: Mutex<ImageCache>,
 }
 
 impl ImageRegistry {
@@ -153,6 +157,9 @@ impl Document {
     /// Rasterizes one display-list page to deterministic PNG bytes. A page past
     /// [`MAX_PIXMAP_DIM`] or [`MAX_PIXMAP_PIXELS`] is refused before any surface
     /// is allocated; an image the backend cannot draw is skipped and counted.
+    /// Glyph outlines and decoded images are cached on the document, so a page
+    /// reuses what earlier pages extracted and decoded; an export past either
+    /// cache's cap re-does what it evicted.
     pub fn render_png(
         &self,
         display_list: &DisplayList,
@@ -169,7 +176,24 @@ impl Document {
             .store
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        let mut glyphs = self
+            .fonts
+            .glyphs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut images = self
+            .images
+            .cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let resources = RenderResources::new(&store, &self.fonts.chains, &self.images.entries);
-        docx_raster::render_page(display_list, page_ordinal, &resources).map_err(Error::Render)
+        docx_raster::render_page_cached(
+            display_list,
+            page_ordinal,
+            &resources,
+            &mut glyphs,
+            &mut images,
+        )
+        .map_err(Error::Render)
     }
 }

@@ -1,0 +1,189 @@
+{
+ "measured": [
+  {
+   "block": {
+    "attrs": {},
+    "id": 0,
+    "kind": "paragraph",
+    "pmEnd": 7,
+    "pmStart": 1,
+    "runs": [
+     {
+      "kind": "text",
+      "pmEnd": 5,
+      "pmStart": 1,
+      "text": "Body"
+     },
+     {
+      "footnoteRefId": 1,
+      "kind": "text",
+      "pmEnd": 6,
+      "pmStart": 5,
+      "superscript": true,
+      "text": "1"
+     }
+    ]
+   },
+   "measure": {
+    "kind": "paragraph",
+    "lines": [
+     {
+      "ascent": 15,
+      "descent": 5,
+      "headChar": 0,
+      "headRun": 0,
+      "lineHeight": 20,
+      "tailChar": 1,
+      "tailRun": 1,
+      "width": 44
+     }
+    ],
+    "totalHeight": 20
+   }
+  }
+ ],
+ "options": {
+  "margins": {
+   "bottom": 96,
+   "left": 96,
+   "right": 96,
+   "top": 96
+  },
+  "pageGap": 20,
+  "pageSize": {
+   "h": 1056,
+   "w": 816
+  }
+ },
+ "layout": {
+  "pageGap": 20,
+  "pageSize": {
+   "h": 1056,
+   "w": 816
+  },
+  "pages": [
+   {
+    "fragments": [
+     {
+      "blockId": 0,
+      "fromLine": 0,
+      "height": 20,
+      "kind": "paragraph",
+      "pmEnd": 7,
+      "pmStart": 1,
+      "toLine": 1,
+      "width": 624,
+      "x": 96,
+      "y": 96
+     }
+    ],
+    "margins": {
+     "bottom": 96,
+     "left": 96,
+     "right": 96,
+     "top": 96
+    },
+    "noteAreas": [
+     {
+      "columns": 2,
+      "height": 60,
+      "kind": "footnote",
+      "notes": [
+       {
+        "anchorDocEnd": 6,
+        "anchorDocStart": 5,
+        "blocks": [
+         {
+          "attrs": {},
+          "id": "note-1-p",
+          "kind": "paragraph",
+          "pmEnd": 13,
+          "pmStart": 1,
+          "runs": [
+           {
+            "kind": "text",
+            "pmEnd": 12,
+            "pmStart": 1,
+            "text": "Left column"
+           }
+          ]
+         }
+        ],
+        "displayLabel": "1",
+        "height": 20,
+        "id": 1,
+        "measures": [
+         {
+          "kind": "paragraph",
+          "lines": [
+           {
+            "ascent": 15,
+            "descent": 5,
+            "headChar": 0,
+            "headRun": 0,
+            "lineHeight": 20,
+            "tailChar": 11,
+            "tailRun": 0,
+            "width": 76
+           }
+          ],
+          "totalHeight": 20
+         }
+        ]
+       },
+       {
+        "anchorDocEnd": 6,
+        "anchorDocStart": 5,
+        "blocks": [
+         {
+          "attrs": {},
+          "id": "note-2-p",
+          "kind": "paragraph",
+          "pmEnd": 14,
+          "pmStart": 1,
+          "runs": [
+           {
+            "kind": "text",
+            "pmEnd": 13,
+            "pmStart": 1,
+            "text": "Right column"
+           }
+          ]
+         }
+        ],
+        "displayLabel": "2",
+        "height": 20,
+        "id": 2,
+        "measures": [
+         {
+          "kind": "paragraph",
+          "lines": [
+           {
+            "ascent": 15,
+            "descent": 5,
+            "headChar": 0,
+            "headRun": 0,
+            "lineHeight": 20,
+            "tailChar": 12,
+            "tailRun": 0,
+            "width": 82
+           }
+          ],
+          "totalHeight": 20
+         }
+        ]
+       }
+      ],
+      "sectionId": "main",
+      "y": 900
+     }
+    ],
+    "number": 1,
+    "size": {
+     "h": 1056,
+     "w": 816
+    }
+   }
+  ]
+ }
+}

@@ -15,6 +15,3 @@
   (fetched from `raw.githubusercontent.com/google/fonts/main/ofl/carlito/`).
 - **Copyright:** Copyright 2013 The Carlito Project Authors
   (https://github.com/googlefonts/carlito), with Reserved Font Name "Carlito".
-
-Glyphs missing from Carlito shape to glyph 0, which Carlito draws as a `.notdef`
-tofu box. A real font-fallback chain (e.g. CJK coverage) is future work.

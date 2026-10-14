@@ -2,7 +2,8 @@
 
 use docx_layout::display_list::{DisplayList, HfKind, build_display_list_json};
 use docx_layout::hit::{
-    HitRegion, HoverTarget, hit_test, hit_test_regions, range_rects, range_rects_in_region,
+    HitRegion, HoverTarget, RegionScope, hit_test, hit_test_regions, range_rects,
+    range_rects_in_region,
 };
 
 const SCENARIOS: &[&str] = &["hf-default-both", "hf-title-page", "hf-even-odd"];
@@ -188,7 +189,7 @@ fn range_rects_resolve_inside_hf_bands_scoped_by_rid() {
     // yield rects inside the header band only (not the footer, not the body).
     let dl = build("hf-default-both");
 
-    let header = range_rects_in_region(&dl, HitRegion::Header, Some("rIdHdrDefault"), 1, 15);
+    let header = range_rects_in_region(&dl, RegionScope::Header(Some("rIdHdrDefault")), 1, 15);
     assert!(!header.is_empty(), "header range yielded no rects");
     for r in &header {
         assert!(
@@ -199,7 +200,7 @@ fn range_rects_resolve_inside_hf_bands_scoped_by_rid() {
         assert!(r.width > 0.0 && r.height > 0.0);
     }
 
-    let footer = range_rects_in_region(&dl, HitRegion::Footer, Some("rIdFtrDefault"), 1, 15);
+    let footer = range_rects_in_region(&dl, RegionScope::Footer(Some("rIdFtrDefault")), 1, 15);
     assert!(!footer.is_empty(), "footer range yielded no rects");
     for r in &footer {
         assert!(
@@ -211,21 +212,23 @@ fn range_rects_resolve_inside_hf_bands_scoped_by_rid() {
 
     // an rId that no band carries yields nothing (variant disambiguation)
     assert!(
-        range_rects_in_region(&dl, HitRegion::Header, Some("rIdNope"), 1, 15).is_empty(),
+        range_rects_in_region(&dl, RegionScope::Header(Some("rIdNope")), 1, 15).is_empty(),
         "non-matching rId must not contribute rects"
     );
 
     // the body wrapper equals the region call with HitRegion::Body — the
     // r_id argument is ignored for the body doc
     let body_wrapper = range_rects(&dl, 1, 8);
-    let body_region = range_rects_in_region(&dl, HitRegion::Body, None, 1, 8);
+    let body_region = range_rects_in_region(&dl, RegionScope::Body, 1, 8);
     assert_eq!(
         body_wrapper, body_region,
         "body wrapper drifted from region"
     );
 
     // a collapsed range is empty in every region
-    assert!(range_rects_in_region(&dl, HitRegion::Header, Some("rIdHdrDefault"), 5, 5).is_empty());
+    assert!(
+        range_rects_in_region(&dl, RegionScope::Header(Some("rIdHdrDefault")), 5, 5).is_empty()
+    );
 }
 
 #[test]
@@ -241,8 +244,7 @@ fn range_rects_region_matches_json_and_handle_paths() {
     // native fn, JSON-arg export, and by-handle export must all agree byte-for-byte
     let native = range_rects_in_region(
         &build("hf-default-both"),
-        HitRegion::Header,
-        Some("rIdHdrDefault"),
+        RegionScope::Header(Some("rIdHdrDefault")),
         1,
         15,
     );

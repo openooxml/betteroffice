@@ -3,11 +3,14 @@ import { spawnSync } from 'node:child_process';
 
 export const RUST_RELEASE_MANIFEST = 'crates/package.json';
 export const WORKSPACE_MANIFEST = 'Cargo.toml';
+export const STANDALONE_WORKSPACES = ['bindings', 'fuzz', 'apps/native-viewer'];
 
 export const RUST_CRATES = [
   { name: 'betteroffice-opc', dependency: 'ooxml-opc' },
   { name: 'betteroffice-ooxml-text', dependency: 'ooxml-text' },
+  { name: 'betteroffice-ooxml-diff', dependency: 'ooxml-diff' },
   { name: 'betteroffice-drawingml', dependency: 'ooxml-drawingml' },
+  { name: 'betteroffice-metafile', dependency: 'ooxml-metafile' },
   { name: 'betteroffice-xlsx-model', dependency: 'xlsx-model' },
   { name: 'betteroffice-xlsx-parse', dependency: 'xlsx-parse' },
   { name: 'betteroffice-xlsx-calc', dependency: 'xlsx-calc' },
@@ -21,20 +24,42 @@ export const RUST_CRATES = [
   { name: 'betteroffice-docx-edit', dependency: 'docx-edit' },
   { name: 'betteroffice-docx', dependency: 'betteroffice-docx' },
   { name: 'betteroffice-pptx-parse', dependency: 'pptx-parse' },
+  { name: 'betteroffice-vsdx-parse', dependency: 'vsdx-parse', publish: false },
+  { name: 'betteroffice-vsdx-formula', dependency: 'vsdx-formula', publish: false },
+  { name: 'betteroffice-vsdx-resolve', dependency: 'vsdx-resolve', publish: false },
+  { name: 'betteroffice-vsdx-eval', dependency: 'vsdx-eval', publish: false },
+  { name: 'betteroffice-vsdx-render', dependency: 'vsdx-render', publish: false },
+  { name: 'betteroffice-vsdx-raster', dependency: 'vsdx-raster', publish: false },
+  { name: 'betteroffice-vsdx-validate', dependency: 'vsdx-validate', publish: false },
+  { name: 'betteroffice-vsdx-edit', dependency: 'vsdx-edit', publish: false },
+  { name: 'betteroffice-vsdx', dependency: 'betteroffice-vsdx', publish: false },
   { name: 'betteroffice-pptx-edit', dependency: 'pptx-edit' },
   { name: 'betteroffice-pptx-render', dependency: 'pptx-render' },
+  { name: 'betteroffice-pptx-raster', dependency: 'pptx-raster' },
   { name: 'betteroffice-pptx', dependency: 'betteroffice-pptx' }
 ];
+
+export const RUST_PUBLISH_CRATES = RUST_CRATES.filter((crate) => crate.publish !== false);
 
 export function rustReleaseVersion() {
   return JSON.parse(readFileSync(RUST_RELEASE_MANIFEST, 'utf8')).version;
 }
 
-export function run(command, args, { capture = false, allowFailure = false } = {}) {
+export function run(command, args, { capture = false, allowFailure = false, env } = {}) {
+  let childEnv = process.env;
+  if (env) {
+    childEnv = { ...process.env };
+    for (const [key, value] of Object.entries(env)) {
+      if (value === undefined) delete childEnv[key];
+      else childEnv[key] = value;
+    }
+  }
   const result = spawnSync(command, args, {
     encoding: capture ? 'utf8' : undefined,
     stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit',
-    env: process.env
+    // cargo metadata output exceeds the 1 MiB default.
+    maxBuffer: 64 * 1024 * 1024,
+    env: childEnv
   });
   if (result.error) throw result.error;
   if (result.status !== 0 && !allowFailure) {
@@ -44,11 +69,11 @@ export function run(command, args, { capture = false, allowFailure = false } = {
   return result;
 }
 
-export function cargoMetadata({ locked = true, manifestPath } = {}) {
+export function cargoMetadata({ locked = true, manifestPath, env } = {}) {
   const args = ['metadata', '--format-version', '1'];
   if (manifestPath) args.push('--manifest-path', manifestPath);
   if (locked) args.push('--locked');
-  const result = run('cargo', args, { capture: true });
+  const result = run('cargo', args, { capture: true, ...(env ? { env } : {}) });
   return JSON.parse(result.stdout);
 }
 
@@ -63,8 +88,9 @@ export function validateRustTrain(metadata, version) {
     if (pkg.version !== version) {
       throw new Error(`${crate.name} is ${pkg.version}; expected ${version}`);
     }
-    if (JSON.stringify(pkg.publish) !== '["crates-io"]') {
-      throw new Error(`${crate.name} must publish only to crates-io`);
+    const registries = crate.publish === false ? [] : ['crates-io'];
+    if (JSON.stringify(pkg.publish) !== JSON.stringify(registries)) {
+      throw new Error(`${crate.name} must declare publish = ${JSON.stringify(registries)}`);
     }
     rustPackages.set(crate.name, pkg);
     for (const dependency of pkg.dependencies) {

@@ -1,0 +1,281 @@
+{
+ "measured": [
+  {
+   "block": {
+    "attrs": {},
+    "id": 0,
+    "kind": "paragraph",
+    "pmEnd": 11,
+    "pmStart": 1,
+    "runs": [
+     {
+      "kind": "text",
+      "pmEnd": 9,
+      "pmStart": 1,
+      "text": "Body one"
+     },
+     {
+      "footnoteRefId": 1,
+      "kind": "text",
+      "pmEnd": 10,
+      "pmStart": 9,
+      "superscript": true,
+      "text": "1"
+     }
+    ]
+   },
+   "measure": {
+    "kind": "paragraph",
+    "lines": [
+     {
+      "ascent": 15,
+      "descent": 5,
+      "headChar": 0,
+      "headRun": 0,
+      "lineHeight": 20,
+      "tailChar": 1,
+      "tailRun": 1,
+      "width": 88
+     }
+    ],
+    "totalHeight": 20
+   }
+  },
+  {
+   "block": {
+    "attrs": {},
+    "id": 1,
+    "kind": "paragraph",
+    "pmEnd": 23,
+    "pmStart": 13,
+    "runs": [
+     {
+      "kind": "text",
+      "pmEnd": 21,
+      "pmStart": 13,
+      "text": "Body two"
+     },
+     {
+      "footnoteRefId": 2,
+      "kind": "text",
+      "pmEnd": 22,
+      "pmStart": 21,
+      "superscript": true,
+      "text": "2"
+     }
+    ]
+   },
+   "measure": {
+    "kind": "paragraph",
+    "lines": [
+     {
+      "ascent": 15,
+      "descent": 5,
+      "headChar": 0,
+      "headRun": 0,
+      "lineHeight": 20,
+      "tailChar": 1,
+      "tailRun": 1,
+      "width": 88
+     }
+    ],
+    "totalHeight": 20
+   }
+  }
+ ],
+ "options": {
+  "margins": {
+   "bottom": 96,
+   "left": 96,
+   "right": 96,
+   "top": 96
+  },
+  "pageGap": 20,
+  "pageSize": {
+   "h": 1056,
+   "w": 816
+  }
+ },
+ "layout": {
+  "pageGap": 20,
+  "pageSize": {
+   "h": 1056,
+   "w": 816
+  },
+  "pages": [
+   {
+    "fragments": [
+     {
+      "blockId": 0,
+      "fromLine": 0,
+      "height": 20,
+      "kind": "paragraph",
+      "pmEnd": 11,
+      "pmStart": 1,
+      "toLine": 1,
+      "width": 624,
+      "x": 96,
+      "y": 96
+     },
+     {
+      "blockId": 1,
+      "fromLine": 0,
+      "height": 20,
+      "kind": "paragraph",
+      "pmEnd": 23,
+      "pmStart": 13,
+      "toLine": 1,
+      "width": 624,
+      "x": 96,
+      "y": 116
+     }
+    ],
+    "margins": {
+     "bottom": 96,
+     "left": 96,
+     "right": 96,
+     "top": 96
+    },
+    "noteAreas": [
+     {
+      "columns": 1,
+      "height": 100,
+      "kind": "footnote",
+      "notes": [
+       {
+        "anchorDocEnd": 10,
+        "anchorDocStart": 9,
+        "blocks": [
+         {
+          "attrs": {},
+          "id": "note-1-p",
+          "kind": "paragraph",
+          "pmEnd": 12,
+          "pmStart": 1,
+          "runs": [
+           {
+            "kind": "text",
+            "pmEnd": 11,
+            "pmStart": 1,
+            "text": "First note"
+           }
+          ]
+         }
+        ],
+        "displayLabel": "1",
+        "height": 20,
+        "id": 1,
+        "measures": [
+         {
+          "kind": "paragraph",
+          "lines": [
+           {
+            "ascent": 15,
+            "descent": 5,
+            "headChar": 0,
+            "headRun": 0,
+            "lineHeight": 20,
+            "tailChar": 10,
+            "tailRun": 0,
+            "width": 70
+           }
+          ],
+          "totalHeight": 20
+         }
+        ]
+       },
+       {
+        "anchorDocEnd": 22,
+        "anchorDocStart": 21,
+        "blocks": [
+         {
+          "attrs": {},
+          "id": "note-2-p",
+          "kind": "paragraph",
+          "pmEnd": 13,
+          "pmStart": 1,
+          "runs": [
+           {
+            "kind": "text",
+            "pmEnd": 12,
+            "pmStart": 1,
+            "text": "Second note"
+           }
+          ]
+         },
+         {
+          "attrs": {
+           "borders": {
+            "top": {
+             "color": "#000000",
+             "size": 8,
+             "style": "single"
+            }
+           }
+          },
+          "id": "note-2-q",
+          "kind": "paragraph",
+          "pmEnd": 23,
+          "pmStart": 14,
+          "runs": [
+           {
+            "kind": "text",
+            "pmEnd": 22,
+            "pmStart": 14,
+            "text": "and more"
+           }
+          ]
+         }
+        ],
+        "displayLabel": "2",
+        "height": 40,
+        "id": 2,
+        "measures": [
+         {
+          "kind": "paragraph",
+          "lines": [
+           {
+            "ascent": 15,
+            "descent": 5,
+            "headChar": 0,
+            "headRun": 0,
+            "lineHeight": 20,
+            "tailChar": 11,
+            "tailRun": 0,
+            "width": 76
+           }
+          ],
+          "totalHeight": 20
+         },
+         {
+          "kind": "paragraph",
+          "lines": [
+           {
+            "ascent": 15,
+            "descent": 5,
+            "headChar": 0,
+            "headRun": 0,
+            "lineHeight": 20,
+            "tailChar": 8,
+            "tailRun": 0,
+            "width": 60
+           }
+          ],
+          "totalHeight": 20
+         }
+        ]
+       }
+      ],
+      "sectionId": "main",
+      "y": 860
+     }
+    ],
+    "number": 1,
+    "size": {
+     "h": 1056,
+     "w": 816
+    }
+   }
+  ]
+ }
+}

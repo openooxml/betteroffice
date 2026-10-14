@@ -1,6 +1,6 @@
 # Redaction upload worker
 
-The CLI removes sensitive content locally. `POST /upload` receives only that redacted package, validates its declared DOCX/XLSX/PPTX format, sanitizes it again inside the `ooxml-opc` WASM trust boundary, and stores the result under an opaque ID. `GET /f/:id` returns the sanitized package without an original filename.
+The CLI removes sensitive content locally. `POST /upload` receives only that redacted package, validates its declared DOCX/XLSX/PPTX/VSDX/VSTX format, sanitizes it again inside the `ooxml-opc` WASM trust boundary, and stores the result under an opaque ID. `GET /f/:id` returns the sanitized package without an original filename.
 
 ## R2 setup
 
@@ -16,7 +16,7 @@ Then replace the `replace-with-redacted-bucket` placeholder in `wrangler.jsonc` 
 
 ```sh
 bun run build:wasm
-bunx tsc --noEmit
+bun run typecheck
 bun test
 bun run deploy
 ```

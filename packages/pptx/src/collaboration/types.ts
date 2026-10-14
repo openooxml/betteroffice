@@ -10,6 +10,14 @@ export interface CollaborationReplica {
   ): () => void;
 }
 
+export interface AsyncCollaborationReplica {
+  readonly clientId: number;
+  encodeStateVector(): Promise<Uint8Array>;
+  encodeStateAsUpdate(remoteStateVector?: Uint8Array): Promise<Uint8Array>;
+  applyUpdate(update: Uint8Array): Promise<unknown>;
+  onUpdate(listener: (update: Uint8Array, origin: CollaborationUpdateOrigin) => void): () => void;
+}
+
 export type CollaborationTransportEvent =
   | { type: 'open' }
   | { type: 'message'; data: Uint8Array }

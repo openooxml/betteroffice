@@ -3,6 +3,8 @@
 //! that lets the shared DrawingML parser read a chart part, and in-place
 //! patching of both parts when a structural edit moves what they name.
 
+#[cfg(feature = "test-counters")]
+use std::cell::Cell;
 use std::ops::Range;
 
 use ooxml_drawingml::chart::{ChartSpace, ChartXml, parse_chart_space};
@@ -34,16 +36,37 @@ const NS_CHART: &str = "http://schemas.openxmlformats.org/drawingml/2006/chart";
 /// `cx:chartSpace`, whose reference syntax and caches are their own vocabulary.
 const NS_CHART_EX: &str = "http://schemas.microsoft.com/office/drawing/2014/chartex";
 /// the worksheet drawing vocabulary that carries the anchors.
-const NS_SPREADSHEET_DRAWING: &str =
+pub(crate) const NS_SPREADSHEET_DRAWING: &str =
     "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing";
 
 /// relationship types followed out of a sheet or drawing part.
 const TYPE_DRAWING: &str = "drawing";
 const TYPE_CHART: &str = "chart";
 
+#[cfg(feature = "test-counters")]
+thread_local! {
+    static CHART_PLAN_BUILDS: Cell<u64> = const { Cell::new(0) };
+    static CHART_SPACE_DECODES: Cell<u64> = const { Cell::new(0) };
+}
+
+#[cfg(feature = "test-counters")]
+#[doc(hidden)]
+pub fn chart_counters() -> (u64, u64) {
+    (CHART_PLAN_BUILDS.get(), CHART_SPACE_DECODES.get())
+}
+
+#[cfg(feature = "test-counters")]
+#[doc(hidden)]
+pub fn reset_chart_counters() {
+    CHART_PLAN_BUILDS.set(0);
+    CHART_SPACE_DECODES.set(0);
+}
+
 /// Parse a chart part into the shared model, resolving `a:schemeClr` through
 /// the workbook theme. `None` when the part carries no recognized plot.
 pub fn chart_space(part: &[u8], theme: &Theme) -> Option<ChartSpace> {
+    #[cfg(feature = "test-counters")]
+    CHART_SPACE_DECODES.set(CHART_SPACE_DECODES.get().wrapping_add(1));
     let root = parse_tree(part).ok()?;
     if has_3d_plot(&root, 0) {
         return None;
@@ -56,88 +79,118 @@ pub fn chart_space(part: &[u8], theme: &Theme) -> Option<ChartSpace> {
 /// part cannot turn one frame into thousands of resolutions.
 const MAX_PROJECTED_REFERENCES: usize = 256;
 
-/// A chart part rendered against the current workbook. Every cache this crate
-/// can resolve safely is rebuilt from live cells so an ordinary edit reaches
-/// the chart; every other cache keeps the values the file was authored with.
-/// This changes only what is drawn — a save still writes the source bytes back
-/// untouched.
-///
-/// This parses the part twice per frame: once here to find the cache sites,
-/// once in [`chart_space`] to read the spliced result. Memoizing it needs a key
-/// over everything the output depends on: the part bytes, the theme, the owner
-/// sheet name, the value of every cell the references name, and the workbook's
-/// set of sheet names — a rename alone flips the output, because a reference
-/// into a sheet the workbook no longer holds walks no cells at all. So a memo
-/// has to be invalidated by cell writes and by sheet renames, not by a
-/// workbook-wide revision counter, or a chart stops following the grid again.
+/// Renders safely resolvable caches from live cells, retaining authored caches otherwise.
+/// For fixed part bytes and theme, [`ChartRefreshPlan`] permits memoizing the result
+/// against its refresh value without changing the saved source bytes.
 pub fn preserved_chart_space(
     part: &[u8],
     workbook: &xlsx_model::Workbook,
     owner: &str,
     theme: &Theme,
 ) -> Option<ChartSpace> {
-    match refreshed_chart_part(part, workbook, owner) {
-        Some(refreshed) => chart_space(&refreshed, theme).or_else(|| chart_space(part, theme)),
-        None => chart_space(part, theme),
-    }
+    let plan = ChartRefreshPlan::new(part);
+    let refresh = plan.refresh(workbook, owner);
+    plan.chart_space(&refresh, part, theme)
 }
 
-/// The part with its resolvable caches spliced up to date, or `None` when
-/// nothing could be refreshed and the source bytes already say it best.
-/// Anything that puts the reference vocabulary itself in doubt — ChartEx, a
-/// pivot or external source, a filtered-series `sqref` — declines the whole
-/// part rather than refreshing the references beside it.
-fn refreshed_chart_part(
-    part: &[u8],
-    workbook: &xlsx_model::Workbook,
-    owner: &str,
-) -> Option<Vec<u8>> {
-    if names_a_foreign_vocabulary(part) {
-        return None;
-    }
-    let source = Part::decode(part).ok()?;
-    let root = source.tree().ok()?;
-    if !root.is(NS_CHART, "chartSpace") || unsupported_reference_form(&root, 0) {
-        return None;
-    }
-    let sites = ref_sites(&root).ok()?;
-    if sites.len() > MAX_PROJECTED_REFERENCES {
-        return None;
-    }
-    let mut rebuild = CacheRebuild::displayed();
-    let mut declined = std::collections::HashSet::new();
-    let mut edits: Vec<(Option<usize>, Edit)> = Vec::new();
-    for site in &sites {
-        let Some(cache) = &site.cache else {
-            continue;
-        };
-        let refreshed = cache
-            .span
-            .clone()
-            .zip(regenerated_cache(cache, &site.formula, workbook, owner, &mut rebuild).ok());
-        match refreshed {
-            Some((span, markup)) => {
-                edits.push((site.series, (span, Replacement::Markup(markup))));
+/// The workbook-independent half of [`preserved_chart_space`]. Anything that
+/// puts the reference vocabulary itself in doubt (ChartEx, a pivot or external
+/// source, a filtered-series `sqref`) leaves it with no sites: authored values.
+#[doc(hidden)]
+pub struct ChartRefreshPlan {
+    source: Option<Part>,
+    sites: Vec<RefSite>,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+#[doc(hidden)]
+pub struct ChartRefresh(Vec<(Range<usize>, String)>);
+
+impl ChartRefreshPlan {
+    pub fn new(part: &[u8]) -> Self {
+        #[cfg(feature = "test-counters")]
+        CHART_PLAN_BUILDS.set(CHART_PLAN_BUILDS.get().wrapping_add(1));
+        let refreshable = (|| {
+            if names_a_foreign_vocabulary(part) {
+                return None;
             }
-            None => {
-                declined.extend(site.series);
+            let source = Part::decode(part).ok()?;
+            let root = source.tree().ok()?;
+            if !root.is(NS_CHART, "chartSpace") || unsupported_reference_form(&root, 0) {
+                return None;
             }
+            let sites = ref_sites(&root).ok()?;
+            if sites.len() > MAX_PROJECTED_REFERENCES {
+                return None;
+            }
+            Some((source, sites))
+        })();
+        match refreshable {
+            Some((source, sites)) => Self {
+                source: Some(source),
+                sites,
+            },
+            None => Self {
+                source: None,
+                sites: Vec::new(),
+            },
         }
     }
-    // A renderer pairs a series' values with its categories slot by slot, so
-    // refreshing one of them while the other keeps authored values would draw a
-    // pairing no version of the file ever held. A series is projected whole or
-    // left alone.
-    let mut edits = edits
-        .into_iter()
-        .filter(|(series, _)| series.is_none_or(|series| !declined.contains(&series)))
-        .map(|(_, edit)| edit)
-        .collect::<Vec<_>>();
-    if edits.is_empty() {
-        return None;
+
+    pub fn refresh(&self, workbook: &xlsx_model::Workbook, owner: &str) -> ChartRefresh {
+        let mut rebuild = CacheRebuild::displayed();
+        let mut declined = std::collections::HashSet::new();
+        let mut edits = Vec::new();
+        for site in &self.sites {
+            let Some(cache) = &site.cache else {
+                continue;
+            };
+            let refreshed = cache
+                .span
+                .clone()
+                .zip(regenerated_cache(cache, &site.formula, workbook, owner, &mut rebuild).ok());
+            match refreshed {
+                Some((span, markup)) => {
+                    edits.push((site.series, (span, markup)));
+                }
+                None => {
+                    declined.extend(site.series);
+                }
+            }
+        }
+        // A renderer pairs a series' values with its categories slot by slot, so
+        // refreshing one of them while the other keeps authored values would draw a
+        // pairing no version of the file ever held. A series is projected whole or
+        // left alone.
+        let mut edits = edits
+            .into_iter()
+            .filter(|(series, _)| series.is_none_or(|series| !declined.contains(&series)))
+            .map(|(_, edit)| edit)
+            .collect::<Vec<_>>();
+        edits.sort_by_key(|(span, _)| span.start);
+        ChartRefresh(edits)
     }
-    edits.sort_by_key(|(span, _)| span.start);
-    source.splice(&edits).ok()
+
+    pub fn chart_space(
+        &self,
+        refresh: &ChartRefresh,
+        part: &[u8],
+        theme: &Theme,
+    ) -> Option<ChartSpace> {
+        if !refresh.0.is_empty()
+            && let Some(source) = &self.source
+        {
+            let edits = refresh
+                .0
+                .iter()
+                .map(|(span, markup)| (span.clone(), Replacement::Markup(markup.clone())))
+                .collect::<Vec<_>>();
+            if let Ok(refreshed) = source.splice(&edits) {
+                return chart_space(&refreshed, theme).or_else(|| chart_space(part, theme));
+            }
+        }
+        chart_space(part, theme)
+    }
 }
 
 /// Whether the raw bytes name a reference vocabulary this crate does not read,
@@ -249,11 +302,25 @@ fn drawing_theme(theme: &Theme) -> DrawingTheme {
 }
 
 /// The charts a sheet anchors, followed from its drawing relationships. Both
-/// worksheets and chartsheets carry drawings, so both are walked. A chart whose
-/// part is missing is skipped rather than failing the parse.
+/// worksheets and chartsheets carry drawings, so both are walked. A drawing or
+/// chart part that is missing, or that this crate cannot read, is skipped
+/// rather than failing the parse: the workbook opens without that chart, and
+/// the part itself is still carried through a save untouched.
+///
+/// A drawing is skipped whole, never anchor by anchor, because `anchor_index`
+/// names a position in the part's anchor list and a partial list would rename
+/// the anchors a later save patches.
+///
+/// Every part skipped is appended to `declined`: this is the only place that
+/// knows one was, and a part no save rewrites has to veto the structural edits
+/// that would move what it names. A chart target is recorded as the drawing
+/// relationship resolved it, which catches one outside the conventional layout
+/// and one the package does not hold — neither of which a walk over the parts
+/// can see.
 pub(crate) fn parse_sheet_charts(
     parts: &[(String, Vec<u8>)],
     sheet_path: &str,
+    declined: &mut Vec<String>,
 ) -> Result<Vec<SheetChart>, ParseError> {
     let mut charts = Vec::new();
     for (drawing_path, drawing_xml) in sheet_drawings(parts, sheet_path)? {
@@ -262,25 +329,45 @@ pub(crate) fn parse_sheet_charts(
             .transpose()?
             .unwrap_or_default();
         let drawing_dir = directory_of(&drawing_path).to_owned();
-        for (index, anchor) in read_anchors(&parse_tree(drawing_xml)?)?
-            .into_iter()
-            .enumerate()
-        {
-            let Some(part) = anchor
-                .chart_rel
-                .as_deref()
-                .and_then(|id| relationship_target(&drawing_rels, id, TYPE_CHART))
+        let Ok(drawing_root) = parse_tree(drawing_xml) else {
+            declined.push(drawing_path);
+            continue;
+        };
+        let Ok(anchors) = read_anchors(&drawing_root) else {
+            declined.push(drawing_path);
+            continue;
+        };
+        for (index, anchor) in anchors.into_iter().enumerate() {
+            let rel_id = match &anchor.chart {
+                AnchorChart::None => continue,
+                AnchorChart::Unrelated => {
+                    declined.push(drawing_path.clone());
+                    continue;
+                }
+                AnchorChart::Related(id) => id.as_str(),
+            };
+            let Some(part) = relationship_target(&drawing_rels, rel_id, TYPE_CHART)
                 .map(|target| resolve_part_path(&drawing_dir, target))
             else {
+                declined.push(drawing_path.clone());
                 continue;
             };
             let Some(chart_xml) = find_part(parts, &part) else {
+                declined.push(part);
                 continue;
             };
-            let root = parse_tree(chart_xml)?;
+            let Ok(root) = parse_tree(chart_xml) else {
+                declined.push(part);
+                continue;
+            };
             if !root.is(NS_CHART, "chartSpace") {
+                declined.push(part);
                 continue;
             }
+            let Ok(refs) = chart_refs(&root) else {
+                declined.push(part);
+                continue;
+            };
             if charts.len() >= MAX_CHART_ANCHORS {
                 return Err(ParseError::TooManyCharts);
             }
@@ -289,7 +376,7 @@ pub(crate) fn parse_sheet_charts(
                 drawing: drawing_path.clone(),
                 anchor_index: index,
                 anchor: anchor.anchor,
-                refs: chart_refs(&root)?,
+                refs,
             });
         }
     }
@@ -325,7 +412,16 @@ fn sheet_drawings<'a>(
 
 struct DrawingAnchor {
     anchor: ChartAnchor,
-    chart_rel: Option<String>,
+    chart: AnchorChart,
+}
+
+/// What an anchor's graphic frame holds: no chart, a chart naming a
+/// relationship, or a chart naming none — which is a frame this crate cannot
+/// model and a save cannot move.
+enum AnchorChart {
+    None,
+    Related(String),
+    Unrelated,
 }
 
 /// Every `xdr:` anchor in a drawing part, in document order, so an index into
@@ -336,38 +432,43 @@ fn read_anchors(root: &Element) -> Result<Vec<DrawingAnchor>, ParseError> {
     }
     let mut anchors = Vec::new();
     for child in root.child_elements().filter(is_anchor) {
-        let anchor = match child.local_name() {
-            "twoCellAnchor" => ChartAnchor::TwoCell {
-                from: anchor_cell(child.child("from"))?,
-                to: anchor_cell(child.child("to"))?,
-                edit_as: match child.attribute(None, "editAs") {
-                    Some(value) => AnchorEditAs::from_sml(value).ok_or_else(|| {
-                        ParseError::Malformed(format!("invalid chart editAs value {value:?}"))
-                    })?,
-                    None => AnchorEditAs::default(),
-                },
-            },
-            "oneCellAnchor" => ChartAnchor::OneCell {
-                from: anchor_cell(child.child("from"))?,
-                extent: anchor_extent(child.child("ext"))?,
-            },
-            _ => ChartAnchor::Absolute {
-                pos: anchor_pos(child.child("pos"))?,
-                extent: anchor_extent(child.child("ext"))?,
-            },
-        };
+        let anchor = anchor_geometry(child)?;
         if anchors.len() >= MAX_CHART_ANCHORS {
             return Err(ParseError::TooManyCharts);
         }
         anchors.push(DrawingAnchor {
             anchor,
-            chart_rel: chart_relationship_id(child, 0),
+            chart: anchor_chart(child, 0),
         });
     }
     Ok(anchors)
 }
 
-fn is_anchor(element: &&Element) -> bool {
+/// Where one `xdr:` anchor element sits on the grid.
+pub(crate) fn anchor_geometry(anchor: &Element) -> Result<ChartAnchor, ParseError> {
+    Ok(match anchor.local_name() {
+        "twoCellAnchor" => ChartAnchor::TwoCell {
+            from: anchor_cell(anchor.child("from"))?,
+            to: anchor_cell(anchor.child("to"))?,
+            edit_as: match anchor.attribute(None, "editAs") {
+                Some(value) => AnchorEditAs::from_sml(value).ok_or_else(|| {
+                    ParseError::Malformed(format!("invalid chart editAs value {value:?}"))
+                })?,
+                None => AnchorEditAs::default(),
+            },
+        },
+        "oneCellAnchor" => ChartAnchor::OneCell {
+            from: anchor_cell(anchor.child("from"))?,
+            extent: anchor_extent(anchor.child("ext"))?,
+        },
+        _ => ChartAnchor::Absolute {
+            pos: anchor_pos(anchor.child("pos"))?,
+            extent: anchor_extent(anchor.child("ext"))?,
+        },
+    })
+}
+
+pub(crate) fn is_anchor(element: &&Element) -> bool {
     element.namespace() == Some(NS_SPREADSHEET_DRAWING)
         && matches!(
             element.local_name(),
@@ -375,20 +476,25 @@ fn is_anchor(element: &&Element) -> bool {
         )
 }
 
-/// `c:chart/@r:id` under a graphic frame, searched depth-capped by expanded
-/// name so an alternate prefix still resolves.
-fn chart_relationship_id(element: &Element, depth: usize) -> Option<String> {
+/// The `c:chart` under a graphic frame, searched depth-capped by expanded name
+/// so an alternate prefix still resolves, and whether it names a relationship.
+fn anchor_chart(element: &Element, depth: usize) -> AnchorChart {
     if depth > MAX_DEPTH {
-        return None;
+        return AnchorChart::None;
     }
     if element.is(NS_CHART, "chart") {
-        return element
-            .attribute_ns(NS_RELATIONSHIPS, "id")
-            .map(str::to_owned);
+        return match element.attribute_ns(NS_RELATIONSHIPS, "id") {
+            Some(id) => AnchorChart::Related(id.to_owned()),
+            None => AnchorChart::Unrelated,
+        };
     }
-    element
-        .child_elements()
-        .find_map(|child| chart_relationship_id(child, depth + 1))
+    for child in element.child_elements() {
+        match anchor_chart(child, depth + 1) {
+            AnchorChart::None => {}
+            found => return found,
+        }
+    }
+    AnchorChart::None
 }
 
 fn anchor_cell(element: Option<&Element>) -> Result<AnchorCell, ParseError> {
@@ -1298,7 +1404,7 @@ pub(crate) fn directory_of(path: &str) -> &str {
         .unwrap_or("")
 }
 
-fn type_is(kind: &str, suffix: &str) -> bool {
+pub(crate) fn type_is(kind: &str, suffix: &str) -> bool {
     kind.rsplit('/').next() == Some(suffix)
 }
 
@@ -1318,9 +1424,12 @@ fn relationship_target<'a>(
 pub(crate) fn parse_relationships(
     data: &[u8],
 ) -> Result<Vec<(String, String, String)>, ParseError> {
-    let root = parse_tree(data)?;
-    Ok(root
-        .child_elements()
+    Ok(relationships_of(&parse_tree(data)?))
+}
+
+/// [`parse_relationships`] over an already parsed `.rels` root.
+pub(crate) fn relationships_of(root: &Element) -> Vec<(String, String, String)> {
+    root.child_elements()
         .filter(|child| {
             child.local_name() == "Relationship"
                 && matches!(child.namespace(), None | Some(NS_PACKAGE_RELATIONSHIPS))
@@ -1337,5 +1446,5 @@ pub(crate) fn parse_relationships(
                 child.attribute_local("Target")?.to_owned(),
             ))
         })
-        .collect())
+        .collect()
 }

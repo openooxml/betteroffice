@@ -8,12 +8,15 @@ use crate::header_footer::HeaderFooter;
 use crate::inline::{InlineNode, Run, RunContent};
 use crate::notes::Note;
 use crate::paragraph::{Paragraph, ParagraphContent};
+use crate::paragraph_identity::parse_paragraph_id;
 use crate::xml::ParseError;
 
 use super::context::SerializerContext;
+use super::paragraph::is_safe_attribute_name;
 use super::raw::validate_raw_subtree;
 use super::sdt::serialize_block_content;
 use super::section::serialize_section_properties;
+use super::splice::{required_prefixes, root_binds, root_tag, root_with_prefixes};
 use super::watermark::serialize_watermark;
 use super::xml_writer::{escape_xml, js_number};
 
@@ -103,6 +106,19 @@ const FULL_NAMESPACES: &str = concat!(
     "xmlns:wps=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\""
 );
 
+/// Prefixes both story-root boilerplates declare; an authored declaration for
+/// any other prefix must survive as a custom binding or replayed raw markup
+/// under it stops resolving.
+const STORY_ROOT_PREFIXES: [&str; 20] = [
+    "wpc", "mc", "o", "r", "m", "v", "wp14", "wp", "w10", "w", "w14", "w15", "w16se", "w16cid",
+    "w16", "w16cex", "w16sdtdh", "wne", "wpg", "wps",
+];
+
+/// True when the document, header, and footer writers declare this prefix.
+pub(crate) fn is_story_root_prefix(prefix: &str) -> bool {
+    prefix == "xml" || STORY_ROOT_PREFIXES.contains(&prefix)
+}
+
 const MC_IGNORABLE: &str =
     "mc:Ignorable=\"w14 w15 w16se w16cid w16 w16cex w16sdtdh w16sdtfl w16du wp14\"";
 
@@ -116,6 +132,43 @@ pub struct CommentParaInfo {
     pub parent_id: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub done: Option<bool>,
+}
+
+/// Root bindings and attributes outside the standard boilerplate.
+fn custom_bindings_attributes(bindings: &[crate::paragraph::RawAttribute]) -> String {
+    let mut custom = String::new();
+    for binding in bindings {
+        if binding.name != "mc:Ignorable" && is_safe_attribute_name(&binding.name) {
+            custom.push(' ');
+            custom.push_str(&binding.name);
+            custom.push_str("=\"");
+            custom.push_str(&escape_xml(&binding.value));
+            custom.push('"');
+        }
+    }
+    custom
+}
+
+fn story_ignorable(bindings: &[crate::paragraph::RawAttribute]) -> String {
+    let mut prefixes = vec![
+        "w14", "w15", "w16se", "w16cid", "w16", "w16cex", "w16sdtdh", "wp14",
+    ];
+    for attribute in bindings
+        .iter()
+        .filter(|attribute| attribute.name == "mc:Ignorable")
+    {
+        for prefix in attribute.value.split_whitespace() {
+            if !prefixes.contains(&prefix)
+                && (is_story_root_prefix(prefix)
+                    || bindings
+                        .iter()
+                        .any(|binding| binding.name.strip_prefix("xmlns:") == Some(prefix)))
+            {
+                prefixes.push(prefix);
+            }
+        }
+    }
+    format!(" mc:Ignorable=\"{}\"", escape_xml(&prefixes.join(" ")))
 }
 
 pub fn serialize_document_body(
@@ -137,9 +190,36 @@ pub fn serialize_document_part(
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
     let body_xml = serialize_document_body(body, context)?;
-    Ok(format!(
-        "{XML_DECLARATION}<w:document {DOCUMENT_NAMESPACES} mc:Ignorable=\"w14 w15 w16se w16cid w16 w16cex w16sdtdh wp14\"><w:body>{body_xml}</w:body></w:document>"
-    ))
+    let custom = custom_bindings_attributes(&body.custom_root_bindings);
+    let ignorable = story_ignorable(&body.custom_root_bindings);
+    let root = format!("<w:document {DOCUMENT_NAMESPACES}{custom}{ignorable}>");
+    let body_xml = format!("<w:body>{body_xml}</w:body>");
+    let canonical = || format!("{XML_DECLARATION}{root}{body_xml}</w:document>");
+    let Some(source) = context.document_root() else {
+        return Ok(canonical());
+    };
+    let Some(prefixes) = required_prefixes(&body_xml) else {
+        return Ok(canonical());
+    };
+    let mut checked = prefixes.clone();
+    if prefixes.contains("w14") {
+        checked.insert("mc");
+    }
+    if root_binds(source, &root, &checked, true) != Some(true) {
+        return Ok(canonical());
+    }
+    let Some(rooted) = root_with_prefixes(source, &root, &prefixes) else {
+        return Ok(canonical());
+    };
+    let Some(tag) = root_tag(&rooted) else {
+        return Ok(canonical());
+    };
+    let opened = if tag.empty {
+        format!("{}>", &rooted[..tag.range.end - 2])
+    } else {
+        rooted.to_string()
+    };
+    Ok(format!("{opened}{body_xml}</{}>", tag.name))
 }
 
 pub fn serialize_header_footer_part(
@@ -161,8 +241,18 @@ pub fn serialize_header_footer_part(
     } else {
         "w:ftr"
     };
+    let custom = custom_bindings_attributes(&story.custom_root_bindings);
+    let ignorable = if story
+        .custom_root_bindings
+        .iter()
+        .any(|attribute| attribute.name == "mc:Ignorable")
+    {
+        story_ignorable(&story.custom_root_bindings)
+    } else {
+        String::new()
+    };
     Ok(format!(
-        "{XML_DECLARATION}\n<{root} {HEADER_FOOTER_NAMESPACES}>{content}</{root}>"
+        "{XML_DECLARATION}\n<{root} {HEADER_FOOTER_NAMESPACES}{custom}{ignorable}>{content}</{root}>"
     ))
 }
 
@@ -203,7 +293,16 @@ fn serialize_notes_part(
         }
         content.push_str(" w:id=\"");
         content.push_str(&js_number(note.id));
-        content.push_str("\">");
+        content.push('"');
+        content.push_str(&custom_bindings_attributes(&note.custom_root_bindings));
+        if note
+            .custom_root_bindings
+            .iter()
+            .any(|attribute| attribute.name == "mc:Ignorable")
+        {
+            content.push_str(&story_ignorable(&note.custom_root_bindings));
+        }
+        content.push('>');
         for block in &note.content {
             content.push_str(&serialize_block_content(block, context)?);
         }
@@ -338,7 +437,17 @@ fn serialize_comment(
     para_infos: &mut Vec<CommentParaInfo>,
     context: &mut SerializerContext,
 ) -> String {
-    let comment_para_id = context.allocate_hex_id();
+    let valid = |id: Option<&str>| {
+        id.filter(|id| parse_paragraph_id(id).is_some())
+            .map(str::to_owned)
+    };
+    // The companion parts key a comment by its last paragraph's ID; one
+    // allocated from the comment ID reaches a fixed point across saves.
+    let comment_para_id = valid(comment.content.last().and_then(|p| p.para_id.as_deref()))
+        .or_else(|| valid(comment.para_id.as_deref()))
+        .unwrap_or_else(|| {
+            context.allocate_paragraph_id(&format!("comment:{}", js_number(comment.id)))
+        });
     let mut output = String::new();
     output.push_str("<w:comment w:id=\"");
     output.push_str(&js_number(comment.id));
@@ -366,36 +475,32 @@ fn serialize_comment(
     }
     output.push('>');
 
-    match comment.content.as_slice() {
-        [] => {
-            output.push_str("<w:p w14:paraId=\"");
-            output.push_str(&comment_para_id);
-            output.push_str("\"><w:r><w:rPr><w:rStyle w:val=\"CommentReference\"/></w:rPr><w:annotationRef/></w:r></w:p>");
-        }
-        [paragraph] => {
-            output.push_str(&serialize_comment_paragraph(
-                paragraph,
-                Some(&comment_para_id),
-                true,
-            ));
-        }
-        paragraphs => {
-            output.push_str(&serialize_comment_paragraph(&paragraphs[0], None, true));
-            for paragraph in &paragraphs[1..paragraphs.len() - 1] {
-                output.push_str(&serialize_comment_paragraph(paragraph, None, false));
-            }
-            output.push_str(&serialize_comment_paragraph(
-                &paragraphs[paragraphs.len() - 1],
-                Some(&comment_para_id),
-                false,
-            ));
-        }
+    if comment.content.is_empty() {
+        output.push_str("<w:p w14:paraId=\"");
+        output.push_str(&comment_para_id);
+        output.push_str("\"><w:r><w:rPr><w:rStyle w:val=\"CommentReference\"/></w:rPr><w:annotationRef/></w:r></w:p>");
+    }
+    let last = comment.content.len().saturating_sub(1);
+    for (index, paragraph) in comment.content.iter().enumerate() {
+        let para_id = if index == last {
+            Some(comment_para_id.clone())
+        } else {
+            valid(paragraph.para_id.as_deref())
+        };
+        output.push_str(&serialize_comment_paragraph(
+            paragraph,
+            para_id.as_deref(),
+            index == 0,
+        ));
     }
     output.push_str("</w:comment>");
     para_infos.push(CommentParaInfo {
         comment_id: comment.id,
         last_para_id: comment_para_id,
-        durable_id: context.allocate_hex_id(),
+        durable_id: comment
+            .durable_id
+            .clone()
+            .unwrap_or_else(|| context.allocate_hex_id()),
         parent_id: comment.parent_id,
         done: comment.done,
     });
@@ -419,13 +524,22 @@ fn serialize_comment_paragraph(
             "<w:r><w:rPr><w:rStyle w:val=\"CommentReference\"/></w:rPr><w:annotationRef/></w:r>",
         );
     }
+    // Re-emitting the authored reference run would add an empty run.
     for item in &paragraph.content {
-        if let ParagraphContent::Inline(InlineNode::Run(run)) = item {
+        if let ParagraphContent::Inline(InlineNode::Run(run)) = item
+            && comment_run_has_content(run)
+        {
             output.push_str(&serialize_comment_run(run));
         }
     }
     output.push_str("</w:p>");
     output
+}
+
+fn comment_run_has_content(run: &Run) -> bool {
+    run.content
+        .iter()
+        .any(|content| matches!(content, RunContent::Text { .. } | RunContent::Break { .. }))
 }
 
 fn serialize_comment_run(run: &Run) -> String {
@@ -522,6 +636,8 @@ fn same_number(left: f64, right: f64) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use crate::block::BlockContent;
     use crate::comments::Comment;
     use crate::formatting::TextFormatting;
@@ -540,11 +656,39 @@ mod tests {
         .unwrap()
     }
 
+    #[test]
+    fn a_comment_reuses_its_parsed_identities_instead_of_minting() {
+        let comment = Comment {
+            id: 0.0,
+            author: "Reviewer".to_owned(),
+            initials: None,
+            date: None,
+            content: Vec::new(),
+            parent_id: None,
+            done: None,
+            status: "active".to_owned(),
+            author_id: None,
+            durable_id: Some("2ECC71AA".to_owned()),
+            para_id: Some("1CB626C9".to_owned()),
+            date_utc: None,
+            palette_index: 0.0,
+            block_content: Vec::new(),
+        };
+        let (xml, infos) = serialize_comments_with_info(&[comment], &mut context());
+        assert!(xml.contains(r#"w14:paraId="1CB626C9""#));
+        assert_eq!(infos[0].last_para_id, "1CB626C9");
+        assert_eq!(infos[0].durable_id, "2ECC71AA");
+    }
+
     fn paragraph(text: &str) -> BlockContent {
-        BlockContent::Paragraph(Paragraph {
+        BlockContent::Paragraph(Arc::new(Paragraph {
             node_type: "paragraph".to_owned(),
             para_id: None,
+            repeated_para_id: None,
+            para_id_attribute: None,
+            source_ordinal: None,
             text_id: None,
+            extra_attributes: Vec::new(),
             formatting: None,
             property_changes: None,
             p_pr_ins: None,
@@ -561,14 +705,16 @@ mod tests {
             list_rendering: None,
             rendered_page_break_before: None,
             section_properties: None,
-        })
+        }))
     }
 
     fn comment(id: f64, parent_id: Option<f64>, text: &str) -> Comment {
         let BlockContent::Paragraph(mut paragraph) = paragraph(text) else {
             unreachable!()
         };
-        if let ParagraphContent::Inline(InlineNode::Run(run)) = &mut paragraph.content[0] {
+        if let ParagraphContent::Inline(InlineNode::Run(run)) =
+            &mut Arc::make_mut(&mut paragraph).content[0]
+        {
             run.formatting = Some(TextFormatting {
                 bold: Some(true),
                 italic: Some(true),
@@ -580,7 +726,7 @@ mod tests {
             author: "Alice <&>".to_owned(),
             initials: None,
             date: Some("2024-01-01T12:30:45.123Z".to_owned()),
-            content: vec![paragraph.clone()],
+            content: vec![paragraph.as_ref().clone()],
             parent_id,
             done: Some(parent_id.is_none()),
             status: "active".to_owned(),
@@ -591,6 +737,23 @@ mod tests {
             palette_index: 0.0,
             block_content: vec![BlockContent::Paragraph(paragraph)],
         }
+    }
+
+    #[test]
+    fn the_story_root_prefix_set_matches_both_boilerplates() {
+        fn declared(boilerplate: &str) -> Vec<&str> {
+            let mut prefixes: Vec<&str> = boilerplate
+                .split("xmlns:")
+                .skip(1)
+                .filter_map(|entry| entry.split('=').next())
+                .collect();
+            prefixes.sort_unstable();
+            prefixes
+        }
+        let mut pinned = STORY_ROOT_PREFIXES.to_vec();
+        pinned.sort_unstable();
+        assert_eq!(declared(DOCUMENT_NAMESPACES), pinned);
+        assert_eq!(declared(HEADER_FOOTER_NAMESPACES), pinned);
     }
 
     #[test]
@@ -618,6 +781,7 @@ mod tests {
                 hdr_ftr_type: "default".to_owned(),
                 content: Vec::new(),
                 watermark: None,
+                custom_root_bindings: Vec::new(),
             },
             &mut context(),
         )
@@ -634,7 +798,9 @@ mod tests {
                 id: -1.0,
                 note_type: "separator".to_owned(),
                 content: vec![paragraph("safe <&>")],
+                custom_root_bindings: Vec::new(),
                 verbatim_xml: None,
+                source_ordinal: None,
             }],
             &mut context(),
         )
@@ -656,9 +822,11 @@ mod tests {
             id: 4.0,
             note_type: "normal".to_owned(),
             content: Vec::new(),
+            custom_root_bindings: Vec::new(),
             verbatim_xml: Some(
                 "<w:endnote w:id=\"4\"><w:customXml><w:p/></w:customXml></w:endnote>".to_owned(),
             ),
+            source_ordinal: None,
         };
         let xml = serialize_endnotes_part(&[valid.clone()], &mut context()).unwrap();
         assert!(xml.contains(valid.verbatim_xml.as_deref().unwrap()));

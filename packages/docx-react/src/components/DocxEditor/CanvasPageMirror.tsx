@@ -10,29 +10,71 @@
  * Focus never lands here: the hidden input remains the editing surface.
  */
 
-import { useEffect, useRef } from 'react';
-import { buildMirrorPage, type DisplayPage } from '@betteroffice/docx/layout/render';
+import { useRef } from 'react';
+import {
+  buildMirrorPage,
+  buildMirrorPageText,
+  reduceMirrorToText,
+  type DisplayPage,
+} from '@betteroffice/docx/layout/render';
+import type { TFunction } from '@betteroffice/docx-i18n';
 import { useTranslation } from '../../i18n';
+import { usePageChrome, type PageChromeHandle } from './usePageChrome';
 
-export function CanvasPageMirror({ page, zoom = 1 }: { page: DisplayPage; zoom?: number }) {
+const mirrorLabels = (page: DisplayPage, t: TFunction) => ({
+  labels: {
+    page: t('a11y.pageLabel', { number: page.pageIndex + 1 }),
+    header: t('a11y.headerLabel'),
+    footer: t('a11y.footerLabel'),
+  },
+});
+const makeMirror = (page: DisplayPage, t: TFunction): HTMLElement =>
+  buildMirrorPage(page, mirrorLabels(page, t));
+const makeMirrorText = (
+  page: DisplayPage,
+  t: TFunction,
+  mirror: HTMLElement | null
+): HTMLElement =>
+  mirror ? reduceMirrorToText(mirror) : buildMirrorPageText(page, mirrorLabels(page, t));
+
+export function CanvasPageMirror({
+  page,
+  zoom = 1,
+  active = true,
+  defer = false,
+  visible = true,
+  register,
+  noteAnchorRevision = 0,
+}: {
+  page: DisplayPage;
+  /**
+   * `displayPageNoteAnchorRevision(page)`: an owned shift moves the note
+   * anchors the mirror renders without replacing the page.
+   */
+  noteAnchorRevision?: number;
+  zoom?: number;
+  /** Holds the full mirror; an inactive page keeps readable text. */
+  active?: boolean;
+  /** The first build may wait for idle time. */
+  defer?: boolean;
+  /** In the page window: a rebuild after a content change never waits. */
+  visible?: boolean;
+  /** Receives the handle that builds the mirror at once. */
+  register?: (handle: PageChromeHandle | null) => void;
+}) {
   const hostRef = useRef<HTMLDivElement>(null);
   const { t } = useTranslation();
-
-  useEffect(() => {
-    const host = hostRef.current;
-    if (!host) return;
-    const mirror = buildMirrorPage(page, {
-      labels: {
-        page: t('a11y.pageLabel', { number: page.pageIndex + 1 }),
-        header: t('a11y.headerLabel'),
-        footer: t('a11y.footerLabel'),
-      },
-    });
-    // Keep the previous mirror connected until this replacement is ready.
-    // Clearing in effect cleanup creates a detached-DOM window on every page
-    // update; unmounting already removes the host and its complete subtree.
-    host.replaceChildren(mirror);
-  }, [page, t]);
+  usePageChrome(hostRef, {
+    page,
+    t,
+    active,
+    defer,
+    rebuildAtOnce: visible,
+    urgentRevision: noteAnchorRevision,
+    register,
+    make: makeMirror,
+    fallback: makeMirrorText,
+  });
 
   return (
     <div

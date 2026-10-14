@@ -208,6 +208,35 @@ describe('wasm collaboration', () => {
     }
   });
 
+  // the wasm event arrives as `[origin, ...update]`, so a listener that reaches
+  // for `.buffer` must not find the origin tag riding along — and the shape must
+  // not depend on how many other listeners happen to be subscribed.
+  it('delivers exact update buffers regardless of subscriber count', () => {
+    for (const extraSubscriber of [false, true]) {
+      const source = collaborative(extraSubscriber ? 2102 : 2101);
+      const peer = collaborative(extraSubscriber ? 2104 : 2103);
+      const received: Uint8Array[] = [];
+      try {
+        source.onUpdate((update, origin) => {
+          if (origin === 'local') received.push(update);
+        });
+        if (extraSubscriber) source.onUpdate(() => {});
+
+        source.editCell(0, 22, 0, 'exact buffer');
+        expect(received).toHaveLength(1);
+        const update = received[0];
+        expect(update.byteOffset).toBe(0);
+        expect(update.buffer.byteLength).toBe(update.byteLength);
+
+        peer.applyUpdate(new Uint8Array(update.buffer));
+        expect(peer.cell(0, 22, 0).input).toBe('exact buffer');
+      } finally {
+        source.dispose();
+        peer.dispose();
+      }
+    }
+  });
+
   it('unsubscribes idempotently', () => {
     const handle = collaborative(3001);
     let calls = 0;
@@ -221,6 +250,47 @@ describe('wasm collaboration', () => {
       expect(calls).toBe(0);
     } finally {
       handle.dispose();
+    }
+  });
+
+  it('syncs idle standalone edits before late subscription and after resubscription', () => {
+    for (const fullState of [false, true]) {
+      const source = openWorkbook(sampleBytes());
+      const peer = collaborative(fullState ? 3101 : 3102);
+      const events: Uint8Array[] = [];
+      let unsubscribe = () => {};
+      try {
+        const baseline = peer.encodeStateVector();
+        source.editCell(0, 20, 0, 'idle');
+        source.editCell(0, 20, 0, '');
+        source.editCell(0, 21, 0, 'retained');
+        unsubscribe = source.onUpdate((update) => events.push(update));
+        expect(events).toHaveLength(0);
+        peer.applyUpdate(source.encodeStateAsUpdate(fullState ? undefined : baseline));
+        expect(peer.cell(0, 20, 0).input).toBe('');
+        expect(peer.cell(0, 21, 0).input).toBe('retained');
+        source.editCell(0, 21, 0, 'observed');
+        source.undo();
+        source.redo();
+        expect(events).toHaveLength(3);
+        for (const update of events.splice(0)) peer.applyUpdate(update);
+        expect(peer.encodeStateVector()).toEqual(source.encodeStateVector());
+        unsubscribe();
+        source.editCell(0, 21, 0, '');
+        expect(events).toHaveLength(0);
+        unsubscribe = source.onUpdate((update) => events.push(update));
+        peer.applyUpdate(source.encodeStateAsUpdate(peer.encodeStateVector()));
+        source.editCell(0, 22, 0, 'resubscribed');
+        expect(events).toHaveLength(1);
+        peer.applyUpdate(events[0]);
+        expect(peer.cell(0, 21, 0).input).toBe('');
+        expect(peer.cell(0, 22, 0).input).toBe('resubscribed');
+        expect(peer.encodeStateAsUpdate()).toEqual(source.encodeStateAsUpdate());
+      } finally {
+        unsubscribe();
+        source.dispose();
+        peer.dispose();
+      }
     }
   });
 

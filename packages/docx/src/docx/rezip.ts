@@ -51,12 +51,26 @@ export interface RepackOptions {
 
 /** Repack a public Document through the Rust package writer. */
 export async function repackDocx(doc: Document, options: RepackOptions = {}): Promise<ArrayBuffer> {
+  return (await repackDocxWithWarnings(doc, options)).buffer;
+}
+
+export interface RepackResult {
+  buffer: ArrayBuffer;
+  warnings: string[];
+}
+
+/** [`repackDocx`], also returning the non-fatal save diagnostics. */
+export async function repackDocxWithWarnings(
+  doc: Document,
+  options: RepackOptions = {}
+): Promise<RepackResult> {
   if (!doc.originalBuffer) {
     throw new Error(
       'Cannot repack document: no original buffer for round-trip. Use createDocx() for new documents.'
     );
   }
-  return (await writeDocumentWithRust(doc, doc.originalBuffer, options)).buffer;
+  const result = await writeDocumentWithRust(doc, doc.originalBuffer, options);
+  return { buffer: result.buffer, warnings: result.warnings };
 }
 
 export async function repackDocxFromRaw(

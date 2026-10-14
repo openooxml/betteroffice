@@ -11,7 +11,7 @@ use crate::image::{
     Image, ImagePadding, ImagePosition, ImageSize, ImageWrap, parse_anchor_position,
     parse_anchor_wrap, placeholder_image,
 };
-use crate::media::{MediaMap, resolve_image_data};
+use crate::media::{MediaMap, media_token_index, resolve_image_data};
 use crate::relationships::{RelationshipMap, TargetMode};
 use crate::scalars::ColorValue;
 use crate::xml::{XmlElement, parse_javascript_integer_prefix};
@@ -197,6 +197,37 @@ pub struct ShapeTextBodyProperties {
     pub preset_text_warp: Option<String>,
 }
 
+impl From<crate::text_box::TextBoxBodyProperties> for ShapeTextBodyProperties {
+    fn from(value: crate::text_box::TextBoxBodyProperties) -> Self {
+        Self {
+            vertical: value.vertical,
+            rotation: value.rotation,
+            upright: value.upright,
+            anchor: value.anchor,
+            anchor_center: value.anchor_center,
+            columns: value.columns,
+            column_spacing: value.column_spacing,
+            wrap: value.wrap,
+            horizontal_overflow: value.horizontal_overflow,
+            vertical_overflow: value.vertical_overflow,
+            margins: value
+                .margins
+                .map(|margins| RelativeRect {
+                    left: margins.left,
+                    top: margins.top,
+                    right: margins.right,
+                    bottom: margins.bottom,
+                })
+                .unwrap_or_default(),
+            auto_fit: value.auto_fit,
+            font_scale: value.font_scale,
+            line_spacing_reduction: value.line_spacing_reduction,
+            from_word_art: value.from_word_art,
+            preset_text_warp: value.preset_text_warp,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShapeTextBody {
@@ -288,6 +319,8 @@ pub struct Shape {
     pub shape_kind: String,
     pub shape_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_box: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -347,6 +380,7 @@ impl Shape {
         Self {
             shape_kind: "shape".into(),
             shape_type,
+            text_box: None,
             id: None,
             name: None,
             size,
@@ -410,6 +444,7 @@ pub fn parse_shape(node: &XmlElement) -> Shape {
             height: transform.size.height,
         },
     );
+    shape.text_box = bool_attribute(direct_child(Some(node), "cNvSpPr"), "txBox");
     if let Some(non_visual) = non_visual {
         shape.id = non_visual.attribute(None, "id").map(str::to_owned);
         shape.name = non_visual.attribute(None, "name").map(str::to_owned);
@@ -1126,11 +1161,11 @@ fn resolve_paint_picture(
         return;
     }
     let resolved = resolve_image_data(&image.relationship_id, Some(relationships), Some(media));
-    if resolved
-        .src
-        .as_deref()
-        .is_some_and(|value| value.starts_with("data:") || value.starts_with("blob:"))
-    {
+    if resolved.src.as_deref().is_some_and(|value| {
+        value.starts_with("data:")
+            || value.starts_with("blob:")
+            || media_token_index(value).is_some()
+    }) {
         image.src = resolved.src
     }
 }
@@ -1604,6 +1639,44 @@ mod tests {
         assert_eq!(shape.text_body.unwrap().content.len(), 1);
         assert_eq!(shape.effects.unwrap()[0].kind.as_deref(), Some("glow"));
         assert_eq!(shape.outline.unwrap().head_end.unwrap().width, None)
+    }
+    #[test]
+    fn plus_authored_adjust_uses_source_extent_while_missing_defers_to_fallback() {
+        let authored = parse_shape(&root(
+            r#"<wps:wsp><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="557530" cy="538480"/></a:xfrm><a:prstGeom prst="plus"><a:avLst><a:gd name="adj" fmla="val 39887"/></a:avLst></a:prstGeom></wps:spPr></wps:wsp>"#,
+        ));
+        assert_eq!(authored.shape_type, "plus");
+        let path = authored
+            .geometry_path
+            .clone()
+            .expect("authored plus keeps its path");
+        assert_eq!(path.len(), 13);
+        let aspect = 557_530.0 / 538_480.0;
+        let adj = 39_887.0 / 100_000.0;
+        let GeometryPathCommand::Move { x: _, y } = path[0] else {
+            panic!("plus must open with a move");
+        };
+        assert!((y - adj).abs() < 1e-9, "{y} != {adj}");
+        let GeometryPathCommand::Line { x, y } = path[1] else {
+            panic!("plus second vertex carries the arm");
+        };
+        assert!((x - adj / aspect).abs() < 1e-9, "{x} != {}", adj / aspect);
+        assert!((y - adj).abs() < 1e-9, "{y} != {adj}");
+        let round_trip: Shape =
+            serde_json::from_value(serde_json::to_value(&authored).unwrap()).unwrap();
+        assert_eq!(round_trip.geometry_path, Some(path.clone()));
+        let missing = parse_shape(&root(
+            r#"<wps:wsp><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="557530" cy="538480"/></a:xfrm><a:prstGeom prst="plus"><a:avLst/></a:prstGeom></wps:spPr></wps:wsp>"#,
+        ));
+        assert!(missing.geometry_path.is_none());
+        let wide = parse_shape(&root(
+            r#"<wps:wsp><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2230120" cy="538480"/></a:xfrm><a:prstGeom prst="plus"><a:avLst><a:gd name="adj" fmla="val 39887"/></a:avLst></a:prstGeom></wps:spPr></wps:wsp>"#,
+        ));
+        let wide_path = wide.geometry_path.expect("wide plus keeps its path");
+        let GeometryPathCommand::Line { x: wide_x, .. } = wide_path[1] else {
+            panic!("plus second vertex carries the arm");
+        };
+        assert!((wide_x - x).abs() > 1e-6, "resize must move the arm");
     }
     #[test]
     fn drawing_extent_anchor_and_scene_limits_are_applied() {

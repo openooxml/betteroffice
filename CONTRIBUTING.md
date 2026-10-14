@@ -22,22 +22,34 @@ cd betteroffice
 # Install dependencies
 bun install
 
-# Compile the ignored XLSX wasm asset
-bun run build:xlsx-wasm
+# Start the editor playground (builds the wasm bundles on first run)
+bun run dev:demo
 
-# Start the web app
+# Start the betteroffice.dev site (no wasm needed)
 bun run dev
+
+# Start the documentation site
+bun run dev:docs
 ```
 
 ## Running Tests
 
 ```bash
-# TypeScript
+# TypeScript (`bun run test` builds the xlsx and docx wasm itself)
 bun run typecheck
 bun run test
 
 # Rust engines (fmt + clippy with -D warnings + tests)
 bun run rust:check
+
+# End-to-end scenarios on pinned corpus documents, every operation timed
+# Requires the pinned corpus and locally built Python bindings.
+bun e2e/python-env.ts
+bun run test:e2e
+
+# Headless Chromium: real DOCX, XLSX, and PPTX editor interactions.
+bunx playwright install chromium
+bun run test:e2e:browser
 ```
 
 ## Contributor License Agreement

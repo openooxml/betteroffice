@@ -1,12 +1,35 @@
 //! Pre-placement break policy.
 
-use crate::keep_together::paragraph_breaks_before;
+use crate::keep_together::paragraph_breaks_before_run;
 use crate::types::LayoutBlock;
 
-/// Whether a block forces a fresh page before it is placed. Today only a
-/// paragraph with `w:pageBreakBefore` (ECMA-376 §17.3.1.23) does.
-pub fn breaks_before_block(block: &LayoutBlock) -> bool {
-    paragraph_breaks_before(block)
+/// Why a paragraph opens a fresh page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthoredBreak {
+    /// `w:pageBreakBefore` (ECMA-376 §17.3.1.23) on the paragraph itself.
+    PageBreakBefore,
+    /// A `w:br w:type="page"` run opening the paragraph (§17.3.3.1).
+    HardBreakRun,
+}
+
+impl AuthoredBreak {
+    /// Word keeps space-before across an authored break, not an automatic one.
+    /// The variants differ only under `w:suppressSpBfAfterPgBrk` (§17.15.1.87).
+    pub fn keeps_leading_spacing(self) -> bool {
+        matches!(self, Self::HardBreakRun | Self::PageBreakBefore)
+    }
+}
+
+/// Why a block forces a fresh page before it is placed, if it does.
+pub fn breaks_before_block(block: &LayoutBlock) -> Option<AuthoredBreak> {
+    let (property, run) = paragraph_breaks_before_run(block);
+    if run {
+        Some(AuthoredBreak::HardBreakRun)
+    } else if property {
+        Some(AuthoredBreak::PageBreakBefore)
+    } else {
+        None
+    }
 }
 
 /// Geometry a keep-with-next group is weighed against at the page cursor.
@@ -38,7 +61,17 @@ pub struct KeepWithNextFit {
 ///   there is nothing above the group to detach from, and advancing would only
 ///   emit a blank page, so Word splits in place
 pub fn keep_with_next_group_must_advance(fit: KeepWithNextFit) -> bool {
-    let intact_placement_exists = fit.group_height <= fit.page_content_height;
+    keep_with_next_group_must_advance_from(fit, fit.group_height)
+}
+
+/// [`keep_with_next_group_must_advance`] for a group that needs
+/// `fresh_page_height` at the top of a blank page, which can be less than at
+/// the cursor: spacing owed there does not follow it.
+pub fn keep_with_next_group_must_advance_from(
+    fit: KeepWithNextFit,
+    fresh_page_height: f64,
+) -> bool {
+    let intact_placement_exists = fresh_page_height <= fit.page_content_height;
     if !intact_placement_exists {
         return false;
     }
@@ -75,22 +108,39 @@ mod tests {
             page_break_before: Some(true),
             ..Default::default()
         };
-        assert!(breaks_before_block(&paragraph(Some(attrs))));
+        assert_eq!(
+            breaks_before_block(&paragraph(Some(attrs))),
+            Some(AuthoredBreak::PageBreakBefore)
+        );
     }
 
     #[test]
     fn breaks_before_is_false_for_a_paragraph_without_page_break_before() {
-        assert!(!breaks_before_block(&paragraph(None)));
+        assert_eq!(breaks_before_block(&paragraph(None)), None);
         let attrs = ParagraphAttrs {
             page_break_before: Some(false),
             ..Default::default()
         };
-        assert!(!breaks_before_block(&paragraph(Some(attrs))));
+        assert_eq!(breaks_before_block(&paragraph(Some(attrs))), None);
+    }
+
+    #[test]
+    fn a_leading_hard_break_run_reports_a_hard_break() {
+        let attrs = ParagraphAttrs {
+            page_break_before_run: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(
+            breaks_before_block(&paragraph(Some(attrs))),
+            Some(AuthoredBreak::HardBreakRun)
+        );
+        assert!(AuthoredBreak::HardBreakRun.keeps_leading_spacing());
+        assert!(AuthoredBreak::PageBreakBefore.keeps_leading_spacing());
     }
 
     #[test]
     fn breaks_before_is_false_for_a_non_paragraph_block() {
-        assert!(!breaks_before_block(&LayoutBlock::Unsupported));
+        assert_eq!(breaks_before_block(&LayoutBlock::Unsupported), None);
     }
 
     #[test]
@@ -102,6 +152,18 @@ mod tests {
             page_content_height: 600.0,
             page_has_content: true,
         }));
+    }
+
+    #[test]
+    fn weighs_a_blank_page_without_the_spacing_owed_at_the_cursor() {
+        let fit = KeepWithNextFit {
+            group_height: 120.0,
+            available_height: 80.0,
+            page_content_height: 100.0,
+            page_has_content: true,
+        };
+        assert!(keep_with_next_group_must_advance_from(fit, 90.0));
+        assert!(!keep_with_next_group_must_advance_from(fit, 110.0));
     }
 
     #[test]

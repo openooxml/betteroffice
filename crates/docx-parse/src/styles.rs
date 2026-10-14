@@ -461,6 +461,24 @@ mod tests {
     }
 
     #[test]
+    fn widow_control_off_descends_the_based_on_chain_until_a_style_turns_it_back_on() {
+        let definitions = parse(
+            r#"<w:styles><w:style w:type="paragraph" w:styleId="Normal"><w:pPr><w:widowControl w:val="0"/></w:pPr></w:style><w:style w:type="paragraph" w:styleId="Body"><w:basedOn w:val="Normal"/><w:pPr><w:spacing w:after="200"/></w:pPr></w:style><w:style w:type="paragraph" w:styleId="Quote"><w:basedOn w:val="Body"/><w:pPr><w:widowControl/></w:pPr></w:style></w:styles>"#,
+        );
+        let widow_control = |style_id: &str| {
+            definitions
+                .styles
+                .iter()
+                .find(|style| style.style_id == style_id)
+                .and_then(|style| style.p_pr.as_ref())
+                .and_then(|p_pr| p_pr.widow_control)
+        };
+        assert_eq!(widow_control("Normal"), Some(false));
+        assert_eq!(widow_control("Body"), Some(false));
+        assert_eq!(widow_control("Quote"), Some(true));
+    }
+
+    #[test]
     fn overlong_based_on_chain_returns_a_budget_error_without_recursing_unboundedly() {
         let mut xml = String::from("<w:styles>");
         for index in 0..70 {

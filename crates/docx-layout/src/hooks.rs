@@ -7,9 +7,12 @@
 //! the caller rather than producing wrong geometry.
 
 use crate::LayoutError;
+use crate::cell_layout::table_compat_leading_shift;
 use crate::page_flow::Paginator;
 use crate::prescan::SectionLayoutConfig;
-use crate::table_row_break::{build_table_row_break_info, snap_row_break};
+use crate::table_row_break::{
+    RowBreaks, first_table_fragment_height, minimum_row_slice, snap_row_break,
+};
 use crate::types::{
     Fragment, LayoutBlock, MeasuredBlock, SectionBreakBlock, SectionBreakType, TableBlock,
     TableExtent, TableFragment,
@@ -24,7 +27,9 @@ fn unsupported(feature: &str) -> LayoutError {
 // `prescan`/`place` keep importing them from the hooks seam
 pub use crate::keep_together::{KeepWithNextGroup, KeepWithNextScan};
 
-pub fn breaks_before_block(block: &LayoutBlock) -> Result<bool, LayoutError> {
+pub fn breaks_before_block(
+    block: &LayoutBlock,
+) -> Result<Option<break_policy::AuthoredBreak>, LayoutError> {
     Ok(break_policy::breaks_before_block(block))
 }
 
@@ -37,6 +42,18 @@ pub fn measure_keep_with_next_group(
     measured: &[MeasuredBlock],
 ) -> Result<f64, LayoutError> {
     Ok(keep_together::measure_keep_with_next_group(group, measured))
+}
+
+pub fn measure_keep_with_next_group_at(
+    group: &KeepWithNextGroup,
+    measured: &[MeasuredBlock],
+    leading: impl Fn(f64) -> f64,
+    deferred: f64,
+    capacity: f64,
+) -> Result<f64, LayoutError> {
+    Ok(keep_together::measure_keep_with_next_group_at(
+        group, measured, leading, deferred, capacity,
+    ))
 }
 
 pub fn keep_with_next_group_must_advance(
@@ -55,12 +72,30 @@ pub fn keep_with_next_group_must_advance(
     ))
 }
 
+pub fn keep_with_next_group_must_advance_from(
+    group_height: f64,
+    fresh_page_height: f64,
+    available_height: f64,
+    page_content_height: f64,
+    page_has_content: bool,
+) -> Result<bool, LayoutError> {
+    Ok(break_policy::keep_with_next_group_must_advance_from(
+        break_policy::KeepWithNextFit {
+            group_height,
+            available_height,
+            page_content_height,
+            page_has_content,
+        },
+        fresh_page_height,
+    ))
+}
+
 pub fn handle_section_break(
     block: &SectionBreakBlock,
     paginator: &mut Paginator,
     next_section_config: &SectionLayoutConfig,
     next_section_type: Option<SectionBreakType>,
-) -> Result<(), LayoutError> {
+) -> Result<bool, LayoutError> {
     section_breaks::handle_section_break(block, paginator, next_section_config, next_section_type)
 }
 
@@ -99,6 +134,98 @@ fn get_header_rows_height(measure: &TableExtent, header_row_count: usize) -> f64
     height
 }
 
+/// Per row that starts a keep-with-next row chain (a row whose cell ends in a
+/// keepNext paragraph, not inside a longer chain): the height of the chain's
+/// rows and the row that follows it.
+pub(crate) fn row_keep_chains(
+    block: &TableBlock,
+    measure: &TableExtent,
+) -> Vec<Option<(f64, usize)>> {
+    let rows = measure.rows.len();
+    let keeps_next = |index: usize| {
+        index + 1 < rows
+            && block.rows.get(index).is_some_and(|row| {
+                row.cells.iter().any(|cell| {
+                    matches!(cell.blocks.last(), Some(LayoutBlock::Paragraph(paragraph))
+                        if paragraph.attrs.as_ref().and_then(|attrs| attrs.keep_next) == Some(true))
+                })
+            })
+    };
+    let mut chains = vec![None; rows];
+    let mut index = 0;
+    while index < rows {
+        if !keeps_next(index) {
+            index += 1;
+            continue;
+        }
+        let head = index;
+        let mut height = 0.0;
+        while keeps_next(index) {
+            height += measure.rows[index].height;
+            index += 1;
+        }
+        chains[head] = Some((height, index));
+        index += 1;
+    }
+    chains
+}
+
+/// The height a keep-with-next row chain keeps on one page in a column
+/// `capacity` tall: its rows and the smallest slice of the row after it, as
+/// Word keeps a row with the next row's start, or that whole row when its
+/// paragraph rules leave no break in such a column. Where every-cell starts
+/// apply, the start of a row from `body_row` on is measured in a column
+/// `body_capacity` tall.
+pub(crate) fn row_keep_height(
+    chain: Option<(f64, usize)>,
+    block: &TableBlock,
+    measure: &TableExtent,
+    breaks: &RowBreaks,
+    capacity: f64,
+    body_row: usize,
+    body_capacity: f64,
+    limited_by_float: bool,
+) -> f64 {
+    let Some((rows, follower)) = chain else {
+        return 0.0;
+    };
+    let mut slice = minimum_row_slice(block, measure, &breaks.kept, follower, 0.0);
+    if !limited_by_float {
+        slice = slice.min(
+            breaks
+                .first_cell_slice(
+                    follower,
+                    0.0,
+                    if follower >= body_row && breaks.every_cell_starts() {
+                        body_capacity
+                    } else {
+                        capacity
+                    },
+                )
+                .unwrap_or(slice),
+        );
+    }
+    rows + if slice <= capacity {
+        slice
+    } else {
+        measure.rows[follower].height
+    }
+}
+
+/// Fits `height` at the cursor and reports whether that moved it. A retry that
+/// leaves the cursor in place (rounding can make a height that failed the
+/// caller's check pass `ensure_fits`) places there instead of looping.
+fn fit_moved_cursor(paginator: &mut Paginator, height: f64) -> bool {
+    let before = paginator.get_current();
+    let (column, pen_y) = {
+        let state = paginator.state(before);
+        (state.column_index, state.pen_y)
+    };
+    let after = paginator.ensure_fits(height);
+    let state = paginator.state(after);
+    after != before || state.column_index != column || state.pen_y > pen_y
+}
+
 /// Places an in-flow table, emitting one fragment per page or column it spans.
 ///
 /// The cursor is `(row_index, consumed)`, where `consumed` is how many pixels
@@ -106,9 +233,12 @@ fn get_header_rows_height(measure: &TableExtent, header_row_count: usize) -> f64
 /// that overruns the remaining space breaks at the deepest whole-line boundary
 /// that fits (Word's "allow row to break across pages"), which keeps the row's
 /// other columns on the page where they start and lets a tall vertically merged
-/// cell flow across the boundary. `w:cantSplit` rows (§17.4.6) never break
-/// unless they cannot fit a whole column even alone. A fresh fragment where not
-/// one line fits places the row's remainder with overflow instead of looping.
+/// cell flow across the boundary. `w:cantSplit` rows (§17.4.6) break only when
+/// taller than a fresh column's body room. `w:trHeight w:hRule="exact"`
+/// rows are likewise atomic: their break geometry offers only the full-height
+/// boundary, so the whole row moves to the next page rather than slicing
+/// mid-row. A fresh fragment where not one line fits places the row's remainder
+/// with overflow instead of looping.
 ///
 /// A continuation fragment repeats the leading header band, but only when the
 /// band plus the smallest legal body slice still fits the column; otherwise it
@@ -119,6 +249,15 @@ pub fn layout_table(
     measure: &TableExtent,
     paginator: &mut Paginator,
 ) -> Result<(), LayoutError> {
+    layout_table_with_position(block, measure, paginator, None)
+}
+
+fn layout_table_with_position(
+    block: &TableBlock,
+    measure: &TableExtent,
+    paginator: &mut Paginator,
+    floating_x: Option<f64>,
+) -> Result<(), LayoutError> {
     let rows = &measure.rows;
     if rows.is_empty() {
         return Ok(());
@@ -126,28 +265,56 @@ pub fn layout_table(
 
     let header_row_count = tally_header_rows(block);
     let header_rows_height = get_header_rows_height(measure, header_row_count);
-    let break_info = build_table_row_break_info(block, measure);
+    let breaks = RowBreaks::new(block, measure);
+    let first_fragment_height = first_table_fragment_height(block, measure, &breaks.kept);
+    let keep_chains = row_keep_chains(block, measure);
 
     let mut row_index = 0usize;
     let mut consumed = 0.0f64; // px of rows[row_index] already placed on a previous fragment
+    let mut cell_tops: Option<Vec<f64>> = None;
 
-    while row_index < rows.len() {
+    'rows: while row_index < rows.len() {
+        breaks.set_every_cell_starts(
+            !paginator.has_float_bands() && !paginator.next_page_may_be_shorter(),
+        );
         let state_idx = paginator.get_current();
+        let available_height = paginator.get_available_height();
+        let limited_by_float = available_height
+            < paginator.state(state_idx).content_limit - paginator.state(state_idx).pen_y;
         let is_first_fragment = row_index == 0 && consumed == 0.0;
-        let column_capacity =
-            paginator.state(state_idx).content_limit - paginator.state(state_idx).content_top;
-        let row_remaining_at_start = rows[row_index].height - consumed;
+        // The tallest stretch a fresh column offers between float bands.
+        let column_capacity = paginator.get_column_capacity();
+        let body_capacity = if header_row_count > 0 && header_rows_height <= column_capacity {
+            column_capacity - header_rows_height
+        } else {
+            column_capacity
+        };
+        let row_remaining_at_start = cell_tops
+            .as_deref()
+            .map_or(rows[row_index].height - consumed, |tops| {
+                breaks.cell_remaining(row_index, tops)
+            });
         let row_cant_split = block
             .rows
             .get(row_index)
             .and_then(|row| row.cant_split)
             .unwrap_or(false);
-        if row_cant_split
+        // An exact-height row is atomic (its break geometry holds only the
+        // full-height boundary), so like `cantSplit` it must move whole to the
+        // next page when it fits there but not in the remaining space. A row
+        // taller than the whole column still progresses: `ensure_fits`
+        // advances at most once for oversized heights and the fresh-fragment
+        // overflow guard below then places it rather than looping.
+        let row_is_exact = block
+            .rows
+            .get(row_index)
+            .is_some_and(|row| row.is_exact_height());
+        if (row_cant_split || row_is_exact)
             && consumed == 0.0
-            && row_remaining_at_start > paginator.get_available_height()
+            && row_remaining_at_start > available_height
             && paginator.state(state_idx).pen_y != paginator.state(state_idx).content_top
+            && fit_moved_cursor(paginator, row_remaining_at_start)
         {
-            paginator.ensure_fits(row_remaining_at_start);
             continue;
         }
 
@@ -157,14 +324,109 @@ pub fn layout_table(
         } else {
             0.0
         };
-        let first_safe_offset = break_info.break_offsets[row_index]
-            .iter()
-            .copied()
-            .find(|offset| *offset > consumed);
-        let minimum_body_slice = first_safe_offset
-            .map(|offset| offset - consumed)
-            .unwrap_or(row_remaining_at_start);
+        // Without cantSplit, a first body row whose paragraph rules leave no break
+        // below the header band starts with the band at its first line, as main does.
+        let first_body_kept_oversized = is_first_fragment
+            && header_row_count > 0
+            && header_row_count < rows.len()
+            && !block
+                .rows
+                .get(header_row_count)
+                .is_some_and(|row| row.cant_split.unwrap_or(false))
+            && breaks.kept_oversized(header_row_count, 0.0, body_capacity);
+        let header_budget = available_height - pending_spacing - header_rows_height;
+        let cell_header_slice = if is_first_fragment && header_row_count > 0 && !limited_by_float {
+            breaks
+                .cell_slice(
+                    header_row_count,
+                    0.0,
+                    None,
+                    header_budget,
+                    snap_row_break(&breaks.kept, header_row_count, 0.0, header_budget),
+                    false,
+                    body_capacity,
+                )
+                .filter(|slice| {
+                    !slice.starved
+                        || breaks
+                            .every_cell_start(header_row_count, 0.0, body_capacity)
+                            .is_none()
+                })
+        } else {
+            None
+        };
+        let shared_start_height = if first_body_kept_oversized {
+            header_rows_height + breaks.fresh_slice(header_row_count, 0.0, body_capacity)
+        } else if first_fragment_height <= column_capacity {
+            first_fragment_height
+        } else {
+            header_rows_height
+        };
+        // The per-cell start only replaces a shared start that would move the table,
+        // and still holds every keep-with-next chain the row loop would hold.
+        let header_start_height = match cell_header_slice {
+            Some(slice) if shared_start_height + pending_spacing > available_height => {
+                let tops: Vec<_> = slice.clips.iter().map(|clip| clip.top).collect();
+                let mut height = header_rows_height
+                    + breaks.cell_fresh_slice(header_row_count, &tops, body_capacity);
+                let mut top = 0.0;
+                for (index, chain) in keep_chains.iter().enumerate().take(header_row_count + 1) {
+                    let room = if index >= header_row_count {
+                        body_capacity
+                    } else {
+                        column_capacity
+                    };
+                    let keep = row_keep_height(
+                        *chain,
+                        block,
+                        measure,
+                        &breaks,
+                        room,
+                        header_row_count,
+                        body_capacity,
+                        limited_by_float,
+                    );
+                    if keep > 0.0 && keep <= room {
+                        height = height.max(top + keep);
+                    }
+                    top += rows[index].height;
+                }
+                height
+            }
+            _ => shared_start_height,
+        };
+        if is_first_fragment
+            && header_row_count > 0
+            && (header_start_height <= column_capacity || first_body_kept_oversized)
+            && header_start_height + pending_spacing > available_height
+            && paginator.state(state_idx).pen_y != paginator.state(state_idx).content_top
+            && fit_moved_cursor(paginator, header_start_height + pending_spacing)
+        {
+            continue;
+        }
+        let mut minimum_body_slice = cell_tops.as_deref().map_or_else(
+            || breaks.fresh_slice(row_index, consumed, body_capacity),
+            |tops| breaks.cell_fresh_slice(row_index, tops, body_capacity),
+        );
+        if !is_first_fragment
+            && cell_tops.is_none()
+            && !limited_by_float
+            && header_row_count > 0
+            && let Some(slice) = breaks.cell_slice(
+                row_index,
+                consumed,
+                None,
+                header_budget,
+                snap_row_break(&breaks.kept, row_index, consumed, header_budget),
+                false,
+                body_capacity,
+            )
+        {
+            let tops: Vec<_> = slice.clips.iter().map(|clip| clip.top).collect();
+            minimum_body_slice = breaks.cell_fresh_slice(row_index, &tops, body_capacity);
+        }
         let header_overhead = if !is_first_fragment
+            && row_index >= header_row_count
             && header_row_count > 0
             && header_rows_height + minimum_body_slice.max(0.0) <= column_capacity
         {
@@ -172,7 +434,7 @@ pub fn layout_table(
         } else {
             0.0
         };
-        let available_height = paginator.get_available_height() - pending_spacing - header_overhead;
+        let available_height = available_height - pending_spacing - header_overhead;
 
         let start_row = row_index;
         let clip_top = consumed;
@@ -185,19 +447,68 @@ pub fn layout_table(
         let mut row_end = row_index; // exclusive
         let mut clip_bottom: Option<f64> = None;
         let mut last_row_partial = false;
+        let mut cell_clips = Vec::new();
+        let mut next_cell_tops = None;
 
         while cur < rows.len() {
+            // a fresh column repeats the header band above a first fragment's body
+            let chain_room = if is_first_fragment && cur >= header_row_count {
+                body_capacity
+            } else {
+                column_capacity - header_overhead
+            };
+            let keep_height = row_keep_height(
+                keep_chains[cur],
+                block,
+                measure,
+                &breaks,
+                chain_room,
+                if is_first_fragment {
+                    header_row_count
+                } else {
+                    0
+                },
+                if is_first_fragment {
+                    body_capacity
+                } else {
+                    chain_room
+                },
+                limited_by_float,
+            );
+            if (cur > start_row || consumed == 0.0)
+                && keep_height > available_height - used
+                && keep_height <= chain_room
+            {
+                if cur > start_row {
+                    break;
+                }
+                if paginator.state(state_idx).pen_y != paginator.state(state_idx).content_top
+                    && fit_moved_cursor(paginator, keep_height + header_overhead + pending_spacing)
+                {
+                    continue 'rows;
+                }
+            }
             let row_height = rows[cur].height;
             let start_off = if cur == start_row {
                 first_row_offset
             } else {
                 0.0
             };
-            let remaining = row_height - start_off;
+            let active_tops = if cur == start_row {
+                cell_tops.as_deref()
+            } else {
+                None
+            };
+            let remaining = active_tops.map_or(row_height - start_off, |tops| {
+                breaks.cell_remaining(cur, tops)
+            });
 
             if used + remaining <= available_height {
                 // The rest of this row fits whole.
                 used += remaining;
+                if let Some(tops) = active_tops {
+                    cell_clips.extend(breaks.cell_remainder(cur, tops).clips);
+                }
                 cur += 1;
                 row_end = cur;
                 continue;
@@ -207,33 +518,167 @@ pub fn layout_table(
             // at the deepest whole line that fits (Word's "allow row to break across
             // pages") — this keeps the row's other columns on the page where they
             // start and flows a tall vertically-merged cell across the boundary.
-            // `w:cantSplit` rows (§17.4.6) never break.
+            // `w:cantSplit` rows (§17.4.6) only break when oversized. Exact-height
+            // rows need no branch here: their break geometry holds only the full-height
+            // boundary, so `snap_row_break` already returns 0 for a partial fit.
             let budget = available_height - used;
             let cant_split = block
                 .rows
                 .get(cur)
                 .and_then(|r| r.cant_split)
                 .unwrap_or(false);
+            let row_capacity = if is_first_fragment && cur >= header_row_count {
+                body_capacity
+            } else {
+                column_capacity - header_overhead
+            };
             let unavoidable_cant_split =
                 cant_split && remaining > column_capacity - header_overhead;
+            let row_breaks = if cant_split {
+                breaks.lines()
+            } else {
+                &breaks.kept
+            };
             let placeable = if cant_split && !unavoidable_cant_split {
                 0.0
             } else {
-                snap_row_break(&break_info, cur, start_off, budget)
+                snap_row_break(row_breaks, cur, start_off, budget)
             };
-            if placeable > 0.0 {
+            let header_above_unavoidable_split = start_row == 0
+                && clip_top == 0.0
+                && cur == header_row_count
+                && !cant_split
+                && breaks.kept_oversized(cur, 0.0, row_capacity);
+            let cell_slice = if active_tops.is_none() && limited_by_float {
+                None
+            } else {
+                breaks.cell_slice(
+                    cur,
+                    start_off,
+                    active_tops,
+                    budget,
+                    placeable,
+                    false,
+                    row_capacity,
+                )
+            };
+            // A row moves whole rather than leave a cell with content no line on
+            // the page, where a whole column lets every cell start.
+            let cell_slice = match cell_slice {
+                Some(slice)
+                    if slice.starved
+                        && breaks
+                            .every_cell_start(cur, start_off, row_capacity)
+                            .is_some() =>
+                {
+                    if placeable > 0.0 || (row_end > start_row && !header_above_unavoidable_split) {
+                        None
+                    } else if row_end == start_row
+                        && paginator.state(state_idx).pen_y
+                            != paginator.state(state_idx).content_top
+                    {
+                        paginator.advance_for_overflow();
+                        continue 'rows;
+                    } else {
+                        Some(slice)
+                    }
+                }
+                slice => slice,
+            };
+            if let Some(slice) = cell_slice {
+                used += slice.height;
+                row_end = cur + 1;
+                if !slice.complete {
+                    clip_bottom = Some(start_off + slice.height);
+                    last_row_partial = true;
+                    next_cell_tops = Some(slice.clips.iter().map(|clip| clip.bottom).collect());
+                }
+                cell_clips.extend(slice.clips);
+                if slice.complete {
+                    cur += 1;
+                    continue;
+                }
+            } else if let Some(tops) = active_tops {
+                if row_end > start_row {
+                    break;
+                }
+                let minimum = breaks.cell_fresh_slice(cur, tops, row_capacity);
+                if minimum <= row_capacity && minimum > budget {
+                    if !paginator.has_float_bands() {
+                        paginator.advance_for_overflow();
+                        continue 'rows;
+                    }
+                    if fit_moved_cursor(paginator, minimum + header_overhead + pending_spacing) {
+                        continue 'rows;
+                    }
+                }
+                let slice = breaks
+                    .cell_slice(
+                        cur,
+                        start_off,
+                        active_tops,
+                        budget,
+                        placeable,
+                        true,
+                        row_capacity,
+                    )
+                    .unwrap_or_else(|| breaks.cell_remainder(cur, tops));
+                used += slice.height;
+                row_end = cur + 1;
+                if !slice.complete {
+                    clip_bottom = Some(start_off + slice.height);
+                    last_row_partial = true;
+                    next_cell_tops = Some(slice.clips.iter().map(|clip| clip.bottom).collect());
+                }
+                cell_clips.extend(slice.clips);
+            } else if placeable > 0.0 {
                 // Break this row mid-content at a whole-line boundary.
                 used += placeable;
                 row_end = cur + 1;
                 clip_bottom = Some(start_off + placeable);
                 last_row_partial = true;
-            } else if row_end > start_row {
-                // Nothing of this row fits, but earlier rows did — end before it.
-            } else {
-                // Fresh fragment and not even one line fits: place the rest of the row
-                // with overflow rather than loop forever (oversized-row guard).
-                used += remaining;
+            } else if row_end > start_row && !header_above_unavoidable_split {
+                // Nothing of this row fits, but earlier rows did — end before it,
+                // unless they are the header band above an unavoidable split.
+            } else if !cant_split
+                && !block.rows.get(cur).is_some_and(|row| row.is_exact_height())
+                && snap_row_break(&breaks.kept, cur, start_off, row_capacity) > 0.0
+            {
+                // The paragraph rules allow a break that a whole column holds:
+                // start the fragment below a float band, else in the next column.
+                let slice = minimum_row_slice(block, measure, &breaks.kept, cur, start_off);
+                if !paginator.has_float_bands() {
+                    paginator.advance_for_overflow();
+                    continue 'rows;
+                }
+                if fit_moved_cursor(paginator, slice + header_overhead + pending_spacing) {
+                    continue 'rows;
+                }
+                // `ensure_fits` grants the slice at the cursor where rounding
+                // left it out of the budget: place it here.
+                used += slice.min(remaining);
                 row_end = cur + 1;
+                if slice < remaining {
+                    clip_bottom = Some(start_off + slice);
+                    last_row_partial = true;
+                }
+            } else {
+                // Paragraph rules that leave no break in a column yield to whole lines.
+                // If no line fits, overflow instead of looping.
+                let line_break = if cant_split && !unavoidable_cant_split {
+                    0.0
+                } else {
+                    snap_row_break(breaks.lines(), cur, start_off, budget)
+                };
+                if line_break > 0.0 {
+                    used += line_break;
+                    row_end = cur + 1;
+                    clip_bottom = Some(start_off + line_break);
+                    last_row_partial = true;
+                } else if row_end == start_row {
+                    used += remaining;
+                    row_end = cur + 1;
+                }
             }
             break;
         }
@@ -247,11 +692,21 @@ pub fn layout_table(
             desired_x += (paginator.column_width() - measure.total_width) / 2.0;
         } else if block.justification.as_deref() == Some("right") {
             desired_x += paginator.column_width() - measure.total_width;
-        } else if let Some(indent) = block.indent
-            && indent != 0.0
-            && !indent.is_nan()
-        {
-            desired_x += indent;
+        } else {
+            let indent = block
+                .indent
+                .filter(|value| value.is_finite())
+                .unwrap_or(0.0);
+            let shift = table_compat_leading_shift(
+                block.justification.as_deref(),
+                block.compatibility_mode,
+                block.cell_margin_left,
+            );
+            desired_x += indent - shift;
+        }
+
+        if let Some(x) = floating_x {
+            desired_x = x;
         }
 
         let fragment = Fragment::Table(TableFragment {
@@ -264,16 +719,13 @@ pub fn layout_table(
             row_end,
             pm_start: block.pm_start,
             pm_end: block.pm_end,
-            is_floating: None,
+            is_floating: floating_x.map(|_| true),
             carried_from_prev: Some(!is_first_fragment),
             carried_to_next: Some(!is_last_fragment),
-            header_row_count: if !is_first_fragment && header_row_count > 0 {
-                Some(header_row_count as f64)
-            } else {
-                None
-            },
+            header_row_count: (header_overhead > 0.0).then_some(header_row_count as f64),
             clip_top: if clip_top > 0.0 { Some(clip_top) } else { None },
             clip_bottom,
+            cell_clips: (!cell_clips.is_empty()).then_some(cell_clips),
         });
 
         paginator.add_fragment(fragment, fragment_height, 0.0, 0.0);
@@ -289,27 +741,38 @@ pub fn layout_table(
         if last_row_partial {
             row_index = row_end - 1;
             consumed = clip_bottom.unwrap_or(0.0);
+            cell_tops = next_cell_tops;
         } else {
             row_index = row_end;
             consumed = 0.0;
+            cell_tops = None;
         }
 
         // If content remains, advance to the next column/page so the next
         // iteration sees fresh space (the current page is exhausted).
         if row_index < rows.len() {
-            let next_offset = break_info.break_offsets[row_index]
-                .iter()
-                .copied()
-                .find(|offset| *offset > consumed);
-            let next_slice = next_offset
-                .map(|offset| offset - consumed)
-                .unwrap_or(rows[row_index].height - consumed);
-            let next_needed =
-                if header_row_count > 0 && header_rows_height + next_slice <= column_capacity {
-                    header_rows_height
-                } else {
-                    0.0
-                } + next_slice;
+            if cell_tops.is_some() {
+                paginator.advance_for_overflow();
+                continue;
+            }
+            let next_breaks = if block
+                .rows
+                .get(row_index)
+                .is_some_and(|row| row.cant_split.unwrap_or(false))
+            {
+                breaks.lines()
+            } else {
+                &breaks.kept
+            };
+            let next_slice = minimum_row_slice(block, measure, next_breaks, row_index, consumed);
+            let next_needed = if row_index >= header_row_count
+                && header_row_count > 0
+                && header_rows_height + next_slice <= column_capacity
+            {
+                header_rows_height
+            } else {
+                0.0
+            } + next_slice;
             paginator.ensure_fits(next_needed);
         }
     }
@@ -326,12 +789,15 @@ pub fn layout_table(
 /// `outside` flip with page parity. Only when the wrap gutters on both sides of
 /// the table fall below the minimum wrap segment (24px) does the pen advance
 /// past the table plus its `w:bottomFromText` distance, since no line could
-/// wrap beside it.
+/// wrap beside it. In a single column, text-anchored tables that cross the
+/// bottom boundary use row fragmentation and retain their X position; text
+/// after a side-wrapped one resumes beside its last fragment.
+/// Page-relative full-width tables advance when inline collisions cannot reflow.
 pub fn layout_floating_table(
     block: &TableBlock,
     measure: &TableExtent,
     paginator: &mut Paginator,
-    _content_width: f64,
+    content_width: f64,
 ) -> Result<(), LayoutError> {
     if block.rows.is_empty() || measure.rows.is_empty() {
         return Err(unsupported("floating table without measurable rows"));
@@ -359,6 +825,7 @@ pub fn layout_floating_table(
     let state_idx = paginator.get_current();
     let state = paginator.state(state_idx);
     let page = &paginator.pages[state.page_index];
+    let margins = page.body_anchor_margins.as_ref().unwrap_or(&page.margins);
     let column_x = paginator.get_column_x(state.column_index);
     let column_width = paginator.column_width();
     let horizontal = floating.horz_anchor.as_deref().unwrap_or("margin");
@@ -366,22 +833,22 @@ pub fn layout_floating_table(
     let h_start = match horizontal {
         "page" => 0.0,
         "text" => column_x,
-        _ => page.margins.left,
+        _ => margins.left,
     };
     let h_end = match horizontal {
         "page" => page.size.w,
         "text" => column_x + column_width,
-        _ => page.size.w - page.margins.right,
+        _ => page.size.w - margins.right,
     };
     let v_start = match vertical {
         "page" => 0.0,
         "text" => state.pen_y,
-        _ => page.margins.top,
+        _ => margins.top,
     };
     let v_end = if vertical == "page" {
         page.size.h
     } else {
-        page.size.h - page.margins.bottom
+        page.size.h - margins.bottom
     };
     let inside_is_start = page.number % 2 == 1;
 
@@ -421,6 +888,77 @@ pub fn layout_floating_table(
         };
     }
 
+    let finite = |value: Option<f64>| value.filter(|v| v.is_finite()).unwrap_or(0.0);
+    let exclusion_left = x - finite(floating.left_from_text);
+    let exclusion_right = x + measure.total_width + finite(floating.right_from_text);
+    let left_space = exclusion_left - column_x;
+    let right_space = column_x + column_width - exclusion_right;
+    let full_width = left_space < 24.0 && right_space < 24.0;
+    let bottom = y + measure.total_height;
+    if full_width
+        && vertical == "page"
+        && floating.tblp_y.is_some_and(f64::is_finite)
+        && (content_width - column_width).abs() < f64::EPSILON
+        && y >= state.content_top
+        && bottom <= state.content_limit
+        && page.fragments.iter().any(|fragment| {
+            let Fragment::Table(previous) = fragment else {
+                return false;
+            };
+            previous.is_floating != Some(true)
+                && previous.carried_from_prev == Some(false)
+                && previous.carried_to_next == Some(false)
+                && previous.row_start == 0
+                && previous.clip_top.is_none()
+                && previous.clip_bottom.is_none()
+                && x < previous.x + previous.width
+                && x + measure.total_width > previous.x
+                && y < previous.y + previous.height
+                && bottom > previous.y
+                && bottom + finite(floating.bottom_from_text).max(0.0) + previous.height
+                    > state.content_limit
+        })
+    {
+        paginator.force_page_break();
+        let next_content_width = paginator.get_content_width();
+        return layout_floating_table(block, measure, paginator, next_content_width);
+    }
+    if (content_width - column_width).abs() < f64::EPSILON
+        && vertical == "text"
+        && !matches!(floating.tblp_x_spec.as_deref(), Some("inside" | "outside"))
+        && y >= state.pen_y
+        && y + measure.total_height > state.content_limit
+    {
+        let pen_y = state.pen_y;
+        let spacing = paginator.spacing(state_idx);
+        if !full_width {
+            paginator.set_spacing(state_idx, (0.0, spacing.1));
+        }
+        paginator.set_pen_y(state_idx, y);
+        layout_table_with_position(block, measure, paginator, Some(x))?;
+        let last_state = paginator.get_current();
+        let resume = if full_width {
+            paginator.state(last_state).pen_y + finite(floating.bottom_from_text).max(0.0)
+        } else if last_state == state_idx {
+            paginator.set_spacing(state_idx, spacing);
+            pen_y
+        } else {
+            paginator.set_spacing(last_state, (0.0, f64::INFINITY));
+            let last = paginator.state(last_state);
+            paginator.pages[last.page_index]
+                .fragments
+                .iter()
+                .rev()
+                .find_map(|fragment| match fragment {
+                    Fragment::Table(table) if table.block_id == block.id => Some(table.y),
+                    _ => None,
+                })
+                .unwrap_or(last.content_top)
+        };
+        paginator.set_pen_y(last_state, resume);
+        return Ok(());
+    }
+
     let fragment = Fragment::Table(TableFragment {
         block_id: block.id.clone(),
         x,
@@ -437,17 +975,29 @@ pub fn layout_floating_table(
         header_row_count: None,
         clip_top: None,
         clip_bottom: None,
+        cell_clips: None,
     });
     paginator.push_fragment_direct(fragment);
 
-    let finite = |value: Option<f64>| value.filter(|v| v.is_finite()).unwrap_or(0.0);
-    let exclusion_left = x - finite(floating.left_from_text);
-    let exclusion_right = x + measure.total_width + finite(floating.right_from_text);
-    let left_space = exclusion_left - column_x;
-    let right_space = column_x + column_width - exclusion_right;
-    if left_space < 24.0 && right_space < 24.0 {
-        let advance_to = y + measure.total_height + finite(floating.bottom_from_text);
-        if advance_to > paginator.state(state_idx).pen_y {
+    if full_width {
+        let band_bottom = y + measure.total_height + finite(floating.bottom_from_text);
+        let current = paginator.state(state_idx);
+        let reflowable = vertical == "page"
+            && floating.tblp_y.is_some_and(f64::is_finite)
+            && y >= current.content_top
+            && band_bottom <= current.content_limit;
+        if reflowable
+            && paginator
+                .clear_float_band(state_idx, y, band_bottom)
+                .is_some()
+        {
+            return Ok(());
+        }
+        // Charges the band to the page even when it opens above the pen; flow
+        // already emitted into it keeps its place.
+        let pen_y = paginator.state(state_idx).pen_y;
+        let advance_to = pen_y.max(y) + measure.total_height + finite(floating.bottom_from_text);
+        if advance_to > pen_y {
             paginator.set_pen_y(state_idx, advance_to);
         }
     }

@@ -1,0 +1,253 @@
+{
+  "auto-default": [
+    {
+      "index": 0,
+      "height": 792.0,
+      "lines": [
+        {
+          "y": 81.5,
+          "text": "ANCHOR"
+        },
+        {
+          "y": 107.5,
+          "text": "AUTO BEFORE"
+        },
+        {
+          "y": 119.5,
+          "text": "AUTO AFTER"
+        },
+        {
+          "y": 145.5,
+          "text": "AFTER TARGET"
+        },
+        {
+          "y": 171.5,
+          "text": "AUTO BOTH"
+        },
+        {
+          "y": 197.6,
+          "text": "BOTH TARGET"
+        }
+      ]
+    }
+  ],
+  "auto-enabled": [
+    {
+      "index": 0,
+      "height": 792.0,
+      "lines": [
+        {
+          "y": 81.5,
+          "text": "ANCHOR"
+        },
+        {
+          "y": 98.5,
+          "text": "AUTO BEFORE"
+        },
+        {
+          "y": 110.5,
+          "text": "AUTO AFTER"
+        },
+        {
+          "y": 132.5,
+          "text": "AFTER TARGET"
+        },
+        {
+          "y": 149.5,
+          "text": "AUTO BOTH"
+        },
+        {
+          "y": 171.5,
+          "text": "BOTH TARGET"
+        }
+      ]
+    }
+  ],
+  "auto-without-fallback": [
+    {
+      "index": 0,
+      "height": 792.0,
+      "lines": [
+        {
+          "y": 81.5,
+          "text": "ANCHOR"
+        },
+        {
+          "y": 93.5,
+          "text": "BEFORE ONLY"
+        },
+        {
+          "y": 105.5,
+          "text": "AFTER ONLY"
+        },
+        {
+          "y": 117.5,
+          "text": "AFTER TARGET"
+        },
+        {
+          "y": 129.5,
+          "text": "BOTH"
+        },
+        {
+          "y": 141.5,
+          "text": "BOTH TARGET"
+        }
+      ]
+    }
+  ],
+  "break-default": [
+    {
+      "index": 0,
+      "height": 792.0,
+      "lines": [
+        {
+          "y": 81.5,
+          "text": "FILLER"
+        }
+      ]
+    },
+    {
+      "index": 1,
+      "height": 792.0,
+      "lines": [
+        {
+          "y": 105.5,
+          "text": "HARD TARGET"
+        }
+      ]
+    },
+    {
+      "index": 2,
+      "height": 792.0,
+      "lines": [
+        {
+          "y": 105.5,
+          "text": "PROPERTY TARGET"
+        }
+      ]
+    },
+    {
+      "index": 3,
+      "height": 792.0,
+      "lines": [
+        {
+          "y": 81.5,
+          "text": "STANDALONE TARGET"
+        }
+      ]
+    }
+  ],
+  "break-enabled": [
+    {
+      "index": 0,
+      "height": 792.0,
+      "lines": [
+        {
+          "y": 81.5,
+          "text": "FILLER"
+        }
+      ]
+    },
+    {
+      "index": 1,
+      "height": 792.0,
+      "lines": [
+        {
+          "y": 81.5,
+          "text": "HARD TARGET"
+        }
+      ]
+    },
+    {
+      "index": 2,
+      "height": 792.0,
+      "lines": [
+        {
+          "y": 105.5,
+          "text": "PROPERTY TARGET"
+        }
+      ]
+    },
+    {
+      "index": 3,
+      "height": 792.0,
+      "lines": [
+        {
+          "y": 81.5,
+          "text": "STANDALONE TARGET"
+        }
+      ]
+    }
+  ],
+  "table-default": [
+    {
+      "index": 0,
+      "height": 792.0,
+      "lines": [
+        {
+          "y": 93.5,
+          "text": "BODY 1"
+        },
+        {
+          "y": 105.5,
+          "text": "BODY 2"
+        },
+        {
+          "y": 117.5,
+          "text": "CELL 1"
+        },
+        {
+          "y": 129.5,
+          "text": "CELL 2"
+        },
+        {
+          "y": 141.5,
+          "text": "CELL 3"
+        },
+        {
+          "y": 153.5,
+          "text": "TABLE END"
+        }
+      ]
+    }
+  ],
+  "table-enabled": [
+    {
+      "index": 0,
+      "height": 792.0,
+      "lines": [
+        {
+          "y": 93.5,
+          "text": "BODY 1"
+        },
+        {
+          "y": 105.5,
+          "text": "BODY 2"
+        },
+        {
+          "y": 117.5,
+          "text": "CELL 1"
+        },
+        {
+          "y": 147.5,
+          "text": "CELL 2"
+        },
+        {
+          "y": 177.5,
+          "text": "CELL 3"
+        },
+        {
+          "y": 189.5,
+          "text": "TABLE END"
+        }
+      ]
+    }
+  ],
+  "_word": {
+    "version": "16.113.2",
+    "units": "points",
+    "line_spacing": 12,
+    "font": "Arial",
+    "font_size": 12
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "strict": true,
+    "ignoreDeprecations": "6.0",
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "declaration": true,
+    "declarationMap": true,
+    "types": ["bun", "node"]
+  },
+  "include": [
+    "commands/spec.ts",
+    "commands/spec.types.test.ts",
+    "commands/host.query.test.ts",
+    "commands/session.read.test.ts",
+    "commands/contract.test.ts",
+    "commands/replay.equality.test.ts",
+    "testing/contract.ts",
+    "testing/frozen.ts",
+    "testing/referenceFormat.ts"
+  ]
+}

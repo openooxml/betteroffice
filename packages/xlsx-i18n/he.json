@@ -12,6 +12,51 @@
     "undo": null,
     "redo": null
   },
+  "commands": {
+    "fontSizeStep": null,
+    "numberFormat": null,
+    "decimalPlaces": null,
+    "borderStyle": null,
+    "moreTools": null,
+    "customFontSize": null,
+    "fontSizePoints": null,
+    "customZoom": null,
+    "zoomPercent": null,
+    "apply": null,
+    "cancel": null,
+    "reasons": {
+      "editorUnavailable": null,
+      "documentLoading": null,
+      "noDocument": null,
+      "readOnly": null,
+      "cellSelectionRequired": null,
+      "unsupportedSelection": null,
+      "multipleCellsRequired": null,
+      "multipleColumnsRequired": null,
+      "multipleRowsRequired": null,
+      "noMergedCells": null,
+      "collaborationUnsupported": null,
+      "nothingToUndo": null,
+      "nothingToRedo": null,
+      "pngUnavailable": null,
+      "noProposals": null,
+      "proposalNotFound": null,
+      "hostDisabled": null,
+      "unsupportedCommand": null,
+      "invalidArguments": null,
+      "inputFailed": null,
+      "documentReplaced": null,
+      "targetChanged": null,
+      "gestureActive": null,
+      "proposalStale": null,
+      "renderFailed": null,
+      "commandFailed": null,
+      "permissionDenied": "היישום המארח לא התיר לתוסף זה להשתמש בפקודה זו.",
+      "unsupportedPolicy": "תוספים עדיין לא יכולים להריץ פקודה זו. השתמש במקום זאת באצוות עריכה.",
+      "pluginUnavailable": "התוסף אינו פעיל עוד.",
+      "aborted": "פעולת התוסף בוטלה לפני שהפקודה רצה."
+    }
+  },
   "editor": {
     "appLabel": null,
     "demoCellText": null,
@@ -36,5 +81,11 @@
     "cellLabelSelected": null,
     "emptyCellLabel": null,
     "emptyCellLabelSelected": null
+  },
+  "plugins": {
+    "toolbarGroup": "תוספים",
+    "panelTabs": "חלוניות תוספים",
+    "collapsePanel": "כווץ את {title}",
+    "expandPanel": "הרחב את {title}"
   }
 }

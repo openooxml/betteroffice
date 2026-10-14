@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef } from 'react';
 import {
+  effectiveZoom,
   resolveDisplayPageClientRect,
   type DisplayListQueries,
 } from '@betteroffice/docx/layout/render';
@@ -31,6 +32,7 @@ export function useFloatingCommentBtn({
   editorContentRef,
   isAddingCommentRef,
   setFloatingCommentBtn,
+  partEditOpen,
   readOnly,
   isLoading,
   zoom,
@@ -42,6 +44,7 @@ export function useFloatingCommentBtn({
   editorContentRef: React.RefObject<HTMLDivElement | null>;
   isAddingCommentRef: React.RefObject<boolean>;
   setFloatingCommentBtn: React.Dispatch<React.SetStateAction<{ top: number; left: number } | null>>;
+  partEditOpen: boolean;
   readOnly: boolean;
   isLoading: boolean;
   zoom: number;
@@ -52,9 +55,15 @@ export function useFloatingCommentBtn({
 }) {
   const readOnlyForFloatingBtnRef = useRef(false);
   readOnlyForFloatingBtnRef.current = readOnly;
+  const partEditOpenRef = useRef(false);
+  partEditOpenRef.current = partEditOpen;
 
   const recomputeFloatingCommentBtn = useCallback(() => {
-    if (isAddingCommentRef.current || readOnlyForFloatingBtnRef.current) {
+    if (
+      partEditOpenRef.current ||
+      isAddingCommentRef.current ||
+      readOnlyForFloatingBtnRef.current
+    ) {
       setFloatingCommentBtn(null);
       return;
     }
@@ -77,9 +86,10 @@ export function useFloatingCommentBtn({
     const size = queries.pageSize(rect.pageIndex);
     if (!pageRect || !size) return;
     const parentRect = parentEl.getBoundingClientRect();
+    const parentZoom = effectiveZoom(parentEl);
     const scaleY = size.height > 0 ? pageRect.height / size.height : 1;
-    const top = pageRect.top - parentRect.top + rect.y * scaleY;
-    const left = pageRect.right - parentRect.left;
+    const top = (pageRect.top - parentRect.top + rect.y * scaleY) / parentZoom;
+    const left = (pageRect.right - parentRect.left) / parentZoom;
     setFloatingCommentBtn({ top, left });
   }, [
     pagedEditorRef,
@@ -111,6 +121,10 @@ export function useFloatingCommentBtn({
   useEffect(() => {
     recomputeFloatingCommentBtn();
   }, [zoom, recomputeFloatingCommentBtn]);
+
+  useEffect(() => {
+    if (partEditOpen) setFloatingCommentBtn(null);
+  }, [partEditOpen, setFloatingCommentBtn]);
 
   return { recomputeFloatingCommentBtn };
 }

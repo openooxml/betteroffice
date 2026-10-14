@@ -34,6 +34,8 @@ export interface DisplayPage {
   /** Formatted PAGE label (for example, "vii"). */
   pageLabel?: string;
   primitives: DisplayPrimitive[]; // body content, paint order
+  /** Leading primitives painted beneath the header and footer. */
+  watermarkPrimitiveCount?: number;
   /** Resolved page background. Undefined = transparent/host white. */
   background?: string;
   pageBorders?: PageBorderPrimitive[];
@@ -41,6 +43,12 @@ export interface DisplayPage {
   footer?: HfRegion;
   /** Footnote/endnote regions in page coordinates. Undefined = none. */
   noteAreas?: NoteRegion[];
+  /** Geometry only: the page's content is built when the host asks for it. */
+  unbuilt?: boolean;
+  /** For an unbuilt page, the lowest and highest body position its layout places. */
+  positionSpan?: [number, number];
+  /** For an unbuilt page, the relationship ids of the header and footer parts its build paints. */
+  hfParts?: { header?: string; footer?: string };
 }
 
 /** A page-local rectangle emitted as display-list metadata. */
@@ -197,6 +205,12 @@ export interface DisplayClipGroupMetadata {
   opacity?: number;
 }
 
+/** Horizontal paint slot for text laid out with guessed metrics. */
+export interface DisplayPaintClip {
+  x: number;
+  w: number;
+}
+
 export interface StructuralRevision {
   scope: 'pmark' | 'table' | 'row' | 'cell';
   author: string;
@@ -337,6 +351,8 @@ export interface DocAttrs {
   clipGroup?: DisplayClipGroupMetadata;
   /** Enclosing table-fragment identity and accessibility semantics. */
   table?: DisplayTableMetadata;
+  /** Inline native-shape atom; true only for paragraph-inline shapes. */
+  inlineShapeAtom?: boolean;
 }
 
 export interface TextRunPrimitive extends DocAttrs {
@@ -345,6 +361,7 @@ export interface TextRunPrimitive extends DocAttrs {
   x: number; // pen origin
   baselineY: number;
   width: number; // measured advance of the whole run
+  paintClip?: DisplayPaintClip;
   font: string;
   color: string;
   letterSpacing?: number;
@@ -412,6 +429,7 @@ export interface GlyphRunPrimitive extends DocAttrs {
   color: string; // "#rrggbb"
   text: string; // source text — the a11y mirror renders this as a real text node
   glyphs: PositionedGlyph[];
+  paintClip?: DisplayPaintClip;
   // resolved CSS font shorthand of the face this run was shaped with (same
   // recipe as TextRunPrimitive.font). The canvas backend's fillText safety net
   // uses it when glyph outlines are unavailable, so the fallback keeps the
@@ -524,6 +542,7 @@ export interface PageBorderPrimitive {
 
 export interface ImagePrimitive extends DocAttrs {
   kind: 'image';
+  shapeType?: string;
   relId: string;
   x: number;
   y: number;
