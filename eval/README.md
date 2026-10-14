@@ -181,7 +181,7 @@ preservation, and targeted variants check tab selection, notes parts, slide
 shape elements, paragraph end properties, fields and empty formatted runs,
 cell, row, column and named style formats, and for DOCX tracked-change markup,
 run splits and formatting, row placement, style resolution, reordered content
-and package parts (61 accepted, 30 untouched rejected, 145 corrupted rejected).
+and package parts (62 accepted, 30 untouched rejected, 145 corrupted rejected).
 [`formats/test-runner.py`](formats/test-runner.py) tests the runner itself with
 a stand-in agent.
 
