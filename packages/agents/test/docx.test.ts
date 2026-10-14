@@ -227,3 +227,27 @@ test('delete_table_row refuses the last row without changing the document', asyn
   expect(doc.list().version).toBe(version);
   expect(await paragraphs(await doc.export())).toEqual(baseline);
 });
+
+test('outline lists table cells by numeric row and column before and after insertion', async () => {
+  const tableRows = Array.from({ length: 11 }, (_, row) =>
+    Array.from({ length: 11 }, (_, column) => tableCell(`Row ${row + 1} Cell ${column + 1}`)).join(''));
+  const doc = await open(await tableFixture(tableRows));
+  const expected = Array.from({ length: 11 }, (_, row) =>
+    Array.from({ length: 11 }, (_, column) => `Row ${row + 1} Cell ${column + 1}`)).flat();
+  const table = (document = doc) => {
+    const items: ReturnType<DocxAgentDocument['list']>['items'] = [];
+    const total = document.overview().paragraphs;
+    for (let offset = 0; offset < total; offset += 100) items.push(...document.list({ offset, limit: 100 }).items);
+    return items.filter(item => item.table);
+  };
+  expect(table().map(item => item.text)).toEqual(expected);
+  expect(table().map(item => [item.table!.row, item.table!.column])).toEqual(
+    Array.from({ length: 11 }, (_, row) => Array.from({ length: 11 }, (_, column) => [row + 1, column + 1])).flat());
+  const anchor = table().find(item => item.text === 'Row 2 Cell 1')!;
+  const cells = Array.from({ length: 11 }, (_, column) => `Inserted Cell ${column + 1}`);
+  await doc.edit({ version: doc.list().version, edits: [{ op: 'insert_table_row', row: anchor.ref, position: 'before', cells }] });
+  expected.splice(11, 0, ...cells);
+  expect(table().map(item => item.text)).toEqual(expected);
+  const reopened = await open(await doc.export());
+  expect(table(reopened).map(item => item.text)).toEqual(expected);
+});
