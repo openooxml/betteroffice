@@ -1,4 +1,4 @@
-import { formats, getFormat } from "./formats";
+import { getFormat, listedLiveFormats } from "./formats";
 
 export const MARKDOWN_MEDIA_TYPE = "text/markdown; charset=utf-8";
 
@@ -8,10 +8,10 @@ export const DOCS = "https://docs.betteroffice.dev";
 export const REPO = "https://github.com/openooxml/betteroffice";
 
 const INTRO =
-  "Live demos of the BetterOffice engines. Each editor opens a real file in the browser and runs on native OOXML engines written in Rust and compiled to WebAssembly. Nothing is uploaded; parsing, editing and rendering happen on the page.";
+  "Live demos of the BetterOffice engines. Each demo opens a real file in the browser and runs on native OOXML engines written in Rust and compiled to WebAssembly. Parsing and rendering happen on the page. Edits in shared demo rooms synchronize through the collaboration relay.";
 
 export function indexMarkdown(): string {
-  const list = formats
+  const list = listedLiveFormats
     .map(
       (format) =>
         `- [${format.id.toUpperCase()}](${SITE}/${format.id}) — ${format.kind}. ${format.tagline}`,

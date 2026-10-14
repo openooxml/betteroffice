@@ -28,12 +28,17 @@ export interface ChartTextProperties {
   bold?: boolean;
   italic?: boolean;
   color?: string;
+  spacingPt?: number;
 }
+
+/** A piece of a `c:tx` label: written text, or a field recomputed per point. */
+export type ChartLabelRun = { Text: string } | { Field: string };
 
 /** One `c:dLbl`: an index plus the switches it overrides. */
 export interface ChartPointLabel {
   index?: number;
   text?: string;
+  runs?: ChartLabelRun[];
   labels: ChartDataLabels;
 }
 
@@ -56,7 +61,8 @@ export interface ChartDataLabels {
 export interface ChartSeries {
   name?: string;
   categories: string[];
-  values: number[];
+  /** A blank cell in the sheet travels as `null` and is not plotted. */
+  values: (number | null)[];
   color?: string;
   index?: number;
   order?: number;
@@ -68,9 +74,9 @@ export interface ChartSeries {
   marker?: { symbol?: string; size?: number; color?: string };
   smooth?: boolean;
   /** `c:xVal` of a scatter or bubble series. */
-  xValues?: number[];
+  xValues?: (number | null)[];
   /** `c:bubbleSize` of a bubble series. */
-  bubbleSizes?: number[];
+  bubbleSizes?: (number | null)[];
   dataLabels?: ChartDataLabels;
 }
 
@@ -129,8 +135,10 @@ export interface ChartPlotGroup {
 }
 
 export interface ChartLegend {
-  position?: 'left' | 'right' | 'top' | 'bottom';
+  position?: 'left' | 'right' | 'top' | 'bottom' | 'topRight';
   visible?: boolean;
+  /** `c:overlay`: the legend sits on the plot instead of taking a band of it. */
+  overlay?: boolean;
   /** `c:txPr` on the legend; unset fields inherit from the chart. */
   text?: ChartTextProperties;
 }
@@ -169,4 +177,9 @@ export interface Chart {
   text?: ChartTextProperties;
   /** `c:txPr` on `c:title`. */
   titleText?: ChartTextProperties;
+  /**
+   * The `w:drawing` that places the chart, replayed verbatim on save. Absent
+   * on package-level entries, which no drawing owns.
+   */
+  drawingXml?: string;
 }

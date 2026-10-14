@@ -32,8 +32,7 @@ export interface ParseOptions {
 export async function parseDocx(input: DocxInput, options: ParseOptions = {}): Promise<Document> {
   // The container + parser wasm are external assets; this async entry is where
   // browsers load them (Node/Bun sync-inits from disk on first use instead).
-  await preloadOpcWasm();
-  await preloadParseWasm();
+  await Promise.all([preloadOpcWasm(), preloadParseWasm()]);
   const buffer = input instanceof ArrayBuffer ? input : await toArrayBuffer(input);
   const onProgress = options.onProgress ?? (() => {});
   try {

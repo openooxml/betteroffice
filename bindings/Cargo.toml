@@ -1,5 +1,5 @@
 [workspace]
-members = ["python-*"]
+members = ["*-native", "python-*"]
 resolver = "3"
 
 [profile.release]

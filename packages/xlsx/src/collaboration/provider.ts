@@ -39,9 +39,13 @@ import {
   type CollaborationTransport,
   type CollaborationTransportEvent,
 } from './types';
+import { asyncReplicaFor, type AsyncCollaborationReplica } from './asyncReplica';
 
 const DEFAULT_MAX_PENDING_BYTES = DEFAULT_MAX_FRAME_BYTES;
 const AWARENESS_EXPIRY_INTERVAL_MS = 1000;
+const DOCUMENT_FINGERPRINT_TAG = new TextEncoder().encode(
+  '\0betteroffice-document-fingerprint-v1\0'
+);
 
 function validateLimit(name: string, value: number, allowZero: boolean): number {
   if (!Number.isSafeInteger(value) || value < (allowZero ? 0 : 1)) {
@@ -72,6 +76,16 @@ function requireBytes(value: unknown, operation: string): Uint8Array {
   return value.slice();
 }
 
+function withoutDocumentFingerprint(payload: Uint8Array): Uint8Array {
+  const suffixLength = DOCUMENT_FINGERPRINT_TAG.byteLength + 32;
+  const tagOffset = payload.byteLength - suffixLength;
+  if (tagOffset < 0) return payload;
+  for (let index = 0; index < DOCUMENT_FINGERPRINT_TAG.byteLength; index += 1) {
+    if (payload[tagOffset + index] !== DOCUMENT_FINGERPRINT_TAG[index]) return payload;
+  }
+  return payload.subarray(0, tagOffset);
+}
+
 function unrefTimer(timer: ReturnType<typeof setTimeout> | ReturnType<typeof setInterval>): void {
   const handle = timer as unknown as { unref?: () => void };
   handle.unref?.();
@@ -99,6 +113,10 @@ function encodableCursor(cursor: AwarenessCursor): boolean {
 
 export class CollaborationProvider {
   private readonly replica: CollaborationReplica;
+  private readonly asyncReplica: AsyncCollaborationReplica | undefined;
+  private replicaTail: Promise<void> = Promise.resolve();
+  private replicaBytes = 0;
+  private openEpoch = 0;
   private readonly transport: CollaborationTransport;
   private readonly maxFrameBytes: number;
   private readonly maxMessagesPerFrame: number;
@@ -139,6 +157,7 @@ export class CollaborationProvider {
     options: CollaborationProviderOptions = {}
   ) {
     this.replica = replica;
+    this.asyncReplica = asyncReplicaFor(replica);
     this.transport = transport;
     this.maxFrameBytes = validateLimit(
       'maxFrameBytes',
@@ -256,6 +275,7 @@ export class CollaborationProvider {
     if (!active) return;
 
     this.clearPending();
+    this.resetReplicaQueue();
     this.publishAwareness(null, 'best-effort');
     this.stopAwarenessTimers();
     this.clearAwarenessPeers();
@@ -280,6 +300,7 @@ export class CollaborationProvider {
       this.connectionStatus === 'connecting' ||
       this.connectionStatus === 'connected';
     this.clearPending();
+    this.resetReplicaQueue();
     this.publishAwareness(null, 'best-effort');
     this.stopAwarenessTimers();
     this.clearAwarenessPeers();
@@ -373,6 +394,7 @@ export class CollaborationProvider {
   private failConnection(token: number, error: CollaborationError): void {
     if (!this.isCurrent(token)) return;
 
+    this.resetReplicaQueue();
     this.stopAwarenessTimers();
     this.clearAwarenessPeers();
     this.hasPublishedAwarenessForOpen = false;
@@ -448,6 +470,7 @@ export class CollaborationProvider {
         if (this.isOpen) this.handleMessage(token, event.data);
         break;
       case 'close':
+        this.resetReplicaQueue();
         this.stopAwarenessTimers();
         this.clearAwarenessPeers();
         this.hasPublishedAwarenessForOpen = false;
@@ -475,11 +498,29 @@ export class CollaborationProvider {
 
   private handleOpen(token: number): void {
     if (this.isOpen) return;
+    const connection = ++this.openEpoch;
+    this.replicaTail = Promise.resolve();
+    this.replicaBytes = 0;
     this.isOpen = true;
     this.hasPublishedAwarenessForOpen = false;
     this.clearPending();
     this.setStatus('connected', false);
     if (!this.isCurrent(token) || !this.isOpen) return;
+
+    if (this.asyncReplica) {
+      const opening = Promise.resolve().then(() => {
+        if (!this.isCurrentOpen(token, connection)) return undefined;
+        return this.asyncReplica!.encodeStateVector();
+      });
+      void opening.then((vector) => {
+        if (!this.isCurrentOpen(token, connection)) return;
+        this.sendHandshake(token, requireBytes(vector, 'encodeStateVector'), connection);
+      }).catch((cause) => {
+        if (this.isCurrentOpen(token, connection)) this.failConnection(token,
+          normalizeError('replica', 'Failed to encode replica state vector', cause));
+      });
+      return;
+    }
 
     let stateVector: Uint8Array;
     try {
@@ -492,6 +533,11 @@ export class CollaborationProvider {
       return;
     }
 
+    this.sendHandshake(token, stateVector, connection);
+  }
+
+  private sendHandshake(token: number, stateVector: Uint8Array, connection: number): void {
+    if (!this.isCurrentOpen(token, connection)) return;
     try {
       this.sendFrame(encodeSyncStep1(stateVector, this.maxFrameBytes));
     } catch (cause) {
@@ -501,32 +547,46 @@ export class CollaborationProvider {
       );
       return;
     }
-    if (!this.isCurrent(token) || !this.isOpen) return;
+    if (!this.isCurrentOpen(token, connection)) return;
 
     try {
       this.sendFrame(encodeQueryAwareness(this.maxFrameBytes));
     } catch (cause) {
       this.report(normalizeError('protocol', 'Failed to encode awareness query', cause));
     }
-    if (!this.isCurrent(token) || !this.isOpen) return;
+    if (!this.isCurrentOpen(token, connection)) return;
     if (!this.hasPublishedAwarenessForOpen) this.publishAwareness();
-    if (!this.isCurrent(token) || !this.isOpen) return;
+    if (!this.isCurrentOpen(token, connection)) return;
     this.startAwarenessTimers();
   }
 
-  private handleMessage(token: number, data: Uint8Array): void {
+  private handleMessage(token: number, data: Uint8Array, decoded?: ReturnType<typeof decodeMessages>): void {
     let messages: ReturnType<typeof decodeMessages>;
     try {
       if (!(data instanceof Uint8Array)) throw new TypeError('Frame must be a Uint8Array');
       if (data.byteLength > this.maxFrameBytes) {
         throw new RangeError(`Frame exceeds ${this.maxFrameBytes} bytes`);
       }
-      messages = decodeMessages(data, this.maxFrameBytes, this.maxMessagesPerFrame);
+      messages = decoded ?? decodeMessages(data, this.maxFrameBytes, this.maxMessagesPerFrame);
     } catch (cause) {
       this.failConnection(
         token,
         normalizeError('protocol', 'Invalid collaboration frame', cause)
       );
+      return;
+    }
+
+    if (this.asyncReplica && !decoded) {
+      const replicaMessages: typeof messages = [];
+      for (const message of messages) {
+        if (!this.isCurrent(token) || !this.isOpen) return;
+        if (message.type === 'sync-step-1' || message.type === 'sync-step-2' || message.type === 'update') {
+          replicaMessages.push(message);
+        } else this.handleMessage(token, new Uint8Array(), [message]);
+      }
+      if (replicaMessages.length && this.isCurrent(token) && this.isOpen) {
+        this.enqueueReplicaMessages(token, data.byteLength, replicaMessages);
+      }
       return;
     }
 
@@ -599,11 +659,51 @@ export class CollaborationProvider {
     }
   }
 
+  private isCurrentOpen(token: number, connection: number): boolean {
+    return this.isCurrent(token) && this.isOpen && connection === this.openEpoch;
+  }
+
+  private resetReplicaQueue(): void {
+    this.openEpoch += 1;
+    this.replicaTail = Promise.resolve();
+    this.replicaBytes = 0;
+  }
+
+  private enqueueReplicaMessages(token: number, bytes: number, messages: ReturnType<typeof decodeMessages>): void {
+    if (bytes > this.maxPendingBytes - this.replicaBytes) {
+      this.failConnection(token, new CollaborationError('backpressure', 'Pending replica data exceeds the byte limit'));
+      return;
+    }
+    this.replicaBytes += bytes;
+    const connection = this.openEpoch;
+    const operation = this.replicaTail.then(async () => {
+      for (const message of messages) {
+        if (!this.isCurrentOpen(token, connection)) return;
+        try {
+          if (message.type === 'sync-step-1') {
+            const update = await this.asyncReplica!.encodeStateAsUpdate(withoutDocumentFingerprint(message.stateVector).slice());
+            if (this.isCurrentOpen(token, connection)) this.sendFrame(encodeSyncStep2(requireBytes(update, 'encodeStateAsUpdate'), this.maxFrameBytes));
+          } else if (message.type === 'sync-step-2' || message.type === 'update') {
+            await this.asyncReplica!.applyUpdate(withoutDocumentFingerprint(message.update).slice());
+            if (message.type === 'sync-step-2' && this.isCurrentOpen(token, connection)) this.setStatus('connected', true);
+          }
+        } catch (cause) {
+          if (this.isCurrentOpen(token, connection)) this.failConnection(token,
+            normalizeError('replica', 'Async replica operation failed', cause));
+          return;
+        }
+      }
+    }).finally(() => {
+      if (connection === this.openEpoch) this.replicaBytes -= bytes;
+    });
+    this.replicaTail = operation.catch(() => {});
+  }
+
   private respondToSyncStep1(token: number, remoteStateVector: Uint8Array): void {
     let update: Uint8Array;
     try {
       update = requireBytes(
-        this.replica.encodeStateAsUpdate(remoteStateVector.slice()),
+        this.replica.encodeStateAsUpdate(withoutDocumentFingerprint(remoteStateVector).slice()),
         'encodeStateAsUpdate'
       );
     } catch (cause) {
@@ -623,7 +723,7 @@ export class CollaborationProvider {
 
   private applyRemoteUpdate(token: number, update: Uint8Array): boolean {
     try {
-      this.replica.applyUpdate(update.slice());
+      this.replica.applyUpdate(withoutDocumentFingerprint(update).slice());
       return true;
     } catch (cause) {
       this.failConnection(

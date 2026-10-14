@@ -150,6 +150,8 @@ export type RunFormatting = {
   emphasisMark?: 'dot' | 'comma' | 'circle' | 'underDot';
   /** Hidden run (OOXML w:vanish, §17.3.2.41). Painter skips the run. */
   hidden?: boolean;
+  /** Run-level document-grid opt-out (OOXML w:snapToGrid, §17.3.2). Absent = on. */
+  snapToGrid?: boolean;
   /**
    * Per-run right-to-left direction (OOXML w:rtl, §17.3.2.30). Independent
    * from the paragraph's bidi flag — a single run may flip direction within
@@ -277,6 +279,7 @@ export type ImageRun = {
   width: number;
   height: number;
   alt?: string;
+  shapeType?: string;
   /** CSS transform string (rotation, flip) */
   transform?: string;
   /** Position for floating/anchored images */
@@ -337,6 +340,8 @@ export type ImageRun = {
   changeRevisionId?: number;
   pmStart?: number;
   pmEnd?: number;
+  /** Native inline DrawingML payload; present only for textless inline shapes. */
+  inlineShape?: unknown;
 };
 
 /** Run for an explicit w:br — ends the line, not the paragraph. */
@@ -355,16 +360,22 @@ export type FieldRun = RunFormatting & {
   fieldType: 'PAGE' | 'NUMPAGES' | 'DATE' | 'TIME' | 'OTHER';
   /**
    * Raw Word field type token (e.g. `TOC`, `PAGEREF`) when `fieldType`
-   * collapsed it to a painter category. Carried for a11y announcement only.
+   * collapsed it to a painter category. Carried for a11y announcement, and
+   * read to number `SEQ` fields.
    */
   rawType?: string;
   /**
    * Raw field instruction text (`w:instrText`), carried INERT so the display
-   * list can announce field identity. Never parsed into behavior or executed.
+   * list can announce field identity. Never executed; only a `SEQ` field's is
+   * parsed, to number it.
    */
   instruction?: string;
-  /** Fallback text if field can't be resolved */
+  /** Text shown when the painter doesn't resolve the field: Word's cached result, or a `SEQ` field's number. */
   fallback?: string;
+  /** `w:fldLock`: the field keeps its cached result. */
+  locked?: boolean;
+  /** Sequences of `SEQ` fields nested in this field; they keep their cached results. */
+  nestedSequences?: string[];
   pmStart?: number;
   pmEnd?: number;
 };
@@ -376,6 +387,8 @@ export type Run = TextRun | TabRun | ImageRun | LineBreakRun | FieldRun;
 
 /** Paragraph spacing (w:spacing): above/below plus the w:lineRule line rule. */
 export type ParagraphSpacing = {
+  beforeLines?: number;
+  afterLines?: number;
   before?: number;
   after?: number;
   line?: number;
@@ -451,7 +464,13 @@ export type ParagraphAttrs = {
   /** w:widowControl, a toggle defaulting on: only an authored off is carried. */
   widowControl?: boolean;
   pageBreakBefore?: boolean;
+  /**
+   * The paragraph opens with a hard `w:br w:type="page"` run rather than
+   * carrying `w:pageBreakBefore`; Word keeps its space-before.
+   */
+  pageBreakBeforeRun?: boolean;
   styleId?: string;
+  effectiveStyleId?: string;
   contextualSpacing?: boolean;
   /** Right-to-left paragraph direction */
   bidi?: boolean;
@@ -465,6 +484,9 @@ export type ParagraphAttrs = {
   listMarkerHidden?: boolean; // w:vanish on numbering level rPr
   listMarkerFontFamily?: string; // from numbering level rPr (w:rFonts)
   listMarkerFontSize?: number; // from numbering level rPr, in points
+  listMarkerBold?: boolean;
+  listMarkerItalic?: boolean;
+  listMarkerColor?: string;
   listMarkerSuffix?: 'tab' | 'space' | 'nothing'; // §17.9.25 w:suff; default 'tab'
   /**
    * Tracked-change state of the list numbering itself. When a list is applied
@@ -495,6 +517,14 @@ export type ParagraphAttrs = {
   pPrIns?: import('../../types/content/trackedChange').RevisionInfo | null;
   /** Tracked-change marker on the paragraph mark (`<w:pPr><w:rPr><w:del/>`). */
   pPrDel?: import('../../types/content/trackedChange').RevisionInfo | null;
+  /** Paragraph-level document-grid opt-out (OOXML w:snapToGrid, §17.3.1). Absent = on. */
+  snapToGrid?: boolean;
+  /** East Asian / Latin auto-spacing opt-out (OOXML w:autoSpaceDE, §17.3.1.11). Absent = on. */
+  autoSpaceDE?: boolean;
+  /** East Asian / number auto-spacing opt-out (OOXML w:autoSpaceDN, §17.3.1.12). Absent = on. */
+  autoSpaceDN?: boolean;
+  /** Section grid pitch in px (w:docGrid w:linePitch), gated to an activating grid type. Absent = no snap. */
+  docGridPitchPx?: number;
 };
 
 /**
@@ -633,8 +663,10 @@ export type TableBlock = {
   widthType?: string;
   /** Preferred `tblW` retained as one typed value. Undefined = legacy fields. */
   preferredWidth?: { value?: number; type?: 'auto' | 'pct' | 'dxa' | 'nil' };
-  /** `w:tblLayout`; undefined preserves the legacy resolver. */
+  /** Width layout policy; undefined preserves the legacy resolver. */
   layoutMode?: 'fixed' | 'autofit';
+  /** DOCX `w:tblLayout`, applied only when all cell content widths are known. */
+  tableLayout?: 'fixed' | 'autofit';
   /** Intrinsic sizing policy. Undefined = legacy fill-available-width. */
   widthAlgorithm?: 'legacy' | 'fixed' | 'autofit';
   /** Resolved table-style provenance/conditionals. */
@@ -672,6 +704,7 @@ export type ImageBlock = {
   width: number;
   height: number;
   alt?: string;
+  shapeType?: string;
   /** CSS transform string (rotation, flip) */
   transform?: string;
   opacity?: number;
@@ -785,6 +818,7 @@ export type ShapeBlock = {
   y?: number;
   /** Optional inner paragraphs for future text-bearing shape rendering. */
   innerText?: ParagraphBlock[];
+  nestedSequences?: string[];
   /** Pre-measured inner paragraph measures for display-list shape text. */
   innerMeasures?: ParagraphExtent[];
   /** Child shapes positioned relative to this shape's top-left corner. */
@@ -795,6 +829,7 @@ export type ShapeBlock = {
   effects?: ShapeEffect[];
   /** Full text-body/autofit settings. */
   textBodyProperties?: ShapeTextBodyProperties;
+  wrapDistances?: { top: number; right: number; bottom: number; left: number };
   /** Anchor/wrap metadata. Undefined = in-flow. */
   position?: ImageRunPosition;
   wrapType?: string;
@@ -1043,6 +1078,8 @@ export type TypesetRow = {
    * as marginTop on the line element; measurement adds it to totalHeight.
    */
   floatSkipBefore?: number;
+  /** Extra first-line indent after a list number overruns its hanging indent. */
+  markerTabOffset?: number;
   /** Exact per-run advances in visual paint order. Undefined = legacy estimation. */
   runAdvances?: TypesetRunAdvance[];
   /** Exact shaped cluster advances. Undefined = legacy estimation. */
@@ -1275,6 +1312,7 @@ export type TableFragment = FragmentBase & {
    * visible band of that single row is `[clipTop, clipBottom)`.
    */
   clipBottom?: number;
+  cellClips?: { row: number; cell: number; top: number; bottom: number }[];
 };
 
 /**
@@ -1439,6 +1477,8 @@ export type Page = {
   fragments: Fragment[];
   /** Page margins. */
   margins: PageMargins;
+  bodyMargins?: PageMargins;
+  bodyAnchorMargins?: PageMargins;
   /** Page size (width, height). */
   size: { w: number; h: number };
   /** Page orientation. */
@@ -1477,6 +1517,8 @@ export type Page = {
   noteAreas?: NoteAreaContract[];
   /** Column layout for this page (if multi-column). */
   columns?: ColumnLayout;
+  /** Automatic parity filler: suppress header/footer, keep physical page. */
+  parityFiller?: boolean;
 };
 
 /**
@@ -1504,6 +1546,7 @@ export type HeaderFooterLayout = {
  * The paginator's complete result — everything the painter needs.
  */
 export type Layout = {
+  summaryOnly?: true;
   /** Serialization contract version. Undefined reads as legacy version 0. */
   contractVersion?: number;
   /** Default page size for the document. */
@@ -1518,6 +1561,8 @@ export type Layout = {
   footers?: Record<string, HeaderFooterLayout>;
   /** Gap between pages in pixels (for rendering). */
   pageGap?: number;
+  /** Lays out only part of the document, so its page count is not the document's. */
+  partial?: boolean;
 };
 
 // =============================================================================
@@ -1588,6 +1633,12 @@ export type LayoutOptions = {
   footnoteReservedHeights?: Map<number, number>;
   /** Section break type for the body-level (final) section (for section transition logic). */
   bodyBreakType?: 'continuous' | 'nextPage' | 'evenPage' | 'oddPage' | 'nextColumn';
+  sectionPageFloatBands?: Array<{
+    default: Array<{ top: number; bottom: number; oddPage?: boolean }>;
+    first?: Array<{ top: number; bottom: number; oddPage?: boolean }> | null;
+    even?: Array<{ top: number; bottom: number; oddPage?: boolean }> | null;
+    anchorMargins?: PageMargins;
+  }>;
   /** Effective section states, indexed by section. Undefined = legacy globals. */
   sections?: Array<{
     sectionId?: string;

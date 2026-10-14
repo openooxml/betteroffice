@@ -91,6 +91,21 @@ impl XmlWriter {
         self
     }
 
+    /// `attribute` for names that only exist at runtime (replayed markup);
+    /// the caller vouches the name is a single XML name.
+    pub fn dynamic_attribute(&mut self, name: &str, value: &str) -> &mut Self {
+        assert!(
+            self.open_start_tag,
+            "XML attributes must immediately follow start_element"
+        );
+        self.output.push(' ');
+        self.output.push_str(name);
+        self.output.push_str("=\"");
+        write_escaped(value, &mut self.output);
+        self.output.push('"');
+        self
+    }
+
     /// Append escaped character data.
     pub fn text(&mut self, value: &str) -> &mut Self {
         self.close_start_tag();

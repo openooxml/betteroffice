@@ -197,6 +197,8 @@ pub struct TextFormatting {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cs: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub snap_to_grid: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub style_id: Option<String>,
 }
 
@@ -286,6 +288,7 @@ pub fn parse_run_properties(
     value.shadow = boolean_child(r_pr, "shadow");
     value.rtl = boolean_child(r_pr, "rtl");
     value.cs = boolean_child(r_pr, "cs");
+    value.snap_to_grid = boolean_child(r_pr, "snapToGrid");
     value.language = r_pr.child("w", "lang").and_then(|language| {
         let value = RunLanguage {
             latin: valid_language_tag(language.attribute(Some("w"), "val")),
@@ -386,6 +389,7 @@ pub fn merge_text_formatting(
             overlay(&mut result.modern_effects, &source.modern_effects);
             overlay(&mut result.rtl, &source.rtl);
             overlay(&mut result.cs, &source.cs);
+            overlay(&mut result.snap_to_grid, &source.snap_to_grid);
             overlay(&mut result.style_id, &source.style_id);
             Some(result)
         }
@@ -486,6 +490,10 @@ pub struct ParagraphFormatting {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub space_after: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub space_before_lines: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub space_after_lines: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub line_spacing: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub line_spacing_rule: Option<String>,
@@ -545,6 +553,18 @@ pub struct ParagraphFormatting {
     pub suppress_line_numbers: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suppress_auto_hyphens: Option<bool>,
+    /// Direct `w:snapToGrid` on pPr (§17.3.1). `None` is the OOXML default
+    /// (snap when a grid is active); `Some(false)` opts the paragraph out.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snap_to_grid: Option<bool>,
+    /// Direct `w:autoSpaceDE` on pPr (§17.3.1.11) — the space Word inserts
+    /// between East Asian and Latin text. `None` is the OOXML default (on).
+    #[serde(rename = "autoSpaceDE", skip_serializing_if = "Option::is_none")]
+    pub auto_space_de: Option<bool>,
+    /// Direct `w:autoSpaceDN` on pPr (§17.3.1.12) — the same between East
+    /// Asian text and numbers. `None` is the OOXML default (on).
+    #[serde(rename = "autoSpaceDN", skip_serializing_if = "Option::is_none")]
+    pub auto_space_dn: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_properties: Option<TextFormatting>,
 }
@@ -560,6 +580,8 @@ pub fn parse_paragraph_properties(
     if let Some(spacing) = p_pr.child("w", "spacing") {
         value.space_before = spacing.parse_numeric_attribute(Some("w"), "before", 1.0);
         value.space_after = spacing.parse_numeric_attribute(Some("w"), "after", 1.0);
+        value.space_before_lines = spacing.parse_numeric_attribute(Some("w"), "beforeLines", 1.0);
+        value.space_after_lines = spacing.parse_numeric_attribute(Some("w"), "afterLines", 1.0);
         value.line_spacing = spacing.parse_numeric_attribute(Some("w"), "line", 1.0);
         value.line_spacing_rule = attribute_nonempty(spacing, "lineRule");
         value.before_autospacing = spacing
@@ -574,6 +596,12 @@ pub fn parse_paragraph_properties(
     if let Some(indent) = p_pr.child("w", "ind") {
         value.indent_left = indent.parse_numeric_attribute(Some("w"), "left", 1.0);
         value.indent_right = indent.parse_numeric_attribute(Some("w"), "right", 1.0);
+        if value.indent_left.is_none() {
+            value.indent_left = indent.parse_numeric_attribute(Some("w"), "start", 1.0);
+        }
+        if value.indent_right.is_none() {
+            value.indent_right = indent.parse_numeric_attribute(Some("w"), "end", 1.0);
+        }
         value.indent_first_line = indent.parse_numeric_attribute(Some("w"), "firstLine", 1.0);
         if let Some(hanging) = indent.parse_numeric_attribute(Some("w"), "hanging", 1.0) {
             value.indent_first_line = Some(-hanging);
@@ -614,6 +642,9 @@ pub fn parse_paragraph_properties(
     value.style_id = string_child(p_pr, "pStyle", "val", true);
     value.suppress_line_numbers = boolean_child(p_pr, "suppressLineNumbers");
     value.suppress_auto_hyphens = boolean_child(p_pr, "suppressAutoHyphens");
+    value.snap_to_grid = boolean_child(p_pr, "snapToGrid");
+    value.auto_space_de = boolean_child(p_pr, "autoSpaceDE");
+    value.auto_space_dn = boolean_child(p_pr, "autoSpaceDN");
     let run_properties_element = p_pr.child("w", "rPr");
     value.run_properties = parse_run_properties(run_properties_element, theme);
     (value != ParagraphFormatting::default()
@@ -652,6 +683,8 @@ pub fn merge_paragraph_formatting(
             overlay(&mut result.bidi, &source.bidi);
             overlay(&mut result.space_before, &source.space_before);
             overlay(&mut result.space_after, &source.space_after);
+            overlay(&mut result.space_before_lines, &source.space_before_lines);
+            overlay(&mut result.space_after_lines, &source.space_after_lines);
             overlay(&mut result.line_spacing, &source.line_spacing);
             overlay(&mut result.line_spacing_rule, &source.line_spacing_rule);
             overlay(&mut result.before_autospacing, &source.before_autospacing);
@@ -703,6 +736,7 @@ pub fn merge_paragraph_formatting(
                 &mut result.suppress_auto_hyphens,
                 &source.suppress_auto_hyphens,
             );
+            overlay(&mut result.snap_to_grid, &source.snap_to_grid);
             result.run_properties = merge_text_formatting(
                 target.run_properties.as_ref(),
                 source.run_properties.as_ref(),
@@ -1081,7 +1115,7 @@ fn parse_table_look(element: Option<&XmlElement>) -> Option<TableLook> {
             *slot = Some(!matches_ci(raw, &["0", "false", "off"]));
         }
     }
-    (value != TableLook::default()).then_some(value)
+    Some(value)
 }
 
 fn parse_hex_prefix(raw: &str) -> Option<u32> {
@@ -1412,6 +1446,37 @@ mod tests {
     use super::*;
     use crate::xml::{ParseBudget, ParseLimits, parse_xml};
 
+    #[test]
+    fn line_unit_paragraph_spacing_survives_parsing_merging_and_serialization() {
+        let element = root(
+            r#"<w:pPr><w:spacing w:before="50" w:after="60" w:beforeLines="50" w:afterLines="100"/></w:pPr>"#,
+        );
+        let inherited = parse_paragraph_properties(Some(&element), None).unwrap();
+        let direct = ParagraphFormatting {
+            space_before: Some(120.0),
+            space_after_lines: Some(0.0),
+            before_autospacing: Some(false),
+            ..ParagraphFormatting::default()
+        };
+        let merged = merge_paragraph_formatting(Some(&inherited), Some(&direct)).unwrap();
+        assert_eq!(merged.space_before, Some(120.0));
+        assert_eq!(merged.space_before_lines, Some(50.0));
+        assert_eq!(merged.space_after_lines, Some(0.0));
+        let xml = crate::serializer::serialize_paragraph_formatting(
+            Some(&merged),
+            None,
+            None,
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+        let reparsed = parse_paragraph_properties(Some(&root(&xml)), None).unwrap();
+        assert_eq!(reparsed, merged);
+        assert!(xml.contains("w:beforeLines=\"50\""));
+        assert!(xml.contains("w:afterLines=\"0\""));
+    }
+
     fn root(xml: &str) -> XmlElement {
         let limits = ParseLimits::default();
         parse_xml(
@@ -1493,6 +1558,20 @@ mod tests {
         let hanging = parse_paragraph_properties(hanging.child("w", "pPr"), None).unwrap();
         assert_eq!(hanging.indent_first_line_chars, Some(-150.0));
         assert_eq!(hanging.hanging_indent, Some(true));
+    }
+
+    #[test]
+    fn a_style_indent_reads_start_and_end_when_left_and_right_are_absent() {
+        let style = root(r#"<w:style><w:pPr><w:ind w:start="720" w:end="360"/></w:pPr></w:style>"#);
+        let paragraph = parse_paragraph_properties(style.child("w", "pPr"), None).unwrap();
+        assert_eq!(paragraph.indent_left, Some(720.0));
+        assert_eq!(paragraph.indent_right, Some(360.0));
+        let style = root(
+            r#"<w:style><w:pPr><w:ind w:left="100" w:start="720" w:right="200" w:end="360"/></w:pPr></w:style>"#,
+        );
+        let paragraph = parse_paragraph_properties(style.child("w", "pPr"), None).unwrap();
+        assert_eq!(paragraph.indent_left, Some(100.0));
+        assert_eq!(paragraph.indent_right, Some(200.0));
     }
 
     #[test]

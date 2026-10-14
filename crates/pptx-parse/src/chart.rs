@@ -1,7 +1,9 @@
 //! PPTX packaging around the shared DrawingML chart part.
 
 use ooxml_drawingml::chart::{ChartSpace, ChartXml, parse_chart_space};
-use ooxml_drawingml::{Theme, resolve_color_value_to_hex_with_theme};
+use ooxml_drawingml::{
+    Theme, get_theme_color, resolve_color_value_to_hex_with_theme, resolve_color_value_to_rgba_hex,
+};
 
 use crate::drawing::parse_color_container;
 use crate::xml::XmlElement;
@@ -62,10 +64,23 @@ impl ChartXml for ChartElement<'_> {
     }
 
     fn solid_fill_hex(&self) -> Option<String> {
-        resolve_color_value_to_hex_with_theme(
-            parse_color_container(self.element).as_ref(),
-            Some(self.theme),
-        )
+        // A series fill carries `a:alpha` as often as not — a stack of one
+        // colour at falling opacities is how a deck bands its bars. An opaque
+        // fill stays six digits, which is what every other consumer reads.
+        let color = parse_color_container(self.element);
+        let translucent = color
+            .as_ref()
+            .and_then(|color| color.alpha)
+            .is_some_and(|alpha| alpha.is_finite() && alpha < 1.0);
+        if translucent {
+            resolve_color_value_to_rgba_hex(color.as_ref(), Some(self.theme))
+        } else {
+            resolve_color_value_to_hex_with_theme(color.as_ref(), Some(self.theme))
+        }
+    }
+
+    fn theme_color_hex(&self, slot: &str) -> Option<String> {
+        Some(format!("#{}", get_theme_color(Some(self.theme), slot)))
     }
 }
 
@@ -79,6 +94,7 @@ pub(crate) fn parse_chart_part(root: &XmlElement, theme: &Theme) -> Option<Chart
 mod tests {
     use super::*;
     use crate::xml::{ParseBudget, ParseLimits, parse_xml};
+    use ooxml_drawingml::chart::{ChartFill, ChartLine};
 
     fn parse(xml: &str, theme: &Theme) -> Option<ChartSpace> {
         let limits = ParseLimits::default();
@@ -133,6 +149,20 @@ mod tests {
     }
 
     #[test]
+    fn a_series_without_its_own_fill_takes_the_theme_accent_in_turn() {
+        let mut theme = Theme::default();
+        theme.color_scheme.accent1 = "112233".to_owned();
+        theme.color_scheme.accent2 = "445566".to_owned();
+        let xml = r#"<c:chartSpace xmlns:c="c" xmlns:a="a"><c:chart><c:plotArea><c:barChart>
+              <c:ser><c:val><c:numRef><c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser>
+              <c:ser><c:val><c:numRef><c:numCache><c:pt idx="0"><c:v>2</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser>
+            </c:barChart></c:plotArea></c:chart></c:chartSpace>"#;
+        let parsed = parse(xml, &theme).expect("parses");
+        assert_eq!(parsed.series[0].color, "#112233");
+        assert_eq!(parsed.series[1].color, "#445566");
+    }
+
+    #[test]
     fn series_colours_resolve_through_the_deck_theme() {
         assert_eq!(
             parse(&fixture("c:"), &themed()).unwrap().series[0].color,
@@ -156,7 +186,7 @@ mod tests {
         )
         .expect("chart parses");
         let points = chart.plot_groups[0].series[0].points.as_ref().unwrap();
-        assert_eq!(points[0].color, "#B1AAF3");
+        assert_eq!(points[0].color, "#B0A9F3");
         assert_eq!(points[1].color, "#112233");
     }
 
@@ -174,6 +204,104 @@ mod tests {
         let points = chart.plot_groups[0].series[0].points.as_ref().unwrap();
         assert_eq!(points[0].color, "#8FAADC");
         assert_eq!(points[1].color, "#848484");
+    }
+
+    #[test]
+    fn the_chart_space_fill_and_the_axis_lines_reach_the_model() {
+        let chart = parse(
+            r#"<c:chartSpace xmlns:c="c" xmlns:a="a"><c:chart><c:plotArea>
+                 <c:lineChart><c:ser><c:val><c:numCache><c:pt><c:v>3</c:v></c:pt></c:numCache></c:val></c:ser></c:lineChart>
+                 <c:catAx><c:axId val="1"/><c:spPr><a:noFill/><a:ln w="9525"><a:solidFill><a:schemeClr val="tx1"><a:lumMod val="15000"/><a:lumOff val="85000"/></a:schemeClr></a:solidFill></a:ln></c:spPr></c:catAx>
+                 <c:valAx><c:axId val="2"/><c:spPr><a:noFill/><a:ln><a:noFill/></a:ln></c:spPr></c:valAx>
+               </c:plotArea></c:chart>
+               <c:spPr><a:pattFill prst="smGrid"><a:fgClr><a:srgbClr val="01C4BF"/></a:fgClr><a:bgClr><a:srgbClr val="01BABC"/></a:bgClr></a:pattFill><a:ln><a:noFill/></a:ln></c:spPr>
+               </c:chartSpace>"#,
+            &Theme::default(),
+        )
+        .expect("chart parses");
+        assert_eq!(
+            chart.fill,
+            Some(ChartFill::Pattern {
+                foreground: Some("#01C4BF".to_owned()),
+                background: Some("#01BABC".to_owned()),
+            })
+        );
+        let axes = chart.axis_list.as_ref().expect("both axes parse");
+        assert_eq!(
+            axes[0].line,
+            Some(ChartLine {
+                none: false,
+                color: Some("#D9D9D9".to_owned()),
+                width_emu: Some(9525.0),
+            })
+        );
+        assert_eq!(
+            axes[1].line,
+            Some(ChartLine {
+                none: true,
+                color: None,
+                width_emu: None,
+            })
+        );
+    }
+
+    #[test]
+    fn a_series_line_reaches_the_model_with_its_own_width() {
+        let chart = parse(
+            r#"<c:chartSpace xmlns:c="c" xmlns:a="a"><c:chart><c:plotArea><c:lineChart>
+                 <c:ser>
+                   <c:spPr><a:ln w="41275" cap="rnd"><a:solidFill><a:schemeClr val="bg1"/></a:solidFill></a:ln></c:spPr>
+                   <c:val><c:numCache><c:pt><c:v>3</c:v></c:pt></c:numCache></c:val>
+                 </c:ser>
+                 <c:ser>
+                   <c:spPr><a:ln><a:noFill/></a:ln></c:spPr>
+                   <c:val><c:numCache><c:pt><c:v>1</c:v></c:pt></c:numCache></c:val>
+                 </c:ser>
+               </c:lineChart></c:plotArea></c:chart></c:chartSpace>"#,
+            &Theme::default(),
+        )
+        .expect("chart parses");
+        let series = &chart.plot_groups[0].series;
+        assert_eq!(
+            series[0].line,
+            Some(ChartLine {
+                none: false,
+                color: Some("#FFFFFF".to_owned()),
+                width_emu: Some(41275.0),
+            })
+        );
+        assert_eq!(
+            series[1].line,
+            Some(ChartLine {
+                none: true,
+                color: None,
+                width_emu: None,
+            })
+        );
+    }
+
+    #[test]
+    fn a_chart_space_without_shape_properties_leaves_the_fill_to_the_renderer() {
+        let space = |properties: &str| {
+            parse(
+                &format!(
+                    r#"<c:chartSpace xmlns:c="c" xmlns:a="a"><c:chart><c:plotArea>
+                         <c:lineChart><c:ser><c:val><c:numCache><c:pt><c:v>3</c:v></c:pt></c:numCache></c:val></c:ser></c:lineChart>
+                       </c:plotArea></c:chart>{properties}</c:chartSpace>"#
+                ),
+                &themed(),
+            )
+            .expect("chart parses")
+            .fill
+        };
+        assert_eq!(space(""), None);
+        assert_eq!(space("<c:spPr><a:noFill/></c:spPr>"), Some(ChartFill::None));
+        assert_eq!(
+            space(r#"<c:spPr><a:solidFill><a:schemeClr val="accent1"/></a:solidFill></c:spPr>"#),
+            Some(ChartFill::Solid {
+                color: "#6254E7".to_owned()
+            })
+        );
     }
 
     #[test]

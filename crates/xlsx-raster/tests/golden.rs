@@ -33,6 +33,7 @@ fn text(x: f32, y: f32, s: &str, align: Align, clip: Rect) -> DrawCmd {
         highlight: None,
         dashed_underline: false,
         font_family: None,
+        number_format: None,
         ghost: false,
         chart: false,
     }
@@ -66,6 +67,7 @@ fn styled_text(
         highlight: None,
         dashed_underline: false,
         font_family: None,
+        number_format: None,
         ghost: false,
         chart: false,
     }
@@ -88,6 +90,7 @@ fn line(
         width,
         color: color.into(),
         style: style.map(Into::into),
+        rail: None,
         clip: None,
     }
 }

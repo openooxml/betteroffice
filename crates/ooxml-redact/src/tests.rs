@@ -23,14 +23,709 @@ const XLSX_SECRETS: &[&str] = &[
     "XLSX_SECRET_AUTHOR",
     "XLSX_SECRET_COMPANY",
     "https://secret.example/xlsx",
+    "XLSX_SECRET_PERSON",
+    "XLSX_SECRET_UPN@example.com",
+    "XLSX_SECRET_THREAD",
+    "2031-02-03T04:05:06",
+    "XLSX_SECRET_REF_SHEET",
+    "XLSX_SECRET_FIELD",
+    "XLSX_SECRET_FCAP",
+    "XLSX_SECRET_SHARED",
+    "918273645",
+    "2031-04-05T06:07:08",
+    "#DIV/0!",
+    "XLSX_SECRET_RECORD",
+    "462782",
+    "XLSX_SECRET_PIVOT",
+    "XLSX_SECRET_DATACAP",
+    "XLSX_SECRET_GTOTAL",
+    "XLSX_SECRET_ROWHEAD",
+    "XLSX_SECRET_COLHEAD",
+    "XLSX_SECRET_ERRCAP",
+    "XLSX_SECRET_MISSCAP",
+    "XLSX_SECRET_SUBTOTAL",
+    "XLSX_SECRET_DATAFIELD",
+    "XLSX_SECRET_CALCITEM",
+    "XLSX_SECRET_CALCMEM",
+    "XLSX_SECRET_CUBE",
+    "XLSX_SECRET_MDX",
+    "XLSX_SECRET_CONN",
+    "XLSX_SECRET_CONNDESC",
+    "XLSX_SECRET_CONNSTR",
+    "XLSX_SECRET_SQL",
+    "XLSX_SECRET_PARAM",
+    "XLSX_SECRET_PROMPT",
+    "XLSX_SECRET_PARAMVAL",
+    "XLSX_SECRET_SOURCE",
+    "XLSX_SECRET_URL",
+    "XLSX_SECRET_POST",
+    "XLSX_SECRET_XSHEET",
+    "XLSX_SECRET_XCACHE",
+    "13579",
+    "XLSX_SECRET_XNAME",
+    "XLSX_SECRET_XREF",
+    "XLSX_SECRET_DDESVC",
+    "XLSX_SECRET_DDETOP",
+    "XLSX_SECRET_DDEITEM",
+    "XLSX_SECRET_DDEVAL",
+    "XLSX_SECRET_OPROG",
+    "XLSX_SECRET_OLEITEM",
+    "XLSX_SECRET_OLEPROG",
+    "XLSX_SECRET_OLELINK",
+    "XLSX_SECRET_CTRL",
+    "XLSX_SECRET_CUSTFILT",
+    "XLSX_SECRET_CFTEXT",
+    "XLSX_SECRET_SCEN",
+    "XLSX_SECRET_SCENUSER",
+    "XLSX_SECRET_SCENCOMMENT",
+    "XLSX_SECRET_WPTITLE",
+    "XLSX_SECRET_WPDEST",
+    "XLSX_SECRET_SHEET2",
+    "XLSX_SECRET_TABLE",
+    "XLSX_SECRET_TCOMMENT",
+    "XLSX_SECRET_TCOL",
+    "XLSX_SECRET_TOTLABEL",
+    "XLSX_SECRET_TCFORM",
+    "XLSX_SECRET_TOTFORM",
+    "XLSX_SECRET_CFFORM",
+    "XLSX_SECRET_DVFORM1",
+    "XLSX_SECRET_DVFORM2",
+    "XLSX_SECRET_QUERY",
+    "XLSX_SECRET_QFIELD",
+    "XLSX_SECRET_SLICER",
+    "XLSX_SECRET_SLICERCAP",
+    "XLSX_SECRET_SLICERCACHE",
+    "XLSX_SECRET_SLICERPIVOT",
+    "XLSX_SECRET_SITEM",
+    "XLSX_SECRET_TL",
+    "XLSX_SECRET_TLCAP",
+    "XLSX_SECRET_RICHV",
+    "24680",
+    "XLSX_SECRET_RICHKEY",
+    "U0VDUkVUX1NFQ1JFVF9SSUNIQkxPQg",
+    "XLSX_SECRET_METAV",
 ];
 const PPTX_SECRETS: &[&str] = &[
     "PPTX_SECRET_TEXT",
     "PPTX_SECRET_NOTES",
     "PPTX_SECRET_AUTHOR",
+    "PPTX_SECRET_MODERN_AUTHOR",
     "PPTX_SECRET_COMPANY",
     "https://secret.example/pptx",
 ];
+
+#[test]
+fn application_versions_use_a_fixed_valid_value_in_both_masking_modes() {
+    for format in [Format::Docx, Format::Xlsx, Format::Pptx] {
+        for random_characters in [false, true] {
+            for namespace in [
+                "http://schemas.openxmlformats.org/officeDocument/2006/extended-properties",
+                "http://purl.oclc.org/ooxml/officeDocument/extendedProperties",
+            ] {
+                for content in [
+                    "16.0000",
+                    "<![CDATA[16.0000]]>",
+                    "&#49;6.<!-- private -->0000",
+                    "",
+                ] {
+                    let source = format!(
+                        r#"<ep:Properties xmlns:ep="{namespace}" xmlns:other="urn:foreign"><ep:AppVersion>{content}</ep:AppVersion><ep:AppVersion/><other:AppVersion>16.0000</other:AppVersion><ep:Company>PRIVATE_COMPANY</ep:Company><ep:Pages>7</ep:Pages></ep:Properties>"#
+                    );
+                    let output = xml::redact_xml_with_styles(
+                        format,
+                        "docProps/app.xml",
+                        source.as_bytes(),
+                        &mut RedactionReport::default(),
+                        &StyleMap::default(),
+                        &mut TextMasker::new(&RedactionOptions { random_characters }),
+                    )
+                    .unwrap();
+                    let output = String::from_utf8(output).unwrap();
+                    assert_eq!(
+                        output
+                            .matches("<ep:AppVersion>0.0000</ep:AppVersion>")
+                            .count(),
+                        2
+                    );
+                    assert!(!output.contains("<other:AppVersion>0.0000"));
+                    assert!(!output.contains("16.0000"));
+                    assert!(!output.contains("PRIVATE_COMPANY"));
+                    assert!(!output.contains("private"));
+                    assert!(output.contains("<ep:Pages>7</ep:Pages>"));
+                    assert!(output.contains(&format!("xmlns:ep=\"{namespace}\"")));
+                    assert!(output.contains("xmlns:other=\"urn:foreign\""));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn fixed_application_versions_do_not_skip_xml_security_validation() {
+    let input = br#"<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><AppVersion><!DOCTYPE private>16.0000</AppVersion></Properties>"#;
+    assert!(
+        xml::redact_xml(
+            Format::Docx,
+            "docprops/app.xml",
+            input,
+            &mut RedactionReport::default()
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn typed_custom_numbers_use_valid_neutral_values() {
+    let cases = [
+        ("i1", "-128", "127"),
+        ("i2", "-32768", "32767"),
+        ("i4", "-2147483648", "2147483647"),
+        ("i8", "-9223372036854775808", "9223372036854775807"),
+        ("int", "-2147483648", "2147483647"),
+        ("ui1", "0", "255"),
+        ("ui2", "0", "65535"),
+        ("ui4", "0", "4294967295"),
+        ("ui8", "0", "18446744073709551615"),
+        ("uint", "0", "4294967295"),
+        ("r4", "-1.17549435E-38", "3.4028235E38"),
+        ("r8", "-2.2250738585072014E-308", "1.7976931348623157E308"),
+        ("decimal", "-12345678901234567890.123456789", "0.123456789"),
+    ];
+    for format in [Format::Docx, Format::Xlsx, Format::Pptx] {
+        for random_characters in [false, true] {
+            for namespace in [
+                "http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes",
+                "http://purl.oclc.org/ooxml/officeDocument/docPropsVTypes",
+            ] {
+                for (kind, minimum, maximum) in cases {
+                    for value in [minimum, maximum, "&#49;<![CDATA[23]]>", ""] {
+                        let source = format!(
+                            r#"<p:Properties xmlns:p="http://schemas.openxmlformats.org/officeDocument/2006/custom-properties" xmlns:t="{namespace}" xmlns:other="urn:foreign"><p:property name="PRIVATE_NUMBER" pid="2"><t:{kind}>{value}</t:{kind}></p:property><p:property name="PRIVATE_EMPTY" pid="3"><t:{kind}/></p:property><other:i4>123</other:i4><p:property name="PRIVATE_TEXT" pid="4"><t:lpwstr>PRIVATE_VALUE</t:lpwstr></p:property></p:Properties>"#
+                        );
+                        let output = xml::redact_xml_with_styles(
+                            format,
+                            "docprops/custom.xml",
+                            source.as_bytes(),
+                            &mut RedactionReport::default(),
+                            &StyleMap::default(),
+                            &mut TextMasker::new(&RedactionOptions { random_characters }),
+                        )
+                        .unwrap();
+                        let output = String::from_utf8(output).unwrap();
+                        assert_eq!(
+                            output.matches(&format!("<t:{kind}>0</t:{kind}>")).count(),
+                            2
+                        );
+                        assert!(output.contains("<other:i4>888</other:i4>"));
+                        assert!(output.contains(&format!("xmlns:t=\"{namespace}\"")));
+                        assert!(!output.contains("PRIVATE_"));
+                        assert!(output.contains("name=\"RedactedProperty3\" pid=\"4\""));
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn typed_custom_number_replacement_is_scoped_and_rejects_dtds() {
+    let input = br#"<root xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"><vt:i4>123</vt:i4></root>"#;
+    for path in ["word/document.xml", "docProps/app.xml"] {
+        assert_eq!(
+            xml::redact_xml(Format::Docx, path, input, &mut RedactionReport::default()).unwrap(),
+            input
+        );
+    }
+    let input = br#"<Properties xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"><vt:i4><!DOCTYPE private>123</vt:i4></Properties>"#;
+    assert!(
+        xml::redact_xml(
+            Format::Docx,
+            "docprops/custom.xml",
+            input,
+            &mut RedactionReport::default()
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn random_characters_preserve_each_office_format() {
+    let options = RedactionOptions {
+        random_characters: true,
+    };
+    for (format, source, secrets, media, text_part) in [
+        (
+            Format::Docx,
+            docx_fixture(),
+            DOCX_SECRETS,
+            "word/media/image1.png",
+            "word/document.xml",
+        ),
+        (
+            Format::Xlsx,
+            xlsx_fixture(),
+            XLSX_SECRETS,
+            "xl/media/image1.png",
+            "xl/sharedStrings.xml",
+        ),
+        (
+            Format::Pptx,
+            pptx_fixture(),
+            PPTX_SECRETS,
+            "ppt/media/image1.png",
+            "ppt/slides/slide1.xml",
+        ),
+    ] {
+        let (output, report) = redact_with_report_and_options(&source, format, &options).unwrap();
+        assert_eq!(report.format, format);
+        assert_fixture_properties(&source, &output, secrets, media);
+        assert_text_lengths(&source, &output, text_part, "t");
+        let output_parts = ooxml_opc::unzip_parts(&output).unwrap();
+        match format {
+            Format::Docx => {
+                parse_docx_s9_wire(&output, S9ParseOptions::default()).unwrap();
+            }
+            Format::Xlsx => {
+                xlsx_parse::parse_workbook(&output_parts).unwrap();
+            }
+            Format::Pptx => {
+                pptx_parse::parse_pptx(&output).unwrap();
+            }
+            Format::Auto | Format::Vsdx | Format::Vstx => unreachable!(),
+        }
+        let default = redact(&source, format).unwrap();
+        let explicit_default = redact_with_options(&source, format, &Default::default()).unwrap();
+        assert_eq!(
+            ooxml_opc::unzip_parts(&default).unwrap(),
+            ooxml_opc::unzip_parts(&explicit_default).unwrap()
+        );
+        let again = redact_with_options(&source, format, &options).unwrap();
+        assert_ne!(
+            part(&output_parts, text_part),
+            part(&ooxml_opc::unzip_parts(&again).unwrap(), text_part)
+        );
+    }
+}
+
+#[test]
+fn random_characters_redact_japanese_text_cdata_and_entities_without_changing_namespaces() {
+    use unicode_script::{Script, UnicodeScript};
+    for (format, path, namespace) in [
+        (
+            Format::Docx,
+            "word/document.xml",
+            "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+        ),
+        (
+            Format::Pptx,
+            "ppt/slides/slide1.xml",
+            "http://schemas.openxmlformats.org/drawingml/2006/main",
+        ),
+        (
+            Format::Xlsx,
+            "xl/sharedStrings.xml",
+            "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
+        ),
+    ] {
+        let source = format!(
+            r#"<alias:root xmlns:alias="{namespace}" xmlns:kept="urn:private:namespace"><alias:t xml:space="preserve">日本語 ひらがな カタカナ</alias:t><alias:t><![CDATA[秘密。123]]></alias:t><alias:t>&#x65E5;&#x3042;&#x30A2;&#32;&amp;</alias:t></alias:root>"#
+        );
+        let output = xml::redact_xml_with_styles(
+            format,
+            path,
+            source.as_bytes(),
+            &mut RedactionReport::default(),
+            &StyleMap::default(),
+            &mut TextMasker::new(&RedactionOptions {
+                random_characters: true,
+            }),
+        )
+        .unwrap();
+        let xml = String::from_utf8(output).unwrap();
+        assert!(xml.contains(&format!("xmlns:alias=\"{namespace}\"")));
+        assert!(xml.contains("xmlns:kept=\"urn:private:namespace\""));
+        assert!(xml.contains("xml:space=\"preserve\""));
+        let mut reader = Reader::from_str(&xml);
+        let mut values = Vec::new();
+        loop {
+            match reader.read_event().unwrap() {
+                Event::Text(text) => values.push(text.decode().unwrap().into_owned()),
+                Event::CData(text) => values.push(text.decode().unwrap().into_owned()),
+                Event::Eof => break,
+                _ => {}
+            }
+        }
+        let first = &values[0];
+        for (source, output) in "日本語 ひらがな カタカナ".chars().zip(first.chars()) {
+            if source.is_whitespace() {
+                assert_eq!(output, source);
+            } else {
+                assert_eq!(output.script(), source.script());
+            }
+        }
+        assert!(
+            values[1]
+                .chars()
+                .all(|character| character.script() == Script::Han)
+        );
+        let entities: String = values[2..].concat();
+        let chars: Vec<_> = entities.chars().collect();
+        assert_eq!(chars.len(), 5);
+        assert_eq!(chars[0].script(), Script::Han);
+        assert_eq!(chars[1].script(), Script::Hiragana);
+        assert_eq!(chars[2].script(), Script::Katakana);
+        assert_eq!(chars[3], ' ');
+        assert!(chars[4].is_ascii_alphabetic());
+    }
+}
+
+#[test]
+fn random_characters_keep_schema_numeric_date_and_formula_masks() {
+    let source = r#"<root><i4>123</i4><r8>-1.25e2</r8><bool>true</bool><filetime>2026-09-14T00:00:00Z</filetime><lpwstr>PRIVATE_LABEL</lpwstr></root>"#;
+    for format in [Format::Docx, Format::Xlsx, Format::Pptx] {
+        let output = xml::redact_xml_with_styles(
+            format,
+            "docprops/custom.xml",
+            source.as_bytes(),
+            &mut RedactionReport::default(),
+            &StyleMap::default(),
+            &mut TextMasker::new(&RedactionOptions {
+                random_characters: true,
+            }),
+        )
+        .unwrap();
+        let text = String::from_utf8(output).unwrap();
+        for expected in [
+            "<i4>888</i4>",
+            "<r8>-8.88e8</r8>",
+            "<bool>false</bool>",
+            "<filetime>1970-01-01T00:00:00Z</filetime>",
+        ] {
+            assert!(text.contains(expected));
+        }
+        assert!(!text.contains("PRIVATE_LABEL"));
+    }
+    for (format, path, source, expected) in [
+        (
+            Format::Docx,
+            "word/document.xml",
+            "<root><instrText>MERGEFIELD PRIVATE</instrText></root>",
+            "<instrText>0</instrText>",
+        ),
+        (
+            Format::Xlsx,
+            "xl/worksheets/sheet1.xml",
+            "<root><c><f>PRIVATE!A1</f><v>123</v></c></root>",
+            "<f>0</f><v>888</v>",
+        ),
+        (
+            Format::Pptx,
+            "ppt/charts/chart1.xml",
+            "<root><f>PRIVATE!A1</f><v>123</v></root>",
+            "<f>0</f><v>888</v>",
+        ),
+    ] {
+        let output = xml::redact_xml_with_styles(
+            format,
+            path,
+            source.as_bytes(),
+            &mut RedactionReport::default(),
+            &StyleMap::default(),
+            &mut TextMasker::new(&RedactionOptions {
+                random_characters: true,
+            }),
+        )
+        .unwrap();
+        assert!(String::from_utf8(output).unwrap().contains(expected));
+    }
+}
+
+#[test]
+fn custom_property_placeholders_are_unique_and_preserve_types() {
+    let input = br#"<cp:Properties xmlns:cp="http://schemas.openxmlformats.org/officeDocument/2006/custom-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes" xmlns:other="urn:other"><other:property name="Secret"/><cp:property name="ClientA" pid="2" fmtid="{D5CDD505-2E9C-101B-9397-08002B2CF9AE}"><vt:lpwstr>Confidential</vt:lpwstr></cp:property><cp:property name="ClientB" pid="3"><vt:i4>123</vt:i4></cp:property><cp:property name="ClientA" pid="4"><vt:bool>true</vt:bool></cp:property><cp:property name="RedactedProperty1" pid="5"/></cp:Properties>"#;
+    for format in [Format::Docx, Format::Pptx, Format::Xlsx] {
+        let output = xml::redact_xml(
+            format,
+            "docprops/custom.xml",
+            input,
+            &mut RedactionReport::default(),
+        )
+        .unwrap();
+        let text = String::from_utf8(output).unwrap();
+        for index in 1..=4 {
+            assert_eq!(
+                text.matches(&format!("name=\"RedactedProperty{index}\""))
+                    .count(),
+                1
+            );
+        }
+        assert!(!text.contains("Client"));
+        assert!(!text.contains("Confidential"));
+        assert!(text.contains("pid=\"2\" fmtid=\"{D5CDD505-2E9C-101B-9397-08002B2CF9AE}\""));
+        assert!(text.contains("<vt:i4>0</vt:i4>"));
+        assert!(text.contains("<vt:bool>false</vt:bool>"));
+    }
+}
+
+#[test]
+fn comment_and_revision_dates_use_valid_epoch_placeholders() {
+    for namespace in [
+        "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+        "http://purl.oclc.org/ooxml/wordprocessingml/main",
+    ] {
+        let input = format!(
+            r#"<d:root xmlns:d="{namespace}" xmlns:c="http://schemas.microsoft.com/office/word/2018/wordml/cex" xmlns:other="urn:other"><d:comment d:id="12" d:author="Secret Author" d:date="2026-03-04T12:34:56Z"/><d:ins d:id="13" d:date="2026-03-05T12:34:56Z"/><d:del d:id="14" d:date="2026-03-06T12:34:56Z"/><d:pPrChange d:date="2026-03-07T12:34:56Z"/><c:commentExtensible c:durableId="1234ABCD" c:dateUtc="2026-03-08T12:34:56Z"/><other:commentExtensible other:dateUtc="foreign-value"/><d:comment other:date="foreign-value"/></d:root>"#
+        );
+        let output = xml::redact_xml(
+            Format::Docx,
+            "word/comments.xml",
+            input.as_bytes(),
+            &mut RedactionReport::default(),
+        )
+        .unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(!text.contains("2026-03"));
+        assert!(!text.contains("Secret Author"));
+        assert_eq!(text.matches("1970-01-01T00:00:00Z").count(), 5);
+        assert_eq!(text.matches("foreign-value").count(), 2);
+        assert!(text.contains("c:durableId=\"1234ABCD\""));
+        assert!(text.contains("d:id=\"12\""));
+    }
+}
+
+fn embedded_font_fixture(strict: bool, shared: bool) -> Vec<u8> {
+    let word = if strict {
+        "http://purl.oclc.org/ooxml/wordprocessingml/main"
+    } else {
+        "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    };
+    let office = if strict {
+        "http://purl.oclc.org/ooxml/officeDocument/relationships"
+    } else {
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    };
+    let embeds = [
+        "embedRegular",
+        "embedBold",
+        "embedItalic",
+        "embedBoldItalic",
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, name)| format!(r#"<d:{name} link:id="font{index}"></d:{name}>"#))
+    .collect::<String>();
+    let references = (0..4).map(|index| format!(r#"<Relationship Id="font{index}" Type="{office}/font" Target="../fonts/font.ttf"/>"#)).collect::<String>();
+    let retained = if shared {
+        r#"<other:preserved link:id="font0"/>"#
+    } else {
+        ""
+    };
+    package(vec![
+        (
+            "[Content_Types].xml",
+            xml(
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="ttf" ContentType="application/x-font-ttf"/></Types>"#,
+            ),
+        ),
+        (
+            "word/document.xml",
+            xml(&format!(
+                r#"<d:document xmlns:d="{word}"><d:body><d:p><d:r><d:t>Secret</d:t></d:r></d:p></d:body></d:document>"#
+            )),
+        ),
+        (
+            "word/custom/fontList.xml",
+            xml(&format!(
+                r#"<d:fonts xmlns:d="{word}" xmlns:link="{office}" xmlns:other="urn:other"><d:font d:name="Arial">{embeds}</d:font>{retained}</d:fonts>"#
+            )),
+        ),
+        (
+            "word/custom/_rels/fontList.xml.rels",
+            xml(&format!(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{references}</Relationships>"#
+            )),
+        ),
+        ("word/fonts/font.ttf", b"PRIVATE_FONT_DATA".to_vec()),
+    ])
+}
+
+#[test]
+fn embedded_fonts_are_detached_instead_of_left_as_empty_font_files() {
+    for strict in [false, true] {
+        let source = embedded_font_fixture(strict, false);
+        let (output, report) = redact_with_report(&source, Format::Docx).unwrap();
+        let parts = ooxml_opc::unzip_parts(&output).unwrap();
+        assert_eq!(report.binary_parts, 1);
+        assert!(!parts.iter().any(|(name, _)| name == "word/fonts/font.ttf"));
+        let fonts = String::from_utf8_lossy(part(&parts, "word/custom/fontList.xml"));
+        assert!(!fonts.contains("embed"));
+        assert!(fonts.contains("Arial"));
+        assert!(
+            !String::from_utf8_lossy(part(&parts, "word/custom/_rels/fontList.xml.rels"))
+                .contains("Target=")
+        );
+        assert!(!String::from_utf8_lossy(part(&parts, "[Content_Types].xml")).contains("ttf"));
+    }
+}
+
+#[test]
+fn font_cleanup_preserves_other_consumers_of_the_same_relationship() {
+    let output = redact(&embedded_font_fixture(false, true), Format::Docx).unwrap();
+    let parts = ooxml_opc::unzip_parts(&output).unwrap();
+    assert!(part(&parts, "word/fonts/font.ttf").is_empty());
+    let fonts = String::from_utf8_lossy(part(&parts, "word/custom/fontList.xml"));
+    assert!(!fonts.contains("embed"));
+    assert!(fonts.contains("other:preserved link:id=\"font0\""));
+    let rels = String::from_utf8_lossy(part(&parts, "word/custom/_rels/fontList.xml.rels"));
+    assert!(rels.contains("Id=\"font0\""));
+    assert!(!rels.contains("Id=\"font1\""));
+}
+
+#[test]
+fn unrelated_attribute_values_do_not_keep_detached_font_parts() {
+    let mut parts = ooxml_opc::unzip_parts(&embedded_font_fixture(false, false)).unwrap();
+    let (_, fonts) = parts
+        .iter_mut()
+        .find(|(name, _)| name == "word/custom/fontList.xml")
+        .unwrap();
+    *fonts = String::from_utf8(fonts.clone())
+        .unwrap()
+        .replace("d:name=\"Arial\"", "d:name=\"font0\" other:value=\"font1\"")
+        .into_bytes();
+    let output = redact(&ooxml_opc::rezip_parts(&parts).unwrap(), Format::Docx).unwrap();
+    let parts = ooxml_opc::unzip_parts(&output).unwrap();
+    assert!(!parts.iter().any(|(name, _)| name == "word/fonts/font.ttf"));
+    assert!(
+        !String::from_utf8_lossy(part(&parts, "word/custom/_rels/fontList.xml.rels"))
+            .contains("Target=")
+    );
+}
+
+#[test]
+fn font_cleanup_preserves_relationship_embed_and_link_consumers() {
+    for attribute in ["embed", "link"] {
+        let mut parts = ooxml_opc::unzip_parts(&embedded_font_fixture(false, true)).unwrap();
+        let (_, fonts) = parts
+            .iter_mut()
+            .find(|(name, _)| name == "word/custom/fontList.xml")
+            .unwrap();
+        *fonts = String::from_utf8(fonts.clone())
+            .unwrap()
+            .replace(
+                "other:preserved link:id=",
+                &format!("other:preserved link:{attribute}="),
+            )
+            .into_bytes();
+        let output = redact(&ooxml_opc::rezip_parts(&parts).unwrap(), Format::Docx).unwrap();
+        let parts = ooxml_opc::unzip_parts(&output).unwrap();
+        assert!(part(&parts, "word/fonts/font.ttf").is_empty());
+        assert!(
+            String::from_utf8_lossy(part(&parts, "word/custom/_rels/fontList.xml.rels"))
+                .contains("Id=\"font0\"")
+        );
+    }
+}
+
+fn pptx_embedded_font_fixture(strict: bool, shared: bool) -> Vec<u8> {
+    let source = embedded_font_fixture(strict, shared);
+    let parts = ooxml_opc::unzip_parts(&source).unwrap();
+    let parts = parts
+        .into_iter()
+        .map(|(path, bytes)| {
+            let path = path
+                .replace("word/document.xml", "ppt/presentation.xml")
+                .replace("word/", "ppt/");
+            let bytes = if path.ends_with(".xml") || path.ends_with(".rels") {
+                String::from_utf8(bytes)
+                    .unwrap()
+                    .replace("wordprocessingml", "presentationml")
+                    .replace("d:document", "d:presentation")
+                    .replace("d:fonts", "d:embeddedFontLst")
+                    .replace(
+                        "<d:font d:name=\"Arial\">",
+                        "<d:embeddedFont><d:font typeface=\"Arial\"/>",
+                    )
+                    .replace("</d:font>", "</d:embeddedFont>")
+                    .replace("embedRegular", "regular")
+                    .replace("embedBoldItalic", "boldItalic")
+                    .replace("embedBold", "bold")
+                    .replace("embedItalic", "italic")
+                    .into_bytes()
+            } else {
+                bytes
+            };
+            (path, bytes)
+        })
+        .collect::<Vec<_>>();
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn pptx_font_variants_are_detached_before_scrubbing_payloads() {
+    for strict in [false, true] {
+        let source = pptx_embedded_font_fixture(strict, false);
+        let (output, report) = redact_with_report(&source, Format::Pptx).unwrap();
+        let parts = ooxml_opc::unzip_parts(&output).unwrap();
+        assert_eq!(report.binary_parts, 1);
+        assert!(!parts.iter().any(|(path, _)| path == "ppt/fonts/font.ttf"));
+        let fonts = String::from_utf8_lossy(part(&parts, "ppt/custom/fontList.xml"));
+        assert!(fonts.contains("typeface=\"Arial\""));
+        for variant in ["regular", "bold", "italic", "boldItalic"] {
+            assert!(!fonts.contains(&format!("<d:{variant}")));
+        }
+        assert!(
+            !String::from_utf8_lossy(part(&parts, "ppt/custom/_rels/fontList.xml.rels"))
+                .contains("Target=")
+        );
+        assert!(!String::from_utf8_lossy(part(&parts, "[Content_Types].xml")).contains("ttf"));
+    }
+}
+
+#[test]
+fn pptx_font_cleanup_preserves_foreign_and_shared_consumers() {
+    for strict in [false, true] {
+        let mut parts = ooxml_opc::unzip_parts(&pptx_embedded_font_fixture(strict, true)).unwrap();
+        let (_, fonts) = parts
+            .iter_mut()
+            .find(|(path, _)| path == "ppt/custom/fontList.xml")
+            .unwrap();
+        *fonts = String::from_utf8(fonts.clone())
+            .unwrap()
+            .replace("other:preserved", "other:regular")
+            .replace(
+                "</d:embeddedFont>",
+                "<d:bold other:id=\"font1\"/></d:embeddedFont>",
+            )
+            .into_bytes();
+        let output = redact(&ooxml_opc::rezip_parts(&parts).unwrap(), Format::Pptx).unwrap();
+        let parts = ooxml_opc::unzip_parts(&output).unwrap();
+        assert!(part(&parts, "ppt/fonts/font.ttf").is_empty());
+        let fonts = String::from_utf8_lossy(part(&parts, "ppt/custom/fontList.xml"));
+        assert!(fonts.contains("other:regular link:id=\"font0\""));
+        assert!(fonts.contains("<d:bold other:id=\"font1\"/>"));
+        assert!(!fonts.contains("<d:regular"));
+        let rels = String::from_utf8_lossy(part(&parts, "ppt/custom/_rels/fontList.xml.rels"));
+        assert!(rels.contains("Id=\"font0\""));
+        assert!(!rels.contains("Id=\"font1\""));
+    }
+}
+
+#[test]
+fn pptx_redacts_editable_design_names_but_preserves_font_and_style_ids() {
+    let input = br#"<root><theme name="PRIVATE_THEME"><clrScheme name="PRIVATE_COLORS"/><fontScheme name="PRIVATE_FONTS"><latin typeface="Arial"/></fontScheme><fmtScheme name="PRIVATE_FORMAT"/></theme><sldLayout matchingName="PRIVATE_LAYOUT" type="title"/><tblStyle styleName="PRIVATE_TABLE" styleId="{STYLE-ID}"/></root>"#;
+    let output = xml::redact_xml(
+        Format::Pptx,
+        "ppt/theme/theme1.xml",
+        input,
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let output = String::from_utf8(output).unwrap();
+    assert!(!output.contains("PRIVATE_"));
+    assert!(output.contains("typeface=\"Arial\""));
+    assert!(output.contains("type=\"title\""));
+    assert!(output.contains("styleId=\"{STYLE-ID}\""));
+}
 
 #[test]
 fn redacts_docx_without_changing_structure() {
@@ -40,6 +735,416 @@ fn redacts_docx_without_changing_structure() {
     assert_fixture_properties(&source, &output, DOCX_SECRETS, "word/media/image1.png");
     assert_text_lengths(&source, &output, "word/document.xml", "t");
     parse_docx_s9_wire(&output, S9ParseOptions::default()).unwrap();
+}
+
+#[test]
+fn xlsx_persons_and_threaded_comments_mask_identity_but_keep_links() {
+    let persons = r#"<personList xmlns="http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments"><person displayName="Jane Doe" id="{8D9DB2FF-51B5-4863-B4CB-D5001D7B3245}" userId="jane@example.com" providerId="AD"/></personList>"#;
+    let output = xml::redact_xml(
+        Format::Xlsx,
+        "xl/persons/person.xml",
+        persons.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(!text.contains("Jane Doe"));
+    assert!(!text.contains("jane@example.com"));
+    assert!(text.contains(r#"id="{8D9DB2FF-51B5-4863-B4CB-D5001D7B3245}""#));
+    assert!(text.contains(r#"providerId="AD""#));
+
+    let thread = r#"<ThreadedComments xmlns="http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments"><threadedComment ref="A1" dT="2031-02-03T04:05:06" personId="{8D9DB2FF-51B5-4863-B4CB-D5001D7B3245}" id="{E722680E-88F9-4806-84CE-A0C8E0F639CB}" parentId="{D0285282-5A03-4F7B-8130-876841640E88}" done="0"><text>Secret reply</text></threadedComment></ThreadedComments>"#;
+    let output = xml::redact_xml(
+        Format::Xlsx,
+        "xl/threadedComments/threadedComment1.xml",
+        thread.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(!text.contains("Secret reply"));
+    assert!(!text.contains("2031-02-03"));
+    assert!(text.contains("1970-01-01T00:00:00Z"));
+    for kept in [
+        r#"ref="A1""#,
+        r#"personId="{8D9DB2FF-51B5-4863-B4CB-D5001D7B3245}""#,
+        r#"id="{E722680E-88F9-4806-84CE-A0C8E0F639CB}""#,
+        r#"parentId="{D0285282-5A03-4F7B-8130-876841640E88}""#,
+        r#"done="0""#,
+    ] {
+        assert!(text.contains(kept), "link lost: {kept} in {text}");
+    }
+}
+
+#[test]
+fn xlsx_pivot_caches_mask_values_and_keep_shared_indexes() {
+    let definition = r##"<pivotCacheDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cacheSource type="worksheet"><worksheetSource ref="A1:B2" sheet="Secret Sheet"/></cacheSource><cacheFields count="1"><cacheField name="Secret Field" caption="Secret Caption" numFmtId="0"><sharedItems count="6"><s v="Secret Shared"/><n v="918273645"/><d v="2031-04-05T06:07:08"/><e v="#DIV/0!"/><b v="1"/><x v="2"/></sharedItems></cacheField></cacheFields></pivotCacheDefinition>"##;
+    let output = xml::redact_xml(
+        Format::Xlsx,
+        "xl/pivotCache/pivotCacheDefinition1.xml",
+        definition.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    for secret in [
+        "Secret Field",
+        "Secret Caption",
+        "Secret Shared",
+        "918273645",
+        "2031-04-05",
+        "#DIV/0!",
+        "Secret Sheet",
+    ] {
+        assert!(
+            !text.contains(secret),
+            "secret survived: {secret} in {text}"
+        );
+    }
+    assert!(text.contains(r#"n v="888888888""#));
+    assert!(text.contains("1970-01-01T00:00:00Z"));
+    assert!(text.contains(r##"e v="#N/A""##));
+    assert!(text.contains(r#"b v="false""#));
+    for kept in [
+        r#"ref="A1:B2""#,
+        r#"numFmtId="0""#,
+        r#"x v="2""#,
+        r#"type="worksheet""#,
+    ] {
+        assert!(text.contains(kept), "structure lost: {kept} in {text}");
+    }
+
+    let records = r#"<pivotCacheRecords xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="1"><r><s v="Secret Record"/><n v="462782"/><x v="0"/><m/></r></pivotCacheRecords>"#;
+    let output = xml::redact_xml(
+        Format::Xlsx,
+        "xl/pivotCache/pivotCacheRecords1.xml",
+        records.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(!text.contains("Secret Record"));
+    assert!(!text.contains("462782"));
+    assert!(text.contains(r#"n v="888888""#));
+    assert!(text.contains(r#"x v="0""#));
+    assert!(text.contains("<m/>"));
+}
+
+#[test]
+fn xlsx_pivot_tables_connections_and_external_links_are_masked() {
+    let table = r#"<pivotTableDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" name="Secret Pivot" cacheId="7" dataCaption="Secret Values" grandTotalCaption="Secret Total" rowHeaderCaption="Secret Rows" colHeaderCaption="Secret Cols" errorCaption="Secret Err" missingCaption="Secret Missing"><pivotFields count="1"><pivotField subtotalCaption="Secret Subtotal"><items count="2"><item x="0"/><item t="default"/></items></pivotField></pivotFields><dataFields count="1"><dataField name="Sum of Secret" fld="0"/></dataFields><calculatedItems count="1"><calculatedItem formula="SecretField+1"><pivotArea><references count="0"/></pivotArea></calculatedItem></calculatedItems></pivotTableDefinition>"#;
+    let output = xml::redact_xml(
+        Format::Xlsx,
+        "xl/pivotTables/pivotTable1.xml",
+        table.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    for secret in [
+        "Secret Pivot",
+        "Secret Values",
+        "Secret Total",
+        "Secret Rows",
+        "Secret Cols",
+        "Secret Err",
+        "Secret Missing",
+        "Secret Subtotal",
+        "Sum of Secret",
+        "SecretField",
+    ] {
+        assert!(
+            !text.contains(secret),
+            "secret survived: {secret} in {text}"
+        );
+    }
+    assert!(text.contains(r#"formula="0""#));
+    for kept in [
+        r#"cacheId="7""#,
+        r#"fld="0""#,
+        r#"item x="0""#,
+        r#"t="default""#,
+    ] {
+        assert!(text.contains(kept), "structure lost: {kept} in {text}");
+    }
+
+    let connections = r#"<connections xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><connection id="1" name="Secret Conn" description="Secret Desc" type="1"><dbPr connection="Server=secret;Pwd=hunter2" command="SELECT secret FROM t" commandType="2"/><parameters count="1"><parameter name="Secret Param" prompt="Secret Prompt"><v>Secret Default</v></parameter></parameters></connection><connection id="2" name="T" type="4"><webPr xml="1" url="https://secret.example/x" post="secret=1"/></connection></connections>"#;
+    let output = xml::redact_xml(
+        Format::Xlsx,
+        "xl/connections.xml",
+        connections.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    for secret in [
+        "Secret Conn",
+        "Secret Desc",
+        "Server=secret",
+        "hunter2",
+        "SELECT secret",
+        "Secret Param",
+        "Secret Prompt",
+        "Secret Default",
+        "secret.example",
+        "secret=1",
+    ] {
+        assert!(
+            !text.contains(secret),
+            "secret survived: {secret} in {text}"
+        );
+    }
+    assert!(text.contains(r#"id="1""#));
+    assert!(text.contains(r#"commandType="2""#));
+
+    let dde = r#"<externalLink xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><ddeLink ddeService="Secret Svc" ddeTopic="[Secret.xls]Sheet1"><ddeItems><ddeItem name="Secret Item" advise="1"><values rows="1" cols="1"><value><val><v>Secret Cached</v></val></value></values></ddeItem></ddeItems></ddeLink></externalLink>"#;
+    let output = xml::redact_xml(
+        Format::Xlsx,
+        "xl/externalLinks/externalLink1.xml",
+        dde.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    for secret in ["Secret Svc", "Secret.xls", "Secret Item", "Secret Cached"] {
+        assert!(
+            !text.contains(secret),
+            "secret survived: {secret} in {text}"
+        );
+    }
+    assert!(text.contains(r#"advise="1""#));
+
+    let ole = r#"<externalLink xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><oleLink xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rId1" progId="Secret.App"><oleItems><oleItem name="Secret Object" icon="0" advise="0" preferPict="0"/></oleItems></oleLink></externalLink>"#;
+    let output = xml::redact_xml(
+        Format::Xlsx,
+        "xl/externalLinks/externalLink2.xml",
+        ole.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(!text.contains("Secret.App"));
+    assert!(!text.contains("Secret Object"));
+    assert!(text.contains(r#"r:id="rId1""#));
+
+    let book = r#"<externalLink xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><externalBook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rId1"><sheetNames><sheetName val="Secret Sheet"/></sheetNames><sheetDataSet><sheetData sheetId="0"><row r="1"><cell r="A1" t="str"><v>Secret Cached</v></cell></row></sheetData></sheetDataSet><definedNames><definedName name="Secret Name" refersTo="SecretSheet!$A$1" sheetId="0"/></definedNames></externalBook></externalLink>"#;
+    let output = xml::redact_xml(
+        Format::Xlsx,
+        "xl/externalLinks/externalLink3.xml",
+        book.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    for secret in [
+        "Secret Sheet",
+        "Secret Cached",
+        "Secret Name",
+        "SecretSheet",
+    ] {
+        assert!(
+            !text.contains(secret),
+            "secret survived: {secret} in {text}"
+        );
+    }
+    assert!(text.contains(r#"sheetId="0""#));
+    assert!(text.contains(r#"r="A1""#));
+}
+
+#[test]
+fn xlsx_table_totals_and_cf_formulas_are_masked() {
+    let table = r#"<table xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" id="1" name="T" displayName="T" ref="A1:B2"><tableColumns count="1"><tableColumn id="1" name="C" totalsRowFunction="sum" totalsRowFormula="SECRET_TOTFORM+1"><calculatedColumnFormula>SECRET_TCFORM+1</calculatedColumnFormula></tableColumn></tableColumns></table>"#;
+    let output = xml::redact_xml(
+        Format::Xlsx,
+        "xl/tables/table1.xml",
+        table.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(
+        !text.contains("SECRET_TOTFORM"),
+        "totals formula survived: {text}"
+    );
+    assert!(text.contains(r#"totalsRowFormula="0""#));
+    assert!(text.contains(r#"totalsRowFunction="sum""#));
+
+    let sheet = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><conditionalFormatting sqref="A1:A2"><cfRule type="expression" priority="1"><formula>SECRET_CFFORM+A1</formula></cfRule></conditionalFormatting><dataValidations count="1"><dataValidation type="list" sqref="A1"><formula1>SECRET_DVFORM1</formula1><formula2>SECRET_DVFORM2</formula2></dataValidation></dataValidations></worksheet>"#;
+    let output = xml::redact_xml(
+        Format::Xlsx,
+        "xl/worksheets/sheet1.xml",
+        sheet.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    for secret in ["SECRET_CFFORM", "SECRET_DVFORM1", "SECRET_DVFORM2"] {
+        assert!(
+            !text.contains(secret),
+            "worksheet formula survived: {secret} in {text}"
+        );
+    }
+    assert_eq!(text.matches("<formula>0</formula>").count(), 1);
+    assert_eq!(text.matches("<formula1>0</formula1>").count(), 1);
+    assert_eq!(text.matches("<formula2>0</formula2>").count(), 1);
+}
+
+#[test]
+fn xlsx_tables_slicers_and_rich_data_keep_labels_masked() {
+    let table = r#"<table xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" id="1" name="Secret Table" displayName="Secret Table" comment="Secret Comment" ref="A1:B2"><tableColumns count="1"><tableColumn id="1" name="Secret Col" totalsRowLabel="Secret Total"><calculatedColumnFormula>SecretCol+1</calculatedColumnFormula></tableColumn></tableColumns></table>"#;
+    let output = xml::redact_xml(
+        Format::Xlsx,
+        "xl/tables/table1.xml",
+        table.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    for secret in [
+        "Secret Table",
+        "Secret Comment",
+        "Secret Col",
+        "Secret Total",
+        "SecretCol",
+    ] {
+        assert!(
+            !text.contains(secret),
+            "secret survived: {secret} in {text}"
+        );
+    }
+    assert!(text.contains("<calculatedColumnFormula>0</calculatedColumnFormula>"));
+    assert!(text.contains(r#"ref="A1:B2""#));
+
+    let sheet = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData/><oleObjects><oleObject progId="Secret.Prog" link="C:\Users\secret\book.xlsx" shapeId="1025" r:id="rId9"/></oleObjects><controls><control shapeId="1026" r:id="rId10" name="Secret Control"/></controls></worksheet>"#;
+    let output = xml::redact_xml(
+        Format::Xlsx,
+        "xl/worksheets/sheet9.xml",
+        sheet.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    for secret in ["Secret.Prog", "secret\\book", "Secret Control"] {
+        assert!(
+            !text.contains(secret),
+            "secret survived: {secret} in {text}"
+        );
+    }
+    assert!(text.contains(r#"shapeId="1025""#));
+    assert!(text.contains(r#"r:id="rId9""#));
+
+    let rich = r#"<rvData xmlns="http://schemas.microsoft.com/office/spreadsheetml/2017/richdata" count="1"><rv s="0"><v>Secret Rich</v></rv></rvData>"#;
+    let output = xml::redact_xml(
+        Format::Xlsx,
+        "xl/richData/rdrichvalue.xml",
+        rich.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    assert!(!String::from_utf8(output).unwrap().contains("Secret Rich"));
+
+    let keys = r#"<rvStructures xmlns="http://schemas.microsoft.com/office/spreadsheetml/2017/richdata2" count="1"><s t="keep"><k n="Secret Key" t="s"/></s></rvStructures>"#;
+    let output = xml::redact_xml(
+        Format::Xlsx,
+        "xl/richData/rdRichValueStructure.xml",
+        keys.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(!text.contains("Secret Key"));
+    assert!(text.contains(r#"t="keep""#));
+
+    let metadata = r#"<metadata xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><valueMetadata count="1"><bk><rc t="1" v="0"><v>Secret Meta</v></rc></bk></valueMetadata></metadata>"#;
+    let output = xml::redact_xml(
+        Format::Xlsx,
+        "xl/metadata.xml",
+        metadata.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(!text.contains("Secret Meta"));
+    assert!(text.contains(r#"rc t="1" v="0""#));
+}
+
+#[test]
+fn random_masks_keep_pivot_and_slicer_names_consistent() {
+    let shared = "SHARED_PIVOT_NAME_SECRET";
+    let patched: Vec<(String, Vec<u8>)> = ooxml_opc::unzip_parts(&xlsx_fixture())
+        .unwrap()
+        .into_iter()
+        .map(|(path, bytes)| {
+            let bytes = if path == "xl/pivotTables/pivotTable1.xml" {
+                String::from_utf8(bytes)
+                    .unwrap()
+                    .replace("XLSX_SECRET_PIVOT", shared)
+                    .into_bytes()
+            } else if path == "xl/slicerCaches/slicerCache1.xml" {
+                String::from_utf8(bytes)
+                    .unwrap()
+                    .replace("XLSX_SECRET_SLICERPIVOT", shared)
+                    .into_bytes()
+            } else {
+                bytes
+            };
+            (path, bytes)
+        })
+        .collect();
+    let source = ooxml_opc::rezip_parts(&patched).unwrap();
+    let options = RedactionOptions {
+        random_characters: true,
+    };
+    let (output, _) = redact_with_report_and_options(&source, Format::Xlsx, &options).unwrap();
+    let out = ooxml_opc::unzip_parts(&output).unwrap();
+    let pivot = String::from_utf8_lossy(part(&out, "xl/pivotTables/pivotTable1.xml")).into_owned();
+    let cache =
+        String::from_utf8_lossy(part(&out, "xl/slicerCaches/slicerCache1.xml")).into_owned();
+    assert!(!pivot.contains(shared) && !cache.contains(shared));
+    assert_eq!(
+        pivot_name(&pivot),
+        slicer_pivot_name(&cache),
+        "pivot/slicer names diverged: {pivot} vs {cache}"
+    );
+    xlsx_parse::parse_workbook(&out).unwrap();
+}
+
+fn pivot_name(xml: &str) -> String {
+    let mut reader = Reader::from_str(xml);
+    loop {
+        match reader.read_event().unwrap() {
+            Event::Start(start) | Event::Empty(start)
+                if start.name().local_name().as_ref() == b"pivotTableDefinition" =>
+            {
+                for attribute in start.attributes().flatten() {
+                    if attribute.key.local_name().as_ref() == b"name" {
+                        return String::from_utf8_lossy(attribute.value.as_ref()).into_owned();
+                    }
+                }
+            }
+            Event::Eof => panic!("pivotTableDefinition name missing in {xml}"),
+            _ => {}
+        }
+    }
+}
+
+fn slicer_pivot_name(xml: &str) -> String {
+    let mut reader = Reader::from_str(xml);
+    loop {
+        match reader.read_event().unwrap() {
+            Event::Start(start) | Event::Empty(start)
+                if start.name().local_name().as_ref() == b"pivotTable" =>
+            {
+                for attribute in start.attributes().flatten() {
+                    if attribute.key.local_name().as_ref() == b"name" {
+                        return String::from_utf8_lossy(attribute.value.as_ref()).into_owned();
+                    }
+                }
+            }
+            Event::Eof => panic!("slicer pivotTable name missing in {xml}"),
+            _ => {}
+        }
+    }
 }
 
 #[test]
@@ -64,12 +1169,15 @@ fn redacts_pptx_without_changing_structure() {
 }
 
 #[test]
-fn preserves_jpeg_dimensions_and_format() {
+fn jpeg_placeholder_is_fixed_size() {
     let source = placeholder_image(ImageFormat::Jpeg);
     let mut report = RedactionReport::default();
     let output = media::replace_media("word/media/photo.jpeg", &source, &mut report).unwrap();
     assert_ne!(source, output);
-    assert_eq!(image_dimensions(&source), image_dimensions(&output));
+    assert_eq!(
+        image_dimensions(&output),
+        (media::PLACEHOLDER_SIZE, media::PLACEHOLDER_SIZE)
+    );
     assert_eq!(image::guess_format(&output).unwrap(), ImageFormat::Jpeg);
 }
 
@@ -77,6 +1185,1235 @@ fn preserves_jpeg_dimensions_and_format() {
 fn rejects_explicit_format_mismatch() {
     let error = redact(&docx_fixture(), Format::Xlsx).unwrap_err();
     assert!(matches!(error, RedactError::FormatMismatch { .. }));
+}
+
+#[test]
+fn scrubs_unrecognized_binary_parts_by_default() {
+    let source = package(vec![
+        (
+            "[Content_Types].xml",
+            xml(
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="bin" ContentType="application/vnd.ms-office.vbaProjectSignature"/><Default Extension="data" ContentType="application/vnd.ms-excel.model"/><Default Extension="sigs" ContentType="application/vnd.ms-office.digitalSignature"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/ppt/fonts/font1.fntdata" ContentType="application/x-fontdata"/></Types>"#,
+            ),
+        ),
+        (
+            "_rels/.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+            ),
+        ),
+        (
+            "xl/workbook.xml",
+            xml(
+                r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets/><extLst><ext uri="{D2B972BC-6C4E-4E1A-B56E-EF2F6D5A1C29}"><model r:id="rIdModel"/></ext></extLst></workbook>"#,
+            ),
+        ),
+        (
+            "xl/_rels/workbook.xml.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rIdModel" Type="http://schemas.microsoft.com/office/2006/relationships/model" Target="model/item.data"/><Relationship Id="rIdOle" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" Target="/xl/embeddings/oleObject1.bin"/></Relationships>"#,
+            ),
+        ),
+        (
+            "xl/worksheets/sheet1.xml",
+            xml(
+                r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData></worksheet>"#,
+            ),
+        ),
+        (
+            "xl/worksheets/_rels/sheet1.xml.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" Target="../embeddings/oleObject1.bin"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://secret.example/xlsx" TargetMode="External"/></Relationships>"#,
+            ),
+        ),
+        ("xl/model/item.data", b"POWERPIVOT_MODEL_SECRET".to_vec()),
+        (
+            "xl/embeddings/oleObject1.bin",
+            b"OLE_EMBEDDED_SECRET".to_vec(),
+        ),
+        (
+            "xl/vbaProjectSignature.bin",
+            b"VBA_SIGNATURE_SECRET".to_vec(),
+        ),
+        (
+            "ppt/fonts/font1.fntdata",
+            b"FONT_GLYPH_SUBSET_SECRET".to_vec(),
+        ),
+        (
+            "_xmlsignatures/origin.sigs",
+            b"XML_SIGNATURE_ORIGIN_SECRET".to_vec(),
+        ),
+        (
+            "_xmlsignatures/_rels/origin.sigs.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.microsoft.com/office/2006/relationships/digitalSignature" Target="sig1.xml"/></Relationships>"#,
+            ),
+        ),
+        (
+            "_xmlsignatures/sig1.xml",
+            xml(
+                r##"<signature xmlns="http://schemas.openxmlformats.org/package/2006/digital-signature"><SignedInfo xmlns="http://www.w3.org/2000/09/xmldsig#"><CanonicalizationMethod Algorithm="http://www.w3.org/TR/2001/REC-xml-c14n-20010315"/><SignatureMethod Algorithm="http://www.w3.org/2000/09/xmldsig#rsa-sha1"/><Reference URI="#idPackageSignature"><DigestMethod Algorithm="http://www.w3.org/2000/09/xmldsig#sha1"/><DigestValue>b64DIGESTVALUE</DigestValue></Reference></SignedInfo><SignatureValue>b64SIGNATUREVALUE</SignatureValue><KeyInfo xmlns="http://www.w3.org/2000/09/xmldsig#"><X509Data><X509Certificate>X509_CERT_CHAIN_BLOB</X509Certificate><X509SubjectName>EMAILSIGNER_SECRET@example.com</X509SubjectName></X509Data></KeyInfo><Object><SignatureProperties><SignatureProperty Id="protoSigId" Target="#idPackageSignature"><SignatureInfoV1 xmlns="http://schemas.microsoft.com/office/2006/digsig"><SignerName>SIGNER_NAME_SECRET</SignerName><SetUpBy>SIGNER_NAME_SECRET</SetUpBy></SignatureInfoV1></SignatureProperty></SignatureProperties></Object></signature>"##,
+            ),
+        ),
+    ]);
+    let (output, report) = redact_with_report(&source, Format::Auto).unwrap();
+    assert_eq!(report.format, Format::Xlsx);
+    let parts = ooxml_opc::unzip_parts(&output).unwrap();
+    xlsx_parse::parse_workbook(&parts).unwrap();
+    for path in [
+        "xl/vbaProjectSignature.bin",
+        "ppt/fonts/font1.fntdata",
+        "_xmlsignatures/origin.sigs",
+        "_xmlsignatures/_rels/origin.sigs.rels",
+        "_xmlsignatures/sig1.xml",
+    ] {
+        assert!(
+            parts.iter().all(|(candidate, _)| candidate != path),
+            "unreferenced binary part survived: {path}"
+        );
+    }
+    for path in ["xl/model/item.data", "xl/embeddings/oleObject1.bin"] {
+        assert_eq!(
+            part(&parts, path),
+            b"",
+            "referenced binary part must stay as an empty entry: {path}"
+        );
+    }
+    assert_eq!(report.binary_parts, 5);
+
+    for secret in [
+        "POWERPIVOT_MODEL_SECRET",
+        "OLE_EMBEDDED_SECRET",
+        "VBA_SIGNATURE_SECRET",
+        "FONT_GLYPH_SUBSET_SECRET",
+        "XML_SIGNATURE_ORIGIN_SECRET",
+        "X509_CERT_CHAIN_BLOB",
+        "EMAILSIGNER_SECRET",
+        "SIGNER_NAME_SECRET",
+    ] {
+        assert!(
+            parts
+                .iter()
+                .all(|(_, bytes)| !String::from_utf8_lossy(bytes).contains(secret)),
+            "secret survived: {secret}"
+        );
+    }
+
+    let content_types = String::from_utf8_lossy(part(&parts, "[Content_Types].xml"));
+    assert!(content_types.contains("spreadsheetml.sheet.main+xml"));
+    assert!(!content_types.contains("fntdata"));
+    assert!(!content_types.contains(r#"Extension="sigs""#));
+    assert!(
+        content_types.contains(r#"Extension="bin""#)
+            && content_types.contains(r#"Extension="data""#),
+        "emptied parts keep their declarations: {content_types}"
+    );
+
+    let workbook_rels = String::from_utf8_lossy(part(&parts, "xl/_rels/workbook.xml.rels"));
+    assert!(workbook_rels.contains("worksheets/sheet1.xml"));
+    assert!(workbook_rels.contains("item.data"));
+    assert!(workbook_rels.contains("oleObject1.bin"));
+
+    let sheet_rels = String::from_utf8_lossy(part(&parts, "xl/worksheets/_rels/sheet1.xml.rels"));
+    assert!(sheet_rels.contains("oleObject1.bin"));
+    assert!(
+        sheet_rels.contains("https://example.com"),
+        "external relationships must survive"
+    );
+
+    let workbook = String::from_utf8_lossy(part(&parts, "xl/workbook.xml"));
+    assert!(
+        workbook.contains("rIdModel") && workbook_rels.contains(r#"Id="rIdModel""#),
+        "host r:id references must still resolve to a relationship"
+    );
+}
+
+#[test]
+fn referenced_binaries_keep_host_references_resolvable() {
+    let source = package(vec![
+        (
+            "[Content_Types].xml",
+            xml(
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="bin" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.printerSettings"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#,
+            ),
+        ),
+        (
+            "_rels/.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+            ),
+        ),
+        (
+            "xl/workbook.xml",
+            xml(
+                r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheets/></workbook>"#,
+            ),
+        ),
+        (
+            "xl/_rels/workbook.xml.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#,
+            ),
+        ),
+        (
+            "xl/worksheets/sheet1.xml",
+            xml(
+                r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><pageSetup orientation="portrait" r:id="rIdPrinter"/></worksheet>"#,
+            ),
+        ),
+        (
+            "xl/worksheets/_rels/sheet1.xml.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdPrinter" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/printerSettings" Target="../printerSettings/printerSettings1.bin"/></Relationships>"#,
+            ),
+        ),
+        (
+            "xl/printerSettings/printerSettings1.bin",
+            b"PRINTER_QUEUE_SECRET".to_vec(),
+        ),
+    ]);
+    let (output, report) = redact_with_report(&source, Format::Auto).unwrap();
+    assert_eq!(report.binary_parts, 1);
+    let parts = ooxml_opc::unzip_parts(&output).unwrap();
+    xlsx_parse::parse_workbook(&parts).unwrap();
+    assert_eq!(
+        part(&parts, "xl/printerSettings/printerSettings1.bin"),
+        b"",
+        "a referenced binary keeps its entry, emptied"
+    );
+    let sheet_rels = String::from_utf8_lossy(part(&parts, "xl/worksheets/_rels/sheet1.xml.rels"));
+    assert!(
+        sheet_rels.contains(r#"Id="rIdPrinter""#),
+        "the relationship a surviving body still references must survive: {sheet_rels}"
+    );
+    let content_types = String::from_utf8_lossy(part(&parts, "[Content_Types].xml"));
+    assert!(content_types.contains(r#"Extension="bin""#));
+    assert!(
+        parts
+            .iter()
+            .all(|(_, bytes)| !String::from_utf8_lossy(bytes).contains("PRINTER_QUEUE_SECRET"))
+    );
+}
+
+#[test]
+fn case_folded_entry_names_match_the_opc_layer() {
+    let source = package(vec![
+        (
+            "[Content_Types].xml",
+            xml(
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Default Extension="bin" ContentType="application/vnd.ms-office.embedded"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#,
+            ),
+        ),
+        (
+            "_rels/.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#,
+            ),
+        ),
+        (
+            "word/document.xml",
+            xml(
+                r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:r><w:drawing r:embed="rIdImage"/></w:r></w:p></w:body></w:document>"#,
+            ),
+        ),
+        (
+            "word/_rels/document.xml.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/key.png"/></Relationships>"#,
+            ),
+        ),
+        // U+212A KELVIN SIGN: `to_lowercase` folds it to `k`, `to_ascii_lowercase` does not.
+        ("word/media/\u{212a}ey.png", placeholder_png()),
+        (
+            "word/embeddings/\u{212a}.bin",
+            b"CASE_FOLDED_SECRET".to_vec(),
+        ),
+        (
+            "word/embeddings/_rels/k.bin.rels",
+            xml(&format!(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/{kelvin}ey.png"/></Relationships>"#,
+                kelvin = '\u{212a}'
+            )),
+        ),
+    ]);
+    let (output, _) = redact_with_report(&source, Format::Auto).unwrap();
+    let parts = ooxml_opc::unzip_parts(&output).unwrap();
+    assert!(
+        parts
+            .iter()
+            .any(|(path, _)| path == "word/media/\u{212a}ey.png"),
+        "a media part a surviving relationship still targets must survive"
+    );
+    assert!(
+        parts
+            .iter()
+            .all(|(path, _)| !path.ends_with("k.bin.rels") && !path.ends_with(".bin")),
+        "the scrubbed part and the relationships it owns must both go"
+    );
+    assert!(
+        parts
+            .iter()
+            .all(|(_, bytes)| !String::from_utf8_lossy(bytes).contains("CASE_FOLDED_SECRET"))
+    );
+}
+
+#[test]
+fn percent_encoded_targets_resolve_to_literal_parts() {
+    let source = package(vec![
+        (
+            "[Content_Types].xml",
+            xml(
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="bin" ContentType="application/vnd.ms-office.embedded"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/></Types>"#,
+            ),
+        ),
+        (
+            "_rels/.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+            ),
+        ),
+        (
+            "xl/workbook.xml",
+            xml(
+                r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheets/></workbook>"#,
+            ),
+        ),
+        (
+            "xl/_rels/workbook.xml.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdOle" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" Target="embeddings/payload%40one.bin"/></Relationships>"#,
+            ),
+        ),
+        (
+            "xl/embeddings/payload%40one.bin",
+            b"LITERAL_TARGET_SECRET".to_vec(),
+        ),
+        (
+            "xl/embeddings/payload@one.bin",
+            b"DECODED_DECOY_SECRET".to_vec(),
+        ),
+        ("xl/embeddings/orphan.bin", b"ORPHAN_SECRET".to_vec()),
+    ]);
+    let (output, _) = redact_with_report(&source, Format::Auto).unwrap();
+    let parts = ooxml_opc::unzip_parts(&output).unwrap();
+    let workbook_rels = String::from_utf8_lossy(part(&parts, "xl/_rels/workbook.xml.rels"));
+    assert!(
+        workbook_rels.contains(r#"Target="embeddings/payload%40one.bin""#),
+        "the literal relationship must survive: {workbook_rels}"
+    );
+    assert!(
+        parts
+            .iter()
+            .any(|(path, _)| path == "xl/embeddings/payload%40one.bin"),
+        "relationship target is dangling: {workbook_rels}"
+    );
+    assert_eq!(
+        part(&parts, "xl/embeddings/payload%40one.bin"),
+        b"",
+        "the literal target must be blanked in place"
+    );
+    for path in ["xl/embeddings/payload@one.bin", "xl/embeddings/orphan.bin"] {
+        assert!(
+            parts.iter().all(|(candidate, _)| candidate != path),
+            "unreferenced part survived, so relationship resolution fell back: {path}"
+        );
+    }
+    let content_types = String::from_utf8_lossy(part(&parts, "[Content_Types].xml"));
+    assert!(
+        content_types.contains(r#"Extension="bin""#),
+        "the retained literal target needs content-type coverage: {content_types}"
+    );
+    for secret in [
+        "LITERAL_TARGET_SECRET",
+        "DECODED_DECOY_SECRET",
+        "ORPHAN_SECRET",
+    ] {
+        assert!(
+            parts
+                .iter()
+                .all(|(_, bytes)| !String::from_utf8_lossy(bytes).contains(secret)),
+            "secret survived: {secret}"
+        );
+    }
+}
+
+#[test]
+fn encoded_relationships_and_overrides_name_literal_parts() {
+    let source = package(vec![
+        (
+            "[Content_Types].xml",
+            xml(
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/custom/twin%2Ebin" ContentType="application/vnd.ms-office.literal"/><Override PartName="/xl/custom/twin.bin" ContentType="application/vnd.ms-office.decoy"/></Types>"#,
+            ),
+        ),
+        (
+            "_rels/.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+            ),
+        ),
+        (
+            "xl/workbook.xml",
+            xml(
+                r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheets/></workbook>"#,
+            ),
+        ),
+        (
+            "xl/_rels/workbook.xml.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdTwin" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" Target="custom/twin%2Ebin"/></Relationships>"#,
+            ),
+        ),
+        ("xl/custom/twin.bin", b"DECODED_PART_SECRET".to_vec()),
+        ("xl/custom/twin%2Ebin", b"LITERAL_PART_SECRET".to_vec()),
+    ]);
+    let (output, _) = redact_with_report(&source, Format::Auto).unwrap();
+    let parts = ooxml_opc::unzip_parts(&output).unwrap();
+    let workbook_rels = String::from_utf8_lossy(part(&parts, "xl/_rels/workbook.xml.rels"));
+    assert!(
+        workbook_rels.contains(r#"Target="custom/twin%2Ebin""#),
+        "the encoded relationship must survive: {workbook_rels}"
+    );
+    assert!(
+        parts.iter().any(|(path, _)| path == "xl/custom/twin%2Ebin"),
+        "relationship target is dangling: {workbook_rels}"
+    );
+    assert_eq!(part(&parts, "xl/custom/twin%2Ebin"), b"");
+    assert!(
+        parts.iter().all(|(path, _)| path != "xl/custom/twin.bin"),
+        "the decoded decoy must not alias the literal target"
+    );
+    let content_types = String::from_utf8_lossy(part(&parts, "[Content_Types].xml"));
+    assert!(
+        content_types.contains(r#"PartName="/xl/custom/twin%2Ebin""#)
+            && content_types.contains("ms-office.literal"),
+        "the retained literal part needs its encoded Override: {content_types}"
+    );
+    assert!(
+        !content_types.contains(r#"PartName="/xl/custom/twin.bin""#)
+            && !content_types.contains("ms-office.decoy"),
+        "the decoded decoy's Override outlived its part: {content_types}"
+    );
+    for secret in ["DECODED_PART_SECRET", "LITERAL_PART_SECRET"] {
+        assert!(
+            parts
+                .iter()
+                .all(|(_, bytes)| !String::from_utf8_lossy(bytes).contains(secret)),
+            "secret survived: {secret}"
+        );
+    }
+}
+
+#[test]
+fn package_control_parts_are_never_cascade_targets() {
+    let source = package(vec![
+        (
+            "[Content_Types].xml",
+            xml(
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="bin" ContentType="application/octet-stream"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/></Types>"#,
+            ),
+        ),
+        (
+            "_rels/.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+            ),
+        ),
+        (
+            "xl/workbook.xml",
+            xml(
+                r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheets/></workbook>"#,
+            ),
+        ),
+        (
+            "xl/embeddings/payload.bin",
+            b"CONTROL_TARGET_SECRET".to_vec(),
+        ),
+        (
+            "xl/embeddings/_rels/payload.bin.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://example.com/x" Target="/[Content_Types].xml"/><Relationship Id="rId2" Type="http://example.com/y" Target="/_rels/.rels"/></Relationships>"#,
+            ),
+        ),
+    ]);
+    let (output, _) = redact_with_report(&source, Format::Auto).unwrap();
+    let parts = ooxml_opc::unzip_parts(&output).unwrap();
+    for path in ["[Content_Types].xml", "_rels/.rels"] {
+        assert!(
+            parts.iter().any(|(candidate, _)| candidate == path),
+            "a package control part was cascaded away: {path}"
+        );
+    }
+    assert_eq!(detect_format(&output).unwrap(), Format::Xlsx);
+    assert!(
+        parts
+            .iter()
+            .all(|(_, bytes)| !String::from_utf8_lossy(bytes).contains("CONTROL_TARGET_SECRET"))
+    );
+}
+
+#[test]
+fn orphans_do_not_spare_targets_and_noncanonical_control_parts_are_pruned() {
+    let source = package(vec![
+        (
+            "./[Content_Types].xml",
+            xml(
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="bin" ContentType="application/octet-stream"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/></Types>"#,
+            ),
+        ),
+        (
+            "_rels/.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+            ),
+        ),
+        (
+            "xl/workbook.xml",
+            xml(
+                r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheets/></workbook>"#,
+            ),
+        ),
+        ("payload.bin", b"ORPHAN_PAYLOAD_SECRET".to_vec()),
+        (
+            "_rels/payload.bin.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://example.com/secret" Target="secret.xml"/></Relationships>"#,
+            ),
+        ),
+        ("secret.xml", xml("<root>ORPHAN_TARGET_SECRET</root>")),
+        (
+            "./_rels/orphan.bin.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://example.com/keep" Target="secret.xml"/></Relationships>"#,
+            ),
+        ),
+    ]);
+    let (output, _) = redact_with_report(&source, Format::Auto).unwrap();
+    let parts = ooxml_opc::unzip_parts(&output).unwrap();
+    for path in ["payload.bin", "_rels/payload.bin.rels", "secret.xml"] {
+        assert!(
+            parts.iter().all(|(candidate, _)| candidate != path),
+            "part survived: {path}"
+        );
+    }
+    let content_types = parts
+        .iter()
+        .find(|(path, _)| path.to_ascii_lowercase().ends_with("[content_types].xml"))
+        .map(|(_, bytes)| String::from_utf8_lossy(bytes).into_owned())
+        .expect("content types part must survive");
+    assert!(!content_types.contains(r#"Extension="bin""#));
+
+    let orphan_rels = parts
+        .iter()
+        .find(|(path, _)| path.to_ascii_lowercase().ends_with("orphan.bin.rels"))
+        .map(|(_, bytes)| String::from_utf8_lossy(bytes).into_owned())
+        .expect("orphan rels must survive as a part");
+    assert!(
+        !orphan_rels.contains("secret.xml"),
+        "dangling relationship to a removed target must be pruned"
+    );
+}
+
+#[test]
+fn unsupported_media_owned_by_scrubbed_binaries_is_removed_not_transformed() {
+    let source = package(vec![
+        (
+            "[Content_Types].xml",
+            xml(
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="bin" ContentType="application/octet-stream"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/></Types>"#,
+            ),
+        ),
+        (
+            "_rels/.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+            ),
+        ),
+        (
+            "xl/workbook.xml",
+            xml(
+                r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheets/></workbook>"#,
+            ),
+        ),
+        ("xl/payload.bin", b"CASCADE_MEDIA_SECRET".to_vec()),
+        (
+            "xl/_rels/payload.bin.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://example.com/thumbnail" Target="media/thumb.dat"/></Relationships>"#,
+            ),
+        ),
+        ("xl/media/thumb.dat", b"NOT_A_DECODABLE_IMAGE".to_vec()),
+    ]);
+    let (output, report) = redact_with_report(&source, Format::Auto).unwrap();
+    let parts = ooxml_opc::unzip_parts(&output).unwrap();
+    for path in [
+        "xl/payload.bin",
+        "xl/_rels/payload.bin.rels",
+        "xl/media/thumb.dat",
+    ] {
+        assert!(
+            parts.iter().all(|(candidate, _)| candidate != path),
+            "part survived: {path}"
+        );
+    }
+    assert_eq!(report.binary_parts, 1);
+}
+
+#[test]
+fn noncanonical_xml_aliases_are_still_redacted() {
+    let source = package(vec![
+        (
+            "[Content_Types].xml",
+            xml(
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/></Types>"#,
+            ),
+        ),
+        (
+            "_rels/.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+            ),
+        ),
+        (
+            "xl/workbook.xml",
+            xml(
+                r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheets/></workbook>"#,
+            ),
+        ),
+        (
+            "./docProps/core.xml",
+            xml(
+                r#"<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:creator>CORE_CREATOR_SECRET</dc:creator><dc:title>CORE_TITLE_SECRET</dc:title></cp:coreProperties>"#,
+            ),
+        ),
+    ]);
+    let (output, _) = redact_with_report(&source, Format::Auto).unwrap();
+    let parts = ooxml_opc::unzip_parts(&output).unwrap();
+    let core = parts
+        .iter()
+        .find(|(path, _)| path.to_ascii_lowercase().ends_with("core.xml"))
+        .map(|(_, bytes)| String::from_utf8_lossy(bytes).into_owned())
+        .expect("core properties must survive as a part");
+    assert!(!core.contains("CORE_CREATOR_SECRET"));
+    assert!(!core.contains("CORE_TITLE_SECRET"));
+}
+
+#[test]
+fn root_level_owned_relationships_cascade_to_their_targets() {
+    let source = package(vec![
+        (
+            "[Content_Types].xml",
+            xml(
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="bin" ContentType="application/octet-stream"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/></Types>"#,
+            ),
+        ),
+        (
+            "_rels/.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+            ),
+        ),
+        (
+            "xl/workbook.xml",
+            xml(
+                r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheets/></workbook>"#,
+            ),
+        ),
+        ("payload.bin", b"ROOT_PAYLOAD_SECRET".to_vec()),
+        (
+            "_rels/payload.bin.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://example.com/secret" Target="secret.xml"/></Relationships>"#,
+            ),
+        ),
+        (
+            "secret.xml",
+            xml("<root>ROOT_SIGNATURE_TARGET_SECRET</root>"),
+        ),
+    ]);
+    let (output, _) = redact_with_report(&source, Format::Auto).unwrap();
+    let parts = ooxml_opc::unzip_parts(&output).unwrap();
+    for path in ["payload.bin", "_rels/payload.bin.rels", "secret.xml"] {
+        assert!(
+            parts.iter().all(|(candidate, _)| candidate != path),
+            "part survived: {path}"
+        );
+    }
+    assert!(
+        !parts
+            .iter()
+            .any(|(_, bytes)| String::from_utf8_lossy(bytes)
+                .contains("ROOT_SIGNATURE_TARGET_SECRET")),
+        "cascade target content must not survive in any part"
+    );
+}
+
+#[test]
+fn shared_relationship_targets_survive_scrubbing() {
+    let source = package(vec![
+        (
+            "[Content_Types].xml",
+            xml(
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/embeddings/binary.bin" ContentType="application/vnd.ms-office.embedded"/></Types>"#,
+            ),
+        ),
+        (
+            "_rels/.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+            ),
+        ),
+        (
+            "xl/workbook.xml",
+            xml(
+                r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheets/></workbook>"#,
+            ),
+        ),
+        (
+            "xl/_rels/workbook.xml.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#,
+            ),
+        ),
+        (
+            "xl/worksheets/sheet1.xml",
+            xml(
+                r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"/>"#,
+            ),
+        ),
+        (
+            "xl/worksheets/_rels/sheet1.xml.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/shared.png"/></Relationships>"#,
+            ),
+        ),
+        ("xl/embeddings/binary.bin", b"BINARY_SECRET".to_vec()),
+        (
+            "xl/embeddings/_rels/binary.bin.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/shared.png"/></Relationships>"#,
+            ),
+        ),
+        ("xl/media/shared.png", placeholder_png()),
+    ]);
+    let (output, report) = redact_with_report(&source, Format::Auto).unwrap();
+    assert_eq!(report.format, Format::Xlsx);
+    assert_eq!(report.binary_parts, 1);
+    let parts = ooxml_opc::unzip_parts(&output).unwrap();
+    assert!(
+        parts.iter().all(|(path, _)| !path.contains("binary.bin")),
+        "binary part or its rels survived"
+    );
+    assert!(
+        parts.iter().any(|(path, _)| path == "xl/media/shared.png"),
+        "shared target must survive scrubbing"
+    );
+    assert!(
+        parts
+            .iter()
+            .all(|(_, bytes)| !String::from_utf8_lossy(bytes).contains("BINARY_SECRET"))
+    );
+    let sheet_rels = String::from_utf8_lossy(part(&parts, "xl/worksheets/_rels/sheet1.xml.rels"));
+    assert!(
+        sheet_rels.contains("../media/shared.png"),
+        "retained reference to the shared target must survive"
+    );
+    let content_types = String::from_utf8_lossy(part(&parts, "[Content_Types].xml"));
+    assert!(!content_types.contains("binary.bin"));
+    assert!(content_types.contains(r#"Extension="png""#));
+}
+
+#[test]
+fn prunes_declarations_of_noncanonically_named_entries() {
+    let source = package(vec![
+        (
+            "[Content_Types].xml",
+            xml(
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/embeddings/binary.bin" ContentType="application/vnd.ms-office.embedded"/><Override PartName="/xl/embeddings/orphan.bin" ContentType="application/vnd.ms-office.orphan"/></Types>"#,
+            ),
+        ),
+        (
+            "_rels/.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+            ),
+        ),
+        (
+            "xl/workbook.xml",
+            xml(
+                r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheets/></workbook>"#,
+            ),
+        ),
+        (
+            "xl/_rels/workbook.xml.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" Target="/xl/embeddings/binary.bin"/></Relationships>"#,
+            ),
+        ),
+        (
+            "xl/worksheets/sheet1.xml",
+            xml(
+                r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"/>"#,
+            ),
+        ),
+        (
+            "xl//embeddings/binary.bin",
+            b"ALIASED_BINARY_SECRET".to_vec(),
+        ),
+        (
+            "./xl/embeddings/orphan.bin",
+            b"ALIASED_ORPHAN_SECRET".to_vec(),
+        ),
+    ]);
+    let (output, report) = redact_with_report(&source, Format::Auto).unwrap();
+    assert_eq!(report.binary_parts, 2);
+    let parts = ooxml_opc::unzip_parts(&output).unwrap();
+    assert_eq!(
+        part(&parts, "xl//embeddings/binary.bin"),
+        b"",
+        "the aliased entry must be recognised as the relationship's target"
+    );
+    assert!(
+        parts.iter().all(|(path, _)| !path.contains("orphan.bin")),
+        "aliased unreferenced binary survived"
+    );
+    for secret in ["ALIASED_BINARY_SECRET", "ALIASED_ORPHAN_SECRET"] {
+        assert!(
+            parts
+                .iter()
+                .all(|(_, bytes)| !String::from_utf8_lossy(bytes).contains(secret)),
+            "secret survived: {secret}"
+        );
+    }
+    let content_types = String::from_utf8_lossy(part(&parts, "[Content_Types].xml"));
+    assert!(
+        !content_types.contains("orphan.bin"),
+        "content-type Override outlived its part: {content_types}"
+    );
+    assert!(!content_types.contains("ms-office.orphan"));
+    assert!(content_types.contains("ms-office.embedded"));
+    let workbook_rels = String::from_utf8_lossy(part(&parts, "xl/_rels/workbook.xml.rels"));
+    assert!(
+        workbook_rels.contains("binary.bin"),
+        "relationship to a retained part was pruned: {workbook_rels}"
+    );
+    assert!(workbook_rels.contains("worksheets/sheet1.xml"));
+}
+
+#[test]
+fn a_uri_in_a_target_fragment_keeps_the_part_it_names() {
+    let source = package(vec![
+        (
+            "[Content_Types].xml",
+            xml(
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="bin" ContentType="application/vnd.ms-office.embedded"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#,
+            ),
+        ),
+        (
+            "_rels/.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#,
+            ),
+        ),
+        (
+            "word/document.xml",
+            xml(
+                r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body/></w:document>"#,
+            ),
+        ),
+        // The fragment carries a URI of its own; only the part before it names a part.
+        (
+            "word/_rels/document.xml.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdFragment" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" Target="payload.bin#ref=https://tracking.invalid/a"/></Relationships>"#,
+            ),
+        ),
+        ("word/payload.bin", b"FRAGMENT_TARGET_SECRET".to_vec()),
+    ]);
+    let (output, _) = redact_with_report(&source, Format::Auto).unwrap();
+    let parts = ooxml_opc::unzip_parts(&output).unwrap();
+    assert_eq!(
+        part(&parts, "word/payload.bin"),
+        b"",
+        "a target whose fragment holds a URI still names its part"
+    );
+    let relationships = String::from_utf8_lossy(part(&parts, "word/_rels/document.xml.rels"));
+    assert!(
+        relationships.contains(r#"Id="rIdFragment""#),
+        "the relationship must not be left dangling: {relationships}"
+    );
+    assert!(
+        parts
+            .iter()
+            .all(|(_, bytes)| !String::from_utf8_lossy(bytes).contains("FRAGMENT_TARGET_SECRET"))
+    );
+}
+
+#[test]
+fn a_foreign_qualified_target_mode_does_not_strand_its_part() {
+    let source = package(vec![
+        (
+            "[Content_Types].xml",
+            xml(
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="bin" ContentType="application/vnd.ms-office.embedded"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#,
+            ),
+        ),
+        (
+            "_rels/.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#,
+            ),
+        ),
+        (
+            "word/document.xml",
+            xml(
+                r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body/></w:document>"#,
+            ),
+        ),
+        // Only the unqualified OPC `TargetMode` may send a relationship outside.
+        (
+            "word/_rels/document.xml.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships" xmlns:q="http://example.com/q"><Relationship Id="rIdForeign" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" Target="payload.bin" q:TargetMode="External"/></Relationships>"#,
+            ),
+        ),
+        ("word/payload.bin", b"FOREIGN_MODE_SECRET".to_vec()),
+    ]);
+    let (output, _) = redact_with_report(&source, Format::Auto).unwrap();
+    let parts = ooxml_opc::unzip_parts(&output).unwrap();
+    assert_eq!(
+        part(&parts, "word/payload.bin"),
+        b"",
+        "a foreign-qualified TargetMode must not make the target external"
+    );
+    let relationships = String::from_utf8_lossy(part(&parts, "word/_rels/document.xml.rels"));
+    assert!(
+        relationships.contains(r#"Id="rIdForeign""#),
+        "the relationship must not be left dangling: {relationships}"
+    );
+    assert!(
+        parts
+            .iter()
+            .all(|(_, bytes)| !String::from_utf8_lossy(bytes).contains("FOREIGN_MODE_SECRET"))
+    );
+}
+
+#[test]
+fn a_literal_percent_spelling_is_kept_when_the_package_holds_only_it() {
+    let source = package(vec![
+        (
+            "[Content_Types].xml",
+            xml(
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="bin" ContentType="application/vnd.ms-office.embedded"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/></Types>"#,
+            ),
+        ),
+        (
+            "_rels/.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+            ),
+        ),
+        (
+            "xl/workbook.xml",
+            xml(
+                r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheets/></workbook>"#,
+            ),
+        ),
+        // `%25` encodes a literal `%`; the decoded spelling names no entry here,
+        // so the stored one is what the relationship resolves to.
+        (
+            "xl/_rels/workbook.xml.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdLiteral" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" Target="custom/literal%25.bin"/></Relationships>"#,
+            ),
+        ),
+        (
+            "xl/custom/literal%25.bin",
+            b"LITERAL_PERCENT_SECRET".to_vec(),
+        ),
+    ]);
+    let (output, _) = redact_with_report(&source, Format::Auto).unwrap();
+    let parts = ooxml_opc::unzip_parts(&output).unwrap();
+    assert_eq!(
+        part(&parts, "xl/custom/literal%25.bin"),
+        b"",
+        "the stored spelling is the one the relationship names"
+    );
+    let relationships = String::from_utf8_lossy(part(&parts, "xl/_rels/workbook.xml.rels"));
+    assert!(
+        relationships.contains(r#"Id="rIdLiteral""#),
+        "the relationship must not be left dangling: {relationships}"
+    );
+    assert!(
+        parts
+            .iter()
+            .all(|(_, bytes)| !String::from_utf8_lossy(bytes).contains("LITERAL_PERCENT_SECRET"))
+    );
+}
+
+#[test]
+fn a_backslash_rooted_target_names_the_part_at_the_package_root() {
+    let source = package(vec![
+        (
+            "[Content_Types].xml",
+            xml(
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="bin" ContentType="application/vnd.ms-office.embedded"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#,
+            ),
+        ),
+        (
+            "_rels/.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#,
+            ),
+        ),
+        (
+            "word/document.xml",
+            xml(
+                r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body/></w:document>"#,
+            ),
+        ),
+        // A single leading backslash roots the target, the way `ooxml-opc`
+        // keys entries; two would make it UNC and send it outside.
+        (
+            "word/_rels/document.xml.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdRooted" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" Target="\word\payload.bin"/></Relationships>"#,
+            ),
+        ),
+        ("word/payload.bin", b"BACKSLASH_ROOT_SECRET".to_vec()),
+    ]);
+    let (output, _) = redact_with_report(&source, Format::Auto).unwrap();
+    let parts = ooxml_opc::unzip_parts(&output).unwrap();
+    assert_eq!(
+        part(&parts, "word/payload.bin"),
+        b"",
+        "a backslash-rooted target still names its part"
+    );
+    let relationships = String::from_utf8_lossy(part(&parts, "word/_rels/document.xml.rels"));
+    assert!(
+        relationships.contains(r#"Id="rIdRooted""#),
+        "the relationship must not be left dangling: {relationships}"
+    );
+    assert!(
+        parts
+            .iter()
+            .all(|(_, bytes)| !String::from_utf8_lossy(bytes).contains("BACKSLASH_ROOT_SECRET"))
+    );
+}
+
+#[test]
+fn an_unresolvable_internal_target_blanks_instead_of_deleting() {
+    let source = package(vec![
+        (
+            "[Content_Types].xml",
+            xml(
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="bin" ContentType="application/vnd.ms-office.embedded"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#,
+            ),
+        ),
+        (
+            "_rels/.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#,
+            ),
+        ),
+        (
+            "word/document.xml",
+            xml(
+                r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body/></w:document>"#,
+            ),
+        ),
+        // This target climbs past the package root, so which part it stands for
+        // cannot be established; nothing may be deleted on that basis.
+        (
+            "word/_rels/document.xml.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdLost" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" Target="../../word/payload.bin"/></Relationships>"#,
+            ),
+        ),
+        ("word/payload.bin", b"UNRESOLVABLE_TARGET_SECRET".to_vec()),
+        ("word/lonely.bin", b"UNREFERENCED_SECRET".to_vec()),
+    ]);
+    let (output, _) = redact_with_report(&source, Format::Auto).unwrap();
+    let parts = ooxml_opc::unzip_parts(&output).unwrap();
+    for path in ["word/payload.bin", "word/lonely.bin"] {
+        assert_eq!(
+            part(&parts, path),
+            b"",
+            "{path} must be emptied in place, not removed"
+        );
+    }
+    let relationships = String::from_utf8_lossy(part(&parts, "word/_rels/document.xml.rels"));
+    assert!(
+        relationships.contains(r#"Id="rIdLost""#),
+        "the relationship must survive alongside its part: {relationships}"
+    );
+    for secret in ["UNRESOLVABLE_TARGET_SECRET", "UNREFERENCED_SECRET"] {
+        assert!(
+            parts
+                .iter()
+                .all(|(_, bytes)| !String::from_utf8_lossy(bytes).contains(secret)),
+            "secret survived: {secret}"
+        );
+    }
+}
+
+#[test]
+fn a_reference_to_scrubbed_owned_relationships_blanks_instead_of_deleting() {
+    let source = package(vec![
+        (
+            "[Content_Types].xml",
+            xml(
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="bin" ContentType="application/vnd.ms-office.embedded"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/></Types>"#,
+            ),
+        ),
+        (
+            "_rels/.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+            ),
+        ),
+        (
+            "xl/workbook.xml",
+            xml(
+                r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><extLst><ext uri="{8D4A375A-586D-4F93-8092-10DB64A2B4A1}"><relsRef r:id="rIdRels"/></ext></extLst></workbook>"#,
+            ),
+        ),
+        (
+            "xl/_rels/workbook.xml.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdRels" Type="http://example.com/relationships/ownedRelationships" Target="embeddings/_rels/oleObject1.bin.rels"/></Relationships>"#,
+            ),
+        ),
+        (
+            "xl/embeddings/oleObject1.bin",
+            b"OWNED_RELATIONSHIPS_SECRET".to_vec(),
+        ),
+        (
+            "xl/embeddings/_rels/oleObject1.bin.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>"#,
+            ),
+        ),
+    ]);
+    let (output, report) = redact_with_report(&source, Format::Auto).unwrap();
+    assert_eq!(report.binary_parts, 1);
+    let parts = ooxml_opc::unzip_parts(&output).unwrap();
+    let workbook = String::from_utf8_lossy(part(&parts, "xl/workbook.xml"));
+    assert!(workbook.contains(r#"r:id="rIdRels""#));
+    let workbook_rels = String::from_utf8_lossy(part(&parts, "xl/_rels/workbook.xml.rels"));
+    assert!(
+        workbook_rels.contains(r#"Id="rIdRels""#),
+        "host r:id must resolve to a surviving relationship: {workbook_rels}"
+    );
+    assert!(
+        parts
+            .iter()
+            .any(|(path, _)| path == "xl/embeddings/_rels/oleObject1.bin.rels"),
+        "the surviving relationship target must survive"
+    );
+    assert_eq!(part(&parts, "xl/embeddings/oleObject1.bin"), b"");
+    assert!(
+        parts.iter().all(
+            |(_, bytes)| !String::from_utf8_lossy(bytes).contains("OWNED_RELATIONSHIPS_SECRET")
+        )
+    );
+}
+
+#[test]
+fn the_exact_case_target_is_the_one_followed() {
+    let source = package(vec![
+        (
+            "[Content_Types].xml",
+            xml(
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="bin" ContentType="application/vnd.ms-office.embedded"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#,
+            ),
+        ),
+        (
+            "_rels/.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#,
+            ),
+        ),
+        (
+            "word/document.xml",
+            xml(
+                r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body/></w:document>"#,
+            ),
+        ),
+        // Both spellings name stored parts, so only attribute precedence decides
+        // which one the relationship keeps alive.
+        (
+            "word/_rels/document.xml.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdExact" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" target="decoy.bin" Target="payload.bin"/></Relationships>"#,
+            ),
+        ),
+        ("word/payload.bin", b"EXACT_TARGET_SECRET".to_vec()),
+        ("word/decoy.bin", b"DECOY_TARGET_SECRET".to_vec()),
+    ]);
+    let (output, _) = redact_with_report(&source, Format::Auto).unwrap();
+    let parts = ooxml_opc::unzip_parts(&output).unwrap();
+    assert_eq!(
+        part(&parts, "word/payload.bin"),
+        b"",
+        "the exact-case Target names the part that must survive"
+    );
+    assert!(
+        parts.iter().all(|(path, _)| path != "word/decoy.bin"),
+        "the tolerated variant names no relationship target"
+    );
+    for secret in ["EXACT_TARGET_SECRET", "DECOY_TARGET_SECRET"] {
+        assert!(
+            parts
+                .iter()
+                .all(|(_, bytes)| !String::from_utf8_lossy(bytes).contains(secret)),
+            "secret survived: {secret}"
+        );
+    }
+}
+
+#[test]
+fn a_case_variant_extension_does_not_drop_the_declaration() {
+    let source = package(vec![
+        (
+            "[Content_Types].xml",
+            xml(
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default extension="decoy" Extension="bin" ContentType="application/vnd.ms-office.embedded"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#,
+            ),
+        ),
+        (
+            "_rels/.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#,
+            ),
+        ),
+        (
+            "word/document.xml",
+            xml(
+                r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body/></w:document>"#,
+            ),
+        ),
+        (
+            "word/_rels/document.xml.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdKept" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" Target="payload.bin"/></Relationships>"#,
+            ),
+        ),
+        ("word/payload.bin", b"DECLARED_PART_SECRET".to_vec()),
+    ]);
+    let (output, _) = redact_with_report(&source, Format::Auto).unwrap();
+    let parts = ooxml_opc::unzip_parts(&output).unwrap();
+    assert_eq!(part(&parts, "word/payload.bin"), b"");
+    let content_types = String::from_utf8_lossy(part(&parts, "[Content_Types].xml"));
+    assert!(
+        content_types.contains(r#"Extension="bin""#),
+        "the retained part keeps its declaration: {content_types}"
+    );
+    assert!(
+        parts
+            .iter()
+            .all(|(_, bytes)| !String::from_utf8_lossy(bytes).contains("DECLARED_PART_SECRET"))
+    );
 }
 
 fn assert_fixture_properties(source: &[u8], output: &[u8], secrets: &[&str], media_path: &str) {
@@ -98,8 +2435,8 @@ fn assert_fixture_properties(source: &[u8], output: &[u8], secrets: &[&str], med
     let after_image = part(&after, media_path);
     assert_ne!(before_image, after_image);
     assert_eq!(
-        image_dimensions(before_image),
-        image_dimensions(after_image)
+        image_dimensions(after_image),
+        (media::PLACEHOLDER_SIZE, media::PLACEHOLDER_SIZE)
     );
     assert_eq!(image::guess_format(after_image).unwrap(), ImageFormat::Png);
 }
@@ -290,6 +2627,114 @@ fn xlsx_fixture() -> Vec<u8> {
             ),
         ),
         (
+            "xl/persons/person.xml",
+            xml(
+                r#"<personList xmlns="http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments"><person displayName="XLSX_SECRET_PERSON" id="{11111111-1111-1111-1111-111111111111}" userId="XLSX_SECRET_UPN@example.com" providerId="AD"/></personList>"#,
+            ),
+        ),
+        (
+            "xl/threadedComments/threadedComment1.xml",
+            xml(
+                r#"<ThreadedComments xmlns="http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments"><threadedComment ref="A1" dT="2031-02-03T04:05:06" personId="{11111111-1111-1111-1111-111111111111}" id="{22222222-2222-2222-2222-222222222222}"><text>XLSX_SECRET_THREAD</text></threadedComment></ThreadedComments>"#,
+            ),
+        ),
+        (
+            "xl/pivotCache/pivotCacheDefinition1.xml",
+            xml(
+                r##"<pivotCacheDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cacheSource type="worksheet"><worksheetSource ref="A1:B2" sheet="XLSX_SECRET_REF_SHEET"/></cacheSource><cacheFields count="1"><cacheField name="XLSX_SECRET_FIELD" caption="XLSX_SECRET_FCAP" numFmtId="0"><sharedItems count="6"><s v="XLSX_SECRET_SHARED"/><n v="918273645"/><d v="2031-04-05T06:07:08"/><e v="#DIV/0!"/><b v="1"/><x v="0"/></sharedItems></cacheField></cacheFields></pivotCacheDefinition>"##,
+            ),
+        ),
+        (
+            "xl/pivotCache/pivotCacheRecords1.xml",
+            xml(
+                r#"<pivotCacheRecords xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="1"><r><s v="XLSX_SECRET_RECORD"/><n v="462782"/><x v="0"/><m/></r></pivotCacheRecords>"#,
+            ),
+        ),
+        (
+            "xl/pivotTables/pivotTable1.xml",
+            xml(
+                r#"<pivotTableDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" name="XLSX_SECRET_PIVOT" cacheId="1" dataCaption="XLSX_SECRET_DATACAP" grandTotalCaption="XLSX_SECRET_GTOTAL" rowHeaderCaption="XLSX_SECRET_ROWHEAD" colHeaderCaption="XLSX_SECRET_COLHEAD" errorCaption="XLSX_SECRET_ERRCAP" missingCaption="XLSX_SECRET_MISSCAP"><pivotFields count="1"><pivotField subtotalCaption="XLSX_SECRET_SUBTOTAL"><items count="1"><item x="0"/></items></pivotField></pivotFields><dataFields count="1"><dataField name="XLSX_SECRET_DATAFIELD" fld="0"/></dataFields><pageFields count="1"><pageField fld="0"/></pageFields><calculatedItems count="1"><calculatedItem formula="XLSX_SECRET_CALCITEM+1"><pivotArea><references count="1"><reference field="0"><x v="0"/></reference></references></pivotArea></calculatedItem></calculatedItems><calculatedMembers count="1"><calculatedMember name="XLSX_SECRET_CALCMEM" mname="[XLSX_SECRET_CUBE].[XLSX_SECRET_CALCMEM]" mdx="XLSX_SECRET_MDX"/></calculatedMembers></pivotTableDefinition>"#,
+            ),
+        ),
+        (
+            "xl/connections.xml",
+            xml(
+                r#"<connections xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><connection id="1" name="XLSX_SECRET_CONN" description="XLSX_SECRET_CONNDESC" type="1"><dbPr connection="XLSX_SECRET_CONNSTR" command="XLSX_SECRET_SQL" commandType="2"/><parameters count="1"><parameter name="XLSX_SECRET_PARAM" sqlType="-9" parameterType="prompt" refreshOnChange="1" prompt="XLSX_SECRET_PROMPT" boolean="0" persistent="0"><v>XLSX_SECRET_PARAMVAL</v></parameter></parameters></connection><connection id="2" name="TextConn" type="4"><textPr prompt="0" fileType="1" sourceFile="XLSX_SECRET_SOURCE"/></connection><connection id="3" name="WebConn" type="4"><webPr xml="1" url="https://XLSX_SECRET_URL.example/x" post="XLSX_SECRET_POST"/></connection></connections>"#,
+            ),
+        ),
+        (
+            "xl/externalLinks/externalLink1.xml",
+            xml(
+                r#"<externalLink xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><externalBook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rId1"><sheetNames><sheetName val="XLSX_SECRET_XSHEET"/></sheetNames><sheetDataSet><sheetData sheetId="0" refreshError="0"><row r="1"><cell r="A1" t="str"><v>XLSX_SECRET_XCACHE</v></cell><cell r="B1"><v>13579</v></cell></row></sheetData></sheetDataSet><definedNames><definedName name="XLSX_SECRET_XNAME" refersTo="XLSX_SECRET_XREF!$A$1" sheetId="0"/></definedNames></externalBook></externalLink>"#,
+            ),
+        ),
+        (
+            "xl/externalLinks/externalLink2.xml",
+            xml(
+                r#"<externalLink xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><ddeLink ddeService="XLSX_SECRET_DDESVC" ddeTopic="XLSX_SECRET_DDETOP"><ddeItems><ddeItem name="XLSX_SECRET_DDEITEM" advise="1"><values rows="1" cols="1"><value><val><v>XLSX_SECRET_DDEVAL</v></val></value></values></ddeItem></ddeItems></ddeLink></externalLink>"#,
+            ),
+        ),
+        (
+            "xl/externalLinks/externalLink3.xml",
+            xml(
+                r#"<externalLink xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><oleLink xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rId1" progId="XLSX_SECRET_OPROG"><oleItems><oleItem name="XLSX_SECRET_OLEITEM" icon="0" advise="0" preferPict="0"/></oleItems></oleLink></externalLink>"#,
+            ),
+        ),
+        (
+            "xl/worksheets/sheet2.xml",
+            xml(
+                r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>XLSX_SECRET_SHEET2</t></is></c></row></sheetData><oleObjects><oleObject progId="XLSX_SECRET_OLEPROG" dvAspect="DVASPECT_CONTENT" link="XLSX_SECRET_OLELINK" shapeId="1025" r:id="rId9"/></oleObjects><controls><control shapeId="1026" r:id="rId10" name="XLSX_SECRET_CTRL"/></controls><autoFilter ref="A1:A2"><filterColumn colId="0"><customFilters><customFilter operator="equal" val="XLSX_SECRET_CUSTFILT"/></customFilters></filterColumn></autoFilter><conditionalFormatting sqref="A1:A2"><cfRule type="containsText" operator="containsText" text="XLSX_SECRET_CFTEXT" priority="1"><formula>XLSX_SECRET_CFFORM</formula></cfRule></conditionalFormatting><dataValidations count="1"><dataValidation type="list" sqref="A1"><formula1>XLSX_SECRET_DVFORM1</formula1><formula2>XLSX_SECRET_DVFORM2</formula2></dataValidation></dataValidations><scenarios><scenario name="XLSX_SECRET_SCEN" user="XLSX_SECRET_SCENUSER" comment="XLSX_SECRET_SCENCOMMENT"><inputCells r="A1">1</inputCells></scenario></scenarios><webPublishItems count="1"><webPublishItem id="1" divId="x" sourceType="sheet" sourceRef="A1" destinationFile="XLSX_SECRET_WPDEST" title="XLSX_SECRET_WPTITLE" autoRepublish="0"/></webPublishItems></worksheet>"#,
+            ),
+        ),
+        (
+            "xl/tables/table1.xml",
+            xml(
+                r#"<table xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" id="1" name="XLSX_SECRET_TABLE" displayName="XLSX_SECRET_TABLE" comment="XLSX_SECRET_TCOMMENT" ref="A1:B2"><tableColumns count="1"><tableColumn id="1" name="XLSX_SECRET_TCOL" totalsRowFunction="sum" totalsRowLabel="XLSX_SECRET_TOTLABEL" totalsRowFormula="XLSX_SECRET_TOTFORM+1"><calculatedColumnFormula>XLSX_SECRET_TCFORM+1</calculatedColumnFormula></tableColumn></tableColumns></table>"#,
+            ),
+        ),
+        (
+            "xl/queryTables/queryTable1.xml",
+            xml(
+                r#"<queryTable xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" name="XLSX_SECRET_QUERY" connectionId="1"><queryTableRefresh><queryTableFields count="1"><queryTableField id="1" name="XLSX_SECRET_QFIELD" tableColumnId="1"/></queryTableFields></queryTableRefresh></queryTable>"#,
+            ),
+        ),
+        (
+            "xl/slicers/slicer1.xml",
+            xml(
+                r#"<slicer xmlns="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main" name="XLSX_SECRET_SLICER" cache="rId1" caption="XLSX_SECRET_SLICERCAP"/>"#,
+            ),
+        ),
+        (
+            "xl/slicerCaches/slicerCache1.xml",
+            xml(
+                r#"<slicerCacheDefinition xmlns="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main" name="XLSX_SECRET_SLICERCACHE"><pivotTables><pivotTable tabId="0" name="XLSX_SECRET_SLICERPIVOT"/></pivotTables><data><tabular><items count="1"><i x="0" c="XLSX_SECRET_SITEM"/></items></tabular></data></slicerCacheDefinition>"#,
+            ),
+        ),
+        (
+            "xl/timelines/timeline1.xml",
+            xml(
+                r#"<timeline xmlns="http://schemas.microsoft.com/office/spreadsheetml/2010/11/main" name="XLSX_SECRET_TL" cache="rId1" caption="XLSX_SECRET_TLCAP"/>"#,
+            ),
+        ),
+        (
+            "xl/richData/rdrichvalue.xml",
+            xml(
+                r#"<rvData xmlns="http://schemas.microsoft.com/office/spreadsheetml/2017/richdata" count="3"><rv s="0"><v>XLSX_SECRET_RICHV</v></rv><rv s="0"><v>24680</v></rv><rvb i="0">U0VDUkVUX1NFQ1JFVF9SSUNIQkxPQg==</rvb></rvData>"#,
+            ),
+        ),
+        (
+            "xl/richData/rdRichValueStructure.xml",
+            xml(
+                r#"<rvStructures xmlns="http://schemas.microsoft.com/office/spreadsheetml/2017/richdata2" count="1"><s t="XLSX_RICH_TYPE"><k n="XLSX_SECRET_RICHKEY" t="s"/></s></rvStructures>"#,
+            ),
+        ),
+        (
+            "xl/metadata.xml",
+            xml(
+                r#"<metadata xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><valueMetadata count="1"><bk><rc t="1" v="0"><v>XLSX_SECRET_METAV</v></rc></bk></valueMetadata></metadata>"#,
+            ),
+        ),
+        (
             "xl/worksheets/_rels/sheet1.xml.rels",
             xml(
                 r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://secret.example/xlsx" TargetMode="External"/></Relationships>"#,
@@ -350,6 +2795,12 @@ fn pptx_fixture() -> Vec<u8> {
             ),
         ),
         (
+            "ppt/authors.xml",
+            xml(
+                r#"<p188:authorLst xmlns:p188="http://schemas.microsoft.com/office/powerpoint/2018/8/main"><p188:author id="{CD37207E-7903-4ED4-8AE8-017538D2DF7E}" name="PPTX_SECRET_MODERN_AUTHOR" initials="PSM" userId="PPTX_SECRET_MODERN_AUTHOR@example.com" providerId="AD"/></p188:authorLst>"#,
+            ),
+        ),
+        (
             "ppt/slides/_rels/slide1.xml.rels",
             xml(
                 r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://secret.example/pptx" TargetMode="External"/></Relationships>"#,
@@ -393,6 +2844,384 @@ fn empty_shared_string_cell_does_not_leak_next_value() {
 }
 
 #[test]
+fn scheme_bearing_relationship_targets_redacted_without_target_mode() {
+    let rels = concat!(
+        r#"<?xml version="1.0"?>"#,
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+        r#"<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://secret.example/docx" TargetMode="External"/>"#,
+        r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.com/a"/>"#,
+        r#"<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="file:///C:/Users/jane/x.xlsx"/>"#,
+        r#"<Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="file:///\\server\share\x.xlsx"/>"#,
+        r#"<Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.png"/>"#,
+        r#"</Relationships>"#,
+    );
+    let mut report = RedactionReport::default();
+    let output = xml::redact_xml(
+        Format::Docx,
+        "word/_rels/document.xml.rels",
+        rels.as_bytes(),
+        &mut report,
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains(r#"Target="https://example.com""#));
+    assert!(!text.contains("secret.example"));
+    assert!(!text.contains(r"\server\share"));
+    assert!(!text.contains("/Users/jane"));
+    assert!(text.contains(r#"Target="media/image1.png""#));
+    assert_eq!(report.attributes, 4);
+}
+
+#[test]
+fn rfc3986_scheme_targets_redacted_without_target_mode() {
+    let rels = concat!(
+        r#"<?xml version="1.0"?>"#,
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+        r#"<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="tel:+49123456789"/>"#,
+        r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="MAILTO:jane@example.com"/>"#,
+        r#"<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="myapp://x"/>"#,
+        r#"<Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="../fonts/x.ttf"/>"#,
+        r#"<Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="media/image:1.png"/>"#,
+        r#"</Relationships>"#,
+    );
+    let mut report = RedactionReport::default();
+    let output = xml::redact_xml(
+        Format::Docx,
+        "word/_rels/document.xml.rels",
+        rels.as_bytes(),
+        &mut report,
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert_eq!(text.matches(r#"Target="https://example.com""#).count(), 3);
+    assert!(!text.contains("tel:"));
+    assert!(!text.contains("jane@example.com"));
+    assert!(!text.contains("myapp:"));
+    assert!(text.contains(r#"Target="../fonts/x.ttf""#));
+    assert!(text.contains(r#"Target="media/image:1.png""#));
+    assert_eq!(report.attributes, 3);
+}
+
+#[test]
+fn uri_in_fragment_keeps_relationship_internal() {
+    let rels = concat!(
+        r#"<?xml version="1.0"?>"#,
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+        r#"<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="worksheet.xml#ref=https://example.com/x"/>"#,
+        r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.com/x"/>"#,
+        r#"</Relationships>"#,
+    );
+    let mut report = RedactionReport::default();
+    let output = xml::redact_xml(
+        Format::Docx,
+        "word/_rels/document.xml.rels",
+        rels.as_bytes(),
+        &mut report,
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains(r#"Target="worksheet.xml#ref=https://example.com/x""#));
+    assert!(!text.contains(r#"Target="https://example.com/x""#));
+    assert!(text.contains(r#"Target="https://example.com""#));
+    assert_eq!(report.attributes, 1);
+}
+
+#[test]
+fn unc_and_protocol_relative_targets_redacted_without_target_mode() {
+    let rels = concat!(
+        r#"<?xml version="1.0"?>"#,
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+        r#"<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="\\fileserver01\finance\q3.xlsx"/>"#,
+        r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="\\?\UNC\fileserver02\finance\q4.xlsx"/>"#,
+        r#"<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="//fileserver03.example/finance/q1.xlsx"/>"#,
+        r#"<Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="\word\media\image1.png"/>"#,
+        r#"</Relationships>"#,
+    );
+    let mut report = RedactionReport::default();
+    let output = xml::redact_xml(
+        Format::Docx,
+        "word/_rels/document.xml.rels",
+        rels.as_bytes(),
+        &mut report,
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert_eq!(text.matches(r#"Target="https://example.com""#).count(), 3);
+    assert!(!text.contains("fileserver01"));
+    assert!(!text.contains("fileserver02"));
+    assert!(!text.contains("fileserver03"));
+    assert!(text.contains(r#"Target="\word\media\image1.png""#));
+    assert_eq!(report.attributes, 3);
+}
+
+#[test]
+fn percent_encoded_and_dotted_relative_targets_stay_internal() {
+    let rels = concat!(
+        r#"<?xml version="1.0"?>"#,
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+        r#"<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../../word/media/im%7Eage1.png"/>"#,
+        r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../../word/./media/image2.png"/>"#,
+        r#"<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="..\..\word\media\image3.png"/>"#,
+        r#"</Relationships>"#,
+    );
+    let mut report = RedactionReport::default();
+    let output = xml::redact_xml(
+        Format::Docx,
+        "word/_rels/document.xml.rels",
+        rels.as_bytes(),
+        &mut report,
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains(r#"Target="../../word/media/im%7Eage1.png""#));
+    assert!(text.contains(r#"Target="../../word/./media/image2.png""#));
+    assert!(text.contains(r#"Target="..\..\word\media\image3.png""#));
+    assert!(!text.contains("TargetMode"));
+    assert_eq!(report.attributes, 0);
+}
+
+#[test]
+fn padded_target_mode_still_marks_relationship_external() {
+    let source = pptx_fixture_with_slide_relationship(
+        r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="PPTX_SECRET_SHARE/finance/q1.xlsx" TargetMode=" External "/>"#,
+    );
+    let (output, _) = redact_with_report(&source, Format::Pptx).unwrap();
+    let parts = ooxml_opc::unzip_parts(&output).unwrap();
+    let rels =
+        String::from_utf8_lossy(part(&parts, "ppt/slides/_rels/slide1.xml.rels")).into_owned();
+    assert!(rels.contains(r#"Target="https://example.com""#));
+    assert!(rels.contains(r#"TargetMode="External""#));
+    assert!(!rels.contains("PPTX_SECRET_SHARE"));
+    pptx_parse::parse_pptx(&output).unwrap();
+}
+
+#[test]
+fn lowercase_target_mode_attribute_is_written_back_canonically() {
+    let source = pptx_fixture_with_slide_relationship(
+        r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://PPTX_SECRET_HOST/x" targetmode="external"/>"#,
+    );
+    let (output, _) = redact_with_report(&source, Format::Pptx).unwrap();
+    let parts = ooxml_opc::unzip_parts(&output).unwrap();
+    let rels =
+        String::from_utf8_lossy(part(&parts, "ppt/slides/_rels/slide1.xml.rels")).into_owned();
+    assert!(rels.contains(r#"TargetMode="External""#));
+    assert!(!rels.contains("targetmode"));
+    assert!(!rels.contains("PPTX_SECRET_HOST"));
+    pptx_parse::parse_pptx(&output).unwrap();
+}
+
+#[test]
+fn a_case_variant_target_does_not_externalize_the_real_one() {
+    let rels = concat!(
+        r#"<?xml version="1.0"?>"#,
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+        r#"<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml" target="mailto:jane@example.com"/>"#,
+        r#"</Relationships>"#,
+    );
+    let mut report = RedactionReport::default();
+    let output = xml::redact_xml(
+        Format::Pptx,
+        "ppt/_rels/presentation.xml.rels",
+        rels.as_bytes(),
+        &mut report,
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains(r#"Target="slides/slide1.xml""#));
+    assert!(!text.contains("TargetMode"));
+    assert_eq!(report.attributes, 0);
+}
+
+#[test]
+fn repeated_target_mode_spellings_collapse_to_one_attribute() {
+    let rels = concat!(
+        r#"<?xml version="1.0"?>"#,
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+        r#"<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://secret.example/x" TargetMode="External" targetmode="external"/>"#,
+        r#"</Relationships>"#,
+    );
+    let mut report = RedactionReport::default();
+    let output = xml::redact_xml(
+        Format::Docx,
+        "word/_rels/document.xml.rels",
+        rels.as_bytes(),
+        &mut report,
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert_eq!(text.matches("TargetMode").count(), 1);
+    assert!(!text.contains("secret.example"));
+    let mut again = RedactionReport::default();
+    xml::redact_xml(
+        Format::Docx,
+        "word/_rels/document.xml.rels",
+        text.as_bytes(),
+        &mut again,
+    )
+    .unwrap();
+}
+
+#[test]
+fn internal_target_mode_keeps_the_producer_spelling() {
+    let rels = concat!(
+        r#"<?xml version="1.0"?>"#,
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+        r#"<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.png" targetmode="internal"/>"#,
+        r#"</Relationships>"#,
+    );
+    let mut report = RedactionReport::default();
+    let output = xml::redact_xml(
+        Format::Docx,
+        "word/_rels/document.xml.rels",
+        rels.as_bytes(),
+        &mut report,
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains(r#"targetmode="internal""#));
+    assert_eq!(report.attributes, 0);
+}
+
+#[test]
+fn inferred_external_relationship_declares_target_mode() {
+    let source = pptx_fixture_with_slide_relationship(
+        r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="tel:+49PPTX_SECRET_PHONE"/>"#,
+    );
+    pptx_parse::parse_pptx(&source).unwrap();
+
+    let (output, _) = redact_with_report(&source, Format::Pptx).unwrap();
+    let parts = ooxml_opc::unzip_parts(&output).unwrap();
+    let rels =
+        String::from_utf8_lossy(part(&parts, "ppt/slides/_rels/slide1.xml.rels")).into_owned();
+    assert!(rels.contains(r#"Target="https://example.com""#));
+    assert!(rels.contains(r#"TargetMode="External""#));
+    assert!(
+        parts
+            .iter()
+            .all(|(_, bytes)| !String::from_utf8_lossy(bytes).contains("PPTX_SECRET_PHONE")),
+        "secret survived: PPTX_SECRET_PHONE"
+    );
+    pptx_parse::parse_pptx(&output).unwrap();
+}
+
+#[test]
+fn declared_target_mode_is_not_duplicated() {
+    let source = pptx_fixture_with_slide_relationship(
+        r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://secret.example/pptx" TargetMode="External"/>"#,
+    );
+    let (output, _) = redact_with_report(&source, Format::Pptx).unwrap();
+    let parts = ooxml_opc::unzip_parts(&output).unwrap();
+    let rels =
+        String::from_utf8_lossy(part(&parts, "ppt/slides/_rels/slide1.xml.rels")).into_owned();
+    assert_eq!(rels.matches("TargetMode").count(), 1);
+    pptx_parse::parse_pptx(&output).unwrap();
+}
+
+#[test]
+fn declared_internal_mode_is_corrected_when_the_target_is_external() {
+    let source = pptx_fixture_with_slide_relationship(
+        r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="tel:+49PPTX_SECRET_PHONE" TargetMode="Internal"/>"#,
+    );
+    pptx_parse::parse_pptx(&source).unwrap();
+
+    let (output, _) = redact_with_report(&source, Format::Pptx).unwrap();
+    let parts = ooxml_opc::unzip_parts(&output).unwrap();
+    let rels =
+        String::from_utf8_lossy(part(&parts, "ppt/slides/_rels/slide1.xml.rels")).into_owned();
+    assert!(rels.contains(r#"Target="https://example.com""#));
+    assert!(rels.contains(r#"TargetMode="External""#));
+    assert!(!rels.contains("PPTX_SECRET_PHONE"));
+    pptx_parse::parse_pptx(&output).unwrap();
+}
+
+#[test]
+fn relative_target_with_parent_segments_stays_internal() {
+    let target = "../../xl/nested/../worksheets/sheet1.xml";
+    let source = fixture_with_part(
+        xlsx_fixture(),
+        "xl/_rels/workbook.xml.rels",
+        xml(&format!(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="{target}"/></Relationships>"#
+        )),
+    );
+    let (output, _) = redact_with_report(&source, Format::Xlsx).unwrap();
+    let parts = ooxml_opc::unzip_parts(&output).unwrap();
+    let rels = String::from_utf8_lossy(part(&parts, "xl/_rels/workbook.xml.rels")).into_owned();
+    assert!(rels.contains(&format!(r#"Target="{target}""#)));
+    assert!(!rels.contains("TargetMode"));
+    xlsx_parse::parse_workbook(&parts).unwrap();
+}
+
+#[test]
+fn foreign_attributes_do_not_drive_relationship_mode() {
+    let rels = concat!(
+        r#"<?xml version="1.0"?>"#,
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships" xmlns:q="urn:qa">"#,
+        r#"<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes" Target="footnotes.xml" q:Target="https://foreign.example/x"/>"#,
+        r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/endnotes" Target="endnotes.xml" q:TargetMode="External"/>"#,
+        r#"</Relationships>"#,
+    );
+    let mut report = RedactionReport::default();
+    let output = xml::redact_xml(
+        Format::Docx,
+        "word/_rels/document.xml.rels",
+        rels.as_bytes(),
+        &mut report,
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains(r#"Target="footnotes.xml""#));
+    assert!(text.contains(r#"Target="endnotes.xml""#));
+    assert!(text.contains(r#"q:TargetMode="External""#));
+    assert!(!text.contains(r#" TargetMode="External""#));
+    assert_eq!(report.attributes, 0);
+}
+
+#[test]
+fn target_inspection_is_limited_to_rels_parts() {
+    let body = concat!(
+        r#"<?xml version="1.0"?>"#,
+        r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:q="urn:qa">"#,
+        r#"<q:Relationship Target="tel:+49123456789"/>"#,
+        r#"<q:Relationship Target="https://secret.example/x" TargetMode="External"/>"#,
+        r#"</w:document>"#,
+    );
+    let mut report = RedactionReport::default();
+    let output = xml::redact_xml(
+        Format::Docx,
+        "word/document.xml",
+        body.as_bytes(),
+        &mut report,
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains(r#"Target="tel:+49123456789""#));
+    assert!(!text.contains("secret.example"));
+    assert_eq!(text.matches("TargetMode").count(), 1);
+    assert_eq!(report.attributes, 1);
+}
+
+fn pptx_fixture_with_slide_relationship(relationship: &str) -> Vec<u8> {
+    fixture_with_part(
+        pptx_fixture(),
+        "ppt/slides/_rels/slide1.xml.rels",
+        xml(&format!(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{relationship}</Relationships>"#
+        )),
+    )
+}
+
+fn fixture_with_part(source: Vec<u8>, path: &str, data: Vec<u8>) -> Vec<u8> {
+    let mut parts = ooxml_opc::unzip_parts(&source).unwrap();
+    for (candidate, bytes) in &mut parts {
+        if candidate == path {
+            *bytes = data.clone();
+        }
+    }
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
 fn media_placeholder_keeps_each_format() {
     for (format, ext) in [
         (ImageFormat::Gif, "gif"),
@@ -410,16 +3239,839 @@ fn media_placeholder_keeps_each_format() {
             "{ext} format changed"
         );
         assert_eq!(
-            image_dimensions(&source),
             image_dimensions(&output),
+            (media::PLACEHOLDER_SIZE, media::PLACEHOLDER_SIZE),
             "{ext} dims changed"
         );
     }
 }
 
 #[test]
-fn media_rejects_unencodable_formats() {
+fn rejects_unknown_extension_media() {
     let mut report = RedactionReport::default();
-    let error = media::replace_media("word/media/image1.emf", b"not an image", &mut report);
+    let error = media::replace_media("word/media/blob.dat", b"not an image", &mut report);
     assert!(matches!(error, Err(RedactError::Image { .. })));
+}
+
+#[test]
+fn replaces_wmf_with_valid_stub() {
+    let mut report = RedactionReport::default();
+    let output = media::replace_media(
+        "docProps/thumbnail.wmf",
+        b"\xd7\xcd\xc6\x9a metafile",
+        &mut report,
+    )
+    .unwrap();
+    assert_eq!(report.media_parts, 1);
+
+    assert_eq!(&output[..4], &0x9AC6_CDD7u32.to_le_bytes());
+    assert_eq!(le_u16(&output, 20), 0x52B1);
+    assert_eq!(le_u16(&output, 10), 2000);
+    assert_eq!(le_u16(&output, 12), 2000);
+    assert_eq!(le_u16(&output, 14), 1440);
+
+    let content = &output[22..];
+    assert_eq!(le_u16(content, 0), 1);
+    assert_eq!(le_u16(content, 2), 9);
+    assert_eq!(le_u16(content, 4), 0x0300);
+    let mt_size = le_u32(content, 6) as usize;
+    assert_eq!(mt_size * 2, content.len());
+    assert_eq!(le_u32(content, 12), 3);
+
+    let eof = &content[18..];
+    assert_eq!(le_u32(eof, 0), 3);
+    assert_eq!(le_u16(eof, 4), 0);
+    assert_eq!(eof.len(), 6);
+}
+
+#[test]
+fn replaces_emf_with_valid_stub() {
+    let mut report = RedactionReport::default();
+    let output = media::replace_media("word/media/image1.emf", b"not an emf", &mut report).unwrap();
+    assert_eq!(report.media_parts, 1);
+
+    assert_eq!(le_u32(&output, 0), 1);
+    assert_eq!(le_u32(&output, 4), 88);
+    assert_eq!(le_u32(&output, 40), 0x464D_4520);
+    assert_eq!(le_u32(&output, 44), 0x0001_0000);
+    assert_eq!(le_u32(&output, 48) as usize, output.len());
+    assert_eq!(le_u32(&output, 52), 2);
+    assert_eq!(le_u16(&output, 56), 1);
+
+    let eof = &output[88..];
+    assert_eq!(eof.len(), 20);
+    assert_eq!(le_u32(eof, 0), 14);
+    assert_eq!(le_u32(eof, 4), 20);
+    assert_eq!(le_u32(eof, 8), 0);
+    assert_eq!(le_u32(eof, 12), 16);
+    assert_eq!(le_u32(eof, 16), 20);
+}
+
+fn le_u16(bytes: &[u8], offset: usize) -> u16 {
+    u16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap())
+}
+
+fn le_u32(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
+}
+
+/// PNG whose IHDR declares `width` x `height` with a matching chunk CRC, so a
+/// dimension-preserving encoder really would allocate that many pixels.
+fn png_declaring(width: u32, height: u32) -> Vec<u8> {
+    let mut out = placeholder_png();
+    out[16..20].copy_from_slice(&width.to_be_bytes());
+    out[20..24].copy_from_slice(&height.to_be_bytes());
+    let crc = png_crc(&out[12..29]);
+    out[29..33].copy_from_slice(&crc.to_be_bytes());
+    out
+}
+
+fn png_crc(bytes: &[u8]) -> u32 {
+    let mut crc = u32::MAX;
+    for byte in bytes {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            crc = if crc & 1 == 0 {
+                crc >> 1
+            } else {
+                (crc >> 1) ^ 0xEDB8_8320
+            };
+        }
+    }
+    !crc
+}
+
+#[test]
+fn oversized_declared_dimensions_emit_fixed_placeholder() {
+    let hostile = png_declaring(8000, 8000);
+    let mut report = RedactionReport::default();
+    let output = media::replace_media("word/media/huge.png", &hostile, &mut report).unwrap();
+    assert_eq!(
+        image_dimensions(&output),
+        (media::PLACEHOLDER_SIZE, media::PLACEHOLDER_SIZE)
+    );
+    assert!(output.len() < 1024);
+}
+
+fn media_package(media: &[(String, Vec<u8>)]) -> Vec<u8> {
+    let mut parts: Vec<(String, Vec<u8>)> = vec![
+        (
+            "[Content_Types].xml".to_owned(),
+            xml(
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Default Extension="jpg" ContentType="image/jpeg"/><Default Extension="gif" ContentType="image/gif"/><Default Extension="bmp" ContentType="image/bmp"/><Default Extension="tiff" ContentType="image/tiff"/><Default Extension="svg" ContentType="image/svg+xml"/><Default Extension="wmf" ContentType="image/x-wmf"/><Default Extension="emf" ContentType="image/x-emf"/></Types>"#,
+            ),
+        ),
+        (
+            "_rels/.rels".to_owned(),
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#,
+            ),
+        ),
+        (
+            "word/document.xml".to_owned(),
+            xml(
+                r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p/></w:body></w:document>"#,
+            ),
+        ),
+    ];
+    parts.extend(media.iter().cloned());
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn hostile_package_media_budget_is_bounded() {
+    let hostile = png_declaring(8000, 8000);
+    let mut media: Vec<(String, Vec<u8>)> = vec![
+        ("docProps/thumbnail.wmf".to_owned(), b"metafile".to_vec()),
+        ("ppt/media/pic.emf".to_owned(), b"metafile".to_vec()),
+    ];
+    for index in 0..32 {
+        media.push((format!("word/media/hostile{index}.png"), hostile.clone()));
+    }
+
+    let (output, report) = redact_with_report(&media_package(&media), Format::Auto).unwrap();
+    assert_eq!(report.media_parts, media.len());
+    let after = ooxml_opc::unzip_parts(&output).unwrap();
+    let mut media_total = 0;
+    for (path, bytes) in &after {
+        if !path.contains("/media/") && !path.ends_with("thumbnail.wmf") {
+            continue;
+        }
+        if path.ends_with(".png") {
+            assert_eq!(
+                image_dimensions(bytes),
+                (media::PLACEHOLDER_SIZE, media::PLACEHOLDER_SIZE)
+            );
+        }
+        media_total += bytes.len();
+    }
+    assert!(media_total < 256 * 1024);
+}
+
+const MEDIA_MARKER: &str = "MEDIA_SOURCE_MARKER";
+
+/// Every replaceable media shape. `mask` is XORed over each wrapped payload and
+/// its marker run, so two masks share no wrapped byte; mask 0 leaves the marker
+/// and the source images verbatim. `mask` also picks the sniffable PNGs' width
+/// and pixels, and those two encodings still share their signature, framing,
+/// IEND tail and some IDAT bytes.
+fn marked_media(mask: u8) -> Vec<(String, Vec<u8>)> {
+    let wrap = |bytes: &[u8]| {
+        let mut out = vec![mask; 8];
+        out.extend(MEDIA_MARKER.bytes().map(|byte| byte ^ mask));
+        out.extend(bytes.iter().map(|byte| byte ^ mask));
+        out.extend(MEDIA_MARKER.bytes().map(|byte| byte ^ mask));
+        out.extend_from_slice(&[mask; 8]);
+        out
+    };
+    let mut encoded = Cursor::new(Vec::new());
+    DynamicImage::ImageRgb8(ImageBuffer::from_pixel(
+        3 + u32::from(mask % 2),
+        2,
+        Rgb([mask, mask, mask]),
+    ))
+    .write_to(&mut encoded, ImageFormat::Png)
+    .unwrap();
+    let sniffable = encoded.into_inner();
+    vec![
+        ("word/media/image1.png".to_owned(), wrap(&placeholder_png())),
+        (
+            "word/media/photo.jpg".to_owned(),
+            wrap(&placeholder_image(ImageFormat::Jpeg)),
+        ),
+        (
+            "word/media/anim.gif".to_owned(),
+            wrap(&placeholder_image(ImageFormat::Gif)),
+        ),
+        (
+            "word/media/raster.bmp".to_owned(),
+            wrap(&placeholder_image(ImageFormat::Bmp)),
+        ),
+        (
+            "word/media/scan.tiff".to_owned(),
+            wrap(&placeholder_image(ImageFormat::Tiff)),
+        ),
+        (
+            "word/media/vector.svg".to_owned(),
+            wrap(
+                format!(
+                    r#"<svg xmlns="http://www.w3.org/2000/svg"><desc>{MEDIA_MARKER}</desc></svg>"#
+                )
+                .as_bytes(),
+            ),
+        ),
+        (
+            "word/media/legacy.wmf".to_owned(),
+            wrap(&[0xd7, 0xcd, 0xc6, 0x9a]),
+        ),
+        (
+            "word/media/legacy.emf".to_owned(),
+            wrap(&[0x01, 0x00, 0x00, 0x00]),
+        ),
+        (
+            "docProps/thumbnail.wmf".to_owned(),
+            wrap(&[0xd7, 0xcd, 0xc6, 0x9a]),
+        ),
+        (
+            "word/media/MixedCase.PNG".to_owned(),
+            wrap(&placeholder_png()),
+        ),
+        ("word/media/sniffed".to_owned(), sniffable.clone()),
+        ("docProps/thumbnail".to_owned(), sniffable),
+        (
+            "word/media/mislabelled.png".to_owned(),
+            wrap(&placeholder_image(ImageFormat::Jpeg)),
+        ),
+        (
+            "word/media/mislabelled.emf".to_owned(),
+            wrap(&placeholder_png()),
+        ),
+        (
+            "word/media/oversized.png".to_owned(),
+            wrap(&png_declaring(8000, 8000)),
+        ),
+        ("word/media/empty.png".to_owned(), Vec::new()),
+        ("word/media/empty.wmf".to_owned(), Vec::new()),
+    ]
+}
+
+#[test]
+fn media_replacement_never_copies_source_bytes() {
+    let first = marked_media(0);
+    let second = marked_media(0x5f);
+    for ((path, wrapped), (_, other)) in first.iter().zip(&second) {
+        if matches!(path.as_str(), "word/media/sniffed" | "docProps/thumbnail") {
+            continue;
+        }
+        assert!(
+            wrapped.iter().zip(other).all(|(one, two)| one != two),
+            "fixtures share a byte in {path}, so a copy of it would go unnoticed"
+        );
+    }
+
+    let (output, report) = redact_with_report(&media_package(&first), Format::Auto).unwrap();
+    assert_eq!(report.media_parts, first.len());
+    let parts = ooxml_opc::unzip_parts(&output).unwrap();
+    for (path, bytes) in &parts {
+        assert!(
+            !bytes
+                .windows(MEDIA_MARKER.len())
+                .any(|window| window == MEDIA_MARKER.as_bytes()),
+            "source bytes survived in {path}"
+        );
+    }
+
+    let (other, _) = redact_with_report(&media_package(&second), Format::Auto).unwrap();
+    assert_eq!(parts, ooxml_opc::unzip_parts(&other).unwrap());
+}
+
+const VSDX_SECRETS: &[&str] = &[
+    "VSDX_SECRET_PROPERTY_VALUE",
+    "VSDX_SECRET_PROPERTY_PROMPT",
+    "VSDX_SECRET_PROPERTY_LABEL",
+    "VSDX_SECRET_FORMULA",
+    "VSDX_SECRET_FORMULA_VALUE",
+    "VSDX_SECRET_USER_VALUE",
+    "VSDX_SECRET_USER_PROMPT",
+    "VSDX_SECRET_SHAPE_TEXT",
+    "VSDX_SECRET_CORE",
+];
+
+#[test]
+fn vsdx_property_user_and_text_are_redacted() {
+    let source = vsdx_fixture("application/vnd.ms-visio.drawing.main+xml");
+    let (output, report) = redact_with_report(&source, Format::Auto).unwrap();
+    assert_eq!(report.format, Format::Vsdx);
+    let text = String::from_utf8_lossy(&output).into_owned();
+    for secret in VSDX_SECRETS {
+        assert!(!text.contains(secret), "secret survived: {secret}");
+    }
+    let parts = ooxml_opc::unzip_parts(&output).unwrap();
+    let page = String::from_utf8_lossy(part(&parts, "visio/pages/page1.xml")).into_owned();
+    for preserved in [
+        "V=\"2.5\"",
+        "V=\"7.5\"",
+        "N=\"Property\"",
+        "N=\"User\"",
+        "ID=\"1\"",
+        "Type=\"Shape\"",
+    ] {
+        assert!(
+            page.contains(preserved),
+            "structural value lost: {preserved}"
+        );
+    }
+    assert!(page.contains("N=\"PinX\""));
+    assert!(page.contains("N=\"Width\""));
+    assert!(
+        !page.contains("VSDX_SHAPE_NAMEU"),
+        "shape NameU must not survive deny-by-default"
+    );
+    assert_eq!(detect_format(&output).unwrap(), Format::Vsdx);
+}
+
+#[test]
+fn vstx_is_accepted_with_the_same_policy() {
+    let source = vsdx_fixture("application/vnd.ms-visio.template.main+xml");
+    let (output, report) = redact_with_report(&source, Format::Auto).unwrap();
+    assert_eq!(report.format, Format::Vstx);
+    let text = String::from_utf8_lossy(&output).into_owned();
+    for secret in VSDX_SECRETS {
+        assert!(!text.contains(secret), "secret survived: {secret}");
+    }
+    assert_eq!(detect_format(&output).unwrap(), Format::Vstx);
+}
+
+const VSDX_FULL_SENTINELS: &[&str] = &[
+    "SENTINELSHAPETEXTALPHA",
+    "SENTINELPROPROWNAMEBETA",
+    "SENTINELPROPVALGAMMA",
+    "SENTINELPROPPROMPTDELTA",
+    "SENTINELPROPLABELEPSILON",
+    "SENTINELPROPFORMULAZETA",
+    "SENTINELPROPFORMULAVALUEETA",
+    "SENTINELUSERROWNAMETHETA",
+    "SENTINELUSERVALIOTA",
+    "SENTINELUSERPROMPTKAPPA",
+    "SENTINELCOMMENTAUTHORLAMBDA",
+    "SENTINELCOMMENTBODYMU",
+    "SENTINELHYPERADDRNU",
+    "SENTINELHYPERSUBXI",
+    "SENTINELHYPERDESCOMICRON",
+    "SENTINELHYPERRELRHO",
+    "SENTINELFIELDVALSIGMA",
+    "SENTINELSHAPENAMETAU",
+    "SENTINELSHAPENAMEUUPSILON",
+    "SENTINELRECORDSETVALPHI",
+    "SENTINELRECORDSETNAMECHI",
+    "SENTINELRECORDSETCMDPSI",
+    "SENTINELDATACONNSTROMEGA",
+    "SENTINELDATACONNCMDALPHA",
+    "SENTINELCUSTOMPROPVALBETA",
+    "SENTINELCUSTOMPROPNAMEGAMMA",
+    "SENTINELCOREPROPDELTA",
+    "SENTINELAPPCOMPANYEPSILON",
+    "SENTINELUNKNOWNSECTIONVALZETA",
+    "SENTINELUNKNOWNSECTIONNAMEETA",
+    "SENTINELUNKNOWNCELLNAMETHETA",
+    "SENTINELPAGENAMEUIOTA",
+    "SENTINELPAGENAMEKAPPA",
+    "SENTINELFONTFACELAMBDA",
+    "SENTINELSTYLESHEETMU",
+    "SENTINELACTIONMENUNU",
+    "SENTINELLAYERROWNAMEXI",
+    "SENTINELSCRATCHVALOMICRON",
+];
+
+#[test]
+fn vsdx_deny_by_default_scrubs_every_surface() {
+    let source = vsdx_full_fixture();
+    let (output, report) = redact_with_report(&source, Format::Auto).unwrap();
+    assert_eq!(report.format, Format::Vsdx);
+    let parts = ooxml_opc::unzip_parts(&output).unwrap();
+    let before = ooxml_opc::unzip_parts(&source).unwrap();
+    assert_eq!(
+        part_names(&before),
+        part_names(&parts),
+        "redaction must preserve the part inventory"
+    );
+    for secret in VSDX_FULL_SENTINELS {
+        for (path, bytes) in &parts {
+            assert!(
+                !String::from_utf8_lossy(bytes).contains(secret),
+                "secret {secret} survived in {path}"
+            );
+        }
+    }
+    let page = String::from_utf8_lossy(part(&parts, "visio/pages/page1.xml")).into_owned();
+    for preserved in [
+        "V=\"2.5\"",
+        "V=\"7.5\"",
+        "N=\"Property\"",
+        "N=\"User\"",
+        "N=\"Geometry\"",
+        "N=\"Character\"",
+        "N=\"Paragraph\"",
+        "N=\"Hyperlink\"",
+        "N=\"Field\"",
+        "ID=\"1\"",
+        "Type=\"Shape\"",
+        "T=\"MoveTo\"",
+    ] {
+        assert!(
+            page.contains(preserved),
+            "structural value lost: {preserved}"
+        );
+    }
+    let rels =
+        String::from_utf8_lossy(part(&parts, "visio/pages/_rels/page1.xml.rels")).into_owned();
+    for preserved in ["TargetMode=\"External\"", "https://example.com"] {
+        assert!(
+            rels.contains(preserved),
+            "structural value lost: {preserved}"
+        );
+    }
+    assert_eq!(detect_format(&output).unwrap(), Format::Vsdx);
+    for (path, bytes) in &parts {
+        if path.ends_with(".xml") || path.ends_with(".rels") {
+            let mut reader = Reader::from_reader(bytes.as_slice());
+            loop {
+                match reader.read_event() {
+                    Ok(Event::Eof) => break,
+                    Ok(_) => {}
+                    Err(error) => panic!("part {path} is not well-formed XML: {error}"),
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn vsdx_relationship_references_reject_author_text() {
+    let input = "<Pages xmlns=\"http://schemas.microsoft.com/office/visio/2012/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" xmlns:other=\"urn:other\"><Page ID=\"1\" NameU=\"Page-1\"><Rel r:id=\"rId1\"/></Page><Page ID=\"2\" NameU=\"Page-2\"><Rel r:id=\"rIdSECRETLEAK\"/></Page><Page ID=\"3\" NameU=\"Page-3\"><Rel other:id=\"rIdSECRETLEAK\"/></Page><Shape ID=\"4\" Type=\"Shape\" r:id=\"rIdSECRETLEAK\"/></Pages>";
+    let output = xml::redact_xml(
+        Format::Vsdx,
+        "visio/pages/pages.xml",
+        input.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(
+        !text.contains("SECRETLEAK"),
+        "author text in a relationship reference survived: {text}"
+    );
+    assert!(
+        text.contains("r:id=\"rId1\""),
+        "declared relationship reference lost: {text}"
+    );
+}
+
+#[test]
+fn vsdx_element_level_relationship_references_survive() {
+    let input = "<Pages xmlns=\"http://schemas.microsoft.com/office/visio/2012/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><Page ID=\"1\" NameU=\"Page-1\" r:id=\"rId1\"/><Page ID=\"2\" NameU=\"Page-2\" r:id=\"rIdSECRETLEAK\"/></Pages>";
+    let output = xml::redact_xml(
+        Format::Vsdx,
+        "visio/pages/pages.xml",
+        input.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(
+        text.contains("r:id=\"rId1\""),
+        "element-level relationship reference lost: {text}"
+    );
+    assert!(
+        !text.contains("SECRETLEAK"),
+        "author text in an element-level reference survived: {text}"
+    );
+}
+
+#[test]
+fn vsdx_typed_attributes_keep_valid_values() {
+    let input = "<Comments xmlns=\"http://schemas.microsoft.com/office/visio/2012/main\"><Comment Author=\"SENTINELCOMMENTAUTHOR\" Date=\"2026-01-02T03:04:05Z\">SENTINELCOMMENTBODY</Comment></Comments>";
+    let output = xml::redact_xml(
+        Format::Vsdx,
+        "visio/comments.xml",
+        input.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(
+        !text.contains("SENTINEL"),
+        "comment secret survived: {text}"
+    );
+    assert!(
+        !text.contains("2026-01-02"),
+        "comment date survived: {text}"
+    );
+    assert!(
+        text.contains("Date=\"1970-01-01T00:00:00Z\""),
+        "comment date lost its dateTime shape: {text}"
+    );
+    let input = "<Masters xmlns=\"http://schemas.microsoft.com/office/visio/2012/main\"><Master ID=\"2\" NameU=\"Rectangle\" UniqueID=\"{08840884-0002-0000-8E40-00608CF305B2}\" BaseID=\"{265F9737-E810-4325-8E7F-292854638452}\"/></Masters>";
+    let output = xml::redact_xml(
+        Format::Vsdx,
+        "visio/masters/masters.xml",
+        input.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(!text.contains("08840884"), "master GUID survived: {text}");
+    assert!(!text.contains("265F9737"), "master GUID survived: {text}");
+    assert!(
+        text.matches("{00000000-0000-0000-0000-000000000000}")
+            .count()
+            == 2,
+        "master GUIDs lost their GUID shape: {text}"
+    );
+    let input = "<Pages xmlns=\"http://schemas.microsoft.com/office/visio/2012/main\"><Page ID=\"0\" NameU=\"Page-1\"><PageSheet LineStyle=\"3\" FillStyle=\"SECRET\"/><Shape ID=\"SECRET\" Type=\"Shape\"/></Page></Pages>";
+    let output = xml::redact_xml(
+        Format::Vsdx,
+        "visio/pages/pages.xml",
+        input.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(
+        !text.contains("SECRET"),
+        "identifier secret survived: {text}"
+    );
+    assert!(
+        text.contains("LineStyle=\"3\""),
+        "numeric style reference outside Shape lost: {text}"
+    );
+    assert!(
+        text.contains("FillStyle=\"0\"") && text.contains("ID=\"0\""),
+        "rejected numerics lost their integer shape: {text}"
+    );
+}
+
+fn vsdx_full_fixture() -> Vec<u8> {
+    let shape = "<Cell N=\"PinX\" V=\"2.5\"/><Cell N=\"PinY\" V=\"7.5\"/><Cell N=\"Width\" V=\"2\"/><Cell N=\"Height\" V=\"1\"/><Section N=\"Property\"><Row N=\"SENTINELPROPROWNAMEBETA\"><Cell N=\"Value\" V=\"SENTINELPROPVALGAMMA\"/><Cell N=\"Prompt\" V=\"SENTINELPROPPROMPTDELTA\"/><Cell N=\"Label\" V=\"SENTINELPROPLABELEPSILON\"/></Row><Row N=\"FormulaRow\"><Cell N=\"Value\" F=\"=SENTINELPROPFORMULAZETA\" V=\"SENTINELPROPFORMULAVALUEETA\"/></Row></Section><Section N=\"User\"><Row N=\"SENTINELUSERROWNAMETHETA\"><Cell N=\"Value\" V=\"SENTINELUSERVALIOTA\"/><Cell N=\"Prompt\" V=\"SENTINELUSERPROMPTKAPPA\"/></Row></Section><Section N=\"Hyperlink\"><Row N=\"LinkRow\"><Cell N=\"Address\" V=\"SENTINELHYPERADDRNU\"/><Cell N=\"SubAddress\" V=\"SENTINELHYPERSUBXI\"/><Cell N=\"Description\" V=\"SENTINELHYPERDESCOMICRON\"/></Row></Section><Section N=\"Field\"><Row IX=\"0\"><Cell N=\"Value\" V=\"SENTINELFIELDVALSIGMA\"/></Row></Section><Section N=\"Action\"><Row N=\"ActionRow\"><Cell N=\"Menu\" V=\"SENTINELACTIONMENUNU\"/></Row></Section><Section N=\"Layer\"><Row N=\"SENTINELLAYERROWNAMEXI\"><Cell N=\"Visible\" V=\"1\"/></Row></Section><Section N=\"Scratch\"><Row IX=\"0\"><Cell N=\"A\" V=\"SENTINELSCRATCHVALOMICRON\"/></Row></Section><Section N=\"QuantumSection\"><Row IX=\"0\"><Cell N=\"QuantumCell\" V=\"SENTINELUNKNOWNSECTIONVALZETA\"/><Cell N=\"SENTINELUNKNOWNCELLNAMETHETA\" V=\"1\"/></Row></Section><Section N=\"SENTINELUNKNOWNSECTIONNAMEETA\"><Row IX=\"0\"><Cell N=\"X\" V=\"1\"/></Row></Section><Section N=\"Geometry\"><Row IX=\"0\" T=\"MoveTo\"><Cell N=\"X\" V=\"0\"/><Cell N=\"Y\" V=\"0\"/></Row></Section><Section N=\"Character\"><Row IX=\"0\"><Cell N=\"Font\" V=\"0\"/><Cell N=\"Size\" V=\"0.25\"/><Cell N=\"Color\" V=\"0\"/></Row></Section><Section N=\"Paragraph\"><Row IX=\"0\"><Cell N=\"HorzAlign\" V=\"1\"/></Row></Section><Text>SENTINELSHAPETEXTALPHA<cp IX=\"0\"/><pp IX=\"0\"/><fld IX=\"0\"/></Text>";
+    package(vec![
+        (
+            "[Content_Types].xml",
+            xml(
+                "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/visio/document.xml\" ContentType=\"application/vnd.ms-visio.drawing.main+xml\"/><Override PartName=\"/docProps/core.xml\" ContentType=\"application/vnd.openxmlformats-package.core-properties+xml\"/><Override PartName=\"/docProps/app.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.extended-properties+xml\"/><Override PartName=\"/docProps/custom.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.custom-properties+xml\"/></Types>",
+            ),
+        ),
+        (
+            "_rels/.rels",
+            xml(
+                "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.microsoft.com/visio/2010/relationships/document\" Target=\"visio/document.xml\"/></Relationships>",
+            ),
+        ),
+        (
+            "docProps/core.xml",
+            xml(
+                "<cp:coreProperties xmlns:cp=\"http://schemas.openxmlformats.org/package/2006/metadata/core-properties\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><dc:creator>SENTINELCOREPROPDELTA</dc:creator><dc:title>SENTINELCOREPROPDELTA</dc:title></cp:coreProperties>",
+            ),
+        ),
+        (
+            "docProps/app.xml",
+            xml(
+                "<Properties xmlns=\"http://schemas.openxmlformats.org/officeDocument/2006/extended-properties\"><Company>SENTINELAPPCOMPANYEPSILON</Company></Properties>",
+            ),
+        ),
+        (
+            "docProps/custom.xml",
+            xml(
+                "<cp:Properties xmlns:cp=\"http://schemas.openxmlformats.org/officeDocument/2006/custom-properties\" xmlns:vt=\"http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes\"><cp:property name=\"SENTINELCUSTOMPROPNAMEGAMMA\" pid=\"2\"><vt:lpwstr>SENTINELCUSTOMPROPVALBETA</vt:lpwstr></cp:property></cp:Properties>",
+            ),
+        ),
+        (
+            "visio/document.xml",
+            xml(
+                "<VisioDocument xmlns=\"http://schemas.microsoft.com/office/visio/2012/main\"><FaceNames><FaceName ID=\"0\" Name=\"SENTINELFONTFACELAMBDA\"/></FaceNames><StyleSheets><StyleSheet ID=\"0\" NameU=\"SENTINELSTYLESHEETMU\"><Cell N=\"LineColor\" V=\"0\"/></StyleSheet></StyleSheets><DocumentSheet><Cell N=\"PageWidth\" V=\"8.5\"/></DocumentSheet></VisioDocument>",
+            ),
+        ),
+        (
+            "visio/_rels/document.xml.rels",
+            xml(
+                "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.microsoft.com/visio/2010/relationships/pages\" Target=\"pages/pages.xml\"/></Relationships>",
+            ),
+        ),
+        (
+            "visio/pages/pages.xml",
+            xml(
+                "<Pages xmlns=\"http://schemas.microsoft.com/office/visio/2012/main\"><Page ID=\"1\" NameU=\"SENTINELPAGENAMEUIOTA\" Name=\"SENTINELPAGENAMEKAPPA\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" r:id=\"rId1\"><PageSheet><Cell N=\"PageWidth\" V=\"8.5\"/></PageSheet></Page></Pages>",
+            ),
+        ),
+        (
+            "visio/pages/_rels/pages.xml.rels",
+            xml(
+                "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.microsoft.com/visio/2010/relationships/page\" Target=\"page1.xml\"/></Relationships>",
+            ),
+        ),
+        (
+            "visio/pages/page1.xml",
+            xml(&format!(
+                "<PageContents xmlns=\"http://schemas.microsoft.com/office/visio/2012/main\"><Shapes><Shape ID=\"1\" Name=\"SENTINELSHAPENAMETAU\" NameU=\"SENTINELSHAPENAMEUUPSILON\" Type=\"Shape\">{shape}</Shape></Shapes><Connects><Connect FromSheet=\"1\" FromCell=\"BeginX\" ToSheet=\"1\" ToCell=\"PinX\"/></Connects></PageContents>"
+            )),
+        ),
+        (
+            "visio/pages/_rels/page1.xml.rels",
+            xml(
+                "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink\" Target=\"https://SENTINELHYPERRELRHO.example\" TargetMode=\"External\"/></Relationships>",
+            ),
+        ),
+        (
+            "visio/comments.xml",
+            xml(
+                "<Comments xmlns=\"http://schemas.microsoft.com/office/visio/2012/main\"><Comment Author=\"SENTINELCOMMENTAUTHORLAMBDA\" Date=\"2026-01-02T03:04:05Z\">SENTINELCOMMENTBODYMU</Comment></Comments>",
+            ),
+        ),
+        (
+            "visio/recordsets/recordset1.xml",
+            xml(
+                "<RecordSet xmlns=\"http://schemas.microsoft.com/office/visio/2012/main\" Name=\"SENTINELRECORDSETNAMECHI\" Command=\"SENTINELRECORDSETCMDPSI\"><Row><Cell>SENTINELRECORDSETVALPHI</Cell></Row></RecordSet>",
+            ),
+        ),
+        (
+            "visio/dataConnections/dataConnection1.xml",
+            xml(
+                "<DataConnection xmlns=\"http://schemas.microsoft.com/office/visio/2012/main\" ConnectionString=\"SENTINELDATACONNSTROMEGA\" Command=\"SENTINELDATACONNCMDALPHA\"/>",
+            ),
+        ),
+    ])
+}
+
+#[test]
+fn vsdm_is_refused_with_a_clear_message() {
+    let source = vsdx_fixture("application/vnd.ms-visio.drawing.macroenabled.main+xml");
+    let error = redact(&source, Format::Auto).unwrap_err();
+    assert!(matches!(error, RedactError::UnsupportedVisio));
+    assert!(error.to_string().contains("Visio"));
+}
+
+#[test]
+fn vssx_stencils_are_out_of_scope() {
+    let source = vsdx_fixture("application/vnd.ms-visio.stencil.main+xml");
+    assert!(matches!(
+        redact(&source, Format::Auto).unwrap_err(),
+        RedactError::UnsupportedVisio
+    ));
+    assert!(matches!(
+        detect_format(&source).unwrap_err(),
+        RedactError::UnsupportedVisio
+    ));
+}
+
+#[test]
+fn visio_ambiguous_nesting_is_refused_not_partially_redacted() {
+    let source = vsdx_fixture_with_shape(
+        "application/vnd.ms-visio.drawing.main+xml",
+        "<Section N=\"Property\"><Section N=\"User\"><Row><Cell N=\"Value\" V=\"VSDX_SECRET_NESTED\"/></Row></Section></Section>",
+    );
+    let error = redact(&source, Format::Auto).unwrap_err();
+    assert!(
+        matches!(error, RedactError::AmbiguousVisio { .. }),
+        "nested Section must refuse, got: {error:?}"
+    );
+    let source = vsdx_fixture_with_shape(
+        "application/vnd.ms-visio.drawing.main+xml",
+        "<Section><Row><Cell N=\"Value\" V=\"VSDX_SECRET_UNNAMED\"/></Row></Section>",
+    );
+    assert!(matches!(
+        redact(&source, Format::Auto),
+        Err(RedactError::AmbiguousVisio { .. })
+    ));
+    for shape in [
+        "<Row><Cell N=\"Value\" V=\"VSDX_SECRET_OUTSIDE\"/></Row>",
+        "<Section N=\"Property\"><Cell N=\"Value\" V=\"VSDX_SECRET_ROWLESS\"/></Section>",
+    ] {
+        let source = vsdx_fixture_with_shape("application/vnd.ms-visio.drawing.main+xml", shape);
+        let output = redact(&source, Format::Auto).unwrap();
+        for (_, bytes) in ooxml_opc::unzip_parts(&output).unwrap() {
+            assert!(!String::from_utf8_lossy(&bytes).contains("VSDX_SECRET"));
+        }
+    }
+}
+
+fn vsdx_fixture(main_content_type: &str) -> Vec<u8> {
+    vsdx_fixture_with_shape(
+        main_content_type,
+        "<Cell N=\"PinX\" V=\"2.5\"/><Cell N=\"PinY\" V=\"7.5\"/><Cell N=\"Width\" V=\"2\"/><Cell N=\"Height\" V=\"1\"/><Section N=\"Property\"><Row N=\"Contract\"><Cell N=\"Value\" V=\"VSDX_SECRET_PROPERTY_VALUE\"/><Cell N=\"Prompt\" V=\"VSDX_SECRET_PROPERTY_PROMPT\"/><Cell N=\"Label\" V=\"VSDX_SECRET_PROPERTY_LABEL\"/></Row><Row N=\"Formula\"><Cell N=\"Value\" F=\"=VSDX_SECRET_FORMULA\" V=\"VSDX_SECRET_FORMULA_VALUE\"/></Row></Section><Section N=\"User\"><Row N=\"Owner\"><Cell N=\"Value\" V=\"VSDX_SECRET_USER_VALUE\"/><Cell N=\"Prompt\" V=\"VSDX_SECRET_USER_PROMPT\"/></Row></Section><Section N=\"Geometry\"><Row IX=\"0\" T=\"MoveTo\"><Cell N=\"X\" V=\"0\"/><Cell N=\"Y\" V=\"0\"/></Row></Section><Text>VSDX_SECRET_SHAPE_TEXT</Text>",
+    )
+}
+
+fn vsdx_fixture_with_shape(main_content_type: &str, shape_inner: &str) -> Vec<u8> {
+    package(vec![
+        (
+            "[Content_Types].xml",
+            xml(&format!(
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/visio/document.xml" ContentType="{main_content_type}"/></Types>"#
+            )),
+        ),
+        (
+            "_rels/.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.microsoft.com/visio/2010/relationships/document" Target="visio/document.xml"/></Relationships>"#,
+            ),
+        ),
+        (
+            "docProps/core.xml",
+            xml(
+                r#"<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:creator>VSDX_SECRET_CORE</dc:creator></cp:coreProperties>"#,
+            ),
+        ),
+        (
+            "visio/document.xml",
+            xml(
+                r#"<VisioDocument xmlns="http://schemas.microsoft.com/office/visio/2012/main"><DocumentSheet><Cell N="PageWidth" V="8.5"/></DocumentSheet></VisioDocument>"#,
+            ),
+        ),
+        (
+            "visio/_rels/document.xml.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.microsoft.com/visio/2010/relationships/pages" Target="pages/pages.xml"/></Relationships>"#,
+            ),
+        ),
+        (
+            "visio/pages/pages.xml",
+            xml(
+                r#"<Pages xmlns="http://schemas.microsoft.com/office/visio/2012/main"><Page ID="1" NameU="Page-1" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rId1"><PageSheet><Cell N="PageWidth" V="8.5"/></PageSheet></Page></Pages>"#,
+            ),
+        ),
+        (
+            "visio/pages/_rels/pages.xml.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.microsoft.com/visio/2010/relationships/page" Target="page1.xml"/></Relationships>"#,
+            ),
+        ),
+        (
+            "visio/pages/page1.xml",
+            xml(&format!(
+                r#"<PageContents xmlns="http://schemas.microsoft.com/office/visio/2012/main"><Shapes><Shape ID="1" NameU="VSDX_SHAPE_NAMEU" Type="Shape">{shape_inner}</Shape></Shapes></PageContents>"#
+            )),
+        ),
+    ])
+}
+
+#[test]
+fn rejects_visio_redaction_even_with_another_declared_format() {
+    for content_type in [
+        "application/vnd.ms-visio.drawing.main+xml",
+        "application/vnd.ms-visio.drawing.macroenabled.main+xml",
+    ] {
+        let source = package(vec![
+            (
+                "[Content_Types].xml",
+                xml(&format!(
+                    r#"<Types><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/visio/document.xml" ContentType="{content_type}"/></Types>"#
+                )),
+            ),
+            ("word/document.xml", xml("<document/>")),
+            ("visio/document.xml", xml("<VisioDocument/>")),
+        ]);
+        assert!(matches!(
+            detect_format(&source),
+            Err(RedactError::UnsupportedVisio)
+        ));
+        assert!(matches!(
+            redact(&source, Format::Docx),
+            Err(RedactError::UnsupportedVisio)
+        ));
+    }
+}
+
+#[test]
+fn rejects_visio_redaction_without_content_types() {
+    let source = package(vec![("visio/document.xml", xml("<VisioDocument/>"))]);
+    assert!(matches!(
+        redact(&source, Format::Auto),
+        Err(RedactError::UnsupportedVisio)
+    ));
+}
+
+#[test]
+fn still_redacts_office_packages_with_embedded_visio() {
+    for (source, format, path) in [
+        (docx_fixture(), Format::Docx, "word/embeddings/diagram.vsdx"),
+        (xlsx_fixture(), Format::Xlsx, "xl/embeddings/diagram.vsdx"),
+        (pptx_fixture(), Format::Pptx, "ppt/embeddings/diagram.vsdx"),
+    ] {
+        let embedded = package(vec![(
+            "visio/document.xml",
+            xml("<VisioDocument>EMBEDDED_SECRET</VisioDocument>"),
+        )]);
+        let mut parts = ooxml_opc::unzip_parts(&source).unwrap();
+        parts.push((path.to_owned(), embedded));
+        let (_, types) = parts
+            .iter_mut()
+            .find(|(name, _)| name == "[Content_Types].xml")
+            .unwrap();
+        *types = String::from_utf8(types.clone()).unwrap().replace("</Types>", &format!(r#"<Default Extension="vsdx" ContentType="application/vnd.ms-visio.drawing"/><Override PartName="/{path}" ContentType="application/vnd.ms-visio.drawing"/><!-- application/vnd.ms-visio.drawing.main+xml --></Types>"#)).into_bytes();
+        let source = ooxml_opc::rezip_parts(&parts).unwrap();
+        let output = redact(&source, format).unwrap();
+        let parts = ooxml_opc::unzip_parts(&output).unwrap();
+        assert!(
+            parts
+                .iter()
+                .all(|(part, data)| part != path || data.is_empty())
+        );
+    }
+}
+
+#[test]
+fn rejects_declared_visio_main_parts_outside_the_usual_directory() {
+    let source = package(vec![
+        (
+            "[Content_Types].xml",
+            xml(
+                r#"<Types><Override PartName="/diagram.xml" ContentType="application/vnd.ms-visio.drawing.main+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#,
+            ),
+        ),
+        ("diagram.xml", xml("<VisioDocument/>")),
+        ("word/document.xml", xml("<document/>")),
+    ]);
+    assert!(matches!(
+        redact(&source, Format::Auto),
+        Err(RedactError::UnsupportedVisio)
+    ));
 }

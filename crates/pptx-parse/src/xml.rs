@@ -5,6 +5,10 @@ use quick_xml::events::{BytesStart, Event};
 
 use crate::PptxError;
 
+pub(crate) const DRAWINGML_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
+pub(crate) const PRESENTATIONML_NS: &str =
+    "http://schemas.openxmlformats.org/presentationml/2006/main";
+
 #[derive(Clone, Debug)]
 pub struct ParseLimits {
     pub max_xml_bytes: usize,
@@ -17,6 +21,7 @@ pub struct ParseLimits {
     pub max_shapes: usize,
     pub max_paragraphs: usize,
     pub max_runs: usize,
+    pub max_comments: usize,
 }
 
 impl Default for ParseLimits {
@@ -32,6 +37,7 @@ impl Default for ParseLimits {
             max_shapes: 100_000,
             max_paragraphs: 500_000,
             max_runs: 2_000_000,
+            max_comments: 100_000,
         }
     }
 }
@@ -46,6 +52,7 @@ pub(crate) struct ParseBudget<'a> {
     shapes: usize,
     paragraphs: usize,
     runs: usize,
+    comments: usize,
 }
 
 impl<'a> ParseBudget<'a> {
@@ -59,6 +66,7 @@ impl<'a> ParseBudget<'a> {
             shapes: 0,
             paragraphs: 0,
             runs: 0,
+            comments: 0,
         }
     }
 
@@ -93,6 +101,16 @@ impl<'a> ParseBudget<'a> {
 
     pub fn charge_run(&mut self, part: &str) -> Result<(), PptxError> {
         charge(&mut self.runs, 1, self.limits.max_runs, "runs", part)
+    }
+
+    pub fn charge_comment(&mut self, part: &str) -> Result<(), PptxError> {
+        charge(
+            &mut self.comments,
+            1,
+            self.limits.max_comments,
+            "comments",
+            part,
+        )
     }
 }
 
@@ -232,6 +250,46 @@ fn append_text(element: &XmlElement, output: &mut String) {
     }
 }
 
+/// The `mc:AlternateContent` branch this crate reads: the first `mc:Choice`
+/// whose `Requires` namespaces are all supported, else the `mc:Fallback`.
+pub(crate) fn alternate_content_branch(element: &XmlElement) -> Option<&XmlElement> {
+    match &element.children[alternate_content_branch_index(element)?] {
+        XmlNode::Element(branch) => Some(branch),
+        XmlNode::Text(_) => None,
+    }
+}
+
+/// Index into `children` of the branch [`alternate_content_branch`] reads.
+pub(crate) fn alternate_content_branch_index(element: &XmlElement) -> Option<usize> {
+    let mut fallback = None;
+    for (index, child) in element.children.iter().enumerate() {
+        let XmlNode::Element(branch) = child else {
+            continue;
+        };
+        match branch.local_name() {
+            "Choice" if choice_is_supported(element, branch) => return Some(index),
+            "Fallback" if fallback.is_none() => fallback = Some(index),
+            _ => {}
+        }
+    }
+    fallback
+}
+
+fn choice_is_supported(alternate: &XmlElement, choice: &XmlElement) -> bool {
+    let Some(requires) = choice.attribute("Requires") else {
+        return false;
+    };
+    let mut prefixes = requires.split_whitespace().peekable();
+    prefixes.peek().is_some()
+        && prefixes.all(|prefix| {
+            let declaration = format!("xmlns:{prefix}");
+            choice
+                .attribute(&declaration)
+                .or_else(|| alternate.attribute(&declaration))
+                .is_some_and(|uri| [DRAWINGML_NS, PRESENTATIONML_NS].contains(&uri))
+        })
+}
+
 pub(crate) fn local_name(name: &str) -> &str {
     name.rsplit_once(':').map_or(name, |(_, local)| local)
 }
@@ -239,6 +297,12 @@ pub(crate) fn local_name(name: &str) -> &str {
 pub(crate) fn serialize_xml(root: &XmlElement) -> Vec<u8> {
     let mut output =
         String::from("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\r\n");
+    write_element(root, &mut output);
+    output.into_bytes()
+}
+
+pub(crate) fn serialize_xml_fragment(root: &XmlElement) -> Vec<u8> {
+    let mut output = String::new();
     write_element(root, &mut output);
     output.into_bytes()
 }

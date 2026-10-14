@@ -18,6 +18,7 @@ import {
 import { cn } from '../../lib/utils';
 import { IconLineSpacing } from './Icons';
 import { useTranslation } from '../../i18n';
+import { useDisabledDescription } from './disabledDescription';
 import type { TranslationKey } from '@betteroffice/docx-i18n';
 
 // ============================================================================
@@ -36,6 +37,8 @@ export interface LineSpacingPickerProps {
   onChange?: (twipsValue: number) => void;
   options?: LineSpacingOption[];
   disabled?: boolean;
+  /** Why the picker is disabled. */
+  description?: string;
   className?: string;
   width?: number | string;
 }
@@ -65,9 +68,12 @@ export function LineSpacingPicker({
   onChange,
   options = DEFAULT_OPTIONS,
   disabled = false,
+  description,
   className,
 }: LineSpacingPickerProps) {
   const { t } = useTranslation();
+  const reason = useDisabledDescription(disabled, description);
+  const [open, setOpen] = React.useState(false);
   // Find current option by twips value
   const currentOption = React.useMemo(() => {
     if (value === undefined) return options[0]; // Default to Single
@@ -77,11 +83,11 @@ export function LineSpacingPicker({
   const handleValueChange = React.useCallback(
     (newValue: string) => {
       const twips = parseInt(newValue, 10);
-      if (!isNaN(twips)) {
+      if (!isNaN(twips) && !disabled) {
         onChange?.(twips);
       }
     },
-    [onChange]
+    [disabled, onChange]
   );
 
   const getOptionLabel = (option: LineSpacingOption) =>
@@ -91,15 +97,23 @@ export function LineSpacingPicker({
     <Select
       value={currentOption.twipsValue.toString()}
       onValueChange={handleValueChange}
-      disabled={disabled}
+      disabled={reason.triggerProps.disabled}
+      open={open && !disabled}
+      onOpenChange={(next) => setOpen(next && !disabled)}
     >
       <SelectTrigger
-        className={cn('h-8 text-sm gap-0.5 px-2', className)}
+        className={cn('h-8 text-sm gap-0.5 px-2', disabled && 'opacity-50', className)}
         style={{ width: 'auto' }}
         aria-label={t('lineSpacing.label')}
-        title={t('lineSpacing.lineSpacingTitle', { label: getOptionLabel(currentOption) })}
+        aria-disabled={reason.triggerProps['aria-disabled']}
+        aria-describedby={reason.triggerProps['aria-describedby']}
+        title={
+          reason.title ??
+          t('lineSpacing.lineSpacingTitle', { label: getOptionLabel(currentOption) })
+        }
       >
         <IconLineSpacing className="h-5 w-5 shrink-0" />
+        {reason.node}
       </SelectTrigger>
       <SelectContent>
         {options.map((option) => (

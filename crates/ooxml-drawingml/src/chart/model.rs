@@ -21,6 +21,63 @@ pub struct ChartSpace {
     /// `c:txPr` on `c:title`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title_text: Option<ChartTextProperties>,
+    /// `c:chartSpace/c:spPr`: the chart's own background paint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill: Option<ChartFill>,
+    /// `c:plotArea/c:layout/c:manualLayout`, when it places the inner plot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plot_layout: Option<ChartManualLayout>,
+}
+
+/// A `c:manualLayout` that places a chart part as fractions of the frame.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartManualLayout {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+/// The fill of a `c:spPr`. Absent means the host paints its own default.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum ChartFill {
+    /// `a:noFill`: nothing is painted, so whatever sits behind shows through.
+    None,
+    Solid {
+        color: String,
+    },
+    /// `a:pattFill`, kept as its two colours: no host paints a hatch yet.
+    Pattern {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        foreground: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        background: Option<String>,
+    },
+    /// `a:gradFill`, kept as its stop colours.
+    Gradient {
+        colors: Vec<String>,
+    },
+    /// Another fill, such as `a:blipFill`, painted in the host's default.
+    Unsupported,
+}
+
+/// The `a:ln` of a `c:spPr`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartLine {
+    /// `a:ln/a:noFill`: the outline is declared and switched off.
+    pub none: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// `a:ln/@w`, in EMU.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width_emu: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -28,6 +85,9 @@ pub struct ChartLegend {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub position: Option<String>,
     pub visible: bool,
+    /// `c:overlay`: the legend sits on the plot instead of taking a band of it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub overlay: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<ChartTextProperties>,
 }
@@ -46,11 +106,80 @@ pub struct ChartTextProperties {
     pub italic: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    /// `a:defRPr/@spc`, in points: tracking added after every cluster.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spacing_pt: Option<f64>,
 }
 
 impl ChartTextProperties {
     pub fn is_empty(&self) -> bool {
         *self == Self::default()
+    }
+
+    /// `self` over `base`, field by field.
+    pub fn over(self, base: &Self) -> Self {
+        Self {
+            font: self.font.or_else(|| base.font.clone()),
+            size_pt: self.size_pt.or(base.size_pt),
+            bold: self.bold.or(base.bold),
+            italic: self.italic.or(base.italic),
+            color: self.color.or_else(|| base.color.clone()),
+            spacing_pt: self.spacing_pt.or(base.spacing_pt),
+        }
+    }
+}
+
+/// A cell the sheet left blank has no number. It travels as `null`, because
+/// JSON has no NaN and the plot has to keep the blank in place to line the
+/// values up with their categories.
+mod blank_numbers {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(values: &[f64], serializer: S) -> Result<S::Ok, S::Error> {
+        values
+            .iter()
+            .map(|value| value.is_finite().then_some(*value))
+            .collect::<Vec<_>>()
+            .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<f64>, D::Error> {
+        Ok(Vec::<Option<f64>>::deserialize(deserializer)?
+            .into_iter()
+            .map(|value| value.unwrap_or(f64::NAN))
+            .collect())
+    }
+
+    pub mod optional {
+        use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+        pub fn serialize<S: Serializer>(
+            values: &Option<Vec<f64>>,
+            serializer: S,
+        ) -> Result<S::Ok, S::Error> {
+            values
+                .as_ref()
+                .map(|values| {
+                    values
+                        .iter()
+                        .map(|value| value.is_finite().then_some(*value))
+                        .collect::<Vec<_>>()
+                })
+                .serialize(serializer)
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(
+            deserializer: D,
+        ) -> Result<Option<Vec<f64>>, D::Error> {
+            Ok(
+                Option::<Vec<Option<f64>>>::deserialize(deserializer)?.map(|values| {
+                    values
+                        .into_iter()
+                        .map(|value| value.unwrap_or(f64::NAN))
+                        .collect()
+                }),
+            )
+        }
     }
 }
 
@@ -60,6 +189,7 @@ pub struct ChartSeries {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     pub categories: Vec<String>,
+    #[serde(with = "blank_numbers")]
     pub values: Vec<f64>,
     pub color: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -70,6 +200,10 @@ pub struct ChartSeries {
     pub category_formula: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value_formula: Option<String>,
+    /// `c:val/c:numRef/c:numCache/c:formatCode`: the format the values were
+    /// cached with, which source-linked data labels read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_format: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub axis_ids: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -81,13 +215,24 @@ pub struct ChartSeries {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub smooth: Option<bool>,
     /// `c:xVal` of a scatter or bubble series.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "blank_numbers::optional"
+    )]
     pub x_values: Option<Vec<f64>>,
     /// `c:bubbleSize` of a bubble series.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "blank_numbers::optional"
+    )]
     pub bubble_sizes: Option<Vec<f64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_labels: Option<ChartDataLabels>,
+    /// `c:ser/c:spPr/a:ln`: the stroke of this series' own line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<ChartLine>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -149,7 +294,20 @@ pub struct ChartPointLabel {
     /// Literal `c:tx` text, which replaces every composed field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// `c:tx` split at its `a:fld` boundaries, when it has any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runs: Option<Vec<ChartLabelRun>>,
     pub labels: ChartDataLabels,
+}
+
+/// A piece of a `c:tx` label: text the deck wrote, or a field PowerPoint
+/// recomputes from the point every time it draws.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ChartLabelRun {
+    Text(String),
+    /// `a:fld/@type`, e.g. `VALUE` or `CATEGORYNAME`.
+    Field(String),
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -229,6 +387,9 @@ pub struct ChartAxis {
     pub crosses: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub crosses_at: Option<f64>,
+    /// `c:crossBetween`: `midCat` puts the points on the category ticks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cross_between: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub major_unit: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -249,6 +410,15 @@ pub struct ChartAxis {
     pub major_gridlines: bool,
     #[serde(default)]
     pub minor_gridlines: bool,
+    /// `c:majorGridlines/c:spPr/a:ln`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub major_gridline_line: Option<ChartLine>,
+    /// `c:minorGridlines/c:spPr/a:ln`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minor_gridline_line: Option<ChartLine>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<ChartTextProperties>,
+    /// `c:spPr/a:ln` of this axis: the rule drawn along the plot's edge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<ChartLine>,
 }

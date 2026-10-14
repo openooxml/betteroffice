@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,7 +8,9 @@ import {
   PYPI_DISTRIBUTIONS,
   PYTHON_BINDINGS,
   PYTHON_BINDING_NAMES,
-  PYTHON_PUBLISH_NAMES
+  PYTHON_PUBLISH_NAMES,
+  bindingVersion,
+  pendingPublishNames
 } from './python-bindings.mjs';
 
 const script = fileURLToPath(new URL('./python-bindings.mjs', import.meta.url));
@@ -121,9 +123,9 @@ describe('registry', () => {
 });
 
 describe('release wiring', () => {
-  test('the registry step computes the publish list from the registry', () => {
+  test('the registry step computes the publish list from PyPI state', () => {
     const step = release.jobs['python-bindings'].steps.find((s: any) => s.id === 'registry');
-    expect(step.run).toContain('scripts/python-bindings.mjs --publish');
+    expect(step.run).toContain('scripts/python-bindings.mjs --pending');
 
     const directory = mkdtempSync(join(tmpdir(), 'registry-'));
     const outputs = join(directory, 'outputs');
@@ -136,9 +138,29 @@ describe('release wiring', () => {
     });
 
     expect(result.status).toBe(0);
-    expect(readFileSync(outputs, 'utf8').trim().split('\n')).toEqual([
-      `publish=${JSON.stringify(PYTHON_PUBLISH_NAMES)}`
-    ]);
+    const lines = readFileSync(outputs, 'utf8').trim().split('\n');
+    expect(lines).toHaveLength(1);
+    const pending = JSON.parse(lines[0]!.replace(/^publish=/, '')) as string[];
+    expect(PYTHON_PUBLISH_NAMES.filter((name) => pending.includes(name))).toEqual(pending);
+  });
+
+  test('a registry lookup failure fails the step instead of publishing nothing', () => {
+    const step = release.jobs['python-bindings'].steps.find((s: any) => s.id === 'registry');
+    const directory = mkdtempSync(join(tmpdir(), 'registry-fail-'));
+    writeFileSync(join(directory, 'node'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+    const path = join(directory, 'registry.sh');
+    writeFileSync(path, step.run);
+    const result = spawnSync('bash', ['-e', path], {
+      encoding: 'utf8',
+      cwd: repository,
+      env: {
+        ...process.env,
+        PATH: `${directory}:${process.env.PATH}`,
+        GITHUB_OUTPUT: join(directory, 'outputs')
+      }
+    });
+
+    expect(result.status).not.toBe(0);
   });
 
   test('the release train exposes the publish list', () => {
@@ -284,5 +306,127 @@ describe('repository-scoped token guard', () => {
     );
     expect(child.env.TOKEN).toBe('${{ secrets.PYPI_API_TOKEN }}');
     expect(child.run).toContain('exit 1');
+  });
+});
+
+describe('pending publish selection', () => {
+  const live = () =>
+    Object.fromEntries(
+      PYTHON_BINDINGS.map((path) => [
+        `betteroffice-${path.replace('bindings/python-', '')}`,
+        [bindingVersion(path)]
+      ])
+    );
+
+  type Files = { yanked?: boolean }[];
+
+  function pypi(releases: Record<string, string[] | Record<string, Files> | null>) {
+    const requested: string[] = [];
+    const fetchImpl = async (url: string) => {
+      requested.push(url);
+      const project = url.match(/\/pypi\/([^/]+)\/json$/)?.[1] ?? '';
+      const entry = releases[project];
+      if (entry == null) return { status: 404, ok: false } as Response;
+      const map = Array.isArray(entry)
+        ? Object.fromEntries(entry.map((version) => [version, [{ yanked: false }]]))
+        : entry;
+      return {
+        status: 200,
+        ok: true,
+        json: async () => ({ releases: map })
+      } as unknown as Response;
+    };
+    return { fetchImpl, requested };
+  }
+
+  test('every binding version is a semver', () => {
+    for (const path of PYTHON_BINDINGS) expect(bindingVersion(path)).toMatch(/^\d+\.\d+\.\d+$/);
+  });
+
+  test('nothing is pending when PyPI serves every version', async () => {
+    const { fetchImpl, requested } = pypi(live());
+    expect(await pendingPublishNames({ fetchImpl })).toEqual([]);
+    expect(requested).toEqual(PYPI_DISTRIBUTIONS.map((d) => `https://pypi.org/pypi/${d}/json`));
+  });
+
+  test('a version PyPI does not serve is pending', async () => {
+    const releases = live();
+    releases['betteroffice-docx'] = ['0.0.0'];
+    const { fetchImpl } = pypi(releases);
+    expect(await pendingPublishNames({ fetchImpl })).toEqual(['docx']);
+  });
+
+  test('a project PyPI does not know is pending', async () => {
+    const releases = live();
+    releases['betteroffice-xlsx'] = null;
+    const { fetchImpl } = pypi(releases);
+    expect(await pendingPublishNames({ fetchImpl })).toEqual(['xlsx']);
+  });
+
+  test('a version whose files are all deleted fails instead of counting as released', async () => {
+    const releases = live();
+    releases['betteroffice-docx'] = { [bindingVersion('bindings/python-docx')]: [] };
+    const { fetchImpl } = pypi(releases);
+    await expect(pendingPublishNames({ fetchImpl })).rejects.toThrow('no installable file');
+  });
+
+  test('a version whose files are all yanked fails instead of counting as released', async () => {
+    const releases = live();
+    releases['betteroffice-docx'] = {
+      [bindingVersion('bindings/python-docx')]: [{ yanked: true }, { yanked: true }]
+    };
+    const { fetchImpl } = pypi(releases);
+    await expect(pendingPublishNames({ fetchImpl })).rejects.toThrow('no installable file');
+  });
+
+  test('one live file among yanked ones counts as released', async () => {
+    const releases = live();
+    releases['betteroffice-docx'] = {
+      [bindingVersion('bindings/python-docx')]: [{ yanked: true }, { yanked: false }]
+    };
+    const { fetchImpl } = pypi(releases);
+    expect(await pendingPublishNames({ fetchImpl })).toEqual([]);
+  });
+
+  test('a version is read from [package], not another table', () => {
+    const fixture = 'scripts/.manifest-fixture';
+    const directory = join(repository, fixture);
+    const read = (body: string) => {
+      mkdirSync(directory, { recursive: true });
+      writeFileSync(join(directory, 'Cargo.toml'), body);
+      try {
+        return bindingVersion(fixture);
+      } catch (error) {
+        return `THROWS: ${(error as Error).message}`;
+      }
+    };
+
+    try {
+      expect(read('[package]\nversion = "1.2.3" # release\n')).toBe('1.2.3');
+      expect(read('[other]\nversion = "9.9.9"\n\n[package]\nversion = "1.2.3"\n')).toBe('1.2.3');
+      expect(read('[package]\nversion.workspace = true\n\n[other]\nversion = "9.9.9"\n')).toContain(
+        'THROWS'
+      );
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('an unreadable PyPI fails the run instead of skipping a publish', async () => {
+    const fetchImpl = async () => ({ status: 503, ok: false }) as Response;
+    await expect(
+      pendingPublishNames({ fetchImpl, attempts: 2, retryDelayMs: 0 })
+    ).rejects.toThrow('cannot read PyPI');
+  });
+
+  test('a transient error is retried', async () => {
+    let calls = 0;
+    const good = pypi(live()).fetchImpl;
+    const fetchImpl = async (url: string) => {
+      calls += 1;
+      if (calls === 1) throw new Error('reset');
+      return good(url);
+    };
+    expect(await pendingPublishNames({ fetchImpl, retryDelayMs: 0 })).toEqual([]);
   });
 });

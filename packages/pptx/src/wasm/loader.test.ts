@@ -4,14 +4,16 @@ import { resolve } from 'node:path';
 import type {
   PresentationHandle,
   ShapePrimitive,
+  SlidePrimitive,
   StorySnapshot,
   TextBoxPrimitive,
 } from '../index';
-import { initWasm, openPresentation } from '../index';
+import { initWasm, openPresentation, paintSlide, StaleProposalError } from '../index';
 
 const root = resolve(import.meta.dir, '../../../..');
 let handle: PresentationHandle;
 let fixture: Uint8Array;
+let fontBytes: Uint8Array;
 
 beforeAll(async () => {
   const [wasm, pptx, font] = await Promise.all([
@@ -21,13 +23,187 @@ beforeAll(async () => {
   ]);
   await initWasm(wasm);
   fixture = pptx;
+  fontBytes = font;
   handle = openPresentation(pptx, {
     clientId: 9001,
     fonts: [{ family: 'Liberation Sans', bytes: font }],
   });
 });
 
+test('proposals preview real frames, accept atomically, save, and preserve stale errors', () => {
+  const source = openPresentation(fixture, { clientId: 9201, fonts: [{ family: 'Liberation Sans', bytes: fontBytes }] });
+  try {
+    const before = source.snapshot();
+    const slide = before.slides[0];
+    const shape = slide.shapes.find((shape) => shape.textStories.length > 0)!;
+    const story = shape.textStories[0];
+    const end = story.paragraphs[0].runs.reduce((length, run) => length + run.text.length, 0);
+    const updates: Uint8Array[] = [];
+    source.onUpdate((update) => updates.push(update));
+    const proposal = source.propose('review-agent', 'Improve this title', [
+      { type: 'replaceText', storyId: story.id, start: 0, end, text: 'A reviewed title' },
+      { type: 'setShapeRect', slideId: slide.id, shapeId: shape.id, rect: { x: shape.x + 100000, y: shape.y, width: shape.width, height: shape.height } },
+    ]);
+    const frameBefore = source.layoutSlide(0);
+    const frameAfter = source.layoutProposalSlide(proposal.id, 0);
+    expect(frameAfter).not.toEqual(frameBefore);
+    const preview = source.previewProposal(proposal.id);
+    expect(source.snapshot()).toEqual(before);
+    expect(source.canUndo()).toBe(false);
+    expect(updates).toHaveLength(0);
+    expect(source.acceptProposal(proposal.id).snapshot).toEqual(preview.snapshot);
+    expect(updates).toHaveLength(1);
+    const reopened = openPresentation(source.save(), { clientId: 9202 });
+    try {
+      expect(JSON.stringify(reopened.snapshot())).toContain('A reviewed title');
+      expect(reopened.listProposals()).toHaveLength(0);
+    } finally { reopened.dispose(); }
+    expect(source.undo().snapshot).toEqual(before);
+    const stale = source.propose('review-agent', null, [{ type: 'setSlideNotes', slideId: slide.id, text: 'Proposed notes' }]);
+    source.setSlideNotes(slide.id, 'Human notes');
+    expect(() => source.acceptProposal(stale.id)).toThrow(StaleProposalError);
+    expect(source.listProposals()[0].staleTargets).toEqual([slide.id]);
+    expect(source.previewProposal(stale.id).proposal.changes[0].oldText).toBe('Human notes');
+    expect(source.acceptProposal(stale.id, { force: true }).snapshot.slides[0].notes).toBe('Proposed notes');
+    const rejected = source.propose('review-agent', null, [{ type: 'setSlideNotes', slideId: slide.id, text: 'Rejected notes' }]);
+    expect(source.rejectProposal(rejected.id)).toBe(true);
+    expect(source.snapshot().slides[0].notes).toBe('Proposed notes');
+  } finally { source.dispose(); }
+});
+
 afterAll(() => handle.dispose());
+
+test('text search returns stable slide and story locations without mutating the deck', () => {
+  const source = openPresentation(fixture, { clientId: 9200 });
+  try {
+    const slide = source.snapshot().slides[0];
+    const receipt = source.addTextBox(slide.id, {
+      name: 'Search fixture',
+      text: 'QueryNeedle queryneedle QUERYNEEDLE',
+      rect: { x: 100000, y: 100000, width: 2000000, height: 500000 },
+      style: {},
+    });
+    const shape = source
+      .snapshot()
+      .slides[0].shapes.find((candidate) => candidate.id === receipt.shapeId)!;
+    const story = shape.textStories[0];
+    const stateWithFixture = source.encodeStateVector();
+
+    expect(source.searchText('queryneedle')).toEqual([
+      {
+        slideIndex: 0,
+        slideId: slide.id,
+        shapeId: shape.id,
+        storyId: story.id,
+        start: 0,
+        end: 11,
+        text: 'QueryNeedle',
+      },
+      {
+        slideIndex: 0,
+        slideId: slide.id,
+        shapeId: shape.id,
+        storyId: story.id,
+        start: 12,
+        end: 23,
+        text: 'queryneedle',
+      },
+      {
+        slideIndex: 0,
+        slideId: slide.id,
+        shapeId: shape.id,
+        storyId: story.id,
+        start: 24,
+        end: 35,
+        text: 'QUERYNEEDLE',
+      },
+    ]);
+    expect(source.searchText('QueryNeedle', { caseSensitive: true })).toHaveLength(1);
+    expect(source.searchText('queryneedle', { limit: 2 })).toHaveLength(2);
+    expect(source.searchText('')).toEqual([]);
+    expect(() => source.searchText('queryneedle', { limit: -1 })).toThrow(RangeError);
+    expect(source.encodeStateVector()).toEqual(stateWithFixture);
+  } finally {
+    source.dispose();
+  }
+});
+
+test('Unicode text search preserves simple-folding matches and UTF-16 offsets', async () => {
+  const text = (await readFile(resolve(root,
+    'crates/pptx-edit/tests/fixtures/unicode-search.txt'), 'utf8')).trimEnd();
+  const source = openPresentation(fixture, { clientId: 9291 });
+  try {
+    const slide = source.snapshot().slides[0];
+    const receipt = source.addTextBox(slide.id, {
+      name: 'Unicode search', text,
+      rect: { x: 100000, y: 100000, width: 2000000, height: 500000 }, style: {},
+    });
+    const cases: Array<[string, string[]]> = [
+      ['i', ['I', 'i']], ['I', ['I', 'i']], ['ı', ['ı']], ['İ', ['İ']],
+      ['ΐ', ['ΐ', 'ΐ']], ['ΐ', ['ΐ', 'ΐ']],
+      ['ΰ', ['ΰ', 'ΰ']], ['ΰ', ['ΰ', 'ΰ']],
+      ['ﬅ', ['ﬅ', 'ﬆ']], ['ﬆ', ['ﬅ', 'ﬆ']],
+    ];
+    for (const [query, expected] of cases) {
+      const matches = source.searchText(query).filter((match) => match.shapeId === receipt.shapeId);
+      expect(matches.map((match) => match.text)).toEqual(expected);
+      for (const match of matches) {
+        expect(match.start).toBe(text.indexOf(match.text));
+        expect(match.end).toBe(match.start + match.text.length);
+      }
+      expect(source.searchText(query, { caseSensitive: true })
+        .filter((match) => match.shapeId === receipt.shapeId).map((match) => match.text))
+        .toEqual([query]);
+    }
+  } finally {
+    source.dispose();
+  }
+});
+
+test('inline proposal diffs reflow and paint marked text without changing hit tests or saved text', async () => {
+  const source = openPresentation(fixture, { clientId: 9203, fonts: [{ family: 'Liberation Sans', bytes: fontBytes }] });
+  try {
+    const slideId = source.snapshot().slides[0].id;
+    const added = source.addTextBox(slideId, {
+      name: 'Inline review', text: 'Old title and shared context',
+      rect: { x: 100000, y: 100000, width: 1800000, height: 4000000 },
+      style: { fontSizePt: 24, fontFamily: 'Liberation Sans' },
+    });
+    const shape = source.snapshot().slides[0].shapes.find((shape) => shape.id === added.shapeId)!;
+    const story = shape.textStories[0];
+    const proposal = source.propose('review-agent', null, [
+      { type: 'replaceText', storyId: story.id, start: 0, end: 3, text: 'A much clearer' },
+    ]);
+    const state = source.encodeStateAsUpdate();
+    source.layoutSlide(0);
+    const hit = source.hitTest(30, 30);
+    const diff = source.layoutProposalDiffSlide(proposal.id, 0);
+    expect(source.hitTest(30, 30)).toEqual(hit);
+    expect(source.encodeStateAsUpdate()).toEqual(state);
+    const box = diff.frame.primitives.find((primitive): primitive is TextBoxPrimitive => primitive.kind === 'textBox' && primitive.storyId === story.id)!;
+    expect(box.lines.length).toBeGreaterThan(1);
+    const runs = box.lines.flatMap((line) => line.runs);
+    expect(runs.some((run) => run.color === '#b91c1c' && run.text.includes('Old'))).toBe(true);
+    expect(runs.some((run) => run.color === '#166534')).toBe(true);
+    expect(diff.textChanges.map((change) => change.kind)).toContain('insertion');
+    expect(diff.textChanges.map((change) => change.kind)).toContain('deletion');
+    const fills: string[] = [];
+    const ctx = new Proxy({ fillStyle: '', fillRect() { fills.push(this.fillStyle); } } as Record<string, any>, {
+      get(target, key) { return key in target ? target[key as string] : () => {}; },
+    }) as CanvasRenderingContext2D;
+    await paintSlide(ctx, { ...diff.frame, background: undefined, primitives: [box] }, 2, 0.75, { textChanges: diff.textChanges });
+    expect(fills).toContain('#fee2e2cc');
+    expect(fills).toContain('#dcfce7cc');
+    expect(fills).toContain('#b91c1c');
+    expect(fills).toContain('#166534');
+    const reopened = openPresentation(source.save());
+    try { expect(JSON.stringify(reopened.snapshot())).not.toContain('A much clearer'); }
+    finally { reopened.dispose(); }
+    source.acceptProposal(proposal.id);
+    expect(JSON.stringify(source.snapshot())).toContain('A much clearer');
+    expect(source.story(story.id).paragraphs[0].runs.some((run) => run.style.color === '#166534')).toBe(false);
+  } finally { source.dispose(); }
+});
 
 describe('PPTX wasm boundary', () => {
   test('opens shared updates without parsing the file bytes', () => {
@@ -50,6 +226,48 @@ describe('PPTX wasm boundary', () => {
     source.dispose();
     left.dispose();
     right.dispose();
+  });
+
+  // the wasm event arrives as `[origin, ...update]`, so a listener that reaches
+  // for `.buffer` must not find the origin tag riding along — and the shape must
+  // not depend on how many other listeners happen to be subscribed.
+  test('delivers exact update buffers regardless of subscriber count', () => {
+    const seed = openPresentation(fixture, { clientId: 9201 });
+    let update: Uint8Array;
+    try {
+      update = seed.encodeStateAsUpdate();
+    } finally {
+      seed.dispose();
+    }
+    for (const extraSubscriber of [false, true]) {
+      const source = openPresentation(Uint8Array.of(0xff), {
+        clientId: extraSubscriber ? 9202 : 9203,
+        initialUpdate: update,
+      });
+      const peer = openPresentation(Uint8Array.of(0xff), {
+        clientId: extraSubscriber ? 9204 : 9205,
+        initialUpdate: update,
+      });
+      const received: Uint8Array[] = [];
+      try {
+        source.onUpdate((bytes, origin) => {
+          if (origin === 'local') received.push(bytes);
+        });
+        if (extraSubscriber) source.onUpdate(() => {});
+
+        const story = firstStory(source.snapshot().slides.flatMap((slide) => slide.shapes));
+        source.insertText(story.id, story.length - 1, ' exact');
+        expect(received).toHaveLength(1);
+        expect(received[0].byteOffset).toBe(0);
+        expect(received[0].buffer.byteLength).toBe(received[0].byteLength);
+
+        peer.applyUpdate(new Uint8Array(received[0].buffer));
+        expect(peer.story(story.id)).toEqual(source.story(story.id));
+      } finally {
+        source.dispose();
+        peer.dispose();
+      }
+    }
   });
 
   test('opens, edits, reflows, hit-tests, and observes a local update', () => {
@@ -87,6 +305,160 @@ describe('PPTX wasm boundary', () => {
       paragraph.runs.some((run) => run.text.includes('edited'))
     )).toBe(false);
     unsubscribe();
+  });
+
+  test('aligns paragraphs, reflows the text box, and undoes in one step', () => {
+    const snapshot = handle.snapshot();
+    const story = firstStory(snapshot.slides.flatMap((slide) => slide.shapes));
+    const laidOut = () =>
+      handle.layoutSlide(0).primitives.find(
+        (primitive): primitive is TextBoxPrimitive =>
+          primitive.kind === 'textBox' && primitive.storyId === story.id
+      );
+    const storedBefore = handle.story(story.id).paragraphs[0].alignment;
+    const renderedBefore = laidOut()?.paragraphs[0]?.align;
+
+    handle.setParagraphAlignment(story.id, 0, 0, 'ctr');
+    expect(handle.story(story.id).paragraphs[0].alignment).toBe('ctr');
+    expect(laidOut()?.paragraphs[0]?.align).toBe('center');
+
+    expect(handle.undo().applied).toBe(true);
+    expect(handle.story(story.id).paragraphs[0].alignment).toBe(storedBefore);
+    expect(laidOut()?.paragraphs[0]?.align).toBe(renderedBefore);
+
+    expect(() =>
+      handle.setParagraphAlignment(story.id, 0, 0, 'middle' as never)
+    ).toThrow();
+  });
+
+  test('sets a shape rectangle in one update and one undo step', () => {
+    const source = openPresentation(fixture, { clientId: 9011 });
+    const slide = source.snapshot().slides[0];
+    const shape = slide.shapes[0];
+    const before = {
+      x: shape.x,
+      y: shape.y,
+      width: shape.width,
+      height: shape.height,
+    };
+    const after = {
+      x: before.x + 120_000,
+      y: before.y + 80_000,
+      width: before.width + 300_000,
+      height: before.height + 200_000,
+    };
+    const updates: Uint8Array[] = [];
+    source.onUpdate((update, origin) => {
+      if (origin === 'local') updates.push(update);
+    });
+
+    expect(source.setShapeRect(slide.id, shape.id, after).after).toEqual(after);
+    expect(updates).toHaveLength(1);
+    expect(shapeSnapshotFrom(source, shape.id)).toMatchObject(after);
+    expect(source.undo().applied).toBe(true);
+    expect(shapeSnapshotFrom(source, shape.id)).toMatchObject(before);
+    expect(source.canUndo()).toBe(false);
+    source.dispose();
+  });
+
+  test('paints the non-justified demo deck with one call per text run', async () => {
+    const source = openPresentation(fixture, {
+      clientId: 9013,
+      fonts: [{ family: 'Liberation Sans', bytes: fontBytes }],
+    });
+    const calls: Array<{ text: string; x: number; y: number }> = [];
+    const expected: Array<{ text: string; x: number; y: number }> = [];
+    const ctx = new Proxy(
+      {
+        fillText: (text: string, x: number, y: number) => calls.push({ text, x, y }),
+      } as Record<string, unknown>,
+      {
+        get(target, property) {
+          if (property in target) return target[property as string];
+          return () => undefined;
+        },
+        set(target, property, value) {
+          target[property as string] = value;
+          return true;
+        },
+      }
+    ) as unknown as CanvasRenderingContext2D;
+    try {
+      for (let slideIndex = 0; slideIndex < source.snapshot().slides.length; slideIndex += 1) {
+        const frame = source.layoutSlide(slideIndex);
+        expected.push(...oneCallPerTextRun(frame.primitives));
+        await paintSlide(ctx, frame);
+      }
+
+      expect(expected).toHaveLength(272);
+      expect(calls).toHaveLength(expected.length);
+      expect(calls).toEqual(expected);
+    } finally {
+      source.dispose();
+    }
+  });
+
+  test('paints engine-produced justified word starts at caret positions', async () => {
+    const source = openPresentation(fixture, {
+      clientId: 9012,
+      fonts: [{ family: 'Liberation Sans', bytes: fontBytes }],
+    });
+    try {
+      const shape = source.snapshot().slides[0].shapes.find(
+        (candidate) => candidate.name === 'Subtitle'
+      );
+      const story = shape?.textStories[0];
+      if (!story) throw new Error('subtitle story is missing');
+      source.setParagraphAlignment(story.id, 0, story.length, 'just');
+      const frame = source.layoutSlide(0);
+      const textBox = frame.primitives.find(
+        (primitive): primitive is TextBoxPrimitive =>
+          primitive.kind === 'textBox' && primitive.storyId === story.id
+      );
+      if (!textBox) throw new Error('subtitle layout is missing');
+      expect(textBox.lines.length).toBeGreaterThan(1);
+
+      const calls: Array<{ text: string; x: number; y: number }> = [];
+      const ctx = new Proxy(
+        {
+          fillText: (text: string, x: number, y: number) => calls.push({ text, x, y }),
+        } as Record<string, unknown>,
+        {
+          get(target, property) {
+            if (property in target) return target[property as string];
+            return () => undefined;
+          },
+          set(target, property, value) {
+            target[property as string] = value;
+            return true;
+          },
+        }
+      ) as unknown as CanvasRenderingContext2D;
+      await paintSlide(ctx, { ...frame, background: undefined, primitives: [textBox] });
+
+      const first = textBox.lines[0];
+      const painted = calls.filter((call) => call.y === first.baseline);
+      expect(painted.length).toBeGreaterThan(1);
+      let position = first.start;
+      for (const call of painted) {
+        const caret = first.caretStops.find((stop) => stop.position === position);
+        if (!caret) throw new Error(`caret stop ${position} is missing`);
+        expect(call.x).toBe(caret.x);
+        position += call.text.length;
+      }
+      expect(position).toBe(first.end);
+
+      const last = textBox.lines[textBox.lines.length - 1];
+      expect(calls.filter((call) => call.y === last.baseline)).toEqual([
+        {
+          text: last.runs.map((run) => run.text).join(''),
+          x: last.runs[0].x,
+          y: last.baseline,
+        },
+      ]);
+    } finally {
+      source.dispose();
+    }
   });
 
   test('inserts and styles preset shapes with undo and redo', () => {
@@ -187,10 +559,104 @@ describe('PPTX wasm boundary', () => {
     source.dispose();
     reopened.dispose();
   });
+
+  test('anchors a legacy comment and carries it through a save', () => {
+    const deck = openPresentation(fixture, { clientId: 9201 });
+    expect(deck.snapshot().commentFlavor).toBeUndefined();
+    expect(deck.comments()).toEqual([]);
+
+    const slideId = deck.snapshot().slides[0].id;
+    const receipt = deck.addComment(slideId, {
+      author: 'Ada Lovelace',
+      initials: 'AL',
+      text: 'Does this claim hold?',
+      created: '2026-09-01T21:40:00.000',
+      xEmu: 914_400,
+      yEmu: 457_200,
+    });
+    expect(receipt.slideId).toBe(slideId);
+    expect(receipt.parentId).toBeNull();
+    expect(receipt.resolved).toBe(false);
+
+    const [comment] = deck.comments();
+    expect([comment.author, comment.initials]).toEqual(['Ada Lovelace', 'AL']);
+    expect([comment.xEmu, comment.yEmu]).toEqual([914_400, 457_200]);
+    expect(deck.snapshot().comments).toHaveLength(1);
+
+    const reopened = openPresentation(deck.save(), { clientId: 9202 });
+    expect(reopened.comments()[0]?.text).toBe('Does this claim hold?');
+    expect(reopened.snapshot().commentFlavor).toBeUndefined();
+
+    deck.removeComment(receipt.commentId);
+    expect(deck.comments()).toEqual([]);
+
+    deck.dispose();
+    reopened.dispose();
+  });
+
+  test('legacy decks refuse replies, status, and a flavour switch', () => {
+    const deck = openPresentation(fixture, { clientId: 9203 });
+    const receipt = deck.addComment(deck.snapshot().slides[0].id, {
+      author: 'Ada',
+      initials: 'AL',
+      text: 'Root.',
+      created: '2026-09-01T21:40:00.000',
+    });
+
+    expect(() =>
+      deck.replyToComment(receipt.commentId, {
+        author: 'Grace',
+        initials: 'GH',
+        text: 'Agreed.',
+        created: '2026-09-01T21:41:00.000',
+      })
+    ).toThrow();
+    expect(() => deck.setCommentStatus(receipt.commentId, true)).toThrow();
+    expect(() => deck.setCommentFlavor('modern')).toThrow();
+
+    deck.dispose();
+  });
+
+  test('a modern thread keeps its reply and resolved state across a save', () => {
+    const deck = openPresentation(fixture, { clientId: 9204 });
+    expect(deck.setCommentFlavor('modern')).toBe('modern');
+
+    const root = deck.addComment(deck.snapshot().slides[0].id, {
+      author: 'Ada Lovelace',
+      initials: 'AL',
+      text: 'Does this claim hold?',
+      created: '2026-09-01T21:40:00.000',
+    });
+    const reply = deck.replyToComment(root.commentId, {
+      author: 'Grace Hopper',
+      initials: 'GH',
+      text: 'Checked, it holds.',
+      created: '2026-09-01T21:41:00.000',
+    });
+    expect(reply.parentId).toBe(root.commentId);
+    expect(deck.setCommentStatus(root.commentId, true).resolved).toBe(true);
+
+    const reopened = openPresentation(deck.save(), { clientId: 9205 });
+    expect(reopened.snapshot().commentFlavor).toBe('modern');
+    const comments = reopened.comments();
+    expect(comments).toHaveLength(2);
+    const roots = comments.filter((candidate) => candidate.parentId === null);
+    const replies = comments.filter((candidate) => candidate.parentId !== null);
+    expect(roots[0]?.resolved).toBe(true);
+    expect(replies[0]?.text).toBe('Checked, it holds.');
+    expect(replies[0]?.parentId).toBe(roots[0]?.id);
+
+    deck.dispose();
+    reopened.dispose();
+  });
 });
 
 function shapeSnapshot(shapeId: string) {
-  const shape = handle.snapshot().slides[0].shapes.find((candidate) => candidate.id === shapeId);
+  return shapeSnapshotFrom(handle, shapeId);
+}
+
+function shapeSnapshotFrom(source: PresentationHandle, shapeId: string) {
+  const shape = source.snapshot().slides[0].shapes.find((candidate) => candidate.id === shapeId);
   if (!shape) throw new Error(`shape ${shapeId} was not found`);
   return shape;
 }
@@ -201,3 +667,190 @@ function firstStory(shapes: Array<{ textStories: StorySnapshot[]; children: unkn
   }
   throw new Error('fixture has no text story');
 }
+
+function oneCallPerTextRun(
+  primitives: SlidePrimitive[]
+): Array<{ text: string; x: number; y: number }> {
+  const calls: Array<{ text: string; x: number; y: number }> = [];
+  for (const primitive of primitives) {
+    if (primitive.kind === 'textBox') {
+      for (const line of primitive.lines) {
+        for (const run of line.runs) calls.push({ text: run.text, x: run.x, y: line.baseline });
+      }
+    } else if (primitive.kind === 'chart' || primitive.kind === 'table') {
+      calls.push(...oneCallPerTextRun(primitive.primitives));
+    } else if (primitive.kind === 'placeholder' && primitive.label) {
+      calls.push({
+        text: primitive.label,
+        x: primitive.x + primitive.w / 2,
+        y: primitive.y + primitive.h / 2,
+      });
+    }
+  }
+  return calls;
+}
+
+test('inserted pictures render, synchronize, arrange and reopen with their bytes', () => {
+  const source = openPresentation(fixture, { clientId: 9401, fonts: [{ family: 'Liberation Sans', bytes: fontBytes }] });
+  const peer = openPresentation(fixture, { clientId: 9402, fonts: [{ family: 'Liberation Sans', bytes: fontBytes }] });
+  const bytes = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 13, 10, 26, 10]);
+  try {
+    const slide = source.snapshot().slides[0];
+    const added = source.addPicture(slide.id, {
+      name: 'Shared picture', rect: { x: 10, y: 20, width: 3000, height: 4000 },
+      contentType: 'image/png', mediaBase64: Buffer.from(bytes).toString('base64'),
+    });
+    const assetId = `pending-media:${added.shapeId}`;
+    expect(source.layoutSlide(0).primitives.some((p) => p.kind === 'image' && p.assetId === assetId)).toBe(true);
+    expect(source.mediaBytes(assetId)).toEqual(bytes);
+    peer.applyUpdate(source.encodeStateAsUpdate());
+    expect(peer.mediaBytes(assetId)).toEqual(bytes);
+    expect(peer.snapshot()).toEqual(source.snapshot());
+    source.sendShapeToBack(slide.id, added.shapeId);
+    expect(source.snapshot().slides[0].shapes[0].id).toBe(added.shapeId);
+    source.bringShapeForward(slide.id, added.shapeId);
+    expect(source.snapshot().slides[0].shapes[1].id).toBe(added.shapeId);
+    source.sendShapeBackward(slide.id, added.shapeId);
+    source.bringShapeToFront(slide.id, added.shapeId);
+    expect(source.snapshot().slides[0].shapes.slice(-1)[0].id).toBe(added.shapeId);
+    const reopened = openPresentation(source.save(), { clientId: 9403 });
+    try {
+      const picture = reopened.snapshot().slides[0].shapes.slice(-1)[0];
+      expect(picture.name).toBe('Shared picture');
+      expect(reopened.mediaBytes(picture.mediaPartPath!)).toEqual(bytes);
+    } finally { reopened.dispose(); }
+  } finally { source.dispose(); peer.dispose(); }
+});
+
+describe('host undo and comment controls', () => {
+  for (const mode of ['auto', 'manual'] as const) {
+    test(`setStoryParagraphs restores the entire story in one ${mode} undo`, () => {
+      const seed = openPresentation(fixture, { clientId: 9970 });
+      let bytes: Uint8Array;
+      try {
+        const story = seed.snapshot().slides[0].shapes.find((shape) => shape.textStories.length)!.textStories[0];
+        seed.setStoryParagraphs(story.id, ['A', 'Keep this paragraph.'].map((text) => ({ runs: [{ text, style: {} }] })));
+        bytes = seed.save();
+      } finally { seed.dispose(); }
+      const deck = openPresentation(bytes, { clientId: 9971 });
+      try {
+        deck.setUndoCaptureMode(mode);
+        const original = deck.snapshot().slides[0].shapes.find((shape) => shape.textStories.length)!.textStories[0];
+        expect(original.paragraphs.map((paragraph) => paragraph.runs.map((run) => run.text).join('')))
+          .toEqual(['A', 'Keep this paragraph.']);
+        expect(deck.canUndo()).toBe(false);
+        const replacement = deck.setStoryParagraphs(original.id,
+          ['Left', 'Right'].map((text) => ({ runs: [{ text, style: {} }] })));
+        expect(replacement.paragraphs.map((paragraph) => paragraph.runs.map((run) => run.text).join('')))
+          .toEqual(['Left', 'Right']);
+        expect(deck.undo().applied).toBe(true);
+        expect(deck.story(original.id)).toEqual(original);
+        expect(deck.canUndo()).toBe(false);
+        expect(deck.redo().applied).toBe(true);
+        expect(deck.story(original.id)).toEqual(replacement);
+      } finally { deck.dispose(); }
+    });
+  }
+
+  test('manual capture groups different operations and keeps explicit boundaries', () => {
+    const deck = openPresentation(fixture, { clientId: 9981 });
+    try {
+      const before = deck.snapshot();
+      const story = before.slides[0].shapes.find((shape) => shape.textStories.length)!.textStories[0];
+      expect(deck.undoCaptureMode()).toBe('auto');
+      deck.setUndoCaptureMode('manual');
+      deck.insertText(story.id, 0, 'First ');
+      deck.setUndoCaptureMode('manual');
+      deck.addComment(before.slides[0].id, { author: 'Host', text: 'Grouped', created: '2026-09-23T00:00:00Z' });
+      const grouped = deck.snapshot();
+      deck.addUndoBoundary();
+      deck.insertText(story.id, 0, 'Second ');
+      expect(deck.undo().snapshot).toEqual(grouped);
+      expect(deck.undo().snapshot).toEqual(before);
+      expect(deck.redo().snapshot).toEqual(grouped);
+      expect(() => deck.setUndoCaptureMode('invalid' as 'auto')).toThrow();
+      expect(deck.undoCaptureMode()).toBe('manual');
+      deck.setUndoCaptureMode('auto');
+      expect(deck.canRedo()).toBe(true);
+    } finally { deck.dispose(); }
+  });
+
+  test('caret anchors follow typing, undo, redo and remote edits as plain data', () => {
+    const deck = openPresentation(fixture, { clientId: 9982 });
+    const peer = openPresentation(fixture, { clientId: 9983, initialUpdate: deck.encodeStateAsUpdate() });
+    try {
+      const story = deck.snapshot().slides[0].shapes.find((shape) => shape.textStories.length)!
+        .textStories[0];
+      const first = deck.story(story.id).paragraphs[0].runs[0].text[0];
+      deck.addUndoBoundary();
+      deck.insertText(story.id, 0, first);
+      const anchor = JSON.parse(JSON.stringify(deck.anchorCaret(story.id, 1)));
+      expect(Object.keys(anchor).sort()).toEqual(['position', 'storyId']);
+      deck.undo();
+      expect(deck.resolveCaretAnchor(anchor)).toBe(0);
+      deck.redo();
+      expect(deck.resolveCaretAnchor(anchor)).toBe(1);
+      peer.applyUpdate(deck.encodeStateAsUpdate());
+      peer.insertText(story.id, 0, 'Remote ');
+      deck.applyUpdate(peer.encodeStateAsUpdate());
+      expect(deck.resolveCaretAnchor(anchor)).toBe(8);
+      expect(peer.resolveCaretAnchor(anchor)).toBe(8);
+      expect(() => deck.anchorCaret(story.id, 100_000)).toThrow();
+      expect(() => deck.resolveCaretAnchor({ storyId: story.id, position: 'not base64!' })).toThrow();
+    } finally {
+      peer.dispose();
+      deck.dispose();
+    }
+  });
+
+  test('moves modern comments without losing their thread or exported position', async () => {
+    const bytes = await readFile(resolve(root, 'crates/pptx-edit/tests/fixtures/modern-comments.pptx'));
+    const deck = openPresentation(bytes, { clientId: 9982 });
+    try {
+      const before = deck.comments();
+      const root = before.find((comment) => !comment.parentId)!;
+      const expected = before.map((comment) => comment.id === root.id
+        ? { ...comment, xEmu: 914400, yEmu: 1828800 } : comment);
+      deck.setCommentPosition(root.id, { xEmu: 914400, yEmu: 1828800 });
+      expect(() => deck.setCommentPosition(root.id, { xEmu: NaN, yEmu: 0 })).toThrow();
+      expect(() => deck.setCommentPosition('missing', { xEmu: 1, yEmu: 2 })).toThrow();
+      for (let cycle = 0; cycle < 3; cycle++) {
+        expect(deck.comments()).toEqual(expected);
+        const reopened = openPresentation(deck.save(), { clientId: 9983 });
+        try { expect(reopened.comments()).toEqual(expected); } finally { reopened.dispose(); }
+        deck.undo();
+        expect(deck.comments()).toEqual(before);
+        deck.redo();
+      }
+    } finally { deck.dispose(); }
+  });
+});
+
+test('a fallback font draws the characters the run face has no glyph for', async () => {
+  const arabic = new Uint8Array(
+    await readFile(resolve(root, 'packages/fonts/assets/NotoSansArabic-Regular.ttf'))
+  );
+  const source = openPresentation(fixture, {
+    clientId: 9301,
+    fonts: [{ family: 'Liberation Sans', bytes: fontBytes }],
+    fallbackFonts: [{ family: 'Noto Sans Arabic', bytes: arabic }],
+  });
+  try {
+    const story = source
+      .snapshot()
+      .slides[0].shapes.find((shape) => shape.textStories.length > 0)!.textStories[0];
+    source.insertText(story.id, 0, 'مرحبا ');
+    const runs = source
+      .layoutSlide(0)
+      .primitives.filter(
+        (primitive): primitive is TextBoxPrimitive =>
+          primitive.kind === 'textBox' && primitive.storyId === story.id
+      )
+      .flatMap((box) => box.lines.flatMap((line) => line.runs));
+    const drawn = runs.find((run) => run.text.includes('مرحبا'));
+    expect(drawn?.fontFamily).toBe('Noto Sans Arabic');
+    expect(runs.some((run) => run.fontFamily === 'Liberation Sans')).toBe(true);
+  } finally {
+    source.dispose();
+  }
+});

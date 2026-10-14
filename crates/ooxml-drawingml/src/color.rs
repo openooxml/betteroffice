@@ -30,6 +30,13 @@ pub struct ColorValue {
     pub alpha: Option<f64>,
 }
 
+impl ColorValue {
+    /// A plain `w:val`/`w:fill` attribute, where `auto` defers to the consumer.
+    pub fn from_attribute(value: &str) -> Self {
+        parse_color_value(Some(value), None, None, None)
+    }
+}
+
 pub fn parse_color_value(
     rgb: Option<&str>,
     theme_color: Option<&str>,
@@ -66,7 +73,7 @@ pub fn resolve_color_value_to_hex_with_theme(
     let rgb = color.rgb.as_deref().or_else(|| {
         color.theme_color.as_deref().map(|slot| {
             theme
-                .and_then(|theme| theme.color_scheme.get(slot))
+                .and_then(|theme| theme.color_scheme.get(theme.color_map.resolve(slot)))
                 .unwrap_or_else(|| default_theme_color(slot))
         })
     })?;
@@ -75,9 +82,8 @@ pub fn resolve_color_value_to_hex_with_theme(
         channels = channels.map(|channel| (f64::from(channel) * shade).round() as u8);
     }
     if let Some(tint) = color.theme_tint.as_deref().and_then(parse_modifier) {
-        channels = channels.map(|channel| {
-            (f64::from(channel) + (255.0 - f64::from(channel)) * tint).round() as u8
-        });
+        channels = channels
+            .map(|channel| (f64::from(channel) * tint + 255.0 * (1.0 - tint)).round() as u8);
     }
     channels = apply_hsl_modifiers(channels, color);
     Some(format!(
@@ -261,6 +267,41 @@ mod tests {
     }
 
     #[test]
+    fn tint_and_shade_are_the_proportion_of_the_colour_that_survives() {
+        let modified = |tint: Option<&str>, shade: Option<&str>| {
+            resolve_color_value_to_hex(Some(&ColorValue {
+                rgb: Some("204060".to_owned()),
+                theme_tint: tint.map(str::to_owned),
+                theme_shade: shade.map(str::to_owned),
+                ..ColorValue::default()
+            }))
+            .expect("resolves")
+        };
+
+        assert_eq!(modified(Some("FF"), None), "#204060");
+        assert_eq!(modified(Some("CC"), None), "#4D6680");
+        assert_eq!(modified(Some("80"), None), "#8F9FAF");
+        assert_eq!(modified(Some("33"), None), "#D2D9DF");
+        assert_eq!(modified(Some("00"), None), "#FFFFFF");
+
+        assert_eq!(modified(None, Some("FF")), "#204060");
+        assert_eq!(modified(None, Some("80")), "#102030");
+        assert_eq!(modified(None, Some("33")), "#060D13");
+        assert_eq!(modified(None, Some("00")), "#000000");
+
+        const OFFICE_ACCENT1_LIGHTER_60: &str = "#B4C7E7";
+        assert_eq!(
+            resolve_color_value_to_hex(Some(&ColorValue {
+                theme_color: Some("accent1".to_owned()),
+                theme_tint: Some("66".to_owned()),
+                ..ColorValue::default()
+            }))
+            .as_deref(),
+            Some(OFFICE_ACCENT1_LIGHTER_60)
+        );
+    }
+
+    #[test]
     fn parses_and_resolves_direct_and_theme_colors() {
         let direct = parse_color_value(Some("AABBCC"), None, None, None);
         assert_eq!(
@@ -283,7 +324,7 @@ mod tests {
         };
         assert_eq!(
             resolve_color_value_to_hex_with_theme(Some(&tinted), Some(&theme)).as_deref(),
-            Some("#90A0B0")
+            Some("#8F9FAF")
         );
 
         let malformed = ColorValue {

@@ -35,6 +35,8 @@ export interface HeaderFooter {
   hdrFtrType: HeaderFooterType;
   /** Content (paragraphs, tables, etc.) */
   content: BlockContent[];
+  /** Root bindings and attributes retained outside the standard boilerplate. */
+  customRootBindings?: { name: string; value: string }[];
   /**
    * Watermark stored on this header (MS Word "Design → Watermark"). Lives
    * here, not in `content`, so it stays out of the editable text flow while
@@ -112,8 +114,12 @@ export interface Footnote {
    * and stays editable on round-trip.
    */
   content: BlockContent[];
+  /** Inherited root bindings required by foreign note content. */
+  customRootBindings?: { name: string; value: string }[];
   /** Verbatim note XML for unmodeled bookmarks or custom XML. */
   verbatimXml?: string;
+  /** The source occurrence of the verbatim note's first `w:p`, on documents parsed for an editing session. */
+  sourceOrdinal?: number;
 }
 
 /**
@@ -131,6 +137,10 @@ export interface Endnote {
    * on `Footnote.content`.
    */
   content: BlockContent[];
+  /** Inherited root bindings required by foreign note content. */
+  customRootBindings?: { name: string; value: string }[];
   /** Verbatim note XML for unmodeled blocks. */
   verbatimXml?: string;
+  /** The source occurrence of the verbatim note's first `w:p`, on documents parsed for an editing session. */
+  sourceOrdinal?: number;
 }

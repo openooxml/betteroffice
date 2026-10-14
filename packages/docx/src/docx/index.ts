@@ -15,7 +15,8 @@
 
 // Top-level archive I/O
 export { parseDocx } from './parser';
-export { repackDocx, createDocx, updateMultipleFiles } from './rezip';
+export { repackDocx, repackDocxWithWarnings, createDocx, updateMultipleFiles } from './rezip';
+export type { RepackResult } from './rezip';
 export { attemptSelectiveSave } from './selectiveSave';
 
 export {

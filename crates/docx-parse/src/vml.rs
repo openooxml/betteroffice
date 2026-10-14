@@ -9,10 +9,10 @@ use crate::image::{
     Image, ImageCrop, ImageEffect, ImageEffects, ImagePosition, ImageSize, ImageWrap, PositionAxis,
     placeholder_image,
 };
-use crate::media::{MediaMap, resolve_image_data};
+use crate::media::{MediaMap, media_token_index, resolve_image_data};
 use crate::relationships::RelationshipMap;
 use crate::scalars::ColorValue;
-use crate::xml::XmlElement;
+use crate::xml::{ParseBudget, XmlElement, namespaces};
 
 const EMU_PER_PIXEL: f64 = 9_525.0;
 const MAX_STYLE_BYTES: usize = 65_536;
@@ -24,6 +24,129 @@ const MAX_VML_DEPTH: usize = 256;
 const MAX_SAFE_EMU: f64 = 1_000_000_000_000.0;
 
 pub type VmlStyle = IndexMap<String, String>;
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HorizontalRule {
+    pub width: Option<f64>,
+    pub width_percent: Option<f64>,
+    pub height: f64,
+    pub alignment: String,
+    pub no_shade: bool,
+    pub color: String,
+    pub xml: String,
+}
+
+pub fn parse_horizontal_rule(picture: &XmlElement) -> Option<HorizontalRule> {
+    let mut shapes = Vec::new();
+    collect_horizontal_rule_shapes(picture, &IndexMap::new(), 0, &mut shapes);
+    let [(shape, bindings)] = shapes.as_slice() else {
+        return None;
+    };
+    if shape.local_name() != "rect"
+        || direct_image_data(shape).is_some()
+        || !matches!(
+            office_attribute(shape, bindings, "hr"),
+            Some("t" | "true" | "1")
+        )
+    {
+        return None;
+    }
+    let style = parse_style_attr(shape.attribute(None, "style"));
+    let standard = matches!(
+        office_attribute(shape, bindings, "hrstd"),
+        Some("t" | "true" | "1")
+    );
+    let width = (!standard)
+        .then(|| css_length_to_px(style.get("width").map(String::as_str)))
+        .flatten()
+        .filter(|value| *value > 0.0)
+        .and_then(pixels_to_emu);
+    if width.is_some() {
+        return None;
+    }
+    let width_percent = office_attribute(shape, bindings, "hrpct")
+        .and_then(js_number)
+        .filter(|value| *value > 0.0 && *value <= 1000.0)
+        .map(|value| value / 10.0);
+    if !standard && width_percent.is_some() {
+        return None;
+    }
+    let height = css_length_to_px(style.get("height").map(String::as_str))
+        .filter(|value| *value > 0.0)
+        .and_then(pixels_to_emu)
+        .unwrap_or(19_050.0);
+    Some(HorizontalRule {
+        width,
+        width_percent,
+        height,
+        alignment: match (standard, office_attribute(shape, bindings, "hralign")) {
+            (true, _) => "left",
+            (_, Some("left")) => "left",
+            (_, Some("right")) => "right",
+            _ => "center",
+        }
+        .to_owned(),
+        no_shade: matches!(
+            office_attribute(shape, bindings, "hrnoshade"),
+            Some("t" | "true" | "1")
+        ),
+        color: normalize_color(shape.attribute(None, "fillcolor")),
+        xml: picture.to_raw_inline_xml(),
+    })
+}
+
+fn collect_horizontal_rule_shapes<'a>(
+    element: &'a XmlElement,
+    inherited: &IndexMap<&'a str, &'a str>,
+    depth: usize,
+    output: &mut Vec<(&'a XmlElement, IndexMap<&'a str, &'a str>)>,
+) {
+    if depth > MAX_VML_DEPTH || output.len() >= MAX_VML_SHAPES {
+        return;
+    }
+    let mut bindings = inherited.clone();
+    for (name, value) in &element.attributes {
+        if name == "xmlns" {
+            bindings.insert("", value);
+        } else if let Some(prefix) = name.strip_prefix("xmlns:") {
+            bindings.insert(prefix, value);
+        }
+    }
+    let prefix = element.namespace_prefix().unwrap_or("");
+    if (prefix == "v" && !bindings.contains_key(prefix)
+        || bindings.get(prefix).copied() == Some(namespaces::V))
+        && matches!(
+            element.local_name(),
+            "shape" | "rect" | "roundrect" | "oval"
+        )
+    {
+        output.push((element, bindings.clone()));
+    }
+    for child in element.child_elements() {
+        collect_horizontal_rule_shapes(child, &bindings, depth + 1, output);
+        if output.len() >= MAX_VML_SHAPES {
+            break;
+        }
+    }
+}
+
+fn office_attribute<'a>(
+    element: &'a XmlElement,
+    bindings: &IndexMap<&str, &str>,
+    local: &str,
+) -> Option<&'a str> {
+    element.attributes.iter().find_map(|(name, value)| {
+        if name == local {
+            return Some(value.as_str());
+        }
+        let (prefix, name) = name.split_once(':')?;
+        (name == local
+            && (prefix == "o" && !bindings.contains_key(prefix)
+                || bindings.get(prefix).copied() == Some(namespaces::O)))
+        .then_some(value.as_str())
+    })
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
@@ -105,6 +228,17 @@ pub fn parse_vml_image_content(
     relationships: Option<&RelationshipMap>,
     media: Option<&MediaMap>,
 ) -> Option<Image> {
+    vml_image_content(picture, relationships, media, None)
+}
+
+/// [`parse_vml_image_content`] reading `media:{n}` sources through `budget`'s
+/// media table, where a failed read fails the parse.
+pub(crate) fn vml_image_content(
+    picture: &XmlElement,
+    relationships: Option<&RelationshipMap>,
+    media: Option<&MediaMap>,
+    mut budget: Option<&mut ParseBudget<'_>>,
+) -> Option<Image> {
     let mut shapes = Vec::new();
     collect_vml_shapes(picture, 0, &mut shapes);
     for shape in shapes.into_iter().take(MAX_VML_SHAPES) {
@@ -132,9 +266,9 @@ pub fn parse_vml_image_content(
         let mut width = css_length_to_px(style.get("width").map(String::as_str));
         let mut height = css_length_to_px(style.get("height").map(String::as_str));
         if width.is_none() || height.is_none() {
-            if let Some((intrinsic_width, intrinsic_height)) =
-                intrinsic_size_px(bytes_from_image_src(resolved.src.as_deref()).as_deref())
-                && intrinsic_width > 0.0
+            if let Some((intrinsic_width, intrinsic_height)) = intrinsic_size_px(
+                image_src_bytes(resolved.src.as_deref(), budget.as_deref_mut()).as_deref(),
+            ) && intrinsic_width > 0.0
                 && intrinsic_height > 0.0
             {
                 match (width, height) {
@@ -188,20 +322,17 @@ pub fn parse_vml_image_content(
             .map(|value| truncate_utf8(value, 4_096).to_owned());
 
         if positioned {
-            let left = css_length_to_px(
-                style
-                    .get("margin-left")
-                    .or_else(|| style.get("left"))
-                    .map(String::as_str),
-            )
-            .and_then(pixels_to_emu);
-            let top = css_length_to_px(
-                style
-                    .get("margin-top")
-                    .or_else(|| style.get("top"))
-                    .map(String::as_str),
-            )
-            .and_then(pixels_to_emu);
+            // `left`/`top` are group-child coordinates, never anchor offsets.
+            let anchor_left = css_length_to_px(style.get("margin-left").map(String::as_str))
+                .and_then(pixels_to_emu);
+            let anchor_top = css_length_to_px(style.get("margin-top").map(String::as_str))
+                .and_then(pixels_to_emu);
+            let left = anchor_left.or_else(|| {
+                css_length_to_px(style.get("left").map(String::as_str)).and_then(pixels_to_emu)
+            });
+            let top = anchor_top.or_else(|| {
+                css_length_to_px(style.get("top").map(String::as_str)).and_then(pixels_to_emu)
+            });
             image.position = Some(ImagePosition {
                 use_simple_pos: None,
                 simple_pos: None,
@@ -225,7 +356,7 @@ pub fn parse_vml_image_content(
                     )
                     .to_owned(),
                     alignment: None,
-                    pos_offset: None,
+                    pos_offset: anchor_left,
                     offset: left,
                 },
                 vertical: PositionAxis {
@@ -236,7 +367,7 @@ pub fn parse_vml_image_content(
                     )
                     .to_owned(),
                     alignment: None,
-                    pos_offset: None,
+                    pos_offset: anchor_top,
                     offset: top,
                 },
             });
@@ -548,6 +679,34 @@ fn vml_fraction(raw: Option<&str>) -> Option<f64> {
     Some((if fixed { parsed / 65_536.0 } else { parsed }).clamp(0.0, 1.0))
 }
 
+/// Whether `shape`'s style positions it from the page or margin.
+pub(crate) fn placed_off_the_text(shape: &XmlElement) -> bool {
+    style_placed_off_the_text(shape.attribute(None, "style"))
+}
+
+pub(crate) fn style_placed_off_the_text(style: Option<&str>) -> bool {
+    let Some(style) = style else { return false };
+    let mut position = None;
+    let mut vertical = None;
+    for declaration in truncate_utf8(style, MAX_STYLE_BYTES)
+        .split(';')
+        .take(MAX_STYLE_DECLARATIONS)
+    {
+        let Some((key, value)) = declaration.split_once(':') else {
+            continue;
+        };
+        let key = key.trim();
+        let value = truncate_utf8(value.trim(), MAX_STYLE_VALUE_BYTES);
+        if key.eq_ignore_ascii_case("position") {
+            position = Some(value);
+        } else if key.eq_ignore_ascii_case("mso-position-vertical-relative") {
+            vertical = Some(value);
+        }
+    }
+    matches!(position, Some("absolute" | "relative"))
+        && matches!(vml_vertical_relative_to(vertical), "page" | "margin")
+}
+
 fn vml_horizontal_relative_to(raw: Option<&str>) -> &'static str {
     match raw {
         Some("page") => "page",
@@ -564,6 +723,22 @@ fn vml_vertical_relative_to(raw: Option<&str>) -> &'static str {
         Some("line") => "line",
         _ => "paragraph",
     }
+}
+
+fn image_src_bytes(source: Option<&str>, budget: Option<&mut ParseBudget<'_>>) -> Option<Vec<u8>> {
+    let index = source.and_then(media_token_index);
+    if let (Some(budget), Some(index)) = (budget, index)
+        && let Some(table) = budget.media_table()
+    {
+        return match table.bytes(index) {
+            Ok(bytes) => Some(bytes.into_owned()),
+            Err(error) => {
+                budget.fail_media_read(error);
+                None
+            }
+        };
+    }
+    bytes_from_image_src(source)
 }
 
 fn bytes_from_image_src(source: Option<&str>) -> Option<Vec<u8>> {
@@ -790,7 +965,150 @@ mod tests {
     }
 
     #[test]
-    fn parses_positioned_vml_image_and_pinned_offset_typo() {
+    fn horizontal_rule_retains_relative_width_and_raw_vml() {
+        let xml = r##"<w:pict xmlns:w="w" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office"><v:rect style="width:0pt;height:1.5pt" o:hr="t" o:hrstd="t" o:hralign="center" fillcolor="#A0A0A0" stroked="f"/></w:pict>"##;
+        let rule = parse_horizontal_rule(&root(xml)).unwrap();
+        assert_eq!(rule.width, None);
+        assert_eq!(rule.width_percent, None);
+        assert_eq!(rule.height, 19_050.0);
+        assert_eq!(rule.alignment, "left");
+        assert!(!rule.no_shade);
+        assert_eq!(rule.color, "#A0A0A0");
+        let run = crate::inline::Run {
+            node_type: crate::inline::RunType::Run,
+            formatting: None,
+            property_changes: None,
+            content: vec![crate::inline::RunContent::HorizontalRule {
+                rule: Box::new(rule.clone()),
+            }],
+        };
+        let mut context =
+            crate::serializer::SerializerContext::new(&crate::serializer::SerializerDeterminism {
+                seed: "0".repeat(64),
+                now: "2000-01-01T00:00:00.000Z".to_owned(),
+            })
+            .unwrap();
+        let saved = crate::serializer::serialize_run(&run, &mut context).unwrap();
+        assert_eq!(parse_horizontal_rule(&root(&saved)).unwrap().width, None);
+        assert!(saved.contains(&rule.xml));
+        assert_eq!(parse_horizontal_rule(&root(&rule.xml)), Some(rule));
+    }
+
+    #[test]
+    fn horizontal_rule_distinguishes_rectangles_and_authored_sizing() {
+        let xml = r#"<w:pict xmlns:w="w" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office"><v:rect style="width:72pt;height:3pt" o:hr="0"/></w:pict>"#;
+        assert!(parse_horizontal_rule(&root(xml)).is_none());
+        let xml = xml.replace(
+            "o:hr=\"0\"",
+            "o:hr=\"1\" o:hrpct=\"50\" o:hralign=\"right\" o:hrnoshade=\"true\"",
+        );
+        assert!(parse_horizontal_rule(&root(&xml)).is_none());
+        let xml = xml
+            .replace("width:72pt", "width:0pt")
+            .replace("o:hrpct=\"50\" ", "");
+        let rule = parse_horizontal_rule(&root(&xml)).unwrap();
+        assert_eq!(rule.width, None);
+        assert_eq!(rule.width_percent, None);
+        assert_eq!(rule.height, 38_100.0);
+        assert_eq!(rule.alignment, "right");
+        assert!(rule.no_shade);
+        let xml = xml.replace("o:hr=\"1\"", "o:hr=\"1\" o:hrstd=\"t\" o:hrpct=\"50\"");
+        assert_eq!(
+            parse_horizontal_rule(&root(&xml)).unwrap().width_percent,
+            Some(5.0)
+        );
+    }
+
+    #[test]
+    fn horizontal_rule_resolves_inherited_aliases_and_preserves_replay_bindings() {
+        let xml = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wx="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:legacy="urn:schemas-microsoft-com:vml" xmlns:office="urn:schemas-microsoft-com:office:office" xmlns:ext="urn:extension" xmlns:unused="urn:unused" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><w:body><w:p><w:r xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><wx:pict mc:Ignorable="unused"><legacy:rect style="width:0pt;height:1.5pt" office:hr="t" office:hrstd="t" office:hrpct="500" office:hrnoshade="t" ext:value="kept" a:value="kept" pic:value="kept"/></wx:pict></w:r></w:p></w:body></w:document>"#;
+        let parsed = root(xml);
+        let picture = parsed.find_deep("w", "pict").unwrap();
+        let rule = parse_horizontal_rule(picture).unwrap();
+        assert_eq!(rule.width_percent, Some(50.0));
+        assert!(rule.no_shade);
+        for prefix in ["wx", "legacy", "office", "ext", "unused", "a", "pic"] {
+            assert!(rule.xml.contains(&format!("xmlns:{prefix}=")));
+        }
+        assert_eq!(parse_horizontal_rule(&root(&rule.xml)), Some(rule.clone()));
+        let run = crate::inline::Run {
+            node_type: crate::inline::RunType::Run,
+            formatting: None,
+            property_changes: None,
+            content: vec![crate::inline::RunContent::HorizontalRule {
+                rule: Box::new(rule.clone()),
+            }],
+        };
+        let mut context =
+            crate::serializer::SerializerContext::new(&crate::serializer::SerializerDeterminism {
+                seed: "0".repeat(64),
+                now: "2000-01-01T00:00:00.000Z".to_owned(),
+            })
+            .unwrap();
+        let saved = crate::serializer::serialize_run(&run, &mut context).unwrap();
+        assert_eq!(
+            parse_horizontal_rule(&root(&saved)).unwrap().width_percent,
+            Some(50.0)
+        );
+        let paragraph = parsed.find_deep("w", "p").unwrap();
+        assert!(paragraph.attributes.is_empty());
+    }
+
+    #[test]
+    fn horizontal_rule_keeps_canonical_picture_attributes_unchanged() {
+        let picture = r#"<w:pict><v:rect o:hr="t" o:hrstd="t"/></w:pict>"#;
+        let xml = format!(
+            r#"<w:document xmlns:w="{}" xmlns:v="{}" xmlns:o="{}"><w:p><w:r>{picture}</w:r></w:p></w:document>"#,
+            namespaces::W,
+            namespaces::V,
+            namespaces::O
+        );
+        let parsed = root(&xml);
+        let parsed_picture = parsed.find_deep("w", "pict").unwrap();
+        assert!(parsed_picture.attributes.is_empty());
+        assert_eq!(parsed_picture.to_raw_inline_xml(), picture);
+    }
+
+    #[test]
+    fn horizontal_rule_rejects_foreign_namespaces_and_shadowed_bindings() {
+        for (vml, office, rect, hr) in [
+            (namespaces::V, "urn:foreign", "legacy", "office"),
+            ("urn:foreign", namespaces::O, "legacy", "office"),
+            (namespaces::V, "urn:foreign", "v", "o"),
+            ("urn:foreign", namespaces::O, "v", "o"),
+        ] {
+            let xml = format!(
+                r#"<w:document xmlns:w="w" xmlns:{rect}="{vml}" xmlns:{hr}="{office}"><w:p><w:r><w:pict><{rect}:rect {hr}:hr="t"/></w:pict></w:r></w:p></w:document>"#
+            );
+            assert!(parse_horizontal_rule(root(&xml).find_deep("w", "pict").unwrap()).is_none());
+        }
+        let xml = format!(
+            r#"<w:document xmlns:w="w" xmlns:legacy="{}" xmlns:office="{}"><w:p xmlns:legacy="urn:foreign"><w:r><w:pict><legacy:rect office:hr="t"/></w:pict></w:r></w:p></w:document>"#,
+            namespaces::V,
+            namespaces::O
+        );
+        assert!(parse_horizontal_rule(root(&xml).find_deep("w", "pict").unwrap()).is_none());
+        let xml = format!(
+            r#"<w:pict xmlns:w="w" xmlns:legacy="{}" xmlns:office="{}"><legacy:rect office:hr="t"><legacy:imagedata/></legacy:rect></w:pict>"#,
+            namespaces::V,
+            namespaces::O
+        );
+        assert!(parse_horizontal_rule(&root(&xml)).is_none());
+    }
+
+    #[test]
+    fn horizontal_rule_keeps_mixed_vml_picture_fallback() {
+        let picture = root(
+            r#"<w:pict xmlns:w="w" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:r="r"><v:rect o:hr="t"/><v:shape style="width:72pt;height:36pt"><v:imagedata r:id="rId7"/></v:shape></w:pict>"#,
+        );
+        assert!(parse_horizontal_rule(&picture).is_none());
+        let image = parse_vml_image_content(&picture, None, None).unwrap();
+        assert_eq!(image.relationship_id, "rId7");
+        assert_eq!(image.size.width, 914_400.0);
+    }
+
+    #[test]
+    fn parses_positioned_vml_image_and_mirrors_the_legacy_offset() {
         let media = build_media_map(&[("word/media/logo.png".to_owned(), vec![0; 24])]);
         let relationships = RelationshipMap::from([(
             "rId7".to_owned(),
@@ -807,9 +1125,40 @@ mod tests {
         let image = parse_vml_image_content(&picture, Some(&relationships), Some(&media)).unwrap();
         assert_eq!(image.size.width, 914_400.0);
         assert_eq!(image.size.height, 914_400.0);
-        assert_eq!(image.position.unwrap().horizontal.offset, Some(19_050.0));
+        let horizontal = image.position.unwrap().horizontal;
+        assert_eq!(horizontal.pos_offset, Some(19_050.0));
+        assert_eq!(horizontal.offset, Some(19_050.0));
         assert_eq!(image.crop.unwrap().left, Some(0.5));
         assert_eq!(image.transform.unwrap().rotation, Some(45.0));
+    }
+
+    #[test]
+    fn header_vml_shape_keeps_its_word_offsets() {
+        let picture = root(
+            r#"<w:pict xmlns:w="w" xmlns:v="v" xmlns:r="r" xmlns:o="o"><v:shape id="_x0000_s1025" style="position:absolute;margin-left:-10.55pt;margin-top:42.75pt;width:505pt;height:133pt;mso-position-horizontal-relative:text;mso-position-vertical-relative:text"><v:imagedata r:id="rId2"/></v:shape></w:pict>"#,
+        );
+        let position = parse_vml_image_content(&picture, None, None)
+            .unwrap()
+            .position
+            .unwrap();
+        assert_eq!(position.horizontal.relative_to, "character");
+        assert_eq!(position.horizontal.pos_offset, Some(-133_985.0));
+        assert_eq!(position.vertical.relative_to, "paragraph");
+        assert_eq!(position.vertical.pos_offset, Some(542_925.0));
+    }
+
+    #[test]
+    fn grouped_vml_child_coordinates_are_not_anchor_offsets() {
+        let picture = root(
+            r#"<w:pict xmlns:w="w" xmlns:v="v" xmlns:r="r" xmlns:o="o"><v:group style="position:absolute;margin-left:36pt;margin-top:770.6pt;width:540pt;height:1.5pt"><v:shape id="Picture 41" style="position:absolute;left:2476;top:4038;width:6952;height:3368"><v:imagedata r:id="rId2"/></v:shape></v:group></w:pict>"#,
+        );
+        let position = parse_vml_image_content(&picture, None, None)
+            .unwrap()
+            .position
+            .unwrap();
+        assert_eq!(position.horizontal.pos_offset, None);
+        assert_eq!(position.vertical.pos_offset, None);
+        assert_eq!(position.horizontal.offset, Some(23_583_900.0));
     }
 
     #[test]

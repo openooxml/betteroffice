@@ -219,5 +219,30 @@ assert_eq "existing signatures file is preserved" \
   "x" "$(jq -r '.signedContributors[0].name' "$NEW")"
 
 echo
+echo "cla_record:"
+REC="$TMPDIR/record/cla.json"
+export COMMENT_USER_LOGIN=bob COMMENT_USER_ID=222 PR_NUMBER=7
+PUSHES=0
+git() {
+  case "$1" in
+    push) PUSHES=$((PUSHES + 1)); [ "$PUSHES" -ge 2 ] ;;
+    diff) return 1 ;;
+    reset) echo '{"signedContributors":[{"name":"dave","id":444,"signed_at":"t","pull_request_no":6}]}' > "$REC" ;;
+    *) return 0 ;;
+  esac
+}
+sleep() { :; }
+cla_record "$REC" "Record" cla_record_signature "$REC"
+assert_eq "a rejected push is retried" "2" "$PUSHES"
+assert_eq "the retry rebuilds the row on the new main" "dave,bob" \
+  "$(jq -r '[.signedContributors[].name] | join(",")' "$REC")"
+
+PUSHES=0
+git() { case "$1" in push) PUSHES=$((PUSHES + 1)); return 1 ;; diff) return 1 ;; *) return 0 ;; esac; }
+cla_record "$REC" "Record" cla_record_signature "$REC" 2>/dev/null && gave_up=0 || gave_up=1
+assert_eq "gives up after five rejected pushes" "1 5" "$gave_up $PUSHES"
+unset -f git sleep
+
+echo
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

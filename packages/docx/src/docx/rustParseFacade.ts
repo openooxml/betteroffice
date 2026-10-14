@@ -10,7 +10,8 @@ import type {
   Relationship,
   RelationshipMap,
 } from '../types/document';
-import { parseDocxS9Wire, parseRelationshipsXmlWire } from './parseWasm';
+import { decodeTiffImage, parseDocxS9Wire, parseRelationshipsXmlWire } from './parseWasm';
+import { maybeTranscodeTiffMedia } from './tiffMedia';
 
 const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
@@ -223,11 +224,12 @@ function decodeS9Package(value: unknown): DocxPackage {
 function decodeS9DocumentBody(value: unknown): DocumentBody {
   const path = 'wire.document.package.document';
   const body = objectAt(value, path);
-  exactKeys(body, ['content', 'sections', 'finalSectionProperties', 'comments'], path, [
-    'sections',
-    'finalSectionProperties',
-    'comments',
-  ]);
+  exactKeys(
+    body,
+    ['content', 'sections', 'finalSectionProperties', 'customRootBindings', 'comments'],
+    path,
+    ['sections', 'finalSectionProperties', 'customRootBindings', 'comments']
+  );
   if (!Array.isArray(body.content)) throw new TypeError(`${path}.content must be an array`);
   body.content.forEach((block, index) => objectAt(block, `${path}.content[${index}]`));
   const documentBody: DocumentBody = {
@@ -259,6 +261,11 @@ function decodeS9DocumentBody(value: unknown): DocumentBody {
       body.finalSectionProperties,
       `${path}.finalSectionProperties`
     ) as unknown as NonNullable<DocumentBody['finalSectionProperties']>;
+  }
+  if (body.customRootBindings !== undefined) {
+    documentBody.customRootBindings = decodeObjectArray<
+      NonNullable<DocumentBody['customRootBindings']>[number]
+    >(body.customRootBindings, `${path}.customRootBindings`);
   }
   if (body.comments !== undefined) {
     documentBody.comments = decodeObjectArray<NonNullable<DocumentBody['comments']>[number]>(
@@ -298,14 +305,20 @@ function decodeMediaEntries(value: unknown): Map<string, MediaFile> {
     let file = bySourcePath.get(sourcePath);
     if (!file) {
       const bytes = decodeBase64(stringAt(wireFile.base64, `${filePath}.base64`));
+      const media = maybeTranscodeTiffMedia(
+        bytes,
+        stringAt(wireFile.mimeType, `${filePath}.mimeType`),
+        stringAt(wireFile.dataUrl, `${filePath}.dataUrl`),
+        decodeTiffImage
+      );
       const created: MediaFile = {
         path: sourcePath,
         ...(wireFile.filename === undefined
           ? {}
           : { filename: stringAt(wireFile.filename, `${filePath}.filename`) }),
-        mimeType: stringAt(wireFile.mimeType, `${filePath}.mimeType`),
-        data: exactArrayBuffer(bytes),
-        dataUrl: stringAt(wireFile.dataUrl, `${filePath}.dataUrl`),
+        mimeType: media.mimeType,
+        data: exactArrayBuffer(media.bytes),
+        dataUrl: media.dataUrl,
       };
       file = created;
       bySourcePath.set(sourcePath, created);

@@ -1,4 +1,9 @@
+import html
+import io
+import re
+import zipfile
 from pathlib import Path
+from typing import Callable
 
 import pytest
 
@@ -167,6 +172,136 @@ def test_replace_text_refuses_what_it_cannot_rebuild(minimal_bytes: bytes) -> No
     assert Document.open(document.save()).paragraph("44444444").text == (
         "Plain and italic"
     )
+
+
+REPEATED = "1A2B3C4D"
+
+
+def _written_ids(package: bytes) -> "dict[str, list[str]]":
+    """The unescaped `w14:paraId` of every `w:p` in each XML part."""
+    with zipfile.ZipFile(io.BytesIO(package)) as archive:
+        return {
+            name: [
+                html.unescape(value)
+                for value in re.findall(
+                    r'<w:p\b[^>]*?w14:paraId="([^"]*)"', archive.read(name).decode()
+                )
+            ]
+            for name in archive.namelist()
+            if name.endswith(".xml")
+        }
+
+
+def _parts(package: bytes) -> "dict[str, bytes]":
+    with zipfile.ZipFile(io.BytesIO(package)) as archive:
+        return {name: archive.read(name) for name in archive.namelist()}
+
+
+def test_a_repeated_paragraph_id_addresses_its_own_paragraph(
+    duplicate_id_bytes: bytes,
+) -> None:
+    document = Document.open(duplicate_id_bytes)
+    ids = document.paragraph_ids
+
+    assert (ids[0], ids[3], ids[5]) == (REPEATED, "0B000002", "0B000003")
+    assert len(set(ids)) == 6
+    assert [document[id].text for id in ids] == [
+        "first",
+        "second",
+        "nested",
+        "",
+        "control",
+        "third",
+    ]
+
+    assert document.replace_text(ids[1], "replacement").para_id == ids[1]
+
+    reopened = Document.open(document.save())
+    assert [(paragraph.id, paragraph.text) for paragraph in reopened.paragraphs()] == [
+        (REPEATED, "first"),
+        (ids[1], "replacement"),
+        (ids[2], "nested"),
+        ("0B000002", ""),
+        (ids[4], "control"),
+        ("0B000003", "third"),
+    ]
+
+
+def test_an_unedited_save_keeps_every_other_part_and_authored_paragraph_id(
+    duplicate_id_bytes: bytes,
+) -> None:
+    document = Document.open(duplicate_id_bytes)
+    ids = document.paragraph_ids
+    assert REPEATED not in ids[1:]
+    for para_id in ids:
+        assert document.paragraph(para_id).id == para_id
+
+    saved = document.save()
+    before, after = _parts(duplicate_id_bytes), _parts(saved)
+    assert list(after) == list(before)
+    serialized = {"word/document.xml", "word/header1.xml"}
+    for name in before.keys() - serialized:
+        assert after[name] == before[name], name
+    written, authored = _written_ids(saved), _written_ids(duplicate_id_bytes)
+    for name in serialized:
+        assert written[name] == authored[name], name
+    assert written["word/document.xml"] == [
+        REPEATED,
+        REPEATED,
+        REPEATED,
+        "0B000002",
+        REPEATED,
+        "0B000003",
+    ]
+
+
+def test_repeated_ids_stay_addressable_across_save_and_reopen_cycles(
+    duplicate_id_bytes: bytes,
+) -> None:
+    ids = Document.open(duplicate_id_bytes).paragraph_ids
+    first = Document.open(duplicate_id_bytes).save()
+    assert Document.open(first).paragraph_ids == ids
+    assert Document.open(first).save() == first
+
+    cycled = duplicate_id_bytes
+    for index, text in [(2, "nested edit"), (4, "control edit"), (1, "second edit")]:
+        document = Document.open(cycled)
+        assert document.paragraph_ids == ids
+        document.replace_text(ids[index], text)
+        cycled = document.save()
+
+    reopened = Document.open(cycled)
+    assert [(paragraph.id, paragraph.text) for paragraph in reopened.paragraphs()] == [
+        (REPEATED, "first"),
+        (ids[1], "second edit"),
+        (ids[2], "nested edit"),
+        ("0B000002", ""),
+        (ids[4], "control edit"),
+        ("0B000003", "third"),
+    ]
+    assert reopened.save() == cycled
+    assert _written_ids(cycled)["word/document.xml"] == ids
+
+
+def test_a_fresh_id_avoids_an_id_written_with_a_character_reference(
+    duplicate_id_package: "Callable[..., bytes]",
+) -> None:
+    taken = Document.open(duplicate_id_package()).paragraph_ids[1]
+    escaped = f"{taken[:7]}&#x{ord(taken[7]):X};"
+    package = duplicate_id_package(escaped)
+
+    ids = Document.open(package).paragraph_ids
+    assert ids[5] == taken
+    assert taken not in ids[1:5]
+    assert len(set(ids)) == 6
+    assert _written_ids(Document.open(package).save())["word/document.xml"] == [
+        REPEATED,
+        REPEATED,
+        REPEATED,
+        "0B000002",
+        REPEATED,
+        taken,
+    ]
 
 
 def test_save_is_deterministic_and_save_path_writes_a_readable_file(

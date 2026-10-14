@@ -27,17 +27,20 @@ describe('canvas hover cursor', () => {
     expect(canvasHoverCursor(editing, hit({ region: 'footer', target: 'none' }))).toBe('default');
   });
 
-  test('a note reads as text over its own runs', () => {
+  test('an idle note area is text unless it is an image', () => {
     expect(
       canvasHoverCursor(editing, hit({ region: 'footnote', noteId: 3, target: 'text' }))
     ).toBe('text');
     expect(canvasHoverCursor(editing, hit({ region: 'endnote', noteId: 3, target: 'none' }))).toBe(
+      'text'
+    );
+    expect(canvasHoverCursor(editing, hit({ region: 'footnote', target: 'image' }))).toBe(
       'default'
     );
   });
 
   test('editing a band makes only that band typeable', () => {
-    const mode = { readOnly: false, hfEditMode: 'header' as const };
+    const mode = { readOnly: false, partEdit: { kind: 'header', rId: 'rId7' } as const };
     expect(canvasHoverCursor(mode, hit({ region: 'header', target: 'none' }))).toBe('text');
     expect(canvasHoverCursor(mode, hit({ region: 'header', target: 'text' }))).toBe('text');
     expect(canvasHoverCursor(mode, hit({ region: 'header', target: 'image' }))).toBe('default');
@@ -46,10 +49,31 @@ describe('canvas hover cursor', () => {
     expect(canvasHoverCursor(mode, hit({ region: 'footnote', target: 'text' }))).toBe('default');
   });
 
-  test('read-only and off-page points never type', () => {
-    expect(canvasHoverCursor({ readOnly: true }, hit({ target: 'text' }))).toBe('default');
+  test('editing a note makes only that note typeable', () => {
+    const mode = { readOnly: false, partEdit: { kind: 'footnote', noteId: 2 } as const };
+    expect(canvasHoverCursor(mode, hit({ region: 'footnote', noteId: 2, target: 'none' }))).toBe(
+      'text'
+    );
+    expect(canvasHoverCursor(mode, hit({ region: 'footnote', noteId: 3, target: 'text' }))).toBe(
+      'default'
+    );
+    expect(canvasHoverCursor(mode, hit({ region: 'body', target: 'text' }))).toBe('default');
+  });
+
+  test('read-only selects body text only, and off-page points never type', () => {
+    expect(canvasHoverCursor({ readOnly: true }, hit({ target: 'text' }))).toBe('text');
+    expect(canvasHoverCursor({ readOnly: true }, hit({ target: 'image' }))).toBe('default');
     expect(
-      canvasHoverCursor({ readOnly: true, hfEditMode: 'footer' }, hit({ region: 'footer' }))
+      canvasHoverCursor({ readOnly: true }, hit({ region: 'header', rId: 'rId7', target: 'text' }))
+    ).toBe('default');
+    expect(
+      canvasHoverCursor({ readOnly: true }, hit({ region: 'footnote', noteId: 2, target: 'text' }))
+    ).toBe('default');
+    expect(
+      canvasHoverCursor(
+        { readOnly: true, partEdit: { kind: 'footer', rId: 'rId8' } },
+        hit({ region: 'footer' })
+      )
     ).toBe('default');
     expect(canvasHoverCursor(editing, null)).toBe('default');
   });
@@ -57,9 +81,13 @@ describe('canvas hover cursor', () => {
   test('a wasm build without the target degrades to the pre-hover behaviour', () => {
     const older: DisplayListRegionHit = { region: 'body', pos: 12 };
     expect(canvasHoverCursor(editing, older)).toBe('default');
+    expect(canvasHoverCursor(editing, { ...older, region: 'footnote' })).toBe('text');
     // an open band types regardless: the whole band is its typeable area
     expect(
-      canvasHoverCursor({ readOnly: false, hfEditMode: 'header' }, { ...older, region: 'header' })
+      canvasHoverCursor(
+        { readOnly: false, partEdit: { kind: 'header', rId: 'rId7' } },
+        { ...older, region: 'header' }
+      )
     ).toBe('text');
   });
 });

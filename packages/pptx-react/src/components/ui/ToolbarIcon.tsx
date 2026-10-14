@@ -2,12 +2,18 @@ import type { CSSProperties } from 'react';
 
 export type ToolbarIconName =
   | 'save'
+  | 'image'
+  | 'insertImage'
   | 'undo'
   | 'redo'
   | 'newSlide'
   | 'select'
   | 'textBox'
   | 'shape'
+  | 'bringToFront'
+  | 'sendToBack'
+  | 'bringForward'
+  | 'sendBackward'
   | 'fillColor'
   | 'borderColor'
   | 'borderWidth'
@@ -15,6 +21,10 @@ export type ToolbarIconName =
   | 'italic'
   | 'underline'
   | 'textColor'
+  | 'alignLeft'
+  | 'alignCenter'
+  | 'alignRight'
+  | 'alignJustify'
   | 'more'
   | 'chevronDown'
   | 'remove'
@@ -42,6 +52,21 @@ export function ToolbarIcon({ name, size = 20, style }: ToolbarIconProps) {
       style={{ display: 'inline-flex', flexShrink: 0, ...style }}
     >
       {name === 'save' && <path d="M12 3v11m0 0 4-4m-4 4-4-4M5 19h14" />}
+      {name === 'image' && (
+        <>
+          <rect x="3" y="5" width="18" height="14" rx="2" />
+          <circle cx="8.5" cy="9.5" r="1.25" />
+          <path d="m6 17 4.5-4.5 3.25 3.25L16 13.5l2 2" />
+        </>
+      )}
+      {name === 'insertImage' && (
+        <>
+          <rect x="3" y="5" width="14" height="12" rx="2" />
+          <circle cx="7.5" cy="9" r="1" />
+          <path d="m5 15 3.5-3.5 2.5 2.5L13 12l1.5 1.5" />
+          <path d="M18 4v6m-3-3h6" />
+        </>
+      )}
       {name === 'undo' && <path d="m9 7-5 5 5 5M5 12h9a6 6 0 0 1 6 6" />}
       {name === 'redo' && <path d="m15 7 5 5-5 5m4-5h-9a6 6 0 0 0-6 6" />}
       {name === 'newSlide' && (
@@ -58,6 +83,36 @@ export function ToolbarIcon({ name, size = 20, style }: ToolbarIconProps) {
         </>
       )}
       {name === 'shape' && <rect x="4" y="6" width="16" height="12" rx="3" />}
+      {name === 'bringToFront' && (
+        <>
+          <rect x="2" y="8" width="9" height="9" rx="1.3" opacity="0.4" />
+          <rect x="6" y="4" width="9" height="9" rx="1.3" fill="currentColor" fillOpacity="0.15" />
+          <path d="M17 17 20 14 23 17" />
+          <path d="M17 12 20 9 23 12" />
+        </>
+      )}
+      {name === 'sendToBack' && (
+        <>
+          <rect x="6" y="4" width="9" height="9" rx="1.3" opacity="0.4" />
+          <rect x="2" y="8" width="9" height="9" rx="1.3" fill="currentColor" fillOpacity="0.15" />
+          <path d="M17 9 20 12 23 9" />
+          <path d="M17 14 20 17 23 14" />
+        </>
+      )}
+      {name === 'bringForward' && (
+        <>
+          <rect x="2" y="8" width="9" height="9" rx="1.3" opacity="0.4" />
+          <rect x="6" y="4" width="9" height="9" rx="1.3" fill="currentColor" fillOpacity="0.15" />
+          <path d="M17 15 20 12 23 15" />
+        </>
+      )}
+      {name === 'sendBackward' && (
+        <>
+          <rect x="6" y="4" width="9" height="9" rx="1.3" opacity="0.4" />
+          <rect x="2" y="8" width="9" height="9" rx="1.3" fill="currentColor" fillOpacity="0.15" />
+          <path d="M17 11 20 14 23 11" />
+        </>
+      )}
       {name === 'fillColor' && (
         <>
           <path d="m7 4 10 10-5 5-7-7Z" />
@@ -90,6 +145,10 @@ export function ToolbarIcon({ name, size = 20, style }: ToolbarIconProps) {
           <path d="M5 20h14" strokeWidth="3" />
         </>
       )}
+      {name === 'alignLeft' && <path d="M4 6h16M4 10h10M4 14h16M4 18h10" />}
+      {name === 'alignCenter' && <path d="M4 6h16M7 10h10M4 14h16M7 18h10" />}
+      {name === 'alignRight' && <path d="M4 6h16M10 10h10M4 14h16M10 18h10" />}
+      {name === 'alignJustify' && <path d="M4 6h16M4 10h16M4 14h16M4 18h16" />}
       {name === 'more' && (
         <>
           <circle cx="5" cy="12" r="1" fill="currentColor" stroke="none" />

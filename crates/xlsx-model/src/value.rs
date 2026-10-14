@@ -40,6 +40,8 @@ pub enum ErrorValue {
     Value,
     #[serde(rename = "#SPILL!")]
     Spill,
+    #[serde(rename = "#CALC!")]
+    Calc,
 }
 
 impl ErrorValue {
@@ -53,6 +55,7 @@ impl ErrorValue {
             ErrorValue::Ref => "#REF!",
             ErrorValue::Value => "#VALUE!",
             ErrorValue::Spill => "#SPILL!",
+            ErrorValue::Calc => "#CALC!",
         }
     }
 }

@@ -11,6 +11,13 @@ pub const CHART_AXIS_COLOR: &str = "#666666";
 pub const CHART_GRID_COLOR: &str = "#D9D9D9";
 pub const CHART_TEXT_COLOR: &str = "#222222";
 pub const CHART_BACKGROUND_COLOR: &str = "#FFFFFF";
+/// The size Office gives a marker whose `c:marker` names none, in points.
+const DEFAULT_MARKER_PT: f64 = 7.0;
+const EMU_PER_PIXEL: f64 = 9525.0;
+/// Keeps a nonsense `a:ln/@w` from drawing a rule across the whole chart.
+const MAX_LINE_PX: f64 = 16.0;
+/// The width a series line is drawn at when its `c:spPr` declares none.
+const DEFAULT_SERIES_LINE_PX: f64 = 2.0;
 pub const CHART_SERIES_COLORS: [&str; 8] = [
     "#4472C4", "#ED7D31", "#A5A5A5", "#FFC000", "#5B9BD5", "#70AD47", "#264478", "#9E480E",
 ];
@@ -26,6 +33,7 @@ pub fn chart_label_font() -> PlotFont {
         size_px: CHART_LABEL_SIZE_PX,
         family: CHART_FONT_FAMILY.to_owned(),
         italic: false,
+        letter_spacing_px: 0.0,
     }
 }
 
@@ -36,6 +44,7 @@ pub fn chart_title_font() -> PlotFont {
         size_px: CHART_TITLE_SIZE_PX,
         family: CHART_FONT_FAMILY.to_owned(),
         italic: false,
+        letter_spacing_px: 0.0,
     }
 }
 
@@ -60,6 +69,34 @@ pub const MAX_PLOT_COORD: f64 = 1e9;
 
 const MAX_LABEL_CHARS: usize = 120;
 const MAX_LEGEND_ENTRIES: usize = 8;
+const AXIS_HEADER: f64 = 18.0;
+/// A side legend's swatch edge, the gap after it, and its row pitch, in ems
+/// of the legend text, as PowerPoint draws them.
+const LEGEND_KEY_EM: f64 = 0.53;
+const LEGEND_KEY_GAP_EM: f64 = 0.32;
+const LEGEND_PITCH_EM: f64 = 1.53;
+/// How far a text row's baseline sits below the middle of its swatch, in ems.
+const LEGEND_BASELINE_EM: f64 = 0.24;
+/// The gap between a side legend and the plot, in ems of the legend text.
+const LEGEND_PLOT_GAP_EM: f64 = 1.0;
+/// The chart area's inner margin, plus the legend's own inset inside it.
+const LEGEND_EDGE: f64 = 13.0;
+/// A top or bottom legend's row height and the gap between its entries, in
+/// ems of the legend text.
+const LEGEND_ROW_EM: f64 = 1.4;
+const LEGEND_ENTRY_GAP_EM: f64 = 0.65;
+/// The smallest plot an automatic layout leaves room for.
+const MIN_PLOT: f64 = 24.0;
+/// Room past a legend label's measured width, so a sink that clips to the box
+/// and can only estimate the width keeps glyphs wider than its estimate; a
+/// right legend's label box then ends at the chart's edge.
+const LEGEND_TEXT_SLACK: f64 = LEGEND_EDGE;
+/// The space a title or a top or bottom legend keeps from the plot's labels.
+const BAND_GAP: f64 = 12.0;
+/// A title's line height and the depth of its baseline below the line's top,
+/// in ems.
+const TITLE_LINE_EM: f64 = 1.22;
+const TITLE_ASCENT_EM: f64 = 0.95;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlotFont {
@@ -67,6 +104,8 @@ pub struct PlotFont {
     pub size_px: f64,
     pub family: String,
     pub italic: bool,
+    /// `a:defRPr/@spc` in pixels, added after every cluster.
+    pub letter_spacing_px: f64,
 }
 
 impl PlotFont {
@@ -85,6 +124,7 @@ pub struct PlotTextStyle<'a> {
     pub bold: Option<bool>,
     pub italic: Option<bool>,
     pub color: Option<&'a str>,
+    pub spacing_pt: Option<f64>,
 }
 
 impl<'a> PlotTextStyle<'a> {
@@ -96,6 +136,7 @@ impl<'a> PlotTextStyle<'a> {
             bold: self.bold.or(base.bold),
             italic: self.italic.or(base.italic),
             color: self.color.or(base.color),
+            spacing_pt: self.spacing_pt.or(base.spacing_pt),
         }
     }
 
@@ -119,6 +160,11 @@ impl<'a> PlotTextStyle<'a> {
                     .map(str::to_owned)
                     .unwrap_or_else(|| CHART_FONT_FAMILY.to_owned()),
                 italic: self.italic.unwrap_or(false),
+                letter_spacing_px: self
+                    .spacing_pt
+                    .filter(|spacing| spacing.is_finite())
+                    .map(|spacing| (spacing * 4.0 / 3.0).clamp(-400.0, 400.0))
+                    .unwrap_or(0.0),
             },
             color: self
                 .color
@@ -158,6 +204,16 @@ pub struct PlotStroke {
     pub width: f64,
 }
 
+/// Text alignment within the op's box.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PlotTextAlign {
+    /// `x` is the left edge of the run.
+    #[default]
+    Start,
+    /// The run is centred in `x .. x + width`.
+    Center,
+}
+
 /// One draw instruction, in the same coordinate space as the input rectangle.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PlotOp {
@@ -175,6 +231,10 @@ pub enum PlotOp {
         width: f64,
         font: PlotFont,
         color: String,
+        align: PlotTextAlign,
+        /// Clockwise turn about the text box's own centre. `0.0` for all but a
+        /// value-axis title, which PowerPoint stands on its side.
+        rotation_deg: f64,
     },
     Line {
         x1: f64,
@@ -201,12 +261,26 @@ pub trait PlotSink {
         true
     }
 
+    fn measure_text(&mut self, _text: &str, _font: &PlotFont) -> Option<f64> {
+        None
+    }
+
     fn push_op(&mut self, op: PlotOp) -> bool;
+
+    /// Whether the host draws a text op at its `rotation_deg`. One that keeps
+    /// every label flat gets a turned title laid out flat instead.
+    fn turns_text(&self) -> bool {
+        false
+    }
 }
 
 impl PlotSink for Vec<PlotOp> {
     fn push_op(&mut self, op: PlotOp) -> bool {
         self.push(op);
+        true
+    }
+
+    fn turns_text(&self) -> bool {
         true
     }
 }
@@ -228,6 +302,32 @@ pub struct PlotChart<'a> {
     /// Every `c:catAx`, `c:valAx`, `c:dateAx` and `c:serAx` of the plot area,
     /// in document order, so a plot group can find the axis it names.
     pub axes: Vec<PlotAxis<'a>>,
+    /// `c:chartSpace/c:spPr`: the chart's own ground.
+    pub fill: Option<PlotFill<'a>>,
+    /// `c:plotArea/c:layout/c:manualLayout`, as fractions of the frame.
+    pub plot_layout: Option<PlotRect>,
+}
+
+/// The paint of a `c:spPr`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PlotFill<'a> {
+    None,
+    Solid(&'a str),
+    Pattern {
+        foreground: Option<&'a str>,
+        background: Option<&'a str>,
+    },
+    Gradient(&'a [String]),
+    /// A fill the geometry cannot paint: the chart's default ground stands in.
+    Unsupported,
+}
+
+/// The `a:ln` of a `c:spPr`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PlotLine<'a> {
+    pub none: bool,
+    pub color: Option<&'a str>,
+    pub width_emu: Option<f64>,
 }
 
 /// Axis titles, drawn horizontally because [`PlotOp::Text`] has no rotation.
@@ -241,6 +341,8 @@ pub struct PlotAxisTitles<'a> {
 pub struct PlotLegend<'a> {
     pub position: Option<&'a str>,
     pub visible: Option<bool>,
+    /// `c:overlay`: the legend sits on the plot instead of taking a band of it.
+    pub overlay: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -284,12 +386,20 @@ pub struct PlotAxis<'a> {
     pub minor_tick_mark: Option<&'a str>,
     pub major_gridlines: bool,
     pub minor_gridlines: bool,
+    /// `c:majorGridlines/c:spPr/a:ln`.
+    pub major_gridline: Option<PlotLine<'a>>,
+    /// `c:minorGridlines/c:spPr/a:ln`.
+    pub minor_gridline: Option<PlotLine<'a>>,
+    /// `c:crossBetween`: `midCat` puts the points on the category ticks.
+    pub cross_between: Option<&'a str>,
     pub number_format: Option<&'a str>,
     pub position: Option<&'a str>,
     pub title: Option<&'a str>,
     pub hidden: bool,
     /// `c:txPr` on this axis.
     pub text: PlotTextStyle<'a>,
+    /// `c:spPr/a:ln` on this axis.
+    pub line: Option<PlotLine<'a>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -330,6 +440,8 @@ pub struct PlotSeries<'a> {
     pub smooth: bool,
     /// This series' `c:dLbls`, already merged over its plot group's.
     pub labels: Option<PlotDataLabels<'a>>,
+    /// This series' own `c:spPr/a:ln`.
+    pub line: Option<PlotLine<'a>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -341,6 +453,8 @@ pub struct PlotPoint<'a> {
     /// Literal label text, which wins over anything [`PlotDataLabels`] would
     /// compose.
     pub label: Option<&'a str>,
+    /// The same `c:tx` split at its fields, when it holds any.
+    pub label_runs: Option<&'a [super::model::ChartLabelRun]>,
     /// `c:explosion`, a percentage of the pie radius.
     pub explosion: Option<f64>,
     /// This point's cascade-resolved `c:dLbl`.
@@ -441,10 +555,20 @@ impl<'a> From<&'a ChartSpace> for PlotChart<'a> {
         Self {
             chart_type: &space.chart_type,
             title: space.title.as_deref(),
-            legend: space.legend.as_ref().map(|legend| PlotLegend {
-                position: legend.position.as_deref(),
-                visible: Some(legend.visible),
-            }),
+            // A chart draws a legend only where it carries a `c:legend`;
+            // without one PowerPoint gives the plot the whole frame.
+            legend: Some(space.legend.as_ref().map_or(
+                PlotLegend {
+                    position: None,
+                    visible: Some(false),
+                    overlay: false,
+                },
+                |legend| PlotLegend {
+                    position: legend.position.as_deref(),
+                    visible: Some(legend.visible),
+                    overlay: legend.overlay,
+                },
+            )),
             value_axis: space
                 .axes
                 .as_ref()
@@ -513,7 +637,30 @@ impl<'a> From<&'a ChartSpace> for PlotChart<'a> {
                         .and_then(|legend| legend.text.as_ref()),
                 ),
             },
+            fill: space.fill.as_ref().map(plot_fill_from_model),
+            plot_layout: space.plot_layout.map(|layout| PlotRect {
+                x: layout.x,
+                y: layout.y,
+                w: layout.w,
+                h: layout.h,
+            }),
         }
+    }
+}
+
+fn plot_fill_from_model(fill: &super::model::ChartFill) -> PlotFill<'_> {
+    match fill {
+        super::model::ChartFill::None => PlotFill::None,
+        super::model::ChartFill::Solid { color } => PlotFill::Solid(color),
+        super::model::ChartFill::Pattern {
+            foreground,
+            background,
+        } => PlotFill::Pattern {
+            foreground: foreground.as_deref(),
+            background: background.as_deref(),
+        },
+        super::model::ChartFill::Gradient { colors } => PlotFill::Gradient(colors),
+        super::model::ChartFill::Unsupported => PlotFill::Unsupported,
     }
 }
 
@@ -524,6 +671,7 @@ fn plot_text_from_model(text: Option<&super::model::ChartTextProperties>) -> Plo
         bold: text.bold,
         italic: text.italic,
         color: text.color.as_deref(),
+        spacing_pt: text.spacing_pt,
     })
     .unwrap_or_default()
 }
@@ -544,11 +692,23 @@ fn plot_axis_from_model(axis: &super::model::ChartAxis) -> PlotAxis<'_> {
         minor_tick_mark: axis.minor_tick_mark.as_deref(),
         major_gridlines: axis.major_gridlines,
         minor_gridlines: axis.minor_gridlines,
+        major_gridline: axis.major_gridline_line.as_ref().map(plot_line_from_model),
+        minor_gridline: axis.minor_gridline_line.as_ref().map(plot_line_from_model),
+        cross_between: axis.cross_between.as_deref(),
         number_format: axis.number_format.as_deref(),
         position: axis.position.as_deref(),
         title: axis.title.as_deref(),
         hidden: axis.hidden,
         text: plot_text_from_model(axis.text.as_ref()),
+        line: axis.line.as_ref().map(plot_line_from_model),
+    }
+}
+
+fn plot_line_from_model(line: &super::model::ChartLine) -> PlotLine<'_> {
+    PlotLine {
+        none: line.none,
+        color: line.color.as_deref(),
+        width_emu: line.width_emu,
     }
 }
 
@@ -556,7 +716,15 @@ fn plot_series_from_model<'a>(
     series: &'a super::model::ChartSeries,
     group_labels: Option<&'a super::model::ChartDataLabels>,
 ) -> PlotSeries<'a> {
-    let labels = plot_labels_from_model(None, series.data_labels.as_ref(), None, group_labels);
+    let mut labels = plot_labels_from_model(None, series.data_labels.as_ref(), None, group_labels);
+    // A label that names no format is source-linked, so it reads the one the
+    // values were cached with — that is what makes 0.86 read as 86% (#797).
+    let cached = series.value_format.as_deref();
+    if let Some(spec) = labels.as_mut()
+        && spec.number_format.is_none()
+    {
+        spec.number_format = cached;
+    }
     let mut points: Vec<PlotPoint<'a>> = series
         .points
         .iter()
@@ -575,6 +743,13 @@ fn plot_series_from_model<'a>(
         })
         .collect();
     merge_point_labels(&mut points, group_labels, series.data_labels.as_ref());
+    for point in &mut points {
+        if let Some(spec) = point.labels.as_mut()
+            && spec.number_format.is_none()
+        {
+            spec.number_format = cached;
+        }
+    }
     PlotSeries {
         name: series.name.as_deref(),
         categories: &series.categories,
@@ -587,6 +762,11 @@ fn plot_series_from_model<'a>(
         bubble_sizes: series.bubble_sizes.as_deref().unwrap_or_default(),
         smooth: series.smooth.unwrap_or(false),
         labels,
+        line: series.line.as_ref().map(|line| PlotLine {
+            none: line.none,
+            color: line.color.as_deref(),
+            width_emu: line.width_emu,
+        }),
     }
 }
 
@@ -701,6 +881,11 @@ fn merge_point_label<'a>(
             .and_then(|point| point.text.as_deref())
             .or_else(|| group_point.and_then(|point| point.text.as_deref()))
     });
+    let label_runs = resolved.and_then(|_| {
+        series_point
+            .and_then(|point| point.runs.as_deref())
+            .or_else(|| group_point.and_then(|point| point.runs.as_deref()))
+    });
     let labels = Some(resolved.unwrap_or_default());
     if let Some(slot) = points
         .iter()
@@ -708,12 +893,14 @@ fn merge_point_label<'a>(
         .filter(|slot| wildcard.is_none_or(|wildcard| *slot <= wildcard))
     {
         points[slot].label = label;
+        points[slot].label_runs = label_runs;
         points[slot].labels = labels;
         return;
     }
     let mut point = PlotPoint {
         index: Some(index),
         label,
+        label_runs,
         labels,
         ..PlotPoint::default()
     };
@@ -776,61 +963,214 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
         .over(chart_text)
         .resolve(CHART_LABEL_SIZE_PX, 400);
 
-    push_rect(ops, x, y, width, height, CHART_BACKGROUND_COLOR);
+    match chart.fill {
+        Some(PlotFill::None) => {}
+        fill => {
+            let ground = fill.and_then(plot_fill_color);
+            push_rect(
+                ops,
+                x,
+                y,
+                width,
+                height,
+                ground.as_deref().unwrap_or(CHART_BACKGROUND_COLOR),
+            );
+        }
+    }
 
     let title_h = if let Some(title) = chart.title.filter(|s| !s.is_empty()) {
-        push_text(
+        let mut style = chart
+            .text
+            .title
+            .over(chart_text)
+            .resolve(CHART_TITLE_SIZE_PX, 600);
+        // A title never takes more than half the chart: past that its type
+        // shrinks to the band.
+        let fits = (height / 2.0 - CHART_PAD - BAND_GAP) / TITLE_LINE_EM;
+        style.font.size_px = style.font.size_px.min(fits.max(1.0));
+        let size = style.font.size_px;
+        push_text_aligned(
             ops,
             title,
-            x + 8.0,
-            y + 18.0,
-            (width - 16.0).max(0.0),
-            &chart
-                .text
-                .title
-                .over(chart_text)
-                .resolve(CHART_TITLE_SIZE_PX, 600),
+            x + CHART_PAD,
+            y + CHART_PAD + TITLE_ASCENT_EM * size,
+            (width - 2.0 * CHART_PAD).max(0.0),
+            &style,
+            PlotTextAlign::Center,
         );
-        28.0
+        CHART_PAD + TITLE_LINE_EM * size + BAND_GAP
     } else {
-        10.0
+        CHART_PAD
     };
 
+    let views: Vec<Vec<SeriesView<'_>>> = if chart.plot_groups.is_empty() {
+        vec![series_views(&chart.series, scan)]
+    } else {
+        chart
+            .plot_groups
+            .iter()
+            .take(MAX_PLOT_GROUPS)
+            .map(|group| series_views(&group.series, scan))
+            .collect()
+    };
+    let families = plot_families(chart, &views, label_style);
+    // Every family on the primary axes hangs its labels off the one plot, so
+    // each side takes the widest band any of them needs.
+    let bands = families
+        .iter()
+        .copied()
+        .filter(|family| has_axes(family.chart_type) && !family.secondary)
+        .map(|family| axis_bands(ops, Some(family), width))
+        .reduce(|a, b| AxisBands {
+            left: a.left.max(b.left),
+            top: a.top.max(b.top),
+            right: a.right.max(b.right),
+            bottom: a.bottom.max(b.bottom),
+            overhang: a.overhang.max(b.overhang),
+        })
+        .unwrap_or_else(|| axis_bands(ops, None, width));
+    let axis_header =
+        if has_transposed_category_title(chart) || secondary_value_axis(chart, true).is_some() {
+            AXIS_HEADER
+        } else {
+            0.0
+        };
+    // A legend `c:overlay` puts on the plot takes no band of its own: the plot
+    // keeps the whole frame and the legend is drawn over it.
+    let legend_reserves = chart.legend.as_ref().is_none_or(|legend| !legend.overlay);
+    // The least height the plot and the labels hung off it take beside a
+    // legend that reserves its band.
+    let plot_floor = legend_reserves.then(|| {
+        if families.iter().any(|family| has_axes(family.chart_type)) {
+            MIN_PLOT + axis_header + bands.top + bands.bottom
+        } else {
+            MIN_PLOT + CHART_PAD
+        }
+    });
     let legend_position = chart
         .legend
         .as_ref()
         .and_then(|legend| legend.position)
         .unwrap_or("right");
-    let legend_w = if has_legend(chart) { 104.0 } else { 8.0 };
-    let plot_x = if legend_position == "left" {
-        x + legend_w + 42.0
-    } else {
-        x + 42.0
+    let legend = legend_band(
+        chart,
+        legend_position,
+        PlotRect {
+            x,
+            y,
+            w: width,
+            h: height,
+        },
+        title_h,
+        plot_floor,
+        legend_style,
+        ops,
+    );
+    // A side legend keeps an em of its text between itself and the plot.
+    let legend_gap = legend_style.font.size_px * LEGEND_PLOT_GAP_EM;
+    let (reserve_left, reserve_right) = match &legend {
+        Some(band) if !band.horizontal && legend_reserves && !band.rows.is_empty() => {
+            if legend_position == "left" {
+                (band.x + band.w + legend_gap - x, 0.0)
+            } else {
+                (0.0, x + width - band.x + legend_gap)
+            }
+        }
+        _ => (0.0, 0.0),
     };
-    let secondary_w = if secondary_value_axis(chart).is_some() {
+    let legend_h = match &legend {
+        Some(band) if band.horizontal && legend_reserves => band.h,
+        _ => 0.0,
+    };
+    let secondary_w = if secondary_value_axis(chart, false).is_some() {
         38.0
     } else {
         0.0
     };
-    let plot = PlotArea {
-        x: plot_x,
-        y: y + title_h,
-        w: (width - 42.0 - legend_w - 10.0 - secondary_w).max(24.0),
-        h: (height - title_h - 34.0).max(24.0),
+    let band_top = if legend_position == "top" && legend_h > 0.0 {
+        legend_h + BAND_GAP
+    } else {
+        0.0
+    };
+    let right_margin = if reserve_right > 0.0 {
+        bands.overhang
+    } else {
+        CHART_PAD + bands.right
+    };
+    let top = title_h;
+    let region_x = x + reserve_left.min(width);
+    let region_w = (width - reserve_left - reserve_right).max(0.0);
+    let gutter = bands.left;
+    let plot_x = x + reserve_left + gutter;
+    let region_y = y + top + band_top;
+    // A row legend keeps its gap from the region on either edge, and the far
+    // edge keeps the chart margin, so the pie is the same size above or below.
+    let region_bottom = if legend_h <= 0.0 {
+        y + height
+    } else if legend_position == "bottom" {
+        y + height - CHART_PAD - legend_h - BAND_GAP
+    } else {
+        y + height - CHART_PAD
+    };
+    let region_h = (region_bottom - region_y).max(0.0);
+    let plot = match chart.plot_layout {
+        // The deck placed the inner plot itself; honouring it is what keeps
+        // manually sized charts where PowerPoint draws them (#797).
+        Some(manual) => PlotArea {
+            x: x + manual.x * width,
+            y: y + manual.y * height,
+            w: (manual.w * width).max(24.0),
+            h: (manual.h * height).max(24.0),
+            gutter,
+        },
+        None => {
+            let plot_y = region_y + axis_header + bands.top;
+            let bottom = if legend_position == "bottom" && legend_h > 0.0 {
+                legend_h + BAND_GAP
+            } else {
+                0.0
+            };
+            let plot_y = plot_y.min(y + height);
+            PlotArea {
+                x: plot_x,
+                y: plot_y,
+                w: (region_w - gutter - right_margin - secondary_w).max(MIN_PLOT),
+                h: (y + height - bottom - bands.bottom - plot_y).max(0.0),
+                gutter,
+            }
+        }
     };
 
+    for family in families {
+        if ops.exhausted() {
+            break;
+        }
+        emit_family(ops, family, plot, region_x, region_y, region_w, region_h);
+    }
+
+    if let Some(band) = legend {
+        emit_legend(ops, chart, band, legend_style);
+    }
+}
+
+/// Every family the chart plots, in draw order, each over its own views.
+fn plot_families<'a>(
+    chart: &'a PlotChart<'a>,
+    views: &'a [Vec<SeriesView<'a>>],
+    label: &'a ResolvedText,
+) -> Vec<PlotFamily<'a>> {
+    let chart_text = chart.text.chart;
     if chart.plot_groups.is_empty() {
-        let series = series_views(&chart.series, scan);
-        emit_family(
-            ops,
-            PlotFamily {
+        return views
+            .first()
+            .map(|series| PlotFamily {
                 chart_type: chart.chart_type,
-                series: &series,
+                series,
                 value_axis: chart.value_axis,
                 axis_titles: chart.axis_titles,
                 group: None,
                 chart_text,
-                label: label_style,
+                label,
                 axis: None,
                 x_axis: None,
                 category_axis: chart
@@ -838,72 +1178,220 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
                     .iter()
                     .find(|axis| axis.kind != PlotAxisKind::Value),
                 secondary: false,
-            },
-            plot,
-            x,
-            y + title_h,
-            width,
-            height - title_h,
-        );
-    } else {
-        let primary = primary_value_axis(chart);
-        for group in chart.plot_groups.iter().take(MAX_PLOT_GROUPS) {
-            if ops.exhausted() {
-                break;
-            }
-            let series = series_views(&group.series, scan);
+            })
+            .into_iter()
+            .collect();
+    }
+    let primary = primary_value_axis(chart);
+    chart
+        .plot_groups
+        .iter()
+        .zip(views)
+        .map(|(group, series)| {
             let (x_axis, axis) = group_value_axes(chart, group);
             let category_axis = group_category_axis(chart, group);
             let legacy_axes = chart.axes.is_empty() && group.axis_ids.is_empty();
-            let secondary = match (axis, primary) {
-                (Some(axis), Some(primary)) => axis.id != primary.id,
-                _ => false,
-            };
-            emit_family(
-                ops,
-                PlotFamily {
-                    chart_type: group.chart_type.unwrap_or(chart.chart_type),
-                    series: &series,
-                    value_axis: legacy_axes.then_some(chart.value_axis).flatten(),
-                    axis_titles: if legacy_axes {
-                        chart.axis_titles
-                    } else {
-                        PlotAxisTitles {
-                            category: category_axis.and_then(|axis| axis.title),
-                            value: axis.and_then(|axis| axis.title),
-                        }
-                    },
-                    group: Some(group),
-                    chart_text,
-                    label: label_style,
-                    axis,
-                    x_axis,
-                    category_axis,
-                    secondary,
+            PlotFamily {
+                chart_type: group.chart_type.unwrap_or(chart.chart_type),
+                series,
+                value_axis: legacy_axes.then_some(chart.value_axis).flatten(),
+                axis_titles: if legacy_axes {
+                    chart.axis_titles
+                } else {
+                    PlotAxisTitles {
+                        category: category_axis.and_then(|axis| axis.title),
+                        value: axis.and_then(|axis| axis.title),
+                    }
                 },
-                plot,
-                x,
-                y + title_h,
-                width,
-                height - title_h,
+                group: Some(group),
+                chart_text,
+                label,
+                axis,
+                x_axis,
+                category_axis,
+                secondary: match (axis, primary) {
+                    (Some(axis), Some(primary)) => axis.id != primary.id,
+                    _ => false,
+                },
+            }
+        })
+        .collect()
+}
+
+fn has_axes(chart_type: &str) -> bool {
+    !matches!(chart_type, "pie" | "doughnut" | "ofPie" | "radar")
+}
+
+/// The chart area's inner margin, as PowerPoint leaves it.
+const CHART_PAD: f64 = 9.5;
+/// How far the plot keeps from an edge nothing hangs over.
+const PLOT_INSET: f64 = 4.6;
+/// The length of a tick, which the gap between an axis and its labels spans.
+const TICK_LEN: f64 = 7.0;
+/// The rest of that gap, in ems of the label text.
+const LABEL_GAP_EM: f64 = 0.6;
+/// The band an axis title takes beside its labels, in ems of its text.
+const AXIS_TITLE_EM: f64 = 1.4;
+/// Line pitch of a label that wraps onto more lines, in ems.
+const LABEL_LINE_EM: f64 = 1.2;
+
+/// Space between an axis line and the near edge of its labels.
+fn label_gap(style: &ResolvedText) -> f64 {
+    TICK_LEN + LABEL_GAP_EM * style.font.size_px
+}
+
+/// The first baseline of labels hung below `edge`.
+fn baseline_below(edge: f64, style: &ResolvedText) -> f64 {
+    edge + label_gap(style) + 0.75 * style.font.size_px
+}
+
+/// The baseline that centres one line of `style` on `middle`.
+fn baseline_centred(middle: f64, style: &ResolvedText) -> f64 {
+    middle + 0.25 * style.font.size_px
+}
+
+/// How far the plot sits in from each edge of the space it is given, so its
+/// axis labels fit beside it.
+struct AxisBands {
+    left: f64,
+    top: f64,
+    right: f64,
+    bottom: f64,
+    /// How far the last value label hangs past the plot's far end.
+    overhang: f64,
+}
+
+/// The bands the primary family's axis labels need, measured from the labels.
+fn axis_bands<S: PlotSink + ?Sized>(
+    ops: &mut Emitter<'_, S>,
+    family: Option<PlotFamily<'_>>,
+    width: f64,
+) -> AxisBands {
+    let empty = AxisBands {
+        left: CHART_PAD + PLOT_INSET,
+        top: PLOT_INSET,
+        right: PLOT_INSET,
+        bottom: CHART_PAD + PLOT_INSET,
+        overhang: 0.0,
+    };
+    let Some(family) = family else {
+        return empty;
+    };
+    let value_style = family.scoped(family.axis.map(|axis| axis.text).unwrap_or_default());
+    let values: Vec<f64> = if family.axis.is_some_and(|axis| axis.hidden) {
+        Vec::new()
+    } else {
+        let scale = value_scale(family);
+        let format = family.axis.and_then(|axis| axis.number_format);
+        axis_ticks(scale, family.axis.and_then(|axis| axis.major_unit))
+            .into_iter()
+            .map(|value| text_width(&scale.format(value, format), &value_style, ops))
+            .collect()
+    };
+    let category_style = family.category_text();
+    let count = category_count(family.series).min(MAX_PLOT_DATA_SCAN);
+    let categories: Vec<String> = if family.category_axis.is_some_and(|axis| axis.hidden) {
+        Vec::new()
+    } else {
+        (0..count)
+            .map(|index| category_label(family.series, index))
+            .collect()
+    };
+    let widest = |ops: &mut Emitter<'_, S>| {
+        categories
+            .iter()
+            .flat_map(|label| label.split('\n'))
+            .map(|line| text_width(line.trim(), &category_style, ops))
+            .fold(0.0, f64::max)
+    };
+    let lines = categories
+        .iter()
+        .map(|label| label.split('\n').count())
+        .max()
+        .unwrap_or(0);
+    let hung = |style: &ResolvedText, lines: usize| {
+        CHART_PAD
+            + label_gap(style)
+            + style.font.size_px * (1.0 + LABEL_LINE_EM * lines.saturating_sub(1) as f64)
+    };
+    let widest_value = values.iter().copied().fold(0.0, f64::max);
+    let titled = |title: Option<&str>| {
+        if title.is_some_and(|title| !title.is_empty()) {
+            AXIS_TITLE_EM * value_style.font.size_px
+        } else {
+            0.0
+        }
+    };
+    let (value_title, category_title) = (
+        titled(family.axis_titles.value),
+        titled(family.axis_titles.category),
+    );
+    if family.transposed() {
+        let overhang = values.last().map_or(0.0, |width| width / 2.0);
+        AxisBands {
+            left: category_title
+                + if categories.is_empty() {
+                    empty.left
+                } else {
+                    CHART_PAD + widest(ops) + label_gap(&category_style)
+                },
+            top: PLOT_INSET,
+            right: PLOT_INSET + overhang,
+            bottom: value_title
+                + if values.is_empty() {
+                    empty.bottom
+                } else {
+                    hung(&value_style, 1)
+                },
+            overhang,
+        }
+    } else {
+        // A scatter's x labels sit centred on their ticks, so the last one
+        // hangs half its width past the plot.
+        let x_overhang = if matches!(family.chart_type, "scatter" | "bubble")
+            && !family.x_axis.is_some_and(|axis| axis.hidden)
+        {
+            let scale = scatter_x_scale(
+                family,
+                PlotArea {
+                    x: 0.0,
+                    y: 0.0,
+                    w: width,
+                    h: 0.0,
+                    gutter: 0.0,
+                },
             );
+            let format = family.x_axis.and_then(|axis| axis.number_format);
+            axis_ticks(scale, family.x_axis.and_then(|axis| axis.major_unit))
+                .last()
+                .map_or(0.0, |value| {
+                    text_width(&scale.format(*value, format), family.label(), ops) / 2.0
+                })
+        } else {
+            0.0
+        };
+        AxisBands {
+            left: value_title
+                + if values.is_empty() {
+                    empty.left
+                } else {
+                    CHART_PAD + widest_value + label_gap(&value_style)
+                },
+            top: if values.is_empty() {
+                PLOT_INSET
+            } else {
+                PLOT_INSET.max(0.5 * value_style.font.size_px - 0.7)
+            },
+            right: PLOT_INSET + x_overhang,
+            bottom: category_title
+                + if categories.is_empty() {
+                    empty.bottom
+                } else {
+                    hung(&category_style, lines)
+                },
+            overhang: x_overhang,
         }
     }
-
-    let legend_x = if legend_position == "left" {
-        x + 6.0
-    } else {
-        x + width - legend_w + 6.0
-    };
-    emit_legend(
-        ops,
-        chart,
-        scan,
-        legend_x,
-        y + title_h + 8.0,
-        legend_w - 12.0,
-        legend_style,
-    );
 }
 
 /// Draw ops for `chart` inside `rect`, collected into one vector.
@@ -1043,6 +1531,11 @@ impl<'a> PlotFamily<'a> {
             _ => Stacking::None,
         }
     }
+
+    /// Values run horizontally.
+    fn transposed(&self) -> bool {
+        self.chart_type == "bar"
+    }
 }
 
 /// How a family piles its series onto one another.
@@ -1119,11 +1612,30 @@ fn group_category_axis<'a>(
     }
 }
 
-/// A second value axis some plot group plots against, which needs its own
-/// scale and its own labels on the far side of the plot area.
-fn secondary_value_axis<'a>(chart: &'a PlotChart<'a>) -> Option<&'a PlotAxis<'a>> {
+fn has_transposed_category_title(chart: &PlotChart<'_>) -> bool {
+    let has_title = |title: Option<&str>| title.is_some_and(|title| !title.is_empty());
+    if chart.plot_groups.is_empty() {
+        return chart.chart_type == "bar" && has_title(chart.axis_titles.category);
+    }
+    chart.plot_groups.iter().take(MAX_PLOT_GROUPS).any(|group| {
+        group.chart_type.unwrap_or(chart.chart_type) == "bar"
+            && has_title(if chart.axes.is_empty() && group.axis_ids.is_empty() {
+                chart.axis_titles.category
+            } else {
+                group_category_axis(chart, group).and_then(|axis| axis.title)
+            })
+    })
+}
+
+fn secondary_value_axis<'a>(
+    chart: &'a PlotChart<'a>,
+    transposed: bool,
+) -> Option<&'a PlotAxis<'a>> {
     let primary = primary_value_axis(chart)?;
     chart.plot_groups.iter().find_map(|group| {
+        if (group.chart_type.unwrap_or(chart.chart_type) == "bar") != transposed {
+            return None;
+        }
         let axis = group_value_axes(chart, group).1?;
         (axis.id != primary.id).then_some(axis)
     })
@@ -1228,13 +1740,16 @@ impl<'a> SeriesView<'a> {
             .unwrap_or_else(|| series_color(Some(self.series), series_index))
     }
 
+    /// `c:marker/c:size` in pixels. The schema counts points, 2 to 72.
     fn marker_size(&self, index: usize) -> f64 {
         self.point(index)
             .and_then(|point| point.marker.as_ref())
             .or(self.series.marker.as_ref())
             .and_then(|marker| marker.size)
-            .unwrap_or(4.0)
-            .clamp(1.0, 24.0)
+            .unwrap_or(DEFAULT_MARKER_PT)
+            .clamp(2.0, 72.0)
+            * 4.0
+            / 3.0
     }
 
     /// The symbol to draw at `index`, or `None` for a point that draws none.
@@ -1244,7 +1759,7 @@ impl<'a> SeriesView<'a> {
             .and_then(|point| point.marker.as_ref())
             .or(self.series.marker.as_ref())
             .and_then(|marker| marker.symbol)
-            .unwrap_or(PlotMarkerSymbol::Square)
+            .unwrap_or(PlotMarkerSymbol::Auto)
             .resolved(series_index);
         (symbol != PlotMarkerSymbol::None).then_some(symbol)
     }
@@ -1259,6 +1774,27 @@ impl<'a> SeriesView<'a> {
 
     fn xy_value(&self, index: usize) -> Option<(f64, f64)> {
         Some((self.x_value(index)?, self.data_value(index)?))
+    }
+
+    fn xy_indices(&self) -> impl Iterator<Item = usize> + '_ {
+        let length = self.series.x_values.len().min(MAX_PLOT_DATA_SCAN);
+        let dense = if self.wildcard.is_some_and(|position| {
+            self.series.points[position]
+                .value
+                .is_some_and(f64::is_finite)
+        }) {
+            length
+        } else {
+            length.min(self.series.values.len())
+        };
+        (0..dense).chain(self.indexed.iter().filter_map(move |&(index, position)| {
+            (index >= dense
+                && index < length
+                && self.series.points[position]
+                    .value
+                    .is_some_and(f64::is_finite))
+            .then_some(index)
+        }))
     }
 
     fn bubble_size(&self, index: usize) -> f64 {
@@ -1289,6 +1825,7 @@ struct PlotArea {
     y: f64,
     w: f64,
     h: f64,
+    gutter: f64,
 }
 
 fn emit_family<S: PlotSink + ?Sized>(
@@ -1309,9 +1846,90 @@ fn emit_family<S: PlotSink + ?Sized>(
         "radar" => emit_radar(ops, family, plot, x, y, width, height),
         "stock" => emit_stock(ops, family, plot),
         "surface" => emit_surface(ops, family, plot),
-        "bar" => emit_bar(ops, family, plot, true),
-        _ => emit_bar(ops, family, plot, false),
+        _ => emit_bar(ops, family, plot),
     }
+}
+
+/// The one colour a fill paints as, or `None` for `a:noFill` and for a fill
+/// whose colours did not resolve. A pattern averages its two and a gradient its
+/// stops: no host carries either paint, and over a whole chart space the mean
+/// reads far closer than any one colour on its own.
+fn plot_fill_color(fill: PlotFill<'_>) -> Option<String> {
+    match fill {
+        PlotFill::None => None,
+        PlotFill::Solid(color) => Some(color.to_owned()),
+        PlotFill::Pattern {
+            foreground,
+            background,
+        } => match (foreground, background) {
+            (Some(foreground), Some(background)) => {
+                Some(blend_hex(foreground, background).unwrap_or_else(|| foreground.to_owned()))
+            }
+            (foreground, background) => foreground.or(background).map(str::to_owned),
+        },
+        PlotFill::Gradient(colors) => mean_hex(colors),
+        PlotFill::Unsupported => None,
+    }
+}
+
+/// The mean of `#RRGGBB` or `#RRGGBBAA` colours, or `None` when there are
+/// none or any fails to parse. Each colour weighs by its opacity, so a clear
+/// stop lends no hue, and the mean alpha stays in the result while it is below
+/// opaque.
+fn mean_hex(colors: &[String]) -> Option<String> {
+    let parsed = colors
+        .iter()
+        .map(|color| parse_rgba(color))
+        .collect::<Option<Vec<[u8; 4]>>>()
+        .filter(|parsed| !parsed.is_empty())?;
+    let count = parsed.len() as u64;
+    let weight: u64 = parsed.iter().map(|rgba| u64::from(rgba[3])).sum();
+    let channel = |index: usize| {
+        parsed
+            .iter()
+            .map(|rgba| u64::from(rgba[index]) * u64::from(rgba[3]))
+            .sum::<u64>()
+            .checked_div(weight)
+            .unwrap_or_else(|| {
+                parsed
+                    .iter()
+                    .map(|rgba| u64::from(rgba[index]))
+                    .sum::<u64>()
+                    / count
+            })
+    };
+    let rgb = format!("#{:02X}{:02X}{:02X}", channel(0), channel(1), channel(2));
+    Some(match weight / count {
+        255 => rgb,
+        alpha => format!("{rgb}{alpha:02X}"),
+    })
+}
+
+fn parse_rgba(color: &str) -> Option<[u8; 4]> {
+    let hex = color.strip_prefix('#').unwrap_or(color);
+    let alpha = match hex.len() {
+        6 => 255,
+        8 => u8::from_str_radix(hex.get(6..8)?, 16).ok()?,
+        _ => return None,
+    };
+    let [red, green, blue] = parse_hex(hex.get(..6)?)?;
+    Some([red, green, blue, alpha])
+}
+
+/// The midpoint of two `#RRGGBB` colours.
+fn blend_hex(first: &str, second: &str) -> Option<String> {
+    let (first, second) = (parse_hex(first)?, parse_hex(second)?);
+    let mix = |index: usize| (u16::from(first[index]) + u16::from(second[index])) / 2;
+    Some(format!("#{:02X}{:02X}{:02X}", mix(0), mix(1), mix(2)))
+}
+
+fn parse_hex(color: &str) -> Option<[u8; 3]> {
+    let hex = color.strip_prefix('#').unwrap_or(color);
+    if hex.len() != 6 || !hex.is_ascii() {
+        return None;
+    }
+    let channel = |at: usize| u8::from_str_radix(&hex[at..at + 2], 16).ok();
+    Some([channel(0)?, channel(2)?, channel(4)?])
 }
 
 fn push_rect<S: PlotSink + ?Sized>(
@@ -1342,6 +1960,32 @@ fn push_text<S: PlotSink + ?Sized>(
     width: f64,
     style: &ResolvedText,
 ) {
+    push_text_aligned(ops, text, x, baseline_y, width, style, PlotTextAlign::Start);
+}
+
+fn push_text_aligned<S: PlotSink + ?Sized>(
+    ops: &mut Emitter<'_, S>,
+    text: &str,
+    x: f64,
+    baseline_y: f64,
+    width: f64,
+    style: &ResolvedText,
+    align: PlotTextAlign,
+) {
+    push_text_turned(ops, text, x, baseline_y, width, style, align, 0.0);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_text_turned<S: PlotSink + ?Sized>(
+    ops: &mut Emitter<'_, S>,
+    text: &str,
+    x: f64,
+    baseline_y: f64,
+    width: f64,
+    style: &ResolvedText,
+    align: PlotTextAlign,
+    rotation_deg: f64,
+) {
     if text.is_empty() || width <= 0.0 || ops.exhausted() {
         return;
     }
@@ -1352,6 +1996,8 @@ fn push_text<S: PlotSink + ?Sized>(
         width,
         font: style.font.clone(),
         color: style.color.clone(),
+        align,
+        rotation_deg,
     });
 }
 
@@ -1385,6 +2031,315 @@ fn has_legend(chart: &PlotChart<'_>) -> bool {
         .unwrap_or(true)
 }
 
+struct LegendBand {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    horizontal: bool,
+    rows: Vec<LegendRow>,
+}
+
+#[derive(Default)]
+struct LegendRow {
+    entries: Vec<LegendEntry>,
+    width: f64,
+    height: f64,
+}
+
+struct LegendEntry {
+    lines: Vec<String>,
+    color: String,
+    width: f64,
+}
+
+fn legend_band<S: PlotSink + ?Sized>(
+    chart: &PlotChart<'_>,
+    position: &str,
+    rect: PlotRect,
+    title_h: f64,
+    plot_floor: Option<f64>,
+    style: &ResolvedText,
+    ops: &mut Emitter<'_, S>,
+) -> Option<LegendBand> {
+    if !has_legend(chart) {
+        return None;
+    }
+    let PlotRect {
+        x,
+        y,
+        w: width,
+        h: height,
+    } = rect;
+    let horizontal = matches!(position, "top" | "bottom");
+    if !horizontal {
+        return Some(side_legend_band(chart, position, rect, title_h, style, ops));
+    }
+    let w = (width - 2.0 * CHART_PAD).max(0.0);
+    let mut rows = legend_rows(chart, w, style, ops);
+    // Rows that would crowd out the plot are left out, as a side legend's are;
+    // an overlay legend only has to stay inside the frame.
+    let room = match plot_floor {
+        Some(floor) => height - title_h - BAND_GAP - floor,
+        None => height - title_h - CHART_PAD,
+    }
+    .max(0.0);
+    let mut used = 0.0;
+    rows.retain(|row| {
+        used += row.height;
+        used <= room
+    });
+    let h = rows.iter().map(|row| row.height).sum::<f64>();
+    Some(LegendBand {
+        x: x + CHART_PAD,
+        y: if position == "bottom" {
+            y + height - CHART_PAD - h
+        } else {
+            y + title_h
+        },
+        w,
+        h,
+        horizontal,
+        rows,
+    })
+}
+
+/// PowerPoint lists a vertical stack top down, so a stacked column or area
+/// group's entries read in the order its series pile up; other groups keep
+/// theirs.
+fn reverse_stacked_rows(chart: &PlotChart<'_>, rows: &mut [LegendRow]) {
+    let mut start = 0;
+    for group in &chart.plot_groups {
+        let end = (start + group.series.len()).min(rows.len());
+        if matches!(
+            group.chart_type.unwrap_or(chart.chart_type),
+            "column" | "area"
+        ) && matches!(group.grouping, Some("stacked" | "percentStacked"))
+        {
+            rows[start..end].reverse();
+        }
+        start = end;
+    }
+}
+
+/// A `left`, `right` or `topRight` legend: one entry per row, as wide as its
+/// longest label up to a third of the chart, held against that edge and centred
+/// on the space below the title.
+fn side_legend_band<S: PlotSink + ?Sized>(
+    chart: &PlotChart<'_>,
+    position: &str,
+    rect: PlotRect,
+    title_h: f64,
+    style: &ResolvedText,
+    ops: &mut Emitter<'_, S>,
+) -> LegendBand {
+    let size = style.font.size_px;
+    let lead = size * (LEGEND_KEY_EM + LEGEND_KEY_GAP_EM);
+    let limit = (rect.w / 3.0).max(lead + size);
+    let mut rows = Vec::new();
+    for (label, color) in legend_entries(chart, &mut ScanBudget::new()) {
+        let lines = wrap_legend_label(&label, limit - lead, style, ops);
+        let width = lead
+            + lines
+                .iter()
+                .map(|line| legend_text_width(line, style, ops, 0.0))
+                .fold(0.0, f64::max);
+        let height = size * LEGEND_PITCH_EM + size * 1.22 * lines.len().saturating_sub(1) as f64;
+        rows.push(LegendRow {
+            entries: vec![LegendEntry {
+                lines,
+                color,
+                width,
+            }],
+            width,
+            height,
+        });
+    }
+    reverse_stacked_rows(chart, &mut rows);
+    let top = if chart.title.is_some_and(|title| !title.is_empty()) {
+        rect.y + title_h
+    } else {
+        rect.y
+    };
+    let first = if position == "topRight" {
+        top + LEGEND_EDGE
+    } else {
+        top
+    };
+    // Entries that would run past the chart's foot are left out, as PowerPoint
+    // leaves them.
+    let room = (rect.y + rect.h - first).max(0.0);
+    let mut used = 0.0;
+    rows.retain(|row| {
+        used += row.height;
+        used <= room
+    });
+    let w = rows
+        .iter()
+        .map(|row| row.width)
+        .fold(0.0, f64::max)
+        .min(limit);
+    let h = rows.iter().map(|row| row.height).sum::<f64>();
+    LegendBand {
+        x: if position == "left" {
+            rect.x + LEGEND_EDGE
+        } else {
+            rect.x + rect.w - LEGEND_EDGE - w
+        },
+        y: if position == "topRight" {
+            first
+        } else {
+            ((top + rect.y + rect.h) / 2.0 - h / 2.0).max(top)
+        },
+        w,
+        h,
+        horizontal: false,
+        rows,
+    }
+}
+
+fn legend_rows<S: PlotSink + ?Sized>(
+    chart: &PlotChart<'_>,
+    width: f64,
+    style: &ResolvedText,
+    ops: &mut Emitter<'_, S>,
+) -> Vec<LegendRow> {
+    let size = style.font.size_px;
+    let lead = size * (LEGEND_KEY_EM + LEGEND_KEY_GAP_EM);
+    let gap = size * LEGEND_ENTRY_GAP_EM;
+    if width <= lead {
+        return Vec::new();
+    }
+    let mut rows = vec![LegendRow::default()];
+    for (label, color) in legend_entries(chart, &mut ScanBudget::new()) {
+        let lines = wrap_legend_label(&label, width - lead, style, ops);
+        let entry_width = lead
+            + lines
+                .iter()
+                .map(|line| legend_text_width(line, style, ops, LEGEND_TEXT_SLACK))
+                .fold(0.0, f64::max);
+        let row = rows.last().unwrap();
+        if !row.entries.is_empty() && row.width + gap + entry_width > width {
+            rows.push(LegendRow::default());
+        }
+        let row = rows.last_mut().unwrap();
+        if !row.entries.is_empty() {
+            row.width += gap;
+        }
+        row.width += entry_width;
+        row.height = row
+            .height
+            .max(size * (LEGEND_ROW_EM + TITLE_LINE_EM * (lines.len() - 1) as f64));
+        row.entries.push(LegendEntry {
+            lines,
+            color,
+            width: entry_width,
+        });
+    }
+    rows
+}
+
+/// A legend line's advance: measured, or estimated at Calibri's widths plus
+/// `slack`, since a legend clips its label to the box it packs.
+fn legend_text_width<S: PlotSink + ?Sized>(
+    label: &str,
+    style: &ResolvedText,
+    ops: &mut Emitter<'_, S>,
+    slack: f64,
+) -> f64 {
+    ops.sink
+        .measure_text(label, &style.font)
+        .filter(|width| width.is_finite() && *width >= 0.0)
+        .unwrap_or_else(|| legend_fallback_width(label, &style.font) + slack)
+}
+
+/// A label's advance in `style`, measured by the sink where it can.
+fn text_width<S: PlotSink + ?Sized>(
+    label: &str,
+    style: &ResolvedText,
+    ops: &mut Emitter<'_, S>,
+) -> f64 {
+    ops.sink
+        .measure_text(label, &style.font)
+        .filter(|width| width.is_finite() && *width >= 0.0)
+        .unwrap_or_else(|| fallback_label_width(label, &style.font))
+}
+
+/// A label's width when the sink cannot measure text: half an em a character,
+/// plus n - 1 tracked gaps as a measured line has.
+pub fn fallback_label_width(label: &str, font: &PlotFont) -> f64 {
+    estimated_width(label, font, |_| 0.5)
+}
+
+/// A legend label's estimate: Calibri's advances and a full em for East Asian
+/// wide characters, never under [`fallback_label_width`]'s.
+fn legend_fallback_width(label: &str, font: &PlotFont) -> f64 {
+    estimated_width(label, font, legend_advance)
+}
+
+fn estimated_width(label: &str, font: &PlotFont, advance: fn(char) -> f64) -> f64 {
+    let count = label.chars().count() as f64;
+    let ems: f64 = label.chars().map(advance).sum();
+    (ems * font.size_px + (count - 1.0).max(0.0) * font.letter_spacing_px).max(0.0)
+}
+
+/// Carlito's advances for `U+0020..=U+007E` in thousandths of an em: Calibri's
+/// widths, which the chart default font falls back on.
+const FALLBACK_ADVANCES: [u16; 95] = [
+    226, 326, 401, 498, 507, 715, 682, 220, 303, 303, 498, 498, 250, 306, 252, 386, 507, 507, 507,
+    507, 507, 507, 507, 507, 507, 507, 268, 268, 498, 498, 498, 464, 894, 578, 544, 533, 615, 488,
+    460, 631, 623, 252, 319, 520, 420, 855, 646, 662, 516, 673, 543, 460, 488, 642, 568, 890, 519,
+    488, 468, 306, 386, 306, 498, 498, 291, 479, 526, 423, 526, 498, 305, 470, 526, 230, 240, 454,
+    230, 799, 526, 528, 526, 526, 348, 391, 335, 526, 452, 715, 433, 452, 395, 314, 460, 314, 498,
+];
+
+fn legend_advance(character: char) -> f64 {
+    match character as u32 {
+        code @ 0x20..=0x7E => {
+            (f64::from(FALLBACK_ADVANCES[(code - 0x20) as usize]) / 1000.0).max(0.5)
+        }
+        0x1100..=0x115F
+        | 0x2E80..=0xA4CF
+        | 0xAC00..=0xD7A3
+        | 0xF900..=0xFAFF
+        | 0xFE30..=0xFE4F
+        | 0xFF00..=0xFF60
+        | 0xFFE0..=0xFFE6
+        | 0x20000..=0x3FFFD => 1.0,
+        _ => 0.5,
+    }
+}
+
+fn wrap_legend_label<S: PlotSink + ?Sized>(
+    label: &str,
+    width: f64,
+    style: &ResolvedText,
+    ops: &mut Emitter<'_, S>,
+) -> Vec<String> {
+    let mut remaining: String = label.chars().take(MAX_LABEL_CHARS).collect();
+    let mut lines = Vec::new();
+    while !remaining.is_empty() && text_width(&remaining, style, ops) > width {
+        let mut end = 0;
+        for (index, ch) in remaining.char_indices() {
+            let next = index + ch.len_utf8();
+            if end > 0 && text_width(&remaining[..next], style, ops) > width {
+                break;
+            }
+            end = next;
+        }
+        let split = remaining[..end]
+            .rfind(char::is_whitespace)
+            .map(|index| index + remaining[index..].chars().next().unwrap().len_utf8())
+            .unwrap_or(end);
+        lines.push(remaining[..split].to_owned());
+        remaining = remaining[split..].to_owned();
+    }
+    if !remaining.is_empty() || lines.is_empty() {
+        lines.push(remaining);
+    }
+    lines
+}
+
 fn hex(color: &str) -> String {
     if color.starts_with('#') {
         color.to_owned()
@@ -1401,12 +2356,14 @@ fn series_color(series: Option<&PlotSeries<'_>>, index: usize) -> String {
         .unwrap_or_else(|| CHART_SERIES_COLORS[index % CHART_SERIES_COLORS.len()].to_owned())
 }
 
+/// How many points the series plots. `c:dPt` and `c:dLbl` overrides are
+/// deliberately not counted: PowerPoint keeps an entry for a point the sheet
+/// no longer has, and counting those drew empty categories past the data.
 fn series_length(series: &PlotSeries<'_>) -> usize {
     series
         .categories
         .len()
         .max(series.values.len())
-        .max(series.points.len())
         .max(series.x_values.len())
         .max(series.bubble_sizes.len())
 }
@@ -1427,6 +2384,8 @@ fn category_label(series: &[SeriesView<'_>], index: usize) -> String {
 struct ValueScale {
     min: f64,
     max: f64,
+    /// `c:majorUnit`, or the rounded step the auto bounds were widened to.
+    unit: f64,
     log_base: Option<f64>,
     reversed: bool,
     percent: bool,
@@ -1440,6 +2399,9 @@ impl ValueScale {
             Some(base) if base > 1.0 && self.min > 0.0 && self.max > self.min => {
                 let log = |value: f64| value.max(f64::MIN_POSITIVE).log(base);
                 (log(value.max(self.min)) - log(self.min)) / (log(self.max) - log(self.min))
+            }
+            _ if !(self.max - self.min).is_finite() => {
+                (value * 0.5 - self.min * 0.5) / (self.max * 0.5 - self.min * 0.5)
             }
             _ => (value - self.min) / (self.max - self.min),
         };
@@ -1461,6 +2423,14 @@ impl ValueScale {
 
     fn x(&self, plot: PlotArea, value: f64) -> f64 {
         plot.x + self.ratio(value) * plot.w
+    }
+
+    fn tick(&self, plot: PlotArea, transposed: bool, value: f64) -> f64 {
+        if transposed {
+            self.x(plot, value)
+        } else {
+            self.y(plot, value)
+        }
     }
 
     /// The value the axis carries zero at, pulled inside the bounds.
@@ -1550,10 +2520,192 @@ fn plain_range(family: PlotFamily<'_>) -> (f64, f64) {
     (min, max)
 }
 
+/// The smallest `{1, 2, 5} x 10^k` at or above `rough`.
+fn nice_unit(rough: f64) -> f64 {
+    if rough <= 0.0 || !rough.is_finite() {
+        return 1.0;
+    }
+    let decade = 10.0_f64.powf(rough.log10().floor());
+    // 0.5 / 0.1 is 5.000000000000001.
+    let scaled = rough / decade * (1.0 - 1e-9);
+    let nice = if scaled <= 1.0 {
+        1.0
+    } else if scaled <= 2.0 {
+        2.0
+    } else if scaled <= 5.0 {
+        5.0
+    } else {
+        10.0
+    };
+    let unit = nice * decade;
+    if unit > 0.0 && unit.is_finite() {
+        unit
+    } else {
+        1.0
+    }
+}
+
+/// Excel's automatic major unit, which PowerPoint inherits and which does not
+/// depend on how large the chart is drawn: the decade below the range, stepped
+/// up to 2 or 5 decades once it would otherwise draw ten or twenty gridlines.
+/// Measured against PowerPoint: a stacked column topping out at 60 is drawn
+/// 0..70 in tens, never 0..60 in fives (#797).
+fn excel_unit(range: f64) -> f64 {
+    if !range.is_finite() || range <= 0.0 {
+        return 1.0;
+    }
+    let major = 10.0_f64.powf(range.log10().round() - 1.0);
+    let steps = range / major;
+    if steps >= 20.0 {
+        major * 5.0
+    } else if steps >= 10.0 {
+        major * 2.0
+    } else {
+        major
+    }
+}
+
+/// Major intervals to aim for along `extent` px: one label per 20px, clamped to `2..=12`.
+fn target_intervals(extent: f64) -> f64 {
+    const LABEL_PITCH_PX: f64 = 20.0;
+    let target = extent / LABEL_PITCH_PX;
+    if target.is_finite() {
+        target.clamp(2.0, 12.0)
+    } else {
+        4.0
+    }
+}
+
+/// `value` moved outward to a multiple of `unit`.
+fn round_to_unit(value: f64, unit: f64, up: bool) -> f64 {
+    let steps = value / unit;
+    if !steps.is_finite() {
+        return value;
+    }
+    let rounded = if up {
+        (steps - 1e-9).ceil()
+    } else {
+        (steps + 1e-9).floor()
+    } * unit;
+    if !rounded.is_finite() {
+        return value;
+    }
+    // `(-1e-9).ceil() * unit` is -0.0, which formats as "-0".
+    if rounded == 0.0 { 0.0 } else { rounded }
+}
+
 #[cfg(test)]
 fn value_range(family: PlotFamily<'_>) -> (f64, f64) {
     let scale = value_scale(family);
     (scale.min, scale.max)
+}
+
+#[derive(Clone, Copy)]
+enum ValueRangeRule {
+    Scatter { intervals: f64 },
+    Value,
+}
+
+/// Ignores non-finite pins; reversed pins collapse to min, equal pins and exhausted edges stay equal.
+fn normalize_value_range(
+    data: Option<(f64, f64)>,
+    pins: PlotAxisRange,
+    rule: ValueRangeRule,
+    log_base: Option<f64>,
+    major_unit: Option<f64>,
+) -> (f64, f64, f64, Option<f64>) {
+    let (mut min, mut max) = data
+        .filter(|(min, max)| !min.is_nan() && !max.is_nan())
+        .map(|(min, max)| (min.clamp(f64::MIN, f64::MAX), max.clamp(f64::MIN, f64::MAX)))
+        .unwrap_or((0.0, 1.0));
+    let pinned_min = pins.min.filter(|value| value.is_finite());
+    let pinned_max = pins.max.filter(|value| value.is_finite());
+    if let Some(value) = pinned_min {
+        min = value;
+    }
+    if let Some(value) = pinned_max {
+        max = value;
+    }
+    if max <= min {
+        let expansion = |edge: f64, up: bool| match rule {
+            ValueRangeRule::Scatter { .. } => edge.abs().max(1.0) * 0.05,
+            ValueRangeRule::Value => {
+                let shifted = if up { edge + 1.0 } else { edge - 1.0 };
+                if shifted != edge {
+                    1.0
+                } else {
+                    edge.abs().max(1.0) * 0.05
+                }
+            }
+        };
+        match (pinned_min, pinned_max) {
+            (Some(_), None) => max = (min + expansion(min, true)).min(f64::MAX),
+            (None, Some(_)) => min = (max - expansion(max, false)).max(f64::MIN),
+            (Some(_), Some(_)) => max = min,
+            (None, None) => {
+                if matches!(rule, ValueRangeRule::Value)
+                    && (min + 1.0).is_finite()
+                    && min + 1.0 > min
+                {
+                    max = min + 1.0;
+                } else {
+                    let low = min.min(0.0);
+                    let high = max.max(0.0);
+                    (min, max) = if high > low {
+                        (low, high)
+                    } else {
+                        (low, low + 1.0)
+                    };
+                }
+            }
+        }
+    }
+    let log_base = log_base.filter(|base| *base > 1.0 && base.is_finite() && min > 0.0);
+    if matches!(rule, ValueRangeRule::Value) && log_base.is_none() {
+        let span = max - min;
+        let padding = if span.is_finite() {
+            span * 0.05
+        } else {
+            (max * 0.5 - min * 0.5) * 0.1
+        };
+        if pinned_max.is_none() && max > 0.0 {
+            max = (max + padding).min(f64::MAX);
+        }
+        if pinned_min.is_none() && min < 0.0 {
+            min = (min - padding).max(f64::MIN);
+        }
+    }
+    let unit = major_unit
+        .filter(|unit| unit.is_finite() && *unit > 0.0)
+        .unwrap_or_else(|| {
+            let span = max - min;
+            if span.is_finite() {
+                match rule {
+                    ValueRangeRule::Scatter { intervals } => nice_unit(span / intervals),
+                    ValueRangeRule::Value => excel_unit(span),
+                }
+            } else {
+                let span = max * 0.5 - min * 0.5;
+                let half_unit = match rule {
+                    ValueRangeRule::Scatter { intervals } => nice_unit(span / intervals),
+                    ValueRangeRule::Value => excel_unit(span),
+                };
+                (half_unit * 2.0).min(f64::MAX)
+            }
+        });
+    let unrounded = (min, max);
+    if log_base.is_none() {
+        if pinned_min.is_none() {
+            min = round_to_unit(min, unit, false);
+        }
+        if pinned_max.is_none() {
+            max = round_to_unit(max, unit, true);
+        }
+    }
+    if max <= min && unrounded.1 > unrounded.0 {
+        (min, max) = unrounded;
+    }
+    (min, max, unit, log_base)
 }
 
 fn value_scale(family: PlotFamily<'_>) -> ValueScale {
@@ -1568,11 +2720,34 @@ fn value_scale(family: PlotFamily<'_>) -> ValueScale {
         .map(|axis| axis.range)
         .or(family.value_axis)
         .unwrap_or_default();
-    if let Some(value) = bounds.min.filter(|value| value.is_finite()) {
+    let data = (min, max);
+    let overflow_scale = || {
+        let (min, max, unit, log_base) = normalize_value_range(
+            Some(data),
+            bounds,
+            ValueRangeRule::Value,
+            family.axis.and_then(|axis| axis.log_base),
+            family.axis.and_then(|axis| axis.major_unit),
+        );
+        ValueScale {
+            min,
+            max,
+            unit,
+            log_base,
+            reversed: family.axis.is_some_and(|axis| axis.reversed),
+            percent: stacking == Stacking::Percent,
+        }
+    };
+    let pinned_min = bounds.min.filter(|value| value.is_finite());
+    let pinned_max = bounds.max.filter(|value| value.is_finite());
+    if let Some(value) = pinned_min {
         min = value;
     }
-    if let Some(value) = bounds.max.filter(|value| value.is_finite()) {
+    if let Some(value) = pinned_max {
         max = value;
+    }
+    if !(max - min).is_finite() {
+        return overflow_scale();
     }
     if max <= min {
         max = min + 1.0;
@@ -1580,22 +2755,55 @@ fn value_scale(family: PlotFamily<'_>) -> ValueScale {
     if !(max - min).is_finite() || max <= min {
         (min, max) = (0.0, 1.0);
     }
+    let log_base = family
+        .axis
+        .and_then(|axis| axis.log_base)
+        .filter(|base| *base > 1.0 && base.is_finite() && min > 0.0);
+    // Excel pads an automatic bound by a twentieth of the data's own span
+    // before rounding it out, which is what lifts a chart whose tallest bar
+    // lands exactly on a gridline clear of the plot's top edge.
+    let padding = (max - min) * 0.05;
+    if log_base.is_none() {
+        if pinned_max.is_none() && max > 0.0 {
+            max += padding;
+        }
+        if pinned_min.is_none() && min < 0.0 {
+            min -= padding;
+        }
+    }
+    if !(max - min).is_finite() {
+        return overflow_scale();
+    }
+    let unit = family
+        .axis
+        .and_then(|axis| axis.major_unit)
+        .filter(|unit| unit.is_finite() && *unit > 0.0)
+        .unwrap_or_else(|| excel_unit(max - min));
+    if log_base.is_none() {
+        if pinned_min.is_none() {
+            min = round_to_unit(min, unit, false);
+        }
+        if pinned_max.is_none() {
+            max = round_to_unit(max, unit, true);
+        }
+    }
+
     ValueScale {
         min,
         max,
-        log_base: family
-            .axis
-            .and_then(|axis| axis.log_base)
-            .filter(|base| *base > 1.0 && base.is_finite() && min > 0.0),
+        unit,
+        log_base,
         reversed: family.axis.is_some_and(|axis| axis.reversed),
         percent: stacking == Stacking::Percent,
     }
 }
 
-/// The major tick values of `scale`: powers of the base on a log axis, at
-/// `c:majorUnit` when it names one, and at five even steps otherwise.
+/// Tick values: powers of the base on a log axis, else a walk in `unit` or the scale's own.
 fn axis_ticks(scale: ValueScale, unit: Option<f64>) -> Vec<f64> {
     let span = scale.max - scale.min;
+    if !span.is_finite() {
+        return overflow_axis_ticks(scale, unit);
+    }
     if let Some(base) = scale.log_base {
         let first = scale.min.log(base).ceil();
         let last = scale.max.log(base).floor();
@@ -1609,14 +2817,16 @@ fn axis_ticks(scale: ValueScale, unit: Option<f64>) -> Vec<f64> {
             }
         }
     }
-    if let Some(unit) = unit.filter(|unit| unit.is_finite() && *unit > 0.0) {
+    let unit = unit
+        .filter(|unit| unit.is_finite() && *unit > 0.0)
+        .unwrap_or(scale.unit);
+    if unit.is_finite() && unit > 0.0 {
         let steps = (span / unit).floor();
         if steps >= 1.0 && steps < MAX_PLOT_AXIS_TICKS as f64 {
-            let first = (scale.min / unit).ceil() * unit;
             let mut ticks = Vec::new();
             let mut index = 0;
             while ticks.len() < MAX_PLOT_AXIS_TICKS {
-                let value = first + unit * index as f64;
+                let value = scale.min + unit * index as f64;
                 if !value.is_finite() || value > scale.max + unit * 1e-9 {
                     break;
                 }
@@ -1636,13 +2846,109 @@ fn axis_ticks(scale: ValueScale, unit: Option<f64>) -> Vec<f64> {
         .collect()
 }
 
+fn overflow_axis_ticks(scale: ValueScale, unit: Option<f64>) -> Vec<f64> {
+    if let Some(base) = scale.log_base {
+        let first = scale.min.log(base).ceil();
+        let last = scale.max.log(base).floor();
+        if last >= first && (last - first) < MAX_PLOT_AXIS_TICKS as f64 {
+            let ticks: Vec<f64> = (0..=(last - first) as usize)
+                .map(|step| base.powf(first + step as f64))
+                .filter(|value| value.is_finite())
+                .collect();
+            if ticks.len() >= 2 {
+                return ticks;
+            }
+        }
+    }
+    let unit = unit
+        .filter(|unit| unit.is_finite() && *unit > 0.0)
+        .unwrap_or(scale.unit);
+    if unit.is_finite() && unit > 0.0 {
+        let steps = ((scale.max * 0.5 - scale.min * 0.5) / (unit * 0.5)).floor();
+        if steps >= 1.0 && steps < MAX_PLOT_AXIS_TICKS as f64 {
+            let mut ticks = Vec::new();
+            let mut index = 0;
+            while ticks.len() < MAX_PLOT_AXIS_TICKS {
+                let value = (scale.min * 0.5 + (unit * 0.5) * index as f64) * 2.0;
+                if !value.is_finite()
+                    || value > (scale.max + unit * 1e-9).min(f64::MAX)
+                    || ticks.last().is_some_and(|last| value <= *last)
+                {
+                    break;
+                }
+                ticks.push(value);
+                index += 1;
+            }
+            if ticks.len() >= 2 {
+                return ticks;
+            }
+        }
+    }
+    let mut ticks: Vec<f64> = (0..=4)
+        .map(|step| match step {
+            4 => scale.max,
+            step => {
+                let fraction = step as f64 / 4.0;
+                (scale.min * 0.5 + (scale.max * 0.5 - scale.min * 0.5) * fraction) * 2.0
+            }
+        })
+        .collect();
+    if scale.max > scale.min {
+        ticks.dedup();
+    }
+    ticks
+}
+
+/// A gridline whose `c:spPr` draws no line is declared only to be hidden.
+fn draws_no_line(line: Option<PlotLine<'_>>) -> bool {
+    line.is_some_and(|line| line.none)
+}
+
 /// Half-length of a tick mark drawn for `mark`, and whether it crosses.
 fn tick_extents(mark: Option<&str>) -> Option<(f64, f64)> {
     match mark? {
-        "in" => Some((0.0, 4.0)),
-        "out" => Some((4.0, 0.0)),
-        "cross" => Some((3.0, 3.0)),
+        "in" => Some((0.0, TICK_LEN)),
+        "out" => Some((TICK_LEN, 0.0)),
+        "cross" => Some((TICK_LEN / 2.0, TICK_LEN / 2.0)),
         _ => None,
+    }
+}
+
+/// The stroke of an axis' own edge line, or `None` when its `c:spPr/a:ln` is
+/// `a:noFill`. An axis that declares no outline keeps the chart default.
+fn axis_stroke<'a>(axis: Option<&'a PlotAxis<'a>>) -> Option<(&'a str, f64)> {
+    match axis.and_then(|axis| axis.line) {
+        Some(line) if line.none => None,
+        Some(line) => Some((
+            line.color.unwrap_or(CHART_AXIS_COLOR),
+            axis_line_width(line.width_emu),
+        )),
+        None => Some((CHART_AXIS_COLOR, 1.0)),
+    }
+}
+
+/// `a:ln/@w` as device pixels at the 96 DPI the plot geometry works in, never
+/// below the hairline a rasteriser would round it up to anyway.
+fn line_width(width_emu: Option<f64>, default_px: f64) -> f64 {
+    match width_emu {
+        Some(emu) if emu.is_finite() => (emu / EMU_PER_PIXEL).clamp(1.0, MAX_LINE_PX),
+        _ => default_px,
+    }
+}
+
+fn axis_line_width(width_emu: Option<f64>) -> f64 {
+    line_width(width_emu, 1.0)
+}
+
+/// The width a series' own line is drawn at, or `None` when its `c:spPr/a:ln`
+/// is `a:noFill`.
+fn series_line_width(series: &PlotSeries<'_>) -> Option<f64> {
+    match series.line {
+        Some(line) if line.none => None,
+        line => Some(line_width(
+            line.and_then(|line| line.width_emu),
+            DEFAULT_SERIES_LINE_PX,
+        )),
     }
 }
 
@@ -1651,30 +2957,35 @@ fn emit_axes<S: PlotSink + ?Sized>(
     family: PlotFamily<'_>,
     plot: PlotArea,
 ) {
+    let transposed = family.transposed();
     let scale = value_scale(family);
     let axis = family.axis;
     let hidden = axis.is_some_and(|axis| axis.hidden);
-    let major_grid = axis.is_none_or(|axis| axis.major_gridlines);
-    let minor_grid = axis.is_some_and(|axis| axis.minor_gridlines);
+    let major_grid =
+        axis.is_none_or(|axis| axis.major_gridlines && !draws_no_line(axis.major_gridline));
+    let minor_grid =
+        axis.is_some_and(|axis| axis.minor_gridlines && !draws_no_line(axis.minor_gridline));
     let number_format = axis.and_then(|axis| axis.number_format);
     let tick_style = &family.scoped(axis.map(|axis| axis.text).unwrap_or_default());
-    let (edge, outward) = if family.secondary {
-        (plot.x + plot.w, 1.0)
-    } else {
-        (plot.x, -1.0)
-    };
-    let label_x = if family.secondary {
-        plot.x + plot.w + 4.0
-    } else {
-        plot.x - 38.0
+    let (edge, outward) = match (transposed, family.secondary) {
+        (true, false) => (plot.y + plot.h, 1.0),
+        (true, true) => (plot.y, -1.0),
+        (false, false) => (plot.x, -1.0),
+        (false, true) => (plot.x + plot.w, 1.0),
     };
 
     if let Some(minor_unit) = axis.and_then(|axis| axis.minor_unit).filter(|_| minor_grid) {
         for value in axis_ticks(scale, Some(minor_unit)) {
-            let y = scale.y(plot, value);
-            push_line(ops, plot.x, y, plot.x + plot.w, y, CHART_GRID_COLOR, 0.25);
+            push_value_gridline(
+                ops,
+                plot,
+                transposed,
+                scale.tick(plot, transposed, value),
+                0.25,
+            );
         }
     }
+    let mut widest: f64 = 0.0;
     for value in axis_ticks(scale, axis.and_then(|axis| axis.major_unit))
         .into_iter()
         .rev()
@@ -1682,72 +2993,136 @@ fn emit_axes<S: PlotSink + ?Sized>(
         if ops.exhausted() {
             return;
         }
-        let y = scale.y(plot, value);
+        let at = scale.tick(plot, transposed, value);
         if major_grid {
-            push_line(ops, plot.x, y, plot.x + plot.w, y, CHART_GRID_COLOR, 0.5);
+            push_value_gridline(ops, plot, transposed, at, 0.5);
         }
         if hidden {
             continue;
         }
-        push_text(
-            ops,
-            &scale.format(value, number_format),
-            label_x,
-            y + 3.0,
-            34.0,
-            tick_style,
-        );
-        if let Some((outer, inner)) = tick_extents(axis.and_then(|axis| axis.major_tick_mark)) {
-            push_line(
+        let text = scale.format(value, number_format);
+        let width = text_width(&text, tick_style, ops);
+        widest = widest.max(width);
+        if transposed {
+            let baseline = if family.secondary {
+                plot.y - label_gap(tick_style) - 0.25 * tick_style.font.size_px
+            } else {
+                baseline_below(plot.y + plot.h, tick_style)
+            };
+            push_text_aligned(
                 ops,
-                edge + outward * outer,
-                y,
-                edge - outward * inner,
-                y,
-                CHART_AXIS_COLOR,
-                1.0,
+                &text,
+                at - width,
+                baseline,
+                width * 2.0,
+                tick_style,
+                PlotTextAlign::Center,
             );
+        } else {
+            let label_x = if family.secondary {
+                plot.x + plot.w + label_gap(tick_style)
+            } else {
+                plot.x - label_gap(tick_style) - width
+            };
+            push_text(
+                ops,
+                &text,
+                label_x,
+                baseline_centred(at, tick_style),
+                width,
+                tick_style,
+            );
+        }
+        if let Some((outer, inner)) = tick_extents(axis.and_then(|axis| axis.major_tick_mark)) {
+            let (near, far) = (edge + outward * outer, edge - outward * inner);
+            if transposed {
+                push_line(ops, at, near, at, far, CHART_AXIS_COLOR, 1.0);
+            } else {
+                push_line(ops, near, at, far, at, CHART_AXIS_COLOR, 1.0);
+            }
         }
     }
     if family.secondary {
-        push_line(
-            ops,
-            plot.x + plot.w,
-            plot.y,
-            plot.x + plot.w,
-            plot.y + plot.h,
-            CHART_AXIS_COLOR,
-            1.0,
-        );
+        if let Some((color, width)) = axis_stroke(axis) {
+            if transposed {
+                push_line(ops, plot.x, plot.y, plot.x + plot.w, plot.y, color, width);
+            } else {
+                push_line(
+                    ops,
+                    plot.x + plot.w,
+                    plot.y,
+                    plot.x + plot.w,
+                    plot.y + plot.h,
+                    color,
+                    width,
+                );
+            }
+        }
         return;
     }
-    push_line(
-        ops,
-        plot.x,
-        plot.y,
-        plot.x,
-        plot.y + plot.h,
-        CHART_AXIS_COLOR,
-        1.0,
-    );
-    push_line(
-        ops,
-        plot.x,
-        plot.y + plot.h,
-        plot.x + plot.w,
-        plot.y + plot.h,
-        CHART_AXIS_COLOR,
-        1.0,
-    );
-    if let Some(title) = family.axis_titles.value.filter(|title| !title.is_empty()) {
-        push_text(
+    let (left, bottom) = if transposed {
+        (axis_stroke(family.category_axis), axis_stroke(axis))
+    } else {
+        (axis_stroke(axis), axis_stroke(family.category_axis))
+    };
+    if let Some((color, width)) = left {
+        push_line(ops, plot.x, plot.y, plot.x, plot.y + plot.h, color, width);
+    }
+    if let Some((color, width)) = bottom {
+        push_line(
             ops,
-            title,
-            plot.x - 38.0,
-            plot.y - 5.0,
-            plot.w + 38.0,
-            tick_style,
+            plot.x,
+            plot.y + plot.h,
+            plot.x + plot.w,
+            plot.y + plot.h,
+            color,
+            width,
         );
+    }
+    let category_style = family.category_text();
+    let below = below_plot(
+        plot,
+        if transposed {
+            tick_style
+        } else {
+            &category_style
+        },
+        tick_style,
+    );
+    let (value_title, category_title) = if transposed {
+        (below, left_of_plot(plot))
+    } else {
+        (left_of_plot(plot), below)
+    };
+    if let Some(title) = family.axis_titles.value.filter(|title| !title.is_empty()) {
+        if transposed || !ops.sink.turns_text() {
+            push_text(
+                ops,
+                title,
+                value_title.0,
+                value_title.1,
+                value_title.2,
+                tick_style,
+            );
+        } else {
+            // PowerPoint stands a value-axis title on its side, centred on the
+            // axis it names; the baseline sits half an ascent below the centre
+            // the box turns about.
+            push_text_turned(
+                ops,
+                title,
+                plot.x
+                    - label_gap(tick_style)
+                    - widest
+                    - AXIS_TITLE_EM / 2.0 * tick_style.font.size_px
+                    - plot.h / 2.0,
+                plot.y + plot.h / 2.0 + tick_style.font.size_px * 0.34,
+                plot.h,
+                tick_style,
+                PlotTextAlign::Center,
+                -90.0,
+            );
+        }
     }
     if let Some(title) = family
         .axis_titles
@@ -1757,10 +3132,57 @@ fn emit_axes<S: PlotSink + ?Sized>(
         push_text(
             ops,
             title,
-            plot.x,
-            plot.y + plot.h + 26.0,
-            plot.w,
+            category_title.0,
+            category_title.1,
+            category_title.2,
             tick_style,
+        );
+    }
+}
+
+fn left_of_plot(plot: PlotArea) -> (f64, f64, f64) {
+    (
+        plot.x - plot.gutter + 4.0,
+        plot.y - 5.0,
+        plot.w + plot.gutter - 4.0,
+    )
+}
+
+/// An axis title's box under the labels hung below the plot.
+fn below_plot(plot: PlotArea, labels: &ResolvedText, title: &ResolvedText) -> (f64, f64, f64) {
+    (
+        plot.x,
+        plot.y + plot.h + label_gap(labels) + labels.font.size_px + title.font.size_px,
+        plot.w,
+    )
+}
+
+fn push_value_gridline<S: PlotSink + ?Sized>(
+    ops: &mut Emitter<'_, S>,
+    plot: PlotArea,
+    transposed: bool,
+    at: f64,
+    width: f64,
+) {
+    if transposed {
+        push_line(
+            ops,
+            at,
+            plot.y,
+            at,
+            plot.y + plot.h,
+            CHART_GRID_COLOR,
+            width,
+        );
+    } else {
+        push_line(
+            ops,
+            plot.x,
+            at,
+            plot.x + plot.w,
+            at,
+            CHART_GRID_COLOR,
+            width,
         );
     }
 }
@@ -1773,10 +3195,26 @@ fn point_label(
     percent_total: f64,
 ) -> Option<String> {
     let point = series.point(index);
+    // A cell the sheet left blank is not plotted and takes no label.
+    series.data_value(index)?;
+    let spec_for_runs = point_label_spec(series, index);
+    if let Some(runs) = point.and_then(|point| point.label_runs) {
+        let number_format = spec_for_runs.and_then(|spec| spec.number_format);
+        return Some(
+            runs.iter()
+                .map(|run| match run {
+                    super::model::ChartLabelRun::Text(text) => text.clone(),
+                    super::model::ChartLabelRun::Field(field) => {
+                        label_field(field, family, series, index, percent_total, number_format)
+                    }
+                })
+                .collect(),
+        );
+    }
     if let Some(text) = point.and_then(|point| point.label) {
         return Some(text.to_owned());
     }
-    let spec = point_label_spec(series, index)?;
+    let spec = spec_for_runs?;
     if !spec.shows_anything() {
         return None;
     }
@@ -1809,6 +3247,38 @@ fn point_label(
         parts.push(format_number(series.bubble_size(index)));
     }
     (!parts.is_empty()).then(|| parts.join(separator))
+}
+
+/// What an `a:fld` inside a `c:tx` stands for, drawn from the point it labels.
+fn label_field(
+    field: &str,
+    family: PlotFamily<'_>,
+    series: &SeriesView<'_>,
+    index: usize,
+    percent_total: f64,
+    number_format: Option<&str>,
+) -> String {
+    let formatted = |value: f64| {
+        number_format
+            .and_then(|code| format_with_code(value, code))
+            .unwrap_or_else(|| format_number(value))
+    };
+    match field {
+        "SERIESNAME" => series.series.name.unwrap_or_default().to_owned(),
+        "CATEGORYNAME" => category_label(family.series, index),
+        "VALUE" => formatted(series.value(index)),
+        "PERCENTAGE" => {
+            let share = if percent_total > 0.0 {
+                series.value(index) / percent_total
+            } else {
+                0.0
+            };
+            number_format
+                .and_then(|code| format_with_code(share, code))
+                .unwrap_or_else(|| format_percent(share))
+        }
+        _ => String::new(),
+    }
 }
 
 fn point_label_spec<'a>(series: &SeriesView<'a>, index: usize) -> Option<PlotDataLabels<'a>> {
@@ -1863,6 +3333,7 @@ fn push_point_label<S: PlotSink + ?Sized>(
     baseline_y: f64,
     width: f64,
     percent_total: f64,
+    align: PlotTextAlign,
 ) {
     let Some(text) = point_label(family, series, index, percent_total) else {
         return;
@@ -1871,7 +3342,72 @@ fn push_point_label<S: PlotSink + ?Sized>(
         .map(|labels| labels.text)
         .unwrap_or_default();
     push_legend_key(ops, series, series_index, index, x, baseline_y);
-    push_text(ops, &text, x, baseline_y, width, &family.scoped(scope));
+    // A `c:tx` label carries its own line breaks, and PowerPoint stacks the
+    // lines on the point rather than running them together.
+    let style = family.scoped(scope);
+    let lines: Vec<&str> = text.split('\n').collect();
+    let step = style.font.size_px * 1.2;
+    let top = baseline_y - step * (lines.len() as f64 - 1.0) / 2.0;
+    for (line, text) in lines.iter().enumerate() {
+        push_text_aligned(
+            ops,
+            text.trim(),
+            x,
+            top + step * line as f64,
+            width,
+            &style,
+            align,
+        );
+    }
+}
+
+/// Width of the box a marker's label is aligned in.
+const MARKER_LABEL_WIDTH: f64 = 48.0;
+
+/// Labels a marker at `point` on the side `c:dLblPos` names: right of it
+/// unless the deck says otherwise, as Office does for lines and scatters.
+#[allow(clippy::too_many_arguments)]
+fn push_marker_label<S: PlotSink + ?Sized>(
+    ops: &mut Emitter<'_, S>,
+    family: PlotFamily<'_>,
+    series: &SeriesView<'_>,
+    series_index: usize,
+    index: usize,
+    (x, y): (f64, f64),
+    size: f64,
+    percent_total: f64,
+) {
+    let spec = point_label_spec(series, index);
+    let font_px = family
+        .scoped(spec.map(|labels| labels.text).unwrap_or_default())
+        .font
+        .size_px;
+    let reach = size / 2.0 + 3.0;
+    let middle = y + font_px * 0.35;
+    let centred = x - MARKER_LABEL_WIDTH / 2.0;
+    let (left, baseline, align) = match spec.and_then(|labels| labels.position) {
+        Some("t") => (centred, y - reach - font_px * 0.25, PlotTextAlign::Center),
+        Some("b") => (centred, y + reach + font_px * 0.75, PlotTextAlign::Center),
+        Some("ctr") => (centred, middle, PlotTextAlign::Center),
+        Some("l") => (
+            x - reach - MARKER_LABEL_WIDTH,
+            middle,
+            PlotTextAlign::Center,
+        ),
+        _ => (x + reach, middle, PlotTextAlign::Start),
+    };
+    push_point_label(
+        ops,
+        family,
+        series,
+        series_index,
+        index,
+        left,
+        baseline,
+        MARKER_LABEL_WIDTH,
+        percent_total,
+        align,
+    );
 }
 
 /// Where `c:dLblPos` puts a bar label, as a fraction of the bar's own span
@@ -1941,10 +3477,10 @@ fn bar_bands(family: PlotFamily<'_>, categories: usize, extent: f64) -> BarBands
     }
 }
 
-/// Drawing position of the `index`th category, which a reversed category axis
-/// counts from the far end.
+/// Category slot in screen order.
 fn category_position(family: PlotFamily<'_>, index: usize, count: usize) -> usize {
-    if family.category_axis.is_some_and(|axis| axis.reversed) {
+    let reversed = family.category_axis.is_some_and(|axis| axis.reversed);
+    if reversed != family.transposed() {
         count.saturating_sub(1).saturating_sub(index)
     } else {
         index
@@ -1993,12 +3529,12 @@ fn emit_bar<S: PlotSink + ?Sized>(
     ops: &mut Emitter<'_, S>,
     family: PlotFamily<'_>,
     plot: PlotArea,
-    horizontal: bool,
 ) {
     let cat_count = category_count(family.series);
     if cat_count == 0 || family.series.is_empty() {
         return;
     }
+    let horizontal = family.transposed();
     emit_axes(ops, family, plot);
     let scale = value_scale(family);
     let bands = bar_bands(family, cat_count, if horizontal { plot.h } else { plot.w });
@@ -2010,24 +3546,34 @@ fn emit_bar<S: PlotSink + ?Sized>(
         }
         let slot = bands.slot * category_position(family, cat_idx, cat_count) as f64;
         let label = category_label(family.series, cat_idx);
-        if horizontal {
-            push_text(
-                ops,
-                &label,
-                plot.x - 38.0,
-                plot.y + slot + bands.slot * 0.55,
-                36.0,
-                category_style,
-            );
-        } else {
-            push_text(
-                ops,
-                &label,
-                plot.x + slot + 2.0,
-                plot.y + plot.h + 14.0,
-                bands.slot - 4.0,
-                category_style,
-            );
+        // A category name carries its own line breaks, and PowerPoint stacks
+        // the lines under the band rather than running them together.
+        let step = category_style.font.size_px * LABEL_LINE_EM;
+        let lift = step * (label.split('\n').count() - 1) as f64 / 2.0;
+        for (line, text) in label.split('\n').enumerate() {
+            if horizontal {
+                let text = text.trim();
+                let width = text_width(text, category_style, ops);
+                push_text(
+                    ops,
+                    text,
+                    plot.x - label_gap(category_style) - width,
+                    baseline_centred(plot.y + slot + bands.slot / 2.0, category_style) - lift
+                        + step * line as f64,
+                    width,
+                    category_style,
+                );
+            } else {
+                push_text_aligned(
+                    ops,
+                    text.trim(),
+                    plot.x + slot + 2.0,
+                    baseline_below(plot.y + plot.h, category_style) + step * line as f64,
+                    bands.slot - 4.0,
+                    category_style,
+                    PlotTextAlign::Center,
+                );
+            }
         }
         stacked_spans(family, cat_idx, spans);
         let total = category_total(family, cat_idx);
@@ -2057,6 +3603,7 @@ fn emit_bar<S: PlotSink + ?Sized>(
                     y + bands.bar,
                     48.0,
                     total,
+                    PlotTextAlign::Start,
                 );
             } else {
                 let (y0, y1) = (scale.y(plot, start), scale.y(plot, end));
@@ -2072,16 +3619,20 @@ fn emit_bar<S: PlotSink + ?Sized>(
                 let (fraction, offset) = bar_label_anchor(
                     point_label_spec(series, cat_idx).and_then(|labels| labels.position),
                 );
+                // PowerPoint centres a column's label on the bar it labels, and
+                // a bar too narrow for the label spills evenly to both sides.
+                let label_w = bands.bar.max(32.0);
                 push_point_label(
                     ops,
                     family,
                     series,
                     ser_idx,
                     cat_idx,
-                    x,
+                    x + (bands.bar - label_w) / 2.0,
                     y0 + (y1 - y0) * fraction - offset,
-                    bands.bar.max(32.0),
+                    label_w,
                     total,
+                    PlotTextAlign::Center,
                 );
             }
         }
@@ -2089,9 +3640,16 @@ fn emit_bar<S: PlotSink + ?Sized>(
 }
 
 /// Where the `index`th of `count` categories sits along a line or area axis.
+/// A point sits mid-band, or on the category's tick when the value axis
+/// crosses there (`midCat`).
 fn line_x(family: PlotFamily<'_>, plot: PlotArea, index: usize, count: usize) -> f64 {
-    let denom = count.saturating_sub(1).max(1) as f64;
-    plot.x + plot.w * category_position(family, index, count) as f64 / denom
+    let position = category_position(family, index, count) as f64;
+    if family.axis.and_then(|axis| axis.cross_between) == Some("midCat") {
+        let denom = count.saturating_sub(1).max(1) as f64;
+        plot.x + plot.w * position / denom
+    } else {
+        plot.x + plot.w * (position + 0.5) / count.max(1) as f64
+    }
 }
 
 fn emit_category_labels<S: PlotSink + ?Sized>(
@@ -2101,18 +3659,27 @@ fn emit_category_labels<S: PlotSink + ?Sized>(
     count: usize,
 ) {
     let style = &family.category_text();
+    // A category name carries its own line breaks, and PowerPoint stacks the
+    // lines under the tick, each centred on the band the category occupies.
+    let slot = (plot.w / count.max(1) as f64).max(32.0);
+    let step = style.font.size_px * LABEL_LINE_EM;
     for index in 0..count {
         if ops.exhausted() {
             return;
         }
-        push_text(
-            ops,
-            &category_label(family.series, index),
-            line_x(family, plot, index, count) - 16.0,
-            plot.y + plot.h + 14.0,
-            32.0,
-            style,
-        );
+        let label = category_label(family.series, index);
+        let x = line_x(family, plot, index, count) - slot / 2.0;
+        for (line, text) in label.split('\n').enumerate() {
+            push_text_aligned(
+                ops,
+                text.trim(),
+                x,
+                baseline_below(plot.y + plot.h, style) + step * line as f64,
+                slot,
+                style,
+                PlotTextAlign::Center,
+            );
+        }
     }
 }
 
@@ -2132,6 +3699,7 @@ fn emit_line<S: PlotSink + ?Sized>(
     let spans = &mut Vec::with_capacity(family.series.len());
     for (ser_idx, series) in family.series.iter().enumerate() {
         let color = series_color(Some(series.series), ser_idx);
+        let width = series_line_width(series.series);
         let markers = family.group.and_then(|group| group.markers) != Some(false);
         let mut prev: Option<(f64, f64)> = None;
         for i in 0..cat_count {
@@ -2146,8 +3714,8 @@ fn emit_line<S: PlotSink + ?Sized>(
             };
             let x = line_x(family, plot, i, cat_count);
             let y = scale.y(plot, value);
-            if let Some((prev_x, prev_y)) = prev {
-                push_line(ops, prev_x, prev_y, x, y, &color, 2.0);
+            if let (Some(width), Some((prev_x, prev_y))) = (width, prev) {
+                push_line(ops, prev_x, prev_y, x, y, &color, width);
             }
             if markers {
                 push_marker(
@@ -2159,16 +3727,15 @@ fn emit_line<S: PlotSink + ?Sized>(
                     &series.point_color(i, ser_idx),
                 );
             }
-            let size = series.marker_size(i);
-            push_point_label(
+            let visible = markers && series.marker_symbol(i, ser_idx).is_some();
+            push_marker_label(
                 ops,
                 family,
                 series,
                 ser_idx,
                 i,
-                x + size,
-                y - size,
-                48.0,
+                (x, y),
+                if visible { series.marker_size(i) } else { 0.0 },
                 category_total(family, i),
             );
             prev = Some((x, y));
@@ -2247,27 +3814,46 @@ fn emit_area<S: PlotSink + ?Sized>(
                 *y - 3.0,
                 48.0,
                 category_total(family, i),
+                PlotTextAlign::Start,
             );
         }
     }
 }
 
 /// The x scale of a scatter or bubble family.
-fn scatter_x_scale(family: PlotFamily<'_>) -> ValueScale {
+fn scatter_x_scale(family: PlotFamily<'_>, plot: PlotArea) -> ValueScale {
     let (mut min, mut max) = (f64::INFINITY, f64::NEG_INFINITY);
     let mut seen = false;
     let mut remaining = MAX_PLOT_DATA_SCAN;
-    for series in family.series {
-        let samples = series.series.x_values.len().min(remaining);
-        remaining -= samples;
-        for index in 0..samples {
-            if let Some((value, _)) = series.xy_value(index) {
-                seen = true;
-                min = min.min(value);
-                max = max.max(value);
+    let automatic = family
+        .x_axis
+        .is_none_or(|axis| axis.range.min.is_none() || axis.range.max.is_none());
+    if automatic {
+        for series in family.series {
+            let samples = remaining;
+            for index in series.xy_indices().take(samples) {
+                remaining -= 1;
+                if let Some((value, _)) = series.xy_value(index) {
+                    seen = true;
+                    min = min.min(value);
+                    max = max.max(value);
+                }
+            }
+        }
+    } else {
+        for series in family.series {
+            let samples = series.series.x_values.len().min(remaining);
+            remaining -= samples;
+            for index in 0..samples {
+                if let Some((value, _)) = series.xy_value(index) {
+                    seen = true;
+                    min = min.min(value);
+                    max = max.max(value);
+                }
             }
         }
     }
+    let constant = seen && min == max;
     if !seen {
         min = 0.0;
         max = 1.0;
@@ -2285,15 +3871,50 @@ fn scatter_x_scale(family: PlotFamily<'_>) -> ValueScale {
     {
         max = value;
     }
+    if !(max - min).is_finite()
+        || constant && axis.is_none_or(|axis| axis.range.min.is_none() && axis.range.max.is_none())
+    {
+        let (min, max, unit, log_base) = normalize_value_range(
+            Some((min, max)),
+            axis.map(|axis| axis.range).unwrap_or_default(),
+            ValueRangeRule::Scatter {
+                intervals: target_intervals(plot.w),
+            },
+            axis.and_then(|axis| axis.log_base),
+            axis.and_then(|axis| axis.major_unit),
+        );
+        return ValueScale {
+            min,
+            max,
+            unit,
+            log_base,
+            reversed: axis.is_some_and(|axis| axis.reversed),
+            percent: false,
+        };
+    }
     if !(max - min).is_finite() || max <= min {
         (min, max) = (min.min(0.0), min.min(0.0) + 1.0);
+    }
+    let log_base = axis
+        .and_then(|axis| axis.log_base)
+        .filter(|base| *base > 1.0 && base.is_finite() && min > 0.0);
+    let unit = axis
+        .and_then(|axis| axis.major_unit)
+        .filter(|unit| unit.is_finite() && *unit > 0.0)
+        .unwrap_or_else(|| nice_unit((max - min) / target_intervals(plot.w)));
+    if log_base.is_none() {
+        if axis.and_then(|axis| axis.range.min).is_none() {
+            min = round_to_unit(min, unit, false);
+        }
+        if axis.and_then(|axis| axis.range.max).is_none() {
+            max = round_to_unit(max, unit, true);
+        }
     }
     ValueScale {
         min,
         max,
-        log_base: axis
-            .and_then(|axis| axis.log_base)
-            .filter(|base| *base > 1.0 && base.is_finite() && min > 0.0),
+        unit,
+        log_base,
         reversed: axis.is_some_and(|axis| axis.reversed),
         percent: false,
     }
@@ -2317,13 +3938,16 @@ fn emit_scatter_x_labels<S: PlotSink + ?Sized>(
         if ops.exhausted() {
             return;
         }
-        push_text(
+        let text = scale.format(value, format);
+        let width = text_width(&text, family.label(), ops);
+        push_text_aligned(
             ops,
-            &scale.format(value, format),
-            scale.x(plot, value) - 16.0,
-            plot.y + plot.h + 14.0,
-            32.0,
+            &text,
+            scale.x(plot, value) - width,
+            baseline_below(plot.y + plot.h, family.label()),
+            width * 2.0,
             family.label(),
+            PlotTextAlign::Center,
         );
     }
 }
@@ -2349,11 +3973,12 @@ fn emit_scatter<S: PlotSink + ?Sized>(
     }
     emit_axes(ops, family, plot);
     let y_scale = value_scale(family);
-    let x_scale = scatter_x_scale(family);
+    let x_scale = scatter_x_scale(family, plot);
     emit_scatter_x_labels(ops, family, plot, x_scale);
     let (lines, markers) = scatter_parts(family.group.and_then(|group| group.scatter_style));
     for (ser_idx, series) in family.series.iter().enumerate() {
         let color = series_color(Some(series.series), ser_idx);
+        let width = series_line_width(series.series);
         let mut prev: Option<(f64, f64)> = None;
         for i in 0..series.length().min(MAX_PLOT_DATA_SCAN) {
             if ops.exhausted() {
@@ -2365,8 +3990,8 @@ fn emit_scatter<S: PlotSink + ?Sized>(
             };
             let x = x_scale.x(plot, x_value);
             let y = y_scale.y(plot, y_value);
-            if lines && let Some((prev_x, prev_y)) = prev {
-                push_line(ops, prev_x, prev_y, x, y, &color, 2.0);
+            if lines && let (Some(width), Some((prev_x, prev_y))) = (width, prev) {
+                push_line(ops, prev_x, prev_y, x, y, &color, width);
             }
             if markers {
                 push_marker(
@@ -2378,15 +4003,15 @@ fn emit_scatter<S: PlotSink + ?Sized>(
                     &series.point_color(i, ser_idx),
                 );
             }
-            push_point_label(
+            let visible = markers && series.marker_symbol(i, ser_idx).is_some();
+            push_marker_label(
                 ops,
                 family,
                 series,
                 ser_idx,
                 i,
-                x + 4.0,
-                y - 4.0,
-                48.0,
+                (x, y),
+                if visible { series.marker_size(i) } else { 0.0 },
                 category_total(family, i),
             );
             prev = Some((x, y));
@@ -2405,7 +4030,7 @@ fn emit_bubble<S: PlotSink + ?Sized>(
     }
     emit_axes(ops, family, plot);
     let y_scale = value_scale(family);
-    let x_scale = scatter_x_scale(family);
+    let x_scale = scatter_x_scale(family, plot);
     emit_scatter_x_labels(ops, family, plot, x_scale);
     let group = family.group;
     let scale_percent = group
@@ -2462,6 +4087,7 @@ fn emit_bubble<S: PlotSink + ?Sized>(
                 y,
                 48.0,
                 category_total(family, i),
+                PlotTextAlign::Start,
             );
         }
     }
@@ -2482,7 +4108,7 @@ fn emit_radar<S: PlotSink + ?Sized>(
     }
     let scale = value_scale(family);
     let spokes = cat_count.min(MAX_PLOT_POLYGON_POINTS);
-    let radius = (width.min(height) * 0.34).max(6.0);
+    let radius = (width.min(height) * 0.34).max(6.0_f64.min(width.min(height) / 2.0).max(0.0));
     let (cx, cy) = (x + width * 0.38, y + height * 0.5);
     let angle = |index: usize| {
         -std::f64::consts::FRAC_PI_2
@@ -2495,8 +4121,11 @@ fn emit_radar<S: PlotSink + ?Sized>(
         (cx + reach * angle.cos(), cy + reach * angle.sin())
     };
 
+    let rings = !family
+        .axis
+        .is_some_and(|axis| draws_no_line(axis.major_gridline));
     for value in axis_ticks(scale, family.axis.and_then(|axis| axis.major_unit)) {
-        if ops.exhausted() || scale.ratio(value) <= 0.0 {
+        if !rings || ops.exhausted() || scale.ratio(value) <= 0.0 {
             continue;
         }
         let ring: Vec<(f64, f64)> = (0..spokes).map(|index| at(index, value)).collect();
@@ -2542,12 +4171,12 @@ fn emit_radar<S: PlotSink + ?Sized>(
             commands.push(GeometryPathCommand::Close);
             push_path(ops, plot, commands, &color, None);
         }
-        if !filled {
+        if !filled && let Some(width) = series_line_width(series.series) {
             for (from, to) in ring_edges(&ring) {
                 if ops.exhausted() {
                     return;
                 }
-                push_line(ops, from.0, from.1, to.0, to.1, &color, 2.0);
+                push_line(ops, from.0, from.1, to.0, to.1, &color, width);
             }
         }
         for (index, (x, y)) in ring.iter().enumerate() {
@@ -2574,6 +4203,7 @@ fn emit_radar<S: PlotSink + ?Sized>(
                 *y - 4.0,
                 48.0,
                 category_total(family, index),
+                PlotTextAlign::Start,
             );
         }
     }
@@ -2627,7 +4257,7 @@ fn emit_stock<S: PlotSink + ?Sized>(
             ops,
             &category_label(family.series, cat_idx),
             plot.x + slot + 2.0,
-            plot.y + plot.h + 14.0,
+            baseline_below(plot.y + plot.h, family.label()),
             bands.slot - 4.0,
             family.label(),
         );
@@ -2781,7 +4411,7 @@ fn emit_surface<S: PlotSink + ?Sized>(
             ops,
             &category_label(family.series, column),
             plot.x + cell_w * category_position(family, column, columns) as f64 + 2.0,
-            plot.y + plot.h + 14.0,
+            baseline_below(plot.y + plot.h, family.label()),
             cell_w - 4.0,
             family.label(),
         );
@@ -2972,9 +4602,11 @@ fn emit_pie<S: PlotSink + ?Sized>(
     if total <= 0.0 {
         return;
     }
-    let r = (width.min(height) * 0.34).max(10.0);
-    let cx = x + width * 0.38;
-    let cy = y + height * 0.46;
+    // The plot rect already excludes the legend and the title, so the pie is
+    // centred in what is left and drawn as large as the labels allow.
+    let r = (width.min(height) * 0.45).max(10.0_f64.min(width.min(height) / 2.0).max(0.0));
+    let cx = x + width / 2.0;
+    let cy = y + height / 2.0;
     let group = family.group;
     let inner_r = if family.chart_type == "doughnut" {
         r * group
@@ -2993,7 +4625,6 @@ fn emit_pie<S: PlotSink + ?Sized>(
             .unwrap_or(0.0)
             .rem_euclid(360.0)
             .to_radians();
-    let vary = group.is_some_and(|group| group.vary_colors);
     let mut angle = start;
     for (index, value) in (0..scanned)
         .map(|index| (index, series.value(index)))
@@ -3004,17 +4635,9 @@ fn emit_pie<S: PlotSink + ?Sized>(
         let middle = angle + sweep / 2.0;
         let offset = r * series.explosion(index) / 100.0;
         let (ox, oy) = (cx + offset * middle.cos(), cy + offset * middle.sin());
-        let color = if vary {
-            series
-                .point(index)
-                .and_then(|point| point.color)
-                .map(hex)
-                .unwrap_or_else(|| {
-                    CHART_SERIES_COLORS[index % CHART_SERIES_COLORS.len()].to_owned()
-                })
-        } else {
-            series.point_color(index, index)
-        };
+        // Varied slices arrive as points; a slice without one keeps the
+        // series' own fill.
+        let color = series.point_color(index, index);
         ops.push(PlotOp::Path {
             x: ox - r,
             y: oy - r,
@@ -3039,6 +4662,7 @@ fn emit_pie<S: PlotSink + ?Sized>(
             oy + reach * middle.sin(),
             48.0,
             total,
+            PlotTextAlign::Start,
         );
         angle += sweep;
     }
@@ -3096,33 +4720,68 @@ fn pie_wedge_path(
 fn emit_legend<S: PlotSink + ?Sized>(
     ops: &mut Emitter<'_, S>,
     chart: &PlotChart<'_>,
-    budget: &mut ScanBudget,
-    x: f64,
-    y: f64,
-    width: f64,
+    band: LegendBand,
     style: &ResolvedText,
 ) {
-    if !has_legend(chart) || width <= 0.0 {
+    if !has_legend(chart) || band.w <= 0.0 {
         return;
     }
-    let series: Vec<&PlotSeries<'_>> = if chart.series.is_empty() {
+    if band.horizontal {
+        emit_legend_rows(ops, band, style);
+        return;
+    }
+    let size = style.font.size_px;
+    let key = size * LEGEND_KEY_EM;
+    let lead = size * (LEGEND_KEY_EM + LEGEND_KEY_GAP_EM);
+    let mut top = band.y;
+    for row in &band.rows {
+        let Some(entry) = row.entries.first() else {
+            continue;
+        };
+        let middle = top + size * LEGEND_PITCH_EM / 2.0;
+        push_rect(ops, band.x, middle - key / 2.0, key, key, &entry.color);
+        for (index, line) in entry.lines.iter().enumerate() {
+            push_text(
+                ops,
+                line,
+                band.x + lead,
+                middle + size * (LEGEND_BASELINE_EM + 1.22 * index as f64),
+                (band.w - lead + LEGEND_TEXT_SLACK).max(1.0),
+                style,
+            );
+        }
+        top += row.height;
+    }
+}
+
+fn legend_entries(chart: &PlotChart<'_>, budget: &mut ScanBudget) -> Vec<(String, String)> {
+    let series: Vec<&PlotSeries<'_>> = if chart.plot_groups.is_empty() {
+        chart.series.iter().take(MAX_LEGEND_ENTRIES).collect()
+    } else {
         chart
             .plot_groups
             .iter()
             .flat_map(|group| group.series.iter())
             .take(MAX_LEGEND_ENTRIES)
             .collect()
-    } else {
-        chart.series.iter().take(MAX_LEGEND_ENTRIES).collect()
     };
-    let pie_legend = matches!(chart.chart_type, "pie" | "doughnut" | "ofPie")
+    let varied_bar = series.len() == 1
+        && chart.plot_groups.iter().any(|group| {
+            group.vary_colors
+                && matches!(
+                    group.chart_type.unwrap_or(chart.chart_type),
+                    "bar" | "column"
+                )
+        });
+    let pie_legend = varied_bar
+        || matches!(chart.chart_type, "pie" | "doughnut" | "ofPie")
         || chart.plot_groups.iter().any(|group| {
             matches!(
                 group.chart_type,
                 Some("pie") | Some("doughnut") | Some("ofPie")
             )
         });
-    let entries: Vec<(String, String)> = if pie_legend {
+    if pie_legend {
         series
             .as_slice()
             .first()
@@ -3157,11 +4816,39 @@ fn emit_legend<S: PlotSink + ?Sized>(
                 )
             })
             .collect()
-    };
-    for (i, (label, color)) in entries.iter().enumerate() {
-        let yy = y + i as f64 * 15.0;
-        push_rect(ops, x, yy, 8.0, 8.0, color);
-        push_text(ops, label, x + 12.0, yy + 8.0, width - 12.0, style);
+    }
+}
+
+fn emit_legend_rows<S: PlotSink + ?Sized>(
+    ops: &mut Emitter<'_, S>,
+    band: LegendBand,
+    style: &ResolvedText,
+) {
+    let size = style.font.size_px;
+    let key = size * LEGEND_KEY_EM;
+    let lead = size * (LEGEND_KEY_EM + LEGEND_KEY_GAP_EM);
+    let gap = size * LEGEND_ENTRY_GAP_EM;
+    let line = size * TITLE_LINE_EM;
+    let mut y = band.y;
+    for row in &band.rows {
+        let mut x = band.x + ((band.w - row.width) / 2.0).max(0.0);
+        let middle = y + row.height / 2.0;
+        for entry in &row.entries {
+            push_rect(ops, x, middle - key / 2.0, key, key, &entry.color);
+            let first = middle - line * (entry.lines.len() - 1) as f64 / 2.0;
+            for (index, text) in entry.lines.iter().enumerate() {
+                push_text(
+                    ops,
+                    text,
+                    x + lead,
+                    first + size * LEGEND_BASELINE_EM + line * index as f64,
+                    (entry.width - lead + LEGEND_TEXT_SLACK).max(1.0),
+                    style,
+                );
+            }
+            x += entry.width + gap;
+        }
+        y += row.height;
     }
 }
 
@@ -3194,74 +4881,214 @@ pub fn format_with_code(value: f64, code: &str) -> Option<String> {
     if !value.is_finite() || code.is_empty() {
         return None;
     }
-    let section = code.split(';').next().unwrap_or(code);
+    let sections = format_sections(code);
+    // Excel reads the sections as positive, negative and zero. A negative with
+    // a section of its own writes itself, parentheses and all; without one it
+    // takes a minus sign.
+    let (section, signed) = match (value, sections.as_slice()) {
+        (value, [_, negative, ..]) if value < 0.0 => (*negative, false),
+        (0.0, [_, _, zero, ..]) => (*zero, false),
+        _ => (sections[0], true),
+    };
     if section.eq_ignore_ascii_case("general") {
         return Some(format_number(value));
     }
-    if section.contains(['y', 'd', 'h', 's', 'E', 'e', '?', '*', '[']) || section.contains("m/") {
+    let section = &strip_modifiers(section)?;
+    if section.contains(['y', 'd', 'h', 's', 'E', 'e']) || section.contains("m/") {
         return None;
     }
-    let digits = section
-        .split('.')
-        .nth(1)
-        .map(|tail| {
-            tail.chars()
-                .take_while(|c| matches!(c, '0' | '#'))
-                .count()
-                .min(9)
-        })
-        .unwrap_or(0);
+    // A section with no digit placeholder writes only its literal text, which
+    // is how `0;-0;"-"` draws a zero as a dash and `0;-0;` as nothing.
+    if !section.contains(['0', '#', '?']) {
+        let (leading, trailing) = literals(section);
+        return Some(leading + &trailing);
+    }
+    let pattern = placeholders(section);
+    let (whole_pattern, fraction_pattern) = match pattern.split_once('.') {
+        Some((whole, fraction)) => (whole, Some(fraction)),
+        None => (pattern.as_str(), None),
+    };
+    let digits = fraction_pattern.map_or(0, |fraction| fraction.len().min(9));
     let percent = section.contains('%');
     let scaled = if percent { value * 100.0 } else { value };
     let factor = 10_f64.powi(digits as i32);
     let rounded = (scaled.abs() * factor).round() / factor;
-    let mut body = format!("{rounded:.digits$}");
+    let mut body = placeholder_digits(rounded, whole_pattern, fraction_pattern, digits);
     if section.contains(',') {
         body = group_thousands(&body);
     }
+    let (leading, trailing) = literals(section);
     let mut out = String::new();
-    if scaled < 0.0 && !body.trim_start_matches(['0', '.', ',']).is_empty() {
+    if signed && scaled < 0.0 && !body.trim_start_matches(['0', '.', ',']).is_empty() {
         out.push('-');
     }
-    out.push_str(&literal(section, true));
+    out.push_str(&leading);
     out.push_str(&body);
-    out.push_str(&literal(section, false));
+    out.push_str(&trailing);
     if percent {
         out.push('%');
     }
     Some(out)
 }
 
-/// The literal characters a format code puts before or after its digits.
-fn literal(code: &str, leading: bool) -> String {
-    let placeholder = |c: char| matches!(c, '0' | '#' | '.' | ',' | '%' | '?');
-    let bytes: Vec<char> = code.chars().collect();
-    let range: Box<dyn Iterator<Item = &char>> = if leading {
-        Box::new(bytes.iter())
-    } else {
-        Box::new(bytes.iter().rev())
-    };
-    let mut literal: Vec<char> = range
-        .take_while(|c| !placeholder(**c))
-        .filter(|c| **c != '"' && **c != '\\' && **c != '_')
-        .copied()
-        .collect();
-    if !leading {
-        literal.reverse();
+/// A format code's `;`-separated sections. A semicolon inside quotes, or one
+/// escaped, spaced or repeated as a literal, belongs to the section it is in.
+fn format_sections(code: &str) -> Vec<&str> {
+    let mut sections = Vec::new();
+    let mut start = 0;
+    let mut quoted = false;
+    let mut literal = false;
+    for (index, character) in code.char_indices() {
+        if literal {
+            literal = false;
+            continue;
+        }
+        match character {
+            '"' => quoted = !quoted,
+            '\\' | '_' | '*' if !quoted => literal = true,
+            ';' if !quoted => {
+                sections.push(&code[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
     }
-    literal.into_iter().collect()
+    sections.push(&code[start..]);
+    sections
+}
+
+/// A section without the `[…]` groups that only colour it or name its locale.
+/// A condition such as `[>100]` picks the section by value, which this does not
+/// model, so it gives up instead.
+fn strip_modifiers(section: &str) -> Option<String> {
+    const COLORS: [&str; 8] = [
+        "black", "blue", "cyan", "green", "magenta", "red", "white", "yellow",
+    ];
+    let mut out = String::with_capacity(section.len());
+    let mut rest = section;
+    while let Some(open) = rest.find('[') {
+        let close = rest[open..].find(']')? + open;
+        let inside = &rest[open + 1..close];
+        out.push_str(&rest[..open]);
+        rest = &rest[close + 1..];
+        // `[$€-407]` is a currency symbol and the locale it belongs to: the
+        // symbol is drawn, the locale is not.
+        if let Some(currency) = inside.strip_prefix('$') {
+            let symbol = currency
+                .split_once('-')
+                .map_or(currency, |(symbol, _)| symbol);
+            for character in symbol.chars() {
+                out.push('\\');
+                out.push(character);
+            }
+            continue;
+        }
+        let known = COLORS.iter().any(|name| inside.eq_ignore_ascii_case(name))
+            || inside.to_ascii_lowercase().starts_with("color");
+        if !known {
+            return None;
+        }
+    }
+    out.push_str(rest);
+    Some(out)
+}
+
+/// The literal characters a format code puts before and after its digits.
+/// `"…"` is quoted text, `\x` an escaped character, and `_x` or `*x` a blank
+/// the width of `x`, which reads as nothing at all.
+fn literals(code: &str) -> (String, String) {
+    let placeholder = |c: char| matches!(c, '0' | '#' | '.' | ',' | '%' | '?');
+    let mut leading = String::new();
+    let mut trailing = String::new();
+    let mut past_digits = false;
+    let mut chars = code.chars();
+    while let Some(character) = chars.next() {
+        let target = if past_digits {
+            &mut trailing
+        } else {
+            &mut leading
+        };
+        match character {
+            '"' => target.extend(chars.by_ref().take_while(|c| *c != '"')),
+            '\\' => target.extend(chars.next()),
+            '_' | '*' => {
+                chars.next();
+            }
+            character if placeholder(character) => past_digits = true,
+            character => target.push(character),
+        }
+    }
+    (leading, trailing)
+}
+
+/// A section's digit placeholders and decimal point, its literal text skipped.
+fn placeholders(code: &str) -> String {
+    let mut pattern = String::new();
+    let mut chars = code.chars();
+    while let Some(character) = chars.next() {
+        match character {
+            '"' => chars.by_ref().take_while(|c| *c != '"').for_each(drop),
+            '\\' | '_' | '*' => {
+                chars.next();
+            }
+            '0' | '#' | '?' => pattern.push(character),
+            '.' if !pattern.contains('.') => pattern.push('.'),
+            _ => {}
+        }
+    }
+    pattern
+}
+
+/// `rounded` written through its placeholders: `0` always writes a digit, while
+/// `#` and `?` write one only where it is significant (a trailing `?` keeps its
+/// place as a space), so `#.##` shows 1.5 as `1.5` and zero as `.`, and an
+/// accounting zero section writes no figure.
+fn placeholder_digits(
+    rounded: f64,
+    whole_pattern: &str,
+    fraction_pattern: Option<&str>,
+    digits: usize,
+) -> String {
+    let fixed = format!("{rounded:.digits$}");
+    let (whole, fraction) = fixed.split_once('.').unwrap_or((fixed.as_str(), ""));
+    let least = whole_pattern.matches('0').count();
+    let mut out = if whole == "0" && least == 0 {
+        String::new()
+    } else {
+        format!("{whole:0>least$}")
+    };
+    if let Some(places) = fraction_pattern {
+        let places = places.as_bytes();
+        let mut kept = fraction.as_bytes().to_vec();
+        let mut end = kept.len();
+        while end > 0 && kept[end - 1] == b'0' && places.get(end - 1).is_some_and(|p| *p != b'0') {
+            if places[end - 1] == b'?' {
+                kept[end - 1] = b' ';
+            } else {
+                kept.remove(end - 1);
+            }
+            end -= 1;
+        }
+        out.push('.');
+        out.extend(kept.into_iter().map(char::from));
+    }
+    out
 }
 
 fn group_thousands(body: &str) -> String {
-    let (whole, rest) = body.split_once('.').unwrap_or((body, ""));
-    let mut grouped = String::with_capacity(whole.len() + whole.len() / 3 + rest.len() + 1);
+    let (whole, rest) = match body.split_once('.') {
+        Some((whole, rest)) => (whole, Some(rest)),
+        None => (body, None),
+    };
+    let mut grouped =
+        String::with_capacity(whole.len() + whole.len() / 3 + rest.map_or(0, str::len) + 1);
     for (index, digit) in whole.chars().enumerate() {
         if index > 0 && (whole.len() - index) % 3 == 0 {
             grouped.push(',');
         }
         grouped.push(digit);
     }
-    if !rest.is_empty() {
+    if let Some(rest) = rest {
         grouped.push('.');
         grouped.push_str(rest);
     }
@@ -3274,6 +5101,36 @@ mod tests {
     use crate::chart::{
         ChartDataLabels, ChartPlotGroup, ChartPointLabel, ChartSeries, ChartTextProperties,
     };
+
+    const DEFAULT_MARKER_PX: f64 = DEFAULT_MARKER_PT * 4.0 / 3.0;
+
+    #[test]
+    fn a_gradient_with_many_opaque_stops_keeps_its_colour() {
+        let stops = vec!["#FFFFFF".to_owned(); 70_000];
+        assert_eq!(mean_hex(&stops).as_deref(), Some("#FFFFFF"));
+    }
+
+    #[test]
+    fn a_gradient_with_a_stop_that_does_not_parse_has_no_mean() {
+        let stops = ["#00000000".to_owned(), "invalid".to_owned()];
+        assert_eq!(mean_hex(&stops), None);
+        assert_eq!(mean_hex(&[]), None);
+    }
+
+    #[test]
+    fn an_unmeasured_legend_label_is_never_negative_and_counts_gaps_between() {
+        let font = |spacing: f64| PlotFont {
+            weight: 400,
+            size_px: 12.0,
+            family: "Arial".to_owned(),
+            italic: false,
+            letter_spacing_px: spacing,
+        };
+        assert!(fallback_label_width("Series", &font(-40.0)) >= 0.0);
+        let loose = fallback_label_width("Series", &font(2.0));
+        let plain = fallback_label_width("Series", &font(0.0));
+        assert!((loose - plain - 10.0).abs() < 1e-9, "{loose} vs {plain}");
+    }
 
     struct Source {
         categories: Vec<String>,
@@ -3390,6 +5247,7 @@ mod tests {
                 bold: Some(true),
                 italic: Some(true),
                 color: Some("FF0000"),
+                spacing_pt: None,
             }
             .resolve(CHART_LABEL_SIZE_PX, 400)
             .font
@@ -3412,11 +5270,12 @@ mod tests {
         assert!(matches!(&ops[0], PlotOp::Rect { fill, .. } if fill == CHART_BACKGROUND_COLOR));
         assert!(matches!(&ops[1], PlotOp::Text { text, font, .. }
             if text == "Revenue" && *font == chart_title_font()));
+        // 10 and 20 scale to Excel's 0..25 in fives: five gridlines, two axes.
         assert_eq!(
             ops.iter()
                 .filter(|op| matches!(op, PlotOp::Line { .. }))
                 .count(),
-            7
+            8
         );
         assert!(
             ops.iter()
@@ -3489,6 +5348,47 @@ mod tests {
     }
 
     #[test]
+    fn a_value_axis_title_turns_only_for_a_host_that_can_draw_it_turned() {
+        struct Flat(Vec<PlotOp>);
+        impl PlotSink for Flat {
+            fn push_op(&mut self, op: PlotOp) -> bool {
+                self.0.push(op);
+                true
+            }
+        }
+        let north = source(&[10.0, 20.0]);
+        let chart = PlotChart {
+            chart_type: "column",
+            axis_titles: PlotAxisTitles {
+                category: None,
+                value: Some("Millions"),
+            },
+            series: vec![series("North", &north)],
+            ..PlotChart::default()
+        };
+        let title = |ops: &[PlotOp]| {
+            ops.iter()
+                .find_map(|op| match op {
+                    PlotOp::Text {
+                        text,
+                        rotation_deg,
+                        width,
+                        ..
+                    } if text == "Millions" => Some((*rotation_deg, *width)),
+                    _ => None,
+                })
+                .expect("the value-axis title is drawn")
+        };
+        let turned = title(&plot_chart(&chart, rect()));
+        assert_eq!(turned.0, -90.0);
+        let mut flat = Flat(Vec::new());
+        plot_chart_into(&chart, rect(), &mut flat);
+        let (rotation, width) = title(&flat.0);
+        assert_eq!(rotation, 0.0);
+        assert_ne!(width, turned.1, "a flat title keeps its own box");
+    }
+
+    #[test]
     fn an_of_pie_group_draws_wedges_and_a_per_slice_legend() {
         let share = source(&[3.0, 1.0]);
         let chart = PlotChart {
@@ -3510,6 +5410,77 @@ mod tests {
         assert!(
             ops.iter()
                 .any(|op| matches!(op, PlotOp::Text { text, .. } if text == "Q1"))
+        );
+    }
+
+    #[test]
+    fn inverted_value_axis_pins_match_main_bounds_and_ticks() {
+        let data = source(&[1.0]);
+        let chart = PlotChart {
+            chart_type: "column",
+            value_axis: Some(PlotAxisRange {
+                min: Some(10.0),
+                max: Some(-10.0),
+            }),
+            series: vec![series("Values", &data)],
+            ..PlotChart::default()
+        };
+        let views = series_views(&chart.series, &mut ScanBudget::new());
+        let label = PlotTextStyle::default().resolve(CHART_LABEL_SIZE_PX, 400);
+        let scale = value_scale(family(&chart, &views, &label));
+        assert_eq!(scale.min.to_bits(), 10.0_f64.to_bits());
+        assert_eq!(scale.max.to_bits(), 11.0_f64.to_bits());
+        assert_eq!(scale.unit.to_bits(), 0.2_f64.to_bits());
+        assert_eq!(
+            axis_ticks(scale, None)
+                .into_iter()
+                .map(f64::to_bits)
+                .collect::<Vec<_>>(),
+            [10.0_f64, 10.2, 10.4, 10.6, 10.8, 11.0].map(f64::to_bits)
+        );
+    }
+
+    #[test]
+    fn inverted_scatter_x_pins_match_main_bounds_and_ticks() {
+        let data = source(&[1.0, 2.0]);
+        let x = [1.0, 2.0];
+        let mut xy = series("XY", &data);
+        xy.x_values = &x;
+        let chart = PlotChart {
+            chart_type: "scatter",
+            series: vec![xy],
+            ..PlotChart::default()
+        };
+        let views = series_views(&chart.series, &mut ScanBudget::new());
+        let label = PlotTextStyle::default().resolve(CHART_LABEL_SIZE_PX, 400);
+        let axis = value_axis("x", 10.0, -10.0);
+        let family = PlotFamily {
+            x_axis: Some(&axis),
+            ..family(&chart, &views, &label)
+        };
+        let scale = scatter_x_scale(family, xy_plot());
+        assert_eq!(scale.min.to_bits(), 0.0_f64.to_bits());
+        assert_eq!(scale.max.to_bits(), 1.0_f64.to_bits());
+        assert_eq!(scale.unit.to_bits(), 0.1_f64.to_bits());
+        assert_eq!(
+            axis_ticks(scale, None)
+                .into_iter()
+                .map(f64::to_bits)
+                .collect::<Vec<_>>(),
+            [
+                0.0_f64,
+                0.1,
+                0.2,
+                0.30000000000000004,
+                0.4,
+                0.5,
+                0.6000000000000001,
+                0.7000000000000001,
+                0.8,
+                0.9,
+                1.0,
+            ]
+            .map(f64::to_bits)
         );
     }
 
@@ -3547,8 +5518,41 @@ mod tests {
             ..PlotPoint::default()
         }];
         let view = SeriesView::new(&series, &mut ScanBudget::new());
-        assert_eq!(view.marker_size(0), 4.0);
-        assert_eq!(view.marker_size(1), 9.0);
+        assert_eq!(view.marker_size(0), DEFAULT_MARKER_PX);
+        assert_eq!(view.marker_size(1), 12.0);
+        for (points, pixels) in [(0.5, 2.0 * 4.0 / 3.0), (400.0, 96.0)] {
+            series.marker = Some(PlotMarker {
+                size: Some(points),
+                symbol: None,
+            });
+            let view = SeriesView::new(&series, &mut ScanBudget::new());
+            assert_eq!(view.marker_size(1), pixels, "{points} pt clamps to 2..72");
+        }
+    }
+
+    #[test]
+    fn a_line_without_markers_keeps_its_labels_beside_the_point() {
+        let data = source(&[1.0, 3.7]);
+        let label_x = |markers: Option<bool>, size: f64| {
+            let mut labelled = series("North", &data);
+            labelled.marker = Some(PlotMarker {
+                size: Some(size),
+                symbol: None,
+            });
+            labelled.labels = Some(PlotDataLabels {
+                show_value: true,
+                ..PlotDataLabels::default()
+            });
+            let mut line = group("line", vec![labelled]);
+            line.markers = markers;
+            texts_at(&plot_chart(&grouped("line", line), rect()))
+                .into_iter()
+                .find(|(text, ..)| text == "3.7")
+                .map(|(_, x, ..)| x)
+                .expect("a label")
+        };
+        assert_eq!(label_x(Some(false), 72.0), label_x(Some(false), 2.0));
+        assert!(label_x(None, 72.0) > label_x(None, 2.0));
     }
 
     #[test]
@@ -3827,7 +5831,7 @@ mod tests {
         assert!(ops.len() <= MAX_PLOT_OPS);
         assert!(
             ops.iter()
-                .any(|op| matches!(op, PlotOp::Rect { fill, .. } if fill == "#010203"))
+                .any(|op| matches!(op, PlotOp::Rect { fill, .. } | PlotOp::Path { fill, .. } if fill == "#010203"))
         );
     }
 
@@ -3956,12 +5960,32 @@ mod tests {
             .collect()
     }
 
+    /// Every rectangle and outlined path, as `(x, y, w, h)`: a marker is one or the other.
+    fn marks(ops: &[PlotOp]) -> Vec<(f64, f64, f64, f64)> {
+        ops.iter()
+            .filter_map(|op| match op {
+                PlotOp::Rect { x, y, w, h, .. } | PlotOp::Path { x, y, w, h, .. } => {
+                    Some((*x, *y, *w, *h))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The edge of a legend swatch at the default label size.
+    const SWATCH: f64 = CHART_LABEL_SIZE_PX * LEGEND_KEY_EM;
+
+    /// Whether a rectangle is a legend swatch at the default label size.
+    fn is_swatch(w: f64, h: f64) -> bool {
+        (w - SWATCH).abs() < 0.01 && (h - SWATCH).abs() < 0.01
+    }
+
     /// Every rectangle but the chart background and the legend swatches.
     fn bars(ops: &[PlotOp]) -> Vec<(f64, f64, f64, f64)> {
         rects(ops)
             .into_iter()
             .skip(1)
-            .filter(|(_, _, w, h)| (*w - 8.0).abs() > 0.01 || (*h - 8.0).abs() > 0.01)
+            .filter(|(_, _, w, h)| !is_swatch(*w, *h))
             .collect()
     }
 
@@ -3977,6 +6001,37 @@ mod tests {
                 PlotOp::Text { text, .. } => Some(text.clone()),
                 _ => None,
             })
+            .collect()
+    }
+
+    /// Every text op as `(text, x, baseline_y, width)`.
+    fn texts_at(ops: &[PlotOp]) -> Vec<(String, f64, f64, f64)> {
+        ops.iter()
+            .filter_map(|op| match op {
+                PlotOp::Text {
+                    text,
+                    x,
+                    baseline_y,
+                    width,
+                    ..
+                } => Some((text.clone(), *x, *baseline_y, *width)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn text_at(ops: &[PlotOp], want: &str) -> (String, f64, f64, f64) {
+        texts_at(ops)
+            .into_iter()
+            .find(|(text, ..)| text == want)
+            .unwrap_or_else(|| panic!("no {want} was drawn"))
+    }
+
+    /// The numeric text ops, which on these charts are the value-axis ticks.
+    fn tick_labels(ops: &[PlotOp]) -> Vec<(String, f64, f64, f64)> {
+        texts_at(ops)
+            .into_iter()
+            .filter(|(text, ..)| text.parse::<f64>().is_ok())
             .collect()
     }
 
@@ -3996,6 +6051,52 @@ mod tests {
         }
     }
 
+    fn xy_plot() -> PlotArea {
+        PlotArea {
+            x: 30.0,
+            y: 20.0,
+            w: 240.0,
+            h: 160.0,
+            gutter: 0.0,
+        }
+    }
+
+    fn xy_layout() -> PlotRect {
+        PlotRect {
+            x: 0.1,
+            y: 0.1,
+            w: 0.8,
+            h: 0.8,
+        }
+    }
+
+    fn xy_scales(chart: &PlotChart<'_>) -> (ValueScale, ValueScale) {
+        let label = PlotTextStyle::default().resolve(CHART_LABEL_SIZE_PX, 400);
+        let views = vec![series_views(
+            &chart.plot_groups[0].series,
+            &mut ScanBudget::new(),
+        )];
+        let families = plot_families(chart, &views, &label);
+        (
+            scatter_x_scale(families[0], xy_plot()),
+            value_scale(families[0]),
+        )
+    }
+
+    fn xy_markers(ops: &[PlotOp]) -> Vec<(f64, f64)> {
+        ops.iter()
+            .filter_map(|op| match op {
+                PlotOp::Rect {
+                    x, y, w, h, fill, ..
+                }
+                | PlotOp::Path {
+                    x, y, w, h, fill, ..
+                } if fill == "#010203" && !is_swatch(*w, *h) => Some((x + w / 2.0, y + h / 2.0)),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn every_family_draws_with_its_own_renderer() {
         let data = source(&[3.0, 1.0]);
@@ -4004,7 +6105,7 @@ mod tests {
             let ops = plot_chart(&chart, rect());
             let columns = bars(&ops)
                 .into_iter()
-                .filter(|(_, _, w, h)| *w > 8.0 && *h > 8.0)
+                .filter(|(_, _, w, h)| *w > DEFAULT_MARKER_PX && *h > DEFAULT_MARKER_PX)
                 .count();
             assert_ne!(columns, 2, "{chart_type} still draws columns");
         }
@@ -4015,11 +6116,19 @@ mod tests {
             "area fills one region"
         );
         let surface = grouped("surface", group("surface", vec![series("North", &data)]));
+        let bands: Vec<String> = plot_chart(&surface, rect())
+            .iter()
+            .filter_map(|op| match op {
+                PlotOp::Rect { fill, .. } if fill != CHART_BACKGROUND_COLOR => Some(fill.clone()),
+                _ => None,
+            })
+            .collect();
         assert!(
-            plot_chart(&surface, rect())
-                .iter()
-                .any(|op| matches!(op, PlotOp::Rect { fill, .. } if fill == "#9E480E")),
-            "a contour band takes its colour from the value ramp"
+            bands.len() > 1
+                && bands
+                    .iter()
+                    .all(|fill| CHART_SERIES_COLORS.contains(&fill.as_str())),
+            "a contour band takes its colour from the value ramp, got {bands:?}"
         );
     }
 
@@ -4031,9 +6140,11 @@ mod tests {
         xy.x_values = &x;
         let chart = grouped("scatter", group("scatter", vec![xy]));
         let ops = plot_chart(&chart, rect());
-        let markers: Vec<(f64, f64, f64, f64)> = rects(&ops)
+        let markers: Vec<(f64, f64, f64, f64)> = marks(&ops)
             .into_iter()
-            .filter(|(_, _, w, h)| (*w - 4.0).abs() < 0.01 && (*h - 4.0).abs() < 0.01)
+            .filter(|(_, _, w, h)| {
+                (*w - DEFAULT_MARKER_PX).abs() < 0.01 && (*h - DEFAULT_MARKER_PX).abs() < 0.01
+            })
             .collect();
         assert_eq!(markers.len(), 2);
         assert!(markers[0].0 < markers[1].0);
@@ -4055,9 +6166,10 @@ mod tests {
             rect(),
         );
         assert_eq!(
-            rects(&scatter)
+            marks(&scatter)
                 .iter()
-                .filter(|(_, _, w, h)| (*w - 4.0).abs() < 0.01 && (*h - 4.0).abs() < 0.01)
+                .filter(|(_, _, w, h)| (*w - DEFAULT_MARKER_PX).abs() < 0.01
+                    && (*h - DEFAULT_MARKER_PX).abs() < 0.01)
                 .count(),
             1
         );
@@ -4093,9 +6205,10 @@ mod tests {
             rect(),
         );
         assert_eq!(
-            rects(&scatter)
+            marks(&scatter)
                 .iter()
-                .filter(|(_, _, w, h)| (*w - 4.0).abs() < 0.01 && (*h - 4.0).abs() < 0.01)
+                .filter(|(_, _, w, h)| (*w - DEFAULT_MARKER_PX).abs() < 0.01
+                    && (*h - DEFAULT_MARKER_PX).abs() < 0.01)
                 .count(),
             1
         );
@@ -4108,6 +6221,1114 @@ mod tests {
             rect(),
         );
         assert_eq!(paths(&bubble), 1);
+    }
+
+    fn main_linear_ticks(scale: ValueScale, unit: Option<f64>) -> Vec<f64> {
+        let span = scale.max - scale.min;
+        let unit = unit
+            .filter(|unit| unit.is_finite() && *unit > 0.0)
+            .unwrap_or(scale.unit);
+        if unit.is_finite() && unit > 0.0 {
+            let steps = (span / unit).floor();
+            if steps >= 1.0 && steps < MAX_PLOT_AXIS_TICKS as f64 {
+                let mut ticks = Vec::new();
+                let mut index = 0;
+                while ticks.len() < MAX_PLOT_AXIS_TICKS {
+                    let value = scale.min + unit * index as f64;
+                    if !value.is_finite() || value > scale.max + unit * 1e-9 {
+                        break;
+                    }
+                    ticks.push(value);
+                    index += 1;
+                }
+                if ticks.len() >= 2 {
+                    return ticks;
+                }
+            }
+        }
+        (0..=4)
+            .map(|step| match step {
+                4 => scale.max,
+                step => scale.min + span * step as f64 / 4.0,
+            })
+            .collect()
+    }
+
+    fn assert_scale_bits(
+        scale: ValueScale,
+        bounds: (f64, f64),
+        unit: f64,
+        ticks: &[f64],
+        value: f64,
+        fraction: f64,
+    ) {
+        assert_eq!(scale.min.to_bits(), bounds.0.to_bits());
+        assert_eq!(scale.max.to_bits(), bounds.1.to_bits());
+        assert_eq!(scale.unit.to_bits(), unit.to_bits());
+        assert_eq!(
+            axis_ticks(scale, None)
+                .into_iter()
+                .map(f64::to_bits)
+                .collect::<Vec<_>>(),
+            ticks.iter().copied().map(f64::to_bits).collect::<Vec<_>>()
+        );
+        assert_eq!(scale.fraction(value).to_bits(), fraction.to_bits());
+    }
+
+    #[test]
+    fn scatter_auto_y_bounds_include_values_without_x_as_on_main() {
+        let data = source(&[5.0, 10.0, 100.0]);
+        let x = [1.0, 2.0];
+        let mut xy = series("XY", &data);
+        xy.x_values = &x;
+        xy.color = Some("#010203");
+        let mut chart = grouped("scatter", group("scatter", vec![xy]));
+        chart.plot_layout = Some(xy_layout());
+        let (_, scale) = xy_scales(&chart);
+        assert_scale_bits(
+            scale,
+            (0.0, 120.0),
+            20.0,
+            &[0.0, 20.0, 40.0, 60.0, 80.0, 100.0, 120.0],
+            5.0,
+            5.0 / 120.0,
+        );
+        assert_eq!(xy_markers(&plot_chart(&chart, rect())).len(), 2);
+    }
+
+    #[test]
+    fn scatter_inverted_rounded_y_maps_as_on_main() {
+        let data = source(&[0.0, 1e-12]);
+        let x = [1.0, 2.0];
+        let mut xy = series("XY", &data);
+        xy.x_values = &x;
+        let mut plot_group = group("scatter", vec![xy]);
+        plot_group.axis_ids = vec!["x", "y"];
+        let chart = PlotChart {
+            chart_type: "scatter",
+            plot_groups: vec![plot_group],
+            axes: vec![PlotAxis {
+                id: Some("y"),
+                kind: PlotAxisKind::Value,
+                range: PlotAxisRange {
+                    min: Some(1e-13),
+                    max: None,
+                },
+                major_unit: Some(1.0),
+                ..PlotAxis::default()
+            }],
+            ..PlotChart::default()
+        };
+        let (_, scale) = xy_scales(&chart);
+        assert_scale_bits(
+            scale,
+            (1e-13, 0.0),
+            1.0,
+            &[
+                1e-13,
+                1e-13 + -1e-13 / 4.0,
+                1e-13 + -1e-13 * 2.0 / 4.0,
+                1e-13 + -1e-13 * 3.0 / 4.0,
+                0.0,
+            ],
+            0.0,
+            1.0,
+        );
+    }
+
+    #[test]
+    fn finite_value_axes_keep_duplicate_tick_bits_as_on_main() {
+        let a = 9007199254740992.0;
+        let b = a + 2.0;
+        let data = source(&[a, b]);
+        let x = [a, b];
+        let mut xy = series("XY", &data);
+        xy.x_values = &x;
+        let mut plot_group = group("scatter", vec![xy]);
+        plot_group.axis_ids = vec!["x", "y"];
+        let axes = ["x", "y"]
+            .map(|id| PlotAxis {
+                major_unit: Some(4.0),
+                ..value_axis(id, a, b)
+            })
+            .to_vec();
+        let chart = PlotChart {
+            chart_type: "scatter",
+            plot_groups: vec![plot_group],
+            axes,
+            ..PlotChart::default()
+        };
+        let (x_scale, y_scale) = xy_scales(&chart);
+        for scale in [x_scale, y_scale] {
+            assert_scale_bits(scale, (a, b), 4.0, &[a, a, a, b, b], b, 1.0);
+        }
+    }
+
+    #[test]
+    fn bubble_auto_x_includes_nonpositive_sizes_as_on_main() {
+        let data = source(&[1.0, 2.0, 3.0]);
+        let x = [1.0, 2.0, 100.0];
+        for size in [0.0, -1.0] {
+            let sizes = [1.0, 1.0, size];
+            let mut xy = series("XY", &data);
+            xy.x_values = &x;
+            xy.bubble_sizes = &sizes;
+            let mut plot_group = group("bubble", vec![xy]);
+            plot_group.axis_ids = vec!["x", "y"];
+            let chart = PlotChart {
+                chart_type: "bubble",
+                plot_groups: vec![plot_group],
+                axes: vec![PlotAxis {
+                    id: Some("x"),
+                    kind: PlotAxisKind::Value,
+                    major_unit: Some(1.0),
+                    ..PlotAxis::default()
+                }],
+                ..PlotChart::default()
+            };
+            let (scale, _) = xy_scales(&chart);
+            assert_scale_bits(
+                scale,
+                (1.0, 100.0),
+                1.0,
+                &[1.0, 25.75, 50.5, 75.25, 100.0],
+                2.0,
+                1.0 / 99.0,
+            );
+        }
+    }
+
+    #[test]
+    fn scatter_auto_x_follows_plotted_points_and_y_includes_unpaired_values() {
+        let x = [40.0, 40.0];
+        for (values, max) in [(vec![5.0, 10.0], 12.0), (vec![5.0, 10.0, 1e9], 1.2e9)] {
+            let data = source(&values);
+            let mut xy = series("XY", &data);
+            xy.x_values = &x;
+            xy.color = Some("#010203");
+            let mut chart = grouped("scatter", group("scatter", vec![xy]));
+            chart.plot_layout = Some(xy_layout());
+            let (x_scale, y_scale) = xy_scales(&chart);
+            assert_eq!((x_scale.min, x_scale.max), (0.0, 40.0));
+            assert_eq!((y_scale.min, y_scale.max), (0.0, max));
+            let ops = plot_chart(&chart, rect());
+            let markers = xy_markers(&ops);
+            assert_eq!(markers.len(), 2);
+            for ((x, y), value) in markers.iter().zip([5.0, 10.0]) {
+                assert!((x - 270.0).abs() < 0.01, "{markers:?}");
+                assert!(
+                    (y - (180.0 - 160.0 * (value / max))).abs() < 0.01,
+                    "{markers:?}"
+                );
+            }
+            let labels = texts(&ops);
+            assert!(labels.contains(&"40".to_owned()), "{labels:?}");
+        }
+    }
+
+    #[test]
+    fn scatter_and_bubble_automatic_y_padding_stays_finite() {
+        let data = source(&[1e308, 1.75e308]);
+        let x = [1.0, 2.0];
+        let sizes = [2.0, 2.0];
+        for chart_type in ["scatter", "bubble"] {
+            for reversed in [false, true] {
+                for major_unit in [None, Some(1.0)] {
+                    let mut xy = series("XY", &data);
+                    xy.x_values = &x;
+                    xy.bubble_sizes = &sizes;
+                    xy.color = Some("#010203");
+                    let mut group = group(chart_type, vec![xy]);
+                    group.axis_ids = vec!["x", "y"];
+                    let chart = PlotChart {
+                        chart_type,
+                        plot_groups: vec![group],
+                        axes: vec![PlotAxis {
+                            id: Some("y"),
+                            kind: PlotAxisKind::Value,
+                            reversed,
+                            major_unit,
+                            ..PlotAxis::default()
+                        }],
+                        plot_layout: Some(xy_layout()),
+                        ..PlotChart::default()
+                    };
+                    let (_, scale) = xy_scales(&chart);
+                    assert!(scale.min.is_finite() && scale.max.is_finite());
+                    assert!(scale.max >= 1.75e308 && scale.max > scale.min);
+                    assert!((scale.max - scale.min).is_finite());
+                    let ticks = axis_ticks(scale, major_unit);
+                    assert!(ticks.len() >= 2, "{ticks:?}");
+                    assert_eq!(
+                        ticks.into_iter().map(f64::to_bits).collect::<Vec<_>>(),
+                        main_linear_ticks(scale, major_unit)
+                            .into_iter()
+                            .map(f64::to_bits)
+                            .collect::<Vec<_>>()
+                    );
+                    let ops = plot_chart(&chart, rect());
+                    assert!(ops.iter().all(op_is_finite));
+                    let markers = xy_markers(&ops);
+                    assert_eq!(markers.len(), 2, "{chart_type}");
+                    assert!(
+                        if reversed {
+                            markers[0].1 < markers[1].1
+                        } else {
+                            markers[0].1 > markers[1].1
+                        },
+                        "{markers:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scatter_and_bubble_constant_negative_y_matches_main_bounds() {
+        let data = source(&[-40.0]);
+        let x = [1.0];
+        let sizes = [2.0];
+        for chart_type in ["scatter", "bubble"] {
+            for reversed in [false, true] {
+                let mut xy = series("XY", &data);
+                xy.x_values = &x;
+                xy.bubble_sizes = &sizes;
+                xy.color = Some("#010203");
+                let mut group = group(chart_type, vec![xy]);
+                group.axis_ids = vec!["x", "y"];
+                let chart = PlotChart {
+                    chart_type,
+                    plot_groups: vec![group],
+                    axes: vec![PlotAxis {
+                        id: Some("y"),
+                        kind: PlotAxisKind::Value,
+                        range: PlotAxisRange {
+                            min: None,
+                            max: Some(-40.0),
+                        },
+                        reversed,
+                        major_unit: Some(1.0),
+                        ..PlotAxis::default()
+                    }],
+                    plot_layout: Some(xy_layout()),
+                    ..PlotChart::default()
+                };
+                let (_, scale) = xy_scales(&chart);
+                assert_eq!(scale.min, -41.0);
+                assert_eq!(scale.max, -39.0);
+                assert!(scale.min.is_finite() && scale.min < scale.max);
+                assert_eq!(scale.fraction(-40.0), 0.5);
+                let ticks = axis_ticks(scale, Some(1.0));
+                assert!(ticks.len() >= 2, "{ticks:?}");
+                assert!(ticks.iter().all(|value| value.is_finite()), "{ticks:?}");
+                assert!(ticks.windows(2).all(|pair| pair[0] < pair[1]), "{ticks:?}");
+                let ops = plot_chart(&chart, rect());
+                assert!(ops.iter().all(op_is_finite));
+                let markers = xy_markers(&ops);
+                assert_eq!(markers.len(), 1, "{chart_type}");
+                assert!((markers[0].1 - 100.0).abs() < 0.01);
+            }
+        }
+    }
+
+    #[test]
+    fn scatter_and_bubble_overflowing_y_spans_preserve_pinned_bounds() {
+        let data = source(&[-1e308, 0.0, 1e308]);
+        let x = [1.0, 2.0, 3.0];
+        let sizes = [2.0, 2.0, 2.0];
+        for chart_type in ["scatter", "bubble"] {
+            for reversed in [false, true] {
+                for major_unit in [None, Some(1.0)] {
+                    let mut xy = series("XY", &data);
+                    xy.x_values = &x;
+                    xy.bubble_sizes = &sizes;
+                    xy.color = Some("#010203");
+                    let mut group = group(chart_type, vec![xy]);
+                    group.axis_ids = vec!["x", "y"];
+                    let mut axis = value_axis("y", -1e308, 1e308);
+                    axis.reversed = reversed;
+                    axis.major_unit = major_unit;
+                    let chart = PlotChart {
+                        chart_type,
+                        plot_groups: vec![group],
+                        axes: vec![axis],
+                        plot_layout: Some(xy_layout()),
+                        ..PlotChart::default()
+                    };
+                    let (_, scale) = xy_scales(&chart);
+                    assert_eq!((scale.min, scale.max), (-1e308, 1e308));
+                    assert_eq!(scale.fraction(0.0), 0.5);
+                    let ticks = axis_ticks(scale, major_unit);
+                    assert!(ticks.len() >= 2, "{ticks:?}");
+                    assert!(ticks.iter().all(|value| value.is_finite()), "{ticks:?}");
+                    assert!(ticks.windows(2).all(|pair| pair[0] < pair[1]), "{ticks:?}");
+                    let ops = plot_chart(&chart, rect());
+                    assert!(ops.iter().all(op_is_finite));
+                    let markers = xy_markers(&ops);
+                    assert_eq!(markers.len(), 3, "{chart_type}");
+                    assert!((markers[1].1 - 100.0).abs() < 0.01, "{markers:?}");
+                    assert!(
+                        if reversed {
+                            markers[0].1 < markers[2].1
+                        } else {
+                            markers[0].1 > markers[2].1
+                        },
+                        "{markers:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn value_axes_extreme_range_sweep() {
+        let values = [
+            -f64::MAX,
+            -1e308,
+            -1.0,
+            -f64::MIN_POSITIVE,
+            -f64::from_bits(1),
+            0.0,
+            f64::from_bits(1),
+            f64::MIN_POSITIVE,
+            1.0,
+            1e308,
+            f64::MAX,
+        ];
+        let samples: Vec<Vec<f64>> = std::iter::once(Vec::new())
+            .chain(
+                values
+                    .iter()
+                    .flat_map(|&value| [vec![value], vec![value, value]]),
+            )
+            .chain(
+                values
+                    .iter()
+                    .flat_map(|&a| values.iter().map(move |&b| vec![a, b])),
+            )
+            .collect();
+        let pins: Vec<Option<f64>> = std::iter::once(None)
+            .chain(values.iter().copied().map(Some))
+            .collect();
+        let label = PlotTextStyle::default().resolve(CHART_LABEL_SIZE_PX, 400);
+        for sample in &samples {
+            let data = source(sample);
+            let sizes = vec![2.0; sample.len()];
+            for chart_type in ["bar", "line", "area", "scatter", "bubble"] {
+                let mut xy = series("XY", &data);
+                xy.x_values = sample;
+                xy.bubble_sizes = &sizes;
+                let chart = PlotChart {
+                    chart_type,
+                    series: vec![xy],
+                    ..PlotChart::default()
+                };
+                let views = series_views(&chart.series, &mut ScanBudget::new());
+                for &min in &pins {
+                    for &max in &pins {
+                        for reversed in [false, true] {
+                            for major_unit in [None, Some(1.0)] {
+                                let axis = PlotAxis {
+                                    kind: PlotAxisKind::Value,
+                                    range: PlotAxisRange { min, max },
+                                    reversed,
+                                    major_unit,
+                                    ..PlotAxis::default()
+                                };
+                                let family = PlotFamily {
+                                    axis: Some(&axis),
+                                    x_axis: Some(&axis),
+                                    ..family(&chart, &views, &label)
+                                };
+                                let scales = [
+                                    Some(value_scale(family)),
+                                    matches!(chart_type, "scatter" | "bubble")
+                                        .then(|| scatter_x_scale(family, xy_plot())),
+                                ];
+                                for (scale_index, scale) in scales.into_iter().enumerate() {
+                                    let Some(scale) = scale else {
+                                        continue;
+                                    };
+                                    let context = (chart_type, sample, min, max, major_unit, scale);
+                                    assert!(
+                                        scale.min.is_finite() && scale.max.is_finite(),
+                                        "{context:?}"
+                                    );
+                                    assert_eq!(scale.reversed, reversed, "{context:?}");
+                                    let is_x = scale_index == 1;
+                                    let data_bounds = if is_x && !sample.is_empty() {
+                                        sample.iter().copied().fold(
+                                            (f64::INFINITY, f64::NEG_INFINITY),
+                                            |(min, max), value| (min.min(value), max.max(value)),
+                                        )
+                                    } else if is_x {
+                                        (0.0, 1.0)
+                                    } else {
+                                        sample
+                                            .iter()
+                                            .copied()
+                                            .fold((0.0_f64, 0.0_f64), |(min, max), value| {
+                                                (min.min(value), max.max(value))
+                                            })
+                                    };
+                                    let mut expected_min = min.unwrap_or(data_bounds.0);
+                                    let mut expected_max = max.unwrap_or(data_bounds.1);
+                                    let constant_x = is_x
+                                        && !sample.is_empty()
+                                        && data_bounds.0 == data_bounds.1
+                                        && min.is_none()
+                                        && max.is_none();
+                                    let inverted_pins =
+                                        min.zip(max).is_some_and(|(min, max)| min > max);
+                                    let mut normalized = !(expected_max - expected_min).is_finite()
+                                        || constant_x
+                                            && expected_max <= expected_min
+                                            && !inverted_pins;
+                                    if !normalized {
+                                        if expected_max <= expected_min {
+                                            if is_x {
+                                                expected_min = expected_min.min(0.0);
+                                                expected_max = expected_min + 1.0;
+                                            } else {
+                                                expected_max = expected_min + 1.0;
+                                            }
+                                        }
+                                        if !is_x
+                                            && (!(expected_max - expected_min).is_finite()
+                                                || expected_max <= expected_min)
+                                        {
+                                            (expected_min, expected_max) = (0.0, 1.0);
+                                        }
+                                        if !is_x {
+                                            let padding = (expected_max - expected_min) * 0.05;
+                                            if max.is_none() && expected_max > 0.0 {
+                                                expected_max += padding;
+                                            }
+                                            if min.is_none() && expected_min < 0.0 {
+                                                expected_min -= padding;
+                                            }
+                                        }
+                                        normalized = !(expected_max - expected_min).is_finite();
+                                        let unit = major_unit.unwrap_or_else(|| {
+                                            if is_x {
+                                                nice_unit(
+                                                    (expected_max - expected_min)
+                                                        / target_intervals(xy_plot().w),
+                                                )
+                                            } else {
+                                                excel_unit(expected_max - expected_min)
+                                            }
+                                        });
+                                        if min.is_none() {
+                                            expected_min = round_to_unit(expected_min, unit, false);
+                                        } else {
+                                            assert_eq!(
+                                                scale.min.to_bits(),
+                                                expected_min.to_bits(),
+                                                "{context:?}"
+                                            );
+                                        }
+                                        if max.is_none() {
+                                            expected_max = round_to_unit(expected_max, unit, true);
+                                        } else {
+                                            assert_eq!(
+                                                scale.max.to_bits(),
+                                                expected_max.to_bits(),
+                                                "{context:?}"
+                                            );
+                                        }
+                                        if !normalized {
+                                            assert_eq!(
+                                                (scale.min.to_bits(), scale.max.to_bits()),
+                                                (expected_min.to_bits(), expected_max.to_bits()),
+                                                "{context:?}"
+                                            );
+                                            assert_eq!(
+                                                scale.unit.to_bits(),
+                                                unit.to_bits(),
+                                                "{context:?}"
+                                            );
+                                            assert_eq!(scale.log_base, None, "{context:?}");
+                                            assert!(!scale.percent, "{context:?}");
+                                        }
+                                    }
+                                    let degenerate = if normalized {
+                                        if constant_x && (expected_max - expected_min).is_finite() {
+                                            match (min, max) {
+                                                (Some(_), None) => {
+                                                    expected_max = (expected_min
+                                                        + expected_min.abs().max(1.0) * 0.05)
+                                                        .min(f64::MAX);
+                                                }
+                                                (None, Some(_)) => {
+                                                    expected_min = (expected_max
+                                                        - expected_max.abs().max(1.0) * 0.05)
+                                                        .max(f64::MIN);
+                                                }
+                                                (Some(_), Some(_)) => expected_max = expected_min,
+                                                (None, None) => {
+                                                    expected_min = expected_min.min(0.0);
+                                                    expected_max = expected_max.max(0.0);
+                                                    if expected_max <= expected_min {
+                                                        expected_max = expected_min + 1.0;
+                                                    }
+                                                }
+                                            }
+                                            let unrounded = (expected_min, expected_max);
+                                            let unit = major_unit.unwrap_or_else(|| {
+                                                nice_unit(
+                                                    (expected_max - expected_min)
+                                                        / target_intervals(xy_plot().w),
+                                                )
+                                            });
+                                            if min.is_none() {
+                                                expected_min =
+                                                    round_to_unit(expected_min, unit, false);
+                                            }
+                                            if max.is_none() {
+                                                expected_max =
+                                                    round_to_unit(expected_max, unit, true);
+                                            }
+                                            if expected_max <= expected_min
+                                                && unrounded.1 > unrounded.0
+                                            {
+                                                (expected_min, expected_max) = unrounded;
+                                            }
+                                            assert_eq!(
+                                                (scale.min.to_bits(), scale.max.to_bits()),
+                                                (expected_min.to_bits(), expected_max.to_bits()),
+                                                "{context:?}"
+                                            );
+                                        }
+                                        if min.zip(max).is_none_or(|(min, max)| min <= max) {
+                                            if let Some(min) = min {
+                                                assert_eq!(scale.min, min, "{context:?}");
+                                            }
+                                            if let Some(max) = max {
+                                                assert_eq!(scale.max, max, "{context:?}");
+                                            }
+                                        }
+                                        min.zip(max).is_some_and(|(min, max)| min >= max)
+                                            || min == Some(f64::MAX) && max.is_none()
+                                            || max == Some(f64::MIN) && min.is_none()
+                                    } else {
+                                        expected_max <= expected_min
+                                    };
+                                    let ticks = axis_ticks(scale, major_unit);
+                                    assert!(ticks.len() >= 2, "{context:?}: {ticks:?}");
+                                    if (scale.max - scale.min).is_finite() {
+                                        assert_eq!(
+                                            ticks
+                                                .iter()
+                                                .copied()
+                                                .map(f64::to_bits)
+                                                .collect::<Vec<_>>(),
+                                            main_linear_ticks(scale, major_unit)
+                                                .into_iter()
+                                                .map(f64::to_bits)
+                                                .collect::<Vec<_>>(),
+                                            "{context:?}"
+                                        );
+                                        for value in [scale.min, scale.max] {
+                                            let raw = (value - scale.min) / (scale.max - scale.min);
+                                            let expected = if raw.is_finite() { raw } else { 0.0 };
+                                            assert_eq!(
+                                                scale.fraction(value).to_bits(),
+                                                expected.to_bits(),
+                                                "{context:?}"
+                                            );
+                                        }
+                                    } else {
+                                        assert!(
+                                            ticks.iter().all(|tick| tick.is_finite()),
+                                            "{context:?}: {ticks:?}"
+                                        );
+                                    }
+                                    if !normalized && expected_max < expected_min {
+                                        assert!(scale.max < scale.min, "{context:?}");
+                                        assert_eq!(scale.fraction(scale.min), 0.0, "{context:?}");
+                                        let expected_span = expected_max - expected_min;
+                                        let expected_ticks: Vec<f64> = (0..=4)
+                                            .map(|step| match step {
+                                                4 => expected_max,
+                                                step => {
+                                                    expected_min + expected_span * step as f64 / 4.0
+                                                }
+                                            })
+                                            .collect();
+                                        assert_eq!(ticks, expected_ticks, "{context:?}");
+                                    } else if degenerate {
+                                        assert_eq!(scale.max, scale.min, "{context:?}");
+                                        assert_eq!(scale.fraction(scale.min), 0.0, "{context:?}");
+                                        assert_eq!(ticks, vec![scale.min; 5], "{context:?}");
+                                    } else {
+                                        assert!(scale.max > scale.min, "{context:?}");
+                                        let span = scale.max - scale.min;
+                                        let span = if span.is_finite() {
+                                            span
+                                        } else {
+                                            scale.max * 0.5 - scale.min * 0.5
+                                        };
+                                        assert!(span.is_finite() && span > 0.0, "{context:?}");
+                                        assert!(
+                                            scale.fraction(scale.min).is_finite(),
+                                            "{context:?}"
+                                        );
+                                        assert!(
+                                            scale.fraction(scale.max).is_finite(),
+                                            "{context:?}"
+                                        );
+                                        if !(scale.max - scale.min).is_finite() {
+                                            assert!(
+                                                ticks.windows(2).all(|pair| pair[0] < pair[1]),
+                                                "{context:?}: {ticks:?}"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn value_range_impossible_inputs_share_fallback() {
+        for rule in [
+            ValueRangeRule::Scatter { intervals: 12.0 },
+            ValueRangeRule::Value,
+        ] {
+            for (data, min, max, expected) in [
+                (
+                    None,
+                    Some(f64::NAN),
+                    Some(f64::INFINITY),
+                    if matches!(rule, ValueRangeRule::Value) {
+                        (0.0, 2.0)
+                    } else {
+                        (0.0, 1.0)
+                    },
+                ),
+                (Some((0.0, 1.0)), Some(2.0), Some(1.0), (2.0, 2.0)),
+                (Some((0.0, 1.0)), Some(40.0), Some(40.0), (40.0, 40.0)),
+                (
+                    Some((f64::MAX, f64::MAX)),
+                    Some(f64::MAX),
+                    None,
+                    (f64::MAX, f64::MAX),
+                ),
+                (
+                    Some((f64::MIN, f64::MIN)),
+                    None,
+                    Some(f64::MIN),
+                    (f64::MIN, f64::MIN),
+                ),
+            ] {
+                let (min, max, unit, log_base) =
+                    normalize_value_range(data, PlotAxisRange { min, max }, rule, None, Some(1.0));
+                assert_eq!((min, max), expected);
+                let scale = ValueScale {
+                    min,
+                    max,
+                    unit,
+                    log_base,
+                    reversed: false,
+                    percent: false,
+                };
+                assert!(scale.fraction(min).is_finite());
+                assert!(axis_ticks(scale, None).iter().all(|tick| tick.is_finite()));
+            }
+        }
+    }
+
+    #[test]
+    fn scatter_and_bubble_constant_x_pins_match_main_bounds() {
+        let data = source(&[10.0]);
+        let sizes = [2.0];
+        for chart_type in ["scatter", "bubble"] {
+            for (value, bounds, expected) in [
+                (40.0, (Some(40.0), None), (0.0, 1.0)),
+                (-40.0, (None, Some(-40.0)), (-40.0, -39.0)),
+                (40.0, (Some(40.0), Some(40.0)), (0.0, 1.0)),
+                (40.0, (Some(20.0), Some(60.0)), (20.0, 60.0)),
+                (40.0, (None, None), (0.0, 40.0)),
+                (-40.0, (None, None), (-40.0, 0.0)),
+            ] {
+                for reversed in [false, true] {
+                    let x = [value];
+                    let mut xy = series("XY", &data);
+                    xy.x_values = &x;
+                    xy.bubble_sizes = &sizes;
+                    xy.color = Some("#010203");
+                    let mut group = group(chart_type, vec![xy]);
+                    group.axis_ids = vec!["x", "y"];
+                    let mut x_axis = value_axis("x", 0.0, 1.0);
+                    x_axis.range = PlotAxisRange {
+                        min: bounds.0,
+                        max: bounds.1,
+                    };
+                    x_axis.reversed = reversed;
+                    let chart = PlotChart {
+                        chart_type,
+                        plot_groups: vec![group],
+                        axes: vec![x_axis, value_axis("y", 0.0, 20.0)],
+                        plot_layout: Some(xy_layout()),
+                        ..PlotChart::default()
+                    };
+                    let (scale, _) = xy_scales(&chart);
+                    assert_eq!((scale.min, scale.max), expected, "{chart_type}");
+                    assert_eq!(scale.reversed, reversed);
+                    let markers = xy_markers(&plot_chart(&chart, rect()));
+                    assert_eq!(markers.len(), 1, "{chart_type}");
+                    let fraction = if expected.0 == expected.1 {
+                        0.0
+                    } else {
+                        ((value - expected.0) / (expected.1 - expected.0)).clamp(0.0, 1.0)
+                    };
+                    let ratio = if reversed { 1.0 - fraction } else { fraction };
+                    assert!((markers[0].0 - (30.0 + 240.0 * ratio)).abs() < 0.01);
+                    assert!((markers[0].1 - 100.0).abs() < 0.01);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scatter_and_bubble_constant_x_large_pins_match_main() {
+        let data = source(&[10.0]);
+        let sizes = [2.0];
+        for chart_type in ["scatter", "bubble"] {
+            for (value, bounds, expected, fraction) in [
+                (
+                    -1.75e308,
+                    (None, Some(-1.75e308)),
+                    (-1.75e308, -1.75e308),
+                    0.0,
+                ),
+                (1.75e308, (Some(1.75e308), None), (0.0, 1.0), 1.75e308),
+            ] {
+                for reversed in [false, true] {
+                    for major_unit in [None, Some(1.0)] {
+                        let x = [value];
+                        let mut xy = series("XY", &data);
+                        xy.x_values = &x;
+                        xy.bubble_sizes = &sizes;
+                        let mut group = group(chart_type, vec![xy]);
+                        group.axis_ids = vec!["x", "y"];
+                        let x_axis = PlotAxis {
+                            id: Some("x"),
+                            kind: PlotAxisKind::Value,
+                            range: PlotAxisRange {
+                                min: bounds.0,
+                                max: bounds.1,
+                            },
+                            reversed,
+                            major_unit,
+                            ..PlotAxis::default()
+                        };
+                        let chart = PlotChart {
+                            chart_type,
+                            plot_groups: vec![group],
+                            axes: vec![x_axis, value_axis("y", 0.0, 20.0)],
+                            ..PlotChart::default()
+                        };
+                        let (scale, _) = xy_scales(&chart);
+                        assert_eq!((scale.min, scale.max), expected, "{chart_type}");
+                        assert!(scale.min.is_finite() && scale.max.is_finite());
+                        assert!(scale.max >= scale.min);
+                        assert!((scale.max - scale.min).is_finite());
+                        assert!(scale.unit.is_finite() && scale.unit > 0.0);
+                        assert_eq!(scale.fraction(value), fraction);
+                        assert_eq!(
+                            scale.ratio(value),
+                            if reversed {
+                                1.0 - fraction.clamp(0.0, 1.0)
+                            } else {
+                                fraction.clamp(0.0, 1.0)
+                            }
+                        );
+                        let ticks = axis_ticks(scale, major_unit);
+                        assert!(ticks.len() >= 2, "{ticks:?}");
+                        assert!(ticks.iter().all(|value| value.is_finite()), "{ticks:?}");
+                        assert_eq!(ticks, main_linear_ticks(scale, major_unit));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scatter_and_bubble_constant_x_inward_pins_match_main() {
+        let data = source(&[10.0]);
+        let sizes = [2.0];
+        for chart_type in ["scatter", "bubble"] {
+            for (value, bounds, expected, fraction) in [
+                (f64::MIN, (Some(f64::MIN), None), (f64::MIN, f64::MIN), 0.0),
+                (f64::MAX, (None, Some(f64::MAX)), (0.0, 1.0), f64::MAX),
+            ] {
+                for reversed in [false, true] {
+                    let x = [value];
+                    let mut xy = series("XY", &data);
+                    xy.x_values = &x;
+                    xy.bubble_sizes = &sizes;
+                    let mut group = group(chart_type, vec![xy]);
+                    group.axis_ids = vec!["x", "y"];
+                    let x_axis = PlotAxis {
+                        id: Some("x"),
+                        kind: PlotAxisKind::Value,
+                        range: PlotAxisRange {
+                            min: bounds.0,
+                            max: bounds.1,
+                        },
+                        reversed,
+                        ..PlotAxis::default()
+                    };
+                    let chart = PlotChart {
+                        chart_type,
+                        plot_groups: vec![group],
+                        axes: vec![x_axis, value_axis("y", 0.0, 20.0)],
+                        ..PlotChart::default()
+                    };
+                    let (scale, _) = xy_scales(&chart);
+                    assert_eq!((scale.min, scale.max), expected);
+                    assert!(scale.min.is_finite() && scale.max.is_finite());
+                    assert!(scale.max >= scale.min);
+                    assert!((scale.max - scale.min).is_finite());
+                    assert!(scale.unit.is_finite() && scale.unit > 0.0);
+                    assert_eq!(scale.fraction(value), fraction);
+                    assert_eq!(
+                        scale.ratio(value),
+                        if reversed {
+                            1.0 - fraction.clamp(0.0, 1.0)
+                        } else {
+                            fraction.clamp(0.0, 1.0)
+                        }
+                    );
+                    let ticks = axis_ticks(scale, None);
+                    assert!(ticks.len() >= 2, "{ticks:?}");
+                    assert!(ticks.iter().all(|value| value.is_finite()), "{ticks:?}");
+                    assert_eq!(ticks, main_linear_ticks(scale, None));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scatter_and_bubble_constant_x_outward_pins_match_main() {
+        let data = source(&[10.0]);
+        let sizes = [2.0];
+        for chart_type in ["scatter", "bubble"] {
+            for (value, bounds, expected, fraction) in [
+                (f64::MIN, (None, Some(f64::MIN)), (f64::MIN, f64::MIN), 0.0),
+                (f64::MAX, (Some(f64::MAX), None), (0.0, 1.0), f64::MAX),
+            ] {
+                for reversed in [false, true] {
+                    let x = [value];
+                    let mut xy = series("XY", &data);
+                    xy.x_values = &x;
+                    xy.bubble_sizes = &sizes;
+                    let mut group = group(chart_type, vec![xy]);
+                    group.axis_ids = vec!["x", "y"];
+                    let x_axis = PlotAxis {
+                        id: Some("x"),
+                        kind: PlotAxisKind::Value,
+                        range: PlotAxisRange {
+                            min: bounds.0,
+                            max: bounds.1,
+                        },
+                        reversed,
+                        ..PlotAxis::default()
+                    };
+                    let chart = PlotChart {
+                        chart_type,
+                        plot_groups: vec![group],
+                        axes: vec![x_axis, value_axis("y", 0.0, 20.0)],
+                        ..PlotChart::default()
+                    };
+                    let (scale, _) = xy_scales(&chart);
+                    assert_eq!((scale.min, scale.max), expected, "{chart_type}");
+                    assert!(scale.min.is_finite() && scale.max.is_finite());
+                    assert_eq!(scale.max - scale.min, expected.1 - expected.0);
+                    assert!(scale.unit.is_finite() && scale.unit > 0.0);
+                    assert_eq!(scale.fraction(value), fraction);
+                    assert_eq!(
+                        scale.ratio(value),
+                        if reversed {
+                            1.0 - fraction.clamp(0.0, 1.0)
+                        } else {
+                            fraction.clamp(0.0, 1.0)
+                        }
+                    );
+                    let ticks = axis_ticks(scale, None);
+                    assert_eq!(ticks, main_linear_ticks(scale, None));
+                    assert!(ticks.iter().all(|value| value.is_finite()), "{ticks:?}");
+                    assert!(ticks.windows(2).all(|pair| pair[0] <= pair[1]), "{ticks:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scatter_and_bubble_unpaired_x_tails_do_not_spend_scale_budget() {
+        let a = source(&[10.0]);
+        let b = source(&[100.0, 200.0]);
+        let a_x = vec![1.0; MAX_PLOT_DATA_SCAN];
+        let b_x = [1.0, 1.0];
+        let a_sizes = vec![2.0; MAX_PLOT_DATA_SCAN];
+        let b_sizes = [2.0, 2.0];
+        for chart_type in ["scatter", "bubble"] {
+            let mut a_series = series("A", &a);
+            a_series.x_values = &a_x;
+            a_series.bubble_sizes = &a_sizes;
+            a_series.color = Some("#010203");
+            let mut b_series = series("B", &b);
+            b_series.x_values = &b_x;
+            b_series.bubble_sizes = &b_sizes;
+            b_series.color = Some("#010203");
+            b_series.marker = Some(PlotMarker {
+                symbol: Some(PlotMarkerSymbol::Circle),
+                ..PlotMarker::default()
+            });
+            let mut chart = grouped(chart_type, group(chart_type, vec![a_series, b_series]));
+            chart.plot_layout = Some(xy_layout());
+            let (_, scale) = xy_scales(&chart);
+            assert!(scale.min <= 100.0 && scale.max >= 200.0, "{scale:?}");
+            let markers = xy_markers(&plot_chart(&chart, rect()));
+            assert_eq!(markers.len(), 3, "{chart_type}");
+            assert!(markers[1].1 > markers[2].1, "{markers:?}");
+            for (_, y) in &markers[1..] {
+                assert!(*y > 20.0 && *y < 180.0, "{markers:?}");
+            }
+            for ((_, y), expected_y) in markers[1..].iter().zip([116.0, 52.0]) {
+                assert!((y - expected_y).abs() < 0.01, "{markers:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn scatter_and_bubble_overflowing_x_spans_stay_usable() {
+        let data = source(&[5.0, 10.0]);
+        let x = [-1e308, 1e308];
+        let sizes = [2.0, 2.0];
+        for chart_type in ["scatter", "bubble"] {
+            for major_unit in [None, Some(1.0)] {
+                let mut xy = series("XY", &data);
+                xy.x_values = &x;
+                xy.bubble_sizes = &sizes;
+                xy.color = Some("#010203");
+                let mut group = group(chart_type, vec![xy]);
+                group.axis_ids = vec!["x", "y"];
+                let x_axis = PlotAxis {
+                    id: Some("x"),
+                    kind: PlotAxisKind::Value,
+                    major_unit,
+                    ..PlotAxis::default()
+                };
+                let chart = PlotChart {
+                    chart_type,
+                    plot_groups: vec![group],
+                    axes: vec![x_axis, value_axis("y", 0.0, 20.0)],
+                    plot_layout: Some(xy_layout()),
+                    ..PlotChart::default()
+                };
+                let (scale, _) = xy_scales(&chart);
+                assert!(scale.min.is_finite() && scale.max.is_finite());
+                assert!(scale.unit.is_finite() && scale.unit > 0.0);
+                let ticks = axis_ticks(scale, major_unit);
+                assert!(ticks.len() >= 2, "{ticks:?}");
+                assert!(ticks.iter().all(|value| value.is_finite()), "{ticks:?}");
+                assert!(ticks.windows(2).all(|pair| pair[0] < pair[1]), "{ticks:?}");
+                let ops = plot_chart(&chart, rect());
+                assert!(ops.iter().all(op_is_finite));
+                let labels = texts(&ops);
+                assert!(
+                    labels.iter().all(|text| {
+                        !text.contains("NaN") && !text.to_ascii_lowercase().contains("inf")
+                    }),
+                    "{labels:?}"
+                );
+                let markers = xy_markers(&ops);
+                assert_eq!(markers.len(), 2, "{chart_type}");
+                assert!(markers.iter().all(|(x, y)| x.is_finite() && y.is_finite()));
+                assert!(markers[0].0 < markers[1].0, "{markers:?}");
+                assert!((markers[0].0 - 30.0).abs() < 0.01, "{markers:?}");
+                assert!((markers[1].0 - 270.0).abs() < 0.01, "{markers:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn bubble_unpaired_size_tails_spend_main_y_scan_budget() {
+        let a = Source {
+            categories: Vec::new(),
+            values: vec![10.0; MAX_PLOT_DATA_SCAN],
+        };
+        let b = source(&[100.0, 200.0]);
+        let a_x = vec![1.0; MAX_PLOT_DATA_SCAN];
+        let b_x = [1.0, 1.0];
+        let a_sizes = [2.0];
+        let b_sizes = [2.0, 2.0];
+        let mut a_series = series("A", &a);
+        a_series.x_values = &a_x;
+        a_series.bubble_sizes = &a_sizes;
+        a_series.color = Some("#010203");
+        let mut b_series = series("B", &b);
+        b_series.x_values = &b_x;
+        b_series.bubble_sizes = &b_sizes;
+        b_series.color = Some("#010203");
+        let mut chart = grouped("bubble", group("bubble", vec![a_series, b_series]));
+        chart.plot_layout = Some(xy_layout());
+        let (_, scale) = xy_scales(&chart);
+        assert_eq!((scale.min, scale.max), (0.0, 12.0));
+        let markers = xy_markers(&plot_chart(&chart, rect()));
+        assert_eq!(markers.len(), 3);
+        assert!((markers[1].1 - 20.0).abs() < 0.01, "{markers:?}");
+        assert!((markers[2].1 - 20.0).abs() < 0.01, "{markers:?}");
+    }
+
+    #[test]
+    fn scatter_and_bubble_y_scan_keeps_main_cap_and_point_overrides() {
+        let dense = Source {
+            categories: Vec::new(),
+            values: vec![10.0; MAX_PLOT_DATA_SCAN],
+        };
+        let sparse = source(&[10.0]);
+        let b = source(&[100.0, 200.0]);
+        let a_x = vec![1.0; MAX_PLOT_DATA_SCAN];
+        let b_x = [1.0, 1.0];
+        let a_sizes = vec![2.0; MAX_PLOT_DATA_SCAN];
+        let b_sizes = [2.0, 2.0];
+        for chart_type in ["scatter", "bubble"] {
+            let mut a_series = series("A", &dense);
+            a_series.x_values = &a_x;
+            a_series.bubble_sizes = &a_sizes;
+            let mut b_series = series("B", &b);
+            b_series.x_values = &b_x;
+            b_series.bubble_sizes = &b_sizes;
+            let mut chart = grouped(chart_type, group(chart_type, vec![a_series, b_series]));
+            let (_, scale) = xy_scales(&chart);
+            assert_eq!((scale.min, scale.max), (0.0, 12.0));
+
+            chart.plot_groups[0].series[0].values = &sparse.values;
+            chart.plot_groups[0].series[0].points = vec![PlotPoint {
+                index: Some(MAX_PLOT_DATA_SCAN - 1),
+                value: Some(500.0),
+                ..PlotPoint::default()
+            }];
+            let (_, scale) = xy_scales(&chart);
+            assert_eq!((scale.min, scale.max), (0.0, 250.0));
+
+            chart.plot_groups[0].series[0].points[0].value = Some(50.0);
+            let (_, scale) = xy_scales(&chart);
+            assert!(scale.max >= 200.0, "{scale:?}");
+
+            chart.plot_groups[0].series[0].points[0].index = None;
+            chart.plot_groups[0].series[0].points[0].value = Some(10.0);
+            let (_, scale) = xy_scales(&chart);
+            assert_eq!((scale.min, scale.max), (0.0, 250.0));
+        }
     }
 
     #[test]
@@ -4503,9 +7724,10 @@ mod tests {
         off.markers = Some(false);
         let ops = plot_chart(&grouped("line", off), rect());
         assert!(
-            !rects(&ops)
+            !marks(&ops)
                 .iter()
-                .any(|(_, _, w, h)| (*w - 4.0).abs() < 0.01 && (*h - 4.0).abs() < 0.01)
+                .any(|(_, _, w, h)| (*w - DEFAULT_MARKER_PX).abs() < 0.01
+                    && (*h - DEFAULT_MARKER_PX).abs() < 0.01)
         );
     }
 
@@ -4649,9 +7871,11 @@ mod tests {
             .into_iter()
             .find(|(_, _, w, h)| *w > 8.0 && *h > 8.0)
             .expect("a column");
-        let marker = bars(&ops)
+        let marker = marks(&ops)
             .into_iter()
-            .find(|(_, _, w, h)| (*w - 4.0).abs() < 0.01 && (*h - 4.0).abs() < 0.01)
+            .find(|(_, _, w, h)| {
+                (*w - DEFAULT_MARKER_PX).abs() < 0.01 && (*h - DEFAULT_MARKER_PX).abs() < 0.01
+            })
             .expect("a line marker");
         assert!(
             marker.1 > bar.1,
@@ -4701,6 +7925,44 @@ mod tests {
     }
 
     #[test]
+    fn a_line_point_sits_mid_band_unless_the_axis_crosses_at_the_category() {
+        let markers = |cross_between| {
+            let data = source(&[1.0, 2.0, 3.0]);
+            let mut trend = series("Trend", &data);
+            trend.marker = Some(PlotMarker {
+                size: Some(8.0),
+                symbol: Some(PlotMarkerSymbol::Diamond),
+            });
+            let mut group = group("line", vec![trend]);
+            group.axis_ids = vec!["1"];
+            let mut axis = value_axis("1", 0.0, 4.0);
+            axis.cross_between = cross_between;
+            let chart = PlotChart {
+                chart_type: "line",
+                plot_groups: vec![group],
+                axes: vec![axis],
+                ..PlotChart::default()
+            };
+            plot_chart(&chart, rect())
+                .into_iter()
+                .filter_map(|op| match op {
+                    PlotOp::Path { x, w, h, .. } if (w - h).abs() < 0.01 => Some(x + w / 2.0),
+                    _ => None,
+                })
+                .collect::<Vec<f64>>()
+        };
+        let on_ticks = markers(Some("midCat"));
+        let mid_band = markers(None);
+        assert_eq!(mid_band, markers(Some("between")));
+        let (tick_step, band) = (on_ticks[1] - on_ticks[0], mid_band[1] - mid_band[0]);
+        assert!(
+            (band / tick_step - 2.0 / 3.0).abs() < 1e-6,
+            "{on_ticks:?} {mid_band:?}"
+        );
+        assert!((mid_band[0] - on_ticks[0] - band / 2.0).abs() < 1e-6);
+    }
+
+    #[test]
     fn a_log_axis_places_values_by_their_logarithm() {
         let data = source(&[1.0, 100.0]);
         let mut group = group("line", vec![series("Growth", &data)]);
@@ -4714,9 +7976,11 @@ mod tests {
             ..PlotChart::default()
         };
         let ops = plot_chart(&chart, rect());
-        let markers: Vec<(f64, f64, f64, f64)> = rects(&ops)
+        let markers: Vec<(f64, f64, f64, f64)> = marks(&ops)
             .into_iter()
-            .filter(|(_, _, w, h)| (*w - 4.0).abs() < 0.01 && (*h - 4.0).abs() < 0.01)
+            .filter(|(_, _, w, h)| {
+                (*w - DEFAULT_MARKER_PX).abs() < 0.01 && (*h - DEFAULT_MARKER_PX).abs() < 0.01
+            })
             .collect();
         let plot_h = 200.0 - 10.0 - 34.0;
         let travelled = markers[0].1 - markers[1].1;
@@ -4748,8 +8012,205 @@ mod tests {
         let tall = bars(&ops);
         assert_eq!(tall.len(), 2);
         assert!(
-            tall[1].1 < 11.0 && tall[1].3 > 150.0,
+            tall[1].1 < 15.0 && tall[1].3 > 150.0,
             "a reversed axis grows the bar downward from the top: {tall:?}"
+        );
+    }
+
+    #[test]
+    fn a_pinned_minimum_starts_the_major_unit_walk() {
+        let data = source(&[268.0, 273.0]);
+        let mut group = group("line", vec![series("Score", &data)]);
+        group.axis_ids = vec!["1"];
+        let mut axis = value_axis("1", 245.0, 285.0);
+        axis.major_unit = Some(10.0);
+        let chart = PlotChart {
+            chart_type: "line",
+            plot_groups: vec![group],
+            axes: vec![axis],
+            ..PlotChart::default()
+        };
+        let ops = plot_chart(&chart, rect());
+        let labels = texts(&ops);
+        for tick in ["245", "255", "265", "275", "285"] {
+            assert!(
+                labels.contains(&tick.to_owned()),
+                "{tick} is missing: {labels:?}"
+            );
+        }
+        assert!(!labels.contains(&"250".to_owned()), "{labels:?}");
+        let mut grid: Vec<f64> = ops
+            .iter()
+            .filter_map(|op| match op {
+                PlotOp::Line { y1, y2, color, .. }
+                    if color == CHART_GRID_COLOR && (y1 - y2).abs() < 0.01 =>
+                {
+                    Some(*y1)
+                }
+                _ => None,
+            })
+            .collect();
+        grid.sort_by(f64::total_cmp);
+        let mut marks: Vec<f64> = texts_at(&ops)
+            .into_iter()
+            .filter(|(text, ..)| text.parse::<f64>().is_ok_and(|value| value >= 245.0))
+            .map(|(_, _, baseline, _)| baseline - 0.25 * CHART_LABEL_SIZE_PX)
+            .collect();
+        marks.sort_by(f64::total_cmp);
+        assert_eq!(grid.len(), 5, "{grid:?}");
+        assert_eq!(marks.len(), grid.len(), "{marks:?}");
+        assert!(
+            grid.iter()
+                .zip(&marks)
+                .all(|(line, mark)| (line - mark).abs() < 1e-9),
+            "every gridline stands on its own label: {grid:?} {marks:?}"
+        );
+    }
+
+    #[test]
+    fn nice_unit_rounds_up_to_one_two_or_five_times_a_power_of_ten() {
+        let close = |got: f64, want: f64| (got - want).abs() <= want.abs() * 1e-9;
+        for (rough, want) in [
+            (1.0, 1.0),
+            (1.01, 2.0),
+            (2.0, 2.0),
+            (2.1, 5.0),
+            (5.0, 5.0),
+            (5.1, 10.0),
+            (10.0, 10.0),
+            (1.757, 2.0),
+            (3.205, 5.0),
+            (6.25, 10.0),
+            (1234.0, 2000.0),
+            (0.5, 0.5),
+            (0.51, 1.0),
+            (0.128, 0.2),
+            (0.05, 0.05),
+        ] {
+            let got = nice_unit(rough);
+            assert!(close(got, want), "nice_unit({rough}) is {got}, want {want}");
+        }
+        for rough in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(nice_unit(rough), 1.0, "nice_unit({rough}) falls back to 1");
+        }
+    }
+
+    #[test]
+    fn an_auto_value_axis_counts_in_round_steps_and_leaves_headroom() {
+        // The `stacked-bar` deck: four categories totalling 8.7, 8.9, 8.3 and
+        // 12.3, with no c:min, no c:max and no c:majorUnit anywhere.
+        let column = |values: &[f64]| Source {
+            categories: ["Alpha", "Beta", "Gamma", "Delta"]
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect(),
+            values: values.to_vec(),
+        };
+        let (north, south, east) = (
+            column(&[2.9, 3.0, 2.8, 4.1]),
+            column(&[2.9, 3.0, 2.8, 4.1]),
+            column(&[2.9, 2.9, 2.7, 4.1]),
+        );
+        let mut stacked = group(
+            "bar",
+            vec![
+                series("North", &north),
+                series("South", &south),
+                series("East", &east),
+            ],
+        );
+        stacked.grouping = Some("stacked");
+        let wide = PlotRect {
+            x: 0.0,
+            y: 0.0,
+            w: 1124.0,
+            h: 482.0,
+        };
+        let ops = plot_chart(&grouped("bar", stacked), wide);
+
+        let mut ticks: Vec<f64> = tick_labels(&ops)
+            .iter()
+            .map(|(text, ..)| text.parse::<f64>().expect("numeric"))
+            .collect();
+        ticks.sort_by(f64::total_cmp);
+        assert_eq!(
+            ticks,
+            vec![0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0],
+            "an auto axis over 0..12.3 counts in twos to 14"
+        );
+        for (text, ..) in tick_labels(&ops) {
+            assert!(!text.contains('.'), "{text} is not a round step");
+        }
+
+        let mut grid: Vec<f64> = ops
+            .iter()
+            .filter_map(|op| match op {
+                PlotOp::Line { x1, x2, color, .. }
+                    if color == CHART_GRID_COLOR && (x1 - x2).abs() < 0.01 =>
+                {
+                    Some(*x1)
+                }
+                _ => None,
+            })
+            .collect();
+        grid.sort_by(f64::total_cmp);
+        assert_eq!(grid.len(), 8);
+        let far = bars(&ops)
+            .iter()
+            .map(|(x, _, w, _)| x + w)
+            .fold(f64::MIN, f64::max);
+        assert!(
+            grid[6] < far && far < grid[7],
+            "the 12.3 stack stops between the 12 and 14 gridlines rather than \
+             against the plot edge: {far} in {grid:?}"
+        );
+    }
+
+    #[test]
+    fn a_pinned_axis_keeps_its_bounds_and_still_counts_in_round_steps() {
+        let data = source(&[10.0, 20.0]);
+        let mut group = group("column", vec![series("North", &data)]);
+        group.axis_ids = vec!["1"];
+        let chart = PlotChart {
+            chart_type: "column",
+            plot_groups: vec![group],
+            axes: vec![value_axis("1", 0.0, 25.0)],
+            ..PlotChart::default()
+        };
+        let mut ticks: Vec<f64> = tick_labels(&plot_chart(&chart, rect()))
+            .iter()
+            .map(|(text, ..)| text.parse::<f64>().expect("numeric"))
+            .collect();
+        ticks.sort_by(f64::total_cmp);
+        assert_eq!(ticks, vec![0.0, 5.0, 10.0, 15.0, 20.0, 25.0]);
+    }
+
+    #[test]
+    fn an_explicit_major_unit_beats_the_computed_one() {
+        let north = source(&[8.0, 12.3]);
+        let mut group = group("column", vec![series("North", &north)]);
+        group.axis_ids = vec!["1"];
+        let chart = PlotChart {
+            chart_type: "column",
+            plot_groups: vec![group],
+            axes: vec![PlotAxis {
+                id: Some("1"),
+                kind: PlotAxisKind::Value,
+                major_gridlines: true,
+                major_unit: Some(3.0),
+                ..PlotAxis::default()
+            }],
+            ..PlotChart::default()
+        };
+        let mut ticks: Vec<f64> = tick_labels(&plot_chart(&chart, rect()))
+            .iter()
+            .map(|(text, ..)| text.parse::<f64>().expect("numeric"))
+            .collect();
+        ticks.sort_by(f64::total_cmp);
+        assert_eq!(
+            ticks,
+            vec![0.0, 3.0, 6.0, 9.0, 12.0, 15.0],
+            "the author's unit picks the ticks and the auto max rounds to it"
         );
     }
 
@@ -4774,6 +8235,43 @@ mod tests {
         };
         assert_eq!(grid(true), 5);
         assert_eq!(grid(false), 0);
+    }
+
+    #[test]
+    fn a_gridline_whose_sp_pr_draws_no_line_is_hidden() {
+        let data = source(&[1.0, 2.0, 3.0]);
+        let grid = |chart_type: &'static str, line: Option<PlotLine<'static>>| {
+            let mut group = group(chart_type, vec![series("North", &data)]);
+            group.axis_ids = vec!["1"];
+            let mut axis = value_axis("1", 0.0, 4.0);
+            axis.major_gridline = line;
+            let chart = PlotChart {
+                chart_type,
+                plot_groups: vec![group],
+                axes: vec![axis],
+                ..PlotChart::default()
+            };
+            plot_chart(&chart, rect())
+                .iter()
+                .filter(|op| matches!(op, PlotOp::Line { color, .. } if color == CHART_GRID_COLOR))
+                .count()
+        };
+        let line = |none| {
+            Some(PlotLine {
+                none,
+                color: None,
+                width_emu: None,
+            })
+        };
+        for chart_type in ["column", "radar"] {
+            assert!(grid(chart_type, None) > 0, "{chart_type}");
+            assert_eq!(
+                grid(chart_type, line(false)),
+                grid(chart_type, None),
+                "{chart_type}"
+            );
+            assert_eq!(grid(chart_type, line(true)), 0, "{chart_type}");
+        }
     }
 
     #[test]
@@ -4828,6 +8326,200 @@ mod tests {
     }
 
     #[test]
+    fn the_chart_space_fill_replaces_the_default_white_ground() {
+        let ground = |fill| {
+            let chart = PlotChart {
+                chart_type: "column",
+                fill,
+                ..PlotChart::default()
+            };
+            plot_chart(&chart, rect())
+                .into_iter()
+                .find_map(|op| match op {
+                    PlotOp::Rect { w, h, fill, .. } if w == 300.0 && h == 200.0 => Some(fill),
+                    _ => None,
+                })
+        };
+        assert_eq!(ground(None).as_deref(), Some(CHART_BACKGROUND_COLOR));
+        assert_eq!(
+            ground(Some(PlotFill::Solid("#123456"))).as_deref(),
+            Some("#123456")
+        );
+        assert_eq!(
+            ground(Some(PlotFill::Pattern {
+                foreground: Some("#01C4BF"),
+                background: Some("#01BABC"),
+            }))
+            .as_deref(),
+            Some("#01BFBD")
+        );
+        assert_eq!(ground(Some(PlotFill::None)), None);
+    }
+
+    /// White series ink over a coloured chart space stays visible only if the
+    /// ground is the part's own, not the hardcoded white.
+    #[test]
+    fn a_no_fill_chart_space_paints_nothing_behind_the_series() {
+        let data = source(&[1.0, 2.0]);
+        let chart = PlotChart {
+            chart_type: "column",
+            plot_groups: vec![group("column", vec![series("North", &data)])],
+            fill: Some(PlotFill::None),
+            ..PlotChart::default()
+        };
+        assert!(!plot_chart(&chart, rect()).iter().any(|op| matches!(
+            op,
+            PlotOp::Rect { w, h, .. } if *w == 300.0 && *h == 200.0
+        )));
+    }
+
+    /// `(x1, y1, x2, y2, color, width)` of every non-gridline rule.
+    fn rules(ops: &[PlotOp]) -> Vec<(f64, f64, f64, f64, String, f64)> {
+        ops.iter()
+            .filter_map(|op| match op {
+                PlotOp::Line {
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    color,
+                    width,
+                } if color != CHART_GRID_COLOR => Some((*x1, *y1, *x2, *y2, color.clone(), *width)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_axis_line_follows_its_own_sp_pr_rather_than_the_chart_default() {
+        let data = source(&[1.0, 2.0]);
+        let edges = |value_line, category_line| {
+            let mut group = group("column", vec![series("North", &data)]);
+            group.axis_ids = vec!["1", "2"];
+            let mut value = value_axis("1", 0.0, 4.0);
+            value.line = value_line;
+            let category = PlotAxis {
+                id: Some("2"),
+                kind: PlotAxisKind::Category,
+                line: category_line,
+                ..PlotAxis::default()
+            };
+            let chart = PlotChart {
+                chart_type: "column",
+                plot_groups: vec![group],
+                axes: vec![value, category],
+                ..PlotChart::default()
+            };
+            rules(&plot_chart(&chart, rect()))
+        };
+
+        let default = edges(None, None);
+        assert_eq!(default.len(), 2);
+        assert!(
+            default
+                .iter()
+                .all(|(.., color, width)| color == CHART_AXIS_COLOR && *width == 1.0)
+        );
+
+        let suppressed = edges(
+            Some(PlotLine {
+                none: true,
+                ..PlotLine::default()
+            }),
+            Some(PlotLine {
+                color: Some("#BFBFBF"),
+                width_emu: Some(9525.0),
+                ..PlotLine::default()
+            }),
+        );
+        assert_eq!(suppressed.len(), 1);
+        let (x1, y1, x2, _, color, width) = suppressed[0].clone();
+        assert!(y1 > 0.0 && x2 > x1, "the surviving rule is the bottom one");
+        assert_eq!((color.as_str(), width), ("#BFBFBF", 1.0));
+    }
+
+    #[test]
+    fn an_axis_line_width_scales_with_its_emu_and_stays_at_least_a_hairline() {
+        assert_eq!(axis_line_width(None), 1.0);
+        assert_eq!(axis_line_width(Some(9525.0)), 1.0);
+        assert_eq!(axis_line_width(Some(3175.0)), 1.0);
+        assert_eq!(axis_line_width(Some(38100.0)), 4.0);
+        assert_eq!(axis_line_width(Some(f64::INFINITY)), 1.0);
+        assert_eq!(axis_line_width(Some(1e30)), MAX_LINE_PX);
+    }
+
+    #[test]
+    fn a_series_line_takes_its_width_from_its_own_sp_pr() {
+        let data = source(&[1.0, 2.0]);
+        let widths = |line| {
+            let mut north = series("North", &data);
+            north.line = line;
+            plot_chart(&grouped("line", group("line", vec![north])), rect())
+                .iter()
+                .filter_map(|op| match op {
+                    PlotOp::Line { color, width, .. } if color == CHART_SERIES_COLORS[0] => {
+                        Some(*width)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(widths(None), [DEFAULT_SERIES_LINE_PX]);
+        assert_eq!(
+            widths(Some(PlotLine {
+                width_emu: Some(41275.0),
+                ..PlotLine::default()
+            })),
+            [41275.0 / EMU_PER_PIXEL]
+        );
+        assert!(
+            widths(Some(PlotLine {
+                none: true,
+                width_emu: Some(41275.0),
+                ..PlotLine::default()
+            }))
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_series_line_width_stays_between_a_hairline_and_the_cap() {
+        let width = |line| {
+            series_line_width(&PlotSeries {
+                line,
+                ..PlotSeries::default()
+            })
+        };
+        assert_eq!(width(None), Some(DEFAULT_SERIES_LINE_PX));
+        assert_eq!(
+            width(Some(PlotLine::default())),
+            Some(DEFAULT_SERIES_LINE_PX)
+        );
+        assert_eq!(
+            width(Some(PlotLine {
+                width_emu: Some(3175.0),
+                ..PlotLine::default()
+            })),
+            Some(1.0)
+        );
+        assert_eq!(
+            width(Some(PlotLine {
+                width_emu: Some(1e30),
+                ..PlotLine::default()
+            })),
+            Some(MAX_LINE_PX)
+        );
+        assert_eq!(
+            width(Some(PlotLine {
+                width_emu: Some(f64::NAN),
+                ..PlotLine::default()
+            })),
+            Some(DEFAULT_SERIES_LINE_PX)
+        );
+    }
+
+    #[test]
     fn a_reversed_category_axis_draws_the_categories_from_the_far_end() {
         let data = source(&[1.0, 9.0]);
         let mut group = group("column", vec![series("North", &data)]);
@@ -4852,6 +8544,581 @@ mod tests {
     }
 
     #[test]
+    fn a_pie_region_stays_inside_the_frame_and_clear_of_its_legend() {
+        let data = source(&[3.0, 1.0]);
+        for position in ["top", "bottom"] {
+            let mut chart = grouped("pie", group("pie", vec![series("North", &data)]));
+            chart.title = Some("Share");
+            chart.legend = Some(PlotLegend {
+                overlay: false,
+                position: Some(position),
+                visible: Some(true),
+            });
+            let frame = PlotRect {
+                x: 0.0,
+                y: 0.0,
+                w: 260.0,
+                h: 180.0,
+            };
+            let ops = plot_chart(&chart, frame);
+            let key = swatches(&ops)[0].1;
+            for op in &ops {
+                if let PlotOp::Path { y, h, .. } = op {
+                    assert!(*y >= frame.y && y + h <= frame.y + frame.h, "{position}");
+                    if position == "bottom" {
+                        let band_top =
+                            key - (LEGEND_ROW_EM - LEGEND_KEY_EM) * CHART_LABEL_SIZE_PX / 2.0;
+                        assert!(
+                            y + h + BAND_GAP <= band_top + 1e-9,
+                            "the pie keeps a full gap from its legend: {} vs {band_top}",
+                            y + h
+                        );
+                    } else {
+                        assert!(*y >= key + SWATCH, "the pie runs into its legend");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_huge_title_leaves_the_plot_inside_the_frame() {
+        let data = source(&[10.0, 20.0]);
+        let frame = PlotRect {
+            x: 0.0,
+            y: 0.0,
+            w: 300.0,
+            h: 140.0,
+        };
+        for chart_type in ["column", "pie"] {
+            let mut chart = grouped(chart_type, group(chart_type, vec![series("North", &data)]));
+            chart.title = Some("Revenue");
+            chart.text.title.size_pt = Some(72.0);
+            chart.legend = Some(PlotLegend {
+                overlay: false,
+                position: None,
+                visible: Some(false),
+            });
+            for op in plot_chart(&chart, frame) {
+                match op {
+                    PlotOp::Rect { y, h, .. } | PlotOp::Path { y, h, .. } => {
+                        assert!(y + h <= frame.y + frame.h + 1e-9, "{chart_type}: {y} + {h}")
+                    }
+                    PlotOp::Line { y1, y2, .. } => {
+                        assert!(y1.max(y2) <= frame.y + frame.h + 1e-9, "{chart_type}")
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_row_legend_keeps_only_the_rows_the_plot_and_its_labels_leave_room_for() {
+        let data = source(&[10.0, 20.0]);
+        let names = ["North America", "South America", "Europe", "Asia Pacific"];
+        let mut chart = legend_chart(Some("bottom"), &names, &data);
+        chart.title = None;
+        chart.text.legend.size_pt = Some(14.0);
+        let frame = PlotRect {
+            x: 0.0,
+            y: 0.0,
+            w: 180.0,
+            h: 140.0,
+        };
+        let ops = plot_chart(&chart, frame);
+        let drawn = texts(&ops);
+        let kept: Vec<&str> = names
+            .into_iter()
+            .filter(|name| drawn.iter().any(|text| text == name))
+            .collect();
+        assert_eq!(kept, ["North America", "South America"]);
+
+        let ticks = tick_labels(&ops);
+        let span = ticks.iter().map(|tick| tick.2).fold(f64::MIN, f64::max)
+            - ticks.iter().map(|tick| tick.2).fold(f64::MAX, f64::min);
+        assert!(span >= MIN_PLOT - 1e-9, "the plot keeps {span}px");
+        let legend_px = 14.0 * 4.0 / 3.0;
+        let legend_top = text_at(&ops, "North America").2 - TITLE_ASCENT_EM * legend_px;
+        let category = text_at(&ops, "Q1");
+        assert!(
+            category.2 + 0.25 * CHART_LABEL_SIZE_PX < legend_top,
+            "{category:?} runs into the legend at {legend_top}"
+        );
+    }
+
+    #[test]
+    fn axis_labels_keep_half_an_em_and_legend_labels_calibri_widths() {
+        let font = chart_label_font();
+        assert_eq!(
+            fallback_label_width("July", &font),
+            4.0 * 0.5 * font.size_px
+        );
+        assert_eq!(
+            fallback_label_width("日本", &font),
+            2.0 * 0.5 * font.size_px
+        );
+        assert_eq!(legend_fallback_width("日本", &font), 2.0 * font.size_px);
+        for label in ["July", "illicit", "WW", "日本"] {
+            assert!(legend_fallback_width(label, &font) >= fallback_label_width(label, &font));
+        }
+        assert!(legend_fallback_width("WW", &font) > 2.0 * 0.85 * font.size_px);
+    }
+
+    #[test]
+    fn an_estimated_row_legend_leaves_each_label_at_least_the_room_it_had() {
+        let data = source(&[10.0, 20.0]);
+        let names = ["EASTERN", "WESTERN"];
+        let ops = plot_chart(
+            &legend_chart(Some("bottom"), &names, &data),
+            PlotRect {
+                x: 0.0,
+                y: 0.0,
+                w: 300.0,
+                h: 180.0,
+            },
+        );
+        let size = chart_label_font().size_px;
+        let key = size * LEGEND_KEY_EM;
+        let swatches: Vec<f64> = rects(&ops)
+            .into_iter()
+            .filter(|(_, _, w, h)| (w - key).abs() < 0.01 && (h - key).abs() < 0.01)
+            .map(|(x, ..)| x)
+            .collect();
+        let first = text_at(&ops, "EASTERN").1;
+        assert_eq!(swatches.len(), 2, "{swatches:?}");
+        assert!(
+            swatches[1] - first >= 7.0 * 0.5 * size + 14.0,
+            "{swatches:?} vs text at {first}"
+        );
+    }
+
+    #[test]
+    fn a_long_category_label_leaves_the_bars_clear_of_a_side_legend() {
+        let data = Source {
+            categories: vec!["Worldwide Customer Management".to_owned()],
+            values: vec![10.0],
+        };
+        let mut chart = legend_chart(Some("right"), &["North"], &data);
+        chart.chart_type = "bar";
+        chart.title = None;
+        let ops = plot_chart(
+            &chart,
+            PlotRect {
+                x: 0.0,
+                y: 0.0,
+                w: 250.0,
+                h: 180.0,
+            },
+        );
+        let key = chart_label_font().size_px * LEGEND_KEY_EM;
+        let (swatches, bars): (Vec<_>, Vec<_>) = rects(&ops)
+            .into_iter()
+            .skip(1)
+            .partition(|(_, _, w, h)| (w - key).abs() < 0.01 && (h - key).abs() < 0.01);
+        assert_eq!(swatches.len(), 1, "{swatches:?}");
+        for bar in &bars {
+            assert!(
+                bar.0 + bar.2 <= swatches[0].0,
+                "{bar:?} reaches {swatches:?}"
+            );
+        }
+        let widest = bars.iter().map(|bar| bar.2).fold(0.0, f64::max);
+        assert!(widest > MIN_PLOT / 2.0, "the bar keeps only {widest}px");
+    }
+
+    #[test]
+    fn a_short_frame_shrinks_the_plot_before_its_labels_leave_it() {
+        let data = source(&[10.0, 20.0]);
+        let mut chart = legend_chart(None, &["North"], &data);
+        chart.legend = None;
+        let frame = PlotRect {
+            x: 0.0,
+            y: 0.0,
+            w: 300.0,
+            h: 80.0,
+        };
+        let ops = plot_chart(&chart, frame);
+        let label = text_at(&ops, "Q1");
+        assert!(
+            label.2 <= frame.y + frame.h - CHART_PAD,
+            "{label:?} leaves the frame"
+        );
+    }
+
+    #[test]
+    fn an_overlay_row_legend_only_has_to_fit_the_frame() {
+        let data = source(&[10.0, 20.0]);
+        let names = ["A"];
+        let mut chart = legend_chart(Some("bottom"), &names, &data);
+        chart.title = None;
+        chart.legend = Some(PlotLegend {
+            overlay: true,
+            position: Some("bottom"),
+            visible: Some(true),
+        });
+        chart.text.legend.size_pt = Some(30.0);
+        let frame = PlotRect {
+            x: 0.0,
+            y: 0.0,
+            w: 260.0,
+            h: 80.0,
+        };
+        let ops = plot_chart(&chart, frame);
+        let key = 40.0 * LEGEND_KEY_EM;
+        let keys: Vec<f64> = rects(&ops)
+            .into_iter()
+            .filter(|(_, _, w, h)| (w - key).abs() < 0.01 && (h - key).abs() < 0.01)
+            .map(|(_, y, _, _)| y)
+            .collect();
+        assert_eq!(keys.len(), 1, "{keys:?}");
+        assert!(keys[0] >= frame.y && keys[0] + key <= frame.y + frame.h);
+    }
+
+    #[test]
+    fn a_legend_label_keeps_room_past_its_estimated_width() {
+        let data = source(&[10.0, 20.0]);
+        let names = ["WW"];
+        for position in ["bottom", "right"] {
+            let ops = plot_chart(&legend_chart(Some(position), &names, &data), rect());
+            let label = text_at(&ops, "WW");
+            assert!(
+                label.3
+                    >= legend_fallback_width("WW", &chart_label_font()) + LEGEND_TEXT_SLACK - 1e-9,
+                "{position}: {label:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_title_takes_a_band_sized_by_its_font() {
+        let data = source(&[10.0, 20.0]);
+        let mut chart = grouped("column", group("column", vec![series("North", &data)]));
+        chart.title = Some("Regional Sales");
+        chart.text.title.size_pt = Some(20.0);
+        chart.legend = Some(PlotLegend {
+            overlay: false,
+            position: None,
+            visible: Some(false),
+        });
+        let ops = plot_chart(&chart, rect());
+        let size = 20.0 * 4.0 / 3.0;
+        let title = text_at(&ops, "Regional Sales");
+        assert!((title.2 - (CHART_PAD + TITLE_ASCENT_EM * size)).abs() < 1e-9);
+        let top_tick = tick_labels(&ops)
+            .into_iter()
+            .map(|tick| tick.2)
+            .fold(f64::MAX, f64::min);
+        let band = CHART_PAD + TITLE_LINE_EM * size + BAND_GAP;
+        assert!(
+            top_tick - 0.75 * CHART_LABEL_SIZE_PX >= band - 1.0,
+            "the top tick {top_tick} rises into the title band {band}"
+        );
+    }
+
+    #[test]
+    fn a_combo_chart_makes_room_for_its_widest_labels() {
+        let data = Source {
+            categories: vec![
+                "A rather long category name".to_owned(),
+                "Another long one".to_owned(),
+            ],
+            values: vec![10.0, 20.0],
+        };
+        let chart = PlotChart {
+            chart_type: "column",
+            plot_groups: vec![
+                group("column", vec![series("North", &data)]),
+                group("bar", vec![series("South", &data)]),
+            ],
+            legend: Some(PlotLegend {
+                overlay: false,
+                position: None,
+                visible: Some(false),
+            }),
+            ..PlotChart::default()
+        };
+        let frame = PlotRect {
+            x: 0.0,
+            y: 0.0,
+            w: 400.0,
+            h: 300.0,
+        };
+        let ops = plot_chart(&chart, frame);
+        for name in ["A rather long category name", "Another long one"] {
+            assert!(
+                texts_at(&ops)
+                    .iter()
+                    .filter(|(text, ..)| text == name)
+                    .all(|(_, x, ..)| *x >= frame.x),
+                "{name} starts outside the frame"
+            );
+        }
+    }
+
+    #[test]
+    fn a_scatter_keeps_its_last_x_label_inside_the_frame() {
+        let data = source(&[1.0, 2.0]);
+        let xs = [0.0, 123_456.0];
+        let mut points = series("North", &data);
+        points.x_values = &xs;
+        let chart = PlotChart {
+            chart_type: "scatter",
+            plot_groups: vec![group("scatter", vec![points])],
+            legend: Some(PlotLegend {
+                overlay: false,
+                position: None,
+                visible: Some(false),
+            }),
+            ..PlotChart::default()
+        };
+        let frame = rect();
+        // Each x label's box is twice its text, centred on the tick.
+        for (text, x, _, width) in tick_labels(&plot_chart(&chart, frame)) {
+            let ink_right = x + width * 0.75;
+            assert!(ink_right <= frame.x + frame.w, "{text} ends at {ink_right}");
+        }
+    }
+
+    #[test]
+    fn axis_labels_keep_a_font_sized_gap_from_their_axis() {
+        let data = source(&[10.0, 20.0]);
+        let mut chart = grouped("column", group("column", vec![series("North", &data)]));
+        chart.legend = Some(PlotLegend {
+            overlay: false,
+            position: None,
+            visible: Some(false),
+        });
+        chart.text.chart.size_pt = Some(18.0);
+        let frame = PlotRect {
+            x: 0.0,
+            y: 0.0,
+            w: 600.0,
+            h: 400.0,
+        };
+        let ops = plot_chart(&chart, frame);
+        let size = 24.0;
+        let gap = TICK_LEN + LABEL_GAP_EM * size;
+        let axis_x = ops
+            .iter()
+            .filter_map(|op| match op {
+                PlotOp::Line { x1, x2, width, .. } if *width >= 1.0 && x1 == x2 => Some(*x1),
+                _ => None,
+            })
+            .fold(f64::MAX, f64::min);
+        let ticks = tick_labels(&ops);
+        let widest = ticks.iter().map(|tick| tick.3).fold(0.0, f64::max);
+        for tick in &ticks {
+            assert!((tick.1 + tick.3 - (axis_x - gap)).abs() < 1e-9, "{tick:?}");
+        }
+        assert!(
+            (axis_x - (CHART_PAD + widest + gap)).abs() < 1e-9,
+            "{axis_x}"
+        );
+        let axis_y = ops
+            .iter()
+            .filter_map(|op| match op {
+                PlotOp::Line { y1, y2, width, .. } if *width >= 1.0 && y1 == y2 => Some(*y1),
+                _ => None,
+            })
+            .fold(f64::MIN, f64::max);
+        let q1 = text_at(&ops, "Q1");
+        assert!((q1.2 - (axis_y + gap + 0.75 * size)).abs() < 1e-9, "{q1:?}");
+        assert!((frame.h - axis_y - (CHART_PAD + gap + size)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_horizontal_bar_chart_draws_its_value_axis_under_the_plot() {
+        let north = source(&[10.0, 20.0]);
+        let plotted = |chart_type| {
+            plot_chart(
+                &PlotChart {
+                    chart_type,
+                    axis_titles: PlotAxisTitles {
+                        category: Some("Quarter"),
+                        value: Some("Millions"),
+                    },
+                    series: vec![series("North", &north)],
+                    ..PlotChart::default()
+                },
+                rect(),
+            )
+        };
+
+        let bar = plotted("bar");
+        let ticks = tick_labels(&bar);
+        assert!(ticks.len() > 1, "the value axis places ticks: {ticks:?}");
+        assert!(
+            ticks.iter().all(|tick| (tick.2 - ticks[0].2).abs() < 0.01),
+            "every value tick shares one row under the plot: {ticks:?}"
+        );
+        assert!(
+            ticks.iter().any(|tick| (tick.1 - ticks[0].1).abs() > 0.01),
+            "and they spread along it: {ticks:?}"
+        );
+        let (q1, q2) = (text_at(&bar, "Q1"), text_at(&bar, "Q2"));
+        assert!(
+            (q1.1 - q2.1).abs() < 0.01 && (q1.2 - q2.2).abs() > 0.01,
+            "the category names stack down the left gutter: {q1:?} {q2:?}"
+        );
+        assert!(
+            ticks
+                .iter()
+                .all(|tick| tick.2 > q1.2.max(q2.2) && (tick.1 - q1.1).abs() > 0.01),
+            "the value ticks vacate the category gutter for the row under the plot: \
+             {ticks:?} {q1:?} {q2:?}"
+        );
+        assert!(
+            q1.1 >= rect().x && q1.3 >= fallback_label_width("Q1", &chart_label_font()),
+            "the gutter is wide enough for a whole category name: {q1:?}"
+        );
+        assert!(
+            text_at(&bar, "Millions").2 > ticks[0].2,
+            "the value title sits below its ticks"
+        );
+        assert!(
+            text_at(&bar, "Quarter").2 < q1.2,
+            "the category title sits above its names"
+        );
+
+        let column = plotted("column");
+        let ticks = tick_labels(&column);
+        assert!(
+            ticks
+                .iter()
+                .all(|tick| (tick.1 + tick.3 - ticks[0].1 - ticks[0].3).abs() < 0.01),
+            "a column chart right-aligns its value ticks in one left-hand column: {ticks:?}"
+        );
+        let (q1, q2) = (text_at(&column, "Q1"), text_at(&column, "Q2"));
+        assert!(
+            (q1.2 - q2.2).abs() < 0.01 && (q1.1 - q2.1).abs() > 0.01,
+            "and its category names along the bottom: {q1:?} {q2:?}"
+        );
+    }
+
+    #[test]
+    fn a_transposed_value_axis_turns_its_gridlines_and_tick_marks_upright() {
+        let data = source(&[1.0, 2.0]);
+        let lines = |chart_type: &'static str| {
+            let mut group = group(chart_type, vec![series("North", &data)]);
+            group.axis_ids = vec!["1"];
+            let mut axis = value_axis("1", 0.0, 4.0);
+            axis.major_tick_mark = Some("out");
+            let chart = PlotChart {
+                chart_type,
+                plot_groups: vec![group],
+                axes: vec![axis],
+                ..PlotChart::default()
+            };
+            let ops = plot_chart(&chart, rect());
+            let upright = |color: &str| {
+                ops.iter()
+                    .filter(|op| {
+                        matches!(op, PlotOp::Line { x1, x2, color: c, .. }
+                        if c == color && (x1 - x2).abs() < 0.01)
+                    })
+                    .count()
+            };
+            (upright(CHART_GRID_COLOR), upright(CHART_AXIS_COLOR))
+        };
+        assert_eq!(
+            lines("bar"),
+            (5, 6),
+            "a bar chart draws vertical gridlines, five tick marks and the left frame line"
+        );
+        assert_eq!(
+            lines("column"),
+            (0, 1),
+            "a column chart draws horizontal gridlines and only the left frame line"
+        );
+    }
+
+    #[test]
+    fn a_horizontal_bar_chart_plots_its_first_category_at_the_bottom() {
+        let data = source(&[1.0, 9.0]);
+        let ordered = |reversed: bool| {
+            let mut group = group("bar", vec![series("North", &data)]);
+            group.axis_ids = vec!["1"];
+            let chart = PlotChart {
+                chart_type: "bar",
+                plot_groups: vec![group],
+                axes: vec![PlotAxis {
+                    id: Some("1"),
+                    kind: PlotAxisKind::Category,
+                    reversed,
+                    ..PlotAxis::default()
+                }],
+                ..PlotChart::default()
+            };
+            bars(&plot_chart(&chart, rect()))
+        };
+
+        let upright = ordered(false);
+        assert_eq!(upright.len(), 2);
+        assert!(
+            upright[0].1 > upright[1].1,
+            "the first category draws below the second: {upright:?}"
+        );
+        assert!(
+            upright[0].2 < upright[1].2,
+            "and it is the shorter bar: {upright:?}"
+        );
+
+        let reversed = ordered(true);
+        assert_eq!(reversed.len(), 2);
+        assert!(
+            reversed[0].1 < reversed[1].1,
+            "a maxMin category axis puts the first category back on top: {reversed:?}"
+        );
+    }
+
+    #[test]
+    fn horizontal_category_titles_have_their_own_header_row() {
+        let data = source(&[1.0, 2.0]);
+        for title in [None, Some("Revenue")] {
+            let chart = PlotChart {
+                chart_type: "bar",
+                title,
+                axis_titles: PlotAxisTitles {
+                    category: Some("Quarter"),
+                    value: Some("Millions"),
+                },
+                series: vec![series("North", &data)],
+                ..PlotChart::default()
+            };
+            let ops = plot_chart(&chart, rect());
+            let category = text_at(&ops, "Quarter");
+            let title_bottom = title.map_or(0.0, |title| text_at(&ops, title).2 + 3.0);
+            assert!(category.2 - CHART_LABEL_SIZE_PX >= title_bottom);
+            assert_eq!(text_at(&ops, "Millions").2, 186.5);
+        }
+    }
+
+    #[test]
+    fn secondary_horizontal_axes_reserve_space_above_the_plot() {
+        let data = source(&[1.0, 2.0]);
+        for title in [None, Some("Revenue")] {
+            let mut primary = group("bar", vec![series("North", &data)]);
+            primary.axis_ids = vec!["1"];
+            let mut secondary = group("bar", vec![series("South", &data)]);
+            secondary.axis_ids = vec!["2"];
+            let mut chart = combo_with_axes(
+                primary,
+                secondary,
+                vec![value_axis("1", 0.0, 4.0), value_axis("2", 0.0, 8.0)],
+            );
+            chart.title = title;
+            let ops = plot_chart(&chart, rect());
+            let upper_tick = text_at(&ops, "8");
+            let title_bottom = title.map_or(0.0, |title| text_at(&ops, title).2 + 3.0);
+            assert!(upper_tick.2 - CHART_LABEL_SIZE_PX >= title_bottom);
+            let centre = upper_tick.1 + upper_tick.3 / 2.0;
+            assert!((centre - 239.0).abs() < 1e-9, "{centre}");
+            assert_eq!(text_at(&ops, "4").2, 188.0);
+        }
+    }
+
+    #[test]
     fn number_format_codes_change_what_the_axis_reads() {
         assert_eq!(format_with_code(0.256, "0.0%").as_deref(), Some("25.6%"));
         assert_eq!(format_with_code(1234.5, "#,##0").as_deref(), Some("1,235"));
@@ -4861,11 +9128,60 @@ mod tests {
         );
         assert_eq!(
             format_with_code(-12.0, "0.0;(0.0)").as_deref(),
-            Some("-12.0")
+            Some("(12.0)")
+        );
+        assert_eq!(format_with_code(-12.0, "0.0").as_deref(), Some("-12.0"));
+        let accounting = "\"$\"#,##0_);[Red]\\(\"$\"#,##0\\)";
+        assert_eq!(
+            format_with_code(18766.0, accounting).as_deref(),
+            Some("$18,766")
+        );
+        assert_eq!(
+            format_with_code(-18766.0, accounting).as_deref(),
+            Some("($18,766)")
         );
         assert_eq!(format_with_code(7.0, "General").as_deref(), Some("7"));
+        assert_eq!(format_with_code(0.0, "0;-0;\"-\"").as_deref(), Some("-"));
+        assert_eq!(format_with_code(0.0, "0;-0;").as_deref(), Some(""));
+        assert_eq!(format_with_code(4.0, "0;-0;").as_deref(), Some("4"));
+        assert_eq!(
+            format_with_code(1234.5, "[$$-409]#,##0.00").as_deref(),
+            Some("$1,234.50")
+        );
+        assert_eq!(
+            format_with_code(1234.5, "[$\u{20ac}-407]#,##0.00").as_deref(),
+            Some("\u{20ac}1,234.50")
+        );
+        assert_eq!(format_with_code(3.0, "[$-409]0").as_deref(), Some("3"));
+        assert_eq!(format_with_code(2.5, "0.0\";\"").as_deref(), Some("2.5;"));
+        assert_eq!(
+            format_with_code(-2.5, "0.0\\;;(0.0)").as_deref(),
+            Some("(2.5)")
+        );
         assert_eq!(format_with_code(7.0, "0 \"kg\"").as_deref(), Some("7 kg"));
         assert_eq!(format_with_code(7.0, "yyyy-mm-dd"), None);
+        let ledger = "_(\"$\"* #,##0_);_(\"$\"* \\(#,##0\\);_(\"$\"* \"-\"??_);_(@_)";
+        assert_eq!(format_with_code(800.0, ledger).as_deref(), Some("$800"));
+        assert_eq!(format_with_code(0.0, ledger).as_deref(), Some("$-"));
+        for (value, code, want) in [
+            (0.0, "#.##", "."),
+            (1.5, "#.##", "1.5"),
+            (0.5, "#.##", ".5"),
+            (1.0, "0.0#", "1.0"),
+            (1.25, "0.0#", "1.25"),
+            (0.0, "#,##0.00", "0.00"),
+            (1234.5, "#,##0.##", "1,234.5"),
+            (7.0, "\"No.\" 0", "No. 7"),
+        ] {
+            assert_eq!(
+                format_with_code(value, code).as_deref(),
+                Some(want),
+                "{value} {code}"
+            );
+        }
+        assert_eq!(format_with_code(1.25, "?.??").as_deref(), Some("1.25"));
+        assert_eq!(format_with_code(0.5, "0.0?").as_deref(), Some("0.5 "));
+        assert_eq!(format_with_code(-40.0, ledger).as_deref(), Some("$(40)"));
         assert_eq!(format_with_code(f64::NAN, "0.0"), None);
         assert_eq!(format_percent(0.5), "50%");
     }
@@ -4883,7 +9199,9 @@ mod tests {
             axes: vec![axis],
             ..PlotChart::default()
         };
-        assert!(texts(&plot_chart(&chart, rect())).contains(&"75%".to_owned()));
+        let labels = texts(&plot_chart(&chart, rect()));
+        assert!(labels.contains(&"80%".to_owned()), "{labels:?}");
+        assert!(labels.contains(&"100%".to_owned()), "{labels:?}");
     }
 
     #[test]
@@ -4965,6 +9283,570 @@ mod tests {
         assert_eq!(keyed(false), 0);
     }
 
+    /// Every legend swatch, in emit order.
+    fn swatches(ops: &[PlotOp]) -> Vec<(f64, f64)> {
+        rects(ops)
+            .into_iter()
+            .filter(|(_, _, w, h)| is_swatch(*w, *h))
+            .map(|(x, y, _, _)| (x, y))
+            .collect()
+    }
+
+    fn legend_chart<'a>(
+        position: Option<&'a str>,
+        names: &'a [&'a str],
+        data: &'a Source,
+    ) -> PlotChart<'a> {
+        PlotChart {
+            chart_type: "column",
+            title: Some("Revenue"),
+            series: names.iter().map(|name| series(name, data)).collect(),
+            legend: Some(PlotLegend {
+                overlay: false,
+                position,
+                visible: Some(true),
+            }),
+            ..PlotChart::default()
+        }
+    }
+
+    #[test]
+    fn a_bottom_legend_flows_in_a_row_below_the_plot() {
+        let data = source(&[10.0, 20.0]);
+        let names = ["North", "South", "East"];
+        let ops = plot_chart(&legend_chart(Some("bottom"), &names, &data), rect());
+        let swatches = swatches(&ops);
+        assert_eq!(swatches.len(), 3);
+        assert!(
+            swatches.windows(2).all(|pair| pair[0].1 == pair[1].1),
+            "a row legend shares one y: {swatches:?}"
+        );
+        assert!(
+            swatches.windows(2).all(|pair| pair[0].0 < pair[1].0),
+            "a row legend advances in x: {swatches:?}"
+        );
+        let plot_bottom = bars(&ops)
+            .into_iter()
+            .map(|(_, y, _, h)| y + h)
+            .fold(f64::MIN, f64::max);
+        assert!(
+            swatches[0].1 > plot_bottom,
+            "the legend row sits over the bars: {} vs {plot_bottom}",
+            swatches[0].1
+        );
+        let span = swatches[2].0 - swatches[0].0;
+        let centre = swatches[0].0 + span / 2.0;
+        assert!(
+            (centre - rect().w / 2.0).abs() < rect().w / 8.0,
+            "the row is not near the frame centre: {centre}"
+        );
+    }
+
+    #[test]
+    fn a_side_legend_keeps_its_column() {
+        let data = source(&[10.0, 20.0]);
+        let names = ["North", "South", "East"];
+        for position in [None, Some("right"), Some("left")] {
+            let ops = plot_chart(&legend_chart(position, &names, &data), rect());
+            let swatches = swatches(&ops);
+            assert_eq!(swatches.len(), 3, "{position:?}");
+            assert!(
+                swatches.windows(2).all(|pair| pair[0].0 == pair[1].0),
+                "{position:?} legend shares one x: {swatches:?}"
+            );
+            assert!(
+                swatches.windows(2).all(|pair| pair[0].1 < pair[1].1),
+                "{position:?} legend advances in y: {swatches:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_side_legend_spaces_its_rows_by_its_font_and_centres_them() {
+        let data = source(&[10.0, 20.0]);
+        let names = ["Hardware", "Software", "Services", "Other"];
+        let mut chart = legend_chart(Some("right"), &names, &data);
+        chart.title = None;
+        chart.text.legend.size_pt = Some(18.0);
+        let frame = PlotRect {
+            x: 0.0,
+            y: 0.0,
+            w: 880.0,
+            h: 560.0,
+        };
+        let ops = plot_chart(&chart, frame);
+        let key = 24.0 * LEGEND_KEY_EM;
+        let keys: Vec<(f64, f64)> = rects(&ops)
+            .into_iter()
+            .filter(|(_, _, w, h)| (w - key).abs() < 0.01 && (h - key).abs() < 0.01)
+            .map(|(x, y, _, _)| (x, y))
+            .collect();
+        assert_eq!(keys.len(), 4);
+        for pair in keys.windows(2) {
+            assert!((pair[1].1 - pair[0].1 - 24.0 * LEGEND_PITCH_EM).abs() < 0.01);
+        }
+        let middle = (keys[0].1 + keys[3].1 + key) / 2.0;
+        assert!((middle - frame.h / 2.0).abs() < 0.01, "{middle}");
+        let right = ops
+            .iter()
+            .filter_map(|op| match op {
+                PlotOp::Text { text, x, width, .. } if names.contains(&text.as_str()) => {
+                    Some(x + width)
+                }
+                _ => None,
+            })
+            .fold(f64::MIN, f64::max);
+        assert!((right - frame.w).abs() < 0.01, "{right}");
+        let plot_right = ops
+            .iter()
+            .filter_map(|op| match op {
+                PlotOp::Line { x2, width, .. } if *width >= 1.0 => Some(*x2),
+                _ => None,
+            })
+            .fold(f64::MIN, f64::max);
+        assert!(
+            (plot_right - (keys[0].0 - 24.0)).abs() < 0.01,
+            "{plot_right}"
+        );
+    }
+
+    #[test]
+    fn a_stacked_column_legend_reads_top_down_like_its_stack() {
+        let data = source(&[10.0, 20.0]);
+        let order = |grouping| {
+            let mut columns = group(
+                "column",
+                vec![series("North", &data), series("South", &data)],
+            );
+            columns.grouping = grouping;
+            let mut chart = grouped("column", columns);
+            chart.legend = Some(PlotLegend {
+                overlay: false,
+                position: Some("right"),
+                visible: Some(true),
+            });
+            let ops = plot_chart(&chart, rect());
+            let mut names: Vec<(f64, String)> = ops
+                .iter()
+                .filter_map(|op| match op {
+                    PlotOp::Text {
+                        text, baseline_y, ..
+                    } if text == "North" || text == "South" => Some((*baseline_y, text.clone())),
+                    _ => None,
+                })
+                .collect();
+            names.sort_by(|a, b| a.0.total_cmp(&b.0));
+            names.into_iter().map(|(_, name)| name).collect::<Vec<_>>()
+        };
+        assert_eq!(order(None), ["North", "South"]);
+        assert_eq!(order(Some("stacked")), ["South", "North"]);
+    }
+
+    #[test]
+    fn a_side_legend_leaves_out_rows_the_chart_cannot_hold() {
+        let data = source(&[10.0, 20.0]);
+        let names = ["A", "B", "C", "D", "E", "F", "G", "H"];
+        let mut chart = legend_chart(Some("right"), &names, &data);
+        chart.title = None;
+        chart.text.legend.size_pt = Some(18.0);
+        let frame = PlotRect {
+            x: 0.0,
+            y: 0.0,
+            w: 400.0,
+            h: 180.0,
+        };
+        let key = 24.0 * LEGEND_KEY_EM;
+        let keys: Vec<(f64, f64)> = rects(&plot_chart(&chart, frame))
+            .into_iter()
+            .filter(|(_, _, w, h)| (w - key).abs() < 0.01 && (h - key).abs() < 0.01)
+            .map(|(x, y, _, _)| (x, y))
+            .collect();
+        assert!(!keys.is_empty() && keys.len() < names.len(), "{keys:?}");
+        assert!(
+            keys.iter()
+                .all(|(_, y)| *y >= frame.y && y + key <= frame.y + frame.h)
+        );
+    }
+
+    #[test]
+    fn a_pie_beside_a_legend_wider_than_its_chart_stays_in_the_frame() {
+        let data = source(&[3.0, 1.0]);
+        let mut chart = grouped("pie", group("pie", vec![series("Share", &data)]));
+        chart.legend = Some(PlotLegend {
+            overlay: false,
+            position: Some("right"),
+            visible: Some(true),
+        });
+        let frame = PlotRect {
+            x: 50.0,
+            y: 0.0,
+            w: 12.0,
+            h: 200.0,
+        };
+        for op in plot_chart(&chart, frame) {
+            if let PlotOp::Path { x, w, .. } = op {
+                assert!(x + w / 2.0 >= frame.x, "the pie centre left its frame: {x}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_combo_legend_reverses_only_its_stacked_group() {
+        let data = source(&[10.0, 20.0]);
+        let mut columns = group(
+            "column",
+            vec![series("North", &data), series("South", &data)],
+        );
+        columns.grouping = Some("stacked");
+        let line = group("line", vec![series("East", &data), series("West", &data)]);
+        let chart = PlotChart {
+            chart_type: "column",
+            plot_groups: vec![columns, line],
+            legend: Some(PlotLegend {
+                overlay: false,
+                position: Some("right"),
+                visible: Some(true),
+            }),
+            ..PlotChart::default()
+        };
+        let mut names: Vec<(f64, String)> = plot_chart(&chart, rect())
+            .into_iter()
+            .filter_map(|op| match op {
+                PlotOp::Text {
+                    text, baseline_y, ..
+                } if ["North", "South", "East", "West"].contains(&text.as_str()) => {
+                    Some((baseline_y, text))
+                }
+                _ => None,
+            })
+            .collect();
+        names.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let order: Vec<String> = names.into_iter().map(|(_, name)| name).collect();
+        assert_eq!(order, ["South", "North", "East", "West"]);
+    }
+
+    #[test]
+    fn a_capped_combo_legend_reverses_its_stacked_group_safely() {
+        let data = source(&[10.0, 20.0]);
+        let names: Vec<String> = (0..9).map(|index| format!("S{index}")).collect();
+        let lines = group(
+            "line",
+            names.iter().map(|name| series(name, &data)).collect(),
+        );
+        let mut columns = group(
+            "column",
+            vec![series("North", &data), series("South", &data)],
+        );
+        columns.grouping = Some("stacked");
+        let chart = PlotChart {
+            chart_type: "line",
+            plot_groups: vec![lines, columns],
+            legend: Some(PlotLegend {
+                overlay: false,
+                position: Some("right"),
+                visible: Some(true),
+            }),
+            ..PlotChart::default()
+        };
+        assert_eq!(
+            swatches(&plot_chart(&chart, rect())).len(),
+            MAX_LEGEND_ENTRIES
+        );
+    }
+
+    #[test]
+    fn a_top_right_legend_keeps_its_rows_inside_a_short_chart() {
+        let data = source(&[10.0, 20.0]);
+        let names = ["A", "B", "C", "D", "E", "F"];
+        let mut chart = legend_chart(Some("topRight"), &names, &data);
+        chart.title = None;
+        let frame = PlotRect {
+            x: 0.0,
+            y: 0.0,
+            w: 300.0,
+            h: 80.0,
+        };
+        let keys = swatches(&plot_chart(&chart, frame));
+        assert!(!keys.is_empty() && keys.len() < names.len(), "{keys:?}");
+        for (_, y) in keys {
+            assert!(y + CHART_LABEL_SIZE_PX * LEGEND_KEY_EM <= frame.y + frame.h);
+        }
+    }
+
+    #[test]
+    fn a_side_legend_with_no_room_leaves_the_plot_its_width() {
+        let data = source(&[10.0, 20.0]);
+        let names = ["North", "South"];
+        let frame = PlotRect {
+            x: 0.0,
+            y: 0.0,
+            w: 300.0,
+            h: 12.0,
+        };
+        let widest = |position| {
+            let mut chart = legend_chart(position, &names, &data);
+            chart.title = None;
+            plot_chart(&chart, frame)
+                .iter()
+                .filter_map(|op| match op {
+                    PlotOp::Line { x1, x2, width, .. } if *width >= 1.0 => Some(x2 - x1),
+                    _ => None,
+                })
+                .fold(f64::MIN, f64::max)
+        };
+        assert_eq!(widest(Some("right")), widest(Some("bottom")));
+    }
+
+    #[test]
+    fn a_top_right_legend_starts_at_the_top() {
+        let data = source(&[10.0, 20.0]);
+        let names = ["North", "South", "East"];
+        let mut chart = legend_chart(Some("topRight"), &names, &data);
+        chart.title = None;
+        let top = swatches(&plot_chart(&chart, rect()))[0].1;
+        let middle = swatches(&plot_chart(
+            &legend_chart(Some("right"), &names, &data),
+            rect(),
+        ))[0]
+            .1;
+        assert!(top < middle, "{top} vs {middle}");
+        assert!(top < rect().y + LEGEND_EDGE + LEGEND_PITCH_EM * CHART_LABEL_SIZE_PX);
+    }
+
+    #[test]
+    fn a_row_legend_hands_its_width_back_to_the_plot() {
+        let data = source(&[10.0, 20.0]);
+        let names = ["North", "South", "East"];
+        let widest = |position| {
+            let ops = plot_chart(&legend_chart(position, &names, &data), rect());
+            ops.iter()
+                .filter_map(|op| match op {
+                    PlotOp::Line { x1, x2, width, .. } if *width >= 1.0 => Some(x2 - x1),
+                    _ => None,
+                })
+                .fold(f64::MIN, f64::max)
+        };
+        let key_x = swatches(&plot_chart(
+            &legend_chart(Some("right"), &names, &data),
+            rect(),
+        ))[0]
+            .0;
+        let column = rect().x + rect().w
+            - CHART_PAD
+            - PLOT_INSET
+            - (key_x - CHART_LABEL_SIZE_PX * LEGEND_PLOT_GAP_EM);
+        assert!(
+            (widest(Some("bottom")) - widest(Some("right")) - column).abs() < 0.01,
+            "a bottom legend must return the column's width: {} vs {}",
+            widest(Some("bottom")),
+            widest(Some("right"))
+        );
+    }
+
+    #[test]
+    fn an_overlaid_legend_takes_no_band_from_the_plot() {
+        let data = source(&[10.0, 20.0]);
+        let names = ["North", "South", "East"];
+        let widest = |overlay| {
+            let mut chart = legend_chart(Some("right"), &names, &data);
+            chart.legend.as_mut().expect("legend").overlay = overlay;
+            plot_chart(&chart, rect())
+                .iter()
+                .filter_map(|op| match op {
+                    PlotOp::Line { x1, x2, width, .. } if *width >= 1.0 => Some(x2 - x1),
+                    _ => None,
+                })
+                .fold(f64::MIN, f64::max)
+        };
+        let key_x = swatches(&plot_chart(
+            &legend_chart(Some("right"), &names, &data),
+            rect(),
+        ))[0]
+            .0;
+        assert!(
+            (widest(true)
+                - widest(false)
+                - (rect().x + rect().w
+                    - CHART_PAD
+                    - PLOT_INSET
+                    - (key_x - CHART_LABEL_SIZE_PX * LEGEND_PLOT_GAP_EM)))
+                .abs()
+                < 0.01,
+            "an overlaid legend must leave the plot its width: {} vs {}",
+            widest(true),
+            widest(false)
+        );
+    }
+
+    #[test]
+    fn a_band_with_no_room_still_finishes_its_wrap() {
+        let mut ops = Vec::new();
+        let mut emitter = Emitter {
+            sink: &mut ops,
+            remaining: MAX_PLOT_OPS,
+        };
+        let style = PlotTextStyle::default().resolve(CHART_LABEL_SIZE_PX, 400);
+        // A negative band leaves the remainder empty and still wider than the
+        // band, the state the wrap used to spin in.
+        let lines = wrap_legend_label("North", -1.0, &style, &mut emitter);
+        assert_eq!(lines.concat(), "North");
+    }
+
+    #[test]
+    fn a_category_name_with_breaks_keeps_every_line_inside_the_frame() {
+        let data = source(&[10.0, 20.0]);
+        let names = ["North"];
+        let categories = ["One\nTwo\nThree".to_owned(), "Four".to_owned()];
+        let mut chart = legend_chart(Some("bottom"), &names, &data);
+        chart.series[0].categories = &categories;
+        let ops = plot_chart(&chart, rect());
+        let bottom = rect().y + rect().h;
+        let three = ops
+            .iter()
+            .find_map(|op| match op {
+                PlotOp::Text {
+                    text, baseline_y, ..
+                } if text == "Three" => Some(*baseline_y),
+                _ => None,
+            })
+            .expect("the third line is drawn");
+        assert!(
+            three < bottom,
+            "the third line sits below the frame: {three} vs {bottom}"
+        );
+    }
+
+    #[test]
+    fn a_wrapped_legend_keeps_every_entry_inside_the_frame() {
+        let data = source(&[10.0, 20.0]);
+        let names = [
+            "Northern region",
+            "Southern region",
+            "Eastern region",
+            "Western region",
+            "Central region",
+            "Coastal region",
+            "Highland region",
+            "Lowland region",
+        ];
+        let ops = plot_chart(&legend_chart(Some("bottom"), &names, &data), rect());
+        let swatches = swatches(&ops);
+        assert_eq!(swatches.len(), MAX_LEGEND_ENTRIES);
+        assert!(
+            swatches.windows(2).any(|pair| pair[0].1 < pair[1].1),
+            "long entries wrap onto another row: {swatches:?}"
+        );
+        for (x, y) in swatches {
+            assert!(x >= rect().x && x + SWATCH <= rect().x + rect().w);
+            assert!(y >= rect().y && y + SWATCH <= rect().y + rect().h);
+        }
+    }
+
+    #[test]
+    fn top_and_bottom_bands_resize_pie_and_radar_families() {
+        let data = source(&[10.0, 20.0, 30.0]);
+        let names = ["North"];
+        for kind in ["pie", "radar"] {
+            let bounds = |position| {
+                let mut chart = legend_chart(position, &names, &data);
+                chart.chart_type = kind;
+                if position.is_none() {
+                    chart.legend.as_mut().unwrap().visible = Some(false);
+                }
+                if kind == "radar" {
+                    chart.plot_groups = vec![PlotGroup {
+                        chart_type: Some("radar"),
+                        series: chart.series.clone(),
+                        radar_style: Some("filled"),
+                        ..PlotGroup::default()
+                    }];
+                }
+                plot_chart(&chart, rect())
+                    .into_iter()
+                    .find_map(|op| match op {
+                        PlotOp::Path { commands, .. } => {
+                            let ys: Vec<_> = commands
+                                .iter()
+                                .filter_map(|command| match command {
+                                    GeometryPathCommand::Move { y, .. }
+                                    | GeometryPathCommand::Line { y, .. } => Some(*y),
+                                    _ => None,
+                                })
+                                .collect();
+                            let min = ys.iter().copied().fold(f64::INFINITY, f64::min);
+                            let max = ys.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                            Some((min, max - min))
+                        }
+                        _ => None,
+                    })
+                    .unwrap()
+            };
+            let original = bounds(None);
+            let top = bounds(Some("top"));
+            let bottom = bounds(Some("bottom"));
+            assert!(top.1 < original.1, "{kind}: {top:?} vs {original:?}");
+            assert!((top.1 - bottom.1).abs() < 1e-9);
+            assert!(
+                (top.0 - bottom.0 - (LEGEND_ROW_EM * CHART_LABEL_SIZE_PX + BAND_GAP)).abs() < 1e-9
+            );
+        }
+    }
+
+    #[test]
+    fn the_title_and_the_category_names_are_the_centred_text() {
+        let data = source(&[10.0, 20.0]);
+        let names = ["North"];
+        let ops = plot_chart(&legend_chart(Some("bottom"), &names, &data), rect());
+        let centred: Vec<&str> = ops
+            .iter()
+            .filter_map(|op| match op {
+                PlotOp::Text {
+                    text,
+                    align: PlotTextAlign::Center,
+                    ..
+                } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(centred, ["Revenue", "Q1", "Q2"]);
+        let title = ops
+            .iter()
+            .find_map(|op| match op {
+                PlotOp::Text { text, x, width, .. } if text == "Revenue" => Some((*x, *width)),
+                _ => None,
+            })
+            .expect("the title is emitted");
+        assert_eq!(title.0 + title.1 / 2.0, rect().x + rect().w / 2.0);
+    }
+
+    #[test]
+    fn a_narrow_column_centres_its_label_on_the_bar() {
+        let mut space = labelled_space(
+            "column",
+            None,
+            Some(ChartDataLabels {
+                show_value: Some(true),
+                position: Some("ctr".to_owned()),
+                ..ChartDataLabels::default()
+            }),
+        );
+        let series = &mut space.plot_groups[0].series[0];
+        series.values = (1..=40).map(f64::from).collect();
+        series.categories = (1..=40).map(|index| format!("C{index}")).collect();
+        let chart = PlotChart::from(&space);
+        let ops = plot_chart(&chart, rect());
+        let bar = bars(&ops)[0];
+        assert!(bar.2 < 32.0, "the bar is narrower than a label: {}", bar.2);
+        let (x, width) = ops
+            .iter()
+            .find_map(|op| match op {
+                PlotOp::Text { text, x, width, .. } if text == "1" => Some((*x, *width)),
+                _ => None,
+            })
+            .expect("the first label is drawn");
+        assert!(((x + width / 2.0) - (bar.0 + bar.2 / 2.0)).abs() < 1e-6);
+    }
+
     #[test]
     fn a_point_text_inherits_series_switches() {
         let space = labelled_space(
@@ -4974,6 +9856,7 @@ mod tests {
                 show_value: Some(true),
                 show_legend_key: Some(true),
                 points: Some(vec![ChartPointLabel {
+                    runs: None,
                     index: Some(1.0),
                     text: Some("pinned".to_owned()),
                     labels: ChartDataLabels::default(),
@@ -5000,6 +9883,7 @@ mod tests {
                 show_value: Some(true),
                 show_category_name: Some(true),
                 points: Some(vec![ChartPointLabel {
+                    runs: None,
                     index: Some(1.0),
                     text: None,
                     labels: ChartDataLabels {
@@ -5026,6 +9910,7 @@ mod tests {
             Some(ChartDataLabels {
                 show_value: Some(true),
                 points: Some(vec![ChartPointLabel {
+                    runs: None,
                     index: Some(1.0),
                     text: None,
                     labels: ChartDataLabels {
@@ -5039,6 +9924,30 @@ mod tests {
         let labels = texts(&plot_chart(&PlotChart::from(&space), rect()));
         assert!(labels.contains(&"3".to_owned()));
         assert!(!labels.contains(&"1".to_owned()));
+    }
+
+    #[test]
+    fn chart_scope_tracking_reaches_every_text_op_and_a_scope_overrides_it() {
+        let mut space = model_space("column", None, vec![model_series("North", &[3.0, 1.0])]);
+        space.title = Some("Revenue".to_owned());
+        space.text = Some(ChartTextProperties {
+            spacing_pt: Some(1.5),
+            ..ChartTextProperties::default()
+        });
+        space.title_text = Some(ChartTextProperties {
+            spacing_pt: Some(-0.75),
+            ..ChartTextProperties::default()
+        });
+        let ops = plot_chart(&PlotChart::from(&space), rect());
+        let spacing = |label: &str| {
+            ops.iter().find_map(|op| match op {
+                PlotOp::Text { text, font, .. } if text == label => Some(font.letter_spacing_px),
+                _ => None,
+            })
+        };
+        assert_eq!(spacing("Revenue"), Some(-1.0));
+        assert_eq!(spacing("Q1"), Some(2.0));
+        assert_eq!(chart_label_font().letter_spacing_px, 0.0);
     }
 
     #[test]
@@ -5138,6 +10047,7 @@ mod tests {
             Some(ChartDataLabels {
                 show_value: Some(true),
                 points: Some(vec![ChartPointLabel {
+                    runs: None,
                     index: Some(1.0),
                     text: None,
                     labels: ChartDataLabels {
@@ -5173,6 +10083,7 @@ mod tests {
         point_restored.data_labels = Some(ChartDataLabels {
             delete: Some(true),
             points: Some(vec![ChartPointLabel {
+                runs: None,
                 index: Some(1.0),
                 text: None,
                 labels: ChartDataLabels {
@@ -5224,6 +10135,7 @@ mod tests {
         shown.data_labels = Some(ChartDataLabels {
             show_value: Some(true),
             points: Some(vec![ChartPointLabel {
+                runs: None,
                 index: Some(1.0),
                 text: None,
                 labels: ChartDataLabels {
@@ -5280,6 +10192,54 @@ mod tests {
         assert!(placed("outEnd") < placed("inEnd"));
         assert!(placed("inEnd") < placed("ctr"));
         assert!(placed("ctr") < placed("inBase"));
+    }
+
+    #[test]
+    fn a_line_label_stands_on_the_side_its_position_names() {
+        let data = source(&[10.0, 20.0]);
+        let placed = |position: Option<&'static str>| {
+            let mut labelled = series("North", &data);
+            labelled.marker = Some(PlotMarker {
+                size: Some(8.0),
+                symbol: Some(PlotMarkerSymbol::Diamond),
+            });
+            labelled.labels = Some(PlotDataLabels {
+                show_value: true,
+                position,
+                ..PlotDataLabels::default()
+            });
+            let ops = plot_chart(&grouped("line", group("line", vec![labelled])), rect());
+            let marker = ops
+                .iter()
+                .filter_map(|op| match op {
+                    PlotOp::Path { x, y, w, h, .. } if (w - h).abs() < 0.01 => {
+                        Some((x + w / 2.0, y + h / 2.0))
+                    }
+                    _ => None,
+                })
+                .nth(1)
+                .expect("the second point's marker");
+            let (_, x, baseline, width) = texts_at(&ops)
+                .into_iter()
+                .rfind(|(text, ..)| text == "20")
+                .expect("a label");
+            (marker, x, baseline, width)
+        };
+        let ((mx, my), x, baseline, _) = placed(None);
+        assert!(
+            x > mx && (baseline - my).abs() < 8.0,
+            "right of the point by default"
+        );
+        let ((mx, my), x, baseline, width) = placed(Some("t"));
+        assert!(
+            (x + width / 2.0 - mx).abs() < 0.01 && baseline < my,
+            "centred above"
+        );
+        let ((mx, my), x, baseline, width) = placed(Some("b"));
+        assert!(
+            (x + width / 2.0 - mx).abs() < 0.01 && baseline > my,
+            "centred below"
+        );
     }
 
     #[test]

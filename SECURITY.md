@@ -28,3 +28,17 @@ changesets outright. Both are worse than the advisory.
 
 Remove this exemption when `@manypkg/get-packages` drops `read-yaml-file`, or
 when Bun supports scoping an override to one dependency path.
+
+### GHSA-vfj7-8cjw-p6xm: braces stack exhaustion on deeply nested patterns
+
+Reached only through build and dev tooling: `tailwindcss` and `shadcn` in the
+private demo app (via `fast-glob › micromatch`), `fumadocs-mdx` in the private
+docs site and `tsup` in every package's devDependencies (via `chokidar`), and
+`@changesets/cli` (via `micromatch`). These expand glob patterns from this
+repository's own configuration and never see user input. No published package
+depends on braces at runtime.
+
+No patched release exists: every braces version up to the latest, 3.0.3, is
+affected.
+
+Remove this exemption when a patched braces release is published.

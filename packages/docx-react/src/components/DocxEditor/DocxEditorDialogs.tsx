@@ -107,8 +107,8 @@ export function DocxEditorDialogs({
   onFind: (searchText: string, options: FindOptions) => FindResult | null;
   onFindNext: () => FindMatch | null;
   onFindPrevious: () => FindMatch | null;
-  onReplace: (replaceText: string) => boolean;
-  onReplaceAll: (searchText: string, replaceText: string, options: FindOptions) => number;
+  onReplace: (replaceText: string) => Promise<boolean>;
+  onReplaceAll: (searchText: string, replaceText: string, options: FindOptions) => Promise<number>;
   // Hyperlink
   hyperlinkDialog: ReturnType<typeof useHyperlinkDialog>;
   onHyperlinkSubmit: (data: HyperlinkData) => void;

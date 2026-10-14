@@ -1,0 +1,30 @@
+{
+  "source": "Microsoft Word 16.113.2 PDF export; points from the page top. imageTops are the images' tops, bottomBTop the last line's top (baseline minus the 11.3pt ascent of a 12pt Arial line). img-cell-300: a one-cell table (Normal style 1.25 lines, 8pt after) holding a text line, an image alone on its line and a text line; bottomATop is the top of the paragraph after the table.",
+  "img-body-240": {
+    "imageTops": [
+      85.8,
+      243.6
+    ],
+    "bottomBTop": 315.5
+  },
+  "img-body-360": {
+    "imageTops": [
+      85.8,
+      250.5
+    ],
+    "bottomBTop": 329.6
+  },
+  "img-body-480": {
+    "imageTops": [
+      85.8,
+      257.4
+    ],
+    "bottomBTop": 343.3
+  },
+  "img-cell-300": {
+    "imageTops": [
+      123.0
+    ],
+    "bottomATop": 304.3
+  }
+}

@@ -1,17 +1,19 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { publishedPackageVersions } from './published-packages.mjs';
-import { RUST_CRATES } from './rust-crates.mjs';
+import { publishedCrates, publishedPackageVersions } from './published-packages.mjs';
+import { RUST_PUBLISH_CRATES } from './rust-crates.mjs';
 
 const script = fileURLToPath(new URL('./check-publish-targets.mjs', import.meta.url));
 const releaseWorkflow = fileURLToPath(new URL('../.github/workflows/release.yml', import.meta.url));
 
 const release = Bun.YAML.parse(readFileSync(releaseWorkflow, 'utf8')) as any;
 const packages = publishedPackageVersions();
-const crates = RUST_CRATES.map((crate) => crate.name);
+const crates = RUST_PUBLISH_CRATES.map((crate) => crate.name);
 
-const NOT_FOUND = new Response('{"error":"Not found"}', { status: 404 });
+function notFound() {
+  return new Response('{"error":"Not found"}', { status: 404 });
+}
 
 function versions(...published: string[]) {
   return Response.json({ versions: Object.fromEntries(published.map((v) => [v, {}])) });
@@ -71,10 +73,16 @@ function published(name: string) {
 }
 
 describe('npm publish targets', () => {
+  test('VSDX packages stay out of npm publication', () => {
+    for (const name of ['@betteroffice/vsdx', '@betteroffice/vsdx-react', '@betteroffice/vsdx-i18n']) {
+      expect(packages.map((entry) => entry.name)).not.toContain(name);
+    }
+  });
+
   test('a package that exists at its release version passes', async () => {
     const result = await guard('--npm', (name) => {
       const found = packages.find((entry) => entry.name === name);
-      return found ? versions(found.version) : NOT_FOUND;
+      return found ? versions(found.version) : notFound();
     });
     expect(result.status).toBe(0);
     expect(result.stdout).toContain(`${packages[0]!.name}@${packages[0]!.version} is on npm.`);
@@ -90,7 +98,7 @@ describe('npm publish targets', () => {
   test('a package that does not exist fails, by name', async () => {
     const missing = packages[0]!.name;
     const result = await guard('--npm', (name) => {
-      if (name === missing) return NOT_FOUND;
+      if (name === missing) return notFound();
       const found = packages.find((entry) => entry.name === name);
       return versions(found!.version);
     });
@@ -101,6 +109,11 @@ describe('npm publish targets', () => {
 });
 
 describe('crates.io publish targets', () => {
+  test('the release list matches publishable manifests and excludes VSDX', () => {
+    expect([...crates].sort()).toEqual(publishedCrates());
+    expect(crates.some((name) => name.includes('vsdx'))).toBe(false);
+  });
+
   test('a crate that exists passes', async () => {
     const result = await guard('--crates', () => Response.json({}));
     expect(result.status).toBe(0);
@@ -109,21 +122,23 @@ describe('crates.io publish targets', () => {
 
   test('a crate that does not exist fails, by name', async () => {
     const result = await guard('--crates', (name) =>
-      name === crates[0] ? NOT_FOUND : Response.json({})
+      name === crates[0] ? notFound() : Response.json({})
     );
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(`${crates[0]} is not on crates.io.`);
     expect(result.stderr).toContain('Initial crates.io release');
   });
 
-  test('a bootstrap token creates crates, so a missing one only prints', async () => {
+  test('a bootstrap token creates missing crates, so a missing one only prints', async () => {
     const result = await guard(
       '--crates',
-      (name) => (name === crates[0] ? NOT_FOUND : Response.json({})),
+      (name) => (name === crates[0] ? notFound() : Response.json({})),
       { CRATES_IO_BOOTSTRAP_TOKEN: 'cio_bootstrap' }
     );
     expect(result.status).toBe(0);
-    expect(result.stdout).toContain(`${crates[0]} is not on crates.io; CRATES_IO_BOOTSTRAP_TOKEN`);
+    expect(result.stdout).toContain(
+      `${crates[0]} is not on crates.io; will be created with the bootstrap token.`
+    );
     expect(result.stderr).toBe('');
   });
 });
@@ -139,9 +154,10 @@ describe('release wiring', () => {
       'node scripts/check-publish-targets.mjs --crates',
       'node scripts/check-publish-targets.mjs --npm'
     ]);
-    for (const step of guards) {
-      expect(step.if).toBe("steps.pending.outputs.publishing == 'true'");
-    }
+    expect(guards.map((step: any) => step.if)).toEqual([
+      "steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_CRATES != 'true'",
+      "steps.pending.outputs.publishing == 'true'"
+    ]);
   });
 
   test('both registries are checked before the first upload of either', () => {
@@ -159,6 +175,37 @@ describe('release wiring', () => {
       steps.indexOf('Pin workspace deps for npm publish')
     );
     for (const entry of packages) expect(Object.keys(entry).sort()).toEqual(['name', 'version']);
+  });
+});
+
+describe('crates OIDC-first wiring', () => {
+  const named = new Map(release.jobs.release.steps.map((step: any) => [step.name, step]));
+
+  test('the OIDC exchange runs on the publish path unless crates are skipped', () => {
+    const auth = named.get('Authenticate to crates.io');
+    expect(auth.uses).toBe(
+      'rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18'
+    );
+    expect(auth.if).toBe(
+      "steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_CRATES != 'true'"
+    );
+  });
+
+  test('an OIDC failure continues only when the bootstrap token is detected', () => {
+    const auth = named.get('Authenticate to crates.io');
+    expect(auth['continue-on-error']).toBe(
+      "${{ steps.crates-bootstrap.outputs.enabled == 'true' }}"
+    );
+  });
+
+  test('the crates publish gets the OIDC token and the bootstrap token separately', () => {
+    const publish = named.get('Publish Rust crates');
+    expect(publish.env.CARGO_REGISTRY_TOKEN).toBe('${{ steps.crates-auth.outputs.token }}');
+    expect(publish.env.CRATES_IO_BOOTSTRAP_TOKEN).toBe('${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN }}');
+  });
+
+  test('the release job can mint OIDC tokens', () => {
+    expect(release.jobs.release.permissions['id-token']).toBe('write');
   });
 });
 

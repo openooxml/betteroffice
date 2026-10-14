@@ -597,3 +597,76 @@ fn glyph_runs_carry_the_resolved_fallback_font() {
     );
     assert!(json.contains(r#""fallbackFont":"400 16px Liberation Sans, sans-serif""#));
 }
+
+/// Painted glyph pens follow the same w:kern gate the measurement uses, so a
+/// run with no threshold draws at the plain hmtx advance.
+#[test]
+fn painted_pen_honors_the_kerning_threshold() {
+    /// Liberation Sans 'A' at 12pt/16px: 1366 units / 2048 upem.
+    const A_ADVANCE: f64 = 1366.0 * 16.0 / 2048.0;
+
+    fn pen(kerning_min_pt: Option<f64>) -> f64 {
+        let mut run = serde_json::json!({
+            "kind": "text",
+            "text": "AV",
+            "pmStart": 1,
+            "pmEnd": 3,
+            "fontFamily": "Liberation Sans",
+            "fontSize": 12.0
+        });
+        if let Some(threshold) = kerning_min_pt {
+            run["kerningMinPt"] = serde_json::json!(threshold);
+        }
+        let input = serde_json::json!({
+            "measured": [{
+                "block": {
+                    "kind": "paragraph", "id": 0, "runs": [run], "pmStart": 1, "pmEnd": 3
+                },
+                "measure": {
+                    "kind": "paragraph",
+                    "totalHeight": 20.0,
+                    "lines": [{
+                        "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 2,
+                        "width": 40.0, "ascent": 16.0, "descent": 4.0, "lineHeight": 20.0
+                    }]
+                }
+            }],
+            "fontChains": { "liberation sans|0|0": [0] },
+            "options": {},
+            "layout": {
+                "pages": [{
+                    "size": {"w": 816.0, "h": 1056.0},
+                    "margins": {"top": 96.0, "right": 96.0, "bottom": 96.0, "left": 96.0},
+                    "number": 1,
+                    "fragments": [{
+                        "kind": "paragraph", "blockId": 0,
+                        "x": FRAG_X, "y": 96.0, "width": FRAG_WIDTH, "height": 20.0,
+                        "fromLine": 0, "toLine": 1, "pmStart": 1, "pmEnd": 3
+                    }]
+                }]
+            }
+        })
+        .to_string();
+        let json =
+            build_display_list_json_with_fonts(&input, &store_with_liberation()).expect("builds");
+        let dl: DisplayList = serde_json::from_str(&json).unwrap();
+        let glyphs = &glyph_runs(&dl)[0].glyphs;
+        glyphs[1].x - glyphs[0].x
+    }
+
+    assert!(
+        (pen(None) - A_ADVANCE).abs() < 1e-3,
+        "no w:kern ⇒ plain advance: got {}",
+        pen(None)
+    );
+    assert!(
+        pen(Some(1.0)) < A_ADVANCE - 1e-3,
+        "w:kern at or below the font size tightens AV: got {}",
+        pen(Some(1.0))
+    );
+    assert!(
+        (pen(Some(14.0)) - A_ADVANCE).abs() < 1e-3,
+        "w:kern above the font size ⇒ plain advance: got {}",
+        pen(Some(14.0))
+    );
+}

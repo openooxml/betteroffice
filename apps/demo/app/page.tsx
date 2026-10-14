@@ -1,5 +1,5 @@
 import { FormatCard } from "./components/FormatCard";
-import { formats } from "../lib/formats";
+import { listedFormats } from "../lib/formats";
 
 export default function Home() {
   return (
@@ -23,7 +23,7 @@ export default function Home() {
           <span className="text-faint">01</span> Editors
         </p>
         <div className="grid grid-cols-2 gap-px overflow-hidden rounded-md border border-line-soft bg-line-soft max-[44rem]:grid-cols-1">
-          {formats.map((f) => (
+          {listedFormats.map((f) => (
             <FormatCard key={f.id} format={f} />
           ))}
         </div>

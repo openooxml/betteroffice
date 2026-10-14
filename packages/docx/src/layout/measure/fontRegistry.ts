@@ -7,6 +7,15 @@ export interface TextEngineFontSink {
    * Throws on unparseable bytes.
    */
   registerFont(bytes: Uint8Array): number;
+  /**
+   * Register a measurement view of `id` carrying the vertical metrics and
+   * advance pitch Word measures `family` with, and return its id — the
+   * engine's answer to a face this host had to substitute. Returns `id` for a
+   * family whose metrics the engine does not know. Optional so partial sinks
+   * (tests, older hosts) keep working; without it a substitute measures with
+   * its own metrics.
+   */
+  registerSubstituteFont?(id: number, family: string): number;
 }
 
 /**
@@ -30,6 +39,12 @@ export type FontScript = 'cjk-sc' | 'cjk-tc' | 'cjk-jp' | 'cjk-kr' | 'arabic' | 
 export interface BundledFontProvider {
   /** Resolve a Word family to bundled metric-compatible face byte loaders, or undefined. */
   resolve(family: string, bold: boolean, italic: boolean): (() => Promise<ArrayBuffer>) | undefined;
+  /** Like {@link BundledFontProvider.resolve}, but also accepts bundled family names such as `"Gelasio"`, and never substitutes another style. */
+  resolveFamily?(
+    family: string,
+    bold: boolean,
+    italic: boolean
+  ): (() => Promise<ArrayBuffer>) | undefined;
   /**
    * Optional per-script coverage fallback (Noto CJK/RTL faces). Same loader
    * contract as {@link BundledFontProvider.resolve}; providers without
@@ -56,12 +71,14 @@ export interface BundledFontProvider {
    * Optional so mock/partial providers can omit it; when absent (or returning
    * undefined) an unmapped family still yields an empty chain and the caller
    * browser-falls-back that run — the pre-policy behavior. Same lazy loader
-   * contract as {@link BundledFontProvider.resolve}.
+   * contract as {@link BundledFontProvider.resolve}. This registry passes
+   * `office: 'word'` so the pick follows Word's substitution.
    */
   resolveLastResort?(
     family: string,
     bold: boolean,
-    italic: boolean
+    italic: boolean,
+    office?: 'word' | 'powerpoint'
   ): (() => Promise<ArrayBuffer>) | undefined;
 }
 
@@ -253,11 +270,12 @@ export class TextMeasureFontRegistry {
   getCachedFontIdChain(
     family: string,
     bold: boolean,
-    italic: boolean
+    italic: boolean,
+    consumeRetryable = true
   ): readonly number[] | undefined {
     const key = chainKey(family, bold, italic);
     const resolution = this.chainResults.get(key);
-    if (resolution?.retryable) {
+    if (consumeRetryable && resolution?.retryable) {
       const results = this.chainResults;
       queueMicrotask(() => {
         if (results.get(key) === resolution) results.delete(key);
@@ -279,7 +297,10 @@ export class TextMeasureFontRegistry {
   }
 
   /** Synchronous settled view; retryable results are evicted after one pass. */
-  getCachedScriptFallbackIds(scripts: FontScript[]): readonly number[] | undefined {
+  getCachedScriptFallbackIds(
+    scripts: FontScript[],
+    consumeRetryable = true
+  ): readonly number[] | undefined {
     const results = this.scriptResults;
     const resolutions: Array<[FontScript, ScriptResolution]> = [];
     for (const script of scripts) {
@@ -291,7 +312,7 @@ export class TextMeasureFontRegistry {
     for (const [script, resolution] of resolutions) {
       const { id } = resolution;
       if (id !== null && !out.includes(id)) out.push(id);
-      if (resolution.retryable) {
+      if (consumeRetryable && resolution.retryable) {
         queueMicrotask(() => {
           if (results.get(script) === resolution) results.delete(script);
         });
@@ -362,7 +383,7 @@ export class TextMeasureFontRegistry {
     // the base face, e.g. Arial→Liberation Sans, contributes one id).
     let lastResort: (() => Promise<ArrayBuffer>) | undefined;
     try {
-      lastResort = bundled?.resolveLastResort?.(family, bold, italic);
+      lastResort = bundled?.resolveLastResort?.(family, bold, italic, 'word');
     } catch (error) {
       retryable = true;
       console.warn(
@@ -431,6 +452,27 @@ export class TextMeasureFontRegistry {
     );
   }
 
+  /**
+   * The id that measures `base`'s bytes the way Word measures `family` — what
+   * a chain head must be for a substituted face, since line metrics come from
+   * the head. Falls back to `base` when the sink or the engine has no metrics
+   * for the family, which is how every face measured before this existed.
+   */
+  private measuredAs(base: number, family: string): number {
+    const substitute = this.sink.registerSubstituteFont;
+    if (!substitute) return base;
+    try {
+      return substitute.call(this.sink, base, family);
+    } catch (error) {
+      console.warn(
+        `[fontRegistry] measurement view of the substitute for "${family}" failed; ` +
+          `measuring with the substitute's own metrics: ` +
+          `${error instanceof Error ? error.message : String(error)}`
+      );
+      return base;
+    }
+  }
+
   /** Register raw bytes exactly once per buffer identity (see `bufferIds`). */
   private registerBuffer(bytes: ArrayBuffer): Promise<number> {
     let pending = this.bufferIds.get(bytes);
@@ -479,7 +521,7 @@ export class TextMeasureFontRegistry {
       pending = (async () => {
         try {
           const bytes = await loader();
-          return await this.registerBuffer(bytes);
+          return this.measuredAs(await this.registerBuffer(bytes), family);
         } catch (error) {
           console.warn(
             `[fontRegistry] bundled face for "${family}" failed to load or register; ` +
@@ -509,7 +551,7 @@ export class TextMeasureFontRegistry {
       pending = (async () => {
         try {
           const bytes = await loader();
-          return await this.registerBuffer(bytes);
+          return this.measuredAs(await this.registerBuffer(bytes), family);
         } catch {
           console.warn(
             `[fontRegistry] last-resort base face for "${family}" failed to load or register; ` +

@@ -34,6 +34,8 @@ export interface DisplayPage {
   /** Formatted PAGE label (for example, "vii"). */
   pageLabel?: string;
   primitives: DisplayPrimitive[]; // body content, paint order
+  /** Leading primitives painted beneath the header and footer. */
+  watermarkPrimitiveCount?: number;
   /** Resolved page background. Undefined = transparent/host white. */
   background?: string;
   pageBorders?: PageBorderPrimitive[];
@@ -41,6 +43,12 @@ export interface DisplayPage {
   footer?: HfRegion;
   /** Footnote/endnote regions in page coordinates. Undefined = none. */
   noteAreas?: NoteRegion[];
+  /** Geometry only: the page's content is built when the host asks for it. */
+  unbuilt?: boolean;
+  /** For an unbuilt page, the lowest and highest body position its layout places. */
+  positionSpan?: [number, number];
+  /** For an unbuilt page, the relationship ids of the header and footer parts its build paints. */
+  hfParts?: { header?: string; footer?: string };
 }
 
 /** A page-local rectangle emitted as display-list metadata. */
@@ -343,6 +351,8 @@ export interface DocAttrs {
   clipGroup?: DisplayClipGroupMetadata;
   /** Enclosing table-fragment identity and accessibility semantics. */
   table?: DisplayTableMetadata;
+  /** Inline native-shape atom; true only for paragraph-inline shapes. */
+  inlineShapeAtom?: boolean;
 }
 
 export interface TextRunPrimitive extends DocAttrs {
@@ -532,6 +542,7 @@ export interface PageBorderPrimitive {
 
 export interface ImagePrimitive extends DocAttrs {
   kind: 'image';
+  shapeType?: string;
   relId: string;
   x: number;
   y: number;

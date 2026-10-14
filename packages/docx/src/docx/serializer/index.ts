@@ -69,6 +69,8 @@ function serializeContent(block: BlockContent): string {
       return serializeTable(block);
     case 'blockSdt':
       return serializeWithRust('S11', { family: 'blockSdt', sdt: block });
+    case 'rawXml':
+      return serializeDocumentBody({ content: [block] });
   }
 }
 

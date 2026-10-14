@@ -11,16 +11,20 @@ import {
 function fakeSeedSession(): {
   session: Pick<YrsSession, 'openDocx' | 'loadState'>;
   host: YrsDocxHost;
-  opened: { bytes: Uint8Array; seedStories: boolean }[];
+  opened: { bytes: Uint8Array; seedStories: boolean; mediaTokens?: boolean }[];
   loaded: Uint8Array[];
 } {
   const host = { name: 'host' } as unknown as YrsDocxHost;
-  const opened: { bytes: Uint8Array; seedStories: boolean }[] = [];
+  const opened: { bytes: Uint8Array; seedStories: boolean; mediaTokens?: boolean }[] = [];
   const loaded: Uint8Array[] = [];
   return {
     session: {
-      openDocx: (bytes, seedStories) => {
-        opened.push({ bytes, seedStories });
+      openDocx: (bytes, seedStories, options) => {
+        opened.push({
+          bytes,
+          seedStories,
+          ...(options?.mediaTokens ? { mediaTokens: true } : {}),
+        });
         return host;
       },
       loadState: (update) => {
@@ -95,6 +99,19 @@ describe('seedYrsSession', () => {
     expect(opened).toEqual([{ bytes, seedStories: true }]);
     expect(loaded).toEqual([]);
     expect(host).toBe(expectedHost);
+  });
+
+  test('opens images as media tokens only when asked to', () => {
+    const { session, opened } = fakeSeedSession();
+    const bytes = Uint8Array.of(1, 2);
+
+    seedYrsSession(session, () => expect.unreachable(), {
+      bytes,
+      document: null,
+      mediaTokens: true,
+    });
+
+    expect(opened).toEqual([{ bytes, seedStories: true, mediaTokens: true }]);
   });
 });
 

@@ -1,0 +1,40 @@
+{
+  "name": "@betteroffice/pptx-native-darwin-x64",
+  "version": "0.2.0",
+  "cpu": [
+    "x64"
+  ],
+  "main": "betteroffice-pptx-native.darwin-x64.node",
+  "files": [
+    "betteroffice-pptx-native.darwin-x64.node"
+  ],
+  "description": "Native Rust bindings for the BetterOffice PPTX engine in Node.js, Bun and Deno.",
+  "keywords": [
+    "pptx",
+    "powerpoint",
+    "presentation",
+    "ooxml",
+    "nodejs",
+    "node-api",
+    "bun",
+    "deno",
+    "native",
+    "rust"
+  ],
+  "homepage": "https://betteroffice.dev/",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/openooxml/betteroffice.git",
+    "directory": "bindings/pptx-native"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "os": [
+    "darwin"
+  ]
+}

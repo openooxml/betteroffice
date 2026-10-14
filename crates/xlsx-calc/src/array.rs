@@ -1,0 +1,3184 @@
+//! array evaluation: blocks, elementwise lifting, and the dynamic-array
+//! builtins. only cells the file marks `<f t="array">` take this path, and
+//! anything without an array-aware implementation falls back to `evaluate`.
+
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+use std::rc::Rc;
+
+use xlsx_model::{CellRange, CellRef, CellValue, ErrorValue, MAX_SPILL_CELLS};
+
+use crate::eval::{
+    Area, EvalContext, apply_binary, apply_percent, apply_unary, as_area, cmp_values, err,
+    evaluate, normalize_provider_value, num, text, to_bool, to_number, to_text,
+};
+use crate::functions::Func;
+use crate::parser::Expr;
+
+#[cfg(test)]
+thread_local! {
+    /// units of array work done, so a test can see that a refused budget
+    /// stopped the work before it began.
+    pub(crate) static STEPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// cells copied out of a block, so a test can see how many copies a
+    /// refused block made first.
+    pub(crate) static COPIES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// count one unit of array work in tests.
+fn step() {
+    #[cfg(test)]
+    STEPS.with(|steps| steps.set(steps.get() + 1));
+}
+
+/// a copy of one cell of a block.
+fn copied(value: &CellValue) -> CellValue {
+    #[cfg(test)]
+    COPIES.with(|copies| copies.set(copies.get() + 1));
+    value.clone()
+}
+
+/// cells one intermediate array may hold. the per-formula evaluation budget
+/// normally bites first; this bounds a single allocation on its own.
+pub const MAX_ARRAY_CELLS: usize = 1 << 20;
+
+/// a rectangular block of values, row-major.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Array {
+    rows: usize,
+    cols: usize,
+    values: Vec<CellValue>,
+}
+
+impl Array {
+    fn new(rows: usize, cols: usize, values: Vec<CellValue>) -> Result<Self, ErrorValue> {
+        if rows == 0 || cols == 0 || rows.checked_mul(cols) != Some(values.len()) {
+            return Err(ErrorValue::Value);
+        }
+        if values.len() > MAX_ARRAY_CELLS {
+            return Err(ErrorValue::Num);
+        }
+        Ok(Self { rows, cols, values })
+    }
+
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+
+    pub fn cols(&self) -> usize {
+        self.cols
+    }
+
+    /// value at an exact position; `#N/A` outside the block, as excel pads.
+    pub fn at(&self, row: usize, col: usize) -> CellValue {
+        if row >= self.rows || col >= self.cols {
+            return err(ErrorValue::NA);
+        }
+        copied(&self.values[row * self.cols + col])
+    }
+
+    /// value for a broadcast position: a single row repeats down, a single
+    /// column repeats across.
+    fn broadcast(&self, row: usize, col: usize) -> CellValue {
+        self.at(
+            if self.rows == 1 { 0 } else { row },
+            if self.cols == 1 { 0 } else { col },
+        )
+    }
+
+    /// every cell, row-major.
+    pub fn cells(&self) -> &[CellValue] {
+        &self.values
+    }
+
+    /// the block's cells, row-major.
+    pub fn into_values(self) -> Vec<CellValue> {
+        self.values
+    }
+
+    fn row_values(&self, row: usize) -> &[CellValue] {
+        &self.values[row * self.cols..(row + 1) * self.cols]
+    }
+
+    /// the text this block holds, which copying it duplicates.
+    fn text_bytes(&self) -> usize {
+        self.values
+            .iter()
+            .map(|value| match value {
+                CellValue::Text { value } => value.len(),
+                _ => 0,
+            })
+            .sum()
+    }
+}
+
+/// a `LAMBDA`: the names its call binds, and the body those names are bound
+/// for. free names resolve through the caller's binding stack, which is the
+/// scope the literal was written in.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Lambda {
+    params: Vec<String>,
+    body: Expr,
+    /// budget one call costs beyond the cell it fills.
+    cost: u64,
+}
+
+/// a `LET` name or `LAMBDA` parameter bound for the body being evaluated.
+#[derive(Debug, Clone)]
+pub(crate) struct Binding {
+    name: String,
+    value: Rc<Value>,
+    /// the reference the name was bound to, kept so a callee that wants an
+    /// area still sees one rather than the block the name evaluates to.
+    reference: Option<Rc<Expr>>,
+}
+
+impl Binding {
+    pub(crate) fn new(name: &str, value: Value, reference: Option<Expr>) -> Self {
+        Self {
+            name: name.to_string(),
+            value: Rc::new(value),
+            reference: reference.map(Rc::new),
+        }
+    }
+
+    pub(crate) fn matches(&self, name: &str) -> bool {
+        self.name.eq_ignore_ascii_case(name)
+    }
+
+    pub(crate) fn value(&self) -> Value {
+        (*self.value).clone()
+    }
+
+    /// the bound value, for a caller that charges before copying it.
+    fn held(&self) -> &Value {
+        &self.value
+    }
+
+    /// the single value this name shows, without copying a whole block.
+    pub(crate) fn scalar(&self) -> CellValue {
+        match &*self.value {
+            Value::Array(array) => array.at(0, 0),
+            Value::Scalar(value) => value.clone(),
+            Value::Lambda(_) => err(ErrorValue::Value),
+        }
+    }
+
+    pub(crate) fn reference(&self) -> Option<&Expr> {
+        self.reference.as_deref()
+    }
+}
+
+/// what an expression evaluates to in array mode.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Value {
+    Scalar(CellValue),
+    Array(Array),
+    Lambda(Rc<Lambda>),
+}
+
+impl Value {
+    fn error(value: ErrorValue) -> Self {
+        Value::Scalar(err(value))
+    }
+
+    fn dims(&self) -> (usize, usize) {
+        match self {
+            Value::Array(array) => (array.rows, array.cols),
+            _ => (1, 1),
+        }
+    }
+
+    fn broadcast(&self, row: usize, col: usize) -> CellValue {
+        match self {
+            Value::Scalar(value) => value.clone(),
+            Value::Array(array) => array.broadcast(row, col),
+            Value::Lambda(_) => err(ErrorValue::Value),
+        }
+    }
+
+    /// the value a single cell shows: the top-left element. an uncalled
+    /// `LAMBDA` is not a value a cell can hold.
+    pub fn into_scalar(self) -> CellValue {
+        match self {
+            Value::Scalar(value) => value,
+            Value::Array(array) => array.at(0, 0),
+            Value::Lambda(_) => err(ErrorValue::Value),
+        }
+    }
+
+    /// this value as a block; a single value becomes a 1x1 block.
+    pub fn into_array(self) -> Array {
+        match self {
+            Value::Array(array) => array,
+            other => Array {
+                rows: 1,
+                cols: 1,
+                values: vec![other.into_scalar()],
+            },
+        }
+    }
+
+    pub fn as_error(&self) -> Option<ErrorValue> {
+        match self {
+            Value::Scalar(CellValue::Error { value }) => Some(*value),
+            _ => None,
+        }
+    }
+}
+
+impl From<CellValue> for Value {
+    fn from(value: CellValue) -> Self {
+        Value::Scalar(value)
+    }
+}
+
+/// the cell count of an output block, refused before anything is reserved so a
+/// product of two in-budget inputs cannot ask for an out-of-budget result.
+fn output_cells(rows: usize, cols: usize) -> Result<usize, ErrorValue> {
+    match rows.checked_mul(cols) {
+        Some(count) if count <= MAX_ARRAY_CELLS => Ok(count),
+        _ => Err(ErrorValue::Num),
+    }
+}
+
+/// expression nodes a callback or a lifted call may evaluate again for each
+/// element on the budget of the cell it fills. every node past these is
+/// charged, so a long body cannot be repeated a million times for free.
+const FREE_NODES: u64 = 8;
+
+/// inner-loop steps, a multiply-add or a separator probe, one budget unit pays
+/// for in the builtins whose work outgrows the cells they read and write.
+const STEPS_PER_UNIT: u64 = 16;
+
+fn charge_steps(ctx: &EvalContext<'_>, steps: u64) -> Result<(), ErrorValue> {
+    if !ctx.consume_cells(steps / STEPS_PER_UNIT) {
+        return Err(ErrorValue::Num);
+    }
+    Ok(())
+}
+
+/// the nodes one evaluation of `expr` walks.
+fn nodes(expr: &Expr) -> u64 {
+    1 + match expr {
+        Expr::ArrayLiteral { values, .. } => values.iter().map(nodes).sum(),
+        Expr::Unary { expr, .. } | Expr::Percent(expr) => nodes(expr),
+        Expr::Binary { lhs, rhs, .. }
+        | Expr::RangeJoin {
+            start: lhs,
+            end: rhs,
+        } => nodes(lhs) + nodes(rhs),
+        Expr::FuncCall { args, .. } => args.iter().map(nodes).sum(),
+        _ => 0,
+    }
+}
+
+/// the scalar builtin over arguments this call already evaluated or resolved,
+/// charged for evaluating them again: fallbacks nested in each other's
+/// arguments would otherwise double their work at every level for free.
+fn fall_back(f: Func, args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    if let Err(error) = ctx.within_budget() {
+        return Value::error(error);
+    }
+    if !ctx.consume_cells(args.iter().map(nodes).sum()) {
+        return Value::error(ErrorValue::Num);
+    }
+    Value::Scalar(f.call(args, ctx))
+}
+
+/// charge the evaluation budget for an output block before any of its cells
+/// is computed, so a refused block costs no work.
+fn reserve(ctx: &EvalContext<'_>, rows: usize, cols: usize) -> Result<usize, ErrorValue> {
+    let count = output_cells(rows, cols)?;
+    if !ctx.consume_cells(count as u64) {
+        return Err(ErrorValue::Num);
+    }
+    Ok(count)
+}
+
+/// the block `reserve` paid for.
+fn reserved(rows: usize, cols: usize, values: Vec<CellValue>) -> Value {
+    match Array::new(rows, cols, values) {
+        Ok(array) if rows * cols == 1 => Value::Scalar(array.at(0, 0)),
+        Ok(array) => Value::Array(array),
+        Err(error) => Value::error(error),
+    }
+}
+
+/// an output block being filled: its cells are paid for before any is
+/// computed, and each cell's text before the block keeps it.
+struct Cells<'c, 'a> {
+    ctx: &'c EvalContext<'a>,
+    values: Vec<CellValue>,
+}
+
+impl<'c, 'a> Cells<'c, 'a> {
+    fn reserve(ctx: &'c EvalContext<'a>, rows: usize, cols: usize) -> Result<Self, ErrorValue> {
+        let count = reserve(ctx, rows, cols)?;
+        Ok(Self {
+            ctx,
+            values: Vec::with_capacity(count),
+        })
+    }
+
+    fn push(&mut self, value: CellValue) -> Result<(), ErrorValue> {
+        if !self.ctx.keep_text(&value) {
+            return Err(ErrorValue::Num);
+        }
+        self.values.push(value);
+        Ok(())
+    }
+
+    /// keep a copy of `value`, its text charged before it is copied.
+    fn copy(&mut self, value: &CellValue) -> Result<(), ErrorValue> {
+        if !self.ctx.keep_text(value) {
+            return Err(ErrorValue::Num);
+        }
+        self.values.push(copied(value));
+        Ok(())
+    }
+
+    fn block(self, rows: usize, cols: usize) -> Value {
+        reserved(rows, cols, self.values)
+    }
+}
+
+/// evaluate an expression as a possibly rectangular value.
+pub fn evaluate_array(expr: &Expr, ctx: &EvalContext<'_>) -> Value {
+    match expr {
+        Expr::Range { .. } | Expr::ColumnRange { .. } | Expr::RowRange { .. } => {
+            match as_array_area(expr, ctx) {
+                Some(area) => area_values(&area, ctx),
+                None => Value::error(ErrorValue::Ref),
+            }
+        }
+        // a join's ends may fail for their own reason, which scalar
+        // evaluation reports and `as_area` would flatten to "not a reference"
+        Expr::RangeJoin { .. } => match as_array_area(expr, ctx) {
+            Some(area) => area_values(&area, ctx),
+            None => Value::Scalar(evaluate(expr, ctx)),
+        },
+        Expr::TableRef { table, spec } => match crate::eval::table_area(table, spec, ctx) {
+            Ok(area) => area_values(&area, ctx),
+            Err(error) => Value::error(error),
+        },
+        Expr::Name { scope, name } => match crate::eval::bound(scope, name, ctx) {
+            // a bound block costs what re-reading the range it came from would,
+            // so a callback body cannot copy one for free once per iteration.
+            Some(binding) => match binding.held() {
+                Value::Array(array)
+                    if !ctx.consume_cells(array.values.len() as u64)
+                        || !ctx.consume_text(array.text_bytes()) =>
+                {
+                    Value::error(ErrorValue::Num)
+                }
+                _ => binding.value(),
+            },
+            None => match as_array_area(expr, ctx) {
+                Some(area) => area_values(&area, ctx),
+                None => Value::Scalar(evaluate(expr, ctx)),
+            },
+        },
+        Expr::ArrayLiteral { cols, values } => array_literal(*cols, values, ctx),
+        Expr::Unary { op, expr } => map1(evaluate_array(expr, ctx), ctx, |v| apply_unary(*op, v)),
+        Expr::Percent(inner) => map1(evaluate_array(inner, ctx), ctx, apply_percent),
+        Expr::Binary { op, lhs, rhs } => {
+            let left = evaluate_array(lhs, ctx);
+            let right = evaluate_array(rhs, ctx);
+            map2(left, right, ctx, |a, b| apply_binary(*op, a, b, ctx))
+        }
+        // these yield a reference, so a multi-cell result is a block here
+        Expr::FuncCall { name, .. }
+            if name.eq_ignore_ascii_case("OFFSET") || name.eq_ignore_ascii_case("INDIRECT") =>
+        {
+            match as_array_area(expr, ctx) {
+                Some(area) => area_values(&area, ctx),
+                None => Value::Scalar(evaluate(expr, ctx)),
+            }
+        }
+        Expr::FuncCall { name, func, args } => call(name, *func, args, ctx),
+        _ => Value::Scalar(evaluate(expr, ctx)),
+    }
+}
+
+fn array_literal(cols: usize, values: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    if cols == 0 || !values.len().is_multiple_of(cols) {
+        return Value::error(ErrorValue::Value);
+    }
+    let rows = values.len() / cols;
+    result((|| {
+        let mut cells = Cells::reserve(ctx, rows, cols)?;
+        for value in values {
+            cells.push(evaluate_array(value, ctx).into_scalar())?;
+        }
+        Ok(cells.block(rows, cols))
+    })())
+}
+
+/// elementwise over one value.
+fn map1(value: Value, ctx: &EvalContext<'_>, f: impl Fn(&CellValue) -> CellValue) -> Value {
+    match value {
+        Value::Array(array) => result((|| {
+            let mut cells = Cells::reserve(ctx, array.rows, array.cols)?;
+            for value in &array.values {
+                cells.push(f(value))?;
+            }
+            Ok(cells.block(array.rows, array.cols))
+        })()),
+        other => Value::Scalar(f(&other.into_scalar())),
+    }
+}
+
+/// elementwise over two values, broadcasting single rows and columns.
+fn map2(
+    left: Value,
+    right: Value,
+    ctx: &EvalContext<'_>,
+    f: impl Fn(&CellValue, &CellValue) -> CellValue,
+) -> Value {
+    if let (Value::Scalar(a), Value::Scalar(b)) = (&left, &right) {
+        return Value::Scalar(f(a, b));
+    }
+    let (lr, lc) = left.dims();
+    let (rr, rc) = right.dims();
+    let (rows, cols) = (lr.max(rr), lc.max(rc));
+    result((|| {
+        let mut cells = Cells::reserve(ctx, rows, cols)?;
+        for row in 0..rows {
+            for col in 0..cols {
+                cells.push(f(&left.broadcast(row, col), &right.broadcast(row, col)))?;
+            }
+        }
+        Ok(cells.block(rows, cols))
+    })())
+}
+
+/// a rectangular reference, with whole-column and whole-row ranges cut to the
+/// extent the sheet actually uses so `A:A` costs the authored data, not a
+/// million blanks.
+fn as_array_area(expr: &Expr, ctx: &EvalContext<'_>) -> Option<Area> {
+    let mut area = as_area(expr, ctx)?;
+    if area.rows >= xlsx_model::MAX_ROWS as usize {
+        let used = ctx.provider.used_rows(area.sheet) as usize;
+        area.rows = used.saturating_sub(area.start.row as usize).max(1);
+    }
+    if area.cols >= xlsx_model::MAX_COLS as usize {
+        let used = ctx.provider.used_cols(area.sheet) as usize;
+        area.cols = used.saturating_sub(area.start.col as usize).max(1);
+    }
+    Some(area)
+}
+
+fn area_values(area: &Area, ctx: &EvalContext<'_>) -> Value {
+    match area.values_ref(ctx) {
+        Ok(values) => {
+            // reading the cells into a block copies their text
+            if !values.iter().all(|value| ctx.keep_text(value)) {
+                return Value::error(ErrorValue::Num);
+            }
+            let values = values
+                .into_iter()
+                .map(std::borrow::Cow::into_owned)
+                .collect();
+            match Array::new(area.rows, area.cols, values) {
+                Ok(array) if area.rows * area.cols == 1 => Value::Scalar(array.at(0, 0)),
+                Ok(array) => Value::Array(array),
+                Err(error) => Value::error(error),
+            }
+        }
+        Err(error) => Value::error(error),
+    }
+}
+
+/// read one argument as a block, whatever shape it has.
+fn argument(args: &[Expr], ctx: &EvalContext<'_>, index: usize) -> Result<Array, ErrorValue> {
+    let value = args
+        .get(index)
+        .map(|arg| evaluate_array(arg, ctx))
+        .ok_or(ErrorValue::Value)?;
+    match value {
+        Value::Scalar(CellValue::Error { value }) => Err(value),
+        Value::Scalar(value) => Array::new(1, 1, vec![value]),
+        Value::Array(array) => Ok(array),
+        Value::Lambda(_) => Err(ErrorValue::Value),
+    }
+}
+
+/// an optional scalar argument; omitted and blank arguments give `None`.
+fn optional(
+    args: &[Expr],
+    ctx: &EvalContext<'_>,
+    index: usize,
+) -> Result<Option<CellValue>, ErrorValue> {
+    let Some(arg) = args.get(index) else {
+        return Ok(None);
+    };
+    match evaluate_array(arg, ctx).into_scalar() {
+        CellValue::Error { value } => Err(value),
+        CellValue::Empty => Ok(None),
+        value => Ok(Some(value)),
+    }
+}
+
+fn optional_number(
+    args: &[Expr],
+    ctx: &EvalContext<'_>,
+    index: usize,
+    default: f64,
+) -> Result<f64, ErrorValue> {
+    match optional(args, ctx, index)? {
+        Some(value) => to_number(&value),
+        None => Ok(default),
+    }
+}
+
+fn optional_bool(
+    args: &[Expr],
+    ctx: &EvalContext<'_>,
+    index: usize,
+    default: bool,
+) -> Result<bool, ErrorValue> {
+    match optional(args, ctx, index)? {
+        Some(value) => to_bool(&value),
+        None => Ok(default),
+    }
+}
+
+/// a count argument as a usize index, rejecting anything outside the sheet.
+fn index_of(value: f64) -> Result<usize, ErrorValue> {
+    if !value.is_finite() || value < 1.0 || value > MAX_ARRAY_CELLS as f64 {
+        return Err(ErrorValue::Value);
+    }
+    Ok(value.trunc() as usize)
+}
+
+fn blank(value: &CellValue) -> bool {
+    matches!(value, CellValue::Empty)
+}
+
+/// excel's dynamic-array ordering: blanks sort last whichever way the order
+/// runs, everything else by the usual cross-type ranking.
+fn order_values(a: &CellValue, b: &CellValue, descending: bool) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (blank(a), blank(b)) {
+        (true, true) => Ordering::Equal,
+        (true, false) => Ordering::Greater,
+        (false, true) => Ordering::Less,
+        (false, false) => {
+            let ordering = cmp_values(a, b);
+            if descending {
+                ordering.reverse()
+            } else {
+                ordering
+            }
+        }
+    }
+}
+
+/// the key `UNIQUE` groups by; hashing it keeps dedup linear rather than
+/// comparing every slice against every kept one.
+fn identity(slice: &[CellValue]) -> String {
+    let mut key = String::with_capacity(slice.len() * 8);
+    for value in slice {
+        match value {
+            CellValue::Empty => key.push_str("n:0"),
+            CellValue::Number { value } => {
+                key.push_str("n:");
+                key.push_str(&crate::eval::format_number(*value + 0.0));
+            }
+            CellValue::Text { value } => {
+                key.push_str("t:");
+                key.push_str(&value.to_lowercase());
+            }
+            CellValue::Bool { value } => key.push_str(if *value { "b:1" } else { "b:0" }),
+            CellValue::Error { value } => {
+                key.push_str("e:");
+                key.push_str(value.as_str());
+            }
+        }
+        key.push('\u{1f}');
+    }
+    key
+}
+
+fn rows_of(array: &Array, row: usize) -> Vec<CellValue> {
+    array.row_values(row).iter().map(copied).collect()
+}
+
+fn column_of(array: &Array, col: usize) -> Vec<CellValue> {
+    (0..array.rows).map(|row| array.at(row, col)).collect()
+}
+
+/// the rows of `data` at `picks`, or its columns, each cell's text charged
+/// before it is copied.
+fn lines(ctx: &EvalContext<'_>, data: &Array, picks: &[usize], by_row: bool) -> Value {
+    let (rows, cols) = if by_row {
+        (picks.len(), data.cols)
+    } else {
+        (data.rows, picks.len())
+    };
+    result((|| {
+        let mut cells = Cells::reserve(ctx, rows, cols)?;
+        for row in 0..rows {
+            for col in 0..cols {
+                let (row, col) = if by_row {
+                    (picks[row], col)
+                } else {
+                    (row, picks[col])
+                };
+                cells.copy(&data.values[row * data.cols + col])?;
+            }
+        }
+        Ok(cells.block(rows, cols))
+    })())
+}
+
+fn result(value: Result<Value, ErrorValue>) -> Value {
+    value.unwrap_or_else(Value::error)
+}
+
+/// an array-aware builtin: lazy arguments in, one rectangular value out.
+type ArrayFn = fn(&[Expr], &EvalContext<'_>) -> Value;
+
+fn call(name: &str, func: Option<Func>, args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    let upper = crate::functions::bare_name(name).to_ascii_uppercase();
+    if let Some(f) = lookup_array(&upper) {
+        return f(args, ctx);
+    }
+    match func {
+        Some(f) if lifts(&upper) => lift(f, args, ctx, None),
+        Some(f) if lifted_positions(&upper).is_some() => {
+            lift(f, args, ctx, lifted_positions(&upper))
+        }
+        Some(f) => Value::Scalar(f.call(args, ctx)),
+        None => {
+            ctx.record_unsupported_function();
+            Value::error(ErrorValue::Name)
+        }
+    }
+}
+
+/// call a scalar builtin once per output position, splicing the lifted
+/// arguments in as literals. `positions` limits lifting to those arguments, so
+/// a builtin whose other arguments are ranges still receives them as written;
+/// `None` lifts every argument. with no array argument the call is left
+/// untouched, so laziness and reference arguments behave as in scalar mode.
+fn lift(f: Func, args: &[Expr], ctx: &EvalContext<'_>, positions: Option<&[usize]>) -> Value {
+    let values: Vec<Option<Value>> = args
+        .iter()
+        .enumerate()
+        .map(|(index, arg)| {
+            positions
+                .is_none_or(|positions| positions.contains(&index))
+                .then(|| evaluate_array(arg, ctx))
+        })
+        .collect();
+    let mut rows = 1usize;
+    let mut cols = 1usize;
+    for value in values.iter().flatten() {
+        let (r, c) = value.dims();
+        rows = rows.max(r);
+        cols = cols.max(c);
+    }
+    if rows == 1 && cols == 1 {
+        return fall_back(f, args, ctx);
+    }
+    result((|| {
+        let count = output_cells(rows, cols)?;
+        // every call reads each lifted element and evaluates the other
+        // arguments again
+        let repeated = args
+            .iter()
+            .zip(&values)
+            .map(|(arg, value)| if value.is_some() { 1 } else { nodes(arg) })
+            .sum::<u64>()
+            .saturating_sub(FREE_NODES);
+        if !ctx.consume_cells((count as u64).saturating_mul(repeated)) {
+            return Err(ErrorValue::Num);
+        }
+        let mut spliced: Vec<Expr> = args.to_vec();
+        let mut cells = Cells::reserve(ctx, rows, cols)?;
+        for row in 0..rows {
+            for col in 0..cols {
+                for (slot, value) in spliced.iter_mut().zip(&values) {
+                    if let Some(value) = value {
+                        *slot = Expr::Literal(value.broadcast(row, col));
+                    }
+                }
+                step();
+                cells.push(f.call(&spliced, ctx))?;
+                ctx.within_budget()?;
+            }
+        }
+        Ok(cells.block(rows, cols))
+    })())
+}
+
+/// argument positions that lift for builtins whose other arguments are ranges:
+/// `COUNTIF(range, {a;b})` answers once per criterion, `VLOOKUP` once per key.
+fn lifted_positions(name: &str) -> Option<&'static [usize]> {
+    Some(match name {
+        "AVERAGEIF" | "COUNTIF" | "SUMIF" => &[1],
+        "COUNTIFS" => &[1, 3, 5, 7, 9],
+        "AVERAGEIFS" | "MAXIFS" | "MINIFS" | "SUMIFS" => &[2, 4, 6, 8, 10],
+        "HLOOKUP" | "VLOOKUP" | "XLOOKUP" => &[0],
+        "MATCH" | "RANK" | "RANK.AVG" | "RANK.EQ" | "XMATCH" => &[0],
+        "LARGE" | "SMALL" => &[1],
+        "PERCENTILE" | "PERCENTILE.INC" | "QUARTILE" | "QUARTILE.INC" => &[1],
+        _ => return None,
+    })
+}
+
+/// scalar builtins whose every argument is a single value, so an array
+/// argument means "do this once per element".
+fn lifts(name: &str) -> bool {
+    matches!(
+        name,
+        "ABS"
+            | "ACOS"
+            | "ASIN"
+            | "ATAN"
+            | "ATAN2"
+            | "CEILING"
+            | "CHAR"
+            | "CLEAN"
+            | "CODE"
+            | "COS"
+            | "COSH"
+            | "DATE"
+            | "DATEDIF"
+            | "DAY"
+            | "DEGREES"
+            | "EDATE"
+            | "EOMONTH"
+            | "EXACT"
+            | "EXP"
+            | "FIND"
+            | "FLOOR"
+            | "HOUR"
+            | "INT"
+            | "ISBLANK"
+            | "ISERR"
+            | "ISERROR"
+            | "ISEVEN"
+            | "ISLOGICAL"
+            | "ISNA"
+            | "ISNUMBER"
+            | "ISODD"
+            | "ISOWEEKNUM"
+            | "ISTEXT"
+            | "IFS"
+            | "LEFT"
+            | "LEN"
+            | "LN"
+            | "LOG"
+            | "LOG10"
+            | "LOWER"
+            | "MID"
+            | "MINUTE"
+            | "MOD"
+            | "MONTH"
+            | "MROUND"
+            | "N"
+            | "NOT"
+            | "NUMBERVALUE"
+            | "POWER"
+            | "PROPER"
+            | "QUOTIENT"
+            | "RADIANS"
+            | "REPLACE"
+            | "REPT"
+            | "RIGHT"
+            | "ROUND"
+            | "ROUNDDOWN"
+            | "ROUNDUP"
+            | "SEARCH"
+            | "SECOND"
+            | "SIGN"
+            | "SIN"
+            | "SINH"
+            | "SQRT"
+            | "SUBSTITUTE"
+            | "T"
+            | "TAN"
+            | "TANH"
+            | "TEXT"
+            | "TEXTAFTER"
+            | "TEXTBEFORE"
+            | "TIME"
+            | "TRIM"
+            | "TRUNC"
+            | "UPPER"
+            | "VALUE"
+            | "WEEKDAY"
+            | "WEEKNUM"
+            | "YEAR"
+    )
+}
+
+/// whether `name` has an array-only implementation, so a cell the file did not
+/// mark as an array formula still evaluates it rather than reporting `#NAME?`.
+/// whether an argument tree calls a builtin that only exists in array form, so
+/// a scalar cell calling an array-aware function over it still needs the array
+/// evaluator — `INDEX(LINEST(..), 3, 1)` is the shape this catches.
+pub(crate) fn args_need_array(args: &[Expr]) -> bool {
+    fn walk(expr: &Expr, depth: usize) -> bool {
+        if depth == 0 {
+            return false;
+        }
+        match expr {
+            Expr::FuncCall { func, name, args } => {
+                (func.is_none() && is_array_builtin(name))
+                    || args.iter().any(|arg| walk(arg, depth - 1))
+            }
+            Expr::Unary { expr, .. } | Expr::Percent(expr) => walk(expr, depth - 1),
+            Expr::Binary { lhs, rhs, .. } => walk(lhs, depth - 1) || walk(rhs, depth - 1),
+            Expr::RangeJoin { start, end } => walk(start, depth - 1) || walk(end, depth - 1),
+            _ => false,
+        }
+    }
+    args.iter().any(|arg| walk(arg, 32))
+}
+
+pub(crate) fn is_array_builtin(name: &str) -> bool {
+    lookup_array(&crate::functions::bare_name(name).to_ascii_uppercase()).is_some()
+}
+
+fn lookup_array(name: &str) -> Option<ArrayFn> {
+    Some(match name {
+        "ANCHORARRAY" => anchorarray,
+        "BYCOL" => bycol,
+        "BYROW" => byrow,
+        "LAMBDA" => lambda,
+        "LET" => let_,
+        "MAKEARRAY" => makearray,
+        "MAP" => map,
+        "REDUCE" => reduce,
+        "SCAN" => scan,
+        "TEXTSPLIT" => textsplit,
+        "AVERAGE" => average,
+        "COUNT" => count,
+        "COUNTA" => counta,
+        "MATCH" => match_,
+        "XLOOKUP" => xlookup,
+        "XMATCH" => xmatch,
+        "LINEST" => linest,
+        "TREND" => trend,
+        "FREQUENCY" => frequency,
+        "MMULT" => mmult,
+        "MAX" => max,
+        "MIN" => min,
+        "PRODUCT" => product,
+        "SUM" => sum,
+        "CHOOSECOLS" => choosecols,
+        "CHOOSEROWS" => chooserows,
+        "COLUMN" => column,
+        "COLUMNS" => columns,
+        "DROP" => drop,
+        "EXPAND" => expand,
+        "FILTER" => filter,
+        "HSTACK" => hstack,
+        "IF" => if_,
+        "IFERROR" => iferror,
+        "IFNA" => ifna,
+        "INDEX" => index,
+        "ROW" => row,
+        "ROWS" => rows_fn,
+        "SUMPRODUCT" => sumproduct,
+        "SEQUENCE" => sequence,
+        "SORT" => sort,
+        "SORTBY" => sortby,
+        "CONCAT" | "CONCATENATE" => concat,
+        "TAKE" => take,
+        "TEXTJOIN" => textjoin,
+        "TOCOL" => tocol,
+        "TOROW" => torow,
+        "TRANSPOSE" => transpose,
+        "UNIQUE" => unique,
+        "VSTACK" => vstack,
+        "WRAPCOLS" => wrapcols,
+        "WRAPROWS" => wraprows,
+        _ => return None,
+    })
+}
+
+/// the block a spilled formula produced, addressed by its anchor cell.
+fn anchorarray(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    let [Expr::Ref { sheet, cell }] = args else {
+        return Value::error(ErrorValue::Ref);
+    };
+    let Some(sid) = crate::eval::resolve_sheet(sheet, ctx) else {
+        return Value::error(ErrorValue::Ref);
+    };
+    let Some(range) = ctx.provider.spill_range(sid, *cell) else {
+        return Value::Scalar(normalize_provider_value(ctx.provider.value(sid, *cell)));
+    };
+    let area = Area {
+        sheet: sid,
+        start: range.start,
+        rows: (range.end.row - range.start.row + 1) as usize,
+        cols: (range.end.col - range.start.col + 1) as usize,
+    };
+    area_values(&area, ctx)
+}
+
+fn filter(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    result((|| {
+        if args.len() < 2 || args.len() > 3 {
+            return Err(ErrorValue::Value);
+        }
+        let data = argument(args, ctx, 0)?;
+        let include = argument(args, ctx, 1)?;
+        let by_rows = include.rows == data.rows && include.cols == 1;
+        let by_cols = include.cols == data.cols && include.rows == 1;
+        if !by_rows && !by_cols {
+            return Err(ErrorValue::Value);
+        }
+        let mut keep = Vec::new();
+        for position in 0..include.values.len() {
+            match to_bool(&include.values[position]) {
+                Ok(true) => keep.push(position),
+                Ok(false) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        if keep.is_empty() {
+            // nothing kept is an empty array, which no cell can hold: excel
+            // answers `#CALC!` unless the call names something to show
+            return Ok(match optional(args, ctx, 2)? {
+                Some(value) => Value::Scalar(value),
+                None => Value::error(ErrorValue::Calc),
+            });
+        }
+        Ok(lines(ctx, &data, &keep, by_rows))
+    })())
+}
+
+/// charge a sort of `count` lines by `keys` keys for its comparisons before
+/// it runs.
+fn charge_sort(ctx: &EvalContext<'_>, count: usize, keys: usize) -> Result<(), ErrorValue> {
+    let depth = u64::from(usize::BITS - count.leading_zeros());
+    charge_steps(ctx, (count as u64 * depth).saturating_mul(keys as u64))
+}
+
+fn sort(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    result((|| {
+        if args.is_empty() || args.len() > 4 {
+            return Err(ErrorValue::Value);
+        }
+        let data = argument(args, ctx, 0)?;
+        let key = index_of(optional_number(args, ctx, 1, 1.0)?)?;
+        let descending = optional_number(args, ctx, 2, 1.0)? < 0.0;
+        let by_col = optional_bool(args, ctx, 3, false)?;
+        let (count, width) = if by_col {
+            (data.cols, data.rows)
+        } else {
+            (data.rows, data.cols)
+        };
+        if key > width {
+            return Err(ErrorValue::Value);
+        }
+        let mut cells = Cells::reserve(ctx, data.rows, data.cols)?;
+        charge_sort(ctx, count, 1)?;
+        let sort_key = |line: usize| {
+            if by_col {
+                &data.values[(key - 1) * data.cols + line]
+            } else {
+                &data.values[line * data.cols + key - 1]
+            }
+        };
+        let mut order: Vec<usize> = (0..count).collect();
+        order.sort_by(|a, b| {
+            step();
+            order_values(sort_key(*a), sort_key(*b), descending)
+        });
+        for row in 0..data.rows {
+            for col in 0..data.cols {
+                cells.push(if by_col {
+                    data.at(row, order[col])
+                } else {
+                    data.at(order[row], col)
+                })?;
+            }
+        }
+        Ok(cells.block(data.rows, data.cols))
+    })())
+}
+
+fn sortby(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    result((|| {
+        if args.len() < 2 {
+            return Err(ErrorValue::Value);
+        }
+        let data = argument(args, ctx, 0)?;
+        let mut keys: Vec<(Array, bool)> = Vec::new();
+        let mut index = 1;
+        while index < args.len() {
+            let by = argument(args, ctx, index)?;
+            if by.rows != data.rows || by.cols != 1 {
+                return Err(ErrorValue::Value);
+            }
+            let descending = optional_number(args, ctx, index + 1, 1.0)? < 0.0;
+            keys.push((by, descending));
+            index += 2;
+        }
+        let mut cells = Cells::reserve(ctx, data.rows, data.cols)?;
+        charge_sort(ctx, data.rows, keys.len())?;
+        let mut order: Vec<usize> = (0..data.rows).collect();
+        order.sort_by(|a, b| {
+            step();
+            for (by, descending) in &keys {
+                let ordering = order_values(&by.at(*a, 0), &by.at(*b, 0), *descending);
+                if ordering != std::cmp::Ordering::Equal {
+                    return ordering;
+                }
+            }
+            std::cmp::Ordering::Equal
+        });
+        for row in order {
+            for col in 0..data.cols {
+                cells.push(data.at(row, col))?;
+            }
+        }
+        Ok(cells.block(data.rows, data.cols))
+    })())
+}
+
+/// `WRAPROWS(vector, count, [pad])`: fill rows of `count` from the vector,
+/// padding the last one. `WRAPCOLS` fills columns instead.
+fn wraprows(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    wrap(args, ctx, true)
+}
+
+fn wrapcols(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    wrap(args, ctx, false)
+}
+
+fn wrap(args: &[Expr], ctx: &EvalContext<'_>, by_row: bool) -> Value {
+    result((|| {
+        if args.len() < 2 || args.len() > 3 {
+            return Err(ErrorValue::Value);
+        }
+        let data = argument(args, ctx, 0)?;
+        if data.rows > 1 && data.cols > 1 {
+            return Err(ErrorValue::Value);
+        }
+        let width = index_of(optional_number(args, ctx, 1, 0.0)?)?;
+        let pad = optional(args, ctx, 2)?.unwrap_or(err(ErrorValue::NA));
+        let groups = data.values.len().div_ceil(width);
+        let (rows, cols) = if by_row {
+            (groups, width)
+        } else {
+            (width, groups)
+        };
+        let mut cells = Cells::reserve(ctx, rows, cols)?;
+        for row in 0..rows {
+            for col in 0..cols {
+                let index = if by_row {
+                    row * width + col
+                } else {
+                    col * width + row
+                };
+                cells.push(
+                    data.values
+                        .get(index)
+                        .cloned()
+                        .unwrap_or_else(|| pad.clone()),
+                )?;
+            }
+        }
+        Ok(cells.block(rows, cols))
+    })())
+}
+
+fn unique(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    result((|| {
+        if args.is_empty() || args.len() > 3 {
+            return Err(ErrorValue::Value);
+        }
+        let data = argument(args, ctx, 0)?;
+        let by_col = optional_bool(args, ctx, 1, false)?;
+        let exactly_once = optional_bool(args, ctx, 2, false)?;
+        let count = if by_col { data.cols } else { data.rows };
+        let mut seen: HashMap<String, usize> = HashMap::with_capacity(count);
+        let mut occurrences: Vec<usize> = vec![0; count];
+        let mut first: Vec<usize> = Vec::new();
+        for index in 0..count {
+            step();
+            let key = if by_col {
+                identity(&column_of(&data, index))
+            } else {
+                identity(data.row_values(index))
+            };
+            match seen.entry(key) {
+                Entry::Occupied(entry) => occurrences[*entry.get()] += 1,
+                Entry::Vacant(entry) => {
+                    entry.insert(index);
+                    occurrences[index] = 1;
+                    first.push(index);
+                }
+            }
+        }
+        let kept: Vec<usize> = first
+            .into_iter()
+            .filter(|index| !exactly_once || occurrences[*index] == 1)
+            .collect();
+        if kept.is_empty() {
+            return Ok(Value::error(ErrorValue::NA));
+        }
+        Ok(lines(ctx, &data, &kept, !by_col))
+    })())
+}
+
+fn sequence(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    result((|| {
+        if args.is_empty() || args.len() > 4 {
+            return Err(ErrorValue::Value);
+        }
+        let rows = index_of(optional_number(args, ctx, 0, 1.0)?)?;
+        let cols = index_of(optional_number(args, ctx, 1, 1.0)?)?;
+        let start = optional_number(args, ctx, 2, 1.0)?;
+        let step = optional_number(args, ctx, 3, 1.0)?;
+        let cells = (0..reserve(ctx, rows, cols)?)
+            .map(|index| num(start + step * index as f64))
+            .collect();
+        Ok(reserved(rows, cols, cells))
+    })())
+}
+
+fn choosecols(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    choose(args, ctx, false)
+}
+
+fn chooserows(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    choose(args, ctx, true)
+}
+
+/// `CHOOSEROWS`/`CHOOSECOLS`: each index argument may itself be an array, and
+/// a negative index counts from the end.
+fn choose(args: &[Expr], ctx: &EvalContext<'_>, by_row: bool) -> Value {
+    result((|| {
+        if args.len() < 2 {
+            return Err(ErrorValue::Value);
+        }
+        let data = argument(args, ctx, 0)?;
+        let limit = if by_row { data.rows } else { data.cols };
+        let mut picks = Vec::new();
+        for position in 1..args.len() {
+            for value in argument(args, ctx, position)?.values {
+                let index = to_number(&value)?.trunc();
+                let resolved = if index < 0.0 {
+                    limit as f64 + index
+                } else {
+                    index - 1.0
+                };
+                if resolved < 0.0 || resolved >= limit as f64 {
+                    return Err(ErrorValue::Value);
+                }
+                picks.push(resolved as usize);
+            }
+        }
+        if picks.is_empty() {
+            return Err(ErrorValue::Value);
+        }
+        Ok(lines(ctx, &data, &picks, by_row))
+    })())
+}
+
+fn hstack(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    result((|| {
+        let blocks = stack_arguments(args, ctx)?;
+        let rows = blocks.iter().map(|block| block.rows).max().unwrap_or(1);
+        let cols = blocks
+            .iter()
+            .try_fold(0usize, |total, block| total.checked_add(block.cols))
+            .ok_or(ErrorValue::Num)?;
+        let mut cells = Cells::reserve(ctx, rows, cols)?;
+        for row in 0..rows {
+            for block in &blocks {
+                for col in 0..block.cols {
+                    cells.push(block.at(row, col))?;
+                }
+            }
+        }
+        Ok(cells.block(rows, cols))
+    })())
+}
+
+fn vstack(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    result((|| {
+        let blocks = stack_arguments(args, ctx)?;
+        let cols = blocks.iter().map(|block| block.cols).max().unwrap_or(1);
+        let rows = blocks
+            .iter()
+            .try_fold(0usize, |total, block| total.checked_add(block.rows))
+            .ok_or(ErrorValue::Num)?;
+        let mut cells = Cells::reserve(ctx, rows, cols)?;
+        for block in &blocks {
+            for row in 0..block.rows {
+                for col in 0..cols {
+                    cells.push(block.at(row, col))?;
+                }
+            }
+        }
+        Ok(cells.block(rows, cols))
+    })())
+}
+
+fn stack_arguments(args: &[Expr], ctx: &EvalContext<'_>) -> Result<Vec<Array>, ErrorValue> {
+    if args.is_empty() {
+        return Err(ErrorValue::Value);
+    }
+    (0..args.len())
+        .map(|index| argument(args, ctx, index))
+        .collect()
+}
+
+fn tocol(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    flatten(args, ctx, false)
+}
+
+fn torow(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    flatten(args, ctx, true)
+}
+
+fn flatten(args: &[Expr], ctx: &EvalContext<'_>, by_row: bool) -> Value {
+    result((|| {
+        if args.is_empty() || args.len() > 3 {
+            return Err(ErrorValue::Value);
+        }
+        let data = argument(args, ctx, 0)?;
+        let ignore = optional_number(args, ctx, 1, 0.0)?.trunc() as i64;
+        if !(0..=3).contains(&ignore) {
+            return Err(ErrorValue::Value);
+        }
+        let scan_by_column = optional_bool(args, ctx, 2, false)?;
+        let kept = |value: &CellValue| match ignore {
+            1 => !blank(value),
+            2 => !matches!(value, CellValue::Error { .. }),
+            3 => !blank(value) && !matches!(value, CellValue::Error { .. }),
+            _ => true,
+        };
+        let order: Vec<usize> = if scan_by_column {
+            (0..data.cols)
+                .flat_map(|col| (0..data.rows).map(move |row| row * data.cols + col))
+                .collect()
+        } else {
+            (0..data.values.len()).collect()
+        };
+        let count = order
+            .iter()
+            .filter(|&&index| kept(&data.values[index]))
+            .count();
+        if count == 0 {
+            return Ok(Value::error(ErrorValue::NA));
+        }
+        let (rows, cols) = if by_row { (1, count) } else { (count, 1) };
+        let mut cells = Cells::reserve(ctx, rows, cols)?;
+        for index in order {
+            if kept(&data.values[index]) {
+                cells.push(data.values[index].clone())?;
+            }
+        }
+        Ok(cells.block(rows, cols))
+    })())
+}
+
+fn expand(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    result((|| {
+        if args.len() < 2 || args.len() > 4 {
+            return Err(ErrorValue::Value);
+        }
+        let data = argument(args, ctx, 0)?;
+        let rows = match optional(args, ctx, 1)? {
+            Some(value) => index_of(to_number(&value)?)?,
+            None => data.rows,
+        };
+        let cols = match optional(args, ctx, 2)? {
+            Some(value) => index_of(to_number(&value)?)?,
+            None => data.cols,
+        };
+        if rows < data.rows || cols < data.cols {
+            return Err(ErrorValue::Value);
+        }
+        let pad = optional(args, ctx, 3)?.unwrap_or(err(ErrorValue::NA));
+        let mut cells = Cells::reserve(ctx, rows, cols)?;
+        for row in 0..rows {
+            for col in 0..cols {
+                cells.push(if row < data.rows && col < data.cols {
+                    data.at(row, col)
+                } else {
+                    pad.clone()
+                })?;
+            }
+        }
+        Ok(cells.block(rows, cols))
+    })())
+}
+
+fn drop(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    slice(args, ctx, true)
+}
+
+fn take(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    slice(args, ctx, false)
+}
+
+/// `DROP` removes the first or last n rows/columns, `TAKE` keeps them.
+fn slice(args: &[Expr], ctx: &EvalContext<'_>, dropping: bool) -> Value {
+    result((|| {
+        if args.len() < 2 || args.len() > 3 {
+            return Err(ErrorValue::Value);
+        }
+        let data = argument(args, ctx, 0)?;
+        let row_span = span(optional(args, ctx, 1)?, data.rows, dropping)?;
+        let col_span = span(optional(args, ctx, 2)?, data.cols, dropping)?;
+        if row_span.is_empty() || col_span.is_empty() {
+            return Err(ErrorValue::Value);
+        }
+        let (rows, cols) = (row_span.len(), col_span.len());
+        let mut cells = Cells::reserve(ctx, rows, cols)?;
+        for row in row_span {
+            for col in col_span.clone() {
+                cells.push(data.at(row, col))?;
+            }
+        }
+        Ok(cells.block(rows, cols))
+    })())
+}
+
+fn span(
+    count: Option<CellValue>,
+    length: usize,
+    dropping: bool,
+) -> Result<std::ops::Range<usize>, ErrorValue> {
+    let Some(count) = count else {
+        return Ok(0..length);
+    };
+    let count = to_number(&count)?.trunc();
+    if !count.is_finite() || count.abs() > length as f64 {
+        return Ok(if dropping { 0..0 } else { 0..length });
+    }
+    let magnitude = count.abs() as usize;
+    Ok(match (dropping, count < 0.0) {
+        (true, false) => magnitude..length,
+        (true, true) => 0..length - magnitude,
+        (false, false) => 0..magnitude,
+        (false, true) => length - magnitude..length,
+    })
+}
+
+fn transpose(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    result((|| {
+        if args.len() != 1 {
+            return Err(ErrorValue::Value);
+        }
+        let data = argument(args, ctx, 0)?;
+        let mut cells = Cells::reserve(ctx, data.cols, data.rows)?;
+        for col in 0..data.cols {
+            for row in 0..data.rows {
+                cells.push(data.at(row, col))?;
+            }
+        }
+        Ok(cells.block(data.cols, data.rows))
+    })())
+}
+
+fn rows_fn(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    dimension(args, ctx, true)
+}
+
+fn columns(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    dimension(args, ctx, false)
+}
+
+/// `ROWS`/`COLUMNS`: a reference keeps the cheap scalar answer, a computed
+/// block is measured directly.
+fn dimension(args: &[Expr], ctx: &EvalContext<'_>, by_row: bool) -> Value {
+    if args.len() == 1 && as_area(&args[0], ctx).is_some() {
+        let name = if by_row { "ROWS" } else { "COLUMNS" };
+        if let Some(f) = crate::functions::resolve(name) {
+            return fall_back(f, args, ctx);
+        }
+    }
+    result((|| {
+        let data = argument(args, ctx, 0)?;
+        Ok(Value::Scalar(num(if by_row {
+            data.rows as f64
+        } else {
+            data.cols as f64
+        })))
+    })())
+}
+
+fn index(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    if args.len() < 2 || args.len() > 3 {
+        return Value::error(ErrorValue::Value);
+    }
+    let rows = evaluate_array(&args[1], ctx);
+    let cols = match args.get(2).map(|arg| evaluate_array(arg, ctx)) {
+        Some(Value::Scalar(CellValue::Empty)) | None => None,
+        Some(value) => Some(value),
+    };
+    // excel picks the form from the first argument: over a reference INDEX
+    // answers with one reference, so an array index collapses to its first
+    // element; only the array form answers once per index
+    let reference = args
+        .first()
+        .is_some_and(|arg| indexes_a_reference(arg, ctx));
+    if !reference && (matches!(rows, Value::Array(_)) || matches!(cols, Some(Value::Array(_)))) {
+        return index_each(args, ctx, &rows, cols.as_ref());
+    }
+    let mut spliced = args.to_vec();
+    spliced[1] = Expr::Literal(rows.into_scalar());
+    if let Some(value) = cols {
+        spliced[2] = Expr::Literal(value.into_scalar());
+    }
+    index_one(&spliced, ctx, reference)
+}
+
+/// whether `INDEX`'s first argument is a reference, picking its reference
+/// form. a `LET` name holds a value, so indexing one takes the array form.
+fn indexes_a_reference(expr: &Expr, ctx: &EvalContext<'_>) -> bool {
+    if let Expr::Name { scope, name } = expr
+        && crate::eval::bound(scope, name, ctx).is_some()
+    {
+        return false;
+    }
+    as_area(expr, ctx).is_some()
+}
+
+fn index_one(args: &[Expr], ctx: &EvalContext<'_>, reference: bool) -> Value {
+    if reference
+        && !whole_axis(args.get(1))
+        && !whole_axis(args.get(2))
+        && let Some(f) = crate::functions::resolve("INDEX")
+    {
+        return fall_back(f, args, ctx);
+    }
+    result((|| {
+        let data = argument(args, ctx, 0)?;
+        let first = optional_number(args, ctx, 1, 0.0)?.trunc();
+        let second = match args.len() {
+            3 => Some(optional_number(args, ctx, 2, 0.0)?.trunc()),
+            _ => None,
+        };
+        // one index against a single row addresses that row's columns
+        let (row, col) = match second {
+            Some(col) => (first, col),
+            None if data.rows == 1 && data.cols > 1 => (0.0, first),
+            None => (first, 0.0),
+        };
+        if row < 0.0 || col < 0.0 || row > data.rows as f64 || col > data.cols as f64 {
+            return Err(ErrorValue::Ref);
+        }
+        Ok(match (row as usize, col as usize) {
+            (0, 0) => Value::Array(data),
+            (0, col) => lines(ctx, &data, &[col - 1], false),
+            (row, 0) => lines(ctx, &data, &[row - 1], true),
+            (row, col) => Value::Scalar(data.at(row - 1, col - 1)),
+        })
+    })())
+}
+
+/// `INDEX(block, {1;3;2})`: one pick per index, laid out over the rectangle
+/// the row and column indices broadcast to.
+fn index_each(args: &[Expr], ctx: &EvalContext<'_>, rows: &Value, cols: Option<&Value>) -> Value {
+    result((|| {
+        let data = argument(args, ctx, 0)?;
+        let (index_rows, index_cols) = rows.dims();
+        let (other_rows, other_cols) = cols.map_or((1, 1), Value::dims);
+        let out_rows = index_rows.max(other_rows);
+        let out_cols = index_cols.max(other_cols);
+        let mut cells = Cells::reserve(ctx, out_rows, out_cols)?;
+        for row in 0..out_rows {
+            for col in 0..out_cols {
+                cells.push(pick(
+                    &data,
+                    rows.broadcast(row, col),
+                    cols.map(|c| c.broadcast(row, col)),
+                ))?;
+            }
+        }
+        Ok(cells.block(out_rows, out_cols))
+    })())
+}
+
+fn pick(data: &Array, row: CellValue, col: Option<CellValue>) -> CellValue {
+    let index = |value: CellValue| to_number(&value).map(f64::trunc);
+    let first = match index(row) {
+        Ok(value) => value,
+        Err(error) => return err(error),
+    };
+    let second = match col.map(index) {
+        Some(Ok(value)) => Some(value),
+        Some(Err(error)) => return err(error),
+        None => None,
+    };
+    let (row, col) = match second {
+        Some(col) => (first, col),
+        None if data.rows == 1 && data.cols > 1 => (1.0, first),
+        None => (first, 1.0),
+    };
+    if row < 1.0 || col < 1.0 || row > data.rows as f64 || col > data.cols as f64 {
+        return err(ErrorValue::Ref);
+    }
+    data.at(row as usize - 1, col as usize - 1)
+}
+
+/// whether an `INDEX` index asks for a whole row or column rather than one
+/// cell, which the single-cell scalar path cannot answer.
+fn whole_axis(arg: Option<&Expr>) -> bool {
+    arg.is_some_and(|expr| {
+        crate::functions::omitted(expr)
+            || matches!(expr, Expr::Number(value) if *value == 0.0)
+            || matches!(expr, Expr::Literal(CellValue::Number { value }) if *value == 0.0)
+    })
+}
+
+/// a single condition still picks one branch lazily; an array condition
+/// evaluates both and chooses per element.
+fn if_(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    if !(2..=3).contains(&args.len()) {
+        return Value::error(ErrorValue::Value);
+    }
+    let condition = evaluate_array(&args[0], ctx);
+    if let Some(error) = condition.as_error() {
+        return Value::error(error);
+    }
+    if let Value::Scalar(value) = &condition {
+        return match to_bool(value) {
+            Ok(true) => evaluate_array(&args[1], ctx),
+            Ok(false) => match args.get(2) {
+                Some(arg) => evaluate_array(arg, ctx),
+                None => Value::Scalar(CellValue::Bool { value: false }),
+            },
+            Err(error) => Value::error(error),
+        };
+    }
+    let whenever = evaluate_array(&args[1], ctx);
+    let otherwise = match args.get(2) {
+        Some(arg) => evaluate_array(arg, ctx),
+        None => Value::Scalar(CellValue::Bool { value: false }),
+    };
+    let (rows, cols) = condition.dims();
+    result((|| {
+        let mut cells = Cells::reserve(ctx, rows, cols)?;
+        for row in 0..rows {
+            for col in 0..cols {
+                cells.push(match to_bool(&condition.broadcast(row, col)) {
+                    Ok(true) => selected(whenever.broadcast(row, col)),
+                    Ok(false) => selected(otherwise.broadcast(row, col)),
+                    Err(error) => err(error),
+                })?;
+            }
+        }
+        Ok(cells.block(rows, cols))
+    })())
+}
+
+/// a block holds values rather than references, so the blank cell `IF` picked
+/// lands in it as the zero excel reads there.
+fn selected(value: CellValue) -> CellValue {
+    match value {
+        CellValue::Empty => CellValue::Number { value: 0.0 },
+        value => value,
+    }
+}
+
+fn iferror(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    fallback(args, ctx, |value| matches!(value, CellValue::Error { .. }))
+}
+
+fn ifna(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    fallback(args, ctx, |value| {
+        matches!(
+            value,
+            CellValue::Error {
+                value: ErrorValue::NA
+            }
+        )
+    })
+}
+
+fn fallback(args: &[Expr], ctx: &EvalContext<'_>, caught: fn(&CellValue) -> bool) -> Value {
+    if args.len() != 2 {
+        return Value::error(ErrorValue::Value);
+    }
+    let budget = ctx.budget_error_checkpoint();
+    let unsupported = ctx.unsupported_checkpoint();
+    let value = evaluate_array(&args[0], ctx);
+    let caught_any = match &value {
+        Value::Scalar(value) => caught(value),
+        Value::Array(array) => array.values.iter().any(caught),
+        Value::Lambda(_) => false,
+    };
+    // a single value needs the fallback only when it is itself caught, so the
+    // usual `IFERROR(VLOOKUP(..),"")` still leaves the fallback unevaluated
+    if !caught_any && !matches!(value, Value::Array(_)) {
+        return value;
+    }
+    if caught_any {
+        ctx.handle_budget_errors_since(budget);
+        ctx.handle_unsupported_since(unsupported);
+    }
+    // an array primary still needs the fallback's shape, because a longer
+    // fallback pads the primary and that padding is caught in turn
+    let checkpoint = ctx.unsupported_checkpoint();
+    let spent = ctx.budget_error_checkpoint();
+    let other = evaluate_array(&args[1], ctx);
+    // both sides answer elementwise, so a block shorter than its fallback
+    // pads with `#N/A` and that padding is caught in turn
+    let (rows, cols) = value.dims();
+    let (other_rows, other_cols) = other.dims();
+    let (rows, cols) = (rows.max(other_rows), cols.max(other_cols));
+    if !caught_any && (rows, cols) == value.dims() {
+        // the fallback never reached the result, so neither its gaps nor what
+        // it spent getting there may discard the answer
+        ctx.handle_unsupported_since(checkpoint);
+        ctx.handle_budget_errors_since(spent);
+        return value;
+    }
+    result((|| {
+        let mut cells = Cells::reserve(ctx, rows, cols)?;
+        for row in 0..rows {
+            for col in 0..cols {
+                let at = value.broadcast(row, col);
+                cells.push(if caught(&at) {
+                    other.broadcast(row, col)
+                } else {
+                    at
+                })?;
+            }
+        }
+        Ok(cells.block(rows, cols))
+    })())
+}
+
+/// aggregates over a computed block; with no block the scalar builtin answers,
+/// so references and literals behave exactly as before.
+fn aggregate(
+    args: &[Expr],
+    ctx: &EvalContext<'_>,
+    name: &str,
+    f: fn(&[f64]) -> CellValue,
+) -> Value {
+    fn empty_is_zero(name: &str) -> bool {
+        matches!(name, "MIN" | "MAX")
+    }
+    // COUNT asks how many numbers there are, so an error is simply not one;
+    // every other aggregate has to answer with it
+    let skip_errors = name == "COUNT";
+    let values: Vec<Value> = args.iter().map(|arg| evaluate_array(arg, ctx)).collect();
+    if !values.iter().any(|value| matches!(value, Value::Array(_)))
+        && let Some(scalar) = crate::functions::resolve(name)
+    {
+        return fall_back(scalar, args, ctx);
+    }
+    let mut numbers = Vec::new();
+    for (arg, value) in args.iter().zip(values) {
+        match value {
+            Value::Array(array) => {
+                for value in &array.values {
+                    match value {
+                        CellValue::Number { value } => numbers.push(*value),
+                        CellValue::Error { value } if !skip_errors => {
+                            return Value::error(*value);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Value::Scalar(value) if as_area(arg, ctx).is_some() => match value {
+                CellValue::Number { value } => numbers.push(value),
+                CellValue::Error { value } if !skip_errors => return Value::error(value),
+                _ => {}
+            },
+            Value::Scalar(value) => match to_number(&value) {
+                Ok(number) => numbers.push(number),
+                Err(_) if matches!(value, CellValue::Empty) => {}
+                Err(error) => return Value::error(error),
+            },
+            Value::Lambda(_) => return Value::error(ErrorValue::Value),
+        }
+    }
+    if numbers.is_empty() && empty_is_zero(name) {
+        return Value::Scalar(num(0.0));
+    }
+    Value::Scalar(f(&numbers))
+}
+
+fn sum(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    aggregate(args, ctx, "SUM", |values| num(values.iter().sum()))
+}
+
+fn product(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    aggregate(args, ctx, "PRODUCT", |values| {
+        num(values.iter().product::<f64>())
+    })
+}
+
+fn average(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    aggregate(args, ctx, "AVERAGE", |values| {
+        if values.is_empty() {
+            err(ErrorValue::Div0)
+        } else {
+            num(values.iter().sum::<f64>() / values.len() as f64)
+        }
+    })
+}
+
+fn min(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    aggregate(args, ctx, "MIN", |values| {
+        num(values.iter().copied().fold(f64::INFINITY, f64::min))
+    })
+}
+
+fn max(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    aggregate(args, ctx, "MAX", |values| {
+        num(values.iter().copied().fold(f64::NEG_INFINITY, f64::max))
+    })
+}
+
+fn count(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    aggregate(args, ctx, "COUNT", |values| num(values.len() as f64))
+}
+
+/// COUNTA counts every non-blank cell, so it reads the block itself rather than
+/// the numbers `aggregate` extracts.
+fn counta(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    let values: Vec<Value> = args.iter().map(|arg| evaluate_array(arg, ctx)).collect();
+    if !values.iter().any(|value| matches!(value, Value::Array(_)))
+        && let Some(scalar) = crate::functions::resolve("COUNTA")
+    {
+        return fall_back(scalar, args, ctx);
+    }
+    let mut total = 0usize;
+    for value in values {
+        match value {
+            Value::Array(array) => total += array.values.iter().filter(|v| !blank(v)).count(),
+            Value::Lambda(_) => return Value::error(ErrorValue::Value),
+            Value::Scalar(value) => total += usize::from(!blank(&value)),
+        }
+    }
+    Value::Scalar(num(total as f64))
+}
+
+/// MATCH over a computed block; a plain reference keeps the scalar path, which
+/// can stop early on a big range.
+fn match_(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    if args.len() < 2 || args.len() > 3 {
+        return Value::error(ErrorValue::Value);
+    }
+    // a block of keys answers once per key; over a reference the scalar
+    // implementation still streams the lookup range rather than copying it
+    if as_area(&args[1], ctx).is_some()
+        && let Some(scalar) = crate::functions::resolve("MATCH")
+    {
+        return lift(scalar, args, ctx, Some(&[0]));
+    }
+    result((|| {
+        let keys = evaluate_array(&args[0], ctx);
+        if let Some(error) = keys.as_error() {
+            return Err(error);
+        }
+        let data = argument(args, ctx, 1)?;
+        let kind = optional_number(args, ctx, 2, 1.0)?.trunc();
+        let (rows, cols) = keys.dims();
+        let count = reserve(ctx, rows, cols)?;
+        let mut first = true;
+        let mut cells = Vec::with_capacity(count);
+        for row in 0..rows {
+            for col in 0..cols {
+                let (position, visits) = match_position(&data, &keys.broadcast(row, col), kind);
+                charge_search(ctx, &mut first, visits)?;
+                cells.push(match position {
+                    Some(position) => num(position as f64),
+                    None => err(ErrorValue::NA),
+                });
+            }
+        }
+        Ok(reserved(rows, cols, cells))
+    })())
+}
+
+/// `MATCH`'s 1-based hit: exact for kind 0, otherwise the last value that
+/// stays on the wanted side of the key, as an ordered scan gives it. the
+/// count is the values the scan visited.
+fn match_position(data: &Array, target: &CellValue, kind: f64) -> (Option<usize>, usize) {
+    let mut best = None;
+    let mut visits = 0;
+    for (position, value) in data.values.iter().enumerate() {
+        visits += 1;
+        step();
+        let ordering = cmp_values(value, target);
+        let hit = match kind {
+            0.0 => ordering == std::cmp::Ordering::Equal,
+            k if k > 0.0 => ordering != std::cmp::Ordering::Greater,
+            _ => ordering != std::cmp::Ordering::Less,
+        };
+        if !hit {
+            // an ordered search reads the data as sorted and ends where it
+            // crosses the key, as the scalar path over a reference does; only
+            // an exact match keeps looking past a miss
+            if kind != 0.0 {
+                break;
+            }
+            continue;
+        }
+        best = Some(position + 1);
+        if kind == 0.0 {
+            break;
+        }
+    }
+    (best, visits)
+}
+
+/// charge a key's search for the values it visited, except the first key's,
+/// which the block's own read paid for: a block of keys against a block
+/// costs what its searches do.
+fn charge_search(ctx: &EvalContext<'_>, first: &mut bool, visits: usize) -> Result<(), ErrorValue> {
+    if !std::mem::take(first) && !ctx.consume_cells(visits as u64) {
+        return Err(ErrorValue::Num);
+    }
+    Ok(())
+}
+
+/// the position `key` takes in a lookup vector, honouring excel's match and
+/// search modes. `None` is `#N/A`.
+/// excel's lookup modes: match 0, -1, 1 or 2; search 1, -1, 2 or -2.
+fn lookup_modes(mode: f64, search: f64) -> Result<(), ErrorValue> {
+    if !matches!(mode as i64, -1..=2) || !matches!(search as i64, 1 | -1 | 2 | -2) {
+        return Err(ErrorValue::Value);
+    }
+    Ok(())
+}
+
+/// the position, and the values visited finding it.
+fn lookup_position(
+    lookup: &Array,
+    key: &CellValue,
+    mode: f64,
+    search: f64,
+) -> (Option<usize>, usize) {
+    use std::cmp::Ordering;
+    let count = lookup.values.len();
+    let reverse = search < 0.0;
+    let mut approximate: Option<(usize, &CellValue)> = None;
+    for visited in 0..count {
+        step();
+        let position = if reverse {
+            count - 1 - visited
+        } else {
+            visited
+        };
+        let value = &lookup.values[position];
+        if mode == 2.0 {
+            let (Ok(pattern), Ok(text)) = (to_text(key), to_text(value)) else {
+                continue;
+            };
+            if crate::functions::criteria::wildcard_match(
+                &pattern.to_lowercase(),
+                &text.to_lowercase(),
+            ) {
+                return (Some(position), visited + 1);
+            }
+            continue;
+        }
+        let ordering = cmp_values(value, key);
+        if ordering == Ordering::Equal {
+            return (Some(position), visited + 1);
+        }
+        // -1 keeps the largest value below the key, 1 the smallest above it
+        let wanted = match mode {
+            m if m < 0.0 => Ordering::Less,
+            m if m > 0.0 => Ordering::Greater,
+            _ => continue,
+        };
+        if ordering != wanted {
+            continue;
+        }
+        let better = approximate.is_none_or(|(_, best)| match wanted {
+            Ordering::Less => cmp_values(value, best) == Ordering::Greater,
+            _ => cmp_values(value, best) == Ordering::Less,
+        });
+        if better {
+            approximate = Some((position, value));
+        }
+    }
+    (approximate.map(|(position, _)| position), count)
+}
+
+/// how a lookup vector addresses a result block: down its rows, or across its
+/// columns. `None` is a mismatch between the two.
+fn lookup_axis(lookup: &Array, data: &Array) -> Option<bool> {
+    if lookup.rows > 1 && lookup.cols > 1 {
+        return None;
+    }
+    let count = lookup.values.len();
+    if lookup.cols == 1 && data.rows == count {
+        return Some(true);
+    }
+    if lookup.rows == 1 && data.cols == count {
+        return Some(false);
+    }
+    match (data.rows == count, data.cols == count) {
+        (true, _) => Some(true),
+        (_, true) => Some(false),
+        _ => None,
+    }
+}
+
+/// `XLOOKUP(key, lookup, result, [if_not_found], [match_mode], [search_mode])`:
+/// the lookup vector picks a whole row or column of the result block, so a
+/// two-dimensional result answers with a block rather than one cell.
+fn xlookup(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    result((|| {
+        if args.len() < 3 || args.len() > 6 {
+            return Err(ErrorValue::Value);
+        }
+        let keys = evaluate_array(&args[0], ctx);
+        if let Some(error) = keys.as_error() {
+            return Err(error);
+        }
+        let lookup = argument(args, ctx, 1)?;
+        let data = argument(args, ctx, 2)?;
+        let mode = optional_number(args, ctx, 4, 0.0)?.trunc();
+        let search = optional_number(args, ctx, 5, 1.0)?.trunc();
+        lookup_modes(mode, search)?;
+        let down = lookup_axis(&lookup, &data).ok_or(ErrorValue::Value)?;
+        let fallback = std::cell::OnceCell::new();
+        let missing = || {
+            fallback
+                .get_or_init(
+                    || match args.get(3).filter(|arg| !crate::functions::omitted(arg)) {
+                        Some(arg) => evaluate_array(arg, ctx).into_scalar(),
+                        None => err(ErrorValue::NA),
+                    },
+                )
+                .clone()
+        };
+        let slice = |key: &CellValue| {
+            let (position, visits) = lookup_position(&lookup, key, mode, search);
+            let picked = match position {
+                Some(position) if down => rows_of(&data, position),
+                Some(position) => column_of(&data, position),
+                None => vec![missing()],
+            };
+            (picked, visits)
+        };
+        // one key against a vector answers per key; a block result needs one
+        if (down && data.cols == 1) || (!down && data.rows == 1) {
+            let (rows, cols) = keys.dims();
+            let mut first = true;
+            let mut cells = Cells::reserve(ctx, rows, cols)?;
+            for row in 0..rows {
+                for col in 0..cols {
+                    let (picked, visits) = slice(&keys.broadcast(row, col));
+                    charge_search(ctx, &mut first, visits)?;
+                    cells.push(picked.into_iter().next().unwrap_or(err(ErrorValue::NA)))?;
+                }
+            }
+            return Ok(cells.block(rows, cols));
+        }
+        let (picked, _) = slice(&keys.broadcast(0, 0));
+        let (rows, cols) = if down {
+            (1, picked.len())
+        } else {
+            (picked.len(), 1)
+        };
+        let mut cells = Cells::reserve(ctx, rows, cols)?;
+        for value in picked {
+            cells.push(value)?;
+        }
+        Ok(cells.block(rows, cols))
+    })())
+}
+
+/// `XMATCH(key, lookup, [match_mode], [search_mode])`: the key's 1-based
+/// position, once per key.
+fn xmatch(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    result((|| {
+        if args.len() < 2 || args.len() > 4 {
+            return Err(ErrorValue::Value);
+        }
+        let keys = evaluate_array(&args[0], ctx);
+        if let Some(error) = keys.as_error() {
+            return Err(error);
+        }
+        let lookup = argument(args, ctx, 1)?;
+        let mode = optional_number(args, ctx, 2, 0.0)?.trunc();
+        let search = optional_number(args, ctx, 3, 1.0)?.trunc();
+        lookup_modes(mode, search)?;
+        let (rows, cols) = keys.dims();
+        let count = reserve(ctx, rows, cols)?;
+        let mut first = true;
+        let mut cells = Vec::with_capacity(count);
+        for row in 0..rows {
+            for col in 0..cols {
+                let (position, visits) =
+                    lookup_position(&lookup, &keys.broadcast(row, col), mode, search);
+                charge_search(ctx, &mut first, visits)?;
+                cells.push(match position {
+                    Some(position) => num(position as f64 + 1.0),
+                    None => err(ErrorValue::NA),
+                });
+            }
+        }
+        Ok(reserved(rows, cols, cells))
+    })())
+}
+
+/// `ROW`/`COLUMN` over a multi-cell reference give its indices as a block.
+fn row(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    indices(args, ctx, "ROW", true)
+}
+
+fn column(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    indices(args, ctx, "COLUMN", false)
+}
+
+fn indices(args: &[Expr], ctx: &EvalContext<'_>, name: &str, by_row: bool) -> Value {
+    let area = match args {
+        [arg] => as_array_area(arg, ctx),
+        _ => None,
+    };
+    let Some(area) = area.filter(|area| if by_row { area.rows } else { area.cols } > 1) else {
+        return match crate::functions::resolve(name) {
+            Some(scalar) => fall_back(scalar, args, ctx),
+            None => Value::error(ErrorValue::Name),
+        };
+    };
+    let (rows, cols, first) = if by_row {
+        (area.rows, 1, area.start.row)
+    } else {
+        (1, area.cols, area.start.col)
+    };
+    let count = match reserve(ctx, rows, cols) {
+        Ok(count) => count,
+        Err(error) => return Value::error(error),
+    };
+    let cells = (0..count)
+        .map(|index| num(f64::from(first) + index as f64 + 1.0))
+        .collect();
+    reserved(rows, cols, cells)
+}
+
+/// MMULT(a, b): matrix product; the inner dimensions must agree and every cell
+/// must be numeric.
+/// LINEST(known_y, [known_x], [const], [stats]): least squares over one or
+/// more predictors. coefficients come back in reverse column order with the
+/// intercept last, which is excel's layout; `stats` adds four more rows.
+fn linest(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    result((|| {
+        if args.is_empty() || args.len() > 4 {
+            return Err(ErrorValue::Value);
+        }
+        let ys_block = argument(args, ctx, 0)?;
+        let n = output_cells(ys_block.rows, ys_block.cols)?;
+        let mut ys = Vec::with_capacity(n);
+        for row in 0..ys_block.rows {
+            for col in 0..ys_block.cols {
+                ys.push(to_number(&ys_block.at(row, col))?);
+            }
+        }
+        // predictors as columns; a y vector laid out in rows means x is too
+        let down = ys_block.cols == 1 && ys_block.rows > 1;
+        let xs: Vec<Vec<f64>> = match args.get(1) {
+            Some(_) => {
+                let xb = argument(args, ctx, 1)?;
+                let (vars, obs) = if down {
+                    (xb.cols, xb.rows)
+                } else {
+                    (xb.rows, xb.cols)
+                };
+                if obs != ys.len() {
+                    return Err(ErrorValue::Ref);
+                }
+                let mut columns = Vec::with_capacity(vars);
+                for v in 0..vars {
+                    let mut column = Vec::with_capacity(obs);
+                    for o in 0..obs {
+                        let cell = if down { xb.at(o, v) } else { xb.at(v, o) };
+                        column.push(to_number(&cell)?);
+                    }
+                    columns.push(column);
+                }
+                columns
+            }
+            None => vec![(1..=ys.len()).map(|i| i as f64).collect()],
+        };
+        let intercept = match args.get(2) {
+            Some(_) => to_bool(&evaluate(&args[2], ctx))?,
+            None => true,
+        };
+        let stats = match args.get(3) {
+            Some(_) => to_bool(&evaluate(&args[3], ctx))?,
+            None => false,
+        };
+        let vars = xs.len();
+        let height = if stats { 5 } else { 1 };
+        reserve(ctx, height, vars + 1)?;
+        let fit = regress(ctx, &ys, &xs, intercept)?;
+        // excel emits the coefficients right to left, intercept last
+        let mut first: Vec<CellValue> = (0..vars).rev().map(|i| num(fit.beta[i])).collect();
+        first.push(num(fit.intercept));
+        if !stats {
+            return Ok(reserved(height, vars + 1, first));
+        }
+        let mut second: Vec<CellValue> = (0..vars).rev().map(|i| num(fit.se[i])).collect();
+        second.push(if intercept {
+            num(fit.se_intercept)
+        } else {
+            CellValue::Error {
+                value: ErrorValue::NA,
+            }
+        });
+        let blank = || CellValue::Error {
+            value: ErrorValue::NA,
+        };
+        let mut rows = vec![first, second];
+        let mut row = vec![num(fit.r2), num(fit.se_y)];
+        row.resize(vars + 1, blank());
+        rows.push(row);
+        let mut row = vec![num(fit.f), num(fit.df)];
+        row.resize(vars + 1, blank());
+        rows.push(row);
+        let mut row = vec![num(fit.ss_reg), num(fit.ss_resid)];
+        row.resize(vars + 1, blank());
+        rows.push(row);
+        Ok(reserved(
+            height,
+            vars + 1,
+            rows.into_iter().flatten().collect(),
+        ))
+    })())
+}
+
+/// TREND(known_y, [known_x], [new_x], [const]): the least-squares line LINEST
+/// fits, evaluated at `new_x` (at the known predictors when it is omitted).
+fn trend(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    result((|| {
+        if args.is_empty() || args.len() > 4 {
+            return Err(ErrorValue::Value);
+        }
+        let ys_block = argument(args, ctx, 0)?;
+        let n = output_cells(ys_block.rows, ys_block.cols)?;
+        let mut ys = Vec::with_capacity(n);
+        for row in 0..ys_block.rows {
+            for col in 0..ys_block.cols {
+                ys.push(to_number(&ys_block.at(row, col))?);
+            }
+        }
+        // predictors as columns; a y vector laid out in rows means x is too
+        let down = ys_block.cols == 1 && ys_block.rows > 1;
+        let xs = known_x(args, ctx, ys.len(), down)?;
+        let intercept = optional_bool(args, ctx, 3, true)?;
+        let fit = regress(ctx, &ys, &xs, intercept)?;
+        let predict = |point: &[f64]| -> f64 {
+            fit.intercept + point.iter().zip(&fit.beta).map(|(x, b)| x * b).sum::<f64>()
+        };
+        let Some(new_block) = optional_block(args, ctx, 2)? else {
+            reserve(ctx, ys_block.rows, ys_block.cols)?;
+            let cells = (0..ys.len())
+                .map(|o| num(predict(&column_at(&xs, o))))
+                .collect();
+            return Ok(reserved(ys_block.rows, ys_block.cols, cells));
+        };
+        if xs.len() == 1 {
+            let count = reserve(ctx, new_block.rows, new_block.cols)?;
+            let mut cells = Vec::with_capacity(count);
+            for row in 0..new_block.rows {
+                for col in 0..new_block.cols {
+                    cells.push(num(predict(&[to_number(&new_block.at(row, col))?])));
+                }
+            }
+            return Ok(reserved(new_block.rows, new_block.cols, cells));
+        }
+        let (vars, points) = if down {
+            (new_block.cols, new_block.rows)
+        } else {
+            (new_block.rows, new_block.cols)
+        };
+        if vars != xs.len() {
+            return Err(ErrorValue::Ref);
+        }
+        let (rows, cols) = if down { (points, 1) } else { (1, points) };
+        let mut cells = Vec::with_capacity(reserve(ctx, rows, cols)?);
+        for point in 0..points {
+            let mut coordinates = Vec::with_capacity(vars);
+            for v in 0..vars {
+                let cell = if down {
+                    new_block.at(point, v)
+                } else {
+                    new_block.at(v, point)
+                };
+                coordinates.push(to_number(&cell)?);
+            }
+            cells.push(num(predict(&coordinates)));
+        }
+        Ok(reserved(rows, cols, cells))
+    })())
+}
+
+/// the predictor columns of a regression argument: the `known_x` block laid
+/// out one column per variable, or `{1;2;3;...}` when it is omitted.
+fn known_x(
+    args: &[Expr],
+    ctx: &EvalContext<'_>,
+    observations: usize,
+    down: bool,
+) -> Result<Vec<Vec<f64>>, ErrorValue> {
+    let Some(xb) = optional_block(args, ctx, 1)? else {
+        return Ok(vec![(1..=observations).map(|i| i as f64).collect()]);
+    };
+    let (vars, obs) = if down {
+        (xb.cols, xb.rows)
+    } else {
+        (xb.rows, xb.cols)
+    };
+    if obs != observations {
+        return Err(ErrorValue::Ref);
+    }
+    let mut columns = Vec::with_capacity(vars);
+    for v in 0..vars {
+        let mut column = Vec::with_capacity(obs);
+        for o in 0..obs {
+            let cell = if down { xb.at(o, v) } else { xb.at(v, o) };
+            column.push(to_number(&cell)?);
+        }
+        columns.push(column);
+    }
+    Ok(columns)
+}
+
+/// one observation's coordinates across every predictor column.
+fn column_at(xs: &[Vec<f64>], observation: usize) -> Vec<f64> {
+    xs.iter().map(|column| column[observation]).collect()
+}
+
+/// an optional block argument; an omitted or blank slot gives `None`.
+fn optional_block(
+    args: &[Expr],
+    ctx: &EvalContext<'_>,
+    index: usize,
+) -> Result<Option<Array>, ErrorValue> {
+    let Some(arg) = args.get(index) else {
+        return Ok(None);
+    };
+    if crate::functions::omitted(arg) {
+        return Ok(None);
+    }
+    match evaluate_array(arg, ctx) {
+        Value::Scalar(CellValue::Error { value }) => Err(value),
+        Value::Scalar(CellValue::Empty) => Ok(None),
+        Value::Scalar(value) => Array::new(1, 1, vec![value]).map(Some),
+        Value::Array(array) => Ok(Some(array)),
+        Value::Lambda(_) => Err(ErrorValue::Value),
+    }
+}
+
+/// FREQUENCY(data, bins): how many of `data` land in each interval the sorted
+/// `bins` cut out, as a column one taller than `bins`. non-numeric cells are
+/// ignored on both sides.
+fn frequency(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    result((|| {
+        if args.len() != 2 {
+            return Err(ErrorValue::Value);
+        }
+        let data = numbers_in(&argument(args, ctx, 0)?)?;
+        let bins = numbers_in(&argument(args, ctx, 1)?)?;
+        reserve(ctx, bins.len() + 1, 1)?;
+        // counting needs the bins in order, but the answer is positioned
+        // against the bins as given: a repeated bin takes its whole count at
+        // its first appearance, which is what makes FREQUENCY(a,a) mark the
+        // distinct values of `a` in place
+        let mut order: Vec<usize> = (0..bins.len()).collect();
+        order.sort_by(|a, b| {
+            bins[*a]
+                .partial_cmp(&bins[*b])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let sorted: Vec<f64> = order.iter().map(|index| bins[*index]).collect();
+        let mut counts = vec![0.0; bins.len() + 1];
+        for value in data {
+            counts[sorted.partition_point(|bin| *bin < value)] += 1.0;
+        }
+        let mut out = vec![num(counts[bins.len()]); bins.len() + 1];
+        for (rank, index) in order.into_iter().enumerate() {
+            out[index] = num(counts[rank]);
+        }
+        Ok(reserved(out.len(), 1, out))
+    })())
+}
+
+/// the numbers a block holds, skipping text, blanks and logicals as the
+/// distribution functions do; an error cell propagates.
+fn numbers_in(array: &Array) -> Result<Vec<f64>, ErrorValue> {
+    let mut out = Vec::new();
+    for value in array.cells() {
+        match value {
+            CellValue::Number { value } => out.push(*value),
+            CellValue::Error { value } => return Err(*value),
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
+/// coefficients and the regression statistics excel reports beside them.
+struct Fit {
+    beta: Vec<f64>,
+    intercept: f64,
+    se: Vec<f64>,
+    se_intercept: f64,
+    r2: f64,
+    se_y: f64,
+    f: f64,
+    df: f64,
+    ss_reg: f64,
+    ss_resid: f64,
+}
+
+/// the least-squares fit, charged for its QR before it runs.
+fn regress(
+    ctx: &EvalContext<'_>,
+    ys: &[f64],
+    xs: &[Vec<f64>],
+    intercept: bool,
+) -> Result<Fit, ErrorValue> {
+    let terms = (xs.len() + usize::from(intercept)) as u64;
+    charge_steps(ctx, (ys.len() as u64).saturating_mul(terms * terms))?;
+    least_squares(ys, xs, intercept).ok_or(ErrorValue::Num)
+}
+
+/// ordinary least squares by householder QR. the normal equations square the
+/// design matrix's condition number, which a polynomial fit like
+/// `LINEST(y, x^{1,2,3,4,5,6})` does not survive; QR works on the matrix itself.
+#[allow(clippy::needless_range_loop)]
+fn least_squares(ys: &[f64], xs: &[Vec<f64>], intercept: bool) -> Option<Fit> {
+    let n = ys.len();
+    let vars = xs.len();
+    if n == 0 || vars == 0 || xs.iter().any(|column| column.len() != n) {
+        return None;
+    }
+    let terms = vars + usize::from(intercept);
+    if n <= terms {
+        return None;
+    }
+    // design matrix, predictors first and the constant column last
+    let mut a = vec![vec![0.0; terms]; n];
+    for (r, row) in a.iter_mut().enumerate() {
+        for (t, cell) in row.iter_mut().enumerate() {
+            *cell = if intercept && t == vars {
+                1.0
+            } else {
+                xs[t][r]
+            };
+        }
+    }
+    let mut b = ys.to_vec();
+    // householder reflections: A becomes R in place, b becomes Q'b
+    for k in 0..terms {
+        let norm = (k..n).map(|r| a[r][k] * a[r][k]).sum::<f64>().sqrt();
+        if norm < 1e-300 {
+            return None;
+        }
+        let alpha = if a[k][k] > 0.0 { -norm } else { norm };
+        let mut v = vec![0.0; n];
+        v[k] = a[k][k] - alpha;
+        for (r, slot) in v.iter_mut().enumerate().take(n).skip(k + 1) {
+            *slot = a[r][k];
+        }
+        let vtv = (k..n).map(|r| v[r] * v[r]).sum::<f64>();
+        if vtv < 1e-300 {
+            a[k][k] = alpha;
+            continue;
+        }
+        for c in k..terms {
+            let dot = (k..n).map(|r| v[r] * a[r][c]).sum::<f64>();
+            let factor = 2.0 * dot / vtv;
+            for r in k..n {
+                a[r][c] -= factor * v[r];
+            }
+        }
+        let dot = (k..n).map(|r| v[r] * b[r]).sum::<f64>();
+        let factor = 2.0 * dot / vtv;
+        for r in k..n {
+            b[r] -= factor * v[r];
+        }
+    }
+    // back-substitute R x = Q'b
+    let mut coefficients = vec![0.0; terms];
+    for i in (0..terms).rev() {
+        if a[i][i].abs() < 1e-12 {
+            return None;
+        }
+        let sum: f64 = (i + 1..terms).map(|j| a[i][j] * coefficients[j]).sum();
+        coefficients[i] = (b[i] - sum) / a[i][i];
+    }
+    // (X'X)^-1 = R^-1 R^-T, for the standard errors
+    let mut r_inverse = vec![vec![0.0; terms]; terms];
+    for i in (0..terms).rev() {
+        r_inverse[i][i] = 1.0 / a[i][i];
+        for j in i + 1..terms {
+            let sum: f64 = (i + 1..=j).map(|k| a[i][k] * r_inverse[k][j]).sum();
+            r_inverse[i][j] = -sum / a[i][i];
+        }
+    }
+    let covariance =
+        |i: usize| -> f64 { (i..terms).map(|k| r_inverse[i][k] * r_inverse[i][k]).sum() };
+    let mean = ys.iter().sum::<f64>() / n as f64;
+    let mut ss_resid = 0.0;
+    let mut ss_total = 0.0;
+    for r in 0..n {
+        let predicted: f64 = (0..terms)
+            .map(|t| {
+                coefficients[t]
+                    * if intercept && t == vars {
+                        1.0
+                    } else {
+                        xs[t][r]
+                    }
+            })
+            .sum();
+        ss_resid += (ys[r] - predicted).powi(2);
+        ss_total += if intercept {
+            (ys[r] - mean).powi(2)
+        } else {
+            ys[r].powi(2)
+        };
+    }
+    let df = (n - terms) as f64;
+    let variance = ss_resid / df;
+    let ss_reg = ss_total - ss_resid;
+    Some(Fit {
+        beta: coefficients[..vars].to_vec(),
+        intercept: if intercept { coefficients[vars] } else { 0.0 },
+        se: (0..vars)
+            .map(|i| (variance * covariance(i)).sqrt())
+            .collect(),
+        se_intercept: if intercept {
+            (variance * covariance(vars)).sqrt()
+        } else {
+            0.0
+        },
+        r2: if ss_total == 0.0 {
+            1.0
+        } else {
+            1.0 - ss_resid / ss_total
+        },
+        se_y: variance.sqrt(),
+        f: if ss_resid == 0.0 {
+            f64::INFINITY
+        } else {
+            (ss_reg / vars as f64) / variance
+        },
+        df,
+        ss_reg,
+        ss_resid,
+    })
+}
+
+fn mmult(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    result((|| {
+        if args.len() != 2 {
+            return Err(ErrorValue::Value);
+        }
+        let left = argument(args, ctx, 0)?;
+        let right = argument(args, ctx, 1)?;
+        if left.cols != right.rows {
+            return Err(ErrorValue::Value);
+        }
+        let count = reserve(ctx, left.rows, right.cols)?;
+        charge_steps(ctx, (count as u64).saturating_mul(left.cols as u64))?;
+        let mut cells = Vec::with_capacity(count);
+        for row in 0..left.rows {
+            for col in 0..right.cols {
+                let mut total = 0.0;
+                for inner in 0..left.cols {
+                    total += to_number(&left.at(row, inner))? * to_number(&right.at(inner, col))?;
+                }
+                cells.push(num(total));
+            }
+        }
+        Ok(reserved(left.rows, right.cols, cells))
+    })())
+}
+
+/// SUMPRODUCT: elementwise product of every argument, summed; non-numeric
+/// cells count as zero.
+fn sumproduct(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    let values: Vec<Value> = args.iter().map(|arg| evaluate_array(arg, ctx)).collect();
+    if !values.iter().any(|value| matches!(value, Value::Array(_)))
+        && let Some(scalar) = crate::functions::resolve("SUMPRODUCT")
+    {
+        return fall_back(scalar, args, ctx);
+    }
+    let mut rows = 1usize;
+    let mut cols = 1usize;
+    let mut paid = 0u64;
+    for value in &values {
+        let (r, c) = value.dims();
+        rows = rows.max(r);
+        cols = cols.max(c);
+        if matches!(value, Value::Array(_)) {
+            paid += (r * c) as u64;
+        }
+    }
+    // every operand is read at every position; a block paid for its own
+    // cells, but a broadcast or a scalar repeated across the others was not
+    let reads = (rows as u64)
+        .saturating_mul(cols as u64)
+        .saturating_mul(values.len() as u64);
+    if !ctx.consume_cells(reads.saturating_sub(paid)) {
+        return Value::error(ErrorValue::Num);
+    }
+    let mut total = 0.0;
+    for row in 0..rows {
+        for col in 0..cols {
+            step();
+            let mut product = 1.0;
+            for value in &values {
+                product *= match value.broadcast(row, col) {
+                    CellValue::Number { value } => value,
+                    CellValue::Bool { value } => f64::from(value),
+                    CellValue::Error { value } => return Value::error(value),
+                    _ => 0.0,
+                };
+            }
+            total += product;
+        }
+    }
+    Value::Scalar(num(total))
+}
+
+/// `TEXTJOIN(separator, ignore_empty, ...)` over computed blocks; with no block
+/// the scalar builtin answers, so references behave exactly as before.
+fn textjoin(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    result((|| {
+        if args.len() < 3 {
+            return Err(ErrorValue::Value);
+        }
+        let Some(values) = joined_values(&args[2..], ctx)? else {
+            return Ok(scalar("TEXTJOIN", args, ctx));
+        };
+        let separator = to_text(&evaluate_array(&args[0], ctx).into_scalar())?;
+        // excel reads an omitted `ignore_empty` as TRUE, not as the FALSE a
+        // blank usually coerces to
+        let ignore_empty = optional_bool(args, ctx, 1, true)?;
+        let mut out = String::new();
+        let mut chars = 0usize;
+        let mut first = true;
+        for value in values {
+            let empty = match &value {
+                CellValue::Empty => true,
+                CellValue::Text { value } => value.is_empty(),
+                _ => false,
+            };
+            if ignore_empty && empty {
+                continue;
+            }
+            // a separator goes between every pair, so a run of kept blanks
+            // still shows as delimiters
+            if !std::mem::take(&mut first) && !append_text(&mut out, &separator, &mut chars) {
+                return Err(ErrorValue::Value);
+            }
+            if !append_text(&mut out, &to_text(&value)?, &mut chars) {
+                return Err(ErrorValue::Value);
+            }
+        }
+        Ok(Value::Scalar(text(ctx, out)))
+    })())
+}
+
+fn concat(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    result((|| {
+        let Some(values) = joined_values(args, ctx)? else {
+            return Ok(scalar("CONCAT", args, ctx));
+        };
+        let mut out = String::new();
+        let mut chars = 0usize;
+        for value in values {
+            if !append_text(&mut out, &to_text(&value)?, &mut chars) {
+                return Err(ErrorValue::Value);
+            }
+        }
+        Ok(Value::Scalar(text(ctx, out)))
+    })())
+}
+
+/// every value the joined arguments contribute, or `None` when none of them is
+/// a computed block.
+fn joined_values(
+    args: &[Expr],
+    ctx: &EvalContext<'_>,
+) -> Result<Option<Vec<CellValue>>, ErrorValue> {
+    let values: Vec<Value> = args.iter().map(|arg| evaluate_array(arg, ctx)).collect();
+    if !values.iter().any(|value| matches!(value, Value::Array(_))) {
+        return Ok(None);
+    }
+    let mut out = Vec::new();
+    for value in values {
+        match value {
+            Value::Array(array) => out.extend(array.values),
+            Value::Lambda(_) => return Err(ErrorValue::Value),
+            Value::Scalar(value) => out.push(value),
+        }
+    }
+    Ok(Some(out))
+}
+
+/// append while the result still fits one cell.
+fn append_text(out: &mut String, piece: &str, chars: &mut usize) -> bool {
+    *chars = chars.saturating_add(piece.chars().count());
+    if *chars > crate::eval::MAX_CELL_TEXT_CHARS {
+        return false;
+    }
+    out.push_str(piece);
+    true
+}
+
+/// the scalar builtin of that name, for the paths that keep the cheap answer.
+fn scalar(name: &str, args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    match crate::functions::resolve(name) {
+        Some(f) => fall_back(f, args, ctx),
+        None => Value::error(ErrorValue::Name),
+    }
+}
+
+/// `LET(name, value, ..., calculation)`: each name is bound for every later
+/// value and for the calculation, and unbound again once this call returns.
+fn let_(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    if args.len() < 3 || args.len().is_multiple_of(2) {
+        return Value::error(ErrorValue::Value);
+    }
+    let depth = ctx.binding_depth();
+    let mut index = 0;
+    let value = loop {
+        if index + 1 >= args.len() {
+            break evaluate_array(&args[index], ctx);
+        }
+        let Expr::Name { scope: None, name } = &args[index] else {
+            break Value::error(ErrorValue::Name);
+        };
+        let value = evaluate_array(&args[index + 1], ctx);
+        if !ctx.push_binding(Binding::new(name, value, reference_of(&args[index + 1]))) {
+            break Value::error(ErrorValue::Num);
+        }
+        index += 2;
+    };
+    ctx.truncate_bindings(depth);
+    value
+}
+
+/// the expression a name keeps standing for when it was bound to a plain
+/// reference, so `as_area` still answers for it.
+fn reference_of(expr: &Expr) -> Option<Expr> {
+    matches!(
+        expr,
+        Expr::Ref { .. }
+            | Expr::Range { .. }
+            | Expr::ColumnRange { .. }
+            | Expr::RowRange { .. }
+            | Expr::TableRef { .. }
+    )
+    .then(|| expr.clone())
+}
+
+/// `LAMBDA(parameter, ..., body)`: a value only the callback builtins consume.
+fn lambda(args: &[Expr], _ctx: &EvalContext<'_>) -> Value {
+    let Some((body, parameters)) = args.split_last() else {
+        return Value::error(ErrorValue::Value);
+    };
+    let mut params = Vec::with_capacity(parameters.len());
+    for parameter in parameters {
+        let Expr::Name { scope: None, name } = parameter else {
+            return Value::error(ErrorValue::Name);
+        };
+        params.push(name.clone());
+    }
+    let cost = (nodes(body) + params.len() as u64).saturating_sub(FREE_NODES);
+    Value::Lambda(Rc::new(Lambda {
+        params,
+        body: body.clone(),
+        cost,
+    }))
+}
+
+/// one argument of a lambda call: its value, plus the reference it stands for
+/// when the caller handed over part of a real range.
+type Argument = (Value, Option<Expr>);
+
+fn plain(value: Value) -> Argument {
+    (value, None)
+}
+
+fn callback(args: &[Expr], ctx: &EvalContext<'_>, index: usize) -> Result<Rc<Lambda>, ErrorValue> {
+    match args.get(index).map(|arg| evaluate_array(arg, ctx)) {
+        Some(Value::Lambda(lambda)) => Ok(lambda),
+        Some(Value::Scalar(CellValue::Error { value })) => Err(value),
+        _ => Err(ErrorValue::Value),
+    }
+}
+
+/// call a lambda with one value per parameter.
+fn invoke(lambda: &Lambda, argv: Vec<Argument>, ctx: &EvalContext<'_>) -> Value {
+    if lambda.params.len() != argv.len() {
+        return Value::error(ErrorValue::Value);
+    }
+    if !ctx.consume_cells(lambda.cost) {
+        return Value::error(ErrorValue::Num);
+    }
+    if !ctx.enter_lambda() {
+        return Value::error(ErrorValue::Num);
+    }
+    let depth = ctx.binding_depth();
+    let mut refused = false;
+    for (name, (value, reference)) in lambda.params.iter().zip(argv) {
+        if !ctx.push_binding(Binding::new(name, value, reference)) {
+            refused = true;
+            break;
+        }
+    }
+    let value = if refused {
+        Value::error(ErrorValue::Num)
+    } else {
+        evaluate_array(&lambda.body, ctx)
+    };
+    ctx.truncate_bindings(depth);
+    ctx.leave_lambda();
+    value
+}
+
+fn byrow(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    by_slice(args, ctx, true)
+}
+
+fn bycol(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    by_slice(args, ctx, false)
+}
+
+/// `BYROW`/`BYCOL`: one call per row or column, each result one cell of a
+/// single-column or single-row block.
+fn by_slice(args: &[Expr], ctx: &EvalContext<'_>, by_row: bool) -> Value {
+    result((|| {
+        if args.len() != 2 {
+            return Err(ErrorValue::Value);
+        }
+        let data = argument(args, ctx, 0)?;
+        let lambda = callback(args, ctx, 1)?;
+        let source = as_array_area(&args[0], ctx).filter(|area| area.sheet == ctx.sheet);
+        let count = if by_row { data.rows } else { data.cols };
+        let (rows, cols) = if by_row { (count, 1) } else { (1, count) };
+        let mut cells = Cells::reserve(ctx, rows, cols)?;
+        for index in 0..count {
+            let slice = lines(ctx, &data, &[index], by_row);
+            ctx.within_budget()?;
+            let reference = source
+                .as_ref()
+                .map(|area| slice_reference(area, index, by_row));
+            cells.push(invoke(&lambda, vec![(slice, reference)], ctx).into_scalar())?;
+            ctx.within_budget()?;
+        }
+        Ok(cells.block(rows, cols))
+    })())
+}
+
+/// the sub-range one `BYROW`/`BYCOL` call covers, so a callee that wants a
+/// reference sees the row or column it was handed.
+/// the rectangle a callback argument came from, when it came from one this
+/// sheet holds and the callback walks it cell for cell rather than
+/// broadcasting it.
+fn cell_source(expr: &Expr, ctx: &EvalContext<'_>, rows: usize, cols: usize) -> Option<Area> {
+    as_array_area(expr, ctx)
+        .filter(|area| area.sheet == ctx.sheet && area.rows == rows && area.cols == cols)
+}
+
+/// the single cell at `(row, col)` of a reference argument, so a callback
+/// that wants a reference — `OFFSET(c,,1)`, or `D8:c` — still has one.
+fn cell_reference(area: &Area, row: usize, col: usize) -> Expr {
+    let step =
+        |base: u32, offset: usize| base.saturating_add(u32::try_from(offset).unwrap_or(u32::MAX));
+    Expr::Ref {
+        sheet: None,
+        cell: CellRef::new(step(area.start.row, row), step(area.start.col, col)),
+    }
+}
+
+fn slice_reference(area: &Area, index: usize, by_row: bool) -> Expr {
+    let step = u32::try_from(index).unwrap_or(u32::MAX);
+    let last_row = area
+        .start
+        .row
+        .saturating_add(area.rows.saturating_sub(1) as u32);
+    let last_col = area
+        .start
+        .col
+        .saturating_add(area.cols.saturating_sub(1) as u32);
+    let (start, end) = if by_row {
+        let row = area.start.row.saturating_add(step);
+        (
+            CellRef::new(row, area.start.col),
+            CellRef::new(row, last_col),
+        )
+    } else {
+        let col = area.start.col.saturating_add(step);
+        (
+            CellRef::new(area.start.row, col),
+            CellRef::new(last_row, col),
+        )
+    };
+    Expr::Range {
+        sheet: None,
+        range: CellRange::new(start, end),
+    }
+}
+
+/// `MAP(array, ..., lambda)`: the lambda takes one element from each array and
+/// its results keep the broadcast shape.
+fn map(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    result((|| {
+        if args.len() < 2 {
+            return Err(ErrorValue::Value);
+        }
+        let lambda = callback(args, ctx, args.len() - 1)?;
+        let mut values = Vec::with_capacity(args.len() - 1);
+        let (mut rows, mut cols) = (1usize, 1usize);
+        for argument in &args[..args.len() - 1] {
+            let value = evaluate_array(argument, ctx);
+            if let Some(error) = value.as_error() {
+                return Err(error);
+            }
+            let (r, c) = value.dims();
+            rows = rows.max(r);
+            cols = cols.max(c);
+            values.push(value);
+        }
+        let sources: Vec<Option<Area>> = args[..args.len() - 1]
+            .iter()
+            .map(|argument| cell_source(argument, ctx, rows, cols))
+            .collect();
+        let mut cells = Cells::reserve(ctx, rows, cols)?;
+        for row in 0..rows {
+            for col in 0..cols {
+                let argv = values
+                    .iter()
+                    .zip(&sources)
+                    .map(|(value, source)| {
+                        (
+                            Value::Scalar(value.broadcast(row, col)),
+                            source.as_ref().map(|area| cell_reference(area, row, col)),
+                        )
+                    })
+                    .collect();
+                cells.push(invoke(&lambda, argv, ctx).into_scalar())?;
+                ctx.within_budget()?;
+            }
+        }
+        Ok(cells.block(rows, cols))
+    })())
+}
+
+/// `REDUCE(initial, array, lambda(accumulator, value))`. the accumulator may
+/// itself be a block, which is how a `VSTACK` body builds a result row by row.
+fn reduce(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    result((|| {
+        if args.len() != 3 {
+            return Err(ErrorValue::Value);
+        }
+        let mut accumulator = evaluate_array(&args[0], ctx);
+        let data = argument(args, ctx, 1)?;
+        let lambda = callback(args, ctx, 2)?;
+        let source = cell_source(&args[1], ctx, data.rows, data.cols);
+        for (index, value) in data.values.iter().enumerate() {
+            let reference = source
+                .as_ref()
+                .map(|area| cell_reference(area, index / data.cols, index % data.cols));
+            let step = vec![
+                plain(accumulator),
+                (Value::Scalar(value.clone()), reference),
+            ];
+            accumulator = invoke(&lambda, step, ctx);
+            if let Some(error) = accumulator.as_error() {
+                return Err(error);
+            }
+            ctx.within_budget()?;
+        }
+        Ok(accumulator)
+    })())
+}
+
+/// `SCAN(initial, array, lambda(accumulator, value))`: every intermediate
+/// accumulator, in the shape of the array scanned.
+fn scan(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    result((|| {
+        if args.len() != 3 {
+            return Err(ErrorValue::Value);
+        }
+        let mut accumulator = evaluate_array(&args[0], ctx);
+        let data = argument(args, ctx, 1)?;
+        let lambda = callback(args, ctx, 2)?;
+        let (rows, cols) = (data.rows, data.cols);
+        let mut cells = Cells::reserve(ctx, rows, cols)?;
+        for value in &data.values {
+            let step = vec![plain(accumulator), plain(Value::Scalar(value.clone()))];
+            accumulator = invoke(&lambda, step, ctx);
+            cells.push(accumulator.broadcast(0, 0))?;
+            ctx.within_budget()?;
+        }
+        Ok(cells.block(rows, cols))
+    })())
+}
+
+/// `MAKEARRAY(rows, columns, lambda(row, column))` with 1-based indices.
+fn makearray(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    result((|| {
+        if args.len() != 3 {
+            return Err(ErrorValue::Value);
+        }
+        let rows = index_of(optional_number(args, ctx, 0, 1.0)?)?;
+        let cols = index_of(optional_number(args, ctx, 1, 1.0)?)?;
+        let lambda = callback(args, ctx, 2)?;
+        let mut cells = Cells::reserve(ctx, rows, cols)?;
+        for row in 0..rows {
+            for col in 0..cols {
+                let argv = vec![
+                    plain(Value::Scalar(num(row as f64 + 1.0))),
+                    plain(Value::Scalar(num(col as f64 + 1.0))),
+                ];
+                cells.push(invoke(&lambda, argv, ctx).into_scalar())?;
+                ctx.within_budget()?;
+            }
+        }
+        Ok(cells.block(rows, cols))
+    })())
+}
+
+/// `TEXTSPLIT(text, column_delimiter, [row_delimiter], [ignore_empty],
+/// [match_mode], [pad_with])`: rows first, then columns within each row.
+fn textsplit(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    result((|| {
+        if args.is_empty() || args.len() > 6 {
+            return Err(ErrorValue::Value);
+        }
+        let source = to_text(&evaluate_array(&args[0], ctx).into_scalar())?;
+        // excel has no empty array, so splitting nothing is an error rather
+        // than one blank cell
+        if source.is_empty() {
+            return Err(ErrorValue::NA);
+        }
+        let columns = delimiters(args, ctx, 1)?;
+        let rows = delimiters(args, ctx, 2)?;
+        let ignore_empty = optional_bool(args, ctx, 3, false)?;
+        let insensitive = optional_number(args, ctx, 4, 0.0)? != 0.0;
+        let pad = optional(args, ctx, 5)?.unwrap_or(err(ErrorValue::NA));
+        let separators = (columns.len() + rows.len()) as u64;
+        charge_steps(ctx, (source.len() as u64).saturating_mul(separators))?;
+        let mut grid: Vec<Vec<String>> = split_text(&source, &rows, insensitive)
+            .into_iter()
+            .map(|row| split_text(&row, &columns, insensitive))
+            .collect();
+        if ignore_empty {
+            for row in &mut grid {
+                row.retain(|cell| !cell.is_empty());
+            }
+            grid.retain(|row| !row.is_empty());
+        }
+        let width = grid.iter().map(Vec::len).max().unwrap_or(0);
+        if width == 0 {
+            return Ok(Value::Scalar(text(ctx, String::new())));
+        }
+        let height = grid.len();
+        let mut cells = Cells::reserve(ctx, height, width)?;
+        for row in &grid {
+            for col in 0..width {
+                cells.push(match row.get(col) {
+                    Some(value) => text(ctx, value.clone()),
+                    None => pad.clone(),
+                })?;
+            }
+        }
+        Ok(cells.block(height, width))
+    })())
+}
+
+/// the separators one `TEXTSPLIT` axis uses; an omitted or empty one never
+/// splits, so that axis stays a single row or column.
+fn delimiters(
+    args: &[Expr],
+    ctx: &EvalContext<'_>,
+    index: usize,
+) -> Result<Vec<String>, ErrorValue> {
+    let Some(argument_expr) = args.get(index) else {
+        return Ok(Vec::new());
+    };
+    if crate::functions::omitted(argument_expr) {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for value in argument(args, ctx, index)?.values {
+        if matches!(value, CellValue::Empty) {
+            continue;
+        }
+        let separator = to_text(&value)?;
+        if !separator.is_empty() {
+            out.push(separator);
+        }
+    }
+    Ok(out)
+}
+
+/// split on any separator, preferring the longest match at a position so a
+/// longer separator is never cut short by a shorter one that also matches.
+fn split_text(source: &str, separators: &[String], insensitive: bool) -> Vec<String> {
+    if separators.is_empty() {
+        return vec![source.to_string()];
+    }
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let mut at = 0usize;
+    while at < source.len() {
+        let hit = separators
+            .iter()
+            .filter(|separator| matches_at(source, at, separator, insensitive))
+            .map(String::len)
+            .max();
+        match hit {
+            Some(len) => {
+                out.push(source.get(start..at).unwrap_or_default().to_string());
+                at += len;
+                start = at;
+            }
+            None => at += next_char_width(source, at),
+        }
+    }
+    out.push(source.get(start..).unwrap_or_default().to_string());
+    out
+}
+
+fn matches_at(source: &str, at: usize, separator: &str, insensitive: bool) -> bool {
+    let Some(slice) = at
+        .checked_add(separator.len())
+        .and_then(|end| source.get(at..end))
+    else {
+        return false;
+    };
+    if insensitive {
+        slice.eq_ignore_ascii_case(separator)
+    } else {
+        slice == separator
+    }
+}
+
+fn next_char_width(source: &str, at: usize) -> usize {
+    source
+        .get(at..)
+        .and_then(|rest| rest.chars().next())
+        .map_or(1, char::len_utf8)
+}
+
+/// where an array formula's result lands and what it holds.
+pub struct Spill {
+    pub range: CellRange,
+    pub values: Vec<CellValue>,
+}
+
+/// place a result at `anchor`: a block fills its own rectangle, a single value
+/// repeats across the rectangle the file recorded, as ctrl-shift-enter does.
+pub fn spill_at(anchor: CellRef, authored: Option<CellRange>, value: Value) -> Spill {
+    let range = spill_range(anchor, &value, authored);
+    let rows = (range.end.row - range.start.row + 1) as usize;
+    let cols = (range.end.col - range.start.col + 1) as usize;
+    let mut out = Vec::with_capacity(rows * cols);
+    for row in 0..rows {
+        for col in 0..cols {
+            // positions the result does not reach stay blank; the ones it does
+            // carry a value, and a blank source reads as zero there
+            out.push(match &value {
+                Value::Array(array) => array
+                    .values
+                    .get(row * cols + col)
+                    .cloned()
+                    .map_or(CellValue::Empty, crate::engine::computed),
+                value => crate::engine::computed(value.clone().into_scalar()),
+            });
+        }
+    }
+    Spill { range, values: out }
+}
+
+/// the rectangle `value` fills from `anchor`: a block its own size, a single
+/// value the rectangle the file recorded, cut to the sheet and to the largest
+/// spill a formula may write before anything is allocated for it.
+fn spill_range(anchor: CellRef, value: &Value, authored: Option<CellRange>) -> CellRange {
+    let (rows, cols) = match (value, authored) {
+        (Value::Array(array), _) => (array.rows, array.cols),
+        (_, Some(range)) => (
+            (range.end.row.saturating_sub(range.start.row) + 1) as usize,
+            (range.end.col.saturating_sub(range.start.col) + 1) as usize,
+        ),
+        _ => (1, 1),
+    };
+    let rows = rows.clamp(1, MAX_SPILL_CELLS);
+    let cols = cols.clamp(1, MAX_SPILL_CELLS.div_euclid(rows).max(1));
+    let end = CellRef::new(
+        anchor
+            .row
+            .saturating_add(rows as u32 - 1)
+            .min(xlsx_model::MAX_ROWS - 1),
+        anchor
+            .col
+            .saturating_add(cols as u32 - 1)
+            .min(xlsx_model::MAX_COLS - 1),
+    );
+    CellRange::new(CellRef::new(anchor.row, anchor.col), end)
+}
+
+/// charge laying `value` out over `range` before any of it is written: every
+/// cell past the ones the value already paid for, and the text each copy
+/// holds. a recalculation's spills share one budget, however many anchors a
+/// workbook holds.
+fn charge_layout(ctx: &EvalContext<'_>, value: &Value, range: CellRange) -> bool {
+    let cells = ((range.end.row - range.start.row + 1) as usize)
+        .saturating_mul((range.end.col - range.start.col + 1) as usize);
+    let (held, bytes) = match value {
+        Value::Array(array) => (array.values.len(), array.text_bytes()),
+        Value::Scalar(CellValue::Text { value }) => (1, value.len()),
+        _ => (1, 0),
+    };
+    let copies = cells.div_ceil(held.max(1)).max(1);
+    ctx.consume_cells(cells.saturating_sub(held) as u64)
+        && ctx.consume_text(bytes.saturating_mul(copies))
+}
+
+/// lay `value` out from `anchor` once the budget has paid for it, or `None`
+/// when the budget refuses it.
+pub(crate) fn charged_spill(
+    ctx: &EvalContext<'_>,
+    anchor: CellRef,
+    authored: Option<CellRange>,
+    value: Value,
+) -> Option<Spill> {
+    charge_layout(ctx, &value, spill_range(anchor, &value, authored))
+        .then(|| spill_at(anchor, authored, value))
+}
+
+/// evaluate a formula as an array formula and lay its result out from
+/// `anchor`. a layout the budget refuses is only its anchor's `#NUM!`, with
+/// the refusal recorded on `ctx`.
+pub fn evaluate_spill(
+    expr: &Expr,
+    ctx: &EvalContext<'_>,
+    anchor: CellRef,
+    authored: Option<CellRange>,
+) -> Spill {
+    charged_spill(ctx, anchor, authored, evaluate_array(expr, ctx))
+        .unwrap_or_else(|| spill_at(anchor, None, Value::error(ErrorValue::Num)))
+}
+
+/// the single value an array formula shows in its anchor when it does not
+/// spill, used where only one cell is being asked about.
+pub fn evaluate_scalar(expr: &Expr, ctx: &EvalContext<'_>) -> CellValue {
+    evaluate_array(expr, ctx).into_scalar()
+}

@@ -90,10 +90,11 @@ describe('hover cursor over an engine-built page', () => {
     expect(disagreements).toEqual([]);
   });
 
-  test('a read-only document never shows the caret cursor', () => {
+  test('a read-only document shows the text cursor over body text', () => {
     const run = body.list.pages[0].primitives.find((primitive) => primitive.kind === 'text');
     if (!run) throw new Error('the fixture page has no run');
-    expect(cursorAt(body, run.x + run.width / 2, run.baselineY - 4, true)).toBe('default');
+    expect(cursorAt(body, run.x + run.width / 2, run.baselineY - 4, true)).toBe('text');
+    expect(cursorAt(body, 2, 2, true)).toBe('default');
   });
 
   // A band has no content box, so only a run's own box can answer here — this

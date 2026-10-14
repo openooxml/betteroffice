@@ -1,0 +1,93 @@
+{
+  "measured": [
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 0,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "Continuous section",
+            "pmStart": 1,
+            "pmEnd": 19
+          }
+        ],
+        "attrs": {},
+        "pmStart": 1,
+        "pmEnd": 20
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 18,
+            "width": 300,
+            "ascent": 19.2,
+            "descent": 4.8,
+            "lineHeight": 24
+          }
+        ],
+        "totalHeight": 24
+      }
+    },
+    {
+      "block": {
+        "kind": "sectionBreak",
+        "id": 1,
+        "type": "continuous"
+      },
+      "measure": {
+        "kind": "sectionBreak"
+      }
+    },
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 2,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "Untyped final section",
+            "pmStart": 21,
+            "pmEnd": 42
+          }
+        ],
+        "attrs": {},
+        "pmStart": 21,
+        "pmEnd": 43
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 21,
+            "width": 300,
+            "ascent": 19.2,
+            "descent": 4.8,
+            "lineHeight": 24
+          }
+        ],
+        "totalHeight": 24
+      }
+    }
+  ],
+  "options": {
+    "pageSize": {
+      "w": 816,
+      "h": 1056
+    },
+    "margins": {
+      "top": 96,
+      "right": 96,
+      "bottom": 96,
+      "left": 96
+    },
+    "pageGap": 20
+  }
+}

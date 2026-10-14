@@ -1,6 +1,5 @@
 //! Table, row, cell, and table-property serializers.
 
-use crate::block::BlockContent;
 use crate::borders::Borders;
 use crate::formatting::{
     CellMargins, FloatingTableProperties, TableCellFormatting, TableFormatting, TableLook,
@@ -17,10 +16,10 @@ use super::context::SerializerContext;
 use super::foundation::{
     BorderSide, serialize_conditional_format_style, serialize_table_grid, write_border,
 };
-use super::paragraph::serialize_paragraph;
 use super::run::{
     append_generated, nonempty, nonempty_trimmed, normalized_tracked_id, write_shading,
 };
+use super::sdt::serialize_block_content;
 use super::xml_writer::{XmlWriter, int_attr};
 
 pub fn serialize_table(
@@ -163,21 +162,10 @@ pub fn serialize_table_cell(
     let mut writer = XmlWriter::with_capacity(512);
     writer.start_element("w:tc");
     append_generated(&mut writer, &properties);
-    let mut emitted = false;
     for block in &cell.content {
-        match block {
-            BlockContent::Paragraph(paragraph) => {
-                append_generated(&mut writer, &serialize_paragraph(paragraph, context)?);
-                emitted = true;
-            }
-            BlockContent::Table(table) => {
-                append_generated(&mut writer, &serialize_table(table, context)?);
-                emitted = true;
-            }
-            BlockContent::BlockSdt(_) => {}
-        }
+        append_generated(&mut writer, &serialize_block_content(block, context)?);
     }
-    if !emitted {
+    if cell.content.is_empty() {
         writer.start_element("w:p").end_element();
     }
     writer.end_element();
@@ -394,12 +382,14 @@ fn write_table_look(writer: &mut XmlWriter, look: Option<&TableLook>) {
         (look.no_h_band, "w:noHBand"),
         (look.no_v_band, "w:noVBand"),
     ];
-    if !values.iter().any(|(value, _)| *value == Some(true)) {
-        return;
-    }
     writer.start_element("w:tblLook");
-    for (_, name) in values.into_iter().filter(|(value, _)| *value == Some(true)) {
-        writer.attribute(name, "1");
+    if let Some(value) = nonempty(look.value.as_deref()) {
+        writer.attribute("w:val", value);
+    }
+    for (value, name) in values {
+        if let Some(value) = value {
+            writer.attribute(name, if value { "1" } else { "0" });
+        }
     }
     writer.end_element();
 }
@@ -475,6 +465,38 @@ mod tests {
             now: "2000-01-01T00:00:00.000Z".to_owned(),
         })
         .unwrap()
+    }
+
+    #[test]
+    fn an_explicit_empty_table_look_survives_serialization() {
+        let mut writer = XmlWriter::with_capacity(32);
+        write_table_look(&mut writer, None);
+        assert_eq!(writer.finish(), "");
+        let mut writer = XmlWriter::with_capacity(32);
+        write_table_look(&mut writer, Some(&TableLook::default()));
+        assert_eq!(writer.finish(), "<w:tblLook/>");
+    }
+
+    #[test]
+    fn table_look_keeps_the_legacy_value_and_explicit_zero_flags() {
+        let mut writer = XmlWriter::with_capacity(64);
+        write_table_look(
+            &mut writer,
+            Some(&crate::formatting::TableLook {
+                value: Some("04A0".to_owned()),
+                first_row: Some(true),
+                last_row: Some(false),
+                first_column: Some(true),
+                last_column: Some(false),
+                no_h_band: Some(false),
+                no_v_band: Some(true),
+            }),
+        );
+        assert_eq!(
+            writer.finish(),
+            "<w:tblLook w:val=\"04A0\" w:firstRow=\"1\" w:lastRow=\"0\" w:firstColumn=\"1\" \
+             w:lastColumn=\"0\" w:noHBand=\"0\" w:noVBand=\"1\"/>"
+        );
     }
 
     #[test]

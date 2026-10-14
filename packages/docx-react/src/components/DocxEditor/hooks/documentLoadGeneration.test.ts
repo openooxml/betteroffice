@@ -2,6 +2,35 @@ import { describe, expect, test } from 'bun:test';
 import { DocumentLoadGeneration } from './documentLoadGeneration';
 
 describe('DocumentLoadGeneration', () => {
+  test('reports layout errors before and after load completion without completing the load', () => {
+    const loads = new DocumentLoadGeneration();
+    const generation = loads.begin();
+    const errors: Error[] = [];
+    const report = (error: Error) => errors.push(error);
+    const before = new Error('preflight');
+    const after = new Error('pagination');
+
+    loads.reportError(generation, before, report);
+    expect(loads.complete(generation)).toBe(true);
+    loads.reportError(generation, after, report);
+    expect(errors).toEqual([before, after]);
+
+    loads.begin();
+    loads.reportError(generation, new Error('stale'), report);
+    expect(errors).toEqual([before, after]);
+  });
+
+  test('a failed load reports no further errors, and the next load does', () => {
+    const loads = new DocumentLoadGeneration();
+    const failed = loads.begin();
+    const errors: string[] = [];
+    const report = (error: Error) => errors.push(error.message);
+    loads.fail(failed);
+    loads.reportError(failed, new Error('after failure'), report);
+    loads.reportError(loads.begin(), new Error('next load'), report);
+    expect(errors).toEqual(['next load']);
+  });
+
   test('rejects stale completion without resolving the current load', async () => {
     const loads = new DocumentLoadGeneration();
     const generationA = loads.begin();

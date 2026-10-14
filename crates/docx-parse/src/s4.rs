@@ -1,5 +1,7 @@
 //! S4 drawing and media projection.
 
+use std::sync::Arc;
+
 use base64::Engine as _;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -25,7 +27,7 @@ const MAX_DRAWING_LEAVES: usize = 100_000;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct S4Projection {
-    pub media_entries: Vec<(String, MediaFile)>,
+    pub media_entries: Vec<(String, Arc<MediaFile>)>,
     pub chart_entries: Vec<(String, Chart)>,
     pub xml_parts: Vec<S4XmlPart>,
     pub smart_art_warnings: Vec<String>,
@@ -68,19 +70,19 @@ pub fn parse_docx_s4_projection(data: &[u8]) -> Result<S4Projection, ParseError>
             let lower = path.to_ascii_lowercase();
             lower.ends_with(".xml") || lower.ends_with(".rels")
         })
-        .cloned()
-        .collect::<IndexMap<_, _>>();
+        .map(|(path, bytes)| (path.clone(), bytes.as_slice()))
+        .collect::<IndexMap<String, &[u8]>>();
     let charts = parse_chart_parts(&all_xml, &limits);
     let mut smart_art = create_smart_art_context(&all_xml);
     let mut relationship_parts = IndexMap::new();
-    for (path, xml) in &all_xml {
+    for (path, &xml) in &all_xml {
         if path.to_ascii_lowercase().ends_with(".rels") {
             relationship_parts.insert(path.clone(), parse_relationships(xml, path, &mut budget)?);
         }
     }
     let document_relationships = relationship_parts.get("word/_rels/document.xml.rels");
     let mut xml_parts = Vec::new();
-    for (path, xml) in &all_xml {
+    for (path, &xml) in &all_xml {
         // Chart parts carry no drawing, VML or watermark leaf, and
         // `parse_chart_parts` has already read them on their own budget.
         if !path.to_ascii_lowercase().ends_with(".xml") || is_chart_part(path) || xml.contains(&0) {
@@ -210,9 +212,17 @@ fn project_drawing(
 ) -> Result<Option<DrawingLeaf>, ParseError> {
     let chart = parse_chart_from_drawing(drawing, relationships, Some(charts))?;
     let (kind, value) = if let Some(text_box) = parse_text_box(drawing) {
-        ("textBox", serde_json::to_value(text_box))
+        (
+            "textBox",
+            serde_json::to_string(&text_box)
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s)),
+        )
     } else if let DrawingChart::Chart(chart) = &chart {
-        ("chart", serde_json::to_value(chart))
+        (
+            "chart",
+            serde_json::to_string(&chart)
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s)),
+        )
     } else if matches!(chart, DrawingChart::Unread) {
         return Ok(None);
     } else if is_smart_art_drawing(drawing) {
@@ -221,18 +231,30 @@ fn project_drawing(
         else {
             return Ok(None);
         };
-        ("smartArt", serde_json::to_value(shape))
+        (
+            "smartArt",
+            serde_json::to_string(&shape)
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s)),
+        )
     } else if is_shape_drawing(drawing) {
         let Some(mut shape) = parse_shape_from_drawing(drawing) else {
             return Ok(None);
         };
         resolve_shape_fill_pictures(&mut shape, relationships, Some(media));
-        ("shape", serde_json::to_value(shape))
+        (
+            "shape",
+            serde_json::to_string(&shape)
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s)),
+        )
     } else {
         let Some(image) = parse_drawing(drawing, relationships, Some(media)) else {
             return Ok(None);
         };
-        ("image", serde_json::to_value(image))
+        (
+            "image",
+            serde_json::to_string(&image)
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s)),
+        )
     };
     Ok(Some(DrawingLeaf {
         element: "drawing".to_owned(),

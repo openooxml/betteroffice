@@ -12,6 +12,7 @@ import { useFixedDropdown } from '../../hooks/useFixedDropdown';
 import { MaterialSymbol } from './MaterialSymbol';
 import { useTranslation } from '../../i18n';
 import type { TranslationKey } from '@betteroffice/docx-i18n';
+import { useDisabledDescription } from './disabledDescription';
 
 // ============================================================================
 // TYPES
@@ -25,6 +26,8 @@ export interface ColorPickerProps {
   onChange?: (color: ColorValue | string) => void;
   theme?: Theme | null;
   disabled?: boolean;
+  /** Why the picker is disabled. */
+  description?: string;
   className?: string;
   style?: CSSProperties;
   title?: string;
@@ -50,7 +53,7 @@ export interface ColorPickerProps {
 // CONSTANTS
 // ============================================================================
 
-const STANDARD_COLORS: Array<{ name: string; nameKey: TranslationKey; hex: string }> = [
+export const STANDARD_COLORS: ReadonlyArray<{ name: string; nameKey: TranslationKey; hex: string }> = [
   { name: 'Dark Red', nameKey: 'colorPicker.colors.darkRed', hex: 'C00000' },
   { name: 'Red', nameKey: 'colorPicker.colors.red', hex: 'FF0000' },
   { name: 'Orange', nameKey: 'colorPicker.colors.orange', hex: 'FFC000' },
@@ -374,6 +377,7 @@ export function ColorPicker({
   onChange,
   theme,
   disabled = false,
+  description,
   className,
   style,
   title,
@@ -397,6 +401,7 @@ export function ColorPicker({
       (mode === 'highlight' ? 'FFFF00' : mode === 'border' ? { rgb: '000000' } : { rgb: 'FF0000' })
   );
   const { t } = useTranslation();
+  const reason = useDisabledDescription(disabled, description);
 
   // Sync custom hex input with the current value
   useEffect(() => {
@@ -529,6 +534,7 @@ export function ColorPicker({
       className={`docx-color-picker ${className || ''}`}
       style={{ ...S_CONTAINER, ...style }}
     >
+      {reason.node}
       {splitButton ? (
         <div
           className="docx-color-picker-split"
@@ -552,8 +558,8 @@ export function ColorPicker({
             onMouseDown={(e) => e.preventDefault()}
             onMouseEnter={() => setApplyHovered(true)}
             onMouseLeave={() => setApplyHovered(false)}
-            disabled={disabled}
-            title={title || defaultTitle}
+            {...reason.triggerProps}
+            title={reason.title ?? (title || defaultTitle)}
             aria-label={title || defaultTitle}
           >
             <MaterialSymbol name={iconName} size={18} />
@@ -588,8 +594,8 @@ export function ColorPicker({
             onMouseDown={(e) => e.preventDefault()}
             onMouseEnter={() => setArrowHovered(true)}
             onMouseLeave={() => setArrowHovered(false)}
-            disabled={disabled}
-            title={title || defaultTitle}
+            {...reason.triggerProps}
+            title={reason.title ?? (title || defaultTitle)}
             aria-label={title || defaultTitle}
             aria-haspopup="true"
             aria-expanded={isOpen}
@@ -606,8 +612,8 @@ export function ColorPicker({
           onMouseDown={(e) => e.preventDefault()}
           onMouseEnter={() => setIsHovered(true)}
           onMouseLeave={() => setIsHovered(false)}
-          disabled={disabled}
-          title={title || defaultTitle}
+          {...reason.triggerProps}
+          title={reason.title ?? (title || defaultTitle)}
           aria-label={title || defaultTitle}
           aria-haspopup="true"
           aria-expanded={isOpen}

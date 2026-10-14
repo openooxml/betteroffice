@@ -3,25 +3,35 @@
 use crate::borders::Borders;
 use crate::formatting::{NumberingProperties, ParagraphFormatting, ParagraphFrame};
 use crate::inline::{
-    BookmarkEnd, BookmarkStart, ComplexField, Hyperlink, InlineNode, InlineSdt, MathEquation,
-    SdtProperties, SimpleField,
+    BookmarkEnd, BookmarkStart, ComplexField, Hyperlink, InlineNode, InlineSdt, MathEquation, Run,
+    RunContent, SdtProperties, SimpleField,
 };
 use crate::paragraph::{
     CommentRange, Paragraph, ParagraphContent, ParagraphPropertyChange, RangeEnd, RangeStart,
-    TrackedChangeInfo, TrackedInline,
+    RawAttribute, TrackedChangeInfo, TrackedInline,
 };
+use crate::paragraph_identity::W14_NAMESPACE;
 use crate::section::SectionProperties;
 use crate::xml::ParseError;
 
 use super::context::SerializerContext;
 use super::foundation::{BorderSide, write_border};
-use super::raw::{validate_math_subtree, validate_raw_subtree};
+use super::raw::{validate_math_subtree, validate_raw_subtree, validate_replayed_fragment};
 use super::run::{
     append_generated, nonempty, nonempty_trimmed, normalized_tracked_id, serialize_deleted_run,
     serialize_run, serialize_text_formatting, write_shading,
 };
 use super::section::serialize_section_properties;
 use super::xml_writer::{XmlWriter, int_attr, js_number};
+
+/// A replayed attribute name must be exactly one XML name, or it could
+/// smuggle markup into the tag.
+pub(crate) fn is_safe_attribute_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, ':' | '-' | '_' | '.')
+        })
+}
 
 /// Serialize one complete `w:p` element.
 pub fn serialize_paragraph(
@@ -31,7 +41,41 @@ pub fn serialize_paragraph(
     context.enter_paragraph(paragraph.rendered_page_break_before == Some(true));
     let result = serialize_paragraph_inner(paragraph, context);
     context.leave_paragraph();
+    if let Ok(xml) = &result {
+        context.record_paragraph(paragraph.source_ordinal, xml);
+    }
     result
+}
+
+/// The prefix a paragraph's Word 2010 attributes take: `w14`, unless the
+/// paragraph rebinds it, then a prefix it binds to that namespace or a fresh
+/// one. Also whether `w14` is rebound.
+fn word_2010_prefix(attributes: &[RawAttribute]) -> (String, bool) {
+    let rebound = attributes
+        .iter()
+        .any(|attribute| attribute.name == "xmlns:w14" && attribute.value.trim() != W14_NAMESPACE);
+    if !rebound {
+        return ("w14".to_owned(), false);
+    }
+    let declared = attributes.iter().find_map(|attribute| {
+        attribute
+            .name
+            .strip_prefix("xmlns:")
+            .filter(|_| attribute.value.trim() == W14_NAMESPACE)
+    });
+    let prefix = declared.map(str::to_owned).unwrap_or_else(|| {
+        (0..)
+            .map(|index| format!("w14p{index}"))
+            .find(|candidate| {
+                !attributes.iter().any(|attribute| {
+                    attribute.name.split_once(':').is_some_and(|(used, local)| {
+                        used == candidate || (used == "xmlns" && local == candidate)
+                    })
+                })
+            })
+            .unwrap_or_default()
+    });
+    (prefix, true)
 }
 
 fn serialize_paragraph_inner(
@@ -40,11 +84,32 @@ fn serialize_paragraph_inner(
 ) -> Result<String, ParseError> {
     let mut writer = XmlWriter::with_capacity(512);
     writer.start_element("w:p");
-    if let Some(value) = nonempty(paragraph.para_id.as_deref()) {
-        writer.attribute("w14:paraId", value);
+    let para_id = nonempty(paragraph.para_id.as_deref());
+    let text_id = nonempty(paragraph.text_id.as_deref());
+    let (prefix, rebound) = word_2010_prefix(&paragraph.extra_attributes);
+    if rebound
+        && (para_id.is_some() || text_id.is_some())
+        && !paragraph
+            .extra_attributes
+            .iter()
+            .any(|attribute| attribute.name == format!("xmlns:{prefix}"))
+    {
+        writer.dynamic_attribute(&format!("xmlns:{prefix}"), W14_NAMESPACE);
     }
-    if let Some(value) = nonempty(paragraph.text_id.as_deref()) {
-        writer.attribute("w14:textId", value);
+    if let Some(value) = para_id {
+        writer.dynamic_attribute(&format!("{prefix}:paraId"), value);
+    }
+    if let Some(value) = text_id {
+        writer.dynamic_attribute(&format!("{prefix}:textId"), value);
+    }
+    for attribute in &paragraph.extra_attributes {
+        let replaced = para_id.is_some()
+            && (attribute.name == "w:paraId"
+                || (!rebound && attribute.name == "w14:paraId")
+                || paragraph.para_id_attribute.as_deref() == Some(attribute.name.as_str()));
+        if !replaced && is_safe_attribute_name(&attribute.name) {
+            writer.dynamic_attribute(&attribute.name, &attribute.value);
+        }
     }
     let properties = serialize_paragraph_formatting(
         paragraph.formatting.as_ref(),
@@ -55,9 +120,37 @@ fn serialize_paragraph_inner(
         paragraph.section_properties.as_ref(),
     )?;
     append_generated(&mut writer, &properties);
+    let mut generated_comment_references = Vec::new();
     for content in &paragraph.content {
-        let content = serialize_paragraph_content(content, context)?;
-        append_generated(&mut writer, &content);
+        append_generated(&mut writer, &serialize_paragraph_content(content, context)?);
+        if let ParagraphContent::CommentRange(marker) = content
+            && marker.node_type == "commentRangeEnd"
+            && !generated_comment_references.contains(&marker.id)
+            && !paragraph.content.iter().any(|content| match content {
+                ParagraphContent::Inline(node) => has_comment_reference(node, marker.id),
+                ParagraphContent::Tracked(change) => change.content.iter().any(|node| {
+                    (matches!(
+                        node,
+                        InlineNode::Run(_) | InlineNode::Hyperlink(_) | InlineNode::InlineSdt(_)
+                    ) || node.has_tracked_control(false, true))
+                        && has_comment_reference(node, marker.id)
+                }),
+                _ => false,
+            })
+        {
+            writer
+                .start_element("w:r")
+                .start_element("w:rPr")
+                .start_element("w:rStyle")
+                .attribute("w:val", "CommentReference")
+                .end_element()
+                .end_element()
+                .start_element("w:commentReference")
+                .attribute("w:id", &js_number(marker.id))
+                .end_element()
+                .end_element();
+            generated_comment_references.push(marker.id);
+        }
     }
     writer.end_element();
     Ok(writer.finish())
@@ -106,9 +199,12 @@ pub fn serialize_paragraph_formatting(
             "w:suppressAutoHyphens",
             formatting.suppress_auto_hyphens,
         );
+        on_off(&mut body, "w:autoSpaceDE", formatting.auto_space_de);
+        on_off(&mut body, "w:autoSpaceDN", formatting.auto_space_dn);
         write_spacing(&mut body, formatting);
         write_indentation(&mut body, formatting);
         on_off(&mut body, "w:bidi", formatting.bidi);
+        on_off(&mut body, "w:snapToGrid", formatting.snap_to_grid);
         if let Some(value) = nonempty(formatting.alignment.as_deref()) {
             empty_attr(&mut body, "w:jc", "w:val", value);
         }
@@ -120,7 +216,16 @@ pub fn serialize_paragraph_formatting(
     if !base_only {
         write_paragraph_mark_properties(&mut body, formatting, p_pr_ins, p_pr_del);
         if let Some(properties) = section_properties {
-            append_generated(&mut body, &serialize_section_properties(Some(properties)));
+            // A paragraph-level sectPr ends a section even when it holds nothing.
+            let section = serialize_section_properties(Some(properties));
+            append_generated(
+                &mut body,
+                if section.is_empty() {
+                    "<w:sectPr/>"
+                } else {
+                    &section
+                },
+            );
         }
         if let Some(change) = property_changes.and_then(|changes| changes.first()) {
             append_generated(&mut body, &serialize_paragraph_property_change(change)?);
@@ -184,7 +289,7 @@ pub(crate) fn serialize_inline_node(
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
     match node {
-        InlineNode::Run(run) => serialize_run(run, context),
+        InlineNode::Run(run) => serialize_context_run(run, context),
         InlineNode::Hyperlink(hyperlink) => serialize_hyperlink(hyperlink, context),
         InlineNode::BookmarkStart(bookmark) => Ok(serialize_bookmark_start(bookmark)),
         InlineNode::BookmarkEnd(bookmark) => Ok(serialize_bookmark_end(bookmark)),
@@ -192,6 +297,11 @@ pub(crate) fn serialize_inline_node(
         InlineNode::ComplexField(field) => serialize_complex_field(field, context),
         InlineNode::InlineSdt(sdt) => serialize_inline_sdt(sdt, context),
         InlineNode::Math(math) => serialize_math(math),
+        InlineNode::Tracked(change) => serialize_tracked_change(change, context),
+        InlineNode::RawXml(raw) => {
+            validate_replayed_fragment(&raw.xml)?;
+            Ok(raw.xml.clone())
+        }
     }
 }
 
@@ -220,19 +330,38 @@ fn serialize_bookmark_end(bookmark: &BookmarkEnd) -> String {
     writer.finish()
 }
 
+fn serialize_context_run(run: &Run, context: &mut SerializerContext) -> Result<String, ParseError> {
+    if context.deletion {
+        serialize_deleted_run(run, context)
+    } else {
+        serialize_run(run, context)
+    }
+}
+
 fn serialize_hyperlink(
     hyperlink: &Hyperlink,
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
     let mut children = String::new();
-    for child in &hyperlink.children {
+    let expanded = context.in_control && context.in_revision;
+    let nested = hyperlink.structured_children.as_ref().filter(|children| {
+        expanded
+            || children
+                .iter()
+                .any(|child| child.has_tracked_control(false, context.in_revision))
+    });
+    for child in nested.unwrap_or(&hyperlink.children) {
         match child {
-            InlineNode::Run(run) => children.push_str(&serialize_run(run, context)?),
+            _ if expanded => children.push_str(&serialize_inline_node(child, context)?),
+            InlineNode::Run(run) => children.push_str(&serialize_context_run(run, context)?),
             InlineNode::BookmarkStart(bookmark) => {
                 children.push_str(&serialize_bookmark_start(bookmark))
             }
             InlineNode::BookmarkEnd(bookmark) => {
                 children.push_str(&serialize_bookmark_end(bookmark))
+            }
+            InlineNode::InlineSdt(_) if child.has_tracked_control(false, context.in_revision) => {
+                children.push_str(&serialize_inline_node(child, context)?);
             }
             _ => {}
         }
@@ -241,7 +370,7 @@ fn serialize_hyperlink(
         || nonempty(hyperlink.anchor.as_deref()).is_some()
         || nonempty(hyperlink.tooltip.as_deref()).is_some()
         || nonempty(hyperlink.target.as_deref()).is_some()
-        || hyperlink.history == Some(false)
+        || hyperlink.history.is_some()
         || nonempty(hyperlink.doc_location.as_deref()).is_some();
     if !has_attributes && nonempty(hyperlink.href.as_deref()).is_none() {
         return Ok(children);
@@ -252,8 +381,8 @@ fn serialize_hyperlink(
     optional_attr(&mut writer, "w:anchor", hyperlink.anchor.as_deref());
     optional_attr(&mut writer, "w:tooltip", hyperlink.tooltip.as_deref());
     optional_attr(&mut writer, "w:tgtFrame", hyperlink.target.as_deref());
-    if hyperlink.history == Some(false) {
-        writer.attribute("w:history", "0");
+    if let Some(history) = hyperlink.history {
+        writer.attribute("w:history", if history { "1" } else { "0" });
     }
     optional_attr(
         &mut writer,
@@ -269,38 +398,21 @@ fn serialize_simple_field(
     field: &SimpleField,
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
-    let properties = field
-        .content
-        .first()
-        .and_then(|run| run.formatting.as_ref())
-        .map(|formatting| serialize_text_formatting(Some(formatting)))
-        .unwrap_or_default();
     let mut output = String::new();
-    output.push_str("<w:r>");
-    output.push_str(&properties);
-    output.push_str("<w:fldChar w:fldCharType=\"begin\"");
+    output.push_str("<w:fldSimple w:instr=\"");
+    output.push_str(&super::xml_writer::escape_xml(&field.instruction));
+    output.push('"');
     if field.fld_lock == Some(true) {
         output.push_str(" w:fldLock=\"true\"");
     }
-    output.push_str("/></w:r>");
-    output.push_str("<w:r>");
-    output.push_str(&properties);
-    output.push_str("<w:instrText");
-    if needs_preserve(&field.instruction) {
-        output.push_str(" xml:space=\"preserve\"");
+    if field.dirty == Some(true) {
+        output.push_str(" w:dirty=\"true\"");
     }
     output.push('>');
-    output.push_str(&super::xml_writer::escape_xml(&field.instruction));
-    output.push_str("</w:instrText></w:r>");
-    output.push_str("<w:r>");
-    output.push_str(&properties);
-    output.push_str("<w:fldChar w:fldCharType=\"separate\"/></w:r>");
     for run in &field.content {
-        output.push_str(&serialize_run(run, context)?);
+        output.push_str(&serialize_context_run(run, context)?);
     }
-    output.push_str("<w:r>");
-    output.push_str(&properties);
-    output.push_str("<w:fldChar w:fldCharType=\"end\"/></w:r>");
+    output.push_str("</w:fldSimple>");
     Ok(output)
 }
 
@@ -334,14 +446,26 @@ fn serialize_complex_field(
         output.push_str("</w:instrText></w:r>");
     } else {
         for run in &field.field_code {
-            output.push_str(&serialize_run(run, context)?);
+            output.push_str(&serialize_context_run(run, context)?);
         }
     }
     output.push_str("<w:r>");
     output.push_str(&properties);
     output.push_str("<w:fldChar w:fldCharType=\"separate\"/></w:r>");
-    for run in &field.field_result {
-        output.push_str(&serialize_run(run, context)?);
+    // Run-level fallback: multi-block results and fields rebuilt by the edit path.
+    let structured = field
+        .structured_result
+        .as_ref()
+        .filter(|content| content.blocks.is_none())
+        .and_then(|content| content.inline.as_ref());
+    if let Some(nodes) = structured {
+        for node in nodes {
+            output.push_str(&serialize_inline_node(node, context)?);
+        }
+    } else {
+        for run in &field.field_result {
+            output.push_str(&serialize_context_run(run, context)?);
+        }
     }
     output.push_str("<w:r>");
     output.push_str(&properties);
@@ -359,9 +483,13 @@ pub fn serialize_inline_sdt(
     append_generated(&mut writer, &properties);
     append_generated(&mut writer, &end_properties);
     writer.start_element("w:sdtContent");
-    for item in &sdt.content {
+    let previous = std::mem::replace(&mut context.in_control, true);
+    let result = sdt.content.iter().try_for_each(|item| {
         append_generated(&mut writer, &serialize_inline_node(item, context)?);
-    }
+        Ok::<_, ParseError>(())
+    });
+    context.in_control = previous;
+    result?;
     writer.end_element().end_element();
     Ok(writer.finish())
 }
@@ -408,7 +536,11 @@ pub fn synthesize_sdt_properties(properties: &SdtProperties) -> String {
     }
     match properties.sdt_type.as_str() {
         "plainText" => {
-            body.start_element("w:text").end_element();
+            body.start_element("w:text");
+            if properties.multi_line == Some(true) {
+                body.attribute("w:multiLine", "1");
+            }
+            body.end_element();
         }
         "date" => {
             body.start_element("w:date");
@@ -486,22 +618,37 @@ fn serialize_tracked_change(
     }
     // Tracked wrappers use explicit start and end tags.
     writer.text("");
-    for item in &change.content {
-        match item {
-            InlineNode::Run(run) => append_generated(
-                &mut writer,
-                &if deletion {
+    let previous_revision = std::mem::replace(&mut context.in_revision, true);
+    let previous_deletion =
+        std::mem::replace(&mut context.deletion, deletion && context.in_control);
+    let result = change.content.iter().try_for_each(|item| {
+        let xml = match item {
+            _ if context.in_control => serialize_inline_node(item, context)?,
+            InlineNode::Run(run) => {
+                if deletion {
                     serialize_deleted_run(run, context)?
                 } else {
                     serialize_run(run, context)?
-                },
-            ),
-            InlineNode::Hyperlink(hyperlink) => {
-                append_generated(&mut writer, &serialize_hyperlink(hyperlink, context)?)
+                }
             }
-            _ => {}
+            InlineNode::Hyperlink(link) => serialize_hyperlink(link, context)?,
+            InlineNode::InlineSdt(_) => {
+                context.deletion = deletion;
+                let result = serialize_inline_node(item, context);
+                context.deletion = false;
+                result?
+            }
+            InlineNode::Tracked(_) if item.has_tracked_control(false, true) => {
+                serialize_inline_node(item, context)?
+            }
+            _ => return Ok(()),
         };
-    }
+        append_generated(&mut writer, &xml);
+        Ok::<_, ParseError>(())
+    });
+    context.in_revision = previous_revision;
+    context.deletion = previous_deletion;
+    result?;
     writer.end_element();
     Ok(writer.finish())
 }
@@ -535,6 +682,55 @@ fn serialize_range_end(marker: &RangeEnd) -> Result<String, ParseError> {
     Ok(writer.finish())
 }
 
+fn run_has_comment_reference(run: &Run, id: f64) -> bool {
+    run.content.iter().any(
+        |content| matches!(content, RunContent::CommentReference { id: reference } if *reference == Some(id)),
+    )
+}
+
+fn has_comment_reference(node: &InlineNode, id: f64) -> bool {
+    match node {
+        InlineNode::Run(run) => run_has_comment_reference(run, id),
+        InlineNode::Hyperlink(hyperlink) => hyperlink
+            .children
+            .iter()
+            .any(|node| matches!(node, InlineNode::Run(run) if run_has_comment_reference(run, id))),
+        InlineNode::InlineSdt(sdt) => sdt
+            .content
+            .iter()
+            .any(|node| has_comment_reference(node, id)),
+        InlineNode::Tracked(change) => change
+            .content
+            .iter()
+            .any(|node| has_comment_reference(node, id)),
+        InlineNode::SimpleField(field) => field
+            .content
+            .iter()
+            .any(|run| run_has_comment_reference(run, id)),
+        InlineNode::ComplexField(field) => {
+            field
+                .field_code
+                .iter()
+                .any(|run| run_has_comment_reference(run, id))
+                || field
+                    .structured_result
+                    .as_ref()
+                    .filter(|content| content.blocks.is_none())
+                    .and_then(|content| content.inline.as_ref())
+                    .map_or_else(
+                        || {
+                            field
+                                .field_result
+                                .iter()
+                                .any(|run| run_has_comment_reference(run, id))
+                        },
+                        |nodes| nodes.iter().any(|node| has_comment_reference(node, id)),
+                    )
+        }
+        _ => false,
+    }
+}
+
 fn serialize_comment_range(marker: &CommentRange) -> Result<String, ParseError> {
     let mut writer = XmlWriter::with_capacity(180);
     match marker.node_type.as_str() {
@@ -548,16 +744,6 @@ fn serialize_comment_range(marker: &CommentRange) -> Result<String, ParseError> 
             writer
                 .start_element("w:commentRangeEnd")
                 .attribute("w:id", &js_number(marker.id))
-                .end_element()
-                .start_element("w:r")
-                .start_element("w:rPr")
-                .start_element("w:rStyle")
-                .attribute("w:val", "CommentReference")
-                .end_element()
-                .end_element()
-                .start_element("w:commentReference")
-                .attribute("w:id", &js_number(marker.id))
-                .end_element()
                 .end_element();
         }
         _ => {}
@@ -664,27 +850,31 @@ fn write_tabs(writer: &mut XmlWriter, tabs: Option<&[crate::tabs::TabStop]>) {
 fn write_spacing(writer: &mut XmlWriter, formatting: &ParagraphFormatting) {
     if formatting.space_before.is_none()
         && formatting.space_after.is_none()
+        && formatting.space_before_lines.is_none()
+        && formatting.space_after_lines.is_none()
         && formatting.line_spacing.is_none()
         && nonempty(formatting.line_spacing_rule.as_deref()).is_none()
-        && formatting.before_autospacing != Some(true)
-        && formatting.after_autospacing != Some(true)
+        && formatting.before_autospacing.is_none()
+        && formatting.after_autospacing.is_none()
     {
         return;
     }
     writer.start_element("w:spacing");
     optional_int(writer, "w:before", formatting.space_before);
     optional_int(writer, "w:after", formatting.space_after);
+    optional_int(writer, "w:beforeLines", formatting.space_before_lines);
+    optional_int(writer, "w:afterLines", formatting.space_after_lines);
     optional_int(writer, "w:line", formatting.line_spacing);
     optional_attr(
         writer,
         "w:lineRule",
         formatting.line_spacing_rule.as_deref(),
     );
-    if formatting.before_autospacing == Some(true) {
-        writer.attribute("w:beforeAutospacing", "1");
+    if let Some(auto) = formatting.before_autospacing {
+        writer.attribute("w:beforeAutospacing", if auto { "1" } else { "0" });
     }
-    if formatting.after_autospacing == Some(true) {
-        writer.attribute("w:afterAutospacing", "1");
+    if let Some(auto) = formatting.after_autospacing {
+        writer.attribute("w:afterAutospacing", if auto { "1" } else { "0" });
     }
     writer.end_element();
 }
@@ -826,11 +1016,43 @@ mod tests {
     }
 
     #[test]
+    fn a_simple_field_saves_back_as_a_simple_field() {
+        let field = SimpleField {
+            node_type: crate::inline::SimpleFieldType::SimpleField,
+            field_type: "PAGE".to_owned(),
+            instruction: " PAGE ".to_owned(),
+            content: vec![Run {
+                node_type: RunType::Run,
+                formatting: None,
+                property_changes: None,
+                content: vec![RunContent::Text {
+                    text: "3".to_owned(),
+                    preserve_space: None,
+                }],
+            }],
+            fld_lock: Some(true),
+            dirty: Some(true),
+            structured_result: None,
+            field_tree: None,
+        };
+        let output = serialize_simple_field(&field, &mut context()).unwrap();
+        assert_eq!(
+            output,
+            "<w:fldSimple w:instr=\" PAGE \" w:fldLock=\"true\" w:dirty=\"true\">\
+             <w:r><w:t>3</w:t></w:r></w:fldSimple>"
+        );
+    }
+
+    #[test]
     fn paragraph_bytes_pin_ids_properties_and_rendered_break_injection() {
         let paragraph = Paragraph {
             node_type: "paragraph".to_owned(),
             para_id: Some("AA&BB\"CC".to_owned()),
+            repeated_para_id: None,
+            para_id_attribute: None,
+            source_ordinal: None,
             text_id: None,
+            extra_attributes: Vec::new(),
             formatting: Some(ParagraphFormatting {
                 keep_next: Some(false),
                 alignment: Some("center".to_owned()),
@@ -855,6 +1077,59 @@ mod tests {
         assert_eq!(
             serialize_paragraph(&paragraph, &mut context()).unwrap(),
             "<w:p w14:paraId=\"AA&amp;BB&quot;CC\"><w:pPr><w:keepNext w:val=\"0\"/><w:jc w:val=\"center\"/></w:pPr><w:r><w:lastRenderedPageBreak/><w:t>hello &amp; goodbye</w:t></w:r></w:p>"
+        );
+    }
+
+    /// A paragraph-level sectPr ends a section even when it holds nothing, so
+    /// it always saves; the body-level one and other paragraphs are unchanged.
+    #[test]
+    fn paragraph_section_marks_save_even_when_empty() {
+        let save = |section_properties: Option<SectionProperties>| {
+            let paragraph = Paragraph {
+                node_type: "paragraph".to_owned(),
+                para_id: Some("00000001".to_owned()),
+                repeated_para_id: None,
+                para_id_attribute: None,
+                source_ordinal: None,
+                text_id: None,
+                extra_attributes: Vec::new(),
+                formatting: None,
+                property_changes: None,
+                p_pr_ins: None,
+                p_pr_del: None,
+                content: vec![ParagraphContent::Inline(InlineNode::Run(Run {
+                    node_type: RunType::Run,
+                    formatting: None,
+                    property_changes: None,
+                    content: vec![RunContent::Text {
+                        text: "A".to_owned(),
+                        preserve_space: None,
+                    }],
+                }))],
+                list_rendering: None,
+                rendered_page_break_before: None,
+                section_properties,
+            };
+            serialize_paragraph(&paragraph, &mut context()).unwrap()
+        };
+        assert_eq!(
+            save(None),
+            "<w:p w14:paraId=\"00000001\"><w:r><w:t>A</w:t></w:r></w:p>"
+        );
+        assert_eq!(
+            save(Some(SectionProperties {
+                section_start: Some("continuous".to_owned()),
+                ..SectionProperties::default()
+            })),
+            "<w:p w14:paraId=\"00000001\"><w:pPr><w:sectPr><w:type w:val=\"continuous\"/></w:sectPr></w:pPr><w:r><w:t>A</w:t></w:r></w:p>"
+        );
+        assert_eq!(
+            save(Some(SectionProperties::default())),
+            "<w:p w14:paraId=\"00000001\"><w:pPr><w:sectPr/></w:pPr><w:r><w:t>A</w:t></w:r></w:p>"
+        );
+        assert_eq!(
+            serialize_section_properties(Some(&SectionProperties::default())),
+            ""
         );
     }
 

@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "commit": "e2361a3001b606df2638c487f97af15385a185ad",
+  "regression": {
+    "percent": 30,
+    "minimumMs": 5
+  },
+  "samples": 5,
+  "fixtures": [
+    {
+      "name": "deep-inheritance",
+      "parseMs": 28.82,
+      "resolveMs": 82.462,
+      "evaluateMs": 10.079,
+      "renderMs": 54.316,
+      "saveMs": 1.739
+    },
+    {
+      "name": "dense-glue",
+      "parseMs": 54.121,
+      "resolveMs": 51.495,
+      "evaluateMs": 12.031,
+      "renderMs": 43.108,
+      "saveMs": 3.893
+    },
+    {
+      "name": "many-pages",
+      "parseMs": 32.931,
+      "resolveMs": 39.996,
+      "evaluateMs": 12.212,
+      "renderMs": 30.763,
+      "saveMs": 1.331
+    },
+    {
+      "name": "nested-groups",
+      "parseMs": 56.399,
+      "resolveMs": 72.708,
+      "evaluateMs": 20.459,
+      "renderMs": 49.912,
+      "saveMs": 2.91
+    },
+    {
+      "name": "shape-heavy",
+      "parseMs": 67.998,
+      "resolveMs": 90.41,
+      "evaluateMs": 23.941,
+      "renderMs": 74.304,
+      "saveMs": 2.931
+    },
+    {
+      "name": "text-heavy",
+      "parseMs": 18.631,
+      "resolveMs": 23.479,
+      "evaluateMs": 6.465,
+      "renderMs": 282.923,
+      "saveMs": 2.769
+    }
+  ]
+}
