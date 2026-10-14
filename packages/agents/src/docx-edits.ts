@@ -9,6 +9,7 @@ export interface TableCell {
   columns: number;
   anchors: TableCellAnchor[];
   anchor: TableCellAnchor;
+  mergedRows: Set<number>;
 }
 
 export interface ParagraphStyle { id: string; name?: string; isDefault: boolean }
@@ -24,7 +25,17 @@ export function tableCells(story: string, segments: readonly YrsStorySegment[]):
     const payload = segment.payload as unknown as TablePayload;
     if (Array.isArray(payload.rows)) {
       const { anchors, columns } = tableAnchors(payload);
-      for (const anchor of anchors) if (anchor.story) cells.set(anchor.story, { story, tableIndex, rows: payload.rows.length, columns, anchors, anchor });
+      const mergedRows = new Set<number>();
+      payload.rows.forEach((row, index) => {
+        if (row.cells.some(cell => {
+          const original = cell.tcPr?._originalFormatting as Record<string, unknown> | undefined;
+          return cell.tcPr?.vMerge !== undefined || original?.vMerge !== undefined;
+        })) mergedRows.add(index);
+      });
+      for (const anchor of anchors) {
+        if (anchor.rowspan > 1) for (let row = anchor.row; row < anchor.row + anchor.rowspan; row++) mergedRows.add(row);
+        if (anchor.story) cells.set(anchor.story, { story, tableIndex, rows: payload.rows.length, columns, anchors, anchor, mergedRows });
+      }
     }
     tableIndex++;
   }
@@ -82,8 +93,16 @@ function covering(anchors: readonly TableCellAnchor[], row: number, column: numb
   return anchors.find(anchor => anchor.row <= row && row < anchor.row + anchor.rowspan && anchor.column <= column && column < anchor.column + anchor.colspan);
 }
 
+function requireUnmergedRow(cell: TableCell) {
+  if (cell.mergedRows.has(cell.anchor.row)) {
+    throw new DocumentToolError('UNSUPPORTED_TARGET', 'This row participates in a vertical merge. Choose another row.');
+  }
+}
+
 export function insertTableRow(draft: YrsSession, target: DocxParagraphTarget, parent: string, position: 'before' | 'after', texts: readonly string[]): DocxParagraphTarget[] {
-  const { story, tableIndex, columns, anchors, anchor } = locate(draft, parent, target.story);
+  const cell = locate(draft, parent, target.story);
+  requireUnmergedRow(cell);
+  const { story, tableIndex, columns, anchors, anchor } = cell;
   const templates = Array.from({ length: columns }, (_, column) => covering(anchors, anchor.row, column)?.story);
   const receipt = draft.insertRow({ story, tableIndex, row: anchor.row, column: anchor.column }, position === 'before' ? 'above' : 'below');
   if (receipt.createdStoryIds.length !== texts.length) {
@@ -103,7 +122,12 @@ export function insertTableRow(draft: YrsSession, target: DocxParagraphTarget, p
 }
 
 export function deleteTableRow(draft: YrsSession, target: DocxParagraphTarget, parent: string): boolean {
-  const { story, tableIndex, anchor } = locate(draft, parent, target.story);
+  const cell = locate(draft, parent, target.story);
+  requireUnmergedRow(cell);
+  if (cell.rows === 1) {
+    throw new DocumentToolError('UNSUPPORTED_TARGET', 'A table keeps at least one row.');
+  }
+  const { story, tableIndex, anchor } = cell;
   const at = { story, tableIndex, row: anchor.row, column: anchor.column };
   return draft.deleteRow({ anchor: at, head: at }).deletedTable;
 }
