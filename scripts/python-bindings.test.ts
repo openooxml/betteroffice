@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   PYPI_DISTRIBUTIONS,
   PYTHON_BINDINGS,
@@ -130,18 +130,33 @@ describe('release wiring', () => {
     const directory = mkdtempSync(join(tmpdir(), 'registry-'));
     const outputs = join(directory, 'outputs');
     const path = join(directory, 'registry.sh');
+    const [served, ...unserved] = PYTHON_PUBLISH_NAMES;
+    const releases = {
+      [`betteroffice-${served}`]: { [bindingVersion(`bindings/python-${served}`)]: [{ yanked: false }] }
+    };
+    const pypi = join(directory, 'pypi.mjs');
+    writeFileSync(
+      pypi,
+      `const served = ${JSON.stringify(releases)};
+globalThis.fetch = async (url) => {
+  const releases = served[String(url).match(/\\/pypi\\/([^/]+)\\/json$/)?.[1]];
+  return releases ? Response.json({ releases }) : new Response(null, { status: 404 });
+};
+`
+    );
     writeFileSync(path, step.run);
     const result = spawnSync('bash', ['-e', path], {
       encoding: 'utf8',
       cwd: repository,
-      env: { ...process.env, GITHUB_OUTPUT: outputs }
+      env: {
+        ...process.env,
+        GITHUB_OUTPUT: outputs,
+        NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --import=${pathToFileURL(pypi).href}`
+      }
     });
 
-    expect(result.status).toBe(0);
-    const lines = readFileSync(outputs, 'utf8').trim().split('\n');
-    expect(lines).toHaveLength(1);
-    const pending = JSON.parse(lines[0]!.replace(/^publish=/, '')) as string[];
-    expect(PYTHON_PUBLISH_NAMES.filter((name) => pending.includes(name))).toEqual(pending);
+    expect(result.status, result.stderr).toBe(0);
+    expect(readFileSync(outputs, 'utf8')).toBe(`publish=${JSON.stringify(unserved)}\n`);
   });
 
   test('a registry lookup failure fails the step instead of publishing nothing', () => {
