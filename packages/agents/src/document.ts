@@ -1,4 +1,6 @@
-import { createYrsSession, saveYrsDocx, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
+import { createYrsSession, saveYrsDocx, type DocxParagraphTarget, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
+import { cellPosition, deleteParagraph, deleteTableRow, hostEdit, insertTableRow, lineText, notInTable, requireParagraph, resolveStyle, tableCells, type ParagraphStyle } from './docx-edits';
+import { docxBatchSchema, type DocxAgentBatch, type DocxAgentEdit, type DocxEditOutcome } from './docx-schema';
 import {
   DocumentToolError,
   type DocumentOptions,
@@ -9,6 +11,7 @@ import {
   type ParagraphRef,
   type Proposal,
   type ProposalChange,
+  type TableCellPosition,
   type TextEdit,
   type TextRun,
 } from './types';
@@ -20,7 +23,10 @@ interface Paragraph extends ParagraphRef {
   headingLevel: number | null;
   runs: TextRun[];
   fingerprint: string;
+  table?: TableCellPosition;
 }
+
+type EditStep = (draft: YrsSession) => { result: Omit<DocxEditOutcome, 'index' | 'op' | 'refs'>; created?: DocxParagraphTarget[] };
 
 interface HeldProposal {
   value: Proposal;
@@ -74,6 +80,7 @@ export class DocxAgentDocument {
   private nextCursor = 1;
   private nextMatch = 1;
   private closed = false;
+  private paragraphStyles?: ParagraphStyle[];
 
   constructor(
     readonly session: YrsSession,
@@ -98,8 +105,8 @@ export class DocxAgentDocument {
       paragraphs: this.paragraphs.length,
       stories: entries,
       nextOffset: offset + entries.length < stories.size ? offset + entries.length : null,
-      capabilities: { grep: 'literal', proposals: true, render: !!this.options.renderer, export: !!this.session.materializeDocx()?.originalBuffer },
-      workflow: 'grep for the exact text to replace; read its ref for context; propose with match and newText; review; render; verify; export.',
+      capabilities: { grep: 'literal', proposals: true, atomicEdits: true, render: !!this.options.renderer, export: !!this.session.materializeDocx()?.originalBuffer },
+      workflow: 'grep for the exact text to replace; read its ref for context; propose with match and newText; review; render; verify; export. For styles, bold/italic/underline, paragraphs and table rows, use docx_edit with the outline version.',
     };
   }
 
@@ -112,7 +119,7 @@ export class DocxAgentDocument {
       (!options.headingsOnly || p.headingLevel !== null));
     return {
       version: this.epoch,
-      items: entries.slice(offset, offset + limit).map(p => ({ ...this.reference(p), style: p.style, headingLevel: p.headingLevel, text: p.text.slice(0, 120), length: p.text.length })),
+      items: entries.slice(offset, offset + limit).map(p => ({ ...this.reference(p), style: p.style, headingLevel: p.headingLevel, text: p.text.slice(0, 120), length: p.text.length, ...(p.table && { table: { ...p.table } }) })),
       nextOffset: offset + limit < entries.length ? offset + limit : null,
       total: entries.length,
     };
@@ -173,6 +180,26 @@ export class DocxAgentDocument {
       ...this.reference(p), text: p.text.slice(start, end), start, end,
       length: p.text.length, nextStart: end < p.text.length ? end : null, style: p.style,
       runs: p.runs.filter(run => run.start < end && run.end > start).map(run => structuredClone({ ...run, start: Math.max(start, run.start), end: Math.min(end, run.end) })),
+      ...(p.table && { table: { ...p.table } }),
+    };
+  }
+
+  /** Applies 1–32 direct edits on a fork, then commits them as one undo step; any failure applies none. */
+  async edit(input: DocxAgentBatch) {
+    this.index();
+    const parsed = docxBatchSchema.safeParse(input);
+    if (!parsed.success) throw new DocumentToolError('INVALID_ARGUMENT', 'Use the docx_edit schema: version and 1–32 edits.', { issues: parsed.error.issues.map(issue => ({ path: issue.path, message: issue.message })) });
+    const { version, edits } = parsed.data;
+    if (version !== this.epoch) throw new DocumentToolError('STALE_VERSION', 'The document changed. Read office_outline or office_grep again and copy its version.');
+    if (JSON.stringify(edits).length > 64_000) throw new DocumentToolError('EDIT_LIMIT', 'A batch holds at most 64000 characters of input. Split it.');
+    const outcomes = await this.commit(version, edits);
+    this.index();
+    return {
+      applied: true as const, version: this.epoch,
+      results: outcomes.map(({ result, created }, index): DocxEditOutcome => ({
+        index, op: edits[index].op, ...result,
+        ...(created && { refs: created.map(({ story, paraId }) => this.identities.get(JSON.stringify([story, paraId]))?.ref ?? null) }),
+      })),
     };
   }
 
@@ -322,13 +349,36 @@ export class DocxAgentDocument {
     if (this.indexedEpoch === this.epoch) return;
     const paragraphs: Paragraph[] = [];
     const active = new Set<string>();
-    for (const story of this.session.storyIds().sort()) {
+    const cells = new Map<string, TableCellPosition>();
+    const stories = this.session.storyIds();
+    const segmentsByStory = new Map(stories.map(story => [story, this.session.storySegments(story)]));
+    for (const [story, segments] of segmentsByStory) {
+      for (const [cell, position] of tableCells(story, segments)) cells.set(cell, cellPosition(position));
+    }
+    const position = (story: string): { root: string; path: number[] } => {
+      const cell = cells.get(story);
+      if (!cell) return { root: story, path: [] };
+      const parent = position(cell.story);
+      return { root: parent.root, path: [...parent.path, cell.index, cell.row, cell.column] };
+    };
+    const positions = new Map(stories.map(story => [story, position(story)]));
+    stories.sort((a, b) => {
+      const left = positions.get(a)!;
+      const right = positions.get(b)!;
+      if (left.root !== right.root) return left.root < right.root ? -1 : 1;
+      for (let i = 0; i < Math.min(left.path.length, right.path.length); i++) {
+        if (left.path[i] !== right.path[i]) return left.path[i] - right.path[i];
+      }
+      return left.path.length - right.path.length;
+    });
+    for (const story of stories) {
       const headings = new Map(this.session.headings(story).map(entry => [entry.paraId, entry.heading.outlineLevel + 1]));
       let text = '';
       let runs: TextRun[] = [];
       let segments: YrsStorySegment[] = [];
       let ordinal = 0;
-      for (const segment of this.session.storySegments(story)) {
+      const storySegments = segmentsByStory.get(story)!;
+      for (const segment of storySegments) {
         segments.push(segment);
         if (segment.kind === 'pilcrow') {
           const key = JSON.stringify([story, segment.paraId]);
@@ -353,6 +403,7 @@ export class DocxAgentDocument {
       }
     }
     for (const key of this.identities.keys()) if (!active.has(key)) this.identities.delete(key);
+    for (const p of paragraphs) p.table = cells.get(p.story);
     this.paragraphs = paragraphs;
     this.indexedEpoch = this.epoch;
   }
@@ -417,6 +468,101 @@ export class DocxAgentDocument {
       const { story, paraId } = held.targets.get(change.ref)!;
       draft.replaceRange({ story, start: { paraId, offset: change.start }, end: { paraId, offset: change.start + change.oldText.length } }, change.newText, author);
     }
+  }
+
+  private async commit(version: number, edits: DocxAgentEdit[]) {
+    let failed: number | undefined;
+    try {
+      const steps: EditStep[] = [];
+      for (const [index, edit] of edits.entries()) { failed = index; steps.push(this.plan(edit)); }
+      failed = undefined;
+      const draft = await this.fork();
+      try {
+        if (this.epoch !== version) throw new DocumentToolError('STALE_VERSION', 'The document changed while the batch started. Read the version again.');
+        const vector = draft.encodeStateVector();
+        const outcomes: Array<ReturnType<EditStep>> = [];
+        for (const [index, step] of steps.entries()) { failed = index; outcomes.push(step(draft)); }
+        failed = undefined;
+        this.session.addUndoBoundary();
+        try { this.session.applyLocalUpdate(draft.encodeStateAsUpdate(vector)); }
+        finally { this.session.addUndoBoundary(); }
+        return outcomes;
+      } finally { draft.destroy(); }
+    } catch (error) {
+      const failure = error instanceof DocumentToolError ? error : new DocumentToolError('INVALID_EDIT', error instanceof Error ? error.message : String(error));
+      throw new DocumentToolError(failure.code, `${failure.message} No batch edits were applied.`, { ...failure.details, ...(failed === undefined ? {} : { failedIndex: failed }) });
+    }
+  }
+
+  private plan(edit: DocxAgentEdit): EditStep {
+    if (edit.op === 'format_text') {
+      const held = this.matches.get(edit.match);
+      if (!held) throw new DocumentToolError('UNKNOWN_MATCH', 'Match expired or belongs to another document. Run grep again and copy its match ID.');
+      const p = this.get(held.ref);
+      if (p.revision !== held.revision) throw new DocumentToolError('STALE_TARGET', 'The matched paragraph changed. Grep again and use a fresh match ID.', { refs: [p.ref] });
+      const delta = { bold: edit.bold, italic: edit.italic, underline: edit.underline };
+      if (Object.values(delta).every(value => value === undefined)) throw new DocumentToolError('INVALID_ARGUMENT', 'format_text needs bold, italic or underline.');
+      const start = held.start ?? 0;
+      const end = start + held.oldText.length;
+      return draft => {
+        requireParagraph(draft, p);
+        draft.formatRange({ story: p.story, start: { paraId: p.paraId, offset: start }, end: { paraId: p.paraId, offset: end } }, delta);
+        return { result: { ref: p.ref, start, end } };
+      };
+    }
+    const p = this.get(edit.op === 'insert_paragraphs' ? edit.after : edit.op === 'set_paragraph_style' || edit.op === 'delete_paragraph' ? edit.paragraph : edit.row);
+    const target = { story: p.story, paraId: p.paraId };
+    switch (edit.op) {
+      case 'set_paragraph_style': {
+        const styleId = resolveStyle(this.styles(), edit.style);
+        return draft => {
+          requireParagraph(draft, target);
+          hostEdit(draft, { op: 'setParagraphStyle', target, styleId });
+          return { result: { ref: p.ref, style: styleId } };
+        };
+      }
+      case 'insert_paragraphs': {
+        const fallback = this.styles().find(style => style.isDefault)?.id;
+        const paragraphs = edit.paragraphs.map(({ text, style }) => {
+          lineText(text);
+          return { text, styleId: style ? resolveStyle(this.styles(), style) : fallback };
+        });
+        return draft => {
+          requireParagraph(draft, target);
+          return { result: {}, created: hostEdit(draft, { op: 'insertParagraphs', target, at: 'end', paragraphs }).newParagraphs };
+        };
+      }
+      case 'delete_paragraph':
+        return draft => {
+          requireParagraph(draft, target);
+          deleteParagraph(draft, target);
+          return { result: { ref: p.ref } };
+        };
+      case 'insert_table_row': {
+        const table = p.table ?? notInTable();
+        if (edit.cells.length !== table.columns) {
+          throw new DocumentToolError('CELL_COUNT', `This table has ${table.columns} columns; supply exactly ${table.columns} cell texts.`, { columns: table.columns });
+        }
+        edit.cells.forEach(text => lineText(text));
+        return draft => {
+          requireParagraph(draft, target);
+          return { result: {}, created: insertTableRow(draft, target, table.story, edit.position, edit.cells) };
+        };
+      }
+      case 'delete_table_row': {
+        const table = p.table ?? notInTable();
+        return draft => {
+          requireParagraph(draft, target);
+          return { result: { ref: p.ref, deletedTable: deleteTableRow(draft, target, table.story) } };
+        };
+      }
+    }
+  }
+
+  private styles(): ParagraphStyle[] {
+    return this.paragraphStyles ??= (this.session.materializeDocx()?.package.styles?.styles ?? [])
+      .filter(style => style.type === 'paragraph')
+      .map(style => ({ id: style.styleId, name: style.name, isDefault: !!style.default }));
   }
 }
 
