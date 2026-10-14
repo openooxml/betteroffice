@@ -228,6 +228,32 @@ test('delete_table_row refuses the last row without changing the document', asyn
   expect(await paragraphs(await doc.export())).toEqual(baseline);
 });
 
+test('outline keeps code-unit order for header stories with case and punctuation', async () => {
+  const zip = await JSZip.loadAsync(await editFixture());
+  const w = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+  const r = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  const ids = ['rIda', 'rId_A', 'rIdA'];
+  const types = await zip.file('[Content_Types].xml')!.async('string');
+  zip.file('[Content_Types].xml', types.replace('</Types>', ids.map((_, index) =>
+    `<Override PartName="/word/header${index + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>`).join('') + '</Types>'));
+  const relationships = await zip.file('word/_rels/document.xml.rels')!.async('string');
+  zip.file('word/_rels/document.xml.rels', relationships.replace('</Relationships>', ids.map((id, index) =>
+    `<Relationship Id="${id}" Type="${r}/header" Target="header${index + 1}.xml"/>`).join('') + '</Relationships>'));
+  const xml = await zip.file('word/document.xml')!.async('string');
+  const variants = ['default', 'first', 'even'];
+  zip.file('word/document.xml', xml.replace('<w:sectPr>', '<w:sectPr>' + ids.map((id, index) =>
+    `<w:headerReference w:type="${variants[index]}" r:id="${id}"/>`).join('')));
+  for (const [index, id] of ids.entries()) {
+    zip.file(`word/header${index + 1}.xml`, `<w:hdr xmlns:w="${w}"><w:p><w:r><w:t>${id}</w:t></w:r></w:p></w:hdr>`);
+  }
+  const doc = await open(await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }));
+  const expected = ['hf:rIdA', 'hf:rId_A', 'hf:rIda'];
+  for (const document of [doc, await open(await doc.export())]) {
+    expect(document.list({ limit: 100 }).items.filter(item => item.story.startsWith('hf:')).map(item => item.story)).toEqual(expected);
+    expect(document.overview().stories.filter(item => item.story.startsWith('hf:')).map(item => item.story)).toEqual(expected);
+  }
+});
+
 test('outline lists table cells by numeric row and column before and after insertion', async () => {
   const tableRows = Array.from({ length: 11 }, (_, row) =>
     Array.from({ length: 11 }, (_, column) => tableCell(`Row ${row + 1} Cell ${column + 1}`)).join(''));
