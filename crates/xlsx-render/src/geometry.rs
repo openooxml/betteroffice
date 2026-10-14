@@ -307,11 +307,16 @@ impl PrintMetrics {
 }
 
 const SIZE_CHUNK_LEN: usize = 256;
+const _: () = assert!(
+    MAX_ROWS as usize % SIZE_CHUNK_LEN == 0 && MAX_COLS as usize % SIZE_CHUNK_LEN == 0
+);
 
 #[derive(Debug, Clone)]
 struct SizeChunk {
     sum: f64,
     count: u32,
+    /// stored values above zero.
+    sized: u32,
     values: [f32; SIZE_CHUNK_LEN],
 }
 
@@ -320,6 +325,7 @@ impl Default for SizeChunk {
         Self {
             sum: 0.0,
             count: 0,
+            sized: 0,
             values: [f32::NAN; SIZE_CHUNK_LEN],
         }
     }
@@ -363,12 +369,14 @@ impl Sizes {
             chunk.values[index as usize % SIZE_CHUNK_LEN] = value;
             chunk.sum += f64::from(value);
             chunk.count += 1;
+            chunk.sized += u32::from(value > 0.0);
         }
         for index in 1..=chunks.len() {
             let parent = index + index.isolate_lowest_one();
             if parent <= chunks.len() {
                 chunks[parent - 1].sum += chunks[index - 1].sum;
                 chunks[parent - 1].count += chunks[index - 1].count;
+                chunks[parent - 1].sized += chunks[index - 1].sized;
             }
         }
         Self {
@@ -380,18 +388,20 @@ impl Sizes {
         }
     }
 
-    fn prefix(&self, count: usize) -> (f64, u32) {
+    fn prefix(&self, count: usize) -> (f64, u32, u32) {
         let mut index = count.min(self.chunks.len());
         let mut sum = 0.0;
         let mut count = 0;
+        let mut sized = 0;
         while index > 0 {
             #[cfg(feature = "test-counters")]
             PREFIX_QUERIES.set(PREFIX_QUERIES.get().wrapping_add(1));
             sum += self.chunks[index - 1].sum;
             count += self.chunks[index - 1].count;
+            sized += self.chunks[index - 1].sized;
             index &= index - 1;
         }
-        (sum, count)
+        (sum, count, sized)
     }
 
     fn grow(&mut self, count: usize) {
@@ -399,7 +409,7 @@ impl Sizes {
             return;
         }
         let old_len = self.chunks.len();
-        let (sum, active) = self.prefix(old_len);
+        let (sum, active, sized) = self.prefix(old_len);
         let count = count
             .next_power_of_two()
             .min((self.limit as usize).div_ceil(SIZE_CHUNK_LEN));
@@ -411,9 +421,10 @@ impl Sizes {
         for index in old_len..count {
             let start = index & (index + 1);
             if start < old_len {
-                let (before, preceding) = self.prefix(start);
+                let (before, preceding, sized_before) = self.prefix(start);
                 self.chunks[index].sum = sum - before;
                 self.chunks[index].count = active - preceding;
+                self.chunks[index].sized = sized - sized_before;
             }
         }
     }
@@ -427,6 +438,8 @@ impl Sizes {
         let delta = f64::from(value.unwrap_or(0.0)) - f64::from(old.unwrap_or(0.0));
         let added = u32::from(value.is_some() && old.is_none());
         let removed = u32::from(value.is_none() && old.is_some());
+        let was_sized = old.is_some_and(|size| size > 0.0);
+        let is_sized = value.is_some_and(|size| size > 0.0);
         let mut current = chunk + 1;
         while current <= self.chunks.len() {
             #[cfg(feature = "test-counters")]
@@ -434,6 +447,8 @@ impl Sizes {
             self.chunks[current - 1].sum += delta;
             self.chunks[current - 1].count += added;
             self.chunks[current - 1].count -= removed;
+            self.chunks[current - 1].sized += u32::from(is_sized && !was_sized);
+            self.chunks[current - 1].sized -= u32::from(was_sized && !is_sized);
             current += current.isolate_lowest_one();
         }
         self.count += added;
@@ -470,6 +485,45 @@ impl Sizes {
         (index * SIZE_CHUNK_LEN + last + 1) as u32
     }
 
+    /// index of the last track with a nonzero size. tracks past the last
+    /// stored value take the default, so they decide unless it is zero.
+    fn last_sized(&self) -> Option<u32> {
+        let implicit = self.default > 0.0;
+        if implicit && self.end < self.limit {
+            return Some(self.limit - 1);
+        }
+        let sized = |node: usize| {
+            let chunk = &self.chunks[node - 1];
+            let unset = (node.isolate_lowest_one() * SIZE_CHUNK_LEN) as u32 - chunk.count;
+            chunk.sized + if implicit { unset } else { 0 }
+        };
+        let mut total = 0;
+        let mut index = self.chunks.len();
+        while index > 0 {
+            total += sized(index);
+            index &= index - 1;
+        }
+        if total == 0 {
+            return None;
+        }
+        let mut index = 0;
+        let mut below = 0;
+        let mut step = 1 << self.chunks.len().ilog2();
+        while step > 0 {
+            let next = index + step;
+            if next <= self.chunks.len() && below + sized(next) < total {
+                below += sized(next);
+                index = next;
+            }
+            step >>= 1;
+        }
+        let within = self.chunks[index]
+            .values
+            .iter()
+            .rposition(|&size| size > 0.0 || (implicit && size.is_nan()))?;
+        Some((index * SIZE_CHUNK_LEN + within) as u32)
+    }
+
     fn value(&self, index: u32) -> Option<f32> {
         let chunk = self.chunks.get(index as usize / SIZE_CHUNK_LEN)?;
         let value = chunk.values[index as usize % SIZE_CHUNK_LEN];
@@ -478,7 +532,7 @@ impl Sizes {
 
     fn offset(&self, index: u32) -> f32 {
         let chunk = index as usize / SIZE_CHUNK_LEN;
-        let (mut sum, mut count) = self.prefix(chunk);
+        let (mut sum, mut count, _) = self.prefix(chunk);
         if let Some(chunk) = self.chunks.get(chunk) {
             #[cfg(feature = "test-counters")]
             PREFIX_QUERIES.set(PREFIX_QUERIES.get().wrapping_add(1));
@@ -509,7 +563,7 @@ impl Sizes {
             if self.default == 0.0 {
                 return self.end;
             }
-            let (sum, count) = self.prefix(self.chunks.len());
+            let (sum, count, _) = self.prefix(self.chunks.len());
             let mut index = self
                 .end
                 .saturating_add(((position - edge) / self.default) as u32);
@@ -748,29 +802,40 @@ impl GridGeometry {
         self.rows.at(y)
     }
 
-    /// half-open (row, col) ranges of cells intersecting the viewport.
+    /// last row with a nonzero height; hidden trailing rows end the grid early.
+    pub fn last_row_with_height(&self) -> Option<RowId> {
+        self.rows.last_sized()
+    }
+
+    /// last column with a nonzero width; hidden trailing columns end the grid early.
+    pub fn last_col_with_width(&self) -> Option<ColId> {
+        self.columns.last_sized()
+    }
+
+    /// half-open (row, col) ranges of cells intersecting the viewport, ending at
+    /// the last track with extent.
     pub fn viewport_range(&self, vp: &Viewport) -> (Range<RowId>, Range<ColId>) {
         let bottom = self.row_y(MAX_ROWS);
         let right = self.col_x(MAX_COLS);
-        let rows = if bottom - vp.y <= 0.0 {
-            MAX_ROWS..MAX_ROWS
-        } else {
-            let r0 = self.row_at_y(vp.y).min(MAX_ROWS - 1);
-            let r1 = self
-                .row_at_y((vp.y + vp.height).min(bottom))
-                .saturating_add(1)
-                .min(MAX_ROWS);
-            r0..r1
+        let rows = match self.last_row_with_height() {
+            Some(last) if bottom - vp.y > 0.0 => {
+                let r0 = self.row_at_y(vp.y).min(last);
+                let r1 = self
+                    .row_at_y((vp.y + vp.height).min(bottom))
+                    .min(last);
+                r0..r1 + 1
+            }
+            _ => MAX_ROWS..MAX_ROWS,
         };
-        let cols = if right - vp.x <= 0.0 {
-            MAX_COLS..MAX_COLS
-        } else {
-            let c0 = self.col_at_x(vp.x).min(MAX_COLS - 1);
-            let c1 = self
-                .col_at_x((vp.x + vp.width).min(right))
-                .saturating_add(1)
-                .min(MAX_COLS);
-            c0..c1
+        let cols = match self.last_col_with_width() {
+            Some(last) if right - vp.x > 0.0 => {
+                let c0 = self.col_at_x(vp.x).min(last);
+                let c1 = self
+                    .col_at_x((vp.x + vp.width).min(right))
+                    .min(last);
+                c0..c1 + 1
+            }
+            _ => MAX_COLS..MAX_COLS,
         };
         (rows, cols)
     }
