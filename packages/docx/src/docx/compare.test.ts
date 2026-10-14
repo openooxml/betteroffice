@@ -468,7 +468,11 @@ describe('compareDocx', () => {
     const styled = (style: string, word: string) =>
       fixture({ body: p(`<w:pPr><w:pStyle w:val="${style}"/></w:pPr>`, run(`The ${word} clause`)), styles });
     await expectRedline(styled('Off', 'old'), styled('Off', 'new'));
-    await expectRefusal(styled('Toggled', 'old'), styled('Toggled', 'new'), 'roundtrip-mismatch');
+    const { docx } = await expectRedline(styled('Toggled', 'old'), styled('Toggled', 'new'));
+    const saved = parseXml(decode(parts(docx)['word/document.xml']!));
+    for (const properties of descendants(saved, 'rPr')) {
+      expect(decode(parts(docx)['word/document.xml']!).slice(properties.start, properties.end)).not.toContain('<w:b');
+    }
   });
 
   it('redlines direct bold under bold paragraph and character styles', async () => {
