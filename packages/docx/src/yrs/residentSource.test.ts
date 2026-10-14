@@ -228,3 +228,19 @@ test('invalid or failed sources leave the client available for a new opening', a
     client.destroy();
   }
 }, TIMEOUT);
+
+for (const input of ['bytes', 'document'] as const) {
+  test(`viewport-first ${input} opening defers preview until command fonts are ready`, async () => {
+    const bytes = source();
+    const document = input === 'document' ? await parsed(bytes) : undefined;
+    const worker = startWorker();
+    const client = new ResidentEngineWorkerClient(worker);
+    try {
+      const opened = await client.openSource({ ...(document ? { document } : { bytes }), preview: true,
+        ...{ deferPreview: true } });
+      expect(opened.preview).toBeUndefined();
+      const initial = await client.commandInit({ ...init(), ...{ provisionalPages: 1 } });
+      expect(initial.frame.payload.layoutProvisional).toBe(true);
+    } finally { client.destroy(); }
+  });
+}

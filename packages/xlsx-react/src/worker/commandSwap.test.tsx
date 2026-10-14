@@ -78,6 +78,7 @@ async function harness(maxPatches = 8) {
     save() {}, restore() {}, setTransform() {}, beginPath() {}, clip() {}, clearRect() {}, rect() {},
     moveTo() {}, lineTo() {}, stroke() {}, setLineDash() {},
     fillRect() {}, fillText(value: string) { text.push(value); },
+    measureText(value: string) { return { width: value.length * 6 }; },
   } as unknown as CanvasRenderingContext2D;
   let source: WorkerPaintSource | undefined;
   const paintFailure = new Error('Canvas installation failed');

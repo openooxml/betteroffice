@@ -249,7 +249,7 @@
     },
     {
       "anchor": {
-        "a1": "F2",
+        "a1": "H2",
         "kind": "cell",
         "sheet": {
           "index": 0,
@@ -258,7 +258,7 @@
         }
       },
       "code": "formatting-approximate",
-      "message": "The number format \"# ?/?\" is only approximated, so displayText falls back to General here and wherever this sheet uses it.",
+      "message": "The number format \"# ?/\" is only approximated, so displayText falls back to General here and wherever this sheet uses it.",
       "severity": "info"
     },
     {
