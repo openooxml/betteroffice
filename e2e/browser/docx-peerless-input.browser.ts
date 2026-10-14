@@ -992,8 +992,7 @@ test('table_tab_and_shift_tab_preserve_typing_with_acks_withheld', async ({ page
   expect(await page.evaluate(() => window.__docxPeerlessInput.mainInstances)).toBe(0);
 });
 
-for (const feature of ['plain', 'table', 'keep', 'section', 'PAGE']) {
-test(`viewport-first ${feature} open preserves pixels and page position as certified geometry grows`, async ({ page }) => {
+async function openViewportFirst(page: Page, feature: string) {
   await installProbe(page);
   await page.goto('/?format=docx&peerless=1');
   await page.evaluate(() => { window.__docxPeerlessInput.holdFrames = true; });
@@ -1005,6 +1004,21 @@ test(`viewport-first ${feature} open preserves pixels and page position as certi
   const canvas = documentCanvas(page);
   await expect(canvas).toBeVisible();
   await expect.poll(() => page.evaluate(() => !!window.__docxPeerlessInput.initial)).toBe(true);
+  return canvas;
+}
+
+async function releaseCertifiedGeometry(page: Page) {
+  const scroller = page.locator('.editor-stage .docx-editor__scroll-container');
+  const prefixHeight = await scroller.evaluate((element) => element.scrollHeight);
+  await expect.poll(() => page.evaluate(() => window.__docxPeerlessInput.heldFrames.some(({ message }) =>
+    message.ok && message.commandFrame?.frame.payload.layoutProvisional !== true))).toBe(true);
+  await page.evaluate(() => window.__docxPeerlessInput.releaseFrames());
+  await expect.poll(() => scroller.evaluate((element) => element.scrollHeight)).toBeGreaterThan(prefixHeight);
+}
+
+for (const feature of ['plain', 'table', 'keep', 'section', 'PAGE']) {
+test(`viewport-first ${feature} open preserves pixels and page position as certified geometry grows`, async ({ page }) => {
+  const canvas = await openViewportFirst(page, feature);
   const initial = await page.evaluate(() => {
     const payload = window.__docxPeerlessInput.initial!.frame!.payload;
     return { provisional: payload.layoutProvisional, frame: Array.from(new Uint8Array(payload.frame)) };
@@ -1015,17 +1029,18 @@ test(`viewport-first ${feature} open preserves pixels and page position as certi
     const rect = element.getBoundingClientRect();
     return { pixels: (element as HTMLCanvasElement).toDataURL(), x: rect.x, y: rect.y };
   });
-  const scroller = page.locator('.editor-stage .docx-editor__scroll-container');
-  const prefixHeight = await scroller.evaluate((element) => element.scrollHeight);
-  await expect.poll(() => page.evaluate(() => window.__docxPeerlessInput.heldFrames.some(({ message }) =>
-    message.ok && message.commandFrame?.frame.payload.layoutProvisional !== true))).toBe(true);
-  await page.evaluate(() => window.__docxPeerlessInput.releaseFrames());
-  await expect.poll(() => scroller.evaluate((element) => element.scrollHeight)).toBeGreaterThan(prefixHeight);
+  await releaseCertifiedGeometry(page);
   const after = await canvas.evaluate((element) => {
     const rect = element.getBoundingClientRect();
     return { pixels: (element as HTMLCanvasElement).toDataURL(), x: rect.x, y: rect.y };
   });
   expect(after).toEqual(before);
+});
+
+test(`viewport-first ${feature} open paints later pages after certified geometry grows`, async ({ page }) => {
+  test.skip(process.env.DOCX_PEERLESS_HARNESS !== '1', 'Viewport probes require DOCX_PEERLESS_HARNESS=1');
+  await openViewportFirst(page, feature);
+  await releaseCertifiedGeometry(page);
   await expect.poll(() => page.evaluate(() => window.__docxPeerlessHarness?.capabilities)).toMatchObject({ presentation: true });
   await page.evaluate(() => window.__docxPeerlessHarness!.registerWorker(window.__docxPeerlessInput.worker!));
   await page.evaluate(async () => { await window.__docxPeerlessHarness!.setViewport!([40, 41, 42]); });
