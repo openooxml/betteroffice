@@ -1314,8 +1314,8 @@ fn captured_format_preserves_protection_after_peer_style_reordering() {
     let captured = a
         .capture_format(SheetId(0), CellRange::parse_a1("A1").unwrap())
         .unwrap();
-    let original_index = captured.source_styles[0];
-    let captured = serde_json::from_str(&serde_json::to_string(&captured).unwrap()).unwrap();
+    let mut captured: xlsx_ops::CapturedFormat =
+        serde_json::from_str(&serde_json::to_string(&captured).unwrap()).unwrap();
     b.apply_update_v1(
         &a.encode_state_as_update_v1(),
         CalculationOptions::default(),
@@ -1336,11 +1336,15 @@ fn captured_format_preserves_protection_after_peer_style_reordering() {
         CalculationOptions::default(),
     )
     .unwrap();
+    captured.source_styles[0] = a
+        .capture_format(SheetId(0), CellRange::parse_a1("B1").unwrap())
+        .unwrap()
+        .source_styles[0];
     assert_ne!(
         a.capture_format(SheetId(0), CellRange::parse_a1("A1").unwrap())
             .unwrap()
             .source_styles[0],
-        original_index
+        captured.source_styles[0]
     );
     a.apply_format(
         SheetId(0),
