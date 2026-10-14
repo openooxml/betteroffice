@@ -441,9 +441,27 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
   const canUsePrefix = (
     command: DocxCommandEnvelope, context: DocxCommandApplyContext, result?: DocxCommandSelection | null
   ): boolean => {
-    if (!prefix) return false;
-    if (result !== undefined && (!result || selectionPageOf(result.anchor, prefix.pages) === undefined ||
-      selectionPageOf(result.focus, prefix.pages) === undefined)) return false;
+    if (!prefix || changes.layoutStale) return false;
+    if (result !== undefined) {
+      if (!result || result.anchor.story !== result.focus.story || result.anchor.paraId !== result.focus.paraId ||
+        result.anchor.offset !== result.focus.offset || result.focus.story !== 'body') return false;
+      const pageIndex = selectionPageOf(result.focus, prefix.pages);
+      if (pageIndex === undefined) return false;
+      const { frame, version } = readSelectionFrame();
+      const position = displayPositionIndex(engine).positionOf(result.focus, 'body');
+      if (position === null) return false;
+      const queries = queriesFor(frame, version);
+      const caret = queries.caretRect(position);
+      if (!caret || caret.height <= 0 || caret.pageIndex !== pageIndex || queries.imageByPos(position)) return false;
+      if (!frame.pages[pageIndex]!.page.primitives.some(primitive =>
+        (primitive.kind === 'glyphRun' || primitive.kind === 'text') && primitive.docStart !== undefined &&
+        primitive.docEnd !== undefined && primitive.docStart <= position && position <= primitive.docEnd)) return false;
+      if (command.kind === 'selectPoint' || command.kind === 'extendSelection') {
+        const point = command.payload as DocxSelectionPointIntent;
+        const hit = queries.hitTestRegions(point.page.pageIndex, point.x, point.y);
+        if (hit?.region !== 'body' || hit.target !== 'text') return false;
+      }
+    }
     const base = context.predecessorSelection ?? hooks.selection();
     switch (command.kind) {
       case 'selectPoint': case 'extendSelection': {
