@@ -14,7 +14,10 @@ import {
 import { preloadEditWasm } from '../wasm/edit';
 import { decodeDocxHostJson, type YrsResidentWorkerSnapshot } from './index';
 import { createResidentEngineSession, type ResidentEngineSession } from './residentEngineSession';
-import type { DocxCommandFrame, ResidentCommandInitRequest } from './residentCommandProtocol';
+import type {
+  DocxCommandAck, DocxCommandEnvelope, DocxCommandFrame, DocxCommandSelection,
+  DocxSelectionPointIntent, ResidentCommandInitRequest,
+} from './residentCommandProtocol';
 import type { DocxPageExportOptions, DocxPageFragment } from './pagedExport';
 import type {
   ResidentEngineWorkerRequest,
@@ -69,7 +72,12 @@ beforeAll(async () => {
     }],
   });
   if (!result.success) throw new AggregateError(result.logs, 'Worker test bundle failed');
-  startWorker = new Function('self', 'testHarness', 'MessageChannel', await result.outputs[0].text()) as typeof startWorker;
+  startWorker = new Function('self', 'testHarness', 'MessageChannel', `
+    const performance = testHarness.clock ?? globalThis.performance;
+    const setTimeout = testHarness.setTimer ?? globalThis.setTimeout;
+    const clearTimeout = testHarness.clearTimer ?? globalThis.clearTimeout;
+    ${await result.outputs[0].text()}
+  `) as typeof startWorker;
 });
 
 function syntheticDocx(feature = 'plain'): Uint8Array {
@@ -90,7 +98,7 @@ function syntheticDocx(feature = 'plain'): Uint8Array {
   const body = Array.from({ length: 80 }, (_, index) =>
     `<w:p w14:paraId="${(index + 1).toString(16).padStart(8, '0')}">` +
     '<w:pPr><w:pageBreakBefore/></w:pPr><w:r><w:rPr><w:sz w:val="22"/></w:rPr><w:t>' +
-    `Paragraph ${index + 1}. ${'alpha beta gamma delta epsilon zeta eta theta '.repeat(8 + index % 5)}` +
+    `Paragraph ${index + 1}. ${feature === 'echo' ? 'alpha beta gamma' : 'alpha beta gamma delta epsilon zeta eta theta '.repeat(8 + index % 5)}` +
     '</w:t></w:r></w:p>'
   ).join('');
   parts.set('word/document.xml', toBytes(
@@ -113,7 +121,7 @@ function syntheticDocx(feature = 'plain'): Uint8Array {
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
-function worker(session: ResidentEngineSession, controlled = false) {
+function worker(session: ResidentEngineSession, controlled = false, virtualTime = false) {
   const turns: (() => void)[] = [];
   const frames: DocxCommandFrame[] = [];
   let nextId = 0;
@@ -126,7 +134,20 @@ function worker(session: ResidentEngineSession, controlled = false) {
       replies.delete(reply.id);
     },
   };
-  const harness = { session, encodeDisplayListFrameExtras, loadRustDisplayListQueryEngine, loadedRustDisplayListQueryEngine };
+  let now = 0;
+  let timerId = 0;
+  const timers = new Map<number, { at: number; callback: () => void }>();
+  const harness = { session, encodeDisplayListFrameExtras, loadRustDisplayListQueryEngine, loadedRustDisplayListQueryEngine,
+    ...(virtualTime ? {
+      clock: { now: () => now },
+      setTimer(callback: () => void, ms: number) {
+        const id = ++timerId;
+        timers.set(id, { at: now + ms, callback });
+        return id;
+      },
+      clearTimer(id: number) { timers.delete(id); },
+    } : {}),
+  };
   startWorker(scope, harness, controlled ? class {
     port1 = { onmessage: () => {} };
     port2 = { postMessage: () => turns.push(() => this.port1.onmessage()) };
@@ -136,6 +157,16 @@ function worker(session: ResidentEngineSession, controlled = false) {
     replaceSession(next: ResidentEngineSession) { harness.session = next; },
     async turn() { turns.shift()?.(); await new Promise<void>((resolve) => setTimeout(resolve, 0)); },
     async drain() { for (let i = 0; i < 2000 && turns.length; i += 1) { turns.shift()!(); await new Promise<void>((resolve) => setTimeout(resolve, 0)); } },
+    async advance(ms: number) {
+      await this.drain();
+      now += ms;
+      for (const [id, timer] of timers) {
+        if (timer.at > now) continue;
+        timers.delete(id);
+        timer.callback();
+      }
+      await this.drain();
+    },
     send(request: ResidentEngineWorkerRequestWithoutId): Promise<ResidentEngineWorkerResponse> {
       const id = ++nextId;
       return new Promise((resolve) => {
@@ -486,11 +517,11 @@ const MEASUREMENT = {
 };
 
 /** `exportable` registers the font for the default family too, as an export requires. */
-async function commandFixture(feature = 'plain', exportable = false) {
+async function commandFixture(feature = 'plain', exportable = false, options: { full?: boolean; virtualTime?: boolean } = {}) {
   const bytes = syntheticDocx(feature);
   const cold = await createResidentEngineSession();
   const engine = await createResidentEngineSession();
-  const w = worker(engine, true);
+  const w = worker(engine, true, options.virtualTime);
   const host = decodeDocxHostJson(cold.openDocx(bytes), bytes);
   const request = buildResidentRegionLayoutRequest(host.document, 24, {});
   if (feature === 'footnote' || feature === 'endnote') {
@@ -520,7 +551,7 @@ async function commandFixture(feature = 'plain', exportable = false) {
   const init: ResidentCommandInitRequest = {
     session: 'viewport-first', incarnation: 1, epoch: 1, readOnly: false,
     fonts: [FONT], layoutInput, layoutWithRegions: true, layoutRevision: 1, extras,
-    displayWindow: [0, 3], ...{ provisionalPages: 3 },
+    displayWindow: [0, 3], ...(options.full ? {} : { provisionalPages: 3 }),
   };
   const reply = await w.send({ type: 'commandInit', request: init });
   if (!reply.ok || !reply.commandInitial) throw new Error(JSON.stringify(reply));
@@ -628,6 +659,177 @@ test('command viewport beyond the prefix completes before painting and cancels s
     const count = f.w.frames.length;
     await f.w.drain();
     expect(f.w.frames).toHaveLength(count);
+  } finally { f.destroy(); }
+});
+
+type CommandFixture = Awaited<ReturnType<typeof commandFixture>>;
+
+function commandPoint(f: CommandFixture, pageIndex = 0, offset = 8): DocxSelectionPointIntent {
+  const page = f.full.pages[pageIndex]!;
+  const run = page.page.primitives.find((primitive) => primitive.kind === 'glyphRun');
+  if (!run || run.kind !== 'glyphRun') throw new Error('Missing text');
+  const glyph = run.glyphs[offset]!;
+  return {
+    page: { pageId: page.pageId.toString(), pageIndex }, x: glyph.x, y: glyph.y - run.size / 2,
+    frameEpoch: f.frame.frameEpoch, layoutRevision: 1, clickCount: 1,
+    modifiers: { shift: false, alt: false, ctrl: false, meta: false },
+  };
+}
+
+async function sendCommand(f: CommandFixture, seq: number, kind: string, payload: DocxCommandEnvelope['payload']): Promise<DocxCommandAck> {
+  const reply = await f.w.send({ type: 'edit', command: {
+    session: f.init.session, incarnation: 1, seq, basis: { epoch: 1, version: 0 }, kind, payload,
+    ...(seq > 1 ? { afterSeq: seq - 1 } : {}),
+  } });
+  if (!reply.ok || !reply.commandAck?.frame) throw new Error(JSON.stringify(reply));
+  expect(reply.commandAck.outcomes[0]?.status).toBe(kind === 'insertText' ? 'applied' : 'noop');
+  return reply.commandAck;
+}
+
+function selectionPositions(selection: DocxCommandSelection | null | undefined) {
+  const position = (at: DocxCommandSelection['focus']) => ({ story: at.story, paraId: at.paraId, offset: at.offset });
+  return selection && { anchor: position(selection.anchor), focus: position(selection.focus) };
+}
+
+function expectPrefixSelection(f: CommandFixture, ack: DocxCommandAck, calls: string[]) {
+  expect(ack.frame!.payload.layoutProvisional).toBe(true);
+  expect(ack.frame!.payload.finalizedPages).toBe(3);
+  expect(f.calls).toEqual(calls);
+  const frame = commandFramesAfter(commandFramesAfter(f.frame, f.w.frames), [ack.frame!]);
+  expect(frame.pages).toHaveLength(3);
+  for (const { page, pageIndex } of frame.pages) expect(page).toEqual(f.full.displayList.pages[pageIndex]);
+}
+
+function expectSelectionParity(ack: DocxCommandAck, full: DocxCommandAck) {
+  expect(selectionPositions(ack.selection)).toEqual(selectionPositions(full.selection));
+  const echo = ack.frame!.payload.echoContext;
+  const completedEcho = full.frame!.payload.echoContext;
+  expect(echo).toBeDefined();
+  expect(completedEcho).toBeDefined();
+  expect(echo!.page).toEqual(completedEcho!.page);
+  expect(echo!.text).toBe(completedEcho!.text);
+  expect(echo!.selection).toEqual(completedEcho!.selection);
+  expect(echo!.boundaries).toEqual(completedEcho!.boundaries);
+  expect(echo!.styleRuns).toEqual(completedEcho!.styleRuns);
+}
+
+test('selectPoint on a certified page acknowledges the exact prefix with echo context without completion', async () => {
+  const f = await commandFixture('echo', false, { virtualTime: true });
+  const full = await commandFixture('echo', false, { full: true, virtualTime: true });
+  try {
+    const ack = await sendCommand(f, 1, 'selectPoint', commandPoint(f));
+    const reference = await sendCommand(full, 1, 'selectPoint', commandPoint(full));
+    expectPrefixSelection(f, ack, []);
+    expectSelectionParity(ack, reference);
+  } finally { f.destroy(); full.destroy(); }
+});
+
+for (const unit of ['character', 'word', 'line'] as const) {
+  for (const direction of ['backward', 'forward'] as const) {
+    test(`navigate ${unit} ${direction} on a certified page acknowledges the exact prefix with echo context`, async () => {
+      const f = await commandFixture('echo', false, { virtualTime: true });
+      const full = await commandFixture('echo', false, { full: true, virtualTime: true });
+      try {
+        await sendCommand(f, 1, 'selectPoint', commandPoint(f));
+        await sendCommand(full, 1, 'selectPoint', commandPoint(full));
+        const calls = f.calls.slice();
+        const navigation = { unit, direction, extend: false };
+        const ack = await sendCommand(f, 2, 'navigate', navigation);
+        const reference = await sendCommand(full, 2, 'navigate', navigation);
+        expectPrefixSelection(f, ack, calls);
+        expectSelectionParity(ack, reference);
+      } finally { f.destroy(); full.destroy(); }
+    });
+  }
+}
+
+test('extendSelection keeps both endpoints on certified pages without completion', async () => {
+  const f = await commandFixture('echo', false, { virtualTime: true });
+  const full = await commandFixture('echo', false, { full: true, virtualTime: true });
+  try {
+    await sendCommand(f, 1, 'selectPoint', commandPoint(f));
+    await sendCommand(full, 1, 'selectPoint', commandPoint(full));
+    const calls = f.calls.slice();
+    const ack = await sendCommand(f, 2, 'extendSelection', commandPoint(f, 0, 12));
+    const reference = await sendCommand(full, 2, 'extendSelection', commandPoint(full, 0, 12));
+    expectPrefixSelection(f, ack, calls);
+    expectSelectionParity(ack, reference);
+  } finally { f.destroy(); full.destroy(); }
+});
+
+for (const kind of ['selectPoint', 'extendSelection', 'line down', 'document end'] as const) {
+  test(`${kind} beyond the certified prefix completes before acknowledging selection`, async () => {
+    const f = await commandFixture('echo', false, { virtualTime: true });
+    const full = await commandFixture('echo', false, { full: true, virtualTime: true });
+    try {
+      await sendCommand(f, 1, 'selectPoint', commandPoint(f, 2));
+      await sendCommand(full, 1, 'selectPoint', commandPoint(full, 2));
+      const commandKind = kind === 'line down' || kind === 'document end' ? 'navigate' : kind;
+      const payload = kind === 'line down' ? { unit: 'line' as const, direction: 'down' as const, extend: false, goalX: commandPoint(f, 2).x }
+        : kind === 'document end' ? { unit: 'document-boundary' as const, direction: 'forward' as const, extend: false }
+        : { ...commandPoint(f), page: { pageId: '0', pageIndex: 3 } };
+      const ack = await sendCommand(f, 2, commandKind, payload);
+      const reference = await sendCommand(full, 2, commandKind, payload);
+      expect(ack.frame!.payload.layoutProvisional).not.toBe(true);
+      expect(commandFramesAfter(commandFramesAfter(f.frame, f.w.frames), [ack.frame!]).pages).toHaveLength(f.full.pages.length);
+      expect(f.calls).toContain('layoutDocumentWithRegionsRetained');
+      expect(selectionPositions(ack.selection)).toEqual(selectionPositions(reference.selection));
+    } finally { f.destroy(); full.destroy(); }
+  });
+}
+
+test('a computed paragraph boundary outside the prefix completes and recomputes selection', async () => {
+  const f = await commandFixture('flow-paragraph', false, { virtualTime: true });
+  const full = await commandFixture('flow-paragraph', false, { full: true, virtualTime: true });
+  try {
+    await sendCommand(f, 1, 'selectPoint', commandPoint(f, 2));
+    await sendCommand(full, 1, 'selectPoint', commandPoint(full, 2));
+    const navigation = { unit: 'paragraph' as const, direction: 'forward' as const, extend: true };
+    const ack = await sendCommand(f, 2, 'navigate', navigation);
+    const reference = await sendCommand(full, 2, 'navigate', navigation);
+    expect(ack.frame!.payload.layoutProvisional).not.toBe(true);
+    expect(f.calls).toContain('layoutDocumentWithRegionsRetained');
+    expect(selectionPositions(ack.selection)).toEqual(selectionPositions(reference.selection));
+  } finally { f.destroy(); full.destroy(); }
+});
+
+test('insertText after a prefix selection completes before editing and matches a full open', async () => {
+  const f = await commandFixture('echo', false, { virtualTime: true });
+  const full = await commandFixture('echo', false, { full: true, virtualTime: true });
+  try {
+    const selected = await sendCommand(f, 1, 'selectPoint', commandPoint(f));
+    const selectedFull = await sendCommand(full, 1, 'selectPoint', commandPoint(full));
+    expectPrefixSelection(f, selected, []);
+    const ack = await sendCommand(f, 2, 'insertText', { text: 'Edit ' });
+    const reference = await sendCommand(full, 2, 'insertText', { text: 'Edit ' });
+    expect(ack.frame!.payload.layoutProvisional).not.toBe(true);
+    expect(f.calls.filter(call => call === 'layoutDocumentWithRegionsRetained')).toHaveLength(2);
+    expect(f.engine.proposalEngine.readParagraphs({ story: 'body', view: 'accepted' })).toEqual(
+      full.engine.proposalEngine.readParagraphs({ story: 'body', view: 'accepted' }));
+    const frame = commandFramesAfter(f.frame, [selected.frame!, ack.frame!]);
+    const referenceFrame = commandFramesAfter(full.frame, [selectedFull.frame!, reference.frame!]);
+    expect(frame.displayList.pages).toEqual(referenceFrame.displayList.pages);
+    expectSelectionParity(ack, reference);
+  } finally { f.destroy(); full.destroy(); }
+});
+
+test('background completion resumes after a prefix selection without restarting', async () => {
+  const f = await commandFixture('echo', false, { virtualTime: true });
+  try {
+    await f.present();
+    await f.w.turn();
+    expect(f.calls).toEqual(['beginRegionLayout']);
+    const ack = await sendCommand(f, 1, 'selectPoint', commandPoint(f));
+    expectPrefixSelection(f, ack, ['beginRegionLayout']);
+    await f.w.advance(INPUT_IDLE_HOLD_MS);
+    expect(f.calls.filter(call => call === 'beginRegionLayout')).toHaveLength(1);
+    expect(f.calls).not.toContain('layoutDocumentWithRegionsRetained');
+    expect(f.calls.filter(call => call === 'resumeRegionLayout').length).toBeGreaterThan(1);
+    expect(f.w.frames.at(-1)!.payload.layoutProvisional).not.toBe(true);
+    const frames = [...f.w.frames, ack.frame!].sort((a, b) => a.revision - b.revision);
+    const completed = commandFramesAfter(f.frame, frames);
+    expect(completed.pages).toHaveLength(f.full.pages.length);
+    expect(completed.displayList.pages).toEqual(f.full.displayList.pages);
   } finally { f.destroy(); }
 });
 
