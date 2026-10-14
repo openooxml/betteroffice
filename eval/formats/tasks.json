@@ -628,5 +628,220 @@
         4
       ]
     }
+  },
+  {
+    "id": "docx-01-fix-heading",
+    "format": "docx",
+    "title": "Fix a misspelled heading",
+    "difficulty": 1,
+    "fixture": "docx-01-fix-heading.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, the heading Sumary is misspelled. Change it to Summary. Edit the document directly, without tracked changes. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "text": {
+        "Sumary": "Summary"
+      }
+    }
+  },
+  {
+    "id": "docx-02-replace-term",
+    "format": "docx",
+    "title": "Rename a project everywhere",
+    "difficulty": 2,
+    "fixture": "docx-02-replace-term.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, replace every occurrence of the project name Atlas with Beacon, in the title, the body text, the list and the table. The match is case-sensitive, so leave the lowercase word atlas unchanged. Edit the document directly, without tracked changes. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "replace": {
+        "old": "Atlas",
+        "new": "Beacon"
+      }
+    }
+  },
+  {
+    "id": "docx-03-correct-cell",
+    "format": "docx",
+    "title": "Correct a table value",
+    "difficulty": 3,
+    "fixture": "docx-03-correct-cell.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, correct the Budget table: the Actual amount for Supplies is 130, not 100, so the Actual total is 660, not 630. Edit the document directly, without tracked changes. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "cells": [
+        {
+          "table": 1,
+          "row": 3,
+          "column": 4,
+          "text": "130"
+        },
+        {
+          "table": 1,
+          "row": 5,
+          "column": 4,
+          "text": "660"
+        }
+      ]
+    }
+  },
+  {
+    "id": "docx-04-add-row",
+    "format": "docx",
+    "title": "Add a table row above the total",
+    "difficulty": 4,
+    "fixture": "docx-04-add-row.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, add a row to the Budget table directly above the Total row: Item Training, Owner Avery, Planned 80, Actual 75. Format it like the other expense rows, not like the bold Total row. Then update the Total row to Planned 700 and Actual 705. Edit the document directly, without tracked changes. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "cells": [
+        {
+          "table": 1,
+          "row": 5,
+          "column": 3,
+          "text": "700"
+        },
+        {
+          "table": 1,
+          "row": 5,
+          "column": 4,
+          "text": "705"
+        }
+      ],
+      "insert_rows": [
+        {
+          "table": 1,
+          "before": 5,
+          "like": 4,
+          "cells": [
+            "Training",
+            "Avery",
+            "80",
+            "75"
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "id": "docx-05-delete-row",
+    "format": "docx",
+    "title": "Delete a table row",
+    "difficulty": 5,
+    "fixture": "docx-05-delete-row.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, the Supplies line was cancelled. Delete its row from the Budget table and update the Total row to Planned 500 and Actual 530. Edit the document directly, without tracked changes. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "cells": [
+        {
+          "table": 1,
+          "row": 5,
+          "column": 3,
+          "text": "500"
+        },
+        {
+          "table": 1,
+          "row": 5,
+          "column": 4,
+          "text": "530"
+        }
+      ],
+      "delete_rows": [
+        {
+          "table": 1,
+          "row": 3
+        }
+      ]
+    }
+  },
+  {
+    "id": "docx-06-heading-style",
+    "format": "docx",
+    "title": "Promote a paragraph to a heading",
+    "difficulty": 6,
+    "fixture": "docx-06-heading-style.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, make the paragraph Risks and mitigations a Heading 2, a subsection heading under Next steps, using the document's Heading 2 style. Keep its text. Edit the document directly, without tracked changes. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "styles": {
+        "Risks and mitigations": "Heading2"
+      }
+    }
+  },
+  {
+    "id": "docx-07-bold-phrase",
+    "format": "docx",
+    "title": "Bold a phrase",
+    "difficulty": 7,
+    "fixture": "docx-07-bold-phrase.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, in the paragraph that begins The pilot started, make only the phrase ten participants bold. Edit the document directly, without tracked changes. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "bold": [
+        {
+          "paragraph": "The pilot started in September with ten participants across two sites.",
+          "phrase": "ten participants"
+        }
+      ]
+    }
+  },
+  {
+    "id": "docx-08-insert-paragraph",
+    "format": "docx",
+    "title": "Insert a paragraph below a heading",
+    "difficulty": 8,
+    "fixture": "docx-08-insert-paragraph.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, insert a new paragraph directly below the heading Next steps with the text The steering group meets on 20 October. Use the normal body text style. Edit the document directly, without tracked changes. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "insert_paragraphs": {
+        "Next steps": [
+          "The steering group meets on 20 October."
+        ]
+      }
+    }
+  },
+  {
+    "id": "docx-09-delete-note",
+    "format": "docx",
+    "title": "Delete a draft note",
+    "difficulty": 9,
+    "fixture": "docx-09-delete-note.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, delete the paragraph that starts with Draft note. Edit the document directly, without tracked changes. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "delete_paragraphs": [
+        "Draft note: confirm the travel figures with finance before sending."
+      ]
+    }
+  },
+  {
+    "id": "docx-10-finalize-report",
+    "format": "docx",
+    "title": "Finalize a report",
+    "difficulty": 10,
+    "fixture": "docx-10-finalize-report.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, finalize the report: replace the placeholder [DATE] with 14 October 2026, delete the line that only says DRAFT, and make the first line, Pilot status report, a Heading 1. Edit the document directly, without tracked changes. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "replace": {
+        "old": "[DATE]",
+        "new": "14 October 2026"
+      },
+      "delete_paragraphs": [
+        "DRAFT"
+      ],
+      "styles": {
+        "Pilot status report": "Heading1"
+      }
+    }
   }
 ]
