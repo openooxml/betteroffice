@@ -10,7 +10,16 @@ const CALC_CHAIN: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/calcChain";
 const CUSTOM_XML: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXml";
-const SHEET: &str = r#"<worksheet><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData></worksheet>"#;
+const SHARED_STRINGS: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings";
+const STYLES: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles";
+const STYLESHEET: &str = r#"<styleSheet><cellXfs count="2"><xf/><xf/></cellXfs></styleSheet>"#;
+const STYLED_SHEET: &str = concat!(
+    r#"<worksheet><sheetData><row r="1">"#,
+    r#"<c r="A1" s="1" t="s"><v>0</v></c></row></sheetData></worksheet>"#
+);
+const SHEET: &str =
+    r#"<worksheet><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData></worksheet>"#;
 
 fn package(workbook: &str, relationships: &str, parts: &[(&str, &str)]) -> Vec<u8> {
     let mut all = vec![
@@ -29,7 +38,9 @@ fn package(workbook: &str, relationships: &str, parts: &[(&str, &str)]) -> Vec<u
 }
 
 fn one_sheet(name: &str) -> String {
-    format!(r#"<workbook><sheets><sheet name="{name}" sheetId="1" r:id="rId1"/></sheets></workbook>"#)
+    format!(
+        r#"<workbook><sheets><sheet name="{name}" sheetId="1" r:id="rId1"/></sheets></workbook>"#
+    )
 }
 
 type Contents = Vec<(String, Vec<(CellRef, CellValue)>)>;
@@ -66,6 +77,18 @@ fn saved_part(saved: &[u8], path: &str) -> String {
     String::from_utf8(bytes.clone()).unwrap()
 }
 
+fn unique_workbook_relationships(saved: &[u8]) -> String {
+    let relationships = saved_part(saved, "xl/_rels/workbook.xml.rels");
+    let ids = relationships
+        .split("Id=\"")
+        .skip(1)
+        .map(|rest| rest.split('"').next().unwrap())
+        .collect::<Vec<_>>();
+    let unique = ids.iter().collect::<std::collections::HashSet<_>>();
+    assert_eq!(unique.len(), ids.len(), "{relationships}");
+    relationships
+}
+
 #[test]
 fn a_sheet_keeps_its_part_when_its_relationship_id_has_a_target_less_duplicate() {
     let source = package(
@@ -78,7 +101,10 @@ fn a_sheet_keeps_its_part_when_its_relationship_id_has_a_target_less_duplicate()
     let (reopened, _) = assert_save_reopens(Workbook::open(&source).unwrap());
     assert_eq!(
         contents(&reopened)[0].1,
-        vec![(CellRef::parse_a1("A1").unwrap(), CellValue::Number { value: 1.0 })]
+        vec![(
+            CellRef::parse_a1("A1").unwrap(),
+            CellValue::Number { value: 1.0 }
+        )]
     );
 }
 
@@ -88,7 +114,10 @@ fn a_sheet_on_the_calc_chain_part_survives_a_save_that_drops_the_calc_chain() {
         let source = package(
             &one_sheet("Chain"),
             &format!(r#"<Relationship Id="rId1" Type="{kind}" Target="calcChain.xml"/>"#),
-            &[("xl/calcChain.xml", r#"<calcChain><c r="A1" i="1"/></calcChain>"#)],
+            &[(
+                "xl/calcChain.xml",
+                r#"<calcChain><c r="A1" i="1"/></calcChain>"#,
+            )],
         );
         assert_save_reopens(Workbook::open(&source).unwrap());
     }
@@ -117,21 +146,42 @@ fn duplicate_workbook_relationship_ids_are_saved_unique() {
         )
         .unwrap();
     let (_, saved) = assert_save_reopens(workbook);
-    let relationships = saved_part(&saved, "xl/_rels/workbook.xml.rels");
-    let ids = relationships
-        .split("Id=\"")
-        .skip(1)
-        .map(|rest| rest.split('"').next().unwrap())
-        .collect::<Vec<_>>();
-    let unique = ids.iter().collect::<std::collections::HashSet<_>>();
-    assert_eq!(unique.len(), ids.len(), "{relationships}");
+    let relationships = unique_workbook_relationships(&saved);
     assert!(
         relationships.contains(&format!(
             r#"Id="rId2" Type="{CUSTOM_XML}" Target="../customXml/item2.xml""#
         )),
         "the id keeps the relationship it resolves to: {relationships}"
     );
-    assert!(relationships.contains("customXml/item1.xml"), "{relationships}");
+    assert!(
+        relationships.contains("customXml/item1.xml"),
+        "{relationships}"
+    );
+}
+
+#[test]
+fn a_workbook_part_sharing_a_relationship_id_keeps_its_part() {
+    let sheet =
+        format!(r#"<Relationship Id="rId1" Type="{WORKSHEET}" Target="worksheets/sheet1.xml"/>"#);
+    let strings =
+        format!(r#"<Relationship Id="rId2" Type="{SHARED_STRINGS}" Target="sharedStrings.xml"/>"#);
+    for relationships in [
+        format!(r#"{sheet}{strings}<Relationship Id="rId2" Type="{STYLES}" Target="styles.xml"/>"#),
+        format!(r#"{sheet}<Relationship Id="rId1" Type="{STYLES}"/>{strings}"#),
+        format!(r#"{sheet}<Relationship Id="rId1" Type="{STYLES}" Target="styles.xml"/>{strings}"#),
+    ] {
+        let source = package(
+            &one_sheet("Data"),
+            &relationships,
+            &[
+                ("xl/worksheets/sheet1.xml", STYLED_SHEET),
+                ("xl/styles.xml", STYLESHEET),
+                ("xl/sharedStrings.xml", r#"<sst><si><t>x</t></si></sst>"#),
+            ],
+        );
+        let (_, saved) = assert_save_reopens(Workbook::open(&source).unwrap());
+        unique_workbook_relationships(&saved);
+    }
 }
 
 #[test]
@@ -155,7 +205,9 @@ fn a_sheet_list_outside_the_workbook_root_does_not_open() {
     ] {
         let source = package(
             workbook,
-            &format!(r#"<Relationship Id="rId1" Type="{WORKSHEET}" Target="worksheets/sheet1.xml"/>"#),
+            &format!(
+                r#"<Relationship Id="rId1" Type="{WORKSHEET}" Target="worksheets/sheet1.xml"/>"#
+            ),
             &[("xl/worksheets/sheet1.xml", SHEET)],
         );
         assert!(Workbook::open(&source).is_err(), "{workbook}");
