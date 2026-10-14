@@ -12,7 +12,6 @@ import type {
 } from '@betteroffice/docx/yrs';
 import type { PeerlessTextIntent } from './inputEvents';
 
-const echoEncoder = new TextEncoder();
 type GlyphSetEntry = { glyphs: EchoGlyphIndex; cache: GlyphCache };
 type EchoLayout = { placement: NonNullable<ReturnType<typeof placeEchoGlyphs>>; cache: GlyphCache };
 
@@ -48,6 +47,7 @@ export interface PeerlessEchoPainter {
 
 /** @internal */
 export function createEchoPainter(options: PeerlessEchoPainterOptions): PeerlessEchoPainter {
+  const echoEncoder = new TextEncoder();
   let context: DocxCommandEchoContext | undefined;
   let staged: DocxCommandFrame['payload']['stagedPresentation'];
   let disabled = false;

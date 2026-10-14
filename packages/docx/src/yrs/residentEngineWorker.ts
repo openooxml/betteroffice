@@ -669,7 +669,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
             const { rect } = dependency;
             const device = [rect.x, rect.y, rect.width, rect.height].map((value) => Math.round(value * pixelRatio)) as
               [number, number, number, number];
-            const buffer = new OffscreenCanvas(1, 1);
+            const buffer = new OffscreenCanvas(device[2], device[3]);
             await rasterizeDisplayPageToBackBuffer(buffer, echoBackgroundPage(retained, dependency), rasterOptions,
               pixelRatio, 1, { x: device[0], y: device[1], width: device[2], height: device[3] });
             return buffer.transferToImageBitmap();
