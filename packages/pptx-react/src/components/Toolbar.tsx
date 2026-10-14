@@ -131,20 +131,21 @@ function DefaultToolbarItems() {
   const { t } = useTranslation();
   return (
     <>
+      <ToolbarGroup label={t('toolbar.groups.history')}>
+        <ToolbarCommandButton id="undo" />
+        <ToolbarCommandButton id="redo" />
+      </ToolbarGroup>
+      <ToolbarSeparator />
+      <ToolbarGroup label={t('toolbar.groups.zoom')}>
+        <ToolbarCommand id="zoom" />
+      </ToolbarGroup>
+      <ToolbarSeparator />
       <ToolbarGroup label={t('toolbar.groups.file')}>
         <ToolbarCommandButton id="save" />
         <ToolbarCommandButton id="exportPng" />
       </ToolbarGroup>
       <ToolbarGroup label={t('toolbar.groups.slides')}>
         <ToolbarCommand id="insertSlide" />
-      </ToolbarGroup>
-      <ToolbarSeparator />
-      <ToolbarGroup label={t('toolbar.groups.history')}>
-        <ToolbarCommandButton id="undo" />
-        <ToolbarCommandButton id="redo" />
-      </ToolbarGroup>
-      <ToolbarGroup label={t('toolbar.groups.zoom')}>
-        <ToolbarCommand id="zoom" />
       </ToolbarGroup>
       <ToolbarSeparator />
       <ToolbarGroup label={t('toolbar.groups.tools')}>

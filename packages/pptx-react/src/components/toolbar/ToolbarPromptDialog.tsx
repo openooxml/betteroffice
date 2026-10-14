@@ -1,7 +1,7 @@
 import { useId, useLayoutEffect, useRef, useState } from 'react';
 import type { KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { useTranslation } from '../../i18n';
-import { interactiveButtonStyle, toolbarColors } from '../ui/ToolbarPrimitives';
+import { toolbarButtonStyle, toolbarTheme } from '../../../../../shared/react-toolbar/theme';
 import type { OverflowPrompt } from './overflowRegistry';
 
 const FOCUSABLE = 'input, button:not([disabled])';
@@ -83,9 +83,9 @@ export function ToolbarPromptDialog({
           boxSizing: 'border-box',
           padding: 16,
           borderRadius: 8,
-          background: toolbarColors.surface,
-          color: toolbarColors.text,
-          boxShadow: '0 8px 24px rgba(60, 64, 67, 0.3)',
+          background: toolbarTheme.surface,
+          color: toolbarTheme.ink,
+          boxShadow: '0 8px 24px rgba(0, 0, 0, 0.18)',
           font: '400 13px ui-sans-serif, system-ui, sans-serif',
         }}
       >
@@ -106,24 +106,24 @@ export function ToolbarPromptDialog({
             width: '100%',
             boxSizing: 'border-box',
             padding: '6px 8px',
-            border: `1px solid ${toolbarColors.border}`,
-            borderRadius: 4,
-            background: toolbarColors.surface,
-            color: toolbarColors.text,
+            border: `1px solid ${toolbarTheme.line}`,
+            borderRadius: 6,
+            background: toolbarTheme.surface,
+            color: toolbarTheme.ink,
           }}
         />
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
           <button
             type="button"
             onClick={onClose}
-            style={interactiveButtonStyle(false, false, false)}
+            style={toolbarButtonStyle({})}
           >
             {t('commands.cancel')}
           </button>
           <button
             type="submit"
             disabled={!valid}
-            style={interactiveButtonStyle(!valid, true, false)}
+            style={toolbarButtonStyle({ disabled: !valid, pressed: true })}
           >
             {t('commands.apply')}
           </button>
