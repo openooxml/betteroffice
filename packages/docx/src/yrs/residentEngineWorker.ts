@@ -129,6 +129,8 @@ let sessionFonts: ResidentSessionFonts | null = null;
 let commandHooksFactory: ResidentCommandHooksFactory | null = null;
 let commandFrameChanges: {
   pages: Set<number>; updates: Uint8Array[];
+  /** The document changed outside a command and its layout has not followed yet. */
+  layoutStale?: boolean;
   viewport?: ResidentCommandViewportRequest;
   window?: [number, number];
   reviewFrame?: { frameEpoch: number; previewVersion: number };
@@ -178,7 +180,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
     clearProvisionalFinalPages();
     selectionLayout = undefined;
   };
-  const relayout = (step?: 'initial' | 'complete' | 'begin' | 'resume', blocks = ALL_BLOCKS) => {
+  const layoutWithPreview = () => {
     const input = JSON.parse(init.layoutWithRegions ? init.layoutInput : layoutInput);
     const snapshot = registry.snapshot();
     const preview = proposalRevisionPreview(snapshot);
@@ -188,44 +190,47 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
       else delete input.renderEnv.revisionPreview;
       if (!init.layoutWithRegions) input.workerOwned = { ...input.workerOwned, renderEnv: input.renderEnv };
     }
-    const preparedInput = JSON.stringify(input);
-    const recordPreview = () => {
-      layoutPreviewVersion = snapshot.previewVersion;
-      if (commandFrameChanges) commandFrameChanges.layoutPreviewVersion = layoutPreviewVersion;
-    };
+    if (init.layoutWithRegions) engine.layoutDocumentWithRegionsAfterEdit(JSON.stringify(input));
+    else engine.layoutDocumentJson(JSON.stringify(input));
+    layoutPreviewVersion = snapshot.previewVersion;
+    if (commandFrameChanges) {
+      commandFrameChanges.layoutPreviewVersion = layoutPreviewVersion;
+      commandFrameChanges.layoutStale = false;
+    }
+  };
+  const relayout = (step?: 'initial' | 'complete' | 'begin' | 'resume', blocks = ALL_BLOCKS) => {
     if (step === 'begin' || step === 'resume') {
       const progress = step === 'begin'
-        ? engine.beginRegionLayout(preparedInput) : engine.resumeRegionLayout(blocks);
+        ? engine.beginRegionLayout(init.layoutInput) : engine.resumeRegionLayout(blocks);
       if (progress.layoutJson !== undefined) {
         dropPrefix();
         certify = true;
-        recordPreview();
         layoutDirty = true;
       }
       return progress;
     }
     if (step === 'initial') {
-      const laid = engine.layoutDocumentWithRegionsExactPrefixRetained(preparedInput,
+      const laid = engine.layoutDocumentWithRegionsExactPrefixRetained(init.layoutInput,
         Math.max(init.provisionalPages ?? 0, init.displayWindow?.[1] ?? 0));
       if (laid.provisional) {
         prefix = { pages: laid.pages, documentWidth: laid.documentWidth };
         provisionalFinalPages = laid.pages;
-        incompleteLayout = { layoutInput: preparedInput, workerAuthoritative: true, extras: init.extras };
+        incompleteLayout = { layoutInput: init.layoutInput, workerAuthoritative: true, extras: init.extras };
       }
       retainedLayoutVersion = prefix ? null : engine.proposalEngine.version();
-      recordPreview();
       layoutReady = true;
       layoutDirty = true;
       return;
     }
     if (prefix) supersedeSlicedCompletion();
-    if (init.layoutWithRegions) {
-      if (step === 'complete') engine.layoutDocumentWithRegionsRetained(preparedInput);
-      else engine.layoutDocumentWithRegionsAfterEdit(preparedInput);
-    } else engine.layoutDocumentJson(preparedInput);
-    if (step === 'complete') certify = true;
-    else retainedLayoutVersion = engine.proposalEngine.version();
-    recordPreview();
+    if (step === 'complete') {
+      if (init.layoutWithRegions) engine.layoutDocumentWithRegionsRetained(init.layoutInput);
+      else engine.layoutDocumentJson(layoutInput);
+      certify = true;
+    } else {
+      layoutWithPreview();
+      retainedLayoutVersion = engine.proposalEngine.version();
+    }
     if (prefix) dropPrefix();
     layoutDirty = true;
   };
@@ -492,7 +497,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
         }
         const updates = changes.updates.splice(0);
         for (const update of updates) engine.applyUpdate(update);
-        if (updates.length) relayout();
+        if (updates.length || changes.layoutStale) relayout();
         const framePreviewVersion = layoutPreviewVersion;
         const relaid = layoutDirty;
         layoutDirty = false;
@@ -769,7 +774,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
           selectionRects,
           ...(fonts.snapshot ? { fontEnvironment: fonts.snapshot } : {}),
           parts: shown.layoutProvisional ? [] : engine.partGeometry(retainedFrame!),
-          geometry: hooks.editState().readOnly ? undefined
+          geometry: hooks.editState().readOnly || shown.layoutProvisional ? undefined
             : await readResidentFrameGeometry(engine, retainedFrame!, hooks.selection(), layoutRevision),
           ...shown, echoContext, ...(echoGlyphSets.length ? { echoGlyphSets } : {}), stagedPresentation: presentation.value,
         });
@@ -865,7 +870,12 @@ function replyCommand<K extends 'commandInitial' | 'commandAck' | 'checkpoint', 
   reply({ id, ok: true, [key]: value }, isTransferResult(result) ? result.transfer : []);
 }
 
-function postCommandFrame(id: number): void {
+/** Answers `id` with the next command frame, carrying `answer` (and its `transfer`) along. */
+function postCommandFrame(
+  id: number,
+  answer: Omit<ResidentEngineWorkerResponse & { ok: true }, 'id' | 'ok'> = {},
+  transfer: Transferable[] = []
+): void {
   const host = requireCommandHost();
   const init = commandInit!;
   void host.frame().then((result) => {
@@ -875,10 +885,10 @@ function postCommandFrame(id: number): void {
     }
     const frame = isTransferResult(result) ? result.value : result;
     reply({
-      id, ok: true, ...frame.payload, selection: session?.selection() ?? null,
+      ...answer, id, ok: true, ...frame.payload, selection: session?.selection() ?? null,
       ...(frame.payload.pageFrames ? { pageFrames: [...frame.payload.pageFrames, frame.payload.frame] } : {}),
       commandFrame: { session: init.session, incarnation: init.incarnation, epoch: init.epoch, frame },
-    }, isTransferResult(result) ? result.transfer : []);
+    }, [...transfer, ...(isTransferResult(result) ? result.transfer : [])]);
   }).catch((error: unknown) => {
     if (commandHost !== host) {
       replyFailure(id, new SessionFailure('disposed', 'Resident command document was replaced'));
@@ -1560,6 +1570,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     }
     const held = pendingUpdates;
     pendingUpdates = [];
+    const before = session.proposalEngine.version();
     try {
       const saved = openedParsed ? await session.saveDocument(request.host, request.comments, editorSaves) : await session.save(
         new Uint8Array(openedSource!.bytes),
@@ -1575,17 +1586,15 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         ? [exactBuffer(session.encodeStateAsUpdate(request.stateVector))]
         : [];
       const stateVector = exactBuffer(session.encodeStateVector());
-      reply(
-        {
-          id: request.id,
-          ok: true,
-          saved: bytes,
-          updates,
-          stateVector,
-          version: session.proposalEngine.version(),
-        },
-        [bytes, ...updates, stateVector]
-      );
+      const answer = { saved: bytes, updates, stateVector, version: session.proposalEngine.version() };
+      if (commandHost && answer.version !== before) {
+        // Identities the save assigned change the document as a remote update would; the answer waits for their frame.
+        noteDocumentChange();
+        fontRequirements = null;
+        completedLayout = null;
+        commandFrameChanges!.layoutStale = true;
+        postCommandFrame(request.id, answer, [bytes, ...updates, stateVector]);
+      } else reply({ id: request.id, ok: true, ...answer }, [bytes, ...updates, stateVector]);
     } finally {
       pendingUpdates = held;
     }

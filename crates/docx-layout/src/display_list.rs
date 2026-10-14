@@ -12493,7 +12493,7 @@ mod tests {
                 paragraph(6, "Four"), page_break(7), paragraph(8, "Five"), page_break(9),
                 paragraph(10, "Six"),
             ],
-            "options": {"pageSize": geometry["pageSize"], "margins": geometry["margins"], "pageGap": 20},
+            "options": {"pageSize": geometry["pageSize"], "margins": geometry["margins"], "pageGap": 20, "bodyBreakType": "oddPage"},
         }))
         .unwrap();
         let mut layout = crate::compute_layout_input(&mut pagination).unwrap();

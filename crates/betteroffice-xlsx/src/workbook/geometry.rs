@@ -59,25 +59,10 @@ impl Workbook {
                         );
                     }
                 }
-                Op::RestoreColStyles { sheet, styles } => {
-                    if let Some(model) = self.model.sheet(*sheet) {
-                        delta.sheets.entry(*sheet).or_default().rows.extend(
-                            model
-                                .iter_cells()
-                                .filter(|(at, cell)| {
-                                    cell.style.is_none()
-                                        && model.col_style(at.col)
-                                            != styles
-                                                .iter()
-                                                .find(|style| {
-                                                    style.first <= at.col && at.col <= style.last
-                                                })
-                                                .map(|style| style.xf)
-                                })
-                                .map(|(at, _)| at.row),
-                        );
-                    }
+                Op::RestoreRowStyles { sheet, .. } => {
+                    delta.sheets.entry(*sheet).or_default().full = true
                 }
+                Op::RestoreColStyles { .. } => {}
                 Op::SetFreezePane { .. }
                 | Op::SetHyperlinks { .. }
                 | Op::SetCharts { .. }

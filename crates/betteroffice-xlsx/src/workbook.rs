@@ -2553,12 +2553,13 @@ impl Workbook {
         range: CellRange,
     ) -> Result<Vec<(CellRef, CellFormat)>> {
         let sheet_ref = self.sheet(sheet)?;
+        let mut defaults = xlsx_model::workbook::ColumnDefaults::new(sheet_ref);
         let mut formats = Vec::new();
         for row in range.start.row..=range.end.row {
             for col in range.start.col..=range.end.col {
                 let at = CellRef::new(row, col);
-                let style = sheet_ref.cell(at).and_then(|cell| cell.style);
-                formats.push((at, self.model.styles.cell_format(style)));
+                let style = defaults.effective_style(at);
+                formats.push((at, self.model.styles.cell_format(Some(style.unwrap_or(0)))));
             }
         }
         Ok(formats)
@@ -2847,6 +2848,7 @@ impl Workbook {
                 | Op::SetFreezePane { sheet, .. }
                 | Op::SetHyperlinks { sheet, .. }
                 | Op::RestoreColStyles { sheet, .. }
+                | Op::RestoreRowStyles { sheet, .. }
                 | Op::MergeCells { sheet, .. }
                 | Op::UnmergeCells { sheet, .. }
                 | Op::PatchRangeStyle { sheet, .. }
@@ -3545,6 +3547,7 @@ fn worksheet_edit_target(op: &Op) -> Option<SheetId> {
         | Op::SetFreezePane { sheet, .. }
         | Op::SetHyperlinks { sheet, .. }
         | Op::RestoreColStyles { sheet, .. }
+        | Op::RestoreRowStyles { sheet, .. }
         | Op::SetCharts { sheet, .. }
         | Op::SetChartAnchor { sheet, .. }
         | Op::MergeCells { sheet, .. }
@@ -3690,7 +3693,8 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
         Op::RestoreSheet { .. }
         | Op::SetDefinedNames { .. }
         | Op::SetCharts { .. }
-        | Op::RestoreColStyles { .. } => {
+        | Op::RestoreColStyles { .. }
+        | Op::RestoreRowStyles { .. } => {
             return Err(Error::InvalidOperation(
                 "restore sheet operations are internal".to_string(),
             ));
@@ -4099,11 +4103,14 @@ fn edit_cell_state(
     cell: CellRef,
     input: &str,
 ) -> CellState {
-    let style = workbook
-        .sheet(sheet)
-        .and_then(|sheet| sheet.cell(cell))
-        .and_then(|cell| cell.style);
-    let number_format = workbook.styles.resolved_format(style).number_format;
+    let sheet = workbook.sheet(sheet);
+    let existing = sheet.and_then(|sheet| sheet.cell(cell));
+    let inherited = sheet.and_then(|sheet| sheet.inherited_style(cell));
+    let style = existing.map_or(inherited, |existing| existing.style);
+    let number_format = workbook
+        .styles
+        .resolved_format(Some(style.unwrap_or(0)))
+        .number_format;
     let mut state = if !input.is_empty()
         && matches!(
             number_format,
@@ -4118,7 +4125,13 @@ fn edit_cell_state(
     } else {
         cell_state_for_input_no_eval(input)
     };
-    state.style = style;
+    state.style = match existing {
+        None if input.is_empty() => None,
+        Some(_) if input.is_empty() && style.is_none() => inherited
+            .is_some_and(|inherited| inherited != 0)
+            .then_some(0),
+        _ => style,
+    };
     state
 }
 
@@ -4546,6 +4559,7 @@ impl CalculationScope {
             | Op::SetFreezePane { .. }
             | Op::SetHyperlinks { .. }
             | Op::RestoreColStyles { .. }
+            | Op::RestoreRowStyles { .. }
             | Op::SetCharts { .. }
             | Op::SetChartAnchor { .. } => Self::Kept,
             Op::SetCell { sheet, at, cell } => {
@@ -4768,6 +4782,7 @@ fn invalidates_proposals(op: &Op) -> bool {
             | Op::DeleteCols { .. }
             | Op::SetHyperlinks { .. }
             | Op::RestoreColStyles { .. }
+            | Op::RestoreRowStyles { .. }
             | Op::SetCharts { .. }
             | Op::AddSheet { .. }
             | Op::RemoveSheet { .. }

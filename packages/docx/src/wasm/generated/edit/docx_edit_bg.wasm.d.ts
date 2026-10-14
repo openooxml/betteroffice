@@ -60,6 +60,7 @@ export const editsession_delete_story: (a: number, b: number, c: number) => [num
 export const editsession_delete_table: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_direct_batches_applied: (a: number) => number;
 export const editsession_display_hit_test_regions_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+export const editsession_display_range_rects_batch: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
 export const editsession_display_range_rects_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_display_range_rects_on_pages_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_display_range_rects_region_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
