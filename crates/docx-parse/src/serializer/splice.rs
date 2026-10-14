@@ -898,6 +898,14 @@ mod tests {
         "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">";
     const SERIALIZED_ROOT: &str = "<w:document xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\" xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" mc:Ignorable=\"w14\">";
 
+    /// `W_ONLY_ROOT` with only the declarations a paragraph id needs appended.
+    fn patched_w_only_root() -> String {
+        format!(
+            "{} xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\" xmlns:mc=\"{MC_NAMESPACE}\" mc:Ignorable=\"w14\">",
+            W_ONLY_ROOT.strip_suffix('>').expect("root tag")
+        )
+    }
+
     /// Splices `source` with `paragraphs` as the written XML of their ordinals, serialized
     /// between `before` and `after`.
     fn splice_around(
@@ -1422,14 +1430,21 @@ mod tests {
     }
 
     #[test]
-    fn writes_the_whole_part_when_a_rewritten_paragraph_needs_a_root_declaration() {
+    fn patches_the_root_when_a_rewritten_paragraph_needs_a_paragraph_id_declaration() {
         let source = concat!(
             "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body>",
             "<w:p><w:r><w:t>a</w:t></w:r></w:p>",
             "</w:body></w:document>"
         );
         let rewritten = "<w:p w14:paraId=\"1234ABCD\"><w:r><w:t>new</w:t></w:r></w:p>";
-        assert_eq!(splice(source, &[(0, rewritten)], &[0]), None);
+        assert_eq!(
+            splice(source, &[(0, rewritten)], &[0]),
+            Some(
+                source
+                    .replace(W_ONLY_ROOT, &patched_w_only_root())
+                    .replace("<w:p><w:r><w:t>a</w:t></w:r></w:p>", rewritten)
+            )
+        );
         assert_eq!(
             splice(source, &[(0, "<w:p><w:r><w:t>new</w:t></w:r></w:p>")], &[0]),
             Some(source.replace("<w:t>a</w:t>", "<w:t>new</w:t>"))
@@ -1762,7 +1777,7 @@ mod tests {
     }
 
     #[test]
-    fn writes_the_whole_part_when_patched_ids_would_declare_a_namespace_a_rewrite_needs() {
+    fn patches_the_root_when_patched_ids_and_a_rewrite_need_a_paragraph_id_declaration() {
         let source = format!(
             "{W_ONLY_ROOT}<w:body><w:p><w:r><w:t>A</w:t></w:r></w:p><w:p><w:r><w:t>B</w:t></w:r></w:p></w:body></w:document>"
         );
@@ -1774,10 +1789,6 @@ mod tests {
             ),
         ];
         let assigned = [(0, "1234ABCD")];
-        assert_eq!(
-            splice_around(&source, &paragraphs, &[1], &assigned, ("", "")),
-            None
-        );
         let declared = source.replace(W_ONLY_ROOT, ROOT);
         let spliced =
             splice_around(&declared, &paragraphs, &[1], &assigned, ("", "")).expect("spliced");
@@ -1786,6 +1797,10 @@ mod tests {
         let occurrences = paragraph_occurrences(&spliced).expect("occurrences");
         assert_eq!(occurrences[0].para_id.as_deref(), Some("1234ABCD"));
         assert_eq!(occurrences[1].para_id.as_deref(), Some("0BCD1234"));
+        assert_eq!(
+            splice_around(&source, &paragraphs, &[1], &assigned, ("", "")),
+            Some(spliced.replacen(ROOT, &patched_w_only_root(), 1))
+        );
     }
 
     #[test]
