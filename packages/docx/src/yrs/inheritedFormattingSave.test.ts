@@ -395,7 +395,7 @@ function s2Fixture(root: Root): Uint8Array {
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
-describe('S2 cell and table formatting stays inherited on save', () => {
+describe('cell and table formatting stays inherited on save', () => {
   describe.each(Object.keys(SAVES) as (keyof typeof SAVES)[])('%s', (path) => {
     describe.each(['plain', 'w14'] as Root[])('with a %s document root', (root) => {
       const source = s2Fixture(root);
@@ -504,7 +504,7 @@ function editFirstRun(engine: TableEditEngine, story: string, bold: boolean): st
   return [story];
 }
 
-describe('S1b toggle inheritance and independent complex-script saves', () => {
+describe('toggle inheritance and independent complex-script saves', () => {
   describe.each(Object.keys(SAVES) as (keyof typeof SAVES)[])('%s', (path) => {
     it('saves all six style combinations with and without an explicit bold request', async () => {
       for (const shape of TOGGLE_CASES) {
