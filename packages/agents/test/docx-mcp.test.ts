@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test';
+import JSZip from 'jszip';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -7,7 +8,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { openDocx } from '../src';
 import { createOfficeMcpServer } from '../src/mcp';
-import { editFixture } from './fixture';
+import { editFixture, tableCell, tableFixture } from './fixture';
 
 test('stdio docx_edit applies a style, format and table-row batch that survives export', async () => {
   const root = await mkdtemp(join(tmpdir(), 'docx-edit-mcp-'));
@@ -76,6 +77,61 @@ test('read-only server does not list docx_edit', async () => {
     expect(names).toContain('office_outline');
     expect(names).not.toContain('docx_edit');
     expect((await client.callTool({ name: 'docx_edit', arguments: {} })).structuredContent).toMatchObject({ code: 'UNKNOWN_TOOL' });
+  } finally {
+    await client.close();
+    await server.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('docx_edit refuses merged and final row batches atomically', async () => {
+  const variants = [
+    [tableCell('Merged', '<w:vMerge w:val="restart"/>') + tableCell('Top'), tableCell('', '<w:vMerge/>') + tableCell('Bottom')],
+    [tableCell('Only') + tableCell('Row')],
+  ];
+  const root = await mkdtemp(join(tmpdir(), 'docx-row-refusal-'));
+  const server = await createOfficeMcpServer({ root });
+  const client = new Client({ name: 'docx-row-refusal', version: '1' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  const call = async (name: string, args: Record<string, unknown>) => {
+    const output = await client.callTool({ name, arguments: args });
+    expect(output.isError).not.toBe(true);
+    return output.structuredContent as Record<string, any>;
+  };
+  try {
+    for (const [index, tableRows] of variants.entries()) {
+      const path = `input-${index}.docx`;
+      await writeFile(join(root, path), await tableFixture(tableRows));
+      const { document } = await call('office_open', { path });
+      const outline = await call('office_outline', { document, limit: 100 });
+      const heading = outline.items.find((item: any) => item.text === 'Quarterly report');
+      await call('office_export', { document, path: `before-${index}.docx` });
+      const baseline = await (await JSZip.loadAsync(await readFile(join(root, `before-${index}.docx`)))).file('word/document.xml')!.async('string');
+      const targets = index === 0 ? ['Merged', 'Bottom'] : ['Only'];
+      let attempt = 0;
+      for (const text of targets) {
+        const row = outline.items.find((item: any) => item.text === text).ref;
+        const edits = index === 0 ? [
+          { op: 'delete_table_row', row },
+          { op: 'insert_table_row', row, position: 'before', cells: ['New', 'Row'] },
+          { op: 'insert_table_row', row, position: 'after', cells: ['New', 'Row'] },
+        ] : [{ op: 'delete_table_row', row }];
+        for (const edit of edits) {
+          const result = await client.callTool({ name: 'docx_edit', arguments: { document, version: outline.version, edits: [
+            { op: 'set_paragraph_style', paragraph: heading.ref, style: 'Heading2' }, edit,
+          ] } });
+          expect(result.isError).toBe(true);
+          expect(result.structuredContent).toMatchObject({ code: 'UNSUPPORTED_TARGET', details: { failedIndex: 1 } });
+          expect(await call('office_outline', { document, limit: 100 })).toEqual(outline);
+          const after = `after-${index}-${attempt++}.docx`;
+          await call('office_export', { document, path: after });
+          const xml = await (await JSZip.loadAsync(await readFile(join(root, after)))).file('word/document.xml')!.async('string');
+          expect(xml).toBe(baseline);
+        }
+      }
+    }
   } finally {
     await client.close();
     await server.close();

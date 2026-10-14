@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from 'bun:test';
 import JSZip from 'jszip';
 import { openDocx, type DocumentToolError, type DocxAgentDocument, type DocxAgentEdit } from '../src';
-import { editFixture } from './fixture';
+import { editFixture, tableCell, tableFixture } from './fixture';
 
 const opened: DocxAgentDocument[] = [];
 async function open(bytes?: Uint8Array) {
@@ -158,4 +158,49 @@ test('delete_table_row removes one row; refusals name the problem and change not
   expect(xml).not.toContain('1.0M');
   expect(content(after)).toEqual(content(before.filter(p => p.text !== 'Q1' && p.text !== '1.0M')));
   expect((await refusal(doc.edit({ version, edits: [{ op: 'delete_paragraph', paragraph: heading.ref }] }))).code).toBe('STALE_VERSION');
+});
+
+test('table row edits refuse vertical merges without applying earlier batch edits', async () => {
+  const variants = [
+    [tableCell('Merged', '<w:vMerge w:val="restart"/>') + tableCell('Top'), tableCell('', '<w:vMerge/>') + tableCell('Bottom')],
+    [tableCell('Merged', '<w:vMerge w:val="restart"/>') + tableCell('Top'), tableCell('Plain') + tableCell('Bottom')],
+    [tableCell('Merged', '<w:vMerge/>') + tableCell('Top'), tableCell('Plain') + tableCell('Bottom')],
+  ];
+  for (const [index, tableRows] of variants.entries()) {
+    const doc = await open(await tableFixture(tableRows));
+    const targets = index === 0 ? ['Merged', 'Top', 'Bottom'] : ['Merged', 'Top'];
+    const heading = hit(doc, 'Quarterly report');
+    const version = doc.list().version;
+    const baseline = await (await JSZip.loadAsync(await doc.export())).file('word/document.xml')!.async('string');
+    for (const text of targets) {
+      const row = hit(doc, text).ref;
+      const edits: DocxAgentEdit[] = [
+        { op: 'delete_table_row', row },
+        { op: 'insert_table_row', row, position: 'before', cells: ['New', 'Row'] },
+        { op: 'insert_table_row', row, position: 'after', cells: ['New', 'Row'] },
+      ];
+      for (const edit of edits) {
+        const error = await refusal(doc.edit({ version, edits: [
+          { op: 'set_paragraph_style', paragraph: heading.ref, style: 'Heading2' }, edit,
+        ] }));
+        expect(error.code).toBe('UNSUPPORTED_TARGET');
+        expect(error.details).toMatchObject({ failedIndex: 1 });
+        expect(doc.list().version).toBe(version);
+        expect(doc.read(heading.ref).style).toBe('Heading1');
+        const xml = await (await JSZip.loadAsync(await doc.export())).file('word/document.xml')!.async('string');
+        expect(xml).toBe(baseline);
+      }
+    }
+  }
+});
+
+test('delete_table_row refuses the last row without changing the document', async () => {
+  const doc = await open();
+  await doc.edit({ version: doc.list().version, edits: [{ op: 'delete_table_row', row: hit(doc, 'Q1').ref }] });
+  const version = doc.list().version;
+  const baseline = await paragraphs(await doc.export());
+  const error = await refusal(doc.edit({ version, edits: [{ op: 'delete_table_row', row: hit(doc, 'Quarter').ref }] }));
+  expect(error.code).toBe('UNSUPPORTED_TARGET');
+  expect(doc.list().version).toBe(version);
+  expect(await paragraphs(await doc.export())).toEqual(baseline);
 });

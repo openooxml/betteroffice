@@ -41,3 +41,14 @@ export async function editFixture(): Promise<Uint8Array> {
   </w:body></w:document>`);
   return zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
 }
+
+export function tableCell(text: string, properties = '', paragraphProperties = ''): string {
+  return `<w:tc><w:tcPr>${properties}</w:tcPr><w:p>${paragraphProperties}<w:r><w:t>${text}</w:t></w:r></w:p></w:tc>`;
+}
+
+export async function tableFixture(tableRows: readonly string[]): Promise<Uint8Array> {
+  const zip = await JSZip.loadAsync(await editFixture());
+  const xml = await zip.file('word/document.xml')!.async('string');
+  zip.file('word/document.xml', xml.replace(/<w:tr\b[\s\S]*?(?=<\/w:tbl>)/, tableRows.map(cells => `<w:tr>${cells}</w:tr>`).join('')));
+  return zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
+}
