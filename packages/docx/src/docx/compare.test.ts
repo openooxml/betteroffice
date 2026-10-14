@@ -471,6 +471,18 @@ describe('compareDocx', () => {
     await expectRefusal(styled('Toggled', 'old'), styled('Toggled', 'new'), 'roundtrip-mismatch');
   });
 
+  it('redlines direct bold under bold paragraph and character styles', async () => {
+    const styles =
+      '<w:style w:type="paragraph" w:styleId="BoldParagraph"><w:rPr><w:b/></w:rPr></w:style>' +
+      '<w:style w:type="character" w:styleId="BoldCharacter"><w:rPr><w:b/></w:rPr></w:style>';
+    const styled = (word: string) => fixture({
+      body: p('<w:pPr><w:pStyle w:val="BoldParagraph"/></w:pPr>',
+        run(`The ${word} clause`, '<w:rStyle w:val="BoldCharacter"/><w:b/>')),
+      styles,
+    });
+    await expectRedline(styled('old'), styled('new'));
+  });
+
   it('keeps Unicode, tabs and special hyphens exact in both granularities', async () => {
     const special = (tail: string) =>
       p(

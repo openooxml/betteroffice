@@ -465,3 +465,88 @@ describe('S2 cell and table formatting stays inherited on save', () => {
     });
   });
 });
+
+const TOGGLE_CASES = [
+  { name: 'paragraph basedOn b+b', paragraph: true, character: false, table: false, chain: 'paragraph', bold: true },
+  { name: 'character basedOn b+b', paragraph: false, character: true, table: false, chain: 'character', bold: true },
+  { name: 'paragraph b + character b', paragraph: true, character: true, table: false, chain: '', bold: false },
+  { name: 'table b + paragraph b', paragraph: true, character: false, table: true, chain: '', bold: false },
+  { name: 'table b + character b', paragraph: false, character: true, table: true, chain: '', bold: false },
+  { name: 'table b alone', paragraph: false, character: false, table: true, chain: '', bold: true },
+] as const;
+
+function runFixture(styles: string, paragraph: string, inTable = false): Uint8Array {
+  const parts: PartsMap = new Map(Object.entries(unzipContainer(fixture('w14'))));
+  parts.set('word/styles.xml', toBytes(
+    `<w:styles xmlns:w="${W}"><w:style w:type="paragraph" w:default="1" w:styleId="Normal"/>${styles}</w:styles>`
+  ));
+  const body = inTable
+    ? '<w:tbl><w:tblPr><w:tblStyle w:val="BoldTable"/></w:tblPr>' +
+      '<w:tblGrid><w:gridCol w:w="4500"/></w:tblGrid>' +
+      `<w:tr><w:tc><w:tcPr><w:tcW w:w="4500" w:type="dxa"/></w:tcPr>${paragraph}</w:tc></w:tr></w:tbl>`
+    : paragraph;
+  parts.set('word/document.xml', toBytes(
+    `<w:document xmlns:w="${W}" xmlns:w14="${W14}"><w:body>${body}<w:sectPr/></w:body></w:document>`
+  ));
+  return new Uint8Array(rezipPartsToArrayBuffer(parts));
+}
+
+function editFirstRun(engine: TableEditEngine, story: string, bold: boolean): string[] {
+  const read = engine.readParagraphs({ story, view: 'accepted' });
+  if (!read.ok) throw new Error(`read refused: ${JSON.stringify(read)}`);
+  const paragraph = read.paragraphs[0]!;
+  const range = {
+    story, start: { paraId: paragraph.paraId, offset: 0 },
+    end: { paraId: paragraph.paraId, offset: paragraph.text.length },
+  };
+  if (bold) engine.formatRange(range, { bold: true });
+  else engine.replaceRange(range, 'جديد');
+  return [story];
+}
+
+describe('S1b toggle inheritance and independent complex-script saves', () => {
+  describe.each(Object.keys(SAVES) as (keyof typeof SAVES)[])('%s', (path) => {
+    it('saves all six style combinations with and without an explicit bold request', async () => {
+      for (const shape of TOGGLE_CASES) {
+        for (const request of [false, true]) {
+          const style = (type: string, id: string) =>
+            `<w:style w:type="${type}" w:styleId="${id}">` +
+            (shape.chain === type ? '<w:basedOn w:val="Base"/>' : '') +
+            '<w:rPr><w:b/></w:rPr></w:style>';
+          const styles =
+            (shape.chain ? `<w:style w:type="${shape.chain}" w:styleId="Base"><w:rPr><w:b/></w:rPr></w:style>` : '') +
+            (shape.paragraph ? style('paragraph', 'BoldParagraph') : '') +
+            (shape.character ? style('character', 'BoldCharacter') : '') +
+            (shape.table ? style('table', 'BoldTable') : '');
+          const paragraph = '<w:p>' +
+            (shape.paragraph ? '<w:pPr><w:pStyle w:val="BoldParagraph"/></w:pPr>' : '') +
+            '<w:r><w:rPr>' + (shape.character ? '<w:rStyle w:val="BoldCharacter"/>' : '') +
+            (request ? '<w:b w:val="0"/>' : '') + '</w:rPr><w:t>قديم</w:t></w:r></w:p>';
+          const story = shape.table ? 'body:t0:r0c0' : 'body';
+          const xml = await saveTableEdit(path, runFixture(styles, paragraph, shape.table),
+            (engine) => editFirstRun(engine, story, request));
+          const properties = xml.match(/<w:rPr\b[^>]*>[\s\S]*?<\/w:rPr>/)?.[0] ?? '';
+          const direct = properties.match(/<w:b\b([^>]*)\/>/);
+          const effective = direct ? !/w:val="(?:0|false|off)"/.test(direct[1]!) : shape.bold;
+          expect({ shape: shape.name, request, effective }).toEqual({
+            shape: shape.name, request, effective: request || shape.bold,
+          });
+          if (request && !shape.bold) expect(properties).toMatch(/<w:b\b(?:\s[^>]*)?\/>/);
+          if (!request) expect(properties).not.toMatch(/<w:b\b/);
+        }
+      }
+    }, TIMEOUT);
+
+    it.each(['b', 'i'] as const)('keeps direct %sCs while replacing Arabic under its non-CS style', async (property) => {
+      const styles = '<w:style w:type="paragraph" w:styleId="Script">' +
+        `<w:rPr><w:${property}/></w:rPr></w:style>`;
+      const paragraph = '<w:p><w:pPr><w:pStyle w:val="Script"/></w:pPr>' +
+        `<w:r><w:rPr><w:${property}Cs/></w:rPr><w:t>قديم</w:t></w:r></w:p>`;
+      const xml = await saveTableEdit(path, runFixture(styles, paragraph),
+        (engine) => editFirstRun(engine, 'body', false));
+      expect(text(xml)).toBe('جديد');
+      const properties = xml.match(/<w:rPr\b[^>]*>[\s\S]*?<\/w:rPr>/)?.[0] ?? '';
+      expect(properties).toContain(`<w:${property}Cs/>`);
+    }, TIMEOUT);
+  });
+});
