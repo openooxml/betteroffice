@@ -562,3 +562,40 @@ describe('S1b toggle inheritance and independent complex-script saves', () => {
     }, TIMEOUT);
   });
 });
+
+describe('source run formatting after disjoint paragraph edits', () => {
+  describe.each(Object.keys(SAVES) as (keyof typeof SAVES)[])('%s', (path) => {
+    it.each([
+      { name: 'Arabic bold', property: 'bCs', runs: ['اااا', 'بببب', 'جججج'], replacements: ['أ', 'چ'] },
+      { name: 'Latin bold', property: 'bCs', runs: ['aaaa', 'bbbb', 'cccc'], replacements: ['A', 'C'] },
+      { name: 'Arabic italic', property: 'iCs', runs: ['اااا', 'بببب', 'جججج'], replacements: ['أ', 'چ'] },
+    ])('keeps each source run’s direct CS values for $name', async ({ property, runs, replacements }) => {
+      const styles = '<w:style w:type="paragraph" w:styleId="P"><w:rPr><w:b/></w:rPr></w:style>';
+      const paragraph = '<w:p><w:pPr><w:pStyle w:val="P"/></w:pPr>' +
+        runs.map((value, index) =>
+          `<w:r><w:rPr><w:${property}${index === 1 ? '' : ' w:val="0"'}/></w:rPr><w:t>${value}</w:t></w:r>`
+        ).join('') + '</w:p>';
+      const xml = await saveTableEdit(path, runFixture(styles, paragraph), (engine) => {
+        const { paraId } = bodyParagraph(engine, runs[0]!);
+        for (const [index, offset] of [0, 11].entries()) {
+          engine.replaceRange({
+            story: 'body', start: { paraId, offset }, end: { paraId, offset: offset + 1 },
+          }, replacements[index]!);
+        }
+        return ['body'];
+      });
+      const savedRuns = Array.from(xml.match(/<w:r\b[^>]*>[\s\S]*?<\/w:r>/g) ?? []);
+      const values = savedRuns.flatMap((run) => {
+        const direct = run.match(new RegExp(`<w:${property}\\b([^>]*)/>`));
+        const value = direct ? !/w:val="(?:0|false|off)"/.test(direct[1]!) : undefined;
+        return Array.from(text(run), () => value);
+      });
+      expect(values.slice(4, 8)).toEqual([true, true, true, true]);
+      expect(values).toEqual([false, false, false, false, true, true, true, true, false, false, false, false]);
+      expect(text(xml)).toBe(replacements[0]! + runs[0]!.slice(1) + runs[1]! + runs[2]!.slice(0, 3) + replacements[1]!);
+      for (const run of savedRuns) {
+        expect(run).not.toMatch(property === 'bCs' ? /<w:iCs\b/ : /<w:bCs\b/);
+      }
+    });
+  });
+});
