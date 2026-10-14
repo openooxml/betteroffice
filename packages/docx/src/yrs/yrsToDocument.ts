@@ -432,6 +432,8 @@ const ON_OFF_RUN_PROPERTIES = new Set<string>([
   'outline', 'shadow', 'emboss', 'imprint', 'hidden', 'rtl', 'boldCs', 'italicCs',
 ]);
 
+const SOURCE_RUN_PROPERTIES = ['bold', 'italic', 'fontSize', 'boldCs', 'italicCs', 'fontSizeCs'] as const;
+
 const lentByLinkStyle = (mark: unknown): boolean => asObject(mark)?.inheritedHyperlink === true;
 
 /** Writes differences from inherited run formatting, including explicit resets. */
@@ -449,10 +451,13 @@ function relativeFormatting(attributes: Attrs, inherited: TextFormatting): TextF
       result[key] = { style: 'none' };
     }
   }
-  const source = asObject(attributes._sourceComplexScript);
-  for (const key of ['boldCs', 'italicCs'] as const) {
+  const source = asObject(attributes._sourceRunFormatting);
+  for (const key of SOURCE_RUN_PROPERTIES) {
     const value = source?.[key];
-    if (typeof value === 'boolean' && (attributes[key] === undefined || attributes[key] === value)) {
+    if (value === undefined) continue;
+    const live = ON_OFF_RUN_PROPERTIES.has(key) ? formatting[key] ?? false : formatting[key];
+    if (sameJson(value, live) ||
+      ((key === 'boldCs' || key === 'italicCs') && attributes[key] === undefined)) {
       result[key] = value;
     }
   }
@@ -1800,7 +1805,7 @@ function paragraphAttrs(properties: Attrs): ParagraphSaveAttrs {
   return attrs as ParagraphSaveAttrs;
 }
 
-function complexScriptSources(content: readonly ParagraphContent[]): OriginalRunBoundary[] {
+function sourceRuns(content: readonly ParagraphContent[]): OriginalRunBoundary[] {
   return content.flatMap((child): OriginalRunBoundary[] => {
     if (child.type === 'run') {
       return [{
@@ -1815,32 +1820,123 @@ function complexScriptSources(content: readonly ParagraphContent[]): OriginalRun
         formatting: child.formatting,
       }];
     }
-    if (child.type === 'hyperlink') return complexScriptSources(child.children as ParagraphContent[]);
+    if (child.type === 'hyperlink') return sourceRuns(child.children as ParagraphContent[]);
     if (isTrackedWrapper(child) || child.type === 'inlineSdt') {
-      return complexScriptSources(child.content as ParagraphContent[]);
+      return sourceRuns(child.content as ParagraphContent[]);
     }
     return [{ text: '\ufffc'.repeat(paragraphContentLength(child)) }];
   });
 }
 
-function preserveSourceComplexScript(items: InlineItem[], sources: OriginalRunBoundary[]): InlineItem[] {
-  if (!sources.some((source) => source.formatting?.boldCs !== undefined || source.formatting?.italicCs !== undefined)) {
+/** A midpoint of the shortest edit path, in UTF-16 units. */
+function editMidpoint(original: string, current: string): [number, number] | null {
+  const distanceLimit = Math.ceil((original.length + current.length) / 2);
+  const offset = distanceLimit + 1;
+  const forward = new Int32Array(2 * distanceLimit + 3).fill(-1);
+  const backward = new Int32Array(forward.length).fill(-1);
+  forward[offset + 1] = 0;
+  backward[offset + 1] = 0;
+  const delta = original.length - current.length;
+  const odd = delta % 2 !== 0;
+  let forwardStart = 0;
+  let forwardEnd = 0;
+  let backwardStart = 0;
+  let backwardEnd = 0;
+  for (let distance = 0; distance <= distanceLimit; distance += 1) {
+    for (let diagonal = -distance + forwardStart; diagonal <= distance - forwardEnd; diagonal += 2) {
+      const index = offset + diagonal;
+      let x = diagonal === -distance ||
+        (diagonal !== distance && forward[index - 1]! < forward[index + 1]!)
+        ? forward[index + 1]! : forward[index - 1]! + 1;
+      let y = x - diagonal;
+      while (x < original.length && y < current.length && original[x] === current[y]) {
+        x += 1;
+        y += 1;
+      }
+      forward[index] = x;
+      if (x > original.length) forwardEnd += 2;
+      else if (y > current.length) forwardStart += 2;
+      else if (odd && backward[offset + delta - diagonal]! >= 0 &&
+        x >= original.length - backward[offset + delta - diagonal]!) return [x, y];
+    }
+    for (let diagonal = -distance + backwardStart; diagonal <= distance - backwardEnd; diagonal += 2) {
+      const index = offset + diagonal;
+      let x = diagonal === -distance ||
+        (diagonal !== distance && backward[index - 1]! < backward[index + 1]!)
+        ? backward[index + 1]! : backward[index - 1]! + 1;
+      let y = x - diagonal;
+      while (x < original.length && y < current.length &&
+        original[original.length - x - 1] === current[current.length - y - 1]) {
+        x += 1;
+        y += 1;
+      }
+      backward[index] = x;
+      if (x > original.length) backwardEnd += 2;
+      else if (y > current.length) backwardStart += 2;
+      else if (!odd && forward[offset + delta - diagonal]! >= 0 &&
+        forward[offset + delta - diagonal]! >= original.length - x) {
+        const start = forward[offset + delta - diagonal]!;
+        return [start, start - delta + diagonal];
+      }
+    }
+  }
+  return null;
+}
+
+interface SourceTextMatch {
+  original: number;
+  current: number;
+  length: number;
+}
+
+function sourceTextMatches(original: string, current: string): SourceTextMatch[] {
+  const matches: SourceTextMatch[] = [];
+  const visit = (before: string, after: string, sourceOffset: number, liveOffset: number): void => {
+    let prefix = 0;
+    while (prefix < Math.min(before.length, after.length) && before[prefix] === after[prefix]) prefix += 1;
+    if (prefix > 0) matches.push({ original: sourceOffset, current: liveOffset, length: prefix });
+    let suffix = 0;
+    while (suffix < Math.min(before.length, after.length) - prefix &&
+      before[before.length - suffix - 1] === after[after.length - suffix - 1]) suffix += 1;
+    const oldMiddle = before.slice(prefix, before.length - suffix);
+    const newMiddle = after.slice(prefix, after.length - suffix);
+    if (oldMiddle.length > 0 && newMiddle.length > 0) {
+      const split = editMidpoint(oldMiddle, newMiddle);
+      if (split && (split[0] > 0 || split[1] > 0) &&
+        (split[0] < oldMiddle.length || split[1] < newMiddle.length)) {
+        visit(oldMiddle.slice(0, split[0]), newMiddle.slice(0, split[1]), sourceOffset + prefix, liveOffset + prefix);
+        visit(oldMiddle.slice(split[0]), newMiddle.slice(split[1]), sourceOffset + prefix + split[0], liveOffset + prefix + split[1]);
+      }
+    }
+    if (suffix > 0) matches.push({
+      original: sourceOffset + before.length - suffix,
+      current: liveOffset + after.length - suffix,
+      length: suffix,
+    });
+  };
+  visit(original, current, 0, 0);
+  return matches;
+}
+
+function preserveSourceRunFormatting(items: InlineItem[], sources: OriginalRunBoundary[]): InlineItem[] {
+  if (!sources.some((source) => SOURCE_RUN_PROPERTIES.some((key) => source.formatting?.[key] !== undefined))) {
     return items;
   }
   const original = sources.map((source) => source.text).join('');
   const current = items.map((item) => item.kind === 'text' ? item.text
     : item.embedKind === 'tab' ? '\t' : '\ufffc').join('');
-  let prefix = 0;
-  while (prefix < Math.min(original.length, current.length) && original[prefix] === current[prefix]) prefix += 1;
-  let suffix = 0;
-  while (suffix < Math.min(original.length, current.length) - prefix &&
-    original[original.length - suffix - 1] === current[current.length - suffix - 1]) suffix += 1;
-  const originalEnd = original.length - suffix;
-  const currentEnd = current.length - suffix;
+  const matches = sourceTextMatches(original, current);
   const mapped = (offset: number): number => {
-    if (offset === 0 || offset < prefix || (offset === prefix && originalEnd > prefix)) return offset;
-    if (offset >= originalEnd) return offset + current.length - original.length;
-    return currentEnd;
+    if (offset === 0) return 0;
+    let sourceEnd = 0;
+    let liveEnd = 0;
+    for (const match of matches) {
+      if (offset < match.original) return offset === sourceEnd ? liveEnd : match.current;
+      if (offset <= match.original + match.length) return match.current + offset - match.original;
+      sourceEnd = match.original + match.length;
+      liveEnd = match.current + match.length;
+    }
+    return offset === sourceEnd ? liveEnd : current.length;
   };
   let sourceOffset = 0;
   const spans = sources.map((source, index) => {
@@ -1855,11 +1951,10 @@ function preserveSourceComplexScript(items: InlineItem[], sources: OriginalRunBo
     while (offset < end) {
       const span = spans.find((span) => span.start <= offset && offset < span.end);
       const next = Math.min(end, span?.end ?? end);
-      const script = {
-        ...(span?.formatting?.boldCs !== undefined ? { boldCs: span.formatting.boldCs } : {}),
-        ...(span?.formatting?.italicCs !== undefined ? { italicCs: span.formatting.italicCs } : {}),
-      };
-      const attributes = { ...item.attributes, _sourceComplexScript: script };
+      const source = Object.fromEntries(SOURCE_RUN_PROPERTIES
+        .filter((key) => span?.formatting?.[key] !== undefined)
+        .map((key) => [key, span!.formatting![key]]));
+      const attributes = { ...item.attributes, _sourceRunFormatting: source };
       slices.push(item.kind === 'text'
         ? { ...item, text: item.text.slice(item.text.length - (end - offset), item.text.length - (end - next)), attributes }
         : { ...item, attributes });
@@ -1881,9 +1976,9 @@ function paragraphFromStory(
   inherited?: ParagraphFormatting
 ): Paragraph {
   const attrs = paragraphAttrs(properties);
-  const sources = baseParagraph ? complexScriptSources(baseParagraph.content)
+  const sources = baseParagraph ? sourceRuns(baseParagraph.content)
     : Array.isArray(attrs._originalRunBoundaries) ? attrs._originalRunBoundaries as OriginalRunBoundary[] : [];
-  let content = buildParagraphContent(preserveSourceComplexScript(items, sources), recovery, format, revisionIds);
+  let content = buildParagraphContent(preserveSourceRunFormatting(items, sources), recovery, format, revisionIds);
   content = restoreOriginalRuns(
     content,
     items,
