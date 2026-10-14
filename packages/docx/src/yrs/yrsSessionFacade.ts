@@ -1367,6 +1367,26 @@ export function wrapSession(
       ),
     writtenParagraphIds: (bytes) =>
       JSON.parse(session.written_paragraph_ids(bytes)) as Record<string, string[]>,
+    runInheritance: (styles) => {
+      const inheritance = session.run_inheritance(JSON.stringify(styles ?? null));
+      return {
+        attributes: (paragraphStyle, runStyle, tableRun) =>
+          JSON.parse(inheritance.attributes(paragraphStyle, runStyle, tableRun ? JSON.stringify(tableRun) : undefined)) as Record<string, unknown>,
+        paragraphFormatting: (paragraphStyle, tableFormatting) =>
+          JSON.parse(inheritance.paragraph_formatting(
+            paragraphStyle, JSON.stringify(tableFormatting ?? null)
+          )) ?? undefined,
+        tableAttributes: (table) => JSON.parse(inheritance.table_attributes(JSON.stringify({
+          formatting: table.formatting,
+          columnWidths: table.columnWidths,
+          rows: table.rows.map((row) => ({
+            formatting: row.formatting,
+            cells: row.cells.map((cell) => ({ formatting: cell.formatting })),
+          })),
+        }))),
+        dispose: () => inheritance.free(),
+      };
+    },
     exportStructured: (options) =>
       JSON.parse(
         session.export_structured_json(JSON.stringify(options))

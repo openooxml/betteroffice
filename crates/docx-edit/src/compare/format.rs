@@ -14,8 +14,7 @@ use super::xml::{Namespaces, run_text};
 /// [`RunStyles::effective`]'s.
 pub(crate) type Formats = Vec<(u32, [TextFormatting; 2])>;
 
-/// Whether each unit's own run properties set complex-script bold and italic, as runs of equal
-/// values: `(units, [bold, italic])`.
+/// Resolved complex-script values as `(units, [bold, italic])` runs.
 pub(crate) type ComplexScript = Vec<(u32, [bool; 2])>;
 
 /// Which revisions a paragraph read keeps.
@@ -57,13 +56,12 @@ pub(crate) struct RunStyles {
     chains: HashMap<String, Chain>,
     default_paragraph: Option<String>,
     theme: Theme,
+    resolver: crate::seed::StyleResolver,
 }
 
-/// A style's run properties along its `basedOn` chain: other properties override root first,
-/// toggles combine by exclusive or across every level that sets them.
+/// A style's merged run properties.
 struct Chain {
     merged: Option<TextFormatting>,
-    toggles: [Option<bool>; TOGGLES.len()],
 }
 
 /// A style as its own definition states it, before inheritance.
@@ -73,13 +71,6 @@ struct Level {
 }
 
 const MAX_CHAIN: usize = 64;
-
-fn toggled(values: impl IntoIterator<Item = Option<bool>>) -> Option<bool> {
-    values.into_iter().fold(None, |state, value| match value {
-        Some(value) => Some(state.unwrap_or(false) ^ value),
-        None => state,
-    })
-}
 
 impl RunStyles {
     pub(crate) fn read(parts: &[(String, Vec<u8>)]) -> Result<Self, String> {
@@ -102,6 +93,20 @@ impl RunStyles {
         )
         .map_err(failed)?;
         docx_parse::apply_theme_font_lang(&mut theme, settings.theme_font_lang.as_ref());
+        let definitions = part("word/styles.xml")
+            .filter(|xml| !xml.is_empty())
+            .map(|xml| {
+                docx_parse::parse_style_definitions(
+                    xml,
+                    Some(&theme),
+                    "word/styles.xml",
+                    &mut budget,
+                )
+                .map_err(failed)
+                .and_then(|styles| serde_json::to_value(styles).map_err(|error| error.to_string()))
+            })
+            .transpose()?;
+        let resolver = crate::seed::StyleResolver::new(definitions.as_ref());
         let mut levels = HashMap::new();
         let mut defaults = None;
         let mut default_paragraph = None;
@@ -163,27 +168,18 @@ impl RunStyles {
             let merged = chain.iter().rev().fold(None, |merged, (_, level)| {
                 merge_text_formatting(merged.as_ref(), level.r_pr.as_ref())
             });
-            let toggles = TOGGLES.map(|(get, _)| {
-                toggled(
-                    chain
-                        .iter()
-                        .rev()
-                        .map(|(_, level)| level.r_pr.as_ref().and_then(get)),
-                )
-            });
-            chains.insert(id.clone(), Chain { merged, toggles });
+            chains.insert(id.clone(), Chain { merged });
         }
         Ok(Self {
             defaults,
             chains,
             default_paragraph,
             theme,
+            resolver,
         })
     }
 
-    /// The effective formatting of a run with `direct` properties in a paragraph of `style`, read
-    /// twice: with style toggles combined across every level as the specification defines, and
-    /// with every level overriding the last, as flattening readers resolve them.
+    /// Effective run formatting with shared style-toggle resolution.
     pub(crate) fn effective(
         &self,
         style: Option<&str>,
@@ -196,27 +192,21 @@ impl RunStyles {
             self.defaults.as_ref(),
             paragraph.and_then(|chain| chain.merged.as_ref()),
         );
-        let mut styled = merge_text_formatting(
+        let styled = merge_text_formatting(
             styled.as_ref(),
             character.and_then(|chain| chain.merged.as_ref()),
-        )
-        .unwrap_or_default();
-        let flattened = merge_text_formatting(Some(&styled), direct).unwrap_or_default();
-        for (index, (get, set)) in TOGGLES.into_iter().enumerate() {
-            let level = |chain: Option<&Chain>| chain.and_then(|chain| chain.toggles[index]);
-            set(
-                &mut styled,
-                toggled([
-                    self.defaults.as_ref().and_then(get),
-                    level(paragraph),
-                    level(character),
-                ]),
-            );
+        );
+        let mut effective = merge_text_formatting(styled.as_ref(), direct).unwrap_or_default();
+        let direct = direct.and_then(|direct| serde_json::to_value(direct).ok());
+        let resolved = self
+            .resolver
+            .effective_run_formatting(style, direct.as_ref())
+            .and_then(|value| serde_json::from_value(value).ok())
+            .unwrap_or_default();
+        for (get, set) in TOGGLES {
+            set(&mut effective, get(&resolved));
         }
-        [
-            merge_text_formatting(Some(&styled), direct).unwrap_or_default(),
-            flattened,
-        ]
+        [effective.clone(), effective]
     }
 
     /// The effective formatting of `paragraph`'s text units in `view` and their own complex-script
@@ -315,11 +305,12 @@ impl Read<'_> {
         let effective = self
             .styles
             .effective(self.style.as_deref(), direct.as_ref());
+        let script = [
+            effective[0].bold_cs == Some(true),
+            effective[0].italic_cs == Some(true),
+        ];
         push(&mut self.formats, units, effective);
-        let own = direct.as_ref().map_or([false; 2], |direct| {
-            [direct.bold_cs == Some(true), direct.italic_cs == Some(true)]
-        });
-        push(&mut self.complex_script, units, own);
+        push(&mut self.complex_script, units, script);
         true
     }
 }

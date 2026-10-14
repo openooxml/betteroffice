@@ -17,7 +17,7 @@ export function CopyButton({ text }: { text: string }) {
   return (
     <button
       type="button"
-      className="shrink-0 cursor-pointer appearance-none rounded border border-line bg-transparent px-2.5 py-1.5 font-mono text-[0.625rem] tracking-[0.12em] text-ink uppercase transition-colors hover:border-dim hover:text-fg data-[copied=true]:border-acc/35 data-[copied=true]:text-acc"
+      className="shrink-0 cursor-pointer appearance-none border border-line bg-bg px-2.5 py-1.5 font-mono text-[0.625rem] tracking-[0.12em] text-ink uppercase transition-colors hover:border-dim hover:text-fg data-[copied=true]:border-acc/35 data-[copied=true]:text-acc"
       data-copied={copied}
       onClick={copy}
       aria-label={copied ? "Copied" : "Copy to clipboard"}

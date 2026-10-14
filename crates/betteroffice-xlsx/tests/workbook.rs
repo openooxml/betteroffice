@@ -8946,3 +8946,36 @@ fn profiled_mutations_time_each_stage_once() {
         Some("A2*2")
     );
 }
+
+/// Excel stores a row dragged to its 409.5pt ceiling as `ht="409.6"`.
+fn excel_max_row_height_fixture() -> Vec<u8> {
+    let mut model = WorkbookModel::default();
+    model.sheets.push(Sheet::new("Data"));
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    set_test_part(
+        &mut parts,
+        "xl/worksheets/sheet1.xml",
+        br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1" ht="409.6" customHeight="1"><c r="A1"><v>1</v></c></row><row r="2"><c r="A2"><v>2</v></c></row></sheetData></worksheet>"#.to_vec(),
+    );
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn excel_max_row_height_survives_save() {
+    let original = excel_max_row_height_fixture();
+    let mut workbook = Workbook::open(&original).unwrap();
+    assert_eq!(
+        package_map(&workbook.save().unwrap())["xl/worksheets/sheet1.xml"],
+        package_map(&original)["xl/worksheets/sheet1.xml"]
+    );
+
+    workbook
+        .edit_cell(SheetId(0), cell("A2"), "3", CalculationOptions::default())
+        .unwrap();
+    let sheet = saved_sheet_text(&workbook);
+    assert!(
+        sheet.contains(r#"<row r="1" ht="409.6" customHeight="1">"#),
+        "{sheet}"
+    );
+    assert!(sheet.contains("<v>3</v>"), "{sheet}");
+}

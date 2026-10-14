@@ -10,6 +10,7 @@ import { SessionFailure } from '../../../../shared/office-session/types';
 import { buildCommandFrame, exactFrameBuffer, packResidentFrame } from './residentCommandFrame';
 import { createResidentCommandHost } from './residentCommandHost';
 import { createResidentDocxCommandHooks } from './residentCommandActions';
+import { releaseResidentSelectionReads } from './residentCommandSelection';
 import { readCommandStickyPosition } from './residentCommandAnchors';
 import { projectCommandEchoContext } from './residentCommandViewProjection';
 import { stageCommandPresentation } from './residentCommandPresentation';
@@ -119,6 +120,7 @@ let resolveHostEditModule: (module: WebAssembly.Module | null) => void;
 let hostEditModule = nextHostEditModule();
 let session: ResidentEngineSession | null = null;
 let commandHost: ResidentCommandHost | null = null;
+let releaseCommandHost: (() => void) | null = null;
 let commandInit: ResidentCommandInitRequest | null = null;
 /** The bound command session's layout owner, through which every command layout runs. */
 interface CommandLayout {
@@ -162,6 +164,8 @@ function reportQueryParseFailure(frame: RetainedFrame, version: string, error: u
 function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommandHost {
   if (!session) throw new Error('Resident engine worker is not initialized');
   if (!commandHooksFactory) throw new Error('Resident command hooks are not installed');
+  releaseCommandHost?.();
+  releaseCommandHost = null;
   const engine = session;
   if (init.rasterScale !== undefined) setCommandRasterScale(init.rasterScale);
   const input = JSON.parse(init.layoutInput || '{}');
@@ -196,7 +200,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
       else delete input.renderEnv.revisionPreview;
       if (!init.layoutWithRegions) input.workerOwned = { ...input.workerOwned, renderEnv: input.renderEnv };
     }
-    if (init.layoutWithRegions) engine.layoutDocumentWithRegionsRetained(JSON.stringify(input));
+    if (init.layoutWithRegions) engine.layoutDocumentWithRegionsAfterEdit(JSON.stringify(input));
     else engine.layoutDocumentJson(JSON.stringify(input));
     layoutPreviewVersion = snapshot.previewVersion;
     if (commandFrameChanges) {
@@ -893,6 +897,11 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
     },
   });
   commandInit = init;
+  releaseCommandHost = () => {
+    selectionQueries?.queries.dispose();
+    selectionQueries = undefined;
+    releaseResidentSelectionReads(engine);
+  };
   commandHost = host;
   if (!viewportFirst(init)) return host;
   commandLayout = {
@@ -2914,6 +2923,8 @@ function destroySession(keepSurfaces = false): void {
   proposals?.destroy();
   layoutReady = false;
   proposals = null;
+  releaseCommandHost?.();
+  releaseCommandHost = null;
   session?.destroy();
   lastProposalMirrorVersion = null;
   session = null;

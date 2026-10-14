@@ -289,6 +289,7 @@ function worker() {
       },
       layoutDocumentJson() {},
       layoutDocumentWithRegionsRetained() {},
+      layoutDocumentWithRegionsAfterEdit() {},
       retainedHeadersFootersJson(): string | undefined {
         return undefined;
       },

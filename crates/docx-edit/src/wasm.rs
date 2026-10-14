@@ -1225,6 +1225,53 @@ impl RetainedLayoutMeta {
     }
 }
 
+/// What runs inherit under one package's styles; see [`EditSession::run_inheritance`].
+#[wasm_bindgen]
+pub struct RunInheritance {
+    inner: crate::seed::RunInheritance,
+}
+
+#[wasm_bindgen]
+impl RunInheritance {
+    /// The attributes, as a JSON object, that seeding merges into the marks of a run of
+    /// `run_style` in a paragraph of `paragraph_style` before the run's direct formatting.
+    pub fn attributes(
+        &mut self,
+        paragraph_style: Option<String>,
+        run_style: Option<String>,
+        table_run_json: Option<String>,
+    ) -> Result<String, JsValue> {
+        let attrs = if let Some(table_run_json) = table_run_json {
+            self.inner.table_run_attrs(
+                paragraph_style.as_deref(),
+                run_style.as_deref(),
+                serde_json::from_str(&table_run_json).map_err(js_err)?,
+            )
+        } else {
+            self.inner
+                .run_attrs(paragraph_style.as_deref(), run_style.as_deref())
+        };
+        serde_json::to_string(&attrs).map_err(js_err)
+    }
+
+    pub fn paragraph_formatting(
+        &mut self,
+        paragraph_style: Option<String>,
+        table_formatting_json: &str,
+    ) -> Result<String, JsValue> {
+        let table_formatting = serde_json::from_str(table_formatting_json).map_err(js_err)?;
+        let formatting = self
+            .inner
+            .paragraph_formatting(paragraph_style.as_deref(), table_formatting);
+        serde_json::to_string(&formatting).map_err(js_err)
+    }
+
+    pub fn table_attributes(&self, table_json: &str) -> Result<String, JsValue> {
+        let table = serde_json::from_str(table_json).map_err(js_err)?;
+        serde_json::to_string(&self.inner.table_attrs(&table)).map_err(js_err)
+    }
+}
+
 /// One yrs replica of the DOCX editing model, held for a JS host.
 ///
 /// Owns the [`EditingDoc`] plus the (single) JS update observer. The JS facade
@@ -1246,6 +1293,9 @@ pub struct EditSession {
     cell_selection: RefCell<Option<LocalCellSelection>>,
     last_apply_profile_json: RefCell<String>,
     resident_deleted_units: Cell<u32>,
+    /// The story and resulting doc epoch of the last
+    /// [`EditSession::edit_text_resident`], until a relayout takes it.
+    resident_text_edit: RefCell<Option<(String, u64)>>,
     /// The comparison applied here, awaiting its saved bytes.
     compared: RefCell<Option<(Box<CompareApplied>, CompareLimits)>>,
     /// Seed images as `media:{n}` tokens rather than `data:` URLs.
@@ -1734,6 +1784,7 @@ impl EditSession {
             cell_selection: RefCell::new(None),
             last_apply_profile_json: RefCell::new("{}".to_owned()),
             resident_deleted_units: Cell::new(0),
+            resident_text_edit: RefCell::new(None),
             compared: RefCell::new(None),
             media_tokens: Cell::new(false),
         };
@@ -1855,6 +1906,21 @@ impl EditSession {
         let _fonts = self.fonts.enter();
         self.engine
             .layout_document_with_regions_retained(input)
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
+    /// [`Self::layout_document_with_regions_retained`] after one edit: the
+    /// resident path when that edit was the [`Self::edit_text_resident`] taken
+    /// last; see `EngineSession::layout_document_with_regions_after_edit`.
+    pub fn layout_document_with_regions_after_edit(&self, input: &str) -> Result<(), JsValue> {
+        let _fonts = self.fonts.enter();
+        let edit = self
+            .resident_text_edit
+            .take()
+            .filter(|(_, epoch)| *epoch == self.engine.doc_epoch());
+        let story = edit.as_ref().map(|(story, _)| story.as_str());
+        self.engine
+            .layout_document_with_regions_after_edit(input, story)
             .map_err(|error| JsValue::from_str(&error))
     }
 
@@ -3642,6 +3708,55 @@ impl EditSession {
         Ok(text_receipt_json(receipt))
     }
 
+    /// A plain local text edit that the resident lowering records, so the next
+    /// [`Self::layout_document_with_regions_after_edit`] re-lowers and
+    /// re-measures only its paragraph: inserts `text` at the collapsed range,
+    /// or deletes `[start, end)` without it. The document changes exactly as
+    /// through [`Self::insert_text`] or [`Self::delete_range`] without an
+    /// author, and the receipt is theirs. An empty insertion, an edit that
+    /// spans paragraphs, or one whose paragraph resident input is not ready
+    /// for goes through them instead and records nothing for the relayout.
+    pub fn edit_text_resident(
+        &self,
+        story: &str,
+        start_para: &str,
+        start_offset: u32,
+        end_para: &str,
+        end_offset: u32,
+        text: Option<String>,
+    ) -> Result<String, JsValue> {
+        let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
+        let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
+        if text.is_some() && start != end {
+            return Err(js_err("resident text insertion needs a collapsed range"));
+        }
+        if !self
+            .engine
+            .takes_resident_text_edit(story, start_para, end_para, text.as_deref())
+        {
+            self.resident_text_edit.replace(None);
+            return match text {
+                Some(text) => self.insert_text(story, start_para, start_offset, &text, None, None),
+                None => self.delete_range(
+                    story,
+                    start_para,
+                    start_offset,
+                    end_para,
+                    end_offset,
+                    None,
+                    None,
+                ),
+            };
+        }
+        let receipt = self
+            .engine
+            .edit_resident_text(StoryRange::new(story, start, end), text.as_deref(), true)
+            .map_err(js_err)?;
+        self.resident_text_edit
+            .replace(Some((story.to_owned(), self.engine.doc_epoch())));
+        Ok(text_receipt_json(receipt))
+    }
+
     /// Deletes `[start, end)`. Because a range crossing a paragraph boundary
     /// includes the boundary pilcrow, a plain delete also merges those
     /// paragraphs. Suggesting mode removes nothing and stamps the content
@@ -5383,6 +5498,14 @@ impl EditSession {
     pub fn written_paragraph_ids(&self, bytes: &[u8]) -> Result<String, JsValue> {
         let ids = docx_parse::paragraph_identity::paragraph_ids_by_part(bytes).map_err(js_err)?;
         serde_json::to_string(&ids).map_err(js_err)
+    }
+
+    /// Resolves what runs inherit under `styles_json`, a package's style definitions or `null`.
+    pub fn run_inheritance(&self, styles_json: &str) -> Result<RunInheritance, JsValue> {
+        let styles: Value = serde_json::from_str(styles_json).map_err(js_err)?;
+        Ok(RunInheritance {
+            inner: crate::seed::RunInheritance::new(Some(&styles)),
+        })
     }
 }
 
@@ -7661,5 +7784,110 @@ mod tests {
         .unwrap();
         assert_eq!(refused["ok"], false);
         assert_eq!(refused["diagnostics"][0]["code"], "invalid-options");
+    }
+
+    /// A session holding two body paragraphs and a header story whose body is
+    /// laid out and shown, so resident input is ready for it.
+    fn shown_text_session(client_id: f64) -> EditSession {
+        let session = EditSession::new(client_id).unwrap();
+        let doc = session.engine.doc();
+        doc.create_story("body", "Alpha beta", "Normal", "left")
+            .unwrap();
+        doc.split_paragraph(&EditCtx::local("", ""), Position::new("body", 5), None)
+            .unwrap();
+        doc.create_story("hf:rId1", "Header", "Normal", "left")
+            .unwrap();
+        let font = session
+            .register_measure_font(include_bytes!(
+                "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+            ))
+            .unwrap();
+        let mut request = json!({
+            "bodyStory": "body",
+            "regions": {"sections": [{"properties": {}}]},
+            "renderEnv": {},
+        });
+        let requirements = envelope(
+            &session
+                .layout_font_requirements_json(&request.to_string())
+                .unwrap(),
+        );
+        let chains: serde_json::Map<String, Value> = requirements
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|requirement| {
+                (
+                    requirement["key"].as_str().unwrap().to_owned(),
+                    json!([font]),
+                )
+            })
+            .collect();
+        request["measurement"] = json!({
+            "fontChains": chains,
+            "defaults": {"fontSize": 11, "fontFamily": "Calibri"},
+        });
+        session
+            .layout_document_with_regions_retained(&request.to_string())
+            .unwrap();
+        session
+            .build_display_list_frame(&json!({ "fontChains": chains }).to_string(), 0.0)
+            .unwrap();
+        session
+    }
+
+    #[test]
+    fn text_commands_take_the_generic_path_where_resident_input_is_not_ready() {
+        let resident = shown_text_session(78.0);
+        let generic = shown_text_session(78.0);
+        let paragraphs = resident.engine.doc().paragraphs("body").unwrap();
+        let (first, second) = (&paragraphs[0].para_id, &paragraphs[1].para_id);
+        let header = &resident.engine.doc().paragraphs("hf:rId1").unwrap()[0].para_id;
+        resident
+            .edit_text_resident("body", first, 1, first, 1, Some("x".to_owned()))
+            .unwrap();
+        assert!(resident.resident_text_edit.borrow().is_some());
+        generic
+            .insert_text("body", first, 1, "x", None, None)
+            .unwrap();
+        assert_eq!(
+            resident
+                .edit_text_resident("body", first, 2, second, 1, None)
+                .unwrap(),
+            generic
+                .delete_range("body", first, 2, second, 1, None, None)
+                .unwrap()
+        );
+        assert!(resident.resident_text_edit.borrow().is_none());
+        assert_eq!(
+            resident
+                .edit_text_resident("hf:rId1", header, 1, header, 1, Some("y".to_owned()))
+                .unwrap(),
+            generic
+                .insert_text("hf:rId1", header, 1, "y", None, None)
+                .unwrap()
+        );
+        assert!(resident.resident_text_edit.borrow().is_none());
+        for story in ["body", "hf:rId1"] {
+            assert_eq!(
+                resident.engine.doc().story_segments(story).unwrap(),
+                generic.engine.doc().story_segments(story).unwrap(),
+                "{story}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_text_command_records_no_resident_edit() {
+        let session = shown_text_session(79.0);
+        let paragraph = session.engine.doc().paragraphs("body").unwrap()[0]
+            .para_id
+            .clone();
+        let before = session.engine.doc().story_segments("body").unwrap();
+        session
+            .edit_text_resident("body", &paragraph, 1, &paragraph, 1, Some(String::new()))
+            .unwrap();
+        assert!(session.resident_text_edit.borrow().is_none());
+        assert_eq!(session.engine.doc().story_segments("body").unwrap(), before);
     }
 }

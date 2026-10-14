@@ -42,7 +42,7 @@ use crate::paragraph_spacing::{
     apply_contextual_spacing_measured, get_spacing_after, get_spacing_before,
 };
 use crate::prescan::{LayoutPlan, SectionLayoutConfig, default_columns, prescan};
-use crate::resolve_lines::{ResolvedLine, resolve_line_segments, utf16_len};
+use crate::resolve_lines::{ResolvedLine, ResolvedSegment, resolve_line_segments, utf16_len};
 use crate::section_breaks::resolve_page_margins;
 use crate::types::{
     BlockExtent, ChartBlock, ChartExtent, ChartFragment, Fragment, ImageBlock, ImageExtent,
@@ -547,6 +547,11 @@ pub fn layout_document_checkpointed(input: &mut Input) -> Result<CheckpointedLay
 /// then stop as soon as page-start geometry and the measured suffix converge
 /// with the retained layout. Callers must conservatively gate unsupported
 /// dependency shapes (floats, notes, structural edits) before entering here.
+///
+/// Equal fingerprints declare a measured block unchanged apart from its
+/// document positions: retained pages keep the run slices of such a block and
+/// move them by the delta its positions moved by, checked against its new run
+/// positions.
 pub fn layout_document_incremental<F: PartialEq>(
     input: &mut Input,
     previous_layout: &mut Layout,
@@ -783,6 +788,12 @@ pub fn layout_document_incremental_ranges<F: PartialEq>(
         pages.append(&mut placed);
         rebuilt_page_ranges.push(rebuilt_start..pages.len());
         let reused_start = pages.len();
+        let first_block = match &converged {
+            Some(Convergence::Skip { previous, .. } | Convergence::Suffix { previous, .. }) => {
+                previous.block_index
+            }
+            None => 0,
+        };
         match converged {
             Some(Convergence::Skip {
                 previous, resume, ..
@@ -811,7 +822,7 @@ pub fn layout_document_incremental_ranges<F: PartialEq>(
             }
             None => {}
         }
-        reused_ranges.push(reused_start..pages.len());
+        reused_ranges.push((reused_start..pages.len(), first_block));
     }
     refresh_reused_page_ranges(&mut pages, &reused_ranges, &input.measured);
 
@@ -1195,95 +1206,279 @@ fn block_id_key(id: &crate::types::BlockId) -> String {
     serde_json::to_string(id).expect("block ids always serialize")
 }
 
-/// Retained suffix pages keep their geometry but absolute document positions move
-/// after an earlier edit. Refresh fragment ranges and resolved run slices from
-/// the new measured arena before the display list consumes them.
-fn refresh_reused_page_ranges(
-    pages: &mut [crate::types::Page],
-    ranges: &[std::ops::Range<usize>],
-    measured: &[MeasuredBlock],
-) {
-    if ranges.iter().all(std::ops::Range::is_empty) {
-        return;
-    }
-    let blocks: std::collections::HashMap<_, _> = measured
-        .iter()
-        .filter_map(|measured| {
-            measured
-                .block
-                .block_id()
-                .map(|id| (block_id_key(id), measured))
-        })
-        .collect();
-    for range in ranges {
-        refresh_reused_pages(&mut pages[range.clone()], &blocks);
+/// A fragment's block id, and whether it continues that block's previous fragment.
+fn fragment_source(fragment: &Fragment) -> (&crate::types::BlockId, bool) {
+    match fragment {
+        Fragment::Paragraph(fragment) => {
+            (&fragment.block_id, fragment.carried_from_prev == Some(true))
+        }
+        Fragment::Table(fragment) => (&fragment.block_id, fragment.carried_from_prev == Some(true)),
+        Fragment::Image(fragment) => (&fragment.block_id, false),
+        Fragment::Shape(fragment) => (&fragment.block_id, false),
+        Fragment::Chart(fragment) => (&fragment.block_id, false),
+        Fragment::TextBox(fragment) => (&fragment.block_id, false),
     }
 }
 
-fn refresh_reused_pages(
+/// Walks a reused page range's fragments alongside the blocks placed on it,
+/// which follow in block order from the convergence checkpoint's block.
+struct ReusedBlocks {
+    next: usize,
+    current: Option<usize>,
+}
+
+impl ReusedBlocks {
+    /// The block `fragment` was placed from: the current block for a continued
+    /// fragment, else the next block carrying its id.
+    fn block<'a>(
+        &mut self,
+        fragment: &Fragment,
+        measured: &'a [MeasuredBlock],
+    ) -> Option<&'a MeasuredBlock> {
+        let (id, continued) = fragment_source(fragment);
+        let index = if continued {
+            self.current
+                .filter(|&index| measured[index].block.block_id() == Some(id))?
+        } else {
+            self.next
+                + measured
+                    .get(self.next..)?
+                    .iter()
+                    .position(|block| block.block.block_id() == Some(id))?
+        };
+        self.current = Some(index);
+        self.next = index + 1;
+        Some(&measured[index])
+    }
+}
+
+/// Retained pages keep their geometry, but an earlier edit moves the document
+/// positions of the blocks they hold. Each fragment takes its block's new range,
+/// and a paragraph fragment moves its resolved run slices by its position delta
+/// where they agree with the new block; anything else, and every fragment after
+/// one whose block is not found in order, is resolved again.
+fn refresh_reused_page_ranges(
     pages: &mut [crate::types::Page],
-    blocks: &std::collections::HashMap<String, &MeasuredBlock>,
+    ranges: &[(std::ops::Range<usize>, usize)],
+    measured: &[MeasuredBlock],
 ) {
-    for page in pages {
-        for fragment in &mut page.fragments {
-            let key = match fragment {
-                Fragment::Paragraph(fragment) => block_id_key(&fragment.block_id),
-                Fragment::Table(fragment) => block_id_key(&fragment.block_id),
-                Fragment::Image(fragment) => block_id_key(&fragment.block_id),
-                Fragment::Shape(fragment) => block_id_key(&fragment.block_id),
-                Fragment::Chart(fragment) => block_id_key(&fragment.block_id),
-                Fragment::TextBox(fragment) => block_id_key(&fragment.block_id),
-            };
-            let Some(measured) = blocks.get(&key) else {
+    let mut by_id: Option<std::collections::HashMap<String, &MeasuredBlock>> = None;
+    for (range, first_block) in ranges {
+        let mut walk = Some(ReusedBlocks {
+            next: *first_block,
+            current: None,
+        });
+        for fragment in pages[range.clone()]
+            .iter_mut()
+            .flat_map(|page| page.fragments.iter_mut())
+        {
+            if let Some(block) = walk
+                .as_mut()
+                .and_then(|walk| walk.block(fragment, measured))
+            {
+                refresh_reused_fragment(fragment, block, true);
                 continue;
-            };
-            match (fragment, &measured.block, &measured.measure) {
-                (
-                    Fragment::Paragraph(fragment),
-                    LayoutBlock::Paragraph(block),
-                    BlockExtent::Paragraph(extent),
-                ) => {
-                    (fragment.pm_start, fragment.pm_end) = get_paragraph_fragment_pm_range(
-                        block,
-                        extent,
-                        fragment.from_line,
-                        fragment.to_line,
-                    );
-                    fragment.resolved_lines = Some(build_resolved_lines(
-                        block,
-                        extent,
-                        fragment.from_line,
-                        fragment.to_line,
-                    ));
-                }
-                (Fragment::Table(fragment), LayoutBlock::Table(block), _) => {
-                    fragment.pm_start = block.pm_start;
-                    fragment.pm_end = block.pm_end;
-                }
-                (Fragment::Image(fragment), LayoutBlock::Image(block), _) => {
-                    fragment.pm_start = block.pm_start;
-                    fragment.pm_end = block.pm_end;
-                }
-                (Fragment::Shape(fragment), LayoutBlock::Shape(block), _) => {
-                    fragment.pm_start = block.pm_start;
-                    fragment.pm_end = block.pm_end;
-                    fragment.doc_start = block.doc_start;
-                    fragment.doc_end = block.doc_end;
-                }
-                (Fragment::Chart(fragment), LayoutBlock::Chart(block), _) => {
-                    fragment.pm_start = block.pm_start;
-                    fragment.pm_end = block.pm_end;
-                    fragment.doc_start = block.doc_start;
-                    fragment.doc_end = block.doc_end;
-                }
-                (Fragment::TextBox(fragment), LayoutBlock::TextBox(block), _) => {
-                    fragment.pm_start = block.pm_start;
-                    fragment.pm_end = block.pm_end;
-                }
-                _ => {}
+            }
+            walk = None;
+            let blocks = by_id.get_or_insert_with(|| {
+                measured
+                    .iter()
+                    .filter_map(|measured| {
+                        measured
+                            .block
+                            .block_id()
+                            .map(|id| (block_id_key(id), measured))
+                    })
+                    .collect()
+            });
+            if let Some(block) = blocks.get(&block_id_key(fragment_source(fragment).0)) {
+                refresh_reused_fragment(fragment, block, false);
             }
         }
     }
+}
+
+fn refresh_reused_fragment(fragment: &mut Fragment, measured: &MeasuredBlock, movable: bool) {
+    match (fragment, &measured.block, &measured.measure) {
+        (
+            Fragment::Paragraph(fragment),
+            LayoutBlock::Paragraph(block),
+            BlockExtent::Paragraph(extent),
+        ) => {
+            let range = get_paragraph_fragment_pm_range(
+                block,
+                extent,
+                fragment.from_line,
+                fragment.to_line,
+            );
+            let moved = movable && move_resolved_lines(fragment, block, extent, range);
+            (fragment.pm_start, fragment.pm_end) = range;
+            if !moved {
+                fragment.resolved_lines = Some(build_resolved_lines(
+                    block,
+                    extent,
+                    fragment.from_line,
+                    fragment.to_line,
+                ));
+            }
+        }
+        (Fragment::Table(fragment), LayoutBlock::Table(block), _) => {
+            fragment.pm_start = block.pm_start;
+            fragment.pm_end = block.pm_end;
+        }
+        (Fragment::Image(fragment), LayoutBlock::Image(block), _) => {
+            fragment.pm_start = block.pm_start;
+            fragment.pm_end = block.pm_end;
+        }
+        (Fragment::Shape(fragment), LayoutBlock::Shape(block), _) => {
+            fragment.pm_start = block.pm_start;
+            fragment.pm_end = block.pm_end;
+            fragment.doc_start = block.doc_start;
+            fragment.doc_end = block.doc_end;
+        }
+        (Fragment::Chart(fragment), LayoutBlock::Chart(block), _) => {
+            fragment.pm_start = block.pm_start;
+            fragment.pm_end = block.pm_end;
+            fragment.doc_start = block.doc_start;
+            fragment.doc_end = block.doc_end;
+        }
+        (Fragment::TextBox(fragment), LayoutBlock::TextBox(block), _) => {
+            fragment.pm_start = block.pm_start;
+            fragment.pm_end = block.pm_end;
+        }
+        _ => {}
+    }
+}
+
+/// A document position whose sum with another stays exact.
+fn exact_position(value: f64) -> bool {
+    value.fract() == 0.0 && value.abs() <= 9_007_199_254_740_992.0
+}
+
+/// `value` moved by `delta`; `None` when either is not an exact position.
+fn moved_position(value: Option<f64>, delta: f64) -> Option<Option<f64>> {
+    match value {
+        None => Some(None),
+        Some(value) if exact_position(value) && exact_position(value + delta) => {
+            Some(Some(value + delta))
+        }
+        Some(_) => None,
+    }
+}
+
+/// Moves a retained fragment's resolved lines by the delta its document range
+/// moved by, when both ends moved alike and every run slice, moved, takes the
+/// positions the resolver gives it from the new block. False leaves the lines
+/// to be resolved again; the lines may then be partly moved.
+fn move_resolved_lines(
+    fragment: &mut ParagraphFragment,
+    block: &ParagraphBlock,
+    extent: &ParagraphExtent,
+    range: (Option<f64>, Option<f64>),
+) -> bool {
+    let (Some(start), Some(end), (Some(next_start), Some(next_end))) =
+        (fragment.pm_start, fragment.pm_end, range)
+    else {
+        return false;
+    };
+    let delta = next_start - start;
+    if next_end - end != delta || !exact_position(delta) {
+        return false;
+    }
+    let Some(lines) = extent.lines.get(fragment.from_line..fragment.to_line) else {
+        return false;
+    };
+    let Some(resolved) = fragment
+        .resolved_lines
+        .as_mut()
+        .filter(|resolved| resolved.len() == lines.len())
+    else {
+        return false;
+    };
+    lines.iter().zip(resolved).all(|(line, resolved)| {
+        let mut segments = resolved.segments.iter_mut();
+        (line.head_run..=line.tail_run)
+            .filter_map(|index| block.runs.get(index).map(|run| (index, run)))
+            .all(|(index, run)| {
+                let head = if index == line.head_run {
+                    line.head_char
+                } else {
+                    0
+                };
+                let tail = (index == line.tail_run).then_some(line.tail_char);
+                segments
+                    .next()
+                    .is_some_and(|segment| move_run_slice(segment, run, head, tail, delta))
+            })
+            && segments.next().is_none()
+    })
+}
+
+/// Moves one resolved run slice by `delta` when it is the slice of `run` the
+/// resolver takes from UTF-16 offset `head` to the line's `tail` offset, or to
+/// the run's end off the line's tail: both its positions, moved, must be the
+/// ones that slice takes from the new run. Runs holding positions of their own
+/// (an inline shape, an inline control widget) are never moved.
+fn move_run_slice(
+    segment: &mut ResolvedSegment,
+    run: &Run,
+    head: usize,
+    tail: Option<usize>,
+    delta: f64,
+) -> bool {
+    let ResolvedSegment { run: slice, text } = segment;
+    let (start, end, expected) = match (slice, run) {
+        (Run::Text(slice), Run::Text(run))
+            if slice.inline_sdt_widget.is_none() && run.inline_sdt_widget.is_none() =>
+        {
+            // A strict slice of a run's text is always shorter than the text.
+            let expected = if head == 0 && text.len() == run.text.len() {
+                (run.pm_start, run.pm_end)
+            } else {
+                let end = tail.unwrap_or_else(|| utf16_len(&run.text));
+                (
+                    run.pm_start.map(|start| start + head as f64),
+                    run.pm_start.map(|start| start + end as f64),
+                )
+            };
+            (&mut slice.pm_start, &mut slice.pm_end, expected)
+        }
+        (Run::Tab(slice), Run::Tab(run)) => (
+            &mut slice.pm_start,
+            &mut slice.pm_end,
+            (run.pm_start, run.pm_end),
+        ),
+        (Run::LineBreak(slice), Run::LineBreak(run)) => (
+            &mut slice.pm_start,
+            &mut slice.pm_end,
+            (run.pm_start, run.pm_end),
+        ),
+        (Run::Field(slice), Run::Field(run)) => (
+            &mut slice.pm_start,
+            &mut slice.pm_end,
+            (run.pm_start, run.pm_end),
+        ),
+        (Run::Image(slice), Run::Image(run))
+            if slice.inline_shape.is_none() && run.inline_shape.is_none() =>
+        {
+            (
+                &mut slice.pm_start,
+                &mut slice.pm_end,
+                (run.pm_start, run.pm_end),
+            )
+        }
+        _ => return false,
+    };
+    let (Some(moved_start), Some(moved_end)) =
+        (moved_position(*start, delta), moved_position(*end, delta))
+    else {
+        return false;
+    };
+    if (moved_start, moved_end) != expected {
+        return false;
+    }
+    (*start, *end) = (moved_start, moved_end);
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -3272,6 +3467,238 @@ mod pagination_rule_tests {
             (1, 9)
         );
         assert!(incremental.placed_blocks * 4 < base.len());
+    }
+
+    /// `count` blocks carrying document positions: two-line paragraphs of text,
+    /// tab, break and image runs, tables, images, shapes, paragraphs of one
+    /// character per line that split across pages and, with `inline_shapes`,
+    /// paragraphs holding an inline shape. Each paragraph in `edits` has
+    /// `extra` more characters.
+    fn positioned_document(
+        count: usize,
+        edits: &[usize],
+        extra: usize,
+        inline_shapes: bool,
+    ) -> Vec<serde_json::Value> {
+        let line = |head: (usize, usize), tail: (usize, usize)| {
+            json!({
+                "headRun": head.0, "headChar": head.1, "tailRun": tail.0, "tailChar": tail.1,
+                "width": 10, "ascent": 8, "descent": 2, "lineHeight": 20,
+            })
+        };
+        let mut position = 0;
+        (0..count)
+            .map(|index| {
+                let start = position;
+                let len = 4 + if edits.contains(&index) { extra } else { 0 };
+                let text = |at: usize| {
+                    json!({"kind": "text", "text": "x".repeat(len), "pmStart": at, "pmEnd": at + len})
+                };
+                let paragraph = |runs: Vec<serde_json::Value>, lines: Vec<serde_json::Value>| {
+                    let end = runs.last().map_or(start + 1, |run| {
+                        run["pmEnd"].as_u64().unwrap() as usize
+                    }) + 1;
+                    let height = lines.len() * 20;
+                    (
+                        json!({"kind": "paragraph", "id": index, "runs": runs, "pmStart": start, "pmEnd": end}),
+                        json!({"kind": "paragraph", "lines": lines, "totalHeight": height}),
+                        end - start,
+                    )
+                };
+                let (block, measure, size) = match index % 8 {
+                    2 if inline_shapes => paragraph(
+                        vec![
+                            text(start + 1),
+                            json!({
+                                "kind": "image", "src": "", "width": 10, "height": 10,
+                                "pmStart": start + 1 + len, "pmEnd": start + 2 + len,
+                                "inlineShape": {
+                                    "id": format!("shape-{index}"), "shapeType": "rect",
+                                    "width": 10, "height": 10, "geometryPath": [], "children": [],
+                                    "pmStart": start + 1 + len, "pmEnd": start + 2 + len,
+                                    "docStart": start + 1 + len, "docEnd": start + 2 + len,
+                                },
+                            }),
+                        ],
+                        vec![line((0, 0), (1, 1))],
+                    ),
+                    3 => (
+                        json!({
+                            "kind": "table", "id": index, "columnWidths": [50],
+                            "rows": [{"id": 1000 + index, "cells": [{"id": 2000 + index, "blocks": []}]}],
+                            "pmStart": start, "pmEnd": start + 6,
+                        }),
+                        json!({
+                            "kind": "table", "columnWidths": [50], "totalWidth": 50, "totalHeight": 20,
+                            "rows": [{"height": 20, "cells": [{"width": 50, "height": 20, "blocks": []}]}],
+                        }),
+                        6,
+                    ),
+                    5 => (
+                        json!({
+                            "kind": "image", "id": index, "src": "", "width": 20, "height": 20,
+                            "pmStart": start, "pmEnd": start + 1,
+                        }),
+                        json!({"kind": "image", "width": 20, "height": 20}),
+                        1,
+                    ),
+                    6 => (
+                        json!({
+                            "kind": "shape", "id": index, "shapeType": "rect", "width": 20,
+                            "height": 20, "geometryPath": [], "children": [],
+                            "pmStart": start, "pmEnd": start + 1,
+                            "docStart": start, "docEnd": start + 1,
+                        }),
+                        json!({"kind": "shape", "width": 20, "height": 20}),
+                        1,
+                    ),
+                    7 => paragraph(
+                        vec![text(start + 1)],
+                        (0..len).map(|offset| line((0, offset), (0, offset + 1))).collect(),
+                    ),
+                    _ => paragraph(
+                        vec![
+                            text(start + 1),
+                            json!({"kind": "tab", "pmStart": start + 1 + len, "pmEnd": start + 2 + len}),
+                            json!({"kind": "lineBreak", "pmStart": start + 2 + len, "pmEnd": start + 3 + len}),
+                            json!({
+                                "kind": "image", "src": "", "width": 10, "height": 10,
+                                "pmStart": start + 3 + len, "pmEnd": start + 4 + len,
+                            }),
+                            json!({"kind": "text", "text": "yz", "pmStart": start + 4 + len, "pmEnd": start + 6 + len}),
+                        ],
+                        vec![line((0, 0), (2, 0)), line((3, 0), (4, 2))],
+                    ),
+                };
+                position += size;
+                json!({"block": block, "measure": measure})
+            })
+            .collect()
+    }
+
+    #[test]
+    fn incremental_layout_refreshes_retained_pages_as_a_full_pass_lays_them_out() {
+        let count = 64;
+        let previous =
+            layout_document_checkpointed(&mut input(positioned_document(count, &[], 0, true)))
+                .unwrap();
+        let cases: [&[usize]; 6] = [&[1], &[2], &[7], &[1, 33], &[9, 26, 50], &[23, 41]];
+        for edits in cases {
+            let next = positioned_document(count, edits, 3, true);
+            let previous_fingerprints = vec![1_u64; count];
+            let mut next_fingerprints = previous_fingerprints.clone();
+            for &index in edits {
+                next_fingerprints[index] = 2;
+            }
+            let incremental = layout_document_incremental(
+                &mut input(next.clone()),
+                &mut previous.layout.clone(),
+                &previous.checkpoints,
+                &previous_fingerprints,
+                &next_fingerprints,
+                edits[0],
+            )
+            .unwrap();
+            let full = layout_document_checkpointed(&mut input(next)).unwrap();
+            assert_eq!(
+                serde_json::to_string(&incremental.layout).unwrap(),
+                serde_json::to_string(&full.layout).unwrap(),
+                "{edits:?}"
+            );
+            assert_eq!(incremental.checkpoints, full.checkpoints, "{edits:?}");
+        }
+    }
+
+    #[test]
+    fn incremental_layout_resolves_only_the_lines_it_places() {
+        let resolved = |count: usize| {
+            let previous =
+                layout_document_checkpointed(&mut input(positioned_document(count, &[], 0, false)))
+                    .unwrap();
+            let mut next = input(positioned_document(count, &[1], 3, false));
+            let previous_fingerprints = vec![1_u64; count];
+            let mut next_fingerprints = previous_fingerprints.clone();
+            next_fingerprints[1] = 2;
+            let mut previous_layout = previous.layout.clone();
+            crate::work_counters::take();
+            let incremental = layout_document_incremental(
+                &mut next,
+                &mut previous_layout,
+                &previous.checkpoints,
+                &previous_fingerprints,
+                &next_fingerprints,
+                1,
+            )
+            .unwrap();
+            (
+                crate::work_counters::take().resolved_lines,
+                incremental.rebuilt_page_end,
+            )
+        };
+        assert_eq!(resolved(24), resolved(240));
+    }
+
+    /// Each later paragraph's one run is whole on its line, and the cases drop
+    /// or add its end while paragraph 0 grows.
+    #[test]
+    fn retained_text_runs_take_the_positions_a_full_pass_resolves() {
+        let document = |extra: usize, ends: &dyn Fn(usize) -> bool| {
+            let mut position = 0;
+            (0..12)
+                .map(|index| {
+                    let len = 1 + if index == 0 { extra } else { 0 };
+                    let start = position;
+                    position += len + 2;
+                    let mut run =
+                        json!({"kind": "text", "text": "a".repeat(len), "pmStart": start + 1});
+                    if ends(index) {
+                        run["pmEnd"] = json!(start + 1 + len);
+                    }
+                    json!({
+                        "block": {
+                            "kind": "paragraph", "id": index, "runs": [run],
+                            "pmStart": start, "pmEnd": start + len + 2,
+                        },
+                        "measure": {
+                            "kind": "paragraph", "totalHeight": 40,
+                            "lines": [{
+                                "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": len,
+                                "width": 10, "ascent": 8, "descent": 2, "lineHeight": 40,
+                            }],
+                        },
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        let all = |_: usize| true;
+        let none = |_: usize| false;
+        let some = |index: usize| index % 2 == 0;
+        let cases: [(&dyn Fn(usize) -> bool, &dyn Fn(usize) -> bool); 4] =
+            [(&none, &all), (&all, &none), (&some, &all), (&all, &some)];
+        for (case, (before, after)) in cases.into_iter().enumerate() {
+            let previous = layout_document_checkpointed(&mut input(document(0, before))).unwrap();
+            let mut next_fingerprints = vec![1_u64; 12];
+            next_fingerprints[0] = 2;
+            let incremental = layout_document_incremental(
+                &mut input(document(1, after)),
+                &mut previous.layout.clone(),
+                &previous.checkpoints,
+                &[1_u64; 12],
+                &next_fingerprints,
+                0,
+            )
+            .unwrap();
+            let full = layout_document_checkpointed(&mut input(document(1, after))).unwrap();
+            assert!(
+                incremental.placed_blocks < full.placed_blocks,
+                "case {case}"
+            );
+            assert_eq!(
+                serde_json::to_string(&incremental.layout).unwrap(),
+                serde_json::to_string(&full.layout).unwrap(),
+                "case {case}"
+            );
+        }
     }
 
     #[test]

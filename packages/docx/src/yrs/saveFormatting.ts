@@ -216,6 +216,7 @@ export interface TableSaveAttrs extends Record<string, unknown> {
   tableLayout?: TableFormatting['layout'];
   floating?: TableFormatting['floating'];
   cellMargins?: { top?: number; bottom?: number; left?: number; right?: number };
+  _originalResolvedMargins?: TableSaveAttrs['cellMargins'];
   look?: TableFormatting['look'];
   bidi?: boolean;
   _originalFormatting?: TableFormatting;
@@ -223,6 +224,9 @@ export interface TableSaveAttrs extends Record<string, unknown> {
 }
 
 export function tableAttrsToFormatting(attrs: TableSaveAttrs): TableFormatting | undefined {
+  const margins = sameValue(attrs.cellMargins, attrs._originalResolvedMargins)
+    ? attrs._originalFormatting?.cellMargins
+    : attrs.cellMargins ? measurementMargins(attrs.cellMargins) : undefined;
   if (attrs._originalFormatting) {
     const orig = attrs._originalFormatting;
     const result = { ...orig };
@@ -247,9 +251,7 @@ export function tableAttrsToFormatting(attrs: TableSaveAttrs): TableFormatting |
             }
           : undefined;
     }
-    if (attrs.cellMargins) {
-      result.cellMargins = measurementMargins(attrs.cellMargins);
-    }
+    if (margins !== orig.cellMargins) result.cellMargins = margins;
     return result;
   }
 
@@ -260,7 +262,7 @@ export function tableAttrsToFormatting(attrs: TableSaveAttrs): TableFormatting |
     attrs.justification ||
     attrs.tableLayout ||
     attrs.floating ||
-    attrs.cellMargins ||
+    margins ||
     attrs.look ||
     attrs.bidi;
   if (!hasFormatting) return undefined;
@@ -276,7 +278,7 @@ export function tableAttrsToFormatting(attrs: TableSaveAttrs): TableFormatting |
     justification: attrs.justification || undefined,
     layout: attrs.tableLayout || undefined,
     floating: attrs.floating || undefined,
-    cellMargins: attrs.cellMargins ? measurementMargins(attrs.cellMargins) : undefined,
+    cellMargins: margins,
     look: attrs.look || undefined,
     bidi: attrs.bidi || undefined,
   };
@@ -343,6 +345,8 @@ export interface TableCellSaveAttrs extends Record<string, unknown> {
   margins?: { top?: number; bottom?: number; left?: number; right?: number };
   _originalFormatting?: TableCellFormatting;
   _originalResolvedFill?: string;
+  _originalResolvedBorders?: TableCellSaveAttrs['borders'];
+  _originalResolvedMargins?: TableCellSaveAttrs['margins'];
   cellMarker?:
     | { kind: 'ins'; info: RevisionInfo }
     | { kind: 'del'; info: RevisionInfo }
@@ -359,6 +363,11 @@ export interface TableCellSaveAttrs extends Record<string, unknown> {
 export function tableCellAttrsToFormatting(
   attrs: TableCellSaveAttrs
 ): TableCellFormatting | undefined {
+  const borders = sameValue(attrs.borders, attrs._originalResolvedBorders)
+    ? attrs._originalFormatting?.borders : attrs.borders || undefined;
+  const margins = sameValue(attrs.margins, attrs._originalResolvedMargins)
+    ? attrs._originalFormatting?.margins
+    : attrs.margins ? cellMargins(attrs.margins) : undefined;
   if (attrs._originalFormatting) {
     const orig = attrs._originalFormatting;
     const result = { ...orig };
@@ -380,8 +389,8 @@ export function tableCellAttrsToFormatting(
     } else if (orig.shading) {
       result.shading = undefined;
     }
-    if (attrs.borders) result.borders = attrs.borders;
-    if (attrs.margins) result.margins = cellMargins(attrs.margins);
+    if (borders !== orig.borders) result.borders = borders;
+    if (margins !== orig.margins) result.margins = margins;
     if (attrs.textDirection !== (orig.textDirection || undefined)) {
       result.textDirection = attrs.textDirection || undefined;
     }
@@ -394,8 +403,8 @@ export function tableCellAttrsToFormatting(
     attrs.width != null ||
     attrs.verticalAlign ||
     attrs.backgroundColor ||
-    attrs.borders ||
-    attrs.margins ||
+    borders ||
+    margins ||
     attrs.textDirection;
   if (!hasFormatting) return undefined;
   return {
@@ -410,8 +419,8 @@ export function tableCellAttrsToFormatting(
     verticalAlign: attrs.verticalAlign || undefined,
     textDirection: attrs.textDirection || undefined,
     shading: attrs.backgroundColor ? { fill: { rgb: attrs.backgroundColor } } : undefined,
-    borders: attrs.borders,
-    margins: attrs.margins ? cellMargins(attrs.margins) : undefined,
+    borders,
+    margins,
   };
 }
 

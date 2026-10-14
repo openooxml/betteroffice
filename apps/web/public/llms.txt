@@ -1,125 +1,97 @@
 # BetterOffice
 
-> BetterOffice is an Apache-2.0 office suite from the OpenOOXML project: Word-faithful DOCX, Excel-faithful XLSX, and PowerPoint-faithful PPTX editors and viewers. The OOXML engines are written in Rust, in-house, and ship three ways — compiled to WebAssembly for the browser packages, published to crates.io as native crates for servers, and compiled into Python wheels on PyPI. Files are edited in their own format, with no conversion to an intermediate model on open or save. Real-time collaboration is a Yrs CRDT inside the engine rather than a server-side merge, and every engine also runs headless for server-side and agent pipelines.
+> BetterOffice is an Apache-2.0 office suite from the OpenOOXML project: Word-faithful DOCX, Excel-faithful XLSX and PowerPoint-faithful PPTX editors and viewers on OOXML engines written in Rust. The engines run in the browser through WebAssembly, natively as Rust crates and in Python wheels. Files are edited in their own format with no intermediate model, collaboration is a Yrs CRDT inside the engine, and every engine also runs headless for servers and agent pipelines.
 
-DOCX, XLSX, and PPTX are available today as full editors or read-only viewers. VSDX diagram editing is available from source and not yet published: its React editor scrolls and pans around a work surface with the page centred, with Space- or middle-drag panning and Ctrl+wheel zoom anchored under the pointer.
+DOCX, XLSX and PPTX are published on npm, crates.io and PyPI. VSDX diagram support builds from source and has no published packages. Versions differ by format and registry; the registries and the [release notes](https://github.com/openooxml/betteroffice/releases) list current versions, and the documentation holds the API reference.
 
-For current versions, use the linked registries and [release notes](https://github.com/openooxml/betteroffice/releases). Versions differ by format and registry; package changelogs record shipped changes.
+Used by: [OpenCode](https://opencode.ai), [atira](https://atira.ai), [Ketryx](https://www.ketryx.com) and others.
+
+## Features
+
+Agents propose edits that people review in the editor as attributed tracked changes, inline diffs and previews, and an accepted proposal undoes as one step. Untouched file parts survive a round trip, and everything is Apache-2.0 and self-hostable; see [all features](https://docs.betteroffice.dev/docs).
+
+## Docs
+
+- [Documentation](https://docs.betteroffice.dev): guides and API reference.
+- [Packages](https://docs.betteroffice.dev/docs/packages): what to install from npm, crates.io and PyPI.
+- [JavaScript guide](https://docs.betteroffice.dev/docs/javascript): React editors and framework-free cores.
+- [Rust guide](https://docs.betteroffice.dev/docs/rust): native format facades and per-layer crates.
+- [Python guide](https://docs.betteroffice.dev/docs/python): installation and examples.
+- [Agents guide](https://docs.betteroffice.dev/docs/agents): the agent SDK and MCP server.
+- [Collaboration guide](https://docs.betteroffice.dev/docs/collaboration): connecting editors and deploying a relay.
+- [VSDX guide](https://docs.betteroffice.dev/docs/vsdx): the diagram editor source preview.
 
 ## npm packages
 
-DOCX, XLSX, PPTX, agent and font packages are published under the `@betteroffice` scope, Apache-2.0. The `-react` packages are drop-in editor components; the format packages without that suffix are the framework-free cores for custom UIs and headless use.
+Published under the `@betteroffice` scope. The editors render inside your app with no iframe or external service, so documents never leave the page. The `-react` packages are drop-in editor components; the packages without that suffix are framework-free cores for custom UIs and headless use. There is no Vue or other framework package.
 
-- [@betteroffice/agents](https://docs.betteroffice.dev/docs/agents): DOCX agent tools through a TypeScript SDK and local stdio MCP server. Bounded outline, literal search and reads return paragraph references and occurrence handles; proposals replace exact matches, refuse stale targets, preserve surrounding formatting, and can be reviewed, rendered and exported before acceptance. Accepted edits form one undo step, with optional attributed tracked changes. Export writes a new DOCX; verification checks save and reopen, not visual or semantic correctness. `openDocx` owns a document session; `attachDocx` shares a host's live session. The Node renderer returns PNG pages. Initial XLSX/PPTX adapters are also available: `openXlsx` reads bounded A1 ranges and proposes whole-cell inputs/formulas using cell handles; `openPptx` searches slide paragraphs and proposes exact text replacements using match handles. Both support review, atomic acceptance, proposed export, and save/reopen checks. XLSX search is case-sensitive over displayed values; formulas use the engine calculation support. Any committed change invalidates outstanding XLSX/PPTX proposals. PNG rendering, live-session attachment, and tracked changes remain DOCX-only.
-
-- [@betteroffice/docx](https://www.npmjs.com/package/@betteroffice/docx): framework-free DOCX core — OOXML parse/serialize, CRDT editing, text shaping, pagination, canvas rendering. Saving round-trips against the original package, so untouched parts keep their source bytes. Unrecognized drawing markup inside runs survives editor saves. Version-checked atomic text and paragraph batches: `readParagraphs`/`findText` return text with a session version (one U+FFFC per inline atom), `listStories`/`readStories` list every story with its kind and read many stories in one call, and `applyEdits` commits every step as one undo step or returns a typed refusal with nothing changed. Text steps stay within one paragraph and cannot replace inline atoms; paragraph and style steps need a session opened from DOCX bytes. `exportDocxStructured`/`exportDocxMarkdown` (and `exportStructured`/`exportMarkdown` on a session) export read-only structured JSON or Markdown with source anchors: an explicit `revisionView` (accepted, original or markup) and story selection, diagnostics for everything omitted, block and byte limits, and cached field results never evaluated. `exportDocxStructuredWithPages` (bytes plus the fonts to lay out with) and `exportStructuredWithPages` on a session attach a version-checked page map: physical pages with displayed page labels, header, footer and note occurrences, exact text ranges per page, table row windows and optional page geometry; stale or incomplete layouts are refused, and `renderDocxMarkdownWithPages` adds optional page markers. Native Rust and Python structured exports do not yet generate page maps automatically. `listDocxContentControls`/`findDocxContentControls` (and `listContentControls`/`findContentControls` on a session, with a version) list content controls in document order with tag, alias, type, lock, placement, anchor and current text; `setContentControlText` batch steps fill plain- and rich-text controls by engine id, unique tag or unique `ooxmlId` (the authored `w:id`, which survives save and reopen) and clear their placeholder, refusing missing or duplicate tags and `ooxmlId`s and locked, data-bound or nested controls with nothing changed. Checkbox, dropdown and date controls keep their typed setters. `compareDocx(original, revised, { author, date })` compares body paragraph text in two DOCX files with unchanged paragraph structure and returns the original with attributed tracked insertions and deletions, which reopen, accept and reject in BetterOffice; whole-paragraph additions, removals and moves, table, formatting, field and style changes, existing revisions and changes outside the body are refused with diagnostics, never partially redlined. Word validation is reported separately, and native Rust and Python comparison is not available yet. `YrsSession.setCommentRanges()` explicitly reanchors existing comments, preserving identity, metadata, undo/redo, and exported ranges. `YrsSession.proposeChanges()` records a round of tracked changes under host proposal ids, targeted by paragraph anchor (such as a persisted Word paragraph ID) and search with a one-based or `'all'` non-overlapping occurrence, as one batch outside undo history or a typed refusal with nothing changed; retries of the same id and edit are no-ops. `setProposalStates()` accepts, rejects or restores proposals as a reversible preview through the `revisionPreview` render environment entry, without changing the document, its version or undo history. `createFontLoadScope` keeps the font loads and notifications of several editors on one page apart, and `registerDocumentFaces` registers a document's embedded faces under their own family names, or under an alias when another open document embeds different faces under the same name.
-- [@betteroffice/docx-react](https://www.npmjs.com/package/@betteroffice/docx-react): the DOCX editor and viewer as a React component — toolbar, paginated canvas, comments, tracked changes. `onSaveRequest` delegates menu/shortcut saves before export; `flushPendingInput()` awaits accepted input and selection before host session access; the ref's `readParagraphs`, `findText`, `validateEdits` and `applyEdits` run version-checked edit batches after flushing input, `listContentControls`/`findContentControls` list content controls to fill with them, and `exportStructuredWithPages` exports structured content with the page map of the editor's current layout. The ref's `proposeChanges`, `setProposalStates` and `getProposals` run host proposals shown with the built-in tracked-change highlighting, with accept, reject and undo previews that never save; `allowHostProposals` admits them in a read-only viewer while typing, edit batches, commands and plugin writes stay blocked. `getMemoryStats()` reports the wasm memories of the main thread and the resident worker against the 4 GiB wasm32 limit, and `onMemoryPressure` reports when the fullest one crosses a warning or critical budget; `memoryBudget.workerLimitBytes` caps the resident worker's allocations, and a worker that runs out of memory twice is reported as `ResidentWorkerOutOfMemoryError` through `onError`. `ref.commands` exposes serializable command state with disabled reasons and ordered execution; the `toolbar` prop and public toolbar parts compose built-in controls with host actions, inside or outside the editor, with an accessible overflow menu. Host-owned plugins (`plugins`, `defineDocxPlugin`) add panels, overlays, sidebar items and commands with lifecycle events and page-aware anchor geometry (`geometry.getAnchorGeometry`) for proposals, revisions, paragraphs, search matches and text ranges, including headers and footers, and `read.listStories`/`read.readStories` list every story with its kind and read all or chosen stories in one call; they read and navigate by default, and built-in commands and edit batches need an explicit `pluginGrants` entry that is checked again, with the editor mode and document policy, whenever a write runs. Several editors can share one page, each with its own font notifications and embedded faces.
-- [@betteroffice/docx-i18n](https://www.npmjs.com/package/@betteroffice/docx-i18n): UI locale strings for the DOCX React editor.
-- [@betteroffice/fonts](https://www.npmjs.com/package/@betteroffice/fonts): bundled metric-compatible Latin fonts plus Hebrew and Arabic coverage faces for deterministic document measurement. Once it is configured with `configureDefaultFonts`, the DOCX editor also takes the browser CSS faces for a document's fonts from the bundle, so it makes no Google Fonts request.
-- [@betteroffice/fonts-cjk](https://www.npmjs.com/package/@betteroffice/fonts-cjk): optional CJK coverage faces for Chinese, Japanese, and Korean documents.
-- [@betteroffice/xlsx](https://www.npmjs.com/package/@betteroffice/xlsx): framework-free XLSX core — SpreadsheetML parse/serialize, formula recalculation, grid display lists, hit-testing, PNG export, and agent proposals a human accepts or rejects. Version-checked atomic cell batches: `readCells`/`findText` return values, formulas and display text with a session version, and `applyEdits` commits cell inputs, formulas, number formats and style patches as one recalculated undo step or returns a typed refusal with nothing changed. Batches do not insert or delete rows, columns or sheets, and refuse writes to merged-cell followers, array-formula cells and protected sheets. XLSX exports bounded sparse worksheet content and Markdown with positional anchors, formulas, stored values, formatted text, explicit hidden-content options, and omission diagnostics: `exportStructured`/`exportMarkdown` on a `WorkbookHandle` carry the session version, and `exportXlsxStructured`, `exportXlsxMarkdown` and `renderXlsxMarkdown` work from bytes or content without a session. Export does not recalculate formulas.
-- [@betteroffice/xlsx-react](https://www.npmjs.com/package/@betteroffice/xlsx-react): the spreadsheet editor and viewer as a React component, with host save interception, awaited input flushing, and client-coordinate pointer queries. `api.commands` exposes serializable command state with disabled reasons, run after pending cell and formula input; the `toolbar` prop and public toolbar parts, including the formula bar, compose built-in controls with host actions, with an accessible overflow menu. The `onReady` API's `version`, `readCells`, `findText`, `validateEdits` and `applyEdits` commit pending drafts, nudges and pastes first, and reject with `XlsxCommandAdmissionError` (`input-failed`, `gesture-active`, `document-replaced`) when they cannot. Host-owned plugins (`plugins`, `defineXlsxPlugin`) add panels, overlays on the grid and commands with lifecycle events, sheet/cell/chart selection and navigation, and grid geometry in overlay pixels (frozen panes included); they read and navigate by default, and built-in commands and edit batches need an explicit `pluginGrants` entry that is checked again, with `readOnly`, whenever a write runs.
-- [@betteroffice/xlsx-i18n](https://www.npmjs.com/package/@betteroffice/xlsx-i18n): UI locale strings for the XLSX React editor.
-- [@betteroffice/pptx](https://www.npmjs.com/package/@betteroffice/pptx): framework-free PPTX core — PresentationML parse, deck model, masters and layouts, slide display lists, canvas rendering, image insertion and shape ordering. Hosts can set auto/manual undo capture, insert explicit undo boundaries, reposition existing comments on their slide, and anchor caret positions that follow later edits, undo and remote updates. Untouched slides keep their source bytes on save. Version-checked atomic edit batches: `readContent`/`findText` return slides and story text with a session version, and `applyEdits` commits text, formatting, alignment, speaker-notes and shape rectangle, fill and outline steps as one undo step or returns a typed refusal with nothing changed. Text steps stay within one paragraph and leave fields and line breaks whole; ids and versions are session-scoped. Structured export: `exportStructured`/`exportMarkdown` on a session (with the version they read) and `exportPptxStructured`/`exportPptxMarkdown`/`renderPptxMarkdown` for bytes return slides in deck order with their shape trees, text stories (paragraph levels, list markers, fields, links), tables with merges, and placeholders with alternative text for pictures, media, charts, SmartArt and embedded objects; every record carries a session or snapshot anchor and source provenance, hidden slides and shapes, notes and comments are explicit options, omissions are listed as diagnostics, and output stops at block and byte limits. Exports read committed state and change nothing.
-- [@betteroffice/pptx-react](https://www.npmjs.com/package/@betteroffice/pptx-react): the slides editor and viewer as a React component, with host save interception, awaited input flushing, and client-coordinate pointer queries. `api.commands` exposes serializable command state with disabled reasons and execution ordered after pending input; the `toolbar` prop and public toolbar parts compose built-in controls with host actions, inside or outside the editor, with an accessible overflow menu. The editor API's `readContent`, `findText`, `validateEdits` and `applyEdits` run version-checked edit batches after flushing input. Host-owned plugins (`plugins`, `definePptxPlugin`) add panels, overlays on the slide and commands with lifecycle events, slide/shape/text selection and navigation, and slide-EMU geometry; they read and navigate by default, and built-in commands and edit batches need an explicit `pluginGrants` entry that is checked again, with `readOnly`, whenever a write runs.
-- [@betteroffice/pptx-i18n](https://www.npmjs.com/package/@betteroffice/pptx-i18n): UI locale strings for the PPTX React editor.
-
-The DOCX and PPTX React editors render TIFF images in the browser (PPTX additionally renders supported bitmap-only WMF and EMF wrappers). The DOCX editor draws EMF, EMF+ and WMF pictures, text and embedded bitmaps included, and reports any it cannot draw in the document's parse warnings. Custom browser image loaders can use the same conversion with `presentationImageBlob(bytes)` from `@betteroffice/pptx`.
-
-PPTX pictures stored as SVG render in both backends. The browser packages hand the document to the browser's own SVG decoding. The Rust and Python `render_png` paths rasterize it natively under a sandbox: shapes, paths, fills, strokes, linear and radial gradients, clip paths and `<use>` draw, styled by attributes or by plain type, class and id stylesheet rules, with no DTD, no reference outside the document, and the cost of expanding and painting the document budgeted before any of it runs. That native rasterizer does not draw text, embedded raster images, markers, filters, masks or patterns; a hyperlink or an embedded image leaves the rest of the picture drawn, and a document past the sandbox's budgets, or one that both strokes and rotates or skews, is counted as a skipped image. A tiled SVG repeats at its intrinsic size. A picture that carries both a raster image and an SVG renders the raster.
-
-DOCX `RenderedDomContext.getPositionAtPoint(clientX, clientY)` resolves a pointer to
-a display position, page, and document region without changing focus or selection.
-`DocxEditorRef.getPositionAtPoint` and plugin `geometry.getPositionAtPoint` add the
-`version` the layout shows and a collapsed accepted-view `target` for edit batch steps,
-in body, header, footer, note and table cell stories, and return null while input is
-pending or the painted layout is behind the document.
-
-The XLSX and PPTX JavaScript cores expose opt-in operation profiles for edit and render/layout timings. Ordinary methods retain their existing return types; see the [JavaScript guide](https://docs.betteroffice.dev/docs/javascript) for the profiling APIs.
-
-There is no Vue package. React and framework-free JavaScript are the supported entry points.
-
-## VSDX source preview
-
-VSDX support is available from source and is not yet published. Batch shape-data editing validates every row before applying a change, with per-row receipts and undo. The headless Rust exporter creates editable PowerPoint slides and Word diagrams, with shape-data tables and export reports. Controls the engine would refuse are disabled rather than offered: locks, GUARD and SETATREF redirection are read from the engine's own mutation policy, not re-derived in the browser.
-
-DOCX hosts can call `YrsSession.addUndoBoundary()` to separate actions, and use
-`setUndoCaptureMode('auto' | 'manual')` for typing coalescence or explicit grouping.
-
-DOCX session keys (`YrsLoc.paraId`) are not Word paragraph IDs and are never saved as
-`w14:paraId`; a session anchor resolves on every replica of one collaborative session,
-and each seeding open (`openDocx`, `seedFromDocx`) starts a new session.
-`saveYrsDocx(session)` returns the saved bytes and, per saved paragraph with a Word
-paragraph ID, a persisted anchor `{ story: { partUri, kind, itemId? }, paraId }` that
-`YrsSession.resolveParagraphAnchor()` resolves after reopening. Source paragraphs without
-an ID have no persisted anchor until `persistParagraphIds()` assigns one, across every
-story part, comments and note separators included. Repeated source IDs resolve as
-`ambiguous`; table, cell and content-control identities are not persisted.
+- [@betteroffice/docx-react](https://www.npmjs.com/package/@betteroffice/docx-react): the DOCX editor and viewer as a React component, with toolbar, paginated canvas, comments and tracked changes. Use it to embed Word documents in a React app.
+- [@betteroffice/docx](https://www.npmjs.com/package/@betteroffice/docx): the framework-free DOCX core: parsing, CRDT editing, pagination and canvas rendering. Use it for a custom UI or headless DOCX work in JavaScript.
+- [@betteroffice/xlsx-react](https://www.npmjs.com/package/@betteroffice/xlsx-react): the spreadsheet editor and viewer as a React component. Use it to embed Excel workbooks in a React app.
+- [@betteroffice/xlsx](https://www.npmjs.com/package/@betteroffice/xlsx): the framework-free XLSX core: parsing, formula recalculation, grid rendering and PNG export. Use it for a custom grid UI or headless workbook processing.
+- [@betteroffice/pptx-react](https://www.npmjs.com/package/@betteroffice/pptx-react): the slides editor and viewer as a React component. Use it to embed PowerPoint decks in a React app.
+- [@betteroffice/pptx](https://www.npmjs.com/package/@betteroffice/pptx): the framework-free PPTX core: parsing, the slide model with masters and layouts, editing and canvas rendering. Use it for a custom slides UI or headless deck processing.
+- [@betteroffice/agents](https://www.npmjs.com/package/@betteroffice/agents): tools for agents to search, read, edit and preview DOCX, XLSX and PPTX files through a TypeScript SDK or a local MCP server. Use it to let an agent work through large Office files the way it works through source code.
+- [@betteroffice/fonts](https://www.npmjs.com/package/@betteroffice/fonts): bundled open fonts (metric-compatible Latin faces, common presentation families, Hebrew and Arabic coverage) for deterministic layout.
+- [@betteroffice/fonts-cjk](https://www.npmjs.com/package/@betteroffice/fonts-cjk): optional Chinese, Japanese and Korean coverage fonts.
+- [@betteroffice/docx-i18n](https://www.npmjs.com/package/@betteroffice/docx-i18n), [@betteroffice/xlsx-i18n](https://www.npmjs.com/package/@betteroffice/xlsx-i18n), [@betteroffice/pptx-i18n](https://www.npmjs.com/package/@betteroffice/pptx-i18n): UI locale strings for the React editors.
 
 ## Rust crates
 
-DOCX, XLSX and PPTX crates are published to crates.io, Apache-2.0. Use a format facade unless you need a single layer of the pipeline.
+Published to crates.io. Use a format facade unless you need a single layer of the pipeline.
 
-- [betteroffice-docx](https://crates.io/crates/betteroffice-docx): typed native API for opening, editing, laying out, and saving DOCX documents, exporting them as read-only structured JSON or Markdown with source anchors, and listing their content controls.
-- [betteroffice-xlsx](https://crates.io/crates/betteroffice-xlsx): typed native API for opening, editing, collaborating, calculating, rendering, and saving XLSX workbooks, including version-checked atomic cell batches and structured JSON and Markdown export that never recalculates.
-- [betteroffice-pptx](https://crates.io/crates/betteroffice-pptx): typed native API for opening, editing, collaborating, and rendering PPTX presentations, including version-checked edit batches and structured JSON and Markdown export with anchors and omission diagnostics.
-- [betteroffice-xlsx-calc](https://crates.io/crates/betteroffice-xlsx-calc): the standalone formula engine — lexer, parser, dependency graph, and evaluator, written spec-first from ECMA-376.
-- [betteroffice-opc](https://crates.io/crates/betteroffice-opc): the OPC container reader/writer with zip-bomb and path-traversal limits, shared by all four formats.
+- [betteroffice-docx](https://crates.io/crates/betteroffice-docx): the native DOCX facade for parsing, editing, layout and saving.
+- [betteroffice-xlsx](https://crates.io/crates/betteroffice-xlsx): the native XLSX facade for editing, calculation, collaboration, rendering and saving.
+- [betteroffice-pptx](https://crates.io/crates/betteroffice-pptx): the native PPTX facade for parsing, editing, rendering and saving.
+- [betteroffice-xlsx-calc](https://crates.io/crates/betteroffice-xlsx-calc): the standalone XLSX formula engine.
+- [betteroffice-opc](https://crates.io/crates/betteroffice-opc): the OPC container reader and writer, with zip-bomb and path-traversal limits.
 
-The native XLSX facade also offers `Workbook::apply_ops_profiled` for edit stage timings; see the [Rust guide](https://docs.betteroffice.dev/docs/rust).
-
-The native PPTX facade's slide render reports the font families it substituted: `RenderedSlide::font_substitutions` names each family the slide asked for that no registered face matched, the family drawn instead, and the first shape that asked for it.
-
-The per-layer crates expose individual pipeline stages:
+Per-layer crates for single pipeline stages:
 
 - [betteroffice-docx-parse](https://crates.io/crates/betteroffice-docx-parse): WordprocessingML parsing and the typed DOCX model.
 - [betteroffice-docx-layout](https://crates.io/crates/betteroffice-docx-layout): DOCX pagination and display lists.
 - [betteroffice-docx-edit](https://crates.io/crates/betteroffice-docx-edit): the Yrs editing schema for DOCX.
-- [betteroffice-docx-raster](https://crates.io/crates/betteroffice-docx-raster): the tiny-skia backend that paints a DOCX display list to PNG.
-- [betteroffice-xlsx-model](https://crates.io/crates/betteroffice-xlsx-model): the workbook, sheet, and cell model, IO-free.
-- [betteroffice-xlsx-parse](https://crates.io/crates/betteroffice-xlsx-parse): streaming SpreadsheetML parse and serialize.
-- [betteroffice-xlsx-ops](https://crates.io/crates/betteroffice-xlsx-ops): the invertible op log behind undo, redo, and agent proposals.
-- [betteroffice-xlsx-render](https://crates.io/crates/betteroffice-xlsx-render): grid geometry and the target-agnostic display list.
-- [betteroffice-xlsx-raster](https://crates.io/crates/betteroffice-xlsx-raster): the tiny-skia backend that paints a display list to PNG.
-- [betteroffice-pptx-parse](https://crates.io/crates/betteroffice-pptx-parse): PresentationML parsing and part-preserving package writes.
+- [betteroffice-docx-raster](https://crates.io/crates/betteroffice-docx-raster): paints a DOCX display list to PNG.
+- [betteroffice-xlsx-model](https://crates.io/crates/betteroffice-xlsx-model): the workbook, sheet and cell model.
+- [betteroffice-xlsx-parse](https://crates.io/crates/betteroffice-xlsx-parse): SpreadsheetML parsing and serialization.
+- [betteroffice-xlsx-ops](https://crates.io/crates/betteroffice-xlsx-ops): the invertible op log behind undo, redo and agent proposals.
+- [betteroffice-xlsx-render](https://crates.io/crates/betteroffice-xlsx-render): grid geometry and the display list.
+- [betteroffice-xlsx-raster](https://crates.io/crates/betteroffice-xlsx-raster): paints an XLSX display list to PNG.
+- [betteroffice-pptx-parse](https://crates.io/crates/betteroffice-pptx-parse): PresentationML parsing and package writes.
 - [betteroffice-pptx-edit](https://crates.io/crates/betteroffice-pptx-edit): the Yrs deck model for PPTX.
-- [betteroffice-pptx-render](https://crates.io/crates/betteroffice-pptx-render): slide layout and the PPTX display-list compiler.
-- [betteroffice-pptx-raster](https://crates.io/crates/betteroffice-pptx-raster): the tiny-skia backend that paints a PPTX display list to PNG.
-- [betteroffice-ooxml-text](https://crates.io/crates/betteroffice-ooxml-text): shared text shaping, measurement, and line breaking.
-- [betteroffice-ooxml-diff](https://crates.io/crates/betteroffice-ooxml-diff): the bounded token LCS diff behind PPTX proposal previews and DOCX comparison.
-- [betteroffice-drawingml](https://crates.io/crates/betteroffice-drawingml): the DrawingML colors, themes, and geometry shared by all four formats.
-- [betteroffice-metafile](https://crates.io/crates/betteroffice-metafile): bounded EMF, EMF+ and WMF replay into vector drawings and SVG.
+- [betteroffice-pptx-render](https://crates.io/crates/betteroffice-pptx-render): slide layout and the PPTX display list.
+- [betteroffice-pptx-raster](https://crates.io/crates/betteroffice-pptx-raster): paints a PPTX display list to PNG.
+- [betteroffice-ooxml-text](https://crates.io/crates/betteroffice-ooxml-text): shared text shaping, measurement and line breaking.
+- [betteroffice-ooxml-diff](https://crates.io/crates/betteroffice-ooxml-diff): the token diff behind proposal previews and DOCX comparison.
+- [betteroffice-drawingml](https://crates.io/crates/betteroffice-drawingml): shared DrawingML colors, themes and geometry.
+- [betteroffice-metafile](https://crates.io/crates/betteroffice-metafile): EMF, EMF+ and WMF replay into vector drawings and SVG.
 
 ## Python packages
 
-Published to PyPI, Apache-2.0. The Rust engine is compiled into each wheel — no Word, no Excel, no PowerPoint, no LibreOffice subprocess, no COM. Wheels cover Linux (x86_64, aarch64), macOS (arm64, x86_64), and Windows (x86_64) against the stable ABI for CPython 3.9 and up. The [Python guide](https://docs.betteroffice.dev/docs/python) carries the install line and a first example.
+Published to PyPI. The Rust engine is compiled into each wheel, so no Office installation, LibreOffice or COM is needed. Wheels cover Linux, macOS and Windows for CPython 3.9 and up.
 
-- [betteroffice-docx](https://pypi.org/project/betteroffice-docx/): `pip install betteroffice-docx`. Read paragraphs, tables, and sections, rewrite the text of a plain single-run paragraph, and save back to DOCX with everything the model does not represent reused from the package it opened. `export_structured` and `export_markdown` return the document as read-only structured content or Markdown with source anchors and omission diagnostics, and `list_content_controls`/`find_content_controls` list its content controls (filling them needs a JavaScript session). It also paginates an already-measured projection of the document and rasterizes one page of the resulting display list; no font is compiled into the wheel, so a family you never registered is an error rather than invisible text.
-- [betteroffice-xlsx](https://pypi.org/project/betteroffice-xlsx/): `pip install betteroffice-xlsx`. Open, recalculate, style, render to PNG, and save XLSX workbooks; formulas are evaluated by this engine rather than read back from the file. Yrs collaboration and agent proposals are exposed as byte-level primitives, `read_cells`/`apply_edits` run the same version-checked cell batches as JavaScript, `export_structured`/`export_markdown` export the same anchored JSON and Markdown without recalculating, and opening, recalculating, rendering, and saving release the GIL.
-- [betteroffice-pptx](https://pypi.org/project/betteroffice-pptx/): `pip install betteroffice-pptx`. Read, edit, and save PPTX decks, lay slides out into the display-list contract the canvas paints, and rasterize a slide to PNG with `render_png`, which resolves pictures out of the package. No font ships in the wheel, so `register_font` must supply at least one face before a slide with text lays out. Yrs collaboration is exposed as byte-level primitives, version-checked edit batches take the same typed request dictionaries as the JavaScript core, `export_structured`/`export_markdown` and `export_pptx_structured` return the same structured content and Markdown dictionaries, and a deck is pinned to the thread that opened it.
+- [betteroffice-docx](https://pypi.org/project/betteroffice-docx/): read, edit, lay out and render DOCX documents.
+- [betteroffice-xlsx](https://pypi.org/project/betteroffice-xlsx/): read, recalculate, style, render and save XLSX workbooks, with formulas evaluated by the engine.
+- [betteroffice-pptx](https://pypi.org/project/betteroffice-pptx/): read, edit, lay out, render and save PPTX decks.
 
 ## Collaboration
 
-Every editor replica is a Yrs (Rust Yjs) document, and the provider speaks the standard Yjs sync-v1 wire protocol used by y-websocket. Room routing, authentication, awareness, and reconnection stay transport concerns, so any reliable binary transport works. Updates flow between the connection and the Rust replica without a second JavaScript `Y.Doc`.
+People and agents edit the same document live as peers, with the same undo and tracked-changes attribution, and offline edits sync on reconnect.
 
-The reference Cloudflare relay atomically checkpoints retained binary updates plus a newer tail and rehydrates them on room restart. Joining peers exchange state vectors with the relay to supply missing seeds and offline edits. Checkpoints preserve CRDT identities and pending dependencies; they compact the log without garbage-collecting deleted content or resetting history. The checkpoint must fit the 16 MiB frame budget, and the reference room still expires after 24 idle hours. Permanent file storage and backups remain host responsibilities.
+Every editor replica is a Yrs document, and the providers speak the standard Yjs sync-v1 protocol over any reliable binary transport you supply. The repository includes a reference Cloudflare relay; the [collaboration guide](https://docs.betteroffice.dev/docs/collaboration) covers both.
 
-## Docs and demos
+## Demos and benchmarks
 
-- [Documentation](https://docs.betteroffice.dev): guides and API reference.
-- [Packages](https://docs.betteroffice.dev/docs/packages): what to install from npm, crates.io, and PyPI, and what each one does.
-- [JavaScript guide](https://docs.betteroffice.dev/docs/javascript): React editors, framework-free cores and setup.
-- [Rust guide](https://docs.betteroffice.dev/docs/rust): native format facades and per-layer crates.
-- [Python guide](https://docs.betteroffice.dev/docs/python): bindings, installation and examples.
-- [Collaboration guide](https://docs.betteroffice.dev/docs/collaboration): connect editors through a shared transport.
-- [Visual fidelity results](https://github.com/openooxml/betteroffice#visual-fidelity): published packages and source builds compared with Microsoft Office on selected corpus samples.
+- [Live demos](https://demo.betteroffice.dev): DOCX, XLSX and PPTX editors running in the browser.
+- [Visual fidelity results](https://github.com/openooxml/betteroffice#benchmarks): published packages and source builds compared with Microsoft Office on selected corpus files.
+- [Benchmarks site](https://benchmarks.betteroffice.dev): per-document results for every benchmark sample.
+- [Benchmark summary](https://betteroffice.dev/#benchmarks): BetterOffice and LibreOffice per format on visual similarity to Office, exact page counts, formula accuracy, and render and recalculation time.
 - [Benchmark method](https://github.com/openooxml/betteroffice/tree/main/scripts/office-quality): Office reference captures and image comparison.
-- [Live demos](https://demo.betteroffice.dev): DOCX, XLSX, and PPTX editors running in the browser.
 
 ## Links
 
 - [Website](https://betteroffice.dev): product home.
-- [GitHub](https://github.com/openooxml/betteroffice): source, issues, and roadmap.
+- [GitHub](https://github.com/openooxml/betteroffice): source, issues and roadmap.
 - [OpenOOXML](https://openooxml.org): the project building the engines.
 - [npm organization](https://www.npmjs.com/org/betteroffice): all published packages.
 - [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0): the license for every package and crate.

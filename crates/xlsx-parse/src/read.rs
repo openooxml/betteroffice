@@ -586,7 +586,9 @@ fn parse_worksheet(
                         }
                         sheet.row_styles.insert(row, style);
                     }
-                    let height = attr(&e, b"ht")?.and_then(|v| v.parse::<f64>().ok());
+                    let height = attr(&e, b"ht")?
+                        .and_then(|v| v.parse::<f64>().ok())
+                        .map(|h| h.min(MAX_ROW_HEIGHT_PT));
                     if let Some(height) = height {
                         legacy.row_heights.insert(row, height);
                     }

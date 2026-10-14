@@ -612,7 +612,14 @@ test('direct applyEdits preserves admitted command frame barriers', async () => 
     }
     expect(results[1]).toEqual(results[0]);
     expect((await edited.call.cellInputs(0, 'A1')).cells[0]?.[0]?.input).toBe('7');
-  } finally { await original.dispose(); await edited.dispose(); }
+  } finally {
+    try {
+      await Promise.all([original.call.dispose(), edited.call.dispose()]);
+    } finally {
+      await original.dispose();
+      await edited.dispose();
+    }
+  }
 });
 
 test('restored refused duplicates preserve outer outcomes and retained status isolation', async () => {

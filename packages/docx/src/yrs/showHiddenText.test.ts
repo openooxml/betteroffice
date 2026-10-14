@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -8,6 +8,8 @@ import { createYrsSession, type YrsSession } from './index';
 const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm');
 
 let session: YrsSession;
+
+afterAll(() => session?.destroy());
 
 beforeAll(async () => {
   preloadEditWasm(new Uint8Array(readFileSync(WASM)));

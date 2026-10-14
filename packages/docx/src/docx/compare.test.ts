@@ -468,7 +468,57 @@ describe('compareDocx', () => {
     const styled = (style: string, word: string) =>
       fixture({ body: p(`<w:pPr><w:pStyle w:val="${style}"/></w:pPr>`, run(`The ${word} clause`)), styles });
     await expectRedline(styled('Off', 'old'), styled('Off', 'new'));
-    await expectRefusal(styled('Toggled', 'old'), styled('Toggled', 'new'), 'roundtrip-mismatch');
+    const { docx } = await expectRedline(styled('Toggled', 'old'), styled('Toggled', 'new'));
+    const saved = parseXml(decode(parts(docx)['word/document.xml']!));
+    for (const properties of descendants(saved, 'rPr')) {
+      expect(decode(parts(docx)['word/document.xml']!).slice(properties.start, properties.end)).not.toContain('<w:b');
+    }
+  });
+
+  it('redlines direct bold under bold paragraph and character styles', async () => {
+    const styles =
+      '<w:style w:type="paragraph" w:styleId="BoldParagraph"><w:rPr><w:b/></w:rPr></w:style>' +
+      '<w:style w:type="character" w:styleId="BoldCharacter"><w:rPr><w:b/></w:rPr></w:style>';
+    const styled = (word: string) => fixture({
+      body: p('<w:pPr><w:pStyle w:val="BoldParagraph"/></w:pPr>',
+        run(`The ${word} clause`, '<w:rStyle w:val="BoldCharacter"/><w:b/>')),
+      styles,
+    });
+    const result = await compareDocx(styled('old'), styled('new'), OPTIONS);
+    expect(result.ok).toBe(true);
+    expect(result.diagnostics.some((diagnostic) => diagnostic.code === 'roundtrip-mismatch')).toBe(false);
+    await expectRedline(styled('old'), styled('new'));
+  });
+
+  it.each(['paragraph', 'character'] as const)('redlines direct bold under a %s basedOn bold chain', async (type) => {
+    const styles =
+      `<w:style w:type="${type}" w:styleId="Base"><w:rPr><w:b/></w:rPr></w:style>` +
+      `<w:style w:type="${type}" w:styleId="Derived"><w:basedOn w:val="Base"/><w:rPr><w:b/></w:rPr></w:style>`;
+    const pair = (word: string) => fixture({
+      body: p(
+        type === 'paragraph' ? '<w:pPr><w:pStyle w:val="Derived"/></w:pPr>' : '',
+        run(`The ${word} clause`, (type === 'character' ? '<w:rStyle w:val="Derived"/>' : '') + '<w:b/>')
+      ),
+      styles,
+    });
+    const result = await compareDocx(pair('old'), pair('new'), { author: 'QA', date: '2026-10-14T00:00:00Z' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.diagnostics).toEqual([]);
+    expect(result.changes.map((change) => [change.kind, change.original.text, change.revised.text])).toEqual([
+      ['replacement', 'old', 'new'],
+    ]);
+    const saved = parseXml(decode(parts(result.docx)['word/document.xml']!));
+    const toggles = new Set(['b', 'bCs', 'i', 'iCs', 'caps', 'smallCaps', 'strike', 'dstrike', 'emboss', 'imprint', 'outline', 'shadow', 'vanish']);
+    for (const kind of ['del', 'ins']) {
+      const changedRuns = descendants(saved, kind).flatMap((revision) => descendants(revision, 'r'));
+      expect(changedRuns.length).toBeGreaterThan(0);
+      for (const changedRun of changedRuns) {
+        const properties = changedRun.children.find((child) => isW(child, 'rPr'));
+        expect(properties?.children.filter((child) => child.ns === W && toggles.has(child.local)).map((child) => child.local)).toEqual(['b']);
+        expect(properties?.children.find((child) => isW(child, 'b'))?.attributes.size).toBe(0);
+      }
+    }
   });
 
   it('keeps Unicode, tabs and special hyphens exact in both granularities', async () => {

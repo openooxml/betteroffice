@@ -737,7 +737,7 @@ fn fills_by_ooxml_id_after_save_and_reopen() {
             .unwrap()
             .1
     };
-    assert_ne!(document(&saved), document(&bytes));
+    assert_eq!(document(&saved), document(&bytes));
     let doc = open(&saved);
     let applied = apply(
         &doc,
