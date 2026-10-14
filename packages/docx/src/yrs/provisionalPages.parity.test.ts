@@ -315,6 +315,7 @@ function featureSection(feature: string): string {
 }
 
 function featureBody(feature: string, body: string): string {
+  if (feature === 'unidentified') return body.replace(/ w14:paraId="[^"]+"/g, '');
   const field = (type: string) => `<w:p><w:fldSimple w:instr=" ${type} "><w:r><w:t>9</w:t></w:r></w:fldSimple></w:p>`;
   if (['PAGE', 'NUMPAGES', 'SECTIONPAGES', 'DATE', 'TIME'].includes(feature)) return field(feature) + body;
   if (feature === 'late-NUMPAGES') return body + field('NUMPAGES');
@@ -393,11 +394,12 @@ function flowDocx(feature: string): Uint8Array {
         Array.from({ length: 10 }, (_, index) => flowParagraph(1, `Chain ${index}`, '<w:keepNext/>')).join('') +
         flowParagraph(1, 'Chain end') + tail('Tail') + flowSection();
       break;
+    case 'flow-inline-image':
     case 'flow-image':
       types.push('<Default Extension="png" ContentType="image/png"/>');
       relationships.push('<Relationship Id="rIdImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.png"/>');
       parts.set('word/media/image1.png', PNG);
-      body = opening + flowParagraph(48, 'Filler', third) +
+      body = (feature === 'flow-inline-image' ? flowParagraph(1, 'Before image') : opening + flowParagraph(48, 'Filler', third)) +
         '<w:p><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr><w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">' +
         '<wp:extent cx="1905000" cy="1428750"/><wp:docPr id="1" name="Picture 1"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">' +
         '<pic:pic><pic:nvPicPr><pic:cNvPr id="0" name="image1.png"/><pic:cNvPicPr/></pic:nvPicPr>' +
@@ -719,6 +721,176 @@ function expectSelectionParity(ack: DocxCommandAck, full: DocxCommandAck, requir
   expect(echo!.boundaries).toEqual(completedEcho!.boundaries);
   expect(echo!.styleRuns).toEqual(completedEcho!.styleRuns);
 }
+
+function expectAnsweredSelectionParity(ack: DocxCommandAck, full: DocxCommandAck, completed = true) {
+  expect(selectionPositions(ack.selection)).toEqual(selectionPositions(full.selection));
+  const payload = ack.frame!.payload;
+  const reference = full.frame!.payload;
+  expect(payload.caret.caretRect).toEqual(reference.caret.caretRect);
+  expect(payload.caret.selection).toEqual(reference.caret.selection);
+  expect(payload.selectionRects).toEqual(reference.selectionRects);
+  expect(payload.parts).toEqual(reference.parts);
+  if (completed) {
+    const geometry = (value: typeof payload.geometry) => value && {
+      selection: value.selection,
+      objects: value.objects.map(({ kind, story, rects }) => ({ kind, story, rects })),
+      unbuiltPages: value.unbuiltPages,
+    };
+    expect(payload.geometry).toBeDefined();
+    expect(geometry(payload.geometry)).toEqual(geometry(reference.geometry));
+  } else {
+    expect(payload.caret.caretRect).not.toBeNull();
+    expect(payload.selectionRects).toEqual([]);
+    expect(payload.geometry?.selection ?? []).toEqual(reference.geometry!.selection);
+  }
+}
+
+for (const [clickCount, label] of [[2, 'word'], [3, 'paragraph']] as const) {
+  test(`prefix ${label} click answers the full selection frame`, async () => {
+    const f = await commandFixture('plain', false, { virtualTime: true });
+    const full = await commandFixture('plain', false, { full: true, virtualTime: true });
+    try {
+      expect(f.initial.frame.payload.layoutProvisional).toBe(true);
+      const ack = await sendCommand(f, 1, 'selectPoint', { ...commandPoint(f), clickCount });
+      const reference = await sendCommand(full, 1, 'selectPoint', { ...commandPoint(full), clickCount });
+      expect(reference.frame!.payload.selectionRects!.length).toBeGreaterThan(0);
+      expectAnsweredSelectionParity(ack, reference);
+      expect(ack.frame!.payload.layoutProvisional).not.toBe(true);
+      expect(f.calls).toContain('layoutDocumentWithRegionsRetained');
+    } finally { f.destroy(); full.destroy(); }
+  });
+}
+
+for (const gesture of ['shift click', 'shift right', 'shift down'] as const) {
+  test(`prefix ${gesture} answers the full selection frame`, async () => {
+    const f = await commandFixture('plain', false, { virtualTime: true });
+    const full = await commandFixture('plain', false, { full: true, virtualTime: true });
+    try {
+      await sendCommand(f, 1, 'selectPoint', commandPoint(f));
+      await sendCommand(full, 1, 'selectPoint', commandPoint(full));
+      const kind = gesture === 'shift click' ? 'extendSelection' : 'navigate';
+      const point = commandPoint(f, 0, 24);
+      const payload = gesture === 'shift click' ? { ...point, modifiers: { ...point.modifiers, shift: true } }
+        : gesture === 'shift right' ? { unit: 'character' as const, direction: 'forward' as const, extend: true }
+          : { unit: 'line' as const, direction: 'down' as const, extend: true, goalX: point.x };
+      const ack = await sendCommand(f, 2, kind, payload);
+      const reference = await sendCommand(full, 2, kind, payload);
+      expect(reference.frame!.payload.selectionRects!.length).toBeGreaterThan(0);
+      expectAnsweredSelectionParity(ack, reference);
+      expect(ack.frame!.payload.layoutProvisional).not.toBe(true);
+      expect(f.calls).toContain('layoutDocumentWithRegionsRetained');
+    } finally { f.destroy(); full.destroy(); }
+  });
+}
+
+test('prefix mid-line shift click then shift down preserves the full focus column', async () => {
+  const f = await commandFixture('plain', false, { virtualTime: true });
+  const full = await commandFixture('plain', false, { full: true, virtualTime: true });
+  try {
+    await sendCommand(f, 1, 'selectPoint', commandPoint(f, 0, 4));
+    await sendCommand(full, 1, 'selectPoint', commandPoint(full, 0, 4));
+    const shifted = await sendCommand(f, 2, 'extendSelection', commandPoint(f, 0, 24));
+    const shiftedFull = await sendCommand(full, 2, 'extendSelection', commandPoint(full, 0, 24));
+    const goal = (ack: DocxCommandAck, fixture: CommandFixture) => {
+      const payload = ack.frame!.payload;
+      const rect = payload.selectionRects?.at(-1);
+      return payload.caret.caretRect?.x ?? (rect ? rect.x + rect.width : fixture.full.pages[0]!.page.contentBounds!.x);
+    };
+    const ack = await sendCommand(f, 3, 'navigate', {
+      unit: 'line', direction: 'down', extend: true, goalX: goal(shifted, f),
+    });
+    const reference = await sendCommand(full, 3, 'navigate', {
+      unit: 'line', direction: 'down', extend: true, goalX: goal(shiftedFull, full),
+    });
+    expect(reference.selection!.focus.offset).toBeGreaterThan(shiftedFull.selection!.focus.offset);
+    expectAnsweredSelectionParity(ack, reference);
+    expectAnsweredSelectionParity(shifted, shiftedFull);
+  } finally { f.destroy(); full.destroy(); }
+});
+
+test('prefix inline image click answers with full object geometry', async () => {
+  const f = await commandFixture('flow-inline-image', false, { virtualTime: true });
+  const full = await commandFixture('flow-inline-image', false, { full: true, virtualTime: true });
+  try {
+    expect(f.initial.frame.payload.layoutProvisional).toBe(true);
+    const image = f.full.pages[0]!.page.primitives.find(primitive => primitive.kind === 'image');
+    if (!image || image.kind !== 'image') throw new Error('Missing inline image');
+    const point = { ...commandPoint(f), x: image.x + image.w / 2, y: image.y + image.h / 2 };
+    const ack = await sendCommand(f, 1, 'selectPoint', point);
+    const reference = await sendCommand(full, 1, 'selectPoint', point);
+    expect(reference.frame!.payload.geometry!.objects.some(object => object.kind === 'image')).toBe(true);
+    expectAnsweredSelectionParity(ack, reference);
+    expect(ack.frame!.payload.layoutProvisional).not.toBe(true);
+    expect(f.calls).toContain('layoutDocumentWithRegionsRetained');
+  } finally { f.destroy(); full.destroy(); }
+});
+
+test('prefix part click answers with full part geometry', async () => {
+  const f = await commandFixture('header-PAGE', false, { virtualTime: true });
+  const full = await commandFixture('header-PAGE', false, { full: true, virtualTime: true });
+  try {
+    expect(f.initial.frame.payload.layoutProvisional).toBe(true);
+    const header = f.full.pages[0]!.page.header!;
+    const run = header.primitives.find(primitive => primitive.kind === 'glyphRun');
+    if (!run || run.kind !== 'glyphRun') throw new Error('Missing header text');
+    const point = { ...commandPoint(f), x: run.glyphs[0]!.x, y: run.glyphs[0]!.y - run.size / 2 };
+    const ack = await sendCommand(f, 1, 'selectPoint', point);
+    const reference = await sendCommand(full, 1, 'selectPoint', point);
+    expect(reference.frame!.payload.parts!.length).toBeGreaterThan(0);
+    expectAnsweredSelectionParity(ack, reference);
+    expect(ack.frame!.payload.layoutProvisional).not.toBe(true);
+  } finally { f.destroy(); full.destroy(); }
+});
+
+test('prefix queued click waits for the layout after an identity assigning save', async () => {
+  const f = await commandFixture('unidentified', false, { virtualTime: true });
+  const full = await commandFixture('unidentified', false, { full: true, virtualTime: true });
+  const native = await loadRustDisplayListQueryEngine();
+  const hit = native.hitTestRegionsByHandle;
+  if (!hit) throw new Error('Missing retained hit testing');
+  const completedBeforeHit: boolean[] = [];
+  native.hitTestRegionsByHandle = (...args) => {
+    completedBeforeHit.push(f.calls.includes('layoutDocumentWithRegionsRetained'));
+    return hit.apply(native, args);
+  };
+  try {
+    expect(f.initial.frame.payload.layoutProvisional).toBe(true);
+    const before = f.engine.proposalEngine.version();
+    const saved = f.w.send({ type: 'save', comments: [] });
+    const clicked = sendCommand(f, 1, 'selectPoint', commandPoint(f));
+    const [save, ack] = await Promise.all([saved, clicked]);
+    if (!save.ok || !save.saved) throw new Error(JSON.stringify(save));
+    expect(save.version).not.toBe(before);
+    expect(completedBeforeHit.length).toBeGreaterThan(0);
+    expect(completedBeforeHit.every(Boolean)).toBe(true);
+    native.hitTestRegionsByHandle = hit;
+    const fullSave = full.w.send({ type: 'save', comments: [] });
+    const referenceClick = sendCommand(full, 1, 'selectPoint', commandPoint(full));
+    const [savedFull, reference] = await Promise.all([fullSave, referenceClick]);
+    expect(savedFull.ok).toBe(true);
+    expectAnsweredSelectionParity(ack, reference);
+    expect(ack.frame!.payload.documentVersion).toBe(save.version);
+    expect(ack.frame!.payload.layoutProvisional).not.toBe(true);
+  } finally { native.hitTestRegionsByHandle = hit; f.destroy(); full.destroy(); }
+});
+
+test('prefix text caret click and character and word moves retain complete caret frames without completion', async () => {
+  const f = await commandFixture('echo', false, { virtualTime: true });
+  const full = await commandFixture('echo', false, { full: true, virtualTime: true });
+  try {
+    const ack = await sendCommand(f, 1, 'selectPoint', commandPoint(f));
+    const reference = await sendCommand(full, 1, 'selectPoint', commandPoint(full));
+    expectPrefixSelection(f, ack, []);
+    expectAnsweredSelectionParity(ack, reference, false);
+    for (const [index, unit] of (['character', 'word'] as const).entries()) {
+      const payload = { unit, direction: 'forward' as const, extend: false };
+      const moved = await sendCommand(f, index + 2, 'navigate', payload);
+      const movedFull = await sendCommand(full, index + 2, 'navigate', payload);
+      expectPrefixSelection(f, moved, []);
+      expectAnsweredSelectionParity(moved, movedFull, false);
+    }
+  } finally { f.destroy(); full.destroy(); }
+});
 
 test('selectPoint on a certified page acknowledges the exact prefix with echo context without completion', async () => {
   const f = await commandFixture('echo', false, { virtualTime: true });
