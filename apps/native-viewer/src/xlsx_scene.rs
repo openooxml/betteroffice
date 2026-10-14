@@ -1,11 +1,17 @@
-use std::sync::LazyLock;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock};
 
 use anyhow::{Result, bail};
 use rustybuzz::{Face, GlyphBuffer, UnicodeBuffer};
 use vello::kurbo::{Affine, BezPath, Line, Rect, Stroke};
-use vello::peniko::{Blob, Color, Fill, FontData};
+use vello::peniko::{
+    Blob, Color, Extend, Fill, FontData, ImageAlphaType, ImageBrush, ImageData, ImageFormat,
+    ImageQuality,
+};
 use vello::{Glyph, Scene};
-use xlsx_render::{Align, DisplayList, DrawCmd, GeometryPathCommand, Rect as DisplayRect};
+use xlsx_render::{
+    Align, DisplayList, DrawCmd, GeometryPathCommand, PatternType, Rect as DisplayRect, border_dash,
+};
 
 use crate::scene_shared::{
     PageScene, SkipStats, draw_placeholder, strict_color, with_clip_layers, with_dashes,
@@ -32,8 +38,9 @@ pub fn translate_sheet(display_list: &DisplayList) -> Result<PageScene> {
         &Rect::new(0.0, 0.0, width, height),
     );
     let mut skipped = SkipStats::default();
+    let mut tiles = PatternTiles::default();
     for command in &display_list.commands {
-        translate_or_placeholder(&mut scene, command, &font, &mut skipped);
+        translate_or_placeholder(&mut scene, command, &font, &mut tiles, &mut skipped);
     }
     Ok(PageScene {
         background: Scene::new(),
@@ -71,16 +78,82 @@ fn translate_or_placeholder(
     scene: &mut Scene,
     command: &DrawCmd,
     font: &FontData,
+    tiles: &mut PatternTiles,
     skipped: &mut SkipStats,
 ) {
-    if let Err(reason) = translate_command(scene, command, font) {
+    if let Err(reason) = translate_command(scene, command, font, tiles) {
         skipped.record(command_kind(command), reason);
         draw_placeholder(scene, command_bounds(command));
     }
 }
 
-fn translate_command(scene: &mut Scene, command: &DrawCmd, font: &FontData) -> Result<(), String> {
+/// One 8x8 tile per pattern and color pair, shared by every cell that uses it.
+#[derive(Default)]
+struct PatternTiles(HashMap<(PatternType, Arc<str>, Arc<str>), ImageData>);
+
+impl PatternTiles {
+    fn tile(
+        &mut self,
+        pattern: PatternType,
+        fg: &Arc<str>,
+        bg: &Arc<str>,
+    ) -> Result<ImageData, String> {
+        let key = (pattern, fg.clone(), bg.clone());
+        if let Some(tile) = self.0.get(&key) {
+            return Ok(tile.clone());
+        }
+        let fg = strict_color(fg)?.to_rgba8();
+        let bg = strict_color(bg)?.to_rgba8();
+        let mut pixels = Vec::with_capacity(8 * 8 * 4);
+        for row in pattern.mask() {
+            for x in 0..8 {
+                let color = if row & (1 << x) != 0 { fg } else { bg };
+                pixels.extend([color.r, color.g, color.b, color.a]);
+            }
+        }
+        let tile = ImageData {
+            data: Blob::from(pixels),
+            format: ImageFormat::Rgba8,
+            alpha_type: ImageAlphaType::Alpha,
+            width: 8,
+            height: 8,
+        };
+        self.0.insert(key, tile.clone());
+        Ok(tile)
+    }
+}
+
+fn translate_command(
+    scene: &mut Scene,
+    command: &DrawCmd,
+    font: &FontData,
+    tiles: &mut PatternTiles,
+) -> Result<(), String> {
     match command {
+        DrawCmd::PatternFill {
+            x,
+            y,
+            w,
+            h,
+            pattern,
+            fg,
+            bg,
+            origin_x,
+            origin_y,
+            clip,
+        } => {
+            let rect = rectangle(*x, *y, *w, *h, "pattern fill")?;
+            let origin = Affine::translate((
+                f64::from(finite(*origin_x, "pattern origin x")?),
+                f64::from(finite(*origin_y, "pattern origin y")?),
+            ));
+            let brush = ImageBrush::new(tiles.tile(*pattern, fg, bg)?)
+                .with_extend(Extend::Repeat)
+                .with_quality(ImageQuality::Low);
+            paint_clipped(scene, clip.as_ref(), |scene| {
+                scene.fill(Fill::NonZero, Affine::IDENTITY, &brush, Some(origin), &rect);
+            })
+        }
         DrawCmd::FillRect {
             x,
             y,
@@ -103,9 +176,10 @@ fn translate_command(scene: &mut Scene, command: &DrawCmd, font: &FontData) -> R
             width,
             color,
             style,
+            rail,
             clip,
         } => {
-            let line = PreparedLine::new(*x1, *y1, *x2, *y2, *width, color, style)?;
+            let line = PreparedLine::new(*x1, *y1, *x2, *y2, *width, color, style, *rail)?;
             paint_clipped(scene, clip.as_ref(), |scene| line.paint(scene))
         }
         DrawCmd::Path {
@@ -195,6 +269,7 @@ struct PreparedLine {
     width: f32,
     color: Color,
     style: Option<String>,
+    rail: Option<f32>,
 }
 
 impl PreparedLine {
@@ -207,11 +282,11 @@ impl PreparedLine {
         width: f32,
         color: &str,
         style: &Option<String>,
+        rail: Option<f32>,
     ) -> Result<Self, String> {
-        if !matches!(
-            style.as_deref(),
-            None | Some("solid" | "double" | "dashed" | "dotted")
-        ) {
+        if !matches!(style.as_deref(), None | Some("solid" | "double"))
+            && border_dash(style.as_deref().unwrap_or_default()).is_empty()
+        {
             return Err(format!(
                 "line style {} is not translated",
                 style.as_deref().unwrap_or_default()
@@ -225,20 +300,25 @@ impl PreparedLine {
             width: nonnegative_f32(width, "line width")?,
             color: strict_color(color)?,
             style: style.clone(),
+            rail: rail
+                .map(|rail| nonnegative_f32(rail, "line rail"))
+                .transpose()?,
         })
     }
 
     fn paint(&self, scene: &mut Scene) {
         match self.style.as_deref() {
             Some("double") => {
-                let offset = (self.width * 0.8).max(0.8);
+                let (offset, width) = match self.rail {
+                    Some(rail) => ((self.width - rail) / 2.0, rail),
+                    None => ((self.width * 0.8).max(0.8), (self.width * 0.6).max(0.5)),
+                };
                 let horizontal = (self.y1 - self.y2).abs() <= (self.x1 - self.x2).abs();
                 let (dx, dy) = if horizontal {
                     (0.0, offset)
                 } else {
                     (offset, 0.0)
                 };
-                let width = (self.width * 0.6).max(0.5);
                 stroke_segment(
                     scene,
                     self.x1 - dx,
@@ -258,24 +338,25 @@ impl PreparedLine {
                     self.color,
                 );
             }
-            Some("dashed") => stroke_segment(
-                scene,
-                self.x1,
-                self.y1,
-                self.x2,
-                self.y2,
-                with_dashes(Stroke::new(f64::from(self.width)), [4.0, 2.0]),
-                self.color,
-            ),
-            Some("dotted") => stroke_segment(
-                scene,
-                self.x1,
-                self.y1,
-                self.x2,
-                self.y2,
-                with_dashes(Stroke::new(f64::from(self.width)), [1.0, 2.0]),
-                self.color,
-            ),
+            Some(style) if !border_dash(style).is_empty() => {
+                let scale = if style.starts_with("medium") {
+                    self.width / 2.0
+                } else {
+                    self.width
+                };
+                stroke_segment(
+                    scene,
+                    self.x1,
+                    self.y1,
+                    self.x2,
+                    self.y2,
+                    with_dashes(
+                        Stroke::new(f64::from(self.width)),
+                        border_dash(style).iter().map(|run| f64::from(run * scale)),
+                    ),
+                    self.color,
+                );
+            }
             None | Some("solid") => stroke_segment(
                 scene,
                 self.x1,
@@ -615,6 +696,7 @@ fn nonnegative(value: f32, name: &str) -> Result<f64, String> {
 fn command_kind(command: &DrawCmd) -> &'static str {
     match command {
         DrawCmd::FillRect { .. } => "fillRect",
+        DrawCmd::PatternFill { .. } => "patternFill",
         DrawCmd::Line { .. } => "line",
         DrawCmd::Path { .. } => "path",
         DrawCmd::Text { .. } => "text",
@@ -623,7 +705,9 @@ fn command_kind(command: &DrawCmd) -> &'static str {
 
 fn command_bounds(command: &DrawCmd) -> Option<Rect> {
     match command {
-        DrawCmd::FillRect { x, y, w, h, .. } => loose_rectangle(*x, *y, *w, *h),
+        DrawCmd::FillRect { x, y, w, h, .. } | DrawCmd::PatternFill { x, y, w, h, .. } => {
+            loose_rectangle(*x, *y, *w, *h)
+        }
         DrawCmd::Line { x1, y1, x2, y2, .. } => loose_extents(*x1, *y1, *x2, *y2),
         DrawCmd::Path { commands, .. } => path_bounds(commands),
         DrawCmd::Text { clip, .. } => loose_rectangle(clip.x, clip.y, clip.w, clip.h),
@@ -716,17 +800,42 @@ mod tests {
             w: 100.0,
             h: 60.0,
         };
-        let mut commands = vec![DrawCmd::FillRect {
-            x: 0.0,
-            y: 0.0,
-            w: 100.0,
-            h: 60.0,
-            color: "#ffffff".into(),
-            clip: Some(clip),
-        }];
-        for (index, style) in [None, Some("dashed"), Some("dotted"), Some("double")]
-            .into_iter()
-            .enumerate()
+        let mut commands = vec![
+            DrawCmd::FillRect {
+                x: 0.0,
+                y: 0.0,
+                w: 100.0,
+                h: 60.0,
+                color: "#ffffff".into(),
+                clip: Some(clip),
+            },
+            DrawCmd::PatternFill {
+                x: 0.0,
+                y: 0.0,
+                w: 100.0,
+                h: 20.0,
+                pattern: PatternType::LightUp,
+                fg: "#123456".into(),
+                bg: "#fedcba".into(),
+                origin_x: -3.0,
+                origin_y: -2.0,
+                clip: Some(clip),
+            },
+        ];
+        for (index, style) in [
+            None,
+            Some("dashed"),
+            Some("dotted"),
+            Some("double"),
+            Some("mediumDashed"),
+            Some("dashDot"),
+            Some("mediumDashDot"),
+            Some("dashDotDot"),
+            Some("mediumDashDotDot"),
+            Some("slantDashDot"),
+        ]
+        .into_iter()
+        .enumerate()
         {
             commands.push(DrawCmd::Line {
                 x1: 0.0,
@@ -736,6 +845,7 @@ mod tests {
                 width: 1.0,
                 color: "#123456".into(),
                 style: style.map(str::to_owned),
+                rail: None,
                 clip: Some(clip),
             });
         }
@@ -806,6 +916,7 @@ mod tests {
             width: 1.0,
             color: "#000000".into(),
             style: Some("future-style".into()),
+            rail: None,
             clip: None,
         }]))
         .unwrap();

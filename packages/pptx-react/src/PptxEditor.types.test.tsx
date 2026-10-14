@@ -3,6 +3,7 @@ import { createElement, memo } from 'react';
 import type { ComponentProps } from 'react';
 import type { AsyncCollaborationReplica, CollaborationReplica } from '@betteroffice/pptx';
 import { PptxEditor } from './PptxEditor';
+import { definePptxPlugin } from './plugins/definePptxPlugin';
 import type { PptxAsyncEditorProps, PptxEditorApi, PptxEditorProps, PptxWorkerViewerApi } from './PptxEditor';
 import type { PptxAsyncEditorApi } from './worker/createPeerlessEditorApi';
 import type { PptxWorkerEditorApi } from './worker/createWorkerEditorApi';
@@ -35,23 +36,19 @@ test('default and in-thread async props preserve async contextual APIs', () => {
   expect(check).toBeFunction();
 });
 
-test('plugin props require the legacy opt-in, including through the props union', () => {
+test('plugin props preserve async and legacy contextual APIs', () => {
+  const plugins = [definePptxPlugin({ id: 'review', createState: () => null })];
   const check = () => [
-    // @ts-expect-error
-    <PptxEditor fonts={[]} plugins={[]} />,
-    // @ts-expect-error
-    <PptxEditor fonts={[]} pluginGrants={{}} />,
-    // @ts-expect-error
-    <PptxEditor fonts={[]} onPluginError={() => {}} />,
-    // @ts-expect-error
-    <PptxEditor fonts={[]} experimentalWorkerOpen={false} plugins={[]} />,
-    // @ts-expect-error
-    { fonts: [], plugins: [] } satisfies PptxEditorProps,
-    // @ts-expect-error
-    { fonts: [], pluginGrants: {} } satisfies PptxEditorProps,
-    // @ts-expect-error
-    { fonts: [], onPluginError: () => {} } satisfies PptxEditorProps,
-    <PptxEditor legacySyncApi fonts={[]} plugins={[]} pluginGrants={{}} onPluginError={() => {}} />,
+    <PptxEditor fonts={[]} plugins={plugins} pluginGrants={{}} onPluginError={() => {}}
+      onReady={(api) => { assertType<Equal<typeof api, PptxAsyncEditorApi>>(); }} />,
+    <PptxEditor fonts={[]} experimentalWorkerOpen={false} plugins={plugins}
+      onReady={(api) => { assertType<Equal<typeof api, PptxAsyncEditorApi>>(); }} />,
+    { fonts: [], plugins, pluginGrants: {}, onPluginError: () => {} } satisfies PptxAsyncEditorProps,
+    { fonts: [], plugins } satisfies PptxEditorProps,
+    <PptxEditor legacySyncApi fonts={[]} plugins={plugins}
+      onReady={(api) => { assertType<Equal<typeof api, PptxWorkerEditorApi>>(); }} />,
+    <PptxEditor legacySyncApi experimentalWorkerOpen={false} fonts={[]} plugins={plugins}
+      onReady={(api) => { assertType<Equal<typeof api, PptxEditorApi>>(); }} />,
   ];
   expect(check).toBeFunction();
 });

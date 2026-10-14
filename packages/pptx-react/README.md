@@ -47,6 +47,9 @@ Props: `file`, `fonts`, `collaboration`, `i18n`, `className`, `fileName`,
 `onChange` (deck snapshots), `onError`, `onSave` (receives the saved bytes;
 without it, saving downloads the file), `readOnly`, `toolbar`, and `showToolbar`.
 
+Plugins created with `definePptxPlugin` work on the default worker-owned editor
+through `plugins`, `pluginGrants`, and `onPluginError`.
+
 ## Compose the toolbar
 
 Every built-in control runs through one command store per editor,

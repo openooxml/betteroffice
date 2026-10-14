@@ -333,10 +333,7 @@ export type PptxWorkerViewerProps = Omit<
 };
 
 export type PptxAsyncEditorProps = Omit<PptxInThreadEditorProps,
-  'onReady' | 'collaboration' | 'experimentalWorkerOpen' | keyof PptxEditorPluginProps> & {
-  plugins?: never;
-  pluginGrants?: never;
-  onPluginError?: never;
+  'onReady' | 'collaboration' | 'experimentalWorkerOpen'> & {
   /** @internal */
   [PEERLESS_FLAG]?: true;
   /** @deprecated Removed in 0.6.0. Omit for the async editor. */
@@ -624,15 +621,6 @@ function PptxAsyncEditorSession(props: PptxAsyncEditorProps) {
   const engine = choice.identity === identity ? choice : start();
   if (choice !== engine) setChoice(engine);
   useEffect(() => { if (engine.reason) warnPptxEngine(engine.reason); }, [engine.reason]);
-  const unsupportedPlugins = !engine.reason && ((props as PptxEditorPluginProps).plugins?.length ?? 0) > 0;
-  const pluginError = useMemo(() => new Error(`PptxEditor plugins require ${LEGACY_SYNC_API}={true}.`), []);
-  const reportedPlugins = useRef(false);
-  useEffect(() => {
-    if (!unsupportedPlugins || reportedPlugins.current) return;
-    reportedPlugins.current = true;
-    try { props.onError?.(pluginError); } catch {}
-  }, [unsupportedPlugins, pluginError, props.onError]);
-  if (unsupportedPlugins) return <PeerlessEditorError error={pluginError} className={props.className} />;
   const fallback = <div className={props.className} role="status">{t('worker.preparing')}</div>;
   return <PeerlessEditorBoundary onError={props.onError} className={props.className}>
     {engine.reason ? <Suspense fallback={fallback}><PptxAsyncInThreadSession {...props} /></Suspense>

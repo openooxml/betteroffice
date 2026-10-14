@@ -3,6 +3,10 @@ use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::Encode;
 use yrs::{Any, Array, Doc, Map, MapPrelim, ReadTxn, StateVector, Transact, Update, WriteTxn};
 
+use crate::authority::snapshot::released_base_layout;
+use crate::snapshot::model::released_layout;
+use crate::workbook::format_facets_tests::{package, part};
+
 fn empty_worker() -> Workbook {
     Workbook::from_model(WorkbookModel {
         sheets: vec![crate::Sheet::new("Data")],
@@ -1400,5 +1404,190 @@ fn snapshot_near_allowance_cell_content_validation_is_resumable() {
         let (builder, _) = completed_builder_with_step_budget(&chunks, budget);
         let (peer, _) = builder.finish().unwrap().into_parts();
         assert_current_identity(&worker, &peer);
+    }
+}
+
+fn released_styles() -> (Vec<u8>, Vec<u8>) {
+    let cells = concat!(
+        r#"<c r="A1" s="1"><v>7</v></c><c r="B1" s="1"><v>8</v></c>"#,
+        r#"<c r="C1" s="2"><v>9</v></c>"#,
+    );
+    let source = concat!(
+        r#"<xf/><xf numFmtId="2" fontId="0" fillId="0" borderId="0" xfId="1""#,
+        r#" applyProtection="1"><alignment textRotation="90"/><protection locked="0"/></xf>"#,
+        r#"<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="1" applyAlignment="1">"#,
+        r#"<alignment wrapText="1" textRotation="45"/></xf>"#,
+    );
+    let released = concat!(
+        r#"<xf/><xf numFmtId="2" fontId="0" fillId="0" borderId="0"/>"#,
+        r#"<xf numFmtId="0" fontId="0" fillId="0" borderId="0" applyAlignment="1">"#,
+        r#"<alignment wrapText="1"/></xf>"#,
+    );
+    let source = package(source, cells, false);
+    (source, package(released, cells, false))
+}
+
+/// Opens `released`, what releases before format facets read from `source`,
+/// over `source` as its package.
+fn released_reading_of(source: &[u8], released: &[u8]) -> Workbook {
+    let mut opened = Workbook::open(source).unwrap();
+    let mut workbook = Workbook::open(released).unwrap();
+    workbook.source_package = opened.source_package.take();
+    workbook.source_container = opened.source_container.take();
+    workbook
+}
+
+/// `workbook`'s snapshot with its XF records in the layout releases before
+/// format facets wrote.
+fn released_snapshot(workbook: &Workbook, budget: SnapshotBudget) -> Vec<Vec<u8>> {
+    let mut base = Vec::new();
+    let mut records = Vec::new();
+    for (kind, ordinal, payload) in decoded_snapshot(&encode(workbook, budget)) {
+        match kind {
+            ChunkKind::AuthorityBase => base.extend(payload),
+            ChunkKind::Model | ChunkKind::Cells => {}
+            _ => records.push((kind, ordinal, payload)),
+        }
+    }
+    let mut reader = Reader::new(&base);
+    while !reader.clone().rest().is_empty() {
+        let mut writer = Writer::new();
+        writer.bytes(&released_base_layout(reader.bytes().unwrap()));
+        records.push((ChunkKind::AuthorityBase, 0, writer.into_bytes()));
+    }
+    let single = SnapshotBudget::new(1, budget.max_bytes()).unwrap();
+    let mut encoder = ModelSnapshotEncoder::new();
+    while let Some(chunk) = encoder.next(workbook.model(), single).unwrap() {
+        let (kind, ordinal, payload) = unframe(&chunk).unwrap();
+        let payload = if kind == ChunkKind::Model {
+            released_layout(payload)
+        } else {
+            payload.to_vec()
+        };
+        records.push((kind, ordinal, payload));
+    }
+    records.sort_by_key(|(kind, _, _)| index(*kind));
+    transport_records(records, budget)
+}
+
+fn restore(chunks: &[Vec<u8>], budget: SnapshotBudget) -> Workbook {
+    completed_builder(chunks, budget)
+        .finish()
+        .unwrap()
+        .into_parts()
+        .0
+}
+
+fn xf_elements(styles: &str) -> Vec<&str> {
+    let start = styles.find("<cellXfs").unwrap();
+    let body = &styles[start..styles.find("</cellXfs>").unwrap()];
+    let body = &body[body.find('>').unwrap() + 1..];
+    let mut starts = body
+        .match_indices("<xf")
+        .map(|(at, _)| at)
+        .collect::<Vec<_>>();
+    starts.push(body.len());
+    starts
+        .windows(2)
+        .map(|pair| body[pair[0]..pair[1]].trim())
+        .collect()
+}
+
+/// Saves `workbook` after a value edit that leaves every format alone.
+fn save_after_value_edit(mut workbook: Workbook) -> Vec<u8> {
+    let d1 = CellRef::new(0, 3);
+    workbook.edit_cell(SheetId(0), d1, "5", context()).unwrap();
+    workbook.save().unwrap()
+}
+
+fn cell_styles(saved: &[u8]) -> [Option<u32>; 3] {
+    let parsed = xlsx_parse::parse_workbook(&ooxml_opc::unzip_parts(saved).unwrap()).unwrap();
+    let style = |col| parsed.sheets[0].cell(CellRef::new(0, col)).unwrap().style;
+    [0, 1, 2].map(style)
+}
+
+#[test]
+fn format_facets_released_snapshot_saves_the_source_xfs() {
+    let (source, released) = released_styles();
+    let budget = SnapshotBudget::new(1, 64 * 1024).unwrap();
+    let expected = save_after_value_edit(Workbook::open(&source).unwrap());
+    let styles = part(&expected, "xl/styles.xml");
+    let worker = released_reading_of(&source, &released);
+    let restored = restore(&released_snapshot(&worker, budget), budget);
+    let recaptured = restore(&encode(&restored, budget), budget);
+    for workbook in [restored, recaptured] {
+        let saved = save_after_value_edit(workbook);
+        assert_eq!(part(&saved, "xl/styles.xml"), styles);
+        assert_eq!(cell_styles(&saved), [Some(1), Some(1), Some(2)]);
+    }
+}
+
+#[test]
+fn format_facets_released_snapshot_edit_writes_only_the_edited_xf() {
+    let (source, released) = released_styles();
+    let budget = SnapshotBudget::new(1, 64 * 1024).unwrap();
+    let worker = released_reading_of(&source, &released);
+    let mut restored = restore(&released_snapshot(&worker, budget), budget);
+    let a1 = CellRef::new(0, 0);
+    restored
+        .patch_range_style(
+            SheetId(0),
+            CellRange::new(a1, a1),
+            crate::StylePatch {
+                bold: Some(true),
+                ..crate::StylePatch::default()
+            },
+            context(),
+        )
+        .unwrap();
+    let saved = restored.save().unwrap();
+    let source_saved = Workbook::open(&source).unwrap().save().unwrap();
+    let expected = part(&source_saved, "xl/styles.xml");
+    let written = part(&saved, "xl/styles.xml");
+    let (expected, written) = (xf_elements(&expected), xf_elements(&written));
+    assert_eq!(written.len(), expected.len() + 1);
+    assert_eq!(written[..expected.len()], expected[..]);
+    let edited = Some(expected.len() as u32);
+    assert_eq!(cell_styles(&saved), [edited, Some(1), Some(2)]);
+}
+
+#[test]
+fn format_facets_current_snapshot_saves_the_xfs_its_records_hold() {
+    let (source, released) = released_styles();
+    let budget = SnapshotBudget::new(1, 64 * 1024).unwrap();
+    let expected = save_after_value_edit(Workbook::open(&source).unwrap());
+    let styles = part(&expected, "xl/styles.xml");
+    let current = restore(&encode(&Workbook::open(&source).unwrap(), budget), budget);
+    let saved = save_after_value_edit(current);
+    assert_eq!(part(&saved, "xl/styles.xml"), styles);
+    assert_eq!(cell_styles(&saved), [Some(1), Some(1), Some(2)]);
+    let worker = released_reading_of(&source, &released);
+    let saved = save_after_value_edit(restore(&encode(&worker, budget), budget));
+    let written = part(&saved, "xl/styles.xml");
+    let (expected, written) = (xf_elements(&styles), xf_elements(&written));
+    assert_eq!(written.len(), expected.len());
+    assert_eq!(written[0], expected[0]);
+    for (written, expected) in written.iter().zip(&expected).skip(1) {
+        assert_ne!(written, expected);
+        for facet in ["xfId", "textRotation", "<protection"] {
+            assert!(!written.contains(facet), "{written}");
+        }
+    }
+}
+
+#[test]
+fn format_facets_released_snapshot_recovery_saves_the_source_xfs() {
+    let (source, released) = released_styles();
+    let budget = SnapshotBudget::new(1, 64 * 1024).unwrap();
+    let expected = save_after_value_edit(Workbook::open(&source).unwrap());
+    let styles = part(&expected, "xl/styles.xml");
+    let worker = released_reading_of(&source, &released);
+    let restored = restore(&released_snapshot(&worker, budget), budget);
+    let recaptured = restore(&encode(&restored, budget), budget);
+    for workbook in [restored, recaptured] {
+        let checkpoint = workbook.recovery_checkpoint(1, None).unwrap();
+        let (recovered, _, _, _) = Workbook::restore_recovery_checkpoint(&checkpoint).unwrap();
+        let saved = save_after_value_edit(recovered);
+        assert_eq!(part(&saved, "xl/styles.xml"), styles);
     }
 }

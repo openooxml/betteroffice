@@ -65,7 +65,6 @@ void invalid;
 
 export const editor = (
   <PptxEditor
-    legacySyncApi
     fonts={[]}
     plugins={[review]}
     pluginGrants={{ 'acme.review': grant }}

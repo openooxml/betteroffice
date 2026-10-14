@@ -6,6 +6,7 @@ import { XlsxCommandAdmissionError } from '../commands/createXlsxCommandStore';
 import type { XlsxCommandStore } from '../commands/types';
 import type { PeerlessWorkerInputCoordinator } from '../commands/peerlessWorkerInputCoordinator';
 import { createAsyncEditorApi, type XlsxAsyncEditorApi } from './createAsyncEditorApi';
+import { XlsxAsyncApiSyncAccessError } from './asyncApiErrors';
 import type { WorkerEditorApiBridge } from './createWorkerEditorApi';
 import type { WorkerDraftController } from './WorkerDraftController';
 import { asError, editableWorkbookSessionBackend, XlsxWorkerSessionFailedError } from './useEditableSessionWorkbook';
@@ -373,7 +374,13 @@ export function usePeerlessSessionWorkbook(
   const replicaReady = run instanceof PeerlessWorkbookSession && run.ready;
   useEffect(() => {
     if (!replicaReady || !(run instanceof PeerlessWorkbookSession) || !onReplica) return;
-    onReplica(run.session.replica ?? null);
+    const replica = run.session.replica;
+    if (replica) {
+      for (const method of ['encodeStateVector', 'encodeStateAsUpdate'] as const) {
+        replica[method] = () => { throw new XlsxAsyncApiSyncAccessError(`replica.${method}()`, `await api.collaboration.${method}()`); };
+      }
+    }
+    onReplica(replica ?? null);
     return () => onReplica(null);
   }, [run, replicaReady, onReplica]);
 

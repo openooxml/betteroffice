@@ -310,6 +310,7 @@ export interface ResidentCommandInitRequest {
   extras: string;
   displayWindow?: [number, number];
   retainBuiltPages?: boolean;
+  rasterScale?: number;
 }
 
 export type ResidentCommandInitReply = DocxCommandAck &
@@ -393,6 +394,7 @@ export interface ResidentCommandViewportRequest {
   start: number;
   end: number;
   frameEpoch: number;
+  rasterScale?: number;
 }
 
 export interface ResidentCommandClient {

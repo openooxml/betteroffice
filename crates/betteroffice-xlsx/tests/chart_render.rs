@@ -118,6 +118,7 @@ fn refused_charts_degrade_to_placeholders_and_keep_the_sheet() {
             .iter()
             .filter(|command| match command {
                 DrawCmd::FillRect { clip, .. }
+                | DrawCmd::PatternFill { clip, .. }
                 | DrawCmd::Line { clip, .. }
                 | DrawCmd::Path { clip, .. } => clip.is_some(),
                 DrawCmd::Text { chart, .. } => *chart,
