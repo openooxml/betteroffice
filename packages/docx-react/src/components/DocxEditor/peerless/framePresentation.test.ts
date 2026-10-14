@@ -381,6 +381,29 @@ test('frames the presentation did not request spend no retry budget while its ow
   expect(events).toEqual(['full', 'full', `error:${stalled}`]);
 });
 
+test('a newer frame that failed while a request was pending is fetched again after an older frame installs', () => {
+  const state = { lost: true };
+  const { presentation, events, held } = setup(false, () => lossyCanvas(state), true);
+  const requested = () => events.filter((event) => event === 'full' || event.startsWith('error:'));
+  expect(presentation.present(frame(1, 0), [], [])).toBe(false);
+  expect(presentation.present(frame(3, 0), [], [])).toBe(false);
+  expect(requested()).toEqual(['full']);
+  state.lost = false;
+  held.shift()!();
+  expect(presentation.present(frame(2, 0), [], [])).toBe(true);
+  expect(requested()).toEqual(['full', 'full']);
+  held.shift()!();
+  expect(presentation.present(frame(4, 0), [], [])).toBe(true);
+  state.lost = true;
+  expect(presentation.present(frame(5, 0), [], [])).toBe(false);
+  expect(presentation.present(frame(6, 0), [], [])).toBe(false);
+  state.lost = false;
+  held.shift()!();
+  expect(presentation.present(frame(7, 0), [], [])).toBe(true);
+  expect(requested()).toEqual(['full', 'full', 'full']);
+  expect(held).toEqual([]);
+});
+
 test('transient failures each re-request one full frame and recover without a report', () => {
   const { presentation, events } = setup();
   expect(presentation.present(frame(1, 0), [], [])).toBe(true);
