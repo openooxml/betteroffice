@@ -315,7 +315,6 @@ function featureSection(feature: string): string {
 }
 
 function featureBody(feature: string, body: string): string {
-  if (feature === 'unidentified') return body.replace(/ w14:paraId="[^"]+"/g, '');
   const field = (type: string) => `<w:p><w:fldSimple w:instr=" ${type} "><w:r><w:t>9</w:t></w:r></w:fldSimple></w:p>`;
   if (['PAGE', 'NUMPAGES', 'SECTIONPAGES', 'DATE', 'TIME'].includes(feature)) return field(feature) + body;
   if (feature === 'late-NUMPAGES') return body + field('NUMPAGES');
@@ -374,6 +373,9 @@ function flowDocx(feature: string): Uint8Array {
   const types: string[] = [];
   let body: string;
   switch (feature) {
+    case 'flow-selection':
+      body = flowParagraph(4, 'alpha beta gamma delta epsilon') + tail('Tail') + flowSection();
+      break;
     case 'flow-paragraph':
       body = opening + flowParagraph(120, 'Long', third) + tail('Tail') + flowSection();
       break;
@@ -521,12 +523,15 @@ const MEASUREMENT = {
 };
 
 /** `exportable` registers the font for the default family too, as an export requires. */
-async function commandFixture(feature = 'plain', exportable = false, options: { full?: boolean; virtualTime?: boolean } = {}) {
+async function commandFixture(feature = 'plain', exportable = false, options: {
+  full?: boolean; virtualTime?: boolean; prepare?: (engine: ResidentEngineSession) => void;
+} = {}) {
   const bytes = syntheticDocx(feature);
   const cold = await createResidentEngineSession();
   const engine = await createResidentEngineSession();
   const w = worker(engine, true, options.virtualTime);
   const host = decodeDocxHostJson(cold.openDocx(bytes), bytes);
+  options.prepare?.(cold);
   const request = buildResidentRegionLayoutRequest(host.document, 24, {});
   if (feature === 'footnote' || feature === 'endnote') {
     request.notes = { contents: [{ id: 1, noteKind: feature, height: 0 }] } as typeof request.notes;
@@ -546,6 +551,7 @@ async function commandFixture(feature = 'plain', exportable = false, options: { 
   const extras = JSON.stringify({ fontChains, headersFooters: JSON.parse(cold.retainedHeadersFootersJson() ?? 'null') });
   const full = applyFrameDelta(null, decodeFrameDelta(cold.buildDisplayListFrame(extras, 0)));
   await w.send({ type: 'open', bytes: bytes.slice().buffer });
+  options.prepare?.(engine);
   const methods = ['layoutDocumentWithRegionsRetained', 'layoutDocumentWithRegionsRetainedJson', 'beginRegionLayout', 'resumeRegionLayout'] as const;
   const calls: string[] = [];
   for (const method of methods) {
@@ -747,8 +753,8 @@ function expectAnsweredSelectionParity(ack: DocxCommandAck, full: DocxCommandAck
 
 for (const [clickCount, label] of [[2, 'word'], [3, 'paragraph']] as const) {
   test(`prefix ${label} click answers the full selection frame`, async () => {
-    const f = await commandFixture('plain', false, { virtualTime: true });
-    const full = await commandFixture('plain', false, { full: true, virtualTime: true });
+    const f = await commandFixture('flow-selection', false, { virtualTime: true });
+    const full = await commandFixture('flow-selection', false, { full: true, virtualTime: true });
     try {
       expect(f.initial.frame.payload.layoutProvisional).toBe(true);
       const ack = await sendCommand(f, 1, 'selectPoint', { ...commandPoint(f), clickCount });
@@ -763,8 +769,8 @@ for (const [clickCount, label] of [[2, 'word'], [3, 'paragraph']] as const) {
 
 for (const gesture of ['shift click', 'shift right', 'shift down'] as const) {
   test(`prefix ${gesture} answers the full selection frame`, async () => {
-    const f = await commandFixture('plain', false, { virtualTime: true });
-    const full = await commandFixture('plain', false, { full: true, virtualTime: true });
+    const f = await commandFixture('flow-selection', false, { virtualTime: true });
+    const full = await commandFixture('flow-selection', false, { full: true, virtualTime: true });
     try {
       await sendCommand(f, 1, 'selectPoint', commandPoint(f));
       await sendCommand(full, 1, 'selectPoint', commandPoint(full));
@@ -784,8 +790,8 @@ for (const gesture of ['shift click', 'shift right', 'shift down'] as const) {
 }
 
 test('prefix mid-line shift click then shift down preserves the full focus column', async () => {
-  const f = await commandFixture('plain', false, { virtualTime: true });
-  const full = await commandFixture('plain', false, { full: true, virtualTime: true });
+  const f = await commandFixture('flow-selection', false, { virtualTime: true });
+  const full = await commandFixture('flow-selection', false, { full: true, virtualTime: true });
   try {
     await sendCommand(f, 1, 'selectPoint', commandPoint(f, 0, 4));
     await sendCommand(full, 1, 'selectPoint', commandPoint(full, 0, 4));
@@ -802,6 +808,7 @@ test('prefix mid-line shift click then shift down preserves the full focus colum
     const reference = await sendCommand(full, 3, 'navigate', {
       unit: 'line', direction: 'down', extend: true, goalX: goal(shiftedFull, full),
     });
+    expect(reference.selection!.focus.paraId).toBe(shiftedFull.selection!.focus.paraId);
     expect(reference.selection!.focus.offset).toBeGreaterThan(shiftedFull.selection!.focus.offset);
     expectAnsweredSelectionParity(ack, reference);
     expectAnsweredSelectionParity(shifted, shiftedFull);
@@ -843,8 +850,12 @@ test('prefix part click answers with full part geometry', async () => {
 });
 
 test('prefix queued click waits for the layout after an identity assigning save', async () => {
-  const f = await commandFixture('unidentified', false, { virtualTime: true });
-  const full = await commandFixture('unidentified', false, { full: true, virtualTime: true });
+  const prepare = (engine: ResidentEngineSession) => {
+    const paragraph = engine.geometryReader.paragraphs('body').at(-1)!;
+    engine.splitParagraph({ story: 'body', paraId: paragraph.paraId, offset: 1 });
+  };
+  const f = await commandFixture('echo', false, { virtualTime: true, prepare });
+  const full = await commandFixture('echo', false, { full: true, virtualTime: true, prepare });
   const native = await loadRustDisplayListQueryEngine();
   const hit = native.hitTestRegionsByHandle;
   if (!hit) throw new Error('Missing retained hit testing');
