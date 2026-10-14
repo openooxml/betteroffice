@@ -16,8 +16,8 @@ import { DocxEditor, type DocxEditorRef } from '../../index';
 import { resetEngineChoiceForTests, setMissingWorkerCapabilitiesForTests } from './internals/engineChoice';
 import { testScope } from './__fixtures__/testScope';
 
-const { act, cleanup, fireEvent, render } = await import('@testing-library/react');
-const { until } = testScope(act);
+const { act: rtlAct, cleanup, fireEvent, render } = await import('@testing-library/react');
+const { act, until } = testScope(rtlAct);
 const quiet = { error: console.error, warn: console.warn };
 
 beforeAll(async () => {
@@ -175,11 +175,14 @@ for (const typing of [false, true]) {
     } finally {
       cleanup();
       takePreloadedResidentEngineWorker()?.destroy();
-      await act(async () => {});
-      for (const worker of workers) worker.terminate();
-      compileModule.mockRestore();
-      resetEngineChoiceForTests();
-      globalThis.Worker = originalWorker;
+      try {
+        await act(async () => {});
+      } finally {
+        for (const worker of workers) worker.terminate();
+        compileModule.mockRestore();
+        resetEngineChoiceForTests();
+        globalThis.Worker = originalWorker;
+      }
     }
   }, 20_000);
 }

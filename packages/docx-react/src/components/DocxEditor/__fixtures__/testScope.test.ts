@@ -5,7 +5,7 @@ let runCallbacks = true;
 const act = mock(async (callback: () => Promise<void>) => {
   if (runCallbacks) await callback();
 });
-const { settle, until } = testScope(act);
+const { act: scopedAct, settle, until } = testScope(act);
 
 const outcome = (call: Promise<void>) =>
   call.then(
@@ -14,12 +14,16 @@ const outcome = (call: Promise<void>) =>
   );
 
 let ended: { acts: number; outcomes: Array<string | null> } | null = null;
+let endedAct: { acts: number; outcome: string | null } | null = null;
 let actsAtEnd = 0;
 afterEach(async () => {
-  const acts = act.mock.calls.length;
+  let acts = act.mock.calls.length;
   const outcomes = await Promise.all([outcome(settle(1)), outcome(until(() => true))]);
+  ended = { acts: act.mock.calls.length - acts, outcomes };
+  acts = act.mock.calls.length;
+  const actOutcome = await outcome(scopedAct(async () => {}));
   actsAtEnd = act.mock.calls.length;
-  ended = { acts: actsAtEnd - acts, outcomes };
+  endedAct = { acts: actsAtEnd - acts, outcome: actOutcome };
 });
 
 test('settle and until act while their test is live', async () => {
@@ -64,4 +68,25 @@ test('until still fails on its expect when done() stays false', async () => {
   } finally {
     runCallbacks = true;
   }
+});
+
+let leftoverActDone = false;
+let leftoverAct: Promise<string | null> = Promise.resolve(null);
+test('a body can leave an act running when its test ends', () => {
+  leftoverAct = outcome(scopedAct(async () => {
+    await new Promise((done) => setTimeout(done, 30));
+    leftoverActDone = true;
+  }));
+});
+
+test('the next test starts only after that act has settled, which then rejects', async () => {
+  expect(leftoverActDone).toBe(true);
+  expect(await leftoverAct).toStartWith('act() from test #6 of this file ran after that test ended');
+});
+
+test('an act called from an ended scope rejects without calling the real act', () => {
+  expect(endedAct).toEqual({
+    acts: 0,
+    outcome: expect.stringMatching(/^act\(\) from test #7 of this file ran after that test ended/),
+  });
 });
