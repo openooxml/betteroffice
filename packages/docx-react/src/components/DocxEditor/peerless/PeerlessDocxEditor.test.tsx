@@ -186,7 +186,7 @@ function fakeBinding(session: DocxWorkerEditSession<PeerlessEchoIntent>, initial
   return {
     session, viewStore, echoPainter, admission,
     commands: createPeerlessCommandBinding(admission),
-    presentation: { hooks: { paint() {}, drop() {}, present() {} }, present: () => true, dispose() {} },
+    presentation: { hooks: { paint() {}, drop() {}, present() {} }, present: () => true, invalidate() {}, dispose() {} },
   };
 }
 

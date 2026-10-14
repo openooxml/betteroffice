@@ -135,6 +135,7 @@ export function usePeerlessEditSession(
               if (!controller.signal.aborted) callbacks.current.onError?.(error instanceof Error ? error : new Error(String(error)));
             });
           },
+          onError: (error) => { if (!controller.signal.aborted) callbacks.current.onError?.(error); },
         });
         cleanups.push(() => presentation.dispose());
         const session = createDocxWorkerEditSession<PeerlessDocumentSource, PeerlessEchoIntent>({
@@ -197,10 +198,12 @@ export function usePeerlessEditSession(
             displayWindow = { start, end };
             viewport = { ...viewport, ...displayWindow };
             void requestViewport();
+            presentation.invalidate();
           },
           setRasterScale(scale) {
             viewport = { ...displayWindow, ...viewport, rasterScale: scale };
             void requestViewport();
+            presentation.invalidate();
           },
         };
         unsubscribe = session.subscribe((state) => viewStore.acceptWorkerState({ session: initial.session, incarnation, epoch: state.epoch }, state));
