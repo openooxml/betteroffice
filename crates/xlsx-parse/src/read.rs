@@ -219,12 +219,15 @@ fn parse_workbook_xml(data: &[u8]) -> Result<WorkbookMeta, ParseError> {
     let mut depth = 0;
     let mut date_system = DateSystem::V1900;
     let mut active_sheet = None;
+    let mut sheets_depth = None;
     let mut sheets = Vec::new();
     let mut defined_names = Vec::new();
 
     loop {
         match next_event(&mut reader, &mut buf, &mut depth)? {
             Event::Start(e) => match local_name(&e).as_slice() {
+                // the save rewrites the root's `sheets` child, so only it lists sheets
+                b"sheets" if depth == 2 => sheets_depth = Some(depth),
                 b"workbookPr" => {
                     if let Some(v) = attr(&e, b"date1904")?
                         && is_truthy(&v)
@@ -240,7 +243,7 @@ fn parse_workbook_xml(data: &[u8]) -> Result<WorkbookMeta, ParseError> {
                             .unwrap_or(SheetId(0)),
                     );
                 }
-                b"sheet" => {
+                b"sheet" if sheets_depth.is_some_and(|sheets| depth == sheets + 1) => {
                     let name = attr(&e, b"name")?.unwrap_or_default();
                     let rid = attr(&e, b"id")?;
                     sheets.push(SheetEntry { name, rid });
@@ -264,6 +267,12 @@ fn parse_workbook_xml(data: &[u8]) -> Result<WorkbookMeta, ParseError> {
                 }
                 _ => {}
             },
+            Event::End(e)
+                if e.name().local_name().as_ref() == b"sheets"
+                    && sheets_depth.is_some_and(|sheets| depth < sheets) =>
+            {
+                sheets_depth = None;
+            }
             Event::Eof => break,
             _ => {}
         }

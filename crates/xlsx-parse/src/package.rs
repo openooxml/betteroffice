@@ -68,10 +68,7 @@ impl PreservedPackage {
             .map(parse_relationships)
             .transpose()?
             .unwrap_or_default();
-        let relationship_by_id = workbook_relationships
-            .iter()
-            .filter_map(|relationship| relationship.id().map(|id| (id.to_owned(), relationship)))
-            .collect::<HashMap<_, _>>();
+        let relationship_by_id = relationships_by_id(&workbook_relationships);
 
         let sheet_entries = parse_sheet_entries(workbook_xml)?;
         let mut sheets = Vec::with_capacity(sheet_entries.len());
@@ -119,6 +116,11 @@ impl PreservedPackage {
             .and_then(|part| find_part(&parts, &part.path))
             .map(XmlTemplate::capture)
             .transpose()?;
+        // a part a sheet resolves to is never a calc chain an edited save drops
+        let sheet_paths = sheets
+            .iter()
+            .map(|sheet| normalized_part_name(&sheet.path))
+            .collect::<HashSet<_>>();
         let mut calc_chains = workbook_relationships
             .iter()
             .filter(|relationship| relationship.has_type("calcChain"))
@@ -135,6 +137,7 @@ impl PreservedPackage {
                 relationship_id: None,
             });
         }
+        calc_chains.retain(|chain| !sheet_paths.contains(&normalized_part_name(&chain.path)));
         let stylesheet_template = styles
             .as_ref()
             .and_then(|part| find_part(&parts, &part.path))
@@ -1177,7 +1180,7 @@ fn parse_sheet_entries(data: &[u8]) -> Result<Vec<SheetEntry>, ParseError> {
     let mut entries = Vec::new();
     loop {
         match next_event(&mut reader, &mut buffer, &mut depth)? {
-            Event::Start(element) if local_name(&element) == b"sheets" => {
+            Event::Start(element) if local_name(&element) == b"sheets" && depth == 2 => {
                 sheets_depth = Some(depth);
             }
             Event::Start(element)
@@ -1201,6 +1204,17 @@ fn parse_sheet_entries(data: &[u8]) -> Result<Vec<SheetEntry>, ParseError> {
         }
     }
     Ok(entries)
+}
+
+/// The relationship each id names, read as the reader reads it: the last one
+/// with that id that has a target, so duplicate ids resolve the same way on
+/// open, on save and on reopen.
+pub(crate) fn relationships_by_id(relationships: &[Relationship]) -> HashMap<&str, &Relationship> {
+    relationships
+        .iter()
+        .filter(|relationship| relationship.target().is_some())
+        .filter_map(|relationship| relationship.id().map(|id| (id, relationship)))
+        .collect()
 }
 
 fn part_reference(
