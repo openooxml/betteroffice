@@ -793,6 +793,40 @@ test('a computed paragraph boundary outside the prefix completes and recomputes 
   } finally { f.destroy(); full.destroy(); }
 });
 
+for (const unit of ['character', 'word'] as const) {
+  test(`a computed ${unit} result beyond the prefix completes and recomputes`, async () => {
+    const f = await commandFixture('echo', false, { virtualTime: true });
+    const full = await commandFixture('echo', false, { full: true, virtualTime: true });
+    try {
+      const selected = await sendCommand(f, 1, 'selectPoint', commandPoint(f, 2));
+      await sendCommand(full, 1, 'selectPoint', commandPoint(full, 2));
+      expectPrefixSelection(f, selected, []);
+      const end = { unit: 'line' as const, direction: 'forward' as const, extend: false };
+      const boundary = await sendCommand(f, 2, 'navigate', end);
+      await sendCommand(full, 2, 'navigate', end);
+      expectPrefixSelection(f, boundary, []);
+      const navigation = { unit, direction: 'forward' as const, extend: true };
+      const ack = await sendCommand(f, 3, 'navigate', navigation);
+      const reference = await sendCommand(full, 3, 'navigate', navigation);
+      expect(ack.frame!.payload.layoutProvisional).not.toBe(true);
+      expect(f.calls).toContain('layoutDocumentWithRegionsRetained');
+      expect(selectionPositions(ack.selection)).toEqual(selectionPositions(reference.selection));
+    } finally { f.destroy(); full.destroy(); }
+  });
+}
+
+test('a triple click whose paragraph crosses the prefix completes and recomputes', async () => {
+  const f = await commandFixture('flow-paragraph', false, { virtualTime: true });
+  const full = await commandFixture('flow-paragraph', false, { full: true, virtualTime: true });
+  try {
+    const ack = await sendCommand(f, 1, 'selectPoint', { ...commandPoint(f, 2), clickCount: 3 });
+    const reference = await sendCommand(full, 1, 'selectPoint', { ...commandPoint(full, 2), clickCount: 3 });
+    expect(ack.frame!.payload.layoutProvisional).not.toBe(true);
+    expect(f.calls).toContain('layoutDocumentWithRegionsRetained');
+    expect(selectionPositions(ack.selection)).toEqual(selectionPositions(reference.selection));
+  } finally { f.destroy(); full.destroy(); }
+});
+
 test('insertText after a prefix selection completes before editing and matches a full open', async () => {
   const f = await commandFixture('echo', false, { virtualTime: true });
   const full = await commandFixture('echo', false, { full: true, virtualTime: true });
