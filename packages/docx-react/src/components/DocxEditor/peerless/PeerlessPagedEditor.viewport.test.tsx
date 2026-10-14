@@ -2,12 +2,13 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import {
-  applyFrameDelta, applyFrameDeltaOwned, CANVAS_PAGE_GAP_PX, displayPageRevision, FRAME_DELTA_VERSION,
-  type DecodedFrameDelta, type DisplayPage, type FramePageOperation,
+  applyFrameDelta, applyFrameDeltaOwned, CANVAS_PAGE_GAP_PX, displayPageIsShiftOf, displayPageNoteAnchorRevision,
+  displayPageRevision, FRAME_DELTA_VERSION, type DecodedFrameDelta, type DisplayPage, type FramePageOperation,
 } from '@betteroffice/docx/layout/render';
 import type { DocxCommandAck, DocxCommandEchoContext, DocxCommandEnvelope, DocxCommandFrame, ResidentCommandConnection } from '@betteroffice/docx/peerless';
 import type { PeerlessEditSessionBinding, UsePeerlessEditSessionOptions } from '../hooks/usePeerlessEditSession';
 import type { PeerlessFrameGeometry } from './viewStore';
+import { CanvasPageMirror } from '../CanvasPageMirror';
 import { PeerlessPagedEditor } from './PeerlessPagedEditor';
 import { glyphChar, installGlyphPaths, testEchoGlyphLine, testEchoGlyphSet } from './echoGlyphs.testing';
 import { commandPageGeometry } from './commandPageGeometry';
@@ -289,7 +290,7 @@ test('peerless_page_offsets_are_monotonic_and_non_overlapping', () => {
   expect(geometry.caret?.x).toBe(110);
 });
 
-test('prepared geometry copies shifted pages and preserves previous geometry', () => {
+test('prepared geometry links a shifted page to its base and keeps its mirror until idle', () => {
   const displayPage = (pageIndex: number, docStart: number): DisplayPage => ({ pageIndex, width: 200, height: 100,
     positionSpan: [docStart, docStart + 4], primitives: [{ kind: 'text', text: 'abcd', x: 0, baselineY: 14, width: 40,
       font: '12px Arial', color: '#000', docStart, docEnd: docStart + 4 }] });
@@ -304,16 +305,23 @@ test('prepared geometry copies shifted pages and preserves previous geometry', (
   const prepare = scrapedPrepareGeometry({ applyFrameDelta, applyFrameDeltaOwned, decodeFrameDelta: (decoded: unknown) => decoded,
     residentCaretSnapshotForFrame: () => ({ caretRect: null }) });
   const first = prepare(command(1, [upsert(1n, 0, 1n, displayPage(0, 1)), upsert(2n, 1, 2n, displayPage(1, 10))]));
-  const shifted = first.pages[1]!.displayPage!;
+  const base = first.pages[1]!.displayPage!;
+  const mirror = (page: DisplayPage) =>
+    <CanvasPageMirror page={page} noteAnchorRevision={displayPageNoteAnchorRevision(page)} />;
+  const { container, rerender } = render(mirror(base));
+  const built = container.querySelector('.canvas-page-mirror')!.firstElementChild;
+  expect(built).not.toBeNull();
   const second = prepare(command(2, [upsert(1n, 0, 3n, displayPage(0, 2)),
     { kind: 'shift-range', pageIndex: 1, pageId: 2n, count: 1, delta: 1, salt: 5n }]));
-  expect(second.pages[0]!.displayPage).not.toBe(first.pages[0]!.displayPage);
-  expect(second.pages[1]!.displayPage).not.toBe(shifted);
-  expect(second.pages[1]!.displayPage!.positionSpan).toEqual([11, 15]);
-  expect(displayPageRevision(second.pages[1]!.displayPage!)).toBe(1);
-  expect(shifted.positionSpan).toEqual([10, 14]);
-  expect(shifted.primitives[0]!.docStart).toBe(10);
-  expect(displayPageRevision(shifted)).toBe(0);
+  const shifted = second.pages[1]!.displayPage!;
+  expect(second.pages[0]!.displayPage!.positionSpan).toEqual([2, 6]);
+  expect(displayPageIsShiftOf(shifted, base)).toBe(true);
+  expect(displayPageRevision(shifted)).toBe(displayPageRevision(base) + 1);
+  expect(shifted.positionSpan).toEqual([11, 15]);
+  expect(shifted.primitives[0]).toMatchObject({ docStart: 11, docEnd: 15 });
+  expect(base.positionSpan).toEqual([10, 14]);
+  rerender(mirror(shifted));
+  expect(container.querySelector('.canvas-page-mirror')!.firstElementChild).toBe(built);
 });
 
 test('scrolling_to_page_n_builds_n_and_releases_far_pages', async () => {
