@@ -14788,4 +14788,159 @@ mod tests {
         assert!(child.get("docStart").is_none());
         assert!(child.get("docEnd").is_none());
     }
+
+    /// A body paragraph followed by a three-category column chart.
+    fn charted_page(values: Value) -> (crate::types::Input, crate::types::Layout) {
+        let mut pagination: crate::types::Input = serde_json::from_value(serde_json::json!({
+            "options": {
+                "pageSize": {"w": 816, "h": 1056},
+                "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96}
+            },
+            "measured": [
+                {
+                    "block": {"kind": "paragraph", "id": "intro", "attrs": {}, "pmStart": 1, "pmEnd": 7,
+                              "runs": [{"kind": "text", "text": "Intro", "pmStart": 1, "pmEnd": 6}]},
+                    "measure": {"kind": "paragraph", "totalHeight": 24, "lines": [{
+                        "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 5,
+                        "width": 40, "ascent": 19, "descent": 5, "lineHeight": 24
+                    }]}
+                },
+                {
+                    "block": {"kind": "chart", "id": "sales", "width": 300, "height": 200, "chart": {
+                        "chartType": "column",
+                        "series": [{"name": "Sales", "categories": ["A", "B", "C"],
+                                    "values": values, "color": "#4472C4"}]
+                    }},
+                    "measure": {"kind": "chart", "width": 300, "height": 200}
+                }
+            ]
+        }))
+        .unwrap();
+        let layout = crate::compute_layout_input(&mut pagination).unwrap();
+        (pagination, layout)
+    }
+
+    /// The chart rects in the series colour: its bars and its legend key.
+    fn series_rects(page: &DisplayPage) -> usize {
+        page.primitives
+            .iter()
+            .filter(|primitive| {
+                matches!(primitive, Primitive::Rect(rect)
+                    if rect.attrs.chart.is_some() && rect.fill.eq_ignore_ascii_case("#4472c4"))
+            })
+            .count()
+    }
+
+    fn paints_block(page: &DisplayPage, key: &str) -> bool {
+        serde_json::to_value(&page.primitives)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|primitive| primitive["blockKey"] == key)
+    }
+
+    #[test]
+    fn a_blank_chart_point_leaves_a_gap_in_both_display_input_paths() {
+        let fonts = ooxml_text::FontStore::default();
+        let (pagination, layout) = charted_page(serde_json::json!([2, 1, 3]));
+        let complete =
+            build_display_list_value_from_resident_with_fonts(&pagination, &layout, "{}", &fonts)
+                .unwrap();
+        let rects = series_rects(&complete.pages[0]);
+        assert!(rects >= 3);
+
+        let (pagination, layout) = charted_page(serde_json::json!([2, null, 3]));
+        let (_, resident) = build_resident_display_list_with_fonts_observed(
+            &pagination,
+            &layout,
+            "{}",
+            &fonts,
+            &mut || {},
+        )
+        .expect("a blank chart point must not fail the document");
+        assert_eq!(series_rects(&resident.pages[0]), rects - 1);
+        assert!(paints_block(&resident.pages[0], "intro"));
+        let json = build_display_list(
+            &resident_build_input_via_json(&pagination, &layout, "{}"),
+            &fonts,
+        );
+        assert_eq!(json, resident);
+    }
+
+    #[test]
+    fn an_unreadable_measured_block_leaves_only_its_own_fragments_unpainted() {
+        let fonts = ooxml_text::FontStore::default();
+        let (mut pagination, layout) = charted_page(serde_json::json!([2, 1, 3]));
+        let clean =
+            build_display_list_value_from_resident_with_fonts(&pagination, &layout, "{}", &fonts)
+                .unwrap();
+        assert!(paints_block(&clean.pages[0], "intro"));
+        let rects = series_rects(&clean.pages[0]);
+        let crate::types::BlockExtent::Paragraph(extent) = &mut pagination.measured[0].measure
+        else {
+            unreachable!()
+        };
+        extent.lines[0].width = f64::NAN;
+        let (_, list) = build_resident_display_list_with_fonts_observed(
+            &pagination,
+            &layout,
+            "{}",
+            &fonts,
+            &mut || {},
+        )
+        .expect("one unreadable block must not fail the document");
+        assert!(!paints_block(&list.pages[0], "intro"));
+        assert_eq!(series_rects(&list.pages[0]), rects);
+
+        let (mut resident, mut list) = build_resident_display_list_partial_with_fonts_observed(
+            &pagination,
+            &layout,
+            "{}",
+            &fonts,
+            &|_| false,
+            &mut || {},
+        )
+        .unwrap();
+        build_resident_display_pages_with_fonts(
+            &pagination,
+            &layout,
+            &fonts,
+            &mut resident,
+            &mut list,
+            &[0],
+        )
+        .expect("one unreadable block must not fail the page");
+        assert!(!paints_block(&list.pages[0], "intro"));
+        assert_eq!(series_rects(&list.pages[0]), rects);
+    }
+
+    #[test]
+    fn an_unreadable_layout_fragment_leaves_the_rest_of_its_page_painted() {
+        let fonts = ooxml_text::FontStore::default();
+        let (pagination, mut layout) = charted_page(serde_json::json!([2, 1, 3]));
+        let clean =
+            build_display_list_value_from_resident_with_fonts(&pagination, &layout, "{}", &fonts)
+                .unwrap();
+        assert!(paints_block(&clean.pages[0], "intro"));
+        let rects = series_rects(&clean.pages[0]);
+        let Some(crate::types::Fragment::Paragraph(fragment)) = layout.pages[0]
+            .fragments
+            .iter_mut()
+            .find(|fragment| matches!(fragment, crate::types::Fragment::Paragraph(_)))
+        else {
+            unreachable!()
+        };
+        fragment.x = f64::INFINITY;
+        let (_, list) = build_resident_display_list_with_fonts_observed(
+            &pagination,
+            &layout,
+            "{}",
+            &fonts,
+            &mut || {},
+        )
+        .expect("one unreadable fragment must not fail the document");
+        assert!(!paints_block(&list.pages[0], "intro"));
+        assert_eq!(series_rects(&list.pages[0]), rects);
+    }
 }
