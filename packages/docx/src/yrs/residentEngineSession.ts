@@ -56,6 +56,14 @@ import { getDocumentWatermark } from '../docx/watermarkApi';
 import { resolvedFinalSectionProperties } from '../editor/finalSection';
 import { readSectionSnapshot, withSectionSnapshot, type DocxSectionMargins, type ResidentSectionSnapshot } from './residentSections';
 
+/** @internal */
+export interface ResidentExactPrefixLayout {
+  provisional: boolean;
+  pages: number;
+  /** The widest page of the whole document, while only a prefix is laid out. */
+  documentWidth?: number;
+}
+
 export type ResidentEngineSession = Pick<
   YrsSession,
   | 'applyDelete'
@@ -154,6 +162,11 @@ export type ResidentEngineSession = Pick<
   exportStructuredWithPagesJson(options: DocxPageExportOptions, currentRequest: string): string;
   /** The region layout of only as much of the body as fills `pages` pages. */
   layoutDocumentWithRegionsPrefixRetainedJson(input: string, pages: number): string;
+  /**
+   * @internal The retained region layout of exactly the first `pages` pages when nothing later
+   * can change them (`provisional`), or of the whole document.
+   */
+  layoutDocumentWithRegionsExactPrefixRetained(input: string, pages: number): ResidentExactPrefixLayout;
   /** Limit incremental rebuilds to the display window and caret pages. Off by default. */
   setWindowedIncrementalBuilds(enabled: boolean): void;
   /** @internal */
@@ -698,6 +711,9 @@ export async function createResidentEngineSession(
     setPartialDocument: (partial) => session.set_partial_document(partial),
     layoutDocumentWithRegionsPrefixRetainedJson: (input, pages) =>
       session.layout_document_with_regions_prefix_retained_json(partLayoutInput(input), pages),
+    layoutDocumentWithRegionsExactPrefixRetained: (input, pages) => JSON.parse(
+      session.layout_document_with_regions_exact_prefix_retained(partLayoutInput(input), pages)
+    ) as ResidentExactPrefixLayout,
     layoutDocumentWithRegionsRetained: (input) =>
       session.layout_document_with_regions_retained(partLayoutInput(input)),
     retainedHeadersFootersJson: () => session.retained_headers_footers_json(),

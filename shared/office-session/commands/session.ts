@@ -113,8 +113,6 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
   const futurePresentations = new Map<number, Deferred<PresentationStatus>>();
   const blockedSeqs = createBlockedLedger();
   const inFlight = new Set<number>();
-  const draftFences = new WeakMap<CommandDraft<P, X>, number>();
-  let fence = 0;
   let ticketId = 0;
   let highSeq = initial.throughSeq;
   let incarnation = initial.incarnation;
@@ -164,12 +162,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
   const waitingReads = new Set<PendingRead>();
   const outbox = createOutbox<P, X>({
     inputBurstCap: options.inputBurstCap,
-    coalesce: options.coalesce && ((prev, next) => {
-      if (draftFences.get(prev) !== draftFences.get(next)) return undefined;
-      const merged = options.coalesce!(prev, next);
-      if (merged) draftFences.set(merged, draftFences.get(next)!);
-      return merged;
-    }),
+    coalesce: options.coalesce,
   });
   const presenter = createPresenter<X, F>({
     echo: options.echo && {
@@ -1128,7 +1121,6 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
       return record.ticket;
     }
     const draft: CommandDraft<P, X> = { kind, payload, options: { ...submitOptions } };
-    draftFences.set(draft, fence);
     try {
       presenter.event(() => {
         const entry = outbox.enqueue(draft, record.ticket);
@@ -1173,7 +1165,6 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
       return () => { listeners.delete(listener); };
     },
     flush() {
-      fence += 1;
       fenceOutbox(outbox);
       if (terminal) return Promise.reject(terminal);
       const acknowledgements = [...pending].filter((record) => !record.ackSettled).map((record) => record.ack.promise);

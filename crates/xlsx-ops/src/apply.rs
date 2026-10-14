@@ -259,6 +259,7 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
             if format.rows == 0
                 || format.columns == 0
                 || format.formats.len() != (format.rows as usize) * (format.columns as usize)
+                || !(format.kept.is_empty() || format.kept.len() == format.formats.len())
             {
                 return Err(OpError::InvalidStyle(
                     "captured format dimensions do not match its cells".into(),
@@ -268,7 +269,11 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
                 let source_row = (row - range.start.row) % format.rows;
                 let source_col = (col - range.start.col) % format.columns;
                 let index = (source_row * format.columns + source_col) as usize;
-                *cell_format = format.formats[index].clone();
+                let mut applied = format.formats[index].clone();
+                if let Some(kept) = format.kept.get(index) {
+                    kept.keep(cell_format, &mut applied);
+                }
+                *cell_format = applied;
                 Ok(())
             })
         }
@@ -2344,6 +2349,7 @@ mod range_format_exhaustion_tests {
                         ..CellFormat::default()
                     },
                 ],
+                kept: Vec::new(),
             },
         };
 
@@ -2390,6 +2396,7 @@ mod range_format_exhaustion_tests {
                         ..CellFormat::default()
                     },
                 ],
+                kept: Vec::new(),
             },
         };
 

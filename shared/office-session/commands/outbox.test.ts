@@ -93,6 +93,56 @@ test('blocks merging across fences, incompatible lanes, groups, and dependencies
   expect(outbox.size).toBe(3);
 });
 
+function keepPrevious(prev: CommandDraft<string, string>, next: CommandDraft<string, string>) {
+  return draft(prev.payload + next.payload, prev.options);
+}
+
+test('merges drafts chained on the previous queued entry under that entry\'s predecessor', () => {
+  const outbox = createOutbox<string, string>({ coalesce: keepPrevious });
+  const sent = ticket(1);
+  outbox.enqueue(draft('a', { coalesceKey: 'text' }), sent.value);
+  const inFlight = outbox.takeNext(() => true)!;
+  sent.send(1);
+  const chain = [2, 3, 4].map((id) => ticket(id).value);
+  const entries = chain.map((value, index) => outbox.enqueue(
+    draft('bcd'[index]!, { coalesceKey: 'text', after: index ? chain[index - 1] : sent.value }), value));
+  expect(inFlight.tickets).toEqual([sent.value]);
+  expect(inFlight.draft.payload).toBe('a');
+  expect(outbox.size).toBe(1);
+  const merged = entries[2]!;
+  expect(merged.id).toBe(2);
+  expect(merged.tickets).toEqual(chain);
+  expect(merged.draft.payload).toBe('bcd');
+  expect(merged.draft.options.after).toBe(sent.value);
+  expect(outbox.takeNext(() => true)).toBe(merged);
+  expect(outbox.size).toBe(0);
+});
+
+test('keeps chained drafts apart across fences, lanes, groups, versions, and older entries', () => {
+  const changes: SubmitOptions<string>[] = [
+    { fence: true }, { lane: 'collab' }, { group: 'other' }, { expectVersion: true }, { coalesceKey: 'other' },
+  ];
+  for (const changed of changes) {
+    const outbox = createOutbox<string, string>({ coalesce: keepPrevious });
+    const first = ticket(1).value;
+    outbox.enqueue(draft('a', { coalesceKey: 'text' }), first);
+    outbox.enqueue(draft('b', { coalesceKey: 'text', after: first, ...changed }), ticket(2).value);
+    expect(outbox.size).toBe(2);
+  }
+  const fenced = createOutbox<string, string>({ coalesce: keepPrevious });
+  const first = ticket(1).value;
+  fenced.enqueue(draft('a', { coalesceKey: 'text' }), first);
+  fenceOutbox(fenced);
+  fenced.enqueue(draft('b', { coalesceKey: 'text', after: first }), ticket(2).value);
+  expect(fenced.size).toBe(2);
+  const older = createOutbox<string, string>({ coalesce: keepPrevious });
+  const root = ticket(1).value;
+  older.enqueue({ ...draft('a', { coalesceKey: 'text' }), kind: 'delete' }, root);
+  older.enqueue(draft('b', { coalesceKey: 'text' }), ticket(2).value);
+  older.enqueue(draft('c', { coalesceKey: 'text', after: root }), ticket(3).value);
+  expect(older.entries.map((entry) => entry.draft.payload)).toEqual(['a', 'b', 'c']);
+});
+
 test('merges compatible defaults but respects declined hooks, kinds, keys, and adjacency', () => {
   const outbox = createOutbox({ coalesce });
   const dependency = ticket(90).value;

@@ -4,14 +4,15 @@ use std::ops::Bound::{Excluded, Unbounded};
 use xlsx_model::{
     Alignment, AnchorCell, AnchorEditAs, AnchorExtent, AnchorPos, Border, BorderEdge, BorderStyle,
     Cell, CellRef, ChartAnchor, ChartRef, ChartRefKind, ColStyle, Color, DateSystem, DefinedName,
-    Fill, Font, FreezePane, HAlign, Hyperlink, Sheet, SheetChart, SheetFormat, SheetId, Table,
-    Theme, VAlign, Workbook, Xf,
+    Fill, Font, FreezePane, HAlign, Hyperlink, PatternType, Protection, Sheet, SheetChart,
+    SheetFormat, SheetId, Table, Theme, VAlign, Workbook, Xf,
 };
 
 use super::cells::{CellCursor, read_cell, read_range, read_ref, write_range, write_ref};
 use super::growth::Growth;
 use super::wire::{ChunkKind, Reader, Writer, frame, frame_records, packed_record, unframe};
 use super::{SnapshotBudget, SnapshotError, SnapshotProgress, SnapshotResult};
+use crate::authority::snapshot::{Released, released};
 
 const HEADER: u8 = 0;
 const NAME: u8 = 1;
@@ -38,6 +39,20 @@ const ROW_STYLE: u8 = 24;
 /// A sheet record that also counts its row defaults; a sheet without any keeps
 /// the `SHEET` layout.
 const STYLED_SHEET: u8 = 25;
+
+const XF_V2: u8 = 21;
+const FILL_V2: u8 = 22;
+const BORDER_V2: u8 = 23;
+
+fn run_tag(tag: u8) -> u8 {
+    match tag {
+        STYLED_SHEET => SHEET,
+        XF_V2 => XF,
+        FILL_V2 => FILL,
+        BORDER_V2 => BORDER,
+        tag => tag,
+    }
+}
 
 #[cfg(test)]
 thread_local! {
@@ -289,10 +304,13 @@ impl MetadataCursor {
                 self.index = 0;
                 continue;
             }
-            let tag = if self.phase == TABLE && self.child != 0 {
-                TABLE_COLUMN
-            } else {
-                self.phase
+            let tag = match self.phase {
+                TABLE if self.child != 0 => TABLE_COLUMN,
+                FILL => FILL_V2,
+                BORDER => BORDER_V2,
+                XF if model.styles.is_released_xf(self.index) => XF,
+                XF => XF_V2,
+                phase => phase,
             };
             w.u8(tag);
             match self.phase {
@@ -301,6 +319,7 @@ impl MetadataCursor {
                 FONT => write_font(w, &model.styles.fonts[self.index]),
                 FILL => write_fill(w, &model.styles.fills[self.index]),
                 BORDER => write_border(w, &model.styles.borders[self.index]),
+                XF if tag == XF => write_released_xf(w, &model.styles.cell_xfs[self.index]),
                 XF => write_xf(w, &model.styles.cell_xfs[self.index]),
                 NUM_FMT => {
                     let (id, code) = &model.styles.num_fmts[self.index];
@@ -545,10 +564,10 @@ impl ModelSnapshotBuilder {
             chunk.len() - self.offset
         };
         let mut r = Reader::new(record);
-        let tag = r.u8()?;
+        let raw = r.u8()?;
+        let tag = run_tag(raw);
         if self.started {
-            if self.runs.front().map(|&(expected, _)| expected)
-                != Some(if tag == STYLED_SHEET { SHEET } else { tag })
+            if self.runs.front().map(|&(expected, _)| expected) != Some(run_tag(tag))
                 || self.remaining_records == 0
             {
                 return Err(SnapshotError::new(
@@ -561,13 +580,13 @@ impl ModelSnapshotBuilder {
                 ));
             }
             if decoding || extent > budget.max_bytes() {
-                self.preflight_large_record(tag, budget)?;
+                self.preflight_large_record(raw, budget)?;
             }
             if !self.advance_capacity(tag, budget)? {
                 return Ok(SnapshotProgress::pending());
             }
             if decoding || extent > budget.max_bytes() {
-                let Some(consumed) = self.read_large_record(tag, r.rest(), budget)? else {
+                let Some(consumed) = self.read_large_record(raw, r.rest(), budget)? else {
                     return Ok(SnapshotProgress::pending());
                 };
                 self.offset += 1 + consumed;
@@ -578,7 +597,7 @@ impl ModelSnapshotBuilder {
                 }
                 return Ok(SnapshotProgress::pending());
             }
-            self.read_record(tag, &mut r)?;
+            self.read_record(raw, &mut r)?;
         } else {
             if extent > budget.max_bytes() {
                 return Err(SnapshotError::new(
@@ -606,7 +625,7 @@ impl ModelSnapshotBuilder {
     }
 
     fn preflight_large_record(&self, tag: u8, budget: SnapshotBudget) -> SnapshotResult<()> {
-        use crate::authority::snapshot::preflight_record;
+        use crate::authority::snapshot::{LegacyXf, preflight_record};
         macro_rules! preflight {
             ($ty:ty) => {
                 preflight_record::<$ty>(&self.decode, (self.ordinal, self.offset), budget)
@@ -616,9 +635,12 @@ impl ModelSnapshotBuilder {
             NAME => preflight!(DefinedName),
             STRING | THEME | INDEXED | TABLE_COLUMN => preflight!(String),
             FONT => preflight!(Font),
-            FILL => preflight!(Fill),
-            BORDER => preflight!(Border),
-            XF => preflight!(Xf),
+            FILL => preflight!(Released<Fill>),
+            FILL_V2 => preflight!(Fill),
+            BORDER => preflight!(Released<Border>),
+            BORDER_V2 => preflight!(Border),
+            XF => preflight!(LegacyXf),
+            XF_V2 => preflight!(Xf),
             NUM_FMT => preflight!((u16, String)),
             HYPERLINK => preflight!(Hyperlink),
             CHART_REF => preflight!(ChartRef),
@@ -639,7 +661,7 @@ impl ModelSnapshotBuilder {
         payload: &[u8],
         budget: SnapshotBudget,
     ) -> SnapshotResult<Option<usize>> {
-        use crate::authority::snapshot::decode_record;
+        use crate::authority::snapshot::{LegacyXf, decode_record};
         macro_rules! decoded {
             ($ty:ty) => {
                 match decode_record::<$ty>(
@@ -670,16 +692,31 @@ impl ModelSnapshotBuilder {
                 end
             }
             FILL => {
+                let (Released(value), end) = decoded!(Released<Fill>);
+                self.model.styles.fills.push(value);
+                end
+            }
+            FILL_V2 => {
                 let (value, end) = decoded!(Fill);
                 self.model.styles.fills.push(value);
                 end
             }
             BORDER => {
+                let (Released(value), end) = decoded!(Released<Border>);
+                self.model.styles.borders.push(value);
+                end
+            }
+            BORDER_V2 => {
                 let (value, end) = decoded!(Border);
                 self.model.styles.borders.push(value);
                 end
             }
             XF => {
+                let (value, end) = decoded!(LegacyXf);
+                self.model.styles.push_released_xf(value.into());
+                end
+            }
+            XF_V2 => {
                 let (value, end) = decoded!(Xf);
                 self.model.styles.cell_xfs.push(value);
                 end
@@ -818,8 +855,8 @@ impl ModelSnapshotBuilder {
             NAME => g.ensure(m, |m| Ok(&mut m.defined_names), budget),
             STRING => g.ensure(m, |m| Ok(&mut m.shared_strings), budget),
             FONT => g.ensure(m, |m| Ok(&mut m.styles.fonts), budget),
-            FILL => g.ensure(m, |m| Ok(&mut m.styles.fills), budget),
-            BORDER => g.ensure(m, |m| Ok(&mut m.styles.borders), budget),
+            FILL | FILL_V2 => g.ensure(m, |m| Ok(&mut m.styles.fills), budget),
+            BORDER | BORDER_V2 => g.ensure(m, |m| Ok(&mut m.styles.borders), budget),
             XF => g.ensure(m, |m| Ok(&mut m.styles.cell_xfs), budget),
             NUM_FMT => g.ensure(m, |m| Ok(&mut m.styles.num_fmts), budget),
             INDEXED => g.ensure(m, |m| Ok(&mut m.styles.indexed_colors), budget),
@@ -956,13 +993,12 @@ impl ModelSnapshotBuilder {
         Ok(())
     }
 
-    fn read_record(&mut self, tag: u8, r: &mut Reader<'_>) -> SnapshotResult<()> {
+    fn read_record(&mut self, raw: u8, r: &mut Reader<'_>) -> SnapshotResult<()> {
+        let tag = run_tag(raw);
         let Some((expected, remaining)) = self.runs.front_mut() else {
             return Err(SnapshotError::new("extra snapshot metadata record"));
         };
-        if (if tag == STYLED_SHEET { SHEET } else { tag }) != *expected
-            || self.remaining_records == 0
-        {
+        if run_tag(tag) != *expected || self.remaining_records == 0 {
             return Err(SnapshotError::new(
                 "snapshot metadata records are reordered",
             ));
@@ -972,13 +1008,16 @@ impl ModelSnapshotBuilder {
             self.runs.pop_front();
         }
         self.remaining_records -= 1;
-        match tag {
+        match raw {
             NAME => self.model.defined_names.push(read_name(r)?),
             STRING => self.model.shared_strings.push(r.str()?.to_owned()),
             FONT => self.model.styles.fonts.push(read_font(r)?),
-            FILL => self.model.styles.fills.push(read_fill(r)?),
-            BORDER => self.model.styles.borders.push(read_border(r)?),
-            XF => self.model.styles.cell_xfs.push(read_xf(r)?),
+            FILL => self.model.styles.fills.push(released(read_fill(r)?)?),
+            FILL_V2 => self.model.styles.fills.push(read_fill(r)?),
+            BORDER => self.model.styles.borders.push(released(read_border(r)?)?),
+            BORDER_V2 => self.model.styles.borders.push(read_border(r)?),
+            XF => self.model.styles.push_released_xf(read_released_xf(r)?),
+            XF_V2 => self.model.styles.cell_xfs.push(read_xf(r)?),
             NUM_FMT => self
                 .model
                 .styles
@@ -1336,6 +1375,10 @@ fn read_u16(r: &mut Reader<'_>) -> SnapshotResult<u16> {
     u16::try_from(r.var_u32()?).map_err(|_| SnapshotError::new("snapshot integer overflows u16"))
 }
 
+fn read_i32(r: &mut Reader<'_>) -> SnapshotResult<i32> {
+    i32::try_from(r.var_i64()?).map_err(|_| SnapshotError::new("snapshot integer overflows i32"))
+}
+
 fn write_name(w: &mut Writer, value: &DefinedName) {
     let DefinedName {
         name,
@@ -1523,6 +1566,12 @@ fn write_fill(w: &mut Writer, value: &Fill) {
             w.u8(1);
             write_color(w, color);
         }
+        Fill::Pattern { pattern, fg, bg } => {
+            w.u8(2);
+            write_pattern(w, pattern);
+            w.option(fg.as_ref(), write_color);
+            w.option(bg.as_ref(), write_color);
+        }
     }
 }
 
@@ -1530,6 +1579,11 @@ fn read_fill(r: &mut Reader<'_>) -> SnapshotResult<Fill> {
     Ok(match r.u8()? {
         0 => Fill::None,
         1 => Fill::Solid(read_color(r)?),
+        2 => Fill::Pattern {
+            pattern: read_pattern(r)?,
+            fg: r.option(read_color)?,
+            bg: r.option(read_color)?,
+        },
         _ => return Err(SnapshotError::new("invalid snapshot fill")),
     })
 }
@@ -1559,6 +1613,19 @@ enum_codec!(write_border_style, read_border_style, BorderStyle, {
     Dotted => 4,
     Double => 5,
     Hair => 6,
+    MediumDashed => 7,
+    DashDot => 8,
+    MediumDashDot => 9,
+    DashDotDot => 10,
+    MediumDashDotDot => 11,
+    SlantDashDot => 12,
+});
+
+enum_codec!(write_pattern, read_pattern, PatternType, {
+    Gray125 => 0, Gray0625 => 1, MediumGray => 2, DarkGray => 3, LightGray => 4,
+    DarkHorizontal => 5, DarkVertical => 6, DarkDown => 7, DarkUp => 8, DarkGrid => 9,
+    DarkTrellis => 10, LightHorizontal => 11, LightVertical => 12, LightDown => 13,
+    LightUp => 14, LightGrid => 15, LightTrellis => 16,
 });
 
 enum_codec!(write_halign, read_halign, HAlign, {
@@ -1636,11 +1703,31 @@ fn write_alignment(w: &mut Writer, value: &Alignment) {
         v,
         wrap_text,
         shrink_to_fit,
+        text_rotation,
+        indent,
+        relative_indent,
+        justify_last_line,
+        reading_order,
     } = value;
     w.option(h.as_ref(), write_halign);
     w.option(v.as_ref(), write_valign);
     w.bool(*wrap_text);
     w.bool(*shrink_to_fit);
+    w.option(*text_rotation, |w, value| w.var_u32(u32::from(value)));
+    w.option(*indent, Writer::var_u32);
+    w.option(*relative_indent, |w, value| w.var_i64(i64::from(value)));
+    w.option(*justify_last_line, Writer::bool);
+    w.option(*reading_order, Writer::var_u32);
+}
+
+fn read_released_alignment(r: &mut Reader<'_>) -> SnapshotResult<Alignment> {
+    Ok(Alignment {
+        h: r.option(read_halign)?,
+        v: r.option(read_valign)?,
+        wrap_text: r.bool()?,
+        shrink_to_fit: r.bool()?,
+        ..Alignment::default()
+    })
 }
 
 fn read_alignment(r: &mut Reader<'_>) -> SnapshotResult<Alignment> {
@@ -1649,6 +1736,11 @@ fn read_alignment(r: &mut Reader<'_>) -> SnapshotResult<Alignment> {
         v: r.option(read_valign)?,
         wrap_text: r.bool()?,
         shrink_to_fit: r.bool()?,
+        text_rotation: r.option(read_u16)?,
+        indent: r.option(Reader::var_u32)?,
+        relative_indent: r.option(read_i32)?,
+        justify_last_line: r.option(Reader::bool)?,
+        reading_order: r.option(Reader::var_u32)?,
     })
 }
 
@@ -1659,12 +1751,48 @@ fn write_xf(w: &mut Writer, value: &Xf) {
         border,
         num_fmt_id,
         alignment,
+        protection,
+        xf_id,
+        quote_prefix,
+        pivot_button,
     } = value;
     w.option(*font, Writer::var_u32);
     w.option(*fill, Writer::var_u32);
     w.option(*border, Writer::var_u32);
     w.option(*num_fmt_id, |w, id| w.var_u32(u32::from(id)));
     w.option(alignment.as_ref(), write_alignment);
+    w.option(protection.as_ref(), |w, value| {
+        w.bool(value.locked);
+        w.bool(value.hidden);
+    });
+    w.option(*xf_id, Writer::var_u32);
+    w.bool(*quote_prefix);
+    w.bool(*pivot_button);
+}
+
+/// An `XF` record in the layout releases before format facets wrote.
+fn write_released_xf(w: &mut Writer, value: &Xf) {
+    w.option(value.font, Writer::var_u32);
+    w.option(value.fill, Writer::var_u32);
+    w.option(value.border, Writer::var_u32);
+    w.option(value.num_fmt_id, |w, id| w.var_u32(u32::from(id)));
+    w.option(value.alignment.as_ref(), |w, alignment| {
+        w.option(alignment.h.as_ref(), write_halign);
+        w.option(alignment.v.as_ref(), write_valign);
+        w.bool(alignment.wrap_text);
+        w.bool(alignment.shrink_to_fit);
+    });
+}
+
+fn read_released_xf(r: &mut Reader<'_>) -> SnapshotResult<Xf> {
+    Ok(Xf {
+        font: r.option(Reader::var_u32)?,
+        fill: r.option(Reader::var_u32)?,
+        border: r.option(Reader::var_u32)?,
+        num_fmt_id: r.option(read_u16)?,
+        alignment: r.option(read_released_alignment)?,
+        ..Xf::default()
+    })
 }
 
 fn read_xf(r: &mut Reader<'_>) -> SnapshotResult<Xf> {
@@ -1674,7 +1802,35 @@ fn read_xf(r: &mut Reader<'_>) -> SnapshotResult<Xf> {
         border: r.option(Reader::var_u32)?,
         num_fmt_id: r.option(read_u16)?,
         alignment: r.option(read_alignment)?,
+        protection: r.option(|r| {
+            Ok(Protection {
+                locked: r.bool()?,
+                hidden: r.bool()?,
+            })
+        })?,
+        xf_id: r.option(Reader::var_u32)?,
+        quote_prefix: r.bool()?,
+        pivot_button: r.bool()?,
     })
+}
+
+/// `record` as releases before format facets wrote it: an `XF` record holding
+/// such a release's reading moves to their layout, any other stays as it is.
+#[cfg(test)]
+pub(crate) fn released_layout(record: &[u8]) -> Vec<u8> {
+    if record.first() != Some(&XF_V2) {
+        return record.to_vec();
+    }
+    let xf = read_xf(&mut Reader::new(&record[1..])).unwrap();
+    let mut w = Writer::new();
+    w.u8(XF);
+    write_released_xf(&mut w, &xf);
+    let released = w.into_bytes();
+    assert_eq!(
+        read_released_xf(&mut Reader::new(&released[1..])).unwrap(),
+        xf
+    );
+    released
 }
 
 fn write_anchor_cell(w: &mut Writer, value: &AnchorCell) {
@@ -1801,6 +1957,177 @@ mod tests {
     use xlsx_model::{CellRange, CellValue, ErrorValue, Stylesheet};
 
     use super::*;
+
+    #[test]
+    fn pattern_border_snapshot_round_trip() {
+        let mut model = Workbook::default();
+        for pattern in [
+            "gray125",
+            "gray0625",
+            "mediumGray",
+            "darkGray",
+            "lightGray",
+            "darkHorizontal",
+            "darkVertical",
+            "darkDown",
+            "darkUp",
+            "darkGrid",
+            "darkTrellis",
+            "lightHorizontal",
+            "lightVertical",
+            "lightDown",
+            "lightUp",
+            "lightGrid",
+            "lightTrellis",
+        ] {
+            model.styles.fills.push(
+                serde_json::from_value(serde_json::json!({"Pattern": {
+                    "pattern": pattern, "fg": {"Theme": {"idx": 4, "tint": -0.25}}, "bg": "Auto"
+                }}))
+                .unwrap(),
+            );
+        }
+        for token in [
+            "mediumDashed",
+            "dashDot",
+            "mediumDashDot",
+            "dashDotDot",
+            "mediumDashDotDot",
+            "slantDashDot",
+        ] {
+            model.styles.borders.push(Border {
+                top: Some(BorderEdge {
+                    style: BorderStyle::from_sml(token),
+                    color: Some(Color::Indexed(5)),
+                }),
+                ..Border::default()
+            });
+        }
+        let restored = decode(&encode(
+            &model,
+            SnapshotBudget::new(256, 64 * 1024).unwrap(),
+        ));
+        assert_eq!(restored.styles, model.styles);
+    }
+
+    fn style_stream(fills: &[Vec<u8>], borders: &[Vec<u8>]) -> Vec<Vec<u8>> {
+        let mut counts = [0; 10];
+        counts[3] = fills.len();
+        counts[4] = borders.len();
+        let theme = (0..12).map(|_| {
+            let mut record = Writer::new();
+            record.u8(THEME);
+            record.str("");
+            record.into_bytes()
+        });
+        let mut chunks = vec![declared_header(13 + fills.len() + borders.len(), counts)];
+        for (ordinal, record) in fills
+            .iter()
+            .chain(borders)
+            .cloned()
+            .chain(theme)
+            .enumerate()
+        {
+            chunks.push(frame(ChunkKind::Model, ordinal as u64 + 1, &record));
+        }
+        chunks
+    }
+
+    fn advance_all(chunks: &[Vec<u8>], budget: SnapshotBudget) -> SnapshotResult<Workbook> {
+        let mut builder = ModelSnapshotBuilder::new();
+        for chunk in chunks {
+            while !builder.advance_bounded(chunk, budget)?.is_ready() {}
+        }
+        builder.finish()
+    }
+
+    #[test]
+    fn fill_and_border_records_keep_their_released_layout() {
+        let long = format!("#{}", "a".repeat(600));
+        let solid = {
+            let mut record = Writer::new();
+            record.u8(FILL);
+            record.u8(1);
+            record.u8(0);
+            record.str(&long);
+            record.into_bytes()
+        };
+        let double = vec![BORDER, 0, 0, 0, 1, 5, 1, 2, 5];
+        let pattern = Fill::Pattern {
+            pattern: PatternType::LightUp,
+            fg: Some(Color::Rgb(long.clone())),
+            bg: None,
+        };
+        let dash_dot = Border {
+            bottom: Some(BorderEdge {
+                style: BorderStyle::MediumDashDot,
+                color: Some(Color::Indexed(5)),
+            }),
+            ..Border::default()
+        };
+        let current = |tag: u8, write: &dyn Fn(&mut Writer)| {
+            let mut record = Writer::new();
+            record.u8(tag);
+            write(&mut record);
+            record.into_bytes()
+        };
+        let pattern_as = |tag: u8| current(tag, &|w: &mut Writer| write_fill(w, &pattern));
+        let dash_dot_as = |tag: u8| current(tag, &|w: &mut Writer| write_border(w, &dash_dot));
+        let budget = SnapshotBudget::new(16, 512).unwrap();
+        let unbounded = |chunks: &[Vec<u8>]| -> SnapshotResult<Workbook> {
+            let mut builder = ModelSnapshotBuilder::new();
+            for chunk in chunks {
+                builder.push(chunk)?;
+            }
+            builder.finish()
+        };
+
+        let released = style_stream(&[vec![FILL, 0], solid], &[double]);
+        let expected_double = Border {
+            bottom: Some(BorderEdge {
+                style: BorderStyle::Double,
+                color: Some(Color::Indexed(5)),
+            }),
+            ..Border::default()
+        };
+        for restored in [unbounded(&released), advance_all(&released, budget)] {
+            let restored = restored.unwrap();
+            assert_eq!(
+                restored.styles.fills,
+                vec![Fill::None, Fill::Solid(Color::Rgb(long.clone()))]
+            );
+            assert_eq!(restored.styles.borders, vec![expected_double.clone()]);
+        }
+        for stream in [
+            style_stream(&[pattern_as(FILL)], &[]),
+            style_stream(&[], &[dash_dot_as(BORDER)]),
+        ] {
+            assert!(unbounded(&stream).is_err());
+            assert!(advance_all(&stream, budget).is_err());
+        }
+        let current_stream = style_stream(&[pattern_as(22)], &[dash_dot_as(23)]);
+        for restored in [
+            unbounded(&current_stream),
+            advance_all(&current_stream, budget),
+        ] {
+            let restored = restored.unwrap();
+            assert_eq!(restored.styles.fills, vec![pattern.clone()]);
+            assert_eq!(restored.styles.borders, vec![dash_dot.clone()]);
+        }
+
+        let mut model = Workbook::default();
+        model.styles.fonts.clear();
+        model.styles.fills = vec![Fill::None];
+        model.styles.borders = vec![Border::default()];
+        let mut cursor = MetadataCursor::default();
+        let mut tags = Vec::new();
+        for _ in 0..2 {
+            let mut record = Writer::new();
+            assert!(cursor.write_next(&mut record, &model).unwrap());
+            tags.push(record.into_bytes()[0]);
+        }
+        assert_eq!(tags, [22, 23]);
+    }
 
     fn encode(model: &Workbook, budget: SnapshotBudget) -> Vec<Vec<u8>> {
         let mut encoder = ModelSnapshotEncoder::new();
@@ -2132,7 +2459,9 @@ mod tests {
                         v: Some(v),
                         wrap_text: true,
                         shrink_to_fit: true,
+                        ..Alignment::default()
                     }),
+                    ..Xf::default()
                 });
             }
         }
@@ -2142,6 +2471,7 @@ mod tests {
             border: None,
             num_fmt_id: Some(u16::MAX),
             alignment: Some(Alignment::default()),
+            ..Xf::default()
         });
         styles.num_fmts = vec![
             (165, "code".into()),
@@ -2770,5 +3100,47 @@ mod tests {
             model.sheets.len() - 1
         );
         assert_eq!(tags.iter().filter(|&&tag| tag > 20).count(), 2);
+    }
+
+    #[test]
+    fn xf_records_released_before_format_facets_still_decode() {
+        let model = sample_model();
+        let budget = SnapshotBudget::new(1, 64 * 1024).unwrap();
+        let chunks = encode(&model, budget);
+        let first = 1 + global_counts(&model)[..5].iter().sum::<usize>();
+        let xfs = first..first + model.styles.cell_xfs.len();
+        let released = chunks
+            .iter()
+            .enumerate()
+            .map(|(ordinal, chunk)| {
+                if !xfs.contains(&ordinal) {
+                    return chunk.clone();
+                }
+                let xf = &model.styles.cell_xfs[ordinal - first];
+                let mut w = Writer::new();
+                w.u8(6);
+                w.option(xf.font, Writer::var_u32);
+                w.option(xf.fill, Writer::var_u32);
+                w.option(xf.border, Writer::var_u32);
+                w.option(xf.num_fmt_id, |w, id| w.var_u32(u32::from(id)));
+                w.option(xf.alignment.as_ref(), |w, alignment| {
+                    w.option(alignment.h.as_ref(), write_halign);
+                    w.option(alignment.v.as_ref(), write_valign);
+                    w.bool(alignment.wrap_text);
+                    w.bool(alignment.shrink_to_fit);
+                });
+                frame(ChunkKind::Model, ordinal as u64, &w.into_bytes())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(decode(&released), model);
+        let mut builder = ModelSnapshotBuilder::new();
+        for chunk in &released {
+            while !builder.advance_bounded(chunk, budget).unwrap().is_ready() {}
+        }
+        assert_eq!(builder.finish().unwrap(), model);
+        for ordinal in xfs {
+            let (_, _, payload) = unframe(&chunks[ordinal]).unwrap();
+            assert_ne!(payload[0], 6);
+        }
     }
 }

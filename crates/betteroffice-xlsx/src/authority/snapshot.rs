@@ -1,7 +1,8 @@
 use std::collections::LinkedList;
 
 use xlsx_model::styles::{
-    Alignment, Border, BorderEdge, BorderStyle, Color, Fill, Font, HAlign, Theme, VAlign, Xf,
+    Alignment, Border, BorderEdge, BorderStyle, Color, Fill, Font, HAlign, PatternType, Protection,
+    Theme, VAlign, Xf,
 };
 use xlsx_model::{AnchorCell, ChartRefKind};
 
@@ -337,6 +338,17 @@ impl Codec for u16 {
     fn read(r: &mut Reader<'_>) -> SnapshotResult<Self> {
         u16::try_from(r.var_u32()?)
             .map_err(|_| SnapshotError::new("snapshot integer overflows u16"))
+    }
+}
+
+impl Codec for i32 {
+    fn write(&self, w: &mut Writer) {
+        w.var_i64(i64::from(*self));
+    }
+
+    fn read(r: &mut Reader<'_>) -> SnapshotResult<Self> {
+        i32::try_from(r.var_i64()?)
+            .map_err(|_| SnapshotError::new("snapshot integer overflows i32"))
     }
 }
 
@@ -714,6 +726,14 @@ macro_rules! enum_codec {
 enum_codec!(DateSystem { V1900 = 0, V1904 = 1 });
 enum_codec!(BorderStyle {
     Thin = 0, Medium = 1, Thick = 2, Dashed = 3, Dotted = 4, Double = 5, Hair = 6,
+    MediumDashed = 7, DashDot = 8, MediumDashDot = 9, DashDotDot = 10,
+    MediumDashDotDot = 11, SlantDashDot = 12,
+});
+enum_codec!(PatternType {
+    Gray125 = 0, Gray0625 = 1, MediumGray = 2, DarkGray = 3, LightGray = 4,
+    DarkHorizontal = 5, DarkVertical = 6, DarkDown = 7, DarkUp = 8, DarkGrid = 9,
+    DarkTrellis = 10, LightHorizontal = 11, LightVertical = 12, LightDown = 13,
+    LightUp = 14, LightGrid = 15, LightTrellis = 16,
 });
 enum_codec!(HAlign {
     General = 0, Left = 1, Center = 2, Right = 3, Fill = 4, Justify = 5,
@@ -800,14 +820,98 @@ struct_codec!(Alignment {
     h,
     v,
     wrap_text,
+    shrink_to_fit,
+    text_rotation,
+    indent,
+    relative_indent,
+    justify_last_line,
+    reading_order
+});
+struct_codec!(Protection { locked, hidden });
+
+/// `Alignment` as laid out before format facets.
+struct LegacyAlignment {
+    h: Option<HAlign>,
+    v: Option<VAlign>,
+    wrap_text: bool,
+    shrink_to_fit: bool,
+}
+struct_codec!(LegacyAlignment {
+    h,
+    v,
+    wrap_text,
     shrink_to_fit
 });
-struct_codec!(Xf {
+
+/// `Xf` as laid out before format facets, which it reads as absent.
+pub(crate) struct LegacyXf {
+    font: Option<u32>,
+    fill: Option<u32>,
+    border: Option<u32>,
+    num_fmt_id: Option<u16>,
+    alignment: Option<LegacyAlignment>,
+}
+struct_codec!(LegacyXf {
     font,
     fill,
     border,
     num_fmt_id,
     alignment
+});
+
+impl From<&Xf> for LegacyXf {
+    fn from(xf: &Xf) -> Self {
+        let alignment = xf.alignment.as_ref();
+        Self {
+            font: xf.font,
+            fill: xf.fill,
+            border: xf.border,
+            num_fmt_id: xf.num_fmt_id,
+            alignment: alignment.map(|alignment| LegacyAlignment {
+                h: alignment.h,
+                v: alignment.v,
+                wrap_text: alignment.wrap_text,
+                shrink_to_fit: alignment.shrink_to_fit,
+            }),
+        }
+    }
+}
+
+impl From<LegacyXf> for Xf {
+    fn from(xf: LegacyXf) -> Self {
+        let LegacyXf {
+            font,
+            fill,
+            border,
+            num_fmt_id,
+            alignment,
+        } = xf;
+        Self {
+            font,
+            fill,
+            border,
+            num_fmt_id,
+            alignment: alignment.map(|alignment| Alignment {
+                h: alignment.h,
+                v: alignment.v,
+                wrap_text: alignment.wrap_text,
+                shrink_to_fit: alignment.shrink_to_fit,
+                ..Alignment::default()
+            }),
+            ..Self::default()
+        }
+    }
+}
+struct_codec!(Xf {
+    font,
+    fill,
+    border,
+    num_fmt_id,
+    alignment,
+    protection,
+    xf_id,
+    quote_prefix,
+    pivot_button
 });
 struct_codec!(AnchorCell {
     col,
@@ -912,13 +1016,24 @@ impl Codec for Fill {
                 r.position = child.position;
                 r.complete = child.complete;
             }
+            2 => {
+                let mut child = DecodePreflight::new(r.payload, r.position, r.state);
+                child.value::<(PatternType, (Option<Color>, Option<Color>))>()?;
+                r.cost = r.cost.max(1usize.saturating_add(child.cost));
+                r.position = child.position;
+                r.complete = child.complete;
+            }
             _ => return Err(SnapshotError::new("invalid snapshot fill")),
         }
         Ok(())
     }
 
     fn decode_cost() -> usize {
-        preparation_cost::<Self>().max(1usize.saturating_add(Color::decode_cost()))
+        preparation_cost::<Self>().max(1usize.saturating_add(Color::decode_cost().max(<(
+            PatternType,
+            (Option<Color>, Option<Color>),
+        )>::decode_cost(
+        ))))
     }
 
     fn write(&self, w: &mut Writer) {
@@ -928,6 +1043,12 @@ impl Codec for Fill {
                 w.u8(1);
                 color.write(w);
             }
+            Self::Pattern { pattern, fg, bg } => {
+                w.u8(2);
+                pattern.write(w);
+                fg.write(w);
+                bg.write(w);
+            }
         }
     }
 
@@ -935,6 +1056,11 @@ impl Codec for Fill {
         match r.u8()? {
             0 => Ok(Self::None),
             1 => Ok(Self::Solid(Codec::read(r)?)),
+            2 => Ok(Self::Pattern {
+                pattern: Codec::read(r)?,
+                fg: Codec::read(r)?,
+                bg: Codec::read(r)?,
+            }),
             _ => Err(SnapshotError::new("invalid snapshot fill")),
         }
     }
@@ -942,8 +1068,82 @@ impl Codec for Fill {
         match r.atomic::<u8>()? {
             0 => Ok(Self::None),
             1 => r.value().map(Self::Solid),
+            2 => {
+                let (pattern, (fg, bg)) = r.value()?;
+                Ok(Self::Pattern { pattern, fg, bg })
+            }
             _ => Err(SnapshotError::new("invalid snapshot fill")),
         }
+    }
+}
+
+/// A record in the layout written before patterned fills and the extended border
+/// styles: it accepts exactly what those releases wrote.
+pub(crate) struct Released<T>(pub(crate) T);
+
+pub(crate) trait ReleasedLayout: Codec {
+    const REFUSAL: &'static str;
+
+    fn released_layout(&self) -> bool;
+}
+
+impl ReleasedLayout for Fill {
+    const REFUSAL: &'static str = "invalid snapshot fill";
+
+    fn released_layout(&self) -> bool {
+        !matches!(self, Self::Pattern { .. })
+    }
+}
+
+impl ReleasedLayout for Border {
+    const REFUSAL: &'static str = "invalid snapshot BorderStyle";
+
+    fn released_layout(&self) -> bool {
+        [&self.left, &self.right, &self.top, &self.bottom]
+            .into_iter()
+            .flatten()
+            .all(|edge| {
+                matches!(
+                    edge.style,
+                    BorderStyle::Thin
+                        | BorderStyle::Medium
+                        | BorderStyle::Thick
+                        | BorderStyle::Dashed
+                        | BorderStyle::Dotted
+                        | BorderStyle::Double
+                        | BorderStyle::Hair
+                )
+            })
+    }
+}
+
+pub(crate) fn released<T: ReleasedLayout>(value: T) -> SnapshotResult<T> {
+    if value.released_layout() {
+        Ok(value)
+    } else {
+        Err(SnapshotError::new(T::REFUSAL))
+    }
+}
+
+impl<T: ReleasedLayout> Codec for Released<T> {
+    fn preflight(r: &mut DecodePreflight<'_>) -> SnapshotResult<()> {
+        r.value::<T>()
+    }
+
+    fn decode_cost() -> usize {
+        preparation_cost::<Self>().max(T::decode_cost())
+    }
+
+    fn write(&self, w: &mut Writer) {
+        self.0.write(w);
+    }
+
+    fn read(r: &mut Reader<'_>) -> SnapshotResult<Self> {
+        released(T::read(r)?).map(Self)
+    }
+
+    fn read_bounded(r: &mut BoundedReader<'_>) -> SnapshotResult<Self> {
+        released(r.value::<T>()?).map(Self)
     }
 }
 
@@ -1059,7 +1259,7 @@ impl Codec for ChartAnchor {
     }
     fn read_bounded(r: &mut BoundedReader<'_>) -> SnapshotResult<Self> {
         Ok(match r.atomic::<u8>()? {
-            0 => {
+            0 | 20 => {
                 let start = r.position;
                 r.prepare::<AnchorCell>()?;
                 r.prepare::<AnchorCell>()?;
@@ -1094,29 +1294,51 @@ const ROW_STYLE_SECTION: usize = 17;
 const ROW_STYLE_MANIFEST_TAG: u8 = 20;
 const ROW_STYLE_TAG: u8 = 21;
 
-fn base_section(tag: u8) -> SnapshotResult<usize> {
+const XF_SECTION: usize = 13;
+/// Tags an `XF_SECTION` record laid out with format facets; a record tagged
+/// with the section itself predates them.
+const XF_V2_TAG: usize = 17;
+const FILL_RECORD: usize = 18;
+const BORDER_RECORD: usize = 19;
+
+fn base_section(tag: usize) -> usize {
     match tag {
-        ROW_STYLE_MANIFEST_TAG => Ok(0),
-        ROW_STYLE_TAG => Ok(ROW_STYLE_SECTION),
-        tag if usize::from(tag) <= RELEASED_BASE_SECTIONS => Ok(usize::from(tag)),
-        _ => Err(SnapshotError::new("unexpected authority base record")),
+        20 => 0,
+        21 => ROW_STYLE_SECTION,
+        XF_V2_TAG => XF_SECTION,
+        FILL_RECORD => 11,
+        BORDER_RECORD => 12,
+        tag if tag <= RELEASED_BASE_SECTIONS => tag,
+        _ => BASE_SECTIONS + 1,
     }
 }
 
 fn manifest_tag(base: &WorkbookBase) -> u8 {
-    if base.row_styles.is_empty() {
-        0
-    } else {
-        ROW_STYLE_MANIFEST_TAG
-    }
+    if base.row_styles.is_empty() { 0 } else { ROW_STYLE_MANIFEST_TAG }
 }
 
-fn manifest_counts(tag: u8) -> usize {
-    if tag == ROW_STYLE_MANIFEST_TAG {
-        BASE_SECTIONS
-    } else {
-        RELEASED_BASE_SECTIONS
+fn manifest_counts(tag: usize) -> usize {
+    if tag == usize::from(ROW_STYLE_MANIFEST_TAG) { BASE_SECTIONS } else { RELEASED_BASE_SECTIONS }
+}
+
+/// `record` as releases before format facets wrote it: an `XF_SECTION` record
+/// holding such a release's reading moves to their layout, any other stays as
+/// it is.
+#[cfg(test)]
+pub(crate) fn released_base_layout(record: &[u8]) -> Vec<u8> {
+    if record.first() != Some(&(XF_V2_TAG as u8)) {
+        return record.to_vec();
     }
+    let xf = Xf::read(&mut Reader::new(&record[1..])).unwrap();
+    let mut w = Writer::new();
+    w.u8(XF_SECTION as u8);
+    LegacyXf::from(&xf).write(&mut w);
+    let released = w.into_bytes();
+    assert_eq!(
+        Xf::from(LegacyXf::read(&mut Reader::new(&released[1..])).unwrap()),
+        xf
+    );
+    released
 }
 
 fn base_counts(base: &WorkbookBase) -> [usize; BASE_SECTIONS] {
@@ -1225,12 +1447,16 @@ impl BaseCursor {
             styles,
             tables,
         } = base;
+        let released = self.section == XF_SECTION && styles.is_released_xf(self.index);
         let mut w = Writer::new();
         w.u8(match self.section {
-            0 => manifest_tag(base),
-            ROW_STYLE_SECTION => ROW_STYLE_TAG,
-            section => section as u8,
-        });
+            0 => usize::from(manifest_tag(base)),
+            ROW_STYLE_SECTION => usize::from(ROW_STYLE_TAG),
+            11 => FILL_RECORD,
+            12 => BORDER_RECORD,
+            XF_SECTION if !released => XF_V2_TAG,
+            section => section,
+        } as u8);
         let index = self.index;
         match self.section {
             0 => write_manifest(base, &mut w),
@@ -1257,6 +1483,7 @@ impl BaseCursor {
             10 => styles.fonts[index].write(&mut w),
             11 => styles.fills[index].write(&mut w),
             12 => styles.borders[index].write(&mut w),
+            13 if released => LegacyXf::from(&styles.cell_xfs[index]).write(&mut w),
             13 => styles.cell_xfs[index].write(&mut w),
             14 => styles.num_fmts[index].write(&mut w),
             15 => styles.indexed_colors[index].write(&mut w),
@@ -1524,15 +1751,16 @@ enum BaseRecord {
     Fill(Fill),
     Border(Border),
     Xf(Xf),
+    ReleasedXf(Xf),
     NumberFormat((u16, String)),
     Color(String),
     Table(Table),
 }
 
 impl BaseRecord {
-    fn preflight_cost(tag: u8, r: &mut DecodePreflight<'_>) -> SnapshotResult<usize> {
-        match base_section(tag)? {
-            0 => {
+    fn preflight_cost(tag: usize, r: &mut DecodePreflight<'_>) -> SnapshotResult<usize> {
+        match tag {
+            0 | 20 => {
                 r.value::<u64>()?;
                 r.value::<DateSystem>()?;
                 r.value::<String>()?;
@@ -1552,21 +1780,24 @@ impl BaseRecord {
             8 => r.value::<HiddenDimensions>()?,
             9 | 15 => r.value::<String>()?,
             10 => r.value::<Font>()?,
-            11 => r.value::<Fill>()?,
-            12 => r.value::<Border>()?,
-            13 => r.value::<Xf>()?,
+            11 => r.value::<Released<Fill>>()?,
+            12 => r.value::<Released<Border>>()?,
+            XF_SECTION => r.value::<LegacyXf>()?,
+            XF_V2_TAG => r.value::<Xf>()?,
             14 => r.value::<(u16, String)>()?,
             16 => r.value::<Table>()?,
-            17 => r.value::<BTreeMap<u32, u32>>()?,
+            21 => r.value::<BTreeMap<u32, u32>>()?,
+            FILL_RECORD => r.value::<Fill>()?,
+            BORDER_RECORD => r.value::<Border>()?,
             _ => return Err(SnapshotError::new("invalid authority base section")),
         }
         Ok(r.cost)
     }
 
     #[cfg(test)]
-    fn decode_cost(section: usize) -> SnapshotResult<usize> {
-        Ok(match section {
-            0 => std::mem::size_of::<BaseManifest>()
+    fn decode_cost(tag: usize) -> SnapshotResult<usize> {
+        Ok(match tag {
+            0 | 20 => std::mem::size_of::<BaseManifest>()
                 .max(u64::decode_cost())
                 .max(DateSystem::decode_cost())
                 .max(String::decode_cost())
@@ -1582,19 +1813,22 @@ impl BaseRecord {
             8 => HiddenDimensions::decode_cost(),
             9 | 15 => String::decode_cost(),
             10 => Font::decode_cost(),
-            11 => Fill::decode_cost(),
-            12 => Border::decode_cost(),
-            13 => Xf::decode_cost(),
+            11 => Released::<Fill>::decode_cost(),
+            12 => Released::<Border>::decode_cost(),
+            XF_SECTION => LegacyXf::decode_cost(),
+            XF_V2_TAG => Xf::decode_cost(),
             14 => <(u16, String)>::decode_cost(),
             16 => Table::decode_cost(),
-            17 => <BTreeMap<u32, u32>>::decode_cost(),
+            21 => <BTreeMap<u32, u32>>::decode_cost(),
+            FILL_RECORD => Fill::decode_cost(),
+            BORDER_RECORD => Border::decode_cost(),
             _ => return Err(SnapshotError::new("invalid authority base section")),
         })
     }
 
-    fn read(r: &mut BoundedReader<'_>, tag: u8) -> SnapshotResult<Self> {
-        Ok(match base_section(tag)? {
-            0 => {
+    fn read(r: &mut BoundedReader<'_>, tag: usize) -> SnapshotResult<Self> {
+        Ok(match tag {
+            0 | 20 => {
                 let start = r.position;
                 r.prepare::<u64>()?;
                 r.prepare::<DateSystem>()?;
@@ -1637,13 +1871,16 @@ impl BaseRecord {
             8 => Self::Hidden(r.value()?),
             9 => Self::String(r.value()?),
             10 => Self::Font(r.value()?),
-            11 => Self::Fill(r.value()?),
-            12 => Self::Border(r.value()?),
-            13 => Self::Xf(r.value()?),
+            11 => Self::Fill(r.value::<Released<Fill>>()?.0),
+            12 => Self::Border(r.value::<Released<Border>>()?.0),
+            XF_SECTION => Self::ReleasedXf(r.value::<LegacyXf>()?.into()),
+            XF_V2_TAG => Self::Xf(r.value()?),
             14 => Self::NumberFormat(r.value()?),
             15 => Self::Color(r.value()?),
             16 => Self::Table(r.value()?),
-            17 => Self::Rows(r.value()?),
+            21 => Self::Rows(r.value()?),
+            FILL_RECORD => Self::Fill(r.value()?),
+            BORDER_RECORD => Self::Border(r.value()?),
             _ => return Err(SnapshotError::new("invalid authority base section")),
         })
     }
@@ -1669,8 +1906,9 @@ impl BaseBuilder {
         }
         let mut cursor = self.cursor.clone();
         cursor.normalize(&self.counts);
-        let tag = Reader::new(payload).u8()?;
-        if base_section(tag)? != cursor.section {
+        let tag = usize::from(Reader::new(payload).u8()?);
+        let section = base_section(tag);
+        if section != cursor.section || section > BASE_SECTIONS {
             return Err(SnapshotError::new("unexpected authority base record"));
         }
         let cost = DECODE_RESERVATION
@@ -1698,8 +1936,9 @@ impl BaseBuilder {
             max_elements: budget.max_records(),
             state: &mut self.decode,
         };
-        let tag = reader.atomic::<u8>()?;
-        if base_section(tag)? != self.cursor.section {
+        let tag = usize::from(reader.atomic::<u8>()?);
+        let section = base_section(tag);
+        if section != self.cursor.section || section > BASE_SECTIONS {
             return Err(SnapshotError::new("unexpected authority base record"));
         }
         let record = BaseRecord::read(&mut reader, tag);
@@ -1765,6 +2004,7 @@ impl BaseBuilder {
                     BaseRecord::Fill(value) => base.styles.fills.push(value),
                     BaseRecord::Border(value) => base.styles.borders.push(value),
                     BaseRecord::Xf(value) => base.styles.cell_xfs.push(value),
+                    BaseRecord::ReleasedXf(value) => base.styles.push_released_xf(value),
                     BaseRecord::NumberFormat(value) => base.styles.num_fmts.push(value),
                     BaseRecord::Color(value) => base.styles.indexed_colors.push(value),
                     BaseRecord::Table(value) => base.tables.push(value),
@@ -1794,9 +2034,9 @@ impl BaseBuilder {
     fn push(&mut self, payload: &[u8]) -> SnapshotResult<()> {
         let mut r = Reader::new(payload);
         self.cursor.normalize(&self.counts);
-        let tag = r.u8()?;
-        let section = base_section(tag)?;
-        if section != self.cursor.section {
+        let tag = usize::from(r.u8()?);
+        let section = base_section(tag);
+        if section != self.cursor.section || section > BASE_SECTIONS {
             return Err(SnapshotError::new("unexpected authority base record"));
         }
         if section == 0 {
@@ -1832,7 +2072,7 @@ impl BaseBuilder {
                 .base
                 .as_mut()
                 .ok_or_else(|| SnapshotError::new("authority base manifest is missing"))?;
-            match section {
+            match tag {
                 1 => base.defined_names.push(Codec::read(&mut r)?),
                 2 => {
                     let key = Codec::read(&mut r)?;
@@ -1856,13 +2096,19 @@ impl BaseBuilder {
                 8 => base.hidden_dimensions.push(Codec::read(&mut r)?),
                 9 => base.shared_strings.push(Codec::read(&mut r)?),
                 10 => base.styles.fonts.push(Codec::read(&mut r)?),
-                11 => base.styles.fills.push(Codec::read(&mut r)?),
-                12 => base.styles.borders.push(Codec::read(&mut r)?),
-                13 => base.styles.cell_xfs.push(Codec::read(&mut r)?),
+                11 => base.styles.fills.push(Released::<Fill>::read(&mut r)?.0),
+                12 => base
+                    .styles
+                    .borders
+                    .push(Released::<Border>::read(&mut r)?.0),
+                XF_V2_TAG => base.styles.cell_xfs.push(Codec::read(&mut r)?),
+                XF_SECTION => base.styles.push_released_xf(LegacyXf::read(&mut r)?.into()),
                 14 => base.styles.num_fmts.push(Codec::read(&mut r)?),
                 15 => base.styles.indexed_colors.push(Codec::read(&mut r)?),
                 16 => base.tables.push(Codec::read(&mut r)?),
-                17 => base.row_styles.push(Codec::read(&mut r)?),
+                21 => base.row_styles.push(Codec::read(&mut r)?),
+                FILL_RECORD => base.styles.fills.push(Codec::read(&mut r)?),
+                BORDER_RECORD => base.styles.borders.push(Codec::read(&mut r)?),
                 _ => return Err(SnapshotError::new("invalid authority base section")),
             }
             self.cursor.index += 1;
@@ -1872,8 +2118,8 @@ impl BaseBuilder {
 
     fn advance_capacity(&mut self, record: &[u8], budget: SnapshotBudget) -> SnapshotResult<bool> {
         self.cursor.normalize(&self.counts);
-        let section = base_section(Reader::new(record).u8()?)?;
-        if section != self.cursor.section {
+        let section = base_section(usize::from(Reader::new(record).u8()?));
+        if section != self.cursor.section || section > BASE_SECTIONS {
             return Err(SnapshotError::new("unexpected authority base record"));
         }
         if section == 0 {
@@ -2261,6 +2507,50 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn pattern_border_authority_codec_round_trip() {
+        for pattern in PatternType::ALL {
+            let fill = Fill::Pattern {
+                pattern,
+                fg: Some(Color::Rgb("#123456".into())),
+                bg: Some(Color::Theme { idx: 4, tint: 0.25 }),
+            };
+            let mut writer = Writer::new();
+            fill.write(&mut writer);
+            let bytes = writer.into_bytes();
+            assert_eq!(Fill::read(&mut Reader::new(&bytes)).unwrap(), fill);
+            let mut state = BaseDecode::default();
+            let budget = SnapshotBudget::new(1, 1024).unwrap();
+            let restored = loop {
+                if let Some((fill, offset)) =
+                    decode_record::<Fill>(&mut state, (1, 0), &bytes, budget).unwrap()
+                {
+                    assert_eq!(offset, bytes.len());
+                    break fill;
+                }
+            };
+            assert_eq!(restored, fill);
+        }
+        for token in [
+            "mediumDashed",
+            "dashDot",
+            "mediumDashDot",
+            "dashDotDot",
+            "mediumDashDotDot",
+            "slantDashDot",
+        ] {
+            let style = BorderStyle::from_sml(token);
+            let mut writer = Writer::new();
+            style.write(&mut writer);
+            assert_eq!(
+                BorderStyle::read(&mut Reader::new(&writer.into_bytes()))
+                    .unwrap()
+                    .as_sml(),
+                token
+            );
+        }
+    }
+
     fn model() -> WorkbookModel {
         let mut sheet = Sheet::new("Data");
         for row in 0..40 {
@@ -2283,6 +2573,76 @@ mod tests {
 
     fn source() -> WorkbookAuthority {
         WorkbookAuthority::from_model(&model()).unwrap()
+    }
+
+    #[test]
+    fn fill_and_border_records_keep_their_released_layout() {
+        let pattern = Fill::Pattern {
+            pattern: PatternType::LightUp,
+            fg: Some(Color::Rgb("#123456".into())),
+            bg: None,
+        };
+        let edge = |style| Border {
+            bottom: Some(BorderEdge {
+                style,
+                color: Some(Color::Indexed(5)),
+            }),
+            ..Border::default()
+        };
+        let push = |section: usize, payload: Vec<u8>| -> SnapshotResult<Stylesheet> {
+            let mut builder = builder_for_section(section, 1);
+            while !builder.push_bounded(&payload, SnapshotBudget::new(1, 1024).unwrap())? {}
+            Ok(builder.base.unwrap().styles)
+        };
+        let current = |tag: u8, value: &dyn Fn(&mut Writer)| {
+            let mut writer = Writer::new();
+            writer.u8(tag);
+            value(&mut writer);
+            writer.into_bytes()
+        };
+
+        let mut solid = Writer::new();
+        solid.u8(11);
+        solid.u8(1);
+        solid.u8(0);
+        solid.str("#123456");
+        assert_eq!(
+            push(11, solid.into_bytes()).unwrap().fills,
+            vec![Fill::Solid(Color::Rgb("#123456".into()))]
+        );
+        assert_eq!(
+            push(12, vec![12, 0, 0, 0, 1, 5, 1, 2, 5]).unwrap().borders,
+            vec![edge(BorderStyle::Double)]
+        );
+        let dash_dot = edge(BorderStyle::MediumDashDot);
+        assert!(push(11, current(11, &|w: &mut Writer| pattern.write(w))).is_err());
+        assert!(push(12, current(12, &|w: &mut Writer| dash_dot.write(w))).is_err());
+        assert_eq!(
+            push(11, current(18, &|w: &mut Writer| pattern.write(w)))
+                .unwrap()
+                .fills,
+            vec![pattern.clone()]
+        );
+        assert_eq!(
+            push(12, current(19, &|w: &mut Writer| dash_dot.write(w)))
+                .unwrap()
+                .borders,
+            vec![dash_dot.clone()]
+        );
+
+        let mut base = (*source().base).clone();
+        base.styles.fills = vec![pattern.clone()];
+        base.styles.borders = vec![dash_dot];
+        let mut tags = Vec::new();
+        for section in [11, 12] {
+            let mut cursor = BaseCursor {
+                section,
+                index: 0,
+                fingerprint_key: None,
+            };
+            tags.push(cursor.next(&base).unwrap()[0]);
+        }
+        assert_eq!(tags, [18, 19]);
     }
 
     #[test]
@@ -3076,7 +3436,19 @@ mod tests {
                     v: Some(VAlign::Top),
                     wrap_text: true,
                     shrink_to_fit: false,
+                    text_rotation: Some(255),
+                    indent: Some(4),
+                    relative_indent: Some(-2),
+                    justify_last_line: Some(true),
+                    reading_order: Some(2),
                 }),
+                protection: Some(Protection {
+                    locked: false,
+                    hidden: true,
+                }),
+                xf_id: Some(1),
+                quote_prefix: true,
+                pivot_button: true,
             },
             Xf::default(),
         ];
@@ -3602,6 +3974,69 @@ mod tests {
             outcome = bounded.push_bounded(&released_tag, budget);
         }
         assert!(outcome.is_err());
+    }
+
+    #[test]
+    fn base_xf_records_released_before_format_facets_still_decode() {
+        let mut a = source();
+        let base = Arc::make_mut(&mut a.base);
+        base.styles.fonts = vec![Font::default()];
+        base.styles.cell_xfs = vec![
+            Xf {
+                font: Some(0),
+                num_fmt_id: Some(9),
+                alignment: Some(Alignment {
+                    h: Some(HAlign::Right),
+                    v: Some(VAlign::Center),
+                    wrap_text: true,
+                    ..Alignment::default()
+                }),
+                ..Xf::default()
+            },
+            Xf::default(),
+        ];
+        let records = base_records(&a.base);
+        let first = 1 + base_counts(&a.base)[..12].iter().sum::<usize>();
+        let xfs = first..first + a.base.styles.cell_xfs.len();
+        let released = records
+            .iter()
+            .enumerate()
+            .map(|(index, record)| {
+                if !xfs.contains(&index) {
+                    return record.clone();
+                }
+                let xf = &a.base.styles.cell_xfs[index - first];
+                let mut w = Writer::new();
+                w.u8(13);
+                xf.font.write(&mut w);
+                xf.fill.write(&mut w);
+                xf.border.write(&mut w);
+                xf.num_fmt_id.write(&mut w);
+                w.option(xf.alignment.as_ref(), |w, alignment| {
+                    alignment.h.write(w);
+                    alignment.v.write(w);
+                    alignment.wrap_text.write(w);
+                    alignment.shrink_to_fit.write(w);
+                });
+                w.into_bytes()
+            })
+            .collect::<Vec<_>>();
+        let budget = SnapshotBudget::new(1, 4096).unwrap();
+        let mut bounded = BaseBuilder::default();
+        let mut whole = BaseBuilder::default();
+        for record in &released {
+            while !bounded.push_bounded(record, budget).unwrap() {}
+            whole.push(record).unwrap();
+        }
+        for builder in [bounded, whole] {
+            assert_eq!(
+                builder.finish().unwrap().styles.cell_xfs,
+                a.base.styles.cell_xfs
+            );
+        }
+        for index in xfs {
+            assert_ne!(records[index][0], 13);
+        }
     }
 }
 

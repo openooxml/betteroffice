@@ -271,29 +271,33 @@ fn equivalent_styles_keep_shared_group_and_source_index() {
     let source = SHARED.replace(r#"r="B2""#, r#"r="B2" s="2""#);
     let mut parts = package(&source, &[], false);
     parts.push(("xl/styles.xml".to_owned(), concat!(
-        r#"<styleSheet><cellXfs count="3"><xf numFmtId="0"/><xf numFmtId="2"/>"#,
-        r#"<xf numFmtId="2" applyProtection="1"><protection locked="0"/></xf></cellXfs></styleSheet>"#,
+        r#"<styleSheet><cellXfs count="4"><xf numFmtId="0"/><xf numFmtId="2"/>"#,
+        r#"<xf numFmtId="2" applyProtection="1"><protection locked="0"/></xf>"#,
+        r#"<xf numFmtId="2" applyProtection="true"><protection locked="false"/></xf></cellXfs></styleSheet>"#,
     ).as_bytes().to_vec()));
     let parsed = parse_workbook_with_package(&parts).unwrap();
-    for cache_edit in [false, true] {
-        let mut workbook = parsed.workbook.clone();
-        edit(&mut workbook, "B2", |cell| {
-            cell.style = Some(1);
-            if cache_edit {
-                cell.value = number(10.0);
-            }
-        });
-        edit(&mut workbook, "D1", |cell| cell.value = number(9.0));
-        let saved = cells(&save(&parsed, &workbook, Some(SheetAxes::default())));
-        let original = cells(&source);
-        let expected = if cache_edit {
-            original["B2"].replace("<v>4</v>", "<v>10</v>")
-        } else {
-            original["B2"].clone()
-        };
-        assert_eq!(saved["B2"], expected);
-        assert_eq!(saved["B1"], original["B1"]);
-        assert_eq!(saved["B3"], original["B3"]);
+    for (assigned, written) in [(3, 2), (1, 1)] {
+        for cache_edit in [false, true] {
+            let mut workbook = parsed.workbook.clone();
+            edit(&mut workbook, "B2", |cell| {
+                cell.style = Some(assigned);
+                if cache_edit {
+                    cell.value = number(10.0);
+                }
+            });
+            edit(&mut workbook, "D1", |cell| cell.value = number(9.0));
+            let saved = cells(&save(&parsed, &workbook, Some(SheetAxes::default())));
+            let original = cells(&source);
+            let expected = if cache_edit {
+                original["B2"].replace("<v>4</v>", "<v>10</v>")
+            } else {
+                original["B2"].clone()
+            };
+            let expected = expected.replace(r#"s="2""#, &format!(r#"s="{written}""#));
+            assert_eq!(saved["B2"], expected);
+            assert_eq!(saved["B1"], original["B1"]);
+            assert_eq!(saved["B3"], original["B3"]);
+        }
     }
 }
 
@@ -756,37 +760,40 @@ fn nested_extension_values_use_legacy_rewrite_and_reopen() {
 
 #[test]
 fn plain_cache_edits_keep_surrounding_bytes_and_equivalent_style() {
-    for cached in ["", "<v/>", "<v>1.00</v>"] {
-        let source = format!(
-            r#"<sheetData><row r="1" customFormat="1"><c r="A1" s="2" ph="1"> <!--formula--> <f  ca='1' aca='1' >A2 &lt; 3</f>
+    for (assigned, written, attrs) in [(4, 2, r#"s="2" ph="1""#), (1, 1, r#"ph="1" s="1""#)] {
+        for cached in ["", "<v/>", "<v>1.00</v>"] {
+            let source = format!(
+                r#"<sheetData><row r="1" customFormat="1"><c r="A1" s="2" ph="1"> <!--formula--> <f  ca='1' aca='1' >A2 &lt; 3</f>
 {cached} <!--tail--> </c><c r="B1"><v>7.00</v></c></row></sheetData>"#
-        );
-        let parsed = super::style_match_tests::parsed_sheet(&source);
-        let mut workbook = parsed.workbook.clone();
-        edit(&mut workbook, "A1", |cell| {
-            cell.style = Some(1);
-            cell.value = number(2.0);
-        });
-        let expected = if cached.is_empty() {
-            source.replace("</f>", "</f><v>2</v>")
-        } else {
-            source.replace(cached, "<v>2</v>")
-        };
-        let saved = save(&parsed, &workbook, Some(SheetAxes::default()));
-        let (oracle, _) =
-            with_legacy_save_path(|| save(&parsed, &workbook, Some(SheetAxes::default())));
-        assert_eq!(saved, oracle);
-        for xml in [&saved, &oracle] {
-            assert_eq!(xml, &format!("<worksheet>{expected}</worksheet>"));
-            let reopened = reopen(xml);
-            let at = CellRef::new(0, 0);
-            let mut expected_cell = workbook.sheets[0].cell(at).unwrap().clone();
-            expected_cell.style = Some(2);
-            assert_eq!(reopened.workbook.sheets[0].cell(at), Some(&expected_cell));
-            assert_eq!(
-                reopened.workbook.sheets[0].cell(CellRef::new(0, 1)),
-                workbook.sheets[0].cell(CellRef::new(0, 1))
             );
+            let parsed = super::style_match_tests::parsed_sheet(&source);
+            let mut workbook = parsed.workbook.clone();
+            edit(&mut workbook, "A1", |cell| {
+                cell.style = Some(assigned);
+                cell.value = number(2.0);
+            });
+            let expected = if cached.is_empty() {
+                source.replace("</f>", "</f><v>2</v>")
+            } else {
+                source.replace(cached, "<v>2</v>")
+            };
+            let expected = expected.replace(r#"s="2" ph="1""#, attrs);
+            let saved = save(&parsed, &workbook, Some(SheetAxes::default()));
+            let (oracle, _) =
+                with_legacy_save_path(|| save(&parsed, &workbook, Some(SheetAxes::default())));
+            assert_eq!(saved, oracle);
+            for xml in [&saved, &oracle] {
+                assert_eq!(xml, &format!("<worksheet>{expected}</worksheet>"));
+                let reopened = reopen(xml);
+                let at = CellRef::new(0, 0);
+                let mut expected_cell = workbook.sheets[0].cell(at).unwrap().clone();
+                expected_cell.style = Some(written);
+                assert_eq!(reopened.workbook.sheets[0].cell(at), Some(&expected_cell));
+                assert_eq!(
+                    reopened.workbook.sheets[0].cell(CellRef::new(0, 1)),
+                    workbook.sheets[0].cell(CellRef::new(0, 1))
+                );
+            }
         }
     }
 }
@@ -924,24 +931,26 @@ fn equivalent_style_cache_edit_keeps_source_index_like_oracle() {
     let source =
         r#"<sheetData><row r="1"><c r="A1" s="2"><f ca="1">A2</f><v>1</v></c></row></sheetData>"#;
     let parsed = super::style_match_tests::parsed_sheet(source);
-    let mut workbook = parsed.workbook.clone();
-    edit(&mut workbook, "A1", |cell| {
-        cell.style = Some(1);
-        cell.value = number(2.0);
-    });
-    assert_ne!(
-        parsed.workbook.sheets[0]
-            .cell(CellRef::new(0, 0))
-            .unwrap()
-            .style,
-        workbook.sheets[0].cell(CellRef::new(0, 0)).unwrap().style
-    );
-    let saved = save(&parsed, &workbook, Some(SheetAxes::default()));
-    let (oracle, _) =
-        with_legacy_save_path(|| save(&parsed, &workbook, Some(SheetAxes::default())));
-    assert_eq!(saved, oracle);
-    assert_eq!(
-        cells(&saved)["A1"],
-        r#"<c r="A1" s="2"><f ca="1">A2</f><v>2</v></c>"#
-    );
+    for (assigned, written) in [(4, 2), (1, 1)] {
+        let mut workbook = parsed.workbook.clone();
+        edit(&mut workbook, "A1", |cell| {
+            cell.style = Some(assigned);
+            cell.value = number(2.0);
+        });
+        assert_ne!(
+            parsed.workbook.sheets[0]
+                .cell(CellRef::new(0, 0))
+                .unwrap()
+                .style,
+            workbook.sheets[0].cell(CellRef::new(0, 0)).unwrap().style
+        );
+        let saved = save(&parsed, &workbook, Some(SheetAxes::default()));
+        let (oracle, _) =
+            with_legacy_save_path(|| save(&parsed, &workbook, Some(SheetAxes::default())));
+        assert_eq!(saved, oracle);
+        assert_eq!(
+            cells(&saved)["A1"],
+            format!(r#"<c r="A1" s="{written}"><f ca="1">A2</f><v>2</v></c>"#)
+        );
+    }
 }

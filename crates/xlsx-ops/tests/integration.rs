@@ -12,6 +12,83 @@ fn r(a1: &str) -> CellRef {
 }
 
 #[test]
+fn pattern_border_format_edit_changes_only_requested_facet() {
+    let mut wb = Workbook::default();
+    wb.sheets.push(Sheet::new("Sheet1"));
+    let mut format = wb.styles.cell_format(None);
+    format.fill = serde_json::from_value(serde_json::json!({"Pattern": {
+        "pattern": "lightUp", "fg": {"Rgb": "#123456"}, "bg": {"Rgb": "#fedcba"}
+    }}))
+    .unwrap();
+    format.border.top = Some(xlsx_model::BorderEdge {
+        style: xlsx_model::BorderStyle::from_sml("mediumDashed"),
+        color: Some(xlsx_model::Color::Indexed(5)),
+    });
+    let style = wb.styles.intern_cell_format(&format).unwrap();
+    wb.sheets[0].set_cell(
+        r("A1"),
+        xlsx_model::Cell {
+            style,
+            ..Default::default()
+        },
+    );
+    let mut stack = UndoStack::new();
+    for patch in [
+        StylePatch {
+            bold: Some(true),
+            ..Default::default()
+        },
+        StylePatch {
+            border: Some(BorderPatch {
+                style: Some(BorderLineStyle::Dotted),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        StylePatch {
+            fill_color: Some("#abcdef".into()),
+            ..Default::default()
+        },
+    ] {
+        stack
+            .commit(
+                &mut wb,
+                &Transaction::new(
+                    vec![Op::PatchRangeStyle {
+                        sheet: SheetId(0),
+                        range: CellRange::parse_a1("A1").unwrap(),
+                        patch: patch.clone(),
+                    }],
+                    Provenance::User,
+                ),
+            )
+            .unwrap();
+        let actual = wb
+            .styles
+            .cell_format(wb.sheets[0].cell(r("A1")).unwrap().style);
+        if patch.bold.is_some() {
+            assert_eq!(actual.fill, format.fill);
+            assert_eq!(actual.border, format.border);
+        } else if patch.border.is_some() {
+            assert_eq!(actual.fill, format.fill);
+            assert_eq!(
+                actual.border.top.as_ref().unwrap().style,
+                xlsx_model::BorderStyle::Dotted
+            );
+        } else {
+            assert_eq!(
+                actual.fill,
+                xlsx_model::Fill::Solid(xlsx_model::Color::Rgb("#abcdef".into()))
+            );
+            assert_eq!(
+                actual.border.top.as_ref().unwrap().style,
+                xlsx_model::BorderStyle::Dotted
+            );
+        }
+    }
+}
+
+#[test]
 fn transaction_json_round_trip() {
     let tx = Transaction::proposal(
         vec![

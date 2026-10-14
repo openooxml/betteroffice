@@ -1,7 +1,7 @@
 //! fixtures are raw xml parts written from the ecma-376 spec. the parser
 //! matches local element names, so fixtures omit namespace declarations.
 
-use xlsx_model::styles::{BorderStyle, Color, Fill, FormatCode, HAlign, VAlign};
+use xlsx_model::styles::{BorderStyle, Color, Fill, FormatCode, HAlign, PatternType, VAlign};
 use xlsx_model::{
     Cell, CellRange, CellRef, CellValue, ColStyle, DateSystem, DefinedName, ErrorValue, FreezePane,
     Hyperlink, SheetId, Workbook,
@@ -297,6 +297,152 @@ pub(super) fn package(
 fn cell_at(wb: &Workbook, a1: &str) -> Cell {
     let addr = CellRef::parse_a1(a1).unwrap();
     wb.sheets[0].cell(addr).cloned().unwrap_or_default()
+}
+
+#[test]
+fn pattern_border_round_trip_all_tokens_and_colors() {
+    for pattern in [
+        "gray125",
+        "gray0625",
+        "mediumGray",
+        "darkGray",
+        "lightGray",
+        "darkHorizontal",
+        "darkVertical",
+        "darkDown",
+        "darkUp",
+        "darkGrid",
+        "darkTrellis",
+        "lightHorizontal",
+        "lightVertical",
+        "lightDown",
+        "lightUp",
+        "lightGrid",
+        "lightTrellis",
+    ] {
+        for border in [
+            "thin",
+            "medium",
+            "dashed",
+            "dotted",
+            "thick",
+            "double",
+            "hair",
+            "mediumDashed",
+            "dashDot",
+            "mediumDashDot",
+            "dashDotDot",
+            "mediumDashDotDot",
+            "slantDashDot",
+        ] {
+            let fill_xml = format!(
+                r#"<fill><patternFill patternType="{pattern}"><fgColor theme="4" tint="0.25"/><bgColor rgb="FF123456"/></patternFill></fill>"#
+            );
+            let border_xml =
+                format!(r#"<border><top style="{border}"><color indexed="5"/></top></border>"#);
+            let styles = format!(
+                r#"<fills>{fill_xml}</fills><borders>{border_xml}</borders><cellXfs><xf fillId="0" borderId="0"/></cellXfs>"#
+            );
+            let parts = package_styled(
+                r#"<sheetData><row r="1"><c r="A1" s="0"><v>1</v></c></row></sheetData>"#,
+                Some(&styles),
+                None,
+            );
+            let parsed = parse_workbook_with_package(&parts).unwrap();
+            let workbook = &parsed.workbook;
+            assert!(
+                format!("{:?}", workbook.styles.fills[0]).starts_with("Pattern"),
+                "{pattern}"
+            );
+            assert_eq!(
+                workbook.styles.borders[0]
+                    .top
+                    .as_ref()
+                    .unwrap()
+                    .style
+                    .as_sml(),
+                border
+            );
+            let saved = serialize_workbook(workbook).unwrap();
+            let xml = String::from_utf8(part_bytes(&saved, "xl/styles.xml")).unwrap();
+            assert!(xml.contains(&fill_xml), "{xml}");
+            assert!(
+                xml.contains(&format!(
+                    r#"<top style="{border}"><color indexed="5"/></top>"#
+                )),
+                "{xml}"
+            );
+            let reopened = parse_workbook(&saved).unwrap();
+            assert_eq!(workbook.styles.fills, reopened.styles.fills);
+            assert_eq!(workbook.styles.borders, reopened.styles.borders);
+            let reused = serialize_workbook_with_package(workbook, &parsed.package).unwrap();
+            assert_eq!(
+                part_bytes(&reused, "xl/styles.xml"),
+                part_bytes(&parts, "xl/styles.xml")
+            );
+        }
+    }
+}
+
+#[test]
+fn pattern_border_same_cell_bold_preserves_source_and_regenerated_styles() {
+    let fill_xml = r#"<fill><patternFill patternType="lightUp"><fgColor rgb="FF123456"/><bgColor rgb="FFFEDCBA"/></patternFill></fill>"#;
+    let border_xml = r#"<border><top style="mediumDashed"><color rgb="FF654321"/></top></border>"#;
+    let styles = format!(
+        r#"<fonts><font/></fonts><fills>{fill_xml}</fills><borders>{border_xml}</borders><cellXfs><xf fontId="0" fillId="0" borderId="0"/></cellXfs>"#
+    );
+    let parts = package_styled(
+        r#"<sheetData><row r="1"><c r="A1" s="0"><v>1</v></c></row></sheetData>"#,
+        Some(&styles),
+        None,
+    );
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let mut wb = parsed.workbook.clone();
+    let mut format = wb.styles.cell_format(Some(0));
+    format.font.bold = true;
+    let style = wb.styles.intern_cell_format(&format).unwrap();
+    wb.sheets[0].cell_mut(CellRef::new(0, 0)).unwrap().style = style;
+    let saved = serialize_workbook_with_package(&wb, &parsed.package).unwrap();
+    let xml = String::from_utf8(part_bytes(&saved, "xl/styles.xml")).unwrap();
+    assert!(xml.contains(fill_xml));
+    assert!(xml.contains(border_xml));
+    let saved = serialize_workbook(&wb).unwrap();
+    let xml = String::from_utf8(part_bytes(&saved, "xl/styles.xml")).unwrap();
+    assert!(xml.contains(fill_xml), "{xml}");
+    assert!(xml.contains(r#"<top style="mediumDashed">"#), "{xml}");
+}
+
+#[test]
+fn gradient_fill_remains_unrendered_and_source_markup_survives_bold() {
+    let fill = r#"<fill><gradientFill degree="90"><stop position="0"><color rgb="FF123456"/></stop><stop position="1"><color rgb="FFFEDCBA"/></stop></gradientFill></fill>"#;
+    let styles = format!(r#"<fills>{fill}</fills><cellXfs><xf fillId="0"/></cellXfs>"#);
+    let parts = package_styled(
+        r#"<sheetData><row r="1"><c r="A1" s="0"><v>1</v></c></row></sheetData>"#,
+        Some(&styles),
+        None,
+    );
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    assert_eq!(parsed.workbook.styles.fills, [Fill::None]);
+    let mut wb = parsed.workbook.clone();
+    let mut format = wb.styles.cell_format(Some(0));
+    format.font.bold = true;
+    wb.sheets[0].cell_mut(CellRef::new(0, 0)).unwrap().style =
+        wb.styles.intern_cell_format(&format).unwrap();
+    let saved = serialize_workbook_with_package(&wb, &parsed.package).unwrap();
+    assert!(
+        String::from_utf8(part_bytes(&saved, "xl/styles.xml"))
+            .unwrap()
+            .contains(fill)
+    );
+}
+
+#[test]
+fn pattern_border_style_match_compares_background_and_border_tokens() {
+    let styles = r#"<fills><fill><patternFill patternType="lightUp"><fgColor rgb="FF123456"/><bgColor rgb="FF000000"/></patternFill></fill><fill><patternFill patternType="lightUp"><fgColor rgb="FF123456"/><bgColor rgb="FFFFFFFF"/></patternFill></fill></fills><borders><border><top style="medium"/></border><border><top style="mediumDashed"/></border></borders><cellXfs><xf fillId="0" borderId="0"/><xf fillId="1" borderId="0"/><xf fillId="0" borderId="1"/></cellXfs>"#;
+    let wb = parse_workbook(&package_styled("<sheetData/>", Some(styles), None)).unwrap();
+    let styles = crate::patch::StyleMatch::new(&wb.styles, &wb.styles);
+    assert!(!styles.equivalent(Some(0), Some(1)));
+    assert!(!styles.equivalent(Some(0), Some(2)));
 }
 
 /// One sheet plus a table part reached through the worksheet relationships.
@@ -1648,8 +1794,14 @@ fn parses_full_styled_workbook() {
         ss.fill_for(1),
         Some(&Fill::Solid(Color::Rgb("#ffff00".into())))
     );
-    // the gray125 convention fill collapses to a solid auto fill
-    assert_eq!(ss.fills[1], Fill::Solid(Color::Auto));
+    assert_eq!(
+        ss.fills[1],
+        Fill::Pattern {
+            pattern: PatternType::Gray125,
+            fg: None,
+            bg: None
+        }
+    );
 
     let border = ss.border_for(1).unwrap();
     let left = border.left.as_ref().unwrap();

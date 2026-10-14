@@ -54,7 +54,7 @@ test('checkpoint after N commands restores a fresh session boundary', async () =
     const projection = { ...opened.editState!, ...edit.editState, ...format.editState, ...selected.editState, ...mode.editState };
     const saved = await original.call.save();
     const checkpoint = await original.call.checkpoint();
-    expect(decodeWorkbookRecovery(checkpoint.state).engine[8]).toBe(4);
+    expect(decodeWorkbookRecovery(checkpoint.state).engine[8]).toBe(5);
     expect(await original.call.version()).toBe(mode.engineVersion);
     await expect(replacement.call.openRecovery({ ...checkpoint, throughSeq: checkpoint.throughSeq - 1 }))
       .rejects.toThrow('envelope mismatch');
@@ -105,6 +105,10 @@ function engineHeader(metadata = '{"collaborative":false}', version = 3) {
   engine.set(payload, 42);
   return engine;
 }
+
+test('recovery reads engine checkpoints from before and since patterned fills', () => {
+  for (const version of [3, 5]) expect(isCollaborativeWorkbookRecovery(engineHeader(undefined, version))).toBe(false);
+});
 
 test.each([
   ['unsupported codec', engineHeader(undefined, 5)],

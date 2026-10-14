@@ -8,6 +8,11 @@ export interface WorkerEditorProbe {
       cells: { anchor: { row: number; col: number }; focus: { row: number; col: number } } | null;
     } | null>;
     failure(): string | null;
+    /** Cell rects of the painted frame in canvas CSS pixels, read through plugin geometry. */
+    cellRects(cells: [number, number][]): Promise<{
+      zoom: number;
+      rects: { x: number; y: number; width: number; height: number }[];
+    } | null>;
     workerCount(): number;
     saveAndReopen(): Promise<number>;
     recoverAndReopen(): Promise<number>;
