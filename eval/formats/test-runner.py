@@ -109,7 +109,10 @@ for line in sys.stdin:
     print(json.dumps({'jsonrpc': '2.0', 'id': message['id'], 'result': result}), flush=True)
 '''
 GENERIC_SUFFIX = (' Use shell commands and Python with openpyxl, python-pptx and python-docx to read and edit the documents.'
-                  ' There is no network access. All other tool calls disqualify the task. The documents live in the current directory.')
+                  ' There is no network access. All other tool calls disqualify the task. The documents live in the current directory.'
+                  ' Access only this directory, the Python interpreter and its standard library/site-packages.'
+                  ' Outside path references disqualify the task.')
+PYTHON_PREFLIGHT = 'import openpyxl, pptx, docx; import json, sysconfig; print(json.dumps(sysconfig.get_paths()))'
 FAKE_GENERIC_CODEX = '''#!/usr/bin/env python3
 import json
 import os
@@ -121,6 +124,7 @@ assert args[:3] == ['exec', '-m', os.environ['FAKE_MODEL']]
 assert args[args.index('--sandbox') + 1] == 'workspace-write'
 workspace = Path(args[args.index('-C') + 1])
 assert Path.cwd() == workspace and len(list(workspace.iterdir())) == 1
+assert not workspace.is_relative_to(Path(os.environ['FAKE_REPO']))
 assert os.environ['PATH'].split(os.pathsep)[0] == os.environ['FAKE_PYTHON_BIN']
 overrides = [args[i + 1] for i, arg in enumerate(args) if arg == '-c']
 assert 'sandbox_workspace_write.network_access=false' in overrides
@@ -139,6 +143,10 @@ if mode == 'mcp':
     print(json.dumps({'type': 'item.completed', 'item': {'id': 'tool-1', 'type': 'mcp_tool_call', 'server': 'betteroffice'}}))
 elif mode == 'web':
     print(json.dumps({'type': 'item.completed', 'item': {'id': 'web-1', 'type': 'web_search', 'query': 'openpyxl docs'}}))
+elif mode == 'path':
+    item = {'id': 'outside-1', 'type': 'command_execution', 'command': os.environ['FAKE_COMMAND']} if 'FAKE_COMMAND' in os.environ else {
+        'id': 'outside-1', 'type': 'file_change', 'changes': [json.loads(os.environ['FAKE_CHANGE'])]}
+    print(json.dumps({'type': 'item.completed', 'item': item}))
 '''
 
 
@@ -177,14 +185,19 @@ class RunnerTests(unittest.TestCase):
         self.environment.start()
         self.generic_bin = self.root / 'generic bin'
         executable(self.generic_bin / 'codex', FAKE_GENERIC_CODEX)
+        self.python_libraries = [self.root / 'runtime' / 'stdlib', self.root / 'runtime' / 'site-packages']
+        paths = json.dumps({'stdlib': str(self.python_libraries[0]), 'platstdlib': str(self.python_libraries[0]),
+                            'purelib': str(self.python_libraries[1]), 'platlib': str(self.python_libraries[1])})
         self.python = executable(self.root / 'python bin' / 'python',
-                                 '#!/bin/sh\n[ "$1" = -c ] && [ "$2" = "import openpyxl, pptx, docx" ] || exit 7\n')
+                                 '#!/bin/sh\n[ "$1" = -c ] && [ "$2" = ' + shlex.quote(PYTHON_PREFLIGHT) + ' ] || exit 7\n'
+                                 "printf '%s\\n' " + shlex.quote(paths) + '\n')
         self.broken_python = executable(self.root / 'broken python' / 'python',
                                         "#!/bin/sh\necho \"ModuleNotFoundError: No module named 'docx'\" >&2\nexit 1\n")
 
     def generic_environment(self, **values):
         return patch.dict(os.environ, {'PATH': str(self.generic_bin) + os.pathsep + os.environ['PATH'],
-                                       'FAKE_PYTHON_BIN': str(self.python.parent), 'FAKE_GENERIC_SUFFIX': GENERIC_SUFFIX, **values})
+                                       'FAKE_PYTHON_BIN': str(self.python.parent), 'FAKE_GENERIC_SUFFIX': GENERIC_SUFFIX,
+                                       'FAKE_REPO': str(runner.REPO), **values})
 
     def tearDown(self):
         self.environment.stop()
@@ -365,6 +378,69 @@ class RunnerTests(unittest.TestCase):
                 if reason:
                     self.assertIn(reason, record['check_message'])
 
+    def test_generic_repository_reads_and_outside_file_changes_fail_with_correct_output(self):
+        commands = [
+            'cat eval/formats/check.py',
+            f'cat {shlex.quote(str(ROOT / "check.py"))}',
+            f'ls {shlex.quote(str(runner.REPO))}',
+            'python3 -c "import eval.formats.check"',
+            'python3 -c "from eval.formats import check"',
+            'cat validate-checkers.py tasks.json fixtures.json',
+            'cat ../other/input.xlsx',
+            'cat /etc/passwd',
+            'cat "/outside directory/input.xlsx"',
+            'cat ~/input.xlsx',
+            'cat "$HOME/input.xlsx"',
+        ]
+        changes = [
+            {'path': '../edit.py', 'kind': 'add'},
+            {'path': '/outside/edit.py', 'kind': 'add'},
+            {'path': 'edit.py', 'kind': 'update', 'diff': '+ from eval.formats import check'},
+            {'path': 'edit.py', 'kind': 'update', 'diff': '+ text = open("/etc/passwd").read()'},
+        ]
+        cases = [{'FAKE_COMMAND': command} for command in commands] + [{'FAKE_CHANGE': json.dumps(change)} for change in changes]
+        for index, values in enumerate(cases):
+            results = self.root / f'generic-path-{index}'
+            results.mkdir()
+            with self.subTest(values=values), self.generic_environment(FAKE_MODE='path', **values):
+                record = runner.run_task(runner.checker.tasks()[0], None, 'test-model', results, arm='generic', python=self.python)
+                runner.checker.check(runner.checker.tasks()[0], results / record['task'] / 'output.xlsx')
+                self.assertEqual(record['agent_exit_code'], 0)
+                self.assertFalse(record['pass'])
+                self.assertIn('forbidden path access', record['check_message'])
+
+    def test_generic_workspace_stays_outside_repository_when_tempdir_is_in_repository(self):
+        results = self.root / 'generic-tempdir'
+        results.mkdir()
+        with self.generic_environment(), patch.object(runner.tempfile, 'tempdir', str(runner.REPO)):
+            record = runner.run_task(runner.checker.tasks()[0], None, 'test-model', results, arm='generic', python=self.python)
+        self.assertTrue(record['pass'], record['check_message'])
+
+    def test_generic_path_audit_allows_task_files_and_python_runtime_only(self):
+        workspace = self.root / 'workspace'
+        workspace.mkdir()
+        log = self.root / 'paths.jsonl'
+        library = self.root / 'runtime' / 'lib'
+        commands = [
+            'python3 edit.py',
+            '/bin/sh -c "python3 edit.py"',
+            'python3 -c \'from pathlib import Path; p = Path.cwd() / "input.xlsx"\'',
+            'python3 -c \'ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"\'',
+            f'python3 -c \'open("{workspace}/input.xlsx")\'',
+            f'{shlex.quote(str(self.python))} edit.py',
+            f'python3 -c \'open("{library}/python3.14/pathlib.py")\'',
+            f'python3 -c \'open("{library}/python3.14/site-packages/docx/__init__.py")\'',
+        ]
+        for command in commands:
+            with self.subTest(command=command):
+                log.write_text(json.dumps({'type': 'item.completed', 'item': {
+                    'type': 'command_execution', 'command': command}}) + '\n')
+                self.assertIsNone(runner.access_violation(log, 'generic', workspace, self.python, [library / 'python3.14']))
+        (workspace / 'linked').symlink_to(runner.REPO, target_is_directory=True)
+        log.write_text(json.dumps({'type': 'item.completed', 'item': {
+            'type': 'command_execution', 'command': 'cat linked/AGENTS.md'}}) + '\n')
+        self.assertIn('forbidden path access', runner.access_violation(log, 'generic', workspace, self.python, []))
+
     def test_generic_shell_run_checks_its_python(self):
         results = self.root / 'generic results'
         with self.generic_environment():
@@ -385,6 +461,9 @@ class RunnerTests(unittest.TestCase):
         self.assertFalse((self.root / 'broken').exists())
         self.assertEqual(usage.returncode, 2)
         self.assertIn('--python', usage.stderr)
+
+    def test_generic_python_preflight_records_only_library_roots(self):
+        self.assertEqual(runner.python_ready(self.python), self.python_libraries)
 
     def test_generic_formats_and_unknown_format(self):
         generic = [str(ROOT / 'run.sh'), '--arm', 'generic', '--python', str(self.python), '--formats']
