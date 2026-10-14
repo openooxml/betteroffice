@@ -567,7 +567,7 @@ mod tests {
             .unwrap();
         let alphabet = ['A', 'B'];
         let size = 16.0;
-        let shape = |text| {
+        let shape = |text: &str| {
             shape_with_direction(
                 &store,
                 font,
