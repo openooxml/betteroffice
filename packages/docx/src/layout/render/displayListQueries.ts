@@ -25,11 +25,11 @@
  * own later queries degrade to its JSON-arg path.
  *
  * **Handle release.** `dispose()` frees the handle immediately, and ending a
- * facade's line frees every handle the line's facades hold. A facade dropped
- * holding one — a `useMemo` replacement, say — is covered by a
- * `FinalizationRegistry` (only a facade that holds a handle is registered),
- * and the Rust store additionally caps live handles and evicts the oldest, so
- * a missed finalize cannot grow memory without bound.
+ * facade's line frees every handle the line's facades hold. Only a facade
+ * holding a handle is registered with a `FinalizationRegistry`, which covers
+ * one dropped without `dispose()` (a `useMemo` replacement, say); the Rust
+ * store additionally caps live handles and evicts the oldest, so a missed
+ * finalize cannot grow memory without bound.
  *
  * **Failure.** A wasm TRAP poisons the whole instance: a guard held across the
  * query leaks and every later call into it fails, so the engine is marked dead,
@@ -797,7 +797,9 @@ export function createDisplayListQueries(
       handleAttempted ||
       cell.handle !== null ||
       !cell.eng ||
-      isDead()
+      isDead() ||
+      // a method kept past its collected facade: nothing could release the handle
+      !self?.deref()
     ) {
       return;
     }
