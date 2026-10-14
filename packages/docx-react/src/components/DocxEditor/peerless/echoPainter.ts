@@ -102,6 +102,8 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
     const set = context && contextGlyphSet(context);
     if (!context || !line || !set) return undefined;
     if (!text && line.canEmpty === false) return undefined;
+    if (line.next && (text.match(/ *$/)?.[0] !== context.text.match(/ *$/)?.[0] ||
+      !text.endsWith(' ') && !line.next.startsWith(' '))) return undefined;
     if (prepared?.context === context && prepared.set === set && prepared.text === text) return prepared.value;
     const placement = placeEchoGlyphs(set.glyphs, text, line.next, line.x);
     const current = currentEnd(context, set);
