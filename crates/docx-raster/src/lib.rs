@@ -2910,4 +2910,37 @@ mod tests {
         broke.bytes = MAX_PAGE_IMAGE_BYTES;
         assert!(!broke.charge(charge));
     }
+
+    fn gif_bytes(width: u32, height: u32) -> Vec<u8> {
+        let mut gif = Vec::new();
+        {
+            let mut encoder = image::codecs::gif::GifEncoder::new(&mut gif);
+            let pixels = vec![0u8; (width * height * 3) as usize];
+            encoder
+                .encode(&pixels, width, height, image::ExtendedColorType::Rgb8)
+                .expect("encode gif");
+        }
+        gif
+    }
+
+    #[test]
+    fn a_gif_frame_past_its_screen_is_refused_once_the_budget_is_spent() {
+        let mut gif = gif_bytes(64, 64);
+        gif[6] = 1;
+        gif[7] = 0;
+        gif[8] = 1;
+        gif[9] = 0;
+        let mut cache = ImageCache::new();
+        let mut page = PageImages::new(&mut cache);
+        page.pixels = MAX_PAGE_IMAGE_PIXELS - 16;
+        page.bytes = MAX_PAGE_IMAGE_BYTES - 1024;
+        let mut charge = ImageCharge::default();
+        assert!(matches!(page.decode(&gif, &mut charge), Decode::Refused));
+
+        let gif = gif_bytes(64, 64);
+        let mut cache = ImageCache::new();
+        let mut page = PageImages::new(&mut cache);
+        let mut charge = ImageCharge::default();
+        assert!(matches!(page.decode(&gif, &mut charge), Decode::Decoded(_)));
+    }
 }
