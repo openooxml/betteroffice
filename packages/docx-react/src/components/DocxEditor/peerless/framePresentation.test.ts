@@ -41,8 +41,9 @@ function frame(revision: number, coverage: number, base?: number): DocxCommandFr
   } };
 }
 
-function setup(realPainter = false, makeCanvas?: (item: typeof page) => HTMLCanvasElement) {
+function setup(realPainter = false, makeCanvas?: (item: typeof page) => HTMLCanvasElement, holdRequests = false) {
   const events: string[] = [];
+  const held: (() => void)[] = [];
   const draws: ImageBitmap[] = [];
   const pixels = new Map<string, ImageBitmap | ImageData>();
   const readbacks = { getImageData: 0, putImageData: 0 };
@@ -97,14 +98,15 @@ function setup(realPainter = false, makeCanvas?: (item: typeof page) => HTMLCanv
     disable() {}, dispose() {},
   };
   const presentation = createFramePresentation({ viewStore: store, echoPainter: painter,
-    canvasForPage, requestFullFrame() { events.push('full'); }, onError(error) { events.push(`error:${error.message}`); },
+    canvasForPage, onError(error) { events.push(`error:${error.message}`); },
+    requestFullFrame(settled?: () => void) { events.push('full'); if (holdRequests) held.push(settled!); else settled?.(); },
     prepareGeometry(candidate): PeerlessFrameGeometry { return { identity: snapshot.identity,
       coversThroughSeq: candidate.coversThroughSeq, frameEpoch: candidate.revision,
       layoutRevision: candidate.payload.layoutRevision, pages: geometryPages.map((page) => ({ page,
         bounds: { x: 0, y: 0, width: 100, height: 20 }, transform: [1, 0, 0, 1, 0, 0] as const })),
       caret: null, selectionRects: [] }; },
   });
-  return { presentation, events, reconciled, store, draws, pixels, canvases, painter, readbacks, closes, drawnAfterClose,
+  return { presentation, events, held, reconciled, store, draws, pixels, canvases, painter, readbacks, closes, drawnAfterClose,
     observeDraw(listener: () => void) { onDraw = listener; },
     mountCanvas(value: boolean) { mounted = value; },
     addCanvas(item: typeof page) { const canvas = create(item); canvases.set(item.pageId, canvas); return canvas; },
@@ -357,6 +359,26 @@ test('a stalled presentation re-arms one request on invalidation and recovers on
     expect(presentation.present(frame(++revision, 1), [], [])).toBe(false);
     expect(events).toEqual(['full']);
   }
+});
+
+test('frames the presentation did not request spend no retry budget while its own request is pending', () => {
+  const { presentation, events, held } = setup(false, () => lossyCanvas({ lost: true }), true);
+  let revision = 0;
+  const failUnrequested = () => {
+    for (let count = 0; count < 3; count += 1) expect(presentation.present(frame(++revision, 0), [], [])).toBe(false);
+  };
+  expect(presentation.present(frame(++revision, 0), [], [])).toBe(false);
+  failUnrequested();
+  expect(events).toEqual(['full']);
+  held.shift()!();
+  expect(presentation.present(frame(++revision, 0), [], [])).toBe(false);
+  failUnrequested();
+  expect(events).toEqual(['full', 'full']);
+  held.shift()!();
+  expect(presentation.present(frame(++revision, 0), [], [])).toBe(false);
+  expect(events).toEqual(['full', 'full', `error:${stalled}`]);
+  failUnrequested();
+  expect(events).toEqual(['full', 'full', `error:${stalled}`]);
 });
 
 test('transient failures each re-request one full frame and recover without a report', () => {

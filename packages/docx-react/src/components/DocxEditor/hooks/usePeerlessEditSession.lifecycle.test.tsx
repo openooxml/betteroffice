@@ -80,19 +80,21 @@ test('unmounting during connection open releases the unused initial frame', asyn
   expect(dispose).toHaveBeenCalledTimes(1);
 });
 
-test('a presentation that keeps failing stops requesting frames, reports once and re-arms on viewport changes', async () => {
+test('a presentation that keeps failing stops requesting frames, reports once without failing and re-arms on viewport changes', async () => {
   const { connection, options } = resident();
   let calls = 0;
   const request = mock(() => ++calls > 8 ? new Promise<DocxCommandAck>(() => {})
     : Promise.resolve({ ...connection.initial, frame: stagedFrame() }));
   connection.requestFullFrame = request;
   const onError = mock((_error: Error) => {});
-  const view = renderHook(() => usePeerlessEditSession({ ...options, onError }));
+  const onRecoverableError = mock((_error: Error) => {});
+  const view = renderHook(() => usePeerlessEditSession({ ...options, onError, onRecoverableError }));
   const settle = () => act(async () => { await new Promise<void>((resolve) => setImmediate(resolve)); });
   await waitFor(() => expect(view.result.current.status).toBe('ready'));
   await settle();
   expect(request).toHaveBeenCalledTimes(2);
-  expect(onError.mock.calls.map(([error]) => error.message))
+  expect(onError).not.toHaveBeenCalled();
+  expect(onRecoverableError.mock.calls.map(([error]) => error.message))
     .toEqual(['Full frame responses did not satisfy requested coverage and revision']);
   const binding = view.result.current.binding!;
   await act(async () => { binding.setRasterScale!(2); });
@@ -101,7 +103,8 @@ test('a presentation that keeps failing stops requesting frames, reports once an
   await act(async () => { binding.setDisplayWindow!(0, 2); });
   await settle();
   expect(request).toHaveBeenCalledTimes(4);
-  expect(onError).toHaveBeenCalledTimes(1);
+  expect(onRecoverableError).toHaveBeenCalledTimes(1);
+  expect(onError).not.toHaveBeenCalled();
   expect(view.result.current.status).toBe('ready');
 });
 
