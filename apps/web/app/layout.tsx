@@ -174,16 +174,6 @@ export default function RootLayout({
                       OpenOOXML
                     </a>
                   </li>
-                  <li>
-                    <a
-                      href={`${DOCS}/docs/javascript#migrate-from-eigenpal`}
-                      target="_blank"
-                      rel="noopener"
-                      className={footLink}
-                    >
-                      eigenpal migration
-                    </a>
-                  </li>
                 </ul>
               </div>
             </div>
