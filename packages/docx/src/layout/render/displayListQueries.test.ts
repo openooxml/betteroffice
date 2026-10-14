@@ -1,6 +1,6 @@
-import { describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, test } from 'bun:test';
 import {
-  createDisplayListQueries,
+  createDisplayListQueries as createQueries,
   endDisplayListQueriesLine,
   isDisplayListQuerySourceDead,
   onDisplayListQuerySourceFailure,
@@ -11,6 +11,19 @@ import {
 } from './displayListQueries';
 import type { DisplayPage } from './displayList';
 import type { RustDisplayListQueryEngine } from './rustDisplayList';
+
+const facades: WeakRef<DisplayListQueries>[] = [];
+
+function createDisplayListQueries(...args: Parameters<typeof createQueries>): DisplayListQueries {
+  const queries = createQueries(...args);
+  facades.push(new WeakRef(queries));
+  return queries;
+}
+
+afterEach(() => {
+  for (const facade of facades) facade.deref()?.dispose();
+  facades.length = 0;
+});
 
 function page(pageIndex: number): DisplayPage {
   return { pageIndex, width: 100, height: 100, primitives: [] };
