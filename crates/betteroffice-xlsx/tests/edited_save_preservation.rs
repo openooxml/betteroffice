@@ -783,7 +783,7 @@ fn explicit_style_selection_and_copy_use_the_selected_xf() {
 }
 
 #[test]
-fn unstyled_cells_keep_general_display_and_default_toolbar_formatting() {
+fn unstyled_cells_display_and_report_the_base_xf() {
     let mut source = parts(&package(VARIANTS[0].1));
     let xml = styles(VARIANTS[0].1).replace(
         "<xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/>",
@@ -800,8 +800,13 @@ fn unstyled_cells_keep_general_display_and_default_toolbar_formatting() {
     let summary = workbook
         .selection_formatting(SheetId(0), CellRange::parse_a1("A1").unwrap())
         .unwrap();
-    assert_eq!(summary.bold, Some(false));
-    assert_eq!(workbook.search_text("1.234", true, None).len(), 1);
+    assert_eq!(summary.bold, Some(true));
+    let matches = workbook.search_text("1.23", true, None);
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].address.sheet, SheetId(0));
+    assert_eq!(matches[0].address.cell, cell("A1"));
+    assert_eq!(matches[0].text, "1.23");
+    assert!(workbook.search_text("1.234", true, None).is_empty());
     assert_eq!(
         workbook.model().styles.cell_format(None),
         xlsx_model::CellFormat::default()
@@ -1155,7 +1160,7 @@ fn genuine_style_change_writes_the_new_index() {
 #[test]
 fn refused_grid_regeneration_preserves_source_after_undo_and_unrelated_edit() {
     let second_sheet = concat!(
-        r#"<sheetData><row s="2" customFormat="1"><c r="A1" s="2"><v>1</v></c>"#,
+        r#"<sheetData><row outlineLevel="1"><c r="A1" s="2"><v>1</v></c>"#,
         r#"<c r="B1" s="2"><v>2</v></c></row></sheetData>"#,
     );
     let source = package_with_second_sheet(VARIANTS[0].1, second_sheet);
@@ -1171,7 +1176,10 @@ fn refused_grid_regeneration_preserves_source_after_undo_and_unrelated_edit() {
         panic!("expected spreadsheet UnsupportedEdit");
     };
     assert!(message.starts_with("sheet Sheet2:"), "{message}");
-    assert!(message.contains(r#"<row> attribute s="2""#), "{message}");
+    assert!(
+        message.contains(r#"<row> attribute outlineLevel="1""#),
+        "{message}"
+    );
 
     assert!(
         workbook

@@ -60,6 +60,11 @@ impl<'a> StyleMatch<'a> {
         {
             return false;
         }
+        if current as usize >= self.original.cell_xfs.len()
+            && self.current.resolved_format(Some(current)) == self.current.resolved_format(None)
+        {
+            return false;
+        }
         let meant = self.original.resolved_format(Some(source));
         self.original.cell_xfs[source as usize] == self.current.cell_xfs[source as usize]
             && meant == self.current.resolved_format(Some(current))

@@ -1,6 +1,6 @@
 use super::*;
 
-const COMBINED_DOMAIN: &[u8] = b"betteroffice-xlsx-yrs-v6-xf-facets-pattern-fills";
+const COMBINED_DOMAIN: &[u8] = b"betteroffice-xlsx-yrs-v7-xf-facets-pattern-fills";
 const COMBINED_TAG: &str = "xf-facets-pattern-fills:";
 
 fn patterned_facets() -> WorkbookModel {

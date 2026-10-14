@@ -729,6 +729,18 @@ pub struct PoolMarks {
     num_fmts: usize,
 }
 
+/// Entries known to save as the plain format (an xf) or as the default entry (a font, fill or
+/// border): source entries whose markup carries nothing the model drops, and entries
+/// [`Stylesheet::plain_xf`] appended, which a save writes from the model. A save keeps any
+/// other source entry's markup, protection, parent style or rotation included.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SavedPlain {
+    pub xf: Option<u32>,
+    pub font: Option<u32>,
+    pub fill: Option<u32>,
+    pub border: Option<u32>,
+}
+
 /// parsed style tables plus theme; private memos accelerate interning and
 /// are invalidated by any pool length change.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -742,6 +754,11 @@ pub struct Stylesheet {
     /// `#rrggbb` entries; empty strings preserve omitted colors and use the default index.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub indexed_colors: Vec<String>,
+    /// not snapshotted: a restored stylesheet knows none and appends its own.
+    #[serde(skip)]
+    saved_plain: SavedPlain,
+    #[serde(skip)]
+    bound_plain: Option<u32>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     format_sources: BTreeMap<u32, Option<u32>>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -869,6 +886,8 @@ impl Stylesheet {
             num_fmts,
             theme: _,
             indexed_colors,
+            saved_plain: _,
+            bound_plain: _,
             format_sources: _,
             exact_style_indices: _,
             released_xfs: _,
@@ -1118,6 +1137,7 @@ impl Stylesheet {
 
     #[inline(never)]
     fn intern_builtin_cell_format(&mut self, format: &CellFormat, num_fmt_id: u16) -> u32 {
+        self.ensure_default_xf();
         if self.cell_xfs.len() < INTERN_CACHE_MIN_POOL {
             let font = (format.font != Font::default())
                 .then(|| intern_linear(&mut self.fonts, &format.font));
@@ -1162,6 +1182,7 @@ impl Stylesheet {
         pattern: &str,
     ) -> Result<Option<u32>, NumFmtTableFull> {
         let num_fmt_id = Some(self.intern_number_format(pattern).ok_or(NumFmtTableFull)?);
+        self.ensure_default_xf();
         if self.cell_xfs.len() < INTERN_CACHE_MIN_POOL {
             let font = (format.font != Font::default())
                 .then(|| intern_linear(&mut self.fonts, &format.font));
@@ -1184,6 +1205,21 @@ impl Stylesheet {
             return Ok(Some(intern_linear(&mut self.cell_xfs, &xf)));
         }
         Ok(Some(self.intern_cell_format_large(format, num_fmt_id)))
+    }
+
+    fn ensure_default_xf(&mut self) {
+        if self.fonts.is_empty() {
+            self.fonts.push(Font::default());
+        }
+        if self.fills.is_empty() {
+            self.fills.push(Fill::None);
+        }
+        if self.borders.is_empty() {
+            self.borders.push(Border::default());
+        }
+        if self.cell_xfs.is_empty() {
+            self.cell_xfs.push(Xf::default());
+        }
     }
 
     #[inline(never)]
@@ -1297,6 +1333,86 @@ impl Stylesheet {
             .retain(|index, _| (*index as usize) < marks.cell_xfs);
         self.derived_memo
             .retain(|_, index| (*index as usize) < marks.cell_xfs);
+    }
+
+    /// records the entries a parser found to save plain.
+    pub fn set_saved_plain(&mut self, saved: SavedPlain) {
+        self.saved_plain = saved;
+    }
+
+    /// the xf the plain format takes without adding one: xf 0 when it reads plain, else an xf
+    /// known to save plain.
+    fn known_plain_xf(&self) -> Option<u32> {
+        if self.reads_plain(0) {
+            return Some(0);
+        }
+        let index = self.saved_plain.xf?;
+        (self.xf(index).is_some() && self.reads_plain(index)).then_some(index)
+    }
+
+    /// the xf the plain format takes, appending one when none is known. A source entry the
+    /// model reads as plain or default may carry markup a save keeps, so the new xf names only
+    /// pool entries known to save as defaults.
+    pub fn plain_xf(&mut self) -> u32 {
+        if let Some(index) = self.known_plain_xf() {
+            return index;
+        }
+        let xf = Xf {
+            font: saved_default(&mut self.fonts, &mut self.saved_plain.font),
+            fill: saved_default(&mut self.fills, &mut self.saved_plain.fill),
+            border: saved_default(&mut self.borders, &mut self.saved_plain.border),
+            num_fmt_id: None,
+            alignment: None,
+            ..Xf::default()
+        };
+        self.cell_xfs.push(xf);
+        let index = (self.cell_xfs.len() - 1) as u32;
+        self.saved_plain.xf = Some(index);
+        index
+    }
+
+    /// binds the plain format to the first xf reading plain, as a shared state resolves it.
+    pub fn bind_plain_xf(&mut self) {
+        self.bound_plain = (0..self.cell_xfs.len() as u32)
+            .find(|&index| self.reads_plain(index))
+            .or_else(|| {
+                (0..self.cell_xfs.len() as u32).find(|&index| self.reads_released_plain(index))
+            });
+    }
+
+    /// whether the plain format is bound to a shared xf.
+    pub fn binds_plain(&self) -> bool {
+        self.bound_plain.is_some()
+    }
+
+    /// Resolves a plain edit, using xf 0 when the binding is unproven.
+    pub fn plain_edit_xf(&mut self) -> u32 {
+        match self.bound_plain {
+            Some(index) if self.known_plain_xf() == Some(index) => index,
+            Some(_) => 0,
+            None => self.plain_xf(),
+        }
+    }
+
+    fn reads_released_plain(&self, index: u32) -> bool {
+        let mut format = self.resolved_format(Some(index));
+        let alignment = Alignment {
+            h: format.alignment.h,
+            v: format.alignment.v,
+            wrap_text: format.alignment.wrap_text,
+            shrink_to_fit: format.alignment.shrink_to_fit,
+            ..Alignment::default()
+        };
+        format.alignment = &alignment;
+        format.protection = None;
+        format.xf_id = None;
+        format.quote_prefix = false;
+        format.pivot_button = false;
+        format == self.resolved_format(None)
+    }
+
+    fn reads_plain(&self, index: u32) -> bool {
+        self.resolved_format(Some(index)) == self.resolved_format(None)
     }
 
     /// appends `xf` as read from a snapshot record written before format facets.
@@ -1461,6 +1577,28 @@ where
     }
     memo.pool_len = values.len();
     index
+}
+
+/// a pool entry known to save as the default, appended when none is. `None` leaves the facet
+/// unset, which saves as entry 0, so only when entry 0 is that entry or the pool is empty.
+fn saved_default<T: Default + PartialEq>(
+    pool: &mut Vec<T>,
+    saved: &mut Option<u32>,
+) -> Option<u32> {
+    if pool.is_empty() {
+        return None;
+    }
+    let default = T::default();
+    match saved.filter(|&index| pool.get(index as usize) == Some(&default)) {
+        Some(0) => None,
+        Some(index) => Some(index),
+        None => {
+            pool.push(default);
+            let index = (pool.len() - 1) as u32;
+            *saved = Some(index);
+            Some(index)
+        }
+    }
 }
 
 #[inline(always)]
@@ -1804,6 +1942,21 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(styles.cell_format(Some(first)), format);
         assert_eq!(styles.intern_cell_format(&CellFormat::default()), Ok(None));
+    }
+
+    #[test]
+    fn the_first_cell_format_preserves_the_default_xf() {
+        let mut styles = Stylesheet::default();
+        let format = CellFormat {
+            font: Font {
+                bold: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(styles.intern_cell_format(&format).unwrap(), Some(1));
+        assert_eq!(styles.cell_format(Some(0)), CellFormat::default());
+        assert_eq!(styles.cell_format(Some(1)), format);
     }
 
     #[test]
@@ -2292,8 +2445,19 @@ mod tests {
             let index = styles.intern_cell_format(&format).unwrap();
             assert_eq!(styles.intern_cell_format(&format).unwrap(), index);
             assert_eq!(styles.fonts.len(), 1);
-            assert!(styles.fills.is_empty());
-            assert!(styles.borders.is_empty());
+            assert!(styles.fills.iter().all(|fill| *fill == Fill::None));
+            assert!(styles.fills.len() <= 1);
+            assert!(
+                styles
+                    .borders
+                    .iter()
+                    .all(|border| *border == Border::default())
+            );
+            assert!(styles.borders.len() <= 1);
+            let xf = styles.xf(index.unwrap()).unwrap();
+            assert_eq!(xf.font, None);
+            assert_eq!(xf.fill, None);
+            assert_eq!(xf.border, None);
         }
     }
 
