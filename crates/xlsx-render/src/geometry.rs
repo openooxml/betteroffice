@@ -1250,7 +1250,98 @@ mod tests {
                 height: 20.0,
             })
             .1,
-            1..6
+            1..4
         );
+    }
+
+    #[test]
+    fn last_sized_tracks_mutations() {
+        const LIMIT: u32 = 4 * SIZE_CHUNK_LEN as u32;
+        let mut seed = 0x9e37_79b9_u32;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed
+        };
+        for default in [0.0_f32, 20.0] {
+            for round in 0..48 {
+                let mut values = BTreeMap::new();
+                for _ in 0..next() % 12 {
+                    let index = next() % LIMIT;
+                    values.insert(index, if next() % 3 == 0 { 0.0 } else { 7.0 });
+                }
+                if round % 2 == 0 {
+                    for index in next() % LIMIT..LIMIT {
+                        values.insert(index, 0.0);
+                    }
+                }
+                let pairs: Vec<_> = values.iter().map(|(&index, &size)| (index, size)).collect();
+                let mut sizes = Sizes::from_values(LIMIT, default, &pairs);
+                let mut model: Vec<_> = (0..LIMIT).map(|index| values.get(&index).copied()).collect();
+                let expected = |model: &[Option<f32>]| {
+                    model
+                        .iter()
+                        .rposition(|size| size.unwrap_or(default) > 0.0)
+                        .map(|index| index as u32)
+                };
+                assert_eq!(sizes.last_sized(), expected(&model), "round {round}");
+                for step in 0..32 {
+                    let index = if next() % 2 == 0 {
+                        next() % LIMIT
+                    } else {
+                        (expected(&model).unwrap_or(0) + next() % 5)
+                            .saturating_sub(2)
+                            .min(LIMIT - 1)
+                    };
+                    let size = match next() % 3 {
+                        0 => None,
+                        1 => Some(0.0),
+                        _ => Some(5.0),
+                    };
+                    sizes.set(index, size);
+                    model[index as usize] = size;
+                    assert_eq!(
+                        sizes.last_sized(),
+                        expected(&model),
+                        "default {default} round {round} step {step}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn viewport_range_ends_at_the_last_track_with_extent() {
+        let mut sheet = Sheet::new("S");
+        for col in 8..MAX_COLS {
+            sheet.col_widths.insert(col, 0.0);
+        }
+        for row in 20..MAX_ROWS {
+            sheet.row_heights.insert(row, 0.0);
+        }
+        let g = GridGeometry::new(&sheet, &styles());
+        let right = g.col_x(MAX_COLS);
+        let bottom = g.row_y(MAX_ROWS);
+        let screen = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 1600.0,
+            height: 1000.0,
+        };
+        assert_eq!(g.viewport_range(&screen), (0..20, 0..8));
+        let corner = Viewport {
+            x: right - 1.0,
+            y: bottom - 1.0,
+            width: 500.0,
+            height: 500.0,
+        };
+        assert_eq!(g.viewport_range(&corner), (19..20, 7..8));
+        let beyond = Viewport {
+            x: right,
+            y: bottom,
+            ..screen
+        };
+        assert_eq!(g.viewport_range(&beyond), (MAX_ROWS..MAX_ROWS, MAX_COLS..MAX_COLS));
     }
 }
