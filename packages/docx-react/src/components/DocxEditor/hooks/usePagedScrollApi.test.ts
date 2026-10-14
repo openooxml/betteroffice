@@ -1,0 +1,728 @@
+import { GlobalRegistrator } from '@happy-dom/global-registrator';
+import { afterAll, afterEach, expect, spyOn, test } from 'bun:test';
+import type { Layout } from '@betteroffice/docx/layout/pagination';
+import type {
+  DisplayListQueries,
+  DisplayListRect,
+  DisplayPage,
+} from '@betteroffice/docx/layout/render';
+import type { YrsSession } from '@betteroffice/docx/yrs';
+import {
+  captureDisplayListScrollAnchor,
+  restoreDisplayListScrollAnchor,
+  restoreScrollSnapshot,
+} from '../internals/scrollRestore';
+import type { DisplayPageNavigation } from './useDisplayList';
+import { usePagedScrollApi } from './usePagedScrollApi';
+
+const ownsDom = !GlobalRegistrator.isRegistered;
+if (ownsDom) GlobalRegistrator.register();
+const { act, cleanup, renderHook } = await import('@testing-library/react');
+
+afterEach(() => cleanup());
+afterAll(async () => {
+  if (ownsDom) await GlobalRegistrator.unregister();
+});
+
+const layout = (pages: number, partial = false) =>
+  ({ pageSize: { w: 1, h: 1 }, pages: Array(pages).fill({}), ...(partial ? { partial } : {}) }) as Layout;
+const queries = (pages: number) =>
+  ({ pageCount: () => pages, pageBounds: () => null }) as unknown as DisplayListQueries;
+
+type Props = { layout: Layout; queries: DisplayListQueries; session?: YrsSession };
+
+function scrollApi() {
+  const scrolled: number[] = [];
+  let page = 0;
+  const navigation = { epoch: 0 };
+  const hook = renderHook(
+    (props: Props) =>
+      usePagedScrollApi({
+        pagesContainerRef: { current: null },
+        yrsInputRef: { current: null },
+        yrsSession: props.session ?? null,
+        yrsLocToDisplayPosition: () => null,
+        getScrollContainer: () => null,
+        displayListQueries: props.queries,
+        layout: props.layout,
+        onNavigationIntent: () => scrolled.push(page),
+        navigationEpoch: () => navigation.epoch,
+      }),
+    { initialProps: { layout: layout(7, true), queries: queries(7) } as Props }
+  );
+  const scrollTo = (target: number) => {
+    page = target;
+    act(() => hook.result.current.scrollToPageImpl(target));
+  };
+  return { hook, scrolled, scrollTo, navigation };
+}
+
+test('a page past a partial layout waits for the full one', () => {
+  const { hook, scrolled, scrollTo } = scrollApi();
+  scrollTo(20);
+  expect(scrolled).toEqual([]);
+  // The full layout lands before its pages are displayed.
+  hook.rerender({ layout: layout(29), queries: queries(7) });
+  expect(scrolled).toEqual([]);
+  hook.rerender({ layout: layout(29), queries: queries(29) });
+  expect(scrolled).toEqual([20]);
+});
+
+test('a page past the full layout is dropped', () => {
+  const { hook, scrolled, scrollTo } = scrollApi();
+  scrollTo(40);
+  hook.rerender({ layout: layout(29), queries: queries(29) });
+  hook.rerender({ layout: layout(45), queries: queries(45) });
+  expect(scrolled).toEqual([]);
+});
+
+test('a newer navigation or another session drops a waiting page', () => {
+  const navigated = scrollApi();
+  navigated.scrollTo(20);
+  navigated.navigation.epoch += 1;
+  navigated.hook.rerender({ layout: layout(29), queries: queries(29) });
+  expect(navigated.scrolled).toEqual([]);
+
+  const reopened = scrollApi();
+  reopened.scrollTo(20);
+  reopened.hook.rerender({ layout: layout(29), queries: queries(29), session: {} as YrsSession });
+  expect(reopened.scrolled).toEqual([]);
+});
+
+function pagedDom() {
+  const scroller = document.createElement('div');
+  const host = document.createElement('div');
+  host.className = 'canvas-pages';
+  for (const index of [6, 8]) {
+    const page = document.createElement('div');
+    page.className = 'canvas-page';
+    page.dataset.pageIndex = String(index);
+    page.getBoundingClientRect = () =>
+      ({
+        top: index * 1000 - scroller.scrollTop,
+        bottom: (index + 1) * 1000 - scroller.scrollTop,
+        height: 1000,
+        left: 0,
+        right: 800,
+        width: 800,
+      } as DOMRect);
+    host.append(page);
+  }
+  scroller.append(host);
+  document.body.append(scroller);
+  Object.defineProperty(scroller, 'clientHeight', { value: 400 });
+  scroller.getBoundingClientRect = () =>
+    ({ top: 0, bottom: 400, height: 400, left: 0, right: 800, width: 800 } as DOMRect);
+  const scrolls: number[] = [];
+  scroller.scrollTo = ((options: ScrollToOptions) => {
+    scrolls.push(options.top ?? 0);
+    scroller.scrollTop = options.top ?? 0;
+  }) as typeof scroller.scrollTo;
+  return { scroller, host, scrolls };
+}
+
+function unbuiltQueries(built: boolean | number[], anchor: DisplayListRect): DisplayListQueries {
+  const pages: DisplayPage[] = Array.from({ length: 10 }, (_, pageIndex) => {
+    const page: DisplayPage = { pageIndex, width: 800, height: 1000, primitives: [] };
+    const isBuilt = Array.isArray(built) ? built.includes(pageIndex) : built || pageIndex < 6;
+    if (!isBuilt) Object.assign(page, { unbuilt: true, positionSpan: [400, 900] });
+    return page;
+  });
+  return {
+    displayList: { pages },
+    anchorRect: () => anchor,
+    pageSize: () => ({ width: 800, height: 1000 }),
+  } as unknown as DisplayListQueries;
+}
+
+function fakePageNavigation() {
+  const builds: number[][] = [];
+  let listener: ((queries: DisplayListQueries) => void) | null = null;
+  const pageNavigation: DisplayPageNavigation = {
+    buildPages(pages) {
+      builds.push([...pages]);
+    },
+    subscribeFrames(next) {
+      listener = next;
+      return () => {
+        listener = null;
+      };
+    },
+  };
+  return { pageNavigation, builds, publish: (queries: DisplayListQueries) => listener?.(queries) };
+}
+
+function revealApi(pageNavigation?: DisplayPageNavigation) {
+  const { scroller, host, scrolls } = pagedDom();
+  const placeholder = { pageIndex: 6, x: 20, y: 20, width: 0, height: 0 };
+  const match = { pageIndex: 6, x: 20, y: 900, width: 0, height: 16 };
+  const hook = renderHook(
+    ({ displayListQueries }) =>
+      usePagedScrollApi({
+        pagesContainerRef: { current: host },
+        yrsInputRef: { current: null },
+        yrsSession: null,
+        yrsLocToDisplayPosition: () => null,
+        getScrollContainer: () => scroller,
+        displayListQueries,
+        pageNavigation,
+      }),
+    { initialProps: { displayListQueries: unbuiltQueries(false, placeholder) } }
+  );
+  return { ...hook, scroller, host, scrolls, placeholder, match };
+}
+
+test('a position navigation requests its unbuilt page alongside the guess scroll', () => {
+  const { pageNavigation, builds } = fakePageNavigation();
+  const { result, scroller, scrolls } = revealApi(pageNavigation);
+  act(() => {
+    result.current.scrollToPositionImpl(500);
+    expect(scrolls).toHaveLength(1);
+    expect(builds).toEqual([[6]]);
+  });
+  scroller.remove();
+});
+
+test('a published frame refines a position before its queries render, only once', () => {
+  const { pageNavigation, builds, publish } = fakePageNavigation();
+  const { result, rerender, scroller, scrolls, match } = revealApi(pageNavigation);
+  act(() => result.current.scrollToPositionImpl(500));
+  const built = unbuiltQueries(true, match);
+  act(() => publish(built));
+  expect(scrolls).toHaveLength(2);
+  expect(builds).toEqual([[6], []]);
+  const matchTop = 6000 - scroller.scrollTop + match.y;
+  expect(matchTop).toBeGreaterThanOrEqual(0);
+  expect(matchTop + match.height).toBeLessThanOrEqual(400);
+
+  rerender({ displayListQueries: built });
+  expect(scrolls).toHaveLength(2);
+  scroller.remove();
+});
+
+test('a user scroll withdraws the page request and ignores later frames', () => {
+  const { pageNavigation, builds, publish } = fakePageNavigation();
+  const { result, scroller, scrolls, match } = revealApi(pageNavigation);
+  act(() => result.current.scrollToPositionImpl(500));
+  scroller.dispatchEvent(new Event('wheel'));
+  expect(builds).toEqual([[6], []]);
+  act(() => publish(unbuiltQueries(true, match)));
+  expect(scrolls).toHaveLength(1);
+  scroller.remove();
+});
+
+test('layout scroll compensation keeps navigation refining', () => {
+  const clock = spyOn(performance, 'now').mockReturnValue(0);
+  const nav = fakePageNavigation();
+  const t = revealApi(nav.pageNavigation);
+  try {
+    Object.defineProperty(t.scroller, 'scrollHeight', { value: 10000 });
+    act(() => t.result.current.revealPositionImpl(500));
+    expect(t.scrolls).toHaveLength(1);
+    const compensatedTop = t.scroller.scrollTop + 100;
+    restoreScrollSnapshot({ scrollTopSnapshot: compensatedTop }, t.scroller);
+    expect(t.scroller.scrollTop).toBe(compensatedTop);
+    t.scroller.dispatchEvent(new Event('scroll'));
+    act(() => nav.publish(unbuiltQueries(true, t.match)));
+    expect(t.scrolls).toHaveLength(2);
+    expect(t.scroller.scrollTop).toBe(6000 + t.match.y + t.match.height / 2 - 200);
+  } finally {
+    t.unmount();
+    t.scroller.remove();
+    clock.mockRestore();
+  }
+});
+
+test('layout scroll compensation after an external move cancels navigation', () => {
+  const clock = spyOn(performance, 'now').mockReturnValue(0);
+  const nav = fakePageNavigation();
+  const t = revealApi(nav.pageNavigation);
+  try {
+    Object.defineProperty(t.scroller, 'scrollHeight', { value: 10000 });
+    act(() => t.result.current.revealPositionImpl(500));
+    t.scroller.scrollTop = 100;
+    restoreScrollSnapshot({ scrollTopSnapshot: 200 }, t.scroller);
+    t.scroller.dispatchEvent(new Event('scroll'));
+    act(() => nav.publish(unbuiltQueries(true, t.match)));
+    expect(t.scrolls).toHaveLength(1);
+    expect(t.scroller.scrollTop).toBe(200);
+    expect(nav.builds).toEqual([[6], []]);
+  } finally {
+    t.unmount();
+    t.scroller.remove();
+    clock.mockRestore();
+  }
+});
+
+test('scroll height clamping keeps navigation refining', () => {
+  const clock = spyOn(performance, 'now').mockReturnValue(0);
+  const nav = fakePageNavigation();
+  const t = revealApi(nav.pageNavigation);
+  try {
+    let scrollHeight = 10000;
+    Object.defineProperty(t.scroller, 'scrollHeight', { get: () => scrollHeight });
+    act(() => t.result.current.revealPositionImpl(500));
+    expect(t.scrolls).toHaveLength(1);
+    scrollHeight = 6000;
+    t.scroller.scrollTop = scrollHeight - t.scroller.clientHeight;
+    t.scroller.dispatchEvent(new Event('scroll'));
+    scrollHeight = 10000;
+    act(() => nav.publish(unbuiltQueries(true, t.match)));
+    expect(t.scrolls).toHaveLength(2);
+    expect(t.scroller.scrollTop).toBe(6000 + t.match.y + t.match.height / 2 - 200);
+  } finally {
+    t.unmount();
+    t.scroller.remove();
+    clock.mockRestore();
+  }
+});
+
+test('scroll height clamping followed by layout compensation keeps navigation refining', () => {
+  const clock = spyOn(performance, 'now').mockReturnValue(0);
+  const nav = fakePageNavigation();
+  const t = revealApi(nav.pageNavigation);
+  try {
+    let scrollHeight = 10000;
+    Object.defineProperty(t.scroller, 'scrollHeight', { get: () => scrollHeight });
+    t.rerender({ displayListQueries: unbuiltQueries(false, { ...t.placeholder, y: 1200 }) });
+    act(() => t.result.current.revealPositionImpl(500));
+    expect(t.scrolls).toEqual([7000]);
+    scrollHeight = 6900;
+    t.scroller.scrollTop = scrollHeight - t.scroller.clientHeight;
+    expect(t.scroller.scrollTop).toBe(6500);
+    restoreScrollSnapshot({ scrollTopSnapshot: 6200 }, t.scroller);
+    t.scroller.dispatchEvent(new Event('scroll'));
+    expect(t.scroller.scrollTop).toBe(6200);
+    expect(nav.builds).toEqual([[6]]);
+    scrollHeight = 10000;
+    act(() => nav.publish(unbuiltQueries(true, t.match)));
+    const target = 6000 + t.match.y + t.match.height / 2 - 200;
+    expect(t.scrolls).toEqual([7000, target]);
+    expect(t.scroller.scrollTop).toBe(target);
+    expect(nav.builds).toEqual([[6], []]);
+  } finally {
+    t.unmount();
+    t.scroller.remove();
+    clock.mockRestore();
+  }
+});
+
+test.each(['scroll', 'frame'])(
+  'height expansion after clamping and layout compensation keeps navigation refining on a %s',
+  (detection) => {
+    const clock = spyOn(performance, 'now').mockReturnValue(0);
+    const nav = fakePageNavigation();
+    const t = revealApi(nav.pageNavigation);
+    try {
+      let scrollHeight = 10000;
+      Object.defineProperty(t.scroller, 'scrollHeight', { get: () => scrollHeight });
+      const queries = unbuiltQueries(false, { ...t.placeholder, y: 1200 });
+      t.rerender({ displayListQueries: queries });
+      act(() => t.result.current.revealPositionImpl(500));
+      expect(t.scrolls).toEqual([7000]);
+      const anchor = captureDisplayListScrollAnchor(queries, t.host, t.scroller, 500);
+      expect(anchor.scrollTopSnapshot).toBe(7000);
+      scrollHeight = 6900;
+      t.scroller.scrollTop = scrollHeight - t.scroller.clientHeight;
+      expect(t.scroller.scrollTop).toBe(6500);
+      restoreDisplayListScrollAnchor(
+        anchor, unbuiltQueries(false, { ...t.placeholder, y: 400 }), t.host, t.scroller
+      );
+      expect(t.scroller.scrollTop).toBe(6200);
+      scrollHeight = 10000;
+      if (detection === 'scroll') t.scroller.dispatchEvent(new Event('scroll'));
+      act(() => nav.publish(unbuiltQueries(true, t.match)));
+      const target = 6000 + t.match.y + t.match.height / 2 - 200;
+      expect(t.scrolls).toEqual([7000, target]);
+      expect(t.scroller.scrollTop).toBe(target);
+      expect(nav.builds).toEqual([[6], []]);
+    } finally {
+      t.unmount();
+      t.scroller.remove();
+      clock.mockRestore();
+    }
+  }
+);
+
+test('stale layout scroll compensation does not excuse an external move after a reveal', () => {
+  const clock = spyOn(performance, 'now').mockReturnValue(0);
+  const nav = fakePageNavigation();
+  const t = revealApi(nav.pageNavigation);
+  try {
+    Object.defineProperty(t.scroller, 'scrollHeight', { value: 10000 });
+    t.rerender({ displayListQueries: unbuiltQueries(false, { ...t.placeholder, y: 60 }) });
+    t.scroller.scrollTop = 5860;
+    restoreScrollSnapshot({ scrollTopSnapshot: 5960 }, t.scroller);
+    expect(t.scroller.scrollTop).toBe(5960);
+    act(() => t.result.current.revealPositionImpl(500));
+    expect(t.scrolls).toEqual([5860]);
+    expect(t.scroller.scrollTop).toBe(5860);
+    t.scroller.scrollTop = 5960;
+    t.scroller.dispatchEvent(new Event('scroll'));
+    expect(nav.builds).toEqual([[6], []]);
+    act(() => nav.publish(unbuiltQueries(true, t.match)));
+    expect(t.scrolls).toEqual([5860]);
+    expect(t.scroller.scrollTop).toBe(5960);
+  } finally {
+    t.unmount();
+    t.scroller.remove();
+    clock.mockRestore();
+  }
+});
+
+test('plain scrolling cancels navigation across later frames', () => {
+  const clock = spyOn(performance, 'now').mockReturnValue(0);
+  const nav = fakePageNavigation();
+  const t = revealApi(nav.pageNavigation);
+  try {
+    act(() => t.result.current.revealPositionImpl(500));
+    for (const built of [false, true]) {
+      t.scroller.scrollTop = 100;
+      t.scroller.dispatchEvent(new Event('scroll'));
+      const rect = { ...t.match, pageIndex: 8 };
+      act(() => nav.publish(unbuiltQueries(built, rect)));
+      expect(t.scroller.scrollTop).toBe(100);
+      expect(t.scrolls).toHaveLength(1);
+    }
+  } finally {
+    t.unmount();
+    t.scroller.remove();
+    clock.mockRestore();
+  }
+});
+
+test('a programmatic scroll without an event cancels navigation before the next frame', () => {
+  const clock = spyOn(performance, 'now').mockReturnValue(0);
+  const nav = fakePageNavigation();
+  const t = revealApi(nav.pageNavigation);
+  try {
+    act(() => t.result.current.revealPositionImpl(500));
+    t.scroller.scrollTop = 100;
+    for (const built of [false, true]) {
+      const rect = { ...t.match, pageIndex: 8 };
+      act(() => nav.publish(unbuiltQueries(built, rect)));
+      expect(t.scroller.scrollTop).toBe(100);
+      expect(t.scrolls).toHaveLength(1);
+    }
+  } finally {
+    t.unmount();
+    t.scroller.remove();
+    clock.mockRestore();
+  }
+});
+
+test('a published frame requests the new unbuilt page holding the position', () => {
+  const { pageNavigation, builds, publish } = fakePageNavigation();
+  const { result, scroller, scrolls, placeholder, match } = revealApi(pageNavigation);
+  const scrollTo = scroller.scrollTo;
+  scroller.scrollTop = 5500;
+  scroller.scrollTo = ((options: ScrollToOptions) => {
+    if (options.behavior === 'smooth') {
+      scrolls.push(options.top ?? 0);
+    } else {
+      scrollTo(options);
+    }
+  }) as typeof scroller.scrollTo;
+  act(() => result.current.scrollToPositionImpl(700));
+  expect(scrolls).toHaveLength(1);
+  expect(scroller.scrollTop).toBe(5500);
+  scroller.scrollTop = 5600;
+  scroller.dispatchEvent(new Event('scroll'));
+  scroller.scrollTop = 5750;
+  act(() => publish(unbuiltQueries([0, 1, 2, 3, 4, 5, 6, 7], { ...placeholder, pageIndex: 8 })));
+  expect(builds).toEqual([[6], [8]]);
+  expect(scrolls).toHaveLength(2);
+  scroller.dispatchEvent(new Event('scroll'));
+
+  act(() => publish(unbuiltQueries(true, { ...match, pageIndex: 8 })));
+  expect(builds).toEqual([[6], [8], []]);
+  expect(scrolls).toHaveLength(3);
+  const matchTop = 8000 - scroller.scrollTop + match.y;
+  expect(matchTop).toBeGreaterThanOrEqual(0);
+  expect(matchTop + match.height).toBeLessThanOrEqual(400);
+  scroller.remove();
+});
+
+test('a reveal follows an unbuilt page past three seconds only with a signal', async () => {
+  let now = 0;
+  const clock = spyOn(performance, 'now').mockImplementation(() => now);
+  try {
+    for (const withSignal of [true, false]) {
+      now = 0;
+      const { result, rerender, unmount, scroller, scrolls, match } = revealApi();
+      const abort = new AbortController();
+      await act(async () => {
+        expect(result.current.revealPositionImpl(500, withSignal ? abort.signal : undefined)).toBe('scrolled');
+      });
+      expect(scrolls).toHaveLength(1);
+
+      now = 4000;
+      await act(async () => rerender({ displayListQueries: unbuiltQueries(true, match) }));
+      expect(scrolls).toHaveLength(withSignal ? 2 : 1);
+      if (withSignal) {
+        const matchTop = 6000 - scroller.scrollTop + match.y;
+        expect(matchTop).toBeGreaterThanOrEqual(0);
+        expect(matchTop + match.height).toBeLessThanOrEqual(400);
+      }
+      unmount();
+      scroller.remove();
+    }
+  } finally {
+    clock.mockRestore();
+  }
+});
+
+test('a position on an unbuilt page is scrolled to again once the page is built', async () => {
+  const { scroller, host, scrolls } = pagedDom();
+  const placeholder = { pageIndex: 6, x: 20, y: 20, width: 0, height: 0 };
+  const match = { pageIndex: 6, x: 20, y: 900, width: 0, height: 16 };
+  const { result, rerender } = renderHook(
+    ({ displayListQueries }) =>
+      usePagedScrollApi({
+        pagesContainerRef: { current: host },
+        yrsInputRef: { current: null },
+        yrsSession: null,
+        yrsLocToDisplayPosition: () => null,
+        getScrollContainer: () => scroller,
+        displayListQueries,
+      }),
+    { initialProps: { displayListQueries: unbuiltQueries(false, placeholder) } }
+  );
+  await act(async () => result.current.scrollToPositionImpl(500));
+  expect(scrolls).toHaveLength(1);
+
+  await act(async () => rerender({ displayListQueries: unbuiltQueries(false, placeholder) }));
+  expect(scrolls).toHaveLength(1);
+
+  await act(async () => rerender({ displayListQueries: unbuiltQueries(true, match) }));
+  expect(scrolls).toHaveLength(2);
+  const matchTop = 6000 - scroller.scrollTop + 900;
+  expect(matchTop).toBeGreaterThanOrEqual(0);
+  expect(matchTop).toBeLessThanOrEqual(400);
+
+  await act(async () => rerender({ displayListQueries: unbuiltQueries(true, match) }));
+  expect(scrolls).toHaveLength(2);
+});
+
+test('a scroll to an unbuilt page follows its position to the page that holds it', async () => {
+  const { scroller, host, scrolls } = pagedDom();
+  const guess = { pageIndex: 6, x: 20, y: 20, width: 0, height: 0 };
+  const next = { pageIndex: 8, x: 20, y: 20, width: 0, height: 0 };
+  const match = { pageIndex: 8, x: 20, y: 500, width: 0, height: 16 };
+  const { result, rerender } = renderHook(
+    ({ displayListQueries }) =>
+      usePagedScrollApi({
+        pagesContainerRef: { current: host },
+        yrsInputRef: { current: null },
+        yrsSession: null,
+        yrsLocToDisplayPosition: () => null,
+        getScrollContainer: () => scroller,
+        displayListQueries,
+      }),
+    { initialProps: { displayListQueries: unbuiltQueries([0, 1, 2, 3, 4, 5], guess) } }
+  );
+  await act(async () => result.current.scrollToPositionImpl(700));
+  await act(async () =>
+    rerender({ displayListQueries: unbuiltQueries([0, 1, 2, 3, 4, 5, 6, 7], next) })
+  );
+  expect(scrolls).toHaveLength(2);
+  await act(async () => rerender({ displayListQueries: unbuiltQueries(true, match) }));
+  expect(scrolls).toHaveLength(3);
+  const matchTop = 8000 - scroller.scrollTop + 500;
+  expect(matchTop).toBeGreaterThanOrEqual(0);
+  expect(matchTop).toBeLessThanOrEqual(400);
+});
+
+test('a user scroll or a later navigation drops the pending refinement', async () => {
+  const { scroller, host, scrolls } = pagedDom();
+  const placeholder = { pageIndex: 6, x: 20, y: 20, width: 0, height: 0 };
+  const match = { pageIndex: 6, x: 20, y: 900, width: 0, height: 16 };
+  const { result, rerender } = renderHook(
+    ({ displayListQueries }) =>
+      usePagedScrollApi({
+        pagesContainerRef: { current: host },
+        yrsInputRef: { current: null },
+        yrsSession: null,
+        yrsLocToDisplayPosition: () => null,
+        getScrollContainer: () => scroller,
+        displayListQueries,
+      }),
+    { initialProps: { displayListQueries: unbuiltQueries(false, placeholder) } }
+  );
+  await act(async () => result.current.scrollToPositionImpl(500));
+  scroller.dispatchEvent(new Event('wheel'));
+  await act(async () => rerender({ displayListQueries: unbuiltQueries(true, match) }));
+  expect(scrolls).toHaveLength(1);
+
+  const onlyFirst = {
+    ...unbuiltQueries(false, placeholder),
+    anchorRect: (position: number) => (position === 500 ? placeholder : null),
+  } as unknown as DisplayListQueries;
+  await act(async () => rerender({ displayListQueries: onlyFirst }));
+  await act(async () => result.current.scrollToPositionImpl(500));
+  expect(result.current.revealPositionImpl(600)).toBe('unsupported');
+  await act(async () => rerender({ displayListQueries: unbuiltQueries(true, match) }));
+  expect(scrolls).toHaveLength(2);
+});
+
+test('aborting a reveal stops following an unbuilt page after three seconds', async () => {
+  let now = 0;
+  const clock = spyOn(performance, 'now').mockImplementation(() => now);
+  try {
+    const { result, rerender, scroller, scrolls, placeholder, match } = revealApi();
+    const abort = new AbortController();
+    await act(async () => {
+      expect(result.current.revealPositionImpl(500, abort.signal)).toBe('scrolled');
+    });
+    expect(scrolls).toHaveLength(1);
+
+    now = 4000;
+    await act(async () =>
+      rerender({ displayListQueries: unbuiltQueries(false, { ...placeholder, pageIndex: 8 }) })
+    );
+    expect(scrolls).toHaveLength(2);
+    abort.abort();
+    await act(async () =>
+      rerender({ displayListQueries: unbuiltQueries(true, { ...match, pageIndex: 8 }) })
+    );
+    expect(scrolls).toHaveLength(2);
+
+    const kept = new AbortController();
+    await act(async () => rerender({ displayListQueries: unbuiltQueries(false, placeholder) }));
+    await act(async () => {
+      result.current.revealPositionImpl(500, kept.signal);
+    });
+    now = 8000;
+    await act(async () => rerender({ displayListQueries: unbuiltQueries(true, match) }));
+    expect(scrolls).toHaveLength(4);
+    scroller.remove();
+  } finally {
+    clock.mockRestore();
+  }
+});
+
+function paginatingApi(session?: YrsSession) {
+  const { scroller, host, scrolls } = pagedDom();
+  const navigation = { epoch: 0 };
+  const focused: number[] = [];
+  const heading = { pageIndex: 8, x: 20, y: 500, width: 0, height: 16 };
+  const laidOut = {
+    ...unbuiltQueries(true, heading),
+    pageCount: () => 10,
+    pageBounds: (pageIndex: number) => ({ pageIndex, x: 0, y: 0, width: 800, height: 1000 }),
+  } as DisplayListQueries;
+  const paginating = {
+    ...laidOut,
+    pageCount: () => 7,
+    anchorRect: () => null,
+  } as DisplayListQueries;
+  const hook = renderHook(
+    (props: Props) =>
+      usePagedScrollApi({
+        pagesContainerRef: { current: host },
+        yrsInputRef: { current: { focus: () => focused.push(1) } as never },
+        yrsSession: props.session ?? null,
+        yrsLocToDisplayPosition: () => 5000,
+        getScrollContainer: () => scroller,
+        displayListQueries: props.queries,
+        layout: props.layout,
+        onNavigationIntent: () => {
+          navigation.epoch += 1;
+        },
+        navigationEpoch: () => navigation.epoch,
+      }),
+    { initialProps: { layout: layout(7, true), queries: paginating, session } as Props }
+  );
+  return { ...hook, scroller, scrolls, navigation, focused, laidOut, paginating };
+}
+
+test('a position past a partial layout is scrolled to once the layout reaches it', async () => {
+  const api = paginatingApi();
+  const { result, rerender, scroller, scrolls, laidOut, paginating, navigation } = api;
+  await act(async () => result.current.scrollToPositionImpl(5000));
+  expect(scrolls).toHaveLength(0);
+  navigation.epoch += 1;
+  await act(async () => rerender({ layout: layout(9, true), queries: paginating }));
+  expect(scrolls).toHaveLength(0);
+  await act(async () => rerender({ layout: layout(10), queries: laidOut }));
+  expect(scrolls).toHaveLength(1);
+  const headingTop = 8000 - scroller.scrollTop + 500;
+  expect(headingTop).toBeGreaterThanOrEqual(0);
+  expect(headingTop).toBeLessThanOrEqual(400);
+  await act(async () => rerender({ layout: layout(10), queries: { ...laidOut } }));
+  expect(scrolls).toHaveLength(1);
+  scroller.remove();
+});
+
+test('a waiting position drops on a user scroll, a new session, an edit or a later page', async () => {
+  let version = '1';
+  const session = { version: () => version } as unknown as YrsSession;
+  const drops: Array<(api: ReturnType<typeof paginatingApi>) => void> = [
+    ({ scroller }) => {
+      scroller.dispatchEvent(new Event('wheel'));
+    },
+    () => {
+      document.body.dispatchEvent(new Event('keydown', { bubbles: true }));
+    },
+    ({ rerender, paginating }) =>
+      rerender({ layout: layout(9, true), queries: paginating, session: {} as YrsSession }),
+    () => {
+      version = '2';
+    },
+    ({ result }) => result.current.scrollToPageImpl(9),
+  ];
+  for (const drop of drops) {
+    version = '1';
+    const api = paginatingApi(session);
+    await act(async () => api.result.current.scrollToPositionImpl(5000));
+    await act(async () => drop(api));
+    await act(async () => api.rerender({ layout: layout(10), queries: api.laidOut, session }));
+    expect(api.scrolls).toEqual(drop === drops[4] ? [8300] : []);
+    api.scroller.remove();
+  }
+});
+
+test('a paragraph navigation that waits for the layout still focuses the input', async () => {
+  const session = {
+    version: () => '1',
+    storyIds: () => ['body'],
+    paragraphs: () => [{ paraId: 'P1' }],
+    locateParagraph: () => ({ start: 0, end: 4 }),
+    setSelection: () => {},
+  } as unknown as YrsSession;
+  const { result, rerender, scroller, scrolls, focused, laidOut } = paginatingApi(session);
+  await act(async () => {
+    result.current.scrollToParaIdImpl('P1');
+  });
+  await act(async () => rerender({ layout: layout(10), queries: laidOut, session }));
+  await act(() => new Promise((resolve) => setTimeout(resolve, 100)));
+  expect(scrolls).toHaveLength(1);
+  expect(focused).toHaveLength(1);
+  scroller.remove();
+});
+
+test('a waiting position resumed onto an unbuilt page stops following it on an edit or a key press', async () => {
+  let version = '1';
+  const session = { version: () => version } as unknown as YrsSession;
+  const placeholder = { pageIndex: 8, x: 20, y: 20, width: 0, height: 0 };
+  const drops = [
+    () => {
+      version = '2';
+    },
+    () => {
+      document.body.dispatchEvent(new Event('keydown', { bubbles: true }));
+    },
+  ];
+  for (const drop of drops) {
+    version = '1';
+    const { result, rerender, scroller, scrolls, laidOut } = paginatingApi(session);
+    await act(async () => result.current.scrollToPositionImpl(5000));
+    const building = unbuiltQueries([0, 1, 2, 3, 4, 5, 6, 7], placeholder);
+    await act(async () => rerender({ layout: layout(10), queries: building, session }));
+    expect(scrolls).toHaveLength(1);
+    await act(async () => drop());
+    await act(async () => rerender({ layout: layout(10), queries: laidOut, session }));
+    expect(scrolls).toHaveLength(1);
+    scroller.remove();
+  }
+});

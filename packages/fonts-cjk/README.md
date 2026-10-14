@@ -8,15 +8,13 @@ npm install @betteroffice/fonts @betteroffice/fonts-cjk
 
 Then hand the base module to the engine once, before any editor mounts — `configureDefaultFonts({ fonts })` from `@betteroffice/docx/layout`, as the [`@betteroffice/fonts` README](https://www.npmjs.com/package/@betteroffice/fonts) shows. `@betteroffice/fonts` picks these faces up through an optional dynamic import, so once the base package is configured the CJK script-fallback chain resolves as soon as this one is present.
 
-Without it nothing breaks: a CJK face resolves to a loader that rejects, the engine logs it once and measures the run with the Latin last-resort face instead. That keeps pagination on the native path, but the ideographs are measured with a font that has no glyphs for them, so CJK line breaking will be wrong.
-
 ## Why a separate package
 
-npm has no partial-tarball fetch: a subpath export inside `@betteroffice/fonts` would still put every byte of these faces into every consumer's `node_modules`. Only a package boundary keeps them out.
+A separate package makes CJK binaries an explicit installation choice.
 
 | Package                   | Faces | Size on disk |
 | ------------------------- | ----- | ------------ |
-| `@betteroffice/fonts`     | 25    | 7.9 MB       |
+| `@betteroffice/fonts`     | 65    | 14.2 MB      |
 | `@betteroffice/fonts-cjk` | 5     | 33 MB        |
 
 The overwhelming majority of documents need only the base package. Measured over 100 real-world English documents, Calibri appears in 91%, Times New Roman in 79%, Arial in 56% and Cambria in 52% — all covered by the base package's metric-compatible Latin set.
@@ -33,9 +31,9 @@ The overwhelming majority of documents need only the base package. Measured over
 
 Notes:
 
-- **Coverage fallbacks first, metric approximations second.** Unlike Carlito/Calibri, the Noto CJK faces do NOT share advance widths with SimSun/MS Gothic/Malgun Gothic et al. (fullwidth ideographs are uniformly 1 em everywhere, but proportional Latin runs and line heights differ), so CJK pagination approximates Word rather than matching it.
-- **Regular only.** Each face ships a single Regular; a bold CJK request resolves to the Regular face and bold falls back through the measurement font chain. Serif TC/JP/KR are not vendored (size budget) — the Ming/Mincho/Batang serif families map to the regional sans face; coverage wins over style.
-- **Static CFF, not the variable TTFs.** These are the static `SubsetOTF` Regulars from noto-cjk, NOT the google/fonts variable TTFs: those VFs default to the Thin (wght=100) instance, and the Rust `FontStore` reads default-instance advances while the browser measures at wght=400 — same bytes, different numbers. The statics keep both sides identical.
+- These Noto faces provide Chinese, Japanese and Korean glyph coverage.
+- Each face ships Regular. Ming, Mincho and Batang families map to regional Noto Sans faces.
+- These are noto-cjk's static `SubsetOTF` Regulars, so browser and Rust measurement read identical advances.
 
 ## API
 

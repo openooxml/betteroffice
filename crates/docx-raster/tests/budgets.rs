@@ -7,8 +7,9 @@ use std::io::Write;
 
 use docx_layout::display_list::DisplayList;
 use docx_raster::{
-    FontChains, ImageMap, ImageScope, MAX_IMAGE_BYTES, MAX_PAGE_DIM, MAX_PAGE_IMAGE_PIXELS,
-    MAX_PAGE_PIXELS, RenderResources, render_page, render_png, scoped_image_key,
+    FontChains, GlyphCache, ImageCache, ImageMap, ImageScope, MAX_IMAGE_BYTES, MAX_PAGE_DIM,
+    MAX_PAGE_IMAGE_PIXELS, MAX_PAGE_PIXELS, RenderResources, render_page, render_page_cached,
+    render_png, scoped_image_key,
 };
 use ooxml_text::FontStore;
 use serde_json::{Value, json};
@@ -457,6 +458,37 @@ fn an_oversized_text_run_is_refused_before_the_shaper_allocates() {
     );
 }
 
+/// A `font` shorthand is a display-list string of any length, and a page may
+/// carry a distinct one per run. Parsing each one once must not mean holding a
+/// copy of every raw string for the length of the page.
+#[test]
+fn a_page_of_distinct_font_shorthands_does_not_retain_them() {
+    let (fonts, chains) = carlito();
+    let images = ImageMap::new();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let primitives: Vec<Value> = (0..512)
+        .map(|index| {
+            json!({
+                "kind": "text",
+                "text": "x",
+                "x": 1,
+                "baselineY": 6,
+                "width": 4,
+                "font": format!("400 {}12px Carlito, sans-serif", " ".repeat(16_384 + index)),
+                "color": "#000000",
+                "leaderGlyphs": {"glyph": ".", "count": 1, "advance": 0}
+            })
+        })
+        .collect();
+    let scene = list(8.0, 8.0, primitives);
+    let (result, allocated) = allocated_by(|| render_png(&scene, 0, &resources));
+    result.expect("render");
+    assert!(
+        allocated < MIB,
+        "a page of distinct shorthands allocated {allocated} bytes keeping them"
+    );
+}
+
 /// A leader repeats its glyph `count` times, and the glyph is a display-list
 /// string of any length. The charge is the product, not the count: 1:1 shaping
 /// leaves no excess for the shaped-glyph charge to recover.
@@ -595,6 +627,35 @@ fn an_oversized_data_url_is_refused_before_its_base64_is_decoded() {
     assert!(
         allocated < MIB,
         "an oversized data URL allocated {allocated} bytes decoding base64 on a 1x1 page"
+    );
+}
+
+/// A decoded image one page leaves in a shared cache is free for the next
+/// page: resolving it again allocates nothing near what one decode spends.
+#[test]
+fn a_shared_image_cache_decodes_once_across_pages() {
+    let (fonts, chains) = (FontStore::new(), FontChains::new());
+    let images = ImageMap::from([(
+        scoped_image_key(ImageScope::Body, "rIdBig"),
+        solid_png(256, 256),
+    )]);
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let scene = |y: u32| {
+        serde_json::from_value::<DisplayList>(json!({
+            "pages": [{"pageIndex": 0, "width": 64.0, "height": 64.0,
+                "primitives": [{"kind":"image","relId":"rIdBig","x":0,"y":y,"w":64,"h":64}]}]
+        }))
+        .expect("display list")
+    };
+    let mut glyphs = GlyphCache::default();
+    let mut cache = ImageCache::default();
+    render_page_cached(&scene(0), 0, &resources, &mut glyphs, &mut cache).expect("page one");
+    let ((), replay) = allocated_by(|| {
+        render_page_cached(&scene(8), 0, &resources, &mut glyphs, &mut cache).expect("page two");
+    });
+    assert!(
+        replay < 64 * 1024,
+        "a warm second page allocated {replay} bytes"
     );
 }
 

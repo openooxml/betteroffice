@@ -10,7 +10,7 @@ import {
   indexMarkdown,
 } from "./lib/markdown";
 
-export const config = { matcher: ["/", "/docx", "/xlsx", "/pptx"] };
+export const config = { matcher: ["/", "/docx", "/xlsx", "/pptx", "/vsdx"] };
 
 const LINKS = [
   `<${DOCS}>; rel="service-doc"`,

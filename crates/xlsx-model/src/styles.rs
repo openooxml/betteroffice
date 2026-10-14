@@ -1,6 +1,9 @@
 //! style types (fonts, fills, borders, xf chains, theme colors). pure data;
 //! the cellXfs indirection chain is walked through the `Stylesheet` accessors.
 
+use std::collections::{BTreeMap, HashMap, hash_map::DefaultHasher};
+use std::hash::{Hash, Hasher};
+
 use serde::{Deserialize, Serialize};
 
 /// a color reference as it appears in a `<color>` element (§18.8.3).
@@ -43,16 +46,115 @@ pub struct Font {
     pub color: Option<Color>,
 }
 
-/// a cell fill. non-solid patterns collapse to their foreground color.
+/// A cell fill.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub enum Fill {
     #[default]
     None,
     Solid(Color),
+    Pattern {
+        pattern: PatternType,
+        fg: Option<Color>,
+        bg: Option<Color>,
+    },
 }
 
-/// border line weight/style, collapsed from the full sml set.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PatternType {
+    Gray125,
+    Gray0625,
+    MediumGray,
+    DarkGray,
+    LightGray,
+    DarkHorizontal,
+    DarkVertical,
+    DarkDown,
+    DarkUp,
+    DarkGrid,
+    DarkTrellis,
+    LightHorizontal,
+    LightVertical,
+    LightDown,
+    LightUp,
+    LightGrid,
+    LightTrellis,
+}
+
+impl PatternType {
+    pub const ALL: [Self; 17] = [
+        Self::Gray125,
+        Self::Gray0625,
+        Self::MediumGray,
+        Self::DarkGray,
+        Self::LightGray,
+        Self::DarkHorizontal,
+        Self::DarkVertical,
+        Self::DarkDown,
+        Self::DarkUp,
+        Self::DarkGrid,
+        Self::DarkTrellis,
+        Self::LightHorizontal,
+        Self::LightVertical,
+        Self::LightDown,
+        Self::LightUp,
+        Self::LightGrid,
+        Self::LightTrellis,
+    ];
+
+    pub fn from_sml(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|pattern| pattern.as_sml() == value)
+    }
+
+    pub fn as_sml(self) -> &'static str {
+        match self {
+            Self::Gray125 => "gray125",
+            Self::Gray0625 => "gray0625",
+            Self::MediumGray => "mediumGray",
+            Self::DarkGray => "darkGray",
+            Self::LightGray => "lightGray",
+            Self::DarkHorizontal => "darkHorizontal",
+            Self::DarkVertical => "darkVertical",
+            Self::DarkDown => "darkDown",
+            Self::DarkUp => "darkUp",
+            Self::DarkGrid => "darkGrid",
+            Self::DarkTrellis => "darkTrellis",
+            Self::LightHorizontal => "lightHorizontal",
+            Self::LightVertical => "lightVertical",
+            Self::LightDown => "lightDown",
+            Self::LightUp => "lightUp",
+            Self::LightGrid => "lightGrid",
+            Self::LightTrellis => "lightTrellis",
+        }
+    }
+
+    pub fn mask(self) -> [u8; 8] {
+        match self {
+            Self::Gray125 => [0x11, 0, 0x44, 0, 0x11, 0, 0x44, 0],
+            Self::Gray0625 => [0x01, 0, 0x10, 0, 0x01, 0, 0x10, 0],
+            Self::MediumGray => [0x55, 0xaa, 0x55, 0xaa, 0x55, 0xaa, 0x55, 0xaa],
+            Self::DarkGray => [0x77, 0xdd, 0x77, 0xdd, 0x77, 0xdd, 0x77, 0xdd],
+            Self::LightGray => [0x11, 0x44, 0x11, 0x44, 0x11, 0x44, 0x11, 0x44],
+            Self::DarkHorizontal => [0xff, 0xff, 0, 0, 0xff, 0xff, 0, 0],
+            Self::DarkVertical => [0x33; 8],
+            Self::DarkDown => [0x33, 0x66, 0xcc, 0x99, 0x33, 0x66, 0xcc, 0x99],
+            Self::DarkUp => [0x33, 0x99, 0xcc, 0x66, 0x33, 0x99, 0xcc, 0x66],
+            Self::DarkGrid => [0xff, 0xff, 0x33, 0x33, 0xff, 0xff, 0x33, 0x33],
+            Self::DarkTrellis => [0x33, 0xff, 0xcc, 0xff, 0x33, 0xff, 0xcc, 0xff],
+            Self::LightHorizontal => [0xff, 0, 0, 0, 0xff, 0, 0, 0],
+            Self::LightVertical => [0x11; 8],
+            Self::LightDown => [0x11, 0x22, 0x44, 0x88, 0x11, 0x22, 0x44, 0x88],
+            Self::LightUp => [0x11, 0x88, 0x44, 0x22, 0x11, 0x88, 0x44, 0x22],
+            Self::LightGrid => [0xff, 0x11, 0x11, 0x11, 0xff, 0x11, 0x11, 0x11],
+            Self::LightTrellis => [0x11, 0xaa, 0x44, 0xaa, 0x11, 0xaa, 0x44, 0xaa],
+        }
+    }
+}
+
+/// Border line style.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BorderStyle {
     Thin,
     Medium,
@@ -61,6 +163,12 @@ pub enum BorderStyle {
     Dotted,
     Double,
     Hair,
+    MediumDashed,
+    DashDot,
+    MediumDashDot,
+    DashDotDot,
+    MediumDashDotDot,
+    SlantDashDot,
 }
 
 impl BorderStyle {
@@ -68,9 +176,15 @@ impl BorderStyle {
     pub fn from_sml(s: &str) -> Self {
         match s {
             "thin" => BorderStyle::Thin,
-            "medium" | "mediumDashed" | "mediumDashDot" | "mediumDashDotDot" => BorderStyle::Medium,
+            "medium" => BorderStyle::Medium,
             "thick" => BorderStyle::Thick,
-            "dashed" | "dashDot" | "dashDotDot" | "slantDashDot" => BorderStyle::Dashed,
+            "dashed" => BorderStyle::Dashed,
+            "mediumDashed" => BorderStyle::MediumDashed,
+            "dashDot" => BorderStyle::DashDot,
+            "mediumDashDot" => BorderStyle::MediumDashDot,
+            "dashDotDot" => BorderStyle::DashDotDot,
+            "mediumDashDotDot" => BorderStyle::MediumDashDotDot,
+            "slantDashDot" => BorderStyle::SlantDashDot,
             "dotted" => BorderStyle::Dotted,
             "double" => BorderStyle::Double,
             "hair" => BorderStyle::Hair,
@@ -88,6 +202,88 @@ impl BorderStyle {
             BorderStyle::Dotted => "dotted",
             BorderStyle::Double => "double",
             BorderStyle::Hair => "hair",
+            BorderStyle::MediumDashed => "mediumDashed",
+            BorderStyle::DashDot => "dashDot",
+            BorderStyle::MediumDashDot => "mediumDashDot",
+            BorderStyle::DashDotDot => "dashDotDot",
+            BorderStyle::MediumDashDotDot => "mediumDashDotDot",
+            BorderStyle::SlantDashDot => "slantDashDot",
+        }
+    }
+}
+
+#[cfg(test)]
+mod pattern_border_tests {
+    use super::*;
+
+    #[test]
+    fn pattern_border_tokens_round_trip() {
+        for token in [
+            "thin",
+            "medium",
+            "dashed",
+            "dotted",
+            "thick",
+            "double",
+            "hair",
+            "mediumDashed",
+            "dashDot",
+            "mediumDashDot",
+            "dashDotDot",
+            "mediumDashDotDot",
+            "slantDashDot",
+        ] {
+            assert_eq!(BorderStyle::from_sml(token).as_sml(), token);
+        }
+        assert_eq!(BorderStyle::from_sml("unknown"), BorderStyle::Thin);
+    }
+
+    #[test]
+    fn pattern_fill_interning_preserves_both_colors() {
+        let value = serde_json::json!({"Pattern": {
+            "pattern": "lightUp", "fg": {"Rgb": "#123456"}, "bg": {"Indexed": 5}
+        }});
+        let fill: Fill = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&fill).unwrap(), value);
+        let mut ss = Stylesheet::default();
+        let mut format = ss.cell_format(None);
+        format.fill = fill;
+        let first = ss.intern_cell_format(&format).unwrap();
+        assert_eq!(ss.intern_cell_format(&format).unwrap(), first);
+        format.fill = serde_json::from_value(serde_json::json!({"Pattern": {
+            "pattern": "lightUp", "fg": {"Rgb": "#123456"}, "bg": {"Indexed": 6}
+        }}))
+        .unwrap();
+        assert_ne!(ss.intern_cell_format(&format).unwrap(), first);
+    }
+
+    #[test]
+    fn pattern_masks_cover_the_specified_share_of_each_tile() {
+        // gray shares are the spec's percentages of 64 pixels; hatches are 1-px (light) or
+        // 2-px (dark) lines every 4 px, and grids and trellises count each crossing once
+        let expected = [
+            (PatternType::Gray0625, 64 / 16),
+            (PatternType::Gray125, 64 / 8),
+            (PatternType::LightGray, 64 / 4),
+            (PatternType::MediumGray, 64 / 2),
+            (PatternType::DarkGray, 64 * 3 / 4),
+            (PatternType::LightHorizontal, 16),
+            (PatternType::LightVertical, 16),
+            (PatternType::LightDown, 16),
+            (PatternType::LightUp, 16),
+            (PatternType::LightGrid, 16 + 16 - 4),
+            (PatternType::LightTrellis, 16 + 16 - 8),
+            (PatternType::DarkHorizontal, 32),
+            (PatternType::DarkVertical, 32),
+            (PatternType::DarkDown, 32),
+            (PatternType::DarkUp, 32),
+            (PatternType::DarkGrid, 32 + 32 - 16),
+            (PatternType::DarkTrellis, 32 + 32 - 16),
+        ];
+        assert_eq!(expected.len(), PatternType::ALL.len());
+        for (pattern, pixels) in expected {
+            let set: u32 = pattern.mask().iter().map(|row| row.count_ones()).sum();
+            assert_eq!(set, pixels, "{}", pattern.as_sml());
         }
     }
 }
@@ -109,7 +305,7 @@ pub struct Border {
 }
 
 /// horizontal alignment (`ST_HorizontalAlignment`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum HAlign {
     General,
     Left,
@@ -151,7 +347,7 @@ impl HAlign {
 }
 
 /// vertical alignment (`ST_VerticalAlignment`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum VAlign {
     Top,
     Center,
@@ -184,30 +380,102 @@ impl VAlign {
 }
 
 /// cell text alignment; unset horizontal defaults to `general`, vertical to `bottom`.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub struct Alignment {
     pub h: Option<HAlign>,
     pub v: Option<VAlign>,
     pub wrap_text: bool,
     pub shrink_to_fit: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_rotation: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indent: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relative_indent: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub justify_last_line: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reading_order: Option<u32>,
 }
 
 impl Alignment {
     /// true when the element carries no meaningful alignment.
     pub fn is_empty(&self) -> bool {
-        self.h.is_none() && self.v.is_none() && !self.wrap_text && !self.shrink_to_fit
+        self.h.is_none()
+            && self.v.is_none()
+            && !self.wrap_text
+            && !self.shrink_to_fit
+            && self.text_rotation.is_none()
+            && self.indent.is_none()
+            && self.relative_indent.is_none()
+            && self.justify_last_line.is_none()
+            && self.reading_order.is_none()
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Protection {
+    pub locked: bool,
+    pub hidden: bool,
+}
+
+impl Default for Protection {
+    fn default() -> Self {
+        Self {
+            locked: true,
+            hidden: false,
+        }
+    }
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 /// a cell format record (`CT_Xf` in cellXfs). a `None` pool index means
 /// "inherit / default", not "index 0".
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub struct Xf {
     pub font: Option<u32>,
     pub fill: Option<u32>,
     pub border: Option<u32>,
     pub num_fmt_id: Option<u16>,
     pub alignment: Option<Alignment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protection: Option<Protection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xf_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub quote_prefix: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pivot_button: bool,
+}
+
+impl Xf {
+    /// this entry as releases before format facets read it: no protection,
+    /// parent style or prefix flags, and only the alignment they modeled.
+    pub fn released_reading(&self) -> Self {
+        let alignment = self
+            .alignment
+            .as_ref()
+            .map(|alignment| Alignment {
+                h: alignment.h,
+                v: alignment.v,
+                wrap_text: alignment.wrap_text,
+                shrink_to_fit: alignment.shrink_to_fit,
+                ..Alignment::default()
+            })
+            .filter(|alignment| !alignment.is_empty());
+        Self {
+            font: self.font,
+            fill: self.fill,
+            border: self.border,
+            num_fmt_id: self.num_fmt_id,
+            alignment,
+            ..Self::default()
+        }
+    }
 }
 
 /// the workbook theme colors in clrScheme declaration order
@@ -253,9 +521,229 @@ impl Theme {
     }
 }
 
-/// the parsed style tables plus the resolved theme. a cell's `s` indexes
-/// `cell_xfs`; `num_fmts` holds only custom codes (id >= 164).
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+/// hashable stand-in for a color; float tints become raw bits.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ColorKey<'a> {
+    Rgb(&'a str),
+    Theme { idx: u8, tint: Option<u64> },
+    Indexed(u8),
+    Auto,
+}
+
+impl<'a> ColorKey<'a> {
+    fn new(color: &'a Color) -> Option<Self> {
+        Some(match color {
+            Color::Rgb(s) => ColorKey::Rgb(s),
+            Color::Theme { idx, tint } => ColorKey::Theme {
+                idx: *idx,
+                tint: Some(float_key(*tint)?),
+            },
+            Color::Indexed(i) => ColorKey::Indexed(*i),
+            Color::Auto => ColorKey::Auto,
+        })
+    }
+}
+
+/// hashable stand-in for a font; `None` when a NaN size/color tint blocks keying.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct FontKey<'a> {
+    name: Option<&'a str>,
+    size_pt: Option<u64>,
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    strike: bool,
+    color: Option<ColorKey<'a>>,
+}
+
+impl<'a> FontKey<'a> {
+    fn new(font: &'a Font) -> Option<Self> {
+        Some(FontKey {
+            name: font.name.as_deref(),
+            size_pt: match font.size_pt {
+                None => None,
+                Some(size) => Some(float_key(size)?),
+            },
+            bold: font.bold,
+            italic: font.italic,
+            underline: font.underline,
+            strike: font.strike,
+            color: match &font.color {
+                None => None,
+                Some(color) => Some(ColorKey::new(color)?),
+            },
+        })
+    }
+}
+
+/// hashable stand-in for a fill.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum FillKey<'a> {
+    None,
+    Solid(ColorKey<'a>),
+    Pattern {
+        pattern: PatternType,
+        fg: Option<ColorKey<'a>>,
+        bg: Option<ColorKey<'a>>,
+    },
+}
+
+impl<'a> FillKey<'a> {
+    fn new(fill: &'a Fill) -> Option<Self> {
+        Some(match fill {
+            Fill::None => FillKey::None,
+            Fill::Solid(color) => FillKey::Solid(ColorKey::new(color)?),
+            Fill::Pattern { pattern, fg, bg } => FillKey::Pattern {
+                pattern: *pattern,
+                fg: match fg {
+                    Some(color) => Some(ColorKey::new(color)?),
+                    None => None,
+                },
+                bg: match bg {
+                    Some(color) => Some(ColorKey::new(color)?),
+                    None => None,
+                },
+            },
+        })
+    }
+}
+
+/// hashable stand-in for a border edge.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct EdgeKey<'a> {
+    style: BorderStyle,
+    color: Option<ColorKey<'a>>,
+}
+
+impl<'a> EdgeKey<'a> {
+    fn new(edge: &'a BorderEdge) -> Option<Self> {
+        Some(EdgeKey {
+            style: edge.style,
+            color: match &edge.color {
+                None => None,
+                Some(color) => Some(ColorKey::new(color)?),
+            },
+        })
+    }
+}
+
+/// hashable stand-in for a border.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct BorderKey<'a> {
+    left: Option<EdgeKey<'a>>,
+    right: Option<EdgeKey<'a>>,
+    top: Option<EdgeKey<'a>>,
+    bottom: Option<EdgeKey<'a>>,
+}
+
+impl<'a> BorderKey<'a> {
+    fn new(border: &'a Border) -> Option<Self> {
+        Some(BorderKey {
+            left: match &border.left {
+                None => None,
+                Some(edge) => Some(EdgeKey::new(edge)?),
+            },
+            right: match &border.right {
+                None => None,
+                Some(edge) => Some(EdgeKey::new(edge)?),
+            },
+            top: match &border.top {
+                None => None,
+                Some(edge) => Some(EdgeKey::new(edge)?),
+            },
+            bottom: match &border.bottom {
+                None => None,
+                Some(edge) => Some(EdgeKey::new(edge)?),
+            },
+        })
+    }
+}
+
+/// intern cache: fingerprint -> index, tagged with its synced pool length.
+#[derive(Debug, Default)]
+struct PoolMemo {
+    map: HashMap<u64, u32>,
+    pool_len: usize,
+    #[cfg(test)]
+    rebuilds: u64,
+}
+
+/// the memo is a pure accelerator, so a clone starts cold instead of copying
+/// the map; the first intern on the clone rebuilds only what it needs.
+impl Clone for PoolMemo {
+    fn clone(&self) -> Self {
+        PoolMemo::default()
+    }
+}
+
+impl PoolMemo {
+    fn invalidate(&mut self, pool_len: usize) {
+        self.map.clear();
+        self.pool_len = pool_len;
+        #[cfg(test)]
+        {
+            self.rebuilds += 1;
+        }
+    }
+}
+
+/// intern cache for `num_fmts`; hits re-verify against the live table.
+#[derive(Debug, Default)]
+struct FmtMemo {
+    patterns: HashMap<String, (u16, usize)>,
+    pool_len: usize,
+    #[cfg(test)]
+    rebuilds: u64,
+}
+
+impl Clone for FmtMemo {
+    fn clone(&self) -> Self {
+        FmtMemo::default()
+    }
+}
+
+impl FmtMemo {
+    fn rebuild(&mut self, formats: &[(u16, String)]) {
+        self.patterns.clear();
+        self.pool_len = formats.len();
+        for (slot, (id, code)) in formats.iter().enumerate() {
+            self.patterns.entry(code.clone()).or_insert((*id, slot));
+        }
+        #[cfg(test)]
+        {
+            self.rebuilds += 1;
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NumFmtTableFull;
+
+/// pool lengths captured before a batch of interning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PoolMarks {
+    fonts: usize,
+    fills: usize,
+    borders: usize,
+    cell_xfs: usize,
+    num_fmts: usize,
+}
+
+/// Entries known to save as the plain format (an xf) or as the default entry (a font, fill or
+/// border): source entries whose markup carries nothing the model drops, and entries
+/// [`Stylesheet::plain_xf`] appended, which a save writes from the model. A save keeps any
+/// other source entry's markup, protection, parent style or rotation included.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SavedPlain {
+    pub xf: Option<u32>,
+    pub font: Option<u32>,
+    pub fill: Option<u32>,
+    pub border: Option<u32>,
+}
+
+/// parsed style tables plus theme; private memos accelerate interning and
+/// are invalidated by any pool length change.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Stylesheet {
     pub fonts: Vec<Font>,
     pub fills: Vec<Fill>,
@@ -263,6 +751,47 @@ pub struct Stylesheet {
     pub cell_xfs: Vec<Xf>,
     pub num_fmts: Vec<(u16, String)>,
     pub theme: Theme,
+    /// `#rrggbb` entries; empty strings preserve omitted colors and use the default index.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub indexed_colors: Vec<String>,
+    /// not snapshotted: a restored stylesheet knows none and appends its own.
+    #[serde(skip)]
+    saved_plain: SavedPlain,
+    #[serde(skip)]
+    bound_plain: Option<u32>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    format_sources: BTreeMap<u32, Option<u32>>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    exact_style_indices: bool,
+    /// set at the `cell_xfs` indices read from snapshot records written before
+    /// format facets.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    released_xfs: Vec<bool>,
+    #[serde(skip)]
+    derived_memo: HashMap<(u32, Xf), u32>,
+    #[serde(skip)]
+    font_memo: PoolMemo,
+    #[serde(skip)]
+    fill_memo: PoolMemo,
+    #[serde(skip)]
+    border_memo: PoolMemo,
+    #[serde(skip)]
+    xf_memo: PoolMemo,
+    #[serde(skip)]
+    fmt_memo: FmtMemo,
+}
+
+impl PartialEq for Stylesheet {
+    fn eq(&self, other: &Self) -> bool {
+        self.fonts == other.fonts
+            && self.fills == other.fills
+            && self.borders == other.borders
+            && self.cell_xfs == other.cell_xfs
+            && self.num_fmts == other.num_fmts
+            && self.theme == other.theme
+            && self.indexed_colors == other.indexed_colors
+            && self.format_sources == other.format_sources
+    }
 }
 
 /// resolved number format for a cell: a custom code string or a builtin id.
@@ -293,9 +822,104 @@ pub struct CellFormat {
     pub border: Border,
     pub number_format: NumberFormat,
     pub alignment: Alignment,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protection: Option<Protection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xf_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub quote_prefix: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pivot_button: bool,
 }
 
+/// borrowed view of a resolved cell format; defaults mirror [`CellFormat::default`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedFormat<'a> {
+    pub font: &'a Font,
+    pub fill: &'a Fill,
+    pub border: &'a Border,
+    pub number_format: FormatCode<'a>,
+    pub alignment: &'a Alignment,
+    pub protection: Option<&'a Protection>,
+    pub xf_id: Option<u32>,
+    pub quote_prefix: bool,
+    pub pivot_button: bool,
+}
+
+const DEFAULT_FONT: Font = Font {
+    name: None,
+    size_pt: None,
+    bold: false,
+    italic: false,
+    underline: false,
+    strike: false,
+    color: None,
+};
+
+const DEFAULT_BORDER: Border = Border {
+    left: None,
+    right: None,
+    top: None,
+    bottom: None,
+};
+
+const DEFAULT_ALIGNMENT: Alignment = Alignment {
+    h: None,
+    v: None,
+    wrap_text: false,
+    shrink_to_fit: false,
+    text_rotation: None,
+    indent: None,
+    relative_indent: None,
+    justify_last_line: None,
+    reading_order: None,
+};
+
 impl Stylesheet {
+    #[doc(hidden)]
+    pub fn snapshot_field_counts(&self) -> [usize; 7] {
+        let Self {
+            fonts,
+            fills,
+            borders,
+            cell_xfs,
+            num_fmts,
+            theme: _,
+            indexed_colors,
+            saved_plain: _,
+            bound_plain: _,
+            format_sources: _,
+            exact_style_indices: _,
+            released_xfs: _,
+            derived_memo: _,
+            font_memo: _,
+            fill_memo: _,
+            border_memo: _,
+            xf_memo: _,
+            fmt_memo: _,
+        } = self;
+        [
+            fonts.len(),
+            fills.len(),
+            borders.len(),
+            cell_xfs.len(),
+            num_fmts.len(),
+            1,
+            indexed_colors.len(),
+        ]
+    }
+
+    /// Resolve a color using this workbook's indexed palette and theme.
+    pub fn resolve_color(&self, color: &Color) -> Option<String> {
+        if let Color::Indexed(index @ 0..=63) = color
+            && let Some(rgb) = self.indexed_colors.get(*index as usize)
+            && !rgb.is_empty()
+        {
+            return Some(rgb.clone());
+        }
+        color.resolve(&self.theme)
+    }
+
     /// true when no style data is present, so the serializer skips the part.
     pub fn is_empty(&self) -> bool {
         self.fonts.is_empty()
@@ -304,6 +928,7 @@ impl Stylesheet {
             && self.cell_xfs.is_empty()
             && self.num_fmts.is_empty()
             && self.theme == Theme::default()
+            && self.indexed_colors.is_empty()
     }
 
     /// the `Xf` a cell's `s` index selects.
@@ -349,65 +974,667 @@ impl Stylesheet {
         FormatCode::Builtin(id)
     }
 
+    /// resolved format for a cell style, cloning each facet; see
+    /// [`Stylesheet::resolved_format`] for the borrow-based variant.
     pub fn cell_format(&self, style_index: Option<u32>) -> CellFormat {
-        let Some(style_index) = style_index else {
-            return CellFormat::default();
-        };
-        let number_format = match self.format_code_for(style_index) {
-            FormatCode::Builtin(id) => NumberFormat::Builtin { id },
-            FormatCode::Custom(pattern) => NumberFormat::Custom {
-                pattern: pattern.to_string(),
-            },
-        };
+        let resolved = self.resolved_format(style_index);
         CellFormat {
-            font: self.font_for(style_index).cloned().unwrap_or_default(),
-            fill: self.fill_for(style_index).cloned().unwrap_or_default(),
-            border: self.border_for(style_index).cloned().unwrap_or_default(),
-            number_format,
-            alignment: self.alignment_for(style_index).cloned().unwrap_or_default(),
+            font: resolved.font.clone(),
+            fill: resolved.fill.clone(),
+            border: resolved.border.clone(),
+            number_format: match resolved.number_format {
+                FormatCode::Builtin(id) => NumberFormat::Builtin { id },
+                FormatCode::Custom(pattern) => NumberFormat::Custom {
+                    pattern: pattern.to_string(),
+                },
+            },
+            alignment: resolved.alignment.clone(),
+            protection: resolved.protection.copied(),
+            xf_id: resolved.xf_id,
+            quote_prefix: resolved.quote_prefix,
+            pivot_button: resolved.pivot_button,
         }
     }
 
-    pub fn intern_cell_format(&mut self, format: &CellFormat) -> Option<u32> {
-        if format == &CellFormat::default() {
-            return None;
+    /// borrows the resolved format for a cell style without cloning; unset
+    /// facets resolve to defaults.
+    pub fn resolved_format(&self, style_index: Option<u32>) -> ResolvedFormat<'_> {
+        let xf = style_index.and_then(|index| self.xf(index));
+        ResolvedFormat {
+            font: xf
+                .and_then(|xf| xf.font)
+                .and_then(|index| self.fonts.get(index as usize))
+                .unwrap_or(&DEFAULT_FONT),
+            fill: xf
+                .and_then(|xf| xf.fill)
+                .and_then(|index| self.fills.get(index as usize))
+                .unwrap_or(&Fill::None),
+            border: xf
+                .and_then(|xf| xf.border)
+                .and_then(|index| self.borders.get(index as usize))
+                .unwrap_or(&DEFAULT_BORDER),
+            number_format: style_index
+                .map_or(FormatCode::Builtin(0), |index| self.format_code_for(index)),
+            alignment: xf
+                .and_then(|xf| xf.alignment.as_ref())
+                .unwrap_or(&DEFAULT_ALIGNMENT),
+            protection: xf.and_then(|xf| xf.protection.as_ref()),
+            xf_id: xf.and_then(|xf| xf.xf_id),
+            quote_prefix: xf.is_some_and(|xf| xf.quote_prefix),
+            pivot_button: xf.is_some_and(|xf| xf.pivot_button),
         }
-        let font = intern(&mut self.fonts, &format.font);
-        let fill = intern(&mut self.fills, &format.fill);
-        let border = intern(&mut self.borders, &format.border);
-        let num_fmt_id = match &format.number_format {
-            NumberFormat::Builtin { id } => Some(*id).filter(|id| *id != 0),
-            NumberFormat::Custom { pattern } => Some(self.intern_number_format(pattern)),
+    }
+
+    #[inline]
+    pub fn intern_cell_format(
+        &mut self,
+        format: &CellFormat,
+    ) -> Result<Option<u32>, NumFmtTableFull> {
+        if format == &CellFormat::default() {
+            return Ok(None);
+        }
+        if self.cell_xfs.is_empty() {
+            if self.fonts.is_empty() {
+                self.fonts.push(Font::default());
+            }
+            if self.fills.is_empty() {
+                self.fills.push(Fill::default());
+            }
+            if self.borders.is_empty() {
+                self.borders.push(Border::default());
+            }
+            self.cell_xfs.push(Xf::default());
+        }
+        if self.fonts.is_empty() && format.font != Font::default() {
+            self.fonts.push(Font::default());
+        }
+        if self.fills.is_empty() && format.fill != Fill::default() {
+            self.fills.push(Fill::default());
+        }
+        if self.borders.is_empty() && format.border != Border::default() {
+            self.borders.push(Border::default());
+        }
+        let previous_len = self.cell_xfs.len();
+        let result = match &format.number_format {
+            NumberFormat::Builtin { id } => Ok(Some(self.intern_builtin_cell_format(format, *id))),
+            NumberFormat::Custom { pattern } => self.intern_custom_cell_format(format, pattern),
         };
+        if let Ok(Some(index)) = result
+            && index as usize >= previous_len
+        {
+            self.format_sources.insert(index, None);
+        }
+        result
+    }
+
+    #[doc(hidden)]
+    pub fn format_source(&self, index: u32) -> (Option<u32>, Option<u32>) {
+        match self.format_sources.get(&index) {
+            None => (Some(index), None),
+            Some(None) => (None, None),
+            Some(Some(source)) => (None, Some(*source)),
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn preserve_style_identity(&mut self) {
+        self.exact_style_indices = true;
+    }
+
+    #[doc(hidden)]
+    pub fn has_style_identity(&self) -> bool {
+        self.exact_style_indices
+    }
+
+    #[doc(hidden)]
+    pub fn mark_generated_format(&mut self, index: u32) {
+        self.format_sources.insert(index, None);
+    }
+
+    #[doc(hidden)]
+    pub fn intern_derived_cell_format(
+        &mut self,
+        source: u32,
+        format: &CellFormat,
+    ) -> Result<u32, NumFmtTableFull> {
+        let source = self
+            .format_sources
+            .get(&source)
+            .copied()
+            .flatten()
+            .unwrap_or(source);
+        let previous_len = self.cell_xfs.len();
+        let index = match self.intern_cell_format(format)? {
+            Some(index) => index,
+            None => self.intern_builtin_cell_format(format, 0),
+        };
+        let canonical_index = index;
+        let xf = self.cell_xfs[index as usize].clone();
+        let xf_key = fingerprint(&xf);
+        let key = (source, xf.clone());
+        if let Some(index) = self.derived_memo.get(&key) {
+            return Ok(*index);
+        }
+        let index = if index as usize >= previous_len
+            || self.format_sources.get(&index) == Some(&Some(source))
+        {
+            index
+        } else {
+            let index = self.cell_xfs.len() as u32;
+            self.cell_xfs.push(xf);
+            index
+        };
+        self.format_sources.insert(index, Some(source));
+        self.derived_memo.insert(key, index);
+        seed_memo(
+            &mut self.xf_memo,
+            self.cell_xfs.len(),
+            Some(xf_key),
+            canonical_index,
+        );
+        Ok(index)
+    }
+
+    #[inline(never)]
+    fn intern_builtin_cell_format(&mut self, format: &CellFormat, num_fmt_id: u16) -> u32 {
+        self.ensure_default_xf();
+        if self.cell_xfs.len() < INTERN_CACHE_MIN_POOL {
+            let font = (format.font != Font::default())
+                .then(|| intern_linear(&mut self.fonts, &format.font));
+            let fill = (format.fill != Fill::default())
+                .then(|| intern_linear(&mut self.fills, &format.fill));
+            let border = (format.border != Border::default())
+                .then(|| intern_linear(&mut self.borders, &format.border));
+            let num_fmt_id = Some(num_fmt_id).filter(|id| *id != 0);
+            let alignment = (!format.alignment.is_empty()).then(|| format.alignment.clone());
+            let xf = Xf {
+                font,
+                fill,
+                border,
+                num_fmt_id,
+                alignment,
+                protection: format.protection,
+                xf_id: format.xf_id,
+                quote_prefix: format.quote_prefix,
+                pivot_button: format.pivot_button,
+            };
+            if let Some(index) = xf.font
+                && xf.fill.is_none()
+                && xf.border.is_none()
+                && xf.num_fmt_id.is_none()
+                && xf.alignment.is_none()
+                && self
+                    .cell_xfs
+                    .get(index as usize)
+                    .is_some_and(|candidate| candidate == &xf)
+            {
+                return index;
+            }
+            return intern_linear(&mut self.cell_xfs, &xf);
+        }
+        self.intern_cell_format_large(format, Some(num_fmt_id).filter(|id| *id != 0))
+    }
+
+    #[inline(never)]
+    fn intern_custom_cell_format(
+        &mut self,
+        format: &CellFormat,
+        pattern: &str,
+    ) -> Result<Option<u32>, NumFmtTableFull> {
+        let num_fmt_id = Some(self.intern_number_format(pattern).ok_or(NumFmtTableFull)?);
+        self.ensure_default_xf();
+        if self.cell_xfs.len() < INTERN_CACHE_MIN_POOL {
+            let font = (format.font != Font::default())
+                .then(|| intern_linear(&mut self.fonts, &format.font));
+            let fill = (format.fill != Fill::default())
+                .then(|| intern_linear(&mut self.fills, &format.fill));
+            let border = (format.border != Border::default())
+                .then(|| intern_linear(&mut self.borders, &format.border));
+            let alignment = (!format.alignment.is_empty()).then(|| format.alignment.clone());
+            let xf = Xf {
+                font,
+                fill,
+                border,
+                num_fmt_id,
+                alignment,
+                protection: format.protection,
+                xf_id: format.xf_id,
+                quote_prefix: format.quote_prefix,
+                pivot_button: format.pivot_button,
+            };
+            return Ok(Some(intern_linear(&mut self.cell_xfs, &xf)));
+        }
+        Ok(Some(self.intern_cell_format_large(format, num_fmt_id)))
+    }
+
+    fn ensure_default_xf(&mut self) {
+        if self.fonts.is_empty() {
+            self.fonts.push(Font::default());
+        }
+        if self.fills.is_empty() {
+            self.fills.push(Fill::None);
+        }
+        if self.borders.is_empty() {
+            self.borders.push(Border::default());
+        }
+        if self.cell_xfs.is_empty() {
+            self.cell_xfs.push(Xf::default());
+        }
+    }
+
+    #[inline(never)]
+    fn intern_cell_format_large(&mut self, format: &CellFormat, num_fmt_id: Option<u16>) -> u32 {
+        if self.xf_memo.map.is_empty() {
+            let font_len = self.fonts.len();
+            let fill_len = self.fills.len();
+            let border_len = self.borders.len();
+            let has_font = format.font != Font::default();
+            let has_fill = format.fill != Fill::default();
+            let has_border = format.border != Border::default();
+            let font = has_font.then(|| intern_linear(&mut self.fonts, &format.font));
+            let fill = has_fill.then(|| intern_linear(&mut self.fills, &format.fill));
+            let border = has_border.then(|| intern_linear(&mut self.borders, &format.border));
+            let alignment = (!format.alignment.is_empty()).then(|| format.alignment.clone());
+            let xf = Xf {
+                font,
+                fill,
+                border,
+                num_fmt_id,
+                alignment,
+                protection: format.protection,
+                xf_id: format.xf_id,
+                quote_prefix: format.quote_prefix,
+                pivot_button: format.pivot_button,
+            };
+            let has_new_facet = (self.fonts.len() != font_len && has_font)
+                || (self.fills.len() != fill_len && has_fill)
+                || (self.borders.len() != border_len && has_border);
+            let index = if has_new_facet {
+                self.cell_xfs.len()
+            } else {
+                scan_index(&self.cell_xfs, &xf)
+            };
+            if index == self.cell_xfs.len() {
+                self.cell_xfs.push(xf);
+            } else {
+                if let Some(font) = font {
+                    seed_memo(
+                        &mut self.font_memo,
+                        self.fonts.len(),
+                        FontKey::new(&format.font).map(|key| fingerprint(&key)),
+                        font,
+                    );
+                }
+                if let Some(fill) = fill {
+                    seed_memo(
+                        &mut self.fill_memo,
+                        self.fills.len(),
+                        FillKey::new(&format.fill).map(|key| fingerprint(&key)),
+                        fill,
+                    );
+                }
+                if let Some(border) = border {
+                    seed_memo(
+                        &mut self.border_memo,
+                        self.borders.len(),
+                        BorderKey::new(&format.border).map(|key| fingerprint(&key)),
+                        border,
+                    );
+                }
+                seed_memo(
+                    &mut self.xf_memo,
+                    self.cell_xfs.len(),
+                    Some(fingerprint(&xf)),
+                    index as u32,
+                );
+            }
+            return index as u32;
+        }
+        let font = (format.font != Font::default()).then(|| self.intern_font(&format.font));
+        let fill = (format.fill != Fill::default()).then(|| self.intern_fill(&format.fill));
+        let border =
+            (format.border != Border::default()).then(|| self.intern_border(&format.border));
         let alignment = (!format.alignment.is_empty()).then(|| format.alignment.clone());
         let xf = Xf {
-            font: (format.font != Font::default()).then_some(font),
-            fill: (format.fill != Fill::default()).then_some(fill),
-            border: (format.border != Border::default()).then_some(border),
+            font,
+            fill,
+            border,
             num_fmt_id,
             alignment,
+            protection: format.protection,
+            xf_id: format.xf_id,
+            quote_prefix: format.quote_prefix,
+            pivot_button: format.pivot_button,
         };
-        Some(intern(&mut self.cell_xfs, &xf))
+        self.intern_xf(&xf)
     }
 
-    fn intern_number_format(&mut self, pattern: &str) -> u16 {
-        if let Some((id, _)) = self.num_fmts.iter().find(|(_, code)| code == pattern) {
-            return *id;
+    /// current pool lengths; interning only ever appends, so truncating back to
+    /// a mark restores exactly the pools that were live when it was taken.
+    pub fn pool_marks(&self) -> PoolMarks {
+        PoolMarks {
+            fonts: self.fonts.len(),
+            fills: self.fills.len(),
+            borders: self.borders.len(),
+            cell_xfs: self.cell_xfs.len(),
+            num_fmts: self.num_fmts.len(),
         }
-        let id = (164..=u16::MAX)
-            .find(|id| self.num_fmts.iter().all(|(used, _)| used != id))
-            .unwrap_or(u16::MAX);
-        self.num_fmts.push((id, pattern.to_string()));
-        id
+    }
+
+    /// drop every pool entry interned since `marks` was taken.
+    pub fn restore_pools(&mut self, marks: PoolMarks) {
+        self.fonts.truncate(marks.fonts);
+        self.fills.truncate(marks.fills);
+        self.borders.truncate(marks.borders);
+        self.cell_xfs.truncate(marks.cell_xfs);
+        self.released_xfs.truncate(marks.cell_xfs);
+        self.num_fmts.truncate(marks.num_fmts);
+        self.format_sources
+            .retain(|index, _| (*index as usize) < marks.cell_xfs);
+        self.derived_memo
+            .retain(|_, index| (*index as usize) < marks.cell_xfs);
+    }
+
+    /// records the entries a parser found to save plain.
+    pub fn set_saved_plain(&mut self, saved: SavedPlain) {
+        self.saved_plain = saved;
+    }
+
+    /// the xf the plain format takes without adding one: xf 0 when it reads plain, else an xf
+    /// known to save plain.
+    fn known_plain_xf(&self) -> Option<u32> {
+        if self.reads_plain(0) {
+            return Some(0);
+        }
+        let index = self.saved_plain.xf?;
+        (self.xf(index).is_some() && self.reads_plain(index)).then_some(index)
+    }
+
+    /// the xf the plain format takes, appending one when none is known. A source entry the
+    /// model reads as plain or default may carry markup a save keeps, so the new xf names only
+    /// pool entries known to save as defaults.
+    pub fn plain_xf(&mut self) -> u32 {
+        if let Some(index) = self.known_plain_xf() {
+            return index;
+        }
+        let xf = Xf {
+            font: saved_default(&mut self.fonts, &mut self.saved_plain.font),
+            fill: saved_default(&mut self.fills, &mut self.saved_plain.fill),
+            border: saved_default(&mut self.borders, &mut self.saved_plain.border),
+            num_fmt_id: None,
+            alignment: None,
+            ..Xf::default()
+        };
+        self.cell_xfs.push(xf);
+        let index = (self.cell_xfs.len() - 1) as u32;
+        self.saved_plain.xf = Some(index);
+        index
+    }
+
+    /// binds the plain format to the first xf reading plain, as a shared state resolves it.
+    pub fn bind_plain_xf(&mut self) {
+        self.bound_plain = (0..self.cell_xfs.len() as u32)
+            .find(|&index| self.reads_plain(index))
+            .or_else(|| {
+                (0..self.cell_xfs.len() as u32).find(|&index| self.reads_released_plain(index))
+            });
+    }
+
+    /// whether the plain format is bound to a shared xf.
+    pub fn binds_plain(&self) -> bool {
+        self.bound_plain.is_some()
+    }
+
+    /// Resolves a plain edit, using xf 0 when the binding is unproven.
+    pub fn plain_edit_xf(&mut self) -> u32 {
+        match self.bound_plain {
+            Some(index) if self.known_plain_xf() == Some(index) => index,
+            Some(_) => 0,
+            None => self.plain_xf(),
+        }
+    }
+
+    fn reads_released_plain(&self, index: u32) -> bool {
+        let mut format = self.resolved_format(Some(index));
+        let alignment = Alignment {
+            h: format.alignment.h,
+            v: format.alignment.v,
+            wrap_text: format.alignment.wrap_text,
+            shrink_to_fit: format.alignment.shrink_to_fit,
+            ..Alignment::default()
+        };
+        format.alignment = &alignment;
+        format.protection = None;
+        format.xf_id = None;
+        format.quote_prefix = false;
+        format.pivot_button = false;
+        format == self.resolved_format(None)
+    }
+
+    fn reads_plain(&self, index: u32) -> bool {
+        self.resolved_format(Some(index)) == self.resolved_format(None)
+    }
+
+    /// appends `xf` as read from a snapshot record written before format facets.
+    #[doc(hidden)]
+    pub fn push_released_xf(&mut self, xf: Xf) {
+        self.released_xfs.resize(self.cell_xfs.len(), false);
+        self.released_xfs.push(true);
+        self.cell_xfs.push(xf);
+    }
+
+    /// whether `cell_xfs[index]` was read from a snapshot record written before
+    /// format facets and still holds only what such a record carries.
+    #[doc(hidden)]
+    pub fn is_released_xf(&self, index: usize) -> bool {
+        let entry = self.cell_xfs.get(index);
+        self.released_xfs.get(index) == Some(&true)
+            && entry.is_some_and(|xf| *xf == xf.released_reading())
+    }
+
+    fn intern_font(&mut self, value: &Font) -> u32 {
+        intern(&mut self.fonts, &mut self.font_memo, value, |value| {
+            FontKey::new(value).map(|key| fingerprint(&key))
+        })
+    }
+
+    fn intern_fill(&mut self, value: &Fill) -> u32 {
+        intern(&mut self.fills, &mut self.fill_memo, value, |value| {
+            FillKey::new(value).map(|key| fingerprint(&key))
+        })
+    }
+
+    fn intern_border(&mut self, value: &Border) -> u32 {
+        intern(&mut self.borders, &mut self.border_memo, value, |value| {
+            BorderKey::new(value).map(|key| fingerprint(&key))
+        })
+    }
+
+    fn intern_xf(&mut self, value: &Xf) -> u32 {
+        intern(&mut self.cell_xfs, &mut self.xf_memo, value, |value| {
+            Some(fingerprint(value))
+        })
+    }
+
+    /// true when a cell using `id` resolves to `pattern` via `format_code_for`:
+    /// the id must be custom-range and its first table entry must carry the code.
+    fn id_resolves_to(&self, id: u16, pattern: &str) -> bool {
+        id >= 164
+            && self
+                .num_fmts
+                .iter()
+                .find(|(used, _)| *used == id)
+                .is_some_and(|(_, code)| code == pattern)
+    }
+
+    fn intern_number_format(&mut self, pattern: &str) -> Option<u16> {
+        if self.fmt_memo.pool_len != self.num_fmts.len() {
+            self.fmt_memo.rebuild(&self.num_fmts);
+        }
+        if let Some(&(id, slot)) = self.fmt_memo.patterns.get(pattern) {
+            let slot_matches = self
+                .num_fmts
+                .get(slot)
+                .is_some_and(|(used, code)| *used == id && code == pattern);
+            let resolves = self.id_resolves_to(id, pattern);
+            if slot_matches && resolves {
+                return Some(id);
+            }
+            self.fmt_memo.rebuild(&self.num_fmts);
+            if let Some(&(id, _)) = self.fmt_memo.patterns.get(pattern)
+                && self.id_resolves_to(id, pattern)
+            {
+                return Some(id);
+            }
+        }
+        if let Some((slot, (id, _))) = self
+            .num_fmts
+            .iter()
+            .enumerate()
+            .find(|(_, (id, code))| code == pattern && self.id_resolves_to(*id, pattern))
+        {
+            self.fmt_memo
+                .patterns
+                .insert(pattern.to_string(), (*id, slot));
+            return Some(*id);
+        }
+        let live_ids: std::collections::HashSet<u16> =
+            self.num_fmts.iter().map(|(id, _)| *id).collect();
+        let candidate = (164..=u16::MAX).find(|id| !live_ids.contains(id))?;
+        let slot = self.num_fmts.len();
+        self.num_fmts.push((candidate, pattern.to_string()));
+        self.fmt_memo
+            .patterns
+            .insert(pattern.to_string(), (candidate, slot));
+        self.fmt_memo.pool_len = self.num_fmts.len();
+        Some(candidate)
     }
 }
 
-fn intern<T: PartialEq + Clone>(values: &mut Vec<T>, value: &T) -> u32 {
-    if let Some(index) = values.iter().position(|candidate| candidate == value) {
+const INTERN_CACHE_MIN_POOL: usize = 128;
+
+fn seed_memo(memo: &mut PoolMemo, pool_len: usize, key: Option<u64>, index: u32) {
+    if let Some(key) = key {
+        memo.map.insert(key, index);
+    }
+    memo.pool_len = pool_len;
+}
+
+fn intern<T>(
+    values: &mut Vec<T>,
+    memo: &mut PoolMemo,
+    value: &T,
+    make_key: impl FnOnce(&T) -> Option<u64>,
+) -> u32
+where
+    T: PartialEq + Clone,
+{
+    if values.len() < INTERN_CACHE_MIN_POOL {
+        return intern_linear(values, value);
+    }
+
+    if !memo.map.is_empty() && memo.pool_len != values.len() {
+        memo.invalidate(values.len());
+    }
+
+    if memo.map.is_empty() {
+        let index = scan_index(values, value);
+        if index == values.len() {
+            values.push(value.clone());
+        } else if values.len() >= INTERN_CACHE_MIN_POOL
+            && let Some(key) = make_key(value)
+        {
+            memo.map.insert(key, index as u32);
+            memo.pool_len = values.len();
+        }
         return index as u32;
+    }
+
+    let Some(key) = make_key(value) else {
+        let index = scan_index(values, value);
+        if index == values.len() {
+            values.push(value.clone());
+            memo.pool_len = values.len();
+        }
+        return index as u32;
+    };
+    let cached = memo.map.get(&key).copied();
+    if let Some(index) = cached
+        && values
+            .get(index as usize)
+            .is_some_and(|candidate| candidate == value)
+    {
+        return index;
+    }
+    if let Some(found) = values.iter().position(|candidate| candidate == value) {
+        memo.map.insert(key, found as u32);
+        return found as u32;
+    }
+    let index = values.len() as u32;
+    values.push(value.clone());
+    if cached.is_some() {
+        memo.map.insert(key, index);
+    }
+    memo.pool_len = values.len();
+    index
+}
+
+/// a pool entry known to save as the default, appended when none is. `None` leaves the facet
+/// unset, which saves as entry 0, so only when entry 0 is that entry or the pool is empty.
+fn saved_default<T: Default + PartialEq>(
+    pool: &mut Vec<T>,
+    saved: &mut Option<u32>,
+) -> Option<u32> {
+    if pool.is_empty() {
+        return None;
+    }
+    let default = T::default();
+    match saved.filter(|&index| pool.get(index as usize) == Some(&default)) {
+        Some(0) => None,
+        Some(index) => Some(index),
+        None => {
+            pool.push(default);
+            let index = (pool.len() - 1) as u32;
+            *saved = Some(index);
+            Some(index)
+        }
+    }
+}
+
+#[inline(always)]
+fn intern_linear<T: PartialEq + Clone>(values: &mut Vec<T>, value: &T) -> u32 {
+    for (index, candidate) in values.iter().enumerate() {
+        if candidate == value {
+            return index as u32;
+        }
     }
     values.push(value.clone());
     (values.len() - 1) as u32
+}
+
+fn scan_index<T: PartialEq>(values: &[T], value: &T) -> usize {
+    for (index, candidate) in values.iter().enumerate() {
+        if candidate == value {
+            return index;
+        }
+    }
+    values.len()
+}
+
+fn fingerprint(value: &impl Hash) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// hashable stand-in for an f64; `None` for NaN (which never compares equal)
+/// with -0.0 folded onto 0.0 so bits equality matches float equality.
+fn float_key(v: f64) -> Option<u64> {
+    if v.is_nan() {
+        None
+    } else {
+        Some(if v == 0.0 { 0.0 } else { v }.to_bits())
+    }
 }
 
 /// apply a spreadsheetml tint to a `#rrggbb` in hsl luminance per §18.8.3:
@@ -503,6 +1730,74 @@ mod tests {
     use super::*;
 
     #[test]
+    fn format_facets_intern_and_serialize_in_small_and_large_pools() {
+        let mut value = serde_json::to_value(CellFormat::default()).unwrap();
+        value["protection"] = serde_json::json!({"locked": false, "hidden": true});
+        value["xfId"] = serde_json::json!(3);
+        value["quotePrefix"] = serde_json::json!(true);
+        value["pivotButton"] = serde_json::json!(true);
+        value["alignment"]["text_rotation"] = serde_json::json!(255);
+        value["alignment"]["indent"] = serde_json::json!(4);
+        value["alignment"]["relative_indent"] = serde_json::json!(-2);
+        value["alignment"]["justify_last_line"] = serde_json::json!(true);
+        value["alignment"]["reading_order"] = serde_json::json!(2);
+        let format: CellFormat = serde_json::from_value(value.clone()).unwrap();
+        for size in [0, INTERN_CACHE_MIN_POOL, INTERN_CACHE_MIN_POOL + 1] {
+            let mut styles = Stylesheet::default();
+            for id in 0..size {
+                styles.cell_xfs.push(Xf {
+                    num_fmt_id: Some(id as u16),
+                    ..Default::default()
+                });
+            }
+            for number_format in [
+                NumberFormat::default(),
+                NumberFormat::Custom {
+                    pattern: "0.000".into(),
+                },
+            ] {
+                let mut format = format.clone();
+                format.number_format = number_format;
+                let index = styles.intern_cell_format(&format).unwrap().unwrap();
+                assert_eq!(styles.intern_cell_format(&format).unwrap(), Some(index));
+                let resolved = styles.cell_format(Some(index));
+                let mut expected = value.clone();
+                expected["numberFormat"] = serde_json::to_value(&format.number_format).unwrap();
+                assert_eq!(serde_json::to_value(&resolved).unwrap(), expected);
+                let mut other = expected.clone();
+                other["protection"]["locked"] = serde_json::json!(true);
+                let other = serde_json::from_value(other).unwrap();
+                let other_index = styles.intern_cell_format(&other).unwrap().unwrap();
+                assert_ne!(index, other_index);
+                assert_ne!(
+                    styles.resolved_format(Some(index)),
+                    styles.resolved_format(Some(other_index))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_cell_format_json_stays_unchanged() {
+        let value = serde_json::json!({
+            "font": {"name": null, "size_pt": null, "bold": false, "italic": false,
+                "underline": false, "strike": false, "color": null},
+            "fill": "None", "border": {"left": null, "right": null, "top": null, "bottom": null},
+            "numberFormat": {"kind": "builtin", "id": 0},
+            "alignment": {"h": null, "v": null, "wrap_text": false, "shrink_to_fit": false}
+        });
+        let format: CellFormat = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(format, CellFormat::default());
+        assert_eq!(serde_json::to_value(format).unwrap(), value);
+        let xf = serde_json::json!({"font": null, "fill": null, "border": null,
+            "num_fmt_id": null, "alignment": null});
+        assert_eq!(
+            serde_json::to_value(serde_json::from_value::<Xf>(xf.clone()).unwrap()).unwrap(),
+            xf
+        );
+    }
+
+    #[test]
     fn theme_slot_swaps_first_two_pairs() {
         let t = Theme::default();
         assert_eq!(t.slot(0), Some("#ffffff"));
@@ -551,6 +1846,28 @@ mod tests {
     }
 
     #[test]
+    fn workbook_indexed_palettes_override_only_palette_colors() {
+        let legacy = serde_json::to_string(&Stylesheet::default()).unwrap();
+        assert!(!legacy.contains("indexed_colors"));
+        let mut styles: Stylesheet = serde_json::from_str(&legacy).unwrap();
+        assert!(styles.indexed_colors.is_empty());
+        styles.indexed_colors = vec!["#123456".into(); 66];
+        assert!(!styles.is_empty());
+        assert_eq!(
+            styles.resolve_color(&Color::Indexed(2)).as_deref(),
+            Some("#123456")
+        );
+        assert_eq!(styles.resolve_color(&Color::Indexed(64)), None);
+        assert_eq!(styles.resolve_color(&Color::Indexed(65)), None);
+        assert_eq!(styles.resolve_color(&Color::Auto), None);
+        styles.indexed_colors.clear();
+        assert_eq!(
+            styles.resolve_color(&Color::Indexed(2)).as_deref(),
+            Some("#ff0000")
+        );
+    }
+
+    #[test]
     fn accessors_walk_the_indirection_chain() {
         let mut ss = Stylesheet {
             fonts: vec![
@@ -574,11 +1891,14 @@ mod tests {
                         v: Some(VAlign::Center),
                         wrap_text: true,
                         shrink_to_fit: false,
+                        ..Alignment::default()
                     }),
+                    ..Xf::default()
                 },
             ],
             num_fmts: vec![(164, "0.0\"%\"".into())],
             theme: Theme::default(),
+            ..Stylesheet::default()
         };
 
         assert!(ss.font_for(1).unwrap().bold);
@@ -617,10 +1937,676 @@ mod tests {
             },
             ..CellFormat::default()
         };
-        let first = styles.intern_cell_format(&format).unwrap();
-        let second = styles.intern_cell_format(&format).unwrap();
+        let first = styles.intern_cell_format(&format).unwrap().unwrap();
+        let second = styles.intern_cell_format(&format).unwrap().unwrap();
         assert_eq!(first, second);
         assert_eq!(styles.cell_format(Some(first)), format);
-        assert_eq!(styles.intern_cell_format(&CellFormat::default()), None);
+        assert_eq!(styles.intern_cell_format(&CellFormat::default()), Ok(None));
+    }
+
+    #[test]
+    fn the_first_cell_format_preserves_the_default_xf() {
+        let mut styles = Stylesheet::default();
+        let format = CellFormat {
+            font: Font {
+                bold: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(styles.intern_cell_format(&format).unwrap(), Some(1));
+        assert_eq!(styles.cell_format(Some(0)), CellFormat::default());
+        assert_eq!(styles.cell_format(Some(1)), format);
+    }
+
+    #[test]
+    fn pool_interning_is_stable_and_reuses_indices() {
+        let mut ss = Stylesheet::default();
+        let plain = Font {
+            name: Some("Calibri".into()),
+            size_pt: Some(11.0),
+            ..Font::default()
+        };
+        let bold = Font {
+            bold: true,
+            ..Font::default()
+        };
+        assert_eq!(ss.intern_font(&plain), 0);
+        assert_eq!(ss.intern_font(&bold), 1);
+        assert_eq!(ss.intern_font(&plain), 0);
+        assert_eq!(ss.fonts.len(), 2);
+
+        let yellow = Fill::Solid(Color::Rgb("#ffff00".into()));
+        assert_eq!(ss.intern_fill(&Fill::None), 0);
+        assert_eq!(ss.intern_fill(&yellow), 1);
+        assert_eq!(ss.intern_fill(&yellow), 1);
+
+        let boxed = Border {
+            top: Some(BorderEdge {
+                style: BorderStyle::Thin,
+                color: None,
+            }),
+            ..Border::default()
+        };
+        let dashed = Border {
+            bottom: Some(BorderEdge {
+                style: BorderStyle::Dashed,
+                color: Some(Color::Indexed(3)),
+            }),
+            ..Border::default()
+        };
+        assert_eq!(ss.intern_border(&Border::default()), 0);
+        assert_eq!(ss.intern_border(&boxed), 1);
+        assert_eq!(ss.intern_border(&dashed), 2);
+        assert_eq!(ss.intern_border(&boxed), 1);
+        assert_eq!(ss.borders.len(), 3);
+
+        let xf_a = Xf {
+            font: Some(0),
+            fill: Some(1),
+            ..Xf::default()
+        };
+        let xf_b = Xf {
+            border: Some(2),
+            alignment: Some(Alignment {
+                h: Some(HAlign::Right),
+                ..Alignment::default()
+            }),
+            ..Xf::default()
+        };
+        assert_eq!(ss.intern_xf(&xf_a), 0);
+        assert_eq!(ss.intern_xf(&xf_b), 1);
+        assert_eq!(ss.intern_xf(&xf_a), 0);
+        assert_eq!(ss.cell_xfs.len(), 2);
+    }
+
+    #[test]
+    fn font_key_covers_every_font_equality_field() {
+        let base = Font::default();
+        let variants = [
+            Font {
+                name: Some("Aptos".into()),
+                ..base.clone()
+            },
+            Font {
+                size_pt: Some(11.0),
+                ..base.clone()
+            },
+            Font {
+                bold: true,
+                ..base.clone()
+            },
+            Font {
+                italic: true,
+                ..base.clone()
+            },
+            Font {
+                underline: true,
+                ..base.clone()
+            },
+            Font {
+                strike: true,
+                ..base.clone()
+            },
+            Font {
+                color: Some(Color::Rgb("#123456".into())),
+                ..base.clone()
+            },
+        ];
+        let base_key = FontKey::new(&base).unwrap();
+        for variant in variants {
+            assert_ne!(FontKey::new(&variant).unwrap(), base_key);
+        }
+    }
+
+    #[test]
+    fn adaptive_interning_skips_small_and_unique_pool_keys() {
+        let mut small = Stylesheet::default();
+        let common = Font {
+            name: Some("Aptos".into()),
+            ..Font::default()
+        };
+        for _ in 0..100 {
+            assert_eq!(small.intern_font(&common), 0);
+        }
+        assert!(small.font_memo.map.is_empty());
+
+        let mut unique = Stylesheet::default();
+        let mut formats = Vec::new();
+        for index in 0..(INTERN_CACHE_MIN_POOL + 8) {
+            let format = CellFormat {
+                font: Font {
+                    name: Some(format!("font-{index}")),
+                    ..Font::default()
+                },
+                ..CellFormat::default()
+            };
+            assert_eq!(
+                unique.intern_cell_format(&format).unwrap(),
+                Some(index as u32 + 1)
+            );
+            formats.push(format);
+        }
+        assert!(unique.font_memo.map.is_empty());
+        assert!(unique.xf_memo.map.is_empty());
+
+        let repeated = formats.last().unwrap();
+        let repeated_index = formats.len() as u32;
+        assert_eq!(
+            unique.intern_cell_format(repeated).unwrap(),
+            Some(repeated_index)
+        );
+        assert_eq!(unique.font_memo.map.len(), 1);
+        assert_eq!(unique.xf_memo.map.len(), 1);
+        assert_eq!(
+            unique.intern_cell_format(repeated).unwrap(),
+            Some(repeated_index)
+        );
+        assert_eq!(unique.font_memo.map.len(), 1);
+        assert_eq!(unique.xf_memo.map.len(), 1);
+    }
+
+    #[test]
+    fn number_format_interning_reuses_ids_and_allocates_lowest_free() {
+        let mut ss = Stylesheet::default();
+        assert_eq!(ss.intern_number_format("0.000"), Some(164));
+        assert_eq!(ss.intern_number_format("#,##0"), Some(165));
+        assert_eq!(ss.intern_number_format("0.000"), Some(164));
+        assert_eq!(ss.num_fmts.len(), 2);
+
+        ss.num_fmts.clear();
+        ss.num_fmts.push((165, "#,##0".into()));
+        assert_eq!(ss.intern_number_format("0.000"), Some(164));
+        assert_eq!(ss.intern_number_format("#,##0"), Some(165));
+    }
+
+    #[test]
+    fn in_place_pool_edit_self_heals_on_next_intern() {
+        let mut ss = Stylesheet::default();
+        let a = Font {
+            name: Some("A".into()),
+            ..Font::default()
+        };
+        let b = Font {
+            name: Some("B".into()),
+            ..Font::default()
+        };
+        assert_eq!(ss.intern_font(&a), 0);
+        ss.fonts[0] = b.clone();
+
+        assert_eq!(ss.intern_font(&a), 1);
+        assert_eq!(ss.fonts.len(), 2);
+        assert_eq!(ss.fonts[1], a);
+
+        assert_eq!(ss.intern_font(&b), 0);
+        assert_eq!(ss.fonts.len(), 2);
+    }
+
+    #[test]
+    fn same_length_swap_dedups_via_scan_instead_of_appending() {
+        let mut ss = Stylesheet::default();
+        let a = Font {
+            name: Some("A".into()),
+            ..Font::default()
+        };
+        let b = Font {
+            name: Some("B".into()),
+            ..Font::default()
+        };
+        assert_eq!(ss.intern_font(&a), 0);
+        ss.fonts[0] = b.clone();
+
+        assert_eq!(
+            ss.intern_font(&b),
+            0,
+            "memo miss must rescan before appending"
+        );
+        assert_eq!(ss.fonts.len(), 1);
+
+        assert_eq!(ss.intern_font(&a), 1);
+        assert_eq!(ss.fonts, vec![b, a]);
+    }
+
+    #[test]
+    fn duplicate_and_nan_entries_do_not_force_rebuilds() {
+        let mut ss = Stylesheet::default();
+        let plain = Font {
+            name: Some("A".into()),
+            ..Font::default()
+        };
+        let nan = Font {
+            size_pt: Some(f64::NAN),
+            ..Font::default()
+        };
+        ss.fonts = vec![plain.clone(), plain.clone(), nan.clone()];
+
+        assert_eq!(ss.intern_font(&plain), 0);
+        assert_eq!(ss.font_memo.rebuilds, 0);
+
+        assert_eq!(ss.intern_font(&plain), 0);
+        assert_eq!(ss.font_memo.rebuilds, 0);
+
+        let first = ss.intern_font(&nan);
+        let second = ss.intern_font(&nan);
+        assert_ne!(first, second);
+        assert_eq!(first, 3);
+        assert_eq!(second, 4);
+
+        let stable = ss.font_memo.rebuilds;
+        assert_eq!(ss.intern_font(&Font::default()), 5);
+        assert_eq!(ss.font_memo.rebuilds, stable);
+        assert_eq!(ss.intern_font(&Font::default()), 5);
+        assert_eq!(ss.font_memo.rebuilds, stable);
+        assert_eq!(ss.fonts.len(), 6);
+    }
+
+    #[test]
+    fn shrink_then_intern_does_not_panic_and_returns_fresh_indices() {
+        let mut ss = Stylesheet::default();
+        let a = Font {
+            name: Some("A".into()),
+            ..Font::default()
+        };
+        let b = Font {
+            name: Some("B".into()),
+            ..Font::default()
+        };
+        let nan = Font {
+            size_pt: Some(f64::NAN),
+            ..Font::default()
+        };
+        assert_eq!(ss.intern_font(&a), 0);
+        assert_eq!(ss.intern_font(&b), 1);
+
+        ss.fonts.clear();
+        assert_eq!(ss.intern_font(&nan), 0);
+        assert_eq!(ss.intern_font(&b), 1);
+        assert_eq!(ss.intern_font(&a), 2);
+        assert_eq!(ss.fonts.len(), 3);
+        assert!(ss.fonts[0].size_pt.unwrap().is_nan());
+        assert_eq!(ss.fonts[1], b);
+        assert_eq!(ss.fonts[2], a);
+    }
+
+    #[test]
+    fn same_length_num_fmt_swap_rebuilds_and_avoids_collisions() {
+        let mut ss = Stylesheet::default();
+        assert_eq!(ss.intern_number_format("a"), Some(164));
+        assert_eq!(ss.intern_number_format("b"), Some(165));
+
+        ss.num_fmts = vec![(164, "x".into()), (170, "y".into())];
+        assert_eq!(ss.intern_number_format("a"), Some(165));
+        assert_eq!(
+            ss.num_fmts,
+            [(164, "x".into()), (170, "y".into()), (165, "a".into())]
+        );
+        assert_eq!(ss.intern_number_format("y"), Some(170));
+        assert_eq!(ss.intern_number_format("x"), Some(164));
+
+        ss.num_fmts = vec![(200, "k".into())];
+        assert_eq!(ss.intern_number_format("q"), Some(164));
+        assert_eq!(ss.num_fmts, [(200, "k".into()), (164, "q".into())]);
+
+        ss.num_fmts = vec![(164, "z".into())];
+        assert_eq!(ss.intern_number_format("q"), Some(165));
+        assert_eq!(ss.num_fmts, [(164, "z".into()), (165, "q".into())]);
+
+        ss.num_fmts = vec![(166, "m".into()), (167, "n".into())];
+        assert_eq!(ss.intern_number_format("qq"), Some(164));
+        assert_eq!(
+            ss.num_fmts,
+            [(166, "m".into()), (167, "n".into()), (164, "qq".into())]
+        );
+    }
+
+    #[test]
+    fn number_format_allocation_fails_explicitly_when_ids_are_exhausted() {
+        let mut ss = Stylesheet {
+            num_fmts: (164..=u16::MAX).map(|id| (id, format!("p{id}"))).collect(),
+            ..Stylesheet::default()
+        };
+        assert_eq!(ss.intern_number_format("overflow"), None);
+        assert!(ss.num_fmts.len() == (u16::MAX - 164 + 1) as usize);
+    }
+
+    #[test]
+    fn fmt_memo_miss_scans_live_table_before_allocating() {
+        let mut ss = Stylesheet::default();
+        assert_eq!(ss.intern_number_format("0.0"), Some(164));
+        ss.fmt_memo.patterns.clear();
+        assert_eq!(ss.intern_number_format("0.0"), Some(164));
+        assert_eq!(ss.num_fmts.len(), 1);
+    }
+
+    #[test]
+    fn absent_pattern_allocation_validates_candidate_against_live_table() {
+        let mut ss = Stylesheet {
+            num_fmts: vec![(164, "a".into()), (200, "b".into())],
+            ..Stylesheet::default()
+        };
+        assert_eq!(ss.intern_number_format("m"), Some(165));
+
+        ss.num_fmts[1] = (166, "evil".into());
+        let allocated = ss.intern_number_format("fresh");
+        let live_ids: Vec<u16> = ss.num_fmts.iter().map(|(id, _)| *id).collect();
+        let Some(allocated) = allocated else {
+            panic!("allocation must succeed while ids remain");
+        };
+        assert_ne!(
+            allocated, 166,
+            "allocated id must not collide with a live id"
+        );
+        assert_eq!(allocated, 167);
+        assert!(!live_ids[..3].contains(&allocated));
+        assert_eq!(
+            ss.num_fmts,
+            [
+                (164, "a".into()),
+                (166, "evil".into()),
+                (165, "m".into()),
+                (167, "fresh".into()),
+            ]
+        );
+
+        ss.num_fmts = vec![(164, "General".into())];
+        assert_eq!(ss.intern_number_format("m"), Some(165));
+        ss.num_fmts[1] = (164, "m".into());
+        assert_eq!(ss.intern_number_format("q"), Some(165));
+        assert_eq!(
+            ss.num_fmts,
+            [
+                (164, "General".into()),
+                (164, "m".into()),
+                (165, "q".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn duplicate_num_fmt_ids_intern_to_round_trippable_ids() {
+        let mut ss = Stylesheet {
+            num_fmts: vec![
+                (164, "a".into()),
+                (164, "b".into()),
+                (100, "c".into()),
+                (300, "d".into()),
+                (300, "e".into()),
+            ],
+            ..Stylesheet::default()
+        };
+        let mut intern_and_check = |pattern: &str| {
+            let id = ss.intern_number_format(pattern).unwrap();
+            let idx = ss.cell_xfs.len() as u32;
+            ss.cell_xfs.push(Xf {
+                num_fmt_id: Some(id),
+                ..Xf::default()
+            });
+            assert_eq!(
+                ss.format_code_for(idx),
+                FormatCode::Custom(pattern),
+                "interned id must resolve back to the pattern"
+            );
+            id
+        };
+
+        assert_eq!(intern_and_check("a"), 164);
+        assert_eq!(
+            intern_and_check("b"),
+            165,
+            "duplicate id must not be reused"
+        );
+        assert_eq!(intern_and_check("c"), 166, "sub-spec id must not be reused");
+        assert_eq!(intern_and_check("d"), 300);
+        assert_eq!(
+            intern_and_check("e"),
+            167,
+            "duplicate id must not be reused"
+        );
+
+        assert_eq!(intern_and_check("a"), 164);
+        assert_eq!(intern_and_check("b"), 165);
+        assert_eq!(intern_and_check("c"), 166);
+        assert_eq!(intern_and_check("d"), 300);
+        assert_eq!(intern_and_check("e"), 167);
+        assert_eq!(
+            ss.num_fmts,
+            [
+                (164, "a".into()),
+                (164, "b".into()),
+                (100, "c".into()),
+                (300, "d".into()),
+                (300, "e".into()),
+                (165, "b".into()),
+                (166, "c".into()),
+                (167, "e".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolved_format_borrows_without_defaulting_gaps() {
+        let mut ss = Stylesheet::default();
+        let format = CellFormat {
+            font: Font {
+                bold: true,
+                size_pt: Some(-0.0),
+                ..Font::default()
+            },
+            number_format: NumberFormat::Custom {
+                pattern: "0.0".into(),
+            },
+            ..CellFormat::default()
+        };
+        let index = ss.intern_cell_format(&format).unwrap().unwrap();
+
+        let resolved = ss.resolved_format(Some(index));
+        assert!(resolved.font.bold);
+        assert_eq!(resolved.font.size_pt, Some(-0.0));
+        assert_eq!(
+            resolved.number_format,
+            FormatCode::Custom("0.0"),
+            "custom code borrows the pooled string"
+        );
+        assert_eq!(resolved.fill, &Fill::None);
+        assert!(!resolved.alignment.wrap_text);
+
+        let fallback = ss.resolved_format(Some(99));
+        assert_eq!(fallback.font, &Font::default());
+        assert_eq!(fallback.number_format, FormatCode::Builtin(0));
+        assert_eq!(
+            ss.resolved_format(None).number_format,
+            FormatCode::Builtin(0)
+        );
+        assert_eq!(ss.cell_format(Some(index)), format);
+    }
+
+    #[test]
+    fn implicit_format_uses_defaults_and_interning_omits_unused_facets() {
+        let mut styles = Stylesheet::default();
+        styles.fonts.push(Font {
+            name: Some("DejaVu Sans".into()),
+            size_pt: Some(17.0),
+            ..Font::default()
+        });
+        styles.cell_xfs.push(Xf {
+            font: Some(0),
+            ..Xf::default()
+        });
+        assert_eq!(styles.cell_format(None), CellFormat::default());
+        for count in [1, INTERN_CACHE_MIN_POOL, INTERN_CACHE_MIN_POOL + 1] {
+            styles.cell_xfs.resize(count, Xf::default());
+            let format = CellFormat {
+                alignment: Alignment {
+                    h: Some(HAlign::Left),
+                    ..Alignment::default()
+                },
+                ..CellFormat::default()
+            };
+            let index = styles.intern_cell_format(&format).unwrap();
+            assert_eq!(styles.intern_cell_format(&format).unwrap(), index);
+            assert_eq!(styles.fonts.len(), 1);
+            assert!(styles.fills.iter().all(|fill| *fill == Fill::None));
+            assert!(styles.fills.len() <= 1);
+            assert!(
+                styles
+                    .borders
+                    .iter()
+                    .all(|border| *border == Border::default())
+            );
+            assert!(styles.borders.len() <= 1);
+            let xf = styles.xf(index.unwrap()).unwrap();
+            assert_eq!(xf.font, None);
+            assert_eq!(xf.fill, None);
+            assert_eq!(xf.border, None);
+        }
+    }
+
+    #[test]
+    fn stylesheet_round_trips_and_keeps_indices_after_reload() {
+        let mut styles = Stylesheet::default();
+        let warm = CellFormat {
+            font: Font {
+                italic: true,
+                color: Some(Color::Theme {
+                    idx: 4,
+                    tint: -0.25,
+                }),
+                ..Font::default()
+            },
+            number_format: NumberFormat::Custom {
+                pattern: "$#,##0.00".into(),
+            },
+            alignment: Alignment {
+                v: Some(VAlign::Top),
+                shrink_to_fit: true,
+                ..Alignment::default()
+            },
+            ..CellFormat::default()
+        };
+        let cold = CellFormat {
+            border: Border {
+                left: Some(BorderEdge {
+                    style: BorderStyle::Double,
+                    color: Some(Color::Rgb("#123456".into())),
+                }),
+                ..Border::default()
+            },
+            ..CellFormat::default()
+        };
+        let warm_index = styles.intern_cell_format(&warm).unwrap().unwrap();
+        let cold_index = styles.intern_cell_format(&cold).unwrap().unwrap();
+        assert_ne!(warm_index, cold_index);
+
+        let json = serde_json::to_string(&styles).unwrap();
+        let mut reloaded: Stylesheet = serde_json::from_str(&json).unwrap();
+        assert_eq!(reloaded, styles);
+        assert_eq!(serde_json::to_string(&reloaded).unwrap(), json);
+
+        assert_eq!(
+            reloaded.intern_cell_format(&warm).unwrap().unwrap(),
+            warm_index
+        );
+        assert_eq!(
+            reloaded.intern_cell_format(&cold).unwrap().unwrap(),
+            cold_index
+        );
+        assert_eq!(reloaded.cell_format(Some(warm_index)), warm);
+        assert_eq!(reloaded.num_fmts.len(), 1);
+    }
+
+    #[test]
+    fn a_clone_starts_cold_and_still_dedups_against_the_pools() {
+        let mut styles = Stylesheet::default();
+        let format = CellFormat {
+            font: Font {
+                bold: true,
+                name: Some("Calibri".into()),
+                ..Font::default()
+            },
+            fill: Fill::Solid(Color::Rgb("#ff0000".into())),
+            number_format: NumberFormat::Custom {
+                pattern: "0.00".into(),
+            },
+            ..CellFormat::default()
+        };
+        let index = styles.intern_cell_format(&format).unwrap().unwrap();
+
+        let mut cloned = styles.clone();
+        assert!(cloned.font_memo.map.is_empty(), "clone must start cold");
+        assert!(cloned.fmt_memo.patterns.is_empty(), "clone must start cold");
+        assert_eq!(cloned, styles, "a cold memo must not change equality");
+
+        assert_eq!(cloned.intern_cell_format(&format).unwrap(), Some(index));
+        assert_eq!(cloned.fonts.len(), styles.fonts.len());
+        assert_eq!(cloned.fills.len(), styles.fills.len());
+        assert_eq!(cloned.cell_xfs.len(), styles.cell_xfs.len());
+        assert_eq!(cloned.num_fmts.len(), styles.num_fmts.len());
+        assert_eq!(cloned, styles);
+    }
+
+    #[test]
+    fn restore_pools_drops_everything_interned_since_the_mark() {
+        let mut ss = Stylesheet::default();
+        let first = CellFormat {
+            font: Font {
+                bold: true,
+                ..Font::default()
+            },
+            number_format: NumberFormat::Custom {
+                pattern: "0.0".into(),
+            },
+            ..CellFormat::default()
+        };
+        ss.intern_cell_format(&first).unwrap().unwrap();
+        let marks = ss.pool_marks();
+        let before = ss.clone();
+
+        let second = CellFormat {
+            font: Font {
+                italic: true,
+                name: Some("Arial".into()),
+                ..Font::default()
+            },
+            fill: Fill::Solid(Color::Indexed(7)),
+            number_format: NumberFormat::Custom {
+                pattern: "#,##0".into(),
+            },
+            ..CellFormat::default()
+        };
+        ss.intern_cell_format(&second).unwrap().unwrap();
+        assert_ne!(ss, before);
+
+        ss.restore_pools(marks);
+        assert_eq!(ss, before, "truncating to a mark must restore the pools");
+        assert_eq!(
+            ss.intern_cell_format(&first).unwrap(),
+            before.cell_xfs.len().checked_sub(1).map(|i| i as u32),
+            "the memo must not hand back a truncated index"
+        );
+        assert_eq!(ss, before);
+    }
+
+    #[test]
+    fn nan_sizes_fall_back_without_deduping() {
+        let mut ss = Stylesheet::default();
+        let nan = Font {
+            size_pt: Some(f64::NAN),
+            ..Font::default()
+        };
+        let a = ss.intern_font(&nan);
+        let b = ss.intern_font(&nan);
+        assert_eq!(a, 0);
+        assert_ne!(a, b);
+        assert_eq!(ss.fonts.len(), 2);
+        assert_eq!(ss.intern_font(&Font::default()), 2);
+        let with_nan_tint = Font {
+            color: Some(Color::Theme {
+                idx: 4,
+                tint: f64::NAN,
+            }),
+            ..Font::default()
+        };
+        assert_eq!(ss.intern_font(&with_nan_tint), 3);
+        assert_eq!(ss.intern_font(&nan), 4);
     }
 }

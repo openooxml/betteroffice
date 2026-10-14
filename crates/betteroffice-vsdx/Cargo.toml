@@ -1,0 +1,30 @@
+[package]
+name = "betteroffice-vsdx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = false
+description = "Typed native facade for inspecting VSDX diagrams."
+readme = "README.md"
+keywords = ["vsdx", "visio", "shapesheet"]
+categories = ["parser-implementations"]
+
+[dependencies]
+vsdx-parse.workspace = true
+vsdx-resolve.workspace = true
+vsdx-validate = { workspace = true }
+vsdx-eval.workspace = true
+vsdx-edit.workspace = true
+vsdx-render.workspace = true
+vsdx-raster = { workspace = true, optional = true }
+
+[features]
+default = ["raster"]
+raster = ["dep:vsdx-raster"]
+
+[dev-dependencies]
+ooxml-opc.workspace = true
+vsdx-resolve.workspace = true
+

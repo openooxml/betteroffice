@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>Visual fidelity · BetterOffice Benchmarks</title>
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body class="viewer flex h-screen bg-bg font-sans text-[13px]/[1.5] text-fg">
+    <aside class="flex w-[300px] flex-none flex-col border-r border-line bg-panel" hidden>
+      <header class="border-b border-line px-[18px] pt-[18px] pb-3">
+        <a class="mb-2.5 inline-block text-[12px] text-dim hover:text-fg" href="/">← Benchmarks</a>
+        <h1 class="text-[13px] font-semibold tracking-[0.01em]">Visual fidelity</h1>
+        <p class="mt-1 mb-3 text-[12px] text-dim" id="revision"></p>
+        <input class="w-full rounded border border-line bg-bg px-2 py-1.5 focus:outline-1 focus:outline-accent" id="filter" type="search" placeholder="Filter documents" autocomplete="off" />
+      </header>
+      <ol class="overflow-y-auto pt-1.5 pb-6" id="documents"></ol>
+    </aside>
+
+    <main class="flex min-w-0 flex-1 flex-col" hidden>
+      <header class="flex items-center gap-[18px] border-b border-line px-5 py-3.5">
+        <span class="font-semibold" id="title"></span>
+        <div class="flex overflow-hidden rounded border border-line" id="modes">
+          <button class="cursor-pointer px-2.5 py-1 text-dim aria-pressed:bg-line aria-pressed:text-fg" data-mode="swipe" aria-pressed="true">Swipe</button>
+          <button class="cursor-pointer px-2.5 py-1 text-dim aria-pressed:bg-line aria-pressed:text-fg" data-mode="difference" aria-pressed="false">Difference</button>
+        </div>
+        <div class="flex overflow-hidden rounded border border-line" id="zooms">
+          <button class="cursor-pointer px-2.5 py-1 text-dim aria-pressed:bg-line aria-pressed:text-fg" data-zoom="fit" aria-pressed="true">Fit</button>
+          <button class="cursor-pointer px-2.5 py-1 text-dim aria-pressed:bg-line aria-pressed:text-fg" data-zoom="full" aria-pressed="false">100%</button>
+        </div>
+        <div class="ml-auto flex gap-[18px] text-dim" id="scores"></div>
+      </header>
+      <p class="border-b border-line px-5 py-2 text-warn" id="note" hidden></p>
+      <nav class="flex gap-1 overflow-x-auto border-b border-line px-5 py-2.5" id="pages"></nav>
+      <div class="grid min-h-0 flex-1 place-items-center overflow-auto p-5" id="stage" data-mode="swipe">
+        <div class="sheet" id="sheet">
+          <img id="reference" alt="Microsoft Office reference page" />
+          <div id="ours"><img id="render" alt="BetterOffice rendered page" /></div>
+          <div id="handle"></div>
+        </div>
+      </div>
+      <footer class="border-t border-line px-5 py-2 text-dim" id="hint">
+        Drag the divider to swipe · hold <kbd class="rounded-[3px] border border-line px-1 py-px font-sans text-[11px] text-fg">B</kbd> to blink between the two ·
+        <kbd class="rounded-[3px] border border-line px-1 py-px font-sans text-[11px] text-fg">←</kbd> <kbd class="rounded-[3px] border border-line px-1 py-px font-sans text-[11px] text-fg">→</kbd> to change page
+      </footer>
+    </main>
+
+    <div class="m-auto max-w-[440px] p-6 text-center" id="loader">
+      <h1 class="text-[13px] font-semibold tracking-[0.01em]">Visual fidelity</h1>
+      <p class="my-[1em] text-dim" id="loader-message">Loading the latest measured run…</p>
+      <label class="mt-2 inline-block cursor-pointer rounded border border-line px-3.5 py-[7px] hover:border-accent">Open a report.json<input class="hidden" id="file" type="file" accept="application/json,.json" /></label>
+    </div>
+
+    <script type="module" src="./compare.js"></script>
+  </body>
+</html>

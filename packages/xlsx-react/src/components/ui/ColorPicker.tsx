@@ -1,20 +1,35 @@
-import { useState } from 'react';
+import { useId, useState } from 'react';
 import { ToolbarIcon } from './ToolbarIcon';
 import { toolbarColors } from './ToolbarPrimitives';
 
 export interface ColorPickerProps {
-  mode: 'text' | 'fill';
+  mode: 'text' | 'fill' | 'border';
   value: string;
   label: string;
   onChange?: (value: string) => void;
+  /** Called as the platform picker opens, before any `onChange`. */
+  onOpen?: () => void;
   disabled?: boolean;
+  /** Why the picker is disabled; announced and shown on hover, and it stays focusable. */
+  description?: string;
 }
 
-export function ColorPicker({ mode, value, label, onChange, disabled = false }: ColorPickerProps) {
+export function ColorPicker({
+  mode,
+  value,
+  label,
+  onChange,
+  onOpen,
+  disabled = false,
+  description,
+}: ColorPickerProps) {
   const [hovered, setHovered] = useState(false);
+  const id = useId();
+  const reason = disabled && description ? description : undefined;
+  const title = reason ? `${label}: ${reason}` : label;
   return (
     <label
-      title={label}
+      title={title}
       aria-label={label}
       style={{
         position: 'relative',
@@ -32,7 +47,10 @@ export function ColorPicker({ mode, value, label, onChange, disabled = false }: 
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >
-      <ToolbarIcon name={mode === 'text' ? 'textColor' : 'fillColor'} size={20} />
+      <ToolbarIcon
+        name={mode === 'text' ? 'textColor' : mode === 'fill' ? 'fillColor' : 'borders'}
+        size={20}
+      />
       <span
         aria-hidden="true"
         style={{
@@ -48,9 +66,20 @@ export function ColorPicker({ mode, value, label, onChange, disabled = false }: 
       <input
         type="color"
         value={value}
-        disabled={disabled}
+        disabled={disabled && !reason}
+        aria-disabled={reason ? true : undefined}
+        aria-describedby={reason ? id : undefined}
         aria-label={label}
-        onChange={(event) => onChange?.(event.target.value)}
+        onClick={(event) => {
+          if (disabled) event.preventDefault();
+          else onOpen?.();
+        }}
+        onKeyDown={(event) => {
+          if (disabled && (event.key === 'Enter' || event.key === ' ')) event.preventDefault();
+        }}
+        onChange={(event) => {
+          if (!disabled) onChange?.(event.target.value);
+        }}
         style={{
           position: 'absolute',
           inset: 0,
@@ -59,6 +88,11 @@ export function ColorPicker({ mode, value, label, onChange, disabled = false }: 
           opacity: 0,
         }}
       />
+      {reason && (
+        <span id={id} hidden>
+          {reason}
+        </span>
+      )}
     </label>
   );
 }

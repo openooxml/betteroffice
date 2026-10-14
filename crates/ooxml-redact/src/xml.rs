@@ -1,29 +1,123 @@
 use quick_xml::events::{BytesCData, BytesStart, BytesText, Event};
-use quick_xml::{Reader, Writer, XmlVersion};
+use quick_xml::name::{QName, ResolveResult};
+use quick_xml::{NsReader, Writer, XmlVersion};
 
+use crate::mask::{TextMasker, placeholder};
+use crate::rels::{self, attribute_local, is_unqualified};
+use crate::schema;
+use crate::styles::StyleMap;
+use crate::visio;
 use crate::{Format, RedactError, RedactionReport};
 
+#[cfg(test)]
 pub(crate) fn redact_xml(
     format: Format,
     path: &str,
     bytes: &[u8],
     report: &mut RedactionReport,
 ) -> Result<Vec<u8>, RedactError> {
-    let mut reader = Reader::from_reader(bytes);
+    redact_xml_with_styles(
+        format,
+        path,
+        bytes,
+        report,
+        &StyleMap::default(),
+        &mut TextMasker::new(&Default::default()),
+    )
+}
+
+pub(crate) fn redact_xml_with_styles(
+    format: Format,
+    path: &str,
+    bytes: &[u8],
+    report: &mut RedactionReport,
+    styles: &StyleMap,
+    masker: &mut TextMasker,
+) -> Result<Vec<u8>, RedactError> {
+    let mut reader = NsReader::from_reader(bytes);
     reader.config_mut().trim_text(false);
     let mut writer = Writer::new(Vec::with_capacity(bytes.len()));
     let mut stack = Vec::new();
-    let mut cell_type: Option<String> = None;
+    let mut state = RewriteState {
+        format,
+        path,
+        report,
+        styles,
+        current_style: None,
+        cell_type: None,
+        custom_property: 0,
+        visio_sections: Vec::new(),
+        masker,
+    };
+    let mut skipped_depth = 0;
+    let mut preserve_skipped_end = false;
 
     loop {
         let event = reader
             .read_event()
             .map_err(|error| xml_error(path, error))?;
+        if matches!(event, Event::DocType(_)) {
+            return Err(xml_error(path, "DTD/entity declarations are forbidden"));
+        }
+        if skipped_depth > 0 {
+            match event {
+                Event::Start(_) => skipped_depth += 1,
+                Event::End(end) => {
+                    skipped_depth -= 1;
+                    if skipped_depth == 0 && preserve_skipped_end {
+                        writer
+                            .write_event(Event::End(end))
+                            .map_err(|error| xml_error(path, error))?;
+                        preserve_skipped_end = false;
+                    }
+                }
+                Event::Text(text) => {
+                    let decoded = text.decode().map_err(|error| xml_error(path, error))?;
+                    charge_text(state.report, &decoded);
+                }
+                Event::CData(text) => {
+                    let decoded = text.decode().map_err(|error| xml_error(path, error))?;
+                    charge_text(state.report, &decoded);
+                }
+                Event::Comment(_) | Event::PI(_) => state.report.xml_comments += 1,
+                Event::GeneralRef(_) if preserve_skipped_end => {
+                    state.report.text_nodes += 1;
+                    state.report.characters += 1;
+                }
+                Event::Eof => return Err(xml_error(path, "unterminated redacted element")),
+                _ => {}
+            }
+            continue;
+        }
+        if let Event::Start(start) | Event::Empty(start) = &event
+            && let Some(value) = fixed_metadata_value(path, &reader, start.name())
+        {
+            let local = local_name(start.local_name().as_ref());
+            let rewritten = rewrite_start(&reader, start.to_owned(), &local, &mut state, true)?;
+            writer
+                .write_event(Event::Start(rewritten.borrow()))
+                .map_err(|error| xml_error(path, error))?;
+            writer
+                .write_event(Event::Text(BytesText::new(value)))
+                .map_err(|error| xml_error(path, error))?;
+            if matches!(event, Event::Empty(_)) {
+                writer
+                    .write_event(Event::End(rewritten.to_end()))
+                    .map_err(|error| xml_error(path, error))?;
+            } else {
+                skipped_depth = 1;
+                preserve_skipped_end = true;
+            }
+            continue;
+        }
         match event {
             Event::Start(start) => {
                 let local = local_name(start.name().local_name().as_ref());
-                let rewritten =
-                    rewrite_start(format, path, &reader, start, &local, report, &mut cell_type)?;
+                if schema_node(path, &reader, start.name()) && schema::drop_element(&local) {
+                    skipped_depth = 1;
+                    continue;
+                }
+                let rewritten = rewrite_start(&reader, start, &local, &mut state, false)?;
                 stack.push(local);
                 writer
                     .write_event(Event::Start(rewritten))
@@ -31,15 +125,34 @@ pub(crate) fn redact_xml(
             }
             Event::Empty(start) => {
                 let local = local_name(start.name().local_name().as_ref());
-                let rewritten =
-                    rewrite_start(format, path, &reader, start, &local, report, &mut cell_type)?;
+                if schema_node(path, &reader, start.name()) && schema::drop_element(&local) {
+                    continue;
+                }
+                let empty_style = local == "style" && word_node(&reader, start.name());
+                let rewritten = rewrite_start(&reader, start, &local, &mut state, true)?;
+                if empty_style {
+                    state.current_style = None;
+                }
                 writer
                     .write_event(Event::Empty(rewritten))
                     .map_err(|error| xml_error(path, error))?;
             }
             Event::End(end) => {
                 if stack.last().is_some_and(|name| name == "c") {
-                    cell_type = None;
+                    state.cell_type = None;
+                }
+                if stack.last().is_some_and(|name| name == "style")
+                    && word_node(&reader, end.name())
+                {
+                    state.current_style = None;
+                }
+                if visio::is_visio(format)
+                    && local_name(end.name().local_name().as_ref()) == "Section"
+                    && matches!(reader.resolver().resolve_element(end.name()).0,
+                        ResolveResult::Bound(ns) if ns.as_ref() == visio::NAMESPACE)
+                    && state.visio_sections.pop().is_none()
+                {
+                    return Err(visio::ambiguous(path, "unbalanced Section end"));
                 }
                 stack.pop();
                 writer
@@ -47,12 +160,14 @@ pub(crate) fn redact_xml(
                     .map_err(|error| xml_error(path, error))?;
             }
             Event::Text(text) => {
-                if let Some(kind) = replacement_kind(format, path, &stack, cell_type.as_deref()) {
+                if let Some(kind) =
+                    replacement_kind(format, path, &stack, state.cell_type.as_deref())
+                {
                     let decoded = text.decode().map_err(|error| xml_error(path, error))?;
                     let unescaped = quick_xml::escape::unescape(&decoded)
                         .map_err(|error| xml_error(path, error))?;
-                    let replacement = replace_text(&unescaped, kind, &stack);
-                    charge_text(report, &unescaped);
+                    let replacement = replace_text(&unescaped, kind, state.masker)?;
+                    charge_text(state.report, &unescaped);
                     writer
                         .write_event(Event::Text(BytesText::new(&replacement)))
                         .map_err(|error| xml_error(path, error))?;
@@ -63,10 +178,12 @@ pub(crate) fn redact_xml(
                 }
             }
             Event::CData(text) => {
-                if let Some(kind) = replacement_kind(format, path, &stack, cell_type.as_deref()) {
+                if let Some(kind) =
+                    replacement_kind(format, path, &stack, state.cell_type.as_deref())
+                {
                     let decoded = text.decode().map_err(|error| xml_error(path, error))?;
-                    let replacement = replace_text(&decoded, kind, &stack);
-                    charge_text(report, &decoded);
+                    let replacement = replace_text(&decoded, kind, state.masker)?;
+                    charge_text(state.report, &decoded);
                     writer
                         .write_event(Event::CData(BytesCData::new(&replacement)))
                         .map_err(|error| xml_error(path, error))?;
@@ -77,11 +194,38 @@ pub(crate) fn redact_xml(
                 }
             }
             Event::GeneralRef(reference) => {
-                if replacement_kind(format, path, &stack, cell_type.as_deref()).is_some() {
-                    report.text_nodes += 1;
-                    report.characters += 1;
+                if let Some(kind) =
+                    replacement_kind(format, path, &stack, state.cell_type.as_deref())
+                {
+                    let replacement = if state.masker.is_random()
+                        && matches!(kind, Replacement::Text)
+                    {
+                        let character = reference
+                            .resolve_char_ref()
+                            .map_err(|error| xml_error(path, error))?;
+                        let decoded = reference.decode().map_err(|error| xml_error(path, error))?;
+                        let text = character
+                            .map(|character| character.to_string())
+                            .unwrap_or_else(|| {
+                                match decoded.as_ref() {
+                                    "amp" => "&",
+                                    "lt" => "<",
+                                    "gt" => ">",
+                                    "quot" => "\"",
+                                    "apos" => "'",
+                                    _ => "x",
+                                }
+                                .to_owned()
+                            });
+                        charge_text(state.report, &text);
+                        state.masker.replace(&text)?
+                    } else {
+                        state.report.text_nodes += 1;
+                        state.report.characters += 1;
+                        "x".to_owned()
+                    };
                     writer
-                        .write_event(Event::Text(BytesText::new("x")))
+                        .write_event(Event::Text(BytesText::new(&replacement)))
                         .map_err(|error| xml_error(path, error))?;
                 } else {
                     writer
@@ -90,13 +234,7 @@ pub(crate) fn redact_xml(
                 }
             }
             Event::Comment(_) | Event::PI(_) => {
-                report.xml_comments += 1;
-            }
-            Event::DocType(_) => {
-                return Err(RedactError::Xml {
-                    part: path.to_owned(),
-                    message: "DTD/entity declarations are forbidden".to_owned(),
-                });
+                state.report.xml_comments += 1;
             }
             Event::Eof => break,
             other => writer
@@ -108,15 +246,43 @@ pub(crate) fn redact_xml(
     Ok(writer.into_inner())
 }
 
-fn rewrite_start(
+struct RewriteState<'a> {
     format: Format,
-    path: &str,
-    reader: &Reader<&[u8]>,
+    path: &'a str,
+    report: &'a mut RedactionReport,
+    styles: &'a StyleMap,
+    current_style: Option<String>,
+    cell_type: Option<String>,
+    custom_property: usize,
+    visio_sections: Vec<Option<String>>,
+    masker: &'a mut TextMasker,
+}
+
+fn rewrite_start(
+    reader: &NsReader<&[u8]>,
     start: BytesStart<'_>,
     element: &str,
-    report: &mut RedactionReport,
-    cell_type: &mut Option<String>,
+    state: &mut RewriteState<'_>,
+    is_empty: bool,
 ) -> Result<BytesStart<'static>, RedactError> {
+    let format = state.format;
+    let path = state.path;
+    let schema = schema_node(path, reader, start.name());
+    let word = format == Format::Docx && word_node(reader, start.name());
+    let custom_property = path == "docprops/custom.xml"
+        && element == "property"
+        && matches!(reader.resolver().resolve_element(start.name()).0,
+            ResolveResult::Bound(ns) if matches!(ns.as_ref(),
+                b"http://schemas.openxmlformats.org/officeDocument/2006/custom-properties"
+                | b"http://purl.oclc.org/ooxml/officeDocument/customProperties"));
+    if custom_property {
+        state.custom_property += 1;
+    }
+    let modern_comment = format == Format::Docx
+        && element == "commentExtensible"
+        && matches!(reader.resolver().resolve_element(start.name()).0,
+            ResolveResult::Bound(ns) if ns.as_ref()
+                == b"http://schemas.microsoft.com/office/word/2018/wordml/cex");
     let mut attributes = Vec::new();
     for attribute in start.attributes() {
         let attribute = attribute.map_err(|error| xml_error(path, error))?;
@@ -127,41 +293,254 @@ fn rewrite_start(
             .into_owned();
         attributes.push((key, value));
     }
+    if word && element == "style" {
+        state.current_style = attributes
+            .iter()
+            .find(|(key, _)| attribute_local(key) == "styleId" && word_attribute(reader, key))
+            .map(|(_, value)| value.clone());
+    }
 
-    let external = element.eq_ignore_ascii_case("Relationship")
-        && attributes.iter().any(|(key, value)| {
-            attribute_local(key).eq_ignore_ascii_case("TargetMode")
-                && value.eq_ignore_ascii_case("External")
-        });
+    let visio_active = visio::is_visio(format);
+    let visio_node = matches!(reader.resolver().resolve_element(start.name()).0,
+        ResolveResult::Bound(ns) if ns.as_ref() == visio::NAMESPACE);
+    let drawingml_node = matches!(reader.resolver().resolve_element(start.name()).0,
+        ResolveResult::Bound(ns) if matches!(ns.as_ref(),
+            b"http://schemas.openxmlformats.org/drawingml/2006/main" | b"http://purl.oclc.org/ooxml/drawingml/main"));
+    if visio_active && visio_node && element == "Section" {
+        if !state.visio_sections.is_empty() {
+            return Err(visio::ambiguous(path, "nested Section"));
+        }
+        if !is_empty {
+            state
+                .visio_sections
+                .push(visio::attribute_named(&attributes, "N"));
+        }
+    }
+    let visio_section = state
+        .visio_sections
+        .last()
+        .map(|name| name.as_deref().unwrap_or(""));
+    let visio_cell = visio::attribute_named(&attributes, "N");
+    let visio_cached = visio::attribute_named(&attributes, "V");
+    let (relationship, external) = relationship_mode(path, element, &attributes);
+    let mut wrote_target_mode = false;
     if format == Format::Xlsx && element == "c" {
-        *cell_type = None;
+        state.cell_type = None;
     }
     let mut output = start.into_owned();
     output.clear_attributes();
     for (key, value) in attributes {
         let local = attribute_local(&key);
-        let replacement = if external && local.eq_ignore_ascii_case("Target") {
-            Some("https://example.com".to_owned())
-        } else if !key.starts_with("xmlns")
-            && sensitive_attribute(format, path, element, local, &value)
+        let instance = path.starts_with("customxml/")
+            && schema::is_instance_namespace(
+                &reader.resolver().resolve_attribute(QName(key.as_bytes())).0,
+            );
+        if local.eq_ignore_ascii_case("gfxdata")
+            && matches!(reader.resolver().resolve_attribute(QName(key.as_bytes())).0,
+                ResolveResult::Bound(namespace) if namespace.as_ref() == b"urn:schemas-microsoft-com:office:office")
+            || schema && is_unqualified(&key) && schema::drop_attribute(element, local)
+            || instance
+                && matches!(
+                    local,
+                    "type" | "schemaLocation" | "noNamespaceSchemaLocation"
+                )
         {
-            Some(placeholder(&value))
+            state.report.attributes += 1;
+            continue;
+        }
+        if relationship && is_unqualified(&key) && local.eq_ignore_ascii_case("TargetMode") {
+            if !external {
+                output.push_attribute((key.as_str(), value.as_str()));
+            } else if !wrote_target_mode {
+                output.push_attribute(("TargetMode", "External"));
+            }
+            wrote_target_mode = true;
+            continue;
+        }
+        let style_replacement = if word && word_attribute(reader, &key) {
+            state
+                .styles
+                .replacement(element, local, &value, state.current_style.as_deref())
         } else {
             None
         };
+        let replacement =
+            if external && is_unqualified(&key) && local.eq_ignore_ascii_case("Target") {
+                Some("https://example.com".to_owned())
+            } else if custom_property && key == "name" {
+                Some(format!("RedactedProperty{}", state.custom_property))
+            } else if word && local == "date" && word_attribute(reader, &key)
+                || modern_comment
+                    && local == "dateUtc"
+                    && matches!(reader.resolver().resolve_attribute(QName(key.as_bytes())).0,
+                        ResolveResult::Bound(ns) if ns.as_ref()
+                            == b"http://schemas.microsoft.com/office/word/2018/wordml/cex")
+            {
+                Some("1970-01-01T00:00:00Z".to_owned())
+            } else if style_replacement.is_some() {
+                style_replacement
+            } else if instance && local == "nil" {
+                let value = value.trim_matches([' ', '\t', '\r', '\n']);
+                Some(
+                    if matches!(value, "true" | "false" | "1" | "0") {
+                        value
+                    } else {
+                        "false"
+                    }
+                    .to_owned(),
+                )
+            } else if visio_active
+                && visio::package_plumbing(path)
+                && key != "xmlns"
+                && !key.starts_with("xmlns:")
+            {
+                if visio::preserve_package_attribute(element, &key) {
+                    None
+                } else {
+                    Some(state.masker.replace(&value)?)
+                }
+            } else if visio_active
+                && !visio::package_plumbing(path)
+                && key != "xmlns"
+                && !key.starts_with("xmlns:")
+            {
+                let is_relationship = matches!(
+                    reader.resolver().resolve_attribute(QName(key.as_bytes())).0,
+                    ResolveResult::Bound(ns) if visio::relationship_namespace(ns.as_ref())
+                );
+                let preserve = if visio_node {
+                    visio::preserve_attribute(
+                        element,
+                        &key,
+                        &value,
+                        visio_section,
+                        visio_cell.as_deref(),
+                        is_relationship,
+                    )
+                } else {
+                    visio::preserve_other_attribute(
+                        element,
+                        &key,
+                        &value,
+                        drawingml_node,
+                        is_relationship,
+                    )
+                };
+                if preserve {
+                    None
+                } else {
+                    Some(if visio_node && element == "Cell" && key == "F" {
+                        visio::cached_formula(
+                            visio_cell.as_deref(),
+                            visio_section,
+                            visio_cached.as_deref(),
+                        )
+                    } else {
+                        visio::redacted_value(element, &key, &value, state.masker)?
+                    })
+                }
+            } else if !key.starts_with("xmlns")
+                && !(schema && is_unqualified(&key) && schema::preserve_attribute(element, local))
+                && let Some(kind) = sensitive_attribute_kind(format, path, element, local, &value)
+            {
+                Some(match kind {
+                    Replacement::Text => state.masker.replace(&value)?,
+                    Replacement::Number => numeric_placeholder(&value),
+                    Replacement::Formula => "0".to_owned(),
+                    Replacement::Date => "1970-01-01T00:00:00Z".to_owned(),
+                    Replacement::Boolean => "false".to_owned(),
+                    Replacement::Error => "#N/A".to_owned(),
+                })
+            } else {
+                None
+            };
         if let Some(replacement) = replacement {
             if replacement != value {
-                report.attributes += 1;
+                state.report.attributes += 1;
             }
             output.push_attribute((key.as_str(), replacement.as_str()));
         } else {
             output.push_attribute((key.as_str(), value.as_str()));
         }
         if format == Format::Xlsx && element == "c" && local == "t" {
-            *cell_type = Some(value);
+            state.cell_type = Some(value);
         }
     }
+    if relationship && external && !wrote_target_mode {
+        output.push_attribute(("TargetMode", "External"));
+    }
     Ok(output)
+}
+
+fn schema_node(path: &str, reader: &NsReader<&[u8]>, name: QName<'_>) -> bool {
+    path.starts_with("customxml/")
+        && schema::is_schema_namespace(&reader.resolver().resolve_element(name).0)
+}
+
+fn word_namespace(namespace: ResolveResult<'_>) -> bool {
+    matches!(namespace, ResolveResult::Bound(ns) if matches!(ns.as_ref(),
+        b"http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            | b"http://purl.oclc.org/ooxml/wordprocessingml/main"))
+}
+
+fn word_node(reader: &NsReader<&[u8]>, name: QName<'_>) -> bool {
+    word_namespace(reader.resolver().resolve_element(name).0)
+}
+
+fn word_attribute(reader: &NsReader<&[u8]>, name: &str) -> bool {
+    word_namespace(
+        reader
+            .resolver()
+            .resolve_attribute(QName(name.as_bytes()))
+            .0,
+    )
+}
+
+fn fixed_metadata_value(
+    path: &str,
+    reader: &NsReader<&[u8]>,
+    name: QName<'_>,
+) -> Option<&'static str> {
+    let application = path.eq_ignore_ascii_case("docprops/app.xml");
+    let custom = path.eq_ignore_ascii_case("docprops/custom.xml");
+    if !application && !custom {
+        return None;
+    }
+    let namespace = reader.resolver().resolve_element(name).0;
+    if application
+        && name.local_name().as_ref() == b"AppVersion"
+        && matches!(&namespace,
+            ResolveResult::Bound(ns) if matches!(ns.as_ref(),
+                b"http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"
+                | b"http://purl.oclc.org/ooxml/officeDocument/extendedProperties"))
+    {
+        Some("0.0000")
+    } else if custom
+        && matches!(
+            name.local_name().as_ref(),
+            b"i1"
+                | b"i2"
+                | b"i4"
+                | b"i8"
+                | b"int"
+                | b"ui1"
+                | b"ui2"
+                | b"ui4"
+                | b"ui8"
+                | b"uint"
+                | b"r4"
+                | b"r8"
+                | b"decimal"
+        )
+        && matches!(namespace,
+            ResolveResult::Bound(ns) if matches!(ns.as_ref(),
+                b"http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"
+                | b"http://purl.oclc.org/ooxml/officeDocument/docPropsVTypes"))
+    {
+        Some("0")
+    } else {
+        None
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -182,6 +561,37 @@ fn replacement_kind(
 ) -> Option<Replacement> {
     let element = stack.last().map(String::as_str)?;
     let lower = path.to_ascii_lowercase();
+    if visio::is_visio(format) {
+        return Some(match (lower.as_str(), element) {
+            ("docprops/core.xml", "created" | "modified" | "lastPrinted")
+            | ("docprops/custom.xml", "date" | "filetime") => Replacement::Date,
+            ("docprops/core.xml", "revision")
+            | (
+                "docprops/app.xml",
+                "TotalTime"
+                | "Pages"
+                | "Words"
+                | "Characters"
+                | "CharactersWithSpaces"
+                | "Lines"
+                | "Paragraphs"
+                | "Slides"
+                | "Notes"
+                | "HiddenSlides"
+                | "MMClips"
+                | "DocSecurity",
+            ) => Replacement::Number,
+            ("docprops/custom.xml", "bool")
+            | (
+                "docprops/app.xml",
+                "ScaleCrop" | "LinksUpToDate" | "SharedDoc" | "HyperlinksChanged",
+            ) => Replacement::Boolean,
+            _ => Replacement::Text,
+        });
+    }
+    if lower.ends_with(".rels") {
+        return None;
+    }
     if lower == "docprops/core.xml" {
         return match element {
             "created" | "modified" | "lastPrinted" => Some(Replacement::Date),
@@ -239,92 +649,161 @@ fn replacement_kind(
             }),
         Format::Pptx => matches!(element, "t" | "text").then_some(Replacement::Text),
         Format::Xlsx => match element {
-            "t" | "author" | "oddHeader" | "oddFooter" | "evenHeader" | "evenFooter"
-            | "firstHeader" | "firstFooter" => Some(Replacement::Text),
-            "f" | "formula1" | "formula2" | "definedName" => Some(Replacement::Formula),
+            "t" | "author" | "text" | "rvb" | "oddHeader" | "oddFooter" | "evenHeader"
+            | "evenFooter" | "firstHeader" | "firstFooter" => Some(Replacement::Text),
+            "f"
+            | "formula"
+            | "formula1"
+            | "formula2"
+            | "definedName"
+            | "calculatedColumnFormula" => Some(Replacement::Formula),
             "v" if cell_type == Some("s") => None,
             "v" if matches!(cell_type, Some("str" | "inlineStr")) => Some(Replacement::Text),
             "v" if cell_type == Some("e") => Some(Replacement::Error),
             "v" => Some(Replacement::Number),
             _ => None,
         },
+        Format::Vsdx | Format::Vstx => Some(Replacement::Text),
         Format::Auto => None,
     }
 }
 
-fn replace_text(text: &str, kind: Replacement, _stack: &[String]) -> String {
+fn replace_text(
+    text: &str,
+    kind: Replacement,
+    masker: &mut TextMasker,
+) -> Result<String, RedactError> {
     if text.trim().is_empty() {
-        return text.to_owned();
+        return Ok(text.to_owned());
     }
-    match kind {
-        Replacement::Text => placeholder(text),
+    Ok(match kind {
+        Replacement::Text => return masker.replace(text),
         Replacement::Number => numeric_placeholder(text),
         Replacement::Formula => "0".to_owned(),
         Replacement::Date => "1970-01-01T00:00:00Z".to_owned(),
         Replacement::Boolean => "false".to_owned(),
         Replacement::Error => "#N/A".to_owned(),
-    }
+    })
 }
 
-fn sensitive_attribute(
+fn sensitive_attribute_kind(
     format: Format,
     path: &str,
     element: &str,
     attribute: &str,
     value: &str,
-) -> bool {
+) -> Option<Replacement> {
     let lower = path.to_ascii_lowercase();
+    if lower.ends_with(".rels") {
+        return None;
+    }
     if lower == "docprops/custom.xml" && attribute == "name" {
-        return true;
+        return Some(Replacement::Text);
     }
     if lower.starts_with("customxml/") && !lower.contains("itemprops") {
-        return !matches!(attribute, "id" | "Id");
+        return (!matches!(attribute, "id" | "Id")).then_some(Replacement::Text);
     }
     if matches!(element, "docPr" | "cNvPr") && matches!(attribute, "name" | "descr" | "title") {
-        return true;
+        return Some(Replacement::Text);
     }
     if element == "textpath" && attribute == "string" {
-        return true;
+        return Some(Replacement::Text);
     }
     match format {
-        Format::Docx => {
-            matches!(attribute, "author" | "initials")
-                || element == "fldSimple" && attribute == "instr"
-                || element == "hyperlink" && matches!(attribute, "tooltip" | "tgtFrame")
-                || matches!(element, "alias" | "tag" | "docVar")
-                    && matches!(attribute, "name" | "val")
-                || lower == "word/styles.xml" && element == "name" && attribute == "val"
-        }
+        Format::Docx => (matches!(attribute, "author" | "initials")
+            || element == "fldSimple" && attribute == "instr"
+            || element == "hyperlink" && matches!(attribute, "tooltip" | "tgtFrame")
+            || matches!(element, "alias" | "tag" | "docVar")
+                && matches!(attribute, "name" | "val"))
+        .then_some(Replacement::Text),
         Format::Xlsx => {
-            element == "sheet" && attribute == "name"
+            if element == "definedName" && attribute == "refersTo"
+                || element == "calculatedItem" && attribute == "formula"
+                || element == "tableColumn" && attribute == "totalsRowFormula"
+            {
+                return Some(Replacement::Formula);
+            }
+            if element == "threadedComment" && attribute == "dT" {
+                return Some(Replacement::Date);
+            }
+            if matches!(element, "s" | "n" | "d" | "e" | "b") && attribute == "v" {
+                return Some(match element {
+                    "n" => Replacement::Number,
+                    "d" => Replacement::Date,
+                    "e" => Replacement::Error,
+                    "b" => Replacement::Boolean,
+                    _ => Replacement::Text,
+                });
+            }
+            (element == "sheet" && attribute == "name"
                 || element == "definedName" && attribute == "name" && !value.starts_with("_xlnm.")
                 || matches!(element, "table" | "tableColumn")
                     && matches!(attribute, "name" | "displayName")
+                || element == "table" && attribute == "comment"
+                || element == "tableColumn" && attribute == "totalsRowLabel"
+                || element == "queryTable" && attribute == "name"
+                || element == "queryTableField" && attribute == "name"
                 || element == "dataValidation"
                     && matches!(attribute, "prompt" | "promptTitle" | "error" | "errorTitle")
-                || element == "hyperlink" && matches!(attribute, "display" | "tooltip" | "location")
-                || element == "filter" && attribute == "val"
+                || element == "hyperlink"
+                    && matches!(attribute, "display" | "tooltip" | "location")
+                || matches!(element, "filter" | "customFilter") && attribute == "val"
+                || element == "cfRule" && attribute == "text"
+                || element == "person" && matches!(attribute, "displayName" | "userId")
+                || element == "cacheField" && matches!(attribute, "name" | "caption")
+                || element == "cacheHierarchy" && attribute == "caption"
+                || element == "sharedItems" && attribute == "caption"
+                || element == "pivotTableDefinition"
+                    && matches!(
+                        attribute,
+                        "name"
+                            | "dataCaption"
+                            | "grandTotalCaption"
+                            | "rowHeaderCaption"
+                            | "colHeaderCaption"
+                            | "errorCaption"
+                            | "missingCaption"
+                    )
+                || element == "pivotTable" && attribute == "name"
+                || element == "slicerCacheDefinition" && attribute == "name"
+                || element == "dataField" && attribute == "name"
+                || element == "pivotField" && matches!(attribute, "name" | "subtotalCaption")
+                || element == "pageField" && matches!(attribute, "name" | "cap")
+                || element == "calculatedMember" && matches!(attribute, "name" | "mname" | "mdx")
+                || element == "i" && attribute == "c"
+                || element == "k" && attribute == "n"
+                || element == "connection" && matches!(attribute, "name" | "description")
+                || element == "dbPr" && matches!(attribute, "connection" | "command")
+                || element == "textPr" && attribute == "sourceFile"
+                || element == "webPr" && matches!(attribute, "url" | "post")
+                || element == "parameter" && matches!(attribute, "name" | "prompt")
+                || element == "rangePr" && attribute == "sourceName"
+                || element == "worksheetSource" && attribute == "sheet"
+                || element == "sheetName" && attribute == "val"
+                || element == "ddeLink" && matches!(attribute, "ddeService" | "ddeTopic")
+                || element == "ddeItem" && attribute == "name"
+                || element == "oleLink" && attribute == "progId"
+                || element == "oleItem" && attribute == "name"
+                || element == "oleObject" && matches!(attribute, "progId" | "link")
+                || element == "control" && attribute == "name"
+                || element == "slicer" && matches!(attribute, "name" | "caption")
+                || element == "timeline" && matches!(attribute, "name" | "caption")
+                || element == "scenario" && matches!(attribute, "name" | "comment" | "user")
+                || element == "webPublishItem" && matches!(attribute, "title" | "destinationFile"))
+            .then_some(Replacement::Text)
         }
-        Format::Pptx => {
-            element == "cSld" && attribute == "name"
-                || element == "cmAuthor" && matches!(attribute, "name" | "initials")
-                || element == "tag" && matches!(attribute, "name" | "val")
-                || element == "custShow" && attribute == "name"
-        }
-        Format::Auto => false,
+        Format::Pptx => (element == "cSld" && attribute == "name"
+            || element == "sldLayout" && attribute == "matchingName"
+            || matches!(element, "theme" | "clrScheme" | "fontScheme" | "fmtScheme")
+                && attribute == "name"
+            || element == "tblStyle" && attribute == "styleName"
+            || element == "cmAuthor" && matches!(attribute, "name" | "initials")
+            || element == "author" && matches!(attribute, "name" | "initials" | "userId")
+            || element == "tag" && matches!(attribute, "name" | "val")
+            || element == "custShow" && attribute == "name")
+            .then_some(Replacement::Text),
+        Format::Vsdx | Format::Vstx | Format::Auto => None,
     }
-}
-
-fn placeholder(text: &str) -> String {
-    text.chars()
-        .map(|character| {
-            if character.is_whitespace() {
-                character
-            } else {
-                'x'
-            }
-        })
-        .collect()
 }
 
 fn numeric_placeholder(text: &str) -> String {
@@ -361,8 +840,17 @@ fn local_name(name: &[u8]) -> String {
     String::from_utf8_lossy(name).into_owned()
 }
 
-fn attribute_local(name: &str) -> &str {
-    name.rsplit_once(':').map_or(name, |(_, local)| local)
+/// Whether the element is a relationship in a package relationship part, and
+/// whether it points outside the package.
+fn relationship_mode(path: &str, element: &str, attributes: &[(String, String)]) -> (bool, bool) {
+    if !element.eq_ignore_ascii_case("Relationship") {
+        return (false, false);
+    }
+    let package_part = path.to_ascii_lowercase().ends_with(".rels");
+    (
+        package_part,
+        rels::external_relationship(attributes, package_part),
+    )
 }
 
 fn xml_error(path: &str, error: impl fmt::Display) -> RedactError {

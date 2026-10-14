@@ -4,13 +4,14 @@
  * Resolves OOXML style definitions to final paragraph and run properties.
  * Handles the cascade:
  * 1. Document defaults (docDefaults)
- * 2. Normal style (if no explicit styleId)
- * 3. Style chain (basedOn inheritance resolved during parsing)
+ * 2. Table paragraph context
+ * 3. Normal style or style chain (basedOn inheritance resolved during parsing)
  * 4. Inline properties
  *
  * Based on ECMA-376 style cascade rules.
  */
 
+import { mergeParagraphFormatting } from '../utils/paragraphFormattingMerge';
 import type {
   StyleDefinitions,
   Style,
@@ -18,7 +19,7 @@ import type {
   ParagraphFormatting,
   TextFormatting,
 } from '../types/document';
-import { mergeTextFormatting } from '../utils/textFormattingMerge';
+import { mergeStyleRunFormatting, mergeTextFormatting } from '../utils/textFormattingMerge';
 
 /**
  * Resolved style properties ready for rendering
@@ -126,7 +127,11 @@ export class StyleResolver {
    * @param styleId - The style ID to resolve (e.g., 'Heading1', 'Normal')
    * @returns Resolved paragraph and run formatting
    */
-  resolveParagraphStyle(styleId: string | undefined | null): ResolvedParagraphStyle {
+  resolveParagraphStyle(
+    styleId: string | undefined | null,
+    tableParagraphFormatting?: ParagraphFormatting,
+    tableRunFormatting?: TextFormatting
+  ): ResolvedParagraphStyle {
     const result: ResolvedParagraphStyle = {};
 
     // Start with document defaults
@@ -136,28 +141,19 @@ export class StyleResolver {
     if (this.docDefaults?.rPr) {
       result.runFormatting = { ...this.docDefaults.rPr };
     }
+    result.runFormatting = mergeStyleRunFormatting(result.runFormatting, tableRunFormatting);
 
-    // If no styleId, apply Normal style (if exists)
-    if (!styleId) {
-      if (this.defaultParagraphStyle) {
-        this.mergeStyleIntoResult(result, this.defaultParagraphStyle);
-      }
-      return result;
+    const style = (styleId ? this.stylesById.get(styleId) : undefined) ?? this.defaultParagraphStyle;
+    if (style === BUILTIN_NORMAL_STYLE) {
+      this.mergeStyleIntoResult(result, style);
     }
-
-    // Get the requested style with its basedOn chain already resolved.
-    const style = this.stylesById.get(styleId);
-    if (!style) {
-      // Style not found, fall back to Normal
-      if (this.defaultParagraphStyle) {
-        this.mergeStyleIntoResult(result, this.defaultParagraphStyle);
-      }
-      return result;
+    if (tableParagraphFormatting) {
+      result.paragraphFormatting = mergeParagraphFormatting(
+        result.paragraphFormatting,
+        tableParagraphFormatting
+      );
     }
-
-    // Merge style properties into result
-    this.mergeStyleIntoResult(result, style);
-
+    if (style && style !== BUILTIN_NORMAL_STYLE) this.mergeStyleIntoResult(result, style);
     return result;
   }
 
@@ -311,53 +307,11 @@ export class StyleResolver {
 
   private mergeStyleIntoResult(result: ResolvedParagraphStyle, style: Style): void {
     if (style.pPr) {
-      result.paragraphFormatting = this.mergeParagraphFormatting(
-        result.paragraphFormatting,
-        style.pPr
-      );
+      result.paragraphFormatting = mergeParagraphFormatting(result.paragraphFormatting, style.pPr);
     }
     if (style.rPr) {
-      result.runFormatting = this.mergeTextFormatting(result.runFormatting, style.rPr);
+      result.runFormatting = mergeStyleRunFormatting(result.runFormatting, style.rPr);
     }
-  }
-
-  /**
-   * Merge paragraph formatting (source overrides target)
-   */
-  private mergeParagraphFormatting(
-    target: ParagraphFormatting | undefined,
-    source: ParagraphFormatting | undefined
-  ): ParagraphFormatting | undefined {
-    if (!source) return target;
-    if (!target) return source ? { ...source } : undefined;
-
-    const result = { ...target };
-
-    for (const key of Object.keys(source) as (keyof ParagraphFormatting)[]) {
-      const value = source[key];
-      if (value !== undefined) {
-        if (key === 'runProperties') {
-          result.runProperties = this.mergeTextFormatting(
-            result.runProperties,
-            source.runProperties
-          );
-        } else if (key === 'borders' || key === 'numPr' || key === 'frame') {
-          const baseValue = result[key] as Record<string, unknown> | undefined;
-          const sourceValue = value as Record<string, unknown> | undefined;
-          (result as Record<string, unknown>)[key] = {
-            ...(baseValue || {}),
-            ...(sourceValue || {}),
-          };
-        } else if (key === 'tabs' && Array.isArray(value)) {
-          // Tabs from higher priority source replace lower priority
-          result.tabs = [...value];
-        } else {
-          (result as Record<string, unknown>)[key] = value;
-        }
-      }
-    }
-
-    return result;
   }
 
   private mergeTextFormatting(

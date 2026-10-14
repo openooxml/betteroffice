@@ -138,6 +138,34 @@ async function intact(dir: string, expected: Record<string, string> | undefined)
   return true;
 }
 
+const EXPORT_DECLARATION = /^\s*(?:readonly|export const) ([\w$]+): .*;$/;
+
+/**
+ * Sorts the raw wasm exports a wasm-bindgen declaration file lists (the
+ * `InitOutput` members, or the consts of a `_bg.wasm.d.ts`) by name. wasm-bindgen
+ * lists them in the compiler's symbol order, which shifts between toolchains.
+ */
+export function sortWasmExportDeclarations(text: string): string {
+  const lines = text.split('\n');
+  const open = lines.indexOf('export interface InitOutput {');
+  const start = open >= 0 ? open + 1 : lines.findIndex((line) => EXPORT_DECLARATION.test(line));
+  let end = Math.max(start, 0);
+  while (end < lines.length && EXPORT_DECLARATION.test(lines[end])) end += 1;
+  const rest = lines.slice(end);
+  if (
+    start < 0 ||
+    end === start ||
+    (open >= 0 ? rest[0] !== '}' : rest.some((line) => EXPORT_DECLARATION.test(line)))
+  ) {
+    throw new Error('unexpected wasm-bindgen declaration layout');
+  }
+  const name = (line: string): string => EXPORT_DECLARATION.exec(line)?.[1] ?? '';
+  const sorted = lines
+    .slice(start, end)
+    .sort((a, b) => (name(a) < name(b) ? -1 : name(a) > name(b) ? 1 : 0));
+  return [...lines.slice(0, start), ...sorted, ...rest].join('\n');
+}
+
 /** Builds every module whose inputs or vendored output changed. */
 export async function buildWasmModules(modules: WasmModule[]): Promise<void> {
   requireWasmPack();
@@ -194,8 +222,10 @@ export async function buildWasmModules(modules: WasmModule[]): Promise<void> {
       resolve(dest, `${name}.js`),
       glue.replace(fallback, `throw new Error('${crate} requires an explicit module or URL');`)
     );
-    for (const file of files.filter((file) => file !== `${name}.js`)) {
-      await copyFile(resolve(output, file), resolve(dest, file));
+    await copyFile(resolve(output, `${name}_bg.wasm`), resolve(dest, `${name}_bg.wasm`));
+    for (const file of [`${name}.d.ts`, `${name}_bg.wasm.d.ts`]) {
+      const declarations = await readFile(resolve(output, file), 'utf8');
+      await writeFile(resolve(dest, file), sortWasmExportDeclarations(declarations));
     }
 
     await mkdir(dirname(stamp), { recursive: true });

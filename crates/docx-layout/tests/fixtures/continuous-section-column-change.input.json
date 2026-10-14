@@ -257,6 +257,7 @@
       "bottom": 96,
       "left": 96
     },
-    "pageGap": 20
+    "pageGap": 20,
+    "bodyBreakType": "continuous"
   }
 }

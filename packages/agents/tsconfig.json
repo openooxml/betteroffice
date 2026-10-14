@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "ignoreDeprecations": "6.0",
+    "skipLibCheck": true,
+    "noEmit": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "types": ["bun", "node"],
+    "paths": {
+      "@betteroffice/docx/yrs": ["../docx/src/yrs/index.ts"],
+      "@betteroffice/docx/editor": ["../docx/src/editor/index.ts"],
+      "@betteroffice/docx/layout": ["../docx/src/layout/index.ts"],
+      "@betteroffice/docx/layout/render": ["../docx/src/layout/render/index.ts"],
+      "@betteroffice/xlsx": ["../xlsx/src/index.ts"],
+      "@betteroffice/pptx": ["../pptx/src/index.ts"],
+      "@betteroffice/fonts": ["../fonts/src/index.ts"]
+    }
+  },
+  "include": ["src", "test"]
+}

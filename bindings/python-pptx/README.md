@@ -92,10 +92,120 @@ paragraphs styles each of them as a single undoable edit. `delete_text` is the
 strict one: a range crossing a paragraph boundary raises `RangeError` rather
 than silently swallowing the break.
 
+## Agent proposals
+
+Proposals stage a group of edits without modifying the deck, its saved file, or
+its undo history:
+
+```python
+proposal = deck.propose("editor-agent", [{
+    "type": "setSlideNotes",
+    "slideId": deck.slide_ids[0],
+    "text": "Explain the customer outcome first.",
+}], note="Clarify the opening")
+
+preview = deck.preview_proposal(proposal.id)
+deck.accept_proposal(proposal.id)
+deck.undo()
+```
+
+Register fonts before `render_proposal`, just as for `render_slide`.
+`proposals()` returns `Proposal` values with agent attribution, notes,
+`ProposalChange` values, and current `stale_targets`. `preview_proposal` returns
+a `ProposalPreview` containing fresh changes and the proposed deck snapshot.
+Snapshot and edit dictionaries use the core's camelCase JSON fields; the
+dataclass attributes use Python snake_case.
+
+Edit objects support `replaceText`, `formatText`, `setParagraphAlignment`,
+`setShapeRect`, `setShapeFill`, `setShapeStroke`, `setShapeAdjust`, and
+`setSlideNotes`. They share the [TypeScript edit contract](../../packages/pptx/src/proposals.ts).
+Replacement ranges stay within one paragraph and use UTF-16 offsets; shape
+geometry uses EMU. A group has 1–256 edits, applied in order, with up to 64
+pending groups per session.
+
+`accept_proposal` applies the entire validated group as one local undo step,
+regardless of the current `origin` setting. A changed target raises
+`StaleProposalError` with a `targets` list. Review the fresh preview before
+retrying with `force=True`. Deleted targets and invalid ranges remain errors.
+`reject_proposal(id)` removes the proposal without changing the deck.
+
+Pending proposals are local to the open session and are excluded from saved
+PPTX files and collaboration updates. Accepted edits save and synchronize
+normally, and Undo preserves unrelated peer edits.
+
+## Edit in version-checked batches
+
+`read_content` returns the slides and each story's text with the session
+version it was read at; `apply_edits` applies a batch against that version as
+one transaction and one undo step, or returns a typed refusal with nothing
+changed:
+
+```python
+read = deck.read_content()
+story = read["stories"][0]
+within = {key: story[key] for key in ("slideId", "shapeId", "storyId")}
+result = deck.apply_edits({
+    "expectVersion": read["version"],
+    "steps": [
+        {"op": "replaceText", "target": {"kind": "search", "within": within, "text": "Q3"},
+         "text": "Q4"},
+        {"op": "setSlideNotes", "target": {"slideId": story["slideId"]}, "text": "Updated"},
+    ],
+})
+if not result["ok"]:
+    print(result["failure"]["code"], result["failure"].get("stepIndex"))
+```
+
+Requests and results are the dictionaries of the
+[TypeScript batch contract](../../packages/pptx/src/edits.ts), typed here as
+`PptxEditRequest`, `PptxEditResult` and friends. A story reads as its
+paragraphs joined by `\n`, with story-local UTF-16 offsets. `find_text`
+searches exactly and within paragraphs, and `validate_edits` runs every check
+without changing anything. Steps insert, replace and delete text within one
+paragraph, format and align text, replace speaker notes, and set a top-level
+shape's rectangle, fill or outline. `"history": "none"` keeps a batch out of
+undo history; `"source": "agent"` records provenance only. Policy failures come
+back with `"ok": False` and a `code`; a malformed request raises `ValueError`.
+Only an applied batch sets `is_edited`. Versions and ids belong to the open
+session.
+
+## Export structured content
+
+`export_structured` returns the committed deck as structured content with the
+version it was read at, and `export_markdown` renders that same read as
+Markdown; neither changes anything:
+
+```python
+read = deck.export_structured(include_notes=True)
+for slide in read["content"]["slides"]:
+    for shape in slide["shapes"]:
+        for story in shape["stories"]:
+            for paragraph in story["paragraphs"]:
+                print(slide["index"], paragraph["list"], paragraph["anchor"])
+
+markdown = deck.export_markdown()["content"]["markdown"]
+```
+
+The dictionaries are the
+[TypeScript export contract](../../packages/pptx/src/structuredExport.ts):
+slides in deck order, shapes in shape-tree order, paragraphs with levels,
+resolved list markers, runs, fields and links, tables with merges, and
+placeholders with alternative text for pictures, media, charts, SmartArt and
+embedded objects. Every record carries an anchor and, when it was read from the
+file, its source part, SHA-256 and element path. A `range` anchor is a batch
+text target: pass it as a step's `"target"` at the version it was read at.
+Hidden slides and shapes, notes and comments are keyword options, and every
+omission is listed in `diagnostics`; a slide whose visibility an older collaboration update does not
+record is exported with `hidden: None` and a `visibility-unknown` diagnostic. Unusable limits come back with `"ok": False`.
+`export_pptx_structured(data, options=...)` and `export_pptx_markdown` read
+bytes with the camelCase wire options and return the content alone,
+`render_pptx_markdown(content)` renders content read earlier, and these raise
+`ExportError` (its `failure` is the refusal) for unusable limits and
+`ParseError` for bytes that are not a PPTX.
+
 ## Lay a slide out
 
-**No font is compiled into the wheel**, so laying out a slide that has text
-needs at least one registered face. Before that, `render_slide` raises:
+Register a face before laying out slide text; until then, `render_slide` raises:
 
 ```python
 deck.render_slide(0)
@@ -117,15 +227,24 @@ layout.write("slide-0.json")
 scene = layout.to_dict()
 ```
 
-Once at least one face exists nothing raises again: a family the deck names but
-you never registered resolves to the same family at regular weight, and failing
-that to the first face you registered at all. One registration therefore renders
-every slide — in that one typeface, at its metrics. Register the real faces when
-line breaking has to match what PowerPoint would do.
+Font selection tries the requested family's style, then that family without
+italic, without bold and plain, then the closest style in the first registered
+family. Known requested families supply their measured metrics.
 
 `render_slide` returns the display list — the same drawing contract the browser
-editor paints, as JSON. There is no PPTX rasterizer yet, so this is a scene
-description rather than pixels; feed it to your own canvas or renderer.
+editor paints, as JSON — for hosts that paint it themselves. `render_png`
+rasterizes a slide instead, resolving pictures out of the package so only fonts
+need registering:
+
+```python
+png = deck.render_png(0, scale=2.0)
+print(png.width, png.height, png.skipped_images)   # 2560 1440 0
+png.write("slide-0.png")
+```
+
+`background` picks what fills the pixels the slide leaves uncovered: `"slide"`
+(the default, opaque white under the slide's own background), `"transparent"`,
+or a `#rrggbb` color.
 
 ## Collaboration
 
@@ -133,14 +252,13 @@ description rather than pixels; feed it to your own canvas or renderer.
 order to converge:
 
 ```python
+data = deck.save()
 left = Presentation.open_collaborative(data)
 right = Presentation.open_collaborative(data)
-
 left.add_text_box(0, x=INCH, y=INCH, width=4 * INCH, height=INCH, text="Q3")
-right.apply_update(left.diff(right.state_vector()))   # right now agrees
-
+right.apply_update(left.diff(right.state_vector()))
 joiner = Presentation.open_collaborative(data)
-joiner.apply_update(left.state_as_update())           # catch up from nothing
+joiner.apply_update(left.state_as_update())
 ```
 
 A deck from `open` or `open_path` is *not* a replica: it has no client ID of its
@@ -211,9 +329,7 @@ the flag untouched.
 | Undo/redo | no | yes |
 | Engine | pure Python | Rust, compiled |
 
-`python-pptx` is a far broader library and covers plenty this does not —
-charts, tables, and templating in particular. If you need slides laid out, or
-edits that merge across replicas, that is the gap this fills.
+Use `betteroffice-pptx` for slide layout and collaborative editing.
 
 ## API
 
@@ -230,11 +346,17 @@ edits that merge across replicas, that is the gap this fills.
 | `deck.media()` | embedded images and other binary parts |
 | `insert_slide` / `delete_slide` / `move_slide` | slide order |
 | `add_text_box` / `add_shape` / `remove_shape` | shape lifecycle |
-| `move_shape` / `resize_shape` | shape geometry |
+| `move_shape` / `resize_shape` / `set_shape_rect` | shape geometry |
 | `set_shape_fill` / `set_shape_stroke` / `set_shape_adjust` | shape styling |
 | `insert_text` / `delete_text` / `format_text` | text editing |
 | `insert_paragraph_break` | split a paragraph |
-| `register_font` / `render_slide` | layout |
+| `add_comment` / `reply_to_comment` / `set_comment_status` / `remove_comment` | comment threads |
+| `comments` / `comment_flavor` / `set_comment_flavor` | read comments, pick the comment system |
+| `export_structured` / `export_markdown` | versioned structured content and Markdown |
+| `export_pptx_structured` / `export_pptx_markdown` / `render_pptx_markdown` | export bytes, render content |
+| `propose` / `proposals` / `preview_proposal` / `render_proposal` | stage and preview agent edits |
+| `accept_proposal` / `reject_proposal` | apply or drop a proposal |
+| `register_font` / `render_slide` / `render_png` | layout and PNG export |
 | `diff` / `apply_update` / `state_vector` / `state_as_update` | Yrs replicas |
 | `deck.is_collaborative` / `deck.client_id` | whether this deck may exchange updates, and as whom |
 | `deck.is_edited` | whether the engine has accepted an edit since open |
@@ -243,7 +365,7 @@ edits that merge across replicas, that is the gap this fills.
 
 Errors raise `PptxError` or a more specific subclass: `ParseError`,
 `RangeError`, `RenderError`, `InvalidUpdateError`, `CollaborativeStateError`,
-`NotCollaborativeError`.
+`NotCollaborativeError`, `StaleProposalError`, `ExportError`.
 An unknown slide, shape, or story ID raises `KeyError`; a bad argument — an
 unsupported geometry, an out-of-range client ID, an unknown parse limit —
 raises `ValueError`.
@@ -251,7 +373,7 @@ raises `ValueError`.
 Parser bounds can be tightened for untrusted input:
 
 ```python
-Presentation.open(untrusted, limits={"max_shapes": 5_000, "max_runs": 50_000})
+Presentation.open_path("untrusted.pptx", limits={"max_shapes": 5_000, "max_runs": 50_000})
 ```
 
 An unknown limit name raises `ValueError` rather than being ignored.
@@ -275,8 +397,9 @@ The leak is easy to hit by accident, because the release does not have to be an
 explicit `del`:
 
 ```python
+from concurrent.futures import ThreadPoolExecutor
 with ThreadPoolExecutor() as pool:
-    decks = [f.result() for f in [pool.submit(load, p) for p in paths]]
+    decks = list(pool.map(Presentation.open_path, ["deck.pptx", "quarterly.pptx"]))
 # every deck was opened on a worker and is now dropped on the main thread
 ```
 
@@ -288,15 +411,15 @@ its own; the deck must also become garbage on its owning thread. Open, use, and
 drop each deck inside one thread, and break any cycle holding it before that
 thread finishes.
 
-Engine calls hold the GIL for their duration, unlike `betteroffice-xlsx`. Only
-the file I/O releases it: `open_path`'s read, and the writes in `save_path`,
-`Media.write` and `DisplayList.write`.
+The heavy operations release the GIL while they run — `open`, `open_path`,
+`open_collaborative`, `render_slide`, `render_png`, `save`, `save_path`,
+`register_font`, and `apply_update` — as do the file writes in `Media.write`,
+`DisplayList.write`, and `Png.write`. `render_proposal` holds the GIL.
 
 ## Status
 
-`0.0.x`, and the API may change before `0.1.0`. `save` writes edits back at the
-XML level and copies untouched parts through byte for byte; the container is
-rebuilt, so output is not byte-identical to the source — see *Writing*.
+Pre-1.0: the API may change between minor versions. Saving patches edited XML,
+preserves untouched parts and rebuilds the ZIP container.
 
 Wheels are built for Linux (x86_64, aarch64), macOS (arm64, x86_64), and Windows
 (x86_64) against the stable ABI for CPython 3.9 and up.

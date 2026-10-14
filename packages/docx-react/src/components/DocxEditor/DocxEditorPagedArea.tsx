@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { ReactNode } from 'react';
 import type {
@@ -9,12 +9,18 @@ import type {
 } from '@betteroffice/docx/types/document';
 import type { Comment } from '@betteroffice/docx/types/content';
 import { type BundledFontProvider } from '@betteroffice/docx/layout';
-import { PagedEditor, type PagedEditorRef } from './PagedEditor';
+import { PagedEditor, type PagedEditorProps, type PagedEditorRef } from './PagedEditor';
+import type { PagedEditorCommandBridge } from './hooks/usePagedEditorRefApi';
 import type { RustFontChainsProvider } from './hooks/useRustMeasurement';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import type { DisplayList, DisplayListQueries } from '@betteroffice/docx/layout/render';
 import type { YrsResidentCaretSnapshot } from '@betteroffice/docx/yrs';
-import type { ResidentFrameApplyResult } from './hooks/useDisplayList';
+import type {
+  DisplayPageNavigation,
+  FontRequirementsInWorker,
+  LayoutInWorker,
+  ResidentFrameApplyResult,
+} from './hooks/useDisplayList';
 import type { ResolveDisplayListQueries } from './hooks/displayListQueryEpochGate';
 import {
   InlineHeaderFooterEditor,
@@ -23,7 +29,7 @@ import { UnifiedSidebar } from '../UnifiedSidebar';
 import { CommentMarginMarkers } from '../CommentMarginMarkers';
 import { useCanvasOverlayTarget } from './internals/useCanvasOverlayTarget';
 import { CanvasCellSelectionOverlay } from './overlays/CanvasCellSelectionOverlay';
-import { CanvasHfSelectionOverlay } from './overlays/CanvasHfSelectionOverlay';
+import { CanvasPartSelectionOverlay } from './overlays/CanvasPartSelectionOverlay';
 import { projectPageLocalRect } from './internals/canvasProjection';
 import { Tooltip } from '../ui/Tooltip';
 import { MaterialSymbol } from '../ui/Icons';
@@ -35,6 +41,9 @@ import type { YrsToolbarSelection } from './yrsToolbar';
 import type { TrackedChangesResult } from '@betteroffice/docx/layout/render';
 import type { DocxEditorCollaborationOptions } from './types';
 import type { YrsCoreSession } from './hooks/useYrsCoreSession';
+import { partEditStory, type NoteEdit, type PartEdit, type PartEditTarget } from './partEdit';
+import { useEscapeKey } from '../../hooks/useEscapeKey';
+import type { ViewerSelectionChange } from './internals/viewerSelectionController';
 
 /**
  * Body of the editor: the paged editor host, its sidebar overlay
@@ -49,11 +58,13 @@ import type { YrsCoreSession } from './hooks/useYrsCoreSession';
 export function DocxEditorPagedArea({
   // PagedEditor refs + state
   pagedEditorRef,
+  commandBridgeRef,
   scrollContainerRef,
   editorContentRef,
   // Document + section
   document,
   yrsCore,
+  pluginHostOpen,
   collaboration,
   theme,
   initialSectionProperties,
@@ -63,20 +74,25 @@ export function DocxEditorPagedArea({
   footerContent,
   firstPageHeaderContent,
   firstPageFooterContent,
-  hfEditPosition,
-  setHfEditPosition,
-  hfEditIsFirstPage,
-  hfEditPageIndex,
+  partEditTarget,
+  setPartEditTarget,
   onHeaderFooterDoubleClick,
+  onNoteClick,
   onRemoveHeaderFooter,
   onBodyClick,
   // Editor
   zoom,
   readOnly,
+  holdInput,
+  inputScope,
+  inputQueries,
+  viewerDocumentRead,
+  showHiddenText = false,
   onYrsContentChange,
   onYrsHistoryChange,
   onPagedSelectionChange,
   onYrsSelectionChange,
+  onViewerSelectionChange,
   onRenderedDomContextReady,
   pluginOverlays,
   onHyperlinkClick,
@@ -93,6 +109,8 @@ export function DocxEditorPagedArea({
   anchorPositions,
   onAnchorPositionsChange,
   onYrsTrackedChangesChange,
+  onViewerCommentRangesChange,
+  viewerSidebarActive,
   pluginRenderedDomContext,
   pageWidthPx,
   expandedSidebarItem,
@@ -104,10 +122,14 @@ export function DocxEditorPagedArea({
   // Scroll page indicator
   onTotalPagesChange,
   onLayoutComputed,
+  layoutInWorker,
+  fontRequirementsInWorker,
+  onError,
   applyResidentInput,
   applyResidentDelete,
   displayListQueries,
   resolveDisplayListQueries,
+  pageNavigation,
   canvasDisplayList,
   displayListFrameEpoch,
   residentCaret,
@@ -130,10 +152,12 @@ export function DocxEditorPagedArea({
   rustFontChainsProviderRef,
 }: {
   pagedEditorRef: React.RefObject<PagedEditorRef | null>;
+  commandBridgeRef: React.MutableRefObject<PagedEditorCommandBridge | null>;
   scrollContainerRef: React.RefObject<HTMLDivElement | null>;
   editorContentRef: React.RefObject<HTMLDivElement | null>;
   document: Document | null;
   yrsCore: YrsCoreSession;
+  pluginHostOpen?: boolean;
   collaboration?: DocxEditorCollaborationOptions;
   theme: Theme | null | undefined;
   initialSectionProperties: SectionProperties | undefined;
@@ -142,20 +166,28 @@ export function DocxEditorPagedArea({
   footerContent: HeaderFooter | null | undefined;
   firstPageHeaderContent: HeaderFooter | null | undefined;
   firstPageFooterContent: HeaderFooter | null | undefined;
-  hfEditPosition: 'header' | 'footer' | null;
-  setHfEditPosition: React.Dispatch<React.SetStateAction<'header' | 'footer' | null>>;
-  hfEditIsFirstPage: boolean;
-  hfEditPageIndex: number;
+  partEditTarget: PartEditTarget | null;
+  setPartEditTarget: React.Dispatch<React.SetStateAction<PartEditTarget | null>>;
   onHeaderFooterDoubleClick: (position: 'header' | 'footer', pageNumber?: number) => void;
+  onNoteClick: (note: NoteEdit) => void;
   onRemoveHeaderFooter: () => void;
   onBodyClick: () => void;
   zoom: number;
   readOnly: boolean;
+  holdInput?: boolean;
+  inputScope?: number;
+  inputQueries?: DisplayListQueries | null;
+  /** A viewer session's document reads; see {@link PagedEditorProps.viewerDocumentRead}. */
+  viewerDocumentRead?: PagedEditorProps['viewerDocumentRead'];
+  showHiddenText?: boolean;
   onYrsContentChange: () => void;
-  onYrsHistoryChange: (canUndo: boolean, canRedo: boolean) => void;
-  onPagedSelectionChange: () => void;
+  onYrsHistoryChange?: (canUndo: boolean, canRedo: boolean) => void;
+  onPagedSelectionChange: NonNullable<PagedEditorProps['onSelectionChange']>;
   onYrsSelectionChange: (selection: YrsToolbarSelection) => void;
-  onRenderedDomContextReady: ((ctx: RenderedDomContext) => void) | undefined;
+  onViewerSelectionChange?: (selection: ViewerSelectionChange) => void;
+  onRenderedDomContextReady:
+    | ((ctx: RenderedDomContext, queries: DisplayListQueries) => void)
+    | undefined;
   pluginOverlays: ReactNode;
   onHyperlinkClick: (data: HyperlinkPopupData) => void;
   hyperlinkPopupData: HyperlinkPopupData | null;
@@ -180,6 +212,8 @@ export function DocxEditorPagedArea({
   anchorPositions: Map<string, number>;
   onAnchorPositionsChange: (positions: Map<string, number>) => void;
   onYrsTrackedChangesChange: (result: TrackedChangesResult) => void;
+  onViewerCommentRangesChange?: PagedEditorProps['onViewerCommentRangesChange'];
+  viewerSidebarActive?: boolean;
   pluginRenderedDomContext: RenderedDomContext | null | undefined;
   pageWidthPx: number;
   expandedSidebarItem: string | null;
@@ -190,7 +224,11 @@ export function DocxEditorPagedArea({
   setShowCommentsSidebar: React.Dispatch<React.SetStateAction<boolean>>;
   onTotalPagesChange: (totalPages: number) => void;
   /** Receives each computed layout. */
+  onError?: (error: Error, session?: unknown) => void;
   onLayoutComputed?: (layout: Layout | null) => void;
+  /** Hands layout passes to the resident worker. */
+  layoutInWorker?: LayoutInWorker;
+  fontRequirementsInWorker?: FontRequirementsInWorker;
   applyResidentInput?: (text: string) => Promise<ResidentFrameApplyResult | null>;
   applyResidentDelete?: (
     direction: 'backward' | 'forward'
@@ -198,6 +236,7 @@ export function DocxEditorPagedArea({
   /** Display-list query source while the canvas renderer paints (null on the DOM-painter path). */
   displayListQueries?: DisplayListQueries | null;
   resolveDisplayListQueries?: ResolveDisplayListQueries;
+  pageNavigation?: DisplayPageNavigation | null;
   canvasDisplayList?: DisplayList | null;
   displayListFrameEpoch?: number | null;
   residentCaret?: YrsResidentCaretSnapshot | null;
@@ -230,14 +269,20 @@ export function DocxEditorPagedArea({
 }) {
   const sidebarCommentIds = useMemo(() => comments.map((comment) => comment.id), [comments]);
 
+  // The open part, split into the two shapes its consumers address it by.
+  const bandEdit =
+    partEditTarget?.kind === 'header' || partEditTarget?.kind === 'footer'
+      ? partEditTarget
+      : null;
+
   // Resolve the active HF block for the inline editor — first-page variant
   // wins when `titlePg` is set and the user double-clicked page 1.
-  const activeHf = hfEditPosition
-    ? hfEditIsFirstPage
-      ? hfEditPosition === 'header'
+  const activeHf = bandEdit
+    ? bandEdit.isFirstPage
+      ? bandEdit.kind === 'header'
         ? firstPageHeaderContent
         : firstPageFooterContent
-      : hfEditPosition === 'header'
+      : bandEdit.kind === 'header'
         ? headerContent
         : footerContent
     : null;
@@ -248,14 +293,14 @@ export function DocxEditorPagedArea({
   // the user is editing page 1 of a titlePg section. This keys the region-aware
   // range-rect query so a first-page vs default variant on another page never
   // contributes stray rects.
-  const activeHfRid = hfEditPosition
+  const activeHfRid = bandEdit
     ? (() => {
         const refs =
-          hfEditPosition === 'header'
+          bandEdit.kind === 'header'
             ? finalSectionProperties?.headerReferences
             : finalSectionProperties?.footerReferences;
         if (!refs) return null;
-        const wantType = hfEditIsFirstPage ? 'first' : 'default';
+        const wantType = bandEdit.isFirstPage ? 'first' : 'default';
         const entry =
           refs.find((r) => r.type === wantType) ??
           refs.find((r) => r.type === 'default') ??
@@ -265,24 +310,43 @@ export function DocxEditorPagedArea({
       })()
     : null;
 
-  // Live HF Yrs selection, captured on every HF selection change.
-  const [hfSelection, setHfSelection] = useState<{ from: number; to: number } | null>(null);
-  useEffect(() => {
-    setHfSelection(null);
-  }, [hfEditPosition, activeHfRid]);
+  const noteEdit =
+    partEditTarget?.kind === 'footnote' || partEditTarget?.kind === 'endnote'
+      ? partEditTarget
+      : null;
+  // Memoised: consumers key effects on this identity, and a band that rebuilt
+  // it per render would re-run them for nothing.
+  const partEdit = useMemo<PartEdit | null>(
+    () => (bandEdit ? { kind: bandEdit.kind, rId: activeHfRid } : noteEdit),
+    [bandEdit, activeHfRid, noteEdit]
+  );
+
+  // Live Yrs selection inside that part, captured on every selection change.
+  const [partSelection, setPartSelection] = useState<{ from: number; to: number } | null>(null);
+  const partStory = partEditStory(partEdit, yrsCore.session);
+  // Cleared during render, not in an effect: the click that opens a note
+  // publishes its caret from a child effect, which React flushes first, and an
+  // effect here would then wipe the very selection that click asked for.
+  const [selectionStory, setSelectionStory] = useState(partStory);
+  if (selectionStory !== partStory) {
+    setSelectionStory(partStory);
+    setPartSelection(null);
+  }
+
+  useEscapeKey(partEditTarget != null, () => setPartEditTarget(null));
 
   // UI chrome is independent of renderer readiness and always portals onto
   // the positioned editor-content host.
   const canvasOverlayTarget = useCanvasOverlayTarget(true, editorContentRef);
 
-  const activeHfPage = displayListQueries
-    ? (displayListQueries.displayList.pages[hfEditPageIndex] ??
-      displayListQueries.displayList.pages.find((page) => {
-        const band = hfEditPosition ? page[hfEditPosition] : null;
-        return band?.rId === activeHfRid;
-      }))
-    : null;
-  const activeHfBand = activeHfPage && hfEditPosition ? activeHfPage[hfEditPosition] : null;
+  const activeHfPage =
+    displayListQueries && bandEdit
+      ? (displayListQueries.displayList.pages[bandEdit.pageIndex] ??
+        displayListQueries.displayList.pages.find(
+          (page) => page[bandEdit.kind]?.rId === activeHfRid
+        ))
+      : null;
+  const activeHfBand = activeHfPage && bandEdit ? activeHfPage[bandEdit.kind] : null;
   const hfChromeRect =
     activeHfPage &&
     activeHfBand &&
@@ -328,7 +392,11 @@ export function DocxEditorPagedArea({
   );
 
   const floatingCommentButton =
-    floatingCommentBtn != null && !isAddingComment && !readOnly ? (
+    partEditTarget == null &&
+    floatingCommentBtn != null &&
+    !isAddingComment &&
+    !readOnly &&
+    yrsCore.replicaReady ? (
       <Tooltip content="Add comment" side="bottom" delayMs={300}>
         <button
           type="button"
@@ -340,7 +408,7 @@ export function DocxEditorPagedArea({
               setCommentSelectionRange(selection);
               pagedEditorRef.current?.setSelection(selection.to);
             }
-            setAddCommentYPosition(floatingCommentBtn.top);
+            setAddCommentYPosition(floatingCommentBtn.top / zoom);
             setShowCommentsSidebar(true);
             setIsAddingComment(true);
             setFloatingCommentBtn(null);
@@ -384,8 +452,10 @@ export function DocxEditorPagedArea({
     <>
       <PagedEditor
         ref={pagedEditorRef}
+        commandBridgeRef={commandBridgeRef}
         document={document}
         yrsCore={yrsCore}
+        pluginHostOpen={pluginHostOpen}
         collaboration={collaboration}
         styles={document?.package.styles}
         theme={document?.package.theme || theme}
@@ -396,8 +466,8 @@ export function DocxEditorPagedArea({
         firstPageHeaderContent={firstPageHeaderContent}
         firstPageFooterContent={firstPageFooterContent}
         onHeaderFooterDoubleClick={onHeaderFooterDoubleClick}
-        hfEditMode={hfEditPosition}
-        hfEditRId={activeHfRid}
+        onNoteClick={onNoteClick}
+        partEdit={partEdit}
         onBodyClick={onBodyClick}
         isSuggesting={isSuggesting}
         author={author}
@@ -405,12 +475,18 @@ export function DocxEditorPagedArea({
         rustFontChainsProviderRef={rustFontChainsProviderRef}
         zoom={zoom}
         readOnly={readOnly}
+        holdInput={holdInput}
+        inputScope={inputScope}
+        inputQueries={inputQueries}
+        viewerDocumentRead={viewerDocumentRead}
+        showHiddenText={showHiddenText}
         onYrsContentChange={onYrsContentChange}
         onYrsHistoryChange={onYrsHistoryChange}
         onSelectionChange={onPagedSelectionChange}
         onYrsSelectionChange={onYrsSelectionChange}
-        onYrsHfSelectionChange={(rId, selection) => {
-          if (rId === activeHfRid) setHfSelection(selection);
+        onViewerSelectionChange={onViewerSelectionChange}
+        onYrsPartSelectionChange={(part, selection) => {
+          if (partEditStory(part, yrsCore.session) === partStory) setPartSelection(selection);
         }}
         onRenderedDomContextReady={onRenderedDomContextReady}
         pluginOverlays={pluginOverlays}
@@ -426,12 +502,18 @@ export function DocxEditorPagedArea({
         onAnchorPositionsChange={onAnchorPositionsChange}
         sidebarCommentIds={sidebarCommentIds}
         onYrsTrackedChangesChange={onYrsTrackedChangesChange}
+        onViewerCommentRangesChange={onViewerCommentRangesChange}
+        viewerSidebarActive={viewerSidebarActive}
         onTotalPagesChange={onTotalPagesChange}
         onLayoutComputed={onLayoutComputed}
+        layoutInWorker={layoutInWorker}
+        fontRequirementsInWorker={fontRequirementsInWorker}
+        onError={onError}
         applyResidentInput={applyResidentInput}
         applyResidentDelete={applyResidentDelete}
         displayListQueries={displayListQueries}
         resolveDisplayListQueries={resolveDisplayListQueries}
+        pageNavigation={pageNavigation}
         canvasDisplayList={canvasDisplayList}
         displayListFrameEpoch={displayListFrameEpoch}
         residentCaret={residentCaret}
@@ -489,46 +571,47 @@ export function DocxEditorPagedArea({
 
       {!canvasOverlayTarget && floatingCommentButton}
 
+      {/* Cell selection is indexed by band, so only an open band offers it. */}
       {canvasOverlayTarget &&
         displayListQueries &&
-        hfEditPosition &&
+        bandEdit &&
         activeHfRid &&
         canvasHostRef && (
-          <>
-            <CanvasCellSelectionOverlay
-              session={pagedEditorRef.current?.getYrsSession() ?? null}
-              positionProjection={null}
-              overlayTarget={canvasOverlayTarget}
-              canvasHostRef={canvasHostRef}
-              displayListQueries={displayListQueries}
-              region={{ kind: hfEditPosition, rId: activeHfRid }}
-              sidebarOpen={sidebarOpen}
-              zoom={zoom}
-            />
-            <CanvasHfSelectionOverlay
-              region={hfEditPosition}
-              rId={activeHfRid}
-              selection={hfSelection}
-              overlayTarget={canvasOverlayTarget}
-              canvasHostRef={canvasHostRef}
-              displayListQueries={displayListQueries}
-              activePageIndex={activeHfPage?.pageIndex}
-              sidebarOpen={sidebarOpen}
-              zoom={zoom}
-            />
-          </>
+          <CanvasCellSelectionOverlay
+            session={pagedEditorRef.current?.getYrsSession() ?? null}
+            positionProjection={null}
+            overlayTarget={canvasOverlayTarget}
+            canvasHostRef={canvasHostRef}
+            displayListQueries={displayListQueries}
+            region={{ kind: bandEdit.kind, rId: activeHfRid }}
+            sidebarOpen={sidebarOpen}
+            zoom={zoom}
+          />
         )}
 
-      {hfEditPosition &&
+      {canvasOverlayTarget && displayListQueries && partEdit && canvasHostRef && (
+        <CanvasPartSelectionOverlay
+          part={partEdit}
+          selection={partSelection}
+          overlayTarget={canvasOverlayTarget}
+          canvasHostRef={canvasHostRef}
+          displayListQueries={displayListQueries}
+          activePageIndex={activeHfPage?.pageIndex}
+          sidebarOpen={sidebarOpen}
+          zoom={zoom}
+        />
+      )}
+
+      {bandEdit &&
         activeHf &&
         hfChromeRect &&
         (() => {
           const editor = (
             <InlineHeaderFooterEditor
-              position={hfEditPosition}
+              position={bandEdit.kind}
               targetRect={hfChromeRect}
               onClose={() => {
-                setHfEditPosition(null);
+                setPartEditTarget(null);
               }}
               onRemove={onRemoveHeaderFooter}
             />

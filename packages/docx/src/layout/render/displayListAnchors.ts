@@ -10,6 +10,7 @@
  */
 
 import type { YrsRevisionInfo, YrsSession } from '../../yrs';
+import { headerFooterDisplayRIds } from '../../yrs/sessionInternals';
 import type { DisplayListQueries, DisplayListRect } from './displayListQueries';
 import { canvasPageTops } from './canvasPageMetrics';
 import {
@@ -155,37 +156,55 @@ export function computeAnchorPositionsFromYrs(
   hfRegions?: YrsHeaderFooterRegions,
   projectY?: (rect: DisplayListRect) => number | null
 ): Map<string, number> {
-  const positions = new Map<string, number>();
-  const pageTops = canvasPageTops(queries);
-
-  const register = (key: string, point: YrsSidebarDisplayPoint | null): boolean => {
-    if (!point || positions.has(key)) return positions.has(key);
-    const rect = rectForYrsPoint(point, queries, hfRegions);
-    if (!rect) return false;
-    const y = projectY ? projectY(rect) : (pageTops[rect.pageIndex] ?? 0) + rect.y;
-    if (y == null) return false;
-    positions.set(key, y);
-    return true;
-  };
-
-  for (const commentId of commentIds) {
-    const key = `comment-${commentId}`;
-    try {
-      for (const anchor of session.resolveComment(String(commentId))) {
-        if (register(key, projection.storyOffsetToDisplayPoint(anchor.story, anchor.start))) break;
+  function* points(): IterableIterator<readonly [string, YrsSidebarDisplayPoint | null]> {
+    for (const commentId of commentIds) {
+      try {
+        for (const anchor of session.resolveComment(String(commentId))) {
+          yield [
+            `comment-${commentId}`,
+            projection.storyOffsetToDisplayPoint(anchor.story, anchor.start),
+          ];
+        }
+      } catch {
+        // Orphaned comments remain unplaced.
       }
-    } catch {
-      // A deleted/orphaned comment has no live yrs anchor and remains unplaced.
+    }
+    for (const revision of revisions) {
+      yield [
+        `revision-${yrsIdToNumericId(revision.revisionId)}`,
+        projection.locToDisplayPoint({ story: revision.story, ...revision.range.start }),
+      ];
     }
   }
-
-  for (const revision of revisions) {
-    register(
-      `revision-${yrsIdToNumericId(revision.revisionId)}`,
-      projection.locToDisplayPoint({ story: revision.story, ...revision.range.start })
-    );
+  function* displayedPoints(): IterableIterator<readonly [string, YrsSidebarDisplayPoint | null]> {
+    for (const [key, point] of points()) {
+      if (!point?.hfRid) {
+        yield [key, point];
+        continue;
+      }
+      for (const rId of headerFooterDisplayRIds(session, point.hfRid)) {
+        yield [key, { ...point, hfRid: rId }];
+      }
+    }
   }
+  return anchorPositionsFromPoints(displayedPoints(), queries, hfRegions, projectY);
+}
 
+export function anchorPositionsFromPoints(
+  points: Iterable<readonly [key: string, point: YrsSidebarDisplayPoint | null]>,
+  queries: DisplayListQueries,
+  hfRegions?: YrsHeaderFooterRegions,
+  projectY?: (rect: DisplayListRect) => number | null
+): Map<string, number> {
+  const positions = new Map<string, number>();
+  const pageTops = canvasPageTops(queries);
+  for (const [key, point] of points) {
+    if (!point || positions.has(key)) continue;
+    const rect = rectForYrsPoint(point, queries, hfRegions);
+    if (!rect) continue;
+    const y = projectY ? projectY(rect) : (pageTops[rect.pageIndex] ?? 0) + rect.y;
+    if (y != null) positions.set(key, y);
+  }
   return positions;
 }
 

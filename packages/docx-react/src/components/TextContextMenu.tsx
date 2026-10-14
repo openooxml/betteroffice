@@ -36,7 +36,10 @@ export type TextContextAction =
   | 'splitCell'
   | 'selectTable'
   | 'deleteTable'
-  | 'addComment';
+  | 'addComment'
+  | 'resizeImage'
+  | 'moveImage'
+  | 'resizeColumn';
 
 /**
  * Menu item configuration
@@ -829,6 +832,9 @@ export function getTextActionLabel(action: TextContextAction): string {
     selectTable: defaultLocale.table.selectTable,
     deleteTable: defaultLocale.table.deleteTable,
     addComment: 'Comment',
+    resizeImage: 'Resize image',
+    moveImage: 'Move image',
+    resizeColumn: 'Column width',
   };
   return labels[action];
 }
@@ -856,6 +862,9 @@ export function getTextActionShortcut(action: TextContextAction): string {
     selectTable: '',
     deleteTable: '',
     addComment: '',
+    resizeImage: '',
+    moveImage: '',
+    resizeColumn: '',
   };
   return shortcuts[action];
 }

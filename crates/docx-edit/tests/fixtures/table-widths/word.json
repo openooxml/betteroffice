@@ -1,0 +1,30 @@
+{
+  "fixed-preferred": {
+    "pageStartRows": [0, 29, 58],
+    "cellLines": [["ID 001"], ["Row 001 alpha beta gamma delta epsilon zeta eta", "theta iota kappa lambda mu"]]
+  },
+  "fixed-span": {
+    "pageStartRows": [0, 29, 58],
+    "cellLines": [["ID 001"], ["Row 001 alpha beta gamma delta epsilon zeta eta", "theta iota kappa lambda mu"]]
+  },
+  "autofit": {
+    "pageStartRows": [0, 29, 58],
+    "cellLines": [["ID", "001"], ["Row 001 alpha beta gamma delta epsilon zeta eta theta iota kappa lambda", "mu"]]
+  },
+  "default-autofit": {
+    "pageStartRows": [0, 29, 58],
+    "cellLines": [["ID", "001"], ["Row 001 alpha beta gamma delta epsilon zeta eta theta iota kappa lambda", "mu"]]
+  },
+  "autofit-span": {
+    "pageStartRows": [0, 29, 58],
+    "cellLines": [["ID", "001"], ["Row 001 alpha beta gamma delta epsilon zeta eta theta iota kappa lambda", "mu"]]
+  },
+  "nowrap": {
+    "pageStartRows": [0, 29, 58],
+    "cellLines": [["ID 001"], ["Row 001 alpha beta gamma delta epsilon zeta eta theta iota kappa lambda", "mu"]]
+  },
+  "margins-indent": {
+    "pageStartRows": [0, 29, 58],
+    "cellLines": [["ID", "001"], ["Row 001 alpha beta gamma delta epsilon zeta eta theta iota", "kappa lambda mu"]]
+  }
+}

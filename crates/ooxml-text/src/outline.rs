@@ -69,32 +69,54 @@ pub struct GlyphOutline {
     pub cmds: Vec<PathCmd>,
 }
 
-/// Collects skrifa's draw callbacks into [`PathCmd`]s, verbatim, in font units.
-#[derive(Default)]
+/// Collects skrifa's draw callbacks into [`PathCmd`]s, in font units, with
+/// every x widened by the font's [`FontStore::advance_scale`] so a glyph fills
+/// the advance the same id measured with.
 struct CmdPen {
     cmds: Vec<PathCmd>,
+    x_scale: f32,
+}
+
+impl CmdPen {
+    fn new(x_scale: f32) -> Self {
+        Self {
+            cmds: Vec::new(),
+            x_scale,
+        }
+    }
 }
 
 impl OutlinePen for CmdPen {
     fn move_to(&mut self, x: f32, y: f32) {
-        self.cmds.push(PathCmd::MoveTo { x, y });
+        self.cmds.push(PathCmd::MoveTo {
+            x: x * self.x_scale,
+            y,
+        });
     }
 
     fn line_to(&mut self, x: f32, y: f32) {
-        self.cmds.push(PathCmd::LineTo { x, y });
+        self.cmds.push(PathCmd::LineTo {
+            x: x * self.x_scale,
+            y,
+        });
     }
 
     fn quad_to(&mut self, cx: f32, cy: f32, x: f32, y: f32) {
-        self.cmds.push(PathCmd::QuadTo { cx, cy, x, y });
+        self.cmds.push(PathCmd::QuadTo {
+            cx: cx * self.x_scale,
+            cy,
+            x: x * self.x_scale,
+            y,
+        });
     }
 
     fn curve_to(&mut self, c1x: f32, c1y: f32, c2x: f32, c2y: f32, x: f32, y: f32) {
         self.cmds.push(PathCmd::CubicTo {
-            c1x,
+            c1x: c1x * self.x_scale,
             c1y,
-            c2x,
+            c2x: c2x * self.x_scale,
             c2y,
-            x,
+            x: x * self.x_scale,
             y,
         });
     }
@@ -105,7 +127,8 @@ impl OutlinePen for CmdPen {
 }
 
 impl FontStore {
-    /// Outline of `glyph_id` in font `id`, in font design units.
+    /// Outline of `glyph_id` in font `id`, in font design units, widened by
+    /// the id's [`FontStore::advance_scale`].
     ///
     /// Returns empty `cmds` for a blank glyph (space). Errors with
     /// [`FontError::UnknownFont`] on an unregistered `id`,
@@ -129,7 +152,7 @@ impl FontStore {
         // Unscaled → coords come out in font units, matching FontStore metrics.
         // No hinting: hinting is a pixel-grid operation and would be wrong at
         // design-space size.
-        let mut pen = CmdPen::default();
+        let mut pen = CmdPen::new(self.advance_scale(id)?);
         glyph
             .draw(
                 DrawSettings::unhinted(Size::unscaled(), LocationRef::default()),

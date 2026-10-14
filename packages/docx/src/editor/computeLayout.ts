@@ -1,25 +1,26 @@
+import { layoutMetaSummary, type LayoutMetaV1 } from '../yrs/layoutMeta';
 import type { ResidentMeasurementConfig } from '../layout/measure';
-import type {
-  BlockExtent,
-  Layout,
-  LayoutBlock,
-  LayoutOptions,
-  MeasuredBlock,
-} from '../layout/pagination';
+import type { Layout, LayoutOptions, MeasuredBlock } from '../layout/pagination';
 import type { DisplayListHeadersFooters } from '../layout/render/rustDisplayList';
 import type { Document, NoteKind, SectionProperties } from '../types/document';
 import type { YrsRenderEnv, YrsSession } from '../yrs';
+import { resolvedFinalSectionProperties } from './finalSection';
 
-interface ResidentRegionLayoutOutput {
-  measured: MeasuredBlock[];
-  options: LayoutOptions;
+interface ResidentRegionLayoutRetainedOutput {
   layout: Layout;
   headersFooters?: DisplayListHeadersFooters;
   notesConverged: boolean;
 }
 
+interface RetainedKernelInputs {
+  measured: MeasuredBlock[];
+  options: LayoutOptions;
+}
+
 export interface ResidentRegionLayoutRequest {
   bodyStory: 'body';
+  /** @internal Use saved page totals while the layout is partial. */
+  cachedPageTotals?: boolean;
   options: Pick<LayoutOptions, 'contractVersion' | 'pageGap'>;
   regions: {
     sections: Array<{
@@ -43,14 +44,19 @@ export interface ResidentRegionLayoutRequest {
 export interface ComputeLayoutInputs {
   document: Document | null;
   pageGap: number;
-  session: Pick<YrsSession, 'layoutDocumentWithRegionsJson'>;
+  session: Pick<
+    YrsSession,
+    | 'layoutDocumentWithRegionsRetainedJson'
+    | 'residentWorkerProbe'
+    | 'retainedKernelInputsJson'
+  >;
   renderEnv: YrsRenderEnv;
   measurement: ResidentMeasurementConfig;
+  /** @internal See `ResidentRegionLayoutRequest.cachedPageTotals`. */
+  cachedPageTotals?: boolean;
 }
 
 export interface LayoutComputation {
-  blocks: LayoutBlock[];
-  measures: BlockExtent[];
   layout: Layout;
   notesConverged: boolean;
 }
@@ -61,6 +67,8 @@ const kernelInputsByLayout = new WeakMap<
     measured: MeasuredBlock[];
     options: LayoutOptions;
     headersFooters?: DisplayListHeadersFooters;
+    /** The session layout revision that produced the layout. */
+    layoutRevision?: number;
   }
 >();
 
@@ -72,8 +80,8 @@ function orderedSections(document: Document | null): ResidentRegionLayoutRequest
     properties: section.properties,
   }));
   sections.push({
-    sectionId: body.finalSectionProperties?.sectionId,
-    properties: body.finalSectionProperties ?? {},
+    sectionId: sections.at(-1)?.sectionId ?? body.finalSectionProperties?.sectionId,
+    properties: resolvedFinalSectionProperties(body) ?? {},
   });
   return sections;
 }
@@ -101,11 +109,39 @@ export function buildResidentRegionLayoutRequest(
     regions: {
       sections: orderedSections(document),
       settings: document?.package.settings,
-      watermark: document?.package.document.finalSectionProperties?.watermark,
+      watermark: resolvedFinalSectionProperties(document?.package.document)?.watermark,
     },
     notes: { contents },
-    renderEnv,
+    renderEnv: {
+      compatibilityFlags: document?.package.settings?.compatibilityFlags,
+      ...renderEnv,
+      ...defaultParagraphStyleEnv(document, renderEnv),
+      tocStyleIds: [...new Set([
+        ...(renderEnv.tocStyleIds ?? []),
+        ...(document?.package.styles?.styles ?? [])
+          .filter((style) => style.type === 'paragraph' && typeof style.styleId === 'string' && style.styleId &&
+            [style.styleId, style.name].some((name) => /^TOC\s*\d+$/i.test(name ?? '')))
+          .map((style) => style.styleId),
+      ])],
+    },
   };
+}
+
+function defaultParagraphStyleEnv(
+  document: Document | null,
+  renderEnv: YrsRenderEnv
+): Pick<YrsRenderEnv, 'defaultParagraphStyleId'> {
+  if (renderEnv.defaultParagraphStyleId) return {};
+  const styles = document?.package.styles?.styles ?? [];
+  const explicit = styles.find(
+    (style) => style.type === 'paragraph' && style.default && style.styleId
+  )?.styleId;
+  if (explicit) return { defaultParagraphStyleId: explicit };
+  const normal = styles.some(
+    (style) => style.type === 'paragraph' && style.styleId === 'Normal'
+  );
+  if (normal) return { defaultParagraphStyleId: 'Normal' };
+  return {};
 }
 
 export function getLayoutKernelInputs(layout: Layout):
@@ -113,6 +149,7 @@ export function getLayoutKernelInputs(layout: Layout):
       measured: MeasuredBlock[];
       options: unknown;
       headersFooters?: DisplayListHeadersFooters;
+      layoutRevision?: number;
     }
   | undefined {
   return kernelInputsByLayout.get(layout);
@@ -125,18 +162,62 @@ export function computeLayout(inputs: ComputeLayoutInputs): LayoutComputation {
     inputs.renderEnv
   );
   request.measurement = inputs.measurement;
+  if (inputs.cachedPageTotals) request.cachedPageTotals = true;
+  const session = inputs.session;
   const output = JSON.parse(
-    inputs.session.layoutDocumentWithRegionsJson(JSON.stringify(request))
-  ) as ResidentRegionLayoutOutput;
+    session.layoutDocumentWithRegionsRetainedJson(JSON.stringify(request))
+  ) as ResidentRegionLayoutRetainedOutput;
+  const layoutRevision = session.residentWorkerProbe()!.layoutRevision;
+  let kernel: RetainedKernelInputs | null = null;
+  const fetchKernel = (): RetainedKernelInputs =>
+    (kernel ??= JSON.parse(
+      session.retainedKernelInputsJson(layoutRevision)
+    ) as RetainedKernelInputs);
   kernelInputsByLayout.set(output.layout, {
-    measured: output.measured,
-    options: output.options,
+    get measured() {
+      return fetchKernel().measured;
+    },
+    get options() {
+      return fetchKernel().options;
+    },
     ...(output.headersFooters ? { headersFooters: output.headersFooters } : {}),
+    layoutRevision,
   });
   return {
-    blocks: output.measured.map((item) => item.block),
-    measures: output.measured.map((item) => item.measure),
     layout: output.layout,
     notesConverged: output.notesConverged,
   };
+}
+
+/**
+ * The layout a resident worker ran, from its region layout reply. The
+ * measured blocks stay in the worker, so the main-thread display fallback has
+ * to lay the document out on this thread first.
+ */
+export function workerLayoutComputation(
+  layoutReply: string | LayoutMetaV1,
+  layoutRevision?: number,
+  headersFooters?: string
+): LayoutComputation {
+  const output: ResidentRegionLayoutRetainedOutput = typeof layoutReply === 'string'
+    ? JSON.parse(layoutReply) as ResidentRegionLayoutRetainedOutput
+    : {
+        layout: layoutMetaSummary(layoutReply),
+        notesConverged: layoutReply.notesConverged,
+        headersFooters: JSON.parse(layoutReply.headersFooters ?? headersFooters ?? 'null') ?? undefined,
+      };
+  const unavailable = (): never => {
+    throw new Error('the measured blocks of a worker-run layout live in the worker');
+  };
+  kernelInputsByLayout.set(output.layout, {
+    get measured() {
+      return unavailable();
+    },
+    get options() {
+      return unavailable();
+    },
+    ...(output.headersFooters ? { headersFooters: output.headersFooters } : {}),
+    ...(layoutRevision !== undefined ? { layoutRevision } : {}),
+  });
+  return { layout: output.layout, notesConverged: output.notesConverged };
 }

@@ -77,6 +77,10 @@ pub struct Chart {
     pub decorative: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub relative_height: Option<f64>,
+    /// The `w:drawing` that places the chart, replayed verbatim on save.
+    /// Absent on package-level entries, which no drawing owns.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drawing_xml: Option<String>,
 }
 
 pub fn parse_chart_xml(
@@ -109,6 +113,7 @@ pub fn parse_chart_xml(
         description: None,
         decorative: None,
         relative_height: None,
+        drawing_xml: None,
     }))
 }
 
@@ -131,8 +136,8 @@ pub fn parse_chart_xml(
 /// together cost no more reads than one part was allowed before. A part the
 /// remainder cannot cover is declined like a malformed one. Nothing else is
 /// shared, so per-part isolation still holds.
-pub fn parse_chart_parts(
-    all_xml: &IndexMap<String, Vec<u8>>,
+pub fn parse_chart_parts<S: AsRef<[u8]>>(
+    all_xml: &IndexMap<String, S>,
     limits: &ParseLimits,
 ) -> ChartPartsMap {
     let mut charts = ChartPartsMap::new();
@@ -146,7 +151,7 @@ pub fn parse_chart_parts(
             ..limits.clone()
         };
         let mut budget = ParseBudget::new(&part_limits);
-        let parsed = parse_chart_xml(xml, Some(&normalized), path, &mut budget);
+        let parsed = parse_chart_xml(xml.as_ref(), Some(&normalized), path, &mut budget);
         events -= budget.xml_events();
         let Ok(Some(chart)) = parsed else {
             continue;
@@ -235,6 +240,7 @@ pub fn parse_chart_from_drawing(
     chart.relationship_id = Some(relationship_id.to_owned());
     chart.path = Some(path);
     chart.size = parse_drawing_extent(drawing).or(chart.size);
+    chart.drawing_xml = Some(drawing.to_raw_inline_xml());
     Ok(DrawingChart::Chart(Box::new(chart)))
 }
 

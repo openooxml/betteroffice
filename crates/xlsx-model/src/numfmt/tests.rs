@@ -22,6 +22,148 @@ fn time_serial(secs: f64) -> f64 {
 }
 
 #[test]
+fn implied_currency_and_accounting_codes() {
+    let codes = [
+        (5, r##""$"#,##0_);("$"#,##0)"##),
+        (6, r##""$"#,##0_);[Red]("$"#,##0)"##),
+        (7, r##""$"#,##0.00_);("$"#,##0.00)"##),
+        (8, r##""$"#,##0.00_);[Red]("$"#,##0.00)"##),
+        (41, r##"_(* #,##0_);_(* (#,##0);_(* "-"_);_(@_)"##),
+        (42, r##"_("$"* #,##0_);_("$"* (#,##0);_("$"* "-"_);_(@_)"##),
+        (43, r##"_(* #,##0.00_);_(* (#,##0.00);_(* "-"??_);_(@_)"##),
+        (
+            44,
+            r##"_("$"* #,##0.00_);_("$"* (#,##0.00);_("$"* "-"??_);_(@_)"##,
+        ),
+    ];
+    for (id, code) in codes {
+        assert_eq!(builtin_format_code(id), Some(code), "id {id}");
+    }
+    for id in 23..=36 {
+        assert_eq!(builtin_format_code(id), None, "id {id}");
+    }
+    assert_eq!(fv(-1234.5, codes[3].1), "($1,234.50)");
+    assert_eq!(color(-1234.5, codes[3].1).as_deref(), Some("#FF0000"));
+}
+
+#[test]
+fn display_padding_retains_character_and_fill_position() {
+    let formatted = format_value(&num(12.0), "_(€* #,##0_)", DateSystem::V1900);
+    let json = serde_json::to_value(&formatted).unwrap();
+    assert_eq!(formatted.text, " €12 ");
+    assert_eq!(
+        json["layout"],
+        serde_json::json!([
+            {"offset": 0, "kind": "padding", "character": "("},
+            {"offset": 4, "kind": "fill", "character": " "},
+            {"offset": 6, "kind": "padding", "character": ")"}
+        ])
+    );
+    let question =
+        serde_json::to_value(format_value(&num(1.2), "??0.??", DateSystem::V1900)).unwrap();
+    assert_eq!(
+        question["layout"],
+        serde_json::json!([
+            {"offset": 0, "kind": "padding", "character": "0"},
+            {"offset": 1, "kind": "padding", "character": "0"},
+            {"offset": 5, "kind": "padding", "character": "0"}
+        ])
+    );
+    let between =
+        serde_json::to_value(format_value(&num(12.0), "0*x0", DateSystem::V1900)).unwrap();
+    assert_eq!(
+        between["layout"],
+        serde_json::json!([
+            {"offset": 1, "kind": "fill", "character": "x"}
+        ])
+    );
+    let repeated = format_value(&num(12.0), "*x0*y", DateSystem::V1900);
+    assert_eq!(repeated.layout.len(), 1);
+}
+
+#[test]
+fn fractions_use_best_approximation() {
+    for (value, id, expected) in [
+        (2.75, 12, "2 3/4"),
+        (0.125, 12, " 1/8"),
+        (1.0 / 3.0, 12, " 1/3"),
+        (0.3, 12, " 2/7"),
+        (0.3, 13, "  3/10"),
+        (0.142857, 13, "  1/7 "),
+        (-2.75, 12, "-2 3/4"),
+        (1.999, 12, "2    "),
+    ] {
+        assert_eq!(fv(value, builtin_format_code(id).unwrap()), expected);
+    }
+    assert_eq!(fv(0.3, "?/8"), "2/8");
+    assert_eq!(fv(2.3, "# ?/8"), "2 2/8");
+    assert_eq!(fv(0.5, "??/??"), " 1/2 ");
+    assert!(!format_is_approximate(&num(0.5), "# ?/?"));
+}
+
+fn assert_general_fallback(value: f64, code: &str, expected: &str) {
+    assert_eq!(fv(value, code), expected);
+    assert_eq!(fv(-value, code), format!("-{expected}"));
+    assert!(format_is_approximate(&num(value), code));
+}
+
+#[test]
+fn fixed_denominator_numerators_beyond_u64_fall_back_to_general() {
+    assert_general_fallback(1e18, "?/32", "1E+18");
+}
+
+#[test]
+fn fraction_convergents_beyond_u64_fall_back_to_general() {
+    assert_general_fallback(1_000_000_000_000.75, "?/?????????", "1E+12");
+}
+
+#[test]
+fn general_width_rounding_preserves_half_away_from_zero() {
+    assert_eq!(
+        fit_general(1.25e12, 76.0, |text| text.len() as f32 * 10.0).as_deref(),
+        Some("1.3E+12")
+    );
+    assert_eq!(
+        fit_general(-1.25e12, 86.0, |text| text.len() as f32 * 10.0).as_deref(),
+        Some("-1.3E+12")
+    );
+}
+
+#[test]
+fn general_width_rounding_uses_fifteen_significant_digits() {
+    for value in [1.005e12, 1.005e12 - 2f64.powi(-13)] {
+        assert_eq!(
+            fit_general(value, 86.0, |text| text.len() as f32 * 10.0).as_deref(),
+            Some("1.01E+12"),
+            "{value}"
+        );
+    }
+}
+
+#[test]
+fn spacing_directives_keep_positions_in_scientific_and_fraction_sections() {
+    assert_eq!(fv(1234.0, "0_)0.0E+00"), "1 2.3E+02");
+    let exponent =
+        serde_json::to_value(format_value(&num(1234.0), "0.0E+0*x0", DateSystem::V1900)).unwrap();
+    assert_eq!(
+        exponent["layout"],
+        serde_json::json!([
+            {"offset": 6, "kind": "fill", "character": "x"}
+        ])
+    );
+    assert_eq!(fv(12.5, "0_)0 ?/?"), "1 2 1/2");
+    let fraction =
+        serde_json::to_value(format_value(&num(12.5), "0*x0 ?/?", DateSystem::V1900)).unwrap();
+    assert_eq!(
+        fraction["layout"],
+        serde_json::json!([
+            {"offset": 1, "kind": "fill", "character": "x"}
+        ])
+    );
+    assert_eq!(fv(1234.5, "#,##0 ?/?"), "1,234 1/2");
+}
+
+#[test]
 fn builtin_table_ids() {
     assert_eq!(builtin_format_code(0), Some("General"));
     assert_eq!(builtin_format_code(1), Some("0"));
@@ -33,7 +175,7 @@ fn builtin_table_ids() {
     assert_eq!(builtin_format_code(11), Some("0.00E+00"));
     assert_eq!(builtin_format_code(12), Some("# ?/?"));
     assert_eq!(builtin_format_code(13), Some("# ??/??"));
-    assert_eq!(builtin_format_code(14), Some("m/d/yyyy"));
+    assert_eq!(builtin_format_code(14), Some("m/d/yy"));
     assert_eq!(builtin_format_code(15), Some("d-mmm-yy"));
     assert_eq!(builtin_format_code(16), Some("d-mmm"));
     assert_eq!(builtin_format_code(17), Some("mmm-yy"));
@@ -41,7 +183,7 @@ fn builtin_table_ids() {
     assert_eq!(builtin_format_code(19), Some("h:mm:ss AM/PM"));
     assert_eq!(builtin_format_code(20), Some("h:mm"));
     assert_eq!(builtin_format_code(21), Some("h:mm:ss"));
-    assert_eq!(builtin_format_code(22), Some("m/d/yyyy h:mm"));
+    assert_eq!(builtin_format_code(22), Some("m/d/yy h:mm"));
     assert_eq!(builtin_format_code(37), Some("#,##0 ;(#,##0)"));
     assert_eq!(builtin_format_code(38), Some("#,##0 ;[Red](#,##0)"));
     assert_eq!(builtin_format_code(39), Some("#,##0.00;(#,##0.00)"));
@@ -51,10 +193,16 @@ fn builtin_table_ids() {
     assert_eq!(builtin_format_code(47), Some("mmss.0"));
     assert_eq!(builtin_format_code(48), Some("##0.0E+0"));
     assert_eq!(builtin_format_code(49), Some("@"));
-    assert_eq!(builtin_format_code(5), None);
-    assert_eq!(builtin_format_code(8), None);
+    assert_eq!(builtin_format_code(5), Some(r##""$"#,##0_);("$"#,##0)"##));
+    assert_eq!(
+        builtin_format_code(8),
+        Some(r##""$"#,##0.00_);[Red]("$"#,##0.00)"##)
+    );
     assert_eq!(builtin_format_code(23), None);
-    assert_eq!(builtin_format_code(44), None);
+    assert_eq!(
+        builtin_format_code(44),
+        Some(r##"_("$"* #,##0.00_);_("$"* (#,##0.00);_("$"* "-"??_);_(@_)"##)
+    );
     assert_eq!(builtin_format_code(163), None);
     assert_eq!(builtin_format_code(164), None);
 }
@@ -72,6 +220,17 @@ fn builtin_number_renders() {
     assert_eq!(fv(12345.0, "0.00E+00"), "1.23E+04");
     assert_eq!(fv(12345.0, "##0.0E+0"), "12.3E+3");
     assert_eq!(fv(1234.0, "@"), "1234");
+}
+
+/// ids 14 and 22 carry a two-digit year: excel 16.112.3 prints `1/1/22` for
+/// both, matched against its own pdf exports of the fidelity corpus.
+#[test]
+fn builtin_short_date_ids_print_two_digit_years() {
+    assert_eq!(fv(44562.0, builtin_format_code(14).unwrap()), "1/1/22");
+    assert_eq!(
+        fv(44562.5, builtin_format_code(22).unwrap()),
+        "1/1/22 12:00"
+    );
 }
 
 #[test]
@@ -322,8 +481,8 @@ fn general_edge_cases() {
 
 #[test]
 fn unsupported_constructs_degrade() {
-    assert_eq!(fv(0.5, "# ?/?"), "0.5");
-    assert_eq!(fv(2.75, "# ??/??"), "2.75");
+    assert_eq!(fv(0.5, "# ?/?"), " 1/2");
+    assert_eq!(fv(2.75, "# ??/??"), "2  3/4 ");
     assert_eq!(fv(5.0, "[$$-409]#,##0.00"), "$5.00");
     assert_eq!(fv(5.0, "[$-409]0"), "5");
     assert_eq!(fv(1234.0, "$#,##0"), "$1,234");
@@ -332,8 +491,271 @@ fn unsupported_constructs_degrade() {
 }
 
 #[test]
+fn approximate_formats_are_the_ones_that_degrade() {
+    let n = CellValue::Number { value: 0.5 };
+    assert!(format_is_approximate(&n, "# ?/"));
+    assert!(!format_is_approximate(&n, "# ?/?"));
+    assert!(!format_is_approximate(&n, "0.00;# ??/??"));
+    assert!(!format_is_approximate(
+        &CellValue::Number { value: -0.5 },
+        "0.00;# ??/??"
+    ));
+    assert!(!format_is_approximate(&n, "0.00"));
+    assert!(!format_is_approximate(&n, "General"));
+    assert!(!format_is_approximate(&n, "m/d/yyyy"));
+    assert!(!format_is_approximate(
+        &CellValue::Text { value: "x".into() },
+        "# ?/?"
+    ));
+}
+
+#[test]
 fn escaped_and_quoted_literals() {
     assert_eq!(fv(5.0, "0\" kg\""), "5 kg");
     assert_eq!(fv(5.0, "0\\ \\k\\g"), "5 kg");
     assert_eq!(fv(100.0, "\"$\"#,##0"), "$100");
+}
+
+#[test]
+fn repeated_codes_render_identically_through_cache() {
+    let codes = [
+        "#,##0.00",
+        "[Red]0.00%;\"neg\";\"zero\";\"txt:\"@",
+        "m/d/yyyy h:mm",
+        "@",
+        "\"p\"0.00",
+    ];
+    for code in codes {
+        let expected = fv(1234.5678, code);
+        for i in 0..(FORMAT_CACHE_CAP * 2) {
+            let _ = fv(i as f64, &format!("\"churn{i}\"0.000"));
+            assert_eq!(fv(1234.5678, code), expected);
+        }
+    }
+    let hello = CellValue::Text {
+        value: "hello".to_string(),
+    };
+    let expected = format_value(&hello, "[Red]\"pre \"@", DateSystem::V1900);
+    for _ in 0..(FORMAT_CACHE_CAP * 2) {
+        assert_eq!(
+            format_value(&hello, "[Red]\"pre \"@", DateSystem::V1900),
+            expected
+        );
+    }
+}
+
+#[test]
+fn eviction_past_capacity_keeps_outputs_identical() {
+    let rounds = FORMAT_CACHE_CAP * 3;
+    let codes: Vec<String> = (0..rounds).map(|i| format!("\"p{i}\"0.00")).collect();
+    let first: Vec<String> = codes.iter().map(|c| fv(7.625, c)).collect();
+    for (i, code) in codes.iter().enumerate() {
+        assert_eq!(fv(7.625, code), format!("p{i}7.63"));
+    }
+    for (code, expected) in codes.iter().zip(&first) {
+        assert_eq!(fv(-7.625, code), format!("-{expected}"));
+    }
+}
+
+fn parse_code(code: &str) -> Arc<[Section]> {
+    split_sections(code).iter().map(|s| tokenize(s)).collect()
+}
+
+#[test]
+fn distinct_insertions_never_exceed_two_generations() {
+    let mut cache = FormatCache::default();
+    for i in 0..=FORMAT_CACHE_CAP * 4 {
+        let key = format!("\"s{i}\"0");
+        cache.insert(&key, parse_code(&key));
+        assert!(cache.hot.len() <= FORMAT_CACHE_CAP);
+        assert!(cache.hot.len() + cache.cold.len() <= FORMAT_CACHE_CAP * 2);
+    }
+}
+
+#[test]
+fn repeat_lookup_returns_the_same_arc() {
+    let mut cache = FormatCache::default();
+    cache.insert("0.000", parse_code("0.000"));
+    let first = cache.get("0.000").unwrap();
+    for _ in 0..3 {
+        let again = cache.get("0.000").unwrap();
+        assert!(Arc::ptr_eq(&first, &again));
+    }
+    assert!(cache.get("0.00").is_none());
+}
+
+#[test]
+fn a_full_generation_ages_out_but_still_answers_once() {
+    let mut cache = FormatCache::default();
+    let keys: Vec<String> = (0..FORMAT_CACHE_CAP)
+        .map(|i| format!("\"e{i}\"0"))
+        .collect();
+    for key in &keys {
+        cache.insert(key, parse_code(key));
+    }
+    assert_eq!(cache.hot.len(), FORMAT_CACHE_CAP);
+    assert!(cache.cold.is_empty());
+
+    let newcomer = "\"fresh\"0";
+    cache.insert(newcomer, parse_code(newcomer));
+    assert_eq!(cache.hot.len(), 1);
+    assert_eq!(cache.cold.len(), FORMAT_CACHE_CAP);
+    assert!(cache.hot.contains_key(newcomer));
+
+    assert!(cache.get(&keys[0]).is_some());
+    assert!(cache.hot.contains_key(&keys[0]));
+}
+
+#[test]
+fn memoized_path_reuses_one_parse_across_lookups() {
+    let mut cache = FormatCache::default();
+    let a = parsed_sections_in(&mut cache, "[Red]#,##0.00;(#,##0.00)");
+    let b = parsed_sections_in(&mut cache, "[Red]#,##0.00;(#,##0.00)");
+    assert!(Arc::ptr_eq(&a, &b));
+    assert_eq!(cache.hot.len(), 1);
+}
+
+#[test]
+fn oversize_codes_render_correctly_but_are_never_cached() {
+    let literal = "x".repeat(MAX_CACHED_CODE_LEN + 1);
+    let code = format!("\"{literal}\"0.00");
+    let mut cache = FormatCache::default();
+    let a = parsed_sections_in(&mut cache, &code);
+    let b = parsed_sections_in(&mut cache, &code);
+    assert!(!Arc::ptr_eq(&a, &b));
+    assert!(cache.hot.is_empty() && cache.cold.is_empty());
+    assert_eq!(fv(7.625, &code), format!("{literal}7.63"));
+}
+
+const CACHE_CORPUS: [&str; 14] = [
+    "#,##0.00",
+    "[Red]0.00%;\"neg\";\"zero\";\"txt:\"@",
+    "m/d/yyyy h:mm",
+    "[$-409]dddd, mmmm d, yyyy",
+    "_($* #,##0.00_);_($* (#,##0.00);_($* \"-\"??_);_(@_)",
+    "0.00E+00",
+    "[>100]\"big\";[<0][Red]0.00;0.0",
+    "# ??/??",
+    "0\\ \\k\\g",
+    "@",
+    // pairs that diverge only late, so a partial key would alias them
+    "#,##0.00;[Red](#,##0.00)",
+    "#,##0.00;[Blue](#,##0.00)",
+    "0.000000000;;\"zero\";@",
+    "0.000000000;;\"nil\";@",
+];
+
+/// every lookup below is a proven hit, and each must equal a fresh parse.
+#[test]
+fn a_cache_hit_returns_what_a_fresh_parse_would() {
+    for code in CACHE_CORPUS {
+        let mut cache = FormatCache::default();
+        let seeded = parsed_sections_in(&mut cache, code);
+        assert_eq!(*seeded, *tokenize_all(code), "{code}");
+
+        for j in 1..FORMAT_CACHE_CAP {
+            let _ = parsed_sections_in(&mut cache, &format!("\"j{j}\"0"));
+        }
+        assert_eq!(cache.hot.len(), FORMAT_CACHE_CAP);
+        assert!(cache.hot.contains_key(code));
+        let hot_hit = parsed_sections_in(&mut cache, code);
+        assert!(Arc::ptr_eq(&seeded, &hot_hit), "{code}: not a hot hit");
+
+        let _ = parsed_sections_in(&mut cache, "\"flip\"0");
+        assert!(cache.cold.contains_key(code) && !cache.hot.contains_key(code));
+        let cold_hit = parsed_sections_in(&mut cache, code);
+        assert!(Arc::ptr_eq(&seeded, &cold_hit), "{code}: not a cold hit");
+        assert_eq!(*cold_hit, *tokenize_all(code), "{code}");
+    }
+}
+
+#[test]
+fn a_cold_hit_promotes_even_when_hot_is_already_full() {
+    let code = "[Red]#,##0.00;(#,##0.00);\"-\";@";
+    let mut cache = FormatCache::default();
+    let seeded = parsed_sections_in(&mut cache, code);
+    for j in 1..FORMAT_CACHE_CAP {
+        let _ = parsed_sections_in(&mut cache, &format!("\"a{j}\"0"));
+    }
+    let _ = parsed_sections_in(&mut cache, "\"flip\"0");
+    assert!(cache.cold.contains_key(code));
+    for j in 1..FORMAT_CACHE_CAP {
+        let _ = parsed_sections_in(&mut cache, &format!("\"b{j}\"0"));
+    }
+    assert_eq!(cache.hot.len(), FORMAT_CACHE_CAP);
+
+    let promoted = parsed_sections_in(&mut cache, code);
+    assert!(Arc::ptr_eq(&seeded, &promoted));
+    assert!(cache.hot.contains_key(code));
+    assert_eq!(*promoted, *tokenize_all(code));
+}
+
+#[test]
+fn reinserting_a_present_key_at_capacity_loses_nothing() {
+    let mut cache = FormatCache::default();
+    let keys: Vec<String> = (0..FORMAT_CACHE_CAP)
+        .map(|i| format!("\"r{i}\"0"))
+        .collect();
+    for key in &keys {
+        cache.insert(key, parse_code(key));
+    }
+    let repeat = &keys[FORMAT_CACHE_CAP / 2];
+    cache.insert(repeat, parse_code(repeat));
+    assert!(cache.hot.contains_key(repeat));
+    for key in &keys {
+        assert!(
+            cache.hot.contains_key(key) || cache.cold.contains_key(key),
+            "{key} was dropped"
+        );
+    }
+}
+
+/// only the first four sections are ever selected, so the parse stops there.
+#[test]
+fn sections_past_the_fourth_are_never_selected() {
+    assert_eq!(fv(1.0, "\"a\";\"b\";\"c\";\"d\";\"e\";\"f\""), "a");
+    assert_eq!(fv(-1.0, "\"a\";\"b\";\"c\";\"d\";\"e\""), "b");
+    assert_eq!(fv(0.0, "\"a\";\"b\";\"c\";\"d\";\"e\""), "c");
+    let text = CellValue::Text {
+        value: "x".to_string(),
+    };
+    assert_eq!(
+        format_value(&text, "\"a\";\"b\";\"c\";\"d\"@;\"e\"@", DateSystem::V1900).text,
+        "dx"
+    );
+    assert_eq!(tokenize_all("0;0;0;0;0;0;0").len(), USED_SECTIONS);
+}
+
+/// the parse is shared but the date system is not: it is applied after lookup.
+#[test]
+fn one_cached_code_still_honours_both_date_systems() {
+    let code = "m/d/yyyy h:mm";
+    let serial = 45_000.5;
+    let v1900 = fv(serial, code);
+    let v1904 = fv04(serial, code);
+    assert_ne!(v1900, v1904);
+    for _ in 0..8 {
+        assert_eq!(fv04(serial, code), v1904);
+        assert_eq!(fv(serial, code), v1900);
+    }
+}
+
+#[test]
+fn concurrent_callers_agree_with_a_single_threaded_render() {
+    let codes: Vec<String> = (0..FORMAT_CACHE_CAP + 64)
+        .map(|i| format!("\"c{i}\"#,##0.00;[Red](#,##0.00)"))
+        .collect();
+    let expected: Vec<String> = codes.iter().map(|c| fv(-1234.5678, c)).collect();
+    std::thread::scope(|s| {
+        for _ in 0..4 {
+            let (codes, expected) = (&codes, &expected);
+            s.spawn(move || {
+                for _ in 0..4 {
+                    for (code, want) in codes.iter().zip(expected) {
+                        assert_eq!(&fv(-1234.5678, code), want);
+                    }
+                }
+            });
+        }
+    });
 }

@@ -70,6 +70,7 @@ export interface Style {
   /** Conditional table style parts */
   tblStylePr?: Array<{
     type:
+      | 'wholeTable'
       | 'band1Horz'
       | 'band1Vert'
       | 'band2Horz'

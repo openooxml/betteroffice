@@ -1,5 +1,5 @@
 import type { ShapeSnapshot } from '@betteroffice/pptx';
-import type { ShapeFormatting } from './components/Toolbar';
+import type { ShapeFormatting } from './components/toolbarTypes';
 
 const EMU_PER_POINT = 12_700;
 

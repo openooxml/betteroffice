@@ -49,6 +49,7 @@ export interface BookmarkOption {
  * Props for the HyperlinkDialog component
  */
 export interface HyperlinkDialogProps {
+  displayTextReadOnly?: boolean;
   /** Whether the dialog is open */
   isOpen: boolean;
   /** Callback when dialog is closed */
@@ -325,6 +326,7 @@ export function HyperlinkDialog({
   isOpen,
   onClose,
   onSubmit,
+  displayTextReadOnly,
   onRemove,
   initialData,
   selectedText = '',
@@ -615,6 +617,7 @@ export function HyperlinkDialog({
               className="docx-hyperlink-dialog-input"
               style={INPUT_STYLE}
               value={displayText}
+              readOnly={displayTextReadOnly}
               onChange={(e) => setDisplayText(e.target.value)}
               placeholder={t('dialogs.hyperlink.displayTextPlaceholder')}
             />

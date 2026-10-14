@@ -77,8 +77,10 @@ export {
   FONT_MAPPING,
   getGoogleFontEquivalent,
   extractFontsFromDocument,
+  createFontLoadScope,
+  registerDocumentFaces,
 } from './fontLoader';
-export type { FontDefinition } from './fontLoader';
+export type { BufferFaceInput, FontDefinition, FontLoadScope } from './fontLoader';
 
 // Embedded fonts (de-obfuscation + load + picker discovery)
 export { deobfuscateFont, isValidFontKey } from './fontDeobfuscation';
@@ -86,6 +88,7 @@ export {
   getEmbeddedFontFaces,
   extractEmbeddedFontFaces,
   loadEmbeddedFonts,
+  loadEmbeddedFontFamilies,
   getEmbeddedFontFamilies,
 } from './embeddedFonts';
 export type { EmbeddedFontFace } from './embeddedFonts';

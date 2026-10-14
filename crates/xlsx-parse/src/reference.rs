@@ -80,6 +80,25 @@ struct ReferenceArea {
 }
 
 impl UnpatchableReference {
+    pub(crate) fn package_facts(&self) -> crate::package_facts::ReferenceFacts {
+        let Self { part, areas } = self;
+        crate::package_facts::ReferenceFacts {
+            part: part.clone(),
+            areas: areas.as_ref().map(|areas| {
+                areas
+                    .iter()
+                    .map(|area| {
+                        let ReferenceArea { sheet, end } = area;
+                        crate::package_facts::ReferenceAreaFacts {
+                            sheet: sheet.clone(),
+                            end: *end,
+                        }
+                    })
+                    .collect()
+            }),
+        }
+    }
+
     /// The package path of the part.
     pub fn part(&self) -> &str {
         &self.part

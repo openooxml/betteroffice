@@ -20,8 +20,9 @@
 //! Text projects one [`CanonicalItem::CharItem`] per Unicode scalar (Rust
 //! `char`) — never per UTF-16 code unit and never coalesced into runs; a tab is
 //! an ordinary `"\t"` item. [`CanonicalItem::ParaMark`] excludes the pilcrow's
-//! `_kind` discriminator and its volatile `paraId`, so two documents that
-//! differ only in freshly minted paragraph ids project identical bytes. Every
+//! `_kind` discriminator, its volatile `paraId` and its paragraph identity
+//! bindings, so two documents that differ only in paragraph identities
+//! project identical bytes. Every
 //! other atom — hard breaks, native `noteRef` anchors — is an
 //! [`CanonicalItem::Embed`] whose `_kind` becomes `kind` and whose remaining
 //! entries become `payload`.
@@ -46,6 +47,7 @@ use serde_json::{Map as JsonMap, Value};
 use yrs::types::{ToJson, text::YChange};
 use yrs::{Any, Map, MapRef, Out, ReadTxn, Text, Transact};
 
+use crate::identity::{OOXML_PARA_ID, PARA_ORIGIN, SOURCE_PARA_ID};
 use crate::op::OpError;
 use crate::{EditingDoc, KIND_KEY, PARA_ID, is_pilcrow, map_string, story_ref};
 
@@ -108,7 +110,17 @@ pub fn project_story(doc: &EditingDoc, story_id: &str) -> Result<Vec<CanonicalIt
             }
             Out::YMap(map) if is_pilcrow(&map, &txn) => {
                 items.push(CanonicalItem::ParaMark {
-                    ppr: canonical_shared_map(&map, &txn, &[KIND_KEY, PARA_ID]),
+                    ppr: canonical_shared_map(
+                        &map,
+                        &txn,
+                        &[
+                            KIND_KEY,
+                            PARA_ID,
+                            OOXML_PARA_ID,
+                            SOURCE_PARA_ID,
+                            PARA_ORIGIN,
+                        ],
+                    ),
                 });
                 unit += 1;
             }
@@ -126,10 +138,10 @@ pub fn project_story(doc: &EditingDoc, story_id: &str) -> Result<Vec<CanonicalIt
                 unit += 1;
             }
             Out::YMap(map) => {
-                items.push(CanonicalItem::Embed {
-                    kind: map_string(&map, &txn, KIND_KEY).unwrap_or_default(),
-                    payload: canonical_shared_map(&map, &txn, &[KIND_KEY]),
-                });
+                items.push(canonical_embed(
+                    map_string(&map, &txn, KIND_KEY).unwrap_or_default(),
+                    canonical_shared_map(&map, &txn, &[KIND_KEY]),
+                ));
                 unit += 1;
             }
             Out::Any(Any::Map(map)) => {
@@ -137,10 +149,7 @@ pub fn project_story(doc: &EditingDoc, story_id: &str) -> Result<Vec<CanonicalIt
                     Some(Any::String(value)) => value.to_string(),
                     _ => String::new(),
                 };
-                items.push(CanonicalItem::Embed {
-                    kind,
-                    payload: canonical_any_map(&map, &[KIND_KEY]),
-                });
+                items.push(canonical_embed(kind, canonical_any_map(&map, &[KIND_KEY])));
                 unit += 1;
             }
             other => {
@@ -159,6 +168,40 @@ pub fn project_story(doc: &EditingDoc, story_id: &str) -> Result<Vec<CanonicalIt
     }
 
     Ok(items)
+}
+
+fn canonical_embed(kind: String, mut payload: BTreeMap<String, Value>) -> CanonicalItem {
+    if kind == "opaqueDrawing" {
+        payload.remove("preview");
+    } else if kind == "sdt"
+        && let Some(content) = payload.get_mut("content")
+    {
+        exclude_inline_opaque_previews(content);
+    }
+    CanonicalItem::Embed { kind, payload }
+}
+
+fn exclude_inline_opaque_previews(content: &mut Value) {
+    let Some(items) = content.as_array_mut() else {
+        return;
+    };
+    for item in items {
+        let kind = item.get("kind").and_then(Value::as_str).map(str::to_owned);
+        let Some(payload) = item.get_mut("payload").and_then(Value::as_object_mut) else {
+            continue;
+        };
+        match kind.as_deref() {
+            Some("opaqueDrawing") => {
+                payload.remove("preview");
+            }
+            Some("sdt") => {
+                if let Some(content) = payload.get_mut("content") {
+                    exclude_inline_opaque_previews(content);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 fn canonical_table<T: ReadTxn>(map: &MapRef, txn: &T) -> CanonicalItem {
@@ -201,18 +244,49 @@ fn exclude_cell_story_ids(rows: &mut Value) {
 /// sorted `[start, end)` UTF-16 story-unit intervals. Ordinals come from
 /// comparing covered story units lexicographically, never from comment keys.
 fn story_comment_groups<T: ReadTxn>(txn: &T, story_id: &str) -> Vec<Vec<(u32, u32)>> {
+    let mut groups: Vec<(Vec<u32>, Vec<(u32, u32)>)> = story_comment_anchors(txn, story_id)
+        .into_values()
+        .filter_map(|anchors| {
+            let intervals: Vec<(u32, u32)> = anchors
+                .into_iter()
+                .filter(|(start, end)| start < end)
+                .collect();
+            if intervals.is_empty() {
+                return None;
+            }
+            let intervals = merge_intervals(intervals);
+            let covered = intervals
+                .iter()
+                .flat_map(|&(start, end)| start..end)
+                .collect();
+            Some((covered, intervals))
+        })
+        .collect();
+    // Lexicographic covered-unit order; ties (identical coverage) are interchangeable
+    // in the projection, so any stable outcome is deterministic.
+    groups.sort_by(|left, right| left.0.cmp(&right.0));
+    groups.into_iter().map(|(_, intervals)| intervals).collect()
+}
+
+/// Each comment anchored in `story_id`, by comment key, with the sorted
+/// `(start, end)` UTF-16 story-unit offsets its anchors there resolve to,
+/// carets included.
+pub(crate) fn story_comment_anchors<T: ReadTxn>(
+    txn: &T,
+    story_id: &str,
+) -> BTreeMap<String, Vec<(u32, u32)>> {
+    let mut comments_by_key = BTreeMap::new();
     let Some(comments) = txn.get_map(crate::COMMENTS) else {
-        return Vec::new();
+        return comments_by_key;
     };
-    let mut groups: Vec<(Vec<u32>, Vec<(u32, u32)>)> = Vec::new();
-    for (_, value) in comments.iter(txn) {
+    for (key, value) in comments.iter(txn) {
         let Out::YMap(comment) = value else {
             continue;
         };
         let Some(Out::Any(Any::Array(anchors))) = comment.get(txn, "anchors") else {
             continue;
         };
-        let mut intervals: Vec<(u32, u32)> = Vec::new();
+        let mut offsets: Vec<(u32, u32)> = Vec::new();
         for encoded in anchors.iter() {
             let Ok(anchor) = crate::decode_anchor(encoded) else {
                 continue;
@@ -220,29 +294,18 @@ fn story_comment_groups<T: ReadTxn>(txn: &T, story_id: &str) -> Vec<Vec<(u32, u3
             if anchor.story != story_id {
                 continue;
             }
-            let (Some(start), Some(end)) =
+            if let (Some(start), Some(end)) =
                 (anchor.start.get_offset(txn), anchor.end.get_offset(txn))
-            else {
-                continue;
-            };
-            if start.index < end.index {
-                intervals.push((start.index, end.index));
+            {
+                offsets.push((start.index, end.index));
             }
         }
-        if intervals.is_empty() {
-            continue;
+        if !offsets.is_empty() {
+            offsets.sort_unstable();
+            comments_by_key.insert(key.to_owned(), offsets);
         }
-        let intervals = merge_intervals(intervals);
-        let covered: Vec<u32> = intervals
-            .iter()
-            .flat_map(|&(start, end)| start..end)
-            .collect();
-        groups.push((covered, intervals));
     }
-    // Lexicographic covered-unit order; ties (identical coverage) are interchangeable
-    // in the projection, so any stable outcome is deterministic.
-    groups.sort_by(|left, right| left.0.cmp(&right.0));
-    groups.into_iter().map(|(_, intervals)| intervals).collect()
+    comments_by_key
 }
 
 /// Merges sorted-or-unsorted intervals, coalescing overlapping AND adjacent spans.
@@ -343,7 +406,10 @@ fn canonical_any_map(
 }
 
 fn canonical_any(value: &Any) -> Option<Value> {
-    let value = serde_json::to_value(value).expect("yrs Any serializes to JSON");
+    let value: Value = serde_json::to_string(value)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .expect("yrs Any serializes to JSON");
     normalize_value(&value)
 }
 
@@ -450,6 +516,104 @@ mod tests {
 
     fn direct() -> EditCtx {
         EditCtx::local("Ada", DATE)
+    }
+
+    #[test]
+    fn opaque_drawing_preview_does_not_change_stream_or_checksum() {
+        fn opaque_story(
+            shared: bool,
+            control_depth: usize,
+            xml: &str,
+            preview: Option<Value>,
+        ) -> EditingDoc {
+            let mut kind = "opaqueDrawing";
+            let mut payload = serde_json::json!({ "kind": "object", "xml": xml });
+            if let Some(preview) = preview {
+                payload
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("preview".to_owned(), preview);
+            }
+            for _ in 0..control_depth {
+                payload = serde_json::json!({
+                    "propertiesJson": "{}",
+                    "content": [{ "kind": kind, "payload": payload, "attrs": {} }]
+                });
+                kind = "sdt";
+            }
+            let doc = EditingDoc::new(44);
+            doc.create_story("body", "", "Normal", "left").unwrap();
+            if shared {
+                doc.apply_raw_ops(
+                    "body",
+                    vec![RawOp::InsertEmbed {
+                        index: 0,
+                        kind: kind.to_owned(),
+                        payload: payload
+                            .as_object()
+                            .unwrap()
+                            .iter()
+                            .map(|(key, value)| {
+                                (key.clone(), Any::from_json(&value.to_string()).unwrap())
+                            })
+                            .collect(),
+                        attrs: Attrs::new(),
+                    }],
+                    &direct(),
+                )
+                .unwrap();
+            } else {
+                payload
+                    .as_object_mut()
+                    .unwrap()
+                    .insert(KIND_KEY.to_owned(), Value::from(kind));
+                let mut txn = doc.yrs_doc().transact_mut();
+                let story = story_ref(&txn, "body").unwrap();
+                story.insert_embed(&mut txn, 0, Any::from_json(&payload.to_string()).unwrap());
+            }
+            doc
+        }
+
+        const XML: &str = r#"<w:object><o:OLEObject Type="Embed"/></w:object>"#;
+        for shared in [false, true] {
+            for control_depth in 0..=2 {
+                let original = opaque_story(shared, control_depth, XML, None);
+                let original_items = project_story(&original, "body").unwrap();
+                let original_bytes = to_canonical_bytes(&original_items);
+                let original_checksum = story_checksum(&original, "body").unwrap();
+                for preview in [
+                    serde_json::json!({
+                        "width": 96,
+                        "height": 48,
+                        "rId": "rIdImage",
+                        "src": "data:image/png;base64,AA=="
+                    }),
+                    serde_json::json!({
+                        "width": 192,
+                        "height": 96,
+                        "rId": "rIdRefreshed",
+                        "src": "data:image/png;base64,AQ=="
+                    }),
+                ] {
+                    let refreshed = opaque_story(shared, control_depth, XML, Some(preview));
+                    let refreshed_items = project_story(&refreshed, "body").unwrap();
+                    assert_eq!(original_items, refreshed_items);
+                    assert_eq!(original_bytes, to_canonical_bytes(&refreshed_items));
+                    assert_eq!(
+                        original_checksum,
+                        story_checksum(&refreshed, "body").unwrap()
+                    );
+                }
+                let changed = opaque_story(
+                    shared,
+                    control_depth,
+                    r#"<w:object><o:OLEObject Type="Link"/></w:object>"#,
+                    None,
+                );
+                assert_ne!(original_items, project_story(&changed, "body").unwrap());
+                assert_ne!(original_checksum, story_checksum(&changed, "body").unwrap());
+            }
+        }
     }
 
     #[test]

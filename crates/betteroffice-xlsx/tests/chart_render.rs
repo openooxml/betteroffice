@@ -96,7 +96,7 @@ fn refused_charts_degrade_to_placeholders_and_keep_the_sheet() {
 
     assert!(display_list.commands.iter().any(|command| matches!(
         command,
-        DrawCmd::Text { text, chart: false, .. } if text == "Quarter"
+        DrawCmd::Text { text, chart: false, .. } if &**text == "Quarter"
     )));
     assert!(display_list.grid.row_offsets.len() > 1);
     assert_eq!(
@@ -105,7 +105,7 @@ fn refused_charts_degrade_to_placeholders_and_keep_the_sheet() {
             .iter()
             .filter(|command| matches!(
                 command,
-                DrawCmd::FillRect { color, clip: Some(_), .. } if color == "#f2f2f2"
+                DrawCmd::FillRect { color, clip: Some(_), .. } if &**color == "#f2f2f2"
             ))
             .count(),
         2
@@ -118,6 +118,7 @@ fn refused_charts_degrade_to_placeholders_and_keep_the_sheet() {
             .iter()
             .filter(|command| match command {
                 DrawCmd::FillRect { clip, .. }
+                | DrawCmd::PatternFill { clip, .. }
                 | DrawCmd::Line { clip, .. }
                 | DrawCmd::Path { clip, .. } => clip.is_some(),
                 DrawCmd::Text { chart, .. } => *chart,
@@ -153,8 +154,9 @@ fn decode_rgba(bytes: &[u8]) -> Vec<[u8; 3]> {
         .unwrap();
     let mut buffer = vec![0; reader.output_buffer_size().unwrap()];
     let info = reader.next_frame(&mut buffer).unwrap();
-    buffer[..info.buffer_size()]
-        .chunks_exact(4)
+    let (pixels, _) = buffer[..info.buffer_size()].as_chunks::<4>();
+    pixels
+        .iter()
         .map(|pixel| [pixel[0], pixel[1], pixel[2]])
         .collect()
 }
@@ -295,7 +297,7 @@ fn assert_damaged_chart_is_dropped(bytes: &[u8]) {
     assert_eq!(display_list.charts.len(), 3);
     assert!(display_list.commands.iter().any(|command| matches!(
         command,
-        DrawCmd::Text { text, chart: false, .. } if text == "Quarter"
+        DrawCmd::Text { text, chart: false, .. } if &**text == "Quarter"
     )));
 }
 

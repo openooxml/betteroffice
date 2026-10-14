@@ -61,6 +61,11 @@ describe('shouldScrollCaretIntoView', () => {
   test('allows a local selection action after a remote relayout', () => {
     expect(shouldScrollCaretIntoView('remote', true)).toBe(true);
   });
+
+  test('a read-only editor follows only its selection', () => {
+    expect(shouldScrollCaretIntoView('local', false, true)).toBe(false);
+    expect(shouldScrollCaretIntoView('local', true, true)).toBe(true);
+  });
 });
 
 describe('mergeLayoutUpdateOrigin', () => {
