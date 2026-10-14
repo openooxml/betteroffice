@@ -1842,6 +1842,7 @@ impl RunInheritance {
         attrs
     }
 
+    #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
     pub(crate) fn table_run_attrs(
         &mut self,
         paragraph_style: Option<&str>,
