@@ -45,6 +45,13 @@ test('echo placement declines characters and pairs the glyph set cannot place', 
   expect(placeEchoGlyphs(indexEchoGlyphSet(glyphSet({ glyphIds: [65, 86, 0, 98, 120, 32] })), 'a', '', 0)).toBeUndefined();
 });
 
+test('echo placement declines kerning that moves a later glyph outside the original ink band', () => {
+  const glyphs = indexEchoGlyphSet(glyphSet({ horizontal: 0.01, advances: [1000, 1000, 1000, 1000, 1000, 1000],
+    kerning: [[3, 4, -3000]], unsafePairs: [] }));
+  expect(placeEchoGlyphs(glyphs, 'ab', '', 96)?.xs).toEqual([96, 106]);
+  expect(placeEchoGlyphs(glyphs, 'abx', '', 96)).toBeUndefined();
+});
+
 test('f32 widths widen to the shortest decimal that names them, as layout widens them', () => {
   expect(widenF32(Math.fround(0.1))).toBe(0.1);
   expect(widenF32(Math.fround(7.415365))).toBe(7.415365);

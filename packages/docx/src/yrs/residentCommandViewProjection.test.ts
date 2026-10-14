@@ -348,6 +348,27 @@ test('echo declines fallback letters when a digits-only primary will resolve fut
   } finally { engine.destroy(); }
 }, 20000);
 
+test('echo projection allocates no encoders or byte arrays per character', () => {
+  const source = glyphLine({ lines: ['a'.repeat(40)], caretLine: 0 });
+  const Encoder = globalThis.TextEncoder;
+  const encode = Encoder.prototype.encode;
+  let constructors = 0;
+  let characters = 0;
+  globalThis.TextEncoder = class extends Encoder { constructor() { super(); constructors += 1; } };
+  Encoder.prototype.encode = function (text = '') {
+    if ([...text].length === 1) characters += 1;
+    return encode.call(this, text);
+  };
+  try {
+    expect(projectCommandEchoContext(source)?.text).toBe('a'.repeat(40));
+  } finally {
+    Encoder.prototype.encode = encode;
+    globalThis.TextEncoder = Encoder;
+  }
+  expect(constructors).toBe(0);
+  expect(characters).toBe(0);
+});
+
 test('echo admits ordinary letters when contextual lookups require combining marks outside the alphabet', async () => {
   const { readFileSync } = await import('node:fs');
   const { preloadEditWasm } = await import('./wasm/index');

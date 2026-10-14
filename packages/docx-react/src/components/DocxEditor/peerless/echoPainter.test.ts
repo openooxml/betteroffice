@@ -349,6 +349,63 @@ test('d2c_viewport_eviction_bounds_bitmaps_and_preserves_active_echo_on_refusal'
   expect(resources.map((value) => closes.get(value))).toEqual(resources.map(() => 1));
 });
 
+test('echo reuses the preview placement and the frame baseline for each key', () => {
+  const { painter, texts } = setup();
+  const get = Map.prototype.get;
+  let characters = 0;
+  Map.prototype.get = function (key) {
+    if (typeof key === 'string' && key.length === 1) characters += 1;
+    return get.call(this, key);
+  };
+  try {
+    const value = painter.preview({ kind: 'insertText', payload: { text: 'x' } });
+    expect(value).toBeDefined();
+    painter.paint([entry(1, value!)]);
+    expect(texts.at(-1)).toBe('abx');
+  } finally { Map.prototype.get = get; }
+  expect(characters).toBe(3);
+});
+
+test('echo submits one glyph run for the whole draft line', () => {
+  const { painter, canvas, texts } = setup();
+  let styles = 0;
+  Object.defineProperty(canvas.getContext('2d')!, 'fillStyle', { configurable: true, set() { styles += 1; } });
+  const value = painter.preview({ kind: 'insertText', payload: { text: 'x' } });
+  expect(value).toBeDefined();
+  painter.paint([entry(1, value!)]);
+  expect(texts.at(-1)).toBe('abx');
+  expect(styles).toBe(1);
+});
+
+test('echo key paints restore the damage band once and drop restores only that band', () => {
+  const { painter, canvas, bitmap, background, draws } = setup();
+  canvas.width = 200;
+  canvas.height = 100;
+  Object.assign(bitmap, { width: 200, height: 100 });
+  const first = entry(1, painter.preview({ kind: 'insertText', payload: { text: 'c' } })!);
+  painter.paint([first]);
+  const second = entry(2, painter.preview({ kind: 'insertText', payload: { text: 'd' } })!);
+  painter.paint([first, second]);
+  expect(draws.filter(([image]) => image === background)).toHaveLength(2);
+  expect(draws.filter(([image]) => image === bitmap)).toHaveLength(0);
+  painter.drop([first, second], 'refused');
+  expect(draws.at(-1)).toEqual([bitmap, 0, 0, 100, 20, 0, 0, 100, 20]);
+});
+
+test('echo painting allocates no encoders for pending input', () => {
+  const { painter, texts } = setup();
+  const Encoder = globalThis.TextEncoder;
+  let constructors = 0;
+  globalThis.TextEncoder = class extends Encoder { constructor() { super(); constructors += 1; } };
+  try {
+    const value = painter.preview({ kind: 'insertText', payload: { text: 'x' } });
+    expect(value).toBeDefined();
+    painter.paint([entry(1, value!)]);
+    expect(texts.at(-1)).toBe('abx');
+  } finally { globalThis.TextEncoder = Encoder; }
+  expect(constructors).toBe(0);
+});
+
 function scaledFrame(frame: DocxCommandFrame, echoContext: DocxCommandEchoContext | undefined) {
   const raster = { width: 1000, height: 1250, close() {} } as ImageBitmap;
   const crop = { width: 125, height: 27, close() {} } as ImageBitmap;
