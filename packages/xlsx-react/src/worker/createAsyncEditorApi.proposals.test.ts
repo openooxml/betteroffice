@@ -73,6 +73,24 @@ const proposal: Proposal = { id: 'proposal:1', agentId: 'agent', note: 'totals',
   cells: [{ sheet: 0, row: 1, col: 0, a1: 'A2', oldText: '', newText: '3' }] };
 
 describe('async worker proposals', () => {
+  test('orders a proposal before later typing while an earlier receipt is pending', async () => {
+    const h = harness();
+    const first = h.coordinator.submit({ ...h.draft, value: 'A' });
+    const proposed = h.waitFor('propose');
+    const result = h.api.proposeChanges!({ agentId: 'agent',
+      edits: [{ sheet: 0, row: 0, col: 0, input: 'agent edit' }] });
+    const later = h.coordinator.submit({ ...h.draft, value: 'B' });
+    expect(h.sent).toHaveLength(1);
+    expect(later.seq).toBeNull();
+    h.ack(h.sent[0]!);
+    await proposed;
+    for (const command of h.sent.slice(1)) h.ack(command, command.kind === 'propose' ? proposal : undefined);
+    await Promise.all([first.result, result, later.result]);
+    expect(h.sent.map((command) => command.kind === 'editCell' ? command.payload.args[3] : command.kind))
+      .toEqual(['A', 'propose', 'B']);
+    expect(h.rawCalls).toEqual([]);
+  });
+
   test('drains pending composition and its edit before proposing through the session command layer', async () => {
     const h = harness();
     const composition = deferred<boolean>();

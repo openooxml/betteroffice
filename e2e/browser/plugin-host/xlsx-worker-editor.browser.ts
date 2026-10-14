@@ -36,10 +36,30 @@ test('default worker API stages proposals after typing and supports accepting an
     return result.content.sheets[0]!.cells.map((cell) => cell.displayText);
   });
   expect(await cellValues()).toEqual(['typed before proposal', '1']);
+  expect(await page.evaluate(() => window.__xlsxWorkerEditor.peerless!.editor.commands.execute('proposalsPanel', { open: true })))
+    .toMatchObject({ ok: true });
+  const panel = page.getByTestId('xlsx-proposals-panel');
+  const review = panel.getByTestId('xlsx-proposal');
+  const paintedTexts = () => page.evaluate(() => window.__xlsxWorkerEditor.paintedTexts());
+  await expect(panel).toBeVisible();
+  await expect(review).toHaveCount(1);
+  await expect(review).toHaveAttribute('data-proposal-id', proposed.proposal.id);
+  await expect(review).toContainText('browser');
+  await expect(review).toContainText('accept this edit');
+  await expect(review.getByTestId('xlsx-proposal-cell')).toHaveText('A1: typed before proposal → accepted');
+  await expect(review.getByTestId('xlsx-proposal-accept')).toBeVisible();
+  await expect(review.getByTestId('xlsx-proposal-reject')).toBeVisible();
+  await expect.poll(paintedTexts).toContain('typed before proposal');
+  await expect.poll(paintedTexts).toContain('accepted');
   expect(await page.evaluate((proposalId) => window.__xlsxWorkerEditor.peerless!.editor.commands.execute('proposalAccept', { proposalId }),
     proposed.proposal.id)).toMatchObject({ ok: true });
   await expect.poll(cellValues).toEqual(['accepted', '1']);
   await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.peerless!.editor.commands.getState('proposalsPanel').value)).toBe(0);
+  await expect(panel).toBeVisible();
+  await expect(review).toHaveCount(0);
+  await expect(panel).toHaveText('No pending proposals');
+  await expect.poll(paintedTexts).toContain('accepted');
+  await expect.poll(paintedTexts).not.toContain('typed before proposal');
   const rejected = await page.evaluate(() => window.__xlsxWorkerEditor.peerless!.editor.proposeChanges!({
     agentId: 'browser', edits: [{ sheet: 0, row: 0, col: 1, input: '99' }],
   }));
@@ -49,10 +69,23 @@ test('default worker API stages proposals after typing and supports accepting an
   expect(rejected.proposal.note).toBeNull();
   await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.peerless!.editor.commands.getState('proposalsPanel').value)).toBe(1);
   expect(await cellValues()).toEqual(['accepted', '1']);
+  await expect(panel).toBeVisible();
+  await expect(review).toHaveCount(1);
+  await expect(review).toHaveAttribute('data-proposal-id', rejected.proposal.id);
+  await expect(review).toContainText('browser');
+  await expect(review.getByTestId('xlsx-proposal-cell')).toHaveText('B1: 1 → 99');
+  await expect.poll(paintedTexts).toContain('accepted');
+  await expect.poll(paintedTexts).toContain('99');
   expect(await page.evaluate((proposalId) => window.__xlsxWorkerEditor.peerless!.editor.commands.execute('proposalReject', { proposalId }),
     rejected.proposal.id)).toMatchObject({ ok: true });
   await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.peerless!.editor.commands.getState('proposalsPanel').value)).toBe(0);
   expect(await cellValues()).toEqual(['accepted', '1']);
+  await expect(panel).toBeVisible();
+  await expect(review).toHaveCount(0);
+  await expect(panel).toHaveText('No pending proposals');
+  await expect.poll(paintedTexts).toContain('accepted');
+  await expect.poll(paintedTexts).toContain('1');
+  await expect.poll(paintedTexts).not.toContain('99');
   expect(await page.evaluate(() => window.__xlsxWorkerEditor.mainThreadEngines())).toBe(0);
   expect(await page.evaluate(() => window.__xlsxWorkerEditor.errors)).toEqual([]);
 });
