@@ -9,7 +9,7 @@ const ROOTS = [
   `<w:document xmlns:w='${W}' xmlns:mc='${MC}' xmlns:x='urn:source' x:token='a&amp;b' >`,
 ];
 
-describe.each(SAVE_PATHS)('%s paragraph insertion patches the source root', (path) => {
+describe.each([...SAVE_PATHS])('%s paragraph insertion patches the source root', (path) => {
   it.each(ROOTS)('preserves every other root byte and declaration order: %s', async (root) => {
     const xml = await save(path, structuralFixture(PROLOG + root), insertStructuralParagraph);
     expect(xml.startsWith(PROLOG)).toBe(true);

@@ -3,7 +3,7 @@ import { SAVE_PATHS, SOURCE_PARAGRAPHS, SOURCE_ROWS, TABLE_PREFIX, W, W14, setup
 
 const save = setupStructuralSaves();
 
-describe.each(SAVE_PATHS)('%s row deletion preserves source bytes', (path) => {
+describe.each([...SAVE_PATHS])('%s row deletion preserves source bytes', (path) => {
   describe.each(['plain', 'w14'])('with a %s root', (binding) => {
     const root = `<w:document xmlns:w="${W}"${binding === 'w14' ? ` xmlns:w14="${W14}"` : ''}>`;
     const source = structuralFixture(root);
