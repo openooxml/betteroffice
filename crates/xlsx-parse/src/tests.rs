@@ -830,6 +830,21 @@ fn negative_column_width_narrows_to_zero_and_saves_verbatim() {
     assert_eq!(part_bytes(&saved, "xl/worksheets/sheet1.xml"), source);
 }
 
+/// Excel opens a `<col>` wider than its 255-character limit at that limit, so
+/// the model holds 255 while the authored attribute survives a save untouched.
+#[test]
+fn oversized_column_width_caps_at_excel_limit_and_saves_verbatim() {
+    let body = r#"<cols><col min="2" max="2" width="300" customWidth="1"/><col min="3" max="3" width="255" customWidth="1"/></cols><sheetData/>"#;
+    let parts = package(body, &[], false);
+    let source = parts[2].1.clone();
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let sheet = &parsed.workbook.sheets[0];
+    assert_eq!(sheet.col_widths.get(&1), Some(&255.0));
+    assert_eq!(sheet.col_widths.get(&2), Some(&255.0));
+    let saved = serialize_workbook_with_package(&parsed.workbook, &parsed.package).unwrap();
+    assert_eq!(part_bytes(&saved, "xl/worksheets/sheet1.xml"), source);
+}
+
 #[test]
 fn a_column_style_run_survives_without_a_width() {
     let body = r#"
