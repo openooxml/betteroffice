@@ -361,7 +361,7 @@ def run_task(task, cli, model, results, arm='betteroffice', python=None):
             message = violation + ('; ' + message if not passed else '')
             passed = False
         calls = tool_calls(log, arm)
-        if calls == 0:
+        if not calls:
             message = 'agent made no tool calls' + ('; ' + message if not passed else '')
             passed = False
         output = workspace / task['output']
