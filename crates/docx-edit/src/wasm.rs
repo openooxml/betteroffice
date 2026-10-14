@@ -1225,6 +1225,53 @@ impl RetainedLayoutMeta {
     }
 }
 
+/// What runs inherit under one package's styles; see [`EditSession::run_inheritance`].
+#[wasm_bindgen]
+pub struct RunInheritance {
+    inner: crate::seed::RunInheritance,
+}
+
+#[wasm_bindgen]
+impl RunInheritance {
+    /// The attributes, as a JSON object, that seeding merges into the marks of a run of
+    /// `run_style` in a paragraph of `paragraph_style` before the run's direct formatting.
+    pub fn attributes(
+        &mut self,
+        paragraph_style: Option<String>,
+        run_style: Option<String>,
+        table_run_json: Option<String>,
+    ) -> Result<String, JsValue> {
+        let attrs = if let Some(table_run_json) = table_run_json {
+            self.inner.table_run_attrs(
+                paragraph_style.as_deref(),
+                run_style.as_deref(),
+                serde_json::from_str(&table_run_json).map_err(js_err)?,
+            )
+        } else {
+            self.inner
+                .run_attrs(paragraph_style.as_deref(), run_style.as_deref())
+        };
+        serde_json::to_string(&attrs).map_err(js_err)
+    }
+
+    pub fn paragraph_formatting(
+        &mut self,
+        paragraph_style: Option<String>,
+        table_formatting_json: &str,
+    ) -> Result<String, JsValue> {
+        let table_formatting = serde_json::from_str(table_formatting_json).map_err(js_err)?;
+        let formatting = self
+            .inner
+            .paragraph_formatting(paragraph_style.as_deref(), table_formatting);
+        serde_json::to_string(&formatting).map_err(js_err)
+    }
+
+    pub fn table_attributes(&self, table_json: &str) -> Result<String, JsValue> {
+        let table = serde_json::from_str(table_json).map_err(js_err)?;
+        serde_json::to_string(&self.inner.table_attrs(&table)).map_err(js_err)
+    }
+}
+
 /// One yrs replica of the DOCX editing model, held for a JS host.
 ///
 /// Owns the [`EditingDoc`] plus the (single) JS update observer. The JS facade
@@ -5451,6 +5498,14 @@ impl EditSession {
     pub fn written_paragraph_ids(&self, bytes: &[u8]) -> Result<String, JsValue> {
         let ids = docx_parse::paragraph_identity::paragraph_ids_by_part(bytes).map_err(js_err)?;
         serde_json::to_string(&ids).map_err(js_err)
+    }
+
+    /// Resolves what runs inherit under `styles_json`, a package's style definitions or `null`.
+    pub fn run_inheritance(&self, styles_json: &str) -> Result<RunInheritance, JsValue> {
+        let styles: Value = serde_json::from_str(styles_json).map_err(js_err)?;
+        Ok(RunInheritance {
+            inner: crate::seed::RunInheritance::new(Some(&styles)),
+        })
     }
 }
 

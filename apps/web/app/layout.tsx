@@ -43,7 +43,6 @@ export const metadata: Metadata = {
     "headless document processing",
     "Rust",
     "WebAssembly",
-    "eigenpal alternative",
   ],
   openGraph: {
     type: "website",
@@ -172,16 +171,6 @@ export default function RootLayout({
                       className={footLink}
                     >
                       OpenOOXML
-                    </a>
-                  </li>
-                  <li>
-                    <a
-                      href={`${DOCS}/docs/javascript#migrate-from-eigenpal`}
-                      target="_blank"
-                      rel="noopener"
-                      className={footLink}
-                    >
-                      eigenpal migration
                     </a>
                   </li>
                 </ul>

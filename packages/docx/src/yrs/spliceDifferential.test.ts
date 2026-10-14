@@ -172,6 +172,34 @@ function paragraphSources(kept: string[], from: string[]): (number | undefined)[
   return sourceOf;
 }
 
+const W14 = 'http://schemas.microsoft.com/office/word/2010/wordml';
+const MC = 'http://schemas.openxmlformats.org/markup-compatibility/2006';
+const ROOT_TAG = /<[A-Za-z_][^\s/>]*(?:[^>"']|"[^"]*"|'[^']*')*>/;
+
+/**
+ * `saved` without the declarations a splice adds to a source root that lacks them so a new
+ * paragraph can carry w14:paraId (xmlns:w14, xmlns:mc, mc:Ignorable or its w14 token). Any
+ * other root change survives.
+ */
+function withoutRootPatch(saved: string, source: string): string {
+  const before = ROOT_TAG.exec(source)?.[0];
+  const after = ROOT_TAG.exec(saved);
+  if (!before || !after) return saved;
+  const declares = (name: string) => new RegExp(`\\s${name}=`).test(before);
+  let root = after[0];
+  if (!declares('xmlns:w14')) {
+    root = root.replace(` xmlns:w14="${W14}"`, '');
+    if (!declares('xmlns:mc')) root = root.replace(` xmlns:mc="${MC}"`, '');
+    const ignorable = /\smc:Ignorable="([^"]*)"/.exec(before)?.[1];
+    if (ignorable === undefined) root = root.replace(' mc:Ignorable="w14"', '');
+    else {
+      const token = `${ignorable}${ignorable ? ' ' : ''}w14`;
+      root = root.replace(`mc:Ignorable="${token}"`, `mc:Ignorable="${ignorable}"`);
+    }
+  }
+  return saved.slice(0, after.index) + root + saved.slice(after.index + after[0].length);
+}
+
 /** The offsets in `gaps` joined at which the paragraphs between them sit. */
 function cuts(gaps: string[]): number[] {
   let at = 0;
@@ -359,6 +387,32 @@ afterEach(() => {
   for (const session of sessions.splice(0)) session.destroy();
 });
 
+describe('the splice root patch allowance', () => {
+  const W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+  const ids = `xmlns:w14="${W14}"`;
+  const plain = `<?xml version="1.0"?>\n<w:document ${W} w:conformance="strict"><w:body>`;
+  const marked = `<?xml version="1.0"?>\n<w:document ${W} xmlns:mc="${MC}" mc:Ignorable="w15"><w:body>`;
+
+  it('strips only the paragraph id declarations the source root lacks', () => {
+    const patched = plain.replace('strict">', `strict" ${ids} xmlns:mc="${MC}" mc:Ignorable="w14">`);
+    expect(withoutRootPatch(patched, plain)).toBe(plain);
+    expect(withoutRootPatch(marked.replace('"w15">', `"w15 w14" ${ids}>`), marked)).toBe(marked);
+  });
+
+  it('keeps every other root change visible', () => {
+    const patched = ` ${ids} xmlns:mc="${MC}" mc:Ignorable="w14">`;
+    for (const changed of [
+      plain.replace('strict">', `transitional"${patched}`),
+      plain.replace('strict">', `strict" xmlns:w15="urn:other"${patched}`),
+      plain.replace('strict">', `strict" ${ids} xmlns:mc="${MC}" mc:Ignorable="w14 w15">`),
+      plain.replace('<w:body>', '<w:body w:extra="1">').replace('strict">', `strict"${patched}`),
+    ]) expect(withoutRootPatch(changed, plain)).not.toBe(plain);
+    const declared = plain.replace('strict">', `strict" ${ids}>`);
+    expect(withoutRootPatch(declared.replace(ids, `${ids} xmlns:mc="${MC}"`), declared)).not.toBe(declared);
+    expect(withoutRootPatch(marked.replace('"w15">', `"w14 w15" ${ids}>`), marked)).not.toBe(marked);
+  });
+});
+
 describe('a spliced session save', () => {
   for (const file of documents()) {
     const name = relative(process.env.SPLICE_DIFF_DOCS ?? ROOT, file);
@@ -421,13 +475,18 @@ describe('a spliced session save', () => {
               );
               continue;
             }
+            const declaresIds = /\sxmlns:w14=/.test(ROOT_TAG.exec(xml)?.[0] ?? '');
+            if (/[\s<]w14:/.test(xml) && !declaresIds) {
+              fail(`${part} uses w14 without declaring it on its root`);
+            }
+            const keptGaps = [withoutRootPatch(kept.gaps[0]!, from.gaps[0] ?? ''), ...kept.gaps.slice(1)];
             const sourceOf = paragraphSources(kept.spans, from.spans);
             const keptOf = new Array<number | undefined>(from.spans.length).fill(undefined);
             sourceOf.forEach((source, index) => {
               if (source !== undefined) keptOf[source] = index;
             });
             if (kept.spans.length === from.spans.length) {
-              kept.gaps.forEach((gap, index) => {
+              keptGaps.forEach((gap, index) => {
                 if (gap !== from.gaps[index]) fail(`${part} XML before paragraph ${index} changed`);
               });
             } else {
@@ -439,7 +498,7 @@ describe('a spliced session save', () => {
               });
               anchors.push([kept.spans.length, from.spans.length]);
               for (const [kb, jb] of anchors) {
-                const saved = kept.gaps.slice(ka + 1, kb + 1);
+                const saved = keptGaps.slice(ka + 1, kb + 1);
                 const source = from.gaps.slice(ja + 1, jb + 1);
                 if (saved.length === source.length) {
                   saved.forEach((gap, offset) => {
