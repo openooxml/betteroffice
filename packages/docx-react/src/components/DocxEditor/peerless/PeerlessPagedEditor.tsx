@@ -122,7 +122,8 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
     setComposition((current) => state && current && state.id !== current.id && state.phase !== 'active' ? current : state);
   }, []);
   const input = useRef<HTMLTextAreaElement>(null);
-  const click = useRef<{ time: number; x: number; y: number; pageId: string; count: number } | null>(null);
+  const click = useRef<{ time: number; x: number; y: number; pageId: string; count: number; press: number } | null>(null);
+  const presses = useRef(0);
   const geometry = snapshot.geometry;
   const pages = geometry?.pages ?? emptyPages;
   const layout = useMemo(() => pageLayout(pages), [pages]);
@@ -130,6 +131,13 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
   const { height } = layout;
   const column = useRef<HTMLDivElement>(null);
   const measuredWindow = useRef<{ start: number; end: number } | null>(null);
+  useLayoutEffect(() => {
+    const owner = column.current?.ownerDocument;
+    if (!owner) return;
+    const press = () => { presses.current += 1; };
+    owner.addEventListener('pointerdown', press, true);
+    return () => owner.removeEventListener('pointerdown', press, true);
+  }, []);
   useLayoutEffect(() => {
     const host = column.current;
     if (!host || !pages.length) return;
@@ -193,9 +201,9 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
     let clickCount = 1;
     if (!drag) {
       const previous = click.current;
-      clickCount = previous && event.timeStamp - previous.time < 500 && previous.pageId === page.page.pageId &&
+      clickCount = previous && previous.press === presses.current - 1 && event.timeStamp - previous.time < 500 && previous.pageId === page.page.pageId &&
         Math.hypot(event.clientX - previous.x, event.clientY - previous.y) < 5 ? previous.count % 3 + 1 : 1;
-      click.current = { time: event.timeStamp, x: event.clientX, y: event.clientY, pageId: page.page.pageId, count: clickCount };
+      click.current = { time: event.timeStamp, x: event.clientX, y: event.clientY, pageId: page.page.pageId, count: clickCount, press: presses.current };
     } else click.current = null;
     const intent = captureSelectionIntent({
       kind: drag ? 'drag' : 'point',
