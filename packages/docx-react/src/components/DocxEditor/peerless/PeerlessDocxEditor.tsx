@@ -529,6 +529,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     try {
       let next = retained.current;
       for (const delta of decodeCommandFrameDeltas(frame)) next = applyFrameDelta(next, delta);
+      if (!next) return undefined;
       const caret = residentCaretSnapshotForFrame(frame.payload.caret, next);
       if (!caret) return undefined;
       const pages = commandPageGeometry(next, frame.payload);
