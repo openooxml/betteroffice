@@ -16,6 +16,7 @@ use super::paragraph::is_safe_attribute_name;
 use super::raw::validate_raw_subtree;
 use super::sdt::serialize_block_content;
 use super::section::serialize_section_properties;
+use super::splice::{required_prefixes, root_tag, root_with_prefixes};
 use super::watermark::serialize_watermark;
 use super::xml_writer::{escape_xml, js_number};
 
@@ -191,9 +192,23 @@ pub fn serialize_document_part(
     let body_xml = serialize_document_body(body, context)?;
     let custom = custom_bindings_attributes(&body.custom_root_bindings);
     let ignorable = story_ignorable(&body.custom_root_bindings);
-    Ok(format!(
-        "{XML_DECLARATION}<w:document {DOCUMENT_NAMESPACES}{custom}{ignorable}><w:body>{body_xml}</w:body></w:document>"
-    ))
+    let root = format!("<w:document {DOCUMENT_NAMESPACES}{custom}{ignorable}>");
+    let body_xml = format!("<w:body>{body_xml}</w:body>");
+    let Some(source) = context.document_root() else {
+        return Ok(format!("{XML_DECLARATION}{root}{body_xml}</w:document>"));
+    };
+    let prefixes = required_prefixes(&body_xml)
+        .ok_or_else(|| ParseError::Canonical("invalid document body XML".to_owned()))?;
+    let rooted = root_with_prefixes(source, &root, &prefixes)
+        .ok_or_else(|| ParseError::Canonical("invalid document root namespaces".to_owned()))?;
+    let tag = root_tag(&rooted)
+        .ok_or_else(|| ParseError::Canonical("invalid document root XML".to_owned()))?;
+    let opened = if tag.empty {
+        format!("{}>", &rooted[..tag.range.end - 2])
+    } else {
+        rooted.to_string()
+    };
+    Ok(format!("{opened}{body_xml}</{}>", tag.name))
 }
 
 pub fn serialize_header_footer_part(

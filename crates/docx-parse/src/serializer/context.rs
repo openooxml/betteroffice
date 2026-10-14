@@ -22,6 +22,7 @@ pub struct SerializerContext {
     pub(crate) in_control: bool,
     pub(crate) in_revision: bool,
     splice: Option<SpliceRecorder>,
+    document_root: Option<String>,
 }
 
 /// The XML written for each model paragraph a spliced part addresses by `sourceOrdinal`.
@@ -58,7 +59,18 @@ impl SerializerContext {
             in_control: false,
             in_revision: false,
             splice: None,
+            document_root: None,
         })
+    }
+
+    pub(crate) fn set_document_source(&mut self, source: Option<&str>) {
+        self.document_root = source.and_then(|xml| {
+            super::splice::root_tag(xml).map(|root| xml[..root.range.end].to_owned())
+        });
+    }
+
+    pub(crate) fn document_root(&self) -> Option<&str> {
+        self.document_root.as_deref()
     }
 
     /// Paragraph IDs the output already uses, which [`Self::allocate_paragraph_id`] avoids.
