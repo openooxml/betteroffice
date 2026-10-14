@@ -1,7 +1,7 @@
 //! fixtures are raw xml parts written from the ecma-376 spec. the parser
 //! matches local element names, so fixtures omit namespace declarations.
 
-use xlsx_model::styles::{BorderStyle, Color, Fill, FormatCode, HAlign, VAlign};
+use xlsx_model::styles::{BorderStyle, Color, Fill, FormatCode, HAlign, PatternType, VAlign};
 use xlsx_model::{
     Cell, CellRange, CellRef, CellValue, ColStyle, DateSystem, DefinedName, ErrorValue, FreezePane,
     Hyperlink, SheetId, Workbook,
@@ -34,6 +34,224 @@ pub(super) fn parse_workbook_with_package(
 
 fn parse_workbook(parts: &[(String, impl AsRef<[u8]>)]) -> Result<Workbook, ParseError> {
     crate::parse_workbook(&owned_parts(parts))
+}
+
+#[test]
+fn row_style_defaults_are_sparse_and_require_custom_format() {
+    let parts = package(
+        r#"<cols><col min="1" max="16384" style="2"/></cols><sheetData><row r="5" s="1" customFormat="1"><c r="A5"/></row><row r="6" s="3" customFormat="0"/><row r="7" s="4"/><row r="8" s="5" customFormat="true"/></sheetData>"#,
+        &[],
+        false,
+    );
+    let workbook = parse_workbook(&parts).unwrap();
+    let sheet = &workbook.sheets[0];
+    assert_eq!(sheet.row_styles, [(4, 1), (7, 5)].into_iter().collect());
+    assert_eq!(sheet.effective_style(CellRef::new(4, 0)), Some(0));
+    assert_eq!(sheet.effective_style(CellRef::new(4, 1)), Some(1));
+    assert_eq!(sheet.effective_style(CellRef::new(5, 1)), Some(2));
+    assert_eq!(sheet.iter_cells().count(), 1);
+}
+
+#[test]
+fn a_worksheet_past_the_row_style_cap_is_refused() {
+    let rows = r#"<row r="5" s="1" customFormat="1"/>"#.repeat(crate::MAX_ROW_STYLES + 1);
+    let parts = package(&format!("<sheetData>{rows}</sheetData>"), &[], false);
+    assert!(matches!(
+        parse_workbook(&parts),
+        Err(ParseError::TooManyRowStyles)
+    ));
+}
+
+#[test]
+fn malformed_custom_format_is_refused_during_parse() {
+    let parts = package(
+        r#"<sheetData><row r="1" customFormat="&missing;"><c r="A1"><v>1</v></c></row></sheetData>"#,
+        &[],
+        false,
+    );
+    assert!(matches!(parse_workbook(&parts), Err(ParseError::Xml(_))));
+}
+
+#[test]
+fn empty_cells_without_an_inherited_style_stay_sparse() {
+    let parts = package(
+        r#"<sheetData><row r="1"><c r="A1"/><c r="B1"><v>1</v></c></row></sheetData>"#,
+        &[],
+        false,
+    );
+    assert_eq!(
+        parse_workbook(&parts).unwrap().sheets[0]
+            .iter_cells()
+            .count(),
+        1
+    );
+}
+
+/// `(min, max, element)` for each `<col>` in document order.
+fn col_elements(xml: &str) -> Vec<(u32, u32, String)> {
+    let number = |element: &str, name: &str| -> u32 {
+        let start = element.find(&format!(r#" {name}=""#)).unwrap() + name.len() + 3;
+        element[start..].split('"').next().unwrap().parse().unwrap()
+    };
+    xml.match_indices("<col ")
+        .map(|(start, _)| {
+            let element = &xml[start..start + xml[start..].find('>').unwrap() + 1];
+            (
+                number(element, "min"),
+                number(element, "max"),
+                element.to_owned(),
+            )
+        })
+        .collect()
+}
+
+fn assert_ascending_and_disjoint(cols: &[(u32, u32, String)]) {
+    for pair in cols.windows(2) {
+        assert!(pair[0].1 < pair[1].0, "{} then {}", pair[0].2, pair[1].2);
+    }
+}
+
+#[test]
+fn regenerated_cols_resolve_overlapping_style_runs_in_column_order() {
+    let body = r#"<cols><col min="1" max="16384" style="7"/><col min="2" max="3" width="12.5" style="9" customWidth="1"/></cols><sheetData/>"#;
+    let wb = parse_workbook(&package(body, &[], false)).unwrap();
+    let saved = serialize_workbook(&wb).unwrap();
+    let xml = String::from_utf8(part_bytes(&saved, "xl/worksheets/sheet1.xml")).unwrap();
+    let cols = col_elements(&xml);
+    assert_ascending_and_disjoint(&cols);
+    assert_eq!(
+        cols.iter()
+            .map(|(min, max, _)| (*min, *max))
+            .collect::<Vec<_>>(),
+        [(1, 1), (2, 2), (3, 3), (4, 16384)]
+    );
+    let reopened = parse_workbook(&saved).unwrap();
+    let sheet = &reopened.sheets[0];
+    for (col, style) in [(0, 7), (1, 9), (2, 9), (3, 7), (16383, 7)] {
+        assert_eq!(sheet.col_style(col), Some(style), "column {col}");
+    }
+    assert_eq!(sheet.col_widths, wb.sheets[0].col_widths);
+}
+
+#[test]
+fn a_whole_sheet_column_style_saves_as_one_col() {
+    let body = r#"<cols><col min="1" max="16384" style="3"/></cols><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>"#;
+    let parts = package(body, &[], false);
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let mut wb = parsed.workbook.clone();
+    wb.sheets[0].set_cell(
+        CellRef::parse_a1("A1").unwrap(),
+        Cell {
+            value: CellValue::Number { value: 2.0 },
+            ..Cell::default()
+        },
+    );
+    for saved in [
+        serialize_workbook(&wb).unwrap(),
+        serialize_workbook_with_package(&wb, &parsed.package).unwrap(),
+    ] {
+        let xml = String::from_utf8(part_bytes(&saved, "xl/worksheets/sheet1.xml")).unwrap();
+        let cols = col_elements(&xml);
+        assert_eq!(cols.len(), 1, "{xml}");
+        assert_eq!((cols[0].0, cols[0].1), (1, 16384));
+    }
+}
+
+#[test]
+fn patched_cols_coalesce_generated_runs_between_source_columns() {
+    let body = concat!(
+        r#"<cols><col min="1" max="1" width="12" customWidth="1"/>"#,
+        r#"<col min="6" max="6" width="9" style="1" customWidth="1"/></cols>"#,
+        r#"<sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>"#,
+    );
+    let parts = package(body, &[], false);
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let mut wb = parsed.workbook.clone();
+    let sheet = &mut wb.sheets[0];
+    sheet.col_styles = vec![ColStyle {
+        first: 1,
+        last: 16383,
+        xf: 1,
+    }];
+    sheet.col_widths.insert(3, 20.0);
+    sheet.set_cell(
+        CellRef::parse_a1("A1").unwrap(),
+        Cell {
+            value: CellValue::Number { value: 2.0 },
+            ..Cell::default()
+        },
+    );
+    let saved = serialize_workbook_with_package(&wb, &parsed.package).unwrap();
+    let xml = String::from_utf8(part_bytes(&saved, "xl/worksheets/sheet1.xml")).unwrap();
+    let cols = col_elements(&xml);
+    assert_ascending_and_disjoint(&cols);
+    assert_eq!(
+        cols.iter()
+            .map(|(min, max, _)| (*min, *max))
+            .collect::<Vec<_>>(),
+        [(1, 1), (2, 3), (4, 4), (5, 5), (6, 6), (7, 16384)]
+    );
+    assert_eq!(
+        cols[0].2,
+        r#"<col min="1" max="1" width="12" customWidth="1"/>"#
+    );
+    assert_eq!(
+        cols[4].2,
+        r#"<col min="6" max="6" width="9" style="1" customWidth="1"/>"#
+    );
+    let reopened = parse_workbook(&saved).unwrap();
+    let sheet = &reopened.sheets[0];
+    assert_eq!(sheet.col_style(0), None);
+    for col in [1, 2, 3, 4, 5, 6, 16383] {
+        assert_eq!(sheet.col_style(col), Some(1), "column {col}");
+    }
+    assert_eq!(sheet.col_widths, wb.sheets[0].col_widths);
+}
+
+#[test]
+fn patched_cols_write_changed_and_cleared_source_column_styles() {
+    let body = concat!(
+        r#"<cols><col min="2" max="4" width="15" style="1" customWidth="1"/></cols>"#,
+        r#"<sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>"#,
+    );
+    let parsed = parse_workbook_with_package(&package(body, &[], false)).unwrap();
+    let save = |styles: Vec<ColStyle>| {
+        let mut wb = parsed.workbook.clone();
+        wb.sheets[0].col_styles = styles;
+        let saved = serialize_workbook_with_package(&wb, &parsed.package).unwrap();
+        let xml = String::from_utf8(part_bytes(&saved, "xl/worksheets/sheet1.xml")).unwrap();
+        let cols = col_elements(&xml);
+        assert_ascending_and_disjoint(&cols);
+        let reopened = parse_workbook(&saved).unwrap();
+        assert_eq!(
+            reopened.sheets[0].col_widths, wb.sheets[0].col_widths,
+            "{xml}"
+        );
+        let styles = (1..=3)
+            .map(|col| reopened.sheets[0].col_style(col))
+            .collect::<Vec<_>>();
+        (cols.len(), styles)
+    };
+    let run = |first, last, xf| ColStyle { first, last, xf };
+    assert_eq!(save(vec![run(1, 3, 2)]), (1, vec![Some(2); 3]));
+    assert_eq!(save(Vec::new()), (1, vec![None; 3]));
+    assert_eq!(
+        save(vec![run(1, 3, 1), run(2, 2, 2)]),
+        (3, vec![Some(1), Some(2), Some(1)])
+    );
+}
+
+#[test]
+fn a_row_default_change_alone_is_saved() {
+    let body = r#"<sheetData><row r="1"><c r="A1"><v>1</v></c></row><row r="3" s="1" customFormat="1"/></sheetData>"#;
+    let parsed = parse_workbook_with_package(&package(body, &[], false)).unwrap();
+    let mut wb = parsed.workbook.clone();
+    wb.sheets[0].row_styles.insert(2, 2);
+    let saved = serialize_workbook_with_package(&wb, &parsed.package).unwrap();
+    assert_eq!(
+        parse_workbook(&saved).unwrap().sheets[0].row_styles,
+        wb.sheets[0].row_styles
+    );
 }
 
 /// assemble a one-sheet package around a worksheet body and optional shared
@@ -79,6 +297,152 @@ pub(super) fn package(
 fn cell_at(wb: &Workbook, a1: &str) -> Cell {
     let addr = CellRef::parse_a1(a1).unwrap();
     wb.sheets[0].cell(addr).cloned().unwrap_or_default()
+}
+
+#[test]
+fn pattern_border_round_trip_all_tokens_and_colors() {
+    for pattern in [
+        "gray125",
+        "gray0625",
+        "mediumGray",
+        "darkGray",
+        "lightGray",
+        "darkHorizontal",
+        "darkVertical",
+        "darkDown",
+        "darkUp",
+        "darkGrid",
+        "darkTrellis",
+        "lightHorizontal",
+        "lightVertical",
+        "lightDown",
+        "lightUp",
+        "lightGrid",
+        "lightTrellis",
+    ] {
+        for border in [
+            "thin",
+            "medium",
+            "dashed",
+            "dotted",
+            "thick",
+            "double",
+            "hair",
+            "mediumDashed",
+            "dashDot",
+            "mediumDashDot",
+            "dashDotDot",
+            "mediumDashDotDot",
+            "slantDashDot",
+        ] {
+            let fill_xml = format!(
+                r#"<fill><patternFill patternType="{pattern}"><fgColor theme="4" tint="0.25"/><bgColor rgb="FF123456"/></patternFill></fill>"#
+            );
+            let border_xml =
+                format!(r#"<border><top style="{border}"><color indexed="5"/></top></border>"#);
+            let styles = format!(
+                r#"<fills>{fill_xml}</fills><borders>{border_xml}</borders><cellXfs><xf fillId="0" borderId="0"/></cellXfs>"#
+            );
+            let parts = package_styled(
+                r#"<sheetData><row r="1"><c r="A1" s="0"><v>1</v></c></row></sheetData>"#,
+                Some(&styles),
+                None,
+            );
+            let parsed = parse_workbook_with_package(&parts).unwrap();
+            let workbook = &parsed.workbook;
+            assert!(
+                format!("{:?}", workbook.styles.fills[0]).starts_with("Pattern"),
+                "{pattern}"
+            );
+            assert_eq!(
+                workbook.styles.borders[0]
+                    .top
+                    .as_ref()
+                    .unwrap()
+                    .style
+                    .as_sml(),
+                border
+            );
+            let saved = serialize_workbook(workbook).unwrap();
+            let xml = String::from_utf8(part_bytes(&saved, "xl/styles.xml")).unwrap();
+            assert!(xml.contains(&fill_xml), "{xml}");
+            assert!(
+                xml.contains(&format!(
+                    r#"<top style="{border}"><color indexed="5"/></top>"#
+                )),
+                "{xml}"
+            );
+            let reopened = parse_workbook(&saved).unwrap();
+            assert_eq!(workbook.styles.fills, reopened.styles.fills);
+            assert_eq!(workbook.styles.borders, reopened.styles.borders);
+            let reused = serialize_workbook_with_package(workbook, &parsed.package).unwrap();
+            assert_eq!(
+                part_bytes(&reused, "xl/styles.xml"),
+                part_bytes(&parts, "xl/styles.xml")
+            );
+        }
+    }
+}
+
+#[test]
+fn pattern_border_same_cell_bold_preserves_source_and_regenerated_styles() {
+    let fill_xml = r#"<fill><patternFill patternType="lightUp"><fgColor rgb="FF123456"/><bgColor rgb="FFFEDCBA"/></patternFill></fill>"#;
+    let border_xml = r#"<border><top style="mediumDashed"><color rgb="FF654321"/></top></border>"#;
+    let styles = format!(
+        r#"<fonts><font/></fonts><fills>{fill_xml}</fills><borders>{border_xml}</borders><cellXfs><xf fontId="0" fillId="0" borderId="0"/></cellXfs>"#
+    );
+    let parts = package_styled(
+        r#"<sheetData><row r="1"><c r="A1" s="0"><v>1</v></c></row></sheetData>"#,
+        Some(&styles),
+        None,
+    );
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let mut wb = parsed.workbook.clone();
+    let mut format = wb.styles.cell_format(Some(0));
+    format.font.bold = true;
+    let style = wb.styles.intern_cell_format(&format).unwrap();
+    wb.sheets[0].cell_mut(CellRef::new(0, 0)).unwrap().style = style;
+    let saved = serialize_workbook_with_package(&wb, &parsed.package).unwrap();
+    let xml = String::from_utf8(part_bytes(&saved, "xl/styles.xml")).unwrap();
+    assert!(xml.contains(fill_xml));
+    assert!(xml.contains(border_xml));
+    let saved = serialize_workbook(&wb).unwrap();
+    let xml = String::from_utf8(part_bytes(&saved, "xl/styles.xml")).unwrap();
+    assert!(xml.contains(fill_xml), "{xml}");
+    assert!(xml.contains(r#"<top style="mediumDashed">"#), "{xml}");
+}
+
+#[test]
+fn gradient_fill_remains_unrendered_and_source_markup_survives_bold() {
+    let fill = r#"<fill><gradientFill degree="90"><stop position="0"><color rgb="FF123456"/></stop><stop position="1"><color rgb="FFFEDCBA"/></stop></gradientFill></fill>"#;
+    let styles = format!(r#"<fills>{fill}</fills><cellXfs><xf fillId="0"/></cellXfs>"#);
+    let parts = package_styled(
+        r#"<sheetData><row r="1"><c r="A1" s="0"><v>1</v></c></row></sheetData>"#,
+        Some(&styles),
+        None,
+    );
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    assert_eq!(parsed.workbook.styles.fills, [Fill::None]);
+    let mut wb = parsed.workbook.clone();
+    let mut format = wb.styles.cell_format(Some(0));
+    format.font.bold = true;
+    wb.sheets[0].cell_mut(CellRef::new(0, 0)).unwrap().style =
+        wb.styles.intern_cell_format(&format).unwrap();
+    let saved = serialize_workbook_with_package(&wb, &parsed.package).unwrap();
+    assert!(
+        String::from_utf8(part_bytes(&saved, "xl/styles.xml"))
+            .unwrap()
+            .contains(fill)
+    );
+}
+
+#[test]
+fn pattern_border_style_match_compares_background_and_border_tokens() {
+    let styles = r#"<fills><fill><patternFill patternType="lightUp"><fgColor rgb="FF123456"/><bgColor rgb="FF000000"/></patternFill></fill><fill><patternFill patternType="lightUp"><fgColor rgb="FF123456"/><bgColor rgb="FFFFFFFF"/></patternFill></fill></fills><borders><border><top style="medium"/></border><border><top style="mediumDashed"/></border></borders><cellXfs><xf fillId="0" borderId="0"/><xf fillId="1" borderId="0"/><xf fillId="0" borderId="1"/></cellXfs>"#;
+    let wb = parse_workbook(&package_styled("<sheetData/>", Some(styles), None)).unwrap();
+    let styles = crate::patch::StyleMatch::new(&wb.styles, &wb.styles);
+    assert!(!styles.equivalent(Some(0), Some(1)));
+    assert!(!styles.equivalent(Some(0), Some(2)));
 }
 
 /// One sheet plus a table part reached through the worksheet relationships.
@@ -1430,8 +1794,14 @@ fn parses_full_styled_workbook() {
         ss.fill_for(1),
         Some(&Fill::Solid(Color::Rgb("#ffff00".into())))
     );
-    // the gray125 convention fill collapses to a solid auto fill
-    assert_eq!(ss.fills[1], Fill::Solid(Color::Auto));
+    assert_eq!(
+        ss.fills[1],
+        Fill::Pattern {
+            pattern: PatternType::Gray125,
+            fg: None,
+            bg: None
+        }
+    );
 
     let border = ss.border_for(1).unwrap();
     let left = border.left.as_ref().unwrap();
@@ -2430,6 +2800,10 @@ fn row_insert_shifts_preserved_row_and_cell_markup() {
     for (row, height) in heights {
         workbook.sheets[0].row_heights.insert(row + 1, height);
     }
+    workbook.sheets[0].row_styles = std::mem::take(&mut workbook.sheets[0].row_styles)
+        .into_iter()
+        .map(|(row, style)| (row + 1, style))
+        .collect();
     let mut provenance = vec![SharedStringCells::new(); 2];
     for ((row, col), index) in parsed.package.source_shared_string_cells(0) {
         provenance[0].insert((row + 1, col), index);

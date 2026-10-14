@@ -40,8 +40,9 @@ import type { DocxContentControlsResult } from './contentControls';
 import type { YrsPositionOutline } from './yrsPositionProjection';
 import type { ResidentSaveRecord } from './residentSave';
 import type { Comment } from '../types/content';
-import type { Document } from '../types/document';
+import type { Document, SectionProperties } from '../types/document';
 import type { DocxListStoriesResult } from './stories';
+import type { DocxCommentPatch } from './residentReview';
 import { DirtyProjectionStories } from './dirtyProjectionStories';
 import { resolveHostJsonCommentMedia } from './hostMedia';
 import { createEditSession, preloadEditWasm, setEditWasmHeapLimit } from './wasm/index';
@@ -50,11 +51,20 @@ import { documentToYrs } from './documentToYrs';
 import { tokenizeResidentDocument } from './residentSource';
 import { partMetadata, withPartMetadata, readPartGeometry, type ResidentPartMetadata, type ResidentPartGeometry } from './residentParts';
 import type { RetainedFrame } from '../layout/render/frameDelta';
+import type { DisplayListHitRegion, DisplayListRect } from '../layout/render/displayListQueries';
 import type { ResidentControlTarget, ResidentControlPosition } from './residentControls';
 import { withPackageMetadata, type ResidentPackageMetadata } from './residentProperties';
 import { getDocumentWatermark } from '../docx/watermarkApi';
-import { resolvedFinalSectionProperties } from '../editor/finalSection';
-import { readSectionSnapshot, withSectionSnapshot, type DocxSectionMargins, type ResidentSectionSnapshot } from './residentSections';
+import { resolvedFinalSectionProperties, updateFinalSectionProperties } from '../editor/finalSection';
+import { readSectionSnapshot, sectionMarkKey, withSectionIds, withSectionNames, withSectionSnapshot, type DocxSectionMargins, type ResidentSectionSnapshot } from './residentSections';
+
+/** @internal */
+export interface ResidentExactPrefixLayout {
+  provisional: boolean;
+  pages: number;
+  /** The widest page of the whole document, while only a prefix is laid out. */
+  documentWidth?: number;
+}
 
 export type ResidentEngineSession = Pick<
   YrsSession,
@@ -70,9 +80,14 @@ export type ResidentEngineSession = Pick<
   | 'cellSelection'
   | 'setCellSelection'
   | 'insertRow'
+  | 'insertTable'
+  | 'insertImage'
+  | 'insertPageBreak'
+  | 'insertSectionBreak'
   | 'tablePayload'
   | 'setHyperlink'
   | 'setImageGeometryAt'
+  | 'setColumnWidth'
   | 'insertText'
   | 'replaceRange'
   | 'deleteRange'
@@ -83,11 +98,16 @@ export type ResidentEngineSession = Pick<
   | 'setParagraphAttrs'
   | 'applyParagraphStyle'
   | 'beginUndoCapture'
+  | 'addUndoBoundary'
   | 'canUndo'
   | 'canRedo'
   | 'undo'
   | 'redo'
-  | 'addUndoBoundary'
+  | 'addComment'
+  | 'setCommentRanges'
+  | 'listComments'
+  | 'acceptChange'
+  | 'rejectChange'
   | 'beginRegionLayout'
   | 'buildDisplayListFrame'
   | 'buildDisplayPagesFrame'
@@ -130,6 +150,23 @@ export type ResidentEngineSession = Pick<
   | 'storiesChangedSince'
   | 'yrsBlocksForStory'
 > & {
+  splitSection(at: YrsLoc, properties: SectionProperties, start: NonNullable<SectionProperties['sectionStart']>): YrsLoc;
+  /**
+   * Display ranges of the paragraphs, tables and block controls of `root` that `ranges` touch.
+   * A paragraph's `length` counts story units; its inline `controls` give each node's story
+   * offset and display range. `selection` maps both ends to display positions.
+   */
+  residentGeometry(root: string, ranges: Array<[number, number]>, selection?: [YrsLoc, YrsLoc]): {
+    paragraphs: Array<{ story: string; paraId: string; index: number; from: number; to: number; leading: number; length: number;
+      controls?: Array<{ offset: number; from: number; to: number }> }>;
+    tables: Array<{ story: string; tableIndex: number; from: number; to: number; at: YrsLoc;
+      cells: Array<{ story: string; paraId: string; row: number; column: number; rowspan: number; colspan: number; from: number; to: number }> }>;
+    controls: Array<{ story: string; contentStory: string; from: number; to: number }>;
+    selection: [number, number] | null;
+  };
+  /** Rects of the resident display list for each `[from, to)` range of one region, in order. */
+  residentRangeRects(region: DisplayListHitRegion, partId: string, ranges: readonly (readonly [number, number])[]): DisplayListRect[][];
+  clearCellSelection(): YrsLoc | null;
   controlTargets(): ResidentControlTarget[];
   repeatControlAt(at: ResidentControlPosition, remove: boolean): boolean;
   setControlValue(at: ResidentControlPosition, value: import('./index').YrsContentControlValue): void;
@@ -141,6 +178,7 @@ export type ResidentEngineSession = Pick<
   setPropertyDocument(document: Document): boolean;
   sectionProperties(): ResidentSectionSnapshot;
   setSectionMargins(section: string, margins: DocxSectionMargins): boolean;
+  updateComment(id: string, patch: DocxCommentPatch): void;
   mediaDataUrl(token: string): string | null;
   /** @internal */
   proposalEngine: DocxProposalSession & Pick<YrsSession, 'validateEdits'>;
@@ -154,6 +192,11 @@ export type ResidentEngineSession = Pick<
   exportStructuredWithPagesJson(options: DocxPageExportOptions, currentRequest: string): string;
   /** The region layout of only as much of the body as fills `pages` pages. */
   layoutDocumentWithRegionsPrefixRetainedJson(input: string, pages: number): string;
+  /**
+   * @internal The retained region layout of exactly the first `pages` pages when nothing later
+   * can change them (`provisional`), or of the whole document.
+   */
+  layoutDocumentWithRegionsExactPrefixRetained(input: string, pages: number): ResidentExactPrefixLayout;
   /** Limit incremental rebuilds to the display window and caret pages. Off by default. */
   setWindowedIncrementalBuilds(enabled: boolean): void;
   /** @internal */
@@ -200,6 +243,10 @@ export async function createResidentEngineSession(
   let partBase: Document | undefined;
   let partsTouched = false;
   let marginsTouched = false;
+  let sectionsTouched = false;
+  const seededSectionMarks = new Map<string, string>();
+  let sectionNames = { host: new Map<string, string>(), resident: new Map<string, string>() };
+  let sectionLayout: { revision: string; sections: ResidentSectionSnapshot['sections'] } | null = null;
   const parsedMedia = new Map<string, string>();
   let parsedFacade: YrsSession | undefined;
   const partDocument = (): Document => {
@@ -209,15 +256,28 @@ export async function createResidentEngineSession(
     const document = stored.body ? withPackageMetadata(withPartMetadata(partBase, stored), stored)
       : properties.metadata ? withPackageMetadata(partBase, properties.metadata) : partBase;
     const margins = JSON.parse(session.section_margins_json()) as Record<string, DocxSectionMargins>;
-    return Object.keys(margins).length ? withSectionSnapshot(document, readSectionSnapshot(resident, document, margins)) : document;
+    if (sectionsTouched) {
+      const revision = JSON.stringify([session.resident_section_revision(),
+        document.package.document.sections?.map(section => [section.id, section.properties]),
+        document.package.document.finalSectionProperties, margins]);
+      if (sectionLayout?.revision !== revision) sectionLayout = { revision,
+        sections: readSectionSnapshot(resident, document, margins, seededSectionMarks, true).sections };
+      const sections = sectionLayout.sections;
+      return { ...document, package: { ...document.package, document: { ...document.package.document,
+        sections: sections.map(section => ({ id: section.section, properties: section.properties, content: [] })),
+        finalSectionProperties: sections.at(-1)!.properties,
+      } } };
+    }
+    return Object.keys(margins).length ? withSectionSnapshot(document, readSectionSnapshot(resident, document, margins, seededSectionMarks)) : document;
   };
+  const hostDocument = (): Document => withSectionNames(partDocument(), sectionNames.host);
   const partLayoutInput = (input: string): string => {
-    if (!partsTouched && !marginsTouched && session.part_metadata_json() === '{}' &&
+    if (!partsTouched && !marginsTouched && !sectionsTouched && session.part_metadata_json() === '{}' &&
       session.document_properties_json() === '{}' && session.section_margins_json() === '{}') return input;
-    const document = partDocument();
+    const document = hostDocument();
     const request = JSON.parse(input);
     const sections = document.package.document.sections?.map(section => ({ sectionId: section.id ?? section.properties.sectionId, properties: section.properties })) ?? [];
-    sections.push({ sectionId: sections.at(-1)?.sectionId, properties: document.package.document.finalSectionProperties ?? {} });
+    if (!sectionsTouched) sections.push({ sectionId: sections.at(-1)?.sectionId, properties: document.package.document.finalSectionProperties ?? {} });
     const variants = sections.flatMap((section, sectionIndex) => (['header', 'footer'] as const).flatMap(kind =>
       (section.properties[kind === 'header' ? 'headerReferences' : 'footerReferences'] ?? []).map(ref => ({ kind, type: ref.type, rId: ref.rId, sectionIndex }))));
     const contents = [...(document.package.footnotes ?? []).map(note => ({ id: note.id, noteKind: 'footnote', height: 0 })),
@@ -227,8 +287,34 @@ export async function createResidentEngineSession(
       headersFooters: request.regions?.headersFooters ? { ...request.regions.headersFooters, watermark } : undefined }, notes: { ...request.notes, contents },
       ...(request.workerOwned ? { workerHeadersFooters: { ...request.workerHeadersFooters, variants } } : {}) });
   };
+  const keySections = (document: Document): Document => {
+    sectionNames = { host: new Map(), resident: new Map() };
+    seededSectionMarks.clear();
+    if (!geometryReader.hasStory('body')) return document;
+    const closing = resident.paragraphs('body')
+      .filter(paragraph => paragraph.properties.sectPr ?? paragraph.properties._sectionProperties);
+    for (const paragraph of closing) {
+      seededSectionMarks.set(paragraph.paraId,
+        sectionMarkKey(paragraph.properties.sectPr ?? paragraph.properties._sectionProperties));
+    }
+    if ((document.package.document.sections?.length ?? 0) < 2) return document;
+    const keyed = withSectionIds(document, closing.map(paragraph => paragraph.paraId));
+    document.package.document.sections!.forEach(({ id }, index) => {
+      const key = keyed.package.document.sections![index]!.id;
+      if (id === undefined || key === undefined || id === key) return;
+      sectionNames.host.set(key, id);
+      sectionNames.resident.set(id, key);
+    });
+    return keyed;
+  };
+  const setSectionMark = (paraId: string, sectPr: SectionProperties): boolean => {
+    const version = session.version();
+    const at = { paraId, offset: 0 };
+    resident.setParagraphAttrs({ story: 'body', start: at, end: at }, { other: { sectPr, sectionBreakType: sectPr.sectionStart ?? null } });
+    return session.version() !== version;
+  };
   const sectionProperties = (): ResidentSectionSnapshot => {
-    return readSectionSnapshot(resident, partDocument(), JSON.parse(session.section_margins_json()));
+    return readSectionSnapshot(resident, partDocument(), JSON.parse(session.section_margins_json()), seededSectionMarks, sectionsTouched);
   };
   session.set_local_lowering(true);
   const listeners = new Set<
@@ -449,30 +535,66 @@ export async function createResidentEngineSession(
   };
 
   const resident: ResidentEngineSession = {
+    splitSection: (at, properties, start) => {
+      const paragraphs = resident.paragraphs(at.story);
+      const index = paragraphs.findIndex(paragraph => paragraph.paraId === at.paraId);
+      if (index < 0) throw new Error('Section break paragraph is unavailable');
+      const sectionOf = (attrs: Record<string, unknown>) => (attrs.sectPr ?? attrs._sectionProperties) as SectionProperties | undefined;
+      const closing = paragraphs.slice(index).find(paragraph => sectionOf(paragraph.properties));
+      const split = resident.splitParagraph(at);
+      const set = (paraId: string, sectPr: SectionProperties) =>
+        resident.setParagraphAttrs({ story: at.story, start: { paraId, offset: 0 }, end: { paraId, offset: 0 } },
+          { other: { sectPr, sectionBreakType: sectPr.sectionStart ?? null } });
+      set(split.firstParaId, properties);
+      if (closing) set(closing.paraId === at.paraId ? split.secondParaId : closing.paraId, { ...sectionOf(closing.properties), sectionStart: start });
+      sectionsTouched = true;
+      sectionLayout = null;
+      if (!closing) {
+        const document = partDocument();
+        const body = updateFinalSectionProperties(document.package.document, final => ({ ...final, sectionStart: start }));
+        session.set_part_metadata(JSON.stringify(partMetadata({ ...document, package: { ...document.package, document: body } })), '[]');
+        partsTouched = true;
+        sectionLayout = null;
+      }
+      return { story: at.story, paraId: split.secondParaId, offset: 0 };
+    },
+    residentGeometry: (root, ranges, selection) => JSON.parse(session.resident_geometry_json(root, JSON.stringify({ ranges, selection }))),
+    residentRangeRects: (region, partId, ranges) => {
+      const flat = session.display_range_rects_batch(region, partId, Float64Array.from(ranges.flat()));
+      const batches: DisplayListRect[][] = [];
+      for (let at = 0; at < flat.length;) {
+        const rects: DisplayListRect[] = [];
+        for (let count = flat[at++]!; count > 0; count -= 1, at += 5) {
+          rects.push({ pageIndex: flat[at]!, x: flat[at + 1]!, y: flat[at + 2]!, width: flat[at + 3]!, height: flat[at + 4]! });
+        }
+        batches.push(rects);
+      }
+      return batches;
+    },
+    clearCellSelection: () => {
+      const at = session.clear_cell_selection();
+      return at === undefined ? null : JSON.parse(at) as YrsLoc;
+    },
     sectionProperties,
     setSectionMargins: (section, margins) => {
       ensureUndo();
       const changed = session.set_section_margins(section, JSON.stringify(margins));
-      if (changed) { marginsTouched = true; projectionStories.add('body'); }
+      if (changed) { marginsTouched = true; sectionLayout = null; projectionStories.add('body'); }
       return changed;
     },
-    propertyDocument: partDocument,
-    setPropertyDocument: document => {
+    propertyDocument: hostDocument,
+    setPropertyDocument: input => {
+      sectionLayout = null;
+      const document = withSectionNames(input, sectionNames.resident);
       const margins = JSON.parse(session.section_margins_json()) as Record<string, DocxSectionMargins>;
-      const sections = sectionProperties().sections;
       let changed = false;
-      for (const [index, section] of sections.slice(0, -1).entries()) {
-        const desired = document.package.document.sections?.[index]?.properties;
-        if (desired && JSON.stringify(section.properties) !== JSON.stringify(desired)) {
-          const at = { paraId: section.section, offset: 0 };
-          resident.setParagraphAttrs({ story: 'body', start: at, end: at }, { other: { sectPr: desired } });
-          changed = true;
-        }
+      for (const section of sectionProperties().sections.slice(0, -1)) {
+        const desired = document.package.document.sections?.find(entry => entry.id === section.section)?.properties;
+        if (desired && JSON.stringify(section.properties) !== JSON.stringify(desired)) changed = setSectionMark(section.section, desired) || changed;
       }
       for (const [section, current] of Object.entries(margins)) {
-        const index = sections.findIndex(entry => entry.section === section);
         const desired = section === 'final' ? resolvedFinalSectionProperties(document.package.document)
-          : document.package.document.sections?.[index]?.properties;
+          : document.package.document.sections?.find(entry => entry.id === section)?.properties;
         const patch = Object.fromEntries(Object.entries(current).filter(([key, value]) => {
           const next = desired?.[key as keyof DocxSectionMargins];
           return next !== undefined && next !== value;
@@ -487,12 +609,23 @@ export async function createResidentEngineSession(
       session.repeat_content_control_at(at.story, at.index, remove)),
     setControlValue: (at, value) => applyCommandMutation(at.story, () =>
       session.set_content_control_value_index(at.story, at.index, JSON.stringify(value))),
-    partDocument,
+    partDocument: hostDocument,
     partGeometry: frame => readPartGeometry(resident, frame),
     partStory: (id) => `hf:${(JSON.parse(session.header_footer_aliases_json()) as Record<string, string>)[id] ?? id}`,
-    setPartDocument: (document, removeStories = []) => {
+    setPartDocument: (input, removeStories = []) => {
+      sectionLayout = null;
       ensureUndo();
-      const changed = session.set_part_metadata(JSON.stringify(partMetadata(document)), JSON.stringify(removeStories));
+      const document = withSectionNames(input, sectionNames.resident);
+      let changed = false;
+      if (sectionsTouched) {
+        const boundaries = resident.paragraphs('body').filter(paragraph => paragraph.properties.sectPr || paragraph.properties._sectionProperties);
+        for (const paragraph of boundaries) {
+          const desired = document.package.document.sections?.find(section => section.id === paragraph.paraId)?.properties;
+          if (!desired || JSON.stringify(desired) === JSON.stringify(paragraph.properties.sectPr ?? paragraph.properties._sectionProperties)) continue;
+          changed = setSectionMark(paragraph.paraId, desired) || changed;
+        }
+      }
+      changed = session.set_part_metadata(JSON.stringify(partMetadata(document)), JSON.stringify(removeStories)) || changed;
       if (changed) { partsTouched = true; markProjectionStories(['body', ...session.story_ids()]); }
       return changed;
     },
@@ -508,6 +641,14 @@ export async function createResidentEngineSession(
       markProjectionStories([...receipt.changedStoryIds, ...receipt.createdStoryIds, ...receipt.deletedStoryIds]);
       return receipt;
     }),
+    insertTable: (at, rows, columns, author) => applyCommandMutation(at.story, () => {
+      const receipt = JSON.parse(session.insert_table(at.story, at.paraId, at.offset, rows, columns, author?.name, author?.date));
+      markProjectionStories([...receipt.changedStoryIds, ...receipt.createdStoryIds, ...receipt.deletedStoryIds]);
+      return receipt;
+    }),
+    insertImage: (at, image, author) => applyCommandMutation(at.story, () => JSON.parse(session.insert_image(at.story, at.paraId, at.offset, JSON.stringify(image), author?.name, author?.date))),
+    insertPageBreak: at => applyCommandMutation(at.story, () => session.insert_page_break(at.story, at.paraId, at.offset)),
+    insertSectionBreak: (at, type) => applyCommandMutation(at.story, () => session.insert_section_break(at.story, at.paraId, at.offset, type)),
     tablePayload: (story, index) => {
       const payload = session.table_payload(story, index);
       return payload === undefined ? null : JSON.parse(payload);
@@ -516,6 +657,8 @@ export async function createResidentEngineSession(
       session.set_hyperlink(...rangeArgs(range), JSON.stringify(hyperlink))),
     setImageGeometryAt: (at, geometry) => applyCommandMutation(at.story, () =>
       session.set_image_geometry_at(at.story, at.paraId, at.offset, JSON.stringify(geometry))),
+    setColumnWidth: (at, width) => applyCommandMutation(at.story, () =>
+      JSON.parse(session.set_column_width(JSON.stringify(at), width))),
     beginUndoCapture: ensureUndo,
     addUndoBoundary: () => session.add_undo_boundary(),
     undo: () => {
@@ -548,6 +691,30 @@ export async function createResidentEngineSession(
       session.set_paragraph_attrs(...rangeArgs(range), JSON.stringify(attrs), author?.name, author?.date)),
     applyParagraphStyle: (range, styleId, author) => applyCommandMutation(range.story, () =>
       session.apply_paragraph_style(...rangeArgs(range), styleId, author?.name, author?.date)),
+    addComment: (ranges, author, date, body) => {
+      ensureUndo();
+      const receipt = JSON.parse(session.add_comment(JSON.stringify(ranges.map(range => ({
+        story: range.story, startPara: range.start.paraId, startOffset: range.start.offset,
+        endPara: range.end.paraId, endOffset: range.end.offset,
+      }))), author, date, JSON.stringify(body)));
+      markProjectionStories(ranges.map(range => range.story));
+      return receipt;
+    },
+    setCommentRanges: (id, ranges) => {
+      ensureUndo();
+      session.set_comment_ranges(id, JSON.stringify(ranges.map(range => ({
+        story: range.story, startPara: range.start.paraId, startOffset: range.start.offset,
+        endPara: range.end.paraId, endOffset: range.end.offset,
+      }))));
+      markProjectionStories(ranges.map(range => range.story));
+    },
+    listComments: () => JSON.parse(session.list_comments()),
+    updateComment: (id, patch) => {
+      ensureUndo();
+      session.update_comment_metadata_json(id, JSON.stringify(patch));
+    },
+    acceptChange: target => { ensureUndo(); return JSON.parse(session.accept_change(JSON.stringify(target))); },
+    rejectChange: target => { ensureUndo(); return JSON.parse(session.reject_change(JSON.stringify(target))); },
     resolveComment: (commentId) =>
       JSON.parse(session.resolve_comment(commentId)) as YrsResolvedCommentAnchor[],
     paragraphSegments: (story, indices) =>
@@ -607,9 +774,12 @@ export async function createResidentEngineSession(
       const nativeMediaDataUrl = parsedFacade.mediaDataUrl;
       parsedFacade.mediaDataUrl = token => parsedMedia.get(token) ?? nativeMediaDataUrl(token);
       documentToYrs(parsedFacade, options.mediaTokens ? tokenizeResidentDocument(document, parsedMedia) : document, options);
-      session.set_part_metadata(JSON.stringify(partMetadata(document)), '[]');
+      partBase = keySections(document);
+      session.set_part_metadata(JSON.stringify(partMetadata(partBase)), '[]');
       partsTouched = false;
       marginsTouched = false;
+      sectionsTouched = false;
+      sectionLayout = null;
       markProjectionStories(session.story_ids());
     },
     saveDocument: async (host, comments, record) => {
@@ -632,9 +802,11 @@ export async function createResidentEngineSession(
         session.open_docx(bytes, seedStories, generation, digest),
         (token) => (token.startsWith('media:') ? (session.media_data_url(token) ?? null) : null)
       );
-      partBase = decodeDocxHostJson(json, bytes).document;
+      partBase = keySections(decodeDocxHostJson(json, bytes).document);
       partsTouched = false;
       marginsTouched = false;
+      sectionsTouched = false;
+      sectionLayout = null;
       return json;
     },
     openDocxPreview: (bytes, blocks, paragraphBudget) => {
@@ -668,7 +840,7 @@ export async function createResidentEngineSession(
       const { saveResidentDocument } = await import('./residentSave');
       let projectedHost = partsTouched || session.part_metadata_json() !== '{}'
         ? withPartMetadata(host ?? partDocument(), partMetadata(partDocument())) : host;
-      if (marginsTouched || session.section_margins_json() !== '{}') projectedHost = withSectionSnapshot(projectedHost ?? partDocument(), sectionProperties());
+      if (marginsTouched || sectionsTouched || session.section_margins_json() !== '{}') projectedHost = withSectionSnapshot(projectedHost ?? partDocument(), sectionProperties());
       return saveResidentDocument(
         session, clientId, source, hostJson, projectedHost, comments, record, projectionStories, stories
       );
@@ -698,6 +870,9 @@ export async function createResidentEngineSession(
     setPartialDocument: (partial) => session.set_partial_document(partial),
     layoutDocumentWithRegionsPrefixRetainedJson: (input, pages) =>
       session.layout_document_with_regions_prefix_retained_json(partLayoutInput(input), pages),
+    layoutDocumentWithRegionsExactPrefixRetained: (input, pages) => JSON.parse(
+      session.layout_document_with_regions_exact_prefix_retained(partLayoutInput(input), pages)
+    ) as ResidentExactPrefixLayout,
     layoutDocumentWithRegionsRetained: (input) =>
       session.layout_document_with_regions_retained(partLayoutInput(input)),
     retainedHeadersFootersJson: () => session.retained_headers_footers_json(),
@@ -763,12 +938,15 @@ export async function createResidentEngineSession(
     loadNoteSeparators: (state) => session.load_note_separators(state),
     loadState: (update) => {
       geometryStories.clear();
+      sectionLayout = null;
       session.load(update);
     },
-    applyUpdate: (update) =>
-      JSON.parse(
+    applyUpdate: (update) => {
+      sectionLayout = null;
+      return JSON.parse(
         session.apply_update_with_inference(update)
-      ) as CollaborationTextInsertion | null,
+      ) as CollaborationTextInsertion | null;
+    },
     onUpdate: (listener) => {
       listeners.add(listener);
       ensureObserver();

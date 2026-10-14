@@ -10,15 +10,17 @@ use crate::{
     serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes,
 };
 
-/// cellXfs[2] differs from cellXfs[1] only in protection; cellXfs[3] adds bold.
+/// cellXfs[2] differs from cellXfs[1] only in protection; cellXfs[3] adds bold;
+/// cellXfs[4] repeats cellXfs[2] with word booleans.
 const STYLES: &str = concat!(
     r#"<styleSheet><fonts count="2"><font><sz val="11"/></font><font><b/><sz val="11"/></font></fonts>"#,
     r#"<fills count="1"><fill><patternFill patternType="none"/></fill></fills>"#,
     r#"<borders count="1"><border/></borders>"#,
-    r#"<cellXfs count="4"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>"#,
+    r#"<cellXfs count="5"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>"#,
     r#"<xf numFmtId="2" fontId="0" fillId="0" borderId="0" applyNumberFormat="1"/>"#,
     r#"<xf numFmtId="2" fontId="0" fillId="0" borderId="0" applyNumberFormat="1" applyProtection="1"><protection locked="0"/></xf>"#,
     r#"<xf numFmtId="2" fontId="1" fillId="0" borderId="0" applyNumberFormat="1" applyFont="1"/>"#,
+    r#"<xf numFmtId="2" fontId="0" fillId="0" borderId="0" applyNumberFormat="1" applyProtection="true"><protection locked="false"/></xf>"#,
     r#"</cellXfs></styleSheet>"#,
 );
 
@@ -56,7 +58,7 @@ pub(super) fn projected(parsed: &ParsedWorkbook) -> Workbook {
         .map(|(at, cell)| (at, cell.clone()))
         .collect::<Vec<_>>();
     for (at, mut cell) in moved {
-        cell.style = Some(1);
+        cell.style = Some(4);
         sheet.set_cell(at, cell);
     }
     workbook
@@ -148,15 +150,18 @@ fn equivalence_needs_the_same_resolved_format_in_both_stylesheets() {
     let parsed = parsed();
     let original = &parsed.workbook.styles;
     let styles = StyleMatch::new(original, original);
-    assert!(styles.equivalent(Some(2), Some(1)));
-    assert!(styles.equivalent(Some(1), Some(2)));
+    assert!(!styles.equivalent(Some(2), Some(1)));
+    assert!(!styles.equivalent(Some(1), Some(2)));
+    assert!(styles.equivalent(Some(2), Some(4)));
+    assert!(styles.equivalent(Some(4), Some(2)));
     assert!(styles.equivalent(None, None));
     assert!(!styles.equivalent(Some(2), Some(3)));
     assert!(!styles.equivalent(Some(0), None));
     assert!(!styles.equivalent(None, Some(0)));
     assert!(!styles.equivalent(Some(9), Some(0)));
     assert!(!styles.equivalent(Some(0), Some(9)));
-    assert_eq!(styles.written(Some(2), Some(1)), Some(2));
+    assert_eq!(styles.written(Some(2), Some(1)), Some(1));
+    assert_eq!(styles.written(Some(2), Some(4)), Some(2));
     assert_eq!(styles.written(Some(2), Some(3)), Some(3));
 
     let mut changed = original.clone();
@@ -167,11 +172,78 @@ fn equivalence_needs_the_same_resolved_format_in_both_stylesheets() {
     let styles = StyleMatch::new(original, &changed);
     assert!(!styles.equivalent(Some(2), Some(1)));
     assert_eq!(styles.written(Some(2), Some(1)), Some(1));
+    assert!(!styles.equivalent(Some(2), Some(4)));
+    assert_eq!(styles.written(Some(2), Some(4)), Some(4));
 
     let mut shortened = original.clone();
     shortened.cell_xfs.truncate(2);
     let styles = StyleMatch::new(original, &shortened);
     assert!(!styles.equivalent(Some(2), Some(1)));
+}
+
+#[test]
+fn format_facets_style_match_requires_equal_facets() {
+    let mut original = xlsx_model::Stylesheet::default();
+    original.cell_xfs.push(Xf::default());
+    let mut variants = vec![
+        Xf {
+            protection: Some(xlsx_model::Protection {
+                locked: false,
+                hidden: true,
+            }),
+            ..Default::default()
+        },
+        Xf {
+            xf_id: Some(1),
+            ..Default::default()
+        },
+        Xf {
+            quote_prefix: true,
+            ..Default::default()
+        },
+        Xf {
+            pivot_button: true,
+            ..Default::default()
+        },
+    ];
+    for alignment in [
+        xlsx_model::Alignment {
+            text_rotation: Some(255),
+            ..Default::default()
+        },
+        xlsx_model::Alignment {
+            indent: Some(4),
+            ..Default::default()
+        },
+        xlsx_model::Alignment {
+            relative_indent: Some(-2),
+            ..Default::default()
+        },
+        xlsx_model::Alignment {
+            justify_last_line: Some(true),
+            ..Default::default()
+        },
+        xlsx_model::Alignment {
+            reading_order: Some(2),
+            ..Default::default()
+        },
+    ] {
+        variants.push(Xf {
+            alignment: Some(alignment),
+            ..Default::default()
+        });
+    }
+    for xf in variants {
+        let mut current = original.clone();
+        current.cell_xfs.push(xf);
+        let styles = StyleMatch::new(&original, &current);
+        assert!(
+            !styles.equivalent(Some(0), Some(1)),
+            "{:?}",
+            current.cell_xfs[1]
+        );
+        assert_eq!(styles.written(Some(0), Some(1)), Some(1));
+    }
 }
 
 #[test]
@@ -200,21 +272,21 @@ fn changed_source_xf_is_not_equivalent_even_when_its_resolved_format_matches() {
     );
     assert_eq!(
         workbook.styles.resolved_format(Some(2)),
-        workbook.styles.resolved_format(Some(1))
+        workbook.styles.resolved_format(Some(4))
     );
     let styles = StyleMatch::new(&parsed.workbook.styles, &workbook.styles);
-    assert!(!styles.equivalent(Some(2), Some(1)));
+    assert!(!styles.equivalent(Some(2), Some(4)));
 
     let saved = cells(&save(&parsed, &workbook, Some(SheetAxes::default())));
 
-    assert_eq!(saved["A1"], r#"<c r="A1" s="1"><v>1</v></c>"#);
+    assert_eq!(saved["A1"], r#"<c r="A1" s="4"><v>1</v></c>"#);
 }
 
 #[test]
 fn moved_cells_do_not_borrow_equivalent_indices_from_the_same_position() {
     let source = concat!(
         r#"<sheetData><row r="1"><c r="A1" s="2"><v>1</v></c></row>"#,
-        r#"<row r="2"><c r="A2" s="1"><v>1</v></c></row></sheetData>"#,
+        r#"<row r="2"><c r="A2" s="4"><v>1</v></c></row></sheetData>"#,
     );
     let parsed = parsed_sheet(source);
     let mut workbook = projected(&parsed);
@@ -240,7 +312,7 @@ fn moved_cells_do_not_borrow_equivalent_indices_from_the_same_position() {
     let saved = save(&parsed, &workbook, Some(axes));
 
     assert_ne!(saved, format!("<worksheet>{source}</worksheet>"));
-    assert_eq!(cells(&saved)["A1"], r#"<c r="A1" s="1"><v>1</v></c>"#);
+    assert_eq!(cells(&saved)["A1"], r#"<c r="A1" s="4"><v>1</v></c>"#);
 }
 
 #[test]
@@ -376,7 +448,8 @@ fn patched_array_master_uses_the_current_rectangle_and_preserves_untouched_cells
 
 #[test]
 fn rewritten_cells_keep_their_equivalent_source_index() {
-    let parsed = parsed();
+    let source = SHEET.replace(r#"<c r="B1" s="2">"#, r#"<c r="B1" s="1">"#);
+    let parsed = parsed_sheet(&source);
     let mut workbook = projected(&parsed);
     edit(&mut workbook, "A1", |cell| {
         cell.value = xlsx_model::CellValue::Number { value: 9.0 }
@@ -395,7 +468,9 @@ fn rewritten_cells_keep_their_equivalent_source_index() {
 
 #[test]
 fn regenerated_sheet_data_keeps_equivalent_source_indices() {
-    let source = SHEET.replace(r#"<row r="1">"#, "<row>");
+    let source = SHEET
+        .replace(r#"<row r="1">"#, "<row>")
+        .replace(r#"<c r="B1" s="2">"#, r#"<c r="B1" s="1">"#);
     assert!(super::scan_sheet_data(source.as_bytes()).unwrap().is_none());
     let parsed = parsed_sheet(&source);
     let mut workbook = projected(&parsed);
@@ -441,12 +516,12 @@ fn regenerated_sheet_data_without_axes_uses_model_indices() {
     assert_eq!(
         styles,
         [
-            ("A1", Some("1")),
+            ("A1", Some("4")),
             ("A2", Some("1")),
             ("B1", Some("3")),
-            ("B2", Some("1")),
-            ("C1", Some("1")),
-            ("C2", Some("1")),
+            ("B2", Some("4")),
+            ("C1", Some("4")),
+            ("C2", Some("4")),
         ]
     );
 }

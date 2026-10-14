@@ -89,6 +89,8 @@ mod inline_content;
 mod list_marker;
 pub mod media;
 mod resident_font;
+#[cfg_attr(not(feature = "wasm"), allow(dead_code))]
+mod resident_geometry;
 pub use resident_font::{ResidentFontError, decode_resident_font};
 mod op;
 mod ops;
@@ -494,12 +496,44 @@ impl<T> Default for EpochCache<T> {
 struct StoryRevisions {
     current: u64,
     structure: u64,
+    geometry: u64,
+    sections: u64,
     stamped: HashMap<Arc<str>, u64>,
 }
 
 impl StoryRevisions {
     fn stamp(&mut self, txn: &yrs::TransactionMut, events: &yrs::types::Events) {
         self.current += 1;
+        if events.iter().any(|event| matches!(event, yrs::types::Event::Map(event)
+            if event.keys(txn).keys().any(|key| matches!(key.as_ref(), "sectPr" | "_sectionProperties" | "sectionBreakType")))) {
+            self.sections += 1;
+        }
+        if events.iter().any(|event| match event {
+            yrs::types::Event::Text(event) => event
+                .delta(txn)
+                .iter()
+                .any(|delta| !matches!(delta, Delta::Retain(_, _))),
+            yrs::types::Event::Map(event) => {
+                event.path().is_empty()
+                    || event.keys(txn).keys().any(|key| {
+                        matches!(
+                            key.as_ref(),
+                            KIND_KEY
+                                | PARA_ID
+                                | "rows"
+                                | "cells"
+                                | "story"
+                                | "tcPr"
+                                | "rowspan"
+                                | "colspan"
+                                | "content"
+                        )
+                    })
+            }
+            _ => true,
+        }) {
+            self.geometry += 1;
+        }
         if events.iter().any(|event| match event {
             yrs::types::Event::Text(event) => event.delta(txn).iter().any(|delta| match delta {
                 Delta::Inserted(Out::Any(Any::String(_)), _) | Delta::Retain(_, _) => false,
@@ -598,6 +632,7 @@ pub struct EditingDoc {
     paragraph_indexes: Mutex<EpochCache<ParagraphIndex>>,
     chunk_snapshots: Mutex<EpochCache<Vec<ops::Chunk>>>,
     table_membership: Mutex<Option<TableMembership>>,
+    resident_geometry: Mutex<HashMap<String, resident_geometry::ResidentGeometryIndex>>,
     shared_read_depth: AtomicU32,
     /// Story projections held only inside a shared-read scope.
     story_views: Mutex<EpochCache<target::StoryView>>,
@@ -662,6 +697,7 @@ impl EditingDoc {
             paragraph_indexes: Mutex::default(),
             chunk_snapshots: Mutex::default(),
             table_membership: Mutex::default(),
+            resident_geometry: Mutex::default(),
             shared_read_depth: AtomicU32::new(0),
             story_views: Mutex::default(),
             source: Mutex::new(None),
@@ -829,6 +865,25 @@ impl EditingDoc {
         if before.checked_add(1) != Some(after) {
             return;
         }
+        let at = self
+            .paragraph_indexes
+            .lock()
+            .unwrap()
+            .get(story_id, before)
+            .and_then(|paragraphs| {
+                paragraphs
+                    .para_at(index)
+                    .filter(|para| index >= para.node_start)
+                    .map(|para| (para.para_id.to_string(), index - para.node_start))
+            });
+        self.advance_resident_geometry(
+            story_id,
+            before,
+            after,
+            at.as_ref().map(|(id, offset)| (id.as_str(), *offset)),
+            text.encode_utf16().count() as i64,
+            true,
+        );
         {
             let mut indexes = self.paragraph_indexes.lock().unwrap();
             if let Some(mut paragraphs) = indexes.take(story_id, before) {
@@ -867,6 +922,25 @@ impl EditingDoc {
         if before.checked_add(1) != Some(after) {
             return;
         }
+        let at = self
+            .paragraph_indexes
+            .lock()
+            .unwrap()
+            .get(story_id, before)
+            .and_then(|paragraphs| {
+                paragraphs
+                    .para_at(start)
+                    .filter(|para| start <= end && start >= para.node_start && end <= para.pilcrow)
+                    .map(|para| (para.para_id.to_string(), end - para.node_start))
+            });
+        self.advance_resident_geometry(
+            story_id,
+            before,
+            after,
+            at.as_ref().map(|(id, offset)| (id.as_str(), *offset)),
+            -i64::from(end.saturating_sub(start)),
+            false,
+        );
         {
             let mut indexes = self.paragraph_indexes.lock().unwrap();
             if let Some(mut paragraphs) = indexes.take(story_id, before) {
@@ -1369,6 +1443,37 @@ impl EditingDoc {
         }
         comment.insert(&mut txn, "anchors", Any::Array(Arc::from(anchors)));
         comment_references::reconcile(&mut txn, &BTreeSet::from([comment_id.to_owned()]), true);
+        Ok(())
+    }
+
+    pub fn update_comment_metadata(
+        &self,
+        comment_id: &str,
+        patch: BTreeMap<String, Any>,
+    ) -> EditResult<()> {
+        for (key, value) in &patch {
+            let valid = match key.as_str() {
+                "body" => true,
+                "author" | "date" => matches!(value, Any::String(_)),
+                "done" => matches!(value, Any::Bool(_)),
+                "parentId" => matches!(value, Any::String(_) | Any::Null),
+                _ => false,
+            };
+            if !valid {
+                return Err(EditError::InvalidComment(format!(
+                    "invalid metadata field {key}"
+                )));
+            }
+        }
+        let mut txn = self.doc.transact_mut_with(self.client_id);
+        let comments = txn.get_map(COMMENTS).expect("comments root is declared");
+        let comment = comments
+            .get(&txn, comment_id)
+            .and_then(|value| value.cast::<MapRef>().ok())
+            .ok_or_else(|| EditError::CommentNotFound(comment_id.to_owned()))?;
+        for (key, value) in patch {
+            comment.insert(&mut txn, key, value);
+        }
         Ok(())
     }
 
@@ -2014,6 +2119,58 @@ mod tests {
             p_style: "Normal".to_owned(),
             alignment: "left".to_owned(),
         }
+    }
+
+    #[test]
+    fn comment_metadata_preserves_anchors_and_history() {
+        let doc = seed("Alpha beta");
+        let id = doc
+            .add_comment(
+                &[StoryRange::new("body", 0, 5)],
+                "Ada",
+                DATE,
+                Any::from("Before"),
+            )
+            .unwrap();
+        let before = doc.resolve_comment(&id).unwrap();
+        let mut undo = doc.undo_manager();
+        doc.update_comment_metadata(
+            &id,
+            BTreeMap::from([
+                ("body".into(), Any::from("After")),
+                ("done".into(), Any::Bool(true)),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(doc.resolve_comment(&id).unwrap(), before);
+        let read = || {
+            doc.list_comments()
+                .unwrap()
+                .into_iter()
+                .find(|c| c.id == id)
+                .unwrap()
+        };
+        assert_eq!(read().body, Any::from("After"));
+        assert!(read().done);
+        assert!(undo.undo());
+        assert_eq!(read().body, Any::from("Before"));
+        assert!(undo.redo());
+        assert!(read().done);
+        assert!(
+            doc.update_comment_metadata(
+                &id,
+                BTreeMap::from([
+                    ("body".into(), Any::from("Invalid")),
+                    ("anchors".into(), Any::Null),
+                ])
+            )
+            .is_err()
+        );
+        assert_eq!(read().body, Any::from("After"));
+        assert!(
+            doc.update_comment_metadata("missing", BTreeMap::new())
+                .is_err()
+        );
     }
 
     #[test]

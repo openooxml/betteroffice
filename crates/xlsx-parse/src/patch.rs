@@ -7,14 +7,14 @@ use std::ops::Range;
 use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::{Reader, Writer};
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
-use xlsx_model::{Cell, CellRange, CellRef, Sheet, Workbook};
+use xlsx_model::{Cell, CellRange, CellRef, ColId, ColStyle, Sheet, Workbook};
 
 use crate::axis::SheetAxes;
 use crate::package::{XmlAttribute, attributes, remove_attribute, set_attribute};
-use crate::read::SharedStringCells;
+use crate::read::{SharedStringCells, is_truthy};
 use crate::write::{
-    SharedStringPlan, cell_value_markup, fmt_num, fragment, shared_string_index, write_cell,
-    write_col, write_cols, write_row,
+    SharedStringPlan, cell_value_markup, col_runs, fmt_num, fragment, shared_string_index,
+    write_cell, write_col_run, write_cols, write_row,
 };
 use crate::xml::{attr, xml_err};
 use crate::{MAX_DEPTH, ParseError};
@@ -32,7 +32,8 @@ mod style_match;
 #[cfg(test)]
 mod style_match_tests;
 
-pub(crate) use style_match::{SourceStyles, StyleMatch};
+pub use style_match::keeps_source;
+pub(crate) use style_match::{SourceStyles, StyleMatch, keeps_source_xf, retains_source_styles};
 
 #[cfg(any(test, feature = "test-oracle"))]
 thread_local! {
@@ -110,6 +111,7 @@ struct DirtyFormulas {
 struct WidthPiece {
     range: Range<u32>,
     changed: Option<Option<f64>>,
+    style: Option<Option<u32>>,
 }
 
 struct SourceCellCursor<'a, I: Iterator> {
@@ -187,11 +189,13 @@ impl SheetPatch<'_> {
         let mut cells = self.sheet.iter_cells().peekable();
         let mut originals = SourceCellCursor::new(self.original, self.original.iter_cells());
         let mut heights = self.sheet.row_heights.keys().copied().peekable();
+        let mut row_styles = self.sheet.row_styles.keys().copied().peekable();
         loop {
             let next_source = source_rows.peek().map(|(current, _)| *current);
             let next_cell = cells.peek().map(|(at, _)| at.row);
             let next_height = heights.peek().copied();
-            let Some(row) = [next_source, next_cell, next_height]
+            let next_style = row_styles.peek().copied();
+            let Some(row) = [next_source, next_cell, next_height, next_style]
                 .into_iter()
                 .flatten()
                 .min()
@@ -200,6 +204,9 @@ impl SheetPatch<'_> {
             };
             if next_height == Some(row) {
                 heights.next();
+            }
+            if next_style == Some(row) {
+                row_styles.next();
             }
             if next_source == Some(row) {
                 let (_, source_row) = source_rows.next().expect("peeked");
@@ -234,8 +241,10 @@ impl SheetPatch<'_> {
         let Some((element, cols)) = scan_cols(source)? else {
             return self.generated_cols();
         };
-        let mut entries: Vec<(u32, Vec<u8>, bool)> = Vec::new();
-        let mut covered = BTreeSet::new();
+        let mut entries: Vec<(u32, Vec<u8>)> = Vec::new();
+        let mut covered = Vec::new();
+        let model_runs = self.sheet.col_style_runs();
+        let source_runs = self.original.col_style_runs();
         for col in &cols {
             let (name, attributes) = start_tag(&source[col.tag.clone()])?;
             let pieces = self
@@ -243,10 +252,12 @@ impl SheetPatch<'_> {
                 .cols
                 .current_ranges(col.range.clone())
                 .into_iter()
-                .flat_map(|range| self.width_pieces(range))
+                .flat_map(|range| self.width_pieces(range, &model_runs, &source_runs))
                 .collect::<Vec<_>>();
-            let verbatim =
-                pieces.len() == 1 && pieces[0].range == col.range && pieces[0].changed.is_none();
+            let verbatim = pieces.len() == 1
+                && pieces[0].range == col.range
+                && pieces[0].changed.is_none()
+                && pieces[0].style.is_none();
             for (index, piece) in pieces.iter().enumerate() {
                 let mut bytes = Vec::new();
                 if index == 0 {
@@ -266,33 +277,35 @@ impl SheetPatch<'_> {
                     if let Some(width) = piece.changed {
                         set_col_width(&mut attributes, width);
                     }
+                    match piece.style {
+                        Some(Some(style)) => {
+                            set_attribute(&mut attributes, "style", "style", style.to_string())
+                        }
+                        Some(None) => remove_attribute(&mut attributes, "style"),
+                        None => {}
+                    }
                     write_start_tag(&mut bytes, &name, &attributes, col.empty)?;
                     if !col.empty {
                         bytes.extend_from_slice(&source[col.tag.end..col.span.end]);
                     }
                 }
-                covered.extend(piece.range.clone());
-                entries.push((piece.range.start, bytes, false));
+                covered.push(piece.range.clone());
+                entries.push((piece.range.start, bytes));
             }
         }
-        for (&col, &width) in &self.sheet.col_widths {
-            if covered.contains(&col) {
-                continue;
-            }
-            let mut writer = Writer::new(Vec::new());
-            write_col(&mut writer, col, width).map_err(xml_err)?;
-            let at = entries
-                .iter()
-                .position(|(min, _, generated)| !generated && *min > col)
-                .unwrap_or(entries.len());
-            entries.insert(at, (col, writer.into_inner(), true));
-        }
-        if entries.is_empty() {
+        let mut generated = col_runs(self.sheet, &covered).into_iter().peekable();
+        if entries.is_empty() && generated.peek().is_none() {
             return Ok(None);
         }
         let mut out = element.prefix;
-        for (_, bytes, _) in entries {
+        for (start, bytes) in entries {
+            while let Some(run) = generated.next_if(|run| run.first < start) {
+                write_col_run(&mut Writer::new(&mut out), &run).map_err(xml_err)?;
+            }
             out.extend_from_slice(&bytes);
+        }
+        for run in generated {
+            write_col_run(&mut Writer::new(&mut out), &run).map_err(xml_err)?;
         }
         let tail = cols
             .last()
@@ -303,27 +316,37 @@ impl SheetPatch<'_> {
     }
 
     fn generated_cols(&self) -> Result<Option<Vec<u8>>, ParseError> {
-        (!self.sheet.col_widths.is_empty())
+        (!self.sheet.col_widths.is_empty() || !self.sheet.col_styles.is_empty())
             .then(|| fragment(|writer| write_cols(writer, self.sheet)))
             .transpose()
     }
 
-    /// Splits a column span wherever the model width parted from the source.
-    fn width_pieces(&self, range: Range<u32>) -> Vec<WidthPiece> {
+    /// Splits a column span wherever the model width or style parted from the
+    /// source; the runs are both sides' ascending, disjoint column styles.
+    fn width_pieces(
+        &self,
+        range: Range<u32>,
+        model_runs: &[ColStyle],
+        source_runs: &[ColStyle],
+    ) -> Vec<WidthPiece> {
         let mut pieces: Vec<WidthPiece> = Vec::new();
         for col in range {
+            let source = self.axes.cols.source(col);
             let model = self.sheet.col_widths.get(&col).copied();
-            let original = self
-                .axes
-                .cols
-                .source(col)
-                .and_then(|source| self.original.col_widths.get(&source).copied());
+            let original = source.and_then(|source| self.original.col_widths.get(&source).copied());
             let changed = (model != original).then_some(model);
+            let model_style = run_style(model_runs, col);
+            let source_style = source.and_then(|source| run_style(source_runs, source));
+            let same = self.styles.equivalent(source_style, model_style);
+            let style = (!same).then_some(model_style);
             match pieces.last_mut() {
-                Some(piece) if piece.changed == changed => piece.range.end = col + 1,
+                Some(piece) if piece.changed == changed && piece.style == style => {
+                    piece.range.end = col + 1
+                }
                 _ => pieces.push(WidthPiece {
                     range: col..col + 1,
                     changed,
+                    style,
                 }),
             }
         }
@@ -447,13 +470,23 @@ impl SheetPatch<'_> {
         let moved = source.index != row;
         let height = self.sheet.row_heights.get(&row).copied();
         let height_changed = height != self.original.row_heights.get(&source.index).copied();
+        let style = self.sheet.row_styles.get(&row).copied();
+        let style_changed = style != self.original.row_styles.get(&source.index).copied();
         let (name, mut attributes) = start_tag(&data[source.tag.clone()])?;
-        let mut rewrite = moved || height_changed;
+        let mut rewrite = moved || height_changed || style_changed;
         if moved {
             set_attribute(&mut attributes, "r", "r", (u64::from(row) + 1).to_string());
         }
         if height_changed {
             set_row_height(&mut attributes, height);
+        }
+        if style_changed {
+            remove_attribute(&mut attributes, "s");
+            remove_attribute(&mut attributes, "customFormat");
+            if let Some(style) = style {
+                set_attribute(&mut attributes, "s", "s", style.to_string());
+                set_attribute(&mut attributes, "customFormat", "customFormat", "1".into());
+            }
         }
         if let Some((min, max)) = columns
             && spans_exclude(&attributes, min, max)
@@ -695,9 +728,19 @@ impl SheetPatch<'_> {
             self.plan,
         );
         let mut writer = Writer::new(std::mem::take(out));
-        let style = original.map_or(cell.style, |original| {
-            self.styles.written(original.style, cell.style)
-        });
+        let style = if original.is_some()
+            || self
+                .axes
+                .rows
+                .source(at.row)
+                .zip(self.axes.cols.source(at.col))
+                .is_some()
+        {
+            self.styles
+                .written(original.and_then(|cell| cell.style), cell.style)
+        } else {
+            cell.style
+        };
         write_cell(
             &mut writer,
             at,
@@ -985,6 +1028,14 @@ fn set_row_height(attributes: &mut Vec<XmlAttribute>, height: Option<f64>) {
     }
 }
 
+/// The style ascending, disjoint `runs` give `col`.
+fn run_style(runs: &[ColStyle], col: ColId) -> Option<u32> {
+    let at = runs.partition_point(|run| run.last < col);
+    runs.get(at)
+        .filter(|run| run.first <= col)
+        .map(|run| run.xf)
+}
+
 fn set_col_width(attributes: &mut Vec<XmlAttribute>, width: Option<f64>) {
     remove_attribute(attributes, "width");
     remove_attribute(attributes, "customWidth");
@@ -1156,6 +1207,8 @@ pub(crate) fn sheet_data_regeneration_loss(data: &[u8]) -> Result<Option<String>
                 if !allowed {
                     return loss(format!("<{}>", String::from_utf8_lossy(&name)), location);
                 }
+                let row_format = name == b"row"
+                    && attr(&element, b"customFormat")?.is_some_and(|value| is_truthy(&value));
                 for attribute in element.attributes() {
                     let attribute = attribute.map_err(xml_err)?;
                     let key = attribute.key.as_ref();
@@ -1173,10 +1226,12 @@ pub(crate) fn sheet_data_regeneration_loss(data: &[u8]) -> Result<Option<String>
                         String::from_utf8_lossy(attribute.value.as_ref())
                     };
                     let allowed = match name.as_slice() {
+                        b"row" if key == b"s" => row_format && value.parse::<u32>().is_ok(),
                         b"row" => {
                             matches!(
                                 key,
                                 b"r" | b"ht"
+                                    | b"customFormat"
                                     | b"customHeight"
                                     | b"hidden"
                                     | b"spans"

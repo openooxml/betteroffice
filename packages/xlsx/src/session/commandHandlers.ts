@@ -255,9 +255,10 @@ function resolveReplayOp(handle: WorkbookHandle, state: WorkbookCommandState, co
       if (target) {
         const resolved = resolveCommandTarget(handle, target, sheets);
         if (operation.type === 'removeSheet') operation.index = resolved.sheet;
+        else if (operation.type === 'moveSheet') operation.from = resolved.sheet;
         else if ('sheet' in operation) operation.sheet = resolved.sheet;
         else throw new WorkbookCommandRefusal('invalid-command');
-      } else if ('sheet' in operation || 'index' in operation || operation.type === 'setDefinedNames' || operation.type === 'restoreSheet') {
+      } else if ('sheet' in operation || 'index' in operation || operation.type === 'moveSheet' || operation.type === 'setDefinedNames' || operation.type === 'restoreSheet') {
         numericSheet();
         if (sheets.length !== state.sheetIds.length || sheets.some((id, index) => id !== state.sheetIds[index])) {
           throw new WorkbookCommandRefusal('stale-target');
@@ -265,6 +266,10 @@ function resolveReplayOp(handle: WorkbookHandle, state: WorkbookCommandState, co
       }
       if (operation.type === 'addSheet') sheets.splice(operation.index as number, 0, `command-sheet:${nextSheetId++}`);
       else if (operation.type === 'removeSheet') sheets.splice(operation.index as number, 1);
+      else if (operation.type === 'moveSheet') {
+        const [moved] = sheets.splice(operation.from as number, 1);
+        sheets.splice(operation.to as number, 0, moved);
+      }
       return operation;
     });
     return op;
@@ -591,9 +596,13 @@ function applyIntent(handle: WorkbookHandle, state: WorkbookCommandState, comman
   const afterHistory = handle.historyState();
   if (committed && op.method === 'applyOps') {
     for (const value of op.args[0]) {
-      const operation = value as { type: string; index: number };
+      const operation = value as { type: string; index: number; from: number; to: number };
       if (operation.type === 'addSheet') state.sheetIds.splice(operation.index, 0, `command-sheet:${state.nextSheetId++}`);
       else if (operation.type === 'removeSheet') state.sheetIds.splice(operation.index, 1);
+      else if (operation.type === 'moveSheet') {
+        const [moved] = state.sheetIds.splice(operation.from, 1);
+        state.sheetIds.splice(operation.to, 0, moved);
+      }
     }
   }
   if (op.method === 'undo' || op.method === 'redo') {
@@ -614,11 +623,11 @@ function applyIntent(handle: WorkbookHandle, state: WorkbookCommandState, comman
       state.catalogDirty = true;
     } else if (op.method === 'applyOps') {
       const types = op.args[0].map((value) => (value as { type: string }).type);
-      const movesCells = types.some((type) => ['insertRows', 'deleteRows', 'insertCols', 'deleteCols', 'addSheet', 'removeSheet'].includes(type));
+      const movesCells = types.some((type) => ['insertRows', 'deleteRows', 'insertCols', 'deleteCols', 'addSheet', 'removeSheet', 'moveSheet'].includes(type));
       state.formattingDirty = movesCells || types.some((type) =>
         ['setCell', 'patchRangeStyle', 'setRangeNumberFormat', 'applyRangeFormat', 'restoreColStyles'].includes(type));
       state.mergesDirty = movesCells || types.some((type) => ['mergeCells', 'unmergeCells'].includes(type));
-      state.catalogDirty = types.some((type) => ['addSheet', 'removeSheet', 'renameSheet'].includes(type));
+      state.catalogDirty = types.some((type) => ['addSheet', 'removeSheet', 'moveSheet', 'renameSheet'].includes(type));
     } else if (op.method === 'patchRangeStyle' || op.method === 'setNumberFormat' ||
       op.method === 'applyFormat' || op.method === 'acceptProposal' ||
       op.method === 'applyEdits' && op.args[0].steps.some((step) => step.op === 'patchStyle' || step.op === 'setNumberFormat')) {

@@ -270,6 +270,100 @@ fn assert_kept(
     assert_eq!(evaluated(), cells(&[]));
 }
 
+#[test]
+fn style_restores_keep_calculation() {
+    let model = WorkbookModel::default();
+    assert_eq!(
+        CalculationScope::of_op(
+            &model,
+            &Op::RestoreRowStyles {
+                sheet: SheetId(0),
+                styles: BTreeMap::from([(1, 1)]),
+            },
+        ),
+        CalculationScope::Kept,
+    );
+    assert_eq!(
+        CalculationScope::of_op(
+            &model,
+            &Op::RestoreColStyles {
+                sheet: SheetId(0),
+                styles: vec![xlsx_model::ColStyle {
+                    first: 0,
+                    last: 3,
+                    xf: 1,
+                }],
+            },
+        ),
+        CalculationScope::Kept,
+    );
+}
+
+#[test]
+fn row_insert_history_restores_styles_and_recalculates_dependents() {
+    let mut model = WorkbookModel::default();
+    let style = model
+        .styles
+        .intern_cell_format(&CellFormat {
+            font: xlsx_model::Font {
+                bold: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .unwrap()
+        .unwrap();
+    let original_styles = BTreeMap::from([(1, style), (4, 0)]);
+    let inserted_styles = BTreeMap::from([(2, style), (5, 0)]);
+    let mut sheet = Sheet::new("Sheet1");
+    sheet.row_styles = original_styles.clone();
+    sheet.set_cell(
+        r("A2"),
+        xlsx_model::Cell {
+            value: number(7.0),
+            ..Default::default()
+        },
+    );
+    sheet.set_cell(
+        r("B4"),
+        xlsx_model::Cell {
+            formula: Some("A2*2+ROW(A2)".into()),
+            ..Default::default()
+        },
+    );
+    model.sheets.push(sheet);
+    let mut workbook = Workbook::from_model(model).unwrap();
+    workbook.recalculate_all(options());
+    assert_eq!(value(&workbook, "B4"), number(16.0));
+    assert_eq!(workbook.model.sheets[0].row_styles, original_styles);
+    assert_fully_calculated(&mut workbook);
+
+    let result = workbook
+        .apply_ops(
+            vec![Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            }],
+            options(),
+        )
+        .unwrap();
+    assert!(result.applied);
+    assert_eq!(workbook.model.sheets[0].row_styles, inserted_styles);
+    assert_eq!(value(&workbook, "B5"), number(17.0));
+    assert_fully_calculated(&mut workbook);
+
+    assert!(workbook.undo(options()).unwrap().applied);
+    assert_eq!(workbook.model.sheets[0].row_styles, original_styles);
+    assert_eq!(value(&workbook, "B4"), number(16.0));
+    assert_fully_calculated(&mut workbook);
+
+    assert!(workbook.redo(options()).unwrap().applied);
+    assert_eq!(workbook.model.sheets[0].row_styles, inserted_styles);
+    assert_eq!(value(&workbook, "B5"), number(17.0));
+    assert_fully_calculated(&mut workbook);
+}
+
 fn check_format(kind: &str, history: bool) {
     let bytes = source(&format!("{STALE}{VOLATILE}"));
     let mut workbook = Workbook::open(&bytes).unwrap();
@@ -579,6 +673,26 @@ fn a_value_edit_after_a_rename_reports_the_status_a_full_rename_leads_to() {
         assert!(cycles.contains(&cell));
     }
     assert!(limited.contains(&(SheetId(0), r("K1"))));
+}
+
+/// A batch that moves Sheet3 in front of Sheet2 and renames Sheet1 reports
+/// Sheet3's cycle at its new position, across undo and redo.
+#[test]
+fn moving_a_sheet_in_a_rename_batch_reports_its_cycle_at_the_new_position() {
+    let third = r#"<c r="C1"><f>D1+1</f><v>0</v></c><c r="D1"><f>C1+1</f><v>0</v></c>"#;
+    let mut workbook = Workbook::open(&package(["", "", third], "")).unwrap();
+    workbook.recalculate_all(options());
+    let cycle = |sheet| vec![(SheetId(sheet), r("C1")), (SheetId(sheet), r("D1"))];
+    assert_eq!(cycle_cells(&workbook), cycle(2));
+    let ops = vec![Op::MoveSheet { from: 2, to: 1 }, rename_sheet(0, "First")];
+    let result = workbook.apply_ops(ops, options()).unwrap();
+    assert_eq!(sorted(&result.cycle_cells), cycle(1));
+    assert_eq!(cycle_cells(&workbook), cycle(1));
+    workbook.undo(options()).unwrap();
+    assert_eq!(cycle_cells(&workbook), cycle(2));
+    workbook.redo(options()).unwrap();
+    assert_eq!(cycle_cells(&workbook), cycle(1));
+    assert_fully_calculated(&mut workbook);
 }
 
 /// Sheet1 renamed to New; C1 reads A1 = 1 through the sheet name, D1 reads C1.

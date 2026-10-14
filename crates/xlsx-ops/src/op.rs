@@ -105,6 +105,11 @@ pub enum Op {
         sheet: SheetId,
         styles: Vec<ColStyle>,
     },
+    #[doc(hidden)]
+    RestoreRowStyles {
+        sheet: SheetId,
+        styles: std::collections::BTreeMap<RowId, u32>,
+    },
     /// Absolute replacement emitted as the inverse of a chart remap.
     #[doc(hidden)]
     SetCharts {
@@ -154,6 +159,10 @@ pub enum Op {
     },
     RemoveSheet {
         index: usize,
+    },
+    MoveSheet {
+        from: usize,
+        to: usize,
     },
     RenameSheet {
         sheet: SheetId,

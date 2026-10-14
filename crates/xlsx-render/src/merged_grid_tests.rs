@@ -50,6 +50,7 @@ fn original_grid_commands(
             width: print.map_or(GRIDLINE_WIDTH, |(m, _)| 96.0 / m.dpi),
             color: gridline_color.clone(),
             style: None,
+            rail: None,
             clip: None,
         });
     }
@@ -62,6 +63,7 @@ fn original_grid_commands(
             width: print.map_or(GRIDLINE_WIDTH, |(m, _)| 96.0 / m.dpi),
             color: gridline_color.clone(),
             style: None,
+            rail: None,
             clip: None,
         });
     }
@@ -122,6 +124,7 @@ fn append_frame_edges(
                 width,
                 color: TEXT_COLOR.into(),
                 style: None,
+                rail: None,
                 clip: None,
             });
         }
@@ -135,6 +138,7 @@ fn append_frame_edges(
             width: PANE_DIVIDER_WIDTH,
             color: PANE_DIVIDER_COLOR.into(),
             style: None,
+            rail: None,
             clip: None,
         });
     }
@@ -147,6 +151,7 @@ fn append_frame_edges(
             width: PANE_DIVIDER_WIDTH,
             color: PANE_DIVIDER_COLOR.into(),
             style: None,
+            rail: None,
             clip: None,
         });
     }

@@ -2,6 +2,7 @@
 //! server-side twin of the browser's canvas backend; never enters the wasm build.
 
 mod font;
+use std::collections::{HashMap, hash_map::Entry};
 
 pub use font::measure_text;
 
@@ -10,7 +11,7 @@ use tiny_skia::{
     Transform,
 };
 
-use xlsx_render::{DisplayList, DrawCmd, GeometryPathCommand, Rect as DlRect};
+use xlsx_render::{Align, DisplayList, DrawCmd, GeometryPathCommand, Rect as DlRect};
 
 /// paint a display list and encode it as png bytes.
 pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
@@ -19,9 +20,67 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
     let mut pixmap = Pixmap::new(w, h).ok_or_else(|| "invalid pixmap size".to_string())?;
     pixmap.fill(Color::WHITE);
     let mut clip_surface = ClipSurface::default();
+    let mut patterns = HashMap::new();
 
     for cmd in &dl.commands {
         match cmd {
+            DrawCmd::PatternFill {
+                x,
+                y,
+                w,
+                h,
+                pattern,
+                fg,
+                bg,
+                origin_x,
+                origin_y,
+                clip,
+            } => {
+                let tile = match patterns.entry((*pattern, fg.clone(), bg.clone())) {
+                    Entry::Occupied(entry) => entry.into_mut(),
+                    Entry::Vacant(entry) => {
+                        let mut tile =
+                            Pixmap::new(8, 8).ok_or_else(|| "invalid pattern tile".to_string())?;
+                        tile.fill(parse_color(bg)?);
+                        let foreground = parse_color(fg)?.to_color_u8().premultiply();
+                        for (y, row) in pattern.mask().into_iter().enumerate() {
+                            for x in 0..8 {
+                                if row & (1 << x) != 0 {
+                                    tile.pixels_mut()[y * 8 + x] = foreground;
+                                }
+                            }
+                        }
+                        entry.insert(tile)
+                    }
+                };
+                let Some(rect) = Rect::from_xywh(
+                    pixel_round(*x),
+                    pixel_round(*y),
+                    pixel_round(x + w) - pixel_round(*x),
+                    pixel_round(y + h) - pixel_round(*y),
+                ) else {
+                    continue;
+                };
+                let paint = Paint {
+                    shader: tiny_skia::Pattern::new(
+                        tile.as_ref(),
+                        tiny_skia::SpreadMode::Repeat,
+                        tiny_skia::FilterQuality::Nearest,
+                        1.0,
+                        Transform::from_translate(pixel_round(*origin_x), pixel_round(*origin_y)),
+                    ),
+                    anti_alias: false,
+                    ..Paint::default()
+                };
+                if let Some(clip) = clip {
+                    clip_surface.paint(&mut pixmap, *clip, |target, transform, mask| {
+                        target.fill_rect(rect, &paint, transform, mask);
+                        Ok(())
+                    })?;
+                } else {
+                    pixmap.fill_rect(rect, &paint, Transform::identity(), None);
+                }
+            }
             DrawCmd::FillRect {
                 x,
                 y,
@@ -52,27 +111,22 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
                 width,
                 color,
                 style,
+                rail,
                 clip,
             } => {
-                if let Some(clip) = clip {
-                    clip_surface.paint(&mut pixmap, *clip, |target, transform, mask| {
-                        paint_line(
+                let paint =
+                    |target: &mut Pixmap, transform: Transform, mask: Option<&Mask>| match rail {
+                        Some(rail) if style.as_deref() == Some("double") => paint_double(
+                            target, *x1, *y1, *x2, *y2, *width, *rail, color, transform, mask,
+                        ),
+                        _ => paint_line(
                             target, *x1, *y1, *x2, *y2, *width, color, style, transform, mask,
-                        )
-                    })?;
+                        ),
+                    };
+                if let Some(clip) = clip {
+                    clip_surface.paint(&mut pixmap, *clip, paint)?;
                 } else {
-                    paint_line(
-                        &mut pixmap,
-                        *x1,
-                        *y1,
-                        *x2,
-                        *y2,
-                        *width,
-                        color,
-                        style,
-                        Transform::identity(),
-                        None,
-                    )?;
+                    paint(&mut pixmap, Transform::identity(), None)?;
                 }
             }
             DrawCmd::Path {
@@ -149,27 +203,46 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
                 highlight,
                 dashed_underline,
                 font_family: _,
+                number_format,
                 ghost: _,
                 chart: _,
             } => {
-                font::paint_text(
-                    &mut pixmap,
-                    &font::TextRun {
-                        x: *x,
-                        y: *y,
+                let run = font::TextRun {
+                    x: *x,
+                    y: *y,
+                    text,
+                    font_size_pt: *font_size,
+                    color: parse_color(color)?,
+                    align: *align,
+                    clip,
+                    bold: *bold,
+                    italic: *italic,
+                    underline: *underline,
+                    strike: *strike,
+                    highlight: highlight.as_deref().map(parse_color).transpose()?,
+                    dashed_underline: *dashed_underline,
+                };
+                if let Some(layout) = number_format {
+                    xlsx_render::paint_number_format(
                         text,
-                        font_size_pt: *font_size,
-                        color: parse_color(color)?,
-                        align: *align,
-                        clip,
-                        bold: *bold,
-                        italic: *italic,
-                        underline: *underline,
-                        strike: *strike,
-                        highlight: highlight.as_deref().map(parse_color).transpose()?,
-                        dashed_underline: *dashed_underline,
-                    },
-                );
+                        layout,
+                        *align,
+                        |literal| font::measure_text(literal, *font_size),
+                        |literal, x| {
+                            font::paint_text(
+                                &mut pixmap,
+                                &font::TextRun {
+                                    x,
+                                    text: literal,
+                                    align: Align::Left,
+                                    ..run
+                                },
+                            )
+                        },
+                    );
+                } else {
+                    font::paint_text(&mut pixmap, &run);
+                }
             }
         }
     }
@@ -189,8 +262,8 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
     Ok(data)
 }
 
-/// paint a line honoring its dash/double style; `double` approximates excel's
-/// double border with two thin parallel passes.
+/// paint a line honoring its dash/double style; a `double` without a rail width
+/// keeps the legacy approximation: two thin passes around the unsnapped line.
 #[allow(clippy::too_many_arguments)]
 fn paint_line(
     pixmap: &mut Pixmap,
@@ -236,17 +309,79 @@ fn paint_line(
                 mask,
             );
         }
-        Some("dashed") => {
-            let dash = StrokeDash::new(vec![4.0, 2.0], 0.0);
-            stroke_seg(pixmap, x1, y1, x2, y2, width, color, dash, transform, mask);
-        }
-        Some("dotted") => {
-            let dash = StrokeDash::new(vec![1.0, 2.0], 0.0);
-            stroke_seg(pixmap, x1, y1, x2, y2, width, color, dash, transform, mask);
+        Some(style) if !xlsx_render::border_dash(style).is_empty() => {
+            let pen = width.round().max(1.0);
+            let (x1, y1, x2, y2) = snap(x1, y1, x2, y2, pen);
+            let scale = if style.starts_with("medium") {
+                width / 2.0
+            } else {
+                width
+            };
+            let dash = StrokeDash::new(
+                xlsx_render::border_dash(style)
+                    .iter()
+                    .map(|run| run * scale)
+                    .collect(),
+                0.0,
+            );
+            stroke_seg(pixmap, x1, y1, x2, y2, pen, color, dash, transform, mask);
         }
         _ => stroke_seg(pixmap, x1, y1, x2, y2, width, color, None, transform, mask),
     }
     Ok(())
+}
+
+/// paint a double line as two `rail`-wide passes on the outer edges of `width`.
+#[allow(clippy::too_many_arguments)]
+fn paint_double(
+    pixmap: &mut Pixmap,
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+    width: f32,
+    rail: f32,
+    color: &str,
+    transform: Transform,
+    mask: Option<&Mask>,
+) -> Result<(), String> {
+    let color = parse_color(color)?;
+    let (x1, y1, x2, y2) = snap(x1, y1, x2, y2, width.round().max(1.0));
+    let off = (width - rail) / 2.0;
+    let (dx, dy) = if (y1 - y2).abs() <= (x1 - x2).abs() {
+        (0.0, off)
+    } else {
+        (off, 0.0)
+    };
+    for sign in [-1.0, 1.0] {
+        stroke_seg(
+            pixmap,
+            x1 + sign * dx,
+            y1 + sign * dy,
+            x2 + sign * dx,
+            y2 + sign * dy,
+            rail,
+            color,
+            None,
+            transform,
+            mask,
+        );
+    }
+    Ok(())
+}
+
+/// centre an axis-aligned line on device pixels for a pen `pen` pixels wide.
+fn snap(x1: f32, y1: f32, x2: f32, y2: f32, pen: f32) -> (f32, f32, f32, f32) {
+    let offset = (pen as u32 % 2) as f32 / 2.0;
+    if y1 == y2 {
+        let y = y1.floor() + offset;
+        (x1.round(), y, x2.round(), y)
+    } else if x1 == x2 {
+        let x = x1.floor() + offset;
+        (x, y1.round(), x, y2.round())
+    } else {
+        (x1, y1, x2, y2)
+    }
 }
 
 /// stroke a single segment with an optional dash pattern.
@@ -286,6 +421,10 @@ struct ClipSurface {
     origin: (i32, i32),
     pixmap: Option<Pixmap>,
     mask: Option<Mask>,
+}
+
+fn pixel_round(value: f32) -> f32 {
+    (value + 0.5).floor()
 }
 
 impl ClipSurface {
@@ -432,6 +571,267 @@ fn parse_color(s: &str) -> Result<Color, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pattern_border_pixels_follow_device_mask_and_dash_runs() {
+        let mut workbook = xlsx_model::Workbook::default();
+        let mut sheet = xlsx_model::Sheet::new("Sheet1");
+        sheet.col_widths.insert(0, 8.0 / 7.0);
+        sheet.row_heights.insert(0, 6.0);
+        let mut format = workbook.styles.cell_format(None);
+        format.fill = serde_json::from_value(serde_json::json!({"Pattern": {
+            "pattern": "lightUp", "fg": {"Rgb": "#000000"}, "bg": {"Rgb": "#ffffff"}
+        }}))
+        .unwrap();
+        let style = workbook.styles.intern_cell_format(&format).unwrap();
+        for col in 0..3 {
+            sheet.set_cell(
+                xlsx_model::CellRef::new(0, col),
+                xlsx_model::Cell {
+                    style,
+                    ..Default::default()
+                },
+            );
+        }
+        workbook.sheets.push(sheet);
+        let mut dl = xlsx_render::build_display_list(
+            &workbook,
+            xlsx_model::SheetId(0),
+            &xlsx_render::Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: 32.0,
+                height: 16.0,
+            },
+        )
+        .unwrap();
+        dl.commands
+            .retain(|cmd| !matches!(cmd, DrawCmd::Line { .. }));
+        dl.commands.push(DrawCmd::Line {
+            x1: 0.0,
+            y1: 12.5,
+            x2: 32.0,
+            y2: 12.5,
+            width: 1.0,
+            color: "#000000".into(),
+            style: Some("dashDot".into()),
+            rail: None,
+            clip: None,
+        });
+        let pixels = Pixmap::decode_png(&render_png(&dl).unwrap()).unwrap();
+        for y in 0..8 {
+            for x in 0..32 {
+                let expected = if (x + y) % 4 == 0 { 0 } else { 255 };
+                assert_eq!(pixels.pixel(x, y).unwrap().red(), expected, "{x},{y}");
+            }
+        }
+        for x in 0..32 {
+            let expected = if matches!(x % 9, 0..=3 | 6) { 0 } else { 255 };
+            assert_eq!(pixels.pixel(x, 12).unwrap().red(), expected, "dash at {x}");
+        }
+        let zoomed = xlsx_render::scaled(dl, 2.0);
+        let pixels = Pixmap::decode_png(&render_png(&zoomed).unwrap()).unwrap();
+        for y in 0..16 {
+            for x in 0..64 {
+                assert_eq!(
+                    pixels.pixel(x, y).unwrap().red(),
+                    if (x + y) % 4 == 0 { 0 } else { 255 },
+                    "zoomed {x},{y}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pattern_border_all_dash_runs_and_double_pixels() {
+        for (style, width, runs) in [
+            ("dashed", 1.0, vec![4, 2]),
+            ("dotted", 1.0, vec![1, 2]),
+            ("mediumDashed", 2.0, vec![8, 4]),
+            ("dashDot", 1.0, vec![4, 2, 1, 2]),
+            ("mediumDashDot", 2.0, vec![8, 4, 2, 4]),
+            ("dashDotDot", 1.0, vec![4, 2, 1, 2, 1, 2]),
+            ("mediumDashDotDot", 2.0, vec![8, 4, 2, 4, 2, 4]),
+            ("slantDashDot", 1.0, vec![4, 2, 1, 2]),
+        ] {
+            let mut pixmap = Pixmap::new(64, 8).unwrap();
+            pixmap.fill(Color::WHITE);
+            let y = if width == 1.0 { 4.5 } else { 4.0 };
+            paint_line(
+                &mut pixmap,
+                0.0,
+                y,
+                64.0,
+                y,
+                width,
+                "#000000",
+                &Some(style.into()),
+                Transform::identity(),
+                None,
+            )
+            .unwrap();
+            let period: u32 = runs.iter().sum();
+            for x in 0..64 {
+                let mut offset = x % period;
+                let mut on = true;
+                for run in &runs {
+                    if offset < *run {
+                        break;
+                    }
+                    offset -= *run;
+                    on = !on;
+                }
+                assert_eq!(
+                    pixmap.pixel(x, 4).unwrap().red(),
+                    if on { 0 } else { 255 },
+                    "{style} at {x}"
+                );
+            }
+        }
+        let mut pixmap = Pixmap::new(16, 8).unwrap();
+        pixmap.fill(Color::WHITE);
+        paint_double(
+            &mut pixmap,
+            0.0,
+            4.5,
+            16.0,
+            4.5,
+            3.0,
+            1.0,
+            "#000000",
+            Transform::identity(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(pixmap.pixel(8, 3).unwrap().red(), 0);
+        assert_eq!(pixmap.pixel(8, 4).unwrap().red(), 255);
+        assert_eq!(pixmap.pixel(8, 5).unwrap().red(), 0);
+    }
+
+    #[test]
+    fn double_line_without_rail_keeps_released_rails() {
+        let black = parse_color("#000000").unwrap();
+        for width in [0.5_f32, 1.0, 2.0] {
+            for (x1, y1, x2, y2) in [(0.0, 8.0, 24.0, 8.0), (12.0, 0.0, 12.0, 16.0)] {
+                let blank = || {
+                    let mut pixmap = Pixmap::new(24, 16).unwrap();
+                    pixmap.fill(Color::WHITE);
+                    pixmap
+                };
+                let mut actual = blank();
+                paint_line(
+                    &mut actual,
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    width,
+                    "#000000",
+                    &Some("double".into()),
+                    Transform::identity(),
+                    None,
+                )
+                .unwrap();
+                let mut expected = blank();
+                let (rail, offset) = ((width * 0.6).max(0.5), (width * 0.8).max(0.8));
+                let (dx, dy) = if y1 == y2 {
+                    (0.0, offset)
+                } else {
+                    (offset, 0.0)
+                };
+                for sign in [-1.0, 1.0] {
+                    stroke_seg(
+                        &mut expected,
+                        x1 + sign * dx,
+                        y1 + sign * dy,
+                        x2 + sign * dx,
+                        y2 + sign * dy,
+                        rail,
+                        black,
+                        None,
+                        Transform::identity(),
+                        None,
+                    );
+                }
+                assert!(actual.data() == expected.data(), "{width} {x1},{y1}");
+            }
+        }
+    }
+
+    #[test]
+    fn produced_double_border_paints_rail_gap_rail() {
+        let mut workbook = xlsx_model::Workbook::default();
+        let mut sheet = xlsx_model::Sheet::new("Sheet1");
+        let mut format = workbook.styles.cell_format(None);
+        format.border.bottom = Some(xlsx_model::BorderEdge {
+            style: xlsx_model::BorderStyle::Double,
+            color: Some(xlsx_model::Color::Rgb("#ff0000".into())),
+        });
+        let style = workbook.styles.intern_cell_format(&format).unwrap();
+        sheet.set_cell(
+            xlsx_model::CellRef::new(0, 0),
+            xlsx_model::Cell {
+                style,
+                ..Default::default()
+            },
+        );
+        workbook.sheets.push(sheet);
+        let dl = xlsx_render::build_display_list(
+            &workbook,
+            xlsx_model::SheetId(0),
+            &xlsx_render::Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: 48.0,
+                height: 40.0,
+            },
+        )
+        .unwrap();
+        for factor in [1.0, 2.0] {
+            let pixels =
+                Pixmap::decode_png(&render_png(&xlsx_render::scaled(dl.clone(), factor)).unwrap())
+                    .unwrap();
+            let ink: Vec<u32> = (0..pixels.height())
+                .filter(|&y| {
+                    let pixel = pixels.pixel(16, y).unwrap();
+                    pixel.red() == 255 && pixel.green() == 0
+                })
+                .collect();
+            let rail = factor as u32;
+            assert_eq!(ink.len() as u32, 2 * rail, "{factor}: {ink:?}");
+            assert_eq!(ink[rail as usize] - ink[0], 2 * rail, "{factor}: {ink:?}");
+            for y in ink[0]..ink[0] + 3 * rail {
+                let pixel = pixels.pixel(16, y).unwrap();
+                assert!(
+                    ink.contains(&y) || pixel.green() > 128,
+                    "{factor}: gap at {y}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dashed_line_below_one_pixel_is_centred_on_its_clamped_width() {
+        let mut pixmap = Pixmap::new(32, 8).unwrap();
+        pixmap.fill(Color::WHITE);
+        paint_line(
+            &mut pixmap,
+            0.0,
+            4.0,
+            32.0,
+            4.0,
+            0.25,
+            "#000000",
+            &Some("dashed".into()),
+            Transform::identity(),
+            None,
+        )
+        .unwrap();
+        for x in 0..32 {
+            assert_eq!(pixmap.pixel(x, 3).unwrap().red(), 255, "above at {x}");
+            assert_eq!(pixmap.pixel(x, 5).unwrap().red(), 255, "below at {x}");
+        }
+        assert_eq!(pixmap.pixel(0, 4).unwrap().red(), 0);
+    }
     use super::*;
     use serde::Deserialize;
     use tiny_skia::PathSegment;
@@ -471,6 +871,7 @@ mod tests {
                     width: 1.0,
                     color: "#d4d4d4".into(),
                     style: None,
+                    rail: None,
                     clip: None,
                 },
                 DrawCmd::Text {
@@ -493,6 +894,7 @@ mod tests {
                     highlight: None,
                     dashed_underline: false,
                     font_family: None,
+                    number_format: None,
                     ghost: false,
                     chart: false,
                 },

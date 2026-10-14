@@ -574,7 +574,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
 
   /** @internal */
   async proposal(operation: ResidentProposalOperation): Promise<ResidentProposalReply> {
-    if (!this.bootstrapped) {
+    if (!this.bootstrapped && !this.commandSession) {
       throw new ResidentWorkerFailureError('Resident engine worker has not laid out its document');
     }
     const response = await this.request({ type: 'proposal', operation });

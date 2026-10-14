@@ -5,7 +5,7 @@ import type {
   DisplayList, Viewport, WorkbookFrame, WorkbookSession, WorkbookSheetView,
 } from '@betteroffice/xlsx';
 import { XlsxEditor } from '../XlsxEditor';
-import type { XlsxEditorProps, XlsxWorkerViewerApi } from '../XlsxEditor';
+import type { XlsxInThreadEditorProps, XlsxWorkerViewerApi } from '../XlsxEditor';
 import { EditorToolbar } from '../components/EditorToolbar';
 import { ToolbarCommandButton } from '../components/toolbar/ToolbarCommand';
 import { workbookSessionOpener } from './useSessionWorkbook';
@@ -185,7 +185,7 @@ describe('workbook session viewer', () => {
     const saved = mock((_bytes: Uint8Array) => {});
     const props = { readOnly: true as const, experimentalWorkerOpen: true as const,
       onReady: (ready: XlsxWorkerViewerApi) => { api = ready; }, onSaveRequest, onSave: saved };
-    const view = render(<XlsxEditor {...props} file={file} />);
+    const view = render(<XlsxEditor legacySyncApi {...props} file={file} />);
     await opened();
     const stale = api;
     const canvas = view.container.querySelector('canvas')!;
@@ -195,7 +195,7 @@ describe('workbook session viewer', () => {
     expect(onSaveRequest).toHaveBeenCalledTimes(1);
     expect(viewer.save).not.toHaveBeenCalled();
     expect(saved).not.toHaveBeenCalled();
-    await act(async () => { view.rerender(<XlsxEditor {...props} file={file.slice()} />); });
+    await act(async () => { view.rerender(<XlsxEditor legacySyncApi {...props} file={file.slice()} />); });
     expect(stale.getPositionAtPoint(184, 96)).toBeNull();
     await expect(stale.flushPendingInput()).rejects.toThrow('replaced');
   });
@@ -204,7 +204,7 @@ describe('workbook session viewer', () => {
     const { viewer, call } = session();
     const opener = open(viewer);
     const ready = mock((_api: XlsxWorkerViewerApi) => {});
-    const view = render(<XlsxEditor file={file} readOnly experimentalWorkerOpen onReady={ready} />);
+    const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen onReady={ready} />);
     await waitFor(() => expect(call.sheetView).toHaveBeenCalledWith(0));
     expect(ready).not.toHaveBeenCalled();
     await opened();
@@ -229,14 +229,14 @@ describe('workbook session viewer', () => {
     const ready = mock((_api: XlsxWorkerViewerApi) => {});
     const errors = mock((_error: Error) => {});
     const legacy = { clientId: 42, collaborative: true };
-    const view = render(<XlsxEditor file={file} readOnly experimentalWorkerOpen {...legacy}
+    const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen {...legacy}
       onReady={ready} onError={errors} />);
     await opened();
     expect(opener.mock.calls[0][1]).not.toHaveProperty('clientId');
     expect(opener.mock.calls[0][1]).not.toHaveProperty('collaborative');
     expect(ready).toHaveBeenCalledTimes(1);
     expect(errors).not.toHaveBeenCalled();
-    view.rerender(<XlsxEditor file={file} readOnly experimentalWorkerOpen {...{ ...legacy, clientId: 43 }}
+    view.rerender(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen {...{ ...legacy, clientId: 43 }}
       onReady={ready} onError={errors} />);
     await tick();
     expect(opener).toHaveBeenCalledTimes(1);
@@ -246,7 +246,7 @@ describe('workbook session viewer', () => {
     const { viewer, call } = session();
     open(viewer);
     let api!: XlsxWorkerViewerApi;
-    render(<XlsxEditor file={file} readOnly experimentalWorkerOpen onReady={(value) => { api = value; }} />);
+    render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen onReady={(value) => { api = value; }} />);
     await opened();
     expect(api.handle).toBeNull();
     expect(api.save()).toBeNull();
@@ -272,12 +272,12 @@ describe('workbook session viewer', () => {
     const opener = open(old.viewer);
     const disposeReady = mock(() => {});
     const ready = mock((_api: XlsxWorkerViewerApi) => disposeReady);
-    const view = render(<XlsxEditor file={file} readOnly experimentalWorkerOpen onReady={ready} />);
+    const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen onReady={ready} />);
     await opened();
     const nextView = deferred<WorkbookSheetView>();
     next.call.sheetView.mockImplementationOnce(() => nextView.promise);
     opener.mockResolvedValue(next.viewer);
-    view.rerender(<XlsxEditor file={new Uint8Array([4])} readOnly experimentalWorkerOpen onReady={ready} />);
+    view.rerender(<XlsxEditor legacySyncApi file={new Uint8Array([4])} readOnly experimentalWorkerOpen onReady={ready} />);
     await waitFor(() => expect(next.call.sheetView).toHaveBeenCalled());
     await act(async () => nextView.resolve(sheetView(0)));
     await tick();
@@ -305,12 +305,12 @@ describe('workbook session viewer', () => {
         });
         const ready = mock((_api: XlsxWorkerViewerApi) => {});
         const errors = mock((_error: Error) => {});
-        const view = render(<XlsxEditor file={file} readOnly experimentalWorkerOpen onReady={ready} onError={errors} />);
+        const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen onReady={ready} onError={errors} />);
         expect(signal.aborted).toBe(false);
         if (close === 'unmount') view.unmount();
         else {
           opener.mockResolvedValue(next.viewer);
-          view.rerender(<XlsxEditor file={new Uint8Array([4])} readOnly experimentalWorkerOpen onReady={ready} onError={errors} />);
+          view.rerender(<XlsxEditor legacySyncApi file={new Uint8Array([4])} readOnly experimentalWorkerOpen onReady={ready} onError={errors} />);
           await opened();
         }
         expect(signal.aborted).toBe(true);
@@ -345,7 +345,7 @@ describe('workbook session viewer', () => {
     });
     const ready = mock((_api: XlsxWorkerViewerApi) => {});
     const errors = mock((_error: Error) => {});
-    const view = render(<XlsxEditor file={file} readOnly experimentalWorkerOpen onReady={ready} onError={errors} />);
+    const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen onReady={ready} onError={errors} />);
     expect(worker.postMessage).toHaveBeenCalledTimes(1);
     view.unmount();
     expect(worker.terminate).toHaveBeenCalledTimes(1);
@@ -361,9 +361,9 @@ describe('workbook session viewer', () => {
     const next = session();
     const opening = deferred<WorkbookSession>();
     const opener = open(old.viewer).mockImplementationOnce(() => opening.promise);
-    const view = render(<XlsxEditor file={file} readOnly experimentalWorkerOpen />);
+    const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen />);
     opener.mockResolvedValue(next.viewer);
-    view.rerender(<XlsxEditor file={new Uint8Array([4])} readOnly experimentalWorkerOpen />);
+    view.rerender(<XlsxEditor legacySyncApi file={new Uint8Array([4])} readOnly experimentalWorkerOpen />);
     await opened();
     await act(async () => opening.resolve(old.viewer));
     expect(old.viewer.dispose).toHaveBeenCalledTimes(1);
@@ -382,7 +382,7 @@ describe('workbook session viewer', () => {
     const next = session();
     const opener = open(old.viewer);
     let api!: XlsxWorkerViewerApi;
-    const view = render(<XlsxEditor file={file} readOnly experimentalWorkerOpen onReady={(value) => { api = value; }} />);
+    const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen onReady={(value) => { api = value; }} />);
     await opened();
     const read = deferred<xlsx.XlsxReadResult>();
     const found = deferred<xlsx.XlsxFindResult>();
@@ -398,7 +398,7 @@ describe('workbook session viewer', () => {
     if (close === 'unmount') view.unmount();
     else {
       opener.mockResolvedValue(next.viewer);
-      view.rerender(<XlsxEditor file={new Uint8Array([4])} readOnly experimentalWorkerOpen />);
+      view.rerender(<XlsxEditor legacySyncApi file={new Uint8Array([4])} readOnly experimentalWorkerOpen />);
     }
     await act(async () => {
       read.resolve({ ok: false, version: 'old', failure: { code: 'missing-target', message: 'old' } });
@@ -419,7 +419,7 @@ describe('workbook session viewer', () => {
     call.frame.mockImplementationOnce(() => first.promise);
     open(viewer);
     const ready = mock((_api: XlsxWorkerViewerApi) => {});
-    const view = render(<XlsxEditor file={file} readOnly experimentalWorkerOpen onReady={ready} />);
+    const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen onReady={ready} />);
     await opened();
     const scroll = view.getByTestId('xlsx-scroll');
     for (const x of [100, 200, 300]) { scroll.scrollLeft = x; fireEvent.scroll(scroll); }
@@ -444,7 +444,7 @@ describe('workbook session viewer', () => {
     call.frame.mockRejectedValueOnce(cancelled);
     open(viewer);
     const errors = mock(() => {});
-    render(<XlsxEditor file={file} readOnly experimentalWorkerOpen onError={errors} />);
+    render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen onError={errors} />);
     await opened();
     expect(painted).toHaveLength(0);
     await tick();
@@ -456,7 +456,7 @@ describe('workbook session viewer', () => {
     const { viewer, call } = session();
     open(viewer);
     let api!: XlsxWorkerViewerApi;
-    const view = render(<XlsxEditor file={file} readOnly experimentalWorkerOpen onReady={(value) => { api = value; }} />);
+    const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen onReady={(value) => { api = value; }} />);
     await opened();
     const stale = deferred<WorkbookFrame>();
     call.frame.mockImplementationOnce(() => stale.promise);
@@ -480,10 +480,10 @@ describe('workbook session viewer', () => {
     old.call.frame.mockImplementationOnce(() => stale.promise);
     const opener = open(old.viewer);
     const ready = mock((_api: XlsxWorkerViewerApi) => {});
-    const view = render(<XlsxEditor file={file} readOnly experimentalWorkerOpen onReady={ready} />);
+    const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen onReady={ready} />);
     await opened();
     opener.mockResolvedValue(next.viewer);
-    view.rerender(<XlsxEditor file={new Uint8Array([4])} readOnly experimentalWorkerOpen onReady={ready} />);
+    view.rerender(<XlsxEditor legacySyncApi file={new Uint8Array([4])} readOnly experimentalWorkerOpen onReady={ready} />);
     await waitFor(() => expect(next.call.sheetView).toHaveBeenCalled());
     await act(async () => stale.resolve(frame(0, viewport)));
     expect(painted).toHaveLength(0);
@@ -499,7 +499,7 @@ describe('workbook session viewer', () => {
     const old = deferred<WorkbookFrame>();
     call.frame.mockImplementationOnce(() => old.promise);
     open(viewer);
-    const view = render(<XlsxEditor file={file} readOnly experimentalWorkerOpen />);
+    const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen />);
     await opened();
     const second = deferred<WorkbookSheetView>();
     call.sheetView.mockImplementationOnce(() => second.promise);
@@ -519,7 +519,7 @@ describe('workbook session viewer', () => {
     const { viewer, call } = session();
     open(viewer);
     let api!: XlsxWorkerViewerApi;
-    const view = render(<XlsxEditor file={file} readOnly experimentalWorkerOpen onReady={(value) => { api = value; }} />);
+    const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen onReady={(value) => { api = value; }} />);
     await opened();
     const target = deferred<WorkbookFrame>();
     call.frame.mockImplementationOnce(() => target.promise);
@@ -545,7 +545,7 @@ describe('workbook session viewer', () => {
     call.sheetView.mockResolvedValue({ ...sheetView(0), contentWidth: 96, contentHeight: 24 });
     open(viewer);
     let api!: XlsxWorkerViewerApi;
-    const view = render(<XlsxEditor file={file} readOnly experimentalWorkerOpen onReady={(value) => { api = value; }} />);
+    const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen onReady={(value) => { api = value; }} />);
     await opened();
     const scroll = view.getByTestId('xlsx-scroll');
     clampScrolling(scroll);
@@ -587,7 +587,7 @@ describe('workbook session viewer', () => {
     }));
     open(viewer);
     let api!: XlsxWorkerViewerApi;
-    const view = render(<XlsxEditor file={file} readOnly experimentalWorkerOpen onReady={(value) => { api = value; }} />);
+    const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen onReady={(value) => { api = value; }} />);
     await opened();
     await act(async () => { await api.commands.execute('zoom', { scale: 1.3 }); });
     await tick();
@@ -624,7 +624,7 @@ describe('workbook session viewer', () => {
     }));
     open(viewer);
     let api!: XlsxWorkerViewerApi;
-    const view = render(<XlsxEditor file={file} readOnly experimentalWorkerOpen onReady={(value) => { api = value; }} />);
+    const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen onReady={(value) => { api = value; }} />);
     await opened();
     let selected!: Promise<boolean>;
     await act(async () => { selected = api.selectCellsAsync(0, xlsx.selectionAt({ row: 0, col: 0 })); });
@@ -646,7 +646,7 @@ describe('workbook session viewer', () => {
     }));
     open(viewer);
     let api!: XlsxWorkerViewerApi;
-    const view = render(<XlsxEditor file={file} readOnly experimentalWorkerOpen onReady={(value) => { api = value; }} />);
+    const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen onReady={(value) => { api = value; }} />);
     await opened();
     const scroll = view.getByTestId('xlsx-scroll');
     clampScrolling(scroll);
@@ -664,7 +664,7 @@ describe('workbook session viewer', () => {
     call.sheetView.mockResolvedValue({ ...sheetView(0), contentWidth: 96, contentHeight: 24 });
     open(viewer);
     let api!: XlsxWorkerViewerApi;
-    const view = render(<XlsxEditor file={file} readOnly experimentalWorkerOpen onReady={(value) => { api = value; }} />);
+    const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen onReady={(value) => { api = value; }} />);
     await opened();
     const scroll = view.getByTestId('xlsx-scroll');
     for (const property of ['scrollLeft', 'scrollTop']) {
@@ -683,7 +683,7 @@ describe('workbook session viewer', () => {
     const { viewer, call } = session();
     open(viewer);
     let api!: XlsxWorkerViewerApi;
-    const view = render(<XlsxEditor file={file} readOnly experimentalWorkerOpen onReady={(value) => { api = value; }} />);
+    const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen onReady={(value) => { api = value; }} />);
     await opened();
     const geometry = deferred<Awaited<ReturnType<WorkbookSession['call']['cellGeometry']>>>();
     call.cellGeometry.mockImplementation(() => geometry.promise);
@@ -698,7 +698,7 @@ describe('workbook session viewer', () => {
     const { viewer, call } = session();
     open(viewer);
     let api!: XlsxWorkerViewerApi;
-    const view = render(<XlsxEditor file={file} readOnly experimentalWorkerOpen onReady={(value) => { api = value; }} />);
+    const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen onReady={(value) => { api = value; }} />);
     await opened();
     const target = deferred<WorkbookFrame>();
     call.frame.mockImplementationOnce(() => target.promise);
@@ -727,7 +727,7 @@ describe('workbook session viewer', () => {
       else Reflect.deleteProperty(window, 'devicePixelRatio');
     });
     let api!: XlsxWorkerViewerApi;
-    const view = render(<XlsxEditor file={file} readOnly experimentalWorkerOpen onReady={(value) => { api = value; }} />);
+    const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen onReady={(value) => { api = value; }} />);
     await opened();
     await act(async () => { await api.commands.execute('zoom', { scale: 1.5 }); });
     await tick();
@@ -755,7 +755,7 @@ describe('workbook session viewer', () => {
     }));
     open(viewer);
     let api!: XlsxWorkerViewerApi;
-    const view = render(<XlsxEditor file={file} readOnly experimentalWorkerOpen onReady={(value) => { api = value; }} />);
+    const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen onReady={(value) => { api = value; }} />);
     await opened();
     expect((view.getByTestId('xlsx-selection') as HTMLElement).style.width).toBe('192px');
     const scroll = view.getByTestId('xlsx-scroll');
@@ -774,7 +774,7 @@ describe('workbook session viewer', () => {
   it('keeps old painted geometry while a scrolled frame is pending', async () => {
     const { viewer, call } = session();
     open(viewer);
-    const view = render(<XlsxEditor file={file} readOnly experimentalWorkerOpen />);
+    const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen />);
     await opened();
     const next = deferred<WorkbookFrame>();
     call.frame.mockImplementationOnce(() => next.promise);
@@ -796,7 +796,7 @@ describe('workbook session viewer', () => {
     const saved = mock((_bytes: Uint8Array) => {});
     let api!: XlsxWorkerViewerApi;
     const toolbar = <EditorToolbar mode="commands"><ToolbarCommandButton id="save" /><EditorToolbar.FormulaBar /></EditorToolbar>;
-    const view = render(<XlsxEditor file={file} readOnly experimentalWorkerOpen toolbar={toolbar}
+    const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen toolbar={toolbar}
       onSave={saved} onReady={(value) => { api = value; }} />);
     await opened();
     await waitFor(() => expect((view.getByTestId('xlsx-formula-input') as HTMLInputElement).value).toBe('=SUM(B1:C1)'));
@@ -806,7 +806,7 @@ describe('workbook session viewer', () => {
     expect(api.commands.getState('proposalsPanel').enabled).toBe(false);
     fireEvent.click(view.getByTestId('xlsx-save'));
     await waitFor(() => expect(saved).toHaveBeenCalledWith(new Uint8Array([8, 9])));
-    view.rerender(<XlsxEditor file={file} readOnly experimentalWorkerOpen toolbar={toolbar} showToolbar={false} />);
+    view.rerender(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen toolbar={toolbar} showToolbar={false} />);
     expect(view.queryByTestId('xlsx-toolbar')).toBeNull();
   });
 
@@ -823,7 +823,7 @@ describe('workbook session viewer', () => {
     open(viewer);
     const external = spyOn(window, 'open').mockReturnValue(null);
     restorers.push(() => external.mockRestore());
-    const view = render(<XlsxEditor file={file} readOnly experimentalWorkerOpen />);
+    const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen />);
     await opened();
     const scroll = view.getByTestId('xlsx-scroll');
     for (const x of [20, 110]) {
@@ -842,13 +842,13 @@ describe('workbook session viewer', () => {
     const { viewer, fail } = session();
     const opener = open(viewer);
     const errors = mock((_error: Error) => {});
-    const view = render(<XlsxEditor file={file} readOnly experimentalWorkerOpen onError={errors} />);
+    const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen onError={errors} />);
     await opened();
     act(() => fail());
     expect(view.getByRole('alert').textContent).toContain('Worker stopped');
     const failure = new Error('Worker unavailable');
     opener.mockRejectedValue(failure);
-    view.rerender(<XlsxEditor file={new Uint8Array([4])} readOnly experimentalWorkerOpen onError={errors} />);
+    view.rerender(<XlsxEditor legacySyncApi file={new Uint8Array([4])} readOnly experimentalWorkerOpen onError={errors} />);
     await waitFor(() => expect(view.getByRole('alert').textContent).toContain(failure.message));
     expect(errors).toHaveBeenCalledWith(failure);
     expect(xlsx.openWorkbook).not.toHaveBeenCalled();
@@ -858,7 +858,7 @@ describe('workbook session viewer', () => {
   it('reports unsupported collaboration without opening a session', async () => {
     const opener = open(session().viewer);
     const collaboration = { collaboration: { clientId: 1 } };
-    const view = render(<XlsxEditor file={file} readOnly experimentalWorkerOpen {...collaboration} />);
+    const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen {...collaboration} />);
     await waitFor(() => expect(view.getByRole('alert').textContent).toContain('Collaboration is unavailable'));
     expect(opener).not.toHaveBeenCalled();
   });
@@ -866,10 +866,9 @@ describe('workbook session viewer', () => {
   for (const props of [
     { experimentalWorkerOpen: false },
     { readOnly: true, experimentalWorkerOpen: false },
-    { readOnly: true },
-  ]) it(`keeps local dispatch without both flags (${JSON.stringify(props)})`, async () => {
+  ]) it(`keeps explicit local dispatch (${JSON.stringify(props)})`, async () => {
     const opener = open(session().viewer);
-    render(<XlsxEditor {...props as XlsxEditorProps} />);
+    render(<XlsxEditor legacySyncApi {...props as XlsxInThreadEditorProps} experimentalWorkerOpen={false} />);
     expect(opener).not.toHaveBeenCalled();
     expect(painted.length).toBeGreaterThanOrEqual(1);
   });

@@ -229,6 +229,12 @@ interface OriginalRunBoundary {
   propertyChanges?: Run['propertyChanges'];
 }
 
+interface LiveParagraphBreaks {
+  leading: readonly BlockBreakKind[];
+  trailing: readonly BlockBreakKind[];
+  leadingPage: boolean;
+}
+
 interface TableCellPayload {
   tcPr?: Attrs;
   story?: string;
@@ -344,9 +350,8 @@ function attrsToTextFormatting(attributes: Attrs): TextFormatting {
     };
   }
 
-  if (typeof attributes.highlight === 'string') {
-    formatting.highlight = attributes.highlight as TextFormatting['highlight'];
-  }
+  const highlight = asString(attributes.highlight) ?? asString(asObject(attributes.highlight)?.color);
+  if (highlight !== undefined) formatting.highlight = highlight as TextFormatting['highlight'];
 
   const fontSize = asObject(attributes.fontSize);
   if (fontSize) {
@@ -1447,37 +1452,173 @@ function boundaryContent(boundary: OriginalRunBoundary, formatting: TextFormatti
   return content;
 }
 
+function sourceBreakBoundaries(paragraph: Paragraph | undefined): OriginalRunBoundary[] {
+  const recorded = paragraph && projectedBlocks.get(paragraph)?.sourceRuns;
+  if (recorded) return recorded;
+  const boundaries: OriginalRunBoundary[] = [];
+  for (const child of paragraph?.content ?? []) {
+    if (child.type !== 'run') {
+      if (
+        child.type === 'commentRangeStart' || child.type === 'commentRangeEnd' ||
+        child.type === 'bookmarkStart' || child.type === 'bookmarkEnd' || child.type === 'rawXml'
+      ) continue;
+      return [];
+    }
+    let text = '';
+    const breaks: NonNullable<OriginalRunBoundary['breaks']> = [];
+    for (const entry of child.content) {
+      if (entry.type === 'text') text += entry.text;
+      else if (entry.type === 'commentReference') text += '\uFFFC';
+      else if (entry.type === 'break' && (entry.breakType === 'page' || entry.breakType === 'column')) {
+        breaks.push({ offset: text.length, type: entry.breakType });
+      } else return [];
+    }
+    boundaries.push({ text, breaks });
+  }
+  return boundaries;
+}
+
+function liveRunBoundaries(
+  boundaries: OriginalRunBoundary[],
+  live: LiveParagraphBreaks
+): OriginalRunBoundary[] {
+  const count = boundaries.reduce((sum, boundary) =>
+    sum + (noteMarkContent(boundary) ? 0 : (boundary.breaks?.length ?? 0)), 0);
+  if (count === 0) return boundaries;
+  const source = boundaries.map((boundary): ParagraphContent => ({
+    type: 'run', content: boundaryContent(boundary, {}),
+  }));
+  const hoisted = count - trailingBlockBreaks({ type: 'paragraph', content: source }).length;
+  const visible = flowTokens(source).includes('visible');
+  let index = 0;
+  let leading = 0;
+  let trailing = 0;
+  return boundaries.map(boundary => {
+    if (!boundary.breaks?.length || noteMarkContent(boundary)) return boundary;
+    const breaks = boundary.breaks.filter(entry => {
+      const before = index++ < hoisted;
+      if (before && visible && entry.type === 'page') return live.leadingPage;
+      if (before) {
+        if (entry.type !== live.leading[leading]) return false;
+        leading += 1;
+      } else {
+        if (entry.type !== live.trailing[trailing]) return false;
+        trailing += 1;
+      }
+      return true;
+    });
+    return breaks.length === boundary.breaks.length ? boundary : { ...boundary, breaks };
+  });
+}
+
+function paragraphBreaksAreLive(content: ParagraphContent[], live: LiveParagraphBreaks): boolean {
+  const paragraph: Paragraph = { type: 'paragraph', content };
+  const tokens = flowTokens(content);
+  return (!(tokens[0] === 'page' && tokens.includes('visible')) || live.leadingPage) &&
+    leadingBlockBreaks(paragraph).every((kind, index) => kind === live.leading[index]) &&
+    trailingBlockBreaks(paragraph).every((kind, index) => kind === live.trailing[index]);
+}
+
+function restoreRecordedBreaks(
+  content: ParagraphContent[],
+  items: InlineItem[],
+  boundaries: OriginalRunBoundary[],
+  liveBreaks: LiveParagraphBreaks
+): ParagraphContent[] {
+  const breaks: { offset: number; type: BlockBreakKind }[] = [];
+  let start = 0;
+  for (const boundary of boundaries) {
+    let cursor = 0;
+    for (const entry of noteMarkContent(boundary) ? [] : (boundary.breaks ?? [])) {
+      cursor = Math.min(Math.max(entry.offset, cursor), boundary.text.length);
+      breaks.push({ offset: start + cursor, type: entry.type });
+    }
+    start += boundary.text.length;
+  }
+  if (breaks.length === 0) return content;
+  const source = boundaries.map((boundary): ParagraphContent => ({
+    type: 'run',
+    content: boundaryContent(boundary, {}),
+  }));
+  const trailing = trailingBlockBreaks({ type: 'paragraph', content: source });
+  const hoisted = breaks.length - trailing.length;
+  const visible = flowTokens(source).includes('visible');
+  const kept = breaks.filter(
+    (entry, index) => index >= hoisted || (visible && entry.type === 'page')
+  );
+  const recorded = boundaries.map((boundary) => boundary.text).join('');
+  const live = items
+    .map((item) => (item.kind === 'text' ? item.text : isBlockBreak(item) ? '' : '\uFFFC'))
+    .join('');
+  let prefix = 0;
+  const shared = Math.min(recorded.length, live.length);
+  while (prefix < shared && recorded[prefix] === live[prefix]) prefix += 1;
+  let suffix = 0;
+  while (
+    suffix < shared - prefix &&
+    recorded[recorded.length - 1 - suffix] === live[live.length - 1 - suffix]
+  ) {
+    suffix += 1;
+  }
+  const length = content.reduce((sum, child) => sum + paragraphContentLength(child), 0);
+  const placed = insertBoundaries(
+    content,
+    kept.map(({ offset }, id) => {
+      const mapped = offset <= prefix
+        ? offset
+        : offset >= recorded.length - suffix
+          ? offset + live.length - recorded.length
+          : Math.min(offset, live.length - suffix);
+      return { id, kind: 'start', offset: Math.min(Math.max(mapped, 0), length) };
+    }),
+    (boundary) => ({ type: 'run', content: [{ type: 'break', breakType: kept[boundary.id]!.type }] })
+  );
+  const placedTrailing = trailingBlockBreaks({ type: 'paragraph', content: placed });
+  return placedTrailing.length === trailing.length &&
+    placedTrailing.every((kind, index) => kind === trailing[index]) &&
+    paragraphBreaksAreLive(placed, liveBreaks)
+    ? placed
+    : content;
+}
+
 function restoreOriginalRuns(
   content: ParagraphContent[],
   items: InlineItem[],
-  boundaries: OriginalRunBoundary[] | undefined
+  boundaries: OriginalRunBoundary[] | undefined,
+  baseParagraph: Paragraph | undefined,
+  liveBreaks: LiveParagraphBreaks
 ): ParagraphContent[] {
+  if (!boundaries?.length) {
+    return restoreRecordedBreaks(content, items,
+      liveRunBoundaries(sourceBreakBoundaries(baseParagraph), liveBreaks), liveBreaks);
+  }
+  const recorded = liveRunBoundaries(boundaries, liveBreaks);
+  const fallback = (): ParagraphContent[] => restoreRecordedBreaks(content, items, recorded, liveBreaks);
   if (
-    !boundaries?.length ||
     !content.every(
       (child) => child.type === 'run' && child.content.every((entry) => entry.type === 'text')
     ) ||
     items.some((item) => item.kind !== 'text' || item.attributes.hyperlink) ||
-    boundaries.some((boundary) => boundary.noteMarks?.length && boundary.text.length > 0)
+    recorded.some((boundary) => boundary.noteMarks?.length && boundary.text.length > 0)
   ) {
-    return content;
+    return fallback();
   }
   const fullText = items.map((item) => (item.kind === 'text' ? item.text : '')).join('');
-  if (fullText !== boundaries.map((boundary) => boundary.text).join('')) return content;
+  if (fullText !== recorded.map((boundary) => boundary.text).join('')) return fallback();
 
   let itemIndex = 0;
   let itemOffset = 0;
   const restoredAttrs: Attrs[] = [];
-  for (const boundary of boundaries) {
+  for (const boundary of recorded) {
     const expected = marksKeyToYrsAttrs(boundary.marksKey);
-    if (!expected) return content;
+    if (!expected) return fallback();
     restoredAttrs.push(expected);
     let remaining = boundary.text.length;
     while (remaining > 0) {
       const item = items[itemIndex];
-      if (item?.kind !== 'text') return content;
+      if (item?.kind !== 'text') return fallback();
       if (stableStringify(formattingAttrs(item.attributes)) !== stableStringify(expected)) {
-        return content;
+        return fallback();
       }
       const available = item.text.length - itemOffset;
       const consumed = Math.min(remaining, available);
@@ -1490,9 +1631,9 @@ function restoreOriginalRuns(
     }
   }
 
-  if (itemIndex !== items.length || itemOffset !== 0) return content;
+  if (itemIndex !== items.length || itemOffset !== 0) return fallback();
 
-  return boundaries.map((boundary, index) => {
+  const restored = recorded.map((boundary, index) => {
     const run: Run = {
       type: 'run',
       content: boundaryContent(boundary, attrsToTextFormatting(restoredAttrs[index])),
@@ -1502,6 +1643,7 @@ function restoreOriginalRuns(
     if (boundary.propertyChanges?.length) run.propertyChanges = boundary.propertyChanges;
     return run;
   });
+  return paragraphBreaksAreLive(restored, liveBreaks) ? restored : content;
 }
 
 /** The story units a run entry projects from: one per UTF-16 unit of text, one per inline embed. */
@@ -1970,6 +2112,7 @@ function paragraphFromStory(
   items: InlineItem[],
   commentBoundaries: CommentBoundary[],
   baseParagraph: Paragraph | undefined,
+  liveBreaks: LiveParagraphBreaks,
   recovery: ChartRecovery,
   format: RunFormatter,
   revisionIds?: RevisionIds,
@@ -1984,7 +2127,9 @@ function paragraphFromStory(
     items,
     Array.isArray(attrs._originalRunBoundaries)
       ? (attrs._originalRunBoundaries as OriginalRunBoundary[])
-      : undefined
+      : undefined,
+    baseParagraph,
+    liveBreaks
   );
   content = restoreRawInlines(content, baseParagraph);
   if (baseParagraph) restoreNestedOrdinals(content, baseParagraph.content);
@@ -2494,6 +2639,9 @@ interface ProjectedBlockMemo {
   children?: readonly BlockContent[][];
   /** Session key of the pilcrow a paragraph was projected from. */
   sessionKey?: string;
+  /** The breaks of a projected paragraph that seeding moves behind it as block embeds. */
+  trailing?: readonly BlockBreakKind[];
+  sourceRuns?: OriginalRunBoundary[];
 }
 
 interface ProjectedStory {
@@ -2534,8 +2682,8 @@ function carryParagraphIdentities(
     const source = previous[index++];
     if (!source?.paraId) return block;
     const carried: Paragraph = { ...block, paraId: source.paraId };
-    const sessionKey = projectedBlocks.get(source)?.sessionKey;
-    if (sessionKey) projectedBlocks.set(carried, { sessionKey });
+    const memo = projectedBlocks.get(source);
+    if (memo?.sessionKey) projectedBlocks.set(carried, { sessionKey: memo.sessionKey, sourceRuns: memo.sourceRuns });
     return carried;
   });
 }
@@ -2549,8 +2697,8 @@ export function ownProjectedParagraphs(blocks: readonly BlockContent[]): BlockCo
   return blocks.map((block) => {
     if (block.type === 'paragraph') {
       const own: Paragraph = { ...block };
-      const sessionKey = projectedBlocks.get(block)?.sessionKey;
-      if (sessionKey) projectedBlocks.set(own, { sessionKey });
+      const memo = projectedBlocks.get(block);
+      if (memo?.sessionKey) projectedBlocks.set(own, { sessionKey: memo.sessionKey, sourceRuns: memo.sourceRuns });
       return own;
     }
     if (block.type !== 'table') return block;
@@ -2608,7 +2756,61 @@ const NESTED_STORY_ID = /^(.*?)(?::t\d+:r\d+c\d+|:sdt\d+)$/;
 
 /** Page and column breaks the layout gives a block of their own, ahead of a paragraph. */
 const isBlockBreak = (item: InlineItem): boolean =>
-  item.kind === 'embed' && (item.embedKind === 'pageBreak' || item.embedKind === 'columnBreak');
+  item.kind === 'embed' && blockBreakKind(item.embedKind) !== null;
+
+type BlockBreakKind = 'page' | 'column';
+
+function blockBreakKind(embedKind: string): BlockBreakKind | null {
+  return embedKind === 'pageBreak' ? 'page' : embedKind === 'columnBreak' ? 'column' : null;
+}
+
+type FlowToken = BlockBreakKind | 'visible';
+
+function runFlowTokens(run: Run, tokens: FlowToken[]): void {
+  for (const content of run.content) {
+    if (content.type === 'break' && (content.breakType === 'page' || content.breakType === 'column')) {
+      tokens.push(content.breakType);
+    } else if (content.type !== 'text' || content.text.length > 0) tokens.push('visible');
+  }
+}
+
+function flowTokens(content: readonly ParagraphContent[], tokens: FlowToken[] = []): FlowToken[] {
+  for (const item of content) {
+    if (item.type === 'run') runFlowTokens(item, tokens);
+    else if (item.type === 'hyperlink') {
+      for (const child of item.children) if (child.type === 'run') runFlowTokens(child, tokens);
+    } else if (item.type === 'simpleField') {
+      for (const child of item.content) if (child.type === 'run') runFlowTokens(child, tokens);
+    } else if (item.type === 'complexField') {
+      for (const child of [...item.fieldCode, ...item.fieldResult]) runFlowTokens(child, tokens);
+    } else if (item.type === 'inlineSdt') flowTokens(item.content as ParagraphContent[], tokens);
+    else if (item.type === 'insertion' || item.type === 'deletion' || item.type === 'moveFrom' || item.type === 'moveTo') {
+      for (const child of item.content) if (child.type === 'run') runFlowTokens(child, tokens);
+    } else if (item.type === 'mathEquation') tokens.push('visible');
+  }
+  return tokens;
+}
+
+function leadingBlockBreaks(paragraph: Paragraph): BlockBreakKind[] {
+  const tokens = flowTokens(paragraph.content);
+  if (!tokens.includes('visible')) return tokens.slice(0, tokens.lastIndexOf('column') + 1) as BlockBreakKind[];
+  return tokens[0] === 'column' ? ['column'] : [];
+}
+
+/** The breaks of `paragraph` that seeding moves behind it as block embeds, in order. */
+function trailingBlockBreaks(paragraph: Paragraph): BlockBreakKind[] {
+  const tokens = flowTokens(paragraph.content);
+  if (!tokens.includes('visible')) return tokens.slice(tokens.lastIndexOf('column') + 1) as BlockBreakKind[];
+  const trailing: BlockBreakKind[] = [];
+  let leading = false;
+  let visible = false;
+  for (const token of tokens) {
+    if (token === 'visible') visible = true;
+    else if (visible || leading) trailing.push(token);
+    else leading = true;
+  }
+  return trailing;
+}
 
 /** Stories a committed op touched; `all` invalidates the whole session. */
 export function noteYrsStoriesDirty(
@@ -2896,6 +3098,18 @@ class SaveContext {
     const blocks: BlockContent[] = [];
     const paragraphIds = this.session.storyParagraphIds(storyId);
     const segments = this.session.storySegments(storyId);
+    const trailingByParagraph = new Map<string, BlockBreakKind[]>();
+    let closing: string | undefined;
+    for (const segment of segments) {
+      if (segment.kind === 'pilcrow') {
+        closing = segment.paraId;
+        trailingByParagraph.set(closing, []);
+      } else {
+        const kind = segment.kind === 'embed' ? blockBreakKind(segment.embedKind) : null;
+        if (kind && closing !== undefined) trailingByParagraph.get(closing)!.push(kind);
+        else closing = undefined;
+      }
+    }
     let items: InlineItem[] = [];
     let paragraphStart = 0;
     let inlineStart = 0;
@@ -2959,16 +3173,23 @@ class SaveContext {
       if (cursor < text.length) items.push({ kind: 'text', text: text.slice(cursor), attributes });
     };
 
+    // Block breaks the previous paragraph's own content carries, and those only the stream does.
+    let witnesses: BlockBreakKind[] = [];
+    let breaks: BlockBreakKind[] = [];
     for (const segment of segments) {
       if (segment.kind === 'text') {
         pushText(segment.text, segment.attributes);
         storyOffset += segment.text.length;
+        witnesses = [];
         continue;
       }
       if (segment.kind === 'pilcrow') {
+        const liveTrailing = trailingByParagraph.get(segment.paraId)!;
         const savedParaId = paragraphIds[paragraphIndex] ?? '';
         const baseParagraph = this.baseParagraphs.get(segment.paraId);
         const boundaries = paragraphCommentBoundaries(storyOffset);
+        const source = sourceBreakBoundaries(baseParagraph);
+        const sourceRuns = source.some(boundary => boundary.breaks?.length) ? source : undefined;
         const inputs = [
           segment.paraId,
           savedParaId,
@@ -2976,6 +3197,9 @@ class SaveContext {
           segment.attributes,
           items,
           boundaries,
+          breaks,
+          liveTrailing,
+          sourceRuns,
         ] as const;
         const priorMemo =
           baseParagraph !== undefined ? projectedBlocks.get(baseParagraph) : undefined;
@@ -2986,6 +3210,7 @@ class SaveContext {
           sameJson(priorMemo.inputs, inputs)
         ) {
           paragraph = baseParagraph;
+          witnesses = [...(priorMemo.trailing ?? trailingBlockBreaks(baseParagraph))];
         } else {
           // Projection mutates `item.payload`; pin the pre-mutation inputs.
           const snapshot = inputs.map((input, index) =>
@@ -2997,15 +3222,25 @@ class SaveContext {
             items,
             boundaries,
             baseParagraph,
+            { leading: breaks, trailing: liveTrailing, leadingPage: segment.properties.pageBreakBeforeRun === true },
             this.recovery(storyId),
             this.runFormatter(storyId, segment.properties),
             this.revisionIds,
             this.inheritedFormatting(storyId, segment.properties)
           );
-          projectedBlocks.set(paragraph, { inputs: snapshot, sessionKey: segment.paraId });
+          const trailing = trailingBlockBreaks(paragraph);
+          const leading = leadingBlockBreaks(paragraph);
+          const consumed = leading.every((kind, index) => kind === breaks[index]) ? leading.length : 0;
+          const pending = breaks.slice(consumed);
+          if (pending.length) paragraph = { ...paragraph, content: [...pending.map((breakType): ParagraphContent => ({
+            type: 'run', content: [{ type: 'break', breakType }],
+          })), ...paragraph.content] };
+          projectedBlocks.set(paragraph, { inputs: snapshot, sessionKey: segment.paraId, trailing, sourceRuns });
+          witnesses = [...trailing];
         }
         blocks.push(paragraph);
         items = [];
+        breaks = [];
         paragraphIndex += 1;
         storyOffset += 1;
         paragraphStart = storyOffset;
@@ -3096,13 +3331,18 @@ class SaveContext {
       } else {
         items.push(segment as EmbedItem);
       }
+      const kind = blockBreakKind(segment.embedKind);
+      if (!kind) witnesses = [];
+      else if (witnesses.includes(kind)) witnesses.splice(witnesses.indexOf(kind), 1);
+      else breaks.push(kind);
       storyOffset += 1;
       if (items.every(isBlockBreak)) inlineStart = storyOffset;
     }
 
+    const pendingBreaks = breaks.map((breakType): ParagraphContent => ({
+      type: 'run', content: [{ type: 'break', breakType }],
+    }));
     // Defensive recovery for malformed/legacy stories without a final pilcrow.
-    // A story ending in a flow-break embed is well-formed, not a lost
-    // paragraph, so only content the projection can carry opens one.
     if (items.length > 0) {
       const trailing = buildParagraphContent(
         items,
@@ -3110,7 +3350,23 @@ class SaveContext {
         directFormatting,
         this.revisionIds
       );
-      if (trailing.length > 0) blocks.push({ type: 'paragraph', content: trailing });
+      if (trailing.length > 0) {
+        blocks.push({ type: 'paragraph', content: breaks.length ? [...pendingBreaks, ...trailing] : trailing });
+        breaks = [];
+      }
+    }
+    if (breaks.length > 0) {
+      let index = blocks.length - 1;
+      while (index >= 0 && blocks[index]!.type !== 'paragraph') index -= 1;
+      const previous = blocks[index];
+      if (previous?.type === 'paragraph') {
+        const paragraph: Paragraph = { ...previous, content: [...previous.content, ...pendingBreaks] };
+        const memo = projectedBlocks.get(previous);
+        if (memo?.sessionKey) projectedBlocks.set(paragraph, { sessionKey: memo.sessionKey, sourceRuns: memo.sourceRuns });
+        blocks[index] = paragraph;
+      } else {
+        blocks.push({ type: 'paragraph', content: pendingBreaks });
+      }
     }
     const projected = restoreRawBlocks(blocks, baseBlocks ?? []);
     this.memo.stories.set(storyId, { commentsKey, blocks: projected });

@@ -14,9 +14,9 @@ export const DOCX_ECHO_MAX_UNACKED_INTENTS = 256;
 
 /** @internal Formatting operations that resolve from the causal predecessor selection. */
 export type PeerlessFormattingIntent = {
-  [K in 'toggleMark' | 'formatRange' | 'clearFormatting' | 'setParagraphAttrs' | 'applyParagraphStyle']:
+  [K in 'toggleMark' | 'formatRange' | 'clearFormatting' | 'setParagraphAttrs' | 'applyParagraphStyle' | 'formatSelection' | 'toggleStrike' | 'toggleList' | 'changeIndent']:
     { kind: K; payload: Omit<DocxCommandPayloads[K], 'selection'> };
-}['toggleMark' | 'formatRange' | 'clearFormatting' | 'setParagraphAttrs' | 'applyParagraphStyle'];
+}['toggleMark' | 'formatRange' | 'clearFormatting' | 'setParagraphAttrs' | 'applyParagraphStyle' | 'formatSelection' | 'toggleStrike' | 'toggleList' | 'changeIndent'];
 
 /** @internal Original-intent accounting happens before the shared coalescing hook. */
 export interface PeerlessAdmissionSnapshot {
@@ -315,6 +315,9 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
       const target: PeerlessAdmissionTarget = tail
         ? { kind: 'predecessor', ticket: tail, suggesting: suggesting === null ? undefined : { name: suggesting, date: new Date().toISOString() } }
         : { kind: 'worker-selection', snapshot: viewStore.getSnapshot(), suggesting: suggesting === null ? undefined : { name: suggesting, date: new Date().toISOString() } };
+      const fence = () => { void session.flush().catch(() => {}); return undefined; };
+      if (tail && deferred.has(tail)) defer(tail, false, fence, undefined, true);
+      else fence();
       if (echoDisabledReason !== 'intent-cap') disableEcho('fence');
       return { slot: compositionSlot, target };
     },

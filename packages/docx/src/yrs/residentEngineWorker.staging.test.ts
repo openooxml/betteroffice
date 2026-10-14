@@ -65,7 +65,8 @@ async function stageRequestedPages(requested: number[], damaged: number[] = [], 
       buildDisplayPagesFrame: (indices: number[]) => { builds.push([...indices]); return bytes; },
       buildDisplayListFrame: () => bytes,
     },
-    commandDisplayWindow: null, layoutDirty: false, revision: 7,
+    commandDisplayWindow: null, layoutDirty: false, revision: 7, layoutPreviewVersion: 0,
+    readResidentFrameGeometry: async () => undefined,
     init: { extras: '{}' }, retainedFrame, layoutRevision: 0,
     fonts: { snapshot: undefined },
     finalizeResidentFrame: async () => ({ bytes, delta, caret: { frameEpoch: 7, caretRect: null } }),
@@ -146,12 +147,17 @@ test('remount_request_with_pending_echo_restages_context_and_background', async 
     fillText(text: string) { texts.push(text); },
   }) }) as unknown as HTMLCanvasElement;
   let canvas = createCanvas();
-  const source = readFileSync(new URL('../../../docx-react/src/components/DocxEditor/peerless/echoPainter.ts', import.meta.url), 'utf8');
+  const peerless = (name: string) => readFileSync(new URL(`../../../docx-react/src/components/DocxEditor/peerless/${name}`, import.meta.url), 'utf8');
+  const ownershipSource = peerless('bitmapOwnership.ts').replace(/^import .*$/gm, '').replaceAll('export function ', 'function ');
+  const ownership = new Function('closeCommandBitmap',
+    new Bun.Transpiler({ loader: 'ts' }).transformSync(ownershipSource) + '\nreturn { retainBitmap, releaseBitmap };'
+  )(closeCommandBitmap) as Record<'retainBitmap' | 'releaseBitmap', (bitmap: ImageBitmap, holder: object) => void>;
+  const source = peerless('echoPainter.ts');
   const painterSource = source.slice(source.indexOf('export function createEchoPainter('))
     .replace('export function createEchoPainter(', 'function createEchoPainter(');
-  const painter = new Function('decodeFrameDelta', 'canvasForPage', 'closeCommandBitmap',
+  const painter = new Function('decodeFrameDelta', 'canvasForPage', 'retainBitmap', 'releaseBitmap',
     new Bun.Transpiler({ loader: 'ts' }).transformSync(painterSource) + '\nreturn createEchoPainter({ canvasForPage });'
-  )(decodeFrameDelta, () => canvas, closeCommandBitmap) as {
+  )(decodeFrameDelta, () => canvas, ownership.retainBitmap, ownership.releaseBitmap) as {
     preview(intent: { kind: 'insertText'; payload: { text: string } }): object | undefined;
     reconcile(frame: DocxCommandFrame, retired: readonly unknown[], remaining: readonly unknown[]): void;
     paint(entries: readonly unknown[]): void;

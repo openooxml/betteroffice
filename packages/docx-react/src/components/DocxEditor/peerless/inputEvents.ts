@@ -11,7 +11,7 @@ export type PeerlessTextIntent = {
 type PeerlessPropertyKind = 'setHyperlink' | 'setSectionProperties' | 'setWatermark';
 export type PeerlessPropertyIntent = { [K in PeerlessPropertyKind]: { kind: K; payload: DocxCommandPayloads[K] } }[PeerlessPropertyKind];
 
-export type PeerlessInputIntent = PeerlessPropertyIntent | PeerlessSelectionIntent | PeerlessTextIntent | { kind: 'undo' | 'redo'; payload: Record<string, never> } | { kind: 'replaceMatches'; payload: DocxCommandPayloads['replaceMatches'] } | { [K in 'setRenderEnvironment' | 'setFontEnvironment']: { kind: K; payload: DocxCommandPayloads[K] } }['setRenderEnvironment' | 'setFontEnvironment'];
+export type PeerlessInputIntent = PeerlessPropertyIntent | PeerlessSelectionIntent | PeerlessTextIntent | { kind: 'undo' | 'redo'; payload: Record<string, never> } | { kind: 'replaceMatches'; payload: DocxCommandPayloads['replaceMatches'] } | { [K in 'setRenderEnvironment' | 'setFontEnvironment']: { kind: K; payload: DocxCommandPayloads[K] } }['setRenderEnvironment' | 'setFontEnvironment'] | { [K in 'insertImage' | 'insertTable' | 'insertPageBreak' | 'insertSectionBreak']: { kind: K; payload: Omit<DocxCommandPayloads[K], 'selection'> } }['insertImage' | 'insertTable' | 'insertPageBreak' | 'insertSectionBreak'];
 
 const implicitVerticalGoals = new WeakSet<PeerlessInputIntent>();
 

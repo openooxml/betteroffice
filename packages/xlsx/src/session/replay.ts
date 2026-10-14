@@ -182,6 +182,9 @@ function editRequest(value: unknown): boolean {
     })) return false;
     switch (step.op) {
       case 'setCellInputs': return matrix(step.inputs);
+      case 'setCellValues': return Array.isArray(step.values) && Array.from(step.values).every(
+        row => Array.isArray(row) && Array.from(row).every(cell => record(cell) && guard({ value: cell }))
+      );
       case 'setFormulas': return matrix(step.formulas);
       case 'setNumberFormat': return numberFormat(step.format);
       case 'patchStyle': return style(step.patch);
@@ -191,9 +194,50 @@ function editRequest(value: unknown): boolean {
 }
 
 function capturedCellFormat(value: unknown): boolean {
-  return record(value) && record(value.font) && (value.fill === 'None' || record(value.fill)) &&
-    record(value.border) && record(value.numberFormat) &&
+  return record(value) && record(value.font) && capturedFill(value.fill) &&
+    capturedBorder(value.border) && record(value.numberFormat) &&
     typeof value.numberFormat.kind === 'string' && record(value.alignment);
+}
+
+const patternTypes = new Set([
+  'gray125', 'gray0625', 'mediumGray', 'darkGray', 'lightGray', 'darkHorizontal',
+  'darkVertical', 'darkDown', 'darkUp', 'darkGrid', 'darkTrellis', 'lightHorizontal',
+  'lightVertical', 'lightDown', 'lightUp', 'lightGrid', 'lightTrellis',
+]);
+const capturedBorderStyles = new Set([
+  'Thin', 'Medium', 'Thick', 'Dashed', 'Dotted', 'Double', 'Hair', 'MediumDashed',
+  'DashDot', 'MediumDashDot', 'DashDotDot', 'MediumDashDotDot', 'SlantDashDot',
+]);
+
+function capturedColor(value: unknown): boolean {
+  if (value === 'Auto') return true;
+  if (!record(value) || Object.keys(value).length !== 1) return false;
+  if ('Rgb' in value) return typeof value.Rgb === 'string';
+  if ('Indexed' in value) return integer(value.Indexed) && value.Indexed <= 255;
+  return record(value.Theme) && integer(value.Theme.idx) && value.Theme.idx <= 255 &&
+    typeof value.Theme.tint === 'number' && Number.isFinite(value.Theme.tint);
+}
+
+function optionalCapturedColor(value: unknown): boolean {
+  return value === undefined || value === null || capturedColor(value);
+}
+
+function capturedFill(value: unknown): boolean {
+  if (value === 'None') return true;
+  if (!record(value) || Object.keys(value).length !== 1) return false;
+  if ('Solid' in value) return capturedColor(value.Solid);
+  const pattern = value.Pattern;
+  return record(pattern) && typeof pattern.pattern === 'string' && patternTypes.has(pattern.pattern) &&
+    optionalCapturedColor(pattern.fg) && optionalCapturedColor(pattern.bg);
+}
+
+function capturedEdge(value: unknown): boolean {
+  return value === undefined || value === null || (record(value) &&
+    typeof value.style === 'string' && capturedBorderStyles.has(value.style) && optionalCapturedColor(value.color));
+}
+
+function capturedBorder(value: unknown): boolean {
+  return record(value) && ['left', 'right', 'top', 'bottom'].every((side) => capturedEdge(value[side]));
 }
 
 function validOp(value: unknown): boolean {

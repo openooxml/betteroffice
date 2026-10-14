@@ -79,6 +79,8 @@ pub struct TextRunSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct ParagraphSnapshot {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preserved_xml: Option<String>,
     pub alignment: Option<String>,
     pub level: u32,
     pub bullet_json: Option<String>,
@@ -430,4 +432,21 @@ fn legal_xml_character(character: char) -> bool {
         || ('\u{20}'..='\u{d7ff}').contains(&character)
         || ('\u{e000}'..='\u{fffd}').contains(&character)
         || ('\u{10000}'..='\u{10ffff}').contains(&character)
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TextParagraphDraft {
+    pub alignment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bullet: Option<bool>,
+    pub runs: Vec<TextRunDraft>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TextRunDraft {
+    pub text: String,
+    #[serde(default)]
+    pub style: TextStyle,
 }

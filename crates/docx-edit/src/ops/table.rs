@@ -19,6 +19,7 @@ use yrs::{
 
 use crate::identity::IdAllocator;
 use crate::op::{OpError, OpResult};
+use crate::ops::paragraph_content_before;
 use crate::seed::border_side_sources;
 use crate::{
     EditCtx, EditingDoc, KIND_KEY, ParagraphIdOrigin, Position, STORIES, check_position,
@@ -1153,6 +1154,19 @@ impl EditingDoc {
         let story = story_ref(&txn, &at.story)?;
         check_position(&story, &txn, at.index)?;
         at.index = crate::ops::code_point_range(&story, &txn, at.index, at.index).0;
+        let split_para_id = if paragraph_content_before(&story, &txn, at.index) {
+            let split = self.split_paragraph_in_transaction(
+                ctx,
+                &mut txn,
+                at.clone(),
+                None,
+                revision_id.clone(),
+            )?;
+            at.index += 1;
+            Some(split.second_para_id)
+        } else {
+            None
+        };
 
         let mut ordinal = 0u32;
         let mut offset = 0u32;
@@ -1173,7 +1187,8 @@ impl EditingDoc {
         let table_slot = fresh_table_slot(&used, &at.story, ordinal as usize);
         let base = format!("{}:t{table_slot}", at.story);
         let mut created_story_ids = Vec::with_capacity((rows * columns) as usize);
-        let mut new_para_ids = Vec::with_capacity((rows * columns) as usize);
+        let mut new_para_ids = Vec::with_capacity((rows * columns) as usize + 1);
+        new_para_ids.extend(split_para_id);
         let revision = revision_id
             .as_ref()
             .map(|id| revision_value(id, &ctx.revision_author()));
@@ -2106,6 +2121,63 @@ mod tests {
         doc.insert_table(ctx, Position::new("body", 0), rows, columns)
             .unwrap();
         doc
+    }
+
+    #[test]
+    fn insert_table_closes_its_anchor_paragraph_and_undo_restores_it() {
+        for offset in [0, 2, 4] {
+            let doc = EditingDoc::new(74);
+            doc.create_story("body", "Seed", "Normal", "center")
+                .unwrap();
+            let before = project_story(&doc, "body").unwrap();
+            let original_id = doc.paragraphs("body").unwrap()[0].para_id.clone();
+            let mut undo = doc.undo_manager();
+            let receipt = doc
+                .insert_table(&direct(), Position::new("body", offset), 2, 2)
+                .unwrap();
+            let blocks = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+            let value = serde_json::to_value(&blocks).unwrap();
+            let table_index = usize::from(offset > 0);
+            assert_eq!(value[table_index]["kind"], "table");
+            let paragraphs = doc.paragraphs("body").unwrap();
+            let expected = match offset {
+                0 => vec!["Seed"],
+                2 => vec!["Se", "ed"],
+                _ => vec!["Seed", ""],
+            };
+            assert_eq!(
+                paragraphs
+                    .iter()
+                    .map(|p| p.text.as_str())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(paragraphs[0].para_id, original_id);
+            assert_eq!(receipt.new_para_ids.len(), 4 + table_index);
+            assert!(undo.undo());
+            assert_eq!(project_story(&doc, "body").unwrap(), before);
+            assert_eq!(doc.story_ids_for_test(), vec!["body"]);
+            assert!(undo.redo());
+            assert!(yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).is_ok());
+        }
+    }
+
+    #[test]
+    fn rejecting_a_suggested_table_also_rejoins_its_split_paragraph() {
+        let doc = EditingDoc::new(74);
+        doc.create_story("body", "Seed", "Normal", "left").unwrap();
+        let receipt = doc
+            .insert_table(&suggesting(), Position::new("body", 2), 1, 1)
+            .unwrap();
+        assert!(yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).is_ok());
+        doc.reject_change(
+            &direct(),
+            &crate::ChangeTarget::Revision(receipt.revision_ids[0].clone()),
+        )
+        .unwrap();
+        assert_eq!(doc.paragraphs("body").unwrap().len(), 1);
+        assert_eq!(doc.paragraphs("body").unwrap()[0].text, "Seed");
+        assert_eq!(doc.story_ids_for_test(), vec!["body"]);
     }
 
     #[test]

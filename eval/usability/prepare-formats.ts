@@ -1,6 +1,6 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { pptxFixture, xlsxFixture } from '../test/format-fixtures';
+import { pptxFixture, xlsxFixture } from '../../packages/agents/test/format-fixtures';
 
 const root = resolve(process.argv[2] ?? '/tmp/betteroffice-formats-eval');
 for (const task of ['xlsx', 'pptx', 'mixed']) {

@@ -117,12 +117,20 @@ export function createOutbox<P, X>(options: OutboxOptions<P, X>): Outbox<P, X> {
     node.segment.lanes[laneOf(node.entry.draft)].set(node.order, node);
   }
 
+  function merge(previous: Node<P, X>, draft: CommandDraft<P, X>): CommandDraft<P, X> | undefined {
+    const base = previous.entry.draft;
+    const after = draft.options.after;
+    const next = after && owners.get(after) === owners.get(previous.tickets[0]!)
+      ? { ...draft, options: { ...draft.options, after: base.options.after } } : draft;
+    const merged = compatible(base, next) ? options.coalesce?.(base, next) : undefined;
+    return merged && laneOf(merged) === laneOf(base) && merged.options.after === base.options.after &&
+      !merged.options.fence ? merged : undefined;
+  }
+
   function enqueue(draft: CommandDraft<P, X>, ticket: CommandTicket): OutboxEntry<P, X> {
     const previous = last?.segment === lastSegment ? last : undefined;
-    const merged = previous && compatible(previous.entry.draft, draft)
-      ? options.coalesce?.(previous.entry.draft, draft) : undefined;
-    if (merged && previous && laneOf(merged) === laneOf(previous.entry.draft) &&
-      merged.options.after === previous.entry.draft.options.after && !merged.options.fence) {
+    const merged = previous && merge(previous, draft);
+    if (merged && previous) {
       previous.tickets.push(ticket);
       previous.entry = { id: previous.entry.id, draft: merged, tickets: previous.tickets };
       owners.set(ticket, owners.get(previous.tickets[0]!)!);

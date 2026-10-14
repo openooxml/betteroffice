@@ -7,7 +7,11 @@ use sha2::{Digest, Sha256};
 use super::*;
 
 const MAGIC: &[u8; 8] = b"XLSXRECV";
-const CODEC_VERSION: u8 = 3;
+const CODEC_VERSION: u8 = 6;
+const PATTERN_CODEC_VERSION: u8 = 5;
+/// Checkpoints before patterned fills, whose styles hold only the fills and
+/// border styles those releases read.
+const RELEASED_CODEC_VERSION: u8 = 3;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -527,7 +531,13 @@ impl Workbook {
     pub fn restore_recovery_checkpoint(
         bytes: &[u8],
     ) -> Result<(Self, u64, Option<CalculationOptions>, bool)> {
-        if bytes.len() < 41 || &bytes[..8] != MAGIC || bytes[8] != CODEC_VERSION {
+        if bytes.len() < 41
+            || &bytes[..8] != MAGIC
+            || !matches!(
+                bytes[8],
+                RELEASED_CODEC_VERSION | PATTERN_CODEC_VERSION | CODEC_VERSION
+            )
+        {
             return Err(invalid("Unsupported workbook recovery codec"));
         }
         let payload = &bytes[41..];
@@ -551,9 +561,15 @@ impl Workbook {
             authority_bytes,
             header.client_id,
             header.next_sheet_id,
+            bytes[8] == CODEC_VERSION,
         )
         .map_err(invalid)?;
         let projection = authority.materialize().map_err(authority_error)?;
+        if bytes[8] == RELEASED_CODEC_VERSION
+            && !crate::authority::released_styles(&projection.styles)
+        {
+            return Err(invalid("Unsupported workbook recovery codec"));
+        }
         let model = checkpoint.calculation.apply(projection)?;
         authority.set_snapshot_projection_valid(true);
         let mut preserved = PreservedSnapshotBuilder::new();
@@ -1359,5 +1375,150 @@ mod tests {
         wrong_engine.extend_from_slice(&Sha256::digest(&payload));
         wrong_engine.extend_from_slice(&payload);
         assert!(Workbook::restore_recovery_checkpoint(&wrong_engine).is_err());
+    }
+
+    fn with_authority_state(bytes: &[u8], version: u8, state: &[u8]) -> Vec<u8> {
+        let mut reader = Reader::new(&bytes[41..]);
+        let checkpoint = reader.bytes().unwrap();
+        reader.bytes().unwrap();
+        let mut writer = Writer::new();
+        writer.bytes(checkpoint);
+        writer.bytes(state);
+        writer.raw(reader.rest());
+        let payload = writer.into_bytes();
+        let mut framed = bytes[..8].to_vec();
+        framed.push(version);
+        framed.extend_from_slice(&Sha256::digest(&payload));
+        framed.extend_from_slice(&payload);
+        framed
+    }
+
+    #[test]
+    fn recovery_checkpoints_version_row_defaults_and_restore_the_released_layout() {
+        let mut styled = model();
+        styled.styles.cell_xfs = vec![xlsx_model::Xf::default(); 2];
+        styled.sheets[0].row_styles = BTreeMap::from([(3, 1)]);
+        let workbook = Workbook::from_model(styled.clone()).unwrap();
+        let bytes = workbook.recovery_checkpoint(0, None).unwrap();
+        assert_ne!(
+            bytes[8], 3,
+            "a checkpoint whose authority state holds row defaults needs its own codec version"
+        );
+        let (restored, ..) = Workbook::restore_recovery_checkpoint(&bytes).unwrap();
+        assert_eq!(
+            restored.model.sheets[0].row_styles,
+            styled.sheets[0].row_styles
+        );
+
+        let plain = Workbook::from_model(model()).unwrap();
+        let bytes = plain.recovery_checkpoint(0, None).unwrap();
+        let released =
+            with_authority_state(&bytes, 3, &plain.authority.encode_released_recovery_state());
+        let (restored, ..) = Workbook::restore_recovery_checkpoint(&released).unwrap();
+        assert_eq!(restored.model, plain.model);
+        assert!(restored.model.sheets[0].row_styles.is_empty());
+        let current_state =
+            with_authority_state(&bytes, 3, &plain.authority.encode_recovery_state().unwrap());
+        assert!(Workbook::restore_recovery_checkpoint(&current_state).is_err());
+    }
+
+    #[test]
+    fn recovery_checkpoints_version_pattern_fills_and_refuse_them_in_the_released_codec() {
+        use xlsx_model::{Border, BorderEdge, BorderStyle, Color, Fill, PatternType};
+        let mut patterned = model();
+        patterned.styles.fills.push(Fill::Pattern {
+            pattern: PatternType::LightUp,
+            fg: Some(Color::Rgb("#123456".into())),
+            bg: None,
+        });
+        let mut dashed = model();
+        dashed.styles.borders.push(Border {
+            top: Some(BorderEdge {
+                style: BorderStyle::MediumDashDot,
+                color: None,
+            }),
+            ..Border::default()
+        });
+        for styled in [patterned, dashed] {
+            let workbook = Workbook::from_model(styled).unwrap();
+            let bytes = workbook.recovery_checkpoint(0, None).unwrap();
+            assert_ne!(
+                bytes[8], 3,
+                "patterned fills and extended borders need their own codec version"
+            );
+            let (restored, ..) = Workbook::restore_recovery_checkpoint(&bytes).unwrap();
+            assert_eq!(restored.model, workbook.model);
+            let mut released = bytes;
+            released[8] = 3;
+            assert!(Workbook::restore_recovery_checkpoint(&released).is_err());
+        }
+
+        let plain = Workbook::from_model(model()).unwrap();
+        let bytes = plain.recovery_checkpoint(0, None).unwrap();
+        let released =
+            with_authority_state(&bytes, 3, &plain.authority.encode_released_recovery_state());
+        let (restored, ..) = Workbook::restore_recovery_checkpoint(&released).unwrap();
+        assert_eq!(restored.model, plain.model);
+    }
+    #[test]
+    fn cascade_composition_recovery_writer_uses_codec_six() {
+        let mut styled = model();
+        styled.styles.cell_xfs = vec![xlsx_model::Xf::default(); 2];
+        styled.styles.cell_xfs[1].xf_id = Some(2);
+        styled.styles.fills.push(xlsx_model::Fill::Pattern {
+            pattern: xlsx_model::PatternType::LightUp,
+            fg: None,
+            bg: None,
+        });
+        styled.sheets[0].row_styles.insert(3, 1);
+        let workbook = Workbook::from_model(styled).unwrap();
+        let bytes = workbook.recovery_checkpoint(0, None).unwrap();
+        assert_eq!(bytes[8], 6);
+        let (restored, ..) = Workbook::restore_recovery_checkpoint(&bytes).unwrap();
+        assert_eq!(restored.model, workbook.model);
+    }
+
+    #[test]
+    fn cascade_composition_recovery_reads_codec_five_without_row_suffix() {
+        let mut styled = model();
+        styled.styles.fills.push(xlsx_model::Fill::Pattern {
+            pattern: xlsx_model::PatternType::LightUp,
+            fg: None,
+            bg: None,
+        });
+        styled.styles.cell_xfs.push(xlsx_model::Xf {
+            xf_id: Some(2),
+            ..xlsx_model::Xf::default()
+        });
+        let workbook = Workbook::from_model(styled).unwrap();
+        let bytes = workbook.recovery_checkpoint(0, None).unwrap();
+        let old = with_authority_state(
+            &bytes,
+            5,
+            &workbook.authority.encode_released_recovery_state(),
+        );
+        let (restored, ..) = Workbook::restore_recovery_checkpoint(&old).unwrap();
+        assert_eq!(restored.model, workbook.model);
+        let new = restored.recovery_checkpoint(0, None).unwrap();
+        assert_eq!(new[8], 6);
+        assert_eq!(
+            Workbook::restore_recovery_checkpoint(&new).unwrap().0.model,
+            restored.model
+        );
+    }
+
+    #[test]
+    fn cascade_composition_recovery_reads_codec_three_and_rejects_four() {
+        let workbook = Workbook::from_model(model()).unwrap();
+        let bytes = workbook.recovery_checkpoint(0, None).unwrap();
+        let state = workbook.authority.encode_released_recovery_state();
+        let old = with_authority_state(&bytes, 3, &state);
+        let (restored, ..) = Workbook::restore_recovery_checkpoint(&old).unwrap();
+        assert_eq!(restored.model, workbook.model);
+        assert_eq!(restored.recovery_checkpoint(0, None).unwrap()[8], 6);
+        assert!(
+            Workbook::restore_recovery_checkpoint(&with_authority_state(&bytes, 4, &state))
+                .is_err()
+        );
     }
 }

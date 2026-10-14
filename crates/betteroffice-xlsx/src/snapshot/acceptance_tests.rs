@@ -3,6 +3,7 @@ use crate::{
     EditStep, ProposalEditInput, ProposalRequest, RangeAddress, RangeTarget, UpdateEvent, Viewport,
     WorkbookModel, XlsxExportOptions,
 };
+use xlsx_model::CellRange;
 use xlsx_ops::{CellState, Op};
 
 use super::*;
@@ -260,6 +261,74 @@ fn hydrate(workbook: &Workbook, budget: SnapshotBudget) -> Workbook {
     assert!(!peer.can_undo());
     assert!(!peer.can_redo());
     peer
+}
+
+#[test]
+fn format_facets_bounded_snapshot_and_replay() {
+    let expected = serde_json::json!({
+        "font": null, "fill": null, "border": null, "num_fmt_id": null,
+        "alignment": {
+            "h": "Distributed", "v": null, "wrap_text": false, "shrink_to_fit": false,
+            "text_rotation": 255, "indent": 4, "relative_indent": -2,
+            "justify_last_line": true, "reading_order": 2
+        },
+        "protection": {"locked": false, "hidden": true},
+        "xf_id": 1, "quote_prefix": true, "pivot_button": true
+    });
+    let xf = serde_json::from_value(expected.clone()).unwrap();
+    let mut model = WorkbookModel {
+        sheets: vec![crate::Sheet::new("Data")],
+        ..Default::default()
+    };
+    model.styles.cell_xfs.push(xf);
+    let at = CellRef::new(0, 0);
+    let range = CellRange::new(at, at);
+    model.sheets[0].set_cell(
+        at,
+        Cell {
+            style: Some(0),
+            value: CellValue::Number { value: 7.0 },
+            ..Default::default()
+        },
+    );
+    let patches = [
+        crate::StylePatch {
+            bold: Some(true),
+            ..Default::default()
+        },
+        crate::StylePatch {
+            italic: Some(true),
+            ..Default::default()
+        },
+    ];
+    for budget in budgets() {
+        let mut worker = Workbook::from_model(model.clone()).unwrap();
+        let mut peer = hydrate(&worker, budget);
+        assert_eq!(
+            serde_json::to_value(&peer.model().styles.cell_xfs[0]).unwrap(),
+            expected
+        );
+        for (step, patch) in patches.iter().enumerate() {
+            for workbook in [&mut worker, &mut peer] {
+                workbook
+                    .patch_range_style(SheetId(0), range, patch.clone(), context())
+                    .unwrap();
+            }
+            assert_edited_identity(&worker, &peer);
+            for workbook in [&worker, &peer] {
+                let style = workbook.model().sheets[0].cell(at).unwrap().style;
+                let format =
+                    serde_json::to_value(workbook.model().styles.cell_format(style)).unwrap();
+                assert_eq!(format["font"]["bold"], true);
+                assert_eq!(format["font"]["italic"], step == 1);
+                assert_eq!(format["protection"], expected["protection"]);
+                assert_eq!(format["alignment"], expected["alignment"]);
+                assert_eq!(format["xfId"], expected["xf_id"]);
+                assert_eq!(format["quotePrefix"], expected["quote_prefix"]);
+                assert_eq!(format["pivotButton"], expected["pivot_button"]);
+            }
+        }
+    }
 }
 
 fn canonical_model(model: &WorkbookModel) -> Vec<Vec<u8>> {
@@ -2790,6 +2859,224 @@ fn snapshot_lineage_uses_cached_authority_revision_for_every_fragment() {
     }
     let failure = encoder.next(&worker).unwrap_err();
     assert_eq!(failure.to_string(), "snapshot workbook lineage has changed");
+}
+
+/// A1 holds a date-sized serial under builtin id 14, which the workbook
+/// declares as `0.00`.
+fn declared_builtin_model() -> WorkbookModel {
+    let mut model = WorkbookModel {
+        sheets: vec![crate::Sheet::new("Data")],
+        ..WorkbookModel::default()
+    };
+    model.styles.num_fmts.push((14, "0.00".into()));
+    model.styles.cell_xfs.push(xlsx_model::styles::Xf {
+        num_fmt_id: Some(14),
+        ..xlsx_model::styles::Xf::default()
+    });
+    model.sheets[0].set_cell(
+        CellRef::new(0, 0),
+        Cell {
+            value: CellValue::Number { value: 45_000.0 },
+            style: Some(0),
+            ..Cell::default()
+        },
+    );
+    model
+}
+
+fn a1_display(model: &WorkbookModel) -> String {
+    let cell = model.sheets[0].cell(CellRef::new(0, 0)).unwrap();
+    xlsx_render::display_text(&model.styles, model.date_system, cell)
+}
+
+/// what schema 6 displayed for A1: the builtin, whatever the workbook declares.
+fn builtin_a1_display() -> String {
+    let mut model = declared_builtin_model();
+    model.styles.num_fmts.clear();
+    a1_display(&model)
+}
+
+#[test]
+fn schema_6_snapshot_with_a_declared_builtin_restores_its_builtin_display() {
+    let model = declared_builtin_model();
+    let displayed = builtin_a1_display();
+    assert_eq!(displayed, a1_display(&model));
+    let mut worker = Workbook::from_model(model.clone()).unwrap();
+    worker.authority = crate::authority::schema_6_authority(&model, 91);
+    for budget in budgets() {
+        let (peer, _) = completed_builder(&encode(&worker, budget), budget)
+            .finish()
+            .unwrap()
+            .into_parts();
+        let (again, _) = completed_builder(&encode(&peer, budget), budget)
+            .finish()
+            .unwrap()
+            .into_parts();
+        for restored in [&peer, &again] {
+            assert_eq!(a1_display(&restored.model), displayed);
+        }
+    }
+}
+
+#[test]
+fn restored_schema_6_snapshot_stages_updates_at_its_own_schema() {
+    let model = declared_builtin_model();
+    let mut worker = Workbook::from_model(model.clone()).unwrap();
+    worker.authority = crate::authority::schema_6_authority(&model, 91);
+    let budget = budgets()[2];
+    let (peer, _) = completed_builder(&encode(&worker, budget), budget)
+        .finish()
+        .unwrap()
+        .into_parts();
+    let staged = peer
+        .authority
+        .stage_updates_v1(&[yrs::Update::EMPTY_V1], None)
+        .unwrap();
+    assert_eq!(a1_display(&staged.model), builtin_a1_display());
+}
+
+/// A1 holds an unstyled number in a workbook that declares General as `0.00`.
+fn declared_general_model() -> WorkbookModel {
+    let mut model = WorkbookModel {
+        sheets: vec![crate::Sheet::new("Data")],
+        ..WorkbookModel::default()
+    };
+    model.styles.num_fmts.push((0, "0.00".into()));
+    model.sheets[0].set_cell(
+        CellRef::new(0, 0),
+        Cell {
+            value: CellValue::Number { value: 12.0 },
+            ..Cell::default()
+        },
+    );
+    model
+}
+
+#[test]
+fn peers_sharing_a_schema_6_state_accept_each_others_updates() {
+    let model = declared_builtin_model();
+    let mut worker = Workbook::from_model(model.clone()).unwrap();
+    worker.authority = crate::authority::schema_6_authority(&model, 91);
+    let budget = budgets()[2];
+    let (restored, _) = completed_builder(&encode(&worker, budget), budget)
+        .finish()
+        .unwrap()
+        .into_parts();
+    let fresh =
+        crate::authority::WorkbookAuthority::from_source(&model, Some(92), &[], None).unwrap();
+    let crate::authority::SnapshotAdoption::Replacement(mut adopted) =
+        fresh.snapshot_replacement(&restored.authority.encode_state_as_update_v1())
+    else {
+        panic!("a fresh replica should adopt the shared state");
+    };
+    let at = CellRef::new(1, 0);
+    adopted
+        .apply_ops(
+            &[Op::SetCell {
+                sheet: SheetId(0),
+                at,
+                cell: CellState {
+                    value: CellValue::Number { value: 7.0 },
+                    ..CellState::default()
+                },
+            }],
+            crate::authority::SyncOrigin::User,
+            &xlsx_model::Stylesheet::default(),
+        )
+        .unwrap();
+    let staged = restored
+        .authority
+        .stage_updates_v1(&[&adopted.encode_state_as_update_v1()], None)
+        .unwrap();
+    assert_eq!(
+        staged.model.sheets[0].cell(at).map(|cell| &cell.value),
+        Some(&CellValue::Number { value: 7.0 })
+    );
+}
+
+#[test]
+fn adopting_a_schema_6_state_keeps_unstyled_cells_general() {
+    let model = declared_general_model();
+    let shared = crate::authority::schema_6_authority(&model, 91);
+    assert_eq!(a1_display(&shared.materialize().unwrap()), "12");
+    let fresh =
+        crate::authority::WorkbookAuthority::from_source(&model, Some(92), &[], None).unwrap();
+    let crate::authority::SnapshotAdoption::Replacement(adopted) =
+        fresh.snapshot_replacement(&shared.encode_state_as_update_v1())
+    else {
+        panic!("a fresh replica should adopt the shared state");
+    };
+    assert_eq!(a1_display(&adopted.materialize().unwrap()), "12");
+}
+
+#[test]
+fn builtins_applied_after_a_schema_6_restore_survive_save_and_reopen() {
+    let mut model = declared_builtin_model();
+    let dated = CellRef::new(0, 1);
+    let captured = CellRef::new(0, 2);
+    for at in [dated, captured] {
+        model.sheets[0].set_cell(
+            at,
+            Cell {
+                value: CellValue::Number { value: 45_000.0 },
+                ..Cell::default()
+            },
+        );
+    }
+    let mut worker = Workbook::from_model(model.clone()).unwrap();
+    worker.authority = crate::authority::schema_6_authority(&model, 91);
+    let budget = budgets()[2];
+    let (mut peer, _) = completed_builder(&encode(&worker, budget), budget)
+        .finish()
+        .unwrap()
+        .into_parts();
+    peer.set_range_number_format(
+        SheetId(0),
+        xlsx_model::CellRange::new(dated, dated),
+        xlsx_ops::NumberFormatMutation::Date,
+        context(),
+    )
+    .unwrap();
+    let builtin = xlsx_model::CellFormat {
+        number_format: xlsx_model::NumberFormat::Builtin { id: 14 },
+        ..xlsx_model::CellFormat::default()
+    };
+    peer.apply_format(
+        SheetId(0),
+        xlsx_model::CellRange::new(captured, captured),
+        xlsx_ops::CapturedFormat {
+            rows: 1,
+            columns: 1,
+            formats: vec![builtin],
+            kept: Vec::new(),
+            source_styles: Vec::new(),
+            source_formats: Vec::new(),
+        },
+        context(),
+    )
+    .unwrap();
+    let reopened = Workbook::open(&peer.save().unwrap()).unwrap();
+    let model = reopened.model();
+    for at in [dated, captured] {
+        let cell = model.sheets[0].cell(at).unwrap();
+        assert_eq!(
+            xlsx_render::display_text(&model.styles, model.date_system, cell),
+            builtin_a1_display(),
+            "{at:?}"
+        );
+    }
+}
+
+#[test]
+fn snapshots_of_a_workbook_declaring_general_restore() {
+    let worker = Workbook::from_model(declared_general_model()).unwrap();
+    for budget in budgets() {
+        let (peer, _) = completed_builder(&encode(&worker, budget), budget)
+            .finish()
+            .unwrap()
+            .into_parts();
+        assert_eq!(a1_display(&peer.model), "12");
+    }
 }
 
 #[path = "invariant_tests.rs"]

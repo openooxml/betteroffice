@@ -3,7 +3,6 @@ import { useWorkerPropertyDialogs } from './useWorkerPropertyDialogs';
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import {
   applyFrameDelta,
-  CANVAS_PAGE_GAP_PX,
   decodeFrameDelta,
   type RetainedFrame,
 } from '@betteroffice/docx/layout/render';
@@ -20,6 +19,7 @@ import {
 import { createResidentCommandConnection, discardCommandPresentation } from '@betteroffice/docx/peerless';
 import type { DocxEditorProps, DocxEditorRef } from '../../DocxEditor';
 import { createPeerlessShellController } from './shellController';
+import { commandPageGeometry } from './commandPageGeometry';
 import { createDocxPluginHost } from '../../../plugins/createDocxPluginHost';
 import { DocxCommandProvider } from '../../../commands/DocxCommandProvider';
 import { DocxEditorShell } from '../DocxEditorShell';
@@ -98,7 +98,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     if (!worker.current) throw new Error('Peer-less worker is not ready');
     return (await worker.current.save({ comments: [...(props.comments ?? sourceComments.current)] })).bytes;
   }, [props.comments]);
-  const printCapture = useRef<ReturnType<typeof createWorkerPrintCapture> | null>(null);
+  const printCaptures = useRef(new Set<ReturnType<typeof createWorkerPrintCapture>>());
   const print = useCallback(async (preview = false) => {
     const popup = openPrintWindow('Print', '');
     let capture: ReturnType<typeof createWorkerPrintCapture> | null = null;
@@ -108,8 +108,9 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       const client = worker.current;
       if (!current || !client) throw new Error('Peer-less worker is not ready');
       capture = createWorkerPrintCapture(current.binding, printBitmap, () => active.current === current && !popup.closed);
-      printCapture.current = capture;
-      const pages = await capture.collect((indices, epoch) => client.buildPages(indices, epoch));
+      printCaptures.current.add(capture);
+      const pages = await capture.collect(
+        (indices, epoch) => client.buildPages(indices, epoch), (epoch) => client.completeLayout(epoch));
       const css = popup.document.createElement('style');
       css.textContent = 'body { margin: 0; } img { display: block; width: 100%; break-after: page; } img:last-child { break-after: auto; } @page { margin: 0; size: auto; } @media print { button { display: none; } }';
       popup.document.head.appendChild(css);
@@ -126,7 +127,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       popup?.close();
       props.onError?.(error instanceof Error ? error : new Error(String(error)));
       throw error;
-    } finally { if (printCapture.current === capture) printCapture.current = null; }
+    } finally { if (capture) printCaptures.current.delete(capture); }
   }, [props.onPrint, props.onError]);
   const prepareFontFamily = useRef<(family: string) => Promise<ResidentFontEnvironment>>(async () => { throw new Error('Worker fonts are unavailable'); });
   const controllerOptions = { ...props, zoom, focus, read, readAt, save, loadBuffer, print, onZoom: setZoom, isDark,
@@ -242,7 +243,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     return () => { current = false; };
   }, [documentBuffer, reportError]);
 
-  const openConnection = useCallback(async (input: PeerlessDocumentSource, signal: AbortSignal): Promise<ResidentCommandConnection> => {
+  const openConnection = useCallback(async (input: PeerlessDocumentSource, signal: AbortSignal, getRasterScale?: () => number): Promise<ResidentCommandConnection> => {
     signal.throwIfAborted();
     active.current = null;
     const client = takePreloadedResidentEngineWorker() ?? new ResidentEngineWorkerClient();
@@ -282,6 +283,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       signal.throwIfAborted();
       const opened = await client.openSource({ ...(input instanceof Uint8Array ? { bytes: input } : { document: input }),
         heapLimitBytes: settings.current.workerLimitBytes, preview: settings.current.previewFirstPage === true,
+        deferPreview: true,
         mediaTokens: settings.current.mediaTokens === true });
       signal.throwIfAborted();
       if (opened.preview) {
@@ -337,9 +339,11 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       const initial = await client.commandInit({
         session: crypto.randomUUID(), incarnation: 1, epoch: 1, readOnly: settings.current.readOnly,
         fonts: fonts.slice(),
+        rasterScale: getRasterScale?.() ?? 1,
         fontRegistrationSlots: { fontChains: config.fontChains },
         layoutInput: JSON.stringify(layout),
-        layoutWithRegions: true, layoutRevision: 1, extras: JSON.stringify({ fontChains: config.fontChains }), displayWindow: [0, 3],
+        layoutWithRegions: true, layoutRevision: 1, extras: JSON.stringify({ fontChains: config.fontChains }),
+        displayWindow: [0, 3], provisionalPages: 3,
       });
       initialFrame = initial.frame;
       const connection = await createResidentCommandConnection(client, initial);
@@ -520,7 +524,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   }, []);
 
   const prepareGeometry = useCallback((frame: DocxCommandFrame): PeerlessFrameGeometry | undefined => {
-    printCapture.current?.accept(frame);
+    for (const capture of printCaptures.current) capture.accept(frame);
     if (!identity.current) return undefined;
     const cached = prepared.current.get(frame);
     if (cached) return cached;
@@ -530,24 +534,14 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       next = applyFrameDelta(next, decodeFrameDelta(frame.payload.frame));
       const caret = residentCaretSnapshotForFrame(frame.payload.caret, next);
       if (!caret) return undefined;
-      let y = 0;
-      const width = next.pages.reduce((maximum, { page }) => Math.max(maximum, page.width), 0);
-      const pages = next.pages.map(({ pageId, pageIndex, page }): PeerlessFrameGeometry['pages'][number] => {
-        const top = y;
-        const left = (width - page.width) / 2;
-        y += page.height + CANVAS_PAGE_GAP_PX;
-        return {
-          page: { pageId: pageId.toString(), pageIndex },
-          bounds: { x: left, y: top, width: page.width, height: page.height },
-          transform: [1, 0, 0, 1, left, top],
-          displayPage: page,
-        };
-      });
+      const pages = commandPageGeometry(next, frame.payload);
       const geometry: PeerlessFrameGeometry = {
         identity: identity.current,
         coversThroughSeq: frame.coversThroughSeq,
         frameEpoch: next.frameEpoch,
         layoutRevision: frame.payload.layoutRevision,
+        documentWidth: frame.payload.documentWidth,
+        layoutProvisional: frame.payload.layoutProvisional,
         pages,
         caret: caret.caretRect ? { ...caret.caretRect,
           x: caret.caretRect.x + (pages[caret.caretRect.pageIndex]?.bounds.x ?? 0), y: caret.caretRect.y + (pages[caret.caretRect.pageIndex]?.bounds.y ?? 0), width: 1 } : null,
@@ -603,7 +597,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     (props.pluginSidebarItems ?? []).some((item) => !item.hidden);
   const sidebarWidth = sidebarOpen ? SIDEBAR_DOCUMENT_SHIFT * 2 : 0;
   const pages = shellState.view?.geometry?.pages;
-  const pageWidth = pages?.length ? pages.reduce((maximum, { bounds }) => Math.max(maximum, bounds.x + bounds.width), 0) : DEFAULT_PAGE_WIDTH;
+  const pageWidth = shellState.view?.geometry?.documentWidth ??
+    (pages?.length ? pages.reduce((maximum, { bounds }) => Math.max(maximum, bounds.x + bounds.width), 0) : DEFAULT_PAGE_WIDTH);
   const outlineWidth = navigation.showOutline ? OUTLINE_RESERVED_SPACE : props.showOutlineButton !== false ? OUTLINE_BUTTON_RESERVED_SPACE : 20;
   const minLayoutWidth = pageWidth * zoom + 2 * outlineWidth + sidebarWidth;
   return <DocxCommandProvider commands={controller.commands.store}>

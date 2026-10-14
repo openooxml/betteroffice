@@ -84,7 +84,7 @@ export function readCommandSelection(
   const resolve = (at: DocxCommandPosition): DocxCommandPosition | null => {
     if (!at.sticky) return requireSticky ? null : { ...at };
     const issued = state.stickyPositions.get(stickyPositionKey(at.story, at.sticky));
-    if (!issued || issued.story !== at.story) return null;
+    if (!issued || issued.story !== at.story || !engine.geometryReader.hasStory(issued.story)) return null;
     const resolved = engine.resolveStickyPosition(issued);
     return resolved && resolved.story === at.story ? { ...resolved, sticky: at.sticky.slice() } : null;
   };
