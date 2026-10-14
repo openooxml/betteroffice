@@ -416,7 +416,7 @@ describe('S2 cell and table formatting stays inherited on save', () => {
         const table = savedTable(xml);
         expect(text(table)).toContain('Lease');
         expectTableInheritance(table);
-        expect(table.match(/<w:sz\b[^>]*\/>/g)).toEqual(Array(4).fill('<w:sz w:val="20"/>'));
+        expect(Array.from(table.match(/<w:sz\b[^>]*\/>/g) ?? [])).toEqual(Array(4).fill('<w:sz w:val="20"/>'));
       }, TIMEOUT);
 
       it('keeps untouched table properties inherited when inserting body paragraphs', async () => {
@@ -428,7 +428,7 @@ describe('S2 cell and table formatting stays inherited on save', () => {
         expect(text(xml)).toContain(NEW_PARAGRAPH);
         const table = savedTable(xml);
         expectTableInheritance(table);
-        expect(table.match(/<w:sz\b[^>]*\/>/g)).toEqual(Array(4).fill('<w:sz w:val="20"/>'));
+        expect(Array.from(table.match(/<w:sz\b[^>]*\/>/g) ?? [])).toEqual(Array(4).fill('<w:sz w:val="20"/>'));
       }, TIMEOUT);
 
       it('writes a changed cell border', async () => {
@@ -460,7 +460,7 @@ describe('S2 cell and table formatting stays inherited on save', () => {
         const empty = paragraphs(table).filter((paragraph) => text(paragraph) === '');
         expect(empty).toHaveLength(2);
         for (const paragraph of empty) expect(paragraph).not.toContain('<w:rPr');
-        expect(table.match(/<w:sz\b[^>]*\/>/g)).toEqual(Array(4).fill('<w:sz w:val="20"/>'));
+        expect(Array.from(table.match(/<w:sz\b[^>]*\/>/g) ?? [])).toEqual(Array(4).fill('<w:sz w:val="20"/>'));
       }, TIMEOUT);
     });
   });
