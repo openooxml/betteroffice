@@ -127,6 +127,29 @@ test('insert_table_row copies the anchor row, its cell properties and first-run 
   expect(doc.read(header.ref).table).toMatchObject({ row: 2 });
 });
 
+test('insert_table_row copies each template paragraph style, indentation and spacing', async () => {
+  const first = '<w:pPr><w:pStyle w:val="Quote"/><w:spacing w:before="120" w:after="240" w:line="360" w:lineRule="auto"/><w:ind w:left="720" w:right="180" w:firstLine="240"/><w:jc w:val="center"/></w:pPr>';
+  const second = '<w:pPr><w:pStyle w:val="Heading2"/><w:spacing w:before="60" w:after="180"/><w:ind w:left="360" w:hanging="120"/><w:jc w:val="right"/></w:pPr>';
+  const doc = await open(await tableFixture([
+    tableCell('Header') + tableCell('Value'),
+    tableCell('Template', '', first) + tableCell('Amount', '', second),
+  ]));
+  const { receipt, xml, before, after } = await edited(doc, [
+    { op: 'insert_table_row', row: hit(doc, 'Template').ref, position: 'after', cells: ['Copied', 'Cell'] },
+  ]);
+  const refs = receipt.results[0].refs as string[];
+  expect(refs.map(ref => doc.read(ref).style)).toEqual(['Quote', 'Heading2']);
+  const properties = (row: string) => row.match(/<w:pPr\b[\s\S]*?<\/w:pPr>/g);
+  const tableRows = rows(xml);
+  expect(properties(tableRows[1])).toHaveLength(2);
+  expect(properties(tableRows[2])).toEqual(properties(tableRows[1]));
+  expect(tableRows[2]).toContain('<w:ind');
+  expect(tableRows[2]).toContain('<w:spacing');
+  expect(after.find(p => p.text === 'Copied')?.style).toBe('Quote');
+  expect(after.find(p => p.text === 'Cell')?.style).toBe('Heading2');
+  expect(content(after.filter(p => p.text !== 'Copied' && p.text !== 'Cell'))).toEqual(content(before));
+});
+
 test('delete_table_row removes one row; refusals name the problem and change nothing', async () => {
   const doc = await open();
   const q1 = hit(doc, 'Q1');
