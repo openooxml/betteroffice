@@ -110,8 +110,9 @@ for line in sys.stdin:
 '''
 GENERIC_SUFFIX = (' Use shell commands and Python with openpyxl, python-pptx and python-docx to read and edit the documents.'
                   ' There is no network access. All other tool calls disqualify the task. The documents live in the current directory.'
-                  ' Access only this directory, the Python interpreter and its standard library/site-packages.'
-                  ' Outside path references disqualify the task.')
+                  ' Use only this directory, the Python interpreter and its standard library/site-packages.'
+                  ' The audit fails logged commands that reference the repository, evaluation sources or task metadata, and file changes outside this directory.'
+                  ' Reads are not sandboxed: this is an audit of logged commands, not filesystem isolation.')
 PYTHON_PREFLIGHT = 'import openpyxl, pptx, docx; import json, sysconfig; print(json.dumps(sysconfig.get_paths()))'
 FAKE_GENERIC_CODEX = '''#!/usr/bin/env python3
 import json

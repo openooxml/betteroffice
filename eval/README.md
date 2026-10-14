@@ -78,11 +78,12 @@ disabled, including `shell_snapshot`, so commands inherit the runner's
 environment. Shell commands and file changes are allowed and counted as tool
 calls; an MCP call, a web search or any other tool item fails the task.
 Each task starts in a fresh temporary directory outside the repository containing
-only its input file; the event audit fails commands or file changes that reference
-evaluation sources, task metadata, parent traversal or paths outside that directory,
-except interpreters and the selected Python's standard library/site-packages.
-The workspace-write sandbox restricts writes and disables network access; it does
-not restrict reads, so the path rule is enforced by auditing the logged events.
+only its input file; the generic arm is told to use only this directory, the Python
+interpreter and its standard library/site-packages. The audit fails logged commands
+that reference the repository, evaluation sources or task metadata, and file changes
+outside the task directory. The workspace-write sandbox restricts writes and disables
+network access. Reads are not sandboxed: this is an audit of logged commands, not
+filesystem isolation.
 
 ### Scoring
 

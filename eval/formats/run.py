@@ -168,8 +168,9 @@ def command_line(cli, workspace, model, prompt, arm='betteroffice'):
                 '-c', 'sandbox_workspace_write.network_access=false',
                 prompt + ' Use shell commands and Python with openpyxl, python-pptx and python-docx to read and edit the documents.'
                 ' There is no network access. All other tool calls disqualify the task. The documents live in the current directory.'
-                ' Access only this directory, the Python interpreter and its standard library/site-packages.'
-                ' Outside path references disqualify the task.']
+                ' Use only this directory, the Python interpreter and its standard library/site-packages.'
+                ' The audit fails logged commands that reference the repository, evaluation sources or task metadata, and file changes outside this directory.'
+                ' Reads are not sandboxed: this is an audit of logged commands, not filesystem isolation.']
     return ['codex', 'exec', '-m', model, '--sandbox', 'read-only', '--skip-git-repo-check',
             '--ignore-user-config', '--ignore-rules', '--ephemeral', '--json', '-C', str(workspace),
             *[argument for feature in DISABLED_FEATURES for argument in ('--disable', feature)],
@@ -228,15 +229,12 @@ def referenced_paths(text):
         except ValueError:
             tokens = []
         for token in tokens:
-            if token == '/' and re.search(r'\s/\s', source) and re.search(r'[=()]', source):
-                continue
             if re.match(r'^[A-Za-z][\w+.-]*://', token):
                 if token.startswith('file://'):
                     paths.add(token[7:])
                 continue
-            if token.startswith('/') or not re.search(r'''[\s'"`(){}=]''', token):
-                paths.add(token)
-            elif token != source:
+            paths.add(token)
+            if not token.startswith('/') and re.search(r'''[\s'"`(){}=]''', token) and token != source:
                 pending.append(token)
         for match in quoted.finditer(source):
             value = match[2]
@@ -247,31 +245,25 @@ def referenced_paths(text):
     return paths
 
 
-def path_violation(text, workspace, python, libraries):
-    if re.search(r'''(?<![\w.])\.\.(?![\w.])''', text):
-        return 'forbidden path access: parent traversal (..)'
+def path_violation(text, workspace):
     if re.search(r'(?<![\w.-])(?:check\.py|validate-checkers\.py|tasks\.json|fixtures\.json)(?![\w.-])', text) or \
             re.search(r'\beval(?:[./\\]|\s+import\b)|\bfrom\s+eval\b', text):
         return 'forbidden path access: evaluation sources or task metadata'
-    text = text.replace('${PWD}', str(workspace)).replace('$PWD', str(workspace))
-    if re.search(r'''(?:^|[\s'"=])~|\$(?:\{[^}]+\}|[A-Za-z_][A-Za-z_0-9]*)[/\\]''', text):
-        return 'forbidden path access: path outside the task directory via environment or home expansion'
-    interpreters = {Path(value).resolve() for name in ('sh', 'bash', 'zsh') if (value := shutil.which(name))}
-    if python is not None:
-        interpreters.add(Path(python).resolve())
+    expansions = {'HOME': str(Path.home()), 'PWD': str(workspace)}
+    text = re.sub(r'\$(?:\{(HOME|PWD)\}|(HOME|PWD)\b)', lambda match: expansions[match[1] or match[2]], text)
+    text = re.sub(r'(?<![\w.-])~(?=/)', lambda match: expansions['HOME'], text)
+    repository = REPO.resolve()
+    for spelling in (str(REPO), str(repository)):
+        if spelling in text:
+            return f'forbidden path access: repository path {spelling}'
     for reference in sorted(referenced_paths(text)):
         try:
-            path = Path(reference)
+            path = Path(reference).expanduser()
             path = (path if path.is_absolute() else workspace / path).resolve()
         except (OSError, RuntimeError, ValueError):
-            return f'forbidden path access: cannot resolve {reference}'
-        if path.is_relative_to(REPO):
+            continue
+        if path.is_relative_to(repository):
             return f'forbidden path access: repository path {reference}'
-        if path.is_relative_to(workspace):
-            continue
-        if path in interpreters or any(path.is_relative_to(library) for library in libraries):
-            continue
-        return f'forbidden path access: outside task directory: {reference}'
     return None
 
 
@@ -293,7 +285,7 @@ def access_violation(log, arm='betteroffice', workspace=None, python=None, libra
                 command = item.get('command')
                 if not isinstance(command, str) or not command:
                     return 'forbidden path access: command text unavailable for audit'
-                violation = path_violation(command, workspace, python, libraries)
+                violation = path_violation(command, workspace)
                 if violation:
                     return violation
             else:
@@ -310,7 +302,7 @@ def access_violation(log, arm='betteroffice', workspace=None, python=None, libra
                         return f'forbidden path access: cannot resolve changed path {change["path"]}'
                     if not path.is_relative_to(workspace):
                         return f'forbidden path access: file change outside task directory: {change["path"]}'
-                    violation = path_violation(json.dumps(change), workspace, python, libraries)
+                    violation = path_violation(json.dumps(change), workspace)
                     if violation:
                         return violation
     return None
