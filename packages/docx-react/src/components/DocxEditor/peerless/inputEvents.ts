@@ -1,4 +1,5 @@
 import type { DocxCommandPayloads } from '@betteroffice/docx/yrs';
+import type { DocxClipboardFragment } from '@betteroffice/docx/yrs';
 import type { PeerlessSelectionIntent } from './selection';
 
 /** @internal Relative mutation payloads omit main-side selection positions. */
@@ -19,7 +20,7 @@ export type PeerlessPropertyIntent = { [K in PeerlessPropertyKind]: { kind: K; p
 type PeerlessControlKind = 'setContentControlValue' | 'addRepeatingItem' | 'removeRepeatingItem';
 export type PeerlessControlIntent = { [K in PeerlessControlKind]: { kind: K; payload: DocxCommandPayloads[K] } }[PeerlessControlKind];
 
-export type PeerlessInputIntent = PeerlessProposalIntent | { [K in 'applyEdits' | 'addComment']: { kind: K; payload: DocxCommandPayloads[K] } }['applyEdits' | 'addComment'] | PeerlessControlIntent | PeerlessRulerIntent | PeerlessPropertyIntent | PeerlessPartIntent | PeerlessSelectionIntent | PeerlessTextIntent | { kind: 'undo' | 'redo'; payload: Record<string, never> } | { kind: 'replaceMatches'; payload: DocxCommandPayloads['replaceMatches'] } | { [K in 'setRenderEnvironment' | 'setFontEnvironment']: { kind: K; payload: DocxCommandPayloads[K] } }['setRenderEnvironment' | 'setFontEnvironment'] | { [K in 'insertImage' | 'insertTable' | 'insertPageBreak' | 'insertSectionBreak']: { kind: K; payload: Omit<DocxCommandPayloads[K], 'selection'> } }['insertImage' | 'insertTable' | 'insertPageBreak' | 'insertSectionBreak'];
+export type PeerlessInputIntent = PeerlessProposalIntent | { [K in 'applyEdits' | 'addComment']: { kind: K; payload: DocxCommandPayloads[K] } }['applyEdits' | 'addComment'] | PeerlessControlIntent | PeerlessRulerIntent | PeerlessPropertyIntent | PeerlessPartIntent | PeerlessSelectionIntent | PeerlessTextIntent | { kind: 'undo' | 'redo'; payload: Record<string, never> } | { kind: 'replaceMatches'; payload: DocxCommandPayloads['replaceMatches'] } | { [K in 'setRenderEnvironment' | 'setFontEnvironment']: { kind: K; payload: DocxCommandPayloads[K] } }['setRenderEnvironment' | 'setFontEnvironment'] | { [K in 'insertImage' | 'insertTable' | 'insertPageBreak' | 'insertSectionBreak']: { kind: K; payload: Omit<DocxCommandPayloads[K], 'selection'> } }['insertImage' | 'insertTable' | 'insertPageBreak' | 'insertSectionBreak'] | { kind: 'pasteFragment'; payload: { fragment: DocxClipboardFragment } };
 
 type PeerlessProposalKind = 'propose' | 'setProposalStates' | 'withdrawProposals';
 export type PeerlessProposalIntent = { [K in PeerlessProposalKind]: { kind: K; payload: DocxCommandPayloads[K] } }[PeerlessProposalKind];

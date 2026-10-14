@@ -5,6 +5,8 @@ import type { DocxCommandEnvironment } from '../../../commands/evaluate';
 import type { DocxCommandStore } from '../../../commands/types';
 import { normalizeInputEvent } from './inputEvents';
 import { admitInputIntents } from './inputAdmission';
+import { isPasteFragmentAllowed } from './clipboard';
+import { parseClipboardHtml } from '../internals/clipboardHtml';
 import { WorkerObjectDialog } from './WorkerObjectDialog';
 import type { PeerlessPropertyIntent } from './inputEvents';
 import type { DocxCommandResult } from '../../../commands/types';
@@ -96,6 +98,30 @@ export function useWorkerContextMenu(options: {
       if (options.environment().readOnly || options.environment().mode === 'viewing') return;
       if (action === 'delete' && selection) current.commands.submit({ kind: 'replaceSelection', payload: { text: '', selection } }, { fence: true, source: 'paste' });
       else if (action === 'paste' || action === 'pasteAsPlainText') {
+        if (action === 'paste' && typeof navigator !== 'undefined' && navigator.clipboard && 'read' in navigator.clipboard) {
+          try {
+            const items = await navigator.clipboard.read();
+            for (const item of items) {
+              if (!item.types.includes('text/html')) continue;
+              const html = await (await item.getType('text/html')).text();
+              const fragment = parseClipboardHtml(html);
+              if (!fragment) break;
+              if (current !== options.binding()) throw new Error('Document was replaced');
+              const latestFragment = current.viewStore.getSnapshot();
+              if (latestFragment.version !== menu.snapshot.version || JSON.stringify(latestFragment.workerSelection) !== JSON.stringify(selection)) {
+                throw new Error('Context menu target changed');
+              }
+              if (options.environment().readOnly || options.environment().mode === 'viewing') return;
+              if (!isPasteFragmentAllowed(options.commands)) break;
+              admitInputIntents(current.admission, [{ kind: 'pasteFragment', payload: { fragment } }],
+                { source: 'paste', fence: true });
+              options.onPaste?.();
+              return;
+            }
+          } catch (error) {
+            if (error instanceof Error && (error.message === 'Document was replaced' || error.message === 'Context menu target changed')) throw error;
+          }
+        }
         const text = await navigator.clipboard.readText();
         if (current !== options.binding()) throw new Error('Document was replaced');
         const latest = current.viewStore.getSnapshot();
