@@ -55,8 +55,10 @@ function rangedCommentIds(content: BlockContent[]): Set<number> {
  * that share their parent comment's text range and have none of their own.
  */
 export function injectReplyRangeMarkers(content: BlockContent[], comments: Comment[]): boolean {
+  const threaded = comments.filter((c) => c.parentId != null);
+  if (threaded.length === 0) return false;
   const ranged = rangedCommentIds(content);
-  const replies = comments.filter((c) => c.parentId != null && !ranged.has(c.id));
+  const replies = threaded.filter((c) => !ranged.has(c.id));
   if (replies.length === 0) return false;
   let inserted = false;
 
@@ -123,10 +125,10 @@ export function injectReplyRangeMarkers(content: BlockContent[], comments: Comme
  */
 export function injectTCReplyRangeMarkers(content: BlockContent[], comments: Comment[]): boolean {
   const commentIds = new Set(comments.map((c) => c.id));
+  const threaded = comments.filter((c) => c.parentId != null && !commentIds.has(c.parentId));
+  if (threaded.length === 0) return false;
   const ranged = rangedCommentIds(content);
-  const tcReplies = comments.filter(
-    (c) => c.parentId != null && !commentIds.has(c.parentId) && !ranged.has(c.id)
-  );
+  const tcReplies = threaded.filter((c) => !ranged.has(c.id));
   if (tcReplies.length === 0) return false;
   let inserted = false;
 
