@@ -1,4 +1,5 @@
-import { beforeAll, expect, spyOn, test } from 'bun:test';
+import { finalizationRegistrations, restoreFinalizationRegistry } from './editPeerFinalization';
+import { afterAll, beforeAll, expect, spyOn, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { isClientMessage, isHostMessage } from '../../../../shared/office-session/protocol';
@@ -26,6 +27,15 @@ beforeAll(async () => {
   font = face;
 });
 
+afterAll(() => {
+  try {
+    expect(finalizationRegistrations.map(({ registry }) => registry))
+      .toEqual(expect.arrayContaining(['pptxdocument', 'pptxrenderer']));
+    const counts = finalizationRegistrations.map(({ registry, live }) => `${registry}: ${live}`).join('\n');
+    expect(finalizationRegistrations.reduce((total, { live }) => total + live, 0), counts).toBe(0);
+  } finally { restoreFinalizationRegistry(); }
+});
+
 async function setup() {
   const pair = createInProcessPair();
   const calls: { method: string; args: unknown[] }[] = [];
@@ -33,13 +43,16 @@ async function setup() {
   const controls = { holdRequests: false, holdReplies: false, postFailure: false,
     mismatch: '' as string, refusal: false };
   let crash!: (cause: unknown) => void;
+  let hostCrash!: (cause: unknown) => void;
   let replayObserved!: () => void;
   const observed = new Promise<void>((resolve) => { replayObserved = resolve; });
   let transportClosed!: () => void;
   const closed = new Promise<void>((resolve) => { transportClosed = resolve; });
   const workerOpen = spyOn(PptxDocument, 'openReplayBaseline');
   const peerOpen = spyOn(PptxDocument, 'openPeerDeckJson');
-  createPresentationSessionHost({ ...pair.host, close() { pair.host.close(); transportClosed(); }, post(message, transfer) {
+  createPresentationSessionHost({ ...pair.host,
+    onError(listener) { hostCrash = listener; return pair.host.onError(listener); },
+    close() { pair.host.close(); transportClosed(); }, post(message, transfer) {
     if (isHostMessage(message) && message.kind === 'reply' && message.ok &&
       typeof message.value === 'object' && message.value !== null && 'consumed' in message.value) {
       replayObserved();
@@ -86,7 +99,11 @@ async function setup() {
   const access = await owner.handleAsync();
   return { owner, access, workerDoc, peerDoc, calls, controls, observed, closed,
     get errors() { return errors; },
-    crash: () => crash(new SessionFailure('crash', 'worker lost')),
+    crash: () => {
+      const cause = new SessionFailure('crash', 'worker lost');
+      hostCrash(cause);
+      crash(cause);
+    },
     hostDispose: () => pair.client.post({ protocol: 1, kind: 'dispose' }),
     release: () => { for (const send of held.splice(0)) send(); },
   };
