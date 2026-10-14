@@ -43,6 +43,7 @@ import type { Comment } from '../types/content';
 import type { Document, SectionProperties } from '../types/document';
 import type { DocxListStoriesResult } from './stories';
 import type { DocxCommentPatch } from './residentReview';
+import { projectResidentComments, type ResidentCommentProjection } from './residentCommentProjection';
 import { DirtyProjectionStories } from './dirtyProjectionStories';
 import { resolveHostJsonCommentMedia } from './hostMedia';
 import { createEditSession, preloadEditWasm, setEditWasmHeapLimit } from './wasm/index';
@@ -179,6 +180,7 @@ export type ResidentEngineSession = Pick<
   sectionProperties(): ResidentSectionSnapshot;
   setSectionMargins(section: string, margins: DocxSectionMargins): boolean;
   updateComment(id: string, patch: DocxCommentPatch): void;
+  commentProjection(): ResidentCommentProjection | null;
   mediaDataUrl(token: string): string | null;
   /** @internal */
   proposalEngine: DocxProposalSession & Pick<YrsSession, 'validateEdits'>;
@@ -241,6 +243,7 @@ export async function createResidentEngineSession(
   setEditWasmHeapLimit(heapLimitBytes);
   const session = createEditSession(clientId);
   let partBase: Document | undefined;
+  const commentAliases = new Map<string, number>();
   let partsTouched = false;
   let marginsTouched = false;
   let sectionsTouched = false;
@@ -575,6 +578,7 @@ export async function createResidentEngineSession(
       const at = session.clear_cell_selection();
       return at === undefined ? null : JSON.parse(at) as YrsLoc;
     },
+    commentProjection: () => partBase ? projectResidentComments(resident, commentAliases) : null,
     sectionProperties,
     setSectionMargins: (section, margins) => {
       ensureUndo();
@@ -766,6 +770,7 @@ export async function createResidentEngineSession(
       return resident.openDocx(bytes, options.digest, options.generation);
     },
     openDocument: (document, options) => {
+      commentAliases.clear();
       geometryStories.clear();
       projectionStories.clear();
       parsedMedia.clear();
@@ -796,6 +801,7 @@ export async function createResidentEngineSession(
       return saved;
     },
     openDocx: (bytes, digest, generation, seedStories = true) => {
+      commentAliases.clear();
       geometryStories.clear();
       projectionStories.clear();
       const json = resolveHostJsonCommentMedia(
@@ -810,6 +816,7 @@ export async function createResidentEngineSession(
       return json;
     },
     openDocxPreview: (bytes, blocks, paragraphBudget) => {
+      commentAliases.clear();
       geometryStories.clear();
       projectionStories.clear();
       const json =

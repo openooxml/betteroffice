@@ -6,7 +6,7 @@ import JSZip from 'jszip';
 const root = resolve(import.meta.dirname, '../..');
 
 async function open(page: Page) {
-  await page.goto('/?format=docx');
+  await page.goto('/?format=docx&peerless=1');
   await page
     .locator('input[type=file]')
     .last()
@@ -45,10 +45,10 @@ async function savedText(
 
 async function focusDocument(page: Page) {
   await page
-    .locator('.canvas-page canvas')
+    .locator('.canvas-page canvas, .paged-editor__page canvas')
     .first()
     .click({ position: { x: 150, y: 150 } });
-  const input = page.getByTestId('yrs-input');
+  const input = page.locator('[data-testid=yrs-input], .paged-editor__peerless-input');
   await expect(input).toBeEditable();
   await input.press('ControlOrMeta+Home');
   return input;
@@ -282,14 +282,12 @@ test('docx: a double-click on the first page header opens the header for editing
   await focusDocument(page);
   const header = page.locator('.layout-page[data-page-index="0"] .layout-page-header');
   const box = (await header.boundingBox())!;
-  const x = box.x + box.width / 2;
-  const y = box.y + box.height / 2;
 
-  await page.mouse.click(x, y);
+  await header.click({ force: true });
   await expect(page.locator('.hf-inline-editor')).toHaveCount(0);
   expect((await header.boundingBox())!.y).toBe(box.y);
 
-  await page.mouse.dblclick(x, y);
+  await header.dblclick({ force: true });
   await expect(page.locator('.hf-inline-editor')).toContainText('Header');
   expect((await header.boundingBox())!.y).toBe(box.y);
   await page.keyboard.type('Edited');
@@ -303,13 +301,13 @@ test('docx: with the first page footer open, a double-click on the next page hea
   await focusDocument(page);
   const footer = page.locator('.layout-page[data-page-index="0"] .layout-page-footer');
   await footer.evaluate((band) => band.scrollIntoView({ block: 'center' }));
-  const footerBox = (await footer.boundingBox())!;
-  await page.mouse.dblclick(footerBox.x + footerBox.width / 2, footerBox.y + footerBox.height / 2);
+  await footer.dblclick({ force: true });
   await expect(page.locator('.hf-inline-editor')).toContainText('Footer');
 
   const header = page.locator('.layout-page[data-page-index="1"] .layout-page-header');
+  await header.scrollIntoViewIfNeeded();
   const box = (await header.boundingBox())!;
-  await page.mouse.dblclick(box.x + box.width / 2, box.y + box.height / 2);
+  await header.dblclick({ force: true });
   await expect(page.locator('.hf-inline-editor')).toContainText('Header');
   expect((await header.boundingBox())!.y).toBe(box.y);
   await page.keyboard.type('Switched');

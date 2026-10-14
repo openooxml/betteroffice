@@ -21,6 +21,7 @@ export {
 
 /** What the editor's earlier saves of a session leave for its next save. @internal */
 export interface EditorSaveRecord {
+  commentIds?: ReadonlyMap<number, string>;
   /** A save wrote every part; every later save does too. */
   full: boolean;
   /** The bytes the last save wrote from the source package. */
@@ -197,7 +198,8 @@ function sameBytes(a: ArrayBuffer, b: ArrayBuffer): boolean {
  * in projected again with them: the editor projects its host's comments.
  * With replies, its body paragraphs are its own for their range markers.
  */
-function withSavedComments(document: Document, session: YrsSession, comments: Comment[]): Document {
+function withSavedComments(document: Document, session: YrsSession, comments: Comment[], record?: EditorSaveRecord): Document {
+  const commentIds = record?.commentIds;
   const base: Document = {
     ...document,
     package: { ...document.package, document: { ...document.package.document, comments } },
@@ -205,14 +207,19 @@ function withSavedComments(document: Document, session: YrsSession, comments: Co
   const storyIds = new Set<string>();
   for (const comment of comments) {
     try {
-      for (const anchor of session.resolveComment(String(comment.id))) {
+      for (const anchor of session.resolveComment(commentIds?.get(comment.id) ?? String(comment.id))) {
         storyIds.add(dirtyProjectionStory(anchor.story));
       }
     } catch {
       // Replies and comments whose anchors are gone hold no range.
     }
   }
-  const saved = storyIds.size > 0 ? yrsToDocument(session, base, { storyIds }) : base;
+  const saved = storyIds.size > 0
+    ? yrsToDocument(session, base, {
+      storyIds,
+      ...(commentIds?.size ? { commentIds } : {}),
+    })
+    : base;
   if (!comments.some((comment) => comment.parentId != null)) return saved;
   const body = saved.package.document;
   return {
@@ -236,7 +243,7 @@ export async function saveEditorDocument(
   record?: EditorSaveRecord
 ): Promise<ArrayBuffer> {
   const capture = projected.originalBuffer ? captureSessionSave(session) : null;
-  const document = withSavedComments(projected, session, comments);
+  const document = withSavedComments(projected, session, comments, record);
 
   // Inject commentRangeStart/End for reply comments that share the parent's range.
   // Pages/Word require every comment (including replies) to have range markers in document.xml.

@@ -1,5 +1,5 @@
 import { commandSelectionRange } from './residentCommandAnchors';
-import type { DocxCommandIntent, ResidentDocxCommandEngine, ResidentDocxCommandState } from './residentCommandProtocol';
+import type { DocxCommandIntent, DocxCommentResult, ResidentDocxCommandEngine, ResidentDocxCommandState } from './residentCommandProtocol';
 
 export const reviewCommandKeys = {
   addComment: ['ranges', 'author', 'date', 'body', 'expectVersion'],
@@ -43,7 +43,7 @@ export function preflightReviewCommand(engine: ResidentDocxCommandEngine, state:
 }
 
 export function applyReviewCommand(engine: ResidentDocxCommandEngine, state: ResidentDocxCommandState, command: ReviewCommand):
-  { status: 'applied' | 'noop' } | { status: 'refused'; reason: string } {
+  { status: 'applied' | 'noop'; comment?: Omit<DocxCommentResult, 'seq'> } | { status: 'refused'; reason: string } {
   const version = engine.proposalEngine.version();
   const before = state.proposals?.snapshot();
   if (command.kind === 'propose' || command.kind === 'setProposalStates' || command.kind === 'withdrawProposals') {
@@ -56,8 +56,9 @@ export function applyReviewCommand(engine: ResidentDocxCommandEngine, state: Res
   }
   engine.beginUndoCapture();
   engine.addUndoBoundary();
+  let added: string | undefined;
   switch (command.kind) {
-    case 'addComment': engine.addComment(command.payload.ranges, command.payload.author, command.payload.date, command.payload.body); break;
+    case 'addComment': added = engine.addComment(command.payload.ranges, command.payload.author, command.payload.date, command.payload.body).commentId; break;
     case 'updateComment': engine.updateComment(command.payload.id, command.payload.patch); break;
     case 'setCommentRanges': engine.setCommentRanges(command.payload.id, command.payload.ranges); break;
     case 'removeComment': engine.applyRawOps('body', [{ op: 'removeComment', id: command.payload.id }]); break;
@@ -66,5 +67,8 @@ export function applyReviewCommand(engine: ResidentDocxCommandEngine, state: Res
   }
   engine.addUndoBoundary();
   engine.markProjectionStories(engine.geometryReader.storyIds());
-  return { status: engine.proposalEngine.version() === version ? 'noop' : 'applied' };
+  const status = engine.proposalEngine.version() === version ? 'noop' : 'applied';
+  const projection = added === undefined ? null : engine.commentProjection();
+  const id = added === undefined ? undefined : projection?.ids[added];
+  return projection && id !== undefined ? { status, comment: { id, comments: projection.comments } } : { status };
 }

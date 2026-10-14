@@ -1,6 +1,8 @@
 import { afterEach, expect, test } from 'bun:test';
 import { closeCommandEngines, command, execute, openCommandEngine, snapshot, TIMEOUT } from './residentCommandTestSupport';
 import { createProposalRegistry } from './proposals';
+import { readResidentReviewSnapshot } from './residentReview';
+import { applyFrameDelta, decodeFrameDelta } from '../layout/render/frameDelta';
 
 afterEach(closeCommandEngines);
 
@@ -35,4 +37,13 @@ test('review_commands_support_reanchoring_and_resolve_all_revision_sites', async
   const revisionId = arm.engine.geometryReader.listRevisions()[0]!.revisionId;
   expect(execute(arm, command(arm, 'acceptRevision', { revisionId, expectVersion: current() }))).toMatchObject({ status: 'applied' });
   expect(arm.engine.geometryReader.listRevisions()).toEqual([]);
+}, TIMEOUT);
+
+test('review snapshots of a preview succeed without a comment projection', async () => {
+  const arm = await openCommandEngine(['Alpha beta', 'Second'], { preview: 1 });
+  const frame = applyFrameDelta(null, decodeFrameDelta(arm.engine.buildDisplayListFrame('{}', 0)));
+  const review = await readResidentReviewSnapshot(arm.resident, createProposalRegistry(arm.engine.proposalEngine), frame, 0);
+  expect(review.comments).toEqual([]);
+  expect(review).not.toHaveProperty('uiComments');
+  expect(review).not.toHaveProperty('commentIds');
 }, TIMEOUT);
