@@ -260,6 +260,125 @@ def correct_pptx(package, number):
                           ContentType=f'application/vnd.openxmlformats-officedocument.presentationml.{kind}+xml')
 
 
+DOCUMENT = 'word/document.xml'
+PILOT = 'The pilot started in September with ten participants across two sites.'
+NOTE = 'Draft note: confirm the travel figures with finance before sending.'
+
+
+def word_body(package):
+    return package.xml(DOCUMENT).find('w:body', NS)
+
+
+def word_text(paragraph):
+    return ''.join(node.text or '' for node in paragraph.iter(tag('w', 't')))
+
+
+def word_paragraph(package, text):
+    return next(paragraph for paragraph in package.xml(DOCUMENT).iter(tag('w', 'p')) if word_text(paragraph) == text)
+
+
+def set_word_text(paragraph, text):
+    paragraph.find('w:r/w:t', NS).text = text
+
+
+def word_rows(package):
+    return word_body(package).find('w:tbl', NS).findall('w:tr', NS)
+
+
+def word_cell(package, row, column):
+    return word_rows(package)[row - 1].findall('w:tc', NS)[column - 1].find('w:p', NS)
+
+
+def word_style(paragraph, style):
+    props = paragraph.find('w:pPr', NS)
+    if props is None:
+        props = ET.Element(tag('w', 'pPr'))
+        paragraph.insert(0, props)
+    node = props.find('w:pStyle', NS)
+    if node is None:
+        node = ET.Element(tag('w', 'pStyle'))
+        props.insert(0, node)
+    node.set(tag('w', 'val'), style)
+
+
+def remove_word_paragraph(package, text):
+    word_body(package).remove(word_paragraph(package, text))
+
+
+def replace_word_text(package, old, new):
+    for node in package.xml(DOCUMENT).iter(tag('w', 't')):
+        node.text = node.text.replace(old, new)
+
+
+def bold(run):
+    props = run.find('w:rPr', NS)
+    if props is None:
+        props = ET.Element(tag('w', 'rPr'))
+        run.insert(0, props)
+    props.insert(0, ET.Element(tag('w', 'b')))
+
+
+def split_run(paragraph, pieces):
+    run = paragraph.find('w:r', NS)
+    runs = []
+    for text, edit in pieces:
+        piece = copy.deepcopy(run)
+        node = piece.find('w:t', NS)
+        node.text = text
+        if text and (text[0].isspace() or text[-1].isspace()):
+            node.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+        if edit:
+            edit(piece)
+        runs.append(piece)
+    index = list(paragraph).index(run)
+    paragraph[index:index + 1] = runs
+
+
+def insert_word_paragraph(package, after, text):
+    paragraph = ET.Element(tag('w', 'p'))
+    ET.SubElement(ET.SubElement(paragraph, tag('w', 'r')), tag('w', 't')).text = text
+    body = word_body(package)
+    body.insert(list(body).index(word_paragraph(package, after)) + 1, paragraph)
+    return paragraph
+
+
+def correct_docx(package, number):
+    if number == 1:
+        set_word_text(word_paragraph(package, 'Sumary'), 'Summary')
+    elif number == 2:
+        replace_word_text(package, 'Atlas', 'Beacon')
+    elif number == 3:
+        set_word_text(word_cell(package, 3, 4), '130')
+        set_word_text(word_cell(package, 5, 4), '660')
+    elif number in (4, 5):
+        for column, text in zip((3, 4), ('700', '705') if number == 4 else ('500', '530')):
+            set_word_text(word_cell(package, 5, column), text)
+        table, rows = word_body(package).find('w:tbl', NS), word_rows(package)
+        if number == 4:
+            row = copy.deepcopy(rows[3])
+            for cell, text in zip(row.findall('w:tc', NS), ['Training', 'Avery', '80', '75']):
+                set_word_text(cell.find('w:p', NS), text)
+            table.insert(list(table).index(rows[4]), row)
+        else:
+            table.remove(rows[2])
+    elif number == 6:
+        word_style(word_paragraph(package, 'Risks and mitigations'), 'Heading2')
+    elif number == 7:
+        split_run(word_paragraph(package, PILOT), [('The pilot started in September with ', None), ('ten participants', bold),
+                                                   (' across two sites.', None)])
+    elif number == 8:
+        insert_word_paragraph(package, 'Next steps', 'The steering group meets on 20 October.')
+    elif number == 9:
+        remove_word_paragraph(package, NOTE)
+    elif number == 10:
+        replace_word_text(package, '[DATE]', '14 October 2026')
+        remove_word_paragraph(package, 'DRAFT')
+        word_style(word_paragraph(package, 'Pilot status report'), 'Heading1')
+
+
+CORRECT = {'xlsx': correct_xlsx, 'pptx': correct_pptx, 'docx': correct_docx}
+
+
 def count(kind):
     COUNTS[kind][0] += 1
     COUNTS[kind][1] += 1
@@ -521,6 +640,58 @@ def named_font(package):
     root.find('s:cellStyleXfs', NS)[1].set('fontId', str(len(fonts) - 1))
 
 
+def reorder_children(part, path):
+    def edit(package):
+        for node in package.xml(part).findall(path, NS):
+            node[:] = reversed(node)
+    return edit
+
+
+def named_font_child(name, edit):
+    def change(package):
+        root = package.xml('xl/styles.xml')
+        xf = root.find('s:cellStyleXfs', NS)[1]
+        font = root.find('s:fonts', NS)[int(xf.get('fontId', '0'))]
+        edit(font, font.find(f's:{name}', NS))
+    return change
+
+
+def empty_cached_value(kind):
+    def edit(package):
+        cell = package.cell('B5')
+        if kind is None:
+            cell.attrib.pop('t', None)
+        else:
+            cell.set('t', kind)
+        cell.find('s:v', NS).text = None
+    return edit
+
+
+def rich_comment(package):
+    part = 'xl/checker-comments.xml'
+    root = ET.Element(tag('s', 'comments'))
+    ET.SubElement(ET.SubElement(root, tag('s', 'authors')), tag('s', 'author')).text = 'Reviewer'
+    comment = ET.SubElement(ET.SubElement(root, tag('s', 'commentList')), tag('s', 'comment'), ref='A1', authorId='0')
+    run = ET.SubElement(ET.SubElement(comment, tag('s', 'text')), tag('s', 'r'))
+    properties = ET.SubElement(run, tag('s', 'rPr'))
+    ET.SubElement(properties, tag('s', 'sz'), val='11')
+    ET.SubElement(properties, tag('s', 'rFont'), val='DejaVu Sans')
+    ET.SubElement(run, tag('s', 't')).text = 'Review note'
+    package.xml_parts[part] = root
+    ET.SubElement(package.xml('[Content_Types].xml'), '{http://schemas.openxmlformats.org/package/2006/content-types}Override',
+                  PartName='/' + part, ContentType='application/vnd.openxmlformats-officedocument.spreadsheetml.comments+xml')
+    path = 'xl/worksheets/_rels/sheet1.xml.rels'
+    links = package.xml(path) if path in package.parts else ET.Element(tag('rel', 'Relationships'))
+    ET.SubElement(links, tag('rel', 'Relationship'), Id='rIdCheckerComment', Type=NS['r'] + '/comments', Target='../checker-comments.xml')
+    package.xml_parts[path] = links
+
+
+def comment_properties(edit):
+    def change(package):
+        edit(package.xml('xl/checker-comments.xml').find('.//s:rPr', NS))
+    return change
+
+
 def cell_style(key, value):
     def edit(package):
         package.xml('xl/styles.xml').find('s:cellStyles', NS)[1].set(key, value)
@@ -584,6 +755,16 @@ def flattened_field(package):
     paragraph[list(paragraph).index(field)] = run
 
 
+def empty_run_paragraph(package):
+    run = ET.SubElement(ET.SubElement(package.shape(2, 'Bullets').find('p:txBody', NS), tag('a', 'p')), tag('a', 'r'))
+    ET.SubElement(run, tag('a', 'rPr'), sz='1800', b='1')
+    ET.SubElement(run, tag('a', 't'))
+
+
+def resize_empty_run(package):
+    package.shape(2, 'Bullets').findall('p:txBody/a:p', NS)[-1].find('a:r/a:rPr', NS).set('sz', '4800')
+
+
 def shape_edit(name, path, **attributes):
     def edit(package):
         package.shape(2, name).find(path, NS).attrib.update(attributes)
@@ -636,8 +817,34 @@ def styled_notes(directory, name, ends, lines, keep_end=True):
     return source, output
 
 
+def damage_docx(package, number):
+    if number == 1:
+        set_word_text(word_paragraph(package, 'Summary'), 'Summery')
+    elif number == 2:
+        set_word_text(word_paragraph(package, 'Beacon licences'), 'Atlas licences')
+    elif number == 3:
+        set_word_text(word_cell(package, 3, 4), '103')
+    elif number == 4:
+        for run in word_rows(package)[4].iter(tag('w', 'r')):
+            bold(run)
+    elif number == 5:
+        set_word_text(word_cell(package, 4, 3), '620')
+    elif number in (6, 8, 10):
+        text, style = {6: ('Risks and mitigations', 'Heading1'), 8: ('The steering group meets on 20 October.', 'Heading1'),
+                       10: ('Pilot status report', 'Title')}[number]
+        word_style(word_paragraph(package, text), style)
+    elif number == 7:
+        runs = word_paragraph(package, PILOT).findall('w:r', NS)
+        runs[1].find('w:t', NS).text = 'ten participants across'
+        runs[2].find('w:t', NS).text = ' two sites.'
+    elif number == 9:
+        insert_word_paragraph(package, 'The table lists planned and actual costs in euros.', '')
+
+
 def damage_requested_change(package, format, number):
-    if format == 'xlsx':
+    if format == 'docx':
+        damage_docx(package, number)
+    elif format == 'xlsx':
         if number == 1:
             package.cell('B5').find('s:v', NS).text = '620'
         elif number == 2:
@@ -762,12 +969,14 @@ def validate(directory):
         fixture = checker.fixture(task)
         package = Package(fixture)
         number = int(task['id'].split('-')[1])
-        (correct_xlsx if task['format'] == 'xlsx' else correct_pptx)(package, number)
+        CORRECT[task['format']](package, number)
         output = directory / f'{task["id"]}.{task["format"]}'
         package.save(output)
         accepts(task, output)
         rejects(task, fixture, UNTOUCHED)
-        if task['format'] == 'xlsx':
+        if task['format'] == 'docx':
+            set_word_text(word_paragraph(package, 'Collect the remaining feedback forms.'), 'Unexpected edit')
+        elif task['format'] == 'xlsx':
             package.set_cell('A1', 'Unexpected edit')
         else:
             package.shape_text(1, 'Bullets', ['Unexpected edit', 'Discuss risks'])
@@ -809,6 +1018,7 @@ def validate(directory):
     assert not document_failures, '\n'.join(document_failures)
     validate_document_metadata(directory)
     validate_models(directory)
+    validate_docx(directory)
     print('; '.join(f'{passed}/{ran} {kind}' for kind, (passed, ran) in COUNTS.items()))
     assert not FAILURES, '\n'.join(FAILURES)
 
@@ -865,6 +1075,39 @@ def validate_models(directory):
     expect('xlsx-04 custom number format renumbered', xlsx04, variant(directory, 'styles-formats', header, renumber_formats), True)
     named_source = variant(directory, 'named-input', checker.fixture(xlsx04), named_heading)
     named = variant(directory, 'named-output', named_source, lambda package: correct_xlsx(package, 4))
+    reordered = variant(directory, 'font-children-reordered', named, reorder_children('xl/styles.xml', 's:fonts/s:font'))
+    expect('xlsx-04 font children reordered', xlsx04, reordered, True, named_source)
+    for name, child, edit in [
+            ('value changed', 'sz', lambda font, node: node.set('val', '14')),
+            ('child added', 'strike', lambda font, node: ET.SubElement(font, tag('s', 'strike'))),
+            ('child removed', 'name', lambda font, node: font.remove(node)),
+            ('child duplicated', 'sz', lambda font, node: font.append(copy.deepcopy(node))),
+            ('bold child duplicated', 'b', lambda font, node: font.append(copy.deepcopy(node)))]:
+        slug = name.replace(' ', '-')
+        expect(f'xlsx-04 font {name}', xlsx04,
+               variant(directory, f'font-{slug}', reordered, named_font_child(child, edit)), False, named_source)
+    expect('xlsx-04 border children reordered', xlsx04,
+           variant(directory, 'border-children-reordered', named, reorder_children('xl/styles.xml', 's:borders/s:border')),
+           False, named_source)
+
+    xlsx01 = task_named('xlsx-01-correct-value')
+    for name, kind in [('implicit numeric', None), ('explicit numeric', 'n')]:
+        expect(f'xlsx-01 empty formula cache ({name})', xlsx01,
+               variant(directory, f'empty-cache-{kind or "implicit"}', output[xlsx01['id']], empty_cached_value(kind)),
+               False, reason='Budget!B5: empty cached value')
+
+    comment_source = variant(directory, 'comment-input', checker.fixture(xlsx03), rich_comment)
+    comment = variant(directory, 'comment-output', comment_source, lambda package: correct_xlsx(package, 3))
+    reordered_comment = variant(directory, 'comment-properties-reordered', comment,
+                                reorder_children('xl/checker-comments.xml', './/s:rPr'))
+    expect('xlsx-03 rich text properties reordered', xlsx03, reordered_comment, True, comment_source)
+    expect('xlsx-03 rich text property changed', xlsx03,
+           variant(directory, 'comment-property-changed', reordered_comment,
+                   comment_properties(lambda props: props.find('s:sz', NS).set('val', '12'))), False, comment_source)
+    expect('xlsx-03 rich text property duplicated', xlsx03,
+           variant(directory, 'comment-property-duplicated', reordered_comment,
+                   comment_properties(lambda props: props.append(copy.deepcopy(props.find('s:sz', NS))))), False, comment_source)
+
     for number, (name, edit, accept) in enumerate([
             ('named styles kept', None, True),
             ('cell style formats reordered', swap_named_formats, True),
@@ -896,6 +1139,17 @@ def validate_models(directory):
             ('field flattened into its run', flattened_field, False)]):
         result = variant(directory, f'ended-{number}', ended, *([edit] if edit else []))
         expect(f'pptx-01 {name}', pptx01, result, accept, ended_source)
+    empty_source = variant(directory, 'empty-run-input', checker.fixture(pptx01), empty_run_paragraph)
+    empty = variant(directory, 'empty-run-output', empty_source, lambda package: correct_pptx(package, 1))
+    expect('pptx-01 empty formatted run kept', pptx01, empty, True, empty_source)
+    expect('pptx-01 untouched empty run resized', pptx01,
+           variant(directory, 'empty-run-resized', empty, resize_empty_run), False, empty_source)
+    pptx04 = task_named('pptx-04-replace-term')
+    field_source = variant(directory, 'term-field-input', checker.fixture(pptx04), ended_slides)
+    term = variant(directory, 'term-field-output', field_source, lambda package: correct_pptx(package, 4))
+    expect('pptx-04 untouched field paragraph kept', pptx04, term, True, field_source)
+    expect('pptx-04 untouched field paragraph changed', pptx04,
+           variant(directory, 'term-field-changed', term, field_type), False, field_source)
     lines = pptx08['expected']['notes']['2'].split('\n')
     source, result = styled_notes(directory, 'notes-styled', ['1700', '1700'], lines)
     expect('pptx-08 styled notes', pptx08, result, True, source)
@@ -923,6 +1177,175 @@ def validate_models(directory):
     expect('pptx-01 shape list style changed', pptx01,
            variant(directory, 'shape-levels-changed', styled, shape_edit('Bullets', 'p:txBody/a:lstStyle/a:lvl1pPr/a:defRPr', sz='2000')),
            False, styled_source)
+
+
+def revision(kind):
+    return ET.Element(tag('w', kind), {tag('w', 'id'): '1', tag('w', 'author'): 'Reviewer', tag('w', 'date'): '2026-10-01T00:00:00Z'})
+
+
+def tracked_run(text, kind):
+    def edit(package):
+        paragraph = word_paragraph(package, text)
+        run = paragraph.find('w:r', NS)
+        wrapper = revision(kind)
+        if kind == 'del':
+            run.find('w:t', NS).tag = tag('w', 'delText')
+        paragraph[list(paragraph).index(run)] = wrapper
+        wrapper.append(run)
+    return edit
+
+
+def tracked_format(package):
+    change = revision('rPrChange')
+    ET.SubElement(change, tag('w', 'rPr'))
+    word_paragraph(package, PILOT).findall('w:r', NS)[1].find('w:rPr', NS).append(change)
+
+
+def split_first_run(package):
+    split_run(word_paragraph(package, PILOT), [('The pilot started ', None), ('in September with ', None)])
+
+
+def without_word_space(index):
+    def edit(package):
+        text = word_paragraph(package, PILOT).findall('w:r/w:t', NS)[index]
+        assert text.text and (text.text[0].isspace() or text.text[-1].isspace())
+        text.attrib.pop('{http://www.w3.org/XML/1998/namespace}space', None)
+    return edit
+
+
+def default_word_space(package):
+    text = word_paragraph(package, 'Collect the remaining feedback forms.').find('w:r/w:t', NS)
+    text.text = 'alpha '
+    text.set('{http://www.w3.org/XML/1998/namespace}space', 'default')
+
+
+def without_default_word_space(package):
+    word_paragraph(package, 'alpha ').find('w:r/w:t', NS).attrib.pop('{http://www.w3.org/XML/1998/namespace}space')
+
+
+def explicit_normal(package):
+    paragraph = word_paragraph(package, 'The steering group meets on 20 October.')
+    word_style(paragraph, 'Normal')
+    paragraph.find('w:r', NS).insert(0, ET.Element(tag('w', 'rPr')))
+
+
+def unformatted_cell(package):
+    run = word_cell(package, 2, 1).find('w:r', NS)
+    run.remove(run.find('w:rPr', NS))
+
+
+def row_after_total(package):
+    table, row = word_body(package).find('w:tbl', NS), word_rows(package)[4]
+    table.remove(row)
+    table.append(row)
+
+
+def plain_new_row(package):
+    for run in word_rows(package)[4].iter(tag('w', 'r')):
+        run.remove(run.find('w:rPr', NS))
+
+
+def swap(parent, first, second):
+    i, j = list(parent).index(first), list(parent).index(second)
+    parent[i], parent[j] = second, first
+
+
+def swap_list_items(package):
+    swap(word_body(package), word_paragraph(package, 'Site visits are complete'), word_paragraph(package, 'Beacon training material is in review'))
+
+
+def swap_heading_styles(package):
+    root = package.xml('word/styles.xml')
+    styles = {style.get(tag('w', 'styleId')): style for style in root.findall('w:style', NS)}
+    swap(root, styles['Heading1'], styles['Heading2'])
+
+
+def word_attribute(part, path, attribute, value):
+    def edit(package):
+        package.xml(part).find(path, NS).set(tag('w', attribute), value)
+    return edit
+
+
+def core_title(package):
+    package.xml('docProps/core.xml').find('{http://purl.org/dc/elements/1.1/}title').text = 'Changed'
+
+
+def save_time(value):
+    def edit(package):
+        root = package.xml('docProps/core.xml')
+        node = root.find(checker.SAVE_TIME)
+        if value is None:
+            root.remove(node)
+        else:
+            node.text = value
+    return edit
+
+
+def direct_heading_formatting(package):
+    run = word_paragraph(package, 'Summary').find('w:r', NS)
+    props = ET.Element(tag('w', 'rPr'))
+    fonts = {tag('w', key): 'DejaVu Sans' for key in ('ascii', 'hAnsi', 'eastAsia', 'cs')}
+    props[:] = [ET.Element(tag('w', 'rFonts'), fonts), ET.Element(tag('w', 'b')), ET.Element(tag('w', 'bCs')),
+                ET.Element(tag('w', 'sz'), {tag('w', 'val'): '32'}), ET.Element(tag('w', 'szCs'), {tag('w', 'val'): '32'})]
+    run.insert(0, props)
+
+
+def direct_cell_spacing(package):
+    word_cell(package, 3, 4).find('w:pPr', NS).insert(0, ET.Element(tag('w', 'spacing'), {
+        tag('w', 'after'): '0', tag('w', 'line'): '240', tag('w', 'lineRule'): 'auto'}))
+
+
+def word_empty_run(package):
+    run = ET.SubElement(word_paragraph(package, 'Collect the remaining feedback forms.'), tag('w', 'r'))
+    ET.SubElement(ET.SubElement(run, tag('w', 'rPr')), tag('w', 'sz'), {tag('w', 'val'): '40'})
+
+
+def resize_word_empty_run(package):
+    word_paragraph(package, 'Collect the remaining feedback forms.').findall('w:r', NS)[-1].find('w:rPr/w:sz', NS).set(tag('w', 'val'), '48')
+
+
+def drop_word_empty_run(package):
+    paragraph = word_paragraph(package, 'Collect the remaining feedback forms.')
+    paragraph.remove(paragraph.findall('w:r', NS)[-1])
+
+
+def validate_docx(directory):
+    docx = {int(task['id'].split('-')[1]): task for task in checker.tasks() if task['format'] == 'docx'}
+    output = {number: directory / f'{task["id"]}.docx' for number, task in docx.items()}
+    tracked = 'tracked changes are not allowed'
+    for name, number, edit, accept, reason in [
+            ('docx-07 bold phrase with the first run split', 7, split_first_run, True, None),
+            ('docx-07 trailing whitespace preservation removed', 7, without_word_space(0), False, None),
+            ('docx-07 leading whitespace preservation removed', 7, without_word_space(2), False, None),
+            ('docx-08 explicit Normal style and empty run properties', 8, explicit_normal, True, None),
+            ('docx-01 tracked insertion', 1, tracked_run('Summary', 'ins'), False, tracked),
+            ('docx-07 tracked formatting change', 7, tracked_format, False, tracked),
+            ('docx-03 untouched cell run formatting dropped', 3, unformatted_cell, False, None),
+            ('docx-04 new row after the total', 4, row_after_total, False, None),
+            ('docx-04 new row without run formatting', 4, plain_new_row, False, None),
+            ('docx-02 list items reordered', 2, swap_list_items, False, None),
+            ('docx-06 style definitions reordered', 6, swap_heading_styles, False, None),
+            ('docx-01 settings changed', 1, word_attribute('word/settings.xml', 'w:defaultTabStop', 'val', '360'), False, None),
+            ('docx-01 section page size changed', 1, word_attribute(DOCUMENT, 'w:body/w:sectPr/w:pgSz', 'w', '12240'), False, None),
+            ('docx-01 numbering changed', 1, word_attribute('word/numbering.xml', './/w:lvlText', 'val', '-'), False, None),
+            ('docx-01 table style changed', 1, word_attribute(DOCUMENT, './/w:tblStyle', 'val', 'TableNormal'), False, None),
+            ('docx-01 core properties changed', 1, core_title, False, None),
+            ('docx-01 save time updated', 1, save_time('2026-10-13T12:00:00Z'), True, None),
+            ('docx-01 save time removed', 1, save_time(None), False, None),
+            ('docx-01 style formatting written as direct run properties', 1, direct_heading_formatting, False, None),
+            ('docx-03 table style spacing written into a cell paragraph', 3, direct_cell_spacing, False, None)]:
+        slug = name.split(' ', 1)[1].replace(' ', '-')
+        expect(name, docx[number], variant(directory, f'word-{slug}', output[number], edit), accept, reason=reason)
+    expect('docx-09 note kept as a tracked deletion', docx[9],
+           variant(directory, 'word-tracked-deletion', checker.fixture(docx[9]), tracked_run(NOTE, 'del')), False, reason=tracked)
+    source = variant(directory, 'word-default-space-input', checker.fixture(docx[1]), default_word_space)
+    result = variant(directory, 'word-default-space-output', source, lambda package: correct_docx(package, 1), without_default_word_space)
+    expect('docx-01 default whitespace attribute omitted', docx[1], result, True, source)
+    source = variant(directory, 'word-empty-input', checker.fixture(docx[1]), word_empty_run)
+    result = variant(directory, 'word-empty-output', source, lambda package: correct_docx(package, 1))
+    expect('docx-01 empty formatted run kept', docx[1], result, True, source)
+    expect('docx-01 untouched empty run resized', docx[1], variant(directory, 'word-empty-resized', result, resize_word_empty_run), False, source)
+    expect('docx-01 untouched empty run dropped', docx[1], variant(directory, 'word-empty-dropped', result, drop_word_empty_run), False, source)
 
 
 def main():

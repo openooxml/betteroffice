@@ -14,6 +14,16 @@ export interface TextRun {
   protected: boolean;
 }
 
+/** A table cell paragraph's place: parent story, one-based table index, row and column, and the table's size. */
+export interface TableCellPosition {
+  story: string;
+  index: number;
+  row: number;
+  column: number;
+  rows: number;
+  columns: number;
+}
+
 export interface ParagraphRead extends ParagraphRef {
   text: string;
   start: number;
@@ -22,6 +32,7 @@ export interface ParagraphRead extends ParagraphRef {
   nextStart: number | null;
   style: string | null;
   runs: TextRun[];
+  table?: TableCellPosition;
 }
 
 export interface GrepOptions {
