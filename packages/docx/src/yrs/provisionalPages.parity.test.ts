@@ -804,8 +804,11 @@ test('insertText after a prefix selection completes before editing and matches a
     const reference = await sendCommand(full, 2, 'insertText', { text: 'Edit ' });
     expect(ack.frame!.payload.layoutProvisional).not.toBe(true);
     expect(f.calls.filter(call => call === 'layoutDocumentWithRegionsRetained')).toHaveLength(2);
-    expect(f.engine.proposalEngine.readParagraphs({ story: 'body', view: 'accepted' })).toEqual(
-      full.engine.proposalEngine.readParagraphs({ story: 'body', view: 'accepted' }));
+    const document = f.engine.proposalEngine.readParagraphs({ story: 'body', view: 'accepted' });
+    const referenceDocument = full.engine.proposalEngine.readParagraphs({ story: 'body', view: 'accepted' });
+    expect(document.ok).toBe(true);
+    expect(referenceDocument.ok).toBe(true);
+    expect(document.ok && document.paragraphs).toEqual(referenceDocument.ok && referenceDocument.paragraphs);
     const frame = commandFramesAfter(f.frame, [selected.frame!, ack.frame!]);
     const referenceFrame = commandFramesAfter(full.frame, [selectedFull.frame!, reference.frame!]);
     expect(frame.displayList.pages).toEqual(referenceFrame.displayList.pages);
