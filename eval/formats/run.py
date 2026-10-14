@@ -164,8 +164,7 @@ def command_line(cli, workspace, model, prompt, arm='betteroffice'):
                 prompt + ' Use shell commands and Python with openpyxl, python-pptx and python-docx to read and edit the documents.'
                 ' There is no network access. All other tool calls disqualify the task. The documents live in the current directory.'
                 ' Use only this directory, the Python interpreter and its standard library/site-packages.'
-                ' The audit fails logged commands that reference the repository, evaluation sources or task metadata, and file changes outside this directory.'
-                ' Reads are not sandboxed: this is an audit of logged commands, not filesystem isolation.']
+                ' Commands that reference the repository, evaluation sources or task metadata, and file changes outside this directory disqualify the task.']
     return ['codex', 'exec', '-m', model, '--sandbox', 'read-only', '--skip-git-repo-check',
             '--ignore-user-config', '--ignore-rules', '--ephemeral', '--json', '-C', str(workspace),
             *[argument for feature in DISABLED_FEATURES for argument in ('--disable', feature)],
