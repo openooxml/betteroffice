@@ -26,12 +26,14 @@ const restorers: (() => void)[] = [];
 
 beforeEach(() => {
   let id = 0;
-  const request = spyOn(globalThis, 'requestIdleCallback').mockImplementation((work) => {
+  const request = globalThis.requestIdleCallback;
+  const cancel = globalThis.cancelIdleCallback;
+  globalThis.requestIdleCallback = (work) => {
     pending.set(++id, work);
     return id;
-  });
-  const cancel = spyOn(globalThis, 'cancelIdleCallback').mockImplementation((id) => { pending.delete(id); });
-  restorers.push(() => request.mockRestore(), () => cancel.mockRestore());
+  };
+  globalThis.cancelIdleCallback = (id) => { pending.delete(id); };
+  restorers.push(() => { globalThis.requestIdleCallback = request; globalThis.cancelIdleCallback = cancel; });
 });
 afterEach(() => {
   cleanup();
@@ -65,8 +67,8 @@ function page(pageIndex: number): DisplayPage {
     noteAreas: [{ kind: 'footnote', y: 80, height: 20, noteIds: [1],
       notes: [{ id: 1, anchorDocStart: start, anchorDocEnd: start + 1 }],
       separatorPrimitives: [text(20, 'separator')], primitives: [{ ...text(30, 'note'), groupId: 'footnote-1' }] }],
-    header: { y: 0, height: 10, primitives: [text(40, 'header')] },
-    footer: { y: 90, height: 10, primitives: [text(50, 'footer')] },
+    header: { kind: 'header', rId: 'header', y: 0, height: 10, primitives: [text(40, 'header')] },
+    footer: { kind: 'footer', rId: 'footer', y: 90, height: 10, primitives: [text(50, 'footer')] },
   } as DisplayPage;
 }
 
@@ -135,17 +137,18 @@ test('copied shifts do not build or replace visible mirrors synchronously, then 
   exactMirrors(hosts, second);
 });
 
-test('copied shift lineage composes while a mirror waits for idle', async () => {
+test('copied shift lineage composes beyond the shift log while a mirror waits for idle', async () => {
   const first = initial();
   const { hosts, calls, update } = mirrors(first);
-  const second = applyFrameDelta(first, shift(2));
-  update(second);
-  const third = applyFrameDelta(second, shift(3));
-  update(third);
+  let latest = first;
+  for (let epoch = 2; epoch <= 67; epoch++) {
+    latest = applyFrameDelta(latest, shift(epoch));
+    update(latest);
+  }
   expect(calls).toEqual([]);
   await idle();
   expect(calls).toEqual([1, 2]);
-  exactMirrors(hosts, third);
+  exactMirrors(hosts, latest);
 });
 
 test('content after a copied shift rebuilds the visible mirror at once', async () => {
@@ -154,7 +157,9 @@ test('content after a copied shift rebuilds the visible mirror at once', async (
   const second = applyFrameDelta(first, shift(2));
   update(second);
   calls.length = 0;
-  const edited = { ...second.displayList.pages[1]!, width: 120 };
+  const shifted = second.displayList.pages[1]!;
+  const edited = { ...shifted, primitives: shifted.primitives.map((primitive) =>
+    primitive.kind === 'text' ? { ...primitive, text: 'changed' } : primitive) };
   const third = applyFrameDelta(second, delta(3, [upsert(edited, 3n)]));
   update(third);
   expect(calls).toEqual([1]);
