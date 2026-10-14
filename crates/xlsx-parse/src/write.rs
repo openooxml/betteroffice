@@ -558,10 +558,11 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
         main_namespace,
         shared_string_plan.as_ref(),
     )?;
-    let styles_retained = matches!(
-        (package.styles.as_ref(), styles.as_ref()),
-        (Some(source), Some(planned)) if source.path == planned.path
-    ) && retains_source_styles(&style_plan.styles, &package.original_workbook.styles);
+    let styles_retained =
+        matches!(
+            (package.styles.as_ref(), styles.as_ref()),
+            (Some(source), Some(planned)) if source.path == planned.path
+        ) && retains_source_styles(&style_plan.styles, &package.original_workbook.styles);
     if !styles_retained {
         replace_optional_part(&mut parts, package.styles.as_ref(), styles.as_ref(), || {
             match &package.stylesheet_template {
