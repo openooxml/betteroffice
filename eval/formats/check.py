@@ -760,7 +760,11 @@ def run_model(node):
     content = []
     for child in node:
         if child.tag == w('t'):
-            content.append(('text', child.text or ''))
+            text = child.text or ''
+            space = child.get('{http://www.w3.org/XML/1998/namespace}space')
+            if text and (text[0].isspace() or text[-1].isspace()) and space != 'preserve':
+                content.append(('xml:space', space))
+            content.append(('text', text))
         elif child.tag != w('rPr'):
             content.append(canonical(child))
     return {'kind': 'r', 'attributes': dict(node.attrib), 'properties': properties(node.find('w:rPr', NS)), 'content': content}

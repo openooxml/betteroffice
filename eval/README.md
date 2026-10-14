@@ -109,7 +109,8 @@ A task passes only if all of these hold:
   counts, including an empty run and its formatting, and only paragraphs whose
   text the task changes differ from the input. For DOCX it covers the body in
   order: each paragraph's style (no style means the default paragraph style),
-  paragraph properties including numbering, every run's properties and text
+  paragraph properties including numbering, every run's properties and text,
+  including `xml:space` for leading or trailing whitespace
   (adjacent runs with identical properties merged, empty runs with formatting
   kept) and every other paragraph child; each table's properties, grid, rows
   and cells with their properties and content; the section properties and the
@@ -173,7 +174,7 @@ preservation, and targeted variants check tab selection, notes parts, slide
 shape elements, paragraph end properties, fields and empty formatted runs,
 cell, row, column and named style formats, and for DOCX tracked-change markup,
 run splits and formatting, row placement, style resolution, reordered content
-and package parts (61 accepted, 173 rejected).
+and package parts (61 accepted, 30 untouched rejected, 145 corrupted rejected).
 [`formats/test-runner.py`](formats/test-runner.py) tests the runner itself with
 a stand-in agent.
 

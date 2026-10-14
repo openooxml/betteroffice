@@ -323,7 +323,10 @@ def split_run(paragraph, pieces):
     runs = []
     for text, edit in pieces:
         piece = copy.deepcopy(run)
-        piece.find('w:t', NS).text = text
+        node = piece.find('w:t', NS)
+        node.text = text
+        if text and (text[0].isspace() or text[-1].isspace()):
+            node.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
         if edit:
             edit(piece)
         runs.append(piece)
