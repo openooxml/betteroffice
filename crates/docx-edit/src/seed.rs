@@ -1467,7 +1467,11 @@ impl StyleResolver {
             .and_then(|style| field(Some(style), "rPr"))
     }
 
-    fn run_formatting(&self, paragraph_run: Option<&Value>, direct: Option<&Value>) -> Option<Value> {
+    fn run_formatting(
+        &self,
+        paragraph_run: Option<&Value>,
+        direct: Option<&Value>,
+    ) -> Option<Value> {
         let style_id = string(field(direct, "styleId"));
         let inherited = merge_style_run_formatting(paragraph_run, self.run_style_own(style_id));
         merge_text_formatting_owned(inherited, direct)
@@ -1827,7 +1831,9 @@ impl RunInheritance {
     ) -> JsonObject {
         let mut attrs = inherited_run_attrs(&self.0, paragraph_style, run_style);
         let direct = run_style.map(|id| json!({ "styleId": id }));
-        let resolved = self.0.effective_run_formatting(paragraph_style, direct.as_ref());
+        let resolved = self
+            .0
+            .effective_run_formatting(paragraph_style, direct.as_ref());
         for key in ["boldCs", "italicCs"] {
             if let Some(value) = field(resolved.as_ref(), key).and_then(Value::as_bool) {
                 attrs.insert(key.to_owned(), Value::Bool(value));
@@ -4288,7 +4294,10 @@ fn table_cell_style_formatting(
             .find(|part| string(field(Some(part), "type")) == Some("wholeTable"));
         result = merge(result.as_ref(), field(whole, property));
     }
-    if !parts.iter().any(|part| field(Some(part), property).is_some()) {
+    if !parts
+        .iter()
+        .any(|part| field(Some(part), property).is_some())
+    {
         return result;
     }
     let formatting = field(Some(table), "formatting");

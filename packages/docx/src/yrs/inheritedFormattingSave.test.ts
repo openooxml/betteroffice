@@ -540,22 +540,25 @@ describe('S1b toggle inheritance and independent complex-script saves', () => {
     it.each(['b', 'i'] as const)('keeps direct %sCs while replacing Arabic under its non-CS style', async (property) => {
       const styles = '<w:style w:type="paragraph" w:styleId="Script">' +
         `<w:rPr><w:${property}/></w:rPr></w:style>`;
-      const paragraph = '<w:p><w:pPr><w:pStyle w:val="Script"/></w:pPr>' +
-        `<w:r><w:rPr><w:${property}Cs/></w:rPr><w:t>قديم</w:t></w:r></w:p>`;
-      const xml = await saveTableEdit(path, runFixture(styles, paragraph),
-        (engine) => {
-          const stories = editFirstRun(engine, 'body', false);
+      for (const boundary of [false, true]) {
+        const paragraph = '<w:p><w:pPr><w:pStyle w:val="Script"/></w:pPr>' +
+          (boundary ? `<w:r><w:t>تمهيد</w:t></w:r><w:r><w:rPr><w:${property}Cs/></w:rPr><w:tab/></w:r>` : '') +
+          `<w:r><w:rPr><w:${property}Cs/></w:rPr><w:t>قديم</w:t></w:r></w:p>`;
+        const xml = await saveTableEdit(path, runFixture(styles, paragraph), (engine) => {
           const read = engine.readParagraphs({ story: 'body', view: 'accepted' });
           if (!read.ok) throw new Error(`read refused: ${JSON.stringify(read)}`);
           const paraId = read.paragraphs[0]!.paraId;
-          engine.formatRange({
-            story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 4 },
-          }, property === 'b' ? { bold: false } : { italic: false });
-          return stories;
+          const start = boundary ? 6 : 0;
+          const range = { story: 'body', start: { paraId, offset: start }, end: { paraId, offset: start + 4 } };
+          engine.replaceRange(range, 'جديد');
+          engine.formatRange(range, property === 'b' ? { bold: false } : { italic: false });
+          return ['body'];
         });
-      expect(text(xml)).toBe('جديد');
-      const properties = xml.match(/<w:rPr\b[^>]*>[\s\S]*?<\/w:rPr>/)?.[0] ?? '';
-      expect(properties).toContain(`<w:${property}Cs/>`);
+        expect(text(xml)).toBe(boundary ? 'تمهيدجديد' : 'جديد');
+        const runs = Array.from(xml.match(/<w:r\b[^>]*>[\s\S]*?<\/w:r>/g) ?? []);
+        expect(runs.find((run) => run.includes('جديد'))).toContain(`<w:${property}Cs/>`);
+        if (boundary) expect(runs.find((run) => run.includes('<w:tab'))).toContain(`<w:${property}Cs/>`);
+      }
     }, TIMEOUT);
   });
 });

@@ -1828,7 +1828,8 @@ function preserveSourceComplexScript(items: InlineItem[], sources: OriginalRunBo
     return items;
   }
   const original = sources.map((source) => source.text).join('');
-  const current = items.map((item) => item.kind === 'text' ? item.text : '\ufffc').join('');
+  const current = items.map((item) => item.kind === 'text' ? item.text
+    : item.embedKind === 'tab' ? '\t' : '\ufffc').join('');
   let prefix = 0;
   while (prefix < Math.min(original.length, current.length) && original[prefix] === current[prefix]) prefix += 1;
   let suffix = 0;
@@ -1837,7 +1838,7 @@ function preserveSourceComplexScript(items: InlineItem[], sources: OriginalRunBo
   const originalEnd = original.length - suffix;
   const currentEnd = current.length - suffix;
   const mapped = (offset: number): number => {
-    if (offset === 0 || offset < prefix) return offset;
+    if (offset === 0 || offset < prefix || (offset === prefix && originalEnd > prefix)) return offset;
     if (offset >= originalEnd) return offset + current.length - original.length;
     return currentEnd;
   };

@@ -105,9 +105,14 @@ impl RunStyles {
         let definitions = part("word/styles.xml")
             .filter(|xml| !xml.is_empty())
             .map(|xml| {
-                docx_parse::parse_style_definitions(xml, Some(&theme), "word/styles.xml", &mut budget)
-                    .map_err(failed)
-                    .and_then(|styles| serde_json::to_value(styles).map_err(|error| error.to_string()))
+                docx_parse::parse_style_definitions(
+                    xml,
+                    Some(&theme),
+                    "word/styles.xml",
+                    &mut budget,
+                )
+                .map_err(failed)
+                .and_then(|styles| serde_json::to_value(styles).map_err(|error| error.to_string()))
             })
             .transpose()?;
         let resolver = crate::seed::StyleResolver::new(definitions.as_ref());
@@ -326,7 +331,9 @@ impl Read<'_> {
             .styles
             .effective(self.style.as_deref(), direct.as_ref());
         push(&mut self.formats, units, effective);
-        let direct = direct.as_ref().and_then(|direct| serde_json::to_value(direct).ok());
+        let direct = direct
+            .as_ref()
+            .and_then(|direct| serde_json::to_value(direct).ok());
         let resolved = self
             .styles
             .resolver
