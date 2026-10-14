@@ -285,7 +285,7 @@ test('peerless_page_offsets_are_monotonic_and_non_overlapping', () => {
   expect(geometry.caret?.x).toBe(110);
 });
 
-test('prepared geometry keeps a shifted page and counts the shift as an in-place revision', () => {
+test('prepared geometry copies shifted pages and preserves previous geometry', () => {
   const displayPage = (pageIndex: number, docStart: number): DisplayPage => ({ pageIndex, width: 200, height: 100,
     positionSpan: [docStart, docStart + 4], primitives: [{ kind: 'text', text: 'abcd', x: 0, baselineY: 14, width: 40,
       font: '12px Arial', color: '#000', docStart, docEnd: docStart + 4 }] });
@@ -304,9 +304,12 @@ test('prepared geometry keeps a shifted page and counts the shift as an in-place
   const second = prepare(command(2, [upsert(1n, 0, 3n, displayPage(0, 2)),
     { kind: 'shift-range', pageIndex: 1, pageId: 2n, count: 1, delta: 1, salt: 5n }]));
   expect(second.pages[0]!.displayPage).not.toBe(first.pages[0]!.displayPage);
-  expect(second.pages[1]!.displayPage).toBe(shifted);
-  expect(shifted.positionSpan).toEqual([11, 15]);
-  expect(displayPageRevision(shifted)).toBe(1);
+  expect(second.pages[1]!.displayPage).not.toBe(shifted);
+  expect(second.pages[1]!.displayPage!.positionSpan).toEqual([11, 15]);
+  expect(displayPageRevision(second.pages[1]!.displayPage!)).toBe(1);
+  expect(shifted.positionSpan).toEqual([10, 14]);
+  expect(shifted.primitives[0]!.docStart).toBe(10);
+  expect(displayPageRevision(shifted)).toBe(0);
 });
 
 test('scrolling_to_page_n_builds_n_and_releases_far_pages', async () => {

@@ -101,6 +101,7 @@ export {
   applyFrameDeltaOwned,
   decodeFrameDelta,
   decodeFrameDeltaSteps,
+  displayPageIsShiftOf,
   displayPageNoteAnchorRevision,
   displayPageRevision,
   FRAME_DELTA_HEADER_BYTES,

@@ -567,7 +567,7 @@ describe('FrameDelta range shifts', () => {
             Object.getOwnPropertyDescriptors(expectedPage)
           );
           if (index < 4) {
-            expect(displayPageRevision(page)).toBe(apply === applyFrameDeltaOwned ? 1 : 0);
+            expect(displayPageRevision(page)).toBe(1);
             expect(page === previous.pages[index]!.page).toBe(apply === applyFrameDeltaOwned);
           }
         }
@@ -1484,7 +1484,7 @@ describe('FrameDelta note anchor shifts', () => {
       ).displayList.pages[0]!;
       expect(moved.primitives[0]).toMatchObject({ docStart: 3, docEnd: 4 });
       expect(moved.noteAreas![0]!.notes).toEqual([{ id: 1, anchorDocStart: 7 }]);
-      if (apply === applyFrameDeltaOwned) expect(displayPageNoteAnchorRevision(moved)).toBe(1);
+      expect(displayPageNoteAnchorRevision(moved)).toBe(1);
 
       for (const missing of [
         [1, 0, 7n, 8n],
