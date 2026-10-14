@@ -5,6 +5,7 @@ import type { ResidentPropertyTarget, ResidentPropertySnapshot } from './residen
 import type { ResidentSectionSnapshot } from './residentSections';
 import type { YrsStoryRange } from './index';
 import type { ResidentReviewSnapshot } from './residentReview';
+import type { ResidentCommentInsertionRange } from './residentCommentProjection';
 import type { ResidentToolbarMetadata } from './residentToolbarMetadata';
 import type { LayoutMetaV1 } from './layoutMeta';
 import type { Checkpoint } from '../../../../shared/office-session/commands/types';
@@ -15,6 +16,7 @@ import type {
   DocxCommandEnvelope,
   DocxCommandFrame,
   DocxCommandSelection,
+  DocxSelectionPointIntent,
   ResidentCommandInitReply,
   ResidentCommandInitRequest,
   ResidentCommandViewportRequest,
@@ -118,6 +120,7 @@ export type ResidentDocumentRead =
   | { kind: 'findContentControls'; query: DocxContentControlQuery; options: DocxContentControlsOptions }
   | { kind: 'rangeHighlights'; ranges: YrsStoryRange[]; expectVersion: string; expectFrameEpoch?: number; expectLayoutRevision?: number }
   | { kind: 'reviewSnapshot'; expectPreviewVersion?: number }
+  | { kind: 'commentInsertionRange'; paraId: string; search?: string }
   | { kind: 'toolbarMetadata' }
   | { kind: 'paragraphIdentities' }
   | { kind: 'resolveParagraphAnchors'; anchors: DocxParagraphAnchor[] }
@@ -132,7 +135,7 @@ export type ResidentDocumentRead =
   | { kind: 'stickyAnchors'; locs: YrsLoc[]; version: string }
   | { kind: 'navigationTarget'; story: string; paraId: string }
   | { kind: 'anchorTargets'; targets: Exclude<AnchorGeometryTarget, { kind: 'proposal' }>[] }
-  | { kind: 'pointPosition'; hit: PointPosition; expectVersion: string }
+  | { kind: 'pointPosition'; hit: PointPosition; expectVersion: string; nativePoint?: DocxSelectionPointIntent }
   | {
       kind: 'selectionUnit';
       story: string;
@@ -161,6 +164,7 @@ export interface ResidentDocumentReadValues {
   findContentControls: DocxContentControlsResult;
   rangeHighlights: ResidentRangeHighlights | null;
   reviewSnapshot: ResidentReviewSnapshot | null;
+  commentInsertionRange: ResidentCommentInsertionRange;
   toolbarMetadata: ResidentToolbarMetadata;
   paragraphIdentities: DocxParagraphIdentitySnapshot;
   resolveParagraphAnchors: { results: DocxParagraphAnchorResult[] };

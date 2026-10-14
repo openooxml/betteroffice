@@ -135,6 +135,31 @@ pub struct CapturedFormat {
     /// Per format, the facets applying it keeps from the target cell. Empty
     /// when every format sets all of them.
     pub kept: Vec<KeptFacets>,
+    pub source_styles: Vec<Option<u32>>,
+    pub source_formats: Vec<PreservedCellFormat>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PreservedCellFormat {
+    #[serde(flatten)]
+    pub format: CellFormat,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_xf: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derived_from: Option<u32>,
+}
+
+impl PreservedCellFormat {
+    pub fn from_style(styles: &xlsx_model::Stylesheet, style: Option<u32>) -> Self {
+        let (source_xf, derived_from) = style
+            .map(|index| styles.format_source(index))
+            .unwrap_or((None, None));
+        Self {
+            format: styles.cell_format(style),
+            source_xf,
+            derived_from,
+        }
+    }
 }
 
 /// Facets a captured format can leave to the target cell. A capture written
@@ -203,6 +228,10 @@ struct CapturedFormatWire {
     rows: u32,
     columns: u32,
     formats: Vec<CapturedCellFormat>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    source_styles: Vec<Option<u32>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    source_formats: Vec<PreservedCellFormat>,
 }
 
 /// A `CellFormat` as captured: every facet it sets is written, and an absent
@@ -400,6 +429,8 @@ impl From<CapturedFormatWire> for CapturedFormat {
             columns: wire.columns,
             formats,
             kept: if any_kept { kept } else { Vec::new() },
+            source_styles: wire.source_styles,
+            source_formats: wire.source_formats,
         }
     }
 }
@@ -411,6 +442,8 @@ impl From<CapturedFormat> for CapturedFormatWire {
             columns,
             formats,
             kept,
+            source_styles,
+            source_formats,
         } = format;
         let formats = formats
             .into_iter()
@@ -423,6 +456,8 @@ impl From<CapturedFormat> for CapturedFormatWire {
             rows,
             columns,
             formats,
+            source_styles,
+            source_formats,
         }
     }
 }

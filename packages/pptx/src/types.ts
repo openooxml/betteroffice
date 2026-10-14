@@ -574,3 +574,9 @@ export interface UpdateEvent {
   origin: 'local' | 'remote';
   update: Uint8Array;
 }
+
+export interface TextParagraphDraft {
+  bullet?: boolean;
+  alignment?: ParagraphAlignment | null;
+  runs: Array<{ text: string; style?: TextStyle }>;
+}

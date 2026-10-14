@@ -24,6 +24,9 @@ export interface HorizontalRulerProps {
   sectionProps?: SectionProperties | null;
   zoom?: number;
   editable?: boolean;
+  paragraphEditable?: boolean;
+  onDragStart?: () => void;
+  onDragEnd?: () => void;
   onLeftMarginChange?: (marginTwips: number) => void;
   onRightMarginChange?: (marginTwips: number) => void;
   onFirstLineIndentChange?: (indentTwips: number) => void;
@@ -39,6 +42,7 @@ export interface HorizontalRulerProps {
   style?: CSSProperties;
   tabStops?: TabStop[] | null;
   onTabStopRemove?: (positionTwips: number) => void;
+  onTabStopsChange?: (tabs: TabStop[]) => void;
 }
 
 type MarkerType = 'leftMargin' | 'rightMargin' | 'firstLineIndent' | 'leftIndent' | 'rightIndent';
@@ -81,6 +85,9 @@ export function HorizontalRuler({
   sectionProps,
   zoom = 1,
   editable = false,
+  paragraphEditable = editable,
+  onDragStart,
+  onDragEnd,
   onLeftMarginChange,
   onRightMarginChange,
   onFirstLineIndentChange,
@@ -96,12 +103,15 @@ export function HorizontalRuler({
   style,
   tabStops,
   onTabStopRemove,
+  onTabStopsChange,
 }: HorizontalRulerProps): React.ReactElement {
   const { t } = useTranslation();
   const [dragging, setDragging] = useState<MarkerType | null>(null);
   const [hoveredMarker, setHoveredMarker] = useState<MarkerType | null>(null);
   const [dragValue, setDragValue] = useState<number | null>(null);
   const [dragPositionPx, setDragPositionPx] = useState<number | null>(null);
+  const [tabDrag, setTabDrag] = useState<{ tab: TabStop; position: number; tabs: TabStop[] } | null>(null);
+  const tabPosition = useRef<number | null>(null);
   const rulerRef = useRef<HTMLDivElement>(null);
 
   // Page dimensions
@@ -128,12 +138,13 @@ export function HorizontalRuler({
 
   const handleDragStart = useCallback(
     (e: React.MouseEvent, marker: MarkerType) => {
-      if (!editable) return;
+      if (!(marker === 'leftMargin' || marker === 'rightMargin' ? editable : paragraphEditable)) return;
       e.preventDefault();
       e.stopPropagation();
+      onDragStart?.();
       setDragging(marker);
     },
-    [editable]
+    [editable, paragraphEditable, onDragStart]
   );
 
   const handleDrag = useCallback(
@@ -196,10 +207,11 @@ export function HorizontalRuler({
   );
 
   const handleDragEnd = useCallback(() => {
+    onDragEnd?.();
     setDragging(null);
     setDragValue(null);
     setDragPositionPx(null);
-  }, []);
+  }, [onDragEnd]);
 
   useEffect(() => {
     if (dragging) {
@@ -212,12 +224,41 @@ export function HorizontalRuler({
     }
   }, [dragging, handleDrag, handleDragEnd]);
 
+  useEffect(() => {
+    if (!tabDrag || !paragraphEditable || !onTabStopsChange) return;
+    const move = (event: MouseEvent) => {
+      const box = rulerRef.current?.getBoundingClientRect();
+      if (!box) return;
+      const position = Math.round(Math.max(0, Math.min(contentTwips, pixelsToTwips((event.clientX - box.left) / zoom) - leftMarginTwips)));
+      tabPosition.current = position;
+      setTabDrag(current => current ? { ...current, position } : null);
+    };
+    const end = () => {
+      const position = tabPosition.current ?? tabDrag.tab.position;
+      if (position !== tabDrag.tab.position) onTabStopsChange(tabDrag.tabs.filter(tab => tab.position !== tabDrag.tab.position && tab.position !== position)
+        .concat({ ...tabDrag.tab, position }).sort((a, b) => a.position - b.position));
+      onDragEnd?.();
+      tabPosition.current = null;
+      setTabDrag(null);
+    };
+    document.addEventListener('mousemove', move);
+    document.addEventListener('mouseup', end);
+    return () => { document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', end); };
+  }, [tabDrag, paragraphEditable, onTabStopsChange, onDragEnd, contentTwips, zoom, leftMarginTwips]);
+
   const ticks = generateTicks(pageWidthTwips, zoom, unit);
 
   return (
     <div
       ref={rulerRef}
       className={`docx-horizontal-ruler ${className}`}
+      onDoubleClick={event => {
+        if (!paragraphEditable || !onTabStopsChange || event.target !== event.currentTarget) return;
+        const box = event.currentTarget.getBoundingClientRect();
+        const position = Math.round(pixelsToTwips((event.clientX - box.left) / zoom) - leftMarginTwips);
+        if (position < 0 || position > contentTwips) return;
+        onTabStopsChange([...(tabStops ?? []).filter(tab => tab.position !== position), { position, alignment: 'left' as const }].sort((a, b) => a.position - b.position));
+      }}
       style={{
         position: 'relative',
         width: formatPx(pageWidthPx),
@@ -281,7 +322,7 @@ export function HorizontalRuler({
         <IndentTriangle
           direction="down"
           positionPx={firstLinePosPx}
-          editable={editable}
+          editable={paragraphEditable}
           isDragging={dragging === 'firstLineIndent'}
           isHovered={hoveredMarker === 'firstLineIndent'}
           onMouseEnter={() => setHoveredMarker('firstLineIndent')}
@@ -292,11 +333,11 @@ export function HorizontalRuler({
       )}
 
       {/* Left indent — ▲ up triangle at bottom-left */}
-      {editable && onIndentLeftChange && (
+      {paragraphEditable && onIndentLeftChange && (
         <IndentTriangle
           direction="up"
           positionPx={leftIndentPosPx}
-          editable={editable}
+          editable={paragraphEditable}
           isDragging={dragging === 'leftIndent'}
           isHovered={hoveredMarker === 'leftIndent'}
           onMouseEnter={() => setHoveredMarker('leftIndent')}
@@ -307,11 +348,11 @@ export function HorizontalRuler({
       )}
 
       {/* Right indent — ▼ down triangle at top-right */}
-      {editable && onIndentRightChange && (
+      {paragraphEditable && onIndentRightChange && (
         <IndentTriangle
           direction="down"
           positionPx={rightIndentPosPx}
-          editable={editable}
+          editable={paragraphEditable}
           isDragging={dragging === 'rightIndent'}
           isHovered={hoveredMarker === 'rightIndent'}
           onMouseEnter={() => setHoveredMarker('rightIndent')}
@@ -326,8 +367,12 @@ export function HorizontalRuler({
         <TabStopMarker
           key={tab.position}
           tabStop={tab}
-          positionPx={twipsToPixels(tab.position) * zoom}
-          onDoubleClick={() => onTabStopRemove?.(tab.position)}
+          positionPx={(onTabStopsChange ? leftMarginPx : 0) + twipsToPixels(tabDrag?.tab.position === tab.position ? tabDrag.position : tab.position) * zoom}
+          onMouseDown={paragraphEditable && onTabStopsChange ? event => {
+            event.preventDefault(); event.stopPropagation(); onDragStart?.();
+            tabPosition.current = tab.position; setTabDrag({ tab, position: tab.position, tabs: [...(tabStops ?? [])] });
+          } : undefined}
+          onDoubleClick={() => { if (!onTabStopsChange || paragraphEditable) onTabStopRemove?.(tab.position); }}
         />
       ))}
 
@@ -496,6 +541,7 @@ function DragTooltip({
 }
 
 interface TabStopMarkerProps {
+  onMouseDown?: React.MouseEventHandler<HTMLDivElement>;
   tabStop: TabStop;
   positionPx: number;
   onDoubleClick: () => void;
@@ -513,6 +559,7 @@ function TabStopMarker({
   tabStop,
   positionPx,
   onDoubleClick,
+  onMouseDown,
 }: TabStopMarkerProps): React.ReactElement {
   return (
     <div
@@ -535,6 +582,7 @@ function TabStopMarker({
         e.stopPropagation();
         onDoubleClick();
       }}
+      onMouseDown={onMouseDown}
       title={`${tabStop.alignment} tab at ${(tabStop.position / 1440).toFixed(2)}"`}
     >
       {TAB_SYMBOLS[tabStop.alignment] || 'L'}

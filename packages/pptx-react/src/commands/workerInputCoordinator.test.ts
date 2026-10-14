@@ -20,7 +20,7 @@ function setup(hydrated = true) {
     flush: mock(() => ack),
   } as unknown as PptxWorkerEditorSession;
   const coordinator = createWorkerInputCoordinator({ session: () => session, gestureActive: () => gesture });
-  const peer = { insertText() {}, deleteText() {}, setSlideNotes() {} } as unknown as PptxWorkerEditorAccess;
+  const peer = { insertText() {}, deleteText() {}, setSlideNotes() {}, setStoryParagraphs() {}, duplicateSlide() {} } as unknown as PptxWorkerEditorAccess;
   const access = hydrated ? coordinator.access(peer) : peer;
   return { coordinator, access, methods, session, acknowledge, gesture: () => { gesture = true; },
     retire: () => Object.defineProperty(session, 'state', { value: { ...session.state, stage: 'disposed' } }) };
@@ -88,4 +88,12 @@ test('manual_history_is_independent_of_worker_delay', async () => {
   expect(methods.slice(-3)).toEqual(['addUndoBoundary', 'setSlideNotes', 'addUndoBoundary']);
   acknowledge();
   await coordinator.flush();
+});
+
+test('story_paragraphs_and_slide_duplication_apply_through_the_session', () => {
+  const { access, methods } = setup();
+  access.setStoryParagraphs('story', [{ runs: [{ text: 'a' }] }]);
+  access.duplicateSlide('slide', 2);
+  expect(methods).toEqual(['addUndoBoundary', 'setStoryParagraphs', 'addUndoBoundary',
+    'addUndoBoundary', 'duplicateSlide', 'addUndoBoundary']);
 });

@@ -1726,7 +1726,7 @@ impl WorkbookSnapshotBuilder {
         }
         if !self.authority_validated {
             self.authority_validated = workbook.authority.validate_snapshot_model(
-                &workbook.model,
+                &mut workbook.model,
                 &mut self.authority_validation,
                 &mut self.authority_keys,
                 budget,

@@ -116,6 +116,20 @@ export async function sharedHeaderDocx(): Promise<Uint8Array> {
 }
 
 /**
+ * Three short pages under one default header `rIdH`, whose paragraph `10000001` holds `{{header}}`
+ * inside the 72 px top margin.
+ */
+export async function repeatedHeaderDocx(): Promise<Uint8Array> {
+  const body =
+    paragraph('00000001', 'Page one') +
+    paragraph('00000002', 'Page two', true) +
+    paragraph('00000003', 'Page three', true) +
+    '<w:sectPr><w:headerReference w:type="default" r:id="rIdH"/><w:pgSz w:w="12240" w:h="2880"/>' +
+    '<w:pgMar w:top="1080" w:right="1440" w:bottom="720" w:left="1440" w:header="360" w:footer="360" w:gutter="0"/></w:sectPr>';
+  return packaged(body, { rIdH: ['header', paragraph('10000001', 'Repeated {{header}} header')] }, { evenAndOdd: false });
+}
+
+/**
  * A package with `body` and one part per relationship id, under `evenAndOddHeaders` unless
  * `evenAndOdd` is false; each `shared` relationship id targets another's part.
  */

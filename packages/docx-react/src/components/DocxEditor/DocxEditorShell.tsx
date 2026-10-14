@@ -26,6 +26,10 @@ interface ScrollPageInfo {
 }
 
 interface HorizontalRulerProps {
+  showFirstLineIndent?: boolean;
+  onDragStart?: () => void;
+  onDragEnd?: () => void;
+  onTabStopsChange?: (tabs: TabStop[]) => void;
   sectionProps: SectionProperties | undefined;
   zoom: number;
   unit: 'inch' | 'cm';
@@ -44,6 +48,8 @@ interface HorizontalRulerProps {
 }
 
 interface VerticalRulerProps {
+  onDragStart?: () => void;
+  onDragEnd?: () => void;
   sectionProps: SectionProperties | undefined;
   zoom: number;
   unit: 'inch' | 'cm';

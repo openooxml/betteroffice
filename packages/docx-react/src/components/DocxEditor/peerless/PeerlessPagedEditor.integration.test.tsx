@@ -1,5 +1,5 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, expect, mock, spyOn, test } from 'bun:test';
+import { afterAll, afterEach, expect, jest, mock, spyOn, test } from 'bun:test';
 import type {
   DocxCommandAck, DocxCommandEnvelope, DocxCommandFrame, ResidentCommandConnection,
 } from '@betteroffice/docx/peerless';
@@ -69,7 +69,7 @@ function frame(revision: number, coverage: number, text = ''): DocxCommandFrame 
 }
 
 async function mount(selection = false, accessible = false, table = false,
-  prepare?: UsePeerlessEditSessionOptions['prepareGeometry']) {
+  prepare?: UsePeerlessEditSessionOptions['prepareGeometry'], caretX: (revision: number) => number = () => 10) {
   const events: string[] = [];
   restorers.push(installGlyphPaths());
   const canvas = document.createElement('canvas');
@@ -120,7 +120,7 @@ async function mount(selection = false, accessible = false, table = false,
             kind: 'text' as const, text: `Readable page ${pageIndex + 1}`, x: 0, baselineY: 14, width: 100, font: '12px Arial', color: '#000',
           }] },
         })) : [{ page, bounds: { x: 0, y: 0, width: 200, height: 40 }, transform: [1, 0, 0, 1, 0, 0] }],
-        caret: { x: 10, y: 0, width: 1, height: 20 },
+        caret: { x: caretX(candidate.revision), y: 0, width: 1, height: 20 },
         selectionRects: selection ? [{ x: 0, y: 0, width: 10, height: 20 }] : [],
       };
     },
@@ -357,4 +357,42 @@ test('worker_frame_installs_through_frame_presentation_and_retires_echo', async 
   expect(editor.textarea.value).toBe('未確定');
   expect(editor.commands).toHaveLength(1);
   expect(editor.container.querySelectorAll('[aria-hidden="true"]')).toHaveLength(0);
+});
+
+test('worker caret blinks on the hybrid interval only while the input is focused', async () => {
+  const editor = await mount(false, false, false, undefined, (revision) => revision * 10);
+  jest.useFakeTimers();
+  restorers.push(() => jest.useRealTimers());
+  const caret = () => {
+    const overlays = editor.container.querySelectorAll<HTMLElement>('[aria-hidden="true"]');
+    expect(overlays).toHaveLength(1);
+    return overlays[0]!.style;
+  };
+  const tick = (ms: number) => act(() => { jest.advanceTimersByTime(ms); });
+  expect(caret().opacity).toBe('0');
+  act(() => { editor.textarea.focus(); });
+  expect(caret().opacity).toBe('1');
+  tick(529);
+  expect(caret().opacity).toBe('1');
+  tick(1);
+  expect(caret().opacity).toBe('0');
+  tick(530);
+  expect(caret().opacity).toBe('1');
+  tick(530);
+  expect(caret().opacity).toBe('0');
+  editor.present(frame(2, 0));
+  expect(caret().left).toBe('20px');
+  expect(caret().opacity).toBe('1');
+  tick(529);
+  expect(caret().opacity).toBe('1');
+  tick(1);
+  expect(caret().opacity).toBe('0');
+  tick(530);
+  expect(caret().opacity).toBe('1');
+  act(() => { editor.textarea.blur(); });
+  expect(caret().opacity).toBe('0');
+  tick(530 * 3);
+  expect(caret().opacity).toBe('0');
+  act(() => { editor.textarea.focus(); });
+  expect(caret().opacity).toBe('1');
 });

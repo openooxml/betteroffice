@@ -87,6 +87,42 @@ function beforeinput(textarea: HTMLTextAreaElement, inputType: string, data: str
   })); });
 }
 
+test('a held submission failure does not report applied composition text as recoverable', async () => {
+  const recovered: string[] = [];
+  const phases: string[] = [];
+  const input = mount(false, {
+    onRecoverableText: text => recovered.push(text),
+    onCompositionChange: state => { if (state) phases.push(state.phase); },
+  });
+  fireEvent.compositionStart(input.textarea);
+  fireEvent.compositionUpdate(input.textarea, { data: '漢字' });
+  const failed = admitIntent(input.admission, { kind: 'insertText', payload: { text: 'failed' } });
+  const last = admitIntent(input.admission, { kind: 'insertText', payload: { text: 'last' } });
+  if (failed.status !== 'held' || last.status !== 'held') throw new Error('intents were not held');
+  const failure = new Error('held submit failed');
+  const send = input.session.submit.bind(input.session);
+  const submit = spyOn(input.session, 'submit').mockImplementation((kind, payload, options) => {
+    if ('text' in payload && payload.text === 'failed') throw failure;
+    return send(kind, payload, options);
+  });
+  try {
+    fireEvent.compositionEnd(input.textarea, { data: '漢字' });
+    expect(input.submitted).toEqual(['replaceSelection']);
+    expect(recovered).toEqual([]);
+    expect(phases).toEqual(['active', 'active', 'committed']);
+    await expect(failed.released).rejects.toBe(failure);
+    await expect(last.released).rejects.toBe(failure);
+    expect(input.admission.getSnapshot().originalUnackedIntents).toBe(1);
+    await act(async () => {
+      input.entries[0]!.settle({ status: 'applied', seq: 1 });
+      await input.entries[0]!.ticket.ack;
+    });
+    expect(recovered).toEqual([]);
+    expect(phases).not.toContain('refused');
+    expect(input.admission.getSnapshot()).toMatchObject({ originalUnackedIntents: 0, tail: undefined, echoEnabled: true });
+  } finally { submit.mockRestore(); input.unmount(); input.admission.dispose(); }
+});
+
 test('d2b_overlapping_browser_events_commit_once', () => {
   const { textarea, submitted } = mount();
   fireEvent.keyDown(textarea, { key: 'Backspace', code: 'Backspace' });

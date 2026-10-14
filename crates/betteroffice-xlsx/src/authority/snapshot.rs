@@ -4103,7 +4103,7 @@ mod tests {
 impl WorkbookAuthority {
     pub(crate) fn validate_snapshot_model(
         &self,
-        model: &WorkbookModel,
+        model: &mut WorkbookModel,
         validation: &mut super::snapshot_validation::SnapshotValidation,
         keys: &mut crate::snapshot::yrs_split::SnapshotKeys,
         budget: SnapshotBudget,

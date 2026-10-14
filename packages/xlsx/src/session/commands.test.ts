@@ -673,6 +673,174 @@ describe('workbook commands', () => {
     } finally { await session.dispose(); }
   });
 
+  test('moveSheet refreshes sheet order and preserves stable edit targets', async () => {
+    const session = await createTestWorkbookSession(bytes);
+    try {
+      const original = structuredClone(session.state.sheets);
+      const target = { ...selected, sheetId: original[0].id };
+      expect(await session.submit(command(session, 1, 'applyOps', {
+        args: [[{ type: 'moveSheet', from: 0, to: 1 }]],
+      }))).toMatchObject({ status: 'applied', committed: true });
+      expect(session.state.sheets).toEqual([
+        { ...original[1], index: 0 }, { ...original[0], index: 1 },
+      ]);
+      expect(await session.submit(command(session, 2, 'editCell', {
+        args: [0, 1, 0, '7'], target: { ...target, range: { kind: 'a1', a1: 'A2' } },
+      }))).toMatchObject({ status: 'applied', committed: true });
+      expect((await session.call.cellInputs(1, 'A2')).cells[0][0].input).toBe('7');
+      expect((await session.call.cellInputs(0, 'A2')).cells[0][0].input).toBe('');
+      expect(await session.submit(command(session, 3, 'applyOps', { args: [[
+        { type: 'moveSheet', from: 1, to: 0 },
+        { type: 'setCell', sheet: 1, target, at: { row: 2, col: 0 },
+          cell: { value: { kind: 'number', value: 9 }, formula: null, style: null } },
+      ]] }))).toMatchObject({ status: 'applied', committed: true });
+      expect(session.state.sheets).toEqual(original);
+      expect((await session.call.cellInputs(0, 'A3')).cells[0][0].input).toBe('9');
+      expect((await session.call.cellInputs(1, 'A3')).cells[0][0].input).toBe('');
+    } finally { await session.dispose(); }
+  });
+
+  test('moveSheet resolves the source sheet from its stable target', async () => {
+    const session = await createTestWorkbookSession(bytes);
+    try {
+      const original = structuredClone(session.state.sheets);
+      expect(await session.submit(command(session, 1, 'applyOps', {
+        args: [[{ type: 'moveSheet', from: 0, to: 0, target: { ...selected, sheetId: original[1].id } }]],
+      }))).toMatchObject({ status: 'applied', committed: true });
+      expect(session.state.sheets).toEqual([
+        { ...original[1], index: 0 }, { ...original[0], index: 1 },
+      ]);
+      expect((await session.call.cellInputs(1, 'A1')).cells[0][0].input).toBe('1');
+    } finally { await session.dispose(); }
+  });
+
+  test('mixed sheet batch commits stable targets and replays undo and redo', async () => {
+    const session = await createTestWorkbookSession(bytes);
+    try {
+      const original = structuredClone(session.state.sheets);
+      const targetA = { ...selected, sheetId: original[0].id };
+      const targetB = { ...selected, sheetId: original[1].id };
+      expect(await session.submit(command(session, 1, 'applyOps', { args: [[
+        { type: 'addSheet', index: 2, name: 'C' },
+        { type: 'moveSheet', from: 0, to: 2, target: targetA },
+        { type: 'renameSheet', sheet: 0, name: 'Renamed', target: targetB },
+        { type: 'setCell', sheet: 2, target: targetA, at: { row: 1, col: 0 },
+          cell: { value: { kind: 'number', value: 42 }, formula: null, style: null } },
+      ]] }))).toMatchObject({ status: 'applied', committed: true });
+      const after = structuredClone(session.state.sheets);
+      expect(after.map((sheet) => sheet.name)).toEqual(['Renamed', 'C', original[0].name]);
+      expect(after[0].id).toBe(original[1].id);
+      expect(after[2].id).toBe(original[0].id);
+      expect((await session.call.cellInputs(2, 'A2')).cells[0][0].input).toBe('42');
+      expect(await session.submit(command(session, 2, 'undo', { args: [] })))
+        .toMatchObject({ status: 'applied', committed: true });
+      expect(session.state.sheets).toEqual(original);
+      expect((await session.call.cellInputs(0, 'A2')).cells[0][0].input).toBe('');
+      expect(await session.submit(command(session, 3, 'redo', { args: [] })))
+        .toMatchObject({ status: 'applied', committed: true });
+      expect(session.state.sheets).toEqual(after);
+      expect((await session.call.cellInputs(2, 'A2')).cells[0][0].input).toBe('42');
+    } finally { await session.dispose(); }
+  });
+
+  for (const structural of ['move', 'insert', 'removeBefore'] as const) {
+    test(`active sheet follows ${structural} and rename through undo and redo`, async () => {
+      const { session, handle } = await trackedSession();
+      try {
+        const original = structuredClone(session.state.sheets);
+        const before = structural === 'removeBefore' ? 1 : 0;
+        const after = structural === 'removeBefore' ? 0 : 1;
+        const target = { ...selected, sheetId: original[before].id };
+        await session.submit(command(session, 1, 'setActiveSheet', { args: [before] }));
+        const operation = structural === 'move' ? { type: 'moveSheet', from: 0, to: 1 }
+          : structural === 'insert' ? { type: 'addSheet', index: 0, name: 'C' }
+          : { type: 'removeSheet', index: 0 };
+        expect(await session.submit(command(session, 2, 'applyOps', { args: [[
+          operation, { type: 'renameSheet', sheet: after, name: 'Renamed', target },
+        ]] }))).toMatchObject({ status: 'applied', committed: true });
+        expect(session.state.activeSheet).toBe(after);
+        expect(session.state.sheets[session.state.activeSheet].id).toBe(target.sheetId);
+        expect(handle.sheetInfo().activeSheet).toBe(after);
+        expect(await session.submit(command(session, 3, 'undo', { args: [] })))
+          .toMatchObject({ status: 'applied', committed: true });
+        expect(session.state.activeSheet).toBe(before);
+        expect(session.state.sheets).toEqual(original);
+        expect(await session.submit(command(session, 4, 'redo', { args: [] })))
+          .toMatchObject({ status: 'applied', committed: true });
+        expect(session.state.activeSheet).toBe(after);
+        expect(session.state.sheets[after]).toMatchObject({ id: target.sheetId, name: 'Renamed' });
+        expect(session.failure).toBeUndefined();
+      } finally { await session.dispose(); }
+    });
+  }
+
+  test('save preserves workbook view tabs through move undo and redo', async () => {
+    const original = await JSZip.loadAsync(bytes);
+    const sourceXml = await original.file('xl/workbook.xml')!.async('string');
+    original.file('xl/workbook.xml', sourceXml
+      .replace('<sheets>', '<bookViews><workbookView/></bookViews><sheets>')
+      .replace('</workbook>', '<calcPr fullCalcOnLoad="1"/></workbook>'));
+    const session = await createTestWorkbookSession(await original.generateAsync({ type: 'uint8array' }));
+    try {
+      expect(await session.submit(command(session, 1, 'applyOps', { args: [[
+        { type: 'renameSheet', sheet: 0, name: 'Renamed' },
+        { type: 'moveSheet', from: 1, to: 0 },
+      ]] }))).toMatchObject({ status: 'applied', committed: true });
+      const zip = await JSZip.loadAsync(await session.save());
+      const xml = await zip.file('xl/workbook.xml')!.async('string');
+      expect(xml).toContain('<workbookView activeTab="1" firstSheet="1"/>');
+      expect(session.state.activeSheet).toBe(1);
+      await session.submit(command(session, 2, 'undo', { args: [] }));
+      const undone = await JSZip.loadAsync(await session.save());
+      expect(await undone.file('xl/workbook.xml')!.async('string'))
+        .toBe(await original.file('xl/workbook.xml')!.async('string'));
+      await session.submit(command(session, 3, 'redo', { args: [] }));
+      const redone = await JSZip.loadAsync(await session.save());
+      expect(await redone.file('xl/workbook.xml')!.async('string')).toBe(xml);
+    } finally { await session.dispose(); }
+  });
+
+  test('queued numeric moveSheet refuses after concurrent sheet deletion', async () => {
+    const session = await createTestWorkbookSession(bytes, batchRequests);
+    try {
+      const remove = command(session, 1, 'applyOps', { args: [[{ type: 'removeSheet', index: 1 }]] });
+      const move = command(session, 2, 'applyOps', { args: [[{ type: 'moveSheet', from: 0, to: 0 }]] }, 1);
+      const statuses = await Promise.all([session.submit(remove), session.submit(move)]);
+      expect(statuses[0]).toMatchObject({ status: 'applied', committed: true });
+      expect(statuses[1]).toMatchObject({ status: 'refused', reason: 'stale-target', committed: false });
+      expect(session.state.sheets).toEqual([{ id: 'sheet:0', index: 0, name: 'Data' }]);
+      const saved = await session.save();
+      await session.submit(command(session, 3, 'undo', { args: [] }));
+      expect(session.state.sheets.map((sheet) => sheet.name)).toEqual(['Data', 'Other']);
+      await session.submit(command(session, 4, 'redo', { args: [] }));
+      expect(await session.save()).toEqual(saved);
+      expect(session.failure).toBeUndefined();
+    } finally { await session.dispose(); }
+  });
+
+  test('moveSheet undo and redo restore sheet ids and later targeted edits', async () => {
+    const session = await createTestWorkbookSession(bytes);
+    try {
+      const original = structuredClone(session.state.sheets);
+      await session.submit(command(session, 1, 'applyOps', { args: [[{ type: 'moveSheet', from: 0, to: 1 }]] }));
+      const moved = [{ ...original[1], index: 0 }, { ...original[0], index: 1 }];
+      expect(session.state.sheets).toEqual(moved);
+      expect(await session.submit(command(session, 2, 'undo', { args: [] })))
+        .toMatchObject({ status: 'applied', committed: true });
+      expect(session.state.sheets).toEqual(original);
+      expect(await session.submit(command(session, 3, 'redo', { args: [] })))
+        .toMatchObject({ status: 'applied', committed: true });
+      expect(session.state.sheets).toEqual(moved);
+      await session.submit(command(session, 4, 'undo', { args: [] }));
+      expect(session.state.sheets).toEqual(original);
+      expect(await session.submit(command(session, 5, 'editCell', {
+        args: [1, 1, 0, '8'], target: { sheetId: original[0].id, range: { kind: 'a1', a1: 'A2' } },
+      }))).toMatchObject({ status: 'applied', committed: true });
+      expect((await session.call.cellInputs(0, 'A2')).cells[0][0].input).toBe('8');
+      expect((await session.call.cellInputs(1, 'A2')).cells[0][0].input).toBe('');
+    } finally { await session.dispose(); }
+  });
+
   for (const kind of ['applyOps', 'propose'] as const) {
     test(`queued ${kind} resolves individual stable sheet targets after insertion`, async () => {
       const session = await createTestWorkbookSession(bytes, batchRequests);

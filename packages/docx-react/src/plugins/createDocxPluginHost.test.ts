@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
-import type { YrsSession } from '@betteroffice/docx/yrs';
-import { createDocxPluginHost } from './createDocxPluginHost';
+import type { ResidentProposalReply, YrsSession } from '@betteroffice/docx/yrs';
+import { registerWorkerProposalAuthority } from '../components/DocxEditor/internals/workerProposalAuthority';
+import { createDocxPluginHost, type DocxPluginHostAccess } from './createDocxPluginHost';
 import { defineDocxPlugin } from './defineDocxPlugin';
 import type { DocxProposalSnapshot } from './proposalPreview';
 import type { DocxPluginEvent, DocxPluginGeometry, DocxPluginLayout } from './types';
@@ -36,7 +37,29 @@ function stubSession(previewVersion = 0) {
   };
 }
 
-function setup(geometry: () => DocxPluginGeometry | null = () => null) {
+function stubGeometry() {
+  const listeners = new Set<() => void>();
+  let subscriptions = 0;
+  return {
+    listeners,
+    subscriptions: () => subscriptions,
+    subscribeGeometry(listener: () => void) {
+      subscriptions += 1;
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    change() {
+      for (const listener of listeners) listener();
+    },
+  };
+}
+
+function setup(
+  geometry: () => DocxPluginGeometry | null = () => null,
+  subscribeGeometry?: DocxPluginHostAccess['subscribeGeometry']
+) {
   const events: DocxPluginEvent[] = [];
   const host = createDocxPluginHost({
     pagedEditorRef: { current: null },
@@ -45,6 +68,7 @@ function setup(geometry: () => DocxPluginGeometry | null = () => null) {
     layout: () => ({ queries: null, complete: false, failed: false }),
     subscribeLayout: () => () => {},
     geometry,
+    subscribeGeometry,
     translate: (key) => key,
   });
   const plugin = defineDocxPlugin({
@@ -66,7 +90,136 @@ const layout = (previewVersion: number): DocxPluginLayout => ({
 });
 const settle = () => new Promise((done) => setTimeout(done, 0));
 
+for (const mode of ['session', 'worker'] as const) {
+  describe(`plugin host ${mode} geometry subscriptions`, () => {
+    function setupGeometryHost() {
+      const geometry = stubGeometry();
+      const { host } = setup(() => null, geometry.subscribeGeometry);
+      const open = () => {
+        if (mode === 'worker') host.openWorker('v1');
+        else host.open(stubSession().session);
+      };
+      return { host, geometry, open };
+    }
+
+    test('detaches on unmount and ignores later geometry changes', async () => {
+      const { host, geometry, open } = setupGeometryHost();
+      let notifications = 0;
+      host.subscribe(() => notifications += 1);
+      open();
+      expect(geometry.listeners.size).toBe(1);
+      host.close('unmounted');
+      await Promise.resolve();
+      notifications = 0;
+      geometry.change();
+      await Promise.resolve();
+      expect(notifications).toBe(0);
+      expect(geometry.listeners.size).toBe(0);
+    });
+
+    test('reattaches once when the same host reopens after unmount', async () => {
+      const { host, geometry, open } = setupGeometryHost();
+      let notifications = 0;
+      host.subscribe(() => notifications += 1);
+      open();
+      host.close('unmounted');
+      expect(geometry.listeners.size).toBe(0);
+      open();
+      expect(geometry.listeners.size).toBe(1);
+      expect(geometry.subscriptions()).toBe(2);
+      await Promise.resolve();
+      notifications = 0;
+      geometry.change();
+      await Promise.resolve();
+      expect(notifications).toBe(1);
+      host.close('unmounted');
+      expect(geometry.listeners.size).toBe(0);
+    });
+
+    test('keeps one subscription across document replacement and repeated opens', async () => {
+      const { host, geometry, open } = setupGeometryHost();
+      let notifications = 0;
+      host.subscribe(() => notifications += 1);
+      open();
+      host.close('document-replaced');
+      expect(geometry.listeners.size).toBe(1);
+      open();
+      open();
+      expect(geometry.listeners.size).toBe(1);
+      expect(geometry.subscriptions()).toBe(1);
+      await Promise.resolve();
+      notifications = 0;
+      geometry.change();
+      await Promise.resolve();
+      expect(notifications).toBe(1);
+      host.close('unmounted');
+      expect(geometry.listeners.size).toBe(0);
+    });
+  });
+}
+
 describe('plugin host proposal previews', () => {
+  test('a proposal event handler can commit a worker read and observe records at the same preview', async () => {
+    const registry = stubSession();
+    Object.assign(registry.session, { encodeStateVector: () => new Uint8Array() });
+    let snapshot: DocxProposalSnapshot = { version: 'v1', previewVersion: 0, proposals: [] };
+    const authority = registerWorkerProposalAuthority(registry.session, {
+      async proposal(): Promise<ResidentProposalReply> {
+        return {
+          mirror: { version: snapshot.version, proposals: { previewVersion: snapshot.previewVersion,
+            entries: snapshot.proposals.map(record => ({ key: record.id, record,
+              suggest: { author: 'Reviewer', date: '2026-10-01T00:00:00Z' } })) } },
+          geometry: { version: snapshot.version, previewVersion: snapshot.previewVersion,
+            proposals: '', targets: {}, hidden: [] },
+          changedStories: [], updates: [], stateVector: new Uint8Array(),
+        };
+      },
+      documentRead: async () => { throw new Error('Unexpected document read'); },
+      handOver: async () => { throw new Error('Unexpected hand-over'); },
+    }, { editorPeer: true, current: () => true, laidOut: async () => {},
+      adopted: () => {}, relayout: () => {}, contentChanged: () => {} });
+    await authority.initialize();
+    const { host } = setup();
+    let finish = (_committed: boolean) => {};
+    const nextCommit = () => new Promise<boolean>(resolve => { finish = resolve; });
+    let events = 0;
+    let flushes = 0;
+    const admission = { flush: async () => { flushes += 1; }, validate: () => {} };
+    const main = async (): Promise<DocxProposalSnapshot> => { throw new Error('Unexpected replica read'); };
+    const plugin = defineDocxPlugin<DocxProposalSnapshot | null>({
+      id: 'test.worker-proposal-read', createState: () => null,
+      async onEvent(context, event) {
+        if (event.type !== 'proposal-change') return;
+        events += 1;
+        const current = await authority.getProposals(main, admission);
+        finish(context.setState(current, current.version));
+      },
+    });
+    try {
+      host.setPlugins([plugin]);
+      host.open(registry.session);
+      await settle();
+      snapshot = { ...snapshot, previewVersion: 1 };
+      let committed = nextCommit();
+      await authority.getProposals(main);
+      expect(await committed).toBe(true);
+      expect(host.activations()[0]!.context.state).toEqual(snapshot);
+      expect(events).toBe(1);
+      expect(flushes).toBe(1);
+      snapshot = { ...snapshot, proposals: [{ id: 'proposal', state: 'accepted',
+        paragraph: { kind: 'session', sessionId: 'session', story: 'body', paraId: 'paragraph' },
+        revisionIds: ['revision'], changed: true }] };
+      committed = nextCommit();
+      await authority.getProposals(main);
+      expect(await committed).toBe(true);
+      expect(host.activations()[0]!.context.state).toEqual(snapshot);
+      expect(events).toBe(2);
+      expect(flushes).toBe(2);
+    } finally {
+      host.close('unmounted');
+    }
+  });
+
   test('publishes preview events and clears stale layout ids synchronously', async () => {
     const { host, plugin, events } = setup();
     const registry = stubSession();
