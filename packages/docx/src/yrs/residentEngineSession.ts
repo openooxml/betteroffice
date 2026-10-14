@@ -81,6 +81,13 @@ export type ResidentEngineSession = Pick<
   | 'cellSelection'
   | 'setCellSelection'
   | 'insertRow'
+  | 'insertColumn'
+  | 'deleteRow'
+  | 'deleteColumn'
+  | 'deleteTable'
+  | 'mergeCells'
+  | 'splitCell'
+  | 'setCellShading'
   | 'insertTable'
   | 'insertImage'
   | 'insertPageBreak'
@@ -647,6 +654,41 @@ export async function createResidentEngineSession(
     }),
     insertTable: (at, rows, columns, author) => applyCommandMutation(at.story, () => {
       const receipt = JSON.parse(session.insert_table(at.story, at.paraId, at.offset, rows, columns, author?.name, author?.date));
+      markProjectionStories([...receipt.changedStoryIds, ...receipt.createdStoryIds, ...receipt.deletedStoryIds]);
+      return receipt;
+    }),
+    insertColumn: (at, side) => applyCommandMutation(at.story, () => {
+      const receipt = JSON.parse(session.insert_column(JSON.stringify(at), side === 'right'));
+      markProjectionStories([...receipt.changedStoryIds, ...receipt.createdStoryIds, ...receipt.deletedStoryIds]);
+      return receipt;
+    }),
+    deleteRow: (range, author) => applyCommandMutation(range.anchor.story, () => {
+      const receipt = JSON.parse(session.delete_row(JSON.stringify(range), author?.name, author?.date));
+      markProjectionStories([...receipt.changedStoryIds, ...receipt.createdStoryIds, ...receipt.deletedStoryIds]);
+      return receipt;
+    }),
+    deleteColumn: (range) => applyCommandMutation(range.anchor.story, () => {
+      const receipt = JSON.parse(session.delete_column(JSON.stringify(range)));
+      markProjectionStories([...receipt.changedStoryIds, ...receipt.createdStoryIds, ...receipt.deletedStoryIds]);
+      return receipt;
+    }),
+    deleteTable: (table) => applyCommandMutation(table.story, () => {
+      const receipt = JSON.parse(session.delete_table(JSON.stringify(table)));
+      markProjectionStories([...receipt.changedStoryIds, ...receipt.createdStoryIds, ...receipt.deletedStoryIds]);
+      return receipt;
+    }),
+    mergeCells: (range) => applyCommandMutation(range.anchor.story, () => {
+      const receipt = JSON.parse(session.merge_cells(JSON.stringify(range)));
+      markProjectionStories([...receipt.changedStoryIds, ...receipt.createdStoryIds, ...receipt.deletedStoryIds]);
+      return receipt;
+    }),
+    splitCell: (at, rows, columns) => applyCommandMutation(at.story, () => {
+      const receipt = JSON.parse(session.split_cell(JSON.stringify(at), rows, columns));
+      markProjectionStories([...receipt.changedStoryIds, ...receipt.createdStoryIds, ...receipt.deletedStoryIds]);
+      return receipt;
+    }),
+    setCellShading: (range, color) => applyCommandMutation(range.anchor.story, () => {
+      const receipt = JSON.parse(session.set_cell_shading(JSON.stringify(range), color ?? undefined));
       markProjectionStories([...receipt.changedStoryIds, ...receipt.createdStoryIds, ...receipt.deletedStoryIds]);
       return receipt;
     }),

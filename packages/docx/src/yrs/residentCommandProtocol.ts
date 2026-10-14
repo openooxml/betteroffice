@@ -41,6 +41,7 @@ import type { DocxCommandSelectionLayout } from './residentCommandSelection';
 import type { DocxProposalRegistry, DocxProposalRequest, DocxProposalStateRequest, DocxProposalWithdrawRequest } from './proposals';
 import type { DocxCommentPatch } from './residentReview';
 import type { DocxCellNavigationPlan } from './residentCommandCells';
+import type { DocxTableCommandTarget } from './residentCommandTables';
 import type { DocxPartTarget, ResidentPartTarget, ResidentPartGeometry } from './residentParts';
 import type { SectionProperties, Watermark, FootnoteProperties, EndnoteProperties } from '../types/document';
 import type { DocxSectionMargins } from './residentSections';
@@ -238,6 +239,14 @@ export interface DocxCommandPayloads {
   changeIndent: DocxSelectionIntent & { direction: 'increase' | 'decrease' };
   insertImage: DocxSelectionIntent & { image: Readonly<Record<string, unknown>> };
   insertTable: DocxSelectionIntent & { rows: number; columns: number };
+  insertTableRow: DocxSelectionIntent & { side: 'above' | 'below' };
+  insertTableColumn: DocxSelectionIntent & { side: 'left' | 'right' };
+  deleteTableRow: DocxSelectionIntent;
+  deleteTableColumn: DocxSelectionIntent;
+  deleteTable: DocxSelectionIntent;
+  mergeTableCells: DocxSelectionIntent;
+  splitTableCell: DocxSelectionIntent & { rows: number; columns: number };
+  setTableCellShading: DocxSelectionIntent & { color: string | null };
   insertPageBreak: DocxSelectionIntent;
   insertSectionBreak: DocxSelectionIntent & { type: 'nextPage' | 'continuous' | 'oddPage' | 'evenPage' };
   resizeObject: { handle: string; expectVersion: string } &
@@ -340,6 +349,7 @@ export interface PreparedDocxCommand {
   selection: DocxCommandSelection | null;
   range: YrsStoryRange | null;
   cellNavigation?: DocxCellNavigationPlan;
+  table?: DocxTableCommandTarget;
   paragraphChanges?: Array<{ range: YrsStoryRange; attrs: YrsParagraphAttrs }>;
   sectionBreakProperties?: SectionProperties;
 }
@@ -462,6 +472,8 @@ export type ResidentDocxCommandEngine = ResidentEngineSession & Pick<YrsSession,
   | 'paragraphs' | 'selectionContext' | 'storySegments' | 'cellSelection' | 'tablePayload'
   | 'insertText' | 'replaceRange' | 'deleteRange' | 'splitParagraph'
   | 'toggleMark' | 'formatRange' | 'clearFormatting' | 'setParagraphAttrs' | 'applyParagraphStyle'
+  | 'insertColumn' | 'deleteRow' | 'deleteColumn' | 'deleteTable'
+  | 'mergeCells' | 'splitCell' | 'setCellShading'
   | 'beginUndoCapture' | 'canUndo' | 'canRedo'
 >;
 
