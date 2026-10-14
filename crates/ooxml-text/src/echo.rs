@@ -9,7 +9,7 @@
 //! glyph offsets) are reported unsafe. A host's advance in pixels is then
 //! `(advance + pair) as f32 * horizontal`, the same product shaping computes.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use serde::Serialize;
 
@@ -73,7 +73,7 @@ pub fn echo_glyph_set(
             advances[index] = value;
         }
     }
-    let ligature_starts = substitution_barriers(store, font, alphabet, &mut glyph_ids, kern)?;
+    let ligature_starts = shaping_barriers(store, font, alphabet, &mut glyph_ids, kern)?;
     let supported: Vec<usize> = (0..alphabet.len())
         .filter(|&index| glyph_ids[index] != 0)
         .collect();
@@ -146,7 +146,7 @@ pub fn echo_glyph_set(
     })
 }
 
-fn substitution_barriers(
+fn shaping_barriers(
     store: &FontStore,
     font: FontId,
     alphabet: &[char],
@@ -154,7 +154,6 @@ fn substitution_barriers(
     kern: bool,
 ) -> Result<Vec<bool>, FontError> {
     use rustybuzz::ttf_parser::{GlyphId, gsub::SubstitutionSubtable};
-    use std::collections::BTreeSet;
 
     let mut ligatures = vec![false; alphabet.len()];
     let Some(face) = store.shaping_face(font)? else {
@@ -162,6 +161,14 @@ fn substitution_barriers(
         return Ok(ligatures);
     };
     if face.tables().morx.is_some() || face.tables().trak.is_some() {
+        glyph_ids.fill(0);
+        return Ok(ligatures);
+    }
+    if face
+        .tables()
+        .gpos
+        .is_some_and(|table| contextual_positioning(&table, alphabet, glyph_ids, kern))
+    {
         glyph_ids.fill(0);
         return Ok(ligatures);
     }
@@ -201,33 +208,7 @@ fn substitution_barriers(
         let Some(feature) = table.features.get(index) else {
             continue;
         };
-        let active = matches!(
-            &feature.tag.to_bytes(),
-            b"ccmp"
-                | b"locl"
-                | b"rlig"
-                | b"calt"
-                | b"clig"
-                | b"liga"
-                | b"rclt"
-                | b"rvrn"
-                | b"abvm"
-                | b"blwm"
-                | b"mark"
-                | b"mkmk"
-                | b"curs"
-                | b"dist"
-                | b"ltra"
-                | b"ltrm"
-                | b"rand"
-                | b"trak"
-                | b"Harf"
-                | b"HARF"
-                | b"Buzz"
-                | b"BUZZ"
-        ) || alphabet.contains(&'\u{2044}')
-            && matches!(&feature.tag.to_bytes(), b"frac" | b"numr" | b"dnom")
-            || kern && feature.tag.to_bytes() == *b"kern"
+        let active = default_echo_feature(feature.tag.to_bytes(), alphabet, kern)
             || required.contains(&index);
         if active {
             lookups.extend(feature.lookup_indices);
@@ -278,6 +259,122 @@ fn substitution_barriers(
         }
     }
     Ok(ligatures)
+}
+
+fn default_echo_feature(tag: [u8; 4], alphabet: &[char], kern: bool) -> bool {
+    matches!(
+        &tag,
+        b"ccmp"
+            | b"locl"
+            | b"rlig"
+            | b"calt"
+            | b"clig"
+            | b"liga"
+            | b"rclt"
+            | b"rvrn"
+            | b"abvm"
+            | b"blwm"
+            | b"mark"
+            | b"mkmk"
+            | b"curs"
+            | b"dist"
+            | b"ltra"
+            | b"ltrm"
+            | b"rand"
+            | b"trak"
+            | b"Harf"
+            | b"HARF"
+            | b"Buzz"
+            | b"BUZZ"
+    ) || alphabet.contains(&'\u{2044}') && matches!(&tag, b"frac" | b"numr" | b"dnom")
+        || kern && tag == *b"kern"
+}
+
+fn contextual_positioning(
+    table: &rustybuzz::ttf_parser::opentype_layout::LayoutTable<'_>,
+    alphabet: &[char],
+    glyph_ids: &[u32],
+    kern: bool,
+) -> bool {
+    use rustybuzz::{UnicodeBuffer, script, ttf_parser::gpos::PositioningSubtable};
+
+    if table.variations.is_some() {
+        return true;
+    }
+    let mut scripts = BTreeSet::new();
+    for (&ch, &id) in alphabet.iter().zip(glyph_ids) {
+        if id == 0 {
+            continue;
+        }
+        let mut buffer = UnicodeBuffer::new();
+        buffer.push_str(&ch.to_string());
+        buffer.set_direction(rustybuzz::Direction::LeftToRight);
+        buffer.guess_segment_properties();
+        let tags = match buffer.script() {
+            script::LATIN => [*b"latn", *b"DFLT", *b"dflt"],
+            script::COMMON | script::INHERITED | script::UNKNOWN => [*b"DFLT", *b"dflt", *b"latn"],
+            _ => return true,
+        };
+        if let Some(selected) = tags.into_iter().find_map(|tag| {
+            (0..table.scripts.len()).find_map(|index| {
+                table
+                    .scripts
+                    .get(index)
+                    .filter(|script| script.tag.to_bytes() == tag)
+            })
+        }) {
+            scripts.insert(selected.tag.to_bytes());
+        }
+    }
+    let mut lookups = BTreeSet::new();
+    for index in 0..table.scripts.len() {
+        let Some(script) = table.scripts.get(index) else {
+            return true;
+        };
+        if !scripts.contains(&script.tag.to_bytes()) {
+            continue;
+        }
+        let mut languages = Vec::new();
+        if let Some(language) = script.default_language {
+            languages.push(language);
+        }
+        for index in 0..script.languages.len() {
+            let Some(language) = script.languages.get(index) else {
+                return true;
+            };
+            languages.push(language);
+        }
+        for language in languages {
+            for index in language
+                .feature_indices
+                .into_iter()
+                .chain(language.required_feature)
+            {
+                let Some(feature) = table.features.get(index) else {
+                    return true;
+                };
+                if default_echo_feature(feature.tag.to_bytes(), alphabet, kern)
+                    || language.required_feature == Some(index)
+                {
+                    lookups.extend(feature.lookup_indices);
+                }
+            }
+        }
+    }
+    for index in lookups {
+        let Some(lookup) = table.lookups.get(index) else {
+            return true;
+        };
+        for index in 0..lookup.subtables.len() {
+            if matches!(
+                lookup.subtables.get::<PositioningSubtable<'_>>(index),
+                None | Some(PositioningSubtable::Context(_) | PositioningSubtable::ChainContext(_))
+            ) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn context_may_match(
@@ -653,5 +750,84 @@ mod tests {
             .collect();
             assert_eq!(advance(&set, &['A', 'B'], "AAA"), shaped);
         }
+    }
+
+    fn rewrite_gpos(mut bytes: Vec<u8>, rewrite: impl FnOnce(&[u8]) -> Vec<u8>) -> Vec<u8> {
+        let count = u16::from_be_bytes(bytes[4..6].try_into().unwrap()) as usize;
+        let entry = (0..count)
+            .map(|index| 12 + index * 16)
+            .find(|&offset| &bytes[offset..offset + 4] == b"GPOS")
+            .unwrap();
+        let start = u32::from_be_bytes(bytes[entry + 8..entry + 12].try_into().unwrap()) as usize;
+        let len = u32::from_be_bytes(bytes[entry + 12..entry + 16].try_into().unwrap()) as usize;
+        let gpos = rewrite(&bytes[start..start + len]);
+        let offset = bytes.len() as u32;
+        bytes[entry + 8..entry + 12].copy_from_slice(&offset.to_be_bytes());
+        bytes[entry + 12..entry + 16].copy_from_slice(&(gpos.len() as u32).to_be_bytes());
+        bytes.extend(gpos);
+        bytes
+    }
+
+    fn assert_latin_positioning_keeps_echo(bytes: Vec<u8>) {
+        let mut store = FontStore::new();
+        let font = store.register(bytes).unwrap();
+        let alphabet = ['A', 'B'];
+        let set = echo_glyph_set(&store, font, 16.0, true, &alphabet).unwrap();
+        assert!(set.glyph_ids.iter().all(|&id| id != 0));
+        for text in ["A", "AA", "AAA", "AABBA"] {
+            let shaped: Vec<f32> = shape_with_direction(
+                &store,
+                font,
+                text,
+                16.0,
+                &kern_features(true),
+                ShapeDirection::Ltr,
+            )
+            .unwrap()
+            .iter()
+            .map(|glyph| glyph.x_advance)
+            .collect();
+            assert_eq!(advance(&set, &alphabet, text), shaped);
+        }
+    }
+
+    #[test]
+    fn contextual_positioning_in_another_script_keeps_latin_echo() {
+        for kind in [7, 8] {
+            let bytes = rewrite_gpos(contextual_positioning_font(kind, true, b"mark"), |table| {
+                let mut table = table.to_vec();
+                table[12..16].copy_from_slice(b"hebr");
+                table
+            });
+            assert_latin_positioning_keeps_echo(bytes);
+        }
+    }
+
+    #[test]
+    fn disabled_optional_positioning_features_keep_echo() {
+        for feature in [b"ss01", b"salt", b"dlig", b"vkrn"] {
+            assert_latin_positioning_keeps_echo(contextual_positioning_font(7, true, feature));
+        }
+    }
+
+    #[test]
+    fn latin_script_precedes_default_contextual_positioning() {
+        let bytes = rewrite_gpos(contextual_positioning_font(8, true, b"kern"), |table| {
+            let mut gpos = table[..10].to_vec();
+            gpos[6..8].copy_from_slice(&46u16.to_be_bytes());
+            gpos[8..10].copy_from_slice(&60u16.to_be_bytes());
+            gpos.extend(2u16.to_be_bytes());
+            gpos.extend(b"DFLT");
+            gpos.extend(14u16.to_be_bytes());
+            gpos.extend(b"latn");
+            gpos.extend(26u16.to_be_bytes());
+            gpos.extend(&table[18..30]);
+            for value in [4u16, 0, 0, 0xffff, 0] {
+                gpos.extend(value.to_be_bytes());
+            }
+            gpos.extend(&table[30..]);
+            gpos
+        });
+        assert_latin_positioning_keeps_echo(bytes);
     }
 }
