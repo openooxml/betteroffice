@@ -27,6 +27,8 @@ export interface VerticalRulerProps {
   zoom?: number;
   /** Whether margins can be dragged to adjust */
   editable?: boolean;
+  onDragStart?: () => void;
+  onDragEnd?: () => void;
   /** Callback when top margin changes (in twips) */
   onTopMarginChange?: (marginTwips: number) => void;
   /** Callback when bottom margin changes (in twips) */
@@ -68,6 +70,8 @@ export function VerticalRuler({
   sectionProps,
   zoom = 1,
   editable = false,
+  onDragStart,
+  onDragEnd,
   onTopMarginChange,
   onBottomMarginChange,
   unit = 'inch',
@@ -94,9 +98,10 @@ export function VerticalRuler({
     (e: React.MouseEvent, marker: MarkerType) => {
       if (!editable) return;
       e.preventDefault();
+      onDragStart?.();
       setDragging(marker);
     },
-    [editable]
+    [editable, onDragStart]
   );
 
   // Handle drag
@@ -133,8 +138,9 @@ export function VerticalRuler({
 
   // Handle drag end
   const handleDragEnd = useCallback(() => {
+    onDragEnd?.();
     setDragging(null);
-  }, []);
+  }, [onDragEnd]);
 
   // Add/remove document event listeners
   useEffect(() => {

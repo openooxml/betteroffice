@@ -723,6 +723,35 @@ test('inserted pictures render, synchronize, arrange and reopen with their bytes
 });
 
 describe('host undo and comment controls', () => {
+  for (const mode of ['auto', 'manual'] as const) {
+    test(`setStoryParagraphs restores the entire story in one ${mode} undo`, () => {
+      const seed = openPresentation(fixture, { clientId: 9970 });
+      let bytes: Uint8Array;
+      try {
+        const story = seed.snapshot().slides[0].shapes.find((shape) => shape.textStories.length)!.textStories[0];
+        seed.setStoryParagraphs(story.id, ['A', 'Keep this paragraph.'].map((text) => ({ runs: [{ text, style: {} }] })));
+        bytes = seed.save();
+      } finally { seed.dispose(); }
+      const deck = openPresentation(bytes, { clientId: 9971 });
+      try {
+        deck.setUndoCaptureMode(mode);
+        const original = deck.snapshot().slides[0].shapes.find((shape) => shape.textStories.length)!.textStories[0];
+        expect(original.paragraphs.map((paragraph) => paragraph.runs.map((run) => run.text).join('')))
+          .toEqual(['A', 'Keep this paragraph.']);
+        expect(deck.canUndo()).toBe(false);
+        const replacement = deck.setStoryParagraphs(original.id,
+          ['Left', 'Right'].map((text) => ({ runs: [{ text, style: {} }] })));
+        expect(replacement.paragraphs.map((paragraph) => paragraph.runs.map((run) => run.text).join('')))
+          .toEqual(['Left', 'Right']);
+        expect(deck.undo().applied).toBe(true);
+        expect(deck.story(original.id)).toEqual(original);
+        expect(deck.canUndo()).toBe(false);
+        expect(deck.redo().applied).toBe(true);
+        expect(deck.story(original.id)).toEqual(replacement);
+      } finally { deck.dispose(); }
+    });
+  }
+
   test('manual capture groups different operations and keeps explicit boundaries', () => {
     const deck = openPresentation(fixture, { clientId: 9981 });
     try {

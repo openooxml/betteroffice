@@ -126,6 +126,7 @@ export function projectDocxEditState(
     documentVersion: engine.proposalEngine?.version(), readOnly: state.readOnly, toolbar: null, effectiveFormatting: null, storedMarks: null,
     canUndo: engine.canUndo?.() ?? false, canRedo: engine.canRedo?.() ?? false,
     hyperlink: null, tableContext: null,
+    ...(state.proposals ? { review: { version: engine.proposalEngine.version(), previewVersion: state.proposals.snapshot().previewVersion } } : {}),
   };
   if (!resolved?.ok) return result;
   const { range, selection } = resolved;

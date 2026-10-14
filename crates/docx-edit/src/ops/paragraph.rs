@@ -369,38 +369,51 @@ impl EditingDoc {
     pub fn split_paragraph(
         &self,
         ctx: &EditCtx,
+        at: Position,
+        next_style: Option<&ResolvedStyleProjection>,
+    ) -> OpResult<SplitReceipt> {
+        let mut txn = self.transact_for(ctx);
+        self.split_paragraph_in_transaction(ctx, &mut txn, at, next_style, None)
+    }
+
+    pub(crate) fn split_paragraph_in_transaction(
+        &self,
+        ctx: &EditCtx,
+        txn: &mut TransactionMut<'_>,
         mut at: Position,
         next_style: Option<&ResolvedStyleProjection>,
+        revision_id: Option<String>,
     ) -> OpResult<SplitReceipt> {
         if let Some(projection) = next_style
             && !projection.known
         {
             return Err(OpError::UnknownStyle(projection.style_id.clone()));
         }
-        let mut txn = self.transact_for(ctx);
-        let story = story_ref(&txn, &at.story)?;
-        check_position(&story, &txn, at.index)?;
-        identity::promote_at(self, &mut txn, &at.story, &story, at.index);
-        let mut ids = IdAllocator::new(self, &txn);
+        let story = story_ref(txn, &at.story)?;
+        check_position(&story, txn, at.index)?;
+        identity::promote_at(self, txn, &at.story, &story, at.index);
+        let mut ids = IdAllocator::new(self, txn);
         let second_para_id = ids.session_key(self);
-        let chunks = position_chunks(&story, &txn, &mut at.index);
+        let chunks = position_chunks(&story, txn, &mut at.index);
         let revision_id = ctx.is_suggesting().then(|| {
-            adjacent_revision_id(&chunks, at.index, crate::INS, &ctx.author)
-                .or_else(|| {
-                    adjacent_paragraph_change_revision_id(&chunks, at.index, &txn, &ctx.author)
-                })
-                .unwrap_or_else(|| self.next_id())
+            revision_id.unwrap_or_else(|| {
+                adjacent_revision_id(&chunks, at.index, crate::INS, &ctx.author)
+                    .or_else(|| {
+                        adjacent_paragraph_change_revision_id(&chunks, at.index, txn, &ctx.author)
+                    })
+                    .unwrap_or_else(|| self.next_id())
+            })
         });
         let (orig_index, orig_map) =
-            next_pilcrow(&story, &txn, at.index).ok_or(OpError::ExpectedPilcrow {
+            next_pilcrow(&story, txn, at.index).ok_or(OpError::ExpectedPilcrow {
                 story: at.story.clone(),
                 index: at.index,
             })?;
-        let (first_para_id, mut props) = capture_pilcrow(&orig_map, &txn);
+        let (first_para_id, mut props) = capture_pilcrow(&orig_map, txn);
         // A mark kept before a pending block carries that block's revision; the new mark does not.
-        let block_revisions = snapshot_range(&story, &txn, orig_index + 1, orig_index + 2)
+        let block_revisions = snapshot_range(&story, txn, orig_index + 1, orig_index + 2)
             .first()
-            .and_then(|chunk| chunk.block_revisions(&txn))
+            .and_then(|chunk| chunk.block_revisions(txn))
             .unwrap_or_default();
         props.retain(|(key, value)| match key.as_str() {
             PPR_INS => block_revisions[0].as_ref() != Some(value),
@@ -413,46 +426,42 @@ impl EditingDoc {
             .as_ref()
             .map(|id| revision_value(id, &ctx.revision_author()));
         let new_pilcrow = story.insert_embed_with_attributes(
-            &mut txn,
+            txn,
             at.index,
             MapPrelim::default(),
             insertion_attrs(ins, None),
         );
-        new_pilcrow.insert(&mut txn, KIND_KEY, crate::PILCROW_KIND);
-        new_pilcrow.insert(&mut txn, PARA_ID, first_para_id.as_str());
+        new_pilcrow.insert(txn, KIND_KEY, crate::PILCROW_KIND);
+        new_pilcrow.insert(txn, PARA_ID, first_para_id.as_str());
         for (key, value) in &props {
-            new_pilcrow.insert(&mut txn, key.clone(), value.clone());
+            new_pilcrow.insert(txn, key.clone(), value.clone());
         }
         if let Some(id) = revision_id.as_ref() {
-            new_pilcrow.insert(
-                &mut txn,
-                PPR_INS,
-                revision_value(id, &ctx.revision_author()),
-            );
+            new_pilcrow.insert(txn, PPR_INS, revision_value(id, &ctx.revision_author()));
         }
 
         // The original pilcrow now terminates the second half: re-mint its identity, then apply
         // post-split inheritance.
-        orig_map.insert(&mut txn, PARA_ID, second_para_id.as_str());
+        orig_map.insert(txn, PARA_ID, second_para_id.as_str());
         if second_half_empty {
             if let Some(next) = next_style {
                 // A `w:next` switch starts from nothing: drop the source
                 // properties before writing the projection.
                 for (key, _) in &props {
-                    orig_map.remove(&mut txn, key);
+                    orig_map.remove(txn, key);
                 }
-                orig_map.insert(&mut txn, "pStyle", next.style_id.as_str());
-                apply_paragraph_attr_projection(&mut txn, &orig_map, &next.paragraph_attrs)?;
-                orig_map.remove(&mut txn, BORDERS);
+                orig_map.insert(txn, "pStyle", next.style_id.as_str());
+                apply_paragraph_attr_projection(txn, &orig_map, &next.paragraph_attrs)?;
+                orig_map.remove(txn, BORDERS);
             } else {
                 // Blank-attr inheritance: keep only the inherited subset; dtf reduced to the
                 // font/size/color carry. Borders fall out of the sweep.
                 for (key, value) in &props {
                     if !INHERITED_PARA_ATTRS.contains(&key.as_str()) {
-                        orig_map.remove(&mut txn, key);
+                        orig_map.remove(txn, key);
                     } else if key == DEFAULT_TEXT_FORMATTING {
                         set_or_remove(
-                            &mut txn,
+                            txn,
                             &orig_map,
                             DEFAULT_TEXT_FORMATTING,
                             style_carry_dtf(value),
@@ -462,16 +471,11 @@ impl EditingDoc {
             }
         } else {
             // Mid-paragraph split keeps the second half's pPr; Word never propagates w:pBdr.
-            orig_map.remove(&mut txn, BORDERS);
+            orig_map.remove(txn, BORDERS);
         }
-        orig_map.remove(&mut txn, SOURCE_PARA_ID);
-        orig_map.remove(&mut txn, PARA_ORIGIN);
-        ids.bind(
-            &mut txn,
-            &orig_map,
-            &second_para_id,
-            ParagraphIdOrigin::Authored,
-        );
+        orig_map.remove(txn, SOURCE_PARA_ID);
+        orig_map.remove(txn, PARA_ORIGIN);
+        ids.bind(txn, &orig_map, &second_para_id, ParagraphIdOrigin::Authored);
         Ok(SplitReceipt {
             first_para_id,
             second_para_id,

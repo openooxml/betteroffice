@@ -675,6 +675,26 @@ fn a_value_edit_after_a_rename_reports_the_status_a_full_rename_leads_to() {
     assert!(limited.contains(&(SheetId(0), r("K1"))));
 }
 
+/// A batch that moves Sheet3 in front of Sheet2 and renames Sheet1 reports
+/// Sheet3's cycle at its new position, across undo and redo.
+#[test]
+fn moving_a_sheet_in_a_rename_batch_reports_its_cycle_at_the_new_position() {
+    let third = r#"<c r="C1"><f>D1+1</f><v>0</v></c><c r="D1"><f>C1+1</f><v>0</v></c>"#;
+    let mut workbook = Workbook::open(&package(["", "", third], "")).unwrap();
+    workbook.recalculate_all(options());
+    let cycle = |sheet| vec![(SheetId(sheet), r("C1")), (SheetId(sheet), r("D1"))];
+    assert_eq!(cycle_cells(&workbook), cycle(2));
+    let ops = vec![Op::MoveSheet { from: 2, to: 1 }, rename_sheet(0, "First")];
+    let result = workbook.apply_ops(ops, options()).unwrap();
+    assert_eq!(sorted(&result.cycle_cells), cycle(1));
+    assert_eq!(cycle_cells(&workbook), cycle(1));
+    workbook.undo(options()).unwrap();
+    assert_eq!(cycle_cells(&workbook), cycle(2));
+    workbook.redo(options()).unwrap();
+    assert_eq!(cycle_cells(&workbook), cycle(1));
+    assert_fully_calculated(&mut workbook);
+}
+
 /// Sheet1 renamed to New; C1 reads A1 = 1 through the sheet name, D1 reads C1.
 fn renamed_workbook() -> Workbook {
     let first = concat!(

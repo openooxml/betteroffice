@@ -4,6 +4,7 @@ use serde::Serialize;
 use yrs::types::text::YChange;
 use yrs::{Any, Map, MapRef, Out, ReadTxn, Text, Transact};
 
+use crate::bridge::inline_sdt_size;
 use crate::{
     EditingDoc, KIND_KEY, PARA_ID, STORIES, is_identity_key, is_pilcrow, map_string, story_ref,
 };
@@ -37,8 +38,12 @@ pub struct GeometryStoryOutline {
 pub struct GeometryParagraphOutline {
     pub para_id: String,
     pub display_start: u64,
+    /// Display units of the content, inline controls counting their content and boundaries.
     pub length: u64,
     pub leading: u64,
+    /// Inline controls as `[story offset within the content, display units]`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub controls: Vec<[u64; 2]>,
 }
 
 #[derive(Debug, PartialEq, Serialize)]
@@ -123,6 +128,8 @@ fn build_story<T: ReadTxn>(
     );
     let mut cursor = 0;
     let mut inline_length = 0;
+    let mut expanded = 0;
+    let mut controls = Vec::new();
     let mut leading = 0;
     let mut paragraph_start = 0;
     let mut table_index = 0;
@@ -133,17 +140,20 @@ fn build_story<T: ReadTxn>(
             Out::Any(Any::String(text)) => inline_length += text.encode_utf16().count() as u64,
             Out::YMap(map) if is_pilcrow(&map, txn) => {
                 let para_id = map_string(&map, txn, PARA_ID).unwrap_or_default();
+                let controls = std::mem::take(&mut controls);
                 if seen.insert(para_id.clone()) {
                     paragraphs.push(GeometryParagraphOutline {
                         para_id,
                         display_start: paragraph_start,
                         length: inline_length,
                         leading,
+                        controls,
                     });
                 }
                 cursor = paragraph_start + inline_length + 2;
                 paragraph_start = cursor;
                 inline_length = 0;
+                expanded = 0;
                 leading = 0;
             }
             Out::YMap(map) => match map_string(&map, txn, KIND_KEY).as_deref().unwrap_or("") {
@@ -176,6 +186,13 @@ fn build_story<T: ReadTxn>(
                     cursor += 1;
                     paragraph_start = cursor;
                     leading += 1;
+                }
+                "sdt" => {
+                    let size =
+                        u64::from(inline_sdt_size(plain_value(&map, txn, "content").as_ref()));
+                    controls.push([inline_length - expanded, size]);
+                    inline_length += size;
+                    expanded += size - 1;
                 }
                 _ => inline_length += 1,
             },

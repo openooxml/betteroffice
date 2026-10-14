@@ -705,13 +705,7 @@ fn region_table_measurement_frames<'a>(
                 let break_type = match section_break {
                     Some(section_break) => section_break.break_type,
                     None => input.options.body_break_type,
-                }
-                .or_else(|| {
-                    section_index
-                        .checked_sub(1)
-                        .and_then(|index| section_breaks.get(index))
-                        .and_then(|section_break| section_break.break_type)
-                });
+                };
                 let continuous = break_type == Some(SectionBreakType::Continuous)
                     || section.and_then(|section| section.section_start)
                         == Some(SectionBreakType::Continuous);
@@ -10407,6 +10401,45 @@ impl EngineSession {
         .and_then(|rects| serde_json::to_string(&rects).map_err(|error| error.to_string()))
     }
 
+    /// [`Self::display_range_rects_region_json`] for many `[from, to)` ranges of one region at
+    /// once, indexing each built body page's primitives a single time.
+    pub fn display_range_rects_batch(
+        &self,
+        region: &str,
+        part_id: &str,
+        ranges: &[(i64, i64)],
+    ) -> Result<Vec<Vec<docx_layout::hit::RangeRect>>, String> {
+        let scope = docx_layout::hit::parse_region_scope(region, part_id)?;
+        self.with_display_list(|list| {
+            if scope != docx_layout::hit::RegionScope::Body {
+                return ranges
+                    .iter()
+                    .map(|&(from, to)| {
+                        docx_layout::hit::range_rects_in_region(list, scope, from, to)
+                    })
+                    .collect();
+            }
+            let pages: Vec<_> = list
+                .pages
+                .iter()
+                .enumerate()
+                .filter(|(_, page)| !page.primitives.is_empty())
+                .map(|(index, page)| docx_layout::hit::RangeRectIndex::new(&page.primitives, index))
+                .collect();
+            ranges
+                .iter()
+                .map(|&(from, to)| {
+                    let (low, high) = (from.min(to), from.max(to));
+                    pages
+                        .iter()
+                        .flat_map(|page| page.rects(low, high))
+                        .collect()
+                })
+                .collect()
+        })
+        .ok_or_else(|| "resident display list is not built".to_owned())
+    }
+
     /// Body, header/footer and note range geometry directly against the
     /// resident list.
     pub fn display_range_rects_region_json(
@@ -11062,6 +11095,32 @@ mod tests {
             measured_table_wrap_margins("text", "left", json!([first, second, third])),
             (0.0, 0.0)
         );
+    }
+
+    #[test]
+    fn an_untyped_section_after_a_continuous_width_change_measures_at_its_own_width() {
+        let mut second = table_wrap_section(500.0, serde_json::Value::Null);
+        second["sectionStart"] = json!("continuous");
+        let regions: DocumentRegions = serde_json::from_value(json!({"sections": [
+            table_wrap_section(600.0, serde_json::Value::Null),
+            second,
+            table_wrap_section(600.0, serde_json::Value::Null),
+        ]}))
+        .unwrap();
+        let mut blocks: Vec<LayoutBlock> = serde_json::from_value(json!([
+            {"kind": "sectionBreak", "id": 0},
+            {"kind": "sectionBreak", "id": 1, "type": "continuous"},
+            {"kind": "paragraph", "id": "text", "runs": []}
+        ]))
+        .unwrap();
+        let mut input = LayoutInput {
+            measured: Vec::new(),
+            options: Default::default(),
+        };
+        apply_section_geometry_to_blocks(&mut blocks, &mut input.options, &regions);
+        let (widths, frames) = region_measurement_frames(blocks.iter(), &input, &regions);
+        assert_eq!(widths.last(), Some(&600.0));
+        assert_eq!(frames.last(), Some(&true));
     }
 
     #[test]

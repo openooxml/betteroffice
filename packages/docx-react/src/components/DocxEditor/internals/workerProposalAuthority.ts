@@ -247,7 +247,11 @@ export function registerWorkerProposalAuthority(
   const editorPeer = (): boolean => hooks.editorPeer === true && !workerOpenDocumentHeld(session);
   const peerReady = (): boolean => workerOpenReplicaReady(session);
   const listeners = new Set<() => void>();
-  const notify = () => { for (const listener of listeners) listener(); };
+  let notifiedInitialized = initialized;
+  const notify = () => {
+    notifiedInitialized = initialized;
+    for (const listener of listeners) listener();
+  };
   const assertCurrent = () => {
     if (failure) throw failure.error;
     if (!hooks.current()) throw new Error('The document changed while applying proposals');
@@ -271,15 +275,18 @@ export function registerWorkerProposalAuthority(
     return result;
   };
   const store = (reply: ResidentProposalReply): void => {
-    geometry = peerReady()
+    const nextGeometry = peerReady()
       ? sameVector(session.encodeStateVector(), reply.stateVector)
         ? { ...reply.geometry, version: session.version() }
         : null
       : reply.geometry;
+    const geometryChanged = JSON.stringify(nextGeometry) !== JSON.stringify(geometry);
+    const mirrorChanged = JSON.stringify(reply.mirror) !== JSON.stringify(mirror);
+    if (geometryChanged) geometry = nextGeometry;
     if (correspondence?.worker !== reply.mirror.version) correspondence = null;
     mirror = reply.mirror;
     if (!editorPeer() && !peerReady()) session.mirrorWorkerDocument(mirror);
-    notify();
+    if (initialized !== notifiedInitialized || geometryChanged || mirrorChanged) notify();
   };
   const route = <T>(call: () => Promise<T>, main: () => T | Promise<T>): Promise<T> => {
     if (!workerProposalAuthority(session)) {

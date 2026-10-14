@@ -18,6 +18,7 @@ import type {
 import type { TransferResult } from '../../../../shared/office-session/protocol';
 import type { MethodHandlers, MethodPolicies } from '../../../../shared/office-session/types';
 import type { ColorValue } from '../types/colors';
+import type { Comment } from '../types/content';
 import type {
   YrsAuthor,
   YrsContentControlValue,
@@ -37,10 +38,13 @@ import type { LayoutMetaV1 } from './layoutMeta';
 import type { DecodedFrameDelta } from '../layout/render/frameDelta';
 import type { ResidentEngineSession } from './residentEngineSession';
 import type { DocxCommandSelectionLayout } from './residentCommandSelection';
+import type { DocxProposalRegistry, DocxProposalRequest, DocxProposalStateRequest, DocxProposalWithdrawRequest } from './proposals';
+import type { DocxCommentPatch } from './residentReview';
 import type { DocxCellNavigationPlan } from './residentCommandCells';
 import type { DocxPartTarget, ResidentPartTarget, ResidentPartGeometry } from './residentParts';
 import type { SectionProperties, Watermark, FootnoteProperties, EndnoteProperties } from '../types/document';
 import type { DocxSectionMargins } from './residentSections';
+import type { ResidentFrameGeometry } from './residentObjectGeometry';
 
 export type DocxCommandPosition = YrsLoc & { sticky?: Uint8Array };
 
@@ -76,11 +80,20 @@ export type DocxEffectiveFormatting = Pick<
   | 'fontFamily' | 'color' | 'highlight' | 'styleId' | 'alignment'
 > & { fontSizePt: number | null };
 
+/** The comment an `addComment` command added, under the ID saves and the host use, with every comment after it. */
+export interface DocxCommentResult {
+  seq: number;
+  id: number;
+  comments: Comment[];
+}
+
 export interface DocxEditState {
   documentVersion?: string;
   batch?: { seq: number; result: DocxEditResult };
+  comment?: DocxCommentResult;
   activePart?: ResidentPartTarget | null;
   readOnly: boolean;
+  review?: { version: string; previewVersion: number };
   toolbar: YrsSelectionContext | null;
   effectiveFormatting: DocxEffectiveFormatting | null;
   storedMarks: DocxStoredMarks | null;
@@ -219,9 +232,29 @@ export interface DocxCommandPayloads {
   setSectionMargins: { section: string; margins: DocxSectionMargins; expectVersion: string };
   setTabStops: DocxSelectionIntent & { tabs: YrsParagraphAttrs['tabs']; expectVersion: string };
   removeTabStop: DocxSelectionIntent & { positionTwips: number; expectVersion: string };
+  formatSelection: DocxSelectionIntent & { delta: YrsInlineFormatDelta };
+  toggleStrike: DocxSelectionIntent;
+  toggleList: DocxSelectionIntent & { kind: 'bullet' | 'numbered' };
+  changeIndent: DocxSelectionIntent & { direction: 'increase' | 'decrease' };
+  insertImage: DocxSelectionIntent & { image: Readonly<Record<string, unknown>> };
+  insertTable: DocxSelectionIntent & { rows: number; columns: number };
+  insertPageBreak: DocxSelectionIntent;
+  insertSectionBreak: DocxSelectionIntent & { type: 'nextPage' | 'continuous' | 'oddPage' | 'evenPage' };
+  resizeObject: { handle: string; expectVersion: string } &
+    ({ widthEmu: number; heightEmu: number } | { widthTwips: number });
+  moveObject: { handle: string; hOffsetEmu: number; vOffsetEmu: number; expectVersion: string };
   replaceMatches: { targets: DocxTextRange[]; text: string; expectVersion: string; suggesting?: YrsAuthor };
   undo: Record<string, never>;
   redo: Record<string, never>;
+  addComment: { ranges: YrsStoryRange[]; author: string; date: string; body: unknown; expectVersion: string };
+  updateComment: { id: string; patch: DocxCommentPatch; expectVersion: string };
+  setCommentRanges: { id: string; ranges: YrsStoryRange[]; expectVersion: string };
+  removeComment: { id: string; expectVersion: string };
+  acceptRevision: { revisionId: string; expectVersion: string };
+  rejectRevision: { revisionId: string; expectVersion: string };
+  propose: DocxProposalRequest;
+  setProposalStates: DocxProposalStateRequest;
+  withdrawProposals: DocxProposalWithdrawRequest;
   navigateCell: DocxSelectionIntent & { direction: 'forward' | 'backward'; extend: boolean; createLastRow: boolean };
   select: { selection: DocxCommandSelection };
   navigate: DocxNavigationIntent;
@@ -250,6 +283,7 @@ export type DocxCommandIntent = {
 export interface DocxCommandFramePayload {
   fontEnvironment?: ResidentFontEnvironmentSnapshot;
   parts?: ResidentPartGeometry[];
+  geometry?: ResidentFrameGeometry;
   frame: ArrayBuffer;
   pageFrames?: ArrayBuffer[];
   caret: YrsResidentCaretSnapshot;
@@ -306,6 +340,8 @@ export interface PreparedDocxCommand {
   selection: DocxCommandSelection | null;
   range: YrsStoryRange | null;
   cellNavigation?: DocxCellNavigationPlan;
+  paragraphChanges?: Array<{ range: YrsStoryRange; attrs: YrsParagraphAttrs }>;
+  sectionBreakProperties?: SectionProperties;
 }
 
 export type DocxCommandPreflightResult =
@@ -328,6 +364,7 @@ export interface ResidentCommandHooks {
 /** @internal Worker-owned layout access for ordered selection resolution. */
 export interface ResidentCommandHooksEnvironment {
   supportsFontEnvironment?: boolean;
+  proposals?: DocxProposalRegistry;
   readSelectionLayout(): DocxCommandSelectionLayout;
   setRenderEnvironment?(environment: DocxCommandPayloads['setRenderEnvironment']): void;
 }
@@ -418,6 +455,7 @@ export interface ResidentDocxCommandState {
   selection: DocxCommandSelection | null;
   storedMarks: DocxStoredMarks | null;
   stickyPositions: Map<string, YrsStickyPosition>;
+  proposals?: DocxProposalRegistry;
 }
 
 export type ResidentDocxCommandEngine = ResidentEngineSession & Pick<YrsSession,

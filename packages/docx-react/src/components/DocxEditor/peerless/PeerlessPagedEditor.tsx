@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useInsertionEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type PointerEvent, type ReactElement } from 'react';
+import { memo, useCallback, useEffect, useInsertionEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type PointerEvent, type ReactElement, type ReactNode, type RefObject } from 'react';
 import type { DocxEchoRect } from '@betteroffice/docx/peerless';
 import type { DocxCommandPageIdentity } from '@betteroffice/docx/peerless';
 import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVerticalScrollParent';
@@ -13,61 +13,21 @@ import { PeerlessInput } from './PeerlessInput';
 import type { PeerlessCompositionState } from './composition';
 import { captureSelectionIntent } from './selection';
 import type { PeerlessFrameGeometry } from './viewStore';
+import { clientPointToPage } from './pagePoint';
 import { CanvasPageMirror } from '../CanvasPageMirror';
 import { CanvasA11yLiveRegion } from '../CanvasA11yLiveRegion';
+import { DEFAULT_BLINK_INTERVAL } from '../overlays/SelectionOverlay';
 
 type PageGeometry = PeerlessFrameGeometry['pages'][number];
-type PageIndex = { bounds: PageGeometry['bounds']; page?: PageGeometry; children?: readonly [PageIndex, PageIndex] };
 const emptyPages: readonly PageGeometry[] = [];
-const pageLayouts = new WeakMap<readonly PageGeometry[], { index: PageIndex | null; width: number; height: number }>();
-
-function indexPages(pages: readonly PageGeometry[]): PageIndex | null {
-  if (!pages.length) return null;
-  if (pages.length === 1) return { bounds: pages[0]!.bounds, page: pages[0]! };
-  const sorted = [...pages].sort((a, b) => a.bounds.y - b.bounds.y);
-  const middle = Math.floor(sorted.length / 2);
-  const left = indexPages(sorted.slice(0, middle))!;
-  const right = indexPages(sorted.slice(middle))!;
-  const x = Math.min(left.bounds.x, right.bounds.x);
-  const y = Math.min(left.bounds.y, right.bounds.y);
-  return { bounds: {
-    x, y,
-    width: Math.max(left.bounds.x + left.bounds.width, right.bounds.x + right.bounds.width) - x,
-    height: Math.max(left.bounds.y + left.bounds.height, right.bounds.y + right.bounds.height) - y,
-  }, children: [left, right] };
-}
-
-function nearestPage(index: PageIndex, x: number, y: number): PageGeometry | undefined {
-  const distance = ({ bounds }: PageIndex) => Math.hypot(
-    Math.max(bounds.x - x, 0, x - bounds.x - bounds.width),
-    Math.max(bounds.y - y, 0, y - bounds.y - bounds.height),
-  );
-  let nearest: PageGeometry | undefined;
-  let best = Infinity;
-  const visit = (node: PageIndex) => {
-    const gap = distance(node);
-    if (gap >= best) return;
-    if (node.page) {
-      if (node.bounds.width > 0 && node.bounds.height > 0) {
-        best = gap;
-        nearest = node.page;
-      }
-      return;
-    }
-    const [left, right] = node.children!;
-    if (distance(left) <= distance(right)) { visit(left); visit(right); }
-    else { visit(right); visit(left); }
-  };
-  visit(index);
-  return nearest;
-}
+const pageLayouts = new WeakMap<readonly PageGeometry[], { width: number; height: number }>();
 
 function pageLayout(pages: readonly PageGeometry[]) {
   const cached = pageLayouts.get(pages);
   if (cached) return cached;
-  const index = indexPages(pages);
-  const layout = { index, width: index ? Math.max(0, index.bounds.x + index.bounds.width) : 0,
-    height: index ? Math.max(0, index.bounds.y + index.bounds.height) : 0 };
+  const layout = pages.reduce((extent, { bounds }) => ({
+    width: Math.max(extent.width, bounds.x + bounds.width), height: Math.max(extent.height, bounds.y + bounds.height),
+  }), { width: 0, height: 0 });
   pageLayouts.set(pages, layout);
   return layout;
 }
@@ -82,6 +42,7 @@ const PeerlessPage = memo(function PeerlessPage({ geometry, canvasForPage, visib
     if (!visible) return;
     const canvas = canvasForPage(geometry.page);
     if (!canvas || !surface.current) return;
+    canvas.dataset.pageIndex = String(geometry.page.pageIndex);
     canvas.style.width = '100%';
     canvas.style.height = '100%';
     canvas.style.display = 'block';
@@ -92,7 +53,7 @@ const PeerlessPage = memo(function PeerlessPage({ geometry, canvasForPage, visib
     ref={surface}
     data-page-id={geometry.page.pageId}
     data-page-index={geometry.page.pageIndex}
-    className="paged-editor__page"
+    className="paged-editor__page canvas-page"
     style={{ position: 'absolute', left: geometry.bounds.x, top: geometry.bounds.y, width: geometry.bounds.width, height: geometry.bounds.height, background: 'white', touchAction: 'none' }}
   >{geometry.displayPage && <CanvasPageMirror page={geometry.displayPage} active={visible} visible={visible} />}</div>;
 }, (previous, next) => previous.canvasForPage === next.canvasForPage &&
@@ -113,7 +74,32 @@ const PeerlessPages = memo(function PeerlessPages({ pages, visiblePages, canvasF
       geometry={page} visible={visible.has(page.page.pageId)} canvasForPage={canvasForPage} />)}</>;
 });
 
-function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableText, displayWindow, onDisplayWindowChange, onClipboard, highlights, onNavigateCell }: {
+function PeerlessCaret({ caret, input }: { caret: DocxEchoRect; input: RefObject<HTMLTextAreaElement | null> }): ReactElement {
+  const [focused, setFocused] = useState(false);
+  const [lit, setLit] = useState(true);
+  useLayoutEffect(() => {
+    const element = input.current;
+    if (!element) return;
+    const focus = () => setFocused(true);
+    const blur = () => setFocused(false);
+    setFocused(document.activeElement === element);
+    element.addEventListener('focus', focus);
+    element.addEventListener('blur', blur);
+    return () => {
+      element.removeEventListener('focus', focus);
+      element.removeEventListener('blur', blur);
+    };
+  }, [input]);
+  useLayoutEffect(() => {
+    setLit(true);
+    if (!focused) return;
+    const blink = setInterval(() => setLit((shown) => !shown), DEFAULT_BLINK_INTERVAL);
+    return () => clearInterval(blink);
+  }, [focused, caret.x, caret.y]);
+  return <div aria-hidden style={{ position: 'absolute', left: caret.x, top: caret.y, width: Math.max(1, caret.width), height: caret.height, background: 'currentColor', opacity: focused && lit ? 1 : 0, pointerEvents: 'none' }} />;
+}
+
+function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableText, displayWindow, onDisplayWindowChange, onClipboard, highlights, onNavigateCell, onPartPoint, pageOverlays }: {
   binding: PeerlessEditSessionBinding;
   canvasForPage(page: DocxCommandPageIdentity): HTMLCanvasElement | null;
   zoom: number;
@@ -124,6 +110,8 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
   onClipboard?(cut: boolean): Promise<void>;
   highlights?: readonly (DocxEchoRect & { current: boolean })[];
   onNavigateCell?(direction: 'forward' | 'backward'): void;
+  onPartPoint?(point: { page: PageGeometry; x: number; y: number; clickCount: number; intent: import('@betteroffice/docx/yrs').DocxSelectionPointIntent }): boolean;
+  pageOverlays?: ReactNode;
 }): ReactElement {
   const snapshot = useSyncExternalStore(binding.viewStore.subscribe, binding.viewStore.getSnapshot, binding.viewStore.getServerSnapshot);
   const notify = useRef<(() => void) | null>(null);
@@ -188,7 +176,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
   useLayoutEffect(() => {
     if (geometry && displayWindow[1] > displayWindow[0]) binding.setDisplayWindow?.(displayWindow[0], displayWindow[1]);
   }, [binding, displayWindow[0], displayWindow[1], geometry?.identity.incarnation, geometry?.identity.epoch]);
-  const caretPage = geometry?.caret && layout.index ? nearestPage(layout.index, geometry.caret.x, geometry.caret.y)?.page.pageId : undefined;
+  const caretPage = geometry?.caret ? clientPointToPage(geometry.caret.x, geometry.caret.y, { left: 0, top: 0 }, 1, pages)?.page.page.pageId : undefined;
   const visiblePages = useMemo(() => pages.filter(({ page }) => page.pageId === caretPage ||
     (page.pageIndex >= displayWindow[0] && page.pageIndex < displayWindow[1])), [pages, caretPage, displayWindow]);
   const dragPointer = useRef<number | null>(null);
@@ -196,15 +184,12 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
     event.preventDefault();
     const current = binding.viewStore.getSnapshot().geometry;
     if (!current) return;
-    const installed = pageLayout(current.pages);
-    if (!installed.index) return;
     const bounds = event.currentTarget.getBoundingClientRect();
     if (bounds.width === 0 || bounds.height === 0) return;
-    const x = (event.clientX - bounds.left) / zoom;
-    const y = (event.clientY - bounds.top) / zoom;
-    const page = nearestPage(installed.index, x, y);
-    if (!page || (!drag && (x < page.bounds.x || x > page.bounds.x + page.bounds.width ||
-      y < page.bounds.y || y > page.bounds.y + page.bounds.height))) return;
+    const point = clientPointToPage(event.clientX, event.clientY, bounds, zoom, current.pages);
+    if (!point) return;
+    const { page, x, y } = point;
+    if (!drag && (x < 0 || x > page.bounds.width || y < 0 || y > page.bounds.height)) return;
     let clickCount = 1;
     if (!drag) {
       const previous = click.current;
@@ -215,12 +200,13 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
     const intent = captureSelectionIntent({
       kind: drag ? 'drag' : 'point',
       point: {
-        page: page.page, x: x - page.bounds.x, y: y - page.bounds.y,
+        page: page.page, x, y,
         frameEpoch: current.frameEpoch, layoutRevision: current.layoutRevision,
         clickCount,
         modifiers: { shift: event.shiftKey, alt: event.altKey, ctrl: event.ctrlKey, meta: event.metaKey },
       },
     }, current);
+    if (!drag && intent.kind === 'selectPoint' && onPartPoint?.({ page, x, y, clickCount, intent: intent.payload })) return true;
     binding.commands.submit(intent, { source: 'selection', fence: true });
     input.current?.focus({ preventScroll: true });
     return true;
@@ -238,9 +224,9 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
       onCompositionChange={onCompositionChange} onRecoverableText={onRecoverableText} onClipboard={onClipboard}
       caretHostRef={column} zoom={zoom} onNavigateCell={onNavigateCell} />
     <div ref={column} style={{ position: 'relative', width: width * zoom, height: height * zoom, marginLeft: 'auto', marginRight: 'auto' }}>
-      <div style={{ position: 'relative', width, height, transform: `scale(${zoom})`, transformOrigin: 'top left', touchAction: 'none' }}
+      <div data-peerless-pages-host style={{ position: 'relative', width, height, transform: `scale(${zoom})`, transformOrigin: 'top left', touchAction: 'none' }}
         onPointerDown={(event) => {
-          if (event.button !== 0 || dragPointer.current !== null) return;
+          if (event.button !== 0 || dragPointer.current !== null || (event.target as HTMLElement).closest('button, input, select, [data-docx-escape-layer]')) return;
           if (!onPoint(event, false)) return;
           event.currentTarget.setPointerCapture(event.pointerId);
           dragPointer.current = event.pointerId;
@@ -251,10 +237,11 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
         onPointerUp={releasePointer}
         onPointerCancel={releasePointer}
         onLostPointerCapture={(event) => { if (dragPointer.current === event.pointerId) dragPointer.current = null; }}>
+        {pageOverlays}
         <PeerlessPages pages={pages} visiblePages={visiblePages} canvasForPage={canvasForPage} />
         {highlights?.map((rect, index) => <div key={`find-${index}`} aria-hidden style={{ position: 'absolute', left: rect.x, top: rect.y, width: rect.width, height: rect.height, background: rect.current ? 'rgba(255, 150, 0, 0.4)' : 'rgba(255, 220, 0, 0.3)', pointerEvents: 'none' }} />)}
         {canDisplaySelection && geometry?.selectionRects.map((rect, index) => <div key={index} aria-hidden style={{ position: 'absolute', left: rect.x, top: rect.y, width: rect.width, height: rect.height, background: 'rgba(59, 130, 246, 0.25)', pointerEvents: 'none' }} />)}
-        {caret && <div aria-hidden style={{ position: 'absolute', left: caret.x, top: caret.y, width: Math.max(1, caret.width), height: caret.height, background: 'currentColor', pointerEvents: 'none' }} />}
+        {caret && <PeerlessCaret caret={caret} input={input} />}
       </div>
     </div>
   </>;
@@ -272,10 +259,12 @@ export interface PeerlessPagedEditorProps {
   onClipboard?(cut: boolean): Promise<void>;
   highlights?: readonly (DocxEchoRect & { current: boolean })[];
   onNavigateCell?(direction: 'forward' | 'backward'): void;
+  onPartPoint?(point: { page: PageGeometry; x: number; y: number; clickCount: number; intent: import('@betteroffice/docx/yrs').DocxSelectionPointIntent }): boolean;
+  pageOverlays?: ReactNode;
 }
 
 /** @internal */
-export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoFocus, onReady, displayWindow, onDisplayWindowChange, onClipboard, highlights, onNavigateCell }: PeerlessPagedEditorProps): ReactElement | null {
+export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoFocus, onReady, displayWindow, onDisplayWindowChange, onClipboard, highlights, onNavigateCell, onPartPoint, pageOverlays }: PeerlessPagedEditorProps): ReactElement | null {
   const [devicePixelRatio, setDevicePixelRatio] = useState(() => typeof window === 'undefined' ? 1 : window.devicePixelRatio || 1);
   useEffect(() => {
     if (typeof window.matchMedia !== 'function') return;
@@ -318,8 +307,7 @@ export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoF
   }, []);
   const evictCanvases = useCallback((geometry: PeerlessFrameGeometry) => {
     const [start, end] = canvasWindow.current;
-    const layout = pageLayout(geometry.pages);
-    const caretPage = geometry.caret && layout.index ? nearestPage(layout.index, geometry.caret.x, geometry.caret.y)?.page.pageId : undefined;
+    const caretPage = geometry.caret ? clientPointToPage(geometry.caret.x, geometry.caret.y, { left: 0, top: 0 }, 1, geometry.pages)?.page.page.pageId : undefined;
     const retained = new Set(geometry.pages.filter(({ page }) => page.pageId === caretPage ||
       (page.pageIndex >= start && page.pageIndex < end)).map(({ page }) => page.pageId));
     for (const [pageId, canvas] of canvases.current) {
@@ -375,7 +363,7 @@ export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoF
   }, [sessionOptions.source, session.status === 'failed']);
   return <div className={className} data-peerless-docx="true" aria-busy={session.status === 'opening'}>
     {session.status === 'ready' && <PeerlessReady binding={session.binding} canvasForPage={canvasForPage} zoom={pageZoom} autoFocus={autoFocus}
-      onRecoverableText={retainText} displayWindow={pageWindow} onDisplayWindowChange={changeWindow} onClipboard={onClipboard} highlights={highlights} onNavigateCell={onNavigateCell} />}
+      onRecoverableText={retainText} displayWindow={pageWindow} onDisplayWindowChange={changeWindow} onClipboard={onClipboard} highlights={highlights} onNavigateCell={onNavigateCell} onPartPoint={onPartPoint} pageOverlays={pageOverlays} />}
     {session.status === 'failed' && <div role="alert">Unable to open document.</div>}
     {recoverableText.map((text, index) => <div key={index} role="status">
       This text could not be applied. Copy it to keep your draft, then dismiss it.

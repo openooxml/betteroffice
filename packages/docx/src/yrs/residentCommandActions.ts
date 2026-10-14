@@ -1,4 +1,7 @@
 import { applyCommandBatch, commandBatchRequest } from './residentCommandBatches';
+import { createProposalRegistry } from './proposals';
+import { applyReviewCommand, preflightReviewCommand, reviewCommandKeys, type ReviewCommand } from './residentReviewCommands';
+import { planResidentListChanges } from './residentCommandLists';
 import type { YrsInlineFormatDelta, YrsLoc, YrsParagraphAttrs, YrsRunMark, YrsSelectionContext, YrsStoryRange } from './index';
 import {
   commandSelectionRange, mintCommandSelection, readCommandSelection, registerCommandAnchorState, resolveCommandSelection,
@@ -9,8 +12,10 @@ import { applyCellNavigation, resolveCellNavigation } from './residentCommandCel
 import { validPartTarget, resolvePart, ensurePartDocument, removePartDocument } from './residentParts';
 import { validControlValue, resolveControlHandle } from './residentControls';
 import { propertyCommand, validPropertyCommand, propertyCommandTarget, applyPropertyCommand } from './residentPropertyCommands';
-import { validSectionMargins, nativeTabStops } from './residentSections';
+import { validSectionMargins, nativeTabStops, residentSectionPropertiesAt } from './residentSections';
 import { validFontEnvironment } from './residentFontEnvironment';
+import { resolveResidentObject } from './residentObjectGeometry';
+import { createYrsPositionProjection, type YrsPositionProjection } from './yrsPositionProjection';
 import type {
   DocxCommandApplyContext,
   DocxCommandApplyResult,
@@ -53,6 +58,21 @@ function json(value: unknown, seen = new Set<object>()): boolean {
 function fields(value: unknown, validators: Record<string, (value: unknown) => boolean>): boolean {
   return object(value) && Object.entries(value).every(([key, entry]) =>
     Object.hasOwn(validators, key) && validators[key]!(entry));
+}
+
+function validParagraphAnchor(value: unknown): boolean {
+  if (!object(value)) return false;
+  if (value.kind === 'session') return fields(value, { kind: string, sessionId: string, story: string, paraId: string }) &&
+    ['sessionId', 'story', 'paraId'].every(key => string(value[key]));
+  if (value.kind === 'source') return fields(value, {
+    kind: string, packageSha256: string, partUri: string,
+    paragraphOrdinal: entry => Number.isSafeInteger(entry) && Number(entry) >= 0 && Number(entry) <= 0xffffffff,
+  }) && string(value.packageSha256) && string(value.partUri) && Number.isSafeInteger(value.paragraphOrdinal);
+  if (value.kind !== 'persisted' || !fields(value, { kind: string, story: object, paraId: string }) || !string(value.paraId)) return false;
+  const story = value.story;
+  return fields(story, { kind: string, partUri: string, itemId: string }) && object(story) && string(story.partUri) &&
+    (['body', 'header', 'footer'].includes(String(story.kind)) ||
+      ['footnote', 'endnote', 'comment'].includes(String(story.kind)) && string(story.itemId));
 }
 
 const nullable = (validate: (value: unknown) => boolean) => (value: unknown) => value === null || validate(value);
@@ -127,7 +147,12 @@ function validCommandIntent(command: DocxCommandEnvelope, error: { reason: strin
     setHyperlink: [], setObjectProperties: [], setSectionProperties: [], setNoteProperties: [], setWatermark: [],
     setSectionMargins: ['section', 'margins', 'expectVersion'],
     setTabStops: ['tabs', 'expectVersion'], removeTabStop: ['positionTwips', 'expectVersion'],
+    formatSelection: ['delta'], toggleStrike: [], toggleList: ['kind'], changeIndent: ['direction'],
+    insertImage: ['image'], insertTable: ['rows', 'columns'], insertPageBreak: [], insertSectionBreak: ['type'],
+    resizeObject: ['handle', 'widthEmu', 'heightEmu', 'widthTwips', 'expectVersion'],
+    moveObject: ['handle', 'hOffsetEmu', 'vOffsetEmu', 'expectVersion'],
     undo: [], redo: [], replaceMatches: ['targets', 'text', 'expectVersion', 'suggesting'],
+    ...reviewCommandKeys,
     select: ['selection'], insertText: ['text'], replaceSelection: ['text'],
     navigate: ['unit', 'direction', 'extend', 'goalX'],
     navigateCell: ['direction', 'extend', 'createLastRow'],
@@ -138,7 +163,7 @@ function validCommandIntent(command: DocxCommandEnvelope, error: { reason: strin
     applyParagraphStyle: ['styleId'], setReadOnly: ['readOnly'], setRenderEnvironment: ['themeColors', 'showHiddenText'],
   } satisfies Record<DocxCommandKind, string[]>;
   const keys = Object.hasOwn(allowed, command.kind) ? allowed[command.kind] : undefined;
-  const semanticSelection = ['navigate', 'selectPoint', 'extendSelection', 'undo', 'redo', 'replaceMatches', 'applyEdits', 'setRenderEnvironment', 'setFontEnvironment'].includes(command.kind);
+  const semanticSelection = ['navigate', 'selectPoint', 'extendSelection', 'undo', 'redo', 'replaceMatches', 'applyEdits', 'setRenderEnvironment', 'setFontEnvironment', 'resizeObject', 'moveObject', ...Object.keys(reviewCommandKeys)].includes(command.kind);
   if (!keys || Object.keys(payload).some((key) => !keys.includes(key) &&
     (command.kind === 'setReadOnly' || semanticSelection || !['selection', 'suggesting'].includes(key)))) return refuse('invalid-payload');
   if (payload.suggesting !== undefined && (!fields(payload.suggesting, { name: string, date: string }) ||
@@ -159,8 +184,36 @@ function validCommandIntent(command: DocxCommandEnvelope, error: { reason: strin
     case 'removeTabStop':
       if (!string(payload.expectVersion) || !number(payload.positionTwips) || Number(payload.positionTwips) < 0) return refuse('invalid-tab-stops');
       break;
+    case 'resizeObject': case 'moveObject':
+      if (!string(payload.handle) || !string(payload.expectVersion) || (command.kind === 'resizeObject'
+        ? payload.widthTwips !== undefined
+          ? !positive(payload.widthTwips) || payload.widthEmu !== undefined || payload.heightEmu !== undefined
+          : !positive(payload.widthEmu) || !positive(payload.heightEmu)
+        : !number(payload.hOffsetEmu) || !number(payload.vOffsetEmu))) return refuse('invalid-payload');
+      break;
     case 'replaceMatches':
       if (!string(payload.text) || !string(payload.expectVersion) || !Array.isArray(payload.targets) || !json(payload.targets) || !payload.targets.every(target => object(target) && string(target.story) && oneOf('accepted', 'original')(target.view) && ['start', 'end'].every(key => object(target[key]) && string(target[key].paraId) && Number.isSafeInteger(target[key].offset) && Number(target[key].offset) >= 0))) return refuse('invalid-payload');
+      break;
+    case 'addComment':
+      if (!string(payload.author) || !string(payload.date) || !json(payload.body)) return refuse('invalid-payload');
+      break;
+    case 'updateComment':
+      if (!string(payload.id) || !fields(payload.patch, { body: json, author: string, date: string, done: boolean, parentId: nullable(string) })) return refuse('invalid-payload');
+      break;
+    case 'propose':
+      if (!Array.isArray(payload.proposals) || !json(payload.proposals) || payload.proposals.some(entry => !object(entry) || !string(entry.id) || !validParagraphAnchor(entry.paragraph) || !object(entry.suggest) || !string(entry.suggest.author) || !string(entry.suggest.date) || !['insertText', 'replaceText'].includes(String(entry.op)) || (entry.op === 'insertText' ? !string(entry.text) : !string(entry.search) || !string(entry.replaceWith)))) return refuse('invalid-payload');
+      break;
+    case 'setProposalStates':
+      if (!Array.isArray(payload.changes) || !payload.changes.every(entry => fields(entry, { id: string, state: oneOf('proposed', 'accepted', 'rejected') }) && object(entry) && string(entry.id) && string(entry.state)) || !Number.isSafeInteger(payload.expectPreviewVersion)) return refuse('invalid-payload');
+      break;
+    case 'withdrawProposals':
+      if (!Array.isArray(payload.ids) || !payload.ids.every(string)) return refuse('invalid-payload');
+      break;
+    case 'removeComment': case 'setCommentRanges':
+      if (!string(payload.id)) return refuse('invalid-payload');
+      break;
+    case 'acceptRevision': case 'rejectRevision':
+      if (!string(payload.revisionId)) return refuse('invalid-payload');
       break;
     case 'navigateCell':
       if (!oneOf('backward', 'forward')(payload.direction) || !boolean(payload.extend) ||
@@ -195,7 +248,7 @@ function validCommandIntent(command: DocxCommandEnvelope, error: { reason: strin
     case 'toggleMark':
       if (!validMark(payload.mark)) return refuse('invalid-formatting');
       break;
-    case 'formatRange':
+    case 'formatSelection': case 'formatRange':
       if (!validDelta(payload.delta)) return refuse('invalid-formatting');
       break;
     case 'setParagraphAttrs':
@@ -203,6 +256,21 @@ function validCommandIntent(command: DocxCommandEnvelope, error: { reason: strin
       break;
     case 'applyParagraphStyle':
       if (!string(payload.styleId) || !payload.styleId) return refuse('invalid-style');
+      break;
+    case 'toggleList':
+      if (!oneOf('bullet', 'numbered')(payload.kind)) return refuse('invalid-payload');
+      break;
+    case 'changeIndent':
+      if (!oneOf('increase', 'decrease')(payload.direction)) return refuse('invalid-payload');
+      break;
+    case 'insertTable':
+      if (![payload.rows, payload.columns].every(entry => typeof entry === 'number' && Number.isSafeInteger(entry) && entry > 0 && entry <= 1000) || Number(payload.rows) * Number(payload.columns) > 10_000) return refuse('invalid-table-size');
+      break;
+    case 'insertImage':
+      if (!object(payload.image) || !json(payload.image) || Object.hasOwn(payload.image, '_kind') || ['widthEmu', 'heightEmu'].some(key => payload.image && object(payload.image) && payload.image[key] !== undefined && !positive(payload.image[key]))) return refuse('invalid-image');
+      break;
+    case 'insertSectionBreak':
+      if (!oneOf('nextPage', 'continuous', 'oddPage', 'evenPage')(payload.type)) return refuse('invalid-payload');
       break;
     case 'setReadOnly':
       if (typeof payload.readOnly !== 'boolean') return refuse('invalid-payload');
@@ -347,9 +415,26 @@ export function preflightDocxCommand(
     if (command.payload.expectVersion !== engine.proposalEngine.version()) return refuse('stale-version');
     return { status: 'ready', prepared: { command: structuredClone(command), selection: state.selection, range: null } };
   }
+  if (command.kind === 'resizeObject' || command.kind === 'moveObject') {
+    if (state.readOnly) return refuse('read-only');
+    if (command.basis.epoch !== context.basis.epoch) return refuse('stale-epoch');
+    if (command.payload.expectVersion !== engine.proposalEngine.version()) return refuse('stale-version');
+    const target = resolveResidentObject(engine, command.payload.handle);
+    if (!target) return refuse('stale-object');
+    if (target.kind === 'cell' && command.kind === 'resizeObject' && 'widthTwips' in command.payload) {
+      if (!target.cell) return refuse('stale-object');
+    } else if (target.kind !== 'image' || (command.kind === 'resizeObject' && 'widthTwips' in command.payload)) return refuse('unsupported-object');
+    return { status: 'ready', prepared: { command: structuredClone(command), selection: state.selection, range: null } };
+  }
   if (command.kind === 'undo' || command.kind === 'redo') {
     if (state.readOnly) return refuse('read-only');
     if (command.basis.epoch !== context.basis.epoch) return refuse('stale-epoch');
+    return { status: 'ready', prepared: { command: structuredClone(command), selection: state.selection, range: null } };
+  }
+  if (Object.hasOwn(reviewCommandKeys, command.kind)) {
+    if (state.readOnly) return refuse('read-only');
+    const reason = preflightReviewCommand(engine, state, command as ReviewCommand);
+    if (reason) return refuse(reason);
     return { status: 'ready', prepared: { command: structuredClone(command), selection: state.selection, range: null } };
   }
   if (command.kind === 'setReadOnly') {
@@ -372,6 +457,27 @@ export function preflightDocxCommand(
     } };
   }
   if (state.readOnly && command.kind !== 'select') return refuse('read-only');
+  if ((command.kind === 'insertPageBreak' || command.kind === 'insertSectionBreak') && command.payload.suggesting) return refuse('unsupported-suggesting');
+  if (command.kind === 'insertPageBreak' || command.kind === 'insertSectionBreak') {
+    if (resolved.range.story !== 'body') return refuse('invalid-selection');
+    const index = engine.geometryReader.paragraphSpans('body').findIndex(span => span.paraId === resolved.range.start.paraId);
+    let leading = 0;
+    for (const segment of engine.paragraphSegments('body', [index])[0] ?? []) {
+      if (segment.kind !== 'embed' || !['table', 'blockSdt', 'pageBreak', 'columnBreak'].includes(segment.embedKind)) break;
+      leading += 1;
+    }
+    if (resolved.range.start.offset < leading) return refuse('invalid-selection');
+    if (command.kind === 'insertSectionBreak') {
+      const properties = residentSectionPropertiesAt(engine, { story: 'body', ...resolved.range.start });
+      if (!properties) return refuse('invalid-selection');
+      return { status: 'ready', prepared: { command: structuredClone(command), selection: resolved.selection, range: resolved.range,
+        sectionBreakProperties: properties } };
+    }
+  }
+  if (command.kind === 'toggleList' || command.kind === 'changeIndent') return { status: 'ready', prepared: {
+    command: structuredClone(command), selection: resolved.selection, range: resolved.range,
+    paragraphChanges: planResidentListChanges(engine, resolved.range, command.payload),
+  } };
   let range = resolved.range;
   if ((command.kind === 'insertText' || command.kind === 'replaceSelection') && state.storedMarks &&
     (typeof state.storedMarks.clear !== 'boolean' || !validDelta(state.storedMarks.delta))) return refuse('invalid-stored-marks');
@@ -388,6 +494,69 @@ export function preflightDocxCommand(
 function sameSelection(left: DocxCommandSelection | null, right: DocxCommandSelection): boolean {
   return !!left && (['anchor', 'focus'] as const).every((key) => left[key].story === right[key].story &&
     left[key].paraId === right[key].paraId && left[key].offset === right[key].offset);
+}
+
+export function repairCommandSelection(engine: ResidentDocxCommandEngine, state: ResidentDocxCommandState): boolean {
+  let cells: ReturnType<ResidentDocxCommandEngine['cellSelection']> = null;
+  try { cells = engine.cellSelection(); }
+  catch (error) { if (error instanceof WebAssembly.RuntimeError) throw error; }
+  const preferred = engine.clearCellSelection();
+  const projections = new Map<string, YrsPositionProjection | null>();
+  const projection = (story: string) => {
+    const root = story === 'body' || story.startsWith('body:') ? 'body' : story.split(':').slice(0, 2).join(':');
+    if (!projections.has(root)) projections.set(root, createYrsPositionProjection(engine.geometryReader, root));
+    return projections.get(root);
+  };
+  const safe = (at: YrsLoc): YrsLoc | null => {
+    if (!engine.geometryReader.hasStory(at.story)) return null;
+    const spans = engine.geometryReader.paragraphSpans(at.story);
+    const index = spans.findIndex(span => span.paraId === at.paraId);
+    if (index < 0 || projection(at.story)?.positionForLoc(at) == null) return null;
+    let leading = 0;
+    for (const segment of engine.paragraphSegments(at.story, [index])[0] ?? []) {
+      if (segment.kind !== 'embed' || !['table', 'blockSdt', 'pageBreak', 'columnBreak'].includes(segment.embedKind)) break;
+      leading += 1;
+    }
+    return { ...at, offset: Math.min(spans[index]!.length, Math.max(leading, at.offset)) };
+  };
+  const resolved = state.selection ? readCommandSelection(engine, state) : null;
+  const collapsed = resolved?.ok && sameSelection({ anchor: resolved.selection.anchor, focus: resolved.selection.anchor }, resolved.selection);
+  let selected = resolved?.ok && [resolved.selection.anchor, resolved.selection.focus].every(at => {
+    const valid = safe(at);
+    return valid && (!collapsed || valid.offset === at.offset);
+  }) ? resolved.selection : null;
+  if (!selected) {
+    const focus = state.selection?.focus;
+    const stories: string[] = [];
+    for (let story = focus?.story; story; story = story.includes(':') ? story.slice(0, story.lastIndexOf(':')) : undefined) stories.push(story);
+    if (!stories.includes('body')) stories.push('body');
+    for (const story of stories) {
+      if (!engine.geometryReader.hasStory(story)) continue;
+      let at = preferred?.story === story ? safe(preferred) : focus?.story === story ? safe(focus) : null;
+      for (const paragraph of at ? [] : engine.geometryReader.paragraphSpans(story)) {
+        at = safe({ story, paraId: paragraph.paraId, offset: 0 });
+        if (at) break;
+      }
+      if (at) { selected = { anchor: at, focus: at }; break; }
+    }
+  }
+  if (!selected) return false;
+  const changed = !sameSelection(state.selection, selected);
+  engine.setSelection(selected.anchor, selected.focus);
+  state.selection = mintCommandSelection(engine, state, selected);
+  const tables = projection(selected.focus.story)?.allTables() ?? [];
+  for (const table of tables) {
+    const cell = table.cells.find(cell => cell.story === selected!.focus.story);
+    if (!cell) continue;
+    const at = { story: table.story, tableIndex: table.tableIndex, row: cell.row, column: cell.column };
+    const head = cells?.head;
+    const keep = head?.story === at.story && head.tableIndex === at.tableIndex && head.row === at.row && head.column === at.column;
+    engine.setCellSelection(keep ? cells! : { anchor: at, head: at });
+    break;
+  }
+  if (changed) state.storedMarks = null;
+  if (state.activePart && !engine.geometryReader.hasStory(state.activePart.story)) state.activePart = null;
+  return true;
 }
 
 function paragraphAttrs(attrs: YrsParagraphAttrs): YrsParagraphAttrs {
@@ -496,6 +665,43 @@ export function applyDocxCommand(
     engine.addUndoBoundary();
     return result(changed ? 'applied' : 'noop');
   }
+  if (command.kind === 'resizeObject' || command.kind === 'moveObject') {
+    const at = resolveResidentObject(engine, command.payload.handle);
+    if (!at) return { ...result('noop'), status: 'refused', reason: 'stale-object' };
+    const version = engine.proposalEngine.version();
+    if (command.kind === 'resizeObject' && 'widthTwips' in command.payload) {
+      if (!at.cell) return { ...result('noop'), status: 'refused', reason: 'stale-object' };
+      engine.addUndoBoundary();
+      engine.setColumnWidth(at.cell, command.payload.widthTwips);
+      engine.addUndoBoundary();
+      return result(engine.proposalEngine.version() === version ? 'noop' : 'applied');
+    }
+    const paragraph = engine.geometryReader.paragraphSpans(at.story).findIndex(span => span.paraId === at.paraId);
+    let offset = 0;
+    const segment = engine.paragraphSegments(at.story, [paragraph])[0]!.find(part => {
+      const start = offset;
+      offset += part.kind === 'text' ? part.text.length : 1;
+      return start === at.offset;
+    });
+    if (segment?.kind !== 'embed') return { ...result('noop'), status: 'refused', reason: 'stale-object' };
+    const size = command.kind === 'resizeObject' && 'widthEmu' in command.payload ? command.payload : null;
+    const widthEmu = size ? size.widthEmu : Number(segment.payload.width ?? 100) * 9525;
+    const heightEmu = size ? size.heightEmu : Number(segment.payload.height ?? 100) * 9525;
+    const position = segment.payload.position as Record<string, unknown> | null | undefined;
+    engine.addUndoBoundary();
+    engine.setImageGeometryAt(at, { widthEmu, heightEmu, other: {
+      width: widthEmu / 9525, height: heightEmu / 9525,
+      ...(command.kind === 'moveObject' ? {
+        wrapType: 'square', displayMode: 'float', cssFloat: 'none',
+        position: { ...position, behindDoc: false,
+          horizontal: { relativeTo: 'page', posOffset: command.payload.hOffsetEmu },
+          vertical: { relativeTo: 'page', posOffset: command.payload.vOffsetEmu },
+        },
+      } : {}),
+    } });
+    engine.addUndoBoundary();
+    return result(engine.proposalEngine.version() === version ? 'noop' : 'applied');
+  }
   if (command.kind === 'replaceMatches') {
     if (!command.payload.targets.length) return result('noop');
     engine.beginUndoCapture();
@@ -526,15 +732,27 @@ export function applyDocxCommand(
       state.activePart = null;
     }
     const resolved = state.selection ? readCommandSelection(engine, state) : null;
-    const native = engine.selection();
+    const story = state.selection?.focus.story;
+    const native = !story || engine.geometryReader.hasStory(story) ? engine.selection() : null;
     const selected = resolved?.ok ? resolved.selection : native && commandSelectionRange(engine, { anchor: native.anchor, focus: native.head })
       ? { anchor: native.anchor, focus: native.head } : null;
-    const first = selected ? null : engine.geometryReader.paragraphSpans('body')[0];
-    const at = first ? { story: 'body', paraId: first.paraId, offset: 0 } : null;
+    const root = story && story !== 'body' && !story.startsWith('body:') ? story.split(':').slice(0, 2).join(':') : 'body';
+    const fallbackStory = engine.geometryReader.hasStory(root) ? root : 'body';
+    const first = selected ? null : engine.geometryReader.paragraphSpans(fallbackStory)[0];
+    const at = first ? { story: fallbackStory, paraId: first.paraId, offset: 0 } : null;
     const repaired = selected ?? (at ? { anchor: at, focus: at } : null);
     state.selection = repaired ? mintCommandSelection(engine, state, repaired) : null;
     if (state.selection) engine.setSelection(state.selection.anchor, state.selection.focus);
     return result('applied');
+  }
+  if (Object.hasOwn(reviewCommandKeys, command.kind)) {
+    const applied = applyReviewCommand(engine, state, command as ReviewCommand);
+    if (applied.status === 'refused') return { ...result('noop'), ...applied };
+    repairCommandSelection(engine, state);
+    state.storedMarks = null;
+    const projected = result(applied.status);
+    if (applied.comment) projected.editState!.comment = { seq: command.seq, ...applied.comment };
+    return projected;
   }
   if (command.kind === 'setReadOnly') {
     state.readOnly = command.payload.readOnly;
@@ -565,11 +783,11 @@ export function applyDocxCommand(
     state.storedMarks.paraId !== selection.focus.paraId || !sameSelection(priorSelection, selection) ||
     selection.anchor.paraId !== selection.focus.paraId || selection.anchor.offset !== selection.focus.offset)) state.storedMarks = null;
   publish(selection);
-  if (collapsed(range) && ['toggleMark', 'formatRange', 'clearFormatting'].includes(command.kind)) {
+  if (collapsed(range) && ['toggleMark', 'toggleStrike', 'formatRange', 'formatSelection', 'clearFormatting'].includes(command.kind)) {
     const current = state.storedMarks;
-    const toolbar = command.kind === 'toggleMark' ? engine.selectionContext(range) : undefined;
-    const delta = command.kind === 'toggleMark' ? markDelta(command.payload.mark, withStoredMarks(toolbar!, current)) :
-      command.kind === 'formatRange' ? command.payload.delta : {};
+    const toolbar = command.kind === 'toggleMark' || command.kind === 'toggleStrike' ? engine.selectionContext(range) : undefined;
+    const delta = command.kind === 'toggleStrike' ? { strike: withStoredMarks(toolbar!, current).strike !== true } : command.kind === 'toggleMark' ? markDelta(command.payload.mark, withStoredMarks(toolbar!, current)) :
+      command.kind === 'formatRange' || command.kind === 'formatSelection' ? command.payload.delta : {};
     state.storedMarks = {
       story: range.story, paraId: range.start.paraId,
       clear: command.kind === 'clearFormatting' || (current?.clear ?? false),
@@ -582,11 +800,12 @@ export function applyDocxCommand(
   }
   if ((command.kind === 'insertText' || command.kind === 'replaceSelection') && command.payload.text === '' && collapsed(range)) return result('noop');
   if ((command.kind === 'deleteBackward' || command.kind === 'deleteForward') && collapsed(range)) return result('noop');
-  if (command.kind === 'formatRange' && Object.keys(command.payload.delta).length === 0) return result('noop');
+  if ((command.kind === 'formatRange' || command.kind === 'formatSelection') && Object.keys(command.payload.delta).length === 0) return result('noop');
   if (command.kind === 'setParagraphAttrs' && Object.keys(command.payload.attrs).length === 0) return result('noop');
   const version = engine.proposalEngine.version();
   engine.beginUndoCapture();
-  if (command.kind === 'setTabStops' || command.kind === 'removeTabStop') engine.addUndoBoundary();
+  const discrete = ['setTabStops', 'removeTabStop', 'toggleList', 'changeIndent', 'insertImage', 'insertTable', 'insertPageBreak', 'insertSectionBreak'].includes(command.kind);
+  if (discrete) engine.addUndoBoundary();
   const caret = (at: YrsLoc) => publish({ anchor: at, focus: at }, true);
   switch (command.kind) {
     case 'setTabStops':
@@ -637,13 +856,50 @@ export function applyDocxCommand(
       caret({ story: at.story, paraId: receipt.secondParaId, offset: 0 });
       break;
     }
+    case 'toggleList': case 'changeIndent':
+      for (const change of prepared.paragraphChanges ?? []) engine.setParagraphAttrs(change.range, change.attrs, command.payload.suggesting);
+      break;
+    case 'insertImage': case 'insertTable': case 'insertPageBreak': case 'insertSectionBreak': {
+      let at = { story: range.story, ...range.start };
+      if (!collapsed(range)) {
+        const removed = engine.deleteRange(range, command.payload.suggesting);
+        if (!removed.range) throw new Error('Delete receipt lacks range');
+        at = { story: removed.range.story, ...removed.range.start };
+      }
+      state.storedMarks = null;
+      if (command.kind === 'insertImage') {
+        const receipt = engine.insertImage(at, command.payload.image, command.payload.suggesting);
+        if (!receipt.range) throw new Error('Image receipt lacks range');
+        caret({ story: receipt.range.story, ...receipt.range.end });
+      } else if (command.kind === 'insertTable') {
+        const receipt = engine.insertTable(at, command.payload.rows, command.payload.columns, command.payload.suggesting);
+        const story = receipt.createdStoryIds[0];
+        const paragraph = story ? engine.paragraphs(story)[0] : undefined;
+        if (!story || !paragraph) throw new Error('Table receipt lacks cell');
+        const cell = { ...receipt.table, row: 0, column: 0 };
+        engine.setCellSelection({ anchor: cell, head: cell });
+        caret({ story, paraId: paragraph.paraId, offset: 0 });
+      } else {
+        if (command.kind === 'insertPageBreak') {
+          if (at.offset > 0) at = { story: at.story, paraId: engine.splitParagraph(at).secondParaId, offset: 0 };
+          engine.insertPageBreak(at);
+          caret({ ...at, offset: at.offset + 1 });
+        } else {
+          const properties = collapsed(range) ? prepared.sectionBreakProperties : residentSectionPropertiesAt(engine, at);
+          if (!properties) throw new Error('Prepared command lacks section properties');
+          caret(engine.splitSection(at, properties, command.payload.type));
+        }
+      }
+      break;
+    }
+    case 'toggleStrike': engine.formatRange(range, { strike: engine.selectionContext(range).strike !== true }); break;
     case 'toggleMark': engine.toggleMark(range, command.payload.mark); break;
-    case 'formatRange': engine.formatRange(range, command.payload.delta); break;
+    case 'formatSelection': case 'formatRange': engine.formatRange(range, command.payload.delta); break;
     case 'clearFormatting': engine.clearFormatting(range); break;
     case 'setParagraphAttrs': engine.setParagraphAttrs(range, paragraphAttrs(command.payload.attrs), command.payload.suggesting); break;
     case 'applyParagraphStyle': engine.applyParagraphStyle(range, command.payload.styleId, command.payload.suggesting); break;
   }
-  if (command.kind === 'setTabStops' || command.kind === 'removeTabStop') engine.addUndoBoundary();
+  if (discrete) engine.addUndoBoundary();
   return result(engine.proposalEngine.version() === version ? 'noop' : 'applied');
 }
 
@@ -656,7 +912,7 @@ export const createResidentDocxCommandHooks: ResidentCommandHooksFactory = (engi
     readOnly: init.readOnly,
     selection: init.selection !== undefined ? init.selection : native
       ? { anchor: native.anchor, focus: native.head } : fallback ? { anchor: fallback, focus: fallback } : null,
-    storedMarks: null, stickyPositions: new Map(),
+    storedMarks: null, stickyPositions: new Map(), proposals: environment?.proposals ?? createProposalRegistry(engine.proposalEngine),
   };
   if (state.selection) {
     const selected = {
@@ -670,7 +926,7 @@ export const createResidentDocxCommandHooks: ResidentCommandHooksFactory = (engi
   registerCommandAnchorState(engine, state);
   let projection: { version: string; selection: DocxCommandSelection | null; editState: ReturnType<typeof projectDocxEditState> } | null = null;
   const remember = (result: DocxCommandApplyResult) => {
-    projection = { version: engine.proposalEngine.version(), selection: result.selection ?? null, editState: result.editState! };
+    projection = { version: `${engine.proposalEngine.version()}:${state.proposals?.snapshot().previewVersion}`, selection: result.selection ?? null, editState: result.editState! };
     return result;
   };
   const projected = () => {
@@ -683,7 +939,7 @@ export const createResidentDocxCommandHooks: ResidentCommandHooksFactory = (engi
       }
       state.activePart = null;
     }
-    if (!projection || projection.version !== engine.proposalEngine.version()) {
+    if (!projection || projection.version !== `${engine.proposalEngine.version()}:${state.proposals?.snapshot().previewVersion}`) {
       const resolved = state.selection ? readCommandSelection(engine, state) : null;
       remember({ status: 'noop', selection: resolved?.ok ? resolved.selection : null,
         editState: projectDocxEditState(engine, state, resolved) });

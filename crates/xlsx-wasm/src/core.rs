@@ -1840,12 +1840,21 @@ mod tests {
         assert!(styles.contains(r#"applyProtection="1""#));
         assert!(styles.find("<alignment").unwrap() < styles.find("<protection").unwrap());
         let reopened = Session::open(&saved, None).unwrap();
-        assert_eq!(
-            reopened
+        let target: serde_json::Value = serde_json::from_str(
+            &reopened
                 .capture_format_json(r#"{"sheet":0,"range":"B1"}"#)
                 .unwrap(),
-            captured
-        );
+        )
+        .unwrap();
+        assert_eq!(without_provenance(target), without_provenance(value));
+    }
+
+    /// Capture provenance names xf indices, which a save renumbers.
+    fn without_provenance(mut capture: serde_json::Value) -> serde_json::Value {
+        let fields = capture.as_object_mut().unwrap();
+        fields.remove("sourceStyles");
+        fields.remove("sourceFormats");
+        capture
     }
 
     #[test]
@@ -1889,7 +1898,7 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        assert_eq!(target, source);
+        assert_eq!(without_provenance(target), without_provenance(source));
     }
 
     #[test]

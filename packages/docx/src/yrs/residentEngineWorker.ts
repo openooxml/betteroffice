@@ -1,6 +1,8 @@
 /// <reference lib="webworker" />
 
+import { readResidentToolbarMetadata } from './residentToolbarMetadata';
 import { readResidentRangeHighlights } from './residentRangeHighlights';
+import { readResidentReviewSnapshot } from './residentReview';
 import { LAYOUT_META_VERSION, type LayoutMetaV1, type RetainedLayoutMeta } from './layoutMeta';
 import { isCommandOutcomeUnknownError } from '../../../../shared/office-session/commands/types';
 import { isTransferResult, type TransferResult } from '../../../../shared/office-session/protocol';
@@ -61,9 +63,12 @@ import { proposalProjectionStories } from './dirtyProjectionStories';
 import { findParagraphs } from './findParagraphs';
 import { DisplayPositionIndex } from './displayPositionIndex';
 import { resolveYrsPointPosition } from './pointPosition';
+import { readResidentPointer } from './residentPointerRead';
+import { readCommentInsertionRange } from './residentCommentProjection';
 import { partMetadata } from './residentParts';
 import { readControlHandles } from './residentControls';
 import { readResidentProperties } from './residentProperties';
+import { readResidentFrameGeometry, resetResidentObjectHandles } from './residentObjectGeometry';
 import {
   resolveBookmarkPosition,
   resolveCommentTarget,
@@ -130,8 +135,12 @@ let commandHooksFactory: ResidentCommandHooksFactory | null = null;
 let commandFrameChanges: {
   pages: Set<number>; updates: Uint8Array[];
   selectionContext?: boolean;
+  /** The document changed outside a command and its layout has not followed yet. */
+  layoutStale?: boolean;
   viewport?: ResidentCommandViewportRequest;
   window?: [number, number];
+  reviewFrame?: { frameEpoch: number; previewVersion: number };
+  layoutPreviewVersion?: number;
 } | null = null;
 
 export function setResidentCommandHooksFactory(factory: ResidentCommandHooksFactory): void {
@@ -167,6 +176,8 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
   const fonts = new ResidentSessionFonts(engine, scope.fonts);
   sessionFonts = fonts;
   const preparedFonts = new WeakMap<PreparedDocxCommand, Awaited<ReturnType<ResidentSessionFonts['prepare']>>>();
+  const registry = proposals ??= createProposalRegistry(engine.proposalEngine);
+  let layoutPreviewVersion = registry.snapshot().previewVersion;
   let prefix: { pages: number; documentWidth?: number } | null = null;
   let certify = false;
   const dropPrefix = () => {
@@ -174,6 +185,24 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
     incompleteLayout = null;
     clearProvisionalFinalPages();
     selectionLayout = undefined;
+  };
+  const layoutWithPreview = () => {
+    const input = JSON.parse(init.layoutWithRegions ? init.layoutInput : layoutInput);
+    const snapshot = registry.snapshot();
+    const preview = proposalRevisionPreview(snapshot);
+    if (preview !== undefined || input.renderEnv?.revisionPreview !== undefined) {
+      input.renderEnv = { ...input.renderEnv };
+      if (preview) input.renderEnv.revisionPreview = preview;
+      else delete input.renderEnv.revisionPreview;
+      if (!init.layoutWithRegions) input.workerOwned = { ...input.workerOwned, renderEnv: input.renderEnv };
+    }
+    if (init.layoutWithRegions) engine.layoutDocumentWithRegionsRetained(JSON.stringify(input));
+    else engine.layoutDocumentJson(JSON.stringify(input));
+    layoutPreviewVersion = snapshot.previewVersion;
+    if (commandFrameChanges) {
+      commandFrameChanges.layoutPreviewVersion = layoutPreviewVersion;
+      commandFrameChanges.layoutStale = false;
+    }
   };
   const relayout = (step?: 'initial' | 'complete' | 'begin' | 'resume', blocks = ALL_BLOCKS) => {
     if (step === 'begin' || step === 'resume') {
@@ -200,10 +229,14 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
       return;
     }
     if (prefix) supersedeSlicedCompletion();
-    if (init.layoutWithRegions) engine.layoutDocumentWithRegionsRetained(init.layoutInput);
-    else engine.layoutDocumentJson(layoutInput);
-    if (step === 'complete') certify = true;
-    else retainedLayoutVersion = engine.proposalEngine.version();
+    if (step === 'complete') {
+      if (init.layoutWithRegions) engine.layoutDocumentWithRegionsRetained(init.layoutInput);
+      else engine.layoutDocumentJson(layoutInput);
+      certify = true;
+    } else {
+      layoutWithPreview();
+      retainedLayoutVersion = engine.proposalEngine.version();
+    }
     if (prefix) dropPrefix();
     layoutDirty = true;
   };
@@ -280,6 +313,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
     return caret && caret.height > 0 && caret.pageIndex < limit && frame.pages[caret.pageIndex] &&
       !frame.pages[caret.pageIndex]!.page.unbuilt ? caret.pageIndex : undefined;
   };
+  resetResidentObjectHandles(engine);
   const hooks = commandHooksFactory(engine, init, {
     setRenderEnvironment(environment) {
       const input = JSON.parse(init.layoutInput);
@@ -292,6 +326,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
       }
     },
     supportsFontEnvironment: true,
+    proposals: registry,
     readSelectionLayout() {
       const { version, frame: selectedFrame } = readSelectionFrame();
       let frame = selectedFrame;
@@ -300,7 +335,10 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
       const installSelectionFrame = (bytes: Uint8Array) => {
         frame = applyFrameDelta(frame, decodeFrameDelta(bytes));
         if (layoutDirty || !retainedFrame) selectionLayout = { version, frame };
-        else retainedFrame = frame;
+        else {
+          retainedFrame = frame;
+          if (commandFrameChanges) commandFrameChanges.reviewFrame = { frameEpoch: frame.frameEpoch, previewVersion: layoutPreviewVersion };
+        }
       };
       const buildPages = () => {
         if (!pages.size) return;
@@ -391,7 +429,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
       return { frame, layoutRevision };
     },
   });
-  const changes: NonNullable<typeof commandFrameChanges> = { pages: new Set<number>(), updates: [] };
+  const changes: NonNullable<typeof commandFrameChanges> = { pages: new Set<number>(), updates: [], layoutPreviewVersion };
   commandFrameChanges = changes;
   const prefixNavigation = {
     character: { backward: 'result', forward: 'result', up: 'complete', down: 'complete' },
@@ -542,7 +580,8 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
         }
         const updates = changes.updates.splice(0);
         for (const update of updates) engine.applyUpdate(update);
-        if (updates.length) relayout();
+        if (updates.length || changes.layoutStale) relayout();
+        const framePreviewVersion = layoutPreviewVersion;
         const relaid = layoutDirty;
         layoutDirty = false;
         const extras = JSON.stringify({
@@ -581,12 +620,12 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
           : engine.buildDisplayListFrame(extras, full ? 0 : revision);
         let first: ReturnType<typeof decodeFrameDelta> | undefined;
         if (pages.length && relaid) {
-          first = applyWorkerFrame(bytes);
+          first = applyWorkerFrame(bytes, framePreviewVersion);
           trackBuilt(first);
           preceding.push(bytes);
           bytes = engine.buildDisplayPagesFrame(pages, first.frameEpoch);
         }
-        let finalized = await finalizeResidentFrame(bytes, false, true, true);
+        let finalized = await finalizeResidentFrame(bytes, false, true, true, framePreviewVersion);
         trackBuilt(finalized.delta);
         if (!retainedFrame) throw new Error('Command frame is unavailable');
         let caretPage = finalized.caret.caretRect?.pageIndex;
@@ -631,7 +670,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
               const install = async (bytes: Uint8Array) => {
                 first ??= finalized.delta;
                 preceding.push(finalized.bytes);
-                finalized = await finalizeResidentFrame(bytes, false, true, true);
+                finalized = await finalizeResidentFrame(bytes, false, true, true, framePreviewVersion);
                 trackBuilt(finalized.delta);
                 probed = true;
               };
@@ -683,7 +722,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
           if (entering.length) {
             first ??= finalized.delta;
             preceding.push(finalized.bytes);
-            finalized = await finalizeResidentFrame(engine.buildDisplayPagesFrame(entering, retainedFrame!.frameEpoch), false, true, true);
+            finalized = await finalizeResidentFrame(engine.buildDisplayPagesFrame(entering, retainedFrame!.frameEpoch), false, true, true, framePreviewVersion);
             trackBuilt(finalized.delta);
           }
           const distant = [...builtPages!].flatMap(([pageId, index]) => {
@@ -695,7 +734,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
             if (released === null) throw new Error('Viewport display pages could not be released');
             first ??= finalized.delta;
             preceding.push(finalized.bytes);
-            finalized = await finalizeResidentFrame(released, false, true, true);
+            finalized = await finalizeResidentFrame(released, false, true, true, framePreviewVersion);
             trackBuilt(finalized.delta);
           }
           residency.caretPage = caretPage;
@@ -823,9 +862,12 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
           selectionRects,
           ...(fonts.snapshot ? { fontEnvironment: fonts.snapshot } : {}),
           parts: shown.layoutProvisional ? [] : engine.partGeometry(retainedFrame!),
+          geometry: hooks.editState().readOnly || shown.layoutProvisional ? undefined
+            : await readResidentFrameGeometry(engine, retainedFrame!, hooks.selection(), layoutRevision),
           ...shown, echoContext, stagedPresentation: presentation.value,
         });
         revision = built.value.revision;
+        changes.reviewFrame = { frameEpoch: retainedFrame!.frameEpoch, previewVersion: framePreviewVersion };
         pendingUpdates = [];
         return built;
       },
@@ -902,7 +944,12 @@ function replyCommand<K extends 'commandInitial' | 'commandAck' | 'checkpoint', 
   reply({ id, ok: true, [key]: value }, isTransferResult(result) ? result.transfer : []);
 }
 
-function postCommandFrame(id: number): void {
+/** Answers `id` with the next command frame, carrying `answer` (and its `transfer`) along. */
+function postCommandFrame(
+  id: number,
+  answer: Omit<ResidentEngineWorkerResponse & { ok: true }, 'id' | 'ok'> = {},
+  transfer: Transferable[] = []
+): void {
   const host = requireCommandHost();
   const init = commandInit!;
   void host.frame().then((result) => {
@@ -912,10 +959,10 @@ function postCommandFrame(id: number): void {
     }
     const frame = isTransferResult(result) ? result.value : result;
     reply({
-      id, ok: true, ...frame.payload, selection: session?.selection() ?? null,
+      ...answer, id, ok: true, ...frame.payload, selection: session?.selection() ?? null,
       ...(frame.payload.pageFrames ? { pageFrames: [...frame.payload.pageFrames, frame.payload.frame] } : {}),
       commandFrame: { session: init.session, incarnation: init.incarnation, epoch: init.epoch, frame },
-    }, isTransferResult(result) ? result.transfer : []);
+    }, [...transfer, ...(isTransferResult(result) ? result.transfer : [])]);
   }).catch((error: unknown) => {
     if (commandHost !== host) {
       replyFailure(id, new SessionFailure('disposed', 'Resident command document was replaced'));
@@ -1154,10 +1201,12 @@ function classify(request: ResidentEngineWorkerRequest): SchedulerMessage {
 }
 
 function isUserInputCommand(kind: string): boolean {
-  return kind === 'setSectionMargins' || kind === 'setTabStops' || kind === 'removeTabStop' || kind === 'setHyperlink' || kind === 'setObjectProperties' || kind === 'setSectionProperties' || kind === 'setNoteProperties' || kind === 'setWatermark' || kind === 'setContentControlValue' || kind === 'addRepeatingItem' || kind === 'removeRepeatingItem' || kind === 'openPart' || kind === 'ensurePart' || kind === 'removePart' || kind === 'replaceMatches' || kind === 'undo' || kind === 'redo' || kind === 'select' || kind === 'insertText' || kind === 'replaceSelection' ||
+  return kind === 'resizeObject' || kind === 'moveObject' || kind === 'setSectionMargins' || kind === 'setTabStops' || kind === 'removeTabStop' || kind === 'setHyperlink' || kind === 'setObjectProperties' || kind === 'setSectionProperties' || kind === 'setNoteProperties' || kind === 'setWatermark' || kind === 'setContentControlValue' || kind === 'addRepeatingItem' || kind === 'removeRepeatingItem' || kind === 'openPart' || kind === 'ensurePart' || kind === 'removePart' || kind === 'replaceMatches' || kind === 'undo' || kind === 'redo' || kind === 'select' || kind === 'insertText' || kind === 'replaceSelection' ||
     kind === 'deleteBackward' || kind === 'deleteForward' || kind === 'paragraphBreak' ||
     kind === 'toggleMark' || kind === 'formatRange' || kind === 'clearFormatting' ||
-    kind === 'setParagraphAttrs' || kind === 'applyParagraphStyle';
+    kind === 'setParagraphAttrs' || kind === 'applyParagraphStyle' || kind === 'formatSelection' || kind === 'toggleStrike' ||
+    kind === 'toggleList' || kind === 'changeIndent' || kind === 'insertImage' || kind === 'insertTable' ||
+    kind === 'insertPageBreak' || kind === 'insertSectionBreak';
 }
 
 function isLegacyMutation(request: ResidentEngineWorkerRequest): boolean {
@@ -1593,12 +1642,16 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     }
     const held = pendingUpdates;
     pendingUpdates = [];
+    const before = session.proposalEngine.version();
     try {
-      const saved = openedParsed ? await session.saveDocument(request.host, request.comments, editorSaves) : await session.save(
+      const projection = commandHost ? session.commentProjection() : null;
+      editorSaves.commentIds = projection?.sessionIds;
+      const comments = projection?.comments ?? request.comments;
+      const saved = openedParsed ? await session.saveDocument(request.host, comments, editorSaves) : await session.save(
         new Uint8Array(openedSource!.bytes),
         openedSource!.hostJson,
         request.host,
-        request.comments,
+        comments,
         editorSaves,
         request.stories
       );
@@ -1608,17 +1661,15 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         ? [exactBuffer(session.encodeStateAsUpdate(request.stateVector))]
         : [];
       const stateVector = exactBuffer(session.encodeStateVector());
-      reply(
-        {
-          id: request.id,
-          ok: true,
-          saved: bytes,
-          updates,
-          stateVector,
-          version: session.proposalEngine.version(),
-        },
-        [bytes, ...updates, stateVector]
-      );
+      const answer = { saved: bytes, updates, stateVector, version: session.proposalEngine.version() };
+      if (commandHost && answer.version !== before) {
+        // Identities the save assigned change the document as a remote update would; the answer waits for their frame.
+        noteDocumentChange();
+        fontRequirements = null;
+        completedLayout = null;
+        commandFrameChanges!.layoutStale = true;
+        postCommandFrame(request.id, answer, [bytes, ...updates, stateVector]);
+      } else reply({ id: request.id, ok: true, ...answer }, [bytes, ...updates, stateVector]);
     } finally {
       pendingUpdates = held;
     }
@@ -1768,6 +1819,9 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     }
     let value: unknown;
     switch (request.read.kind) {
+      case 'commentInsertionRange':
+        value = readCommentInsertionRange(session, request.read.paraId, request.read.search);
+        break;
       case 'rawSelectionInfo': {
         const { anchor, focus } = request.read.selection;
         if (anchor.story !== focus.story) throw new Error('Cross-story selection is unavailable');
@@ -1777,9 +1831,15 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       case 'validateEdits':
         value = engine.validateEdits(request.read.request);
         break;
-      case 'contentControlHandles':
-        value = readControlHandles(session);
+      case 'contentControlHandles': {
+        const frame = retainedFrame && retainedLayoutVersion === engine.version() ? retainedFrame : undefined;
+        let queries: ReturnType<typeof createDisplayListQueries> | undefined;
+        try {
+          value = readControlHandles(session, frame, layoutRevision,
+            frame && (() => queries ??= createDisplayListQueries(frame.displayList, loadedRustDisplayListQueryEngine() ?? undefined)));
+        } finally { queries?.dispose(); }
         break;
+      }
       case 'partSnapshot':
         value = { metadata: partMetadata(session.partDocument()), geometry: retainedFrame && retainedLayoutVersion === engine.version() ? session.partGeometry(retainedFrame) : [],
           frameEpoch: retainedFrame && retainedLayoutVersion === engine.version() ? retainedFrame.frameEpoch : null, layoutRevision };
@@ -1805,6 +1865,24 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
           (request.read.expectFrameEpoch !== undefined && request.read.expectFrameEpoch !== retainedFrame.frameEpoch) ||
           (request.read.expectLayoutRevision !== undefined && request.read.expectLayoutRevision !== layoutRevision)
           ? null : await readResidentRangeHighlights(session, retainedFrame, request.read.ranges, layoutRevision);
+        break;
+      case 'reviewSnapshot': {
+        const registry = proposals ??= createProposalRegistry(engine);
+        const frame = retainedFrame;
+        const layoutVersion = retainedLayoutVersion;
+        const previewVersion = registry.snapshot().previewVersion;
+        const published = commandFrameChanges?.reviewFrame;
+        const review = !frame || layoutVersion !== engine.version() ||
+          (commandHost && (published?.frameEpoch !== frame.frameEpoch || published?.previewVersion !== previewVersion)) ||
+          (request.read.expectPreviewVersion !== undefined && request.read.expectPreviewVersion !== previewVersion)
+          ? null : await readResidentReviewSnapshot(session, registry, frame, layoutRevision);
+        value = commandHost && review && (review.previewVersion !== previewVersion || review.version !== layoutVersion ||
+          registry.snapshot().previewVersion !== previewVersion || engine.version() !== layoutVersion || retainedFrame?.frameEpoch !== frame?.frameEpoch)
+          ? null : review;
+        break;
+      }
+      case 'toolbarMetadata':
+        value = openedSource ? readResidentToolbarMetadata(openedSource.hostJson) : { styles: [], fontFamilies: [] };
         break;
       case 'paragraphIdentities':
         value = session.paragraphIdentities();
@@ -1861,7 +1939,8 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         );
         break;
       case 'pointPosition':
-        value = resolveYrsPointPosition(
+        value = request.read.nativePoint ? retainedFrame && retainedLayoutVersion === engine.version()
+          ? await readResidentPointer(session, retainedFrame, layoutRevision, request.read.nativePoint, request.read.expectVersion) : null : resolveYrsPointPosition(
           displayPositionIndex(session),
           request.read.hit,
           request.read.expectVersion
@@ -2892,9 +2971,15 @@ function setCommandRasterScale(scale: number, indices?: ReadonlySet<number>): vo
   if (resized) for (const { pageId } of pages) pendingOffscreenPageIds.add(pageId.toString());
 }
 
-function applyWorkerFrame(bytes: Uint8Array) {
+function applyWorkerFrame(bytes: Uint8Array, previewVersion?: number) {
   const delta = decodeFrameDelta(bytes);
+  const published = commandFrameChanges?.reviewFrame;
+  const inherited = published?.frameEpoch === retainedFrame?.frameEpoch && delta.baseFrameEpoch === retainedFrame?.frameEpoch
+    ? published?.previewVersion : commandFrameChanges?.layoutPreviewVersion;
   retainedFrame = applyFrameDeltaOwned(retainedFrame, delta);
+  if (commandHost && commandFrameChanges && (previewVersion ?? inherited) !== undefined) {
+    commandFrameChanges.reviewFrame = { frameEpoch: retainedFrame.frameEpoch, previewVersion: (previewVersion ?? inherited)! };
+  }
   for (const pageId of retainedFrame.damagedPageIds) pendingOffscreenPageIds.add(pageId.toString());
   return delta;
 }
@@ -2903,9 +2988,10 @@ async function finalizeResidentFrame(
   bytes: Uint8Array,
   requireCaret = false,
   paintCaret = false,
-  stageCommand = false
+  stageCommand = false,
+  previewVersion?: number
 ) {
-  let delta = applyWorkerFrame(bytes);
+  let delta = applyWorkerFrame(bytes, previewVersion);
   const limit = provisionalFinalPages;
   if (session && limit !== null && retainedFrame) {
     const pages = retainedFrame.displayList.pages
@@ -2915,7 +3001,7 @@ async function finalizeResidentFrame(
       const released = session.releaseDisplayPagesFrame(pages, retainedFrame.frameEpoch);
       if (released === null) throw new Error('Provisional display pages could not be released');
       bytes = session.buildDisplayPagesFrame([], 0);
-      delta = applyWorkerFrame(bytes);
+      delta = applyWorkerFrame(bytes, previewVersion);
     }
   }
   const caret = session?.residentCaretSnapshot();

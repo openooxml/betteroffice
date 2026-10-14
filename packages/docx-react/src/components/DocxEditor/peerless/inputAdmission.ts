@@ -14,9 +14,9 @@ export const DOCX_ECHO_MAX_UNACKED_INTENTS = 256;
 
 /** @internal Formatting operations that resolve from the causal predecessor selection. */
 export type PeerlessFormattingIntent = {
-  [K in 'toggleMark' | 'formatRange' | 'clearFormatting' | 'setParagraphAttrs' | 'applyParagraphStyle']:
+  [K in 'toggleMark' | 'formatRange' | 'clearFormatting' | 'setParagraphAttrs' | 'applyParagraphStyle' | 'formatSelection' | 'toggleStrike' | 'toggleList' | 'changeIndent']:
     { kind: K; payload: Omit<DocxCommandPayloads[K], 'selection'> };
-}['toggleMark' | 'formatRange' | 'clearFormatting' | 'setParagraphAttrs' | 'applyParagraphStyle'];
+}['toggleMark' | 'formatRange' | 'clearFormatting' | 'setParagraphAttrs' | 'applyParagraphStyle' | 'formatSelection' | 'toggleStrike' | 'toggleList' | 'changeIndent'];
 
 /** @internal Original-intent accounting happens before the shared coalescing hook. */
 export interface PeerlessAdmissionSnapshot {
@@ -38,12 +38,13 @@ export type PeerlessAdmissionTarget =
 export interface PeerlessAdmissionOptions extends Omit<SubmitOptions<PeerlessEchoIntent>, 'after' | 'echo'> {
   source?: 'typing' | 'paste' | 'formatting' | 'selection' | 'composition';
   onSubmitted?(ticket: CommandTicket): void;
+  hostProposal?: boolean;
 }
 
-/** @internal Held intents remain admitted; cap overflow only suppresses their echo. */
+/** @internal Held intents remain admitted and `released` settles with their admission when the composition ends; cap overflow only suppresses their echo. */
 export type PeerlessAdmissionResult =
   | { status: 'submitted'; ticket: CommandTicket; echoEnabled: boolean }
-  | { status: 'held'; slot: number; echoEnabled: false }
+  | { status: 'held'; slot: number; echoEnabled: false; released: Promise<PeerlessAdmissionResult> }
   | { status: 'ignored'; reason: 'read-only' | 'empty-composition' };
 
 /** @internal */
@@ -87,7 +88,8 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
   const prefixes = new WeakMap<CommandTicket, Promise<boolean>>();
   const deferred = new WeakMap<CommandTicket, Promise<{ ticket?: CommandTicket; blocked?: boolean }>>();
   const cancellations = new Set<() => void>();
-  const held: Array<{ intent: AdmissionIntent; options: PeerlessAdmissionOptions; deletionExtension: boolean }> = [];
+  const held: Array<{ intent: AdmissionIntent; options: PeerlessAdmissionOptions; deletionExtension: boolean;
+    release(result: PeerlessAdmissionResult): void; drop(error: Error): void }> = [];
   let tail: CommandTicket | undefined;
   let originalUnackedIntents = 0;
   let echoDisabledReason: PeerlessAdmissionSnapshot['echoDisabledReason'] = null;
@@ -112,6 +114,15 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
     originalUnackedIntents += 1;
     if (originalUnackedIntents > DOCX_ECHO_MAX_UNACKED_INTENTS) disableEcho('intent-cap');
   };
+  const resetIdle = () => {
+    if (originalUnackedIntents !== 0) return;
+    if (tail !== modeBarrier) tail = undefined;
+    if (compositionSlot === null) echoDisabledReason = null;
+  };
+  const releaseCount = (count = 1) => {
+    originalUnackedIntents -= count;
+    resetIdle();
+  };
   const readOnly = () => requestedReadOnly ?? viewStore.getSnapshot().editState?.readOnly ?? session.state.editState?.readOnly ?? false;
   const workerSelection = () => latestSelection(session, viewStore);
   const track = (ticket: CommandTicket) => {
@@ -122,12 +133,9 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
     pending.set(ticket, 1);
     const settle = () => {
       if (disposed) return;
-      originalUnackedIntents -= pending.get(ticket) ?? 0;
+      const count = pending.get(ticket) ?? 0;
       pending.delete(ticket);
-      if (originalUnackedIntents === 0) {
-        if (tail !== modeBarrier) tail = undefined;
-        if (compositionSlot === null) echoDisabledReason = null;
-      }
+      releaseCount(count);
     };
     void ticket.ack.then(settle, settle);
   };
@@ -217,59 +225,70 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
   ): PeerlessAdmissionResult => {
     if (disposed) throw new Error('Input admission is disposed');
     const environment = intent.kind === 'setRenderEnvironment' || intent.kind === 'setFontEnvironment';
-    if (readOnly() && !environment && (!isSelection(intent) || deletionExtension)) {
-      if (counted) originalUnackedIntents -= 1;
+    const proposal = intent.kind === 'propose' || intent.kind === 'setProposalStates' || intent.kind === 'withdrawProposals';
+    const { source, onSubmitted, hostProposal, ...metadata } = options;
+    if (readOnly() && !environment && (!isSelection(intent) || deletionExtension) && !(proposal && hostProposal)) {
+      if (counted) releaseCount();
       return { status: 'ignored', reason: 'read-only' };
     }
-    const authored = !['setHyperlink', 'setSectionProperties', 'setWatermark'].includes(intent.kind) && !environment && intent.kind !== 'undo' && intent.kind !== 'redo' &&
-      (!isSelection(intent) || (intent.kind === 'navigateCell' && intent.payload.createLastRow));
+    const authored = SUGGESTED[intent.kind] && (intent.kind !== 'navigateCell' || intent.payload.createLastRow === true);
     if (authored && !stamped.has(intent)) {
       const author = target ? target.suggesting : suggesting === null ? undefined : { name: suggesting, date: new Date().toISOString() };
       intent = { ...intent, payload: { ...intent.payload, ...(authored && author ? { suggesting: author } : {}) } } as AdmissionIntent;
       stamped.add(intent);
     }
-    if (!counted) count();
-    if (compositionSlot !== null && !target) {
-      held.push({ intent, options, deletionExtension });
-      return { status: 'held', slot: compositionSlot, echoEnabled: false };
+    try {
+      if (!counted) count();
+      if (compositionSlot !== null && !target) {
+        let release!: (result: PeerlessAdmissionResult) => void;
+        let drop!: (error: Error) => void;
+        const released = new Promise<PeerlessAdmissionResult>((resolve, reject) => { release = resolve; drop = reject; });
+        released.catch(() => {});
+        held.push({ intent, options, deletionExtension, release, drop });
+        return { status: 'held', slot: compositionSlot, echoEnabled: false, released };
+      }
+      const fence = 'suggesting' in intent.payload || metadata.fence || isSelection(intent) || !isText(intent) ||
+        intent.kind === 'paragraphBreak' || intent.kind === 'replaceSelection' ||
+        source === 'paste' || source === 'composition';
+      if (fence && echoDisabledReason !== 'intent-cap') disableEcho('fence');
+      const after = target?.kind === 'predecessor' ? target.ticket : tail;
+      const preview = !echoDisabledReason && isText(intent) ? echoPainter.preview(intent) : undefined;
+      const echo = preview ? { ...preview, originalIntentCount: 1 } : undefined;
+      const vertical = intent.kind === 'navigate' && (intent.payload.direction === 'up' || intent.payload.direction === 'down')
+        ? intent.payload.direction : undefined;
+      const send = (predecessor: CommandTicket | undefined, goalX?: number) => {
+        const selection = workerSelection();
+        if (deletionExtension && !isCollapsed(selection)) return predecessor;
+        if (intent.kind === 'navigate' && 'goalX' in intent.payload) {
+          verticalGoal = hasImplicitVerticalGoal(intent) ? goalX : intent.payload.goalX;
+          goalX = verticalGoal;
+        } else verticalGoal = undefined;
+        const payload = intent.kind === 'formatRange'
+          ? { ...intent.payload, selection: requireSelection(selection) }
+          : vertical && intent.kind === 'navigate' && goalX !== undefined
+            ? { ...intent.payload, goalX }
+            : target?.kind === 'worker-selection' && target.snapshot.workerSelection && isText(intent)
+              ? { ...intent.payload, selection: target.snapshot.workerSelection } : intent.payload;
+        const ticket = session.submit(intent.kind, payload, {
+          ...metadata, after: predecessor, fence: !!fence,
+          coalesceKey: fence ? undefined : metadata.coalesceKey ?? intent.kind,
+          echo,
+        });
+        if (onSubmitted) {
+          try { onSubmitted(ticket); } catch (error) { console.error('[PeerlessInput] submission observer failed', error); }
+        }
+        return ticket;
+      };
+      const waitForSelection = intent.kind === 'formatRange' || deletionExtension || vertical !== undefined;
+      const ticket = deletionExtension || vertical || (after && (waitForSelection || deferred.has(after))) ||
+        (intent.kind === 'formatRange' && !workerSelection())
+        ? defer(after, waitForSelection, send, vertical) : send(after)!;
+      track(ticket);
+      return { status: 'submitted', ticket, echoEnabled: echo !== undefined };
+    } catch (error) {
+      if (!counted) releaseCount();
+      throw error;
     }
-    const { source, onSubmitted, ...metadata } = options;
-    const fence = 'suggesting' in intent.payload || metadata.fence || isSelection(intent) || !isText(intent) ||
-      intent.kind === 'paragraphBreak' || intent.kind === 'replaceSelection' ||
-      source === 'paste' || source === 'composition';
-    if (fence && echoDisabledReason !== 'intent-cap') disableEcho('fence');
-    const after = target?.kind === 'predecessor' ? target.ticket : tail;
-    const preview = !echoDisabledReason && isText(intent) ? echoPainter.preview(intent) : undefined;
-    const echo = preview ? { ...preview, originalIntentCount: 1 } : undefined;
-    const vertical = intent.kind === 'navigate' && (intent.payload.direction === 'up' || intent.payload.direction === 'down')
-      ? intent.payload.direction : undefined;
-    const send = (predecessor: CommandTicket | undefined, goalX?: number) => {
-      const selection = workerSelection();
-      if (deletionExtension && !isCollapsed(selection)) return predecessor;
-      if (intent.kind === 'navigate' && 'goalX' in intent.payload) {
-        verticalGoal = hasImplicitVerticalGoal(intent) ? goalX : intent.payload.goalX;
-        goalX = verticalGoal;
-      } else verticalGoal = undefined;
-      const payload = intent.kind === 'formatRange'
-        ? { ...intent.payload, selection: requireSelection(selection) }
-        : vertical && intent.kind === 'navigate' && goalX !== undefined
-          ? { ...intent.payload, goalX }
-          : target?.kind === 'worker-selection' && target.snapshot.workerSelection && isText(intent)
-            ? { ...intent.payload, selection: target.snapshot.workerSelection } : intent.payload;
-      const ticket = session.submit(intent.kind, payload, {
-        ...metadata, after: predecessor, fence: !!fence,
-        coalesceKey: fence ? undefined : metadata.coalesceKey ?? intent.kind,
-        echo,
-      });
-      onSubmitted?.(ticket);
-      return ticket;
-    };
-    const waitForSelection = intent.kind === 'formatRange' || deletionExtension || vertical !== undefined;
-    const ticket = deletionExtension || vertical || (after && (waitForSelection || deferred.has(after))) ||
-      (intent.kind === 'formatRange' && !workerSelection())
-      ? defer(after, waitForSelection, send, vertical) : send(after)!;
-    track(ticket);
-    return { status: 'submitted', ticket, echoEnabled: echo !== undefined };
   };
   const admission: PeerlessInputAdmission = {
     session, viewStore, echoPainter,
@@ -325,15 +344,25 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
       if (disposed) throw new Error('Input admission is disposed');
       if (slot !== compositionSlot) throw new Error('Composition slot is not active');
       compositionSlot = null;
-      const result: PeerlessAdmissionResult = commit?.text
-        ? submit({ kind: 'replaceSelection', payload: { text: commit.text } },
-          { source: 'composition', fence: true }, false, commit.target)
-        : { status: 'ignored', reason: 'empty-composition' };
-      const continuation = held.splice(0);
-      for (const entry of continuation) submit(entry.intent, entry.options, true, undefined, entry.deletionExtension);
+      let failed = false;
+      let failure: unknown;
+      let result: PeerlessAdmissionResult = { status: 'ignored', reason: 'empty-composition' };
+      try {
+        if (commit?.text) result = submit({ kind: 'replaceSelection', payload: { text: commit.text } },
+          { source: 'composition', fence: true }, false, commit.target);
+      } catch (error) { failed = true; failure = error; }
+      const compositionFailed = failed;
+      for (const entry of held.splice(0)) {
+        if (!failed) {
+          try { entry.release(submit(entry.intent, entry.options, true, undefined, entry.deletionExtension)); continue; } catch (error) { failed = true; failure = error; }
+        }
+        releaseCount();
+        entry.drop(failure instanceof Error ? failure : new Error(String(failure)));
+      }
       for (const waiter of compositionWaiters) waiter.resolve();
       compositionWaiters.clear();
-      if (originalUnackedIntents === 0) echoDisabledReason = null;
+      resetIdle();
+      if (compositionFailed) throw failure;
       return result;
     },
     dispose() {
@@ -342,7 +371,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
       compositionWaiters.clear();
       for (const cancel of cancellations) cancel();
       cancellations.clear();
-      held.length = 0;
+      for (const entry of held.splice(0)) entry.drop(new Error('Input admission is disposed'));
       pending.clear();
       modeListeners.clear();
       tail = undefined;
@@ -395,6 +424,22 @@ export function submitFormattingIntent(
 }
 
 type AdmissionIntent = PeerlessInputIntent | PeerlessFormattingIntent;
+
+/** Kinds the worker records as suggestions; suggesting mode stamps its author on exactly these. */
+const SUGGESTED = {
+  insertText: true, replaceSelection: true, deleteBackward: true, deleteForward: true, paragraphBreak: true,
+  applyEdits: true, replaceMatches: true, insertImage: true, insertTable: true, insertPageBreak: true, insertSectionBreak: true,
+  toggleMark: true, formatRange: true, clearFormatting: true, setParagraphAttrs: true, applyParagraphStyle: true,
+  formatSelection: true, toggleStrike: true, toggleList: true, changeIndent: true, navigateCell: true,
+  addComment: false, resizeObject: false, moveObject: false,
+  setHyperlink: false, setObjectProperties: false, setSectionProperties: false, setNoteProperties: false, setWatermark: false,
+  setSectionMargins: false, setTabStops: false, removeTabStop: false,
+  setContentControlValue: false, addRepeatingItem: false, removeRepeatingItem: false,
+  openPart: false, ensurePart: false, removePart: false,
+  select: false, navigate: false, selectPoint: false, extendSelection: false,
+  undo: false, redo: false, setRenderEnvironment: false, setFontEnvironment: false,
+  propose: false, setProposalStates: false, withdrawProposals: false,
+} satisfies Record<AdmissionIntent['kind'], boolean>;
 const admissions = new WeakMap<PeerlessInputAdmission,
   (intent: AdmissionIntent, options?: PeerlessAdmissionOptions, deletionExtension?: boolean) => PeerlessAdmissionResult>();
 
@@ -424,7 +469,7 @@ function requireSelection(selection: DocxCommandSelection | null | undefined): D
 }
 
 function isSelection(intent: AdmissionIntent): boolean {
-  return intent.kind === 'select' || intent.kind === 'navigate' || intent.kind === 'navigateCell' ||
+  return intent.kind === 'openPart' || intent.kind === 'select' || intent.kind === 'navigate' || intent.kind === 'navigateCell' ||
     intent.kind === 'selectPoint' || intent.kind === 'extendSelection';
 }
 

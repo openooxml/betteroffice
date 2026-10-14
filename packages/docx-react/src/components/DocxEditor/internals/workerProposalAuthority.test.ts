@@ -1357,6 +1357,24 @@ function editorRoundHarness(laidOut = async () => {}) {
   return { session, worker, authority, peerUpdated, events };
 }
 
+test('unchanged editor reinitialization notifies readiness subscribers', async () => {
+  const h = editorRoundHarness();
+  const readiness: boolean[] = [];
+  h.authority.subscribe(() => { readiness.push(h.authority.initialized); });
+  await h.authority.initialize();
+  expect(readiness).toEqual([true]);
+  const geometry = h.authority.geometry();
+  const snapshot = h.authority.snapshot();
+  h.authority.restart();
+  expect(readiness).toEqual([true, false]);
+  await h.authority.initialize();
+  expect(h.authority.initialized).toBe(true);
+  expect(h.authority.geometry()).toBe(geometry);
+  expect(h.authority.snapshot()).toEqual(snapshot);
+  expect(h.events).toEqual(['snapshot', 'snapshot']);
+  expect(readiness).toEqual([true, false, true]);
+});
+
 test('integrated proposal updates notify peerUpdated only for changed stories', async () => {
   const h = editorRoundHarness();
   await h.authority.initialize();

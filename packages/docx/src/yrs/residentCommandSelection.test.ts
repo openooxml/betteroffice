@@ -8,9 +8,11 @@ import { loadRustDisplayListQueryEngine, loadedRustDisplayListQueryEngine } from
 import { DisplayPositionIndex } from './displayPositionIndex';
 import { displayPositionToYrsLoc } from './inputPositionMap';
 import { YrsPositionProjection } from './yrsPositionProjection';
+import { readResidentFrameGeometry, resetResidentObjectHandles } from './residentObjectGeometry';
 import type { YrsLoc, YrsStoryRange, YrsStorySegment } from './index';
 import { mintCommandSelection } from './residentCommandAnchors';
 import { ResidentSessionFonts } from './residentFontEnvironment';
+import { createProposalRegistry, proposalRevisionPreview } from './proposals';
 import { applyDocxCommand, preflightDocxCommand } from './residentCommandActions';
 import { resolveDocxSelectionIntent, type DocxSelectionCommandIntent } from './residentCommandSelection';
 import type { DocxCommandEnvelope, DocxCommandSelection, DocxNavigationIntent, ResidentCommandHooks, ResidentCommandHooksFactory, ResidentCommandHostOptions, ResidentCommandInitRequest, ResidentDocxCommandEngine } from './residentCommandProtocol';
@@ -249,7 +251,7 @@ function workerSelectionHooks(arm: CommandArm, frame: RetainedFrame, buildPages?
     commandHooksFactory: factory,
     init: { layoutWithRegions: true, layoutInput: '{}', extras: '{}' } as ResidentCommandInitRequest,
     retainedFrame: frame, retainedLayoutVersion: null, layoutRevision: 0, commandFrameChanges: null,
-    commandInit: null, commandHost: null,
+    commandInit: null, commandHost: null, readResidentFrameGeometry, resetResidentObjectHandles, proposals: null, createProposalRegistry, proposalRevisionPreview,
     sessionFonts: null, ResidentSessionFonts, scope: { fonts: undefined },
     createResidentCommandHost: (options: ResidentCommandHostOptions) => options.hooks,
     displayPositionIndex: () => index, createDisplayListQueries: queryModule.createDisplayListQueries,
@@ -619,7 +621,7 @@ test('d2a_worker_vertical_navigation_builds_unbuilt_neighbours_before_chained_ty
     session: arm.engine, commandHooksFactory: factory,
     init: { layoutWithRegions: true, layoutInput: '{}', extras: '{}' } as ResidentCommandInitRequest,
     retainedFrame: windowed, retainedLayoutVersion: null, layoutRevision: 0, commandFrameChanges: null,
-    commandInit: null, commandHost: null,
+    commandInit: null, commandHost: null, readResidentFrameGeometry, resetResidentObjectHandles, proposals: null, createProposalRegistry, proposalRevisionPreview,
     sessionFonts: null, ResidentSessionFonts, scope: { fonts: undefined },
     createResidentCommandHost: (options: ResidentCommandHostOptions) => options.hooks,
     displayPositionIndex: () => index, createDisplayListQueries: queryModule.createDisplayListQueries,

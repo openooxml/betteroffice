@@ -78,6 +78,7 @@ export { decodeDocxHostJson } from './yrsSessionFacade';
 /** @internal */
 export type {
   DocxCommandEchoContext,
+  DocxCommandKind,
   DocxCommandFrame,
   DocxCommandPageIdentity,
   DocxCommandPayloads,
@@ -112,6 +113,8 @@ export * from './stories';
 export type { DocxResolvedPointPosition } from './pointPosition';
 export type { ResidentRangeHighlights } from './residentRangeHighlights';
 export type { ResidentDocumentRead, ResidentDocumentReadValues } from './residentEngineWorkerProtocol';
+export type { DocxCommentPatch, ResidentReviewSnapshot } from './residentReview';
+export type { ResidentToolbarMetadata } from './residentToolbarMetadata';
 export type {
   DocxDisplayRange,
   DocxDisplaySelectionInfo,

@@ -14,8 +14,49 @@ export type YrsLocProjection = Pick<YrsPositionProjection, 'positionForLoc'>;
 export type YrsPositionOutline = Record<string, {
   contentStart: number;
   size: number;
-  paragraphs: Array<{ paraId: string; displayStart: number; length: number; leading: number }>;
+  /** `length` counts display units; `controls` lists inline controls as `[story offset, display units]`. */
+  paragraphs: Array<{ paraId: string; displayStart: number; length: number; leading: number; controls?: InlineControls }>;
 }>;
+
+/** Inline controls of a paragraph as `[story offset within the content, display units]`, in order. */
+type InlineControls = ReadonlyArray<readonly [number, number]>;
+
+/** Display units of an inline control with `payload`: its content and its two boundaries, as the layout counts them. */
+function inlineControlDisplaySize(payload: Record<string, unknown>): number {
+  if (!Array.isArray(payload.content)) return 2;
+  let size = 2;
+  for (const child of payload.content as unknown[]) {
+    if (!child || typeof child !== 'object' || Array.isArray(child)) continue;
+    const item = child as Record<string, unknown>;
+    if (item.kind === 'text') size += typeof item.text === 'string' ? item.text.length : 0;
+    else if (item.kind !== 'sdt') size += 1;
+    else size += item.payload && typeof item.payload === 'object' && !Array.isArray(item.payload)
+      ? inlineControlDisplaySize(item.payload as Record<string, unknown>) : 2;
+  }
+  return size;
+}
+
+/** Display units from a paragraph's content start to story offset `offset` in it. */
+function controlDisplayOffset(offset: number, controls: InlineControls | undefined): number {
+  let expanded = 0;
+  for (const [at, size] of controls ?? []) {
+    if (at >= offset) break;
+    expanded += size - 1;
+  }
+  return offset + expanded;
+}
+
+/** Story offset at display units `display` from a paragraph's content start; inside a control, its nearer edge. */
+function controlStoryOffset(display: number, controls: InlineControls): number {
+  let expanded = 0;
+  for (const [at, size] of controls) {
+    const start = at + expanded;
+    if (display <= start) break;
+    if (display < start + size) return display - start < start + size - display ? at : at + 1;
+    expanded += size - 1;
+  }
+  return display - expanded;
+}
 
 export function createYrsLocProjectionFromOutline(outline: YrsPositionOutline): YrsLocProjection {
   const stories = new Map(Object.entries(outline).map(([id, story]) => {
@@ -31,7 +72,7 @@ export function createYrsLocProjectionFromOutline(outline: YrsPositionOutline): 
       const paragraph = story?.paragraphs.get(loc.paraId);
       if (!story || !paragraph) return null;
       return story.contentStart + paragraph.displayStart + 1 +
-        Math.min(Math.max(0, loc.offset - paragraph.leading), paragraph.length);
+        Math.min(controlDisplayOffset(Math.max(0, loc.offset - paragraph.leading), paragraph.controls), paragraph.length);
     },
   };
 }
@@ -77,9 +118,11 @@ interface StoryProjection {
     paraId: string;
     displayStart: number;
     inputStart: number;
+    /** Display units of the content. */
     length: number;
     /** Leading block embeds counted by story offsets. */
     leading: number;
+    controls: InlineControls;
   }>;
   tables: YrsProjectedTable[];
 }
@@ -164,6 +207,10 @@ export class YrsPositionProjection {
     return this.nodes.get(position) ?? null;
   }
 
+  allTables(): readonly YrsProjectedTable[] {
+    return this.tables;
+  }
+
   tableAtPosition(position: number): YrsProjectedTable | null {
     let result: YrsProjectedTable | null = null;
     for (const table of this.tables) {
@@ -224,7 +271,10 @@ export class YrsPositionProjection {
       story.contentStart +
       paragraph.displayStart +
       1 +
-      Math.min(Math.max(0, loc.offset - paragraph.leading), paragraph.length)
+      Math.min(
+        controlDisplayOffset(Math.max(0, loc.offset - paragraph.leading), paragraph.controls),
+        paragraph.length
+      )
     );
   }
 
@@ -295,6 +345,8 @@ export class YrsPositionProjection {
     const segments = this.source.segments(storyId);
     let cursor = 0;
     let inlineLength = 0;
+    let inlineUnits = 0;
+    let controls: Array<[number, number]> = [];
     let leading = 0;
     let paragraphStart = 0;
     let inputStart = 0;
@@ -303,6 +355,7 @@ export class YrsPositionProjection {
     for (const segment of segments) {
       if (segment.kind === 'text') {
         inlineLength += segment.text.length;
+        inlineUnits += segment.text.length;
         continue;
       }
       if (segment.kind === 'pilcrow') {
@@ -327,11 +380,14 @@ export class YrsPositionProjection {
           inputStart,
           length: inlineLength,
           leading,
+          controls,
         });
-        inputStart += nodeSize + leading;
+        inputStart += inlineUnits + 2 + leading;
         cursor = paragraphStart + nodeSize;
         paragraphStart = cursor;
         inlineLength = 0;
+        inlineUnits = 0;
+        controls = [];
         leading = 0;
         continue;
       }
@@ -386,14 +442,17 @@ export class YrsPositionProjection {
       }
 
       const start = contentStart + paragraphStart + 1 + inlineLength;
+      const nodeSize = segment.embedKind === 'sdt' ? inlineControlDisplaySize(segment.payload) : 1;
       this.nodes.set(start, {
         kind: segment.embedKind,
         start,
-        nodeSize: 1,
+        nodeSize,
         attrs: { ...segment.payload, ...segment.attributes },
         story: storyId,
       });
-      inlineLength += 1;
+      if (segment.embedKind === 'sdt') controls.push([inlineUnits, nodeSize]);
+      inlineLength += nodeSize;
+      inlineUnits += 1;
     }
 
     story.size = Math.max(cursor, paragraphStart + (inlineLength > 0 ? inlineLength + 2 : 0));
@@ -408,10 +467,11 @@ export class YrsPositionProjection {
       paragraph = candidate;
     }
     if (!paragraph) return 0;
+    const display = Math.min(Math.max(0, projected - paragraph.displayStart), paragraph.length + 1);
     return (
       paragraph.inputStart +
       paragraph.leading +
-      Math.min(Math.max(0, projected - paragraph.displayStart), paragraph.length + 1)
+      (display === 0 ? 0 : 1 + controlStoryOffset(display - 1, paragraph.controls))
     );
   }
 

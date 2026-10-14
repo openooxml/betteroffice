@@ -1,11 +1,38 @@
-import { expect, test } from 'bun:test';
+import { expect, spyOn, test } from 'bun:test';
 import type { DocxCommandPayload, DocxCommandSelection, DocxWorkerEditSession } from '@betteroffice/docx/peerless';
 import type { CommandTicket, SubmitOptions, TicketOutcome } from '../../../../../../shared/office-session/commands/types';
 import type { PeerlessEchoIntent, PeerlessEchoPainter } from './echoPainter';
 import type { PeerlessViewSnapshot, PeerlessViewStore } from './viewStore';
 import { admitInputIntents, admitIntent, createInputAdmission, submitFormattingIntent, type PeerlessFormattingIntent } from './inputAdmission';
-import { normalizeInputEvent } from './inputEvents';
+import { normalizeInputEvent, type PeerlessInputIntent } from './inputEvents';
 import { createPeerlessCommandBinding } from './commandBinding';
+import { beginComposition, endComposition, updateComposition } from './composition';
+
+test('widget mutations preserve captured payloads behind pending text and composition', () => {
+  for (const kind of ['setContentControlValue', 'addRepeatingItem', 'removeRepeatingItem'] as const) {
+    const { admission, submitted } = lane();
+    admitIntent(admission, { kind: 'insertText', payload: { text: 'pending' } });
+    admission.setSuggesting?.('Writer');
+    const payload = { handle: 'physical-control', expectVersion: 'native-token',
+      ...(kind === 'setContentControlValue' ? { value: { kind: 'checkbox' as const, checked: true } } : {}) };
+    const intent: PeerlessInputIntent = kind === 'setContentControlValue'
+      ? { kind, payload: { ...payload, value: { kind: 'checkbox', checked: true } } }
+      : { kind, payload };
+    expect(admitIntent(admission, intent, { coalesceKey: 'widget' }).status).toBe('submitted');
+    expect(submitted[1]!.payload).toEqual(payload);
+    expect(submitted[1]!.options).toMatchObject({ after: submitted[0]!.ticket, fence: true });
+    expect(submitted[1]!.options.coalesceKey).toBeUndefined();
+    expect(submitted[1]!.options.echo).toBeUndefined();
+    const reservation = admission.reserveComposition();
+    expect(admitIntent(admission, intent).status).toBe('held');
+    expect(submitted).toHaveLength(2);
+    admission.settleComposition(reservation.slot, { text: 'composed', target: reservation.target });
+    expect(submitted.map(entry => entry.kind)).toEqual(['insertText', kind, 'replaceSelection', kind]);
+    expect(submitted[3]!.options).toMatchObject({ after: submitted[2]!.ticket, fence: true });
+    expect(submitted[3]!.payload).toEqual(payload);
+    admission.dispose();
+  }
+});
 
 test('render settings held by composition report the submitted ticket without author metadata', () => {
   const { admission, submitted } = lane();
@@ -24,6 +51,162 @@ test('render settings held by composition report the submitted ticket without au
   admission.setReadOnly(true);
   expect(admitIntent(admission, { kind: 'setRenderEnvironment', payload: { themeColors: {}, showHiddenText: false } }).status).toBe('submitted');
   admission.dispose();
+});
+
+test('a throwing submission observer cannot strand held intents, trailing input or composition waiters', async () => {
+  const { admission, submitted } = lane();
+  const failure = new Error('observer failed');
+  const report = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const reservation = admission.reserveComposition();
+    const first = admitIntent(admission, { kind: 'setRenderEnvironment', payload: { themeColors: {}, showHiddenText: true } },
+      { fence: true, onSubmitted: () => { throw failure; } });
+    const second = admitIntent(admission, { kind: 'insertText', payload: { text: 'after' } });
+    if (first.status !== 'held' || second.status !== 'held') throw new Error('intents were not held');
+    const settled = admission.whenCompositionSettled!();
+    expect(admission.settleComposition(reservation.slot, null)).toEqual({ status: 'ignored', reason: 'empty-composition' });
+    await settled;
+    expect(await first.released).toMatchObject({ status: 'submitted', ticket: submitted[0]!.ticket });
+    expect(await second.released).toMatchObject({ status: 'submitted', ticket: submitted[1]!.ticket });
+    expect(submitted.map(entry => entry.kind)).toEqual(['setRenderEnvironment', 'insertText']);
+    expect(report).toHaveBeenCalledWith('[PeerlessInput] submission observer failed', failure);
+    for (const [index, entry] of submitted.entries()) entry.settle({ status: 'applied', seq: index + 1 });
+    for (let turn = 0; turn < 5; turn++) await Promise.resolve();
+    expect(admission.getSnapshot()).toMatchObject({ heldIntents: 0, compositionSlot: null, originalUnackedIntents: 0, tail: undefined });
+  } finally { report.mockRestore(); admission.dispose(); }
+});
+
+test('a held submission that throws settles the rest as dropped and still releases composition waiters', async () => {
+  const { admission, submitted } = lane();
+  const failure = new Error('submit failed');
+  const reservation = admission.reserveComposition();
+  const first = admitIntent(admission, { kind: 'insertText', payload: { text: 'a' } });
+  const second = admitIntent(admission, { kind: 'insertText', payload: { text: 'b' } });
+  if (first.status !== 'held' || second.status !== 'held') throw new Error('intents were not held');
+  const settled = admission.whenCompositionSettled!();
+  const submit = spyOn(admission.session, 'submit').mockImplementationOnce(() => { throw failure; });
+  try {
+    expect(admission.settleComposition(reservation.slot, null)).toEqual({ status: 'ignored', reason: 'empty-composition' });
+    await settled;
+    await expect(first.released).rejects.toBe(failure);
+    await expect(second.released).rejects.toBe(failure);
+    expect(submitted).toHaveLength(0);
+    expect(admission.getSnapshot()).toMatchObject({ heldIntents: 0, compositionSlot: null, originalUnackedIntents: 0 });
+  } finally { submit.mockRestore(); admission.dispose(); }
+});
+
+test('a throwing composition clears a refused tail after every held intent drops', async () => {
+  const { admission, submitted } = lane();
+  admitIntent(admission, { kind: 'insertText', payload: { text: 'refused' } });
+  const reservation = admission.reserveComposition();
+  const held = ['first', 'second'].map(text => admitIntent(admission, { kind: 'insertText', payload: { text } }));
+  submitted[0]!.settle({ status: 'refused', seq: 1, reason: 'stale-version' });
+  await submitted[0]!.ticket.ack;
+  expect(admission.getSnapshot()).toMatchObject({ originalUnackedIntents: 2, tail: submitted[0]!.ticket });
+  const failure = new Error('composition submit failed');
+  const submit = spyOn(admission.session, 'submit').mockImplementationOnce(() => { throw failure; });
+  try {
+    const settled = admission.whenCompositionSettled!();
+    expect(() => admission.settleComposition(reservation.slot, { text: '漢字', target: reservation.target })).toThrow(failure);
+    await settled;
+    for (const entry of held) {
+      if (entry.status !== 'held') throw new Error('intent was not held');
+      await expect(entry.released).rejects.toBe(failure);
+    }
+    expect(admission.getSnapshot()).toMatchObject({
+      originalUnackedIntents: 0, tail: undefined, echoEnabled: true, echoDisabledReason: null,
+      compositionSlot: null, heldIntents: 0,
+    });
+    const next = submitFormattingIntent(admission, { kind: 'formatRange', payload: { delta: { bold: true } } });
+    expect(next.status).toBe('submitted');
+    expect(submitted).toHaveLength(2);
+    expect(submitted[1]!.options.after).toBeUndefined();
+    submitted[1]!.settle({ status: 'applied', seq: 2 });
+    if (next.status === 'submitted') expect(await next.ticket.ack).toMatchObject({ status: 'applied' });
+    expect(admission.getSnapshot().originalUnackedIntents).toBe(0);
+  } finally { submit.mockRestore(); admission.dispose(); }
+});
+
+test('a plain submission that throws releases its own intent count and echo fence', () => {
+  for (const kind of ['insertText', 'replaceSelection'] as const) {
+    const { admission, submitted } = lane();
+    const failure = new Error('plain submit failed');
+    const submit = spyOn(admission.session, 'submit').mockImplementationOnce(() => { throw failure; });
+    try {
+      expect(() => admitIntent(admission, { kind, payload: { text: 'failed' } })).toThrow(failure);
+      expect(submitted).toHaveLength(0);
+      expect(admission.getSnapshot()).toMatchObject({
+        originalUnackedIntents: 0, tail: undefined, echoEnabled: true, echoDisabledReason: null,
+      });
+      expect(admitIntent(admission, { kind: 'insertText', payload: { text: 'next' } })).toMatchObject({
+        status: 'submitted', echoEnabled: true,
+      });
+      expect(submitted[0]!.options.after).toBeUndefined();
+    } finally { submit.mockRestore(); admission.dispose(); }
+  }
+});
+
+test('a held submission failure preserves the committed composition and drops its successors', async () => {
+  const { admission, submitted } = lane();
+  const selection = admission.viewStore.getSnapshot().workerSelection;
+  if (!selection) throw new Error('worker selection is unavailable');
+  const state = updateComposition(beginComposition(admission, 1), 'かな');
+  const first = admitIntent(admission, { kind: 'insertText', payload: { text: 'first' } });
+  const failed = admitIntent(admission, { kind: 'insertText', payload: { text: 'failed' } });
+  const last = admitIntent(admission, { kind: 'insertText', payload: { text: 'last' } });
+  if (first.status !== 'held' || failed.status !== 'held' || last.status !== 'held') throw new Error('intents were not held');
+  const failure = new Error('held submit failed');
+  const send = admission.session.submit.bind(admission.session);
+  const submit = spyOn(admission.session, 'submit').mockImplementation((kind, payload, options) => {
+    if ('text' in payload && payload.text === 'failed') throw failure;
+    return send(kind, payload, options);
+  });
+  try {
+    const settled = admission.whenCompositionSettled!();
+    const result = endComposition(admission, state, '漢字');
+    expect(result).toMatchObject({ status: 'committed', ticket: submitted[0]!.ticket,
+      state: { phase: 'committed', text: '漢字', ticket: submitted[0]!.ticket } });
+    expect(result.state.recoverableText).toBeUndefined();
+    await settled;
+    expect(await first.released).toMatchObject({ status: 'submitted', ticket: submitted[1]!.ticket });
+    await expect(failed.released).rejects.toBe(failure);
+    await expect(last.released).rejects.toBe(failure);
+    expect(submitted.map(entry => entry.payload)).toEqual([{ text: '漢字', selection }, { text: 'first' }]);
+    expect(submitted[1]!.options.after).toBe(submitted[0]!.ticket);
+    expect(admission.getSnapshot()).toMatchObject({ heldIntents: 0, compositionSlot: null, originalUnackedIntents: 2 });
+    submitted[1]!.settle({ status: 'applied', seq: 2 });
+    await submitted[1]!.ticket.ack;
+    expect(admission.getSnapshot().originalUnackedIntents).toBe(1);
+    submitted[0]!.settle({ status: 'applied', seq: 1 });
+    await submitted[0]!.ticket.ack;
+    expect(result.state.phase).toBe('committed');
+    expect(result.state.recoverableText).toBeUndefined();
+    expect(endComposition(admission, state, '漢字')).toBe(result);
+    expect(admission.getSnapshot()).toMatchObject({ originalUnackedIntents: 0, tail: undefined, echoEnabled: true });
+  } finally { submit.mockRestore(); admission.dispose(); }
+});
+
+test('a held failure after a read-only held entry releases each count once', async () => {
+  const { admission, submitted } = lane();
+  const reservation = admission.reserveComposition();
+  const ignored = admitIntent(admission, { kind: 'insertText', payload: { text: 'ignored' } });
+  const failed = admitIntent(admission, { kind: 'setRenderEnvironment', payload: { themeColors: {}, showHiddenText: true } });
+  const last = admitIntent(admission, { kind: 'setRenderEnvironment', payload: { themeColors: {}, showHiddenText: false } });
+  if (ignored.status !== 'held' || failed.status !== 'held' || last.status !== 'held') throw new Error('intents were not held');
+  const barrier = admission.setReadOnly(true);
+  const failure = new Error('environment submit failed');
+  const submit = spyOn(admission.session, 'submit').mockImplementationOnce(() => { throw failure; });
+  try {
+    expect(admission.settleComposition(reservation.slot, null)).toEqual({ status: 'ignored', reason: 'empty-composition' });
+    expect(await ignored.released).toEqual({ status: 'ignored', reason: 'read-only' });
+    await expect(failed.released).rejects.toBe(failure);
+    await expect(last.released).rejects.toBe(failure);
+    expect(submitted).toHaveLength(1);
+    expect(admission.getSnapshot()).toMatchObject({ originalUnackedIntents: 0, tail: barrier, heldIntents: 0 });
+    submitted[0]!.settle({ status: 'noop', seq: 1 });
+    await barrier.ack;
+    expect(admission.getSnapshot()).toMatchObject({ originalUnackedIntents: 0, tail: undefined, echoEnabled: true });
+  } finally { submit.mockRestore(); admission.dispose(); }
 });
 
 function lane() {
@@ -460,5 +643,21 @@ test('editing composition does not acquire a later suggesting author', () => {
   expect(submitted[0]!.payload).not.toHaveProperty('suggesting');
   admitIntent(admission, { kind: 'insertText', payload: { text: 'tracked' } });
   expect(submitted[1]!.payload).toMatchObject({ suggesting: { name: 'Writer' } });
+  admission.dispose();
+});
+
+test('suggesting mode leaves comment and object commands without text suggestion metadata', () => {
+  const { admission, submitted } = lane();
+  admission.setSuggesting!('Writer');
+  const range = { story: 'body', start: { paraId: 'p', offset: 0 }, end: { paraId: 'p', offset: 4 } };
+  const intents: PeerlessInputIntent[] = [
+    { kind: 'addComment', payload: { ranges: [range], author: 'Writer', date: '2026-01-01', body: 'Note', expectVersion: 'native' } },
+    { kind: 'resizeObject', payload: { handle: 'image', widthEmu: 9525, heightEmu: 9525, expectVersion: 'native' } },
+    { kind: 'moveObject', payload: { handle: 'image', hOffsetEmu: 0, vOffsetEmu: 0, expectVersion: 'native' } },
+  ];
+  for (const intent of intents) expect(admitIntent(admission, intent).status).toBe('submitted');
+  expect(submitted.map(entry => entry.payload)).toEqual(intents.map(intent => intent.payload));
+  admitIntent(admission, { kind: 'insertText', payload: { text: 'tracked' } });
+  expect(submitted.at(-1)!.payload).toMatchObject({ suggesting: { name: 'Writer' } });
   admission.dispose();
 });

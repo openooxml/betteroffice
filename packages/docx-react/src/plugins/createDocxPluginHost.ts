@@ -55,6 +55,8 @@ export interface DocxPluginHostAccess extends DocxPluginEditorAccess {
   translate(key: TranslationKey): string;
   /** Geometry of the layout that shows the current version, or null. */
   geometry(): DocxPluginGeometry | null;
+  /** Calls `listener` when geometry answers change within one layout, so plugin views read them again. */
+  subscribeGeometry?(listener: () => void): () => void;
 }
 
 export interface DocxPluginHost {
@@ -65,6 +67,7 @@ export interface DocxPluginHost {
   open(session: YrsSession): void;
   openWorker(version: string): void;
   workerChanged(version: string): void;
+  workerProposalsChanged(snapshot: DocxProposalSnapshot): void;
   close(reason: 'document-replaced' | 'unmounted'): void;
   generation(): string | null;
   version(): string;
@@ -144,8 +147,10 @@ function sameLayout(a: DocxPluginLayout | null, b: DocxPluginLayout | null): boo
 export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHost {
   let reporter: ((error: DocxPluginError) => void) | undefined;
   let session: YrsSession | null = null;
+  let workerProposalKey: string | null = null;
   let detachUpdates: (() => void) | null = null;
   let detachProposals: (() => void) | null = null;
+  let detachGeometry: (() => void) | null = null;
   let installed = false;
   let generations = 0;
   let commandSignature: string | null = null;
@@ -266,6 +271,10 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
     validate: definitionProblem,
     report,
   });
+
+  const observeGeometry = (): void => {
+    if (!detachGeometry) detachGeometry = access.subscribeGeometry?.(() => runtime.touch()) ?? null;
+  };
 
   const notify = (event: DocxPluginEvent): void => runtime.notify(event);
   const hasGeometry = (): boolean => {
@@ -396,21 +405,28 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       state.layout = null;
       state.selection = EMPTY_SELECTION;
       observe();
+      observeGeometry();
       generations += 1;
       runtime.open(`document-${generations}`);
     },
 
     close(reason) {
       closeSession();
+      if (reason === 'unmounted') {
+        detachGeometry?.();
+        detachGeometry = null;
+      }
       runtime.close(reason);
     },
 
     openWorker(version) {
       closeSession();
+      workerProposalKey = null;
       state.version = version;
       state.previewVersion = 0;
       state.layout = null;
       state.selection = EMPTY_SELECTION;
+      observeGeometry();
       generations += 1;
       runtime.open(`document-${generations}`);
     },
@@ -424,6 +440,22 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
         state.layout = null;
         notify({ type: 'layout-change', generation, layout: null });
       }
+    },
+
+    workerProposalsChanged(snapshot) {
+      const generation = runtime.generation();
+      const key = JSON.stringify(snapshot);
+      if (!generation || key === workerProposalKey) return;
+      workerProposalKey = key;
+      if (snapshot.version !== state.version) {
+        state.version = snapshot.version;
+        notify({ type: 'document-change', generation, version: snapshot.version });
+      }
+      state.previewVersion = snapshot.previewVersion;
+      const invalidated = state.layout && (state.layout.version !== snapshot.version || state.layout.previewVersion !== snapshot.previewVersion);
+      if (invalidated) state.layout = null;
+      notify({ type: 'proposal-change', generation, version: snapshot.version, previewVersion: snapshot.previewVersion });
+      if (invalidated) notify({ type: 'layout-change', generation, layout: null });
     },
 
     generation: () => runtime.generation(),

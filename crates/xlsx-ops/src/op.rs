@@ -160,6 +160,10 @@ pub enum Op {
     RemoveSheet {
         index: usize,
     },
+    MoveSheet {
+        from: usize,
+        to: usize,
+    },
     RenameSheet {
         sheet: SheetId,
         name: String,

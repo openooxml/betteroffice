@@ -311,6 +311,656 @@ fn part_text(parts: &BTreeMap<String, Vec<u8>>, path: &str) -> String {
     .unwrap()
 }
 
+#[test]
+fn replacing_paragraphs_preserves_properties_and_end_run_markup() {
+    let properties = r#"<a:pPr algn="r" lvl="2" marL="3000" indent="-1000"><a:lnSpc><a:spcPct val="120000"/></a:lnSpc><a:spcBef><a:spcPts val="500"/></a:spcBef><a:buNone/></a:pPr>"#;
+    let end = r#"<a:endParaRPr lang="de-DE" sz="1700"/>"#;
+    let mut source = fixture_parts(256);
+    let slide = source
+        .iter_mut()
+        .find(|(path, _)| path == "ppt/slides/slide2.xml")
+        .unwrap();
+    slide.1 = slide.1.replace("<a:p><a:r><a:t>Second</a:t></a:r></a:p>", &format!("<a:p>{properties}<a:r><a:rPr b=\"1\" lang=\"en-US\" strike=\"sngStrike\"/><a:t>Second</a:t></a:r>{end}</a:p>"));
+    let deck = DeckSession::open(&zip(source), 11).unwrap();
+    let story = deck.snapshot().unwrap().slides[1].shapes[0].text_stories[0].clone();
+    deck.set_story_paragraphs(
+        &context(),
+        &story.id,
+        &[pptx_edit::TextParagraphDraft {
+            bullet: None,
+            alignment: None,
+            runs: vec![pptx_edit::TextRunDraft {
+                text: "Replacement".into(),
+                style: story.paragraphs[0].runs[0].style.clone(),
+            }],
+        }],
+    )
+    .unwrap();
+    assert_eq!(
+        deck.story(&story.id).unwrap().paragraphs[0].id,
+        story.paragraphs[0].id
+    );
+    let xml = part_text(&parts(&deck.save().unwrap()), "ppt/slides/slide2.xml");
+    for markup in [
+        "algn=\"r\"",
+        "lvl=\"2\"",
+        "marL=\"3000\"",
+        "indent=\"-1000\"",
+        "<a:lnSpc><a:spcPct val=\"120000\"/></a:lnSpc>",
+        "<a:spcBef><a:spcPts val=\"500\"/></a:spcBef>",
+        "<a:buNone/>",
+    ] {
+        assert!(xml.contains(markup), "{markup}");
+    }
+    assert!(xml.contains("<a:endParaRPr lang=\"de-DE\" sz=\"1700\"/>"));
+    assert!(xml.contains("lang=\"en-US\""));
+    assert!(xml.contains("strike=\"sngStrike\""));
+    assert!(xml.contains("Replacement"));
+    assert!(deck.undo());
+    assert_eq!(deck.story(&story.id).unwrap(), story);
+}
+
+fn replacement_source(texts: &[&str]) -> Vec<u8> {
+    let mut source = fixture_parts(256);
+    let slide = source
+        .iter_mut()
+        .find(|(path, _)| path == "ppt/slides/slide2.xml")
+        .unwrap();
+    let paragraphs = texts
+        .iter()
+        .map(|text| format!("<a:p><a:r><a:t>{text}</a:t></a:r></a:p>"))
+        .collect::<String>();
+    slide.1 = slide
+        .1
+        .replace("<a:p><a:r><a:t>Second</a:t></a:r></a:p>", &paragraphs);
+    zip(source)
+}
+
+fn replacement_story(deck: &DeckSession) -> pptx_edit::StorySnapshot {
+    deck.snapshot().unwrap().slides[1].shapes[0].text_stories[0].clone()
+}
+
+fn replacement_drafts(texts: &[&str]) -> Vec<pptx_edit::TextParagraphDraft> {
+    texts
+        .iter()
+        .map(|text| pptx_edit::TextParagraphDraft {
+            alignment: None,
+            bullet: None,
+            runs: vec![pptx_edit::TextRunDraft {
+                text: (*text).into(),
+                style: TextStyle::default(),
+            }],
+        })
+        .collect()
+}
+
+fn snapshot_drafts(story: &pptx_edit::StorySnapshot) -> Vec<pptx_edit::TextParagraphDraft> {
+    story
+        .paragraphs
+        .iter()
+        .map(|paragraph| pptx_edit::TextParagraphDraft {
+            alignment: None,
+            bullet: None,
+            runs: paragraph
+                .runs
+                .iter()
+                .map(|run| pptx_edit::TextRunDraft {
+                    text: run.text.clone(),
+                    style: run.style.clone(),
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+fn sync_replacement_peers(a: &DeckSession, b: &DeckSession) {
+    a.apply_update_v1(&b.encode_state_as_update_v1()).unwrap();
+    b.apply_update_v1(&a.encode_state_as_update_v1()).unwrap();
+}
+
+fn undo_replacement_peers(a: &DeckSession, b: &DeckSession, b_first: bool) {
+    let (first, second) = if b_first { (b, a) } else { (a, b) };
+    assert!(first.undo());
+    second
+        .apply_update_v1(&first.encode_state_as_update_v1())
+        .unwrap();
+    assert!(second.undo());
+    first
+        .apply_update_v1(&second.encode_state_as_update_v1())
+        .unwrap();
+    second
+        .apply_update_v1(&first.encode_state_as_update_v1())
+        .unwrap();
+}
+
+#[test]
+fn story_replacement_concurrent_undos_keep_original_markers() {
+    let source = replacement_source(&["A", "B"]);
+    for (a_id, b_id) in [(11, 12), (12, 11)] {
+        for b_first in [false, true] {
+            let a = DeckSession::open(&source, a_id).unwrap();
+            let b = DeckSession::open(&source, b_id).unwrap();
+            let original = replacement_story(&a);
+            for (deck, texts) in [
+                (&a, ["First left", "First right"]),
+                (&b, ["Other left", "Other right"]),
+            ] {
+                deck.set_story_paragraphs(&context(), &original.id, &replacement_drafts(&texts))
+                    .unwrap();
+            }
+            sync_replacement_peers(&a, &b);
+            undo_replacement_peers(&a, &b, b_first);
+            let current = a.story(&original.id).unwrap();
+            assert_eq!(current, b.story(&original.id).unwrap());
+            assert_eq!(
+                current.paragraphs.len(),
+                2,
+                "clients {a_id}/{b_id}, B first {b_first}"
+            );
+            let ids = current.paragraphs.iter().map(|p| &p.id).collect::<Vec<_>>();
+            assert_eq!(
+                ids.iter().collect::<std::collections::HashSet<_>>().len(),
+                2
+            );
+            assert_eq!(
+                ids,
+                original
+                    .paragraphs
+                    .iter()
+                    .map(|p| &p.id)
+                    .collect::<Vec<_>>()
+            );
+            for deck in [&a, &b] {
+                let reopened = DeckSession::open(&deck.save().unwrap(), 13).unwrap();
+                assert_eq!(reopened.story(&original.id).unwrap().paragraphs.len(), 2);
+            }
+        }
+    }
+}
+
+#[test]
+fn story_replacement_concurrent_undos_match_text_primitives() {
+    let source = replacement_source(&["A", "B"]);
+    for (a_id, b_id) in [(11, 12), (12, 11)] {
+        for b_first in [false, true] {
+            let mut final_texts = Vec::new();
+            for primitives in [false, true] {
+                let a = DeckSession::open(&source, a_id).unwrap();
+                let b = DeckSession::open(&source, b_id).unwrap();
+                let original = replacement_story(&a);
+                for (deck, texts) in [
+                    (&a, ["First left", "First right"]),
+                    (&b, ["Other left", "Other right"]),
+                ] {
+                    if primitives {
+                        deck.set_undo_capture_mode(pptx_edit::UndoCaptureMode::Manual);
+                        deck.add_undo_barrier();
+                        for (index, text) in texts.iter().enumerate().rev() {
+                            let start = index as u32 * 2;
+                            deck.delete_text(&context(), &original.id, start, start + 1)
+                                .unwrap();
+                            deck.insert_text(
+                                &context(),
+                                &original.id,
+                                start,
+                                text,
+                                &TextStyle::default(),
+                            )
+                            .unwrap();
+                        }
+                        deck.add_undo_barrier();
+                    } else {
+                        deck.set_story_paragraphs(
+                            &context(),
+                            &original.id,
+                            &replacement_drafts(&texts),
+                        )
+                        .unwrap();
+                    }
+                }
+                sync_replacement_peers(&a, &b);
+                undo_replacement_peers(&a, &b, b_first);
+                let current = a.story(&original.id).unwrap();
+                assert_eq!(current, b.story(&original.id).unwrap());
+                final_texts.push(current.plain_text());
+            }
+            assert_eq!(
+                final_texts[0], final_texts[1],
+                "clients {a_id}/{b_id}, B first {b_first}"
+            );
+        }
+    }
+}
+
+#[test]
+fn story_replacement_preserves_surviving_paragraph_ids() {
+    for (old, new, survivors) in [
+        (
+            vec!["A", "B", "C"],
+            vec!["A", "X", "C"],
+            vec![(0, 0), (1, 1), (2, 2)],
+        ),
+        (
+            vec!["A", "B", "C", "D"],
+            vec!["A", "C", "D"],
+            vec![(0, 0), (2, 1), (3, 2)],
+        ),
+        (
+            vec!["A", "B", "C"],
+            vec!["A", "X", "B", "C"],
+            vec![(0, 0), (1, 2), (2, 3)],
+        ),
+    ] {
+        let deck = DeckSession::open(&replacement_source(&old), 11).unwrap();
+        let original = replacement_story(&deck);
+        let current = deck
+            .set_story_paragraphs(&context(), &original.id, &replacement_drafts(&new))
+            .unwrap();
+        assert_eq!(current.plain_text(), new.join("\n"));
+        assert_eq!(current.paragraphs.len(), new.len());
+        for (before, after) in survivors {
+            assert_eq!(current.paragraphs[after].id, original.paragraphs[before].id);
+            if old[before] == new[after] {
+                assert_eq!(current.paragraphs[after], original.paragraphs[before]);
+            }
+        }
+    }
+}
+
+#[test]
+fn story_replacement_noop_preserves_version_history_and_remote() {
+    let source = replacement_source(&["A😀B", "Second"]);
+    for (a_id, b_id) in [(11, 12), (12, 11)] {
+        for existing_history in [false, true] {
+            let a = DeckSession::open(&source, a_id).unwrap();
+            let b = DeckSession::open(&source, b_id).unwrap();
+            let story = replacement_story(&a);
+            if existing_history {
+                a.insert_text(&context(), &story.id, 0, "!", &TextStyle::default())
+                    .unwrap();
+                sync_replacement_peers(&a, &b);
+            }
+            let original = a.story(&story.id).unwrap();
+            let version = a.version();
+            let can_undo = a.can_undo();
+            let update = a.encode_state_as_update_v1();
+            let remote_version = b.version();
+            assert_eq!(
+                a.set_story_paragraphs(&context(), &story.id, &snapshot_drafts(&original))
+                    .unwrap(),
+                original
+            );
+            assert_eq!(a.version(), version);
+            assert_eq!(a.can_undo(), can_undo);
+            assert_eq!(a.encode_state_as_update_v1(), update);
+            b.apply_update_v1(&a.encode_state_as_update_v1()).unwrap();
+            assert_eq!(b.version(), remote_version);
+            assert_eq!(b.story(&story.id).unwrap(), original);
+        }
+    }
+}
+
+#[test]
+fn story_replacement_ignores_empty_runs_and_equal_run_boundaries() {
+    let deck = DeckSession::open(&replacement_source(&["A😀B", "Second"]), 11).unwrap();
+    let original = replacement_story(&deck);
+    let mut drafts = snapshot_drafts(&original);
+    drafts[0].runs = vec![
+        pptx_edit::TextRunDraft {
+            text: "A".into(),
+            style: TextStyle::default(),
+        },
+        pptx_edit::TextRunDraft {
+            text: String::new(),
+            style: TextStyle {
+                bold: Some(true),
+                ..TextStyle::default()
+            },
+        },
+        pptx_edit::TextRunDraft {
+            text: "😀B".into(),
+            style: TextStyle::default(),
+        },
+    ];
+    let version = deck.version();
+    assert_eq!(
+        deck.set_story_paragraphs(&context(), &original.id, &drafts)
+            .unwrap(),
+        original
+    );
+    assert_eq!(deck.version(), version);
+    assert!(!deck.can_undo());
+}
+
+#[test]
+fn story_replacement_keeps_concurrent_insertions_in_untouched_text() {
+    for (old, new, kept) in [
+        (vec!["Alpha😀end", "Beta"], vec!["Alpha😀end", "X"], vec![0]),
+        (
+            vec!["Alpha😀end", "Beta"],
+            vec!["Alpha😀end", "Beta", "C"],
+            vec![0, 1],
+        ),
+        (
+            vec!["Alpha😀end", "Beta", "C"],
+            vec!["Alpha😀end", "Beta"],
+            vec![0, 1],
+        ),
+    ] {
+        for (a_id, b_id) in [(11, 12), (12, 11)] {
+            for &index in &kept {
+                let source = replacement_source(&old);
+                let a = DeckSession::open(&source, a_id).unwrap();
+                let b = DeckSession::open(&source, b_id).unwrap();
+                let original = replacement_story(&a);
+                let start = if index == 0 { 0 } else { 11 };
+                a.insert_text(
+                    &context(),
+                    &original.id,
+                    start + 2,
+                    "!",
+                    &TextStyle::default(),
+                )
+                .unwrap();
+                let expected = a.story(&original.id).unwrap().paragraphs[index]
+                    .runs
+                    .clone();
+                let mut drafts = replacement_drafts(&new);
+                drafts[0].runs = snapshot_drafts(&original)[0].runs.clone();
+                b.set_story_paragraphs(&context(), &original.id, &drafts)
+                    .unwrap();
+                sync_replacement_peers(&a, &b);
+                let current = a.story(&original.id).unwrap();
+                assert_eq!(current, b.story(&original.id).unwrap());
+                assert_eq!(current.paragraphs[index].runs, expected);
+                let mut expected_texts = new
+                    .iter()
+                    .map(|text| (*text).to_owned())
+                    .collect::<Vec<_>>();
+                expected_texts[index].insert(2, '!');
+                assert_eq!(current.plain_text(), expected_texts.join("\n"));
+            }
+        }
+    }
+}
+
+#[test]
+fn story_replacement_keeps_concurrent_formatting_in_untouched_text() {
+    let source = replacement_source(&["Alpha😀end", "Beta"]);
+    for (a_id, b_id) in [(11, 12), (12, 11)] {
+        let a = DeckSession::open(&source, a_id).unwrap();
+        let b = DeckSession::open(&source, b_id).unwrap();
+        let original = replacement_story(&a);
+        a.format_text(
+            &context(),
+            &original.id,
+            1,
+            3,
+            &pptx_edit::TextStylePatch {
+                bold: Some(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let expected = a.story(&original.id).unwrap().paragraphs[0].clone();
+        let mut drafts = snapshot_drafts(&original);
+        drafts[1] = replacement_drafts(&["X"]).remove(0);
+        b.set_story_paragraphs(&context(), &original.id, &drafts)
+            .unwrap();
+        sync_replacement_peers(&a, &b);
+        let current = a.story(&original.id).unwrap();
+        assert_eq!(current, b.story(&original.id).unwrap());
+        assert_eq!(current.paragraphs[0], expected);
+        assert_eq!(current.paragraphs[1].runs[0].text, "X");
+    }
+}
+
+#[test]
+fn story_replacement_single_undo_and_redo_restore_exact_snapshots() {
+    for (old, new) in [
+        (vec!["A", "B", "C"], vec!["A", "X", "C"]),
+        (vec!["A", "B", "C", "D"], vec!["A", "C", "D"]),
+        (vec!["A", "B", "C"], vec!["A", "X", "B", "C"]),
+        (vec!["A", "B"], vec!["A", "B", "C"]),
+        (vec!["A", "B", "C"], vec!["A", "B"]),
+    ] {
+        let deck = DeckSession::open(&replacement_source(&old), 11).unwrap();
+        let original = replacement_story(&deck);
+        let replaced = deck
+            .set_story_paragraphs(&context(), &original.id, &replacement_drafts(&new))
+            .unwrap();
+        assert!(deck.undo());
+        assert_eq!(deck.story(&original.id).unwrap(), original);
+        assert!(!deck.can_undo());
+        assert!(deck.redo());
+        assert_eq!(deck.story(&original.id).unwrap(), replaced);
+    }
+}
+
+#[test]
+fn story_replacement_keeps_styled_prefix_and_suffix_characters() {
+    let source = replacement_source(&["ab😀OLD🚀yz", "Last"]);
+    for (a_id, b_id) in [(11, 12), (12, 11)] {
+        let a = DeckSession::open(&source, a_id).unwrap();
+        let b = DeckSession::open(&source, b_id).unwrap();
+        let original = replacement_story(&a);
+        a.insert_text(&context(), &original.id, 1, "!", &TextStyle::default())
+            .unwrap();
+        a.format_text(
+            &context(),
+            &original.id,
+            10,
+            12,
+            &pptx_edit::TextStylePatch {
+                bold: Some(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut drafts = snapshot_drafts(&original);
+        drafts[0].runs = vec![
+            pptx_edit::TextRunDraft {
+                text: "ab😀".into(),
+                style: TextStyle::default(),
+            },
+            pptx_edit::TextRunDraft {
+                text: "NEW".into(),
+                style: TextStyle {
+                    bold: Some(true),
+                    ..Default::default()
+                },
+            },
+            pptx_edit::TextRunDraft {
+                text: "🚀yz".into(),
+                style: TextStyle::default(),
+            },
+        ];
+        b.set_story_paragraphs(&context(), &original.id, &drafts)
+            .unwrap();
+        sync_replacement_peers(&a, &b);
+        let current = a.story(&original.id).unwrap();
+        assert_eq!(current, b.story(&original.id).unwrap());
+        assert_eq!(current.plain_text(), "a!b😀NEW🚀yz\nLast");
+        assert_eq!(
+            current.paragraphs[0].runs,
+            vec![
+                pptx_edit::TextRunSnapshot {
+                    text: "a!b😀".into(),
+                    style: TextStyle::default(),
+                },
+                pptx_edit::TextRunSnapshot {
+                    text: "NEW".into(),
+                    style: TextStyle {
+                        bold: Some(true),
+                        ..Default::default()
+                    },
+                },
+                pptx_edit::TextRunSnapshot {
+                    text: "🚀".into(),
+                    style: TextStyle::default(),
+                },
+                pptx_edit::TextRunSnapshot {
+                    text: "yz".into(),
+                    style: TextStyle {
+                        bold: Some(true),
+                        ..Default::default()
+                    },
+                },
+            ]
+        );
+    }
+}
+
+#[test]
+fn story_replacement_templates_preserve_distinct_paragraph_properties() {
+    let mut source = fixture_parts(256);
+    let slide = source
+        .iter_mut()
+        .find(|(path, _)| path == "ppt/slides/slide2.xml")
+        .unwrap();
+    let xml = [
+        r#"<a:p><a:pPr algn="l" lvl="1" marL="1000"><a:buNone/></a:pPr><a:r><a:t>A</a:t></a:r><a:endParaRPr sz="1100"/></a:p>"#,
+        r#"<a:p><a:pPr algn="r" lvl="2" marL="2000"><a:buChar char="*"/></a:pPr><a:r><a:t>B</a:t></a:r><a:endParaRPr sz="2200"/></a:p>"#,
+        r#"<a:p><a:pPr algn="ctr" lvl="3" marL="3000"><a:buChar char="+"/></a:pPr><a:r><a:t>C</a:t></a:r><a:endParaRPr sz="3300"/></a:p>"#,
+    ];
+    slide.1 = slide
+        .1
+        .replace("<a:p><a:r><a:t>Second</a:t></a:r></a:p>", &xml.join(""));
+    let source = zip(source);
+    for (texts, templates) in [
+        (vec!["A", "X", "B", "C"], vec![0, 0, 1, 2]),
+        (vec!["X", "A", "B", "C"], vec![0, 0, 1, 2]),
+        (vec!["A", "B", "C", "D"], vec![0, 1, 2, 2]),
+        (vec!["A", "B"], vec![0, 1]),
+        (vec!["A"], vec![0]),
+        (vec!["C"], vec![2]),
+    ] {
+        let deck = DeckSession::open(&source, 11).unwrap();
+        let original = replacement_story(&deck);
+        let current = deck
+            .set_story_paragraphs(&context(), &original.id, &replacement_drafts(&texts))
+            .unwrap();
+        assert_eq!(current.plain_text(), texts.join("\n"));
+        for (paragraph, &template) in current.paragraphs.iter().zip(&templates) {
+            let expected = &original.paragraphs[template];
+            assert_eq!(paragraph.level, expected.level);
+            assert_eq!(paragraph.alignment, expected.alignment);
+            assert_eq!(paragraph.bullet_json, expected.bullet_json);
+        }
+        let saved = deck.save().unwrap();
+        let slide = part_text(&parts(&saved), "ppt/slides/slide2.xml");
+        for index in 0..3 {
+            let count = templates
+                .iter()
+                .filter(|&&template| template == index)
+                .count();
+            assert_eq!(
+                slide.matches(&format!("marL=\"{}000\"", index + 1)).count(),
+                count
+            );
+            assert_eq!(
+                slide
+                    .matches(&format!("<a:endParaRPr sz=\"{}00\"/>", (index + 1) * 11))
+                    .count(),
+                count
+            );
+        }
+        let reopened = DeckSession::open(&saved, 12).unwrap();
+        let reopened = reopened.story(&original.id).unwrap();
+        assert_eq!(reopened.plain_text(), current.plain_text());
+        for (paragraph, expected) in reopened.paragraphs.iter().zip(&current.paragraphs) {
+            assert_eq!(paragraph.level, expected.level);
+            assert_eq!(paragraph.alignment, expected.alignment);
+            assert_eq!(paragraph.bullet_json, expected.bullet_json);
+        }
+        assert!(deck.undo());
+        assert_eq!(deck.story(&original.id).unwrap(), original);
+        assert!(deck.redo());
+        assert_eq!(deck.story(&original.id).unwrap(), current);
+    }
+}
+
+#[test]
+fn concurrent_paragraph_replacements_keep_unique_ids_and_formatting_through_history() {
+    let properties = r#"<a:pPr algn="r" lvl="2" marL="3000" indent="-1000"><a:spcBef><a:spcPts val="500"/></a:spcBef><a:buNone/></a:pPr>"#;
+    let end = r#"<a:endParaRPr lang="de-DE" sz="1700"/>"#;
+    let mut source = fixture_parts(256);
+    let slide = source
+        .iter_mut()
+        .find(|(path, _)| path == "ppt/slides/slide2.xml")
+        .unwrap();
+    slide.1 = slide.1.replace("<a:p><a:r><a:t>Second</a:t></a:r></a:p>", &format!("<a:p>{properties}<a:r><a:rPr b=\"1\" lang=\"en-US\" strike=\"sngStrike\"/><a:t>Second</a:t></a:r>{end}</a:p>"));
+    let source = zip(source);
+    let first = DeckSession::open(&source, 11).unwrap();
+    let second = DeckSession::open(&source, 12).unwrap();
+    let story = first.snapshot().unwrap().slides[1].shapes[0].text_stories[0].clone();
+    for (deck, text) in [
+        (&first, "First replacement"),
+        (&second, "Second replacement"),
+    ] {
+        deck.set_story_paragraphs(
+            &context(),
+            &story.id,
+            &[pptx_edit::TextParagraphDraft {
+                bullet: None,
+                alignment: None,
+                runs: vec![pptx_edit::TextRunDraft {
+                    text: text.into(),
+                    style: story.paragraphs[0].runs[0].style.clone(),
+                }],
+            }],
+        )
+        .unwrap();
+    }
+    first
+        .apply_update_v1(&second.encode_state_as_update_v1())
+        .unwrap();
+    second
+        .apply_update_v1(&first.encode_state_as_update_v1())
+        .unwrap();
+    assert_eq!(
+        first.story(&story.id).unwrap(),
+        second.story(&story.id).unwrap()
+    );
+    let check = |deck: &DeckSession| {
+        let current = deck.story(&story.id).unwrap();
+        let ids: std::collections::HashSet<_> = current.paragraphs.iter().map(|p| &p.id).collect();
+        assert_eq!(ids.len(), current.paragraphs.len());
+        let xml = part_text(&parts(&deck.save().unwrap()), "ppt/slides/slide2.xml");
+        for markup in [
+            "algn=\"r\"",
+            "marL=\"3000\"",
+            "indent=\"-1000\"",
+            end,
+            "lang=\"en-US\"",
+            "strike=\"sngStrike\"",
+        ] {
+            if markup == "lang=\"en-US\"" || markup == "strike=\"sngStrike\"" {
+                assert!(
+                    xml.matches(markup).count() >= current.paragraphs.len(),
+                    "{markup}"
+                );
+            } else {
+                assert_eq!(
+                    xml.matches(markup).count(),
+                    current.paragraphs.len(),
+                    "{markup}"
+                );
+            }
+        }
+    };
+    check(&first);
+    check(&second);
+    assert!(first.undo());
+    check(&first);
+    assert!(first.redo());
+    check(&first);
+    second
+        .apply_update_v1(&first.encode_state_as_update_v1())
+        .unwrap();
+    check(&second);
+}
+
 /// Every internal relationship in every .rels part must resolve to a part.
 fn assert_relationships_resolve(parts: &BTreeMap<String, Vec<u8>>) {
     for (path, bytes) in parts {
@@ -2287,4 +2937,93 @@ fn picture_insertion_preserves_prefixed_metadata_and_exhausted_numeric_names() {
         saved_parts["ppt/media/image18446744073709551615.png"],
         b"existing"
     );
+}
+
+#[test]
+fn concurrent_replacements_keep_terminal_marker() {
+    let properties = r#"<a:pPr algn="r" lvl="2" marL="3000" indent="-1000"><a:spcBef><a:spcPts val="500"/></a:spcBef><a:buNone/></a:pPr>"#;
+    let end = r#"<a:endParaRPr lang="de-DE" sz="1700"/>"#;
+    let mut source = fixture_parts(256);
+    let slide = source
+        .iter_mut()
+        .find(|(path, _)| path == "ppt/slides/slide2.xml")
+        .unwrap();
+    let paragraph = format!(
+        "<a:p>{properties}<a:r><a:rPr b=\"1\" lang=\"en-US\" strike=\"sngStrike\"/><a:t>Source</a:t></a:r>{end}</a:p>"
+    );
+    slide.1 = slide.1.replace(
+        "<a:p><a:r><a:t>Second</a:t></a:r></a:p>",
+        &paragraph.repeat(2),
+    );
+    let source = zip(source);
+    for (a_id, b_id) in [(11, 12), (12, 11)] {
+        for (a_count, b_count) in [(1, 2), (2, 1), (1, 3), (3, 2), (3, 3)] {
+            let a = DeckSession::open(&source, a_id).unwrap();
+            let b = DeckSession::open(&source, b_id).unwrap();
+            let story = a.snapshot().unwrap().slides[1].shapes[0].text_stories[0].clone();
+            for (deck, count, prefix) in [(&a, a_count, "A"), (&b, b_count, "B")] {
+                let paragraphs = (0..count)
+                    .map(|index| pptx_edit::TextParagraphDraft {
+                        bullet: None,
+                        alignment: None,
+                        runs: vec![pptx_edit::TextRunDraft {
+                            text: format!("{prefix} replacement {index}"),
+                            style: story.paragraphs[0].runs[0].style.clone(),
+                        }],
+                    })
+                    .collect::<Vec<_>>();
+                deck.set_story_paragraphs(&context(), &story.id, &paragraphs)
+                    .unwrap();
+            }
+            let a_update = a.encode_state_as_update_v1();
+            let b_update = b.encode_state_as_update_v1();
+            let a_result = a.apply_update_v1(&b_update);
+            let b_result = b.apply_update_v1(&a_update);
+            assert!(a_result.is_ok(), "A: {a_result:?}");
+            assert!(b_result.is_ok(), "B: {b_result:?}");
+            assert_eq!(a.story(&story.id).unwrap(), b.story(&story.id).unwrap());
+            let merged_text = a.story(&story.id).unwrap().plain_text();
+            for (count, prefix) in [(a_count, "A"), (b_count, "B")] {
+                for index in 0..count {
+                    assert!(merged_text.contains(&format!("{prefix} replacement {index}")));
+                }
+            }
+            let check = |deck: &DeckSession| {
+                let current = deck.story(&story.id).unwrap();
+                let ids = current
+                    .paragraphs
+                    .iter()
+                    .map(|p| &p.id)
+                    .collect::<std::collections::HashSet<_>>();
+                assert_eq!(ids.len(), current.paragraphs.len());
+                assert_eq!(
+                    current.paragraphs.last().unwrap().id,
+                    story.paragraphs.last().unwrap().id
+                );
+                let xml = part_text(&parts(&deck.save().unwrap()), "ppt/slides/slide2.xml");
+                for markup in ["algn=\"r\"", "marL=\"3000\"", "indent=\"-1000\"", end] {
+                    assert_eq!(
+                        xml.matches(markup).count(),
+                        current.paragraphs.len(),
+                        "{markup}, counts {a_count}/{b_count}"
+                    );
+                }
+                for markup in ["lang=\"en-US\"", "strike=\"sngStrike\""] {
+                    assert!(
+                        xml.matches(markup).count() >= current.paragraphs.len(),
+                        "{markup}"
+                    );
+                }
+            };
+            check(&a);
+            check(&b);
+            assert!(a.undo());
+            check(&a);
+            assert!(a.redo());
+            check(&a);
+            b.apply_update_v1(&a.encode_state_as_update_v1()).unwrap();
+            check(&b);
+            assert_eq!(a.story(&story.id).unwrap(), b.story(&story.id).unwrap());
+        }
+    }
 }
