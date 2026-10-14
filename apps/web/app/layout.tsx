@@ -43,7 +43,6 @@ export const metadata: Metadata = {
     "headless document processing",
     "Rust",
     "WebAssembly",
-    "eigenpal alternative",
   ],
   openGraph: {
     type: "website",
