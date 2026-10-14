@@ -74,7 +74,7 @@ function sliceFixture(fragment: DocxClipboardFragment | null) {
 
 test('copy with a fragment writes both types through writeSlice', async () => {
   const { binding, readSelection } = fixture();
-  const fragment = {
+  const fragment: DocxClipboardFragment = {
     paragraphs: [{
       tables: [{
         tblPr: { width: 9360, widthType: 'dxa' },
