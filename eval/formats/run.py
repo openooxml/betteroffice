@@ -242,7 +242,7 @@ def referenced_paths(text):
 def path_violation(text, workspace):
     names = re.finditer(r'(?<![\w.-])(?:check\.py|validate-checkers\.py|tasks\.json|fixtures\.json)(?![\w.-])', text)
     if any(not (workspace / match[0]).is_file() for match in names) or \
-            re.search(r'''\beval[/\\]+[^\s/'"\\]|\beval\.formats\b|\b(?:from|import)\s+eval\b''', text):
+            re.search(r'''\beval[/\\]|\beval\.formats\b|\b(?:from|import)\s+eval\b''', text):
         return 'forbidden path access: evaluation sources or task metadata'
     expansions = {'HOME': str(Path.home()), 'PWD': str(workspace)}
     text = re.sub(r'\$(?:\{(HOME|PWD)\}|(HOME|PWD)\b)', lambda match: expansions[match[1] or match[2]], text)
