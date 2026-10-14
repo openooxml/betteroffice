@@ -60,6 +60,11 @@ interface SelectionReads {
 
 const selectionReads = new WeakMap<ResidentDocxCommandEngine, SelectionReads>();
 
+export function releaseResidentSelectionReads(engine: ResidentDocxCommandEngine): void {
+  for (const queries of selectionReads.get(engine)?.queries.values() ?? []) queries.dispose();
+  selectionReads.delete(engine);
+}
+
 function readsFor(engine: ResidentDocxCommandEngine): SelectionReads {
   const reader = engine.geometryReader;
   const version = reader.version();

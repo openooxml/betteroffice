@@ -1,4 +1,4 @@
-import { expect, spyOn, test } from 'bun:test';
+import { afterEach, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import * as queryModule from '../layout/render/displayListQueries';
 import type { DisplayPage } from '../layout/render/displayList';
@@ -7,8 +7,15 @@ import { FRAME_DELTA_VERSION, retainedFramePageById, type RetainedFrame } from '
 import { loadRustDisplayListQueryEngine, type RustDisplayListQueryEngine } from '../layout/render/rustDisplayList';
 import type { YrsLoc, YrsStorySegment } from './index';
 import { createResidentDocxCommandHooks } from './residentCommandActions';
+import { releaseResidentSelectionReads } from './residentCommandSelection';
 import { ResidentSessionFonts } from './residentFontEnvironment';
 import type { DocxCommandApplyContext, DocxCommandEnvelope, DocxCommandIntent, ResidentCommandHooks, ResidentCommandHooksFactory, ResidentCommandHostOptions, ResidentCommandInitRequest } from './residentCommandProtocol';
+
+const releasesAfterTest: (() => void)[] = [];
+
+afterEach(() => {
+  for (const release of releasesAfterTest.splice(0)) release();
+});
 
 function splitRowWorker(direction: 'up' | 'down', queryEngine?: RustDisplayListQueryEngine, boundary?: 'cold' | 'warm', malformedTable: boolean | 'anonymous' = false, options: { caretPage?: number; malformedNeighbour?: boolean; warmCaret?: boolean; trailingEnd?: number; caretHint?: 'missing' | 'misleading'; productionHooks?: boolean } = {}) {
   const focus: YrsLoc = { story: boundary ? 'body' : 'body:t0:r0c0', paraId: boundary ? 'wrapped' : 'cell', offset: 20 };
@@ -123,7 +130,7 @@ function splitRowWorker(direction: 'up' | 'down', queryEngine?: RustDisplayListQ
     commandHooksFactory: factory,
     init: { epoch: 1, readOnly: false, layoutWithRegions: true, layoutInput: '{}', extras: '{}' } as ResidentCommandInitRequest,
     retainedFrame: frame, retainedLayoutVersion: null, layoutRevision: 0, commandFrameChanges: null,
-    commandInit: null, commandHost: null,
+    commandInit: null, commandHost: null, releaseCommandHost: null, releaseResidentSelectionReads,
     createResidentCommandHost: (options: ResidentCommandHostOptions) => options.hooks,
     displayPositionIndex: () => ({ positionOf: (at: YrsLoc, root: string) => {
       expect(at).toEqual(focus);
@@ -172,8 +179,9 @@ function splitRowWorker(direction: 'up' | 'down', queryEngine?: RustDisplayListQ
   };
   const worker = new Function(...Object.keys(dependencies),
     new Bun.Transpiler({ loader: 'ts' }).transformSync(binding) +
-    '\nlet hooks = bindResidentCommands(init); return { get hooks() { return hooks; }, rebind: () => { hooks = bindResidentCommands(init); }, changes: commandFrameChanges, install: (frame) => { retainedFrame = frame; } };'
-  )(...Object.values(dependencies)) as { hooks: ResidentCommandHooks; rebind(): void; changes: { pages: Set<number> }; install(frame: RetainedFrame): void };
+    '\nlet hooks = bindResidentCommands(init); return { get hooks() { return hooks; }, rebind: () => { hooks = bindResidentCommands(init); }, release: () => { releaseCommandHost?.(); releaseCommandHost = null; }, changes: commandFrameChanges, install: (frame) => { retainedFrame = frame; } };'
+  )(...Object.values(dependencies)) as { hooks: ResidentCommandHooks; rebind(): void; release(): void; changes: { pages: Set<number> }; install(frame: RetainedFrame): void };
+  releasesAfterTest.push(worker.release);
   return {
     builds, releases, queryFrames, navigationQueryFrames, caretHints, focus, caretPage, neighbour, position, changes: worker.changes,
     frame: () => read!,
