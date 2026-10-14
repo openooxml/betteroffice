@@ -6,7 +6,9 @@ import {
   BUNDLED_FONTS,
   createFontProvider,
   loadBundledFontBytes,
+  maxDigitWidth,
   resolveBundledFamilyFace,
+  resolveDigitAdvance,
   resolveLastResortFace,
   resolveMetricCompatFace,
   resolveMetricCompatFamily,
@@ -71,6 +73,84 @@ describe('resolution', () => {
     expect(resolveLastResortFace('Trebuchet MS', false, false).file).toBe('Carlito-Regular.ttf');
     expect(resolveLastResortFace('Gill Sans MT', false, false).file).toBe('Carlito-Regular.ttf');
   });
+
+  test('a width-matched substitute keeps the digit advance of the family it draws', () => {
+    expect(resolveDigitAdvance('Verdana')).toBe(0.636);
+    expect(resolveDigitAdvance(' VERDANA ')).toBe(0.636);
+    expect(resolveDigitAdvance('Calibri')).toBeUndefined();
+    expect(resolveDigitAdvance('Trebuchet MS')).toBeUndefined();
+  });
+
+  test('the max digit width counts a substituted family in its own digits', () => {
+    const montserrat: Record<string, number> = {
+      0: 0.662, 1: 0.361, 2: 0.568, 3: 0.564, 4: 0.661,
+      5: 0.566, 6: 0.609, 7: 0.589, 8: 0.638, 9: 0.609,
+    };
+    const drawn = (em: Record<string, number>, sizePx: number) => (digit: string) =>
+      em[digit] * sizePx;
+    expect(maxDigitWidth('Verdana', 10, drawn(montserrat, 10))).toBe(6);
+    expect(maxDigitWidth('Verdana', 40 / 3, drawn(montserrat, 40 / 3))).toBe(8);
+  });
+
+  test('the max digit width respects a bold Normal font', () => {
+    expect(maxDigitWidth('Verdana', 10, () => 8, true, false)).toBe(7);
+    expect(resolveDigitAdvance('Verdana', true, false)).toBe(0.711);
+  });
+
+  test('the digit advance respects italic and bold italic styles', () => {
+    expect(maxDigitWidth('Verdana', 10, () => 8, false, true)).toBe(6);
+    expect(resolveDigitAdvance('Verdana', false, true)).toBe(0.636);
+    expect(maxDigitWidth('Verdana', 10, () => 8, true, true)).toBe(7);
+    expect(resolveDigitAdvance(' VERDANA ', true, true)).toBe(0.711);
+  });
+
+  test('unrecorded digit advances measure the widest digit', () => {
+    const measure = (digit: string) => digit === '8' ? 7.5 : 6.4;
+    expect(maxDigitWidth('Calibri', 10, measure)).toBe(8);
+    expect(maxDigitWidth('Calibri', 10, measure, true, true)).toBe(8);
+    expect(resolveDigitAdvance('Calibri', true, true)).toBeUndefined();
+  });
+
+  test('unrecorded digit advances round half pixels up', () => {
+    const measure = (digit: string) => digit === '8' ? 6.5 : 6.4;
+    expect(maxDigitWidth('Calibri', 10, measure)).toBe(7);
+  });
+
+  for (const family of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) {
+    test(`${family} has no recorded digit advance`, () => {
+      for (const bold of [false, true]) {
+        for (const italic of [false, true]) {
+          expect(resolveDigitAdvance(family, bold, italic)).toBeUndefined();
+        }
+      }
+    });
+
+    test(`${family} measures every digit for its max width`, () => {
+      for (const bold of [false, true]) {
+        for (const italic of [false, true]) {
+          const measured: string[] = [];
+          const measure = (digit: string) => {
+            measured.push(digit);
+            return digit === '8' ? 7.5 : 6.4;
+          };
+          expect(maxDigitWidth(family, 10, measure, bold, italic)).toBe(8);
+          expect(measured.join('')).toBe('0123456789');
+        }
+      }
+    });
+
+    test(`${family} resolves to the unknown-family fallback`, () => {
+      for (const office of ['powerpoint', 'word'] as const) {
+        for (const bold of [false, true]) {
+          for (const italic of [false, true]) {
+            expect(resolveLastResortFace(family, bold, italic, office)).toBe(
+              resolveLastResortFace('Unknown Family', bold, italic, office),
+            );
+          }
+        }
+      }
+    });
+  }
 
   test('a trailing light weight on a known family outranks the bold flag', () => {
     expect(resolveLastResortFace('Calibri Light', true, false).file).toBe('Carlito-Regular.ttf');
