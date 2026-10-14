@@ -97,7 +97,7 @@ function setup(realPainter = false, makeCanvas?: (item: typeof page) => HTMLCanv
     disable() {}, dispose() {},
   };
   const presentation = createFramePresentation({ viewStore: store, echoPainter: painter,
-    canvasForPage, requestFullFrame() { events.push('full'); },
+    canvasForPage, requestFullFrame() { events.push('full'); }, onError(error) { events.push(`error:${error.message}`); },
     prepareGeometry(candidate): PeerlessFrameGeometry { return { identity: snapshot.identity,
       coversThroughSeq: candidate.coversThroughSeq, frameEpoch: candidate.revision,
       layoutRevision: candidate.payload.layoutRevision, pages: geometryPages.map((page) => ({ page,
@@ -315,6 +315,58 @@ test('d2c_delta_mismatch_retains_echo_and_requests_full_frame', () => {
     expect(store.getSnapshot().presentedThroughSeq).toBe(0);
     expect(reconciled.length).toBe(1);
   }
+});
+
+const stalled = 'Full frame responses did not satisfy requested coverage and revision';
+
+function lossyCanvas(state: { lost: boolean }): HTMLCanvasElement {
+  const ctx = { save() {}, restore() {}, setTransform() {}, clearRect() {}, drawImage() {} };
+  return { width: 100, height: 20, getContext: () => state.lost ? null : ctx } as unknown as HTMLCanvasElement;
+}
+
+test('a presentation that keeps failing re-requests twice, reports once and stops requesting', () => {
+  const { presentation, events } = setup(false, () => lossyCanvas({ lost: true }));
+  let revision = 0;
+  do expect(presentation.present(frame(++revision, 0), [], [])).toBe(false);
+  while (events.at(-1) === 'full' && revision < 20);
+  expect(events).toEqual(['full', 'full', `error:${stalled}`]);
+  expect(presentation.present(frame(++revision, 0), [], [])).toBe(false);
+  expect(events).toEqual(['full', 'full', `error:${stalled}`]);
+});
+
+test('a stalled presentation re-arms one request on invalidation and recovers on the next installable frame', () => {
+  for (const clear of ['invalidate', 'frame'] as const) {
+    const state = { lost: true };
+    const { presentation, events } = setup(false, () => lossyCanvas(state));
+    let revision = 0;
+    do presentation.present(frame(++revision, 0), [], []);
+    while (events.at(-1) === 'full' && revision < 20);
+    expect(events.at(-1)).toBe(`error:${stalled}`);
+    events.length = 0;
+    presentation.invalidate();
+    expect(presentation.present(frame(++revision, 0), [], [])).toBe(false);
+    expect(events).toEqual(['full']);
+    state.lost = false;
+    events.length = 0;
+    if (clear === 'invalidate') presentation.invalidate();
+    expect(events).toEqual(clear === 'invalidate' ? ['full'] : []);
+    expect(presentation.present(frame(++revision, 1), [], [])).toBe(true);
+    events.length = 0;
+    presentation.invalidate();
+    state.lost = true;
+    expect(presentation.present(frame(++revision, 1), [], [])).toBe(false);
+    expect(events).toEqual(['full']);
+  }
+});
+
+test('transient failures each re-request one full frame and recover without a report', () => {
+  const { presentation, events } = setup();
+  expect(presentation.present(frame(1, 0), [], [])).toBe(true);
+  for (let revision = 2; revision < 8; revision += 2) {
+    expect(presentation.present(frame(revision, 0, 99), [], [])).toBe(false);
+    expect(presentation.present(frame(revision + 1, 0), [], [])).toBe(true);
+  }
+  expect(events.filter((event) => event === 'full' || event.startsWith('error:'))).toEqual(['full', 'full', 'full']);
 });
 
 test('d2c_new_revision_at_same_coverage_installs_without_extra_retirement', () => {

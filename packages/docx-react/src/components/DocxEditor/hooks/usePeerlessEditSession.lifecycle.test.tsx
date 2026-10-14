@@ -80,6 +80,31 @@ test('unmounting during connection open releases the unused initial frame', asyn
   expect(dispose).toHaveBeenCalledTimes(1);
 });
 
+test('a presentation that keeps failing stops requesting frames, reports once and re-arms on viewport changes', async () => {
+  const { connection, options } = resident();
+  let calls = 0;
+  const request = mock(() => ++calls > 8 ? new Promise<DocxCommandAck>(() => {})
+    : Promise.resolve({ ...connection.initial, frame: stagedFrame() }));
+  connection.requestFullFrame = request;
+  const onError = mock((_error: Error) => {});
+  const view = renderHook(() => usePeerlessEditSession({ ...options, onError }));
+  const settle = () => act(async () => { await new Promise<void>((resolve) => setImmediate(resolve)); });
+  await waitFor(() => expect(view.result.current.status).toBe('ready'));
+  await settle();
+  expect(request).toHaveBeenCalledTimes(2);
+  expect(onError.mock.calls.map(([error]) => error.message))
+    .toEqual(['Full frame responses did not satisfy requested coverage and revision']);
+  const binding = view.result.current.binding!;
+  await act(async () => { binding.setRasterScale!(2); });
+  await settle();
+  expect(request).toHaveBeenCalledTimes(3);
+  await act(async () => { binding.setDisplayWindow!(0, 2); });
+  await settle();
+  expect(request).toHaveBeenCalledTimes(4);
+  expect(onError).toHaveBeenCalledTimes(1);
+  expect(view.result.current.status).toBe('ready');
+});
+
 test('a requested frame arriving after unmount releases its transferred bitmaps', async () => {
   const { connection, options } = resident();
   let resolve!: (value: DocxCommandAck) => void;
