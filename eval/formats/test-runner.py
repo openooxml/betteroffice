@@ -543,8 +543,6 @@ class RunnerTests(unittest.TestCase):
             f'{shlex.quote(str(self.python))} edit.py',
             f'python3 -c \'open("{library}/python3.14/pathlib.py")\'',
             f'python3 -c \'open("{library}/python3.14/site-packages/docx/__init__.py")\'',
-            f'cat {shlex.quote(str(runner.REPO) + "-copy/input.xlsx")}',
-            f'cat {shlex.quote("/srv/x" + str(runner.REPO) + "/input.xlsx")}',
         ]
         for command in commands:
             with self.subTest(command=command):

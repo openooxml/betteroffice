@@ -249,7 +249,7 @@ def path_violation(text, workspace):
     text = re.sub(r'(?<![\w.-])~(?=/)', lambda match: expansions['HOME'], text)
     repository = REPO.resolve()
     for spelling in (str(REPO), str(repository)):
-        if re.search(r'(?<![\w.-])' + re.escape(spelling) + r'(?![\w.-])', text):
+        if spelling in text:
             return f'forbidden path access: repository path {spelling}'
     for reference in sorted(referenced_paths(text)):
         try:
