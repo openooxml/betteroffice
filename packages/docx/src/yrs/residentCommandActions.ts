@@ -465,16 +465,6 @@ export function preflightDocxCommand(
     return { status: 'ready', prepared: { command: structuredClone(command), selection: state.selection, range: null } };
   }
   if ((command.kind === 'select' || command.kind === 'formatRange') && command.payload.selection === undefined) return refuse('invalid-selection');
-  const resolved = resolveCommandSelection(engine, state, command, context);
-  if (!resolved.ok) return refuse(resolved.reason);
-  if (command.kind === 'navigateCell') {
-    const cellNavigation = resolveCellNavigation(engine, resolved.selection, command.payload, state.readOnly);
-    if (cellNavigation === 'read-only') return refuse('read-only');
-    if (!cellNavigation) return refuse('invalid-cell-target');
-    return { status: 'ready', prepared: {
-      command: structuredClone(command), selection: resolved.selection, range: resolved.range, cellNavigation,
-    } };
-  }
   if (isTableCommandKind(command.kind)) {
     if (state.readOnly) return refuse('read-only');
     const explicit = (command.payload as { selection?: DocxCommandSelection }).selection;
@@ -495,11 +485,22 @@ export function preflightDocxCommand(
         range: { story: focus.story, start: at, end: at }, table: tabled.target,
       } };
     }
-    if (!resolved.ok) return refuse(resolved.reason);
-    const tabled = preflightTableCommand(engine, command as TableCommandIntent, resolved.selection);
+    const tableResolved = resolveCommandSelection(engine, state, command, context);
+    if (!tableResolved.ok) return refuse(tableResolved.reason);
+    const tabled = preflightTableCommand(engine, command as TableCommandIntent, tableResolved.selection);
     if ('reason' in tabled) return refuse(tabled.reason);
     return { status: 'ready', prepared: {
-      command: structuredClone(command), selection: resolved.selection, range: resolved.range, table: tabled.target,
+      command: structuredClone(command), selection: tableResolved.selection, range: tableResolved.range, table: tabled.target,
+    } };
+  }
+  const resolved = resolveCommandSelection(engine, state, command, context);
+  if (!resolved.ok) return refuse(resolved.reason);
+  if (command.kind === 'navigateCell') {
+    const cellNavigation = resolveCellNavigation(engine, resolved.selection, command.payload, state.readOnly);
+    if (cellNavigation === 'read-only') return refuse('read-only');
+    if (!cellNavigation) return refuse('invalid-cell-target');
+    return { status: 'ready', prepared: {
+      command: structuredClone(command), selection: resolved.selection, range: resolved.range, cellNavigation,
     } };
   }
   if (state.readOnly && command.kind !== 'select') return refuse('read-only');
@@ -793,7 +794,7 @@ export function applyDocxCommand(
       engine.geometryReader.paragraphSpans(at.story).some((span) => span.paraId === at.paraId)) ?? null;
     const first = selected ? null : engine.geometryReader.paragraphSpans(fallbackStory)[0];
     const at = first ? { story: fallbackStory, paraId: first.paraId, offset: 0 } : null;
-    const repaired = selected ?? near ?? (at ? { anchor: at, focus: at } : null);
+    const repaired = selected ?? (near ? { anchor: near, focus: near } : null) ?? (at ? { anchor: at, focus: at } : null);
     state.selection = repaired ? mintCommandSelection(engine, state, repaired) : null;
     if (state.selection) {
       engine.setSelection(state.selection.anchor, state.selection.focus);

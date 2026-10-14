@@ -204,6 +204,21 @@ function liveCellStory(engine: ResidentDocxCommandEngine, at: YrsCellLoc): strin
   return liveAnchor(engine, at)?.story ?? null;
 }
 
+function nearestCellStory(engine: ResidentDocxCommandEngine, at: YrsCellLoc): string | null {
+  const payload = engine.tablePayload(at.story, at.tableIndex) as TablePayload | null;
+  if (!payload || !Array.isArray(payload.rows)) return null;
+  const anchors = tableAnchors(payload).anchors;
+  const covering = anchors.find((anchor) =>
+    anchor.row <= at.row && at.row < anchor.row + anchor.rowspan &&
+    anchor.column <= at.column && at.column < anchor.column + anchor.colspan);
+  if (covering) return covering.story;
+  const column = anchors
+    .filter((anchor) => anchor.column <= at.column && at.column < anchor.column + anchor.colspan)
+    .sort((left, right) => Math.abs(left.row - at.row) - Math.abs(right.row - at.row));
+  const ordered = anchors.slice().sort((left, right) => (left.row - at.row) || (left.column - at.column));
+  return (column[0] ?? ordered[0])?.story ?? null;
+}
+
 export function syncCellSelectionWithCaret(engine: ResidentDocxCommandEngine, story: string): void {
   const cell = liveCell(engine, story);
   if (cell) engine.setCellSelection({ anchor: cell, head: cell });
@@ -217,17 +232,16 @@ export interface TableCommandSink {
 
 function caretInCellStory(
   engine: ResidentDocxCommandEngine,
-  story: string,
+  story: string | null,
   keep: YrsLoc | null
 ): YrsLoc | null {
-  if (keep && keep.story === story && engine.geometryReader.hasStory(story)) {
+  if (!story || !engine.geometryReader.hasStory(story)) return null;
+  if (keep && keep.story === story) {
     const spans = engine.geometryReader.paragraphSpans(story);
     const length = spans.find((span) => span.paraId === keep.paraId)?.length;
     if (length !== undefined) return { story, paraId: keep.paraId, offset: Math.min(keep.offset, length) };
   }
-  const paragraph = engine.geometryReader.hasStory(story)
-    ? engine.geometryReader.paragraphSpans(story)[0]
-    : undefined;
+  const paragraph = engine.geometryReader.paragraphSpans(story)[0];
   return paragraph ? { story, paraId: paragraph.paraId, offset: 0 } : null;
 }
 
@@ -254,12 +268,12 @@ export function applyTableCommand(
     case 'insertTableRow':
       engine.setCellSelection({ anchor: target.focused, head: target.focused });
       engine.insertRow(target.focused, command.payload.side, command.payload.suggesting);
-      place(caretInCellStory(engine, liveCellStory(engine, target.focused) ?? target.focused.story, keep));
+      place(caretInCellStory(engine, nearestCellStory(engine, target.focused), keep));
       break;
     case 'insertTableColumn':
       engine.setCellSelection({ anchor: target.focused, head: target.focused });
       engine.insertColumn(target.focused, command.payload.side);
-      place(caretInCellStory(engine, liveCellStory(engine, target.focused) ?? target.focused.story, keep));
+      place(caretInCellStory(engine, nearestCellStory(engine, target.focused), keep));
       break;
     case 'deleteTableRow':
     case 'deleteTableColumn': {
@@ -271,7 +285,7 @@ export function applyTableCommand(
         break;
       }
       const surviving = readCellSelection(engine)?.anchor ?? target.focused;
-      place(caretInCellStory(engine, liveCellStory(engine, surviving) ?? surviving.story, keep));
+      place(caretInCellStory(engine, nearestCellStory(engine, surviving), keep));
       break;
     }
     case 'deleteTable':
@@ -281,7 +295,7 @@ export function applyTableCommand(
     case 'mergeTableCells': {
       engine.mergeCells(target.range);
       const surviving = readCellSelection(engine)?.anchor ?? target.range.anchor;
-      place(caretInCellStory(engine, liveCellStory(engine, surviving) ?? surviving.story, keep));
+      place(caretInCellStory(engine, nearestCellStory(engine, surviving), keep));
       break;
     }
     case 'splitTableCell': {
