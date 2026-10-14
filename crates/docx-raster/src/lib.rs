@@ -2955,18 +2955,18 @@ mod tests {
     }
 
     #[test]
-    fn a_gif_frame_past_its_screen_is_refused_once_the_budget_is_spent() {
+    fn a_gif_frame_past_its_screen_waits_for_a_page_with_budget_left() {
         let mut gif = gif_bytes(64, 64);
-        gif[6] = 1;
-        gif[7] = 0;
-        gif[8] = 1;
-        gif[9] = 0;
+        gif[6..10].copy_from_slice(&[1, 0, 1, 0]);
         let mut cache = ImageCache::new();
-        let mut page = PageImages::new(&mut cache);
-        page.pixels = MAX_PAGE_IMAGE_PIXELS - 16;
-        page.bytes = MAX_PAGE_IMAGE_BYTES - 1024;
-        let mut charge = ImageCharge::default();
-        assert!(matches!(page.decode(&gif, &mut charge), Decode::Refused));
+        let mut crowded = PageImages::new(&mut cache);
+        crowded.pixels = MAX_PAGE_IMAGE_PIXELS - 16;
+        crowded.bytes = MAX_PAGE_IMAGE_BYTES - 1024;
+        assert!(crowded.resolve(ImageSource::Registered(&gif)).is_none());
+        let pixmap = PageImages::new(&mut cache)
+            .resolve(ImageSource::Registered(&gif))
+            .expect("a page with budget left decodes it");
+        assert_eq!((pixmap.width(), pixmap.height()), (1, 1));
 
         let gif = gif_bytes(64, 64);
         let mut cache = ImageCache::new();
