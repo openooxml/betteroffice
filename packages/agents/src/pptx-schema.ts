@@ -26,7 +26,7 @@ export const pptxEditSchema = z.discriminatedUnion('op', [
   z.object({ op: z.literal('add_text_box'), slide: id, name: z.string().min(1).max(200), rect: pptxRectSchema, text, style: pptxRunStyleSchema.optional() }).strict(),
   z.object({ op: z.literal('add_shape'), slide: id, name: z.string().min(1).max(200), rect: pptxRectSchema, geometry: z.enum(['rect', 'roundRect', 'ellipse', 'triangle', 'diamond', 'line', 'rightArrow', 'chevron']), fill: color.nullable().optional() }).strict(),
   z.object({ op: z.literal('add_image'), slide: id, name: z.string().min(1).max(200), rect: pptxRectSchema, contentType: z.enum(['image/png', 'image/jpeg', 'image/gif', 'image/webp']), base64: z.string().min(4).max(11200000) }).strict(),
-  z.object({ op: z.literal('set_notes'), slide: id, text }).strict(),
+  z.object({ op: z.literal('set_notes'), slide: id, text: text.describe('One paragraph per line; a blank line adds an empty paragraph.') }).strict(),
 ]);
 export const pptxBatchSchema = z.object({ version: z.string().min(1).max(256), edits: z.array(pptxEditSchema).min(1).max(32) }).strict();
 export type PptxAgentEdit = z.infer<typeof pptxEditSchema>;
