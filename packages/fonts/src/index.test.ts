@@ -116,6 +116,42 @@ describe('resolution', () => {
     expect(maxDigitWidth('Calibri', 10, measure)).toBe(7);
   });
 
+  for (const family of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) {
+    test(`${family} has no recorded digit advance`, () => {
+      for (const bold of [false, true]) {
+        for (const italic of [false, true]) {
+          expect(resolveDigitAdvance(family, bold, italic)).toBeUndefined();
+        }
+      }
+    });
+
+    test(`${family} measures every digit for its max width`, () => {
+      for (const bold of [false, true]) {
+        for (const italic of [false, true]) {
+          const measured: string[] = [];
+          const measure = (digit: string) => {
+            measured.push(digit);
+            return digit === '8' ? 7.5 : 6.4;
+          };
+          expect(maxDigitWidth(family, 10, measure, bold, italic)).toBe(8);
+          expect(measured.join('')).toBe('0123456789');
+        }
+      }
+    });
+
+    test(`${family} resolves to the unknown-family fallback`, () => {
+      for (const office of ['powerpoint', 'word'] as const) {
+        for (const bold of [false, true]) {
+          for (const italic of [false, true]) {
+            expect(resolveLastResortFace(family, bold, italic, office)).toBe(
+              resolveLastResortFace('Unknown Family', bold, italic, office),
+            );
+          }
+        }
+      }
+    });
+  }
+
   test('a trailing light weight on a known family outranks the bold flag', () => {
     expect(resolveLastResortFace('Calibri Light', true, false).file).toBe('Carlito-Regular.ttf');
     expect(resolveLastResortFace('Inter Light', true, false).file).toBe('Inter-Regular.ttf');
