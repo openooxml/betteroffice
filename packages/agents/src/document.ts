@@ -350,14 +350,35 @@ export class DocxAgentDocument {
     const paragraphs: Paragraph[] = [];
     const active = new Set<string>();
     const cells = new Map<string, TableCellPosition>();
-    for (const story of this.session.storyIds().sort()) {
+    const stories = this.session.storyIds();
+    const segmentsByStory = new Map(stories.map(story => [story, this.session.storySegments(story)]));
+    for (const [story, segments] of segmentsByStory) {
+      for (const [cell, position] of tableCells(story, segments)) cells.set(cell, cellPosition(position));
+    }
+    const position = (story: string): { root: string; path: number[] } => {
+      const cell = cells.get(story);
+      if (!cell) return { root: story, path: [] };
+      const parent = position(cell.story);
+      return { root: parent.root, path: [...parent.path, cell.index, cell.row, cell.column] };
+    };
+    const positions = new Map(stories.map(story => [story, position(story)]));
+    stories.sort((a, b) => {
+      const left = positions.get(a)!;
+      const right = positions.get(b)!;
+      const root = left.root.localeCompare(right.root);
+      if (root) return root;
+      for (let i = 0; i < Math.min(left.path.length, right.path.length); i++) {
+        if (left.path[i] !== right.path[i]) return left.path[i] - right.path[i];
+      }
+      return left.path.length - right.path.length;
+    });
+    for (const story of stories) {
       const headings = new Map(this.session.headings(story).map(entry => [entry.paraId, entry.heading.outlineLevel + 1]));
       let text = '';
       let runs: TextRun[] = [];
       let segments: YrsStorySegment[] = [];
       let ordinal = 0;
-      const storySegments = this.session.storySegments(story);
-      for (const [cell, position] of tableCells(story, storySegments)) cells.set(cell, cellPosition(position));
+      const storySegments = segmentsByStory.get(story)!;
       for (const segment of storySegments) {
         segments.push(segment);
         if (segment.kind === 'pilcrow') {
