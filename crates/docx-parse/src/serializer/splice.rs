@@ -269,11 +269,15 @@ pub(crate) fn root_binds(
     let bound = bindings(source, &root);
     let target = root_tag(serialized)?;
     let wanted = bindings(serialized, &target);
-    Some(prefixes.iter().all(|prefix| match (bound.get(prefix), wanted.get(prefix)) {
-        (Some(existing), Some(uri)) => existing.trim() == uri.trim(),
-        (None, _) => allow_missing,
-        _ => false,
-    }))
+    Some(
+        prefixes
+            .iter()
+            .all(|prefix| match (bound.get(prefix), wanted.get(prefix)) {
+                (Some(existing), Some(uri)) => existing.trim() == uri.trim(),
+                (None, _) => allow_missing,
+                _ => false,
+            }),
+    )
 }
 
 /// Where the addressed paragraphs sit in a source part: each one's parent element and, for
