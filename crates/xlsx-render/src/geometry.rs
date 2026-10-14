@@ -307,8 +307,10 @@ impl PrintMetrics {
 }
 
 const SIZE_CHUNK_LEN: usize = 256;
-const _: () =
-    assert!(MAX_ROWS as usize % SIZE_CHUNK_LEN == 0 && MAX_COLS as usize % SIZE_CHUNK_LEN == 0);
+const _: () = assert!(
+    (MAX_ROWS as usize).is_multiple_of(SIZE_CHUNK_LEN)
+        && (MAX_COLS as usize).is_multiple_of(SIZE_CHUNK_LEN)
+);
 
 #[derive(Debug, Clone)]
 struct SizeChunk {
@@ -1336,10 +1338,7 @@ mod tests {
                         values.insert(index, 0.0);
                     }
                 }
-                let pairs: Vec<_> = values
-                    .iter()
-                    .map(|(&index, &size)| (index, size))
-                    .collect();
+                let pairs: Vec<_> = values.iter().map(|(&index, &size)| (index, size)).collect();
                 let mut sizes = Sizes::from_values(LIMIT, default, &pairs);
                 let mut model: Vec<_> = (0..LIMIT)
                     .map(|index| values.get(&index).copied())
