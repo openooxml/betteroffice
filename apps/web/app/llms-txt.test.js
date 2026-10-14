@@ -18,8 +18,10 @@ describe("llms.txt", () => {
     expect(phantom).toEqual([]);
   });
 
-  test("names every published npm package", () => {
-    const missing = publishedPackages().filter((name) => !LLMS.includes(name));
+  test("links every published npm package", () => {
+    const missing = publishedPackages().filter(
+      (name) => !LLMS.includes(`[${name}](https://www.npmjs.com/package/${name})`),
+    );
     expect(missing).toEqual([]);
   });
 
@@ -47,32 +49,22 @@ describe("llms.txt", () => {
     expect(missing).toEqual([]);
   });
 
-  test("states what XLSX structured export covers and that it never recalculates", () => {
-    expect(LLMS).toContain(
-      "XLSX exports bounded sparse worksheet content and Markdown with positional anchors, formulas, stored values, formatted text, explicit hidden-content options, and omission diagnostics",
-    );
-    expect(LLMS).toContain("Export does not recalculate formulas.");
-    for (const api of [
-      "exportStructured",
-      "exportMarkdown",
-      "exportXlsxStructured",
-      "exportXlsxMarkdown",
-      "renderXlsxMarkdown",
-      "export_structured",
-    ]) {
-      expect(LLMS).toContain(api);
+  test("follows the llms.txt index layout", () => {
+    const lines = LLMS.split("\n");
+    expect(lines[0]).toBe("# BetterOffice");
+    expect(lines[2].startsWith("> ")).toBe(true);
+    for (const section of ["## Docs", "## npm packages", "## Rust crates", "## Python packages"]) {
+      expect(lines).toContain(section);
     }
   });
 
-  test("states the PPTX structured export", () => {
-    for (const phrase of [
-      "`exportStructured`/`exportMarkdown`",
-      "`exportPptxStructured`/`exportPptxMarkdown`/`renderPptxMarkdown`",
-      "omissions are listed as diagnostics",
-      "`export_structured`/`export_markdown` and `export_pptx_structured`",
-    ]) {
-      expect(LLMS).toContain(phrase);
-    }
+  test("keeps every entry to a short description", () => {
+    const entries = LLMS.split("\n").filter((line) => line.startsWith("- ["));
+    const long = entries.filter((line) => {
+      const desc = line.slice(line.lastIndexOf("): ") + 3);
+      return desc.split(/\s+/).length > 45 || desc.split(/\.\s/).length > 2;
+    });
+    expect(long).toEqual([]);
   });
 
   test("tells no one to install a distribution that is not on PyPI", () => {
