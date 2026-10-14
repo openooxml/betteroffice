@@ -272,11 +272,15 @@ def run_task(task, cli, model, results, arm='betteroffice', python=None):
         if violation:
             message = violation + ('; ' + message if not passed else '')
             passed = False
+        calls = tool_calls(log, arm)
+        if calls == 0:
+            message = 'agent made no tool calls' + ('; ' + message if not passed else '')
+            passed = False
         output = workspace / task['output']
         if output.is_file():
             shutil.copyfile(output, directory / task['output'])
     return {'task': task['id'], 'format': task['format'], 'pass': passed, 'check_message': message,
-            'tool_calls': tool_calls(log, arm), 'duration_seconds': round(time.monotonic() - started, 3),
+            'tool_calls': calls, 'duration_seconds': round(time.monotonic() - started, 3),
             'agent_exit_code': exit_code, 'timed_out': timed_out}
 
 

@@ -83,6 +83,7 @@ calls; an MCP call, a web search or any other tool item fails the task.
 A task passes only if all of these hold:
 
 - the agent exits with code 0 within the timeout;
+- the agent makes at least one tool call;
 - the JSON event log contains no `command_execution`, MCP call to a server
   other than `betteroffice`, or other tool-call item; only BetterOffice MCP
   items, agent messages, reasoning and errors are allowed (the generic arm
